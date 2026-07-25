@@ -1,0 +1,34 @@
+appId: com.lexasoft.singz
+productName: SingZ
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!build/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!electron-builder.yml'
+  - '!{.gitignore,README.md,CHANGELOG.md,dev-app-update.yml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!{.env,.env.*,.npmrc,package-lock.json}'
+asar: true
+npmRebuild: false
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+mac:
+  # No signing certificate wired up yet — ships unsigned (right-click → Open).
+  # To sign later: remove `identity`, add CSC_LINK/CSC_KEY_PASSWORD secrets in CI.
+  identity: null
+  category: public.app-category.music
+  darkModeSupport: true
+  target:
+    - target: dmg
+dmg:
+  title: ${productName}
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
