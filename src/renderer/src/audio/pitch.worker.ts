@@ -25,9 +25,9 @@ const WIN = 1024
 /** Sung melody lives below ~A5; higher hits are harmonics/cymbal bleed. */
 const F_MAX = 900
 /** Frames whose tone is less periodic than this are noise (growl, bleed). */
-const MIN_CLARITY = 0.8
-/** A real note holds for at least this many frames (~125 ms). */
-const MIN_RUN = 5
+const MIN_CLARITY = 0.7
+/** A real note holds for at least this many frames (~100 ms). */
+const MIN_RUN = 4
 /** Analysis hop in seconds (hop = round(sr * HOP_SEC) below). */
 const HOP_SEC = 0.025
 
@@ -53,7 +53,7 @@ function cleanMelody(raw: Float32Array, clarity: Float32Array, rms: Float32Array
   // scaled off the loud parts of this particular vocal stem.
   const loud = Array.from(rms).sort((a, b) => a - b)
   const p90 = loud[Math.floor(loud.length * 0.9)] ?? 0
-  const gate = Math.max(0.008, p90 * 0.08)
+  const gate = Math.max(0.006, p90 * 0.04)
 
   const cents = new Float32Array(n)
   for (let i = 0; i < n; i++) {
@@ -75,19 +75,24 @@ function cleanMelody(raw: Float32Array, clarity: Float32Array, rms: Float32Array
     }
   }
 
-  // Fold isolated octave jumps back toward the running melody.
-  let last = 0
+  // Fold octave errors back toward the running melody (median of the last
+  // ~40 voiced frames) — repairing frames keeps recall, dropping them lost
+  // half the sung melody in earlier tunings.
+  const hist: number[] = []
   for (let i = 0; i < n; i++) {
     if (med[i] <= 0) continue
-    if (last > 0) {
-      for (const shift of [-1200, 1200]) {
-        if (Math.abs(med[i] - last) > 900 && Math.abs(med[i] + shift - last) < 350) {
+    if (hist.length >= 8) {
+      const h = [...hist].sort((a, b) => a - b)
+      const ref = h[Math.floor(h.length / 2)]
+      for (const shift of [-2400, -1200, 1200, 2400]) {
+        if (Math.abs(med[i] - ref) > 800 && Math.abs(med[i] + shift - ref) < 450) {
           med[i] += shift
           break
         }
       }
     }
-    last = med[i]
+    hist.push(med[i])
+    if (hist.length > 40) hist.shift()
   }
 
   // Collect voiced runs, then keep only the credible ones: long enough to be

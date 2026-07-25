@@ -43,7 +43,8 @@ function toNoteSegments(f0: Float32Array, hopSec: number): NoteSeg[] {
       continue
     }
     const midi = Math.round(midiOfHz(f))
-    if (cur && cur.midi === midi && t - cur.e <= hopSec * 1.6) {
+    // gap tolerance is time-based so 10 ms-hop melodies don't fragment
+    if (cur && cur.midi === midi && t - cur.e <= Math.max(0.06, hopSec * 1.6)) {
       cur.e = t + hopSec
     } else {
       cur = { s: t, e: t + hopSec, midi }
