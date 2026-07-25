@@ -6,6 +6,7 @@ import { basename, dirname, join } from 'node:path'
 import type { LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
 import { lookupLyrics, lyricsById, metaFromFilename, type TrackMeta } from './lrclib'
 import { stemsRoot } from './media'
+import { log } from './log'
 import { downloadFile, modelsDir } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
@@ -325,6 +326,7 @@ export class Transcriber {
       !alignBase &&
       (prefer === 'auto' || (prefer === 'whisper' && cached.source === 'whisper'))
     ) {
+      log('lyrics', `using cached lyrics for ${basename(songPath)} (${cached.source}${cached.aligned ? ', aligned' : ''}) from ${lyricsPath}`)
       return {
         ok: true,
         cached: true,
@@ -339,11 +341,14 @@ export class Transcriber {
     if (prefer === 'auto' && !alignBase) {
       onProgress({ stage: 'searching', percent: 10 })
       const meta = await readTrackMeta(songPath, durationSec)
+      log('lyrics', `LRCLIB search: ${meta.artist ?? '?'} — ${meta.title ?? '?'} (${Math.round(durationSec)}s)`)
       const hit = await lookupLyrics(meta)
       if (hit) {
+        log('lyrics', `LRCLIB hit: ${hit.credit ?? 'synced lyrics'}`)
         await this.writeCache(lyricsPath, { source: 'lrclib', credit: hit.credit, lines: hit.lines })
         return { ok: true, cached: false, source: 'lrclib', credit: hit.credit, lines: hit.lines }
       }
+      log('lyrics', 'LRCLIB: no match')
     }
 
     // 2) Fallback: on-device transcription of the vocals stem (project-local
@@ -410,6 +415,7 @@ export class Transcriber {
         '-t',
         String(threads)
       ]
+      log('lyrics', `run: ${engine[0]} ${args.join(' ')}`)
       const child = spawn(engine[0], args, { env: spawnEnv() })
       this.child = child
 
@@ -436,6 +442,7 @@ export class Transcriber {
 
       child.on('exit', (code) => {
         this.child = null
+        log('lyrics', `whisper-cli exited with code ${code}`)
         if (this.cancelled) {
           void rm(outDir, { recursive: true, force: true })
           resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
@@ -455,6 +462,7 @@ export class Transcriber {
             }
             if (alignBase) {
               const lines = alignLines(alignBase.lines, words)
+              log('lyrics', `aligned ${lines.length} lines against ${words.length} transcribed words`)
               const cache: LyricsCache = {
                 source: 'lrclib',
                 credit: alignBase.credit,
@@ -484,6 +492,7 @@ export class Transcriber {
           } catch (err) {
             await rm(outDir, { recursive: true, force: true })
             const msg = err instanceof Error ? err.message : String(err)
+            log('lyrics', `transcription failed: ${msg}`, 'error')
             resolve({ ok: false, error: `Transcription failed: ${msg || 'unknown error'}` })
           }
         })()

@@ -109,6 +109,15 @@ export type LyricsResult =
       error: string
     }
 
+export type LogLevel = 'info' | 'warn' | 'error'
+
+export interface LogEntry {
+  t: number
+  level: LogLevel
+  source: string
+  line: string
+}
+
 export interface SingzApi {
   /** Resolve the on-disk path of a dropped/picked File (empty string if none). */
   pathForFile(file: File): string
@@ -153,6 +162,12 @@ export interface SingzApi {
   onModelsProgress(cb: (p: ModelsProgress) => void): () => void
   /** 44.1k stereo PCM of the current song for the bundled splitter. */
   provideSplitInput(songPath: string, ch0: Float32Array, ch1: Float32Array): Promise<void>
+  /** Diagnostic log: current buffer, live stream, save-to-file (dialog unless path given). */
+  getLog(): Promise<LogEntry[]>
+  saveLog(
+    path?: string
+  ): Promise<{ ok: true; path: string } | { ok: false; cancelled?: boolean; error: string }>
+  onLogLine(cb: (e: LogEntry) => void): () => void
   /** Save the current song + stems + lyrics + settings into ~/Music/SingZ/<name>/. */
   saveProject(
     songPath: string,

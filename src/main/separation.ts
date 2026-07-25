@@ -4,10 +4,11 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { access, mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { cpus, homedir } from 'node:os'
-import { delimiter, extname, join } from 'node:path'
+import { basename, delimiter, extname, join } from 'node:path'
 import { STEMS, type EngineStatus, type SeparationProgress, type SeparateResult, type StemName } from '../shared/types'
 import { stemsRoot } from './media'
-import { DEMUCS_MODEL_FILE, demucsModelPath, packDir, packPython } from './models'
+import { log, logChunk } from './log'
+import { DEMUCS_MODEL_FILE, demucsModelPath, packDir, packOnnxModel, packPython } from './models'
 
 const MODEL = 'htdemucs'
 const PROBE_TIMEOUT_MS = 45_000
@@ -139,6 +140,8 @@ export async function writeInputWav(outDir: string, ch0: Float32Array, ch1: Floa
 }
 
 function friendlyError(tail: string): string {
+  if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
+    return 'The fast splitter pack is missing its model — open the model manager (splitter chip) and download it again.'
   if (/ModuleNotFoundError|No module named/i.test(tail))
     return 'The demucs install looks broken (missing Python module). Try: pipx reinstall demucs && pipx inject demucs numpy'
   if (/ffmpeg|torchaudio.*backend|Could not load|soundfile/i.test(tail))
@@ -170,6 +173,7 @@ export class Separator {
       for (const cmd of pythonCandidates()) {
         if (await probe(cmd)) {
           this.engine = { kind: 'python', cmd }
+          log('splitter', `engine: system demucs (${cmd.join(' ')})`)
           return { ok: true, command: this.describe(this.engine) }
         }
       }
@@ -179,9 +183,14 @@ export class Separator {
     // pack); Windows pack = demucs-onnx with DirectML.
     if (await exists(packPython())) {
       if (process.platform === 'win32') {
+        // Require the embedded model too — a half-extracted pack has a
+        // working python.exe but nothing to split with.
         const cmd = [packPython(), '-c', ONNX_SHIM]
-        if (await probe(cmd)) {
+        if ((await packOnnxModel()) === null) {
+          log('splitter', 'GPU pack present but its model is missing — ignoring the pack', 'warn')
+        } else if (await probe(cmd)) {
           this.engine = { kind: 'onnx', cmd }
+          log('splitter', `engine: ${this.describe(this.engine)}`)
           return { ok: true, command: this.describe(this.engine), needsPcm: true }
         }
       } else {
@@ -192,6 +201,7 @@ export class Separator {
             TORCH_HOME: join(packDir(), 'python', 'torch-home'),
             HF_HOME: join(packDir(), 'python', 'hf-home')
           }
+          log('splitter', `engine: GPU pack (${cmd.join(' ')})`)
           return { ok: true, command: this.describe(this.engine) }
         }
       }
@@ -199,15 +209,18 @@ export class Separator {
     const bundled = await bundledEngine()
     if (bundled.bin && bundled.model) {
       this.engine = { kind: 'bundled', cmd: [bundled.bin], model: bundled.model }
+      log('splitter', `engine: ${bundled.bin}`)
       return { ok: true, command: this.describe(this.engine), needsPcm: true }
     }
     if (bundled.bin && !bundled.model) {
+      log('splitter', 'bundled splitter found, model weights not downloaded yet', 'warn')
       return {
         ok: false,
         needsModels: true,
         message: 'The splitter model has not been downloaded yet.'
       }
     }
+    log('splitter', 'no engine found — build is missing its bundled splitter', 'error')
     return {
       ok: false,
       message: 'No stem-splitting engine found — this build seems to be missing its bundled splitter.'
@@ -250,17 +263,23 @@ export class Separator {
     const stems = this.stemPaths(outDir)
 
     const allThere = (await Promise.all(STEMS.map((s) => exists(stems[s])))).every(Boolean)
-    if (allThere) return { ok: true, cached: true, stems }
+    if (allThere) {
+      log('splitter', `split of ${basename(input)}: stems already cached (${hash})`)
+      return { ok: true, cached: true, stems }
+    }
 
     const status = await this.check()
     if (!status.ok) return { ok: false, error: status.message }
     const engine = this.engine as ResolvedEngine
+    log('splitter', `splitting ${basename(input)} with ${this.describe(engine)} (cache ${hash})`)
 
     await mkdir(outDir, { recursive: true })
     this.cancelled = false
 
     if (engine.kind === 'python') {
-      return this.runPython(engine.cmd, input, outDir, stems, onProgress)
+      const res = await this.runPython(engine.cmd, input, outDir, stems, onProgress)
+      this.logResult(res)
+      return res
     }
     // Non-python engines want plain audio files: prefer the WAV the renderer
     // rendered from its decoded buffer (any source format), else the original
@@ -280,7 +299,14 @@ export class Separator {
         ? await this.runOnnx(engine, fileInput, outDir, stems, onProgress)
         : await this.runBundled(engine, fileInput, outDir, stems, onProgress)
     if (result.ok) await rm(provided, { force: true })
+    this.logResult(result)
     return result
+  }
+
+  private logResult(r: SeparateResult): void {
+    if (r.ok) log('splitter', 'split finished — 4 stems written')
+    else if (r.cancelled) log('splitter', 'split cancelled')
+    else log('splitter', `split failed: ${r.error}`, 'error')
   }
 
   private runPython(
@@ -292,6 +318,7 @@ export class Separator {
   ): Promise<SeparateResult> {
     return new Promise<SeparateResult>((resolve) => {
       const args = [...cmd.slice(1), '-n', MODEL, '--filename', '{stem}.{ext}', '-o', outDir, input]
+      log('splitter', `run: ${cmd[0]} ${args.join(' ')}`)
       const child = spawn(cmd[0], args, { env: { ...spawnEnv(), ...this.extraEnv } })
       this.child = child
 
@@ -302,6 +329,7 @@ export class Separator {
       const consume = (chunk: Buffer): void => {
         const text = chunk.toString('utf8')
         tail = (tail + text).slice(-8000)
+        logChunk('splitter', text, /%\||it\/s|B\/s/)
         const segment = text.split('\r').pop() ?? ''
         const nextStage: SeparationProgress['stage'] = /MB\/s|MiB|Downloading/i.test(segment)
           ? 'downloading-model'
@@ -329,6 +357,7 @@ export class Separator {
 
       child.on('exit', (code) => {
         this.child = null
+        log('splitter', `demucs exited with code ${code}`)
         if (this.cancelled) {
           void rm(outDir, { recursive: true, force: true })
           resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
@@ -359,6 +388,7 @@ export class Separator {
       // Leave one core for the UI; demucs.cpp is the CPU floor, so use the rest.
       const threads = Math.max(2, cpus().length - 1)
       const args = [engine.model, input, tmpOut, String(threads)]
+      log('splitter', `run: ${engine.cmd[0]} ${args.join(' ')}`)
       let maxPercent = 0
       void mkdir(tmpOut, { recursive: true }).then(() => {
         const child = spawn(engine.cmd[0], args, { env: spawnEnv() })
@@ -368,6 +398,7 @@ export class Separator {
         const consume = (chunk: Buffer): void => {
           const text = chunk.toString('utf8')
           tail = (tail + text).slice(-8000)
+          logChunk('splitter', text, /\(\d{1,3}(?:\.\d+)?%\)/)
           // "[THREAD 3] (42.857%) ..." — per-thread progress; track the max seen.
           for (const m of text.matchAll(/\((\d{1,3}(?:\.\d+)?)%\)/g)) {
             const pct = Math.min(100, parseFloat(m[1]))
@@ -386,6 +417,7 @@ export class Separator {
 
         child.on('exit', (code) => {
           this.child = null
+          log('splitter', `bundled splitter exited with code ${code}`)
           if (this.cancelled) {
             void rm(outDir, { recursive: true, force: true })
             resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
@@ -424,8 +456,10 @@ export class Separator {
   ): Promise<SeparateResult> {
     let last: SeparateResult = { ok: false, error: 'not started' }
     for (const provider of ['dml', 'cpu']) {
+      log('splitter', `trying ONNX provider: ${provider}`)
       last = await this.spawnOnnx(engine, provider, input, outDir, stems, onProgress)
       if (last.ok || (!last.ok && last.cancelled)) return last
+      log('splitter', `provider ${provider} failed: ${last.error}`, 'warn')
     }
     return last
   }
@@ -458,13 +492,28 @@ export class Separator {
       void rm(tmpOut, { recursive: true, force: true })
         .then(() => mkdir(tmpOut, { recursive: true }))
         .then(() => {
-          const child = spawn(engine.cmd[0], args, { env: spawnEnv() })
+          log('splitter', `run: ${engine.cmd[0]} ${args.join(' ')}`)
+          const child = spawn(engine.cmd[0], args, {
+            env: {
+              ...spawnEnv(),
+              // Progress lines must arrive live, not on exit (block buffering
+              // left the UI on "Warming up" for whole splits).
+              PYTHONUNBUFFERED: '1',
+              // The model ships inside the pack; a broken pack must fail fast
+              // with a clear error, never silently re-download 166 MB.
+              HF_HUB_OFFLINE: '1'
+            }
+          })
           this.child = child
+          // The bar moves as soon as the engine is up (session compile can
+          // take a while on first DirectML run — 0% beats a frozen label).
+          onProgress({ stage: 'separating', percent: 0 })
 
           let tail = ''
           const consume = (chunk: Buffer): void => {
             const text = chunk.toString('utf8')
             tail = (tail + text).slice(-8000)
+            logChunk('splitter', text)
             // "    chunk 3/12: 4.1s elapsed"
             for (const m of text.matchAll(/chunk (\d+)\/(\d+)/g)) {
               const pct = (parseInt(m[1], 10) / Math.max(1, parseInt(m[2], 10))) * 100
@@ -481,6 +530,7 @@ export class Separator {
 
           child.on('exit', (code) => {
             this.child = null
+            log('splitter', `ONNX splitter exited with code ${code}`)
             if (this.cancelled) {
               void rm(outDir, { recursive: true, force: true })
               resolve({ ok: false, cancelled: true, error: 'Cancelled.' })

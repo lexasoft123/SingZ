@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { LyricsProgress, ModelsProgress, SeparationProgress, SingzApi } from '../shared/types'
+import type {
+  LogEntry,
+  LyricsProgress,
+  ModelsProgress,
+  SeparationProgress,
+  SingzApi
+} from '../shared/types'
 
 const api: SingzApi = {
   pathForFile: (file) => webUtils.getPathForFile(file),
@@ -62,6 +68,18 @@ const api: SingzApi = {
 
   provideSplitInput: (songPath, ch0, ch1) =>
     ipcRenderer.invoke('separation:provide-input', songPath, ch0, ch1),
+
+  getLog: () => ipcRenderer.invoke('log:all'),
+
+  saveLog: (path) => ipcRenderer.invoke('log:save', path),
+
+  onLogLine: (cb) => {
+    const listener = (_e: IpcRendererEvent, entry: LogEntry): void => cb(entry)
+    ipcRenderer.on('log:line', listener)
+    return () => {
+      ipcRenderer.removeListener('log:line', listener)
+    }
+  },
 
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings)

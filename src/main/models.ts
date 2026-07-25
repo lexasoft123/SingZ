@@ -1,9 +1,10 @@
 import { app, net } from 'electron'
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import { access, mkdir, rename, rm } from 'node:fs/promises'
+import { access, mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ModelId, ModelInfo, ModelsProgress } from '../shared/types'
+import { log } from './log'
 
 /**
  * Shared local model cache, identical for every way the app runs (dev,
@@ -22,6 +23,42 @@ export function packPython(): string {
   return process.platform === 'win32'
     ? join(packDir(), 'python', 'python.exe')
     : join(packDir(), 'python', 'bin', 'python3')
+}
+
+/**
+ * The Windows pack embeds the ONNX model in a hub-style cache; a pack whose
+ * extraction failed half-way has python.exe but no model. Resolve the real
+ * snapshot file so "installed" means "will actually split".
+ */
+export async function packOnnxModel(): Promise<string | null> {
+  const snaps = join(
+    packDir(),
+    'python',
+    'model-cache',
+    'models--StemSplitio--htdemucs-onnx',
+    'snapshots'
+  )
+  try {
+    for (const rev of await readdir(snaps)) {
+      const file = join(snaps, rev, 'htdemucs_fp16weights.onnx')
+      try {
+        const info = await stat(file)
+        if (info.isFile() && info.size > 100e6) return file
+      } catch {
+        // dangling symlink or missing file — keep looking
+      }
+    }
+  } catch {
+    // no cache at all
+  }
+  return null
+}
+
+/** Everything the pack needs to run — not just the interpreter. */
+async function packComplete(): Promise<boolean> {
+  if (!(await exists(packPython()))) return false
+  if (process.platform === 'win32') return (await packOnnxModel()) !== null
+  return true
 }
 
 export const DEMUCS_MODEL_FILE = 'ggml-model-htdemucs-4s-f16.bin'
@@ -50,6 +87,7 @@ export async function downloadFile(
   await mkdir(join(dest, '..'), { recursive: true })
   const part = dest + '.part'
   try {
+    log('models', `downloading ${url}`)
     const res = await net.fetch(url, { signal })
     if (!res.ok || !res.body) throw new Error(`download failed (HTTP ${res.status})`)
     const total = Number(res.headers.get('content-length')) || approxBytes
@@ -68,20 +106,33 @@ export async function downloadFile(
       out.on('error', reject)
     })
     await rename(part, dest)
+    log('models', `saved ${dest} (${(got / 1e6).toFixed(1)} MB)`)
     onPct(100)
   } catch (err) {
     await rm(part, { force: true })
+    log('models', `download failed: ${err instanceof Error ? err.message : String(err)}`, 'error')
     throw err
   }
 }
 
 function untar(archive: string, destDir: string): Promise<void> {
+  log('models', `extracting ${archive}`)
   return new Promise((resolve, reject) => {
+    let tail = ''
     const child = spawn('tar', ['-xzf', archive, '-C', destDir])
+    child.stderr?.on('data', (c: Buffer) => {
+      tail = (tail + c.toString('utf8')).slice(-2000)
+    })
     child.on('error', reject)
-    child.on('exit', (code) =>
-      code === 0 ? resolve() : reject(new Error(`extract failed (tar exit ${code})`))
-    )
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        const detail = tail.split('\n').filter(Boolean).slice(-3).join(' — ')
+        log('models', `tar exit ${code}: ${detail}`, 'error')
+        reject(new Error(`extract failed (tar exit ${code}${detail ? `: ${detail}` : ''})`))
+      }
+    })
   })
 }
 
@@ -134,7 +185,7 @@ export class ModelManager {
   private abort: AbortController | null = null
 
   private async present(entry: RegistryEntry): Promise<boolean> {
-    if (entry.kind === 'archive') return exists(packPython())
+    if (entry.kind === 'archive') return packComplete()
     return (
       (await exists(join(modelsDir(), entry.file as string))) ||
       // dev convenience: weights fetched by scripts/vendor-demucs.sh
@@ -191,13 +242,22 @@ export class ModelManager {
             this.abort.signal
           )
           onProgress({ id: entry.id, percent: 92 })
-          await rm(packDir(), { recursive: true, force: true })
-          await mkdir(packDir(), { recursive: true })
-          await untar(archive, packDir())
-          await rm(archive, { force: true })
-          if (!(await exists(packPython()))) {
-            throw new Error('the downloaded pack is incomplete')
+          try {
+            await rm(packDir(), { recursive: true, force: true })
+            await mkdir(packDir(), { recursive: true })
+            await untar(archive, packDir())
+            if (!(await packComplete())) {
+              throw new Error('The downloaded pack looks incomplete — try downloading it again.')
+            }
+          } catch (err) {
+            // A half-extracted pack must never look installed (or get picked
+            // as an engine) — remove it so the wizard offers a clean retry.
+            await rm(packDir(), { recursive: true, force: true })
+            throw err
+          } finally {
+            await rm(archive, { force: true })
           }
+          log('models', `${entry.id} installed`)
           onProgress({ id: entry.id, percent: 100 })
         }
       }
@@ -205,6 +265,7 @@ export class ModelManager {
     } catch (err) {
       const cancelled = this.abort?.signal.aborted ?? false
       const msg = err instanceof Error ? err.message : String(err)
+      if (!cancelled) log('models', `install failed: ${msg}`, 'error')
       return cancelled
         ? { ok: false, cancelled: true, error: 'Cancelled.' }
         : { ok: false, error: msg }

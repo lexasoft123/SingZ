@@ -4,6 +4,7 @@ import { estimateKey, estimateTempo, type KeyGuess } from './audio/analysis'
 import { MultitrackEngine } from './audio/engine'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
+import LogPanel from './components/LogPanel'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
 import SetupWizard from './components/SetupWizard'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
@@ -65,6 +66,7 @@ export default function App(): React.JSX.Element {
   const [sep, setSep] = useState<SeparationProgress | null>(null)
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
   const [showSetup, setShowSetup] = useState(false)
+  const [showLog, setShowLog] = useState(false)
   const [wizard, setWizard] = useState<{
     models: import('../../shared/types').ModelInfo[]
     origin: 'auto' | 'manual'
@@ -535,6 +537,14 @@ export default function App(): React.JSX.Element {
               Open…
             </button>
           )}
+          <button
+            type="button"
+            className="pill ghost small"
+            title="What the app is doing under the hood — copy or save it when reporting a problem"
+            onClick={() => setShowLog(true)}
+          >
+            Log
+          </button>
           <EngineChip
             status={engineStatus}
             onClick={() => {
@@ -635,6 +645,8 @@ export default function App(): React.JSX.Element {
       {wizard && (
         <SetupWizard models={wizard.models} origin={wizard.origin} onClose={closeWizard} />
       )}
+
+      {showLog && <LogPanel onClose={() => setShowLog(false)} />}
 
       <input
         ref={fileInputRef}

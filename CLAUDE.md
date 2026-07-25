@@ -49,6 +49,13 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
   distribution (CI Xeon AVX-512 crashes user CPUs).
 - **HF hub caches checkpoints as extension-less blobs** — never glob for
   `*.safetensors` under `HF_HOME`.
+- **HF hub caches symlink snapshots→blobs** — packs must materialize links and
+  prune `blobs/` (build-onnx-pack.sh), because Windows tar can't extract
+  symlinks without admin rights (the v0.2.2 pack shipped broken this way).
+- **Spawned python buffers stdout when not a TTY** — set `PYTHONUNBUFFERED=1`
+  or progress lines arrive only at process exit (UI stuck on "Warming up").
+- **Engine subprocesses run with `HF_HUB_OFFLINE=1`** — models must come from
+  the pack; without it a broken pack silently re-downloads 166 MB mid-split.
 - **electron-builder**: `files` must exclude `vendor/`, `.engines-src/` etc. or
   they land in the asar (was 241 MB); `${os}` macro is `mac`/`win`, NOT node's
   `darwin`/`win32` — extraResources are declared per-platform.

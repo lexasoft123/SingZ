@@ -1470,3 +1470,79 @@ button.chip-status:hover {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 240, 214, 0.22);
 }
+
+/* ---------- diagnostic log panel ---------- */
+
+.modal-card.log-card {
+  width: min(860px, calc(100vw - 60px));
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 90px);
+  padding: 22px 24px;
+}
+
+.log-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.log-head h2 {
+  margin-bottom: 0;
+}
+
+.log-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.log-body {
+  flex: 1;
+  min-height: 240px;
+  overflow-y: auto;
+  background: var(--panel-deep);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.log-empty {
+  color: var(--faint);
+  padding: 8px 2px;
+}
+
+.log-line {
+  display: flex;
+  gap: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-time {
+  color: var(--faint);
+  flex: none;
+}
+
+.log-src {
+  color: var(--dim);
+  flex: none;
+  min-width: 52px;
+}
+
+.log-line.warn .log-msg {
+  color: var(--accent);
+}
+
+.log-line.error .log-msg {
+  color: var(--danger);
+}
+
+.log-saved {
+  margin-top: 10px;
+  margin-bottom: 0;
+}

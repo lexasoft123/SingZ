@@ -9,6 +9,8 @@ import { detectProject, projectsRoot, saveProject } from './projects'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
+import { log, logEntries, saveLog } from './log'
+import { modelsDir, packDir } from './models'
 import { Separator } from './separation'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
@@ -209,9 +211,22 @@ function registerIpc(): void {
     const url = new URL(String(raw))
     if (url.protocol === 'https:') void shell.openExternal(url.toString())
   })
+
+  ipcMain.handle('log:all', () => logEntries())
+
+  ipcMain.handle('log:save', (_e, path?: string) =>
+    saveLog(typeof path === 'string' && path ? path : undefined)
+  )
 }
 
 app.whenReady().then(() => {
+  log(
+    'app',
+    `SingZ ${app.isPackaged ? app.getVersion() : 'dev'} on ${process.platform}-${process.arch}` +
+      ` — electron ${process.versions.electron}`
+  )
+  log('app', `userData: ${app.getPath('userData')}`)
+  log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   allowRoot(stemsRoot())
