@@ -2,13 +2,20 @@ import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { access, mkdir, readdir, rename, rm } from 'node:fs/promises'
+import { access, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { cpus, homedir } from 'node:os'
 import { basename, delimiter, extname, join } from 'node:path'
 import { STEMS, type EngineStatus, type SeparationProgress, type SeparateResult, type StemName } from '../shared/types'
 import { stemsRoot } from './media'
 import { log, logChunk } from './log'
-import { DEMUCS_MODEL_FILE, demucsModelPath, packDir, packOnnxModel, packPython } from './models'
+import {
+  DEMUCS_MODEL_FILE,
+  demucsModelPath,
+  dmlFlagPath,
+  packDir,
+  packOnnxModel,
+  packPython
+} from './models'
 
 const MODEL = 'htdemucs'
 const PROBE_TIMEOUT_MS = 45_000
@@ -140,6 +147,8 @@ export async function writeInputWav(outDir: string, ch0: Float32Array, ch1: Floa
 }
 
 function friendlyError(tail: string): string {
+  if (/887A0005|DXGI_ERROR_DEVICE_REMOVED|device.{0,10}removed|DmlExecutionProvider/i.test(tail))
+    return 'The graphics driver could not run this model (GPU device removed).'
   if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
     return 'The fast splitter pack is missing its model — open the model manager (splitter chip) and download it again.'
   if (/ModuleNotFoundError|No module named/i.test(tail))
@@ -454,12 +463,34 @@ export class Separator {
     stems: Record<StemName, string>,
     onProgress: (p: SeparationProgress) => void
   ): Promise<SeparateResult> {
+    // A GPU that crashed or stalled on this model once will do it again —
+    // don't make every split pay the DirectML tax before falling back.
+    let providers = ['dml', 'cpu']
+    if (await exists(dmlFlagPath())) {
+      log(
+        'splitter',
+        'DirectML is switched off on this machine after an earlier failure — using the CPU engine (re-download the pack to try DirectML again)'
+      )
+      providers = ['cpu']
+    }
     let last: SeparateResult = { ok: false, error: 'not started' }
-    for (const provider of ['dml', 'cpu']) {
+    for (const provider of providers) {
       log('splitter', `trying ONNX provider: ${provider}`)
       last = await this.spawnOnnx(engine, provider, input, outDir, stems, onProgress)
       if (last.ok || (!last.ok && last.cancelled)) return last
       log('splitter', `provider ${provider} failed: ${last.error}`, 'warn')
+      if (provider === 'dml') {
+        try {
+          await writeFile(
+            dmlFlagPath(),
+            JSON.stringify({ at: new Date().toISOString(), reason: last.error }, null, 2),
+            'utf8'
+          )
+          log('splitter', 'DirectML marked as broken here — future splits go straight to CPU', 'warn')
+        } catch {
+          // purely an optimization marker — never fail the split over it
+        }
+      }
     }
     return last
   }
@@ -510,10 +541,24 @@ export class Separator {
           onProgress({ stage: 'separating', percent: 0 })
 
           // The engine is mute while onnxruntime compiles the model for the
-          // GPU (minutes on a first DirectML run) — say so instead of nothing.
+          // GPU (minutes on a first DirectML run) — say so instead of nothing,
+          // and give up on a compile that goes nowhere (device-removed GPUs
+          // burned 10 minutes before crashing).
           let lastOutput = Date.now()
+          let sawOutput = false
+          let timedOut = false
           const heartbeat = setInterval(() => {
             const quiet = Math.round((Date.now() - lastOutput) / 1000)
+            if (provider === 'dml' && !sawOutput && quiet >= 240) {
+              timedOut = true
+              log(
+                'splitter',
+                'DirectML produced nothing for 4 minutes — giving up on it and switching to the CPU engine',
+                'warn'
+              )
+              child.kill('SIGTERM')
+              return
+            }
             if (quiet >= 30) {
               log(
                 'splitter',
@@ -525,6 +570,7 @@ export class Separator {
           let tail = ''
           const consume = (chunk: Buffer): void => {
             lastOutput = Date.now()
+            sawOutput = true
             const text = chunk.toString('utf8')
             tail = (tail + text).slice(-8000)
             logChunk('splitter', text)
@@ -550,6 +596,10 @@ export class Separator {
             if (this.cancelled) {
               void rm(outDir, { recursive: true, force: true })
               resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
+              return
+            }
+            if (timedOut) {
+              resolve({ ok: false, error: 'DirectML took too long preparing the model.' })
               return
             }
             void (async () => {

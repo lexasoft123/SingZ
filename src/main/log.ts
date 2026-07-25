@@ -22,7 +22,10 @@ export function log(source: string, line: string, level: LogLevel = 'info'): voi
 
 /** Log every non-empty line of child-process output, skipping progress spam. */
 export function logChunk(source: string, chunk: string, skip?: RegExp): void {
-  for (const raw of chunk.split(/\r?\n|\r/)) {
+  // Windows engines emit UTF-16 stretches and ANSI colors — strip both or
+  // the log shows "s p a c e d  o u t" escape soup.
+  const clean = chunk.replace(/\u0000/g, '').replace(/\u001b\[[0-9;]*m/g, '')
+  for (const raw of clean.split(/\r?\n|\r/)) {
     const line = raw.trim()
     if (!line || (skip && skip.test(line))) continue
     log(source, line)

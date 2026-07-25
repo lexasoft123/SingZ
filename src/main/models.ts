@@ -26,6 +26,14 @@ export function packPython(): string {
 }
 
 /**
+ * Marker written when DirectML crashed or stalled on this machine — splits
+ * then go straight to the CPU provider. Re-downloading the pack clears it.
+ */
+export function dmlFlagPath(): string {
+  return join(packDir(), '..', 'dml-disabled.json')
+}
+
+/**
  * The Windows pack embeds the ONNX model in a hub-style cache; a pack whose
  * extraction failed half-way has python.exe but no model. Resolve the real
  * snapshot file so "installed" means "will actually split".
@@ -257,6 +265,8 @@ export class ModelManager {
           } finally {
             await rm(archive, { force: true })
           }
+          // fresh pack → give DirectML another chance if it was disabled
+          await rm(dmlFlagPath(), { force: true })
           log('models', `${entry.id} installed`)
           onProgress({ id: entry.id, percent: 100 })
         }
