@@ -1747,3 +1747,10 @@ button.chip-status:hover {
   align-items: center;
   gap: 10px;
 }
+
+/* Windows iGPUs pay full-window re-raster for backdrop blur (field: HD 4600
+   at a 3200x1800 panel) — a solid scrim composites for free there. */
+body.win .modal-scrim {
+  backdrop-filter: none;
+  background: rgba(8, 6, 3, 0.82);
+}
