@@ -277,13 +277,53 @@ button.chip-status:hover {
 .zoom-cluster {
   position: absolute;
   right: 0;
-  top: 1px;
-  display: flex;
-  gap: 4px;
+  top: 3px;
   z-index: 6;
-  padding: 2px 4px 3px 8px;
+  padding-left: 10px;
   background: var(--bg);
-  border-radius: 8px;
+}
+
+.zoom-seg {
+  display: flex;
+  align-items: stretch;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--panel) 65%, transparent);
+}
+
+.zoom-seg button {
+  padding: 0 11px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--dim);
+  display: grid;
+  place-items: center;
+  transition:
+    color 0.12s,
+    background 0.12s;
+}
+
+.zoom-seg button + button {
+  border-left: 1px solid var(--line);
+}
+
+.zoom-seg button:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 240, 214, 0.05);
+}
+
+.zoom-seg button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.zoom-seg button:focus-visible {
+  outline: none;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .ruler-spacer {

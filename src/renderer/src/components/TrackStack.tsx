@@ -151,17 +151,39 @@ export default function TrackStack({
           </span>
         ))}
         <div className="zoom-cluster no-drag">
-          <button type="button" className="chip zoom" title="Zoom out (scroll wheel works too)" onClick={() => onZoom(1.4)}>
-            −
-          </button>
-          <button type="button" className="chip zoom" title="Zoom in around the playhead" onClick={() => onZoom(0.65)}>
-            +
-          </button>
-          {view && (
-            <button type="button" className="chip zoom" title="Show the whole song" onClick={onResetZoom}>
+          <div className="zoom-seg">
+            <button
+              type="button"
+              title="Zoom out (scroll wheel works too)"
+              onClick={(e) => {
+                e.currentTarget.blur()
+                onZoom(1.4)
+              }}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              title="Zoom in around the playhead"
+              onClick={(e) => {
+                e.currentTarget.blur()
+                onZoom(0.65)
+              }}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              title="Show the whole song"
+              disabled={!view}
+              onClick={(e) => {
+                e.currentTarget.blur()
+                onResetZoom()
+              }}
+            >
               Full
             </button>
-          )}
+          </div>
         </div>
       </div>
 
