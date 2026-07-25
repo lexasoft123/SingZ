@@ -44,7 +44,10 @@ const api: SingzApi = {
     }
   },
 
-  askMicAccess: () => ipcRenderer.invoke('mic:ask')
+  askMicAccess: () => ipcRenderer.invoke('mic:ask'),
+
+  saveProject: (songPath, name, settings) =>
+    ipcRenderer.invoke('project:save', songPath, name, settings)
 }
 
 contextBridge.exposeInMainWorld('singz', api)

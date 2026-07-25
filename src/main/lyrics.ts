@@ -3,10 +3,11 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { cpus } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
 import { lookupLyrics, lyricsById, metaFromFilename, type TrackMeta } from './lrclib'
 import { stemsRoot } from './media'
+import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
 
 // Fallback transcription only runs when no online lyrics exist, so a bigger
@@ -61,6 +62,15 @@ export function modelsDir(): string {
 
 export function whisperModelPath(): string {
   return join(modelsDir(), `ggml-${MODEL}.bin`)
+}
+
+/** Prefer the configured model, but use any already-downloaded one before asking. */
+async function bestAvailableModel(): Promise<string | null> {
+  for (const m of [MODEL, 'medium', 'small', 'base', 'tiny']) {
+    const p = join(modelsDir(), `ggml-${m}.bin`)
+    if (await exists(p)) return p
+  }
+  return null
 }
 
 /** One-time migration from the old per-identity location (userData/models). */
@@ -141,9 +151,14 @@ export class Transcriber {
     return join(stemsRoot(), await hashFile(songPath))
   }
 
-  private async readCache(dir: string): Promise<LyricsCache | null> {
+  /** Project songs keep lyrics next to project.json; others use the hash cache. */
+  private async lyricsFile(songPath: string): Promise<string> {
+    return (await projectLyricsPath(songPath)) ?? join(await this.cacheDir(songPath), 'lyrics.json')
+  }
+
+  private async readCache(file: string): Promise<LyricsCache | null> {
     try {
-      const raw = JSON.parse(await readFile(join(dir, 'lyrics.json'), 'utf8')) as Partial<LyricsCache>
+      const raw = JSON.parse(await readFile(file, 'utf8')) as Partial<LyricsCache>
       if (!Array.isArray(raw.lines) || raw.lines.length === 0) return null
       return { source: raw.source ?? 'whisper', credit: raw.credit, lines: raw.lines }
     } catch {
@@ -151,17 +166,20 @@ export class Transcriber {
     }
   }
 
-  private async writeCache(dir: string, cache: LyricsCache): Promise<void> {
-    await mkdir(dir, { recursive: true })
-    await writeFile(join(dir, 'lyrics.json'), JSON.stringify(cache), 'utf8')
+  private async writeCache(file: string, cache: LyricsCache): Promise<void> {
+    await mkdir(join(file, '..'), { recursive: true })
+    await writeFile(file, JSON.stringify(cache), 'utf8')
   }
 
   /** Apply a manually chosen LRCLIB record and cache it for this song. */
   async applyById(songPath: string, id: number, durationSec: number): Promise<LyricsResult> {
     const hit = await lyricsById(id, durationSec)
     if (!hit) return { ok: false, error: 'That entry has no usable synced lyrics.' }
-    const dir = await this.cacheDir(songPath)
-    await this.writeCache(dir, { source: 'lrclib', credit: hit.credit, lines: hit.lines })
+    await this.writeCache(await this.lyricsFile(songPath), {
+      source: 'lrclib',
+      credit: hit.credit,
+      lines: hit.lines
+    })
     return { ok: true, cached: false, source: 'lrclib', credit: hit.credit, lines: hit.lines }
   }
 
@@ -208,9 +226,9 @@ export class Transcriber {
 
     onProgress({ stage: 'preparing', percent: 0 })
     const dir = await this.cacheDir(songPath)
-    const lyricsPath = join(dir, 'lyrics.json')
+    const lyricsPath = await this.lyricsFile(songPath)
 
-    const cached = await this.readCache(dir)
+    const cached = await this.readCache(lyricsPath)
     if (cached && (prefer === 'auto' || cached.source === 'whisper')) {
       return { ok: true, cached: true, source: cached.source, credit: cached.credit, lines: cached.lines }
     }
@@ -221,13 +239,17 @@ export class Transcriber {
       const meta = await readTrackMeta(songPath, durationSec)
       const hit = await lookupLyrics(meta)
       if (hit) {
-        await this.writeCache(dir, { source: 'lrclib', credit: hit.credit, lines: hit.lines })
+        await this.writeCache(lyricsPath, { source: 'lrclib', credit: hit.credit, lines: hit.lines })
         return { ok: true, cached: false, source: 'lrclib', credit: hit.credit, lines: hit.lines }
       }
     }
 
-    // 2) Fallback: on-device transcription of the vocals stem
-    const vocals = join(dir, 'htdemucs', 'vocals.wav')
+    // 2) Fallback: on-device transcription of the vocals stem (project-local
+    // stems first, then the hash cache)
+    let vocals = join(dirname(songPath), 'stems', 'vocals.wav')
+    if (!(await projectLyricsPath(songPath)) || !(await exists(vocals))) {
+      vocals = join(dir, 'htdemucs', 'vocals.wav')
+    }
     if (!(await exists(vocals))) {
       return { ok: false, error: 'Split the song into stems first — lyrics are read from the vocals track.' }
     }
@@ -242,7 +264,8 @@ export class Transcriber {
     }
 
     await migrateOldModel()
-    if (!(await exists(whisperModelPath()))) {
+    let modelPath = await bestAvailableModel()
+    if (!modelPath) {
       if (!allowDownload) {
         return {
           ok: false,
@@ -253,12 +276,14 @@ export class Transcriber {
       this.cancelled = false
       try {
         await this.downloadModel(onProgress)
+        modelPath = whisperModelPath()
       } catch (err) {
         if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
         const msg = err instanceof Error ? err.message : String(err)
         return { ok: false, error: `Could not download the speech model: ${msg}` }
       }
     }
+    const model = modelPath
 
     const outDir = join(dir, 'whisper-out')
     await mkdir(outDir, { recursive: true })
@@ -269,7 +294,7 @@ export class Transcriber {
       const args = [
         ...engine.slice(1),
         '-m',
-        whisperModelPath(),
+        model,
         '-f',
         vocals,
         '-l',

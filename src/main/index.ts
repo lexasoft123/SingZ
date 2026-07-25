@@ -4,6 +4,8 @@ import { basename, extname, join, resolve } from 'node:path'
 import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
 import { Transcriber } from './lyrics'
+import { detectProject, projectsRoot, saveProject } from './projects'
+import type { ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { Separator } from './separation'
 
@@ -70,7 +72,14 @@ function registerIpc(): void {
       const info = await stat(full)
       if (!info.isFile()) return { ok: false, error: 'That is not a file.' }
       allowFile(full)
-      return { ok: true, path: full, name: basename(full, ext), size: info.size }
+      const project = await detectProject(full)
+      return {
+        ok: true,
+        path: full,
+        name: project?.name ?? basename(full, ext),
+        size: info.size,
+        project: project ?? undefined
+      }
     } catch {
       return { ok: false, error: 'Could not read that file.' }
     }
@@ -137,6 +146,12 @@ function registerIpc(): void {
 
   ipcMain.handle('lyrics:cancel', () => transcriber.cancel())
 
+  ipcMain.handle('project:save', async (_e, raw: string, name: string, settings: ProjectSettings) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    return saveProject(full, String(name), settings)
+  })
+
   ipcMain.handle('mic:ask', async () => {
     if (process.platform !== 'darwin') return true
     try {
@@ -159,6 +174,7 @@ function registerIpc(): void {
 
 app.whenReady().then(() => {
   allowRoot(stemsRoot())
+  allowRoot(projectsRoot())
   registerIpc()
   createWindow()
 

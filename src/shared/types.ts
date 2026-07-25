@@ -9,8 +9,22 @@ export interface SeparationProgress {
   detail?: string
 }
 
+export interface ProjectSettings {
+  transpose: number
+  tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
+}
+
+export interface ProjectInfo {
+  dir: string
+  name: string
+  settings: ProjectSettings
+  /** All four stem files, when the project has them. */
+  stems?: Record<StemName, string>
+  hasLyrics: boolean
+}
+
 export type RegisterResult =
-  | { ok: true; path: string; name: string; size: number }
+  | { ok: true; path: string; name: string; size: number; project?: ProjectInfo }
   | { ok: false; error: string }
 
 export type SeparateResult =
@@ -93,4 +107,10 @@ export interface SingzApi {
   onLyricsProgress(cb: (p: LyricsProgress) => void): () => void
   /** Ask the OS for microphone permission (macOS prompts; other platforms return true). */
   askMicAccess(): Promise<boolean>
+  /** Save the current song + stems + lyrics + settings into ~/Music/SingZ/<name>/. */
+  saveProject(
+    songPath: string,
+    name: string,
+    settings: ProjectSettings
+  ): Promise<{ ok: true; dir: string } | { ok: false; error: string }>
 }

@@ -60,6 +60,7 @@ export default function App(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
   const [karaoke, setKaraoke] = useState(false)
   const [lyrics, setLyrics] = useState<LyricsState>({ status: 'idle' })
   const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
@@ -137,15 +138,54 @@ export default function App(): React.JSX.Element {
       preferRef.current = 'auto'
       setTranspose(0)
       void engine.setTranspose(0)
+      setSaveState('idle')
       setPhase('loading')
       setSong({ path: reg.path, name: reg.name })
       try {
+        // Saved project with stems: load them directly and restore settings.
+        if (reg.project?.stems) {
+          const proj = reg.project
+          const stems = proj.stems as Record<StemName, string>
+          const buffers = await Promise.all(
+            STEM_ORDER.map(async (s) => engine.decode(await window.singz.readAudio(stems[s])))
+          )
+          if (seq !== loadSeq.current) return
+          engine.load(STEM_ORDER.map((s, i) => ({ id: s, buffer: buffers[i] })))
+          const uiTracks = STEM_ORDER.map((s, i) => {
+            const t = makeTrack(s, buffers[i])
+            const saved = proj.settings.tracks[s]
+            if (saved) {
+              t.muted = saved.muted
+              t.solo = saved.solo
+              t.volume = saved.volume
+              engine.setMuted(s, saved.muted)
+              engine.setSolo(s, saved.solo)
+              engine.setVolume(s, saved.volume)
+            }
+            return t
+          })
+          setTracks(uiTracks)
+          setSplit(true)
+          setStemFiles(stems)
+          vocalsBufRef.current = buffers[STEM_ORDER.indexOf('vocals')]
+          const st = proj.settings.transpose ?? 0
+          setTranspose(st)
+          void engine.setTranspose(st)
+          setSaveState('saved')
+          setPhase('ready')
+          void prepLyricsRef.current?.()
+          return
+        }
+
         const buf = await window.singz.readAudio(reg.path)
         const audio = await engine.decode(buf)
         if (seq !== loadSeq.current) return
         engine.load([{ id: 'original', buffer: audio }])
         setTracks([makeTrack('original', audio)])
         setPhase('ready')
+        // Look for lyrics right away (cache/online only — never triggers the
+        // model download without consent), so karaoke opens with answers ready.
+        void prepLyricsRef.current?.()
       } catch {
         if (seq !== loadSeq.current) return
         setPhase('empty')
@@ -270,6 +310,7 @@ export default function App(): React.JSX.Element {
   }, [])
 
   const preferRef = useRef<'auto' | 'whisper'>('auto')
+  const prepLyricsRef = useRef<((allowDownload?: boolean, prefer?: 'auto' | 'whisper') => Promise<void>) | null>(null)
 
   const prepLyrics = useCallback(
     async (allowDownload = false, prefer?: 'auto' | 'whisper') => {
@@ -292,6 +333,7 @@ export default function App(): React.JSX.Element {
     },
     [song, engine, applyLyricsResult]
   )
+  prepLyricsRef.current = prepLyrics
 
   const prepMelody = useCallback(() => {
     if (melodyRef.current.status !== 'none') return
@@ -333,6 +375,25 @@ export default function App(): React.JSX.Element {
 
   const openPicker = useCallback(() => fileInputRef.current?.click(), [])
 
+  const handleSaveProject = useCallback(async () => {
+    if (!song || saveState === 'saving') return
+    setSaveState('saving')
+    const settings = {
+      transpose,
+      tracks: Object.fromEntries(
+        tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
+      )
+    }
+    const res = await window.singz.saveProject(song.path, cleanSongName(song.name), settings)
+    if (res.ok) {
+      setSaveState('saved')
+      setTimeout(() => setSaveState('idle'), 2500)
+    } else {
+      setSaveState('idle')
+      setError(`Could not save the project: ${res.error}`)
+    }
+  }, [song, saveState, transpose, tracks])
+
   const handleTranspose = useCallback(
     (st: number) => {
       const clamped = Math.max(-12, Math.min(12, st))
@@ -350,6 +411,17 @@ export default function App(): React.JSX.Element {
         </div>
         {song && phase === 'ready' && <div className="song-title">{song.name}</div>}
         <div className="header-right no-drag">
+          {phase === 'ready' && (
+            <button
+              type="button"
+              className="pill ghost small"
+              title="Save song, stems, lyrics and settings into ~/Music/SingZ"
+              disabled={saveState === 'saving'}
+              onClick={() => void handleSaveProject()}
+            >
+              {saveState === 'saved' ? 'Saved ✓' : saveState === 'saving' ? 'Saving…' : 'Save project'}
+            </button>
+          )}
           {phase === 'ready' && (
             <button type="button" className="pill ghost small" onClick={openPicker}>
               Open…
