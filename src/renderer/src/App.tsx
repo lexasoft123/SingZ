@@ -38,9 +38,14 @@ function EngineChip({
   }
   if (status.ok) {
     return (
-      <span className="chip-status" title={status.command}>
+      <button
+        type="button"
+        className="chip-status"
+        title={`${status.command} — click to manage AI models`}
+        onClick={onClick}
+      >
         <span className="dot ok" /> splitter ready
-      </span>
+      </button>
     )
   }
   return (
@@ -60,7 +65,10 @@ export default function App(): React.JSX.Element {
   const [sep, setSep] = useState<SeparationProgress | null>(null)
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
   const [showSetup, setShowSetup] = useState(false)
-  const [wizardModels, setWizardModels] = useState<import('../../shared/types').ModelInfo[] | null>(null)
+  const [wizard, setWizard] = useState<{
+    models: import('../../shared/types').ModelInfo[]
+    origin: 'auto' | 'manual'
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
@@ -90,15 +98,19 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     void window.singz.checkEngine().then(setEngineStatus)
-    // First-run setup: required models that aren't downloaded yet.
+    // First-run setup: open when something required is missing.
     void window.singz.modelsStatus().then((models) => {
-      const missing = models.filter((m) => m.required && !m.present)
-      if (missing.length > 0) setWizardModels(missing)
+      if (models.some((m) => m.required && !m.present)) setWizard({ models, origin: 'auto' })
     })
   }, [])
 
-  const finishWizard = useCallback(() => {
-    setWizardModels(null)
+  const openWizard = useCallback(async (origin: 'auto' | 'manual') => {
+    const models = await window.singz.modelsStatus()
+    setWizard({ models, origin })
+  }, [])
+
+  const closeWizard = useCallback(() => {
+    setWizard(null)
     void window.singz.checkEngine(true).then(setEngineStatus)
   }, [])
 
@@ -262,8 +274,7 @@ export default function App(): React.JSX.Element {
     }
     if (!status.ok) {
       if (status.needsModels) {
-        const models = await window.singz.modelsStatus()
-        setWizardModels(models.filter((m) => !m.present))
+        await openWizard('auto')
       } else {
         setShowSetup(true)
       }
@@ -527,12 +538,10 @@ export default function App(): React.JSX.Element {
           <EngineChip
             status={engineStatus}
             onClick={() => {
-              if (engineStatus && !engineStatus.ok && engineStatus.needsModels) {
-                void window.singz.modelsStatus().then((models) => {
-                  setWizardModels(models.filter((m) => !m.present))
-                })
-              } else {
+              if (engineStatus && !engineStatus.ok && !engineStatus.needsModels) {
                 setShowSetup(true)
+              } else {
+                void openWizard('manual')
               }
             }}
           />
@@ -623,12 +632,8 @@ export default function App(): React.JSX.Element {
         />
       )}
 
-      {wizardModels && wizardModels.length > 0 && (
-        <SetupWizard
-          models={wizardModels}
-          onDone={finishWizard}
-          onSkip={() => setWizardModels(null)}
-        />
+      {wizard && (
+        <SetupWizard models={wizard.models} origin={wizard.origin} onClose={closeWizard} />
       )}
 
       <input

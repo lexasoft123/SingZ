@@ -10,14 +10,16 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
-export type ModelId = 'htdemucs'
+export type ModelId = 'htdemucs' | 'gpu-splitter'
 
 export interface ModelInfo {
   id: ModelId
   label: string
+  description: string
   sizeMb: number
   present: boolean
   required: boolean
+  optional: boolean
 }
 
 export interface ModelsProgress {
@@ -139,7 +141,9 @@ export interface SingzApi {
   askMicAccess(): Promise<boolean>
   /** First-run setup: model inventory and the shared download flow. */
   modelsStatus(): Promise<ModelInfo[]>
-  downloadModels(): Promise<{ ok: true } | { ok: false; cancelled?: boolean; error: string }>
+  downloadModels(
+    ids?: ModelId[]
+  ): Promise<{ ok: true } | { ok: false; cancelled?: boolean; error: string }>
   cancelModels(): Promise<void>
   onModelsProgress(cb: (p: ModelsProgress) => void): () => void
   /** 44.1k stereo PCM of the current song for the bundled splitter. */

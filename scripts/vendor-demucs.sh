@@ -16,7 +16,9 @@ if [ ! -d "$SRC" ]; then
 fi
 
 if [ ! -f "$ROOT/vendor/models/ggml-model-htdemucs-4s-f16.bin" ]; then
-  curl -L --fail -o "$ROOT/vendor/models/ggml-model-htdemucs-4s-f16.bin" "$MODEL_URL"
+  AUTH=()
+  [ -n "${HF_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $HF_TOKEN")
+  curl -L --fail "${AUTH[@]}" -o "$ROOT/vendor/models/ggml-model-htdemucs-4s-f16.bin" "$MODEL_URL"
 fi
 
 EXTRA=""

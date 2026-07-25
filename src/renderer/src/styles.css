@@ -1433,8 +1433,16 @@ button.chip-status:hover {
   color: var(--faint);
 }
 
-.wiz-row.done .wiz-size {
+.wiz-row.done .wiz-size,
+.wiz-size.ok {
   color: #58d68a;
+}
+
+.wiz-desc {
+  font-size: 11.5px !important;
+  color: var(--faint) !important;
+  line-height: 1.5 !important;
+  margin: 0 0 6px !important;
 }
 
 .wiz-row.error .wiz-size {

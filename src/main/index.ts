@@ -149,14 +149,20 @@ function registerIpc(): void {
 
   ipcMain.handle('lyrics:cancel', () => transcriber.cancel())
 
-  ipcMain.handle('models:status', async () => modelManager.status(await separator.hasPython()))
+  ipcMain.handle('models:status', async () =>
+    modelManager.status(await separator.hasFastSplitter())
+  )
 
-  ipcMain.handle('models:download', async (e) => {
+  ipcMain.handle('models:download', async (e, ids?: string[]) => {
     const send = (p: ModelsProgress): void => {
       if (!e.sender.isDestroyed()) e.sender.send('models:progress', p)
     }
-    const result = await modelManager.downloadMissing(await separator.hasPython(), send)
-    if (result.ok) void separator.check(true) // pick up the freshly downloaded weights
+    const result = await modelManager.downloadModels(
+      await separator.hasFastSplitter(),
+      send,
+      Array.isArray(ids) && ids.length > 0 ? (ids as ModelsProgress['id'][]) : undefined
+    )
+    if (result.ok) void separator.check(true) // pick up freshly downloaded engines/weights
     return result
   })
 

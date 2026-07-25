@@ -1,4 +1,5 @@
 import { app, net } from 'electron'
+import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { access, mkdir, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -12,9 +13,16 @@ export function modelsDir(): string {
   return process.env.SINGZ_MODELS_DIR ?? join(app.getPath('appData'), 'SingZ', 'models')
 }
 
+/** Optional GPU splitter pack (relocatable Python + torch/MPS + demucs). */
+export function packDir(): string {
+  return process.env.SINGZ_PACK_DIR ?? join(app.getPath('appData'), 'SingZ', 'gpu-splitter')
+}
+
+export function packPython(): string {
+  return join(packDir(), 'python', 'bin', 'python3')
+}
+
 export const DEMUCS_MODEL_FILE = 'ggml-model-htdemucs-4s-f16.bin'
-const DEMUCS_URL =
-  'https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-4s-f16.bin'
 
 export function demucsModelPath(): string {
   return join(modelsDir(), DEMUCS_MODEL_FILE)
@@ -65,65 +73,128 @@ export async function downloadFile(
   }
 }
 
+function untar(archive: string, destDir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('tar', ['-xzf', archive, '-C', destDir])
+    child.on('error', reject)
+    child.on('exit', (code) =>
+      code === 0 ? resolve() : reject(new Error(`extract failed (tar exit ${code})`))
+    )
+  })
+}
+
 interface RegistryEntry {
   id: ModelId
   label: string
+  description: string
   sizeMb: number
-  file: string
+  kind: 'file' | 'archive'
+  file?: string
   url: string
+  optional: boolean
+  platforms?: string[]
 }
 
 const REGISTRY: RegistryEntry[] = [
   {
     id: 'htdemucs',
     label: 'Stem splitter · htdemucs',
+    description: 'Splits songs into vocals, drums, bass and instruments.',
     sizeMb: 81,
+    kind: 'file',
     file: DEMUCS_MODEL_FILE,
-    url: DEMUCS_URL
+    url: 'https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-4s-f16.bin',
+    optional: false
+  },
+  {
+    id: 'gpu-splitter',
+    label: 'Fast splitter · GPU',
+    description: 'Splits a song in seconds instead of minutes using the GPU (PyTorch). Recommended on Apple Silicon.',
+    sizeMb: 240,
+    kind: 'archive',
+    url:
+      process.env.SINGZ_GPU_PACK_URL ??
+      'https://github.com/lexasoft123/SingZ/releases/latest/download/gpu-splitter-darwin-arm64.tar.gz',
+    optional: true,
+    platforms: ['darwin-arm64']
   }
 ]
+
+function forThisPlatform(): RegistryEntry[] {
+  const here = `${process.platform}-${process.arch}`
+  return REGISTRY.filter((e) => !e.platforms || e.platforms.includes(here))
+}
 
 export class ModelManager {
   private abort: AbortController | null = null
 
-  /** `pythonSplitter` marks htdemucs optional when a fast system demucs exists. */
-  async status(pythonSplitter: boolean): Promise<ModelInfo[]> {
+  private async present(entry: RegistryEntry): Promise<boolean> {
+    if (entry.kind === 'archive') return exists(packPython())
+    return (
+      (await exists(join(modelsDir(), entry.file as string))) ||
+      // dev convenience: weights fetched by scripts/vendor-demucs.sh
+      (await exists(join(app.getAppPath(), 'vendor', 'models', entry.file as string)))
+    )
+  }
+
+  /** `fastSplitter` marks htdemucs optional when a fast demucs already exists. */
+  async status(fastSplitter: boolean): Promise<ModelInfo[]> {
     const out: ModelInfo[] = []
-    for (const entry of REGISTRY) {
-      const present =
-        (await exists(join(modelsDir(), entry.file))) ||
-        // dev convenience: weights fetched by scripts/vendor-demucs.sh
-        (await exists(join(app.getAppPath(), 'vendor', 'models', entry.file)))
+    for (const entry of forThisPlatform()) {
       out.push({
         id: entry.id,
         label: entry.label,
+        description: entry.description,
         sizeMb: entry.sizeMb,
-        present,
-        required: entry.id === 'htdemucs' ? !pythonSplitter : false
+        present: await this.present(entry),
+        optional: entry.optional,
+        required: entry.id === 'htdemucs' ? !fastSplitter : false
       })
     }
     return out
   }
 
-  async downloadMissing(
-    pythonSplitter: boolean,
-    onProgress: (p: ModelsProgress) => void
+  async downloadModels(
+    fastSplitter: boolean,
+    onProgress: (p: ModelsProgress) => void,
+    ids?: ModelId[]
   ): Promise<{ ok: true } | { ok: false; cancelled?: boolean; error: string }> {
     if (this.abort) return { ok: false, error: 'A model download is already running.' }
     this.abort = new AbortController()
     try {
-      const missing = (await this.status(pythonSplitter)).filter((m) => !m.present)
-      for (const m of missing) {
+      const all = await this.status(fastSplitter)
+      const wanted = all.filter((m) => !m.present && (ids ? ids.includes(m.id) : m.required))
+      for (const m of wanted) {
         const entry = REGISTRY.find((e) => e.id === m.id)
         if (!entry) continue
         onProgress({ id: entry.id, percent: 0 })
-        await downloadFile(
-          entry.url,
-          join(modelsDir(), entry.file),
-          entry.sizeMb * 1e6,
-          (pct) => onProgress({ id: entry.id, percent: pct }),
-          this.abort.signal
-        )
+        if (entry.kind === 'file') {
+          await downloadFile(
+            entry.url,
+            join(modelsDir(), entry.file as string),
+            entry.sizeMb * 1e6,
+            (pct) => onProgress({ id: entry.id, percent: pct }),
+            this.abort.signal
+          )
+        } else {
+          const archive = join(packDir(), '..', `${entry.id}.tar.gz`)
+          await downloadFile(
+            entry.url,
+            archive,
+            entry.sizeMb * 1e6,
+            (pct) => onProgress({ id: entry.id, percent: pct * 0.9 }),
+            this.abort.signal
+          )
+          onProgress({ id: entry.id, percent: 92 })
+          await rm(packDir(), { recursive: true, force: true })
+          await mkdir(packDir(), { recursive: true })
+          await untar(archive, packDir())
+          await rm(archive, { force: true })
+          if (!(await exists(packPython()))) {
+            throw new Error('the downloaded pack is incomplete')
+          }
+          onProgress({ id: entry.id, percent: 100 })
+        }
       }
       return { ok: true }
     } catch (err) {

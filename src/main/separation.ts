@@ -7,7 +7,7 @@ import { cpus, homedir } from 'node:os'
 import { delimiter, extname, join } from 'node:path'
 import { STEMS, type EngineStatus, type SeparationProgress, type SeparateResult, type StemName } from '../shared/types'
 import { stemsRoot } from './media'
-import { DEMUCS_MODEL_FILE, demucsModelPath } from './models'
+import { DEMUCS_MODEL_FILE, demucsModelPath, packDir, packPython } from './models'
 
 const MODEL = 'htdemucs'
 const PROBE_TIMEOUT_MS = 45_000
@@ -150,12 +150,16 @@ function friendlyError(tail: string): string {
 
 export class Separator {
   private engine: ResolvedEngine | null = null
+  private extraEnv: Record<string, string> = {}
   private child: ChildProcess | null = null
   private cancelled = false
 
   async check(force = false): Promise<EngineStatus> {
     if (this.engine && !force) return { ok: true, command: this.describe(this.engine) }
-    if (force) this.engine = null
+    if (force) {
+      this.engine = null
+      this.extraEnv = {}
+    }
     // Python demucs is much faster when the machine has it (GPU via torch);
     // the bundled demucs.cpp guarantees a clean install always works.
     if (!process.env.SINGZ_NO_SYSTEM_ENGINES) {
@@ -164,6 +168,19 @@ export class Separator {
           this.engine = { kind: 'python', cmd }
           return { ok: true, command: this.describe(this.engine) }
         }
+      }
+    }
+    // App-managed GPU pack (works on "clean OS" too — it is our own download).
+    // TORCH_HOME points at the checkpoint embedded in the pack.
+    if (await exists(packPython())) {
+      const cmd = [packPython(), '-m', 'demucs']
+      if (await probe(cmd)) {
+        this.engine = { kind: 'python', cmd }
+        this.extraEnv = {
+          TORCH_HOME: join(packDir(), 'python', 'torch-home'),
+          HF_HOME: join(packDir(), 'python', 'hf-home')
+        }
+        return { ok: true, command: this.describe(this.engine) }
       }
     }
     const bundled = await bundledEngine()
@@ -184,10 +201,11 @@ export class Separator {
     }
   }
 
-  /** Is a (fast, GPU-capable) system demucs available? Drives model requirements. */
-  async hasPython(): Promise<boolean> {
-    if (process.env.SINGZ_NO_SYSTEM_ENGINES) return false
+  /** Is a fast (GPU-capable) demucs available — system install or our pack? */
+  async hasFastSplitter(): Promise<boolean> {
     if (this.engine?.kind === 'python') return true
+    if (await exists(packPython())) return true
+    if (process.env.SINGZ_NO_SYSTEM_ENGINES) return false
     for (const cmd of pythonCandidates()) {
       if (await probe(cmd)) return true
     }
@@ -256,7 +274,7 @@ export class Separator {
   ): Promise<SeparateResult> {
     return new Promise<SeparateResult>((resolve) => {
       const args = [...cmd.slice(1), '-n', MODEL, '--filename', '{stem}.{ext}', '-o', outDir, input]
-      const child = spawn(cmd[0], args, { env: spawnEnv() })
+      const child = spawn(cmd[0], args, { env: { ...spawnEnv(), ...this.extraEnv } })
       this.child = child
 
       let tail = ''

@@ -48,7 +48,7 @@ const api: SingzApi = {
 
   modelsStatus: () => ipcRenderer.invoke('models:status'),
 
-  downloadModels: () => ipcRenderer.invoke('models:download'),
+  downloadModels: (ids) => ipcRenderer.invoke('models:download', ids),
 
   cancelModels: () => ipcRenderer.invoke('models:cancel'),
 

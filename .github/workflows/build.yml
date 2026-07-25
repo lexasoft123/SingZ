@@ -43,15 +43,25 @@ jobs:
 
       - name: Build bundled engines (macOS)
         if: runner.os == 'macOS'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/vendor-whisper.sh darwin-arm64
           bash scripts/vendor-whisper.sh darwin-x64
           bash scripts/vendor-demucs.sh darwin-arm64
           bash scripts/vendor-demucs.sh darwin-x64
 
+      - name: Build GPU splitter pack (Apple Silicon)
+        if: runner.os == 'macOS'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash scripts/build-gpu-pack.sh
+
       - name: Build bundled engines (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/vendor-whisper.sh win32-x64
           bash scripts/vendor-demucs.sh win32-x64
@@ -66,6 +76,7 @@ jobs:
           path: |
             dist/*.dmg
             dist/*.exe
+            vendor/packs/*.tar.gz
           if-no-files-found: error
 
       - name: Attach to GitHub Release
@@ -75,3 +86,4 @@ jobs:
           files: |
             dist/*.dmg
             dist/*.exe
+            vendor/packs/*.tar.gz

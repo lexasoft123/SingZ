@@ -1,90 +1,97 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ModelInfo } from '../../../shared/types'
+import type { ModelId, ModelInfo } from '../../../shared/types'
 
 interface Props {
   models: ModelInfo[]
-  onDone: () => void
-  onSkip: () => void
+  origin: 'auto' | 'manual'
+  onClose: () => void
 }
 
-type RowState = 'waiting' | 'downloading' | 'done' | 'error'
-
 /**
- * First-run setup: downloads the AI models the app needs into the shared
- * local cache, with per-model progress. Starts automatically on mount.
+ * Model manager / first-run setup. Required items download automatically
+ * (auto origin); optional packs have their own Get button. Everything lands
+ * in the shared local cache with per-model progress.
  */
-export default function SetupWizard({ models, onDone, onSkip }: Props): React.JSX.Element {
+export default function SetupWizard({ models: initial, origin, onClose }: Props): React.JSX.Element {
+  const [models, setModels] = useState(initial)
   const [progress, setProgress] = useState<Record<string, number>>({})
-  const [states, setStates] = useState<Record<string, RowState>>({})
+  const [running, setRunning] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const startedRef = useRef(false)
+  const busy = running.size > 0
+
+  const download = async (ids?: ModelId[]): Promise<void> => {
+    setError(null)
+    const target = ids ?? models.filter((m) => m.required && !m.present).map((m) => m.id)
+    if (target.length === 0) return
+    setRunning(new Set(target))
+    const unsub = window.singz.onModelsProgress((p) =>
+      setProgress((prev) => ({ ...prev, [p.id]: p.percent }))
+    )
+    const res = await window.singz.downloadModels(target)
+    unsub()
+    setRunning(new Set())
+    setModels(await window.singz.modelsStatus())
+    if (!res.ok && !res.cancelled) setError(res.error)
+  }
 
   useEffect(() => {
-    if (startedRef.current) return
-    startedRef.current = true
-    const unsub = window.singz.onModelsProgress((p) => {
-      setProgress((prev) => ({ ...prev, [p.id]: p.percent }))
-      setStates((prev) => ({ ...prev, [p.id]: p.percent >= 100 ? 'done' : 'downloading' }))
-    })
-    void (async () => {
-      const res = await window.singz.downloadModels()
-      unsub()
-      if (res.ok) {
-        onDone()
-      } else if (!res.cancelled) {
-        setError(res.error)
-        setStates((prev) => {
-          const next = { ...prev }
-          for (const m of models) if (next[m.id] !== 'done') next[m.id] = 'error'
-          return next
-        })
-      }
-    })()
-    return () => unsub()
+    if (origin === 'auto' && !startedRef.current) {
+      startedRef.current = true
+      void download()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const retry = (): void => {
-    setError(null)
-    startedRef.current = false
-    setStates({})
-    // re-trigger the mount effect by toggling a key upstream is overkill;
-    // just run the same flow again inline
-    startedRef.current = true
-    const unsub = window.singz.onModelsProgress((p) => {
-      setProgress((prev) => ({ ...prev, [p.id]: p.percent }))
-      setStates((prev) => ({ ...prev, [p.id]: p.percent >= 100 ? 'done' : 'downloading' }))
-    })
-    void window.singz.downloadModels().then((res) => {
-      unsub()
-      if (res.ok) onDone()
-      else if (!res.cancelled) setError(res.error)
-    })
-  }
+  // First-run flow closes itself once everything required is in place.
+  const requiredDone = models.every((m) => !m.required || m.present)
+  useEffect(() => {
+    if (origin === 'auto' && requiredDone && !busy && !error) {
+      const t = setTimeout(onClose, 1100)
+      return () => clearTimeout(t)
+    }
+    return undefined
+  }, [origin, requiredDone, busy, error, onClose])
 
   return (
     <div className="modal-scrim">
       <div className="modal-card wizard">
-        <h2>Setting up SingZ</h2>
+        <h2>{origin === 'auto' ? 'Setting up SingZ' : 'AI models'}</h2>
         <p>
-          Downloading the AI models SingZ runs locally — a one-time step; everything is stored on
-          this machine and reused for every song.
+          SingZ runs its AI locally. Models download once into a shared folder and are reused for
+          every song.
         </p>
         <div className="wiz-rows">
           {models.map((m) => {
-            const st = states[m.id] ?? 'waiting'
+            const isRunning = running.has(m.id)
             const pct = progress[m.id] ?? 0
             return (
-              <div key={m.id} className={`wiz-row ${st}`}>
+              <div key={m.id} className={`wiz-row${m.present ? ' done' : ''}`}>
                 <div className="wiz-head">
                   <span className="wiz-name">{m.label}</span>
-                  <span className="wiz-size">
-                    {st === 'done' ? '✓' : st === 'error' ? 'failed' : `${m.sizeMb} MB`}
-                  </span>
+                  {m.present ? (
+                    <span className="wiz-size ok">installed ✓</span>
+                  ) : isRunning ? (
+                    <span className="wiz-size">{Math.round(pct)}%</span>
+                  ) : m.optional ? (
+                    <button
+                      type="button"
+                      className="pill ghost small"
+                      disabled={busy}
+                      onClick={() => void download([m.id])}
+                    >
+                      Get · {m.sizeMb} MB
+                    </button>
+                  ) : (
+                    <span className="wiz-size">{m.sizeMb} MB</span>
+                  )}
                 </div>
-                <div className="lp-bar">
-                  <div style={{ width: `${st === 'done' ? 100 : pct}%` }} />
-                </div>
+                <p className="wiz-desc">{m.description}</p>
+                {(isRunning || (!m.present && !m.optional)) && (
+                  <div className="lp-bar">
+                    <div style={{ width: `${m.present ? 100 : pct}%` }} />
+                  </div>
+                )}
               </div>
             )
           })}
@@ -92,7 +99,7 @@ export default function SetupWizard({ models, onDone, onSkip }: Props): React.JS
         {error && <p className="fine warn">{error}</p>}
         <div className="modal-actions">
           {error && (
-            <button type="button" className="pill primary" onClick={retry}>
+            <button type="button" className="pill primary" onClick={() => void download()}>
               Try again
             </button>
           )}
@@ -101,10 +108,10 @@ export default function SetupWizard({ models, onDone, onSkip }: Props): React.JS
             className="pill ghost"
             onClick={() => {
               void window.singz.cancelModels()
-              onSkip()
+              onClose()
             }}
           >
-            Skip for now
+            {origin === 'auto' && !requiredDone ? 'Skip for now' : 'Close'}
           </button>
         </div>
       </div>
