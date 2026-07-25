@@ -46,8 +46,32 @@ async function resolveEngine(): Promise<string[] | null> {
   return null
 }
 
+/**
+ * Models live in a stable folder shared by every way the app runs (dev,
+ * packaged, tests) so the weights are only ever downloaded once:
+ * ~/Library/Application Support/SingZ/models on macOS, %APPDATA%/SingZ/models
+ * on Windows. Override with SINGZ_MODELS_DIR.
+ */
+export function modelsDir(): string {
+  return process.env.SINGZ_MODELS_DIR ?? join(app.getPath('appData'), 'SingZ', 'models')
+}
+
 export function whisperModelPath(): string {
-  return join(app.getPath('userData'), 'models', `ggml-${MODEL}.bin`)
+  return join(modelsDir(), `ggml-${MODEL}.bin`)
+}
+
+/** One-time migration from the old per-identity location (userData/models). */
+async function migrateOldModel(): Promise<void> {
+  const oldPath = join(app.getPath('userData'), 'models', `ggml-${MODEL}.bin`)
+  const newPath = whisperModelPath()
+  if (!(await exists(newPath)) && (await exists(oldPath))) {
+    try {
+      await mkdir(join(newPath, '..'), { recursive: true })
+      await rename(oldPath, newPath)
+    } catch {
+      // cross-volume or locked — the downloader will fetch a fresh copy
+    }
+  }
 }
 
 export function whisperModelSizeMb(): number {
@@ -154,6 +178,7 @@ export class Transcriber {
       }
     }
 
+    await migrateOldModel()
     if (!(await exists(whisperModelPath()))) {
       if (!allowDownload) {
         return {
