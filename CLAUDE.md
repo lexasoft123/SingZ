@@ -1,6 +1,6 @@
 # SingZ — instructions for Claude Code
 
-Electron desktop app for singers: split songs into stems (demucs), karaoke with
+Electron desktop app for singers: split songs into six stems (htdemucs_6s), karaoke with
 synced lyrics (LRCLIB + whisper.cpp), pitch matching, transpose, projects.
 Deeper docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
@@ -44,11 +44,14 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
   before aligning (see `alignLines`).
 - **LRC gives line starts only** — word timing is estimated at ~12 chars/sec,
   never stretched to the next timestamp (lag), unless AI-aligned.
-- **Splitting requires a downloaded pack** (no bundled engine since 0.3.0):
-  torch/MPS on Apple Silicon; demucs-onnx elsewhere (DirectML on Windows with
-  a `dml-disabled.json` marker after failures; CPU on Intel Macs — CoreML
-  crashes compiling the graph). ONNX packs get a renderer-rendered 44.1 kHz
-  WAV (`needsPcm`).
+- **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
+  and every split is six stems (htdemucs_6s; silent guitar/piano lanes are
+  hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere
+  (DirectML on Windows with a `dml-disabled.json` marker after failures; CPU
+  on Intel Macs — CoreML crashes compiling the graph). ONNX packs get a
+  renderer-rendered 44.1 kHz WAV (`needsPcm`). Packs are versioned via
+  `python/pack.json` — bump `PACK_FORMAT_REQUIRED` (models.ts) with the
+  build-script stamp to force everyone onto a new pack.
 - **HF hub caches checkpoints as extension-less blobs** — never glob for
   `*.safetensors` under `HF_HOME`.
 - **HF hub caches symlink snapshots→blobs** — packs must materialize links and

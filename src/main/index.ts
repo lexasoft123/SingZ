@@ -10,7 +10,7 @@ import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { log, logEntries, saveLog } from './log'
-import { modelsDir, packDir } from './models'
+import { cleanupObsoleteModels, modelsDir, packDir } from './models'
 import { Separator } from './separation'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
@@ -240,6 +240,7 @@ app.whenReady().then(async () => {
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()
+  await cleanupObsoleteModels()
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
   registerIpc()

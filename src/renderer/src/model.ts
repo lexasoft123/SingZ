@@ -29,7 +29,16 @@ export const TRACK_META: Record<string, { label: string; color: string }> = {
   vocals: { label: 'Vocals', color: '#ff5d66' },
   drums: { label: 'Drums', color: '#f2c14e' },
   bass: { label: 'Bass', color: '#7a9bff' },
+  guitar: { label: 'Guitar', color: '#e0873f' },
+  piano: { label: 'Piano', color: '#b48ead' },
   other: { label: 'Instruments', color: '#45d6b5' }
+}
+
+/** Display order for any stem set — filter by what a split produced. */
+export const STEM_ORDER_ALL = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'] as const
+
+export function orderedStems(stems: Record<string, string | undefined>): string[] {
+  return STEM_ORDER_ALL.filter((s) => Boolean(stems[s]))
 }
 
 /** "08. Sixteen Tons [Am +2st]" → "Sixteen Tons" (for lyrics search prefill). */

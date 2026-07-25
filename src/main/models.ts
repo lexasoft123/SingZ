@@ -1,7 +1,7 @@
 import { app, net } from 'electron'
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import { access, mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ModelId, ModelInfo, ModelsProgress } from '../shared/types'
 import { log } from './log'
@@ -34,24 +34,21 @@ export function dmlFlagPath(): string {
 }
 
 /**
- * The Windows pack embeds the ONNX model in a hub-style cache; a pack whose
- * extraction failed half-way has python.exe but no model. Resolve the real
+ * ONNX packs keep models in a hub-style cache; a pack whose extraction
+ * failed half-way has a working interpreter but no model. Resolve the real
  * snapshot file so "installed" means "will actually split".
  */
-export async function packOnnxModel(): Promise<string | null> {
-  const snaps = join(
-    packDir(),
-    'python',
-    'model-cache',
-    'models--StemSplitio--htdemucs-onnx',
-    'snapshots'
-  )
+export async function packOnnxModel(
+  repo = 'models--StemSplitio--htdemucs-6s-onnx',
+  file = 'htdemucs_6s_fp16weights.onnx'
+): Promise<string | null> {
+  const snaps = join(packDir(), 'python', 'model-cache', repo, 'snapshots')
   try {
     for (const rev of await readdir(snaps)) {
-      const file = join(snaps, rev, 'htdemucs_fp16weights.onnx')
+      const candidate = join(snaps, rev, file)
       try {
-        const info = await stat(file)
-        if (info.isFile() && info.size > 100e6) return file
+        const info = await stat(candidate)
+        if (info.isFile() && info.size > 100e6) return candidate
       } catch {
         // dangling symlink or missing file — keep looking
       }
@@ -62,11 +59,51 @@ export async function packOnnxModel(): Promise<string | null> {
   return null
 }
 
+
+/**
+ * Packs are versioned: bumping PACK_FORMAT_REQUIRED (with the stamp in the
+ * build scripts) makes every installed pack read as "not installed", so the
+ * wizard re-downloads it and the installer wipes the old directory. Legacy
+ * packs without pack.json count as version 0.
+ */
+const PACK_FORMAT_REQUIRED = 2
+
+async function packFormatVersion(): Promise<number> {
+  try {
+    const raw = JSON.parse(
+      await readFile(join(packDir(), 'python', 'pack.json'), 'utf8')
+    ) as { formatVersion?: number }
+    return raw.formatVersion ?? 0
+  } catch {
+    return 0
+  }
+}
+
 /** Everything the pack needs to run — not just the interpreter. */
 async function packComplete(): Promise<boolean> {
   if (!(await exists(packPython()))) return false
+  const version = await packFormatVersion()
+  if (version < PACK_FORMAT_REQUIRED) {
+    log('models', `splitter pack is format v${version}, app needs v${PACK_FORMAT_REQUIRED} — re-download it`, 'warn')
+    return false
+  }
   if (isOnnxPack()) return (await packOnnxModel()) !== null
   return true
+}
+
+/** Files older app versions downloaded that nothing uses any more. */
+export async function cleanupObsoleteModels(): Promise<void> {
+  for (const name of [
+    'ggml-model-htdemucs-4s-f16.bin',
+    'ggml-model-htdemucs-4s-f16.bin.part',
+    'htdemucs_6s.ok'
+  ]) {
+    const p = join(modelsDir(), name)
+    if (await exists(p)) {
+      await rm(p, { force: true })
+      log('models', `removed obsolete ${name}`)
+    }
+  }
 }
 
 /** Packs on Windows and Intel Macs run demucs-onnx (Apple Silicon: torch). */
@@ -150,7 +187,7 @@ interface RegistryEntry {
   sizeMb: number
   kind: 'file' | 'archive'
   file?: string
-  url: string
+  url?: string
   optional: boolean
   platforms?: string[]
 }
@@ -161,11 +198,11 @@ const REGISTRY: RegistryEntry[] = [
     label: 'Stem splitter · AI',
     description:
       process.platform === 'win32'
-        ? 'Splits songs into vocals, drums, bass and instruments — uses your GPU when it can (works with NVIDIA, AMD and Intel graphics).'
+        ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — using your GPU when it can (NVIDIA, AMD and Intel graphics).'
         : process.arch === 'arm64'
-          ? 'Splits songs into vocals, drums, bass and instruments in seconds on the Apple Silicon GPU.'
-          : 'Splits songs into vocals, drums, bass and instruments on this Mac.',
-    sizeMb: process.platform === 'win32' ? 227 : process.arch === 'arm64' ? 240 : 210,
+          ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
+          : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
+    sizeMb: process.platform === 'win32' ? 210 : process.arch === 'arm64' ? 210 : 180,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
@@ -221,7 +258,7 @@ export class ModelManager {
         onProgress({ id: entry.id, percent: 0 })
         if (entry.kind === 'file') {
           await downloadFile(
-            entry.url,
+            entry.url as string,
             join(modelsDir(), entry.file as string),
             entry.sizeMb * 1e6,
             (pct) => onProgress({ id: entry.id, percent: pct }),
@@ -230,7 +267,7 @@ export class ModelManager {
         } else {
           const archive = join(packDir(), '..', `${entry.id}.tar.gz`)
           await downloadFile(
-            entry.url,
+            entry.url as string,
             archive,
             entry.sizeMb * 1e6,
             (pct) => onProgress({ id: entry.id, percent: pct * 0.9 }),

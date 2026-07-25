@@ -1,7 +1,14 @@
 import { app } from 'electron'
 import { access, copyFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
-import { STEMS, type ProjectInfo, type ProjectListItem, type ProjectSettings, type StemName } from '../shared/types'
+import {
+  STEMS,
+  STEMS_6,
+  type ProjectInfo,
+  type ProjectListItem,
+  type ProjectSettings,
+  type StemName6
+} from '../shared/types'
 import { log } from './log'
 import { stemsRoot } from './media'
 import { hashFile } from './separation'
@@ -107,18 +114,17 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
   if (!(await exists(metaPath))) return null
   try {
     const meta = JSON.parse(await readFile(metaPath, 'utf8')) as ProjectFile
-    const stems = {} as Record<StemName, string>
-    let allStems = true
-    for (const s of STEMS) {
+    const stems: Partial<Record<StemName6, string>> = {}
+    for (const s of STEMS_6) {
       const p = join(dir, 'stems', `${s}.wav`)
       if (await exists(p)) stems[s] = p
-      else allStems = false
     }
+    const coreThere = STEMS.every((s) => Boolean(stems[s]))
     return {
       dir,
       name: meta.name ?? basename(dir),
       settings: meta.settings ?? { transpose: 0, tracks: {} },
-      stems: allStems ? stems : undefined,
+      stems: coreThere ? stems : undefined,
       hasLyrics: await exists(join(dir, 'lyrics.json'))
     }
   } catch {
@@ -147,9 +153,13 @@ export async function saveProject(
       await copyFile(songPath, songDest)
     }
 
-    // processed stems from the hash cache (if the song has been split)
-    const cacheDir = join(stemsRoot(), await hashFile(songPath), 'htdemucs')
-    for (const s of STEMS) {
+    // processed stems from the hash cache (if the song has been split);
+    // the six-stem split wins when both exist — it is a superset
+    const hashDir = join(stemsRoot(), await hashFile(songPath))
+    const sixDir = join(hashDir, 'htdemucs_6s')
+    const useSix = await exists(join(sixDir, 'vocals.wav'))
+    const cacheDir = useSix ? sixDir : join(hashDir, 'htdemucs')
+    for (const s of useSix ? STEMS_6 : STEMS) {
       const src = join(cacheDir, `${s}.wav`)
       const dst = join(dir, 'stems', `${s}.wav`)
       if ((await exists(src)) && !(await exists(dst))) await copyFile(src, dst)
@@ -185,7 +195,13 @@ export async function renameProject(
   songPath: string,
   newName: string
 ): Promise<
-  | { ok: true; name: string; dir: string; songPath: string; stems?: Record<StemName, string> }
+  | {
+      ok: true
+      name: string
+      dir: string
+      songPath: string
+      stems?: Partial<Record<StemName6, string>>
+    }
   | { ok: false; error: string }
 > {
   try {
@@ -200,20 +216,19 @@ export async function renameProject(
     if (newDir !== oldDir) await rename(oldDir, newDir)
     meta.name = name
     await writeFile(join(newDir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
-    const stems = {} as Record<StemName, string>
-    let allStems = true
-    for (const s of STEMS) {
+    const stems: Partial<Record<StemName6, string>> = {}
+    for (const s of STEMS_6) {
       const p = join(newDir, 'stems', `${s}.wav`)
       if (await exists(p)) stems[s] = p
-      else allStems = false
     }
+    const coreThere = STEMS.every((s) => Boolean(stems[s]))
     log('app', `project renamed: ${oldDir} → ${newDir}`)
     return {
       ok: true,
       name,
       dir: newDir,
       songPath: join(newDir, meta.songFile),
-      stems: allStems ? stems : undefined
+      stems: coreThere ? stems : undefined
     }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }

@@ -11,7 +11,7 @@ TrackStack/Waveform (canvas)                      separation.ts engine ladder + 
 PitchStrip (piano roll + mic)                     lyrics.ts    LRCLIB→whisper ladder
 LyricsPanel (synced lyrics)                       lrclib.ts    lrclib.net client
 SetupWizard (model manager)                       models.ts    weights/pack downloads
-App.tsx (orchestration)                           projects.ts  ~/Music/SingZ projects
+App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
 
 ## Audio playback (`renderer/src/audio/engine.ts`)
@@ -41,7 +41,11 @@ Engine ladder, resolved once and cached:
 1. **System Python demucs** (pipx etc.) — dev setups (torch GPU/MPS). Skipped
    when `SINGZ_NO_SYSTEM_ENGINES=1`.
 2. **Splitter pack** — the required first-run download, app-managed
-   relocatable Python in `<appData>/SingZ/gpu-splitter/`:
+   relocatable Python in `<appData>/SingZ/gpu-splitter/`, always splitting
+   into six stems (htdemucs_6s — guitar and piano included; the UI hides
+   lanes that come back silent). Packs carry a `python/pack.json` format
+   version; the app treats older formats as not installed so the wizard
+   re-downloads them. Backends:
    - Apple Silicon: torch/MPS demucs, spawned with `TORCH_HOME`/`HF_HOME`
      pointing at the checkpoint embedded in the pack.
    - Windows: demucs-onnx via DirectML with CPU fallback (a
@@ -53,7 +57,7 @@ Engine ladder, resolved once and cached:
 Without a pack (and no system demucs), splitting reports `needsModels` and
 the app opens the model wizard. There is no bundled fallback engine.
 
-Results cache: `<userData>/stems/<sha1-16>/htdemucs/{vocals,drums,bass,other}.wav`.
+Results cache: `<userData>/stems/<sha1-16>/htdemucs_6s/{vocals,drums,bass,guitar,piano,other}.wav`.
 
 ## Lyrics (`main/lyrics.ts`, `main/lrclib.ts`)
 
@@ -71,9 +75,9 @@ Ladder, auto-started when a song loads:
 
 ## Models & first-run setup (`main/models.ts`)
 
-Registry of downloadables (htdemucs weights = required when no fast splitter;
-GPU pack = optional, darwin-arm64). Shared cache `<appData>/SingZ/models`
-regardless of app identity. The SetupWizard auto-downloads required items on
+Registry of downloadables (the splitter pack = required unless a system
+demucs exists). Shared cache `<appData>/SingZ/models` regardless of app
+identity. The SetupWizard auto-downloads required items on
 first run and offers optional ones; the header's splitter chip reopens it.
 Archives are untarred with the system `tar`. URLs point at
 `releases/latest/download/…` (repo must stay public) or Hugging Face.
@@ -81,13 +85,13 @@ Archives are untarred with the system `tar`. URLs point at
 ## Projects (`main/projects.ts`)
 
 "Save project" copies song + stems + lyrics + settings (transpose, per-stem
-mute/solo/volume) into `~/Music/SingZ/<name>/` with a `project.json`. Opening
+mute/solo/volume) into `~/Documents/SingZ/<name>/` with a `project.json`. Opening
 the project's song file restores everything (register detects the sibling
 `project.json`; the lyrics ladder prefers the project-local `lyrics.json`).
 
 ## Analysis (renderer)
 
-Melody: YIN pitch tracking over the decimated vocals stem in a Web Worker →
+Melody: probabilistic YIN (pYIN + Viterbi) over the decimated vocals stem in a Web Worker →
 `f0` array. Key: Krumhansl-Schmuckler over the melody's pitch-class histogram.
 Tempo: onset-flux autocorrelation over the drums stem (60–200 BPM, folded to
 70–180 — can pick double-time on busy hats). Vocal range: p5–p95 of melody
@@ -97,7 +101,7 @@ notes. All displayed transpose-aware in the pitch strip's info card.
 
 ```
 <userData>/stems/<sha1-16>/         per-song cache (stems, lyrics.json)
-<appData>/SingZ/models/             shared model weights (whisper, htdemucs)
-<appData>/SingZ/gpu-splitter/       optional GPU pack (python/, torch-home, hf-home)
-~/Music/SingZ/<name>/               saved projects (song, stems/, lyrics.json, project.json)
+<appData>/SingZ/models/             shared model weights (whisper)
+<appData>/SingZ/gpu-splitter/       splitter pack (python/, model caches, pack.json)
+~/Documents/SingZ/<name>/           saved projects (song, stems/, lyrics.json, project.json)
 ```

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { EngineStatus, SeparationProgress, StemName } from '../../shared/types'
+import type { EngineStatus, SeparationProgress } from '../../shared/types'
 import { estimateKey, estimateTempo, type KeyGuess } from './audio/analysis'
 import { MultitrackEngine } from './audio/engine'
 import { computePeaks } from './audio/peaks'
@@ -12,11 +12,34 @@ import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import Transport from './components/Transport'
-import { cleanSongName, STEM_ORDER, TRACK_META, type TimeView, type UITrack } from './model'
+import { cleanSongName, orderedStems, TRACK_META, type TimeView, type UITrack } from './model'
 
 type Phase = 'empty' | 'loading' | 'ready'
 
 const ACCEPT = '.mp3,.wav,.flac,.m4a,.aac,.ogg,.oga,.opus,.aif,.aiff,audio/*'
+
+
+/** Guitar/piano lanes only appear when the song actually has them. */
+function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[]; buffers: AudioBuffer[] } {
+  const keptOrder: string[] = []
+  const keptBuffers: AudioBuffer[] = []
+  for (let i = 0; i < order.length; i++) {
+    if (order[i] === 'guitar' || order[i] === 'piano') {
+      const data = buffers[i].getChannelData(0)
+      let energy = 0
+      const step = Math.max(1, Math.floor(data.length / 200000))
+      let n = 0
+      for (let j = 0; j < data.length; j += step) {
+        energy += data[j] * data[j]
+        n++
+      }
+      if (Math.sqrt(energy / Math.max(1, n)) < 0.004) continue
+    }
+    keptOrder.push(order[i])
+    keptBuffers.push(buffers[i])
+  }
+  return { order: keptOrder, buffers: keptBuffers }
+}
 
 function makeTrack(id: string, buffer: AudioBuffer): UITrack {
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
@@ -63,7 +86,7 @@ export default function App(): React.JSX.Element {
   const [song, setSong] = useState<{ path: string; name: string } | null>(null)
   const [tracks, setTracks] = useState<UITrack[]>([])
   const [split, setSplit] = useState(false)
-  const [stemFiles, setStemFiles] = useState<Record<StemName, string> | null>(null)
+  const [stemFiles, setStemFiles] = useState<Record<string, string> | null>(null)
   const [sep, setSep] = useState<SeparationProgress | null>(null)
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
   const [showSetup, setShowSetup] = useState(false)
@@ -196,13 +219,15 @@ export default function App(): React.JSX.Element {
         // Saved project with stems: load them directly and restore settings.
         if (reg.project?.stems) {
           const proj = reg.project
-          const stems = proj.stems as Record<StemName, string>
-          const buffers = await Promise.all(
-            STEM_ORDER.map(async (s) => engine.decode(await window.singz.readAudio(stems[s])))
+          const stems = proj.stems as Record<string, string>
+          const rawOrder = orderedStems(stems)
+          const decoded = await Promise.all(
+            rawOrder.map(async (s) => engine.decode(await window.singz.readAudio(stems[s])))
           )
           if (seq !== loadSeq.current) return
-          engine.load(STEM_ORDER.map((s, i) => ({ id: s, buffer: buffers[i] })))
-          const uiTracks = STEM_ORDER.map((s, i) => {
+          const { order, buffers } = audibleStems(rawOrder, decoded)
+          engine.load(order.map((s, i) => ({ id: s, buffer: buffers[i] })))
+          const uiTracks = order.map((s, i) => {
             const t = makeTrack(s, buffers[i])
             const saved = proj.settings.tracks[s]
             if (saved) {
@@ -219,8 +244,8 @@ export default function App(): React.JSX.Element {
           setSplit(true)
           setStemFiles(stems)
           setIsProject(true)
-          vocalsBufRef.current = buffers[STEM_ORDER.indexOf('vocals')]
-          drumsBufRef.current = buffers[STEM_ORDER.indexOf('drums')]
+          vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
+          drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
           const st = proj.settings.transpose ?? 0
           setTranspose(st)
           void engine.setTranspose(st)
@@ -334,20 +359,23 @@ export default function App(): React.JSX.Element {
     }
     setSep({ stage: 'loading-stems', percent: 100 })
     try {
-      const buffers = await Promise.all(
-        STEM_ORDER.map(async (s) => engine.decode(await window.singz.readAudio(res.stems[s])))
+      const stems = res.stems as Record<string, string>
+      const rawOrder = orderedStems(stems)
+      const decoded = await Promise.all(
+        rawOrder.map(async (s) => engine.decode(await window.singz.readAudio(stems[s])))
       )
+      const { order, buffers } = audibleStems(rawOrder, decoded)
       const position = engine.position
       const wasPlaying = engine.playing
       engine.load(
-        STEM_ORDER.map((s, i) => ({ id: s, buffer: buffers[i] })),
+        order.map((s, i) => ({ id: s, buffer: buffers[i] })),
         { position, play: wasPlaying }
       )
-      setTracks(STEM_ORDER.map((s, i) => makeTrack(s, buffers[i])))
-      setStemFiles(res.stems)
+      setTracks(order.map((s, i) => makeTrack(s, buffers[i])))
+      setStemFiles(stems)
       setSplit(true)
-      vocalsBufRef.current = buffers[STEM_ORDER.indexOf('vocals')]
-      drumsBufRef.current = buffers[STEM_ORDER.indexOf('drums')]
+      vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
+      drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
     } catch {
       setError('Separation finished, but loading the stem files failed.')
     }

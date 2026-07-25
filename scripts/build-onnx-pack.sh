@@ -59,9 +59,12 @@ if ! "$PY" -c "import demucs_onnx, onnxruntime" >/dev/null 2>&1; then
   fi
 fi
 
+# only the current model ships — drop caches from earlier pack generations
+rm -rf "$WORK/python/model-cache/models--StemSplitio--htdemucs-onnx"
+
 # embed the model + validate the stack (CPU provider: CI runners have no GPU)
 "$PY" -c "import sys; from demucs_onnx.cli import main; sys.exit(main())" \
-  prewarm --models htdemucs --precision fp16weights --providers cpu \
+  prewarm --models htdemucs_6s --precision fp16weights --providers cpu \
   --cache-dir "$WORK/python/model-cache"
 
 # The hub cache links snapshots/<rev>/<file> to blobs/<hash> with a SYMLINK
@@ -89,16 +92,21 @@ if find "$WORK/python" -type l | grep -q .; then
     exit 1
   fi
 fi
-find "$WORK/python/model-cache" -name 'htdemucs_fp16weights.onnx' -type f -size +100M \
+find "$WORK/python/model-cache" -name 'htdemucs_6s_fp16weights.onnx' -type f -size +100M \
   | grep -q . || { echo "ERROR: no materialized model file in the cache" >&2; exit 1; }
 
 # the pruned cache must resolve fully offline — that is what user machines do
 HF_HUB_OFFLINE=1 "$PY" -c "import sys; from demucs_onnx.cli import main; sys.exit(main())" \
-  prewarm --models htdemucs --precision fp16weights --providers cpu \
+  prewarm --models htdemucs_6s --precision fp16weights --providers cpu \
   --cache-dir "$WORK/python/model-cache"
 
 find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
+
+# version stamp: the app refuses packs older than its required format
+cat > "$WORK/python/pack.json" << EOF
+{ "formatVersion": 2, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python
 du -sh "$WORK/python" "$OUTFILE"

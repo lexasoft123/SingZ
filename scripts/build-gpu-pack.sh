@@ -38,11 +38,12 @@ rm -rf "$WORK/python/lib/python3.12/site-packages/pip" \
        "$WORK/python/lib/python3.12/site-packages/torch/include" \
        "$WORK/python/lib/python3.12/site-packages/torch/test"
 
-# embed the htdemucs checkpoint so the first split needs no download
+# embed the htdemucs_6s checkpoint so the first split needs no download
 # (demucs 4.1 fetches via huggingface-hub → HF_HOME; older paths use TORCH_HOME)
+rm -rf "$WORK/python/torch-home" "$WORK/python/hf-home"   # only the current model ships
 mkdir -p "$WORK/python/torch-home" "$WORK/python/hf-home"
 TORCH_HOME="$WORK/python/torch-home" HF_HOME="$WORK/python/hf-home" \
-  "$PY" -c "from demucs.pretrained import get_model; get_model('htdemucs')"
+  "$PY" -c "from demucs.pretrained import get_model; get_model('htdemucs_6s')"
 # HF caches checkpoints as extension-less blobs — assert on any large file
 FOUND=$(find "$WORK/python/torch-home" "$WORK/python/hf-home" -type f -size +10M 2>/dev/null | head -1 || true)
 [ -n "$FOUND" ] || { echo "checkpoint embed failed"; exit 1; }
@@ -50,6 +51,11 @@ echo "embedded checkpoint blob: $FOUND ($(du -h "$FOUND" | cut -f1))"
 
 # sanity: demucs must import and answer --help with this python
 "$PY" -m demucs --help >/dev/null
+
+# version stamp: the app refuses packs older than its required format
+cat > "$WORK/python/pack.json" << EOF
+{ "formatVersion": 2, "target": "darwin-arm64", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+EOF
 
 tar -C "$WORK" -czf "$OUT/gpu-splitter-darwin-arm64.tar.gz" python
 du -sh "$WORK/python" "$OUT/gpu-splitter-darwin-arm64.tar.gz"

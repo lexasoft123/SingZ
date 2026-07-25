@@ -5,12 +5,18 @@ import { createReadStream } from 'node:fs'
 import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, delimiter, extname, join } from 'node:path'
-import { STEMS, type EngineStatus, type SeparationProgress, type SeparateResult, type StemName } from '../shared/types'
+import {
+  STEMS_6,
+  type EngineStatus,
+  type SeparationProgress,
+  type SeparateResult,
+  type StemName6
+} from '../shared/types'
 import { stemsRoot } from './media'
 import { log, logChunk } from './log'
 import { dmlFlagPath, isOnnxPack, packDir, packOnnxModel, packPython } from './models'
 
-const MODEL = 'htdemucs'
+const MODEL = 'htdemucs_6s'
 const PROBE_TIMEOUT_MS = 45_000
 /** Formats the ONNX engine's soundfile loader can read directly. */
 const DIRECT_INPUT_EXT = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga'])
@@ -215,9 +221,9 @@ export class Separator {
     return this.child !== null
   }
 
-  stemPaths(outDir: string): Record<StemName, string> {
-    const map = {} as Record<StemName, string>
-    for (const stem of STEMS) map[stem] = join(outDir, MODEL, `${stem}.wav`)
+  stemPaths(outDir: string): Partial<Record<StemName6, string>> {
+    const map: Partial<Record<StemName6, string>> = {}
+    for (const stem of STEMS_6) map[stem] = join(outDir, MODEL, `${stem}.wav`)
     return map
   }
 
@@ -229,7 +235,9 @@ export class Separator {
     const outDir = join(stemsRoot(), hash)
     const stems = this.stemPaths(outDir)
 
-    const allThere = (await Promise.all(STEMS.map((s) => exists(stems[s])))).every(Boolean)
+    const allThere = (
+      await Promise.all(STEMS_6.map((s) => exists(stems[s] as string)))
+    ).every(Boolean)
     if (allThere) {
       log('splitter', `split of ${basename(input)}: stems already cached (${hash})`)
       return { ok: true, cached: true, stems }
@@ -268,7 +276,7 @@ export class Separator {
   }
 
   private logResult(r: SeparateResult): void {
-    if (r.ok) log('splitter', 'split finished — 4 stems written')
+    if (r.ok) log('splitter', `split finished — ${Object.keys(r.stems).length} stems written`)
     else if (r.cancelled) log('splitter', 'split cancelled')
     else log('splitter', `split failed: ${r.error}`, 'error')
   }
@@ -277,7 +285,7 @@ export class Separator {
     cmd: string[],
     input: string,
     outDir: string,
-    stems: Record<StemName, string>,
+    stems: Partial<Record<StemName6, string>>,
     onProgress: (p: SeparationProgress) => void
   ): Promise<SeparateResult> {
     return new Promise<SeparateResult>((resolve) => {
@@ -328,7 +336,9 @@ export class Separator {
           return
         }
         void (async () => {
-          const complete = (await Promise.all(STEMS.map((s) => exists(stems[s])))).every(Boolean)
+          const complete = (
+            await Promise.all(STEMS_6.map((s) => exists(stems[s] as string)))
+          ).every(Boolean)
           if (code === 0 && complete) {
             resolve({ ok: true, cached: false, stems })
           } else {
@@ -345,7 +355,7 @@ export class Separator {
     engine: { cmd: string[] },
     input: string,
     outDir: string,
-    stems: Record<StemName, string>,
+    stems: Partial<Record<StemName6, string>>,
     onProgress: (p: SeparationProgress) => void
   ): Promise<SeparateResult> {
     // A GPU that crashed or stalled on this model once will do it again —
@@ -386,7 +396,7 @@ export class Separator {
     provider: string,
     input: string,
     outDir: string,
-    stems: Record<StemName, string>,
+    stems: Partial<Record<StemName6, string>>,
     onProgress: (p: SeparationProgress) => void
   ): Promise<SeparateResult> {
     return new Promise<SeparateResult>((resolve) => {
@@ -397,7 +407,7 @@ export class Separator {
         input,
         tmpOut,
         '--model',
-        'htdemucs',
+        MODEL,
         '--precision',
         'fp16weights',
         '--cache-dir',
@@ -492,10 +502,10 @@ export class Separator {
               try {
                 if (code !== 0) throw new Error(friendlyError(tail))
                 await mkdir(join(outDir, MODEL), { recursive: true })
-                for (const stem of STEMS) {
+                for (const stem of STEMS_6) {
                   const src = join(tmpOut, `${stem}.wav`)
                   if (!(await exists(src))) throw new Error(`GPU pack produced no ${stem} file`)
-                  await rename(src, stems[stem])
+                  await rename(src, stems[stem] as string)
                 }
                 await rm(tmpOut, { recursive: true, force: true })
                 resolve({ ok: true, cached: false, stems })

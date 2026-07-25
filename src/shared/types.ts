@@ -1,6 +1,10 @@
 export const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 export type StemName = (typeof STEMS)[number]
 
+/** Six-stem model adds guitar and piano (order = display order). */
+export const STEMS_6 = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'] as const
+export type StemName6 = (typeof STEMS_6)[number]
+
 export type EngineStatus =
   | {
       ok: true
@@ -47,8 +51,8 @@ export interface ProjectInfo {
   dir: string
   name: string
   settings: ProjectSettings
-  /** All four stem files, when the project has them. */
-  stems?: Record<StemName, string>
+  /** Stem files on disk (at least the core four), when the project has them. */
+  stems?: Partial<Record<StemName6, string>>
   hasLyrics: boolean
 }
 
@@ -62,7 +66,13 @@ export interface ProjectListItem {
 }
 
 export type RenameResult =
-  | { ok: true; name: string; dir: string; songPath: string; stems?: Record<StemName, string> }
+  | {
+      ok: true
+      name: string
+      dir: string
+      songPath: string
+      stems?: Partial<Record<StemName6, string>>
+    }
   | { ok: false; error: string }
 
 export type RegisterResult =
@@ -70,7 +80,7 @@ export type RegisterResult =
   | { ok: false; error: string }
 
 export type SeparateResult =
-  | { ok: true; cached: boolean; stems: Record<StemName, string> }
+  | { ok: true; cached: boolean; stems: Partial<Record<StemName6, string>> }
   | { ok: false; cancelled?: boolean; error: string }
 
 export interface LyricWord {

@@ -352,10 +352,18 @@ export class Transcriber {
     }
 
     // 2) Fallback: on-device transcription of the vocals stem (project-local
-    // stems first, then the hash cache)
-    let vocals = join(dirname(songPath), 'stems', 'vocals.wav')
-    if (!(await projectLyricsPath(songPath)) || !(await exists(vocals))) {
-      vocals = join(dir, 'htdemucs', 'vocals.wav')
+    // stems first, then the hash cache — either split model)
+    const vocalsCandidates = [
+      ...((await projectLyricsPath(songPath)) ? [join(dirname(songPath), 'stems', 'vocals.wav')] : []),
+      join(dir, 'htdemucs', 'vocals.wav'),
+      join(dir, 'htdemucs_6s', 'vocals.wav')
+    ]
+    let vocals = vocalsCandidates[vocalsCandidates.length - 1]
+    for (const c of vocalsCandidates) {
+      if (await exists(c)) {
+        vocals = c
+        break
+      }
     }
     if (!(await exists(vocals))) {
       return { ok: false, error: 'Split the song into stems first — lyrics are read from the vocals track.' }
