@@ -158,6 +158,7 @@ export default function PitchStrip({
 
   useEffect(() => {
     let raf = 0
+    let lastKey = ''
     const tick = (): void => {
       if (modalCoversApp()) {
         raf = requestAnimationFrame(tick)
@@ -168,6 +169,19 @@ export default function PitchStrip({
       const { segments, fitRange, fit, transpose, melody, view } = stateRef.current
       const w = canvas.clientWidth
       const h = canvas.clientHeight
+      // Paused with the mic off, nothing on this canvas changes — a full
+      // repaint every frame kept an idle iGPU busy (field report). The mic
+      // trail fades with time, so any trail keeps frames flowing.
+      const key = `${engine.position.toFixed(3)}|${view?.s ?? -1}|${view?.e ?? -1}|${w}|${h}|${transpose}|${fit ? 1 : 0}|${melody.status}|${segments.length}`
+      if (
+        key === lastKey &&
+        !micRef.current &&
+        trailRef.current.length === 0
+      ) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
+      lastKey = key
       if (w > 0 && h > 0) {
         const dpr = Math.min(2, window.devicePixelRatio || 1)
         if (canvas.width !== Math.round(w * dpr)) canvas.width = Math.round(w * dpr)
