@@ -7,7 +7,7 @@ import type {
   LyricsSource
 } from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
-import { fmtTime } from '../model'
+import { fmtTime, modalCoversApp } from '../model'
 
 export type LyricsState =
   | { status: 'idle' }
@@ -88,6 +88,10 @@ export default function LyricsPanel({
     let raf = 0
     let last = -1
     const tick = (): void => {
+      if (modalCoversApp()) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
       const pos = engine.position
       const li = findLine(lines, pos, last)
       if (li !== last) {

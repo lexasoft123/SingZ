@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
-import type { TimeView, UITrack } from '../model'
+import { modalCoversApp, type TimeView, type UITrack } from '../model'
 import TrackLane from './TrackLane'
 
 interface Props {
@@ -73,10 +73,11 @@ export default function TrackStack({
   // following the playhead while zoomed in.
   useEffect(() => {
     let raf = 0
+    let lastP = ''
     const tick = (): void => {
       const el = stackRef.current
       const v = viewRef.current
-      if (el && engine.duration > 0) {
+      if (el && engine.duration > 0 && !modalCoversApp()) {
         const span = v.e - v.s
         const pos = engine.position
         if (v.zoomed && span > 0) {
@@ -89,7 +90,12 @@ export default function TrackStack({
           }
         }
         const pct = span > 0 ? ((pos - v.s) / span) * 100 : 0
-        el.style.setProperty('--p', `${Math.max(0, Math.min(100, pct))}%`)
+        // quantized + change-gated: identical values must not invalidate paint
+        const next = `${(Math.max(0, Math.min(100, pct))).toFixed(3)}%`
+        if (next !== lastP) {
+          lastP = next
+          el.style.setProperty('--p', next)
+        }
       }
       raf = requestAnimationFrame(tick)
     }

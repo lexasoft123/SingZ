@@ -1,14 +1,21 @@
 import { useEffect, useRef } from 'react'
 import type { SeparationProgress } from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
-import { fmtClock, fmtTime } from '../model'
+import { fmtClock, fmtTime, modalCoversApp } from '../model'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
   const ref = useRef<HTMLSpanElement>(null)
   useEffect(() => {
     let raf = 0
+    let last = ''
     const tick = (): void => {
-      if (ref.current) ref.current.textContent = fmtClock(engine.position)
+      if (ref.current && !modalCoversApp()) {
+        const next = fmtClock(engine.position)
+        if (next !== last) {
+          last = next
+          ref.current.textContent = next
+        }
+      }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)

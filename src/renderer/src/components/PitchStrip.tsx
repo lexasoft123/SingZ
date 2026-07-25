@@ -3,6 +3,7 @@ import type { KeyGuess } from '../audio/analysis'
 import type { MultitrackEngine } from '../audio/engine'
 import { MicPitch } from '../audio/mic'
 import { CONTROLS_W, fmtTime, type TimeView } from '../model'
+import { modalCoversApp } from '../model'
 
 export type MelodyState =
   | { status: 'none' }
@@ -158,6 +159,10 @@ export default function PitchStrip({
   useEffect(() => {
     let raf = 0
     const tick = (): void => {
+      if (modalCoversApp()) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
       const canvas = canvasRef.current
       if (!canvas) return
       const { segments, fitRange, fit, transpose, melody, view } = stateRef.current

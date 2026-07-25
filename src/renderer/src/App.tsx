@@ -146,6 +146,13 @@ export default function App(): React.JSX.Element {
     void window.singz.checkEngine(true).then(setEngineStatus)
   }, [])
 
+  // Background animation loops pause while a modal covers the app (the
+  // scrim's backdrop blur re-rasters the whole window on every change).
+  useEffect(() => {
+    const open = Boolean(showLog || showProjects || showSetup || wizard)
+    document.body.classList.toggle('modal-open', open)
+  }, [showLog, showProjects, showSetup, wizard])
+
   useEffect(() => {
     if (!error) return
     const t = setTimeout(() => setError(null), 7000)

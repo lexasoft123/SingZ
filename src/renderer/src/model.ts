@@ -62,3 +62,12 @@ export function fmtClock(t: number): string {
   const d = Math.floor((t % 1) * 10)
   return `${m}:${String(s).padStart(2, '0')}.${d}`
 }
+
+/**
+ * True while a modal covers the app. Background rAF loops skip their DOM
+ * writes then — every invalidated pixel under the scrim forces a full-window
+ * backdrop-blur recomposite (a weak Intel iGPU hit ~95% GPU on exactly this).
+ */
+export function modalCoversApp(): boolean {
+  return document.body.classList.contains('modal-open')
+}
