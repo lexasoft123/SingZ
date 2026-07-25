@@ -12,6 +12,12 @@ const path = require('node:path')
 
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return
+  // Real signing configured? electron-builder already signed with the actual
+  // identity — do not clobber it with an ad-hoc signature.
+  if (process.env.CSC_LINK || process.env.CSC_NAME || process.env.CSC_KEY_PASSWORD) {
+    console.log('  • real signing identity configured — skipping ad-hoc sign')
+    return
+  }
   const appName = `${context.packager.appInfo.productFilename}.app`
   const appPath = path.join(context.appOutDir, appName)
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', appPath], { stdio: 'inherit' })
