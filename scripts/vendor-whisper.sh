@@ -7,6 +7,13 @@ TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$ROOT/.engines-src/whisper.cpp"
 
+EXT=""
+case "$TARGET" in win32-*) EXT=".exe" ;; esac
+if [ -f "$ROOT/vendor/$TARGET/whisper-cli$EXT" ]; then
+  echo "cached: vendor/$TARGET/whisper-cli$EXT"
+  exit 0
+fi
+
 mkdir -p "$ROOT/.engines-src"
 if [ ! -d "$SRC" ]; then
   git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$SRC"
@@ -26,5 +33,5 @@ cmake --build "$BUILD" -j --config Release --target whisper-cli
 mkdir -p "$ROOT/vendor/$TARGET"
 BIN="$BUILD/bin/whisper-cli"
 [ -f "$BIN" ] || BIN="$BUILD/bin/Release/whisper-cli.exe"
-cp "$BIN" "$ROOT/vendor/$TARGET/"
-echo "vendored: $ROOT/vendor/$TARGET/$(basename "$BIN")"
+cp "$BIN" "$ROOT/vendor/$TARGET/whisper-cli$EXT"
+echo "vendored: $ROOT/vendor/$TARGET/whisper-cli$EXT"

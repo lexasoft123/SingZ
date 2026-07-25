@@ -7,6 +7,13 @@ set -euo pipefail
 TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$ROOT/.engines-src/demucs.cpp"
+
+DEXT=""
+case "$TARGET" in win32-*) DEXT=".exe" ;; esac
+if [ -f "$ROOT/vendor/$TARGET/demucs-cli$DEXT" ] && [ -f "$ROOT/vendor/models/ggml-model-htdemucs-4s-f16.bin" ]; then
+  echo "cached: vendor/$TARGET/demucs-cli$DEXT + weights"
+  exit 0
+fi
 MODEL_URL="https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-4s-f16.bin"
 
 mkdir -p "$ROOT/.engines-src" "$ROOT/vendor/models"
@@ -63,7 +70,5 @@ if [ -z "$BIN" ]; then
   BIN=$(find "$BUILD" -name 'demucs.cpp.main*' -type f | head -1)
 fi
 [ -n "$BIN" ] || { echo "demucs binary not found in $BUILD"; exit 1; }
-EXT=""
-case "$TARGET" in win32-*) EXT=".exe" ;; esac
-cp "$BIN" "$ROOT/vendor/$TARGET/demucs-cli$EXT"
-echo "vendored: $ROOT/vendor/$TARGET/demucs-cli$EXT (from $(basename "$BIN"))"
+cp "$BIN" "$ROOT/vendor/$TARGET/demucs-cli$DEXT"
+echo "vendored: $ROOT/vendor/$TARGET/demucs-cli$DEXT (from $(basename "$BIN"))"

@@ -14,6 +14,11 @@ WORK="$ROOT/.engines-src/gpu-pack"
 OUT="$ROOT/vendor/packs"
 mkdir -p "$WORK" "$OUT"
 
+if [ -f "$OUT/gpu-splitter-darwin-arm64.tar.gz" ]; then
+  echo "cached: vendor/packs/gpu-splitter-darwin-arm64.tar.gz"
+  exit 0
+fi
+
 if [ ! -f "$WORK/$PBS_PY" ]; then
   curl -L --fail -o "$WORK/$PBS_PY" "$PBS_URL"
 fi
