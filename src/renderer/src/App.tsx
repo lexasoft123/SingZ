@@ -444,10 +444,18 @@ export default function App(): React.JSX.Element {
     const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
       type: 'module'
     })
-    worker.onmessage = (e: MessageEvent<{ type: string; p?: number; f0?: Float32Array; hopSec?: number }>) => {
+    worker.onmessage = (e: MessageEvent<{ type: string; p?: number; f0?: Float32Array; raw?: Float32Array; clarity?: Float32Array; rms?: Float32Array; hopSec?: number }>) => {
       if (e.data.type === 'progress') {
         setMelody({ status: 'computing', p: e.data.p ?? 0 })
       } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
+        // diagnostics hook: E2E drivers dump this to tune the melody cleaner
+        ;(window as { __melody?: unknown }).__melody = {
+          f0: e.data.f0,
+          raw: e.data.raw,
+          clarity: e.data.clarity,
+          rms: e.data.rms,
+          hopSec: e.data.hopSec
+        }
         setMelody({ status: 'ready', f0: e.data.f0, hopSec: e.data.hopSec })
         setSongInfo({
           key: estimateKey(e.data.f0),
