@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
 import { MicPitch } from '../audio/mic'
+import { CONTROLS_W, type TimeView } from '../model'
 
 export type MelodyState =
   | { status: 'none' }
@@ -9,7 +10,9 @@ export type MelodyState =
 
 const HIT_CENTS = 60
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+const BLACK = new Set([1, 3, 6, 8, 10])
 const FULL_RANGE: [number, number] = [36, 84] // C2..C6
+const KEYB_W = 60
 
 const midiOfHz = (f: number): number => 69 + 12 * Math.log2(f / 440)
 const noteName = (midi: number): string =>
@@ -53,9 +56,17 @@ interface Props {
   engine: MultitrackEngine
   melody: MelodyState
   transpose: number
+  view: TimeView | null
+  onZoom: (factor: number, center?: number) => void
 }
 
-export default function PitchStrip({ engine, melody, transpose }: Props): React.JSX.Element {
+export default function PitchStrip({
+  engine,
+  melody,
+  transpose,
+  view,
+  onZoom
+}: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stripRef = useRef<HTMLDivElement>(null)
   const scoreRef = useRef<HTMLSpanElement>(null)
@@ -63,7 +74,6 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
   const trailRef = useRef<Trail[]>([])
   const scoreAcc = useRef({ hit: 0, total: 0 })
   const [mic, setMic] = useState<'off' | 'starting' | 'on' | 'denied'>('off')
-  const [windowSec, setWindowSec] = useState(8)
   const [fit, setFit] = useState(true)
 
   const segments = useMemo(
@@ -82,8 +92,10 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
     return [Math.max(24, Math.round(mid - span / 2)), Math.min(96, Math.round(mid + span / 2))]
   }, [segments])
 
-  const stateRef = useRef({ segments, fitRange, fit, windowSec, transpose, melody })
-  stateRef.current = { segments, fitRange, fit, windowSec, transpose, melody }
+  const stateRef = useRef({ segments, fitRange, fit, transpose, melody, view })
+  stateRef.current = { segments, fitRange, fit, transpose, melody, view }
+  const zoomRef = useRef(onZoom)
+  zoomRef.current = onZoom
 
   useEffect(() => {
     return () => {
@@ -92,24 +104,34 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
     }
   }, [])
 
-  // ctrl/cmd-free wheel zoom on the strip (non-passive to preventDefault)
+  // wheel = same global zoom as the lanes above
   useEffect(() => {
     const el = stripRef.current
     if (!el) return
     const onWheel = (e: WheelEvent): void => {
       e.preventDefault()
-      setWindowSec((w) => Math.max(3, Math.min(18, w * (e.deltaY > 0 ? 1.15 : 0.87))))
+      const { view } = stateRef.current
+      const rect = el.getBoundingClientRect()
+      const rollX = rect.left + CONTROLS_W
+      const rollW = rect.width - CONTROLS_W
+      const vs = view?.s ?? 0
+      const ve = view?.e ?? engine.duration
+      let center: number | undefined
+      if (e.clientX > rollX && rollW > 0) {
+        center = vs + ((e.clientX - rollX) / rollW) * (ve - vs)
+      }
+      zoomRef.current(e.deltaY > 0 ? 1.25 : 0.8, center)
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [])
+  }, [engine])
 
   useEffect(() => {
     let raf = 0
     const tick = (): void => {
       const canvas = canvasRef.current
       if (!canvas) return
-      const { segments, fitRange, fit, windowSec, transpose, melody } = stateRef.current
+      const { segments, fitRange, fit, transpose, melody, view } = stateRef.current
       const w = canvas.clientWidth
       const h = canvas.clientHeight
       if (w > 0 && h > 0) {
@@ -124,42 +146,80 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
           const [rawLo, rawHi] = fit ? fitRange : FULL_RANGE
           const lo = rawLo + (fit ? transpose : 0)
           const hi = rawHi + (fit ? transpose : 0)
+          const rowH = h / (hi - lo)
           const yOf = (midi: number): number => h - ((midi - lo) / (hi - lo)) * h
 
           const pos = engine.position
-          const back = windowSec * 0.25
-          const t0 = pos - back
-          const xOf = (t: number): number => ((t - t0) / windowSec) * w
+          const vs = view?.s ?? 0
+          const ve = view?.e ?? Math.max(engine.duration, 1)
+          const span = Math.max(0.001, ve - vs)
+          const x0 = CONTROLS_W
+          const rollW = w - x0
+          const xOf = (t: number): number => x0 + ((t - vs) / span) * rollW
 
-          // note grid: label every C and G in range
-          ctx.font = '9px "Martian Mono Variable", monospace'
-          for (let m = Math.ceil(lo); m <= Math.floor(hi); m++) {
+          // ——— piano-roll row striping + keyboard on the left
+          ctx.font = '8px "Martian Mono Variable", monospace'
+          for (let m = Math.floor(lo); m <= Math.ceil(hi); m++) {
             const pc = ((m % 12) + 12) % 12
-            if (pc !== 0 && pc !== 7) continue
-            const y = yOf(m)
-            ctx.fillStyle = pc === 0 ? 'rgba(255,240,214,0.07)' : 'rgba(255,240,214,0.035)'
-            ctx.fillRect(0, y, w, 1)
-            ctx.fillStyle = 'rgba(255,240,214,0.25)'
-            ctx.fillText(noteName(m), 6, y - 3)
+            const yTop = yOf(m) - rowH / 2
+            const black = BLACK.has(pc)
+            // roll background bands, like keyboard buttons
+            ctx.fillStyle = black ? 'rgba(0,0,0,0.28)' : 'rgba(255,240,214,0.035)'
+            ctx.fillRect(x0, yTop, rollW, rowH)
+            if (pc === 11 || pc === 4) {
+              // hairline between B/C and E/F (adjacent white keys)
+              ctx.fillStyle = 'rgba(0,0,0,0.35)'
+              ctx.fillRect(x0, yTop, rollW, 1)
+            }
+            // keyboard key
+            if (black) {
+              ctx.fillStyle = 'rgba(240,234,222,0.88)'
+              ctx.fillRect(x0 - KEYB_W, yTop, KEYB_W, rowH)
+              ctx.fillStyle = '#171310'
+              ctx.fillRect(x0 - KEYB_W, yTop, KEYB_W * 0.62, rowH)
+            } else {
+              ctx.fillStyle = 'rgba(240,234,222,0.88)'
+              ctx.fillRect(x0 - KEYB_W, yTop, KEYB_W, rowH)
+              if (pc === 11 || pc === 4) {
+                ctx.fillStyle = 'rgba(20,17,13,0.55)'
+                ctx.fillRect(x0 - KEYB_W, yTop, KEYB_W, 1)
+              }
+              if (pc === 0 && rowH >= 7) {
+                ctx.fillStyle = '#4a4336'
+                ctx.textAlign = 'right'
+                ctx.fillText(noteName(m), x0 - 5, yOf(m) + 2.5)
+                ctx.textAlign = 'left'
+              }
+            }
           }
+          // keyboard right edge
+          ctx.fillStyle = 'rgba(255,240,214,0.15)'
+          ctx.fillRect(x0 - 1, 0, 1, h)
 
-          // target melody as note bars + names
+          // ——— roll content, clipped to the roll area
+          ctx.save()
+          ctx.beginPath()
+          ctx.rect(x0, 0, rollW, h)
+          ctx.clip()
+
+          const barH = Math.min(7, Math.max(3, rowH - 2))
           let lastLabelX = -100
+          ctx.font = '9px "Martian Mono Variable", monospace'
           for (const seg of segments) {
-            if (seg.e < t0 || seg.s > t0 + windowSec) continue
+            if (seg.e < vs || seg.s > ve) continue
             const midi = seg.midi + transpose
             if (midi < lo - 1 || midi > hi + 1) continue
-            const x0 = Math.max(0, xOf(seg.s))
-            const x1 = Math.min(w, xOf(seg.e))
+            const sx = xOf(seg.s)
+            const ex = xOf(seg.e)
             const y = yOf(midi)
             ctx.fillStyle = seg.e < pos ? 'rgba(255,160,40,0.30)' : 'rgba(255,160,40,0.6)'
             ctx.beginPath()
-            ctx.roundRect(x0, y - 3.5, Math.max(2, x1 - x0), 7, 3.5)
+            ctx.roundRect(sx, y - barH / 2, Math.max(2, ex - sx), barH, barH / 2)
             ctx.fill()
-            if (x1 - x0 >= 34 && x0 - lastLabelX >= 30) {
+            if (ex - sx >= 34 && sx - lastLabelX >= 30 && rowH >= 6) {
               ctx.fillStyle = 'rgba(255,214,150,0.85)'
-              ctx.fillText(noteName(midi), x0 + 3, y - 7)
-              lastLabelX = x0
+              ctx.fillText(noteName(midi), sx + 3, y - barH / 2 - 2)
+              lastLabelX = sx
             }
           }
 
@@ -167,13 +227,13 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
           const micPitch = micRef.current
           if (micPitch?.active) {
             const f = micPitch.read()
-            const targetIdx = melody.status === 'ready' ? Math.round(pos / melody.hopSec) : -1
-            const targetHz = targetIdx >= 0 ? (melody.status === 'ready' ? melody.f0[targetIdx] ?? 0 : 0) : 0
+            const targetHz =
+              melody.status === 'ready' ? (melody.f0[Math.round(pos / melody.hopSec)] ?? 0) : 0
             const targetMidi = targetHz > 0 ? midiOfHz(targetHz) + transpose : 0
             const sungMidi = f > 0 ? midiOfHz(f) : 0
             let hit = false
             if (sungMidi > 0 && targetMidi > 0) {
-              const cents = Math.abs((((sungMidi - targetMidi) * 100) % 1200 + 1800) % 1200 - 600)
+              const cents = Math.abs(((((sungMidi - targetMidi) * 100) % 1200) + 1800) % 1200 - 600)
               hit = cents <= HIT_CENTS
             }
             if (engine.playing && targetMidi > 0) {
@@ -189,7 +249,7 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
               if (trailRef.current.length > 900) trailRef.current.splice(0, 150)
             }
             for (const p of trailRef.current) {
-              if (p.t < t0 || p.midi < lo - 1 || p.midi > hi + 1) continue
+              if (p.t < vs || p.t > ve || p.midi < lo - 1 || p.midi > hi + 1) continue
               ctx.beginPath()
               ctx.arc(xOf(p.t), yOf(p.midi), 2.5, 0, Math.PI * 2)
               ctx.fillStyle = p.hit ? '#58d68a' : 'rgba(255,122,92,0.7)'
@@ -205,6 +265,7 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
           // now line
           ctx.fillStyle = 'rgba(255,244,224,0.85)'
           ctx.fillRect(xOf(pos), 0, 1, h)
+          ctx.restore()
         }
       }
       raf = requestAnimationFrame(tick)
@@ -253,22 +314,6 @@ export default function PitchStrip({ engine, melody, transpose }: Props): React.
           onClick={() => setFit((f) => !f)}
         >
           Fit
-        </button>
-        <button
-          type="button"
-          className="chip zoom"
-          title="Zoom in (scroll on the strip also zooms)"
-          onClick={() => setWindowSec((w) => Math.max(3, w * 0.75))}
-        >
-          +
-        </button>
-        <button
-          type="button"
-          className="chip zoom"
-          title="Zoom out"
-          onClick={() => setWindowSec((w) => Math.min(18, w * 1.33))}
-        >
-          −
         </button>
         {mic === 'on' && <span className="score" ref={scoreRef} />}
         <button

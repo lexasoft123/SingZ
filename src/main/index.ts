@@ -119,7 +119,7 @@ function registerIpc(): void {
         full,
         Number(durationSec) || 0,
         Boolean(allowDownload),
-        prefer === 'whisper' ? 'whisper' : 'auto',
+        prefer === 'whisper' ? 'whisper' : prefer === 'align' ? 'align' : 'auto',
         send
       )
     }

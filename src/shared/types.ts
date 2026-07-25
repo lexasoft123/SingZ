@@ -61,7 +61,15 @@ export interface LyricsCandidate {
 }
 
 export type LyricsResult =
-  | { ok: true; cached: boolean; lines: LyricLine[]; source: LyricsSource; credit?: string }
+  | {
+      ok: true
+      cached: boolean
+      lines: LyricLine[]
+      source: LyricsSource
+      credit?: string
+      /** Word timing was refined against a Whisper transcription of the vocals. */
+      aligned?: boolean
+    }
   | {
       ok: false
       cancelled?: boolean
@@ -94,7 +102,7 @@ export interface SingzApi {
     songPath: string,
     durationSec: number,
     allowDownload?: boolean,
-    prefer?: 'auto' | 'whisper'
+    prefer?: 'auto' | 'whisper' | 'align'
   ): Promise<LyricsResult>
   /** Manual LRCLIB search for the variant picker. */
   searchLyrics(

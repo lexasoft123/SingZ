@@ -12,6 +12,15 @@ export interface UITrack {
 
 export const STEM_ORDER: StemName[] = ['vocals', 'drums', 'bass', 'other']
 
+/** Width of the track-controls column; keep in sync with --controls-w in styles.css. */
+export const CONTROLS_W = 228
+
+/** Shared zoom viewport over the song timeline (null = whole song). */
+export interface TimeView {
+  s: number
+  e: number
+}
+
 export const TRACK_META: Record<string, { label: string; color: string }> = {
   original: { label: 'Full mix', color: '#bfb49d' },
   vocals: { label: 'Vocals', color: '#ff5d66' },

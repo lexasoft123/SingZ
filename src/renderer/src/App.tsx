@@ -8,7 +8,7 @@ import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import Transport from './components/Transport'
-import { cleanSongName, STEM_ORDER, TRACK_META, type UITrack } from './model'
+import { cleanSongName, STEM_ORDER, TRACK_META, type TimeView, type UITrack } from './model'
 
 type Phase = 'empty' | 'loading' | 'ready'
 
@@ -65,6 +65,7 @@ export default function App(): React.JSX.Element {
   const [lyrics, setLyrics] = useState<LyricsState>({ status: 'idle' })
   const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
   const [transpose, setTranspose] = useState(0)
+  const [view, setView] = useState<TimeView | null>(null)
   const loadSeq = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
@@ -139,6 +140,7 @@ export default function App(): React.JSX.Element {
       setTranspose(0)
       void engine.setTranspose(0)
       setSaveState('idle')
+      setView(null)
       setPhase('loading')
       setSong({ path: reg.path, name: reg.name })
       try {
@@ -304,16 +306,24 @@ export default function App(): React.JSX.Element {
     }
     setLyrics(
       res.lines.length > 0
-        ? { status: 'ready', lines: res.lines, source: res.source, credit: res.credit }
+        ? {
+            status: 'ready',
+            lines: res.lines,
+            source: res.source,
+            credit: res.credit,
+            aligned: res.aligned
+          }
         : { status: 'error', error: 'No words were detected in the vocals.' }
     )
   }, [])
 
-  const preferRef = useRef<'auto' | 'whisper'>('auto')
-  const prepLyricsRef = useRef<((allowDownload?: boolean, prefer?: 'auto' | 'whisper') => Promise<void>) | null>(null)
+  const preferRef = useRef<'auto' | 'whisper' | 'align'>('auto')
+  const prepLyricsRef = useRef<
+    ((allowDownload?: boolean, prefer?: 'auto' | 'whisper' | 'align') => Promise<void>) | null
+  >(null)
 
   const prepLyrics = useCallback(
-    async (allowDownload = false, prefer?: 'auto' | 'whisper') => {
+    async (allowDownload = false, prefer?: 'auto' | 'whisper' | 'align') => {
       if (!song) return
       if (prefer) preferRef.current = prefer
       const cur = lyricsRef.current.status
@@ -403,6 +413,42 @@ export default function App(): React.JSX.Element {
     [engine]
   )
 
+  /** Global timeline zoom shared by the lanes and the pitch strip. */
+  const clampView = useCallback(
+    (s: number, e: number): TimeView | null => {
+      const dur = engine.duration
+      if (dur <= 0 || e - s >= dur) return null
+      let span = Math.max(2, e - s)
+      let ns = s
+      if (ns < 0) ns = 0
+      if (ns + span > dur) ns = dur - span
+      return { s: ns, e: ns + span }
+    },
+    [engine]
+  )
+
+  const zoomBy = useCallback(
+    (factor: number, center?: number) => {
+      setView((v) => {
+        const dur = engine.duration
+        if (dur <= 0) return v
+        const cur = v ?? { s: 0, e: dur }
+        const span = (cur.e - cur.s) * factor
+        const c = center ?? Math.min(Math.max(engine.position, cur.s), cur.e)
+        const ratio = span > 0 ? (c - cur.s) / (cur.e - cur.s) : 0.5
+        return clampView(c - span * ratio, c - span * ratio + span)
+      })
+    },
+    [engine, clampView]
+  )
+
+  const shiftView = useCallback(
+    (s: number, e: number) => {
+      setView(clampView(s, e))
+    },
+    [clampView]
+  )
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -438,11 +484,23 @@ export default function App(): React.JSX.Element {
               <TrackStack
                 tracks={tracks}
                 engine={engine}
+                view={view}
+                onZoom={zoomBy}
+                onViewShift={shiftView}
+                onResetZoom={() => setView(null)}
                 onMute={handleMute}
                 onSolo={handleSolo}
                 onVolume={handleVolume}
               />
-              {karaoke && <PitchStrip engine={engine} melody={melody} transpose={transpose} />}
+              {karaoke && (
+                <PitchStrip
+                  engine={engine}
+                  melody={melody}
+                  transpose={transpose}
+                  view={view}
+                  onZoom={zoomBy}
+                />
+              )}
             </div>
             {karaoke && (
               <LyricsPanel
@@ -455,6 +513,7 @@ export default function App(): React.JSX.Element {
                 onRetry={() => void prepLyrics()}
                 onDownloadModel={() => void prepLyrics(true)}
                 onUseWhisper={() => void prepLyrics(false, 'whisper')}
+                onRefineTiming={() => void prepLyrics(false, 'align')}
                 onResult={applyLyricsResult}
                 onCancel={() => void window.singz.cancelLyrics()}
               />

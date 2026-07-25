@@ -9,6 +9,8 @@ interface Props {
   onVolume: (id: string, volume: number) => void
   showSolo: boolean
   index: number
+  viewStart: number
+  viewEnd: number
 }
 
 export default function TrackLane({
@@ -18,7 +20,9 @@ export default function TrackLane({
   onSolo,
   onVolume,
   showSolo,
-  index
+  index,
+  viewStart,
+  viewEnd
 }: Props): React.JSX.Element {
   const off = track.muted || dimmed
   // Explicit grid rows: the scrub overlay is definitely-placed and would
@@ -71,7 +75,7 @@ export default function TrackLane({
         className={`lane-wave${off ? ' is-off' : ''}`}
         style={{ gridRow: row, ['--i' as string]: index }}
       >
-        <Waveform peaks={track.peaks} color={track.color} />
+        <Waveform peaks={track.peaks} color={track.color} viewStart={viewStart} viewEnd={viewEnd} />
       </div>
     </>
   )

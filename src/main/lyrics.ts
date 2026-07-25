@@ -117,7 +117,99 @@ function groupWords(words: LyricWord[]): LyricLine[] {
 interface LyricsCache {
   source: LyricsSource
   credit?: string
+  aligned?: boolean
   lines: LyricLine[]
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  const m = a.length
+  const n = b.length
+  if (m === 0 || n === 0) return Math.max(m, n)
+  let prev = Array.from({ length: n + 1 }, (_, j) => j)
+  for (let i = 1; i <= m; i++) {
+    const cur = [i]
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    prev = cur
+  }
+  return prev[n]
+}
+
+const normWord = (w: string): string => w.toLowerCase().replace(/[^\p{L}\p{N}']/gu, '')
+
+function wordsMatch(a: string, b: string): boolean {
+  const na = normWord(a)
+  const nb = normWord(b)
+  if (!na || !nb) return false
+  if (na === nb) return true
+  return Math.min(na.length, nb.length) >= 4 && levenshtein(na, nb) <= 1
+}
+
+/**
+ * Snap known-correct lyrics onto whisper's word timestamps: per line, anchor
+ * matching words to their recognized times and interpolate the rest. Lines
+ * where recognition failed keep their estimated timing.
+ */
+function alignLines(ref: LyricLine[], hyp: LyricWord[]): LyricLine[] {
+  return ref.map((line) => {
+    const est = line.end - line.start
+    const windowWords = hyp.filter((w) => w.s >= line.start - 4 && w.s <= line.start + est + 8)
+    if (windowWords.length === 0) return line
+
+    const anchors: { i: number; s: number; e: number }[] = []
+    let cursor = 0
+    line.words.forEach((rw, i) => {
+      for (let j = cursor; j < windowWords.length; j++) {
+        if (wordsMatch(rw.w, windowWords[j].w)) {
+          anchors.push({ i, s: windowWords[j].s, e: windowWords[j].e })
+          cursor = j + 1
+          break
+        }
+      }
+    })
+    if (anchors.length < Math.max(2, Math.ceil(line.words.length * 0.4))) return line
+
+    const words: LyricWord[] = line.words.map((w) => ({ ...w }))
+    for (const a of anchors) {
+      words[a.i].s = a.s
+      words[a.i].e = a.e
+    }
+    // interpolate the unanchored words between neighbouring anchors
+    const rate = 12 // chars/sec fallback for edges
+    const first = anchors[0]
+    let t = first.s
+    for (let i = first.i - 1; i >= 0; i--) {
+      const dur = Math.max(0.12, (words[i].w.length + 1) / rate)
+      words[i].e = t
+      words[i].s = Math.max(line.start - 2, t - dur)
+      t = words[i].s
+    }
+    for (let k = 0; k < anchors.length - 1; k++) {
+      const a = anchors[k]
+      const b = anchors[k + 1]
+      const between = words.slice(a.i + 1, b.i)
+      const total = between.reduce((sum, w) => sum + w.w.length + 1, 0)
+      let cur = a.e
+      const spanT = Math.max(0, b.s - a.e)
+      for (const w of between) {
+        const dur = total > 0 ? (spanT * (w.w.length + 1)) / total : 0
+        w.s = cur
+        w.e = cur + dur
+        cur = w.e
+      }
+    }
+    const last = anchors[anchors.length - 1]
+    let t2 = last.e
+    for (let i = last.i + 1; i < words.length; i++) {
+      const dur = Math.max(0.12, (words[i].w.length + 1) / rate)
+      words[i].s = t2
+      words[i].e = t2 + dur
+      t2 = words[i].e
+    }
+    return { ...line, start: words[0].s, end: words[words.length - 1].e, words }
+  })
 }
 
 async function readTrackMeta(songPath: string, durationSec: number): Promise<TrackMeta> {
@@ -219,7 +311,7 @@ export class Transcriber {
     songPath: string,
     durationSec: number,
     allowDownload: boolean,
-    prefer: 'auto' | 'whisper',
+    prefer: 'auto' | 'whisper' | 'align',
     onProgress: (p: LyricsProgress) => void
   ): Promise<LyricsResult> {
     if (this.busy) return { ok: false, error: 'A lyrics job is already running.' }
@@ -229,12 +321,29 @@ export class Transcriber {
     const lyricsPath = await this.lyricsFile(songPath)
 
     const cached = await this.readCache(lyricsPath)
-    if (cached && (prefer === 'auto' || cached.source === 'whisper')) {
-      return { ok: true, cached: true, source: cached.source, credit: cached.credit, lines: cached.lines }
+    // Alignment refines existing online lyrics; without them, behave like auto.
+    let alignBase: LyricsCache | null = null
+    if (prefer === 'align') {
+      if (cached?.source === 'lrclib' && !cached.aligned) alignBase = cached
+      else prefer = cached?.source === 'lrclib' ? 'auto' : 'auto'
+    }
+    if (
+      cached &&
+      !alignBase &&
+      (prefer === 'auto' || (prefer === 'whisper' && cached.source === 'whisper'))
+    ) {
+      return {
+        ok: true,
+        cached: true,
+        source: cached.source,
+        credit: cached.credit,
+        aligned: cached.aligned,
+        lines: cached.lines
+      }
     }
 
     // 1) Online synced lyrics (no stems, no model needed)
-    if (prefer === 'auto') {
+    if (prefer === 'auto' && !alignBase) {
       onProgress({ stage: 'searching', percent: 10 })
       const meta = await readTrackMeta(songPath, durationSec)
       const hit = await lookupLyrics(meta)
@@ -350,6 +459,26 @@ export class Transcriber {
               const w = String(seg.text ?? '').trim()
               if (!w || /^[[(♪]/.test(w)) continue
               words.push({ w, s: (seg.offsets?.from ?? 0) / 1000, e: (seg.offsets?.to ?? 0) / 1000 })
+            }
+            if (alignBase) {
+              const lines = alignLines(alignBase.lines, words)
+              const cache: LyricsCache = {
+                source: 'lrclib',
+                credit: alignBase.credit,
+                aligned: true,
+                lines
+              }
+              await writeFile(lyricsPath, JSON.stringify(cache), 'utf8')
+              await rm(outDir, { recursive: true, force: true })
+              resolve({
+                ok: true,
+                cached: false,
+                source: 'lrclib',
+                credit: alignBase.credit,
+                aligned: true,
+                lines
+              })
+              return
             }
             const lines = groupWords(words)
             await writeFile(

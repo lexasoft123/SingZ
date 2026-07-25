@@ -1,23 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
-import { fmtTime, type UITrack } from '../model'
+import { fmtTime, type TimeView, type UITrack } from '../model'
 import TrackLane from './TrackLane'
 
 interface Props {
   tracks: UITrack[]
   engine: MultitrackEngine
+  view: TimeView | null
+  onZoom: (factor: number, center?: number) => void
+  onViewShift: (s: number, e: number) => void
+  onResetZoom: () => void
   onMute: (id: string, muted: boolean) => void
   onSolo: (id: string, solo: boolean) => void
   onVolume: (id: string, volume: number) => void
 }
 
-function makeTicks(duration: number, width: number): { time: number; left: number }[] {
-  if (duration <= 0 || width <= 0) return []
-  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
-  const step = steps.find((s) => (width * s) / duration >= 64) ?? 600
+function makeTicks(
+  viewS: number,
+  viewE: number,
+  width: number
+): { time: number; left: number }[] {
+  const span = viewE - viewS
+  if (span <= 0 || width <= 0) return []
+  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+  const step = steps.find((s) => (width * s) / span >= 64) ?? 600
   const ticks: { time: number; left: number }[] = []
-  for (let t = step; t < duration - step * 0.25; t += step) {
-    ticks.push({ time: t, left: (t / duration) * 100 })
+  for (let t = Math.ceil(viewS / step) * step; t < viewE - step * 0.2; t += step) {
+    if (t <= 0) continue
+    ticks.push({ time: t, left: ((t - viewS) / span) * 100 })
   }
   return ticks
 }
@@ -25,6 +35,10 @@ function makeTicks(duration: number, width: number): { time: number; left: numbe
 export default function TrackStack({
   tracks,
   engine,
+  view,
+  onZoom,
+  onViewShift,
+  onResetZoom,
   onMute,
   onSolo,
   onVolume
@@ -34,14 +48,36 @@ export default function TrackStack({
   const dragRef = useRef<{ wasPlaying: boolean } | null>(null)
   const [width, setWidth] = useState(0)
 
+  const duration = engine.duration
+  const viewS = view?.s ?? 0
+  const viewE = view?.e ?? duration
+  const viewRef = useRef({ s: viewS, e: viewE, zoomed: view !== null })
+  viewRef.current = { s: viewS, e: viewE, zoomed: view !== null }
+  const shiftRef = useRef(onViewShift)
+  shiftRef.current = onViewShift
+
   // One rAF loop drives the playhead + the bright "played" waveform clip for
-  // every lane via the inherited --p custom property. No React re-renders.
+  // every lane via the inherited --p custom property, and keeps the viewport
+  // following the playhead while zoomed in.
   useEffect(() => {
     let raf = 0
     const tick = (): void => {
       const el = stackRef.current
+      const v = viewRef.current
       if (el && engine.duration > 0) {
-        el.style.setProperty('--p', `${(engine.position / engine.duration) * 100}%`)
+        const span = v.e - v.s
+        const pos = engine.position
+        if (v.zoomed && span > 0) {
+          if (
+            (engine.playing && pos > v.e - span * 0.08) ||
+            pos < v.s ||
+            pos > v.e
+          ) {
+            shiftRef.current(pos - span * 0.25, pos + span * 0.75)
+          }
+        }
+        const pct = span > 0 ? ((pos - v.s) / span) * 100 : 0
+        el.style.setProperty('--p', `${Math.max(0, Math.min(100, pct))}%`)
       }
       raf = requestAnimationFrame(tick)
     }
@@ -58,18 +94,36 @@ export default function TrackStack({
     return () => ro.disconnect()
   }, [])
 
-  const duration = engine.duration
-  const ticks = useMemo(() => makeTicks(duration, width), [duration, width])
+  // wheel = zoom around the cursor's time
+  useEffect(() => {
+    const el = overlayRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault()
+      const v = viewRef.current
+      const rect = el.getBoundingClientRect()
+      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+      const center = v.s + frac * (v.e - v.s)
+      onZoom(e.deltaY > 0 ? 1.25 : 0.8, center)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [onZoom])
+
+  const ticks = useMemo(() => makeTicks(viewS, viewE, width), [viewS, viewE, width])
 
   const seekFromPointer = (clientX: number): void => {
     const el = overlayRef.current
     if (!el || engine.duration <= 0) return
     const rect = el.getBoundingClientRect()
     const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-    engine.seek(frac * engine.duration)
+    const v = viewRef.current
+    engine.seek(v.s + frac * (v.e - v.s))
   }
 
   const anySolo = tracks.some((t) => t.solo)
+  const vs = duration > 0 ? viewS / duration : 0
+  const ve = duration > 0 ? viewE / duration : 1
 
   return (
     <div
@@ -84,6 +138,19 @@ export default function TrackStack({
             {fmtTime(t.time)}
           </span>
         ))}
+        <div className="zoom-cluster no-drag">
+          <button type="button" className="chip zoom" title="Zoom out (scroll wheel works too)" onClick={() => onZoom(1.4)}>
+            −
+          </button>
+          <button type="button" className="chip zoom" title="Zoom in around the playhead" onClick={() => onZoom(0.65)}>
+            +
+          </button>
+          {view && (
+            <button type="button" className="chip zoom" title="Show the whole song" onClick={onResetZoom}>
+              Full
+            </button>
+          )}
+        </div>
       </div>
 
       {tracks.map((t, i) => (
@@ -93,6 +160,8 @@ export default function TrackStack({
           index={i}
           dimmed={anySolo && !t.solo}
           showSolo={tracks.length > 1}
+          viewStart={vs}
+          viewEnd={ve}
           onMute={onMute}
           onSolo={onSolo}
           onVolume={onVolume}

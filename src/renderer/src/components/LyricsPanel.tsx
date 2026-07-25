@@ -13,7 +13,7 @@ export type LyricsState =
   | { status: 'idle' }
   | { status: 'consent'; sizeMb: number }
   | { status: 'loading'; progress: LyricsProgress | null }
-  | { status: 'ready'; lines: LyricLine[]; source: LyricsSource; credit?: string }
+  | { status: 'ready'; lines: LyricLine[]; source: LyricsSource; credit?: string; aligned?: boolean }
   | { status: 'error'; error: string }
 
 const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
@@ -33,6 +33,7 @@ interface Props {
   onRetry: () => void
   onDownloadModel: () => void
   onUseWhisper: () => void
+  onRefineTiming: () => void
   onResult: (res: LyricsResult) => void
   onCancel: () => void
 }
@@ -61,6 +62,7 @@ export default function LyricsPanel({
   onRetry,
   onDownloadModel,
   onUseWhisper,
+  onRefineTiming,
   onResult,
   onCancel
 }: Props): React.JSX.Element {
@@ -152,7 +154,18 @@ export default function LyricsPanel({
           </span>
           <span className="src-credit" title={lyrics.credit}>
             {lyrics.source === 'lrclib' ? (lyrics.credit ?? 'LRCLIB') : 'from the vocals stem'}
+            {lyrics.aligned ? ' · AI-aligned' : ''}
           </span>
+          {lyrics.source === 'lrclib' && !lyrics.aligned && (
+            <button
+              type="button"
+              className="linkish"
+              title="Listen to the vocals with Whisper and snap the word timing to what is actually sung"
+              onClick={onRefineTiming}
+            >
+              Refine timing
+            </button>
+          )}
           <button
             type="button"
             className="linkish"

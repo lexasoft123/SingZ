@@ -79,7 +79,11 @@ export function parseLrc(lrc: string, totalDuration: number): LyricLine[] {
     const { t, text } = stamped[i]
     if (!text) continue // empty stamps mark gaps; they still bound the previous line via nextT
     const nextT = stamped[i + 1]?.t ?? Math.max(t + 1, totalDuration)
-    const end = Math.min(Math.max(nextT, t + 0.8), t + 12)
+    // LRC only marks line starts. Estimate how long the line is actually sung
+    // (~12 chars/sec) instead of stretching words across instrumental gaps,
+    // otherwise the word highlight lags far behind the voice.
+    const sung = Math.min(Math.max(text.length / 12, 1.2), 9)
+    const end = Math.min(Math.max(nextT - 0.05, t + 0.8), t + sung)
     lines.push({ start: t, end, text, words: distributeWords(text, t, end) })
   }
   return lines

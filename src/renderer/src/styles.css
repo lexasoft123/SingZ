@@ -15,6 +15,8 @@
   --danger: #ff7a5c;
   --font-display: 'Bricolage Grotesque Variable', system-ui, sans-serif;
   --font-mono: 'Martian Mono Variable', ui-monospace, 'SF Mono', monospace;
+  /* keep in sync with CONTROLS_W in model.ts */
+  --controls-w: 228px;
 }
 
 * {
@@ -267,9 +269,18 @@ button.chip-status:hover {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 228px 1fr;
+  grid-template-columns: var(--controls-w) 1fr;
   padding: 4px 22px 10px 10px;
   position: relative;
+}
+
+.zoom-cluster {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  display: flex;
+  gap: 4px;
+  z-index: 6;
 }
 
 .ruler-spacer {
@@ -1031,16 +1042,18 @@ button.chip-status:hover {
 
 .pitch-strip {
   flex: none;
-  height: 150px;
+  height: 172px;
   position: relative;
+  /* same horizontal geometry as .stack so the time scales align exactly */
+  padding: 0 22px 0 10px;
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel-deep) 55%, transparent);
   animation: fade 0.25s;
 }
 
 .pitch-strip canvas {
-  position: absolute;
-  inset: 0;
+  position: relative;
+  display: block;
   width: 100%;
   height: 100%;
 }

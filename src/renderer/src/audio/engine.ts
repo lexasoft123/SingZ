@@ -69,7 +69,9 @@ export class MultitrackEngine {
 
   get position(): number {
     if (!this._playing) return this.startOffset
-    const lag = this.semitones !== 0 ? this.stretchLatency : 0
+    // Track what the listener hears: stretch-node latency plus device output latency.
+    const lag =
+      (this.semitones !== 0 ? this.stretchLatency : 0) + (this.ctx.outputLatency || 0)
     const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt) - lag
     return Math.min(this.duration, Math.max(this.startOffset, elapsed))
   }
