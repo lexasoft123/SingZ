@@ -1,16 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
-import type { LyricLine, LyricsProgress } from '../../../shared/types'
+import type {
+  LyricLine,
+  LyricsCandidate,
+  LyricsProgress,
+  LyricsResult,
+  LyricsSource
+} from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
+import { fmtTime } from '../model'
 
 export type LyricsState =
   | { status: 'idle' }
   | { status: 'consent'; sizeMb: number }
   | { status: 'loading'; progress: LyricsProgress | null }
-  | { status: 'ready'; lines: LyricLine[] }
+  | { status: 'ready'; lines: LyricLine[]; source: LyricsSource; credit?: string }
   | { status: 'error'; error: string }
 
 const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
   preparing: 'Warming up',
+  searching: 'Searching online lyrics',
   'downloading-model': 'Downloading speech model',
   transcribing: 'Listening to the vocals'
 }
@@ -18,15 +26,18 @@ const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
 interface Props {
   engine: MultitrackEngine
   lyrics: LyricsState
+  songPath: string
+  songName: string
   guideOn: boolean
   onToggleGuide: () => void
   onRetry: () => void
   onDownloadModel: () => void
+  onUseWhisper: () => void
+  onResult: (res: LyricsResult) => void
   onCancel: () => void
 }
 
 function findLine(lines: LyricLine[], t: number, from: number): number {
-  // fast path: stay on / advance from the previous index
   if (from >= 0 && from < lines.length) {
     const l = lines[from]
     if (t >= l.start && t < l.end) return from
@@ -43,21 +54,34 @@ function findLine(lines: LyricLine[], t: number, from: number): number {
 export default function LyricsPanel({
   engine,
   lyrics,
+  songPath,
+  songName,
   guideOn,
   onToggleGuide,
   onRetry,
   onDownloadModel,
+  onUseWhisper,
+  onResult,
   onCancel
 }: Props): React.JSX.Element {
   const [current, setCurrent] = useState(-1)
-  const bodyRef = useRef<HTMLDivElement>(null)
+  const [view, setView] = useState<'lyrics' | 'variants'>('lyrics')
+  const [query, setQuery] = useState(songName)
+  const [results, setResults] = useState<LyricsCandidate[] | null>(null)
+  const [busy, setBusy] = useState(false)
   const lineRefs = useRef<(HTMLParagraphElement | null)[]>([])
   const wordStateRef = useRef<string>('')
 
   const lines = lyrics.status === 'ready' ? lyrics.lines : null
 
   useEffect(() => {
-    if (!lines) return
+    setView('lyrics')
+    setResults(null)
+    setQuery(songName)
+  }, [songPath, songName])
+
+  useEffect(() => {
+    if (!lines || view !== 'lyrics') return
     let raf = 0
     let last = -1
     const tick = (): void => {
@@ -66,10 +90,8 @@ export default function LyricsPanel({
       if (li !== last) {
         last = li
         setCurrent(li)
-        const el = li >= 0 ? lineRefs.current[li] : null
-        el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        lineRefs.current[li]?.scrollIntoView({ block: 'center', behavior: 'smooth' })
       }
-      // word-level highlight inside the current line, DOM-only (no re-render)
       if (li >= 0) {
         const el = lineRefs.current[li]
         if (el) {
@@ -77,9 +99,7 @@ export default function LyricsPanel({
           let state = ''
           const spans = el.children
           for (let i = 0; i < words.length && i < spans.length; i++) {
-            const sung = pos >= words[i].e
-            const now = pos >= words[i].s && pos < words[i].e
-            state += sung ? 's' : now ? 'n' : '.'
+            state += pos >= words[i].e ? 's' : pos >= words[i].s ? 'n' : '.'
           }
           if (state !== wordStateRef.current) {
             wordStateRef.current = state
@@ -93,7 +113,23 @@ export default function LyricsPanel({
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [engine, lines])
+  }, [engine, lines, view])
+
+  const search = async (): Promise<void> => {
+    setBusy(true)
+    setResults(null) // drop stale rows so they can't be clicked mid-search
+    const found = await window.singz.searchLyrics({ free: query.trim() }, engine.duration)
+    setResults(found)
+    setBusy(false)
+  }
+
+  const applyCandidate = async (id: number): Promise<void> => {
+    setBusy(true)
+    const res = await window.singz.applyLyrics(songPath, id, engine.duration)
+    setBusy(false)
+    onResult(res)
+    if (res.ok) setView('lyrics')
+  }
 
   return (
     <aside className="lyrics-panel">
@@ -109,69 +145,161 @@ export default function LyricsPanel({
         </button>
       </header>
 
-      <div className="lp-body" ref={bodyRef}>
-        {lyrics.status === 'consent' && (
-          <div className="lp-state">
-            <p>
-              SingZ reads the lyrics out of the vocals with <strong>Whisper</strong>, running
-              entirely on your machine.
-            </p>
-            <p className="fine">
-              One thing is missing: the speech model — a one-time download of about{' '}
-              {lyrics.sizeMb} MB. It's stored locally and reused for every song.
-            </p>
-            <button type="button" className="pill primary" onClick={onDownloadModel}>
-              Download model &amp; transcribe
-            </button>
-          </div>
-        )}
+      {lyrics.status === 'ready' && view === 'lyrics' && (
+        <div className="lp-source">
+          <span className={`src-badge ${lyrics.source}`}>
+            {lyrics.source === 'lrclib' ? 'Synced' : 'AI transcribed'}
+          </span>
+          <span className="src-credit" title={lyrics.credit}>
+            {lyrics.source === 'lrclib' ? (lyrics.credit ?? 'LRCLIB') : 'from the vocals stem'}
+          </span>
+          <button
+            type="button"
+            className="linkish"
+            onClick={() => {
+              setView('variants')
+              if (!results) void search()
+            }}
+          >
+            Change…
+          </button>
+        </div>
+      )}
 
-        {lyrics.status === 'loading' && (
-          <div className="lp-state">
-            <p className="lp-loading">
-              {lyrics.progress ? STAGE_LABEL[lyrics.progress.stage] : 'Starting'}…{' '}
-              <span className="lp-pct">
-                {lyrics.progress ? `${Math.round(lyrics.progress.percent)}%` : ''}
-              </span>
-            </p>
-            <div className="lp-bar">
-              <div style={{ width: `${lyrics.progress?.percent ?? 0}%` }} />
-            </div>
-            <p className="fine">AI transcription of the vocals stem — takes a minute or two.</p>
-            <button type="button" className="pill ghost small" onClick={onCancel}>
-              Cancel
-            </button>
-          </div>
-        )}
-
-        {lyrics.status === 'error' && (
-          <div className="lp-state">
-            <p className="fine warn">{lyrics.error}</p>
-            <button type="button" className="pill ghost" onClick={onRetry}>
-              Try again
-            </button>
-          </div>
-        )}
-
-        {lines && (
-          <div className="lyr-lines">
-            {lines.map((l, i) => (
-              <p
-                key={i}
-                ref={(el) => {
-                  lineRefs.current[i] = el
+      <div className="lp-body">
+        {view === 'variants' ? (
+          <div className="lp-variants">
+            <div className="lp-search">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void search()
                 }}
-                className={`lyr-line${i === current ? ' current' : i < current ? ' past' : ''}`}
-                onClick={() => engine.seek(l.start)}
-                title="Jump here"
+                placeholder="artist or song title…"
+                spellCheck={false}
+              />
+              <button type="button" className="pill ghost small" disabled={busy} onClick={() => void search()}>
+                {busy ? '…' : 'Search'}
+              </button>
+            </div>
+            {results?.length === 0 && <p className="fine">Nothing found — try other words.</p>}
+            {results?.map((c) => (
+              <button
+                type="button"
+                key={c.id}
+                className="variant"
+                disabled={!c.synced || busy}
+                onClick={() => void applyCandidate(c.id)}
               >
-                {l.words.map((w, wi) => (
-                  <span key={wi}>{w.w} </span>
-                ))}
-              </p>
+                <span className="v-main">
+                  {c.track} <span className="v-artist">{c.artist}</span>
+                </span>
+                <span className="v-meta">
+                  {fmtTime(c.duration)}
+                  {Math.abs(c.duration - engine.duration) <= 3 ? ' · matches' : ''}
+                  {c.synced ? ' · synced' : ' · text only'}
+                </span>
+              </button>
             ))}
-            <p className="fine lp-note">AI-transcribed from the vocals — not always perfect.</p>
+            <div className="lp-variants-foot">
+              <button type="button" className="linkish" onClick={onUseWhisper}>
+                Use AI transcription instead
+              </button>
+              <button type="button" className="linkish" onClick={() => setView('lyrics')}>
+                Back
+              </button>
+            </div>
           </div>
+        ) : (
+          <>
+            {lyrics.status === 'consent' && (
+              <div className="lp-state">
+                <p>
+                  No online lyrics found for this song. SingZ can read them out of the vocals with{' '}
+                  <strong>Whisper</strong>, running entirely on your machine.
+                </p>
+                <p className="fine">
+                  That needs the speech model — a one-time download of about {lyrics.sizeMb} MB,
+                  stored locally and reused for every song.
+                </p>
+                <button type="button" className="pill primary" onClick={onDownloadModel}>
+                  Download model &amp; transcribe
+                </button>
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => {
+                    setView('variants')
+                    if (!results) void search()
+                  }}
+                >
+                  Or search the lyrics database manually
+                </button>
+              </div>
+            )}
+
+            {lyrics.status === 'loading' && (
+              <div className="lp-state">
+                <p className="lp-loading">
+                  {lyrics.progress ? STAGE_LABEL[lyrics.progress.stage] : 'Starting'}…{' '}
+                  <span className="lp-pct">
+                    {lyrics.progress && lyrics.progress.stage !== 'searching'
+                      ? `${Math.round(lyrics.progress.percent)}%`
+                      : ''}
+                  </span>
+                </p>
+                <div className="lp-bar">
+                  <div style={{ width: `${lyrics.progress?.percent ?? 0}%` }} />
+                </div>
+                <button type="button" className="pill ghost small" onClick={onCancel}>
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {lyrics.status === 'error' && (
+              <div className="lp-state">
+                <p className="fine warn">{lyrics.error}</p>
+                <button type="button" className="pill ghost" onClick={onRetry}>
+                  Try again
+                </button>
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => {
+                    setView('variants')
+                    if (!results) void search()
+                  }}
+                >
+                  Search the lyrics database manually
+                </button>
+              </div>
+            )}
+
+            {lines && (
+              <div className="lyr-lines">
+                {lines.map((l, i) => (
+                  <p
+                    key={i}
+                    ref={(el) => {
+                      lineRefs.current[i] = el
+                    }}
+                    className={`lyr-line${i === current ? ' current' : i < current ? ' past' : ''}`}
+                    onClick={() => engine.seek(l.start)}
+                    title="Jump here"
+                  >
+                    {l.words.map((w, wi) => (
+                      <span key={wi}>{w.w} </span>
+                    ))}
+                  </p>
+                ))}
+                {lyrics.status === 'ready' && lyrics.source === 'whisper' && (
+                  <p className="fine lp-note">AI-transcribed from the vocals — not always perfect.</p>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </aside>

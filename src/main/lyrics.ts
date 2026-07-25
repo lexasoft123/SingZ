@@ -3,12 +3,15 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { cpus } from 'node:os'
-import { join } from 'node:path'
-import type { LyricLine, LyricWord, LyricsProgress, LyricsResult } from '../shared/types'
+import { basename, join } from 'node:path'
+import type { LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
+import { lookupLyrics, lyricsById, metaFromFilename, type TrackMeta } from './lrclib'
 import { stemsRoot } from './media'
 import { hashFile, spawnEnv } from './separation'
 
-const MODEL = process.env.SINGZ_WHISPER_MODEL || 'small'
+// Fallback transcription only runs when no online lyrics exist, so a bigger
+// one-time download is worth it — turbo is far stronger than `small` on singing.
+const MODEL = process.env.SINGZ_WHISPER_MODEL || 'large-v3-turbo'
 const MODEL_SIZES_MB: Record<string, number> = {
   tiny: 75,
   base: 142,
@@ -101,6 +104,30 @@ function groupWords(words: LyricWord[]): LyricLine[] {
   return lines
 }
 
+interface LyricsCache {
+  source: LyricsSource
+  credit?: string
+  lines: LyricLine[]
+}
+
+async function readTrackMeta(songPath: string, durationSec: number): Promise<TrackMeta> {
+  const fromName = metaFromFilename(basename(songPath))
+  try {
+    const mm = await import('music-metadata')
+    const parsed = await mm.parseFile(songPath, { duration: false })
+    const title = parsed.common.title?.trim()
+    const cleaned = title ? metaFromFilename(title) : null
+    return {
+      artist: parsed.common.artist?.trim() || cleaned?.artist || fromName.artist,
+      title: cleaned?.title || fromName.title,
+      album: parsed.common.album?.trim(),
+      durationSec
+    }
+  } catch {
+    return { ...fromName, durationSec }
+  }
+}
+
 export class Transcriber {
   private child: ChildProcess | null = null
   private cancelled = false
@@ -108,6 +135,34 @@ export class Transcriber {
 
   get busy(): boolean {
     return this.child !== null || this.abort !== null
+  }
+
+  private async cacheDir(songPath: string): Promise<string> {
+    return join(stemsRoot(), await hashFile(songPath))
+  }
+
+  private async readCache(dir: string): Promise<LyricsCache | null> {
+    try {
+      const raw = JSON.parse(await readFile(join(dir, 'lyrics.json'), 'utf8')) as Partial<LyricsCache>
+      if (!Array.isArray(raw.lines) || raw.lines.length === 0) return null
+      return { source: raw.source ?? 'whisper', credit: raw.credit, lines: raw.lines }
+    } catch {
+      return null
+    }
+  }
+
+  private async writeCache(dir: string, cache: LyricsCache): Promise<void> {
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'lyrics.json'), JSON.stringify(cache), 'utf8')
+  }
+
+  /** Apply a manually chosen LRCLIB record and cache it for this song. */
+  async applyById(songPath: string, id: number, durationSec: number): Promise<LyricsResult> {
+    const hit = await lyricsById(id, durationSec)
+    if (!hit) return { ok: false, error: 'That entry has no usable synced lyrics.' }
+    const dir = await this.cacheDir(songPath)
+    await this.writeCache(dir, { source: 'lrclib', credit: hit.credit, lines: hit.lines })
+    return { ok: true, cached: false, source: 'lrclib', credit: hit.credit, lines: hit.lines }
   }
 
   private async downloadModel(onProgress: (p: LyricsProgress) => void): Promise<void> {
@@ -142,28 +197,36 @@ export class Transcriber {
     }
   }
 
-  async transcribe(
+  async resolve(
     songPath: string,
     durationSec: number,
     allowDownload: boolean,
+    prefer: 'auto' | 'whisper',
     onProgress: (p: LyricsProgress) => void
   ): Promise<LyricsResult> {
-    if (this.busy) return { ok: false, error: 'A transcription is already running.' }
+    if (this.busy) return { ok: false, error: 'A lyrics job is already running.' }
 
     onProgress({ stage: 'preparing', percent: 0 })
-    const hash = await hashFile(songPath)
-    const dir = join(stemsRoot(), hash)
+    const dir = await this.cacheDir(songPath)
     const lyricsPath = join(dir, 'lyrics.json')
 
-    if (await exists(lyricsPath)) {
-      try {
-        const cached = JSON.parse(await readFile(lyricsPath, 'utf8')) as { lines: LyricLine[] }
-        return { ok: true, cached: true, lines: cached.lines }
-      } catch {
-        // corrupt cache — re-transcribe
+    const cached = await this.readCache(dir)
+    if (cached && (prefer === 'auto' || cached.source === 'whisper')) {
+      return { ok: true, cached: true, source: cached.source, credit: cached.credit, lines: cached.lines }
+    }
+
+    // 1) Online synced lyrics (no stems, no model needed)
+    if (prefer === 'auto') {
+      onProgress({ stage: 'searching', percent: 10 })
+      const meta = await readTrackMeta(songPath, durationSec)
+      const hit = await lookupLyrics(meta)
+      if (hit) {
+        await this.writeCache(dir, { source: 'lrclib', credit: hit.credit, lines: hit.lines })
+        return { ok: true, cached: false, source: 'lrclib', credit: hit.credit, lines: hit.lines }
       }
     }
 
+    // 2) Fallback: on-device transcription of the vocals stem
     const vocals = join(dir, 'htdemucs', 'vocals.wav')
     if (!(await exists(vocals))) {
       return { ok: false, error: 'Split the song into stems first — lyrics are read from the vocals track.' }
@@ -184,7 +247,7 @@ export class Transcriber {
         return {
           ok: false,
           needsModel: { sizeMb: whisperModelSizeMb() },
-          error: 'The speech model has not been downloaded yet.'
+          error: 'No online lyrics found — transcribing needs the speech model.'
         }
       }
       this.cancelled = false
@@ -264,9 +327,13 @@ export class Transcriber {
               words.push({ w, s: (seg.offsets?.from ?? 0) / 1000, e: (seg.offsets?.to ?? 0) / 1000 })
             }
             const lines = groupWords(words)
-            await writeFile(lyricsPath, JSON.stringify({ lines }), 'utf8')
+            await writeFile(
+              lyricsPath,
+              JSON.stringify({ source: 'whisper', lines } satisfies LyricsCache),
+              'utf8'
+            )
             await rm(outDir, { recursive: true, force: true })
-            resolve({ ok: true, cached: false, lines })
+            resolve({ ok: true, cached: false, source: 'whisper', lines })
           } catch (err) {
             await rm(outDir, { recursive: true, force: true })
             const msg = err instanceof Error ? err.message : String(err)

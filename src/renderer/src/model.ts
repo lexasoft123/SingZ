@@ -20,6 +20,15 @@ export const TRACK_META: Record<string, { label: string; color: string }> = {
   other: { label: 'Instruments', color: '#45d6b5' }
 }
 
+/** "08. Sixteen Tons [Am +2st]" → "Sixteen Tons" (for lyrics search prefill). */
+export function cleanSongName(name: string): string {
+  return name
+    .replace(/^\s*\d{1,3}[\s.\-_]+/, '')
+    .replace(/[[(][^\])]*[\])]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 export function fmtTime(t: number): string {
   const m = Math.floor(t / 60)
   const s = Math.floor(t % 60)

@@ -1,3 +1,5 @@
+import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
+
 export interface EngineTrackInput {
   id: string
   buffer: AudioBuffer
@@ -36,6 +38,9 @@ export class MultitrackEngine {
   private startOffset = 0
   private _playing = false
   private listeners = new Set<() => void>()
+  private stretch: StretchNode | null = null
+  private stretchLatency = 0
+  private semitones = 0
 
   duration = 0
 
@@ -64,8 +69,43 @@ export class MultitrackEngine {
 
   get position(): number {
     if (!this._playing) return this.startOffset
-    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt)
+    const lag = this.semitones !== 0 ? this.stretchLatency : 0
+    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt) - lag
     return Math.min(this.duration, Math.max(this.startOffset, elapsed))
+  }
+
+  get transpose(): number {
+    return this.semitones
+  }
+
+  /**
+   * Pitch-shift the whole mix (one Signalsmith Stretch node on the master bus:
+   * phase-coherent across stems, duration unchanged, per-stem mutes stay live).
+   */
+  async setTranspose(st: number): Promise<void> {
+    const target = Math.max(-12, Math.min(12, Math.round(st)))
+    if (target === this.semitones) return
+    this.semitones = target
+    if (target === 0) {
+      this.stretch?.schedule({ active: false })
+      this.master.disconnect()
+      this.master.connect(this.ctx.destination)
+    } else {
+      if (!this.stretch) {
+        this.stretch = await SignalsmithStretch(this.ctx)
+        this.stretch.connect(this.ctx.destination)
+        try {
+          const l = this.stretch.latency()
+          this.stretchLatency = typeof l === 'number' ? l : ((await l) ?? 0)
+        } catch {
+          this.stretchLatency = 0
+        }
+      }
+      this.master.disconnect()
+      this.master.connect(this.stretch)
+      this.stretch.schedule({ active: true, semitones: target })
+    }
+    this.emit()
   }
 
   decode(data: ArrayBuffer): Promise<AudioBuffer> {

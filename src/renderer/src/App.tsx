@@ -8,7 +8,7 @@ import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import Transport from './components/Transport'
-import { STEM_ORDER, TRACK_META, type UITrack } from './model'
+import { cleanSongName, STEM_ORDER, TRACK_META, type UITrack } from './model'
 
 type Phase = 'empty' | 'loading' | 'ready'
 
@@ -63,6 +63,7 @@ export default function App(): React.JSX.Element {
   const [karaoke, setKaraoke] = useState(false)
   const [lyrics, setLyrics] = useState<LyricsState>({ status: 'idle' })
   const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
+  const [transpose, setTranspose] = useState(0)
   const loadSeq = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
@@ -133,6 +134,9 @@ export default function App(): React.JSX.Element {
       setLyrics({ status: 'idle' })
       setMelody({ status: 'none' })
       vocalsBufRef.current = null
+      preferRef.current = 'auto'
+      setTranspose(0)
+      void engine.setTranspose(0)
       setPhase('loading')
       setSong({ path: reg.path, name: reg.name })
       try {
@@ -247,34 +251,46 @@ export default function App(): React.JSX.Element {
 
   const vocalsMuted = tracks.find((t) => t.id === 'vocals')?.muted ?? false
 
+  const applyLyricsResult = useCallback((res: import('../../shared/types').LyricsResult) => {
+    if (!res.ok) {
+      setLyrics(
+        res.cancelled
+          ? { status: 'idle' }
+          : res.needsModel
+            ? { status: 'consent', sizeMb: res.needsModel.sizeMb }
+            : { status: 'error', error: res.error }
+      )
+      return
+    }
+    setLyrics(
+      res.lines.length > 0
+        ? { status: 'ready', lines: res.lines, source: res.source, credit: res.credit }
+        : { status: 'error', error: 'No words were detected in the vocals.' }
+    )
+  }, [])
+
+  const preferRef = useRef<'auto' | 'whisper'>('auto')
+
   const prepLyrics = useCallback(
-    async (allowDownload = false) => {
+    async (allowDownload = false, prefer?: 'auto' | 'whisper') => {
       if (!song) return
+      if (prefer) preferRef.current = prefer
       const cur = lyricsRef.current.status
-      if (!allowDownload && (cur === 'loading' || cur === 'ready' || cur === 'consent')) return
-      // Cache-first: cached lyrics come back instantly; a fresh transcription
-      // may require the one-time model download, which the user approves first.
+      if (!allowDownload && !prefer && (cur === 'loading' || cur === 'ready' || cur === 'consent'))
+        return
+      // Ladder: cache → LRCLIB synced lyrics → whisper (with model consent).
       setLyrics({ status: 'loading', progress: null })
       const unsub = window.singz.onLyricsProgress((p) => setLyrics({ status: 'loading', progress: p }))
-      const res = await window.singz.getLyrics(song.path, engine.duration, allowDownload)
-      unsub()
-      if (!res.ok) {
-        setLyrics(
-          res.cancelled
-            ? { status: 'idle' }
-            : res.needsModel
-              ? { status: 'consent', sizeMb: res.needsModel.sizeMb }
-              : { status: 'error', error: res.error }
-        )
-        return
-      }
-      setLyrics(
-        res.lines.length > 0
-          ? { status: 'ready', lines: res.lines }
-          : { status: 'error', error: 'No words were detected in the vocals.' }
+      const res = await window.singz.getLyrics(
+        song.path,
+        engine.duration,
+        allowDownload,
+        preferRef.current
       )
+      unsub()
+      applyLyricsResult(res)
     },
-    [song, engine]
+    [song, engine, applyLyricsResult]
   )
 
   const prepMelody = useCallback(() => {
@@ -317,6 +333,15 @@ export default function App(): React.JSX.Element {
 
   const openPicker = useCallback(() => fileInputRef.current?.click(), [])
 
+  const handleTranspose = useCallback(
+    (st: number) => {
+      const clamped = Math.max(-12, Math.min(12, st))
+      setTranspose(clamped)
+      void engine.setTranspose(clamped)
+    },
+    [engine]
+  )
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -345,16 +370,20 @@ export default function App(): React.JSX.Element {
                 onSolo={handleSolo}
                 onVolume={handleVolume}
               />
-              {karaoke && <PitchStrip engine={engine} melody={melody} />}
+              {karaoke && <PitchStrip engine={engine} melody={melody} transpose={transpose} />}
             </div>
             {karaoke && (
               <LyricsPanel
                 engine={engine}
                 lyrics={lyrics}
+                songPath={song?.path ?? ''}
+                songName={cleanSongName(song?.name ?? '')}
                 guideOn={!vocalsMuted}
                 onToggleGuide={() => handleMute('vocals', !vocalsMuted)}
                 onRetry={() => void prepLyrics()}
                 onDownloadModel={() => void prepLyrics(true)}
+                onUseWhisper={() => void prepLyrics(false, 'whisper')}
+                onResult={applyLyricsResult}
                 onCancel={() => void window.singz.cancelLyrics()}
               />
             )}
@@ -365,6 +394,8 @@ export default function App(): React.JSX.Element {
             split={split}
             sep={sep}
             karaokeOn={karaoke}
+            transpose={transpose}
+            onTranspose={handleTranspose}
             onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
             onCancelSplit={() => void window.singz.cancelSeparation()}

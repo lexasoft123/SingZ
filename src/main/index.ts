@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, shell, systemPreferences } from 'electron'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
+import { searchCandidates } from './lrclib'
 import { Transcriber } from './lyrics'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { Separator } from './separation'
@@ -97,13 +98,41 @@ function registerIpc(): void {
 
   ipcMain.handle('separation:cancel', () => separator.cancel())
 
-  ipcMain.handle('lyrics:get', async (e, raw: string, durationSec: number, allowDownload: boolean) => {
+  ipcMain.handle(
+    'lyrics:get',
+    async (e, raw: string, durationSec: number, allowDownload: boolean, prefer: string) => {
+      const full = resolve(String(raw))
+      if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+      const send = (p: LyricsProgress): void => {
+        if (!e.sender.isDestroyed()) e.sender.send('lyrics:progress', p)
+      }
+      return transcriber.resolve(
+        full,
+        Number(durationSec) || 0,
+        Boolean(allowDownload),
+        prefer === 'whisper' ? 'whisper' : 'auto',
+        send
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'lyrics:search',
+    (_e, query: { artist?: string; title?: string; free?: string }, durationSec: number) =>
+      searchCandidates(
+        {
+          artist: query?.artist ? String(query.artist) : undefined,
+          title: query?.title ? String(query.title) : undefined,
+          free: query?.free ? String(query.free) : undefined
+        },
+        Number(durationSec) || 0
+      )
+  )
+
+  ipcMain.handle('lyrics:apply', (_e, raw: string, id: number, durationSec: number) => {
     const full = resolve(String(raw))
     if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
-    const send = (p: LyricsProgress): void => {
-      if (!e.sender.isDestroyed()) e.sender.send('lyrics:progress', p)
-    }
-    return transcriber.transcribe(full, Number(durationSec) || 0, Boolean(allowDownload), send)
+    return transcriber.applyById(full, Number(id), Number(durationSec) || 0)
   })
 
   ipcMain.handle('lyrics:cancel', () => transcriber.cancel())

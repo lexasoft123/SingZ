@@ -26,8 +26,13 @@ const api: SingzApi = {
     }
   },
 
-  getLyrics: (songPath, durationSec, allowDownload) =>
-    ipcRenderer.invoke('lyrics:get', songPath, durationSec, Boolean(allowDownload)),
+  getLyrics: (songPath, durationSec, allowDownload, prefer) =>
+    ipcRenderer.invoke('lyrics:get', songPath, durationSec, Boolean(allowDownload), prefer ?? 'auto'),
+
+  searchLyrics: (query, durationSec) => ipcRenderer.invoke('lyrics:search', query, durationSec),
+
+  applyLyrics: (songPath, id, durationSec) =>
+    ipcRenderer.invoke('lyrics:apply', songPath, id, durationSec),
 
   cancelLyrics: () => ipcRenderer.invoke('lyrics:cancel'),
 

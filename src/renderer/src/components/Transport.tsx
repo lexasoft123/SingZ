@@ -30,6 +30,8 @@ interface Props {
   split: boolean
   sep: SeparationProgress | null
   karaokeOn: boolean
+  transpose: number
+  onTranspose: (st: number) => void
   onToggleKaraoke: () => void
   onSplit: () => void
   onCancelSplit: () => void
@@ -42,6 +44,8 @@ export default function Transport({
   split,
   sep,
   karaokeOn,
+  transpose,
+  onTranspose,
   onToggleKaraoke,
   onSplit,
   onCancelSplit,
@@ -92,6 +96,25 @@ export default function Transport({
       </div>
 
       <div className="transport-right">
+        {engine.duration > 0 && (
+          <div className="transpose-ctl" title="Transpose the whole song (pitch only, tempo unchanged)">
+            <button type="button" className="chip" onClick={() => onTranspose(transpose - 1)}>
+              −
+            </button>
+            <button
+              type="button"
+              className={`tr-badge${transpose !== 0 ? ' active' : ''}`}
+              title="Reset transpose"
+              onClick={() => onTranspose(0)}
+            >
+              {transpose > 0 ? `+${transpose}` : transpose}
+              <span className="tr-unit">st</span>
+            </button>
+            <button type="button" className="chip" onClick={() => onTranspose(transpose + 1)}>
+              +
+            </button>
+          </div>
+        )}
         {sep ? (
           <div className="sep-pill">
             <span className="sep-stage">{STAGE_LABEL[sep.stage]}</span>
