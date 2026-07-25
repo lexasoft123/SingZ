@@ -30,6 +30,12 @@ case "$TARGET" in
   # BLAS comes from MSYS2's mingw-w64 OpenBLAS (see CI workflow).
   win32-x64)
     MINGW_PREFIX=${MINGW_PREFIX:-/c/msys64/mingw64}
+    # wavpack uses the MSVC intrinsic _BitScanReverse; mingw-w64 has it too,
+    # but only after including <intrin.h>
+    WVH="$SRC/vendor/libnyquist/third_party/wavpack/src/wavpack_local.h"
+    if [ -f "$WVH" ] && ! grep -q '<intrin.h>' "$WVH"; then
+      sed -i '1i #include <intrin.h>' "$WVH"
+    fi
     export CPATH="$(cygpath -w "$MINGW_PREFIX/include/openblas" 2>/dev/null || echo "$MINGW_PREFIX/include/openblas")"
     EXTRA="-G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
       -DCMAKE_EXE_LINKER_FLAGS=-static \
