@@ -19,7 +19,9 @@ export function packDir(): string {
 }
 
 export function packPython(): string {
-  return join(packDir(), 'python', 'bin', 'python3')
+  return process.platform === 'win32'
+    ? join(packDir(), 'python', 'python.exe')
+    : join(packDir(), 'python', 'bin', 'python3')
 }
 
 export const DEMUCS_MODEL_FILE = 'ggml-model-htdemucs-4s-f16.bin'
@@ -109,14 +111,17 @@ const REGISTRY: RegistryEntry[] = [
   {
     id: 'gpu-splitter',
     label: 'Fast splitter · GPU',
-    description: 'Splits a song in seconds instead of minutes using the GPU (PyTorch). Recommended on Apple Silicon.',
-    sizeMb: 240,
+    description:
+      process.platform === 'win32'
+        ? 'Splits songs many times faster using your GPU (DirectML — works with NVIDIA, AMD and Intel graphics).'
+        : 'Splits a song in seconds instead of minutes using the GPU (PyTorch). Recommended on Apple Silicon.',
+    sizeMb: process.platform === 'win32' ? 200 : 240,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
-      'https://github.com/lexasoft123/SingZ/releases/latest/download/gpu-splitter-darwin-arm64.tar.gz',
+      `https://github.com/lexasoft123/SingZ/releases/latest/download/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
     optional: true,
-    platforms: ['darwin-arm64']
+    platforms: ['darwin-arm64', 'win32-x64']
   }
 ]
 

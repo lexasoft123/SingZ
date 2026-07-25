@@ -2,7 +2,12 @@ export const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 export type StemName = (typeof STEMS)[number]
 
 export type EngineStatus =
-  | { ok: true; command: string }
+  | {
+      ok: true
+      command: string
+      /** Renderer should provide a rendered 44.1k WAV before splitting. */
+      needsPcm?: boolean
+    }
   | {
       ok: false
       message: string

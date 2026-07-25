@@ -89,6 +89,7 @@ jobs:
         run: |
           bash scripts/vendor-whisper.sh win32-x64
           PATH="/c/msys64/mingw64/bin:$PATH" bash scripts/vendor-demucs.sh win32-x64
+          bash scripts/build-onnx-pack.sh
 
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never

@@ -17,7 +17,11 @@ const BUNDLED_INPUT_EXT = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga'])
 
 type ResolvedEngine =
   | { kind: 'python'; cmd: string[] }
+  | { kind: 'onnx'; cmd: string[] }
   | { kind: 'bundled'; cmd: string[]; model: string }
+
+/** Console-script wrappers embed absolute paths; -c keeps the pack relocatable. */
+const ONNX_SHIM = 'import sys; from demucs_onnx.cli import main; sys.exit(main())'
 
 /** PATH as seen by GUI apps often misses the dirs where demucs lives. */
 export function spawnEnv(): NodeJS.ProcessEnv {
@@ -171,22 +175,31 @@ export class Separator {
       }
     }
     // App-managed GPU pack (works on "clean OS" too — it is our own download).
-    // TORCH_HOME points at the checkpoint embedded in the pack.
+    // macOS pack = PyTorch/MPS (checkpoint via TORCH_HOME/HF_HOME inside the
+    // pack); Windows pack = demucs-onnx with DirectML.
     if (await exists(packPython())) {
-      const cmd = [packPython(), '-m', 'demucs']
-      if (await probe(cmd)) {
-        this.engine = { kind: 'python', cmd }
-        this.extraEnv = {
-          TORCH_HOME: join(packDir(), 'python', 'torch-home'),
-          HF_HOME: join(packDir(), 'python', 'hf-home')
+      if (process.platform === 'win32') {
+        const cmd = [packPython(), '-c', ONNX_SHIM]
+        if (await probe(cmd)) {
+          this.engine = { kind: 'onnx', cmd }
+          return { ok: true, command: this.describe(this.engine), needsPcm: true }
         }
-        return { ok: true, command: this.describe(this.engine) }
+      } else {
+        const cmd = [packPython(), '-m', 'demucs']
+        if (await probe(cmd)) {
+          this.engine = { kind: 'python', cmd }
+          this.extraEnv = {
+            TORCH_HOME: join(packDir(), 'python', 'torch-home'),
+            HF_HOME: join(packDir(), 'python', 'hf-home')
+          }
+          return { ok: true, command: this.describe(this.engine) }
+        }
       }
     }
     const bundled = await bundledEngine()
     if (bundled.bin && bundled.model) {
       this.engine = { kind: 'bundled', cmd: [bundled.bin], model: bundled.model }
-      return { ok: true, command: this.describe(this.engine) }
+      return { ok: true, command: this.describe(this.engine), needsPcm: true }
     }
     if (bundled.bin && !bundled.model) {
       return {
@@ -213,7 +226,9 @@ export class Separator {
   }
 
   private describe(e: ResolvedEngine): string {
-    return e.kind === 'python' ? e.cmd.join(' ') : 'bundled demucs.cpp'
+    if (e.kind === 'python') return e.cmd.join(' ')
+    if (e.kind === 'onnx') return 'GPU pack (DirectML)'
+    return 'bundled demucs.cpp'
   }
 
   get busy(): boolean {
@@ -247,20 +262,23 @@ export class Separator {
     if (engine.kind === 'python') {
       return this.runPython(engine.cmd, input, outDir, stems, onProgress)
     }
-    // The bundled engine wants 44.1k audio: prefer the WAV the renderer
+    // Non-python engines want plain audio files: prefer the WAV the renderer
     // rendered from its decoded buffer (any source format), else the original
-    // file when the format is one libnyquist reads.
+    // file when the format is directly readable.
     const provided = join(outDir, 'input44k.wav')
-    let cppInput = input
+    let fileInput = input
     if (await exists(provided)) {
-      cppInput = provided
+      fileInput = provided
     } else if (!BUNDLED_INPUT_EXT.has(extname(input).toLowerCase())) {
       return {
         ok: false,
         error: `The built-in splitter reads WAV/MP3/FLAC/OGG — convert ${extname(input)} first, or install demucs for full format support.`
       }
     }
-    const result = await this.runBundled(engine, cppInput, outDir, stems, onProgress)
+    const result =
+      engine.kind === 'onnx'
+        ? await this.runOnnx(engine, fileInput, outDir, stems, onProgress)
+        : await this.runBundled(engine, fileInput, outDir, stems, onProgress)
     if (result.ok) await rm(provided, { force: true })
     return result
   }
@@ -392,6 +410,99 @@ export class Separator {
           })()
         })
       })
+    })
+  }
+
+  /** demucs-onnx pack: try DirectML, fall back to CPU (still ~5x demucs.cpp). */
+  private async runOnnx(
+    engine: { cmd: string[] },
+    input: string,
+    outDir: string,
+    stems: Record<StemName, string>,
+    onProgress: (p: SeparationProgress) => void
+  ): Promise<SeparateResult> {
+    let last: SeparateResult = { ok: false, error: 'not started' }
+    for (const provider of ['dml', 'cpu']) {
+      last = await this.spawnOnnx(engine, provider, input, outDir, stems, onProgress)
+      if (last.ok || (!last.ok && last.cancelled)) return last
+    }
+    return last
+  }
+
+  private spawnOnnx(
+    engine: { cmd: string[] },
+    provider: string,
+    input: string,
+    outDir: string,
+    stems: Record<StemName, string>,
+    onProgress: (p: SeparationProgress) => void
+  ): Promise<SeparateResult> {
+    return new Promise<SeparateResult>((resolve) => {
+      const tmpOut = join(outDir, 'onnx-out')
+      const args = [
+        ...engine.cmd.slice(1),
+        'separate',
+        input,
+        tmpOut,
+        '--model',
+        'htdemucs',
+        '--precision',
+        'fp16weights',
+        '--cache-dir',
+        join(packDir(), 'python', 'model-cache'),
+        '--providers',
+        provider,
+        '-v'
+      ]
+      void rm(tmpOut, { recursive: true, force: true })
+        .then(() => mkdir(tmpOut, { recursive: true }))
+        .then(() => {
+          const child = spawn(engine.cmd[0], args, { env: spawnEnv() })
+          this.child = child
+
+          let tail = ''
+          const consume = (chunk: Buffer): void => {
+            const text = chunk.toString('utf8')
+            tail = (tail + text).slice(-8000)
+            // "    chunk 3/12: 4.1s elapsed"
+            for (const m of text.matchAll(/chunk (\d+)\/(\d+)/g)) {
+              const pct = (parseInt(m[1], 10) / Math.max(1, parseInt(m[2], 10))) * 100
+              onProgress({ stage: 'separating', percent: Math.min(99, pct) })
+            }
+          }
+          child.stdout?.on('data', consume)
+          child.stderr?.on('data', consume)
+
+          child.on('error', (err) => {
+            this.child = null
+            resolve({ ok: false, error: `Could not start the GPU pack: ${err.message}` })
+          })
+
+          child.on('exit', (code) => {
+            this.child = null
+            if (this.cancelled) {
+              void rm(outDir, { recursive: true, force: true })
+              resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
+              return
+            }
+            void (async () => {
+              try {
+                if (code !== 0) throw new Error(friendlyError(tail))
+                await mkdir(join(outDir, MODEL), { recursive: true })
+                for (const stem of STEMS) {
+                  const src = join(tmpOut, `${stem}.wav`)
+                  if (!(await exists(src))) throw new Error(`GPU pack produced no ${stem} file`)
+                  await rename(src, stems[stem])
+                }
+                await rm(tmpOut, { recursive: true, force: true })
+                resolve({ ok: true, cached: false, stems })
+              } catch (err) {
+                await rm(tmpOut, { recursive: true, force: true })
+                resolve({ ok: false, error: err instanceof Error ? err.message : String(err) })
+              }
+            })()
+          })
+        })
     })
   }
 

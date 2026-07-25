@@ -280,9 +280,9 @@ export default function App(): React.JSX.Element {
       }
       return
     }
-    // The bundled splitter needs 44.1k audio — render it from the decoded
+    // Some engines want a plain 44.1k WAV — render it from the decoded
     // buffer so any source format/sample-rate works.
-    if (status.command === 'bundled demucs.cpp' && originalBufRef.current) {
+    if (status.needsPcm && originalBufRef.current) {
       const orig = originalBufRef.current
       const off = new OfflineAudioContext(2, Math.ceil(orig.duration * 44100), 44100)
       const src = off.createBufferSource()
