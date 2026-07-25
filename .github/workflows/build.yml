@@ -57,6 +57,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/build-gpu-pack.sh
 
+      - name: Install MinGW OpenBLAS (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-openblas mingw-w64-x86_64-gcc mingw-w64-x86_64-ninja
+
       - name: Build bundled engines (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -64,7 +69,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/vendor-whisper.sh win32-x64
-          bash scripts/vendor-demucs.sh win32-x64
+          PATH="/c/msys64/mingw64/bin:$PATH" bash scripts/vendor-demucs.sh win32-x64
 
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never

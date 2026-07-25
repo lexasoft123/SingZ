@@ -26,8 +26,15 @@ case "$TARGET" in
   darwin-arm64) EXTRA="-DCMAKE_OSX_ARCHITECTURES=arm64" ;;
   darwin-x64) EXTRA="-DCMAKE_OSX_ARCHITECTURES=x86_64" ;;
   # upstream's flags are gcc-style (-Wextra …) which MSVC rejects — use the
-  # runners' MinGW gcc via Ninja, statically linked so no MinGW DLLs needed
-  win32-x64) EXTRA="-G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_EXE_LINKER_FLAGS=-static" ;;
+  # MinGW gcc via Ninja, statically linked so no MinGW DLLs are needed.
+  # BLAS comes from MSYS2's mingw-w64 OpenBLAS (see CI workflow).
+  win32-x64)
+    MINGW_PREFIX=${MINGW_PREFIX:-/c/msys64/mingw64}
+    export CPATH="$(cygpath -w "$MINGW_PREFIX/include/openblas" 2>/dev/null || echo "$MINGW_PREFIX/include/openblas")"
+    EXTRA="-G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+      -DCMAKE_EXE_LINKER_FLAGS=-static \
+      -DBLAS_LIBRARIES=$MINGW_PREFIX/lib/libopenblas.a"
+    ;;
 esac
 
 BUILD="$SRC/build-$TARGET"
