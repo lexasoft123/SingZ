@@ -101,6 +101,9 @@ SmartScreen prompt (and needs the VC++ runtime); to sign, remove
 `identity: null` from [electron-builder.yml](electron-builder.yml) and add
 certificate secrets in CI.
 
+Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [CLAUDE.md](CLAUDE.md)
+
 ## How it works
 
 - **Main process** ([src/main](src/main)) — engine resolution ladder (system
