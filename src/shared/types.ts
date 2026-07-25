@@ -52,6 +52,19 @@ export interface ProjectInfo {
   hasLyrics: boolean
 }
 
+export interface ProjectListItem {
+  dir: string
+  name: string
+  songPath: string
+  savedAt: string
+  hasStems: boolean
+  hasLyrics: boolean
+}
+
+export type RenameResult =
+  | { ok: true; name: string; dir: string; songPath: string; stems?: Record<StemName, string> }
+  | { ok: false; error: string }
+
 export type RegisterResult =
   | { ok: true; path: string; name: string; size: number; project?: ProjectInfo }
   | { ok: false; error: string }
@@ -168,10 +181,19 @@ export interface SingzApi {
     path?: string
   ): Promise<{ ok: true; path: string } | { ok: false; cancelled?: boolean; error: string }>
   onLogLine(cb: (e: LogEntry) => void): () => void
-  /** Save the current song + stems + lyrics + settings into ~/Music/SingZ/<name>/. */
+  /** App version for the titlebar ("dev" outside packaged builds). */
+  appVersion(): Promise<string>
+  /**
+   * Save the current song + stems + lyrics + settings into
+   * ~/Documents/SingZ/<name>/; the song then lives at the returned songPath.
+   */
   saveProject(
     songPath: string,
     name: string,
     settings: ProjectSettings
-  ): Promise<{ ok: true; dir: string } | { ok: false; error: string }>
+  ): Promise<{ ok: true; dir: string; songPath: string } | { ok: false; error: string }>
+  /** Saved-project library for the in-app Open screen. */
+  listProjects(): Promise<{ root: string; projects: ProjectListItem[] }>
+  /** Rename a saved project's folder + metadata; returns the moved paths. */
+  renameProject(songPath: string, newName: string): Promise<RenameResult>
 }

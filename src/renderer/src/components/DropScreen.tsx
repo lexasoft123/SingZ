@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+import type { ProjectListItem } from '../../../shared/types'
 import { TRACK_META } from '../model'
 
 const BAR_COLORS = [
@@ -18,9 +20,27 @@ interface Props {
   loading: boolean
   songName?: string
   onBrowse: () => void
+  onOpenProject: (songPath: string) => void
 }
 
-export default function DropScreen({ loading, songName, onBrowse }: Props): React.JSX.Element {
+export default function DropScreen({
+  loading,
+  songName,
+  onBrowse,
+  onOpenProject
+}: Props): React.JSX.Element {
+  const [projects, setProjects] = useState<ProjectListItem[]>([])
+
+  useEffect(() => {
+    let alive = true
+    void window.singz.listProjects().then((res) => {
+      if (alive) setProjects(res.projects)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
   return (
     <div className={`drop-screen${loading ? ' loading' : ''}`}>
       <div className="drop-inner">
@@ -53,6 +73,21 @@ export default function DropScreen({ loading, songName, onBrowse }: Props): Reac
               Browse files…
             </button>
             <span className="drop-hint">or drag it anywhere into this window</span>
+            {projects.length > 0 && (
+              <div className="drop-projects">
+                <span className="drop-projects-title">Your projects</span>
+                {projects.slice(0, 5).map((p) => (
+                  <button
+                    type="button"
+                    key={p.dir}
+                    className="drop-project"
+                    onClick={() => onOpenProject(p.songPath)}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>

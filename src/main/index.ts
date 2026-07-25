@@ -5,7 +5,7 @@ import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shar
 import { searchCandidates } from './lrclib'
 import { Transcriber } from './lyrics'
 import { ModelManager } from './models'
-import { detectProject, projectsRoot, saveProject } from './projects'
+import { detectProject, listProjects, migrateProjects, projectsRoot, renameProject, saveProject } from './projects'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
@@ -193,6 +193,16 @@ function registerIpc(): void {
     return saveProject(full, String(name), settings)
   })
 
+  ipcMain.handle('projects:list', () => listProjects())
+
+  ipcMain.handle('project:rename', async (_e, raw: string, newName: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    return renameProject(full, String(newName))
+  })
+
+  ipcMain.handle('app:version', () => (app.isPackaged ? app.getVersion() : 'dev'))
+
   ipcMain.handle('mic:ask', async () => {
     if (process.platform !== 'darwin') return true
     try {
@@ -219,7 +229,7 @@ function registerIpc(): void {
   )
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   log(
     'app',
     `SingZ ${app.isPackaged ? app.getVersion() : 'dev'} on ${process.platform}-${process.arch}` +
@@ -229,6 +239,7 @@ app.whenReady().then(() => {
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+  await migrateProjects()
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
   registerIpc()

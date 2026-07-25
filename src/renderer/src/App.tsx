@@ -6,6 +6,7 @@ import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
 import LogPanel from './components/LogPanel'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+import ProjectPicker from './components/ProjectPicker'
 import SetupWizard from './components/SetupWizard'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import SetupModal from './components/SetupModal'
@@ -67,6 +68,11 @@ export default function App(): React.JSX.Element {
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
   const [showSetup, setShowSetup] = useState(false)
   const [showLog, setShowLog] = useState(false)
+  const [showProjects, setShowProjects] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [ver, setVer] = useState('')
+  const [isProject, setIsProject] = useState(false)
+  const [editName, setEditName] = useState<string | null>(null)
   const [wizard, setWizard] = useState<{
     models: import('../../shared/types').ModelInfo[]
     origin: 'auto' | 'manual'
@@ -99,6 +105,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => engine.subscribe(() => setPlaying(engine.playing)), [engine])
 
   useEffect(() => {
+    void window.singz.appVersion().then(setVer)
     void window.singz.checkEngine().then(setEngineStatus)
     // First-run setup: open when something required is missing.
     void window.singz.modelsStatus().then((models) => {
@@ -121,6 +128,12 @@ export default function App(): React.JSX.Element {
     const t = setTimeout(() => setError(null), 7000)
     return () => clearTimeout(t)
   }, [error])
+
+  useEffect(() => {
+    if (!notice) return
+    const t = setTimeout(() => setNotice(null), 6000)
+    return () => clearTimeout(t)
+  }, [notice])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -147,13 +160,8 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [engine])
 
-  const loadFile = useCallback(
-    async (file: File) => {
-      const path = window.singz.pathForFile(file)
-      if (!path) {
-        setError('Could not resolve that file on disk.')
-        return
-      }
+  const loadPath = useCallback(
+    async (path: string) => {
       const reg = await window.singz.registerSource(path)
       if (!reg.ok) {
         setError(reg.error)
@@ -166,6 +174,7 @@ export default function App(): React.JSX.Element {
       setSplit(false)
       setStemFiles(null)
       setError(null)
+      setNotice(null)
       setKaraoke(false)
       setLyrics({ status: 'idle' })
       setMelody({ status: 'none' })
@@ -180,6 +189,9 @@ export default function App(): React.JSX.Element {
       setView(null)
       setPhase('loading')
       setSong({ path: reg.path, name: reg.name })
+      setIsProject(Boolean(reg.project))
+      setEditName(null)
+      setShowProjects(false)
       try {
         // Saved project with stems: load them directly and restore settings.
         if (reg.project?.stems) {
@@ -206,6 +218,7 @@ export default function App(): React.JSX.Element {
           setTracks(uiTracks)
           setSplit(true)
           setStemFiles(stems)
+          setIsProject(true)
           vocalsBufRef.current = buffers[STEM_ORDER.indexOf('vocals')]
           drumsBufRef.current = buffers[STEM_ORDER.indexOf('drums')]
           const st = proj.settings.transpose ?? 0
@@ -236,6 +249,18 @@ export default function App(): React.JSX.Element {
       }
     },
     [engine]
+  )
+
+  const loadFile = useCallback(
+    async (file: File) => {
+      const path = window.singz.pathForFile(file)
+      if (!path) {
+        setError('Could not resolve that file on disk.')
+        return
+      }
+      await loadPath(path)
+    },
+    [loadPath]
   )
 
   useEffect(() => {
@@ -461,12 +486,39 @@ export default function App(): React.JSX.Element {
     const res = await window.singz.saveProject(song.path, cleanSongName(song.name), settings)
     if (res.ok) {
       setSaveState('saved')
+      // The song now lives inside its project folder — anchor there so
+      // renaming and future saves act on the project, not the original file.
+      setSong((s) => (s ? { ...s, path: res.songPath } : s))
+      setIsProject(true)
+      setNotice(`Saved to ${res.dir}`)
       setTimeout(() => setSaveState('idle'), 2500)
     } else {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
   }, [song, saveState, transpose, tracks])
+
+  const commitRename = useCallback(
+    async (raw: string) => {
+      setEditName(null)
+      const name = raw.trim()
+      if (!song || !name || name === song.name) return
+      if (isProject) {
+        const res = await window.singz.renameProject(song.path, name)
+        if (!res.ok) {
+          setError(res.error)
+          return
+        }
+        setSong({ path: res.songPath, name: res.name })
+        if (res.stems) setStemFiles(res.stems)
+        setNotice(`Renamed — the project folder is now ${res.dir}`)
+      } else {
+        setSong({ ...song, name })
+        setSaveState('idle')
+      }
+    },
+    [song, isProject]
+  )
 
   const handleTranspose = useCallback(
     (st: number) => {
@@ -518,8 +570,38 @@ export default function App(): React.JSX.Element {
       <header className="titlebar">
         <div className="logo">
           Sing<span>Z</span>
+          {ver && <em className="ver">{ver}</em>}
         </div>
-        {song && phase === 'ready' && <div className="song-title">{song.name}</div>}
+        {song && phase === 'ready' && (
+          <div className="song-title no-drag">
+            {editName === null ? (
+              <>
+                <span className="song-title-text">{song.name}</span>
+                <button
+                  type="button"
+                  className="pencil"
+                  title={isProject ? 'Rename song and project folder' : 'Rename song'}
+                  onClick={() => setEditName(song.name)}
+                >
+                  ✎
+                </button>
+              </>
+            ) : (
+              <input
+                className="title-input"
+                value={editName}
+                autoFocus
+                spellCheck={false}
+                onChange={(e) => setEditName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void commitRename(editName)
+                  else if (e.key === 'Escape') setEditName(null)
+                }}
+                onBlur={() => void commitRename(editName)}
+              />
+            )}
+          </div>
+        )}
         <div className="header-right no-drag">
           {phase === 'ready' && (
             <button
@@ -533,7 +615,7 @@ export default function App(): React.JSX.Element {
             </button>
           )}
           {phase === 'ready' && (
-            <button type="button" className="pill ghost small" onClick={openPicker}>
+            <button type="button" className="pill ghost small" onClick={() => setShowProjects(true)}>
               Open…
             </button>
           )}
@@ -619,7 +701,12 @@ export default function App(): React.JSX.Element {
           />
         </>
       ) : (
-        <DropScreen loading={phase === 'loading'} songName={song?.name} onBrowse={openPicker} />
+        <DropScreen
+          loading={phase === 'loading'}
+          songName={song?.name}
+          onBrowse={openPicker}
+          onOpenProject={(p) => void loadPath(p)}
+        />
       )}
 
       {dragDepth > 0 && (
@@ -634,6 +721,8 @@ export default function App(): React.JSX.Element {
         </div>
       )}
 
+      {notice && !error && <div className="toast ok">{notice}</div>}
+
       {showSetup && (
         <SetupModal
           status={engineStatus}
@@ -647,6 +736,17 @@ export default function App(): React.JSX.Element {
       )}
 
       {showLog && <LogPanel onClose={() => setShowLog(false)} />}
+
+      {showProjects && (
+        <ProjectPicker
+          onOpen={(p) => void loadPath(p)}
+          onBrowse={() => {
+            setShowProjects(false)
+            openPicker()
+          }}
+          onClose={() => setShowProjects(false)}
+        />
+      )}
 
       <input
         ref={fileInputRef}

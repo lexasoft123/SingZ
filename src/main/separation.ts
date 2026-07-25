@@ -509,8 +509,22 @@ export class Separator {
           // take a while on first DirectML run — 0% beats a frozen label).
           onProgress({ stage: 'separating', percent: 0 })
 
+          // The engine is mute while onnxruntime compiles the model for the
+          // GPU (minutes on a first DirectML run) — say so instead of nothing.
+          let lastOutput = Date.now()
+          const heartbeat = setInterval(() => {
+            const quiet = Math.round((Date.now() - lastOutput) / 1000)
+            if (quiet >= 30) {
+              log(
+                'splitter',
+                `engine is busy, ${quiet}s without output — a first run on a GPU compiles the model and can take a few minutes`
+              )
+            }
+          }, 30_000)
+
           let tail = ''
           const consume = (chunk: Buffer): void => {
+            lastOutput = Date.now()
             const text = chunk.toString('utf8')
             tail = (tail + text).slice(-8000)
             logChunk('splitter', text)
@@ -524,11 +538,13 @@ export class Separator {
           child.stderr?.on('data', consume)
 
           child.on('error', (err) => {
+            clearInterval(heartbeat)
             this.child = null
             resolve({ ok: false, error: `Could not start the GPU pack: ${err.message}` })
           })
 
           child.on('exit', (code) => {
+            clearInterval(heartbeat)
             this.child = null
             log('splitter', `ONNX splitter exited with code ${code}`)
             if (this.cancelled) {
