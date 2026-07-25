@@ -4,7 +4,7 @@ A practice app for singers. Drop a song, see its timeline, split it into stems
 (vocals / drums / bass / instruments) with AI, and mute any track while it plays —
 kill the vocals and it's your karaoke machine.
 
-![SingZ playing a song split into four stems, karaoke mode on](docs/screenshot.png)
+![SingZ playing a song split into six stems — vocals, drums, bass, guitar, piano and instruments — karaoke mode on](docs/screenshot.png)
 
 Cross-platform desktop app: Electron + React + TypeScript, Web Audio for
 sample-locked multitrack playback. Everything runs locally — no cloud, no
