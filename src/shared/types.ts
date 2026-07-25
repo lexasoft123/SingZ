@@ -15,7 +15,7 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
-export type ModelId = 'htdemucs' | 'gpu-splitter'
+export type ModelId = 'gpu-splitter'
 
 export interface ModelInfo {
   id: ModelId

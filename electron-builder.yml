@@ -31,6 +31,7 @@ mac:
   extraResources:
     - from: vendor/darwin-${arch}
       to: engines
+      filter: ['whisper-cli*']
   target:
     - target: dmg
 dmg:
@@ -39,6 +40,7 @@ win:
   extraResources:
     - from: vendor/win32-x64
       to: engines
+      filter: ['whisper-cli*']
   target:
     - target: nsis
       arch: [x64]

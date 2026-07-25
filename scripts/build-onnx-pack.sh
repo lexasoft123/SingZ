@@ -1,19 +1,40 @@
 #!/usr/bin/env bash
-# Windows fast-splitter pack: relocatable Python + demucs-onnx +
-# onnxruntime-directml, with the htdemucs fp16 ONNX model prewarmed into
-# python/model-cache. Runs on Windows (CI git-bash). GPU via DirectML works on
-# any vendor (NVIDIA/AMD/Intel iGPU); falls back to CPU, which is still ~5x
-# faster than the bundled demucs.cpp.
+# ONNX splitter pack: relocatable Python + demucs-onnx with the htdemucs fp16
+# model prewarmed into python/model-cache. This is the DEFAULT splitter the
+# app downloads on first run (Windows + Intel Macs; Apple Silicon uses the
+# torch/MPS pack from build-gpu-pack.sh).
+#
+# Usage: scripts/build-onnx-pack.sh [win32-x64|darwin-x64]
+#   win32-x64  — onnxruntime-directml (GPU on any vendor, CPU fallback)
+#   darwin-x64 — onnxruntime CPU (CoreML crashes on this graph)
 set -euo pipefail
 
+TARGET="${1:-win32-x64}"
 PBS_TAG="20260718"
-PBS_PY="cpython-3.12.13+${PBS_TAG}-x86_64-pc-windows-msvc-install_only.tar.gz"
+case "$TARGET" in
+  win32-x64)
+    PBS_PY="cpython-3.12.13+${PBS_TAG}-x86_64-pc-windows-msvc-install_only.tar.gz"
+    PYBIN="python/python.exe"
+    SITE="python/Lib/site-packages"
+    WANT_DML=1
+    ;;
+  darwin-x64)
+    PBS_PY="cpython-3.12.13+${PBS_TAG}-x86_64-apple-darwin-install_only.tar.gz"
+    PYBIN="python/bin/python3"
+    SITE="python/lib/python3.12/site-packages"
+    WANT_DML=0
+    ;;
+  *)
+    echo "unknown target: $TARGET" >&2
+    exit 1
+    ;;
+esac
 PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${PBS_PY}"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-WORK="$ROOT/.engines-src/onnx-pack"
+WORK="$ROOT/.engines-src/onnx-pack-$TARGET"
 OUT="$ROOT/vendor/packs"
-OUTFILE="$OUT/gpu-splitter-win32-x64.tar.gz"
+OUTFILE="$OUT/gpu-splitter-$TARGET.tar.gz"
 
 if [ -f "$OUTFILE" ]; then
   echo "cached: vendor/packs/$(basename "$OUTFILE")"
@@ -25,15 +46,17 @@ if [ ! -f "$WORK/$PBS_PY" ]; then
   curl -L --fail -o "$WORK/$PBS_PY" "$PBS_URL"
 fi
 
-PY="$WORK/python/python.exe"
+PY="$WORK/$PYBIN"
 if ! "$PY" -c "import demucs_onnx, onnxruntime" >/dev/null 2>&1; then
   rm -rf "$WORK/python"
   tar -C "$WORK" -xzf "$WORK/$PBS_PY"
   "$PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
   "$PY" -m pip install --no-cache-dir demucs-onnx
-  # swap the CPU-only onnxruntime for the DirectML build (same module name)
-  "$PY" -m pip uninstall -y onnxruntime >/dev/null
-  "$PY" -m pip install --no-cache-dir onnxruntime-directml
+  if [ "$WANT_DML" = 1 ]; then
+    # swap the CPU-only onnxruntime for the DirectML build (same module name)
+    "$PY" -m pip uninstall -y onnxruntime >/dev/null
+    "$PY" -m pip install --no-cache-dir onnxruntime-directml
+  fi
 fi
 
 # embed the model + validate the stack (CPU provider: CI runners have no GPU)
@@ -54,9 +77,17 @@ done
 find "$WORK/python/model-cache" -type d -name blobs -prune -exec rm -rf {} +
 
 if find "$WORK/python" -type l | grep -q .; then
-  echo "ERROR: pack still contains symlinks:" >&2
-  find "$WORK/python" -type l >&2
-  exit 1
+  if [ "$TARGET" = win32-x64 ]; then
+    echo "ERROR: pack still contains symlinks:" >&2
+    find "$WORK/python" -type l >&2
+    exit 1
+  fi
+  # macOS python builds legitimately contain symlinks (bin/python3 etc.) and
+  # macOS tar extracts them fine — only the model cache must be link-free.
+  if find "$WORK/python/model-cache" -type l | grep -q .; then
+    echo "ERROR: model cache still contains symlinks" >&2
+    exit 1
+  fi
 fi
 find "$WORK/python/model-cache" -name 'htdemucs_fp16weights.onnx' -type f -size +100M \
   | grep -q . || { echo "ERROR: no materialized model file in the cache" >&2; exit 1; }
@@ -67,8 +98,7 @@ HF_HUB_OFFLINE=1 "$PY" -c "import sys; from demucs_onnx.cli import main; sys.exi
   --cache-dir "$WORK/python/model-cache"
 
 find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
-rm -rf "$WORK/python/Lib/site-packages/pip" \
-       "$WORK/python/Lib/site-packages/setuptools"
+rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
 
 tar -C "$WORK" -czf "$OUTFILE" python
 du -sh "$WORK/python" "$OUTFILE"

@@ -41,55 +41,35 @@ jobs:
             vendor/darwin-arm64
             vendor/darwin-x64
             vendor/win32-x64
-            vendor/models
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-demucs.sh', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       - name: Cache engine sources and build trees
         if: steps.engines-out.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: .engines-src
-          key: engines-src-${{ runner.os }}-v3
+          key: engines-src-${{ runner.os }}-v4
           restore-keys: engines-src-${{ runner.os }}-
 
-      - name: Cache MSYS2 packages (Windows)
-        if: runner.os == 'Windows' && steps.engines-out.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
-        with:
-          path: C:\msys64\var\cache\pacman\pkg
-          key: msys2-pkg-${{ runner.os }}-v1
-
-      - name: Build bundled engines (macOS)
+      - name: Build engines and splitter packs (macOS)
         if: runner.os == 'macOS'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/vendor-whisper.sh darwin-arm64
           bash scripts/vendor-whisper.sh darwin-x64
-          bash scripts/vendor-demucs.sh darwin-arm64
-          bash scripts/vendor-demucs.sh darwin-x64
+          bash scripts/build-gpu-pack.sh
+          bash scripts/build-onnx-pack.sh darwin-x64
 
-      - name: Build GPU splitter pack (Apple Silicon)
-        if: runner.os == 'macOS'
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: bash scripts/build-gpu-pack.sh
-
-      - name: Install MinGW OpenBLAS (Windows)
-        if: runner.os == 'Windows' && steps.engines-out.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-openblas mingw-w64-x86_64-gcc mingw-w64-x86_64-ninja
-
-      - name: Build bundled engines (Windows)
+      - name: Build engines and splitter pack (Windows)
         if: runner.os == 'Windows'
         shell: bash
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/vendor-whisper.sh win32-x64
-          PATH="/c/msys64/mingw64/bin:$PATH" bash scripts/vendor-demucs.sh win32-x64
-          bash scripts/build-onnx-pack.sh
+          bash scripts/build-onnx-pack.sh win32-x64
 
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never

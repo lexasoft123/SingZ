@@ -14,8 +14,8 @@ npm run build        # bundle into out/  — ALWAYS build before driving E2E
 npm run dist         # package installer for current platform
 npx electron .       # run the built app (out/) without packaging
 scripts/vendor-whisper.sh   # build whisper-cli into vendor/<platform>-<arch>/
-scripts/vendor-demucs.sh    # build demucs-cli + fetch htdemucs ggml weights
-scripts/build-gpu-pack.sh   # optional GPU pack (Apple Silicon only)
+scripts/build-gpu-pack.sh   # torch/MPS splitter pack (Apple Silicon)
+scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
 ```
 
 All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
@@ -44,9 +44,11 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
   before aligning (see `alignLines`).
 - **LRC gives line starts only** — word timing is estimated at ~12 chars/sec,
   never stretched to the next timestamp (lag), unless AI-aligned.
-- **demucs.cpp**: 44.1 kHz input only (renderer renders WAV from its decoded
-  buffer); CPU-only; `-march=native` is patched to `x86-64-v2` for Windows
-  distribution (CI Xeon AVX-512 crashes user CPUs).
+- **Splitting requires a downloaded pack** (no bundled engine since 0.3.0):
+  torch/MPS on Apple Silicon; demucs-onnx elsewhere (DirectML on Windows with
+  a `dml-disabled.json` marker after failures; CPU on Intel Macs — CoreML
+  crashes compiling the graph). ONNX packs get a renderer-rendered 44.1 kHz
+  WAV (`needsPcm`).
 - **HF hub caches checkpoints as extension-less blobs** — never glob for
   `*.safetensors` under `HF_HOME`.
 - **HF hub caches symlink snapshots→blobs** — packs must materialize links and

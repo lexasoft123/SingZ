@@ -38,15 +38,20 @@ around the cursor; two-finger scroll pans; the view follows the playhead.
 
 Engine ladder, resolved once and cached:
 
-1. **System Python demucs** (pipx etc.) — fastest (torch GPU/MPS). Skipped
+1. **System Python demucs** (pipx etc.) — dev setups (torch GPU/MPS). Skipped
    when `SINGZ_NO_SYSTEM_ENGINES=1`.
-2. **GPU pack** — app-managed relocatable Python+torch in
-   `<appData>/SingZ/gpu-splitter/`, spawned with `TORCH_HOME`/`HF_HOME`
-   pointing at the checkpoint embedded in the pack.
-3. **Bundled demucs.cpp** (`resources/engines/demucs-cli`) — CPU floor,
-   always present. Input must be 44.1 kHz: the renderer renders a WAV from its
-   already-decoded buffer (`separation:provide-input`) so any source format
-   works. Output `target_N_<stem>.wav` files are renamed into the cache layout.
+2. **Splitter pack** — the required first-run download, app-managed
+   relocatable Python in `<appData>/SingZ/gpu-splitter/`:
+   - Apple Silicon: torch/MPS demucs, spawned with `TORCH_HOME`/`HF_HOME`
+     pointing at the checkpoint embedded in the pack.
+   - Windows: demucs-onnx via DirectML with CPU fallback (a
+     `dml-disabled.json` marker skips DirectML after it fails once).
+   - Intel Macs: demucs-onnx on CPU (CoreML crashes compiling the graph).
+   ONNX engines read a plain 44.1 kHz WAV the renderer renders from its
+   already-decoded buffer (`separation:provide-input`, `needsPcm`).
+
+Without a pack (and no system demucs), splitting reports `needsModels` and
+the app opens the model wizard. There is no bundled fallback engine.
 
 Results cache: `<userData>/stems/<sha1-16>/htdemucs/{vocals,drums,bass,other}.wav`.
 

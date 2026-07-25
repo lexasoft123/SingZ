@@ -2,31 +2,20 @@ import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { access, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { cpus, homedir } from 'node:os'
+import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, delimiter, extname, join } from 'node:path'
 import { STEMS, type EngineStatus, type SeparationProgress, type SeparateResult, type StemName } from '../shared/types'
 import { stemsRoot } from './media'
 import { log, logChunk } from './log'
-import {
-  DEMUCS_MODEL_FILE,
-  demucsModelPath,
-  dmlFlagPath,
-  packDir,
-  packOnnxModel,
-  packPython
-} from './models'
+import { dmlFlagPath, isOnnxPack, packDir, packOnnxModel, packPython } from './models'
 
 const MODEL = 'htdemucs'
 const PROBE_TIMEOUT_MS = 45_000
-const DEMUCS_EXE = process.platform === 'win32' ? 'demucs-cli.exe' : 'demucs-cli'
-/** Formats libnyquist (the bundled engine's loader) can read. */
-const BUNDLED_INPUT_EXT = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga'])
+/** Formats the ONNX engine's soundfile loader can read directly. */
+const DIRECT_INPUT_EXT = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga'])
 
-type ResolvedEngine =
-  | { kind: 'python'; cmd: string[] }
-  | { kind: 'onnx'; cmd: string[] }
-  | { kind: 'bundled'; cmd: string[]; model: string }
+type ResolvedEngine = { kind: 'python'; cmd: string[] } | { kind: 'onnx'; cmd: string[] }
 
 /** Console-script wrappers embed absolute paths; -c keeps the pack relocatable. */
 const ONNX_SHIM = 'import sys; from demucs_onnx.cli import main; sys.exit(main())'
@@ -97,25 +86,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Bundled demucs.cpp binary (packaged resources or dev vendor) + downloaded weights. */
-async function bundledEngine(): Promise<{ bin: string | null; model: string | null }> {
-  const target = `${process.platform}-${process.arch}`
-  const binCandidates = [
-    join(process.resourcesPath ?? '', 'engines', DEMUCS_EXE),
-    join(import.meta.dirname, '..', '..', 'vendor', target, DEMUCS_EXE)
-  ]
-  const modelCandidates = [
-    demucsModelPath(),
-    join(import.meta.dirname, '..', '..', 'vendor', 'models', DEMUCS_MODEL_FILE)
-  ]
-  let bin: string | null = null
-  for (const c of binCandidates) if (await exists(c)) { bin = c; break }
-  let model: string | null = null
-  for (const c of modelCandidates) if (await exists(c)) { model = c; break }
-  return { bin, model }
-}
-
-/** Write 44.1k stereo int16 WAV from renderer-decoded PCM (bundled engine input). */
+/** Write 44.1k stereo int16 WAV from renderer-decoded PCM (ONNX engine input). */
 export async function writeInputWav(outDir: string, ch0: Float32Array, ch1: Float32Array): Promise<string> {
   const frames = Math.min(ch0.length, ch1.length)
   const dataBytes = frames * 2 * 2
@@ -150,7 +121,7 @@ function friendlyError(tail: string): string {
   if (/887A0005|DXGI_ERROR_DEVICE_REMOVED|device.{0,10}removed|DmlExecutionProvider/i.test(tail))
     return 'The graphics driver could not run this model (GPU device removed).'
   if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
-    return 'The fast splitter pack is missing its model — open the model manager (splitter chip) and download it again.'
+    return 'The splitter is missing its model — open the model manager (splitter chip) and download it again.'
   if (/ModuleNotFoundError|No module named/i.test(tail))
     return 'The demucs install looks broken (missing Python module). Try: pipx reinstall demucs && pipx inject demucs numpy'
   if (/ffmpeg|torchaudio.*backend|Could not load|soundfile/i.test(tail))
@@ -176,8 +147,8 @@ export class Separator {
       this.engine = null
       this.extraEnv = {}
     }
-    // Python demucs is much faster when the machine has it (GPU via torch);
-    // the bundled demucs.cpp guarantees a clean install always works.
+    // A system demucs install wins when the machine has one (dev setups);
+    // everyone else uses the downloaded splitter pack.
     if (!process.env.SINGZ_NO_SYSTEM_ENGINES) {
       for (const cmd of pythonCandidates()) {
         if (await probe(cmd)) {
@@ -191,12 +162,12 @@ export class Separator {
     // macOS pack = PyTorch/MPS (checkpoint via TORCH_HOME/HF_HOME inside the
     // pack); Windows pack = demucs-onnx with DirectML.
     if (await exists(packPython())) {
-      if (process.platform === 'win32') {
+      if (isOnnxPack()) {
         // Require the embedded model too — a half-extracted pack has a
-        // working python.exe but nothing to split with.
+        // working interpreter but nothing to split with.
         const cmd = [packPython(), '-c', ONNX_SHIM]
         if ((await packOnnxModel()) === null) {
-          log('splitter', 'GPU pack present but its model is missing — ignoring the pack', 'warn')
+          log('splitter', 'splitter pack present but its model is missing — ignoring it', 'warn')
         } else if (await probe(cmd)) {
           this.engine = { kind: 'onnx', cmd }
           log('splitter', `engine: ${this.describe(this.engine)}`)
@@ -210,37 +181,23 @@ export class Separator {
             TORCH_HOME: join(packDir(), 'python', 'torch-home'),
             HF_HOME: join(packDir(), 'python', 'hf-home')
           }
-          log('splitter', `engine: GPU pack (${cmd.join(' ')})`)
+          log('splitter', `engine: splitter pack (${cmd.join(' ')})`)
           return { ok: true, command: this.describe(this.engine) }
         }
       }
     }
-    const bundled = await bundledEngine()
-    if (bundled.bin && bundled.model) {
-      this.engine = { kind: 'bundled', cmd: [bundled.bin], model: bundled.model }
-      log('splitter', `engine: ${bundled.bin}`)
-      return { ok: true, command: this.describe(this.engine), needsPcm: true }
-    }
-    if (bundled.bin && !bundled.model) {
-      log('splitter', 'bundled splitter found, model weights not downloaded yet', 'warn')
-      return {
-        ok: false,
-        needsModels: true,
-        message: 'The splitter model has not been downloaded yet.'
-      }
-    }
-    log('splitter', 'no engine found — build is missing its bundled splitter', 'error')
+    log('splitter', 'no splitter yet — the pack has not been downloaded', 'warn')
     return {
       ok: false,
-      message: 'No stem-splitting engine found — this build seems to be missing its bundled splitter.'
+      needsModels: true,
+      message: 'The stem splitter has not been downloaded yet.'
     }
   }
 
-  /** Is a fast (GPU-capable) demucs available — system install or our pack? */
+  /** Is a splitter available besides our pack (a system demucs install)? */
   async hasFastSplitter(): Promise<boolean> {
-    if (this.engine?.kind === 'python') return true
-    if (await exists(packPython())) return true
     if (process.env.SINGZ_NO_SYSTEM_ENGINES) return false
+    if (this.engine?.kind === 'python' && !this.engine.cmd[0].startsWith(packDir())) return true
     for (const cmd of pythonCandidates()) {
       if (await probe(cmd)) return true
     }
@@ -248,9 +205,10 @@ export class Separator {
   }
 
   private describe(e: ResolvedEngine): string {
-    if (e.kind === 'python') return e.cmd.join(' ')
-    if (e.kind === 'onnx') return 'GPU pack (DirectML)'
-    return 'bundled demucs.cpp'
+    if (e.kind === 'onnx') {
+      return process.platform === 'win32' ? 'splitter pack (DirectML)' : 'splitter pack (ONNX)'
+    }
+    return e.cmd.join(' ')
   }
 
   get busy(): boolean {
@@ -290,23 +248,20 @@ export class Separator {
       this.logResult(res)
       return res
     }
-    // Non-python engines want plain audio files: prefer the WAV the renderer
+    // The ONNX engine wants a plain audio file: prefer the WAV the renderer
     // rendered from its decoded buffer (any source format), else the original
     // file when the format is directly readable.
     const provided = join(outDir, 'input44k.wav')
     let fileInput = input
     if (await exists(provided)) {
       fileInput = provided
-    } else if (!BUNDLED_INPUT_EXT.has(extname(input).toLowerCase())) {
+    } else if (!DIRECT_INPUT_EXT.has(extname(input).toLowerCase())) {
       return {
         ok: false,
-        error: `The built-in splitter reads WAV/MP3/FLAC/OGG — convert ${extname(input)} first, or install demucs for full format support.`
+        error: `The splitter reads WAV/MP3/FLAC/OGG — convert ${extname(input)} first.`
       }
     }
-    const result =
-      engine.kind === 'onnx'
-        ? await this.runOnnx(engine, fileInput, outDir, stems, onProgress)
-        : await this.runBundled(engine, fileInput, outDir, stems, onProgress)
+    const result = await this.runOnnx(engine, fileInput, outDir, stems, onProgress)
     if (result.ok) await rm(provided, { force: true })
     this.logResult(result)
     return result
@@ -385,77 +340,7 @@ export class Separator {
     })
   }
 
-  private runBundled(
-    engine: { cmd: string[]; model: string },
-    input: string,
-    outDir: string,
-    stems: Record<StemName, string>,
-    onProgress: (p: SeparationProgress) => void
-  ): Promise<SeparateResult> {
-    return new Promise<SeparateResult>((resolve) => {
-      const tmpOut = join(outDir, 'cpp-out')
-      // Leave one core for the UI; demucs.cpp is the CPU floor, so use the rest.
-      const threads = Math.max(2, cpus().length - 1)
-      const args = [engine.model, input, tmpOut, String(threads)]
-      log('splitter', `run: ${engine.cmd[0]} ${args.join(' ')}`)
-      let maxPercent = 0
-      void mkdir(tmpOut, { recursive: true }).then(() => {
-        const child = spawn(engine.cmd[0], args, { env: spawnEnv() })
-        this.child = child
-
-        let tail = ''
-        const consume = (chunk: Buffer): void => {
-          const text = chunk.toString('utf8')
-          tail = (tail + text).slice(-8000)
-          logChunk('splitter', text, /\(\d{1,3}(?:\.\d+)?%\)/)
-          // "[THREAD 3] (42.857%) ..." — per-thread progress; track the max seen.
-          for (const m of text.matchAll(/\((\d{1,3}(?:\.\d+)?)%\)/g)) {
-            const pct = Math.min(100, parseFloat(m[1]))
-            if (pct > maxPercent) maxPercent = pct
-          }
-          onProgress({ stage: 'separating', percent: maxPercent })
-        }
-        child.stdout?.on('data', consume)
-        child.stderr?.on('data', consume)
-
-        child.on('error', (err) => {
-          this.child = null
-          void rm(outDir, { recursive: true, force: true })
-          resolve({ ok: false, error: `Could not start the bundled splitter: ${err.message}` })
-        })
-
-        child.on('exit', (code) => {
-          this.child = null
-          log('splitter', `bundled splitter exited with code ${code}`)
-          if (this.cancelled) {
-            void rm(outDir, { recursive: true, force: true })
-            resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
-            return
-          }
-          void (async () => {
-            try {
-              if (code !== 0) throw new Error(friendlyError(tail))
-              // demucs.cpp writes one wav per source into tmpOut — map by name.
-              const produced = await readdir(tmpOut)
-              await mkdir(join(outDir, MODEL), { recursive: true })
-              for (const stem of STEMS) {
-                const match = produced.find((f) => f.toLowerCase().includes(stem) && f.endsWith('.wav'))
-                if (!match) throw new Error(`bundled splitter produced no ${stem} file (${produced.join(', ')})`)
-                await rename(join(tmpOut, match), stems[stem])
-              }
-              await rm(tmpOut, { recursive: true, force: true })
-              resolve({ ok: true, cached: false, stems })
-            } catch (err) {
-              await rm(outDir, { recursive: true, force: true })
-              resolve({ ok: false, error: err instanceof Error ? err.message : String(err) })
-            }
-          })()
-        })
-      })
-    })
-  }
-
-  /** demucs-onnx pack: try DirectML, fall back to CPU (still ~5x demucs.cpp). */
+  /** demucs-onnx pack: DirectML with CPU fallback on Windows, CPU on Intel Macs. */
   private async runOnnx(
     engine: { cmd: string[] },
     input: string,
@@ -465,8 +350,9 @@ export class Separator {
   ): Promise<SeparateResult> {
     // A GPU that crashed or stalled on this model once will do it again —
     // don't make every split pay the DirectML tax before falling back.
-    let providers = ['dml', 'cpu']
-    if (await exists(dmlFlagPath())) {
+    // (CoreML crashes compiling this graph, so Intel Macs go straight to CPU.)
+    let providers = process.platform === 'win32' ? ['dml', 'cpu'] : ['cpu']
+    if (providers.includes('dml') && (await exists(dmlFlagPath()))) {
       log(
         'splitter',
         'DirectML is switched off on this machine after an earlier failure — using the CPU engine (re-download the pack to try DirectML again)'

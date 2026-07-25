@@ -65,14 +65,13 @@ export async function packOnnxModel(): Promise<string | null> {
 /** Everything the pack needs to run — not just the interpreter. */
 async function packComplete(): Promise<boolean> {
   if (!(await exists(packPython()))) return false
-  if (process.platform === 'win32') return (await packOnnxModel()) !== null
+  if (isOnnxPack()) return (await packOnnxModel()) !== null
   return true
 }
 
-export const DEMUCS_MODEL_FILE = 'ggml-model-htdemucs-4s-f16.bin'
-
-export function demucsModelPath(): string {
-  return join(modelsDir(), DEMUCS_MODEL_FILE)
+/** Packs on Windows and Intel Macs run demucs-onnx (Apple Silicon: torch). */
+export function isOnnxPack(): boolean {
+  return process.platform === 'win32' || (process.platform === 'darwin' && process.arch === 'x64')
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -158,29 +157,21 @@ interface RegistryEntry {
 
 const REGISTRY: RegistryEntry[] = [
   {
-    id: 'htdemucs',
-    label: 'Stem splitter · htdemucs',
-    description: 'Splits songs into vocals, drums, bass and instruments.',
-    sizeMb: 81,
-    kind: 'file',
-    file: DEMUCS_MODEL_FILE,
-    url: 'https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-4s-f16.bin',
-    optional: false
-  },
-  {
     id: 'gpu-splitter',
-    label: 'Fast splitter · GPU',
+    label: 'Stem splitter · AI',
     description:
       process.platform === 'win32'
-        ? 'Splits songs many times faster using your GPU (DirectML — works with NVIDIA, AMD and Intel graphics).'
-        : 'Splits a song in seconds instead of minutes using the GPU (PyTorch). Recommended on Apple Silicon.',
-    sizeMb: process.platform === 'win32' ? 227 : 240,
+        ? 'Splits songs into vocals, drums, bass and instruments — uses your GPU when it can (works with NVIDIA, AMD and Intel graphics).'
+        : process.arch === 'arm64'
+          ? 'Splits songs into vocals, drums, bass and instruments in seconds on the Apple Silicon GPU.'
+          : 'Splits songs into vocals, drums, bass and instruments on this Mac.',
+    sizeMb: process.platform === 'win32' ? 227 : process.arch === 'arm64' ? 240 : 210,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
       `https://github.com/lexasoft123/SingZ/releases/latest/download/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
-    optional: true,
-    platforms: ['darwin-arm64', 'win32-x64']
+    optional: false,
+    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
   }
 ]
 
@@ -194,15 +185,11 @@ export class ModelManager {
 
   private async present(entry: RegistryEntry): Promise<boolean> {
     if (entry.kind === 'archive') return packComplete()
-    return (
-      (await exists(join(modelsDir(), entry.file as string))) ||
-      // dev convenience: weights fetched by scripts/vendor-demucs.sh
-      (await exists(join(app.getAppPath(), 'vendor', 'models', entry.file as string)))
-    )
+    return exists(join(modelsDir(), entry.file as string))
   }
 
-  /** `fastSplitter` marks htdemucs optional when a fast demucs already exists. */
-  async status(fastSplitter: boolean): Promise<ModelInfo[]> {
+  /** `systemSplitter` marks the pack optional when a system demucs exists. */
+  async status(systemSplitter: boolean): Promise<ModelInfo[]> {
     const out: ModelInfo[] = []
     for (const entry of forThisPlatform()) {
       out.push({
@@ -212,7 +199,7 @@ export class ModelManager {
         sizeMb: entry.sizeMb,
         present: await this.present(entry),
         optional: entry.optional,
-        required: entry.id === 'htdemucs' ? !fastSplitter : false
+        required: entry.optional ? false : !systemSplitter
       })
     }
     return out

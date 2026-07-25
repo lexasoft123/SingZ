@@ -5,7 +5,7 @@
 ```bash
 npm install
 scripts/vendor-whisper.sh      # once per machine (needs cmake)
-scripts/vendor-demucs.sh       # once; also fetches htdemucs weights
+scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
 npm run dev
 ```
 
@@ -69,17 +69,19 @@ produce four stems.
    (`scripts/afterPack.cjs`), and attaches everything to the GitHub Release.
 
 Engine builds are cached on the vendor scripts' content hash (editing a script
-forces a clean rebuild); MSYS2 packages and source trees have their own
-caches. Keep releases public: the in-app GPU-pack URL is
-`releases/latest/download/gpu-splitter-darwin-arm64.tar.gz`.
+forces a clean rebuild); source trees have their own cache. Keep releases
+public: the in-app pack URLs are
+`releases/latest/download/gpu-splitter-<platform>-<arch>.tar.gz`.
 
-### Windows engine build
+### Splitter packs
 
-demucs.cpp is gcc-only; CI builds it with MinGW gcc + Ninja + MSYS2 OpenBLAS,
-statically linked (`-static -fopenmp`), with three vendored patches applied by
-`scripts/vendor-demucs.sh` (wavpack `<intrin.h>`, `fs::path::string()`,
-`-march=x86-64-v2` instead of `native`). If upstream updates break a patch,
-the sed calls there are the place to look.
+There is no bundled splitter — every platform downloads its pack on first
+run. `scripts/build-gpu-pack.sh` builds the Apple Silicon torch/MPS pack;
+`scripts/build-onnx-pack.sh <target>` builds the demucs-onnx packs
+(win32-x64 with onnxruntime-directml, darwin-x64 with CPU onnxruntime).
+Pack tarballs must contain no symlinks in the model cache (Windows tar
+can't extract them without admin rights) — the script materializes and
+asserts this, then re-verifies the cache resolves fully offline.
 
 ### Signing status
 
