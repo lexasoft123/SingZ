@@ -95,11 +95,21 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The in-app GPU-pack download points at the latest release asset, so releases
-must be publicly reachable (or set `SINGZ_GPU_PACK_URL`). Builds are unsigned
-for now — macOS users right-click → Open on first launch, Windows shows a
-SmartScreen prompt (and needs the VC++ runtime); to sign, remove
+must be publicly reachable (or set `SINGZ_GPU_PACK_URL`).
+
+Builds are unsigned for now. **macOS** (Sequoia and later) blocks the first
+launch with *"Apple could not verify…"* — open **System Settings → Privacy &
+Security**, scroll to *"SingZ" was blocked*, click **Open Anyway**, then launch
+again (one time per version). Or in Terminal:
+
+```bash
+xattr -d com.apple.quarantine /Applications/SingZ.app
+```
+
+**Windows** shows a SmartScreen prompt ("More info → Run anyway") and needs the
+VC++ runtime. The only clean fix is real signing/notarization: remove
 `identity: null` from [electron-builder.yml](electron-builder.yml) and add
-certificate secrets in CI.
+certificate secrets in CI (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
 Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [CLAUDE.md](CLAUDE.md)
