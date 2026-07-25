@@ -124,6 +124,8 @@ export async function writeInputWav(outDir: string, ch0: Float32Array, ch1: Floa
 }
 
 function friendlyError(tail: string): string {
+  if (/8007000E|Not enough memory resources/i.test(tail))
+    return 'The graphics card ran out of memory for this model.'
   if (/887A0005|DXGI_ERROR_DEVICE_REMOVED|device.{0,10}removed|DmlExecutionProvider/i.test(tail))
     return 'The graphics driver could not run this model (GPU device removed).'
   if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
