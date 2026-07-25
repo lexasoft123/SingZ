@@ -13,6 +13,43 @@ export function yinPitch(buf: Float32Array, sampleRate: number, fMin = 70, fMax 
   return yinPitchInfo(buf, sampleRate, fMin, fMax).f0
 }
 
+/**
+ * Cumulative-mean-normalized difference profile of one frame — the core of
+ * YIN. 0 at lag τ means "repeats perfectly every τ samples". Shared by the
+ * plain detector (mic) and the probabilistic tracker (melody worker).
+ */
+export function cmndProfile(
+  buf: Float32Array,
+  sampleRate: number,
+  fMin: number,
+  fMax: number
+): { cmnd: Float32Array; tauMin: number; tauMax: number } | null {
+  const n = buf.length
+  const tauMin = Math.max(2, Math.floor(sampleRate / fMax))
+  const tauMax = Math.min(Math.floor(sampleRate / fMin), Math.floor(n / 2))
+  if (tauMax <= tauMin + 2) return null
+
+  const w = n - tauMax
+  const d = new Float32Array(tauMax + 1)
+  for (let tau = 1; tau <= tauMax; tau++) {
+    let sum = 0
+    for (let i = 0; i < w; i++) {
+      const diff = buf[i] - buf[i + tau]
+      sum += diff * diff
+    }
+    d[tau] = sum
+  }
+
+  const cmnd = new Float32Array(tauMax + 1)
+  cmnd[0] = 1
+  let running = 0
+  for (let tau = 1; tau <= tauMax; tau++) {
+    running += d[tau]
+    cmnd[tau] = running === 0 ? 1 : (d[tau] * tau) / running
+  }
+  return { cmnd, tauMin, tauMax }
+}
+
 /** yinPitch plus the evidence a melody cleaner needs (clarity + frame RMS). */
 export function yinPitchInfo(
   buf: Float32Array,
@@ -26,29 +63,9 @@ export function yinPitchInfo(
   const rms = Math.sqrt(energy / n)
   if (rms < 0.01) return { f0: 0, clarity: 0, rms }
 
-  const tauMin = Math.max(2, Math.floor(sampleRate / fMax))
-  const tauMax = Math.min(Math.floor(sampleRate / fMin), Math.floor(n / 2))
-  if (tauMax <= tauMin + 2) return { f0: 0, clarity: 0, rms }
-
-  const w = n - tauMax
-  const d = new Float32Array(tauMax + 1)
-  for (let tau = 1; tau <= tauMax; tau++) {
-    let sum = 0
-    for (let i = 0; i < w; i++) {
-      const diff = buf[i] - buf[i + tau]
-      sum += diff * diff
-    }
-    d[tau] = sum
-  }
-
-  // cumulative mean normalized difference
-  const cmnd = new Float32Array(tauMax + 1)
-  cmnd[0] = 1
-  let running = 0
-  for (let tau = 1; tau <= tauMax; tau++) {
-    running += d[tau]
-    cmnd[tau] = running === 0 ? 1 : (d[tau] * tau) / running
-  }
+  const profile = cmndProfile(buf, sampleRate, fMin, fMax)
+  if (!profile) return { f0: 0, clarity: 0, rms }
+  const { cmnd, tauMin, tauMax } = profile
 
   const threshold = 0.15
   let tau = -1
