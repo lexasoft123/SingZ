@@ -1741,3 +1741,9 @@ button.chip-status:hover {
   color: var(--text);
   background: var(--accent-soft);
 }
+
+.wiz-installed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

@@ -45,30 +45,48 @@ function pythonCandidates(): string[][] {
 }
 
 export function probe(cmd: string[]): Promise<boolean> {
+  return probeDetailed(cmd).then((r) => r.ok)
+}
+
+/**
+ * Like probe, but keeps the evidence — the pack path logs WHY its python
+ * would not run (a field machine had files installed but a missing MSVC
+ * runtime, and nothing said so).
+ */
+export function probeDetailed(
+  cmd: string[]
+): Promise<{ ok: boolean; detail: string }> {
   return new Promise((done) => {
     let settled = false
-    const finish = (ok: boolean): void => {
+    let tail = ''
+    const finish = (ok: boolean, detail: string): void => {
       if (!settled) {
         settled = true
-        done(ok)
+        done({ ok, detail })
       }
     }
     try {
-      const child = spawn(cmd[0], [...cmd.slice(1), '--help'], { env: spawnEnv(), stdio: 'ignore' })
+      const child = spawn(cmd[0], [...cmd.slice(1), '--help'], { env: spawnEnv() })
+      const consume = (c: Buffer): void => {
+        tail = (tail + c.toString('utf8')).slice(-1500)
+      }
+      child.stdout?.on('data', consume)
+      child.stderr?.on('data', consume)
       const timer = setTimeout(() => {
         child.kill('SIGKILL')
-        finish(false)
+        finish(false, `probe timed out after ${PROBE_TIMEOUT_MS / 1000}s`)
       }, PROBE_TIMEOUT_MS)
-      child.on('error', () => {
+      child.on('error', (err) => {
         clearTimeout(timer)
-        finish(false)
+        finish(false, `could not start: ${err.message}`)
       })
       child.on('exit', (code) => {
         clearTimeout(timer)
-        finish(code === 0)
+        const lines = tail.replace(/\u0000/g, '').split('\n').map((l) => l.trim()).filter(Boolean)
+        finish(code === 0, `exit ${code}: ${lines.slice(-3).join(' — ').slice(0, 300)}`)
       })
-    } catch {
-      finish(false)
+    } catch (err) {
+      finish(false, err instanceof Error ? err.message : String(err))
     }
   })
 }
@@ -176,14 +194,19 @@ export class Separator {
         const cmd = [packPython(), '-c', ONNX_SHIM]
         if ((await packOnnxModel()) === null) {
           log('splitter', 'splitter pack present but its model is missing — ignoring it', 'warn')
-        } else if (await probe(cmd)) {
-          this.engine = { kind: 'onnx', cmd }
-          log('splitter', `engine: ${this.describe(this.engine)}`)
-          return { ok: true, command: this.describe(this.engine), needsPcm: true }
+        } else {
+          const res = await probeDetailed(cmd)
+          if (res.ok) {
+            this.engine = { kind: 'onnx', cmd }
+            log('splitter', `engine: ${this.describe(this.engine)}`)
+            return { ok: true, command: this.describe(this.engine), needsPcm: true }
+          }
+          log('splitter', `pack python would not run (${res.detail}) — Reinstall in the model manager may fix it`, 'error')
         }
       } else {
         const cmd = [packPython(), '-m', 'demucs']
-        if (await probe(cmd)) {
+        const res = await probeDetailed(cmd)
+        if (res.ok) {
           this.engine = { kind: 'python', cmd }
           this.extraEnv = {
             TORCH_HOME: join(packDir(), 'python', 'torch-home'),
@@ -192,6 +215,7 @@ export class Separator {
           log('splitter', `engine: splitter pack (${cmd.join(' ')})`)
           return { ok: true, command: this.describe(this.engine) }
         }
+        log('splitter', `pack python would not run (${res.detail}) — Reinstall in the model manager may fix it`, 'error')
       }
     }
     log('splitter', 'no splitter yet — the pack has not been downloaded', 'warn')

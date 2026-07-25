@@ -54,7 +54,7 @@ echo "embedded checkpoint blob: $FOUND ($(du -h "$FOUND" | cut -f1))"
 
 # version stamp: the app refuses packs older than its required format
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 2, "target": "darwin-arm64", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 3, "target": "darwin-arm64", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUT/gpu-splitter-darwin-arm64.tar.gz" python

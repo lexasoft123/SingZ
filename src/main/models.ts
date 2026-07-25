@@ -66,7 +66,9 @@ export async function packOnnxModel(
  * wizard re-downloads it and the installer wipes the old directory. Legacy
  * packs without pack.json count as version 0.
  */
-const PACK_FORMAT_REQUIRED = 2
+// Windows requires v3 (bundled MSVC runtime DLLs — clean installs lack the
+// system redistributable); Mac v2 packs remain fully valid.
+const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 3 : 2
 
 async function packFormatVersion(): Promise<number> {
   try {
@@ -251,7 +253,9 @@ export class ModelManager {
     this.abort = new AbortController()
     try {
       const all = await this.status(fastSplitter)
-      const wanted = all.filter((m) => !m.present && (ids ? ids.includes(m.id) : m.required))
+      // explicit ids re-download even when present (the wizard's Reinstall
+      // lever for installs that exist on disk but fail to run)
+      const wanted = all.filter((m) => (ids ? ids.includes(m.id) : m.required && !m.present))
       for (const m of wanted) {
         const entry = REGISTRY.find((e) => e.id === m.id)
         if (!entry) continue

@@ -69,8 +69,19 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
               <div key={m.id} className={`wiz-row${m.present ? ' done' : ''}`}>
                 <div className="wiz-head">
                   <span className="wiz-name">{m.label}</span>
-                  {m.present ? (
-                    <span className="wiz-size ok">installed ✓</span>
+                  {m.present && !isRunning ? (
+                    <span className="wiz-installed">
+                      <span className="wiz-size ok">installed ✓</span>
+                      <button
+                        type="button"
+                        className="pill ghost small"
+                        title="Download and install this again — fixes an install that exists but won't run"
+                        disabled={busy}
+                        onClick={() => void download([m.id])}
+                      >
+                        Reinstall
+                      </button>
+                    </span>
                   ) : isRunning ? (
                     <span className="wiz-size">{Math.round(pct)}%</span>
                   ) : m.optional ? (

@@ -62,6 +62,17 @@ fi
 # only the current model ships — drop caches from earlier pack generations
 rm -rf "$WORK/python/model-cache/models--StemSplitio--htdemucs-onnx"
 
+if [ "$TARGET" = win32-x64 ]; then
+  # onnxruntime needs the MSVC C++ runtime; clean Windows installs lack it.
+  # Microsoft permits redistributing these DLLs — ship them beside python.exe
+  # (the application directory wins the DLL search order).
+  for dll in msvcp140.dll msvcp140_1.dll msvcp140_2.dll vcruntime140.dll vcruntime140_1.dll; do
+    [ -f "/c/Windows/System32/$dll" ] && cp "/c/Windows/System32/$dll" "$WORK/python/" || true
+  done
+  [ -f "$WORK/python/msvcp140.dll" ] || { echo "ERROR: msvcp140.dll not bundled" >&2; exit 1; }
+  [ -f "$WORK/python/vcruntime140.dll" ] || { echo "ERROR: vcruntime140.dll not bundled" >&2; exit 1; }
+fi
+
 # embed the model + validate the stack (CPU provider: CI runners have no GPU)
 "$PY" -c "import sys; from demucs_onnx.cli import main; sys.exit(main())" \
   prewarm --models htdemucs_6s --precision fp16weights --providers cpu \
@@ -105,7 +116,7 @@ rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
 
 # version stamp: the app refuses packs older than its required format
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 2, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 3, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python
