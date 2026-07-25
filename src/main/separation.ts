@@ -490,11 +490,16 @@ export class Separator {
           }, 30_000)
 
           let tail = ''
+          // demucs-onnx retries on CPU internally when DirectML dies — the
+          // process then exits 0 and our own fallback never fires, so watch
+          // for the library's fallback line to remember the broken GPU.
+          let internalCpuFallback = false
           const consume = (chunk: Buffer): void => {
             lastOutput = Date.now()
             sawOutput = true
             const text = chunk.toString('utf8')
             tail = (tail + text).slice(-8000)
+            if (/Falling back to \['CPUExecutionProvider'\]/.test(text)) internalCpuFallback = true
             logChunk('splitter', text)
             // "    chunk 3/12: 4.1s elapsed"
             for (const m of text.matchAll(/chunk (\d+)\/(\d+)/g)) {
@@ -527,6 +532,26 @@ export class Separator {
             void (async () => {
               try {
                 if (code !== 0) throw new Error(friendlyError(tail))
+                if (provider === 'dml' && internalCpuFallback) {
+                  try {
+                    await writeFile(
+                      dmlFlagPath(),
+                      JSON.stringify(
+                        { at: new Date().toISOString(), reason: 'engine fell back to CPU internally' },
+                        null,
+                        2
+                      ),
+                      'utf8'
+                    )
+                    log(
+                      'splitter',
+                      'DirectML failed inside the engine — future splits go straight to CPU',
+                      'warn'
+                    )
+                  } catch {
+                    // marker is an optimization only
+                  }
+                }
                 await mkdir(join(outDir, MODEL), { recursive: true })
                 for (const stem of STEMS_6) {
                   const src = join(tmpOut, `${stem}.wav`)
