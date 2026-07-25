@@ -1754,3 +1754,12 @@ body.win .modal-scrim {
   backdrop-filter: none;
   background: rgba(8, 6, 3, 0.82);
 }
+
+/* Infinite animations behind an open modal each force a full-window
+   backdrop re-raster — freeze them; they resume the moment it closes. */
+body.modal-open .dot.warn,
+body.modal-open .sep-pill,
+body.modal-open .eq span,
+body.modal-open .lyr-line::before {
+  animation-play-state: paused;
+}
