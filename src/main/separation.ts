@@ -356,7 +356,8 @@ export class Separator {
   ): Promise<SeparateResult> {
     return new Promise<SeparateResult>((resolve) => {
       const tmpOut = join(outDir, 'cpp-out')
-      const threads = Math.min(8, Math.max(2, Math.floor(cpus().length / 2)))
+      // Leave one core for the UI; demucs.cpp is the CPU floor, so use the rest.
+      const threads = Math.max(2, cpus().length - 1)
       const args = [engine.model, input, tmpOut, String(threads)]
       let maxPercent = 0
       void mkdir(tmpOut, { recursive: true }).then(() => {

@@ -115,7 +115,7 @@ const REGISTRY: RegistryEntry[] = [
       process.platform === 'win32'
         ? 'Splits songs many times faster using your GPU (DirectML — works with NVIDIA, AMD and Intel graphics).'
         : 'Splits a song in seconds instead of minutes using the GPU (PyTorch). Recommended on Apple Silicon.',
-    sizeMb: process.platform === 'win32' ? 200 : 240,
+    sizeMb: process.platform === 'win32' ? 227 : 240,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??

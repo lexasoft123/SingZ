@@ -43,7 +43,7 @@ jobs:
             vendor/win32-x64
             vendor/models
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-demucs.sh', 'scripts/build-gpu-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-demucs.sh', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       - name: Cache engine sources and build trees
         if: steps.engines-out.outputs.cache-hit != 'true'
