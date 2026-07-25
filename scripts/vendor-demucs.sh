@@ -44,8 +44,9 @@ case "$TARGET" in
     # pin the distributable binary to the x86-64-v2 baseline
     sed -i 's/-march=native/-march=x86-64-v2/g' "$SRC/CMakeLists.txt"
     export CPATH="$(cygpath -w "$MINGW_PREFIX/include/openblas" 2>/dev/null || echo "$MINGW_PREFIX/include/openblas")"
+    # -fopenmp: MSYS2's OpenBLAS is OpenMP-threaded; -static folds libgomp in
+    export LDFLAGS="-static -fopenmp"
     EXTRA="-G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
-      -DCMAKE_EXE_LINKER_FLAGS=-static \
       -DBLAS_LIBRARIES=$MINGW_PREFIX/lib/libopenblas.a"
     ;;
 esac
