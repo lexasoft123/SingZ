@@ -108,6 +108,11 @@ body.mac .titlebar {
   padding-left: 92px;
 }
 
+/* Windows: native min/max/close overlay sits top-right over our titlebar */
+body.win .titlebar {
+  padding-right: 150px;
+}
+
 .no-drag,
 .titlebar button {
   -webkit-app-region: no-drag;

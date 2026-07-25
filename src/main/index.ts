@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, shell, systemPreferences } from 'electron'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
@@ -44,7 +44,14 @@ function createWindow(): void {
     backgroundColor: '#12100d',
     ...(process.platform === 'darwin'
       ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 18, y: 17 } }
-      : {}),
+      : process.platform === 'win32'
+        ? {
+            // frameless with native window controls drawn over our titlebar —
+            // keeps Win11 snap layouts while the chrome matches the app theme
+            titleBarStyle: 'hidden' as const,
+            titleBarOverlay: { color: '#12100d', symbolColor: '#9b917e', height: 52 }
+          }
+        : {}),
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.mjs'),
       sandbox: false
@@ -205,6 +212,8 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
   registerIpc()
