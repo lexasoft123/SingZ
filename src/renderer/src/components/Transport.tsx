@@ -110,7 +110,7 @@ export default function Transport({
               type="button"
               className={`pill karaoke${karaokeOn ? ' active' : ''}`}
               aria-pressed={karaokeOn}
-              title="Mute the vocals and sing it yourself"
+              title="Karaoke view: lyrics, melody line and mic matching (Esc to close)"
               onClick={onToggleKaraoke}
             >
               <svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor" aria-hidden>

@@ -857,6 +857,224 @@ button.chip-status:hover {
   flex-wrap: wrap;
 }
 
+/* ————————————————————————————————— karaoke: layout ————— */
+
+.main-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ————————————————————————————————— karaoke: lyrics panel ————— */
+
+.lyrics-panel {
+  width: 360px;
+  flex: none;
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--panel) 40%, transparent);
+  animation: panel-in 0.3s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+.lp-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.lp-title {
+  font-weight: 800;
+  font-size: 15px;
+  font-variation-settings: 'wdth' 88;
+  letter-spacing: 0.02em;
+}
+
+.chip.guide {
+  width: auto;
+  padding: 0 10px;
+  height: 26px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+}
+
+.chip.guide.active {
+  background: var(--accent-soft);
+  border-color: rgba(255, 160, 40, 0.55);
+  color: var(--accent);
+}
+
+.lp-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 6px 40vh 6px;
+}
+
+.lp-state {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.lp-state p {
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.lp-state p strong {
+  color: var(--text);
+}
+
+.lp-state .cmd {
+  width: 100%;
+  margin: 0;
+}
+
+.lp-loading {
+  font-weight: 600;
+  color: var(--text) !important;
+}
+
+.lp-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.lp-bar {
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 240, 214, 0.08);
+  overflow: hidden;
+}
+
+.lp-bar div {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-deep), #ffd489);
+  box-shadow: 0 0 8px rgba(255, 170, 60, 0.7);
+  transition: width 0.4s ease;
+}
+
+.lyr-lines {
+  display: flex;
+  flex-direction: column;
+}
+
+.lyr-line {
+  padding: 7px 14px;
+  border-radius: 10px;
+  font-size: 17.5px;
+  line-height: 1.45;
+  font-weight: 650;
+  font-variation-settings: 'wdth' 92;
+  color: var(--faint);
+  cursor: pointer;
+  transition:
+    color 0.25s,
+    background 0.15s,
+    transform 0.25s;
+  transform-origin: left center;
+}
+
+.lyr-line:hover {
+  background: rgba(255, 240, 214, 0.04);
+}
+
+.lyr-line.past {
+  color: var(--dim);
+}
+
+.lyr-line.current {
+  color: var(--text);
+  transform: scale(1.03);
+}
+
+.lyr-line.current span.sung {
+  color: var(--accent);
+}
+
+.lyr-line.current span.now {
+  color: var(--accent);
+  text-shadow: 0 0 14px rgba(255, 160, 40, 0.75);
+}
+
+.lp-note {
+  padding: 22px 14px 0;
+  opacity: 0.75;
+}
+
+/* ————————————————————————————————— karaoke: pitch strip ————— */
+
+.pitch-strip {
+  flex: none;
+  height: 150px;
+  position: relative;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel-deep) 55%, transparent);
+  animation: fade 0.25s;
+}
+
+.pitch-strip canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ps-hud {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ps-note {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--faint);
+  letter-spacing: 0.04em;
+}
+
+.score {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #58d68a;
+  text-shadow: 0 0 10px rgba(88, 214, 138, 0.5);
+  font-variant-numeric: tabular-nums;
+}
+
+.mic-toggle.active {
+  background: rgba(88, 214, 138, 0.12);
+  border-color: rgba(88, 214, 138, 0.5);
+  color: #58d68a;
+}
+
 /* scrollbars */
 
 ::-webkit-scrollbar {

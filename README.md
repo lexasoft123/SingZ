@@ -10,6 +10,15 @@ Cross-platform desktop app: Electron + React + TypeScript, Web Audio for
 sample-locked multitrack playback, [Demucs](https://github.com/adefossez/demucs)
 (htdemucs) running locally for stem separation. No cloud, no accounts.
 
+**Karaoke mode**: hit the Karaoke button after splitting and SingZ mutes the
+vocals, transcribes them into word-timed lyrics with a bundled
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp) (shown in a side panel
+with live word-by-word highlighting — click a line to jump there), extracts the
+vocal melody, and scrolls it as a pitch lane. Turn on the mic and it tracks your
+singing against the melody (octave-agnostic) with a live match score. The speech
+model (~466 MB) is downloaded once by the app itself, after asking you first;
+`SINGZ_WHISPER_MODEL` picks another size (tiny/base/small/medium).
+
 ## Run it
 
 ```bash
@@ -45,7 +54,12 @@ split once.
   with per-track gain ramps for click-free mute/solo/volume. Waveforms are canvas
   peak envelopes; the playhead drives a CSS variable so progress costs no redraws.
 
-Keyboard: **space** play/pause, **←/→** seek ±5 s. Scrub by dragging the timeline.
+Keyboard: **space** play/pause, **←/→** seek ±5 s, **Esc** closes karaoke.
+Scrub by dragging the timeline.
+
+Dev note: the transcription engine is a vendored static binary — build it once
+with `scripts/vendor-whisper.sh` (needs cmake); CI builds it for every platform
+automatically and electron-builder bundles it from `vendor/<platform>-<arch>/`.
 
 ## Build & releases
 

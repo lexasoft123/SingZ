@@ -58,6 +58,10 @@ export class MultitrackEngine {
     return this._playing
   }
 
+  get context(): AudioContext {
+    return this.ctx
+  }
+
   get position(): number {
     if (!this._playing) return this.startOffset
     const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt)

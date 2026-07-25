@@ -1,9 +1,16 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, systemPreferences } from 'electron'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
-import type { RegisterResult, SeparationProgress } from '../shared/types'
+import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
+import { Transcriber } from './lyrics'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { Separator } from './separation'
+
+// Test hook: fake microphone input so E2E drivers can exercise pitch matching.
+if (process.env.SINGZ_FAKE_MIC) {
+  app.commandLine.appendSwitch('use-fake-device-for-media-capture')
+  app.commandLine.appendSwitch('use-fake-ui-for-media-capture')
+}
 
 const AUDIO_EXT = new Set([
   '.mp3',
@@ -19,6 +26,7 @@ const AUDIO_EXT = new Set([
 ])
 
 const separator = new Separator()
+const transcriber = new Transcriber()
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -89,6 +97,26 @@ function registerIpc(): void {
 
   ipcMain.handle('separation:cancel', () => separator.cancel())
 
+  ipcMain.handle('lyrics:get', async (e, raw: string, durationSec: number, allowDownload: boolean) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    const send = (p: LyricsProgress): void => {
+      if (!e.sender.isDestroyed()) e.sender.send('lyrics:progress', p)
+    }
+    return transcriber.transcribe(full, Number(durationSec) || 0, Boolean(allowDownload), send)
+  })
+
+  ipcMain.handle('lyrics:cancel', () => transcriber.cancel())
+
+  ipcMain.handle('mic:ask', async () => {
+    if (process.platform !== 'darwin') return true
+    try {
+      return await systemPreferences.askForMediaAccess('microphone')
+    } catch {
+      return false
+    }
+  })
+
   ipcMain.handle('stems:reveal', (_e, raw: string) => {
     const full = resolve(String(raw))
     if (isAllowed(full)) shell.showItemInFolder(full)
@@ -110,9 +138,13 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', () => separator.cancel())
+app.on('before-quit', () => {
+  separator.cancel()
+  transcriber.cancel()
+})
 
 app.on('window-all-closed', () => {
   separator.cancel()
+  transcriber.cancel()
   if (process.platform !== 'darwin') app.quit()
 })

@@ -11,7 +11,7 @@ const MODEL = 'htdemucs'
 const PROBE_TIMEOUT_MS = 45_000
 
 /** PATH as seen by GUI apps often misses the dirs where demucs lives. */
-function spawnEnv(): NodeJS.ProcessEnv {
+export function spawnEnv(): NodeJS.ProcessEnv {
   const extra = [join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']
   const path = [process.env.PATH, ...extra].filter(Boolean).join(delimiter)
   return { ...process.env, PATH: path }
@@ -28,7 +28,7 @@ function candidates(): string[][] {
   return list
 }
 
-function probe(cmd: string[]): Promise<boolean> {
+export function probe(cmd: string[]): Promise<boolean> {
   return new Promise((done) => {
     let settled = false
     const finish = (ok: boolean): void => {
@@ -57,7 +57,7 @@ function probe(cmd: string[]): Promise<boolean> {
   })
 }
 
-function hashFile(path: string): Promise<string> {
+export function hashFile(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash('sha1')
     createReadStream(path)

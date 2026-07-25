@@ -33,6 +33,23 @@ jobs:
 
       - run: npm run build
 
+      - name: Cache engine sources
+        uses: actions/cache@v4
+        with:
+          path: .engines-src
+          key: engines-${{ runner.os }}-v1
+
+      - name: Build bundled engines (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          bash scripts/vendor-whisper.sh darwin-arm64
+          bash scripts/vendor-whisper.sh darwin-x64
+
+      - name: Build bundled engines (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/vendor-whisper.sh win32-x64
+
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never
 

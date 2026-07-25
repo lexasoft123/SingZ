@@ -3,6 +3,8 @@ import type { EngineStatus, SeparationProgress, StemName } from '../../shared/ty
 import { MultitrackEngine } from './audio/engine'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
+import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import Transport from './components/Transport'
@@ -58,10 +60,18 @@ export default function App(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
+  const [karaoke, setKaraoke] = useState(false)
+  const [lyrics, setLyrics] = useState<LyricsState>({ status: 'idle' })
+  const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
   const loadSeq = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
+  const vocalsBufRef = useRef<AudioBuffer | null>(null)
+  const lyricsRef = useRef(lyrics)
+  lyricsRef.current = lyrics
+  const melodyRef = useRef(melody)
+  melodyRef.current = melody
 
   useEffect(() => engine.subscribe(() => setPlaying(engine.playing)), [engine])
 
@@ -82,7 +92,9 @@ export default function App(): React.JSX.Element {
         (tgt instanceof HTMLInputElement && tgt.type !== 'range') ||
         tgt instanceof HTMLTextAreaElement
       if (inText) return
-      if (e.code === 'Space') {
+      if (e.code === 'Escape') {
+        setKaraoke(false)
+      } else if (e.code === 'Space') {
         e.preventDefault()
         ;(tgt.closest('button') as HTMLElement | null)?.blur()
         engine.toggle()
@@ -112,10 +124,15 @@ export default function App(): React.JSX.Element {
       }
       const seq = ++loadSeq.current
       await window.singz.cancelSeparation()
+      await window.singz.cancelLyrics()
       setSep(null)
       setSplit(false)
       setStemFiles(null)
       setError(null)
+      setKaraoke(false)
+      setLyrics({ status: 'idle' })
+      setMelody({ status: 'none' })
+      vocalsBufRef.current = null
       setPhase('loading')
       setSong({ path: reg.path, name: reg.name })
       try {
@@ -199,6 +216,7 @@ export default function App(): React.JSX.Element {
       setTracks(STEM_ORDER.map((s, i) => makeTrack(s, buffers[i])))
       setStemFiles(res.stems)
       setSplit(true)
+      vocalsBufRef.current = buffers[STEM_ORDER.indexOf('vocals')]
     } catch {
       setError('Separation finished, but loading the stem files failed.')
     }
@@ -227,7 +245,75 @@ export default function App(): React.JSX.Element {
     [engine]
   )
 
-  const karaokeOn = split && (tracks.find((t) => t.id === 'vocals')?.muted ?? false)
+  const vocalsMuted = tracks.find((t) => t.id === 'vocals')?.muted ?? false
+
+  const prepLyrics = useCallback(
+    async (allowDownload = false) => {
+      if (!song) return
+      const cur = lyricsRef.current.status
+      if (!allowDownload && (cur === 'loading' || cur === 'ready' || cur === 'consent')) return
+      // Cache-first: cached lyrics come back instantly; a fresh transcription
+      // may require the one-time model download, which the user approves first.
+      setLyrics({ status: 'loading', progress: null })
+      const unsub = window.singz.onLyricsProgress((p) => setLyrics({ status: 'loading', progress: p }))
+      const res = await window.singz.getLyrics(song.path, engine.duration, allowDownload)
+      unsub()
+      if (!res.ok) {
+        setLyrics(
+          res.cancelled
+            ? { status: 'idle' }
+            : res.needsModel
+              ? { status: 'consent', sizeMb: res.needsModel.sizeMb }
+              : { status: 'error', error: res.error }
+        )
+        return
+      }
+      setLyrics(
+        res.lines.length > 0
+          ? { status: 'ready', lines: res.lines }
+          : { status: 'error', error: 'No words were detected in the vocals.' }
+      )
+    },
+    [song, engine]
+  )
+
+  const prepMelody = useCallback(() => {
+    if (melodyRef.current.status !== 'none') return
+    const buf = vocalsBufRef.current
+    if (!buf) return
+    const chans = Math.min(2, buf.numberOfChannels)
+    const mono = new Float32Array(buf.length)
+    for (let c = 0; c < chans; c++) {
+      const data = buf.getChannelData(c)
+      for (let i = 0; i < data.length; i++) mono[i] += data[i] / chans
+    }
+    setMelody({ status: 'computing', p: 0 })
+    const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
+      type: 'module'
+    })
+    worker.onmessage = (e: MessageEvent<{ type: string; p?: number; f0?: Float32Array; hopSec?: number }>) => {
+      if (e.data.type === 'progress') {
+        setMelody({ status: 'computing', p: e.data.p ?? 0 })
+      } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
+        setMelody({ status: 'ready', f0: e.data.f0, hopSec: e.data.hopSec })
+        worker.terminate()
+      }
+    }
+    worker.postMessage({ mono, sampleRate: buf.sampleRate }, [mono.buffer])
+  }, [])
+
+  const toggleKaraoke = useCallback(() => {
+    if (karaoke) {
+      setKaraoke(false)
+      return
+    }
+    if (!split) return
+    setKaraoke(true)
+    engine.setMuted('vocals', true)
+    setTracks((ts) => ts.map((t) => (t.id === 'vocals' ? { ...t, muted: true } : t)))
+    void prepLyrics()
+    prepMelody()
+  }, [karaoke, split, engine, prepLyrics, prepMelody])
 
   const openPicker = useCallback(() => fileInputRef.current?.click(), [])
 
@@ -250,20 +336,36 @@ export default function App(): React.JSX.Element {
 
       {phase === 'ready' ? (
         <>
-          <TrackStack
-            tracks={tracks}
-            engine={engine}
-            onMute={handleMute}
-            onSolo={handleSolo}
-            onVolume={handleVolume}
-          />
+          <div className="main-row">
+            <div className="main-col">
+              <TrackStack
+                tracks={tracks}
+                engine={engine}
+                onMute={handleMute}
+                onSolo={handleSolo}
+                onVolume={handleVolume}
+              />
+              {karaoke && <PitchStrip engine={engine} melody={melody} />}
+            </div>
+            {karaoke && (
+              <LyricsPanel
+                engine={engine}
+                lyrics={lyrics}
+                guideOn={!vocalsMuted}
+                onToggleGuide={() => handleMute('vocals', !vocalsMuted)}
+                onRetry={() => void prepLyrics()}
+                onDownloadModel={() => void prepLyrics(true)}
+                onCancel={() => void window.singz.cancelLyrics()}
+              />
+            )}
+          </div>
           <Transport
             engine={engine}
             playing={playing}
             split={split}
             sep={sep}
-            karaokeOn={karaokeOn}
-            onToggleKaraoke={() => handleMute('vocals', !karaokeOn)}
+            karaokeOn={karaoke}
+            onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
             onCancelSplit={() => void window.singz.cancelSeparation()}
             onReveal={

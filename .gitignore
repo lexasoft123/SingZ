@@ -1,5 +1,7 @@
 node_modules/
 out/
 dist/
+vendor/
+.engines-src/
 *.log
 .DS_Store

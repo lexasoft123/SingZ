@@ -20,11 +20,19 @@ mac:
   identity: null
   category: public.app-category.music
   darkModeSupport: true
+  extendInfo:
+    NSMicrophoneUsageDescription: SingZ listens to your singing to show how well you match the melody.
+  extraResources:
+    - from: vendor/darwin-${arch}
+      to: engines
   target:
     - target: dmg
 dmg:
   title: ${productName}
 win:
+  extraResources:
+    - from: vendor/win32-x64
+      to: engines
   target:
     - target: nsis
       arch: [x64]
