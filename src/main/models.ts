@@ -202,7 +202,7 @@ const REGISTRY: RegistryEntry[] = [
         : process.arch === 'arm64'
           ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
-    sizeMb: process.platform === 'win32' ? 210 : process.arch === 'arm64' ? 210 : 180,
+    sizeMb: process.platform === 'win32' ? 201 : process.arch === 'arm64' ? 208 : 177,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
