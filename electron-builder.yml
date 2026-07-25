@@ -18,6 +18,7 @@ files:
   - '!{.env,.env.*,.npmrc,package-lock.json}'
 asar: true
 npmRebuild: false
+afterPack: scripts/afterPack.cjs
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 mac:
   # No signing certificate wired up yet — ships unsigned (right-click → Open).
