@@ -4,6 +4,8 @@ A practice app for singers. Drop a song, see its timeline, split it into stems
 (vocals / drums / bass / instruments) with AI, and mute any track while it plays —
 kill the vocals and it's your karaoke machine.
 
+![SingZ playing a song split into four stems](docs/screenshot.png)
+
 Cross-platform desktop app: Electron + React + TypeScript, Web Audio for
 sample-locked multitrack playback, [Demucs](https://github.com/adefossez/demucs)
 (htdemucs) running locally for stem separation. No cloud, no accounts.
