@@ -106,7 +106,7 @@ export default function TrackStack({
     return () => ro.disconnect()
   }, [])
 
-  // wheel = zoom around the cursor's time
+  // pinch / cmd+wheel = zoom around the cursor; two-finger scroll = pan
   useEffect(() => {
     const el = overlayRef.current
     if (!el) return
@@ -114,9 +114,16 @@ export default function TrackStack({
       e.preventDefault()
       const v = viewRef.current
       const rect = el.getBoundingClientRect()
-      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-      const center = v.s + frac * (v.e - v.s)
-      onZoom(e.deltaY > 0 ? 1.25 : 0.8, center)
+      const span = v.e - v.s
+      if (e.ctrlKey || e.metaKey) {
+        const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+        const factor = Math.min(1.4, Math.max(0.7, Math.exp(e.deltaY * 0.008)))
+        onZoom(factor, v.s + frac * span)
+      } else if (v.zoomed && span > 0) {
+        const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+        const dt = (d / rect.width) * span
+        shiftRef.current(v.s + dt, v.e + dt)
+      }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)

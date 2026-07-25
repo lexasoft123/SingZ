@@ -1402,6 +1402,45 @@ button.chip-status:hover {
   color: var(--faint);
 }
 
+/* first-run setup wizard */
+
+.modal-card.wizard {
+  width: min(440px, calc(100vw - 60px));
+}
+
+.wiz-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 18px 0 6px;
+}
+
+.wiz-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.wiz-name {
+  font-weight: 650;
+  font-size: 13.5px;
+}
+
+.wiz-size {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.wiz-row.done .wiz-size {
+  color: #58d68a;
+}
+
+.wiz-row.error .wiz-size {
+  color: var(--danger);
+}
+
 /* scrollbars */
 
 ::-webkit-scrollbar {

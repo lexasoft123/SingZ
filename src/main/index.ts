@@ -4,8 +4,10 @@ import { basename, extname, join, resolve } from 'node:path'
 import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
 import { Transcriber } from './lyrics'
+import { ModelManager } from './models'
 import { detectProject, projectsRoot, saveProject } from './projects'
-import type { ProjectSettings } from '../shared/types'
+import { hashFile, writeInputWav } from './separation'
+import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { Separator } from './separation'
 
@@ -30,6 +32,7 @@ const AUDIO_EXT = new Set([
 
 const separator = new Separator()
 const transcriber = new Transcriber()
+const modelManager = new ModelManager()
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -145,6 +148,29 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('lyrics:cancel', () => transcriber.cancel())
+
+  ipcMain.handle('models:status', async () => modelManager.status(await separator.hasPython()))
+
+  ipcMain.handle('models:download', async (e) => {
+    const send = (p: ModelsProgress): void => {
+      if (!e.sender.isDestroyed()) e.sender.send('models:progress', p)
+    }
+    const result = await modelManager.downloadMissing(await separator.hasPython(), send)
+    if (result.ok) void separator.check(true) // pick up the freshly downloaded weights
+    return result
+  })
+
+  ipcMain.handle('models:cancel', () => modelManager.cancel())
+
+  ipcMain.handle(
+    'separation:provide-input',
+    async (_e, raw: string, ch0: Float32Array, ch1: Float32Array) => {
+      const full = resolve(String(raw))
+      if (!isAllowed(full)) return
+      const outDir = join(stemsRoot(), await hashFile(full))
+      await writeInputWav(outDir, ch0, ch1)
+    }
+  )
 
   ipcMain.handle('project:save', async (_e, raw: string, name: string, settings: ProjectSettings) => {
     const full = resolve(String(raw))

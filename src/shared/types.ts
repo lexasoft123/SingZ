@@ -1,7 +1,29 @@
 export const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 export type StemName = (typeof STEMS)[number]
 
-export type EngineStatus = { ok: true; command: string } | { ok: false; message: string }
+export type EngineStatus =
+  | { ok: true; command: string }
+  | {
+      ok: false
+      message: string
+      /** The engine binary is there but its model weights are not downloaded yet. */
+      needsModels?: boolean
+    }
+
+export type ModelId = 'htdemucs'
+
+export interface ModelInfo {
+  id: ModelId
+  label: string
+  sizeMb: number
+  present: boolean
+  required: boolean
+}
+
+export interface ModelsProgress {
+  id: ModelId
+  percent: number
+}
 
 export interface SeparationProgress {
   stage: 'preparing' | 'downloading-model' | 'separating' | 'loading-stems'
@@ -115,6 +137,13 @@ export interface SingzApi {
   onLyricsProgress(cb: (p: LyricsProgress) => void): () => void
   /** Ask the OS for microphone permission (macOS prompts; other platforms return true). */
   askMicAccess(): Promise<boolean>
+  /** First-run setup: model inventory and the shared download flow. */
+  modelsStatus(): Promise<ModelInfo[]>
+  downloadModels(): Promise<{ ok: true } | { ok: false; cancelled?: boolean; error: string }>
+  cancelModels(): Promise<void>
+  onModelsProgress(cb: (p: ModelsProgress) => void): () => void
+  /** 44.1k stereo PCM of the current song for the bundled splitter. */
+  provideSplitInput(songPath: string, ch0: Float32Array, ch1: Float32Array): Promise<void>
   /** Save the current song + stems + lyrics + settings into ~/Music/SingZ/<name>/. */
   saveProject(
     songPath: string,

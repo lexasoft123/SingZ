@@ -59,6 +59,7 @@ interface Props {
   transpose: number
   view: TimeView | null
   onZoom: (factor: number, center?: number) => void
+  onViewShift: (s: number, e: number) => void
   info: { key: KeyGuess | null; bpm: number | null }
 }
 
@@ -71,6 +72,7 @@ export default function PitchStrip({
   transpose,
   view,
   onZoom,
+  onViewShift,
   info
 }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -112,6 +114,8 @@ export default function PitchStrip({
   stateRef.current = { segments, fitRange, fit, transpose, melody, view }
   const zoomRef = useRef(onZoom)
   zoomRef.current = onZoom
+  const shiftRef = useRef(onViewShift)
+  shiftRef.current = onViewShift
 
   useEffect(() => {
     return () => {
@@ -120,7 +124,7 @@ export default function PitchStrip({
     }
   }, [])
 
-  // wheel = same global zoom as the lanes above
+  // pinch / cmd+wheel = global zoom; two-finger scroll = pan (same as the lanes)
   useEffect(() => {
     const el = stripRef.current
     if (!el) return
@@ -132,11 +136,19 @@ export default function PitchStrip({
       const rollW = rect.width - CONTROLS_W
       const vs = view?.s ?? 0
       const ve = view?.e ?? engine.duration
-      let center: number | undefined
-      if (e.clientX > rollX && rollW > 0) {
-        center = vs + ((e.clientX - rollX) / rollW) * (ve - vs)
+      const span = ve - vs
+      if (e.ctrlKey || e.metaKey) {
+        let center: number | undefined
+        if (e.clientX > rollX && rollW > 0) {
+          center = vs + ((e.clientX - rollX) / rollW) * span
+        }
+        const factor = Math.min(1.4, Math.max(0.7, Math.exp(e.deltaY * 0.008)))
+        zoomRef.current(factor, center)
+      } else if (view && span > 0 && rollW > 0) {
+        const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+        const dt = (d / rollW) * span
+        shiftRef.current(vs + dt, ve + dt)
       }
-      zoomRef.current(e.deltaY > 0 ? 1.25 : 0.8, center)
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)

@@ -5,6 +5,7 @@ import { MultitrackEngine } from './audio/engine'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+import SetupWizard from './components/SetupWizard'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
@@ -59,6 +60,7 @@ export default function App(): React.JSX.Element {
   const [sep, setSep] = useState<SeparationProgress | null>(null)
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
   const [showSetup, setShowSetup] = useState(false)
+  const [wizardModels, setWizardModels] = useState<import('../../shared/types').ModelInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
@@ -78,6 +80,7 @@ export default function App(): React.JSX.Element {
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
+  const originalBufRef = useRef<AudioBuffer | null>(null)
   const lyricsRef = useRef(lyrics)
   lyricsRef.current = lyrics
   const melodyRef = useRef(melody)
@@ -87,6 +90,16 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     void window.singz.checkEngine().then(setEngineStatus)
+    // First-run setup: required models that aren't downloaded yet.
+    void window.singz.modelsStatus().then((models) => {
+      const missing = models.filter((m) => m.required && !m.present)
+      if (missing.length > 0) setWizardModels(missing)
+    })
+  }, [])
+
+  const finishWizard = useCallback(() => {
+    setWizardModels(null)
+    void window.singz.checkEngine(true).then(setEngineStatus)
   }, [])
 
   useEffect(() => {
@@ -144,6 +157,7 @@ export default function App(): React.JSX.Element {
       setMelody({ status: 'none' })
       vocalsBufRef.current = null
       drumsBufRef.current = null
+      originalBufRef.current = null
       setSongInfo({ key: null, bpm: null })
       preferRef.current = 'auto'
       setTranspose(0)
@@ -192,6 +206,7 @@ export default function App(): React.JSX.Element {
         const buf = await window.singz.readAudio(reg.path)
         const audio = await engine.decode(buf)
         if (seq !== loadSeq.current) return
+        originalBufRef.current = audio
         engine.load([{ id: 'original', buffer: audio }])
         setTracks([makeTrack('original', audio)])
         setPhase('ready')
@@ -246,8 +261,29 @@ export default function App(): React.JSX.Element {
       setEngineStatus(status)
     }
     if (!status.ok) {
-      setShowSetup(true)
+      if (status.needsModels) {
+        const models = await window.singz.modelsStatus()
+        setWizardModels(models.filter((m) => !m.present))
+      } else {
+        setShowSetup(true)
+      }
       return
+    }
+    // The bundled splitter needs 44.1k audio — render it from the decoded
+    // buffer so any source format/sample-rate works.
+    if (status.command === 'bundled demucs.cpp' && originalBufRef.current) {
+      const orig = originalBufRef.current
+      const off = new OfflineAudioContext(2, Math.ceil(orig.duration * 44100), 44100)
+      const src = off.createBufferSource()
+      src.buffer = orig
+      src.connect(off.destination)
+      src.start()
+      const rendered = await off.startRendering()
+      await window.singz.provideSplitInput(
+        song.path,
+        rendered.getChannelData(0),
+        rendered.numberOfChannels > 1 ? rendered.getChannelData(1) : rendered.getChannelData(0)
+      )
     }
     setSep({ stage: 'preparing', percent: 0 })
     const unsub = window.singz.onSeparationProgress((p) => setSep(p))
@@ -488,7 +524,18 @@ export default function App(): React.JSX.Element {
               Open…
             </button>
           )}
-          <EngineChip status={engineStatus} onClick={() => setShowSetup(true)} />
+          <EngineChip
+            status={engineStatus}
+            onClick={() => {
+              if (engineStatus && !engineStatus.ok && engineStatus.needsModels) {
+                void window.singz.modelsStatus().then((models) => {
+                  setWizardModels(models.filter((m) => !m.present))
+                })
+              } else {
+                setShowSetup(true)
+              }
+            }}
+          />
         </div>
       </header>
 
@@ -514,6 +561,7 @@ export default function App(): React.JSX.Element {
                   transpose={transpose}
                   view={view}
                   onZoom={zoomBy}
+                  onViewShift={shiftView}
                   info={songInfo}
                 />
               )}
@@ -572,6 +620,14 @@ export default function App(): React.JSX.Element {
           status={engineStatus}
           onClose={() => setShowSetup(false)}
           onStatus={setEngineStatus}
+        />
+      )}
+
+      {wizardModels && wizardModels.length > 0 && (
+        <SetupWizard
+          models={wizardModels}
+          onDone={finishWizard}
+          onSkip={() => setWizardModels(null)}
         />
       )}
 

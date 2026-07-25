@@ -1,12 +1,12 @@
-import { app, net } from 'electron'
+import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { createWriteStream } from 'node:fs'
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { cpus } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
 import { lookupLyrics, lyricsById, metaFromFilename, type TrackMeta } from './lrclib'
 import { stemsRoot } from './media'
+import { downloadFile, modelsDir } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
 
@@ -48,16 +48,6 @@ async function resolveEngine(): Promise<string[] | null> {
     if (c && (await exists(c))) return [c]
   }
   return null
-}
-
-/**
- * Models live in a stable folder shared by every way the app runs (dev,
- * packaged, tests) so the weights are only ever downloaded once:
- * ~/Library/Application Support/SingZ/models on macOS, %APPDATA%/SingZ/models
- * on Windows. Override with SINGZ_MODELS_DIR.
- */
-export function modelsDir(): string {
-  return process.env.SINGZ_MODELS_DIR ?? join(app.getPath('appData'), 'SingZ', 'models')
 }
 
 export function whisperModelPath(): string {
@@ -296,32 +286,15 @@ export class Transcriber {
   }
 
   private async downloadModel(onProgress: (p: LyricsProgress) => void): Promise<void> {
-    const dest = whisperModelPath()
-    await mkdir(join(dest, '..'), { recursive: true })
-    const part = dest + '.part'
     this.abort = new AbortController()
     try {
-      const res = await net.fetch(modelUrl(MODEL), { signal: this.abort.signal })
-      if (!res.ok || !res.body) throw new Error(`model download failed (HTTP ${res.status})`)
-      const total = Number(res.headers.get('content-length')) || whisperModelSizeMb() * 1e6
-      const out = createWriteStream(part)
-      const reader = res.body.getReader()
-      let got = 0
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        got += value.byteLength
-        if (!out.write(value)) await new Promise((r) => out.once('drain', r))
-        onProgress({ stage: 'downloading-model', percent: Math.min(99, (got / total) * 100) })
-      }
-      await new Promise<void>((resolve, reject) => {
-        out.end(() => resolve())
-        out.on('error', reject)
-      })
-      await rename(part, dest)
-    } catch (err) {
-      await rm(part, { force: true })
-      throw err
+      await downloadFile(
+        modelUrl(MODEL),
+        whisperModelPath(),
+        whisperModelSizeMb() * 1e6,
+        (pct) => onProgress({ stage: 'downloading-model', percent: pct }),
+        this.abort.signal
+      )
     } finally {
       this.abort = null
     }

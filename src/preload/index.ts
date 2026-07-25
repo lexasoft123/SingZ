@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { LyricsProgress, SeparationProgress, SingzApi } from '../shared/types'
+import type { LyricsProgress, ModelsProgress, SeparationProgress, SingzApi } from '../shared/types'
 
 const api: SingzApi = {
   pathForFile: (file) => webUtils.getPathForFile(file),
@@ -45,6 +45,23 @@ const api: SingzApi = {
   },
 
   askMicAccess: () => ipcRenderer.invoke('mic:ask'),
+
+  modelsStatus: () => ipcRenderer.invoke('models:status'),
+
+  downloadModels: () => ipcRenderer.invoke('models:download'),
+
+  cancelModels: () => ipcRenderer.invoke('models:cancel'),
+
+  onModelsProgress: (cb) => {
+    const listener = (_e: IpcRendererEvent, p: ModelsProgress): void => cb(p)
+    ipcRenderer.on('models:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('models:progress', listener)
+    }
+  },
+
+  provideSplitInput: (songPath, ch0, ch1) =>
+    ipcRenderer.invoke('separation:provide-input', songPath, ch0, ch1),
 
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings)
