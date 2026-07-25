@@ -1,5 +1,6 @@
 import { net } from 'electron'
 import type { LyricLine, LyricWord } from '../shared/types'
+import { log } from './log'
 
 const API = 'https://lrclib.net/api'
 const HEADERS = { 'Lrclib-Client': 'SingZ v0.2.0 (https://github.com/lexasoft123/SingZ)' }
@@ -10,6 +11,8 @@ export interface TrackMeta {
   title: string
   album?: string
   durationSec: number
+  /** Unstripped filename reading — retried when the cleaned title misses. */
+  altTitle?: string
 }
 
 interface LrclibRecord {
@@ -37,14 +40,26 @@ async function apiJson(path: string): Promise<unknown | null> {
 }
 
 /** "08. Sixteen Tons [Am +2st]" / "Sixteen Tons (Am, +2)" → artist?/title. */
-export function metaFromFilename(basename: string): { artist?: string; title: string } {
-  let s = basename.replace(/\.[^.]+$/, '')
-  s = s.replace(/^\s*\d{1,3}[\s.\-_]+/, '')
-  s = s.replace(/[[(][^\])]*[\])]/g, ' ')
-  s = s.replace(/\s{2,}/g, ' ').trim()
-  const parts = s.split(/\s+-\s+/)
-  if (parts.length >= 2) return { artist: parts[0], title: parts.slice(1).join(' - ') }
-  return { title: s }
+export function metaFromFilename(
+  basename: string
+): { artist?: string; title: string; altTitle?: string } {
+  const clean = (input: string, stripTrackNo: boolean): { artist?: string; title: string } => {
+    // strip only real audio extensions — this also runs on tag titles,
+    // where "Mr. Brightside" must not lose its second half
+    let s = input.replace(/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$/i, '')
+    if (stripTrackNo) s = s.replace(/^\s*\d{1,3}[\s.\-_]+/, '')
+    s = s.replace(/[[(][^\])]*[\])]/g, ' ')
+    s = s.replace(/\s{2,}/g, ' ').trim()
+    const parts = s.split(/\s+-\s+/)
+    if (parts.length >= 2) return { artist: parts[0], title: parts.slice(1).join(' - ') }
+    return { title: s }
+  }
+  const primary = clean(basename, true)
+  const raw = clean(basename, false)
+  // Numeric titles ("212-85-06") lose digits to the track-number stripper —
+  // keep the unstripped reading as a fallback search.
+  if (raw.title !== primary.title) return { ...primary, altTitle: raw.title }
+  return primary
 }
 
 /** Spread a line's words across [start, end] weighted by word length. */
@@ -175,6 +190,11 @@ export async function lookupLyrics(
     if (meta.artist) q.set('artist_name', meta.artist)
     const found = (await apiJson(`/search?${q}`)) as LrclibRecord[] | null
     if (Array.isArray(found)) best = pickBest(found, meta.durationSec)
+  }
+
+  if (!best?.syncedLyrics && meta.altTitle && meta.altTitle !== meta.title) {
+    log('lyrics', `retrying LRCLIB with unstripped title: ${meta.altTitle}`)
+    return lookupLyrics({ ...meta, title: meta.altTitle, altTitle: undefined })
   }
 
   if (!best?.syncedLyrics) return null

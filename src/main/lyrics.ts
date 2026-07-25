@@ -233,6 +233,7 @@ async function readTrackMeta(songPath: string, durationSec: number): Promise<Tra
     return {
       artist: parsed.common.artist?.trim() || cleaned?.artist || fromName.artist,
       title: cleaned?.title || fromName.title,
+      altTitle: cleaned?.title ? cleaned.altTitle : fromName.altTitle,
       album: parsed.common.album?.trim(),
       durationSec
     }
