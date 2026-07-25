@@ -36,6 +36,13 @@ case "$TARGET" in
     if [ -f "$WVH" ] && ! grep -q '<intrin.h>' "$WVH"; then
       sed -i '1i #include <intrin.h>' "$WVH"
     fi
+    # fs::path → std::string needs an explicit .string() on Windows (wchar_t paths)
+    for f in "$SRC"/cli-apps/*.cpp; do
+      sed -i 's/, p_target)/, p_target.string())/' "$f"
+    done
+    # -march=native on the CI Xeon emits AVX-512 that crashes on user CPUs —
+    # pin the distributable binary to the x86-64-v2 baseline
+    sed -i 's/-march=native/-march=x86-64-v2/g' "$SRC/CMakeLists.txt"
     export CPATH="$(cygpath -w "$MINGW_PREFIX/include/openblas" 2>/dev/null || echo "$MINGW_PREFIX/include/openblas")"
     EXTRA="-G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
       -DCMAKE_EXE_LINKER_FLAGS=-static \
