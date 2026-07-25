@@ -1,8 +1,13 @@
 import { useLayoutEffect, useRef } from 'react'
 
+/** Below this many visible envelope buckets, draw from raw samples instead. */
+const RAW_THRESHOLD_BUCKETS = 600
+
 function drawWave(
   canvas: HTMLCanvasElement,
   peaks: Float32Array,
+  buffer: AudioBuffer,
+  scale: number,
   color: string,
   viewStart: number,
   viewEnd: number
@@ -25,8 +30,37 @@ function drawWave(
   ctx.fillStyle = grad
 
   const mid = h / 2
-  const n = peaks.length
+  const amp = mid - 2
   const span = viewEnd - viewStart
+  const n = peaks.length
+
+  if (span * n < RAW_THRESHOLD_BUCKETS && buffer.length > 0) {
+    // Deep zoom: true min/max waveform from the raw samples.
+    const ch0 = buffer.getChannelData(0)
+    const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null
+    const total = buffer.length
+    const s0 = Math.max(0, Math.floor(viewStart * total))
+    const s1 = Math.min(total, Math.ceil(viewEnd * total))
+    const spanS = Math.max(1, s1 - s0)
+    for (let x = 0; x < w; x++) {
+      const a = s0 + Math.floor((x / w) * spanS)
+      const b = Math.min(s1, Math.max(a + 1, s0 + Math.floor(((x + 1) / w) * spanS)))
+      const stride = Math.max(1, Math.floor((b - a) / 64))
+      let mn = 0
+      let mx = 0
+      for (let i = a; i < b; i += stride) {
+        const v = ch1 ? (ch0[i] + ch1[i]) * 0.5 : ch0[i]
+        if (v > mx) mx = v
+        if (v < mn) mn = v
+      }
+      const top = mid - Math.min(1, mx * scale) * amp
+      const bot = mid - Math.max(-1, mn * scale) * amp
+      ctx.fillRect(x, top, 0.8, Math.max(1.5, bot - top))
+    }
+    return
+  }
+
+  // Overview: envelope buckets, mirrored around the midline.
   for (let x = 0; x < w; x++) {
     const f0 = viewStart + (x / w) * span
     const f1 = viewStart + ((x + 1) / w) * span
@@ -34,13 +68,15 @@ function drawWave(
     const b1 = Math.min(n, Math.max(b0 + 1, Math.ceil(f1 * n)))
     let peak = 0
     for (let b = b0; b < b1; b++) if (peaks[b] > peak) peak = peaks[b]
-    const half = Math.max(0.75, peak * (mid - 2))
+    const half = Math.max(0.75, peak * amp)
     ctx.fillRect(x, mid - half, 0.8, half * 2)
   }
 }
 
 interface Props {
   peaks: Float32Array
+  buffer: AudioBuffer
+  scale: number
   color: string
   /** Visible window as fractions of the whole buffer. */
   viewStart: number
@@ -52,21 +88,29 @@ interface Props {
  * "played" layer clipped by the shared --p CSS variable (set by the playhead
  * rAF loop), so progress needs zero canvas redraws.
  */
-export default function Waveform({ peaks, color, viewStart, viewEnd }: Props): React.JSX.Element {
+export default function Waveform({
+  peaks,
+  buffer,
+  scale,
+  color,
+  viewStart,
+  viewEnd
+}: Props): React.JSX.Element {
   const baseRef = useRef<HTMLCanvasElement>(null)
   const brightRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
     const redraw = (): void => {
-      if (baseRef.current) drawWave(baseRef.current, peaks, color, viewStart, viewEnd)
-      if (brightRef.current) drawWave(brightRef.current, peaks, color, viewStart, viewEnd)
+      if (baseRef.current) drawWave(baseRef.current, peaks, buffer, scale, color, viewStart, viewEnd)
+      if (brightRef.current)
+        drawWave(brightRef.current, peaks, buffer, scale, color, viewStart, viewEnd)
     }
     redraw()
     const ro = new ResizeObserver(redraw)
     if (wrapRef.current) ro.observe(wrapRef.current)
     return () => ro.disconnect()
-  }, [peaks, color, viewStart, viewEnd])
+  }, [peaks, buffer, scale, color, viewStart, viewEnd])
 
   return (
     <div className="wave" ref={wrapRef}>

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { KeyGuess } from '../audio/analysis'
 import type { MultitrackEngine } from '../audio/engine'
 import { MicPitch } from '../audio/mic'
-import { CONTROLS_W, type TimeView } from '../model'
+import { CONTROLS_W, fmtTime, type TimeView } from '../model'
 
 export type MelodyState =
   | { status: 'none' }
@@ -58,14 +59,19 @@ interface Props {
   transpose: number
   view: TimeView | null
   onZoom: (factor: number, center?: number) => void
+  info: { key: KeyGuess | null; bpm: number | null }
 }
+
+const keyName = (k: KeyGuess, shift: number): string =>
+  NOTE_NAMES[(((k.pc + shift) % 12) + 12) % 12] + (k.minor ? 'm' : '')
 
 export default function PitchStrip({
   engine,
   melody,
   transpose,
   view,
-  onZoom
+  onZoom,
+  info
 }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -90,6 +96,16 @@ export default function PitchStrip({
     const span = Math.max(12, hi - lo)
     const mid = (lo + hi) / 2
     return [Math.max(24, Math.round(mid - span / 2)), Math.min(96, Math.round(mid + span / 2))]
+  }, [segments])
+
+  // Sung range: 5th–95th percentile of the melody notes (without padding).
+  const vocalRange = useMemo((): [number, number] | null => {
+    if (segments.length === 0) return null
+    const midis = segments.map((s) => s.midi).sort((a, b) => a - b)
+    return [
+      midis[Math.floor(midis.length * 0.05)],
+      midis[Math.min(midis.length - 1, Math.floor(midis.length * 0.95))]
+    ]
   }, [segments])
 
   const stateRef = useRef({ segments, fitRange, fit, transpose, melody, view })
@@ -303,6 +319,33 @@ export default function PitchStrip({
   return (
     <div className="pitch-strip" ref={stripRef}>
       <canvas ref={canvasRef} />
+      <div className="ps-info">
+        <div className="psi-row">
+          <span className="psi-label">key</span>
+          <span className="psi-value psi-key">
+            {info.key ? keyName(info.key, transpose) : '—'}
+          </span>
+          {info.key && transpose !== 0 && (
+            <span className="psi-sub">from {keyName(info.key, 0)}</span>
+          )}
+        </div>
+        <div className="psi-row">
+          <span className="psi-label">tempo</span>
+          <span className="psi-value">{info.bpm ? `${info.bpm} bpm` : '—'}</span>
+        </div>
+        <div className="psi-row">
+          <span className="psi-label">range</span>
+          <span className="psi-value">
+            {vocalRange
+              ? `${noteName(vocalRange[0] + transpose)}–${noteName(vocalRange[1] + transpose)}`
+              : '—'}
+          </span>
+        </div>
+        <div className="psi-row">
+          <span className="psi-label">length</span>
+          <span className="psi-value">{fmtTime(engine.duration)}</span>
+        </div>
+      </div>
       <div className="ps-hud">
         {melody.status === 'computing' && (
           <span className="ps-note">reading melody… {Math.round(melody.p * 100)}%</span>

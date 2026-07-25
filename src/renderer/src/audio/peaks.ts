@@ -1,11 +1,17 @@
+export interface PeakData {
+  peaks: Float32Array
+  /** Normalization factor applied to the envelope — reuse for raw-sample drawing. */
+  scale: number
+}
+
 /**
  * Peak envelope for waveform drawing: `buckets` max-amplitude values across the
  * whole buffer, lightly normalized so quiet stems still read visually.
  */
-export function computePeaks(buffer: AudioBuffer, buckets = 2400): Float32Array {
+export function computePeaks(buffer: AudioBuffer, buckets = 2400): PeakData {
   const peaks = new Float32Array(buckets)
   const length = buffer.length
-  if (length === 0) return peaks
+  if (length === 0) return { peaks, scale: 1 }
 
   const channels: Float32Array[] = []
   for (let c = 0; c < Math.min(2, buffer.numberOfChannels); c++) {
@@ -30,9 +36,10 @@ export function computePeaks(buffer: AudioBuffer, buckets = 2400): Float32Array 
 
   let overall = 0
   for (let b = 0; b < buckets; b++) if (peaks[b] > overall) overall = peaks[b]
+  let scale = 1
   if (overall > 0) {
-    const scale = 1 / Math.max(0.35, overall)
+    scale = 1 / Math.max(0.35, overall)
     for (let b = 0; b < buckets; b++) peaks[b] = Math.min(1, peaks[b] * scale)
   }
-  return peaks
+  return { peaks, scale }
 }

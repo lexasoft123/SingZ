@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
-import { fmtTime, type TimeView, type UITrack } from '../model'
+import type { TimeView, UITrack } from '../model'
 import TrackLane from './TrackLane'
 
 interface Props {
@@ -15,19 +15,31 @@ interface Props {
   onVolume: (id: string, volume: number) => void
 }
 
+const CLUSTER_W = 130 // px kept clear of ticks so the zoom buttons never overlap labels
+
+function fmtTick(t: number, step: number): string {
+  const m = Math.floor(t / 60)
+  const s = Math.floor(t % 60)
+  const base = `${m}:${String(s).padStart(2, '0')}`
+  return step < 1 ? `${base}.${Math.floor((t % 1) * 10)}` : base
+}
+
 function makeTicks(
   viewS: number,
   viewE: number,
   width: number
-): { time: number; left: number }[] {
+): { time: number; left: number; label: string }[] {
   const span = viewE - viewS
   if (span <= 0 || width <= 0) return []
-  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
-  const step = steps.find((s) => (width * s) / span >= 64) ?? 600
-  const ticks: { time: number; left: number }[] = []
+  const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+  const step = steps.find((s) => (width * s) / span >= 74) ?? 600
+  const ticks: { time: number; left: number; label: string }[] = []
+  const maxLeft = width > 0 ? ((width - CLUSTER_W) / width) * 100 : 100
   for (let t = Math.ceil(viewS / step) * step; t < viewE - step * 0.2; t += step) {
-    if (t <= 0) continue
-    ticks.push({ time: t, left: ((t - viewS) / span) * 100 })
+    if (t <= 1e-6) continue
+    const left = ((t - viewS) / span) * 100
+    if (left > maxLeft) break
+    ticks.push({ time: t, left, label: fmtTick(t, step) })
   }
   return ticks
 }
@@ -135,7 +147,7 @@ export default function TrackStack({
       <div className="ruler" style={{ gridRow: 1 }}>
         {ticks.map((t) => (
           <span key={t.time} className="tick" style={{ left: `${t.left}%` }}>
-            {fmtTime(t.time)}
+            {t.label}
           </span>
         ))}
         <div className="zoom-cluster no-drag">

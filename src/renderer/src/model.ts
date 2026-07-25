@@ -5,6 +5,9 @@ export interface UITrack {
   label: string
   color: string
   peaks: Float32Array
+  /** Decoded audio + envelope normalization, for sample-accurate zoomed drawing. */
+  buffer: AudioBuffer
+  scale: number
   muted: boolean
   solo: boolean
   volume: number

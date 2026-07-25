@@ -75,7 +75,14 @@ export default function TrackLane({
         className={`lane-wave${off ? ' is-off' : ''}`}
         style={{ gridRow: row, ['--i' as string]: index }}
       >
-        <Waveform peaks={track.peaks} color={track.color} viewStart={viewStart} viewEnd={viewEnd} />
+        <Waveform
+          peaks={track.peaks}
+          buffer={track.buffer}
+          scale={track.scale}
+          color={track.color}
+          viewStart={viewStart}
+          viewEnd={viewEnd}
+        />
       </div>
     </>
   )

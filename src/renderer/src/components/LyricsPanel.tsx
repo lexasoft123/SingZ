@@ -73,6 +73,7 @@ export default function LyricsPanel({
   const [busy, setBusy] = useState(false)
   const lineRefs = useRef<(HTMLParagraphElement | null)[]>([])
   const wordStateRef = useRef<string>('')
+  const countRef = useRef<{ el: HTMLElement | null; n: number }>({ el: null, n: 0 })
 
   const lines = lyrics.status === 'ready' ? lyrics.lines : null
 
@@ -111,10 +112,40 @@ export default function LyricsPanel({
           }
         }
       }
+      // count-in dots during the last 3s of a long gap before the next line
+      const nextIdx = li === -1 ? 0 : li + 1
+      const target = nextIdx < lines.length ? lines[nextIdx] : null
+      let countEl: HTMLElement | null = null
+      let count = 0
+      if (target) {
+        const gapStart = li === -1 ? 0 : lines[li].end
+        const dt = target.start - pos
+        if (target.start - gapStart >= 3 && dt > 0 && dt <= 3) {
+          count = Math.min(3, Math.ceil(dt))
+          countEl = lineRefs.current[nextIdx]
+        }
+      }
+      // Re-assert every frame: React re-renders rewrite the managed className
+      // and would silently wipe an imperatively added count class.
+      if (countRef.current.el && countRef.current.el !== countEl) {
+        countRef.current.el.classList.remove('count-1', 'count-2', 'count-3')
+      }
+      if (countEl && count > 0) {
+        const want = `count-${count}`
+        if (!countEl.classList.contains(want)) {
+          countEl.classList.remove('count-1', 'count-2', 'count-3')
+          countEl.classList.add(want)
+        }
+      }
+      countRef.current = { el: countEl, n: count }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf)
+      countRef.current.el?.classList.remove('count-1', 'count-2', 'count-3')
+      countRef.current = { el: null, n: 0 }
+    }
   }, [engine, lines, view])
 
   const search = async (): Promise<void> => {

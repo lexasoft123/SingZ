@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { EngineStatus, SeparationProgress, StemName } from '../../shared/types'
+import { estimateKey, estimateTempo, type KeyGuess } from './audio/analysis'
 import { MultitrackEngine } from './audio/engine'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
@@ -16,7 +17,8 @@ const ACCEPT = '.mp3,.wav,.flac,.m4a,.aac,.ogg,.oga,.opus,.aif,.aiff,audio/*'
 
 function makeTrack(id: string, buffer: AudioBuffer): UITrack {
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
-  return { id, ...meta, peaks: computePeaks(buffer), muted: false, solo: false, volume: 1 }
+  const { peaks, scale } = computePeaks(buffer)
+  return { id, ...meta, peaks, buffer, scale, muted: false, solo: false, volume: 1 }
 }
 
 function EngineChip({
@@ -66,6 +68,11 @@ export default function App(): React.JSX.Element {
   const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
   const [transpose, setTranspose] = useState(0)
   const [view, setView] = useState<TimeView | null>(null)
+  const [songInfo, setSongInfo] = useState<{ key: KeyGuess | null; bpm: number | null }>({
+    key: null,
+    bpm: null
+  })
+  const drumsBufRef = useRef<AudioBuffer | null>(null)
   const loadSeq = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
@@ -136,6 +143,8 @@ export default function App(): React.JSX.Element {
       setLyrics({ status: 'idle' })
       setMelody({ status: 'none' })
       vocalsBufRef.current = null
+      drumsBufRef.current = null
+      setSongInfo({ key: null, bpm: null })
       preferRef.current = 'auto'
       setTranspose(0)
       void engine.setTranspose(0)
@@ -170,6 +179,7 @@ export default function App(): React.JSX.Element {
           setSplit(true)
           setStemFiles(stems)
           vocalsBufRef.current = buffers[STEM_ORDER.indexOf('vocals')]
+          drumsBufRef.current = buffers[STEM_ORDER.indexOf('drums')]
           const st = proj.settings.transpose ?? 0
           setTranspose(st)
           void engine.setTranspose(st)
@@ -263,6 +273,7 @@ export default function App(): React.JSX.Element {
       setStemFiles(res.stems)
       setSplit(true)
       vocalsBufRef.current = buffers[STEM_ORDER.indexOf('vocals')]
+      drumsBufRef.current = buffers[STEM_ORDER.indexOf('drums')]
     } catch {
       setError('Separation finished, but loading the stem files failed.')
     }
@@ -364,6 +375,10 @@ export default function App(): React.JSX.Element {
         setMelody({ status: 'computing', p: e.data.p ?? 0 })
       } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
         setMelody({ status: 'ready', f0: e.data.f0, hopSec: e.data.hopSec })
+        setSongInfo({
+          key: estimateKey(e.data.f0),
+          bpm: drumsBufRef.current ? estimateTempo(drumsBufRef.current) : null
+        })
         worker.terminate()
       }
     }
@@ -499,6 +514,7 @@ export default function App(): React.JSX.Element {
                   transpose={transpose}
                   view={view}
                   onZoom={zoomBy}
+                  info={songInfo}
                 />
               )}
             </div>

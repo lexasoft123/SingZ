@@ -152,7 +152,17 @@ function wordsMatch(a: string, b: string): boolean {
  * matching words to their recognized times and interpolate the rest. Lines
  * where recognition failed keep their estimated timing.
  */
-function alignLines(ref: LyricLine[], hyp: LyricWord[]): LyricLine[] {
+function alignLines(ref: LyricLine[], hypRaw: LyricWord[]): LyricLine[] {
+  // whisper.cpp occasionally emits zero/backward offsets — sanitize first.
+  const hyp: LyricWord[] = []
+  let lastS = 0
+  for (const w of hypRaw) {
+    let e = w.e
+    if (!(e > w.s)) e = w.s + 0.15
+    if (w.s < lastS - 0.5) continue
+    lastS = Math.max(lastS, w.s)
+    hyp.push({ w: w.w, s: w.s, e })
+  }
   return ref.map((line) => {
     const est = line.end - line.start
     const windowWords = hyp.filter((w) => w.s >= line.start - 4 && w.s <= line.start + est + 8)
@@ -207,6 +217,16 @@ function alignLines(ref: LyricLine[], hyp: LyricWord[]): LyricLine[] {
       words[i].s = t2
       words[i].e = t2 + dur
       t2 = words[i].e
+    }
+    // Validate: reject the alignment when it came out non-monotonic (bad
+    // anchors across repeated phrases), then enforce clean word ordering.
+    const sane = words.every(
+      (w, i) => w.e >= w.s && (i === 0 || w.s >= words[i - 1].s - 0.01)
+    )
+    if (!sane) return line
+    for (let i = 1; i < words.length; i++) {
+      if (words[i].s < words[i - 1].e - 0.01) words[i].s = words[i - 1].e
+      if (words[i].e < words[i].s + 0.05) words[i].e = words[i].s + 0.05
     }
     return { ...line, start: words[0].s, end: words[words.length - 1].e, words }
   })

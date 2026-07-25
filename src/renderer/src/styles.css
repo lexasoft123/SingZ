@@ -276,11 +276,14 @@ button.chip-status:hover {
 
 .zoom-cluster {
   position: absolute;
-  right: 4px;
-  top: 2px;
+  right: 0;
+  top: 1px;
   display: flex;
   gap: 4px;
   z-index: 6;
+  padding: 2px 4px 3px 8px;
+  background: var(--bg);
+  border-radius: 8px;
 }
 
 .ruler-spacer {
@@ -1038,6 +1041,33 @@ button.chip-status:hover {
   opacity: 0.75;
 }
 
+/* count-in dots before a line that follows an instrumental gap */
+
+.lyr-line.count-1::before,
+.lyr-line.count-2::before,
+.lyr-line.count-3::before {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 5px;
+  line-height: 1;
+  margin-bottom: 4px;
+  color: var(--accent);
+  text-shadow: 0 0 10px rgba(255, 160, 40, 0.6);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.lyr-line.count-3::before {
+  content: '● ● ●';
+}
+
+.lyr-line.count-2::before {
+  content: '● ●';
+}
+
+.lyr-line.count-1::before {
+  content: '●';
+}
+
 /* ————————————————————————————————— karaoke: pitch strip ————— */
 
 .pitch-strip {
@@ -1061,10 +1091,63 @@ button.chip-status:hover {
 .ps-hud {
   position: absolute;
   top: 10px;
-  right: 14px;
+  right: 24px;
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* song info card in the strip's left column */
+
+.ps-info {
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: calc(var(--controls-w) - 60px - 14px);
+  padding: 14px 10px 10px 6px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.psi-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.psi-label {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  width: 44px;
+  flex: none;
+}
+
+.psi-value {
+  font-weight: 700;
+  font-size: 14px;
+  font-variation-settings: 'wdth' 92;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.psi-key {
+  font-size: 19px;
+  color: var(--accent);
+  text-shadow: 0 0 14px rgba(255, 160, 40, 0.35);
+}
+
+.psi-sub {
+  font-size: 10px;
+  color: var(--faint);
+  white-space: nowrap;
 }
 
 .ps-note {
