@@ -81,12 +81,16 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
   are cancellable; caches key on the 16-hex sha1 of the source file.
 - `--controls-w` in styles.css must equal `CONTROLS_W` in model.ts.
 - User-visible copy is sentence-case, friendly, and states sizes/time costs.
+- Renderer perf rules (weak-iGPU fleet): rAF loops are change-gated and skip
+  under `body.modal-open`; every infinite CSS animation needs a modal-open
+  pause rule; Windows keeps the solid (blur-free) modal scrim.
 
 ## Releasing
 
 Push to main freely once the user approves pushes; **releases are cut by
-tagging `v*`** — CI builds mac (arm64+x64 dmg) + win (NSIS) + GPU pack and
-attaches everything to the GitHub Release. Bump `package.json` version to match
+tagging `v*`** — CI builds mac (arm64+x64 dmg) + win (NSIS) + all three
+splitter packs and attaches everything to the GitHub Release (gh-based
+attach step, race-safe). Bump `package.json` version to match
 the tag (artifact names use it). Engine steps are cached keyed on the vendor
 scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
 `releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.

@@ -10,7 +10,8 @@ MultitrackEngine (Web Audio)   window.singz  ──►  media.ts     allowlisted
 TrackStack/Waveform (canvas)                      separation.ts engine ladder + runs
 PitchStrip (piano roll + mic)                     lyrics.ts    LRCLIB→whisper ladder
 LyricsPanel (synced lyrics)                       lrclib.ts    lrclib.net client
-SetupWizard (model manager)                       models.ts    weights/pack downloads
+SetupWizard (model manager)                       models.ts    versioned pack downloads
+LogPanel (diagnostics)                            log.ts       ring-buffer app log
 App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
 
@@ -85,14 +86,29 @@ Archives are untarred with the system `tar`. URLs point at
 ## Projects (`main/projects.ts`)
 
 "Save project" copies song + stems + lyrics + settings (transpose, per-stem
-mute/solo/volume) into `~/Documents/SingZ/<name>/` with a `project.json`. Opening
-the project's song file restores everything (register detects the sibling
-`project.json`; the lyrics ladder prefers the project-local `lyrics.json`).
+mute/solo/volume) into `~/Documents/SingZ/<name>/` with a `project.json`
+(saving re-anchors the session inside the project). Opening the project's song
+restores everything; `listProjects` powers the in-app Open… library and the
+drop-screen shortcuts; `renameProject` moves the folder + metadata (the title
+pencil). Legacy `~/Music/SingZ` migrates on startup.
+
+## Diagnostics (`main/log.ts`)
+
+A ring buffer (4000 entries) in the main process; engines, downloads and
+lyrics log every move (spawn command lines, child output with progress spam
+filtered, exit codes). Streamed live to the renderer's Log panel
+(header button), saveable to a text file — field bugs get diagnosed from
+user-saved logs. Probe failures record the child's stderr.
 
 ## Analysis (renderer)
 
-Melody: probabilistic YIN (pYIN + Viterbi) over the decimated vocals stem in a Web Worker →
-`f0` array. Key: Krumhansl-Schmuckler over the melody's pitch-class histogram.
+Melody: probabilistic YIN over the decimated vocals stem in a Web Worker —
+every CMND trough becomes a weighted candidate (Beta(2,18) threshold prior,
+Boltzmann anti-subharmonic bias), a banded Viterbi over pitch ×
+voiced/unvoiced states decodes the melody path, then octave errors fold to a
+running median and incredible runs drop (`pyin.ts` + `pitch.worker.ts`;
+tuned against synced-lyrics ground truth). Key: Krumhansl-Schmuckler over the
+melody's pitch-class histogram.
 Tempo: onset-flux autocorrelation over the drums stem (60–200 BPM, folded to
 70–180 — can pick double-time on busy hats). Vocal range: p5–p95 of melody
 notes. All displayed transpose-aware in the pitch strip's info card.
