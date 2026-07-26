@@ -144,6 +144,11 @@ export interface LogEntry {
 }
 
 export interface SingzApi {
+  winMinimize: () => void
+  winMaximizeToggle: () => void
+  winClose: () => void
+  winIsMaximized: () => Promise<boolean>
+  onWinMaximized: (cb: (maximized: boolean) => void) => () => void
   /** Resolve the on-disk path of a dropped/picked File (empty string if none). */
   pathForFile(file: File): string
   /** Read a registered audio file's bytes (source song or produced stem). */

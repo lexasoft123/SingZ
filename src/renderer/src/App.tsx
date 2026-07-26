@@ -11,6 +11,7 @@ import SetupWizard from './components/SetupWizard'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
+import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
 import { cleanSongName, orderedStems, TRACK_META, type TimeView, type UITrack } from './model'
 
@@ -179,6 +180,7 @@ export default function App(): React.JSX.Element {
       if (inText) return
       if (e.code === 'Escape') {
         setKaraoke(false)
+        localStorage.setItem('singz.karaoke', '0')
       } else if (e.code === 'Space') {
         e.preventDefault()
         ;(tgt.closest('button') as HTMLElement | null)?.blur()
@@ -260,7 +262,8 @@ export default function App(): React.JSX.Element {
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
-          prepMelodyRef.current?.()
+          if (localStorage.getItem('singz.karaoke') === '1') openKaraokeRef.current?.()
+          else prepMelodyRef.current?.()
           const st = proj.settings.transpose ?? 0
           setTranspose(st)
           void engine.setTranspose(st)
@@ -395,8 +398,10 @@ export default function App(): React.JSX.Element {
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
       // Analyze right away (melody, key, bpm) so karaoke opens warm and the
-      // bpm box fills in without a trip through karaoke mode.
-      prepMelodyRef.current?.()
+      // bpm box fills in without a trip through karaoke mode. If karaoke was
+      // open last session, reopen it.
+      if (localStorage.getItem('singz.karaoke') === '1') openKaraokeRef.current?.()
+      else prepMelodyRef.current?.()
     } catch {
       setError('Separation finished, but loading the stem files failed.')
     }
@@ -518,18 +523,26 @@ export default function App(): React.JSX.Element {
   const prepMelodyRef = useRef<(() => void) | null>(null)
   prepMelodyRef.current = prepMelody
 
-  const toggleKaraoke = useCallback(() => {
-    if (karaoke) {
-      setKaraoke(false)
-      return
-    }
-    if (!split) return
+  const openKaraoke = useCallback(() => {
     setKaraoke(true)
     engine.setMuted('vocals', true)
     setTracks((ts) => ts.map((t) => (t.id === 'vocals' ? { ...t, muted: true } : t)))
     void prepLyrics()
     prepMelody()
-  }, [karaoke, split, engine, prepLyrics, prepMelody])
+  }, [engine, prepLyrics, prepMelody])
+  const openKaraokeRef = useRef(openKaraoke)
+  openKaraokeRef.current = openKaraoke
+
+  const toggleKaraoke = useCallback(() => {
+    if (karaoke) {
+      setKaraoke(false)
+      localStorage.setItem('singz.karaoke', '0')
+      return
+    }
+    if (!split) return
+    localStorage.setItem('singz.karaoke', '1')
+    openKaraoke()
+  }, [karaoke, split, openKaraoke])
 
   const openPicker = useCallback(() => fileInputRef.current?.click(), [])
 
@@ -649,6 +662,7 @@ export default function App(): React.JSX.Element {
   return (
     <div className="app">
       <header className="titlebar">
+        {document.body.classList.contains('win') && <WindowButtons />}
         <div className="logo">
           Sing<span>Z</span>
           {ver && <em className="ver">{ver}</em>}

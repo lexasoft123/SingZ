@@ -1796,3 +1796,61 @@ body.modal-open .lyr-line::before {
   opacity: 0.35;
   cursor: default;
 }
+
+/* ————————————————————————————————— windows chrome (frameless) ————— */
+
+body.win {
+  background: transparent;
+}
+
+body.win .app {
+  background: var(--bg);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 240, 214, 0.14);
+  overflow: hidden;
+}
+
+/* the fixed grain/tungsten overlays must clip to the same rounded rect */
+body.win::before,
+body.win::after {
+  border-radius: 12px;
+}
+
+body.win.maximized .app,
+body.win.maximized::before,
+body.win.maximized::after {
+  border-radius: 0;
+}
+
+body.win.maximized .app {
+  border-color: transparent;
+}
+
+.win-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  display: flex;
+  z-index: 10;
+}
+
+.win-controls button {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--dim);
+  border-radius: 0;
+  transition: background 0.1s, color 0.1s;
+}
+
+.win-controls button:hover {
+  background: rgba(255, 240, 214, 0.07);
+  color: var(--text);
+}
+
+.win-controls button.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}

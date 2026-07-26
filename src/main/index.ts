@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, Menu, shell, systemPreferences } from 'electron'
+import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
@@ -37,30 +38,43 @@ const transcriber = new Transcriber()
 const modelManager = new ModelManager()
 
 function createWindow(): void {
+  const st = loadWindowState({ width: 1240, height: 820 })
   const win = new BrowserWindow({
-    width: 1240,
-    height: 820,
+    width: st.width,
+    height: st.height,
+    ...(st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
     minWidth: 940,
     minHeight: 600,
     show: false,
-    backgroundColor: '#12100d',
     ...(process.platform === 'darwin'
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 18, y: 17 } }
+      ? {
+          backgroundColor: '#12100d',
+          titleBarStyle: 'hiddenInset' as const,
+          trafficLightPosition: { x: 18, y: 17 }
+        }
       : process.platform === 'win32'
         ? {
-            // frameless with native window controls drawn over our titlebar —
-            // keeps Win11 snap layouts while the chrome matches the app theme
-            titleBarStyle: 'hidden' as const,
-            titleBarOverlay: { color: '#12100d', symbolColor: '#9b917e', height: 52 }
+            // Fully frameless + transparent so the renderer can draw rounded
+            // corners (Windows 10 never rounds native frames). Window buttons
+            // are ours, wired over IPC.
+            frame: false,
+            transparent: true,
+            backgroundColor: '#00000000'
           }
-        : {}),
+        : { backgroundColor: '#12100d' }),
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.mjs'),
       sandbox: false
     }
   })
 
-  win.on('ready-to-show', () => win.show())
+  trackWindowState(win)
+  win.on('maximize', () => win.webContents.send('win:maximized', true))
+  win.on('unmaximize', () => win.webContents.send('win:maximized', false))
+  win.on('ready-to-show', () => {
+    if (st.maximized) win.maximize()
+    win.show()
+  })
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
@@ -74,6 +88,16 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.on('win:minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize())
+  ipcMain.on('win:maximize-toggle', (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender)
+    if (!w) return
+    if (w.isMaximized()) w.unmaximize()
+    else w.maximize()
+  })
+  ipcMain.on('win:close', (e) => BrowserWindow.fromWebContents(e.sender)?.close())
+  ipcMain.handle('win:is-maximized', (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
+
   ipcMain.handle('source:register', async (_e, raw: string): Promise<RegisterResult> => {
     try {
       const full = resolve(String(raw))

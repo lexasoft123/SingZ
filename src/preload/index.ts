@@ -10,6 +10,18 @@ import type {
 const api: SingzApi = {
   pathForFile: (file) => webUtils.getPathForFile(file),
 
+  winMinimize: () => ipcRenderer.send('win:minimize'),
+  winMaximizeToggle: () => ipcRenderer.send('win:maximize-toggle'),
+  winClose: () => ipcRenderer.send('win:close'),
+  winIsMaximized: () => ipcRenderer.invoke('win:is-maximized'),
+  onWinMaximized: (cb) => {
+    const listener = (_e: IpcRendererEvent, v: boolean): void => cb(v)
+    ipcRenderer.on('win:maximized', listener)
+    return () => {
+      ipcRenderer.removeListener('win:maximized', listener)
+    }
+  },
+
   readAudio: (path) => ipcRenderer.invoke('media:read', path),
 
   registerSource: (path) => ipcRenderer.invoke('source:register', path),
