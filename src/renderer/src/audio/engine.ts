@@ -128,8 +128,8 @@ export class MultitrackEngine {
    * resulting pitch shift by -12*log2(rate) on top of the user's transpose.
    */
   async setTempo(rate: number): Promise<void> {
-    const target = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 100) / 100
-    if (Math.abs(target - this.rate) < 0.001) return
+    const target = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
+    if (Math.abs(target - this.rate) < 0.0001) return
     this.applyRate(target)
     await this.applyStretchState()
     this.emit()

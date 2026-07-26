@@ -67,33 +67,53 @@ function BpmEntry({
     }
     setDraft(null)
   }
+  const stepBpm = (d: number): void => {
+    if (bpm === null) return
+    onTempo((Math.round(bpm * tempo) + d) / bpm)
+  }
   if (bpm === null) {
     return (
-      <label className="bpm-entry disabled" title="Beats per minute — detected once the song is split and analyzed">
-        <input type="text" value="—" disabled readOnly />
-        <span className="tr-unit">bpm</span>
-      </label>
+      <>
+        <button type="button" className="chip" disabled>
+          −
+        </button>
+        <label className="bpm-entry disabled" title="Beats per minute — detected once the song is split and analyzed">
+          <input type="text" value="—" disabled readOnly />
+          <span className="tr-unit">bpm</span>
+        </label>
+        <button type="button" className="chip" disabled>
+          +
+        </button>
+      </>
     )
   }
   return (
-    <label className="bpm-entry" title="Set the playback tempo in beats per minute">
-      <input
-        type="text"
-        inputMode="numeric"
-        value={shown}
-        onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ''))}
-        onFocus={(e) => e.currentTarget.select()}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-          if (e.key === 'Escape') {
-            setDraft(null)
-            ;(e.target as HTMLInputElement).blur()
-          }
-        }}
-      />
-      <span className="tr-unit">bpm</span>
-    </label>
+    <>
+      <button type="button" className="chip" onClick={() => stepBpm(-1)}>
+        −
+      </button>
+      <label className="bpm-entry" title="Set the playback tempo in beats per minute">
+        <input
+          type="text"
+          inputMode="numeric"
+          value={shown}
+          onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ''))}
+          onFocus={(e) => e.currentTarget.select()}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+            if (e.key === 'Escape') {
+              setDraft(null)
+              ;(e.target as HTMLInputElement).blur()
+            }
+          }}
+        />
+        <span className="tr-unit">bpm</span>
+      </label>
+      <button type="button" className="chip" onClick={() => stepBpm(1)}>
+        +
+      </button>
+    </>
   )
 }
 

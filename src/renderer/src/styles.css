@@ -1791,3 +1791,8 @@ body.modal-open .lyr-line::before {
   opacity: 0.4;
   cursor: default;
 }
+
+.transpose-ctl .chip:disabled {
+  opacity: 0.35;
+  cursor: default;
+}

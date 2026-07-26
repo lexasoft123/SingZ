@@ -599,7 +599,7 @@ export default function App(): React.JSX.Element {
 
   const handleTempo = useCallback(
     (rate: number) => {
-      const clamped = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 100) / 100
+      const clamped = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
       touchSettings()
       setTempoRate(clamped)
       void engine.setTempo(clamped).finally(() => {
