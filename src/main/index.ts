@@ -12,6 +12,7 @@ import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { log, logEntries, saveLog } from './log'
 import { logHardwareInfo } from './hwinfo'
+import { installUpdate, startUpdater, updateState } from './updater'
 import { cleanupObsoleteModels, modelsDir, packDir } from './models'
 import { Separator } from './separation'
 
@@ -98,6 +99,8 @@ function registerIpc(): void {
   })
   ipcMain.on('win:close', (e) => BrowserWindow.fromWebContents(e.sender)?.close())
   ipcMain.handle('win:is-maximized', (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
+  ipcMain.handle('update:state', () => updateState())
+  ipcMain.on('update:install', () => installUpdate())
 
   ipcMain.handle('source:register', async (_e, raw: string): Promise<RegisterResult> => {
     try {
@@ -263,6 +266,11 @@ app.whenReady().then(async () => {
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   logHardwareInfo()
+  startUpdater((st) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('update:state', st)
+    }
+  })
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()

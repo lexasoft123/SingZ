@@ -20,6 +20,12 @@ asar: true
 npmRebuild: false
 afterPack: scripts/afterPack.cjs
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+# Update metadata (latest*.yml + blockmaps) for the in-app updater; the CI
+# attach step uploads them, electron-builder itself never publishes.
+publish:
+  provider: github
+  owner: lexasoft123
+  repo: SingZ
 mac:
   # No signing certificate wired up yet — ships unsigned (right-click → Open).
   # To sign later: remove `identity`, add CSC_LINK/CSC_KEY_PASSWORD secrets in CI.

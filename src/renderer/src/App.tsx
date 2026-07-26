@@ -99,6 +99,7 @@ export default function App(): React.JSX.Element {
   const [showProjects, setShowProjects] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [ver, setVer] = useState('')
+  const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
   const [isProject, setIsProject] = useState(false)
   const [editName, setEditName] = useState<string | null>(null)
   const [wizard, setWizard] = useState<{
@@ -137,6 +138,11 @@ export default function App(): React.JSX.Element {
   selectionRef.current = selection
 
   useEffect(() => engine.subscribe(() => setPlaying(engine.playing)), [engine])
+
+  useEffect(() => {
+    void window.singz.updateStateNow().then(setUpdate)
+    return window.singz.onUpdateState(setUpdate)
+  }, [])
 
   useEffect(() => {
     void window.singz.appVersion().then(setVer)
@@ -756,6 +762,31 @@ export default function App(): React.JSX.Element {
           Sing<span>Z</span>
           {ver && <em className="ver">{ver}</em>}
         </div>
+        {update.state === 'ready' && (
+          <button
+            type="button"
+            className="pill primary small no-drag update-chip"
+            title="The update is downloaded — restarting installs it"
+            onClick={() => window.singz.installUpdate()}
+          >
+            Restart to update
+          </button>
+        )}
+        {update.state === 'available' && (
+          <button
+            type="button"
+            className="pill ghost small no-drag update-chip"
+            title="A newer version is out — opens the download page"
+            onClick={() => void window.singz.openExternal(update.url)}
+          >
+            Get v{update.version}
+          </button>
+        )}
+        {update.state === 'downloading' && (
+          <span className="chip-status no-drag update-chip" title="Downloading the update in the background">
+            <span className="dot idle" /> update {update.percent}%
+          </span>
+        )}
         {song && phase === 'ready' && (
           <div className="song-title no-drag">
             {editName === null ? (

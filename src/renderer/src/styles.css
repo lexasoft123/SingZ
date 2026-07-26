@@ -1888,3 +1888,7 @@ body.win.maximized .app {
   box-shadow: 0 0 7px rgba(255, 160, 40, 0.7);
   vertical-align: 1px;
 }
+
+.update-chip {
+  margin-left: 4px;
+}

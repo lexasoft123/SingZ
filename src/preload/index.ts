@@ -10,6 +10,16 @@ import type {
 const api: SingzApi = {
   pathForFile: (file) => webUtils.getPathForFile(file),
 
+  updateStateNow: () => ipcRenderer.invoke('update:state'),
+  installUpdate: () => ipcRenderer.send('update:install'),
+  onUpdateState: (cb) => {
+    const listener = (_e: IpcRendererEvent, s: import('../shared/types').UpdateState): void => cb(s)
+    ipcRenderer.on('update:state', listener)
+    return () => {
+      ipcRenderer.removeListener('update:state', listener)
+    }
+  },
+
   winMinimize: () => ipcRenderer.send('win:minimize'),
   winMaximizeToggle: () => ipcRenderer.send('win:maximize-toggle'),
   winClose: () => ipcRenderer.send('win:close'),

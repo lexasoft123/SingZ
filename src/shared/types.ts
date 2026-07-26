@@ -140,6 +140,14 @@ export type LyricsResult =
       error: string
     }
 
+export type UpdateState =
+  | { state: 'none' }
+  | { state: 'checking' }
+  | { state: 'available'; version: string; url: string }
+  | { state: 'downloading'; version: string; percent: number }
+  | { state: 'ready'; version: string }
+  | { state: 'error'; message: string }
+
 export type LogLevel = 'info' | 'warn' | 'error'
 
 export interface LogEntry {
@@ -150,6 +158,9 @@ export interface LogEntry {
 }
 
 export interface SingzApi {
+  updateStateNow: () => Promise<UpdateState>
+  installUpdate: () => void
+  onUpdateState: (cb: (s: UpdateState) => void) => () => void
   winMinimize: () => void
   winMaximizeToggle: () => void
   winClose: () => void
