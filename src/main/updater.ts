@@ -64,6 +64,10 @@ function checkViaElectronUpdater(): void {
     return
   }
   updaterWired = true
+  // Test/self-host hook: point the updater at any generic feed directory.
+  if (process.env.SINGZ_UPDATE_URL) {
+    autoUpdater.setFeedURL({ provider: 'generic', url: process.env.SINGZ_UPDATE_URL })
+  }
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
   autoUpdater.on('checking-for-update', () => set({ state: 'checking' }))

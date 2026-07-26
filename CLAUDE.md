@@ -23,8 +23,9 @@ All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 ## Verification policy
 
 UI or engine changes are verified by driving the real app with
-`playwright-core`'s `_electron` (drivers live in the session scratchpad, never
-in the repo). Load files through the hidden `<input type=file>` — same code
+`playwright-core`'s `_electron` (session drivers live in the scratchpad, never
+in the repo; the one permanent CI harness is `tests/e2e/win-smoke.cjs`, run by
+the E2E Windows workflow). Load files through the hidden `<input type=file>` — same code
 path as drag-drop. Read the screenshots you take. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

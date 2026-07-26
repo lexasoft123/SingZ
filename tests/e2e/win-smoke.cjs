@@ -1,0 +1,112 @@
+/**
+ * Windows CI smoke: drives the real app on a windows-latest runner.
+ * - default: launches the built app (out/) — frameless chrome, window
+ *   buttons over IPC, window-state persistence, the update chip.
+ * - E2E_PACKAGED (path to SingZ.exe) + E2E_FEED_URL: additionally runs the
+ *   full electron-updater flow against a local generic feed until the
+ *   "Restart to update" button appears.
+ * Session-scratch drivers stay out of the repo; this file is the permanent
+ * CI harness (see CLAUDE.md).
+ */
+const path = require('node:path')
+const { _electron } = require('playwright-core')
+
+const results = []
+const check = (cond, msg) => {
+  results.push(`${cond ? 'ok ' : 'FAIL'} ${msg}`)
+  console.log(`${cond ? 'ok ' : 'FAIL'} ${msg}`)
+  if (!cond) {
+    console.error(results.join('\n'))
+    process.exit(1)
+  }
+}
+
+const packaged = process.env.E2E_PACKAGED ? path.resolve(process.env.E2E_PACKAGED) : null
+const feed = process.env.E2E_FEED_URL ?? null
+
+const launch = (env = {}) =>
+  _electron.launch(
+    packaged
+      ? { executablePath: packaged, args: [], env: { ...process.env, ...env } }
+      : {
+          args: [path.resolve('out/main/index.js')],
+          executablePath: require('electron'),
+          env: { ...process.env, ...env }
+        }
+  )
+
+;(async () => {
+  // ---- chrome + window buttons ----
+  let app = await launch()
+  let page = await app.firstWindow()
+  await page.waitForSelector('.win-controls button', { timeout: 60000 })
+  const chrome = await page.evaluate(() => ({
+    winClass: document.body.classList.contains('win'),
+    buttons: document.querySelectorAll('.win-controls button').length,
+    radius: getComputedStyle(document.querySelector('.app')).borderRadius,
+    bodyBg: getComputedStyle(document.body).backgroundColor
+  }))
+  check(chrome.winClass, 'body.win class present')
+  check(chrome.buttons === 3, `3 window buttons (got ${chrome.buttons})`)
+  check(chrome.radius === '12px', `rounded app corners (got ${chrome.radius})`)
+  check(
+    chrome.bodyBg === 'rgba(0, 0, 0, 0)' || chrome.bodyBg === 'transparent',
+    `transparent body (got ${chrome.bodyBg})`
+  )
+
+  await page.click('.win-controls button[title="Maximize"]')
+  await page.waitForTimeout(900)
+  check(
+    await page.evaluate(() => document.body.classList.contains('maximized')),
+    'maximized class set after maximize click'
+  )
+  await page.click('.win-controls button[title="Restore"]')
+  await page.waitForTimeout(700)
+  check(
+    await page.evaluate(() => !document.body.classList.contains('maximized')),
+    'maximized class cleared after restore'
+  )
+
+  // ---- window-state persistence across relaunch ----
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].setBounds({ x: 60, y: 60, width: 1005, height: 705 })
+  )
+  await page.waitForTimeout(900) // debounce save
+  await app.close()
+  app = await launch()
+  page = await app.firstWindow()
+  await page.waitForSelector('.titlebar', { timeout: 60000 })
+  const b = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())
+  check(b.width === 1005 && b.height === 705, `bounds restored (got ${b.width}x${b.height})`)
+  await app.close()
+
+  // ---- update chip (GitHub check, test mode) ----
+  app = await launch({ SINGZ_TEST_UPDATER: '1', SINGZ_FAKE_VERSION: '0.0.1' })
+  page = await app.firstWindow()
+  await page.waitForSelector('.update-chip', { timeout: 60000 })
+  const chip = (await page.textContent('.update-chip'))?.trim() ?? ''
+  check(/^Get v\d/.test(chip), `update chip offers download (got "${chip}")`)
+  await app.close()
+
+  // ---- full electron-updater flow (packaged + local feed only) ----
+  if (packaged && feed) {
+    app = await launch({ SINGZ_UPDATE_URL: feed })
+    page = await app.firstWindow()
+    await page.waitForSelector('.update-chip', { timeout: 120000 })
+    await page.waitForFunction(
+      () => document.querySelector('.update-chip')?.textContent?.includes('Restart to update'),
+      null,
+      { timeout: 300000 }
+    )
+    check(true, 'electron-updater downloaded and reached "Restart to update"')
+    await app.close()
+  } else {
+    console.log('skip full updater flow (E2E_PACKAGED/E2E_FEED_URL not set)')
+  }
+
+  console.log('ALL PASS')
+  process.exit(0)
+})().catch((e) => {
+  console.error('DRIVER ERROR', e)
+  process.exit(1)
+})

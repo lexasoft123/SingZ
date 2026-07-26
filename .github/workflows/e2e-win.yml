@@ -1,0 +1,63 @@
+name: E2E Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [e2e-win]
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Smoke E2E (built app)
+        run: node tests/e2e/win-smoke.cjs
+
+      - name: Restore vendored engines (whisper-cli for packaging)
+        id: engines-out
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            vendor/darwin-arm64
+            vendor/darwin-x64
+            vendor/win32-x64
+            vendor/packs
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+
+      - name: Build whisper-cli if cache missed
+        if: steps.engines-out.outputs.cache-hit != 'true'
+        run: bash scripts/vendor-whisper.sh win32-x64
+
+      - name: Package NSIS and prepare a local update feed
+        run: |
+          npx electron-builder --win --publish never
+          python - <<'PY'
+          import re
+          p = 'dist/latest.yml'
+          s = open(p).read()
+          s = re.sub(r'^version: .*$', 'version: 99.0.0', s, count=1, flags=re.M)
+          open(p, 'w').write(s)
+          print(s)
+          PY
+          (python -m http.server 8099 --directory dist > feed.log 2>&1 &)
+          sleep 2
+          curl -s -o /dev/null -w "feed probe: %{http_code}\n" http://127.0.0.1:8099/latest.yml
+
+      - name: Full updater E2E (packaged app)
+        env:
+          E2E_PACKAGED: dist/win-unpacked/SingZ.exe
+          E2E_FEED_URL: http://127.0.0.1:8099
+        run: node tests/e2e/win-smoke.cjs
