@@ -11,6 +11,7 @@ import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { log, logEntries, saveLog } from './log'
+import { logHardwareInfo } from './hwinfo'
 import { cleanupObsoleteModels, modelsDir, packDir } from './models'
 import { Separator } from './separation'
 
@@ -261,6 +262,7 @@ app.whenReady().then(async () => {
   )
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
+  logHardwareInfo()
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()
