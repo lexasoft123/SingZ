@@ -96,5 +96,5 @@ jobs:
           gh release create "$TAG" --title "$TAG" --notes "" 2>/dev/null || true
           # nullglob: each matrix job only has its own platform's files
           shopt -s nullglob
-          FILES=(dist/*.dmg dist/*.exe dist/*.yml dist/*.blockmap vendor/packs/*.tar.gz)
+          FILES=(dist/*.dmg dist/*.exe dist/latest*.yml dist/*.blockmap vendor/packs/*.tar.gz)
           gh release upload "$TAG" "${FILES[@]}" --clobber
