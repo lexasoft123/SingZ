@@ -132,6 +132,8 @@ export default function App(): React.JSX.Element {
   lyricsRef.current = lyrics
   const melodyRef = useRef(melody)
   melodyRef.current = melody
+  const selectionRef = useRef(selection)
+  selectionRef.current = selection
 
   useEffect(() => engine.subscribe(() => setPlaying(engine.playing)), [engine])
 
@@ -181,6 +183,10 @@ export default function App(): React.JSX.Element {
         tgt instanceof HTMLTextAreaElement
       if (inText) return
       if (e.code === 'Escape') {
+        if (selectionRef.current) {
+          setSelection(null)
+          return
+        }
         setKaraoke(false)
         localStorage.setItem('singz.karaoke', '0')
       } else if (e.code === 'Space') {
