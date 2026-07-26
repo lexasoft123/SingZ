@@ -44,6 +44,7 @@ export class MultitrackEngine {
   private stretchOn = false
   private semitones = 0
   private rate = 1
+  private loopRegion: { start: number; end: number } | null = null
 
   duration = 0
 
@@ -77,6 +78,11 @@ export class MultitrackEngine {
     const lag = (this.stretchOn ? this.stretchLatency : 0) + (this.ctx.outputLatency || 0)
     const elapsed =
       this.startOffset + (this.ctx.currentTime - this.startedAt - lag) * this.rate
+    const r = this.loopRegion
+    if (r && this.startOffset < r.end && elapsed > r.end) {
+      // Sources loop natively at r.end -> r.start; fold the linear clock.
+      return r.start + ((elapsed - r.end) % (r.end - r.start))
+    }
     return Math.min(this.duration, Math.max(this.startOffset, elapsed))
   }
 
@@ -86,6 +92,27 @@ export class MultitrackEngine {
 
   get tempo(): number {
     return this.rate
+  }
+
+  /**
+   * Loop a region (or null to stop looping). Uses the sources' native
+   * loopStart/loopEnd, so every stem wraps on the same sample — no gap.
+   */
+  setLoopRegion(region: { start: number; end: number } | null): void {
+    const valid = region && region.end - region.start > 0.05 ? region : null
+    this.loopRegion = valid
+    for (const src of this.sources) this.applyLoop(src)
+  }
+
+  private applyLoop(src: AudioBufferSourceNode): void {
+    const r = this.loopRegion
+    if (r && src.buffer) {
+      src.loopStart = Math.max(0, r.start)
+      src.loopEnd = Math.min(r.end, src.buffer.duration)
+      src.loop = src.loopEnd - src.loopStart > 0.05
+    } else {
+      src.loop = false
+    }
   }
 
   /**
@@ -216,6 +243,7 @@ export class MultitrackEngine {
       const src = this.ctx.createBufferSource()
       src.buffer = t.buffer
       src.playbackRate.value = this.rate
+      this.applyLoop(src)
       src.connect(t.gain)
       src.start(when, Math.min(this.startOffset, t.buffer.duration))
       this.sources.push(src)

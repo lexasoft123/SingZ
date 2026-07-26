@@ -37,6 +37,9 @@ interface Props {
   split: boolean
   sep: SeparationProgress | null
   karaokeOn: boolean
+  loopOn: boolean
+  onToggleLoop: () => void
+  hasSelection: boolean
   transpose: number
   onTranspose: (st: number) => void
   tempo: number
@@ -123,6 +126,9 @@ export default function Transport({
   split,
   sep,
   karaokeOn,
+  loopOn,
+  onToggleLoop,
+  hasSelection,
   transpose,
   onTranspose,
   tempo,
@@ -175,6 +181,17 @@ export default function Transport({
           <TimeCode engine={engine} />
           <span className="clock-total">/ {fmtTime(engine.duration)}</span>
         </div>
+        <button
+          type="button"
+          className={`round-ghost loop${loopOn ? ' active' : ''}`}
+          title={hasSelection ? 'Loop the selection' : 'Loop the whole song (drag on the waveforms to loop a section)'}
+          disabled={engine.duration === 0}
+          onClick={onToggleLoop}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+            <path d="M3.5 6.5v-1a2 2 0 0 1 2-2h7l-1.8-1.8M12.5 9.5v1a2 2 0 0 1-2 2h-7l1.8 1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
       </div>
 
       <div className="transport-right">

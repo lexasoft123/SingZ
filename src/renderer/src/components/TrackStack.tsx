@@ -7,12 +7,33 @@ interface Props {
   tracks: UITrack[]
   engine: MultitrackEngine
   view: TimeView | null
+  selection: { s: number; e: number } | null
+  onSelection: (sel: { s: number; e: number } | null) => void
   onZoom: (factor: number, center?: number) => void
   onViewShift: (s: number, e: number) => void
   onResetZoom: () => void
   onMute: (id: string, muted: boolean) => void
   onSolo: (id: string, solo: boolean) => void
   onVolume: (id: string, volume: number) => void
+}
+
+function SelectionRange({
+  selection,
+  viewS,
+  viewE
+}: {
+  selection: { s: number; e: number }
+  viewS: number
+  viewE: number
+}): React.JSX.Element | null {
+  const span = viewE - viewS
+  if (span <= 0) return null
+  const left = ((selection.s - viewS) / span) * 100
+  const right = ((selection.e - viewS) / span) * 100
+  if (right <= 0 || left >= 100) return null
+  const l = Math.max(0, left)
+  const r = Math.min(100, right)
+  return <div className="sel-range" style={{ left: `${l}%`, width: `${r - l}%` }} />
 }
 
 const CLUSTER_W = 130 // px kept clear of ticks so the zoom buttons never overlap labels
@@ -48,6 +69,8 @@ export default function TrackStack({
   tracks,
   engine,
   view,
+  selection,
+  onSelection,
   onZoom,
   onViewShift,
   onResetZoom,
@@ -57,7 +80,7 @@ export default function TrackStack({
 }: Props): React.JSX.Element {
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
-  const dragRef = useRef<{ wasPlaying: boolean } | null>(null)
+  const dragRef = useRef<{ t0: number; x0: number; selecting: boolean } | null>(null)
   const [width, setWidth] = useState(0)
 
   const duration = engine.duration
@@ -137,13 +160,13 @@ export default function TrackStack({
 
   const ticks = useMemo(() => makeTicks(viewS, viewE, width), [viewS, viewE, width])
 
-  const seekFromPointer = (clientX: number): void => {
+  const timeFromPointer = (clientX: number): number | null => {
     const el = overlayRef.current
-    if (!el || engine.duration <= 0) return
+    if (!el || engine.duration <= 0) return null
     const rect = el.getBoundingClientRect()
     const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
     const v = viewRef.current
-    engine.seek(v.s + frac * (v.e - v.s))
+    return v.s + frac * (v.e - v.s)
   }
 
   const anySolo = tracks.some((t) => t.solo)
@@ -220,22 +243,37 @@ export default function TrackStack({
         ref={overlayRef}
         style={{ gridRow: `1 / ${tracks.length + 2}` }}
         onPointerDown={(e) => {
+          const t = timeFromPointer(e.clientX)
+          if (t === null) return
           e.currentTarget.setPointerCapture(e.pointerId)
-          dragRef.current = { wasPlaying: engine.playing }
-          if (engine.playing) engine.pause()
-          seekFromPointer(e.clientX)
+          dragRef.current = { t0: t, x0: e.clientX, selecting: false }
         }}
         onPointerMove={(e) => {
-          if (dragRef.current) seekFromPointer(e.clientX)
+          const d = dragRef.current
+          if (!d) return
+          if (!d.selecting && Math.abs(e.clientX - d.x0) < 5) return
+          d.selecting = true
+          const t = timeFromPointer(e.clientX)
+          if (t === null) return
+          onSelection({ s: Math.min(d.t0, t), e: Math.max(d.t0, t) })
         }}
         onPointerUp={() => {
-          if (dragRef.current?.wasPlaying) void engine.play()
+          const d = dragRef.current
           dragRef.current = null
+          if (!d) return
+          if (!d.selecting) {
+            // A plain click: place the playhead and drop any selection.
+            onSelection(null)
+            engine.seek(d.t0)
+          }
         }}
         onPointerCancel={() => {
           dragRef.current = null
         }}
       >
+        {selection && view !== undefined && (
+          <SelectionRange selection={selection} viewS={viewS} viewE={viewE} />
+        )}
         <div className="playhead">
           <span className="playhead-cap" />
         </div>

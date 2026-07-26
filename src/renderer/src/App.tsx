@@ -115,6 +115,8 @@ export default function App(): React.JSX.Element {
   const [transpose, setTranspose] = useState(0)
   const [tempoRate, setTempoRate] = useState(1)
   const [view, setView] = useState<TimeView | null>(null)
+  const [selection, setSelection] = useState<{ s: number; e: number } | null>(null)
+  const [loopOn, setLoopOn] = useState(false)
   const [songInfo, setSongInfo] = useState<{ key: KeyGuess | null; bpm: number | null }>({
     key: null,
     bpm: null
@@ -224,6 +226,9 @@ export default function App(): React.JSX.Element {
       void engine.setTranspose(0)
       setTempoRate(1)
       void engine.setTempo(1)
+      setSelection(null)
+      setLoopOn(false)
+      setView(null)
       setSaveState('idle')
       setView(null)
       setPhase('loading')
@@ -270,6 +275,10 @@ export default function App(): React.JSX.Element {
           const tr = proj.settings.tempo ?? 1
           setTempoRate(tr)
           void engine.setTempo(tr)
+          const v = proj.settings.view
+          if (v && Number.isFinite(v.s) && Number.isFinite(v.e) && v.e - v.s > 0.05) {
+            setView({ s: Math.max(0, v.s), e: v.e })
+          }
           setSaveState('saved')
           setPhase('ready')
           void prepLyricsRef.current?.()
@@ -552,6 +561,7 @@ export default function App(): React.JSX.Element {
     const settings = {
       transpose,
       tempo: tempoRate,
+      view: view ?? undefined,
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
@@ -569,7 +579,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, tracks])
+  }, [song, saveState, transpose, tempoRate, view, tracks])
 
   const commitRename = useCallback(
     async (raw: string) => {
@@ -610,6 +620,24 @@ export default function App(): React.JSX.Element {
     [engine, touchSettings]
   )
 
+  // Looping: native source loop over the selection, or the whole song.
+  useEffect(() => {
+    engine.setLoopRegion(
+      loopOn ? (selection ? { start: selection.s, end: selection.e } : { start: 0, end: engine.duration }) : null
+    )
+  }, [engine, loopOn, selection, tracks])
+
+  const toggleLoop = useCallback(() => {
+    setLoopOn((on) => {
+      const next = !on
+      if (next && selection) {
+        const pos = engine.position
+        if (pos < selection.s || pos > selection.e) engine.seek(selection.s)
+      }
+      return next
+    })
+  }, [engine, selection])
+
   const handleTempo = useCallback(
     (rate: number) => {
       const clamped = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
@@ -639,6 +667,7 @@ export default function App(): React.JSX.Element {
 
   const zoomBy = useCallback(
     (factor: number, center?: number) => {
+      touchSettings()
       setView((v) => {
         const dur = engine.duration
         if (dur <= 0) return v
@@ -649,14 +678,15 @@ export default function App(): React.JSX.Element {
         return clampView(c - span * ratio, c - span * ratio + span)
       })
     },
-    [engine, clampView]
+    [engine, clampView, touchSettings]
   )
 
   const shiftView = useCallback(
     (s: number, e: number) => {
+      touchSettings()
       setView(clampView(s, e))
     },
-    [clampView]
+    [clampView, touchSettings]
   )
 
   return (
@@ -743,9 +773,14 @@ export default function App(): React.JSX.Element {
                 tracks={tracks}
                 engine={engine}
                 view={view}
+                selection={selection}
+                onSelection={setSelection}
                 onZoom={zoomBy}
                 onViewShift={shiftView}
-                onResetZoom={() => setView(null)}
+                onResetZoom={() => {
+                  touchSettings()
+                  setView(null)
+                }}
                 onMute={handleMute}
                 onSolo={handleSolo}
                 onVolume={handleVolume}
@@ -786,6 +821,9 @@ export default function App(): React.JSX.Element {
             split={split}
             sep={sep}
             karaokeOn={karaoke}
+            loopOn={loopOn}
+            onToggleLoop={toggleLoop}
+            hasSelection={selection !== null}
             transpose={transpose}
             onTranspose={handleTranspose}
             tempo={tempoRate}

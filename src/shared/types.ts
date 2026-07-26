@@ -46,6 +46,8 @@ export interface ProjectSettings {
   transpose: number
   /** Playback speed (1 = original); optional for projects saved before it existed. */
   tempo?: number
+  /** Saved timeline zoom viewport (seconds). */
+  view?: { s: number; e: number }
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
