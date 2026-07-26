@@ -40,6 +40,25 @@ const launch = (env = {}) =>
   let app = await launch()
   let page = await app.firstWindow()
   await page.waitForSelector('.win-controls button', { timeout: 60000 })
+  const diag = await page.evaluate(() => ({
+    bodyClass: document.body.className,
+    rules: [...document.styleSheets]
+      .flatMap((sh) => {
+        try {
+          return [...sh.cssRules]
+        } catch {
+          return []
+        }
+      })
+      .filter((r) => r.selectorText && r.selectorText.includes('.app'))
+      .map((r) => r.cssText.slice(0, 140))
+  }))
+  const winInfo = await app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0]
+    return { maximized: w.isMaximized(), bounds: w.getBounds() }
+  })
+  console.log('diag:', JSON.stringify({ ...diag, ...winInfo }, null, 1))
+
   const chrome = await page.evaluate(() => ({
     winClass: document.body.classList.contains('win'),
     buttons: document.querySelectorAll('.win-controls button').length,
