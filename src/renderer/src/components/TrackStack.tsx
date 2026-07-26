@@ -80,7 +80,7 @@ export default function TrackStack({
 }: Props): React.JSX.Element {
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
-  const dragRef = useRef<{ t0: number; x0: number; selecting: boolean } | null>(null)
+  const dragRef = useRef<{ mode: 'new' | 'resize'; anchor: number; x0: number; selecting: boolean } | null>(null)
   const [width, setWidth] = useState(0)
 
   const duration = engine.duration
@@ -159,6 +159,22 @@ export default function TrackStack({
   }, [onZoom])
 
   const ticks = useMemo(() => makeTicks(viewS, viewE, width), [viewS, viewE, width])
+
+  /** Which selection bar (if any) sits within grab range of the pointer. */
+  const edgeAtPointer = (clientX: number): 's' | 'e' | null => {
+    const el = overlayRef.current
+    if (!el || !selection) return null
+    const rect = el.getBoundingClientRect()
+    const v = viewRef.current
+    const span = v.e - v.s
+    if (span <= 0 || rect.width <= 0) return null
+    const px = (t: number): number => rect.left + ((t - v.s) / span) * rect.width
+    const ds = Math.abs(clientX - px(selection.s))
+    const de = Math.abs(clientX - px(selection.e))
+    const GRAB = 6
+    if (ds > GRAB && de > GRAB) return null
+    return ds <= de ? 's' : 'e'
+  }
 
   const timeFromPointer = (clientX: number): number | null => {
     const el = overlayRef.current
@@ -246,29 +262,47 @@ export default function TrackStack({
           const t = timeFromPointer(e.clientX)
           if (t === null) return
           e.currentTarget.setPointerCapture(e.pointerId)
-          dragRef.current = { t0: t, x0: e.clientX, selecting: false }
+          const edge = edgeAtPointer(e.clientX)
+          if (edge && selection) {
+            // Grab a selection bar: the opposite edge anchors the resize.
+            dragRef.current = {
+              mode: 'resize',
+              anchor: edge === 's' ? selection.e : selection.s,
+              x0: e.clientX,
+              selecting: true
+            }
+            e.currentTarget.style.cursor = 'ew-resize'
+          } else {
+            dragRef.current = { mode: 'new', anchor: t, x0: e.clientX, selecting: false }
+          }
         }}
         onPointerMove={(e) => {
           const d = dragRef.current
-          if (!d) return
+          if (!d) {
+            // Hover feedback: arrows over a selection bar, I-beam elsewhere.
+            e.currentTarget.style.cursor = edgeAtPointer(e.clientX) ? 'ew-resize' : ''
+            return
+          }
           if (!d.selecting && Math.abs(e.clientX - d.x0) < 5) return
           d.selecting = true
           const t = timeFromPointer(e.clientX)
           if (t === null) return
-          onSelection({ s: Math.min(d.t0, t), e: Math.max(d.t0, t) })
+          onSelection({ s: Math.min(d.anchor, t), e: Math.max(d.anchor, t) })
         }}
-        onPointerUp={() => {
+        onPointerUp={(e) => {
           const d = dragRef.current
           dragRef.current = null
+          e.currentTarget.style.cursor = ''
           if (!d) return
-          if (!d.selecting) {
+          if (d.mode === 'new' && !d.selecting) {
             // A plain click: place the playhead and drop any selection.
             onSelection(null)
-            engine.seek(d.t0)
+            engine.seek(d.anchor)
           }
         }}
-        onPointerCancel={() => {
+        onPointerCancel={(e) => {
           dragRef.current = null
+          e.currentTarget.style.cursor = ''
         }}
       >
         {selection && view !== undefined && (

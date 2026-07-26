@@ -185,6 +185,7 @@ export default function App(): React.JSX.Element {
       if (e.code === 'Escape') {
         if (selectionRef.current) {
           setSelection(null)
+          setSaveState((st) => (st === 'saved' ? 'idle' : st))
           return
         }
         setKaraoke(false)
@@ -284,6 +285,10 @@ export default function App(): React.JSX.Element {
           const v = proj.settings.view
           if (v && Number.isFinite(v.s) && Number.isFinite(v.e) && v.e - v.s > 0.05) {
             setView({ s: Math.max(0, v.s), e: v.e })
+          }
+          const sel = proj.settings.selection
+          if (sel && Number.isFinite(sel.s) && Number.isFinite(sel.e) && sel.e - sel.s > 0.05) {
+            setSelection({ s: Math.max(0, sel.s), e: sel.e })
           }
           setSaveState('saved')
           setPhase('ready')
@@ -568,6 +573,7 @@ export default function App(): React.JSX.Element {
       transpose,
       tempo: tempoRate,
       view: view ?? undefined,
+      selection: selection ?? undefined,
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
@@ -585,7 +591,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, tracks])
+  }, [song, saveState, transpose, tempoRate, view, selection, tracks])
 
   const commitRename = useCallback(
     async (raw: string) => {
@@ -632,6 +638,14 @@ export default function App(): React.JSX.Element {
       loopOn ? (selection ? { start: selection.s, end: selection.e } : { start: 0, end: engine.duration }) : null
     )
   }, [engine, loopOn, selection, tracks])
+
+  const handleSelection = useCallback(
+    (sel: { s: number; e: number } | null) => {
+      touchSettings()
+      setSelection(sel)
+    },
+    [touchSettings]
+  )
 
   const toggleLoop = useCallback(() => {
     setLoopOn((on) => {
@@ -780,7 +794,7 @@ export default function App(): React.JSX.Element {
                 engine={engine}
                 view={view}
                 selection={selection}
-                onSelection={setSelection}
+                onSelection={handleSelection}
                 onZoom={zoomBy}
                 onViewShift={shiftView}
                 onResetZoom={() => {

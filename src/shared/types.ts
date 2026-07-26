@@ -48,6 +48,8 @@ export interface ProjectSettings {
   tempo?: number
   /** Saved timeline zoom viewport (seconds). */
   view?: { s: number; e: number }
+  /** Saved loop/selection range (seconds). */
+  selection?: { s: number; e: number }
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
