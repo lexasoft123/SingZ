@@ -39,6 +39,7 @@ export class MultitrackEngine {
   private _playing = false
   private listeners = new Set<() => void>()
   private stretch: StretchNode | null = null
+  private stretchPromise: Promise<StretchNode> | null = null
   private stretchLatency = 0
   private semitones = 0
 
@@ -84,6 +85,28 @@ export class MultitrackEngine {
    * Pitch-shift the whole mix (one Signalsmith Stretch node on the master bus:
    * phase-coherent across stems, duration unchanged, per-stem mutes stay live).
    */
+  /** Create the stretch worklet once; concurrent callers share the same promise. */
+  private ensureStretch(): Promise<StretchNode> {
+    if (!this.stretchPromise) {
+      this.stretchPromise = (async () => {
+        const node = await SignalsmithStretch(this.ctx)
+        node.connect(this.ctx.destination)
+        try {
+          const l = node.latency()
+          this.stretchLatency = typeof l === 'number' ? l : ((await l) ?? 0)
+        } catch {
+          this.stretchLatency = 0
+        }
+        this.stretch = node
+        return node
+      })()
+      this.stretchPromise.catch(() => {
+        this.stretchPromise = null
+      })
+    }
+    return this.stretchPromise
+  }
+
   async setTranspose(st: number): Promise<void> {
     const target = Math.max(-12, Math.min(12, Math.round(st)))
     if (target === this.semitones) return
@@ -93,19 +116,25 @@ export class MultitrackEngine {
       this.master.disconnect()
       this.master.connect(this.ctx.destination)
     } else {
-      if (!this.stretch) {
-        this.stretch = await SignalsmithStretch(this.ctx)
-        this.stretch.connect(this.ctx.destination)
-        try {
-          const l = this.stretch.latency()
-          this.stretchLatency = typeof l === 'number' ? l : ((await l) ?? 0)
-        } catch {
-          this.stretchLatency = 0
-        }
+      try {
+        // A worklet that never finishes booting (e.g. CSP blocking its WASM)
+        // must fail loudly, not leave the mix silently untransposed.
+        const stretch = await Promise.race([
+          this.ensureStretch(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('stretch worklet did not start within 5s')), 5000)
+          )
+        ])
+        if (this.semitones !== target) return // superseded by a later call
+        this.master.disconnect()
+        this.master.connect(stretch)
+        stretch.schedule({ active: true, semitones: target })
+      } catch (err) {
+        console.error('Transpose unavailable:', err)
+        this.semitones = 0
+        this.master.disconnect()
+        this.master.connect(this.ctx.destination)
       }
-      this.master.disconnect()
-      this.master.connect(this.stretch)
-      this.stretch.schedule({ active: true, semitones: target })
     }
     this.emit()
   }

@@ -81,7 +81,11 @@ function EngineChip({
 }
 
 export default function App(): React.JSX.Element {
-  const [engine] = useState(() => new MultitrackEngine())
+  const [engine] = useState(() => {
+    const e = new MultitrackEngine()
+    ;(window as unknown as { __engine: MultitrackEngine }).__engine = e
+    return e
+  })
   const [phase, setPhase] = useState<Phase>('empty')
   const [song, setSong] = useState<{ path: string; name: string } | null>(null)
   const [tracks, setTracks] = useState<UITrack[]>([])
@@ -567,7 +571,9 @@ export default function App(): React.JSX.Element {
     (st: number) => {
       const clamped = Math.max(-12, Math.min(12, st))
       setTranspose(clamped)
-      void engine.setTranspose(clamped)
+      // Re-sync afterwards: if the stretch worklet fails, the engine reverts
+      // to 0 and the badge must not keep promising a shift that isn't heard.
+      void engine.setTranspose(clamped).finally(() => setTranspose(engine.transpose))
     },
     [engine]
   )
