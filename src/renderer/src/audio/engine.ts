@@ -21,6 +21,16 @@ export interface TrackState {
   volume: number
 }
 
+/**
+ * Vocal-training schedule: the chosen stems duck (gain 0) while the singer
+ * carries them. 'period' alternates hear/sing every periodSec of song time
+ * (first phase is always hear); 'windows' ducks inside explicit song-time
+ * ranges (computed from lyric lines by the app).
+ */
+export type TrainingSpec =
+  | { mode: 'period'; periodSec: number; stems: string[] }
+  | { mode: 'windows'; windows: { s: number; e: number }[]; stems: string[] }
+
 const START_DELAY = 0.04 // scheduling headroom so all stems start sample-locked
 
 /**
@@ -47,6 +57,9 @@ export class MultitrackEngine {
   private region: { start: number; end: number } | null = null
   private regionLoop = false
   private boundTimer: ReturnType<typeof setInterval> | null = null
+  private training: TrainingSpec | null = null
+  private ducked = new Set<string>()
+  private trainTimer: ReturnType<typeof setInterval> | null = null
 
   duration = 0
 
@@ -135,6 +148,50 @@ export class MultitrackEngine {
     } else if (!active && this.boundTimer !== null) {
       clearInterval(this.boundTimer)
       this.boundTimer = null
+    }
+  }
+
+  /**
+   * Arm or clear the vocal-training schedule. Ducking is a separate layer on
+   * the per-stem gains — user mute/solo/volume are untouched and restored
+   * exactly when training ends.
+   */
+  setTraining(spec: TrainingSpec | null): void {
+    this.training = spec
+    this.syncTrainWatcher()
+    this.trainTick()
+  }
+
+  /** Stems currently ducked by the training schedule. */
+  get duckedStems(): string[] {
+    return [...this.ducked]
+  }
+
+  private duckAt(pos: number): boolean {
+    const tr = this.training
+    if (!tr) return false
+    if (tr.mode === 'period') return Math.floor(pos / tr.periodSec) % 2 === 1
+    for (const w of tr.windows) if (pos >= w.s && pos < w.e) return true
+    return false
+  }
+
+  /** Apply the schedule at the current position; a no-op while nothing changes. */
+  private trainTick(): void {
+    const tr = this.training
+    const want = tr && this.duckAt(this.position) ? tr.stems : []
+    if (want.length === this.ducked.size && want.every((id) => this.ducked.has(id))) return
+    this.ducked = new Set(want)
+    this.applyGains()
+    this.emit()
+  }
+
+  private syncTrainWatcher(): void {
+    const active = this._playing && this.training !== null
+    if (active && this.trainTimer === null) {
+      this.trainTimer = setInterval(() => this.trainTick(), 50)
+    } else if (!active && this.trainTimer !== null) {
+      clearInterval(this.trainTimer)
+      this.trainTimer = null
     }
   }
 
@@ -239,6 +296,7 @@ export class MultitrackEngine {
 
   load(list: EngineTrackInput[], opts: { position?: number; play?: boolean } = {}): void {
     this.stopSources()
+    this.ducked.clear() // fresh tracks start unducked; the schedule re-applies on play
     for (const t of this.tracks) t.gain.disconnect()
     this.tracks = list.map((t) => {
       const gain = this.ctx.createGain()
@@ -285,6 +343,8 @@ export class MultitrackEngine {
     this.startedAt = when
     this._playing = true
     this.syncBoundWatcher()
+    this.syncTrainWatcher()
+    this.trainTick() // duck state must be right before the first sample sounds
     this.emit()
   }
 
@@ -294,6 +354,7 @@ export class MultitrackEngine {
     this._playing = false
     this.stopSources()
     this.syncBoundWatcher()
+    this.syncTrainWatcher()
     this.emit()
   }
 
@@ -311,6 +372,7 @@ export class MultitrackEngine {
       void this.play()
     } else {
       this.startOffset = clamped
+      this.trainTick() // keep the ducked-lane preview honest while paused
       this.emit()
     }
   }
@@ -346,7 +408,7 @@ export class MultitrackEngine {
   private applyGains(instant = false): void {
     const anySolo = this.tracks.some((t) => t.solo)
     for (const t of this.tracks) {
-      const audible = !t.muted && (!anySolo || t.solo)
+      const audible = !t.muted && (!anySolo || t.solo) && !this.ducked.has(t.id)
       const target = audible ? t.volume : 0
       if (instant) {
         t.gain.gain.value = target

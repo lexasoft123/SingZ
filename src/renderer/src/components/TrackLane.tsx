@@ -4,6 +4,8 @@ import Waveform from './Waveform'
 interface Props {
   track: UITrack
   dimmed: boolean
+  /** Vocal training is currently silencing this stem — the singer has it. */
+  ducked: boolean
   onMute: (id: string, muted: boolean) => void
   onSolo: (id: string, solo: boolean) => void
   onVolume: (id: string, volume: number) => void
@@ -16,6 +18,7 @@ interface Props {
 export default function TrackLane({
   track,
   dimmed,
+  ducked,
   onMute,
   onSolo,
   onVolume,
@@ -31,12 +34,13 @@ export default function TrackLane({
   return (
     <>
       <div
-        className={`lane-controls${off ? ' is-off' : ''}`}
+        className={`lane-controls${off ? ' is-off' : ''}${ducked ? ' is-ducked' : ''}`}
         style={{ gridRow: row, ['--stem' as string]: track.color, ['--i' as string]: index }}
       >
         <div className="lane-title">
           <span className="lane-dot" />
           <span className="lane-name">{track.label}</span>
+          {ducked && <span className="lane-you">your turn</span>}
         </div>
         <div className="lane-buttons">
           <button
@@ -72,7 +76,7 @@ export default function TrackLane({
         </div>
       </div>
       <div
-        className={`lane-wave${off ? ' is-off' : ''}`}
+        className={`lane-wave${off ? ' is-off' : ''}${ducked ? ' is-ducked' : ''}`}
         style={{ gridRow: row, ['--i' as string]: index }}
       >
         <Waveform

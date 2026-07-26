@@ -7,6 +7,8 @@ interface Props {
   tracks: UITrack[]
   engine: MultitrackEngine
   view: TimeView | null
+  /** Stems currently silenced by vocal training (the singer carries them). */
+  ducked: string[]
   selection: { s: number; e: number } | null
   onSelection: (sel: { s: number; e: number } | null) => void
   onZoom: (factor: number, center?: number) => void
@@ -69,6 +71,7 @@ export default function TrackStack({
   tracks,
   engine,
   view,
+  ducked,
   selection,
   onSelection,
   onZoom,
@@ -245,6 +248,7 @@ export default function TrackStack({
           track={t}
           index={i}
           dimmed={anySolo && !t.solo}
+          ducked={ducked.includes(t.id)}
           showSolo={tracks.length > 1}
           viewStart={vs}
           viewEnd={ve}

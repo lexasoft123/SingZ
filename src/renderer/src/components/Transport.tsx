@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SeparationProgress } from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
-import { fmtClock, fmtTime, modalCoversApp } from '../model'
+import { fmtClock, fmtTime, modalCoversApp, TRACK_META, type TrainingConfig } from '../model'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
   const ref = useRef<HTMLSpanElement>(null)
@@ -41,6 +41,13 @@ interface Props {
   loopOn: boolean
   onToggleLoop: () => void
   hasSelection: boolean
+  training: boolean
+  trainCfg: TrainingConfig
+  onToggleTraining: () => void
+  onTrainCfg: (cfg: TrainingConfig) => void
+  ducking: boolean
+  linesReady: boolean
+  stemIds: string[]
   transpose: number
   onTranspose: (st: number) => void
   tempo: number
@@ -122,6 +129,160 @@ function BpmEntry({
   )
 }
 
+/** Vocal-training setup: on/off, the alternation mode and who sings what. */
+function TrainPopover({
+  training,
+  cfg,
+  linesReady,
+  stemIds,
+  onToggle,
+  onCfg,
+  onClose
+}: {
+  training: boolean
+  cfg: TrainingConfig
+  linesReady: boolean
+  stemIds: string[]
+  onToggle: () => void
+  onCfg: (cfg: TrainingConfig) => void
+  onClose: () => void
+}): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const onDown = (e: PointerEvent): void => {
+      // The wrapper includes the train button — its own click handles closing.
+      if (!ref.current?.parentElement?.contains(e.target as Node)) onClose()
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.code === 'Escape') {
+        e.stopPropagation() // the app-level Esc must not also clear the selection
+        onClose()
+      }
+    }
+    document.addEventListener('pointerdown', onDown)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [onClose])
+
+  const toggleStem = (id: string): void => {
+    const has = cfg.stems.includes(id)
+    if (has && cfg.stems.length === 1) return // someone has to sing something
+    onCfg({ ...cfg, stems: has ? cfg.stems.filter((s) => s !== id) : [...cfg.stems, id] })
+  }
+
+  const caption =
+    cfg.mode === 'time'
+      ? `Guide plays ${cfg.periodSec} s, then you take the next ${cfg.periodSec} s.`
+      : linesReady
+        ? `Hear ${cfg.hear} line${cfg.hear > 1 ? 's' : ''}, then sing ${cfg.sing} on your own.`
+        : 'No synced lyrics yet — alternating by time until they load.'
+
+  return (
+    <div className="train-pop" ref={ref}>
+      <div className="tp-head">
+        <span className="tp-title">Vocal training</span>
+        <div className="mode-seg">
+          <button type="button" className={training ? '' : 'on'} onClick={training ? onToggle : undefined}>
+            Off
+          </button>
+          <button type="button" className={training ? 'on' : ''} onClick={training ? undefined : onToggle}>
+            On
+          </button>
+        </div>
+      </div>
+      <div className="mode-seg tp-mode">
+        <button
+          type="button"
+          className={cfg.mode === 'time' ? 'on' : ''}
+          onClick={() => onCfg({ ...cfg, mode: 'time' })}
+        >
+          By time
+        </button>
+        <button
+          type="button"
+          className={cfg.mode === 'lines' ? 'on' : ''}
+          title="Alternate by karaoke lyric lines"
+          onClick={() => onCfg({ ...cfg, mode: 'lines' })}
+        >
+          By lyric lines
+        </button>
+      </div>
+      {cfg.mode === 'time' ? (
+        <div className="tp-row">
+          <span className="tp-label">Switch every</span>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => onCfg({ ...cfg, periodSec: Math.max(5, cfg.periodSec - 5) })}
+          >
+            −
+          </button>
+          <span className="tp-num">{cfg.periodSec} s</span>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => onCfg({ ...cfg, periodSec: Math.min(60, cfg.periodSec + 5) })}
+          >
+            +
+          </button>
+        </div>
+      ) : (
+        <div className="tp-row">
+          <span className="tp-label">Hear</span>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => onCfg({ ...cfg, hear: Math.max(1, cfg.hear - 1) })}
+          >
+            −
+          </button>
+          <span className="tp-num">{cfg.hear}</span>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => onCfg({ ...cfg, hear: Math.min(8, cfg.hear + 1) })}
+          >
+            +
+          </button>
+          <span className="tp-label">sing</span>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => onCfg({ ...cfg, sing: Math.max(1, cfg.sing - 1) })}
+          >
+            −
+          </button>
+          <span className="tp-num">{cfg.sing}</span>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => onCfg({ ...cfg, sing: Math.min(8, cfg.sing + 1) })}
+          >
+            +
+          </button>
+        </div>
+      )}
+      <p className="fine tp-caption">{caption}</p>
+      <div className="tp-stems" title="These tracks go silent during your turns — you perform them">
+        <span className="tp-label">Muted while you sing:</span>
+        {stemIds.map((id) => (
+          <button
+            type="button"
+            key={id}
+            className={`chip stem${cfg.stems.includes(id) ? ' active' : ''}`}
+            onClick={() => toggleStem(id)}
+          >
+            {TRACK_META[id]?.label ?? id}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function Transport({
   engine,
   playing,
@@ -132,6 +293,13 @@ export default function Transport({
   loopOn,
   onToggleLoop,
   hasSelection,
+  training,
+  trainCfg,
+  onToggleTraining,
+  onTrainCfg,
+  ducking,
+  linesReady,
+  stemIds,
   transpose,
   onTranspose,
   tempo,
@@ -143,6 +311,7 @@ export default function Transport({
   onCancelSplit,
   onReveal
 }: Props): React.JSX.Element {
+  const [trainOpen, setTrainOpen] = useState(false)
   return (
     <footer className="transport">
       {sep && (
@@ -196,6 +365,33 @@ export default function Transport({
             <path d="M3.5 6.5v-1a2 2 0 0 1 2-2h7l-1.8-1.8M12.5 9.5v1a2 2 0 0 1-2 2h-7l1.8 1.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
+        {split && (
+          <div className="train-wrap">
+            <button
+              type="button"
+              className={`round-ghost train${training ? ' active' : ''}${ducking ? ' ducking' : ''}`}
+              aria-pressed={training}
+              title="Vocal training — the guide drops out on a schedule so you carry the line yourself"
+              onClick={() => setTrainOpen((o) => !o)}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
+                <rect x="2" y="4" width="5" height="8" rx="1.5" fill="currentColor" />
+                <rect x="9.7" y="4.65" width="3.7" height="6.7" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+              </svg>
+            </button>
+            {trainOpen && (
+              <TrainPopover
+                training={training}
+                cfg={trainCfg}
+                linesReady={linesReady}
+                stemIds={stemIds}
+                onToggle={onToggleTraining}
+                onCfg={onTrainCfg}
+                onClose={() => setTrainOpen(false)}
+              />
+            )}
+          </div>
+        )}
       </div>
 
       <div className="transport-right">

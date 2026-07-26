@@ -24,6 +24,67 @@ export interface TimeView {
   e: number
 }
 
+/** Vocal-training setup (what alternates, how often, which stems the singer carries). */
+export interface TrainingConfig {
+  mode: 'time' | 'lines'
+  periodSec: number
+  hear: number
+  sing: number
+  stems: string[]
+}
+
+export const TRAIN_DEFAULTS: TrainingConfig = {
+  mode: 'time',
+  periodSec: 10,
+  hear: 1,
+  sing: 1,
+  stems: ['vocals']
+}
+
+/** Clamp any stored/saved training config into a valid one. */
+export function sanitizeTraining(raw: unknown): TrainingConfig {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const int = (v: unknown, lo: number, hi: number, dflt: number): number => {
+    const n = Math.round(Number(v))
+    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : dflt
+  }
+  const stems = Array.isArray(r.stems) ? r.stems.filter((s): s is string => typeof s === 'string') : []
+  return {
+    mode: r.mode === 'lines' ? 'lines' : 'time',
+    periodSec: int(r.periodSec, 5, 60, 10),
+    hear: int(r.hear, 1, 8, 1),
+    sing: int(r.sing, 1, 8, 1),
+    stems: stems.length > 0 ? stems : ['vocals']
+  }
+}
+
+/**
+ * Duck windows for line-based training: cycle hear+sing through the lyric
+ * lines; each run of sing lines ducks from its first line until the next
+ * heard line begins (the guide re-enters in the breath before it — never
+ * mid-word, and estimated line ends can't cut the singer short).
+ */
+export function trainingWindows(
+  lines: { start: number; end: number }[],
+  hear: number,
+  sing: number,
+  duration: number
+): { s: number; e: number }[] {
+  const cycle = Math.max(1, hear) + Math.max(1, sing)
+  const PRE = 0.15 // cut/restore slightly early, in the breath gap
+  const wins: { s: number; e: number }[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (i % cycle < hear) continue
+    let j = i
+    while (j + 1 < lines.length && (j + 1) % cycle >= hear) j++
+    const s = Math.max(0, lines[i].start - PRE)
+    const e = j + 1 < lines.length ? Math.max(0, lines[j + 1].start - PRE) : duration
+    if (e > s) wins.push({ s, e })
+    i = j
+  }
+  return wins
+}
+
 export const TRACK_META: Record<string, { label: string; color: string }> = {
   original: { label: 'Full mix', color: '#bfb49d' },
   vocals: { label: 'Vocals', color: '#ff5d66' },

@@ -52,6 +52,15 @@ export interface ProjectSettings {
   selection?: { s: number; e: number }
   /** Loop button armed. */
   loop?: boolean
+  /** Vocal training: chosen stems drop out on a schedule so the singer carries them. */
+  training?: {
+    on?: boolean
+    mode: 'time' | 'lines'
+    periodSec: number
+    hear: number
+    sing: number
+    stems: string[]
+  }
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 

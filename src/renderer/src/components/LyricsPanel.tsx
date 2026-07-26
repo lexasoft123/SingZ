@@ -26,6 +26,8 @@ const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
 interface Props {
   engine: MultitrackEngine
   lyrics: LyricsState
+  /** Vocal training, line mode: true = the singer carries this line alone. */
+  singMask: boolean[] | null
   songPath: string
   songName: string
   guideOn: boolean
@@ -55,6 +57,7 @@ function findLine(lines: LyricLine[], t: number, from: number): number {
 export default function LyricsPanel({
   engine,
   lyrics,
+  singMask,
   songPath,
   songName,
   guideOn,
@@ -333,7 +336,7 @@ export default function LyricsPanel({
                     ref={(el) => {
                       lineRefs.current[i] = el
                     }}
-                    className={`lyr-line${i === current ? ' current' : i < current ? ' past' : ''}`}
+                    className={`lyr-line${i === current ? ' current' : i < current ? ' past' : ''}${singMask?.[i] ? ' sing' : ''}`}
                     onClick={() => engine.seek(l.start)}
                     title="Jump here"
                   >

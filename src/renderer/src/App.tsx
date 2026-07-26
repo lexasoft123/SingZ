@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EngineStatus, SeparationProgress } from '../../shared/types'
 import { estimateKey, estimateTempo, type KeyGuess } from './audio/analysis'
 import { MultitrackEngine } from './audio/engine'
@@ -13,7 +13,17 @@ import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
-import { cleanSongName, orderedStems, TRACK_META, type TimeView, type UITrack } from './model'
+import {
+  cleanSongName,
+  orderedStems,
+  sanitizeTraining,
+  TRACK_META,
+  TRAIN_DEFAULTS,
+  trainingWindows,
+  type TimeView,
+  type TrainingConfig,
+  type UITrack
+} from './model'
 
 type Phase = 'empty' | 'loading' | 'ready'
 
@@ -119,6 +129,16 @@ export default function App(): React.JSX.Element {
   const [view, setView] = useState<TimeView | null>(null)
   const [selection, setSelection] = useState<{ s: number; e: number } | null>(null)
   const [loopOn, setLoopOn] = useState(false)
+  const [training, setTraining] = useState(false)
+  const [trainCfg, setTrainCfg] = useState<TrainingConfig>(() => {
+    try {
+      const raw = localStorage.getItem('singz.train')
+      return raw ? sanitizeTraining(JSON.parse(raw)) : TRAIN_DEFAULTS
+    } catch {
+      return TRAIN_DEFAULTS
+    }
+  })
+  const [duckedIds, setDuckedIds] = useState<string[]>([])
   const [songInfo, setSongInfo] = useState<{ key: KeyGuess | null; bpm: number | null }>({
     key: null,
     bpm: null
@@ -137,6 +157,29 @@ export default function App(): React.JSX.Element {
   const selectionRef = useRef(selection)
   selectionRef.current = selection
   const selMemReadyRef = useRef(false)
+  const trainingRef = useRef(training)
+  trainingRef.current = training
+  const trainCfgRef = useRef(trainCfg)
+  trainCfgRef.current = trainCfg
+  const tracksRef = useRef(tracks)
+  tracksRef.current = tracks
+
+  // The coach configures the drill once — the setup follows them across songs.
+  useEffect(() => {
+    localStorage.setItem('singz.train', JSON.stringify(trainCfg))
+  }, [trainCfg])
+
+  // Mirror the engine's ducked set (lane dimming + the pulsing train button).
+  useEffect(
+    () =>
+      engine.subscribe(() => {
+        setDuckedIds((prev) => {
+          const next = engine.duckedStems
+          return next.length === prev.length && next.every((v, i) => v === prev[i]) ? prev : next
+        })
+      }),
+    [engine]
+  )
 
   // Every song remembers its selection and loop arm (projects additionally
   // carry them in project.json, which wins on open). Guarded so the load-time
@@ -258,6 +301,7 @@ export default function App(): React.JSX.Element {
       selMemReadyRef.current = false
       setSelection(null)
       setLoopOn(false)
+      setTraining(false)
       setView(null)
       setDirty(false)
       setSaveState('idle')
@@ -304,6 +348,17 @@ export default function App(): React.JSX.Element {
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
+          // Restore training BEFORE karaoke may reopen: its auto-mute must
+          // know training governs the vocals (the ref is set synchronously —
+          // state alone would land a render too late).
+          const tn = proj.settings.training
+          if (tn) {
+            setTrainCfg(sanitizeTraining(tn))
+            if (tn.on === true) {
+              setTraining(true)
+              trainingRef.current = true
+            }
+          }
           if (localStorage.getItem('singz.karaoke') === '1') openKaraokeRef.current?.()
           else prepMelodyRef.current?.()
           const st = proj.settings.transpose ?? 0
@@ -603,8 +658,12 @@ export default function App(): React.JSX.Element {
 
   const openKaraoke = useCallback(() => {
     setKaraoke(true)
-    engine.setMuted('vocals', true)
-    setTracks((ts) => ts.map((t) => (t.id === 'vocals' ? { ...t, muted: true } : t)))
+    // Karaoke normally mutes the guide so you sing over the band — but with
+    // training armed, the training schedule governs the vocals instead.
+    if (!trainingRef.current) {
+      engine.setMuted('vocals', true)
+      setTracks((ts) => ts.map((t) => (t.id === 'vocals' ? { ...t, muted: true } : t)))
+    }
     void prepLyrics()
     prepMelody()
   }, [engine, prepLyrics, prepMelody])
@@ -633,6 +692,7 @@ export default function App(): React.JSX.Element {
       view: view ?? undefined,
       selection: selection ?? undefined,
       loop: loopOn || undefined,
+      training: { on: training || undefined, ...trainCfg },
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
@@ -651,7 +711,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, tracks])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, tracks])
 
   const commitRename = useCallback(
     async (raw: string) => {
@@ -746,6 +806,57 @@ export default function App(): React.JSX.Element {
     },
     [engine, touchSettings]
   )
+
+  const lines = lyrics.status === 'ready' ? lyrics.lines : null
+
+  /** Arm/disarm vocal training; arming un-mutes the stems it alternates. */
+  const toggleTraining = useCallback(() => {
+    touchSettings()
+    const arming = !trainingRef.current
+    if (arming) {
+      for (const id of trainCfgRef.current.stems) {
+        const t = tracksRef.current.find((x) => x.id === id)
+        if (t?.muted) handleMute(id, false)
+      }
+    }
+    setTraining(arming)
+  }, [touchSettings, handleMute])
+
+  const handleTrainCfg = useCallback(
+    (cfg: TrainingConfig) => {
+      touchSettings()
+      setTrainCfg(cfg)
+      // Line mode needs the lyrics — fetch them if nothing has yet (no-op
+      // when they are already loading or ready; never downloads models).
+      if (cfg.mode === 'lines') void prepLyricsRef.current?.()
+    },
+    [touchSettings]
+  )
+
+  // Push the training schedule into the engine. Line mode falls back to the
+  // timer until synced lyrics are actually available.
+  useEffect(() => {
+    if (!training || !split) {
+      engine.setTraining(null)
+      return
+    }
+    if (trainCfg.mode === 'lines' && lines && lines.length > 0) {
+      engine.setTraining({
+        mode: 'windows',
+        windows: trainingWindows(lines, trainCfg.hear, trainCfg.sing, engine.duration),
+        stems: trainCfg.stems
+      })
+    } else {
+      engine.setTraining({ mode: 'period', periodSec: trainCfg.periodSec, stems: trainCfg.stems })
+    }
+  }, [engine, training, split, trainCfg, lines])
+
+  /** Which lyric lines the singer carries alone (karaoke tints them). */
+  const singMask = useMemo(() => {
+    if (!training || trainCfg.mode !== 'lines' || !lines) return null
+    const cycle = trainCfg.hear + trainCfg.sing
+    return lines.map((_, i) => i % cycle >= trainCfg.hear)
+  }, [training, trainCfg, lines])
 
   /** Global timeline zoom shared by the lanes and the pitch strip. */
   const clampView = useCallback(
@@ -903,6 +1014,7 @@ export default function App(): React.JSX.Element {
                 tracks={tracks}
                 engine={engine}
                 view={view}
+                ducked={duckedIds}
                 selection={selection}
                 onSelection={handleSelection}
                 onZoom={zoomBy}
@@ -932,6 +1044,7 @@ export default function App(): React.JSX.Element {
               <LyricsPanel
                 engine={engine}
                 lyrics={lyrics}
+                singMask={singMask}
                 songPath={song?.path ?? ''}
                 songName={cleanSongName(song?.name ?? '')}
                 guideOn={!vocalsMuted}
@@ -955,6 +1068,13 @@ export default function App(): React.JSX.Element {
             loopOn={loopOn}
             onToggleLoop={toggleLoop}
             hasSelection={selection !== null}
+            training={training}
+            trainCfg={trainCfg}
+            onToggleTraining={toggleTraining}
+            onTrainCfg={handleTrainCfg}
+            ducking={duckedIds.length > 0}
+            linesReady={lines !== null && lines.length > 0}
+            stemIds={split ? tracks.map((t) => t.id) : []}
             transpose={transpose}
             onTranspose={handleTranspose}
             tempo={tempoRate}

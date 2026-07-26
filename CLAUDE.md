@@ -1,7 +1,8 @@
 # SingZ — instructions for Claude Code
 
 Electron desktop app for singers: split songs into six stems (htdemucs_6s), karaoke with
-synced lyrics (LRCLIB + whisper.cpp), pitch matching, transpose, projects.
+synced lyrics (LRCLIB + whisper.cpp), pitch matching, transpose, vocal training
+(chosen stems drop out on a time or lyric-line schedule), projects.
 Deeper docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

@@ -547,6 +547,9 @@ button.chip-status:hover {
   background: color-mix(in srgb, var(--panel) 72%, transparent);
   backdrop-filter: blur(20px);
   position: relative;
+  /* backdrop-filter makes this a stacking context at z auto — lift it so the
+     training popover can open upward over the scrub overlay (z 5) */
+  z-index: 20;
 }
 
 .sep-line {
@@ -1922,4 +1925,136 @@ body.win.maximized .app {
 .mode-seg button.on {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* ---- Vocal training ---------------------------------------------------- */
+
+.train-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.round-ghost.train.active {
+  color: var(--accent);
+  border-color: rgba(255, 160, 40, 0.55);
+  background: var(--accent-soft);
+  box-shadow: 0 0 14px rgba(255, 160, 40, 0.15);
+}
+
+/* The guide is out right now — the singer carries it. Static styling only:
+   an infinite pulse here would defeat the weak-iGPU animation rules. */
+.round-ghost.train.active.ducking {
+  color: #12100d;
+  background: var(--accent);
+  border-color: var(--accent-deep);
+}
+
+.train-pop {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  left: -8px;
+  width: 294px;
+  padding: 14px;
+  background: #1d1915;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+  cursor: default;
+}
+
+.tp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.tp-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.tp-mode {
+  display: flex;
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.tp-mode button {
+  flex: 1;
+}
+
+.tp-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 2px;
+}
+
+.tp-label {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.tp-num {
+  min-width: 34px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tp-caption {
+  margin: 8px 2px 10px;
+}
+
+.tp-stems {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.tp-stems .chip.stem {
+  width: auto;
+  padding: 0 10px;
+  height: 26px;
+  font-weight: 600;
+}
+
+.tp-stems .chip.stem.active {
+  color: var(--accent);
+  border-color: rgba(255, 160, 40, 0.55);
+  background: var(--accent-soft);
+}
+
+/* Ducked lane: the band plays on, this part is yours. */
+.lane-wave.is-ducked {
+  opacity: 0.35;
+}
+
+.lane-you {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #12100d;
+  background: var(--stem, var(--accent));
+  white-space: nowrap;
+}
+
+/* Karaoke: lines the singer carries alone (inset bar avoids layout shift). */
+.lyr-line.sing {
+  box-shadow: inset 3px 0 0 rgba(255, 160, 40, 0.45);
+  background: rgba(255, 160, 40, 0.05);
+}
+
+.lyr-line.sing.current {
+  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--accent-soft);
 }
