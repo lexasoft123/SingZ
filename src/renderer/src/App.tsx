@@ -256,6 +256,12 @@ export default function App(): React.JSX.Element {
           )
           if (seq !== loadSeq.current) return
           const { order, buffers } = audibleStems(rawOrder, decoded)
+      const hidden = rawOrder.filter((st) => !order.includes(st))
+      if (hidden.length > 0) {
+        setNotice(
+          `Split into six stems — ${hidden.join(' and ')} ${hidden.length > 1 ? 'are' : 'is'} silent in this song, so ${hidden.length > 1 ? 'their lanes are' : 'its lane is'} hidden.`
+        )
+      }
           engine.load(order.map((s, i) => ({ id: s, buffer: buffers[i] })))
           const uiTracks = order.map((s, i) => {
             const t = makeTrack(s, buffers[i])
