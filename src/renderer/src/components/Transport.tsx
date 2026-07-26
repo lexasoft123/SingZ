@@ -34,6 +34,7 @@ const STAGE_LABEL: Record<SeparationProgress['stage'], string> = {
 interface Props {
   engine: MultitrackEngine
   playing: boolean
+  onTogglePlay: () => void
   split: boolean
   sep: SeparationProgress | null
   karaokeOn: boolean
@@ -123,6 +124,7 @@ function BpmEntry({
 export default function Transport({
   engine,
   playing,
+  onTogglePlay,
   split,
   sep,
   karaokeOn,
@@ -164,7 +166,7 @@ export default function Transport({
           type="button"
           className={`play${playing ? ' is-playing' : ''}`}
           title={playing ? 'Pause (space)' : 'Play (space)'}
-          onClick={() => engine.toggle()}
+          onClick={onTogglePlay}
         >
           {playing ? (
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>

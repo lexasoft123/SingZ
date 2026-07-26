@@ -193,7 +193,7 @@ export default function App(): React.JSX.Element {
       } else if (e.code === 'Space') {
         e.preventDefault()
         ;(tgt.closest('button') as HTMLElement | null)?.blur()
-        engine.toggle()
+        togglePlayRef.current()
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault()
         engine.seekBy(-5)
@@ -647,6 +647,20 @@ export default function App(): React.JSX.Element {
     [touchSettings]
   )
 
+  /** Space / play button: starting with a selection armed targets the selection. */
+  const togglePlay = useCallback(() => {
+    if (!engine.playing) {
+      const sel = selectionRef.current
+      if (sel) {
+        const pos = engine.position
+        if (pos < sel.s - 0.05 || pos >= sel.e - 0.05) engine.seek(sel.s)
+      }
+    }
+    engine.toggle()
+  }, [engine])
+  const togglePlayRef = useRef(togglePlay)
+  togglePlayRef.current = togglePlay
+
   const toggleLoop = useCallback(() => {
     setLoopOn((on) => {
       const next = !on
@@ -838,6 +852,7 @@ export default function App(): React.JSX.Element {
           <Transport
             engine={engine}
             playing={playing}
+            onTogglePlay={togglePlay}
             split={split}
             sep={sep}
             karaokeOn={karaoke}
