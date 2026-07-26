@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SeparationProgress } from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
 import { fmtClock, fmtTime, modalCoversApp } from '../model'
@@ -39,10 +39,54 @@ interface Props {
   karaokeOn: boolean
   transpose: number
   onTranspose: (st: number) => void
+  tempo: number
+  onTempo: (rate: number) => void
+  bpm: number | null
   onToggleKaraoke: () => void
   onSplit: () => void
   onCancelSplit: () => void
   onReveal: (() => void) | null
+}
+
+/** Effective-BPM readout that doubles as an input: type a target, get a rate. */
+function BpmEntry({
+  bpm,
+  tempo,
+  onTempo
+}: {
+  bpm: number
+  tempo: number
+  onTempo: (rate: number) => void
+}): React.JSX.Element {
+  const [draft, setDraft] = useState<string | null>(null)
+  const shown = draft ?? String(Math.round(bpm * tempo))
+  const commit = (): void => {
+    if (draft !== null) {
+      const target = Number(draft)
+      if (Number.isFinite(target) && target > 0) onTempo(target / bpm)
+    }
+    setDraft(null)
+  }
+  return (
+    <label className="bpm-entry" title="Set the playback tempo in beats per minute">
+      <input
+        type="text"
+        inputMode="numeric"
+        value={shown}
+        onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ''))}
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          if (e.key === 'Escape') {
+            setDraft(null)
+            ;(e.target as HTMLInputElement).blur()
+          }
+        }}
+      />
+      <span className="tr-unit">bpm</span>
+    </label>
+  )
 }
 
 export default function Transport({
@@ -53,6 +97,9 @@ export default function Transport({
   karaokeOn,
   transpose,
   onTranspose,
+  tempo,
+  onTempo,
+  bpm,
   onToggleKaraoke,
   onSplit,
   onCancelSplit,
@@ -120,6 +167,26 @@ export default function Transport({
             <button type="button" className="chip" onClick={() => onTranspose(transpose + 1)}>
               +
             </button>
+          </div>
+        )}
+        {engine.duration > 0 && (
+          <div className="transpose-ctl" title="Playback speed (pitch stays put)">
+            <button type="button" className="chip" onClick={() => onTempo(tempo - 0.05)}>
+              −
+            </button>
+            <button
+              type="button"
+              className={`tr-badge${Math.abs(tempo - 1) > 0.001 ? ' active' : ''}`}
+              title="Reset speed"
+              onClick={() => onTempo(1)}
+            >
+              {Math.round(tempo * 100)}
+              <span className="tr-unit">%</span>
+            </button>
+            <button type="button" className="chip" onClick={() => onTempo(tempo + 0.05)}>
+              +
+            </button>
+            {bpm ? <BpmEntry bpm={bpm} tempo={tempo} onTempo={onTempo} /> : null}
           </div>
         )}
         {sep ? (

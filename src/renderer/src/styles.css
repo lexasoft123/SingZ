@@ -1402,6 +1402,29 @@ button.chip-status:hover {
   box-shadow: 0 0 14px rgba(255, 160, 40, 0.15);
 }
 
+.bpm-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: text;
+}
+
+.bpm-entry input {
+  width: 30px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  text-align: right;
+  outline: none;
+  padding: 0;
+}
+
 .tr-unit {
   font-size: 9px;
   color: var(--faint);

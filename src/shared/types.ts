@@ -44,6 +44,8 @@ export interface SeparationProgress {
 
 export interface ProjectSettings {
   transpose: number
+  /** Playback speed (1 = original); optional for projects saved before it existed. */
+  tempo?: number
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 

@@ -112,6 +112,7 @@ export default function App(): React.JSX.Element {
   const [lyrics, setLyrics] = useState<LyricsState>({ status: 'idle' })
   const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
   const [transpose, setTranspose] = useState(0)
+  const [tempoRate, setTempoRate] = useState(1)
   const [view, setView] = useState<TimeView | null>(null)
   const [songInfo, setSongInfo] = useState<{ key: KeyGuess | null; bpm: number | null }>({
     key: null,
@@ -219,6 +220,8 @@ export default function App(): React.JSX.Element {
       preferRef.current = 'auto'
       setTranspose(0)
       void engine.setTranspose(0)
+      setTempoRate(1)
+      void engine.setTempo(1)
       setSaveState('idle')
       setView(null)
       setPhase('loading')
@@ -260,6 +263,9 @@ export default function App(): React.JSX.Element {
           const st = proj.settings.transpose ?? 0
           setTranspose(st)
           void engine.setTranspose(st)
+          const tr = proj.settings.tempo ?? 1
+          setTempoRate(tr)
+          void engine.setTempo(tr)
           setSaveState('saved')
           setPhase('ready')
           void prepLyricsRef.current?.()
@@ -526,6 +532,7 @@ export default function App(): React.JSX.Element {
     setSaveState('saving')
     const settings = {
       transpose,
+      tempo: tempoRate,
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
@@ -543,7 +550,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tracks])
+  }, [song, saveState, transpose, tempoRate, tracks])
 
   const commitRename = useCallback(
     async (raw: string) => {
@@ -567,15 +574,34 @@ export default function App(): React.JSX.Element {
     [song, isProject]
   )
 
+  /** Any settings change makes an open project re-savable. */
+  const touchSettings = useCallback(() => {
+    setSaveState((s) => (s === 'saved' ? 'idle' : s))
+  }, [])
+
   const handleTranspose = useCallback(
     (st: number) => {
       const clamped = Math.max(-12, Math.min(12, st))
+      touchSettings()
       setTranspose(clamped)
       // Re-sync afterwards: if the stretch worklet fails, the engine reverts
       // to 0 and the badge must not keep promising a shift that isn't heard.
       void engine.setTranspose(clamped).finally(() => setTranspose(engine.transpose))
     },
-    [engine]
+    [engine, touchSettings]
+  )
+
+  const handleTempo = useCallback(
+    (rate: number) => {
+      const clamped = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 100) / 100
+      touchSettings()
+      setTempoRate(clamped)
+      void engine.setTempo(clamped).finally(() => {
+        setTempoRate(engine.tempo)
+        setTranspose(engine.transpose)
+      })
+    },
+    [engine, touchSettings]
   )
 
   /** Global timeline zoom shared by the lanes and the pitch strip. */
@@ -709,6 +735,7 @@ export default function App(): React.JSX.Element {
                   engine={engine}
                   melody={melody}
                   transpose={transpose}
+                  tempo={tempoRate}
                   view={view}
                   onZoom={zoomBy}
                   onViewShift={shiftView}
@@ -741,6 +768,9 @@ export default function App(): React.JSX.Element {
             karaokeOn={karaoke}
             transpose={transpose}
             onTranspose={handleTranspose}
+            tempo={tempoRate}
+            onTempo={handleTempo}
+            bpm={songInfo.bpm}
             onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
             onCancelSplit={() => void window.singz.cancelSeparation()}

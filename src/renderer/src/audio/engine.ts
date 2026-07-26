@@ -41,7 +41,9 @@ export class MultitrackEngine {
   private stretch: StretchNode | null = null
   private stretchPromise: Promise<StretchNode> | null = null
   private stretchLatency = 0
+  private stretchOn = false
   private semitones = 0
+  private rate = 1
 
   duration = 0
 
@@ -70,15 +72,20 @@ export class MultitrackEngine {
 
   get position(): number {
     if (!this._playing) return this.startOffset
-    // Track what the listener hears: stretch-node latency plus device output latency.
-    const lag =
-      (this.semitones !== 0 ? this.stretchLatency : 0) + (this.ctx.outputLatency || 0)
-    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt) - lag
+    // Track what the listener hears: stretch-node latency plus device output
+    // latency (real seconds), converted to song time by the playback rate.
+    const lag = (this.stretchOn ? this.stretchLatency : 0) + (this.ctx.outputLatency || 0)
+    const elapsed =
+      this.startOffset + (this.ctx.currentTime - this.startedAt - lag) * this.rate
     return Math.min(this.duration, Math.max(this.startOffset, elapsed))
   }
 
   get transpose(): number {
     return this.semitones
+  }
+
+  get tempo(): number {
+    return this.rate
   }
 
   /**
@@ -111,32 +118,65 @@ export class MultitrackEngine {
     const target = Math.max(-12, Math.min(12, Math.round(st)))
     if (target === this.semitones) return
     this.semitones = target
-    if (target === 0) {
+    await this.applyStretchState()
+    this.emit()
+  }
+
+  /**
+   * Playback speed with pitch preserved: every stem source runs at `rate`
+   * (varispeed, sample-locked), and the master-bus stretch node corrects the
+   * resulting pitch shift by -12*log2(rate) on top of the user's transpose.
+   */
+  async setTempo(rate: number): Promise<void> {
+    const target = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 100) / 100
+    if (Math.abs(target - this.rate) < 0.001) return
+    this.applyRate(target)
+    await this.applyStretchState()
+    this.emit()
+  }
+
+  /** Re-anchor the clock at the current position, then switch the rate. */
+  private applyRate(rate: number): void {
+    if (this._playing) {
+      this.startOffset = this.position
+      this.startedAt = this.ctx.currentTime
+    }
+    this.rate = rate
+    for (const src of this.sources) src.playbackRate.value = rate
+  }
+
+  private async applyStretchState(): Promise<void> {
+    const semitones = this.semitones
+    const rate = this.rate
+    if (semitones === 0 && rate === 1) {
+      this.stretchOn = false
       this.stretch?.schedule({ active: false })
       this.master.disconnect()
       this.master.connect(this.ctx.destination)
-    } else {
-      try {
-        // A worklet that never finishes booting (e.g. CSP blocking its WASM)
-        // must fail loudly, not leave the mix silently untransposed.
-        const stretch = await Promise.race([
-          this.ensureStretch(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('stretch worklet did not start within 5s')), 5000)
-          )
-        ])
-        if (this.semitones !== target) return // superseded by a later call
-        this.master.disconnect()
-        this.master.connect(stretch)
-        stretch.schedule({ active: true, semitones: target })
-      } catch (err) {
-        console.error('Transpose unavailable:', err)
-        this.semitones = 0
-        this.master.disconnect()
-        this.master.connect(this.ctx.destination)
-      }
+      return
     }
-    this.emit()
+    try {
+      // A worklet that never finishes booting (e.g. CSP blocking its WASM)
+      // must fail loudly, not leave the mix silently unprocessed.
+      const stretch = await Promise.race([
+        this.ensureStretch(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('stretch worklet did not start within 5s')), 5000)
+        )
+      ])
+      if (this.semitones !== semitones || this.rate !== rate) return // superseded
+      this.master.disconnect()
+      this.master.connect(stretch)
+      stretch.schedule({ active: true, semitones: semitones - 12 * Math.log2(rate) })
+      this.stretchOn = true
+    } catch (err) {
+      console.error('Pitch/tempo processing unavailable:', err)
+      this.semitones = 0
+      this.applyRate(1)
+      this.stretchOn = false
+      this.master.disconnect()
+      this.master.connect(this.ctx.destination)
+    }
   }
 
   decode(data: ArrayBuffer): Promise<AudioBuffer> {
@@ -175,6 +215,7 @@ export class MultitrackEngine {
     this.tracks.forEach((t, i) => {
       const src = this.ctx.createBufferSource()
       src.buffer = t.buffer
+      src.playbackRate.value = this.rate
       src.connect(t.gain)
       src.start(when, Math.min(this.startOffset, t.buffer.duration))
       this.sources.push(src)

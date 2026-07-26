@@ -59,6 +59,7 @@ interface Props {
   engine: MultitrackEngine
   melody: MelodyState
   transpose: number
+  tempo: number
   view: TimeView | null
   onZoom: (factor: number, center?: number) => void
   onViewShift: (s: number, e: number) => void
@@ -72,6 +73,7 @@ export default function PitchStrip({
   engine,
   melody,
   transpose,
+  tempo,
   view,
   onZoom,
   onViewShift,
@@ -363,7 +365,7 @@ export default function PitchStrip({
         </div>
         <div className="psi-row">
           <span className="psi-label">tempo</span>
-          <span className="psi-value">{info.bpm ? `${info.bpm} bpm` : '—'}</span>
+          <span className="psi-value">{info.bpm ? `${Math.round(info.bpm * tempo)} bpm` : '—'}</span>
         </div>
         <div className="psi-row">
           <span className="psi-label">range</span>
