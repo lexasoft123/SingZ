@@ -632,10 +632,16 @@ export default function App(): React.JSX.Element {
     [engine, touchSettings]
   )
 
-  // Looping: native source loop over the selection, or the whole song.
+  // Selection/loop region: with loop the region repeats; without it,
+  // playback started inside the selection stops at its end.
   useEffect(() => {
-    engine.setLoopRegion(
-      loopOn ? (selection ? { start: selection.s, end: selection.e } : { start: 0, end: engine.duration }) : null
+    engine.setRegion(
+      selection
+        ? { start: selection.s, end: selection.e }
+        : loopOn
+          ? { start: 0, end: engine.duration }
+          : null,
+      loopOn
     )
   }, [engine, loopOn, selection, tracks])
 

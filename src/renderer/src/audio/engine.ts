@@ -44,7 +44,9 @@ export class MultitrackEngine {
   private stretchOn = false
   private semitones = 0
   private rate = 1
-  private loopRegion: { start: number; end: number } | null = null
+  private region: { start: number; end: number } | null = null
+  private regionLoop = false
+  private boundTimer: ReturnType<typeof setInterval> | null = null
 
   duration = 0
 
@@ -78,7 +80,7 @@ export class MultitrackEngine {
     const lag = (this.stretchOn ? this.stretchLatency : 0) + (this.ctx.outputLatency || 0)
     const elapsed =
       this.startOffset + (this.ctx.currentTime - this.startedAt - lag) * this.rate
-    const r = this.loopRegion
+    const r = this.regionLoop ? this.region : null
     if (r && this.startOffset < r.end && elapsed > r.end) {
       // Sources loop natively at r.end -> r.start; fold the linear clock.
       return r.start + ((elapsed - r.end) % (r.end - r.start))
@@ -95,23 +97,44 @@ export class MultitrackEngine {
   }
 
   /**
-   * Loop a region (or null to stop looping). Uses the sources' native
-   * loopStart/loopEnd, so every stem wraps on the same sample — no gap.
+   * Play region: with loop, sources wrap natively at the region edges (every
+   * stem on the same sample — no gap); without loop, playback that started
+   * inside the region stops at its end. Live-updatable while playing.
    */
-  setLoopRegion(region: { start: number; end: number } | null): void {
-    const valid = region && region.end - region.start > 0.05 ? region : null
-    this.loopRegion = valid
+  setRegion(region: { start: number; end: number } | null, loop: boolean): void {
+    this.region = region && region.end - region.start > 0.05 ? region : null
+    this.regionLoop = loop
     for (const src of this.sources) this.applyLoop(src)
+    this.syncBoundWatcher()
   }
 
   private applyLoop(src: AudioBufferSourceNode): void {
-    const r = this.loopRegion
+    const r = this.regionLoop ? this.region : null
     if (r && src.buffer) {
       src.loopStart = Math.max(0, r.start)
       src.loopEnd = Math.min(r.end, src.buffer.duration)
       src.loop = src.loopEnd - src.loopStart > 0.05
     } else {
       src.loop = false
+    }
+  }
+
+  /** A selection without loop bounds playback: stop when its end is reached. */
+  private syncBoundWatcher(): void {
+    const active = this._playing && this.region !== null && !this.regionLoop
+    if (active && this.boundTimer === null) {
+      this.boundTimer = setInterval(() => {
+        const r = this.region
+        if (!this._playing || !r || this.regionLoop) return
+        if (this.startOffset < r.end && this.position >= r.end - 0.015) {
+          this.pause()
+          this.startOffset = Math.min(r.end, this.duration)
+          this.emit()
+        }
+      }, 25)
+    } else if (!active && this.boundTimer !== null) {
+      clearInterval(this.boundTimer)
+      this.boundTimer = null
     }
   }
 
@@ -261,6 +284,7 @@ export class MultitrackEngine {
     }
     this.startedAt = when
     this._playing = true
+    this.syncBoundWatcher()
     this.emit()
   }
 
@@ -269,6 +293,7 @@ export class MultitrackEngine {
     this.startOffset = this.position
     this._playing = false
     this.stopSources()
+    this.syncBoundWatcher()
     this.emit()
   }
 
