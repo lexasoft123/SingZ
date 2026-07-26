@@ -469,22 +469,52 @@ export class Separator {
           let lastOutput = Date.now()
           let sawOutput = false
           let timedOut = false
+          // Chunk-pace watchdog: a DirectML session can "work" pathologically
+          // slowly (seen in the field: ~18 min per 7.8 s chunk when DML lands
+          // on the WARP software adapter). First chunk gets 10 minutes (it
+          // includes the one-time GPU compile), later chunks 5 — anything
+          // slower loses to CPU on every machine we have, so bailing is right.
+          const sessionStart = Date.now()
+          let chunksSeen = 0
+          let lastChunkAt = 0
+          const FIRST_CHUNK_LIMIT_S = 600
+          const CHUNK_LIMIT_S = 300
           const heartbeat = setInterval(() => {
             const quiet = Math.round((Date.now() - lastOutput) / 1000)
-            if (provider === 'dml' && !sawOutput && quiet >= 240) {
-              timedOut = true
-              log(
-                'splitter',
-                'DirectML produced nothing for 4 minutes — giving up on it and switching to the CPU engine',
-                'warn'
-              )
-              child.kill('SIGTERM')
-              return
+            if (provider === 'dml' && !timedOut) {
+              if (!sawOutput && quiet >= 240) {
+                timedOut = true
+                log(
+                  'splitter',
+                  'DirectML produced nothing for 4 minutes — giving up on it and switching to the CPU engine',
+                  'warn'
+                )
+                child.kill('SIGTERM')
+                return
+              }
+              if (sawOutput) {
+                const sinceChunk = Math.round(
+                  (Date.now() - (chunksSeen > 0 ? lastChunkAt : sessionStart)) / 1000
+                )
+                const limit = chunksSeen > 0 ? CHUNK_LIMIT_S : FIRST_CHUNK_LIMIT_S
+                if (sinceChunk >= limit) {
+                  timedOut = true
+                  log(
+                    'splitter',
+                    `DirectML is running far too slowly here (${sinceChunk}s on chunk ${chunksSeen + 1} — CPU will be much faster) — switching engines`,
+                    'warn'
+                  )
+                  child.kill('SIGTERM')
+                  return
+                }
+              }
             }
             if (quiet >= 30) {
               log(
                 'splitter',
-                `engine is busy, ${quiet}s without output — a first run on a GPU compiles the model and can take a few minutes`
+                chunksSeen > 0
+                  ? `engine is busy — chunk ${chunksSeen + 1} running for ${quiet}s`
+                  : `engine is busy, ${quiet}s without output — a first run on a GPU compiles the model and can take a few minutes`
               )
             }
           }, 30_000)
@@ -503,7 +533,9 @@ export class Separator {
             logChunk('splitter', text)
             // "    chunk 3/12: 4.1s elapsed"
             for (const m of text.matchAll(/chunk (\d+)\/(\d+)/g)) {
-              const pct = (parseInt(m[1], 10) / Math.max(1, parseInt(m[2], 10))) * 100
+              chunksSeen = parseInt(m[1], 10)
+              lastChunkAt = Date.now()
+              const pct = (chunksSeen / Math.max(1, parseInt(m[2], 10))) * 100
               onProgress({ stage: 'separating', percent: Math.min(99, pct) })
             }
           }
@@ -526,7 +558,7 @@ export class Separator {
               return
             }
             if (timedOut) {
-              resolve({ ok: false, error: 'DirectML took too long preparing the model.' })
+              resolve({ ok: false, error: 'DirectML ran too slowly on this machine.' })
               return
             }
             void (async () => {

@@ -48,7 +48,9 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
 - **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
   and every split is six stems (htdemucs_6s; silent guitar/piano lanes are
   hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere
-  (DirectML on Windows with a `dml-disabled.json` marker after failures; CPU
+  (DirectML on Windows with a `dml-disabled.json` marker after failures —
+  including pathologically slow sessions caught by the chunk-pace watchdog
+  (WARP/remote-desktop adapters); CPU
   on Intel Macs — CoreML crashes compiling the graph). ONNX packs get a
   renderer-rendered 44.1 kHz WAV (`needsPcm`). Packs are versioned via
   `python/pack.json` — bump `PACK_FORMAT_REQUIRED` (models.ts) with the
