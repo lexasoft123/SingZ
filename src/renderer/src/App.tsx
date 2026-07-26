@@ -302,6 +302,7 @@ export default function App(): React.JSX.Element {
       setSelection(null)
       setLoopOn(false)
       setTraining(false)
+      trainingRef.current = false // openKaraoke may consult it before the render flushes
       setView(null)
       setDirty(false)
       setSaveState('idle')

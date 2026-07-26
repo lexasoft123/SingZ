@@ -391,7 +391,7 @@ export class Separator {
     if (providers.includes('dml') && (await exists(dmlFlagPath()))) {
       log(
         'splitter',
-        'DirectML is switched off on this machine after an earlier failure — using the CPU engine (re-download the pack to try DirectML again)'
+        'DirectML is switched off on this machine after an earlier failure — using the CPU engine (pick GPU in the model manager to try it again)'
       )
       providers = ['cpu']
     }
