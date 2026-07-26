@@ -50,6 +50,8 @@ export interface ProjectSettings {
   view?: { s: number; e: number }
   /** Saved loop/selection range (seconds). */
   selection?: { s: number; e: number }
+  /** Loop button armed. */
+  loop?: boolean
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 

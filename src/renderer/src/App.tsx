@@ -109,6 +109,7 @@ export default function App(): React.JSX.Element {
   const [playing, setPlaying] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
+  const [dirty, setDirty] = useState(false)
   const [karaoke, setKaraoke] = useState(false)
   const [lyrics, setLyrics] = useState<LyricsState>({ status: 'idle' })
   const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
@@ -236,6 +237,7 @@ export default function App(): React.JSX.Element {
       setSelection(null)
       setLoopOn(false)
       setView(null)
+      setDirty(false)
       setSaveState('idle')
       setView(null)
       setPhase('loading')
@@ -290,6 +292,7 @@ export default function App(): React.JSX.Element {
           if (sel && Number.isFinite(sel.s) && Number.isFinite(sel.e) && sel.e - sel.s > 0.05) {
             setSelection({ s: Math.max(0, sel.s), e: sel.e })
           }
+          if (proj.settings.loop === true) setLoopOn(true)
           setSaveState('saved')
           setPhase('ready')
           void prepLyricsRef.current?.()
@@ -415,6 +418,9 @@ export default function App(): React.JSX.Element {
       setTracks(order.map((s, i) => makeTrack(s, buffers[i])))
       setStemFiles(stems)
       setSplit(true)
+      // Fresh stems in an open project are unsaved content.
+      setDirty(true)
+      setSaveState((st) => (st === 'saved' ? 'idle' : st))
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
       // Analyze right away (melody, key, bpm) so karaoke opens warm and the
@@ -428,26 +434,35 @@ export default function App(): React.JSX.Element {
     setSep(null)
   }, [song, engineStatus, engine])
 
+  /** Any settings change marks an open project as having unsaved changes. */
+  const touchSettings = useCallback(() => {
+    setDirty(true)
+    setSaveState((s) => (s === 'saved' ? 'idle' : s))
+  }, [])
+
   const handleMute = useCallback(
     (id: string, muted: boolean) => {
+      touchSettings()
       engine.setMuted(id, muted)
       setTracks((ts) => ts.map((t) => (t.id === id ? { ...t, muted } : t)))
     },
-    [engine]
+    [engine, touchSettings]
   )
   const handleSolo = useCallback(
     (id: string, solo: boolean) => {
+      touchSettings()
       engine.setSolo(id, solo)
       setTracks((ts) => ts.map((t) => (t.id === id ? { ...t, solo } : t)))
     },
-    [engine]
+    [engine, touchSettings]
   )
   const handleVolume = useCallback(
     (id: string, volume: number) => {
+      touchSettings()
       engine.setVolume(id, volume)
       setTracks((ts) => ts.map((t) => (t.id === id ? { ...t, volume } : t)))
     },
-    [engine]
+    [engine, touchSettings]
   )
 
   const vocalsMuted = tracks.find((t) => t.id === 'vocals')?.muted ?? false
@@ -574,12 +589,14 @@ export default function App(): React.JSX.Element {
       tempo: tempoRate,
       view: view ?? undefined,
       selection: selection ?? undefined,
+      loop: loopOn || undefined,
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
     }
     const res = await window.singz.saveProject(song.path, cleanSongName(song.name), settings)
     if (res.ok) {
+      setDirty(false)
       setSaveState('saved')
       // The song now lives inside its project folder — anchor there so
       // renaming and future saves act on the project, not the original file.
@@ -591,7 +608,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, tracks])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, tracks])
 
   const commitRename = useCallback(
     async (raw: string) => {
@@ -614,11 +631,6 @@ export default function App(): React.JSX.Element {
     },
     [song, isProject]
   )
-
-  /** Any settings change makes an open project re-savable. */
-  const touchSettings = useCallback(() => {
-    setSaveState((s) => (s === 'saved' ? 'idle' : s))
-  }, [])
 
   const handleTranspose = useCallback(
     (st: number) => {
@@ -668,6 +680,7 @@ export default function App(): React.JSX.Element {
   togglePlayRef.current = togglePlay
 
   const toggleLoop = useCallback(() => {
+    touchSettings()
     setLoopOn((on) => {
       const next = !on
       if (next && selection) {
@@ -676,7 +689,7 @@ export default function App(): React.JSX.Element {
       }
       return next
     })
-  }, [engine, selection])
+  }, [engine, selection, touchSettings])
 
   const handleTempo = useCallback(
     (rate: number) => {
@@ -772,11 +785,20 @@ export default function App(): React.JSX.Element {
             <button
               type="button"
               className="pill ghost small"
-              title="Save song, stems, lyrics and settings into ~/Music/SingZ"
+              title="Save song, stems, lyrics and settings into ~/Documents/SingZ"
               disabled={saveState === 'saving'}
               onClick={() => void handleSaveProject()}
             >
-              {saveState === 'saved' ? 'Saved ✓' : saveState === 'saving' ? 'Saving…' : 'Save project'}
+              {saveState === 'saved' ? (
+                'Saved ✓'
+              ) : saveState === 'saving' ? (
+                'Saving…'
+              ) : (
+                <>
+                  Save project
+                  {isProject && dirty && <span className="dirty-dot" title="Unsaved changes" />}
+                </>
+              )}
             </button>
           )}
           {phase === 'ready' && (
@@ -872,6 +894,7 @@ export default function App(): React.JSX.Element {
             bpm={songInfo.bpm}
             onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
+            onResplit={split && !sep ? () => void startSplit() : null}
             onCancelSplit={() => void window.singz.cancelSeparation()}
             onReveal={
               stemFiles ? () => void window.singz.revealInFolder(stemFiles.vocals) : null

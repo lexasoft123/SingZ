@@ -48,6 +48,7 @@ interface Props {
   bpm: number | null
   onToggleKaraoke: () => void
   onSplit: () => void
+  onResplit: (() => void) | null
   onCancelSplit: () => void
   onReveal: (() => void) | null
 }
@@ -138,6 +139,7 @@ export default function Transport({
   bpm,
   onToggleKaraoke,
   onSplit,
+  onResplit,
   onCancelSplit,
   onReveal
 }: Props): React.JSX.Element {
@@ -263,6 +265,16 @@ export default function Transport({
               </svg>
               Karaoke
             </button>
+            {onResplit && (
+              <button
+                type="button"
+                className="pill ghost"
+                title="Split again with the current AI model — upgrades older four-stem splits to six"
+                onClick={onResplit}
+              >
+                ↻ Re-split
+              </button>
+            )}
             {onReveal && (
               <button
                 type="button"

@@ -1877,3 +1877,14 @@ body.win.maximized .app {
   background: var(--accent-soft);
   box-shadow: 0 0 14px rgba(255, 160, 40, 0.15);
 }
+
+.dirty-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 7px rgba(255, 160, 40, 0.7);
+  vertical-align: 1px;
+}
