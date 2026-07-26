@@ -1894,3 +1894,32 @@ body.win.maximized .app {
 .update-chip {
   margin-left: 4px;
 }
+
+.wiz-engine {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 6px;
+}
+
+.mode-seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.mode-seg button {
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+}
+
+.mode-seg button + button {
+  border-left: 1px solid var(--line);
+}
+
+.mode-seg button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}

@@ -111,6 +111,36 @@ const launch = (env = {}) =>
   check(!restored.cls, 'maximized class cleared after restore')
   check(restored.radius === '12px', `corners rounded again after restore (got ${restored.radius})`)
 
+  // ---- CPU/GPU knob in the model manager (wizard auto-opens on fresh runner) ----
+  const wizVisible = await page
+    .waitForSelector('.wiz-engine', { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false)
+  if (!wizVisible) {
+    await page.click('.chip-status')
+    await page.waitForSelector('.wiz-engine', { timeout: 15000 })
+  }
+  const seg = await page.evaluate(() => ({
+    buttons: [...document.querySelectorAll('.mode-seg button')].map((b) => ({
+      label: b.textContent?.trim(),
+      on: b.className.includes('on')
+    }))
+  }))
+  check(seg.buttons.length === 2, `engine knob has 2 options (got ${seg.buttons.length})`)
+  check(
+    seg.buttons.find((b) => b.label === 'GPU')?.on === true,
+    'GPU selected by default'
+  )
+  await page.click('.mode-seg button:nth-child(2)') // CPU
+  await page.waitForTimeout(600)
+  const cpuMode = await page.evaluate(() => window.singz.getSplitterMode())
+  check(cpuMode.mode === 'cpu', `knob wrote the CPU marker (got ${cpuMode.mode})`)
+  await page.click('.mode-seg button:nth-child(1)') // back to GPU
+  await page.waitForTimeout(600)
+  const autoMode = await page.evaluate(() => window.singz.getSplitterMode())
+  check(autoMode.mode === 'auto', `knob cleared the marker (got ${autoMode.mode})`)
+  await page.keyboard.press('Escape')
+
   // ---- window-state persistence across relaunch ----
   await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].setBounds({ x: 60, y: 60, width: 1005, height: 705 })

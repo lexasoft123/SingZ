@@ -10,6 +10,9 @@ import type {
 const api: SingzApi = {
   pathForFile: (file) => webUtils.getPathForFile(file),
 
+  getSplitterMode: () => ipcRenderer.invoke('splitter:mode'),
+  setSplitterMode: (mode) => ipcRenderer.invoke('splitter:set-mode', mode),
+
   updateStateNow: () => ipcRenderer.invoke('update:state'),
   installUpdate: () => ipcRenderer.send('update:install'),
   onUpdateState: (cb) => {

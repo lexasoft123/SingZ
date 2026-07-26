@@ -158,6 +158,9 @@ export interface LogEntry {
 }
 
 export interface SingzApi {
+  /** Windows splitting engine preference (backed by the dml-disabled marker). */
+  getSplitterMode(): Promise<{ mode: 'auto' | 'cpu'; reason?: string }>
+  setSplitterMode(mode: 'auto' | 'cpu'): Promise<{ ok: boolean; error?: string }>
   updateStateNow: () => Promise<UpdateState>
   installUpdate: () => void
   onUpdateState: (cb: (s: UpdateState) => void) => () => void

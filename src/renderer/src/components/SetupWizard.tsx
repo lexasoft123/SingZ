@@ -17,6 +17,19 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
   const [progress, setProgress] = useState<Record<string, number>>({})
   const [running, setRunning] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
+  const isWin = document.body.classList.contains('win')
+  const [engineMode, setEngineMode] = useState<{ mode: 'auto' | 'cpu'; reason?: string } | null>(
+    null
+  )
+
+  useEffect(() => {
+    if (isWin) void window.singz.getSplitterMode().then(setEngineMode)
+  }, [isWin])
+
+  const chooseMode = async (mode: 'auto' | 'cpu'): Promise<void> => {
+    await window.singz.setSplitterMode(mode)
+    setEngineMode(await window.singz.getSplitterMode())
+  }
   const startedRef = useRef(false)
   const busy = running.size > 0
 
@@ -107,6 +120,38 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
             )
           })}
         </div>
+        {isWin && engineMode && (
+          <div className="wiz-engine">
+            <div className="wiz-head">
+              <span className="wiz-name">Splitting engine</span>
+              <span className="mode-seg">
+                <button
+                  type="button"
+                  className={engineMode.mode === 'auto' ? 'on' : ''}
+                  title="Try the graphics card first, fall back to the processor if it misbehaves"
+                  onClick={() => void chooseMode('auto')}
+                >
+                  GPU
+                </button>
+                <button
+                  type="button"
+                  className={engineMode.mode === 'cpu' ? 'on' : ''}
+                  title="Split on the processor only"
+                  onClick={() => void chooseMode('cpu')}
+                >
+                  CPU
+                </button>
+              </span>
+            </div>
+            <p className="wiz-desc">
+              {engineMode.mode === 'cpu'
+                ? engineMode.reason && engineMode.reason !== 'chosen in the model manager'
+                  ? `The graphics card was turned off automatically (${engineMode.reason}) — pick GPU to try it again.`
+                  : 'Splits use the processor only.'
+                : 'Splits try the graphics card first and fall back to the processor if it misbehaves.'}
+            </p>
+          </div>
+        )}
         {error && <p className="fine warn">{error}</p>}
         <div className="modal-actions">
           {error && (

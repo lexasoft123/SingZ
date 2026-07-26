@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, Menu, shell, systemPreferences } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
@@ -13,7 +13,7 @@ import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
 import { log, logEntries, saveLog } from './log'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
-import { cleanupObsoleteModels, modelsDir, packDir } from './models'
+import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir } from './models'
 import { Separator } from './separation'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
@@ -101,6 +101,34 @@ function registerIpc(): void {
   ipcMain.handle('win:is-maximized', (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
   ipcMain.handle('update:state', () => updateState())
   ipcMain.on('update:install', () => installUpdate())
+
+  ipcMain.handle('splitter:mode', async () => {
+    try {
+      const j = JSON.parse(await readFile(dmlFlagPath(), 'utf8')) as { reason?: string }
+      return { mode: 'cpu', reason: j.reason }
+    } catch {
+      return { mode: 'auto' }
+    }
+  })
+  ipcMain.handle('splitter:set-mode', async (_e, mode: string) => {
+    try {
+      if (mode === 'cpu') {
+        await writeFile(
+          dmlFlagPath(),
+          JSON.stringify({ at: new Date().toISOString(), reason: 'chosen in the model manager' }, null, 2),
+          'utf8'
+        )
+        log('splitter', 'engine set to CPU only (model manager)')
+      } else {
+        await rm(dmlFlagPath(), { force: true })
+        log('splitter', 'GPU (DirectML) re-enabled (model manager)')
+      }
+      void separator.check(true)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: String(err) }
+    }
+  })
 
   ipcMain.handle('source:register', async (_e, raw: string): Promise<RegisterResult> => {
     try {

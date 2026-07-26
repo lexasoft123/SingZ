@@ -136,6 +136,21 @@ export default function App(): React.JSX.Element {
   melodyRef.current = melody
   const selectionRef = useRef(selection)
   selectionRef.current = selection
+  const selMemReadyRef = useRef(false)
+
+  // Every song remembers its selection and loop arm (projects additionally
+  // carry them in project.json, which wins on open). Guarded so the load-time
+  // reset never clobbers the stored value before restore runs.
+  useEffect(() => {
+    const path = song?.path
+    if (!path || !selMemReadyRef.current) return
+    const key = `singz.sel:${path}`
+    if (selection) {
+      localStorage.setItem(key, JSON.stringify({ s: selection.s, e: selection.e, loop: loopOn }))
+    } else {
+      localStorage.removeItem(key)
+    }
+  }, [selection, loopOn, song])
 
   useEffect(() => engine.subscribe(() => setPlaying(engine.playing)), [engine])
 
@@ -240,6 +255,7 @@ export default function App(): React.JSX.Element {
       void engine.setTranspose(0)
       setTempoRate(1)
       void engine.setTempo(1)
+      selMemReadyRef.current = false
       setSelection(null)
       setLoopOn(false)
       setView(null)
@@ -305,6 +321,7 @@ export default function App(): React.JSX.Element {
             setSelection({ s: Math.max(0, sel.s), e: sel.e })
           }
           if (proj.settings.loop === true) setLoopOn(true)
+          selMemReadyRef.current = true
           setSaveState('saved')
           setPhase('ready')
           void prepLyricsRef.current?.()
@@ -317,6 +334,20 @@ export default function App(): React.JSX.Element {
         originalBufRef.current = audio
         engine.load([{ id: 'original', buffer: audio }])
         setTracks([makeTrack('original', audio)])
+        try {
+          const mem = JSON.parse(localStorage.getItem(`singz.sel:${reg.path}`) ?? 'null') as {
+            s: number
+            e: number
+            loop?: boolean
+          } | null
+          if (mem && Number.isFinite(mem.s) && Number.isFinite(mem.e) && mem.e - mem.s > 0.05) {
+            setSelection({ s: Math.max(0, mem.s), e: mem.e })
+            if (mem.loop === true) setLoopOn(true)
+          }
+        } catch {
+          /* corrupt entry — ignore */
+        }
+        selMemReadyRef.current = true
         setPhase('ready')
         // Look for lyrics right away (cache/online only — never triggers the
         // model download without consent), so karaoke opens with answers ready.
