@@ -260,6 +260,7 @@ export default function App(): React.JSX.Element {
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
+          prepMelodyRef.current?.()
           const st = proj.settings.transpose ?? 0
           setTranspose(st)
           void engine.setTranspose(st)
@@ -393,6 +394,9 @@ export default function App(): React.JSX.Element {
       setSplit(true)
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
+      // Analyze right away (melody, key, bpm) so karaoke opens warm and the
+      // bpm box fills in without a trip through karaoke mode.
+      prepMelodyRef.current?.()
     } catch {
       setError('Separation finished, but loading the stem files failed.')
     }
@@ -511,6 +515,8 @@ export default function App(): React.JSX.Element {
     }
     worker.postMessage({ mono, sampleRate: buf.sampleRate }, [mono.buffer])
   }, [])
+  const prepMelodyRef = useRef<(() => void) | null>(null)
+  prepMelodyRef.current = prepMelody
 
   const toggleKaraoke = useCallback(() => {
     if (karaoke) {

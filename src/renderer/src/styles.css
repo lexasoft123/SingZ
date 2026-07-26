@@ -1786,3 +1786,8 @@ body.modal-open .eq span,
 body.modal-open .lyr-line::before {
   animation-play-state: paused;
 }
+
+.bpm-entry.disabled {
+  opacity: 0.4;
+  cursor: default;
+}

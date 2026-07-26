@@ -54,18 +54,26 @@ function BpmEntry({
   tempo,
   onTempo
 }: {
-  bpm: number
+  bpm: number | null
   tempo: number
   onTempo: (rate: number) => void
 }): React.JSX.Element {
   const [draft, setDraft] = useState<string | null>(null)
-  const shown = draft ?? String(Math.round(bpm * tempo))
+  const shown = bpm === null ? '—' : (draft ?? String(Math.round(bpm * tempo)))
   const commit = (): void => {
-    if (draft !== null) {
+    if (draft !== null && bpm !== null) {
       const target = Number(draft)
       if (Number.isFinite(target) && target > 0) onTempo(target / bpm)
     }
     setDraft(null)
+  }
+  if (bpm === null) {
+    return (
+      <label className="bpm-entry disabled" title="Beats per minute — detected once the song is split and analyzed">
+        <input type="text" value="—" disabled readOnly />
+        <span className="tr-unit">bpm</span>
+      </label>
+    )
   }
   return (
     <label className="bpm-entry" title="Set the playback tempo in beats per minute">
@@ -186,7 +194,7 @@ export default function Transport({
             <button type="button" className="chip" onClick={() => onTempo(tempo + 0.05)}>
               +
             </button>
-            {bpm ? <BpmEntry bpm={bpm} tempo={tempo} onTempo={onTempo} /> : null}
+            <BpmEntry bpm={bpm} tempo={tempo} onTempo={onTempo} />
           </div>
         )}
         {sep ? (
