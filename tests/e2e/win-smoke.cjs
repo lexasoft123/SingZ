@@ -87,6 +87,21 @@ const launch = (env = {}) =>
   }))
   check(maxed.cls, 'maximized class set after maximize click')
   check(maxed.radius === '0px', `corners square when maximized (got ${maxed.radius})`)
+  const maxDiag = await page.evaluate(() => {
+    const b = document.querySelector('.win-controls button[title="Restore"]')
+    const r = b?.getBoundingClientRect()
+    const at = r ? document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) : null
+    return {
+      btnRect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width) } : null,
+      centerHits: at ? `${at.tagName}.${at.className}` : 'nothing',
+      inner: { w: window.innerWidth, h: window.innerHeight }
+    }
+  })
+  const maxBounds = await app.evaluate(({ BrowserWindow, screen }) => ({
+    win: BrowserWindow.getAllWindows()[0].getBounds(),
+    display: screen.getPrimaryDisplay().workArea
+  }))
+  console.log('maximized diag:', JSON.stringify({ ...maxDiag, ...maxBounds }))
   await page.click('.win-controls button[title="Restore"]')
   await page.waitForTimeout(700)
   const restored = await page.evaluate(() => ({
