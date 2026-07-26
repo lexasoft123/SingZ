@@ -59,15 +59,21 @@ const launch = (env = {}) =>
   })
   console.log('diag:', JSON.stringify({ ...diag, ...winInfo }, null, 1))
 
+  // Small runner displays can launch the window maximized — normalize first.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].unmaximize())
+  await page.waitForTimeout(900)
+
   const chrome = await page.evaluate(() => ({
     winClass: document.body.classList.contains('win'),
+    maximizedClass: document.body.classList.contains('maximized'),
     buttons: document.querySelectorAll('.win-controls button').length,
     radius: getComputedStyle(document.querySelector('.app')).borderRadius,
     bodyBg: getComputedStyle(document.body).backgroundColor
   }))
   check(chrome.winClass, 'body.win class present')
+  check(!chrome.maximizedClass, 'maximized class cleared after unmaximize')
   check(chrome.buttons === 3, `3 window buttons (got ${chrome.buttons})`)
-  check(chrome.radius === '12px', `rounded app corners (got ${chrome.radius})`)
+  check(chrome.radius === '12px', `rounded app corners when windowed (got ${chrome.radius})`)
   check(
     chrome.bodyBg === 'rgba(0, 0, 0, 0)' || chrome.bodyBg === 'transparent',
     `transparent body (got ${chrome.bodyBg})`
@@ -75,16 +81,20 @@ const launch = (env = {}) =>
 
   await page.click('.win-controls button[title="Maximize"]')
   await page.waitForTimeout(900)
-  check(
-    await page.evaluate(() => document.body.classList.contains('maximized')),
-    'maximized class set after maximize click'
-  )
+  const maxed = await page.evaluate(() => ({
+    cls: document.body.classList.contains('maximized'),
+    radius: getComputedStyle(document.querySelector('.app')).borderRadius
+  }))
+  check(maxed.cls, 'maximized class set after maximize click')
+  check(maxed.radius === '0px', `corners square when maximized (got ${maxed.radius})`)
   await page.click('.win-controls button[title="Restore"]')
   await page.waitForTimeout(700)
-  check(
-    await page.evaluate(() => !document.body.classList.contains('maximized')),
-    'maximized class cleared after restore'
-  )
+  const restored = await page.evaluate(() => ({
+    cls: document.body.classList.contains('maximized'),
+    radius: getComputedStyle(document.querySelector('.app')).borderRadius
+  }))
+  check(!restored.cls, 'maximized class cleared after restore')
+  check(restored.radius === '12px', `corners rounded again after restore (got ${restored.radius})`)
 
   // ---- window-state persistence across relaunch ----
   await app.evaluate(({ BrowserWindow }) =>
