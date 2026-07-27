@@ -230,18 +230,32 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
           continue
         }
         var stems: [String: String] = [:]
+        var cached = true
+        var bytes = 0
         let stemsDir = dir.appendingPathComponent("stems", isDirectory: true)
         for s in ["vocals", "drums", "bass", "guitar", "piano", "other"] {
+          var ext: String? = nil
           if present(stemsDir, "\(s).flac") {
-            stems[s] = "flac"
+            ext = "flac"
           } else if present(stemsDir, "\(s).wav") {
-            stems[s] = "wav"
+            ext = "wav"
+          }
+          guard let e = ext else { continue }
+          stems[s] = e
+          // materialized = the real file exists (not just a .name.icloud placeholder)
+          let real = stemsDir.appendingPathComponent("\(s).\(e)")
+          if fm.fileExists(atPath: real.path) {
+            bytes += (try? real.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+          } else {
+            cached = false
           }
         }
         out.append([
           "dir": dir.lastPathComponent,
           "meta": metaText,
           "stems": stems,
+          "cached": stems.isEmpty ? false : cached,
+          "bytes": bytes,
           "hasLyrics": present(dir, "lyrics.json"),
         ])
       }

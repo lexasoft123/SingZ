@@ -28,6 +28,8 @@ interface NativeProject {
   dir: string
   meta: string
   stems: Record<string, 'flac' | 'wav'>
+  cached: boolean
+  bytes: number
   hasLyrics: boolean
 }
 
@@ -36,6 +38,10 @@ export interface ProjectEntry {
   doc: ProjectDoc
   /** Per-stem on-disk format — v2 projects say flac, pre-conversion ones wav. */
   stems: Record<string, 'flac' | 'wav'>
+  /** Every stem is materialized on this device (no iCloud download needed). */
+  cached: boolean
+  /** Total bytes of materialized stems (0 while everything is still in the cloud). */
+  bytes: number
   hasLyrics: boolean
 }
 
@@ -54,6 +60,8 @@ export async function listProjects(): Promise<ProjectEntry[]> {
         dir: p.dir,
         doc: JSON.parse(p.meta) as ProjectDoc,
         stems: p.stems,
+        cached: p.cached === true,
+        bytes: typeof p.bytes === 'number' ? p.bytes : 0,
         hasLyrics: p.hasLyrics
       })
     } catch {
@@ -78,24 +86,25 @@ export interface LoadedProject {
 export async function loadProject(
   entry: ProjectEntry,
   sampleRate: number,
-  onStep: (msg: string) => void,
+  onStep: (msg: string, frac: number) => void,
   crumb?: (note: string) => Promise<void>
 ): Promise<LoadedProject> {
   const ids = STEM_ORDER_ALL.filter((s) => entry.stems[s])
   const stems: { id: string; buffer: AudioBuffer }[] = []
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i]
-    onStep(`Fetching ${id} (${i + 1}/${ids.length})…`)
+    onStep(`Fetching ${id} · ${i + 1}/${ids.length}`, i / ids.length)
     await crumb?.(`fetching ${id}`)
     const path = await Folder.localFile(entry.dir, `stems/${id}.${entry.stems[id]}`)
-    onStep(`Decoding ${id} (${i + 1}/${ids.length})…`)
+    onStep(`Decoding ${id} · ${i + 1}/${ids.length}`, (i + 0.5) / ids.length)
     await crumb?.(`decoding ${id}`)
     stems.push({ id, buffer: await decodeAudioData(path, sampleRate) })
   }
+  onStep('Lyrics…', 0.98)
   await crumb?.('lyrics')
   let lyrics: LyricsDoc | null = null
   if (entry.hasLyrics) {
-    onStep('Fetching lyrics…')
+    onStep('Fetching lyrics…', 0.99)
     try {
       lyrics = JSON.parse(await Folder.readText(entry.dir, 'lyrics.json')) as LyricsDoc
     } catch {

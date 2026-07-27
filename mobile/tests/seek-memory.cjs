@@ -13,7 +13,7 @@ const http = require('http');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');
 
-const BUNDLE = 'org.reactjs.native.example.SingZPlayer';
+const BUNDLE = 'com.lexasoft.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
 const BURSTS = parseInt(process.env.BURSTS || '6', 10);
 /**
