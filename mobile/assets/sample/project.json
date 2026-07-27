@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "name": "Sixteen Tons",
+  "songFile": "song.mp3",
+  "savedAt": "2026-07-26T16:09:55.232Z",
+  "settings": {
+    "transpose": 0,
+    "tempo": 0.95,
+    "selection": {
+      "s": 47.036079000995244,
+      "e": 54.87542362699049
+    },
+    "loop": true,
+    "training": {
+      "on": true,
+      "mode": "lines",
+      "periodSec": 10,
+      "hear": 1,
+      "sing": 1,
+      "stems": [
+        "vocals"
+      ]
+    },
+    "tracks": {
+      "vocals": {
+        "muted": false,
+        "solo": false,
+        "volume": 1
+      },
+      "drums": {
+        "muted": false,
+        "solo": false,
+        "volume": 1
+      },
+      "bass": {
+        "muted": false,
+        "solo": false,
+        "volume": 1
+      },
+      "other": {
+        "muted": false,
+        "solo": false,
+        "volume": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,624 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Pressable,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+  type GestureResponderEvent,
+  type LayoutChangeEvent
+} from 'react-native'
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
+import { AudioManager } from 'react-native-audio-api'
+import { MultitrackEngine, type TrackState, type TrainingSpec } from './src/engine'
+import {
+  fmtTime,
+  sanitizeTraining,
+  singMask,
+  trainingWindows,
+  STEM_ORDER_ALL,
+  TRACK_META,
+  TRAIN_DEFAULTS,
+  type LyricsDoc,
+  type ProjectDoc,
+  type TrainingConfig
+} from './src/model'
+
+/* Bundled sample project — same layout a desktop save produces. */
+const PROJECT = require('./assets/sample/project.json') as ProjectDoc
+const LYRICS = require('./assets/sample/lyrics.json') as LyricsDoc
+const STEM_ASSETS: Record<string, number> = {
+  vocals: require('./assets/sample/stems/vocals.flac'),
+  drums: require('./assets/sample/stems/drums.flac'),
+  bass: require('./assets/sample/stems/bass.flac'),
+  guitar: require('./assets/sample/stems/guitar.flac'),
+  piano: require('./assets/sample/stems/piano.flac'),
+  other: require('./assets/sample/stems/other.flac')
+}
+
+const C = {
+  bg: '#131009',
+  panel: '#1d1915',
+  border: '#31291f',
+  text: '#e8ddc8',
+  dim: '#9a8d76',
+  faint: '#5f5545',
+  amber: '#f2c14e'
+}
+
+const engine = new MultitrackEngine()
+
+/** Horizontal drag/tap bar (seek + volume). Value is 0..1 of its width. */
+function Bar({
+  value,
+  onChange,
+  color,
+  height = 26,
+  track = '#2a231b'
+}: {
+  value: number
+  onChange: (v: number) => void
+  color: string
+  height?: number
+  track?: string
+}): React.JSX.Element {
+  const width = useRef(1)
+  const handle = useCallback(
+    (e: GestureResponderEvent) => {
+      onChange(Math.max(0, Math.min(1, e.nativeEvent.locationX / width.current)))
+    },
+    [onChange]
+  )
+  return (
+    <View
+      style={[styles.bar, { height, backgroundColor: track }]}
+      onLayout={(e: LayoutChangeEvent) => {
+        width.current = Math.max(1, e.nativeEvent.layout.width)
+      }}
+      onStartShouldSetResponder={() => true}
+      onMoveShouldSetResponder={() => true}
+      onResponderGrant={handle}
+      onResponderMove={handle}
+    >
+      <View
+        pointerEvents="none"
+        style={{
+          width: `${Math.max(0, Math.min(1, value)) * 100}%`,
+          height: '100%',
+          backgroundColor: color,
+          opacity: 0.85
+        }}
+      />
+    </View>
+  )
+}
+
+function Chip({
+  label,
+  active,
+  activeColor,
+  onPress
+}: {
+  label: string
+  active: boolean
+  activeColor: string
+  onPress: () => void
+}): React.JSX.Element {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={[styles.chip, active && { backgroundColor: activeColor, borderColor: activeColor }]}
+      hitSlop={6}
+    >
+      <Text style={[styles.chipText, active && { color: '#191510' }]}>{label}</Text>
+    </Pressable>
+  )
+}
+
+function Stepper({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step = 1
+}: {
+  label: string
+  value: number
+  onChange: (v: number) => void
+  min: number
+  max: number
+  step?: number
+}): React.JSX.Element {
+  return (
+    <View style={styles.stepRow}>
+      <Text style={styles.stepLabel}>{label}</Text>
+      <Pressable
+        style={styles.stepBtn}
+        hitSlop={6}
+        onPress={() => onChange(Math.max(min, value - step))}
+      >
+        <Text style={styles.stepBtnText}>−</Text>
+      </Pressable>
+      <Text style={styles.stepValue}>{value}</Text>
+      <Pressable
+        style={styles.stepBtn}
+        hitSlop={6}
+        onPress={() => onChange(Math.min(max, value + step))}
+      >
+        <Text style={styles.stepBtnText}>+</Text>
+      </Pressable>
+    </View>
+  )
+}
+
+export default function App(): React.JSX.Element {
+  const [loaded, setLoaded] = useState<'loading' | 'ready' | string>('loading')
+  const [tracks, setTracks] = useState<TrackState[]>([])
+  const [ducked, setDucked] = useState<string[]>([])
+  const [playing, setPlaying] = useState(false)
+  const [pos, setPos] = useState(0)
+  const [training, setTraining] = useState(false)
+  const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
+  const [showTrain, setShowTrain] = useState(false)
+  const [loop, setLoop] = useState(false)
+
+  const lines = LYRICS.lines
+  const stems = useMemo(() => STEM_ORDER_ALL.filter((s) => s in STEM_ASSETS), [])
+
+  /* Load + decode the six FLAC stems, then apply the saved project settings. */
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        AudioManager.setAudioSessionOptions({ iosCategory: 'playback', iosMode: 'default' })
+        await AudioManager.setAudioSessionActivity(true)
+        const buffers = await Promise.all(stems.map((s) => engine.decode(STEM_ASSETS[s])))
+        if (cancelled) return
+        engine.load(stems.map((id, i) => ({ id, buffer: buffers[i] })))
+        const st = PROJECT.settings
+        for (const [id, t] of Object.entries(st.tracks ?? {})) {
+          engine.setMuted(id, t.muted)
+          engine.setSolo(id, t.solo)
+          engine.setVolume(id, t.volume)
+        }
+        if (st.selection) {
+          engine.setRegion({ start: st.selection.s, end: st.selection.e }, st.loop === true)
+          setLoop(st.loop === true)
+        }
+        const tn = st.training
+        if (tn) {
+          setTrainCfg(sanitizeTraining(tn))
+          if (tn.on === true) setTraining(true)
+        }
+        setLoaded('ready')
+      } catch (err) {
+        setLoaded(String(err instanceof Error ? err.message : err))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [stems])
+
+  /* Mirror engine state into React (change-gated by the engine's emits). */
+  useEffect(() => {
+    return engine.subscribe(() => {
+      setTracks(engine.getTrackStates())
+      setDucked(engine.duckedStems)
+      setPlaying(engine.playing)
+      setPos(engine.position)
+    })
+  }, [])
+
+  /* Position ticker while playing. */
+  useEffect(() => {
+    if (!playing) return
+    const t = setInterval(() => setPos(engine.position), 100)
+    return () => clearInterval(t)
+  }, [playing])
+
+  /* Training schedule -> engine spec (same derivation as desktop App.tsx). */
+  useEffect(() => {
+    if (!training || loaded !== 'ready') {
+      engine.setTraining(null)
+      return
+    }
+    let spec: TrainingSpec
+    if (trainCfg.mode === 'lines' && lines.length > 0) {
+      spec = {
+        mode: 'windows',
+        windows: trainingWindows(lines, trainCfg.hear, trainCfg.sing, engine.duration),
+        stems: trainCfg.stems
+      }
+    } else {
+      spec = { mode: 'period', periodSec: trainCfg.periodSec, stems: trainCfg.stems }
+    }
+    engine.setTraining(spec)
+  }, [training, trainCfg, lines, loaded])
+
+  const mask = useMemo(
+    () =>
+      training && trainCfg.mode === 'lines'
+        ? singMask(lines.length, trainCfg.hear, trainCfg.sing)
+        : null,
+    [training, trainCfg, lines.length]
+  )
+
+  const currentLine = useMemo(() => {
+    let cur = -1
+    for (let i = 0; i < lines.length; i++) if (lines[i].start <= pos + 0.05) cur = i
+    return cur
+  }, [lines, pos])
+
+  /* Keep the current lyric line in view. */
+  const scrollRef = useRef<ScrollView>(null)
+  const lineYs = useRef<number[]>([])
+  useEffect(() => {
+    const y = lineYs.current[currentLine]
+    if (currentLine >= 0 && y !== undefined) {
+      scrollRef.current?.scrollTo({ y: Math.max(0, y - 130), animated: true })
+    }
+  }, [currentLine])
+
+  const toggleTrainStem = (id: string): void => {
+    setTrainCfg((c) => {
+      const has = c.stems.includes(id)
+      if (has && c.stems.length === 1) return c // never empty
+      return { ...c, stems: has ? c.stems.filter((s) => s !== id) : [...c.stems, id] }
+    })
+  }
+
+  const armTraining = (): void => {
+    // Arming unmutes the trained stems — the schedule now owns their silence.
+    if (!training) for (const id of trainCfg.stems) engine.setMuted(id, false)
+    setTraining(!training)
+  }
+
+  if (loaded !== 'ready') {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={[styles.root, styles.center]}>
+          <StatusBar barStyle="light-content" />
+          <Text style={styles.loadTitle}>SingZ</Text>
+          <Text style={styles.loadText}>
+            {loaded === 'loading' ? 'Loading stems…' : `Could not load: ${loaded}`}
+          </Text>
+        </SafeAreaView>
+      </SafeAreaProvider>
+    )
+  }
+
+  return (
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
+        <StatusBar barStyle="light-content" />
+
+        {/* Header */}
+        <View style={styles.header}>
+          <Text style={styles.title} numberOfLines={1}>
+            {PROJECT.name}
+          </Text>
+          <Text style={styles.time}>
+            {fmtTime(pos)} / {fmtTime(engine.duration)}
+          </Text>
+        </View>
+
+        {/* Seek */}
+        <View style={styles.seekWrap}>
+          <Bar
+            value={engine.duration > 0 ? pos / engine.duration : 0}
+            onChange={(v) => engine.seek(v * engine.duration)}
+            color={C.amber}
+            height={30}
+          />
+        </View>
+
+        {/* Transport */}
+        <View style={styles.transport}>
+          <Pressable style={styles.skipBtn} onPress={() => engine.seekBy(-5)} hitSlop={8}>
+            <Text style={styles.skipText}>−5s</Text>
+          </Pressable>
+          <Pressable style={styles.playBtn} onPress={() => engine.toggle()} hitSlop={8}>
+            <Text style={styles.playText}>{playing ? '❚❚' : '▶'}</Text>
+          </Pressable>
+          <Pressable style={styles.skipBtn} onPress={() => engine.seekBy(5)} hitSlop={8}>
+            <Text style={styles.skipText}>+5s</Text>
+          </Pressable>
+          <View style={styles.transportRight}>
+            <Chip
+              label="Loop"
+              active={loop}
+              activeColor={C.amber}
+              onPress={() => {
+                const next = !loop
+                setLoop(next)
+                const sel = PROJECT.settings.selection
+                engine.setRegion(sel ? { start: sel.s, end: sel.e } : null, next)
+              }}
+            />
+            <Chip
+              label={training && ducked.length > 0 ? 'You sing!' : 'Training'}
+              active={training}
+              activeColor={C.amber}
+              onPress={() => setShowTrain((v) => !v)}
+            />
+          </View>
+        </View>
+
+        {/* Training panel */}
+        {showTrain && (
+          <View style={styles.trainPanel}>
+            <View style={styles.trainHead}>
+              <Text style={styles.trainTitle}>Vocal training</Text>
+              <Chip
+                label={training ? 'On' : 'Off'}
+                active={training}
+                activeColor={C.amber}
+                onPress={armTraining}
+              />
+            </View>
+            <View style={styles.segRow}>
+              <Chip
+                label="By time"
+                active={trainCfg.mode === 'time'}
+                activeColor={C.amber}
+                onPress={() => setTrainCfg((c) => ({ ...c, mode: 'time' }))}
+              />
+              <Chip
+                label="By lyric lines"
+                active={trainCfg.mode === 'lines'}
+                activeColor={C.amber}
+                onPress={() => setTrainCfg((c) => ({ ...c, mode: 'lines' }))}
+              />
+            </View>
+            {trainCfg.mode === 'time' ? (
+              <>
+                <Stepper
+                  label="Interval"
+                  value={trainCfg.periodSec}
+                  min={5}
+                  max={60}
+                  step={5}
+                  onChange={(v) => setTrainCfg((c) => ({ ...c, periodSec: v }))}
+                />
+                <Text style={styles.caption}>
+                  Guide plays {trainCfg.periodSec} s, then you take the next {trainCfg.periodSec} s.
+                </Text>
+              </>
+            ) : (
+              <>
+                <Stepper
+                  label="Hear"
+                  value={trainCfg.hear}
+                  min={1}
+                  max={8}
+                  onChange={(v) => setTrainCfg((c) => ({ ...c, hear: v }))}
+                />
+                <Stepper
+                  label="Sing"
+                  value={trainCfg.sing}
+                  min={1}
+                  max={8}
+                  onChange={(v) => setTrainCfg((c) => ({ ...c, sing: v }))}
+                />
+                <Text style={styles.caption}>
+                  Hear {trainCfg.hear} line{trainCfg.hear > 1 ? 's' : ''}, then sing {trainCfg.sing}{' '}
+                  on your own.
+                </Text>
+              </>
+            )}
+            <Text style={styles.trainStemsLabel}>Muted while you sing:</Text>
+            <View style={styles.stemChips}>
+              {stems.map((id) => (
+                <Chip
+                  key={id}
+                  label={TRACK_META[id]?.label ?? id}
+                  active={trainCfg.stems.includes(id)}
+                  activeColor={C.amber}
+                  onPress={() => toggleTrainStem(id)}
+                />
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* Stems */}
+        <View style={styles.stems}>
+          {tracks.map((t) => {
+            const meta = TRACK_META[t.id] ?? { label: t.id, color: C.dim }
+            const isDucked = ducked.includes(t.id)
+            return (
+              <View key={t.id} style={styles.stemRow}>
+                <View style={[styles.stemDot, { backgroundColor: meta.color }]} />
+                <Text style={styles.stemLabel} numberOfLines={1}>
+                  {meta.label}
+                </Text>
+                {isDucked && (
+                  <View style={[styles.youPill, { backgroundColor: meta.color }]}>
+                    <Text style={styles.youPillText}>your turn</Text>
+                  </View>
+                )}
+                <View style={styles.stemVol}>
+                  <Bar
+                    value={t.volume}
+                    onChange={(v) => engine.setVolume(t.id, v)}
+                    color={meta.color}
+                    height={20}
+                  />
+                </View>
+                <Chip
+                  label="M"
+                  active={t.muted}
+                  activeColor="#e2574c"
+                  onPress={() => engine.setMuted(t.id, !t.muted)}
+                />
+                <Chip
+                  label="S"
+                  active={t.solo}
+                  activeColor={C.amber}
+                  onPress={() => engine.setSolo(t.id, !t.solo)}
+                />
+              </View>
+            )
+          })}
+        </View>
+
+        {/* Lyrics */}
+        <ScrollView ref={scrollRef} style={styles.lyrics} contentContainerStyle={styles.lyricsPad}>
+          {lines.map((ln, i) => {
+            const isCurrent = i === currentLine
+            const isSing = mask?.[i] === true
+            return (
+              <View
+                key={i}
+                style={[styles.line, isSing && styles.lineSing]}
+                onLayout={(e) => {
+                  lineYs.current[i] = e.nativeEvent.layout.y
+                }}
+              >
+                <Text style={styles.lineText}>
+                  {ln.words.map((w, j) => (
+                    <Text
+                      key={j}
+                      style={[
+                        styles.word,
+                        i < currentLine && styles.wordPast,
+                        isCurrent && styles.wordCurrent,
+                        isCurrent && pos >= w.s && styles.wordSung,
+                        isSing && isCurrent && pos >= w.s && styles.wordSungSing
+                      ]}
+                    >
+                      {w.w + (j < ln.words.length - 1 ? ' ' : '')}
+                    </Text>
+                  ))}
+                </Text>
+              </View>
+            )
+          })}
+        </ScrollView>
+      </SafeAreaView>
+    </SafeAreaProvider>
+  )
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: C.bg },
+  center: { alignItems: 'center', justifyContent: 'center', gap: 8 },
+  loadTitle: { color: C.amber, fontSize: 28, fontWeight: '700', letterSpacing: 1 },
+  loadText: { color: C.dim, fontSize: 15, paddingHorizontal: 30, textAlign: 'center' },
+
+  header: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    gap: 10
+  },
+  title: { color: C.text, fontSize: 20, fontWeight: '700', flexShrink: 1 },
+  time: { color: C.dim, fontSize: 13, fontVariant: ['tabular-nums'], marginLeft: 'auto' },
+
+  seekWrap: { paddingHorizontal: 16, paddingTop: 8 },
+  bar: { borderRadius: 6, overflow: 'hidden' },
+
+  transport: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    gap: 10
+  },
+  playBtn: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: C.amber,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  playText: { color: '#191510', fontSize: 18, fontWeight: '800' },
+  skipBtn: {
+    paddingHorizontal: 10,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  skipText: { color: C.dim, fontSize: 13, fontWeight: '600' },
+  transportRight: { flexDirection: 'row', gap: 8, marginLeft: 'auto' },
+
+  chip: {
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 13,
+    paddingHorizontal: 10,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#221c15'
+  },
+  chipText: { color: C.dim, fontSize: 12, fontWeight: '700' },
+
+  trainPanel: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: C.panel,
+    borderWidth: 1,
+    borderColor: C.border,
+    gap: 8
+  },
+  trainHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  trainTitle: { color: C.text, fontSize: 15, fontWeight: '700' },
+  segRow: { flexDirection: 'row', gap: 8 },
+  stepRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  stepLabel: { color: C.dim, fontSize: 13, width: 60 },
+  stepBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  stepBtnText: { color: C.text, fontSize: 16, fontWeight: '700' },
+  stepValue: {
+    color: C.text,
+    fontSize: 15,
+    fontWeight: '700',
+    minWidth: 28,
+    textAlign: 'center',
+    fontVariant: ['tabular-nums']
+  },
+  caption: { color: C.faint, fontSize: 12 },
+  trainStemsLabel: { color: C.dim, fontSize: 12, marginTop: 2 },
+  stemChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+
+  stems: { paddingHorizontal: 16, gap: 6, paddingBottom: 6 },
+  stemRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  stemDot: { width: 10, height: 10, borderRadius: 5 },
+  stemLabel: { color: C.text, fontSize: 13, fontWeight: '600', width: 86 },
+  stemVol: { flex: 1 },
+  youPill: { borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1 },
+  youPillText: { color: '#191510', fontSize: 10, fontWeight: '800' },
+
+  lyrics: { flex: 1, marginTop: 4, borderTopWidth: 1, borderTopColor: C.border },
+  lyricsPad: { paddingHorizontal: 20, paddingVertical: 14, paddingBottom: 120 },
+  line: { paddingVertical: 5, paddingHorizontal: 8, borderRadius: 8 },
+  lineSing: {
+    backgroundColor: 'rgba(242, 193, 78, 0.07)',
+    borderLeftWidth: 3,
+    borderLeftColor: C.amber
+  },
+  lineText: { fontSize: 17, lineHeight: 24 },
+  word: { color: C.faint, fontWeight: '500' },
+  wordPast: { color: '#6e6350' },
+  wordCurrent: { color: C.text },
+  wordSung: { color: C.amber, fontWeight: '700' },
+  wordSungSing: { color: '#ffd97a' }
+})
