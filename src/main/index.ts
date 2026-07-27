@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, systemPreferences } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
@@ -6,7 +6,17 @@ import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shar
 import { searchCandidates } from './lrclib'
 import { Transcriber } from './lyrics'
 import { ModelManager } from './models'
-import { detectProject, listProjects, migrateProjects, projectsRoot, renameProject, saveProject } from './projects'
+import {
+  detectProject,
+  getStorage,
+  listProjects,
+  migrateProjects,
+  migrateProjectToV2,
+  projectsRoot,
+  renameProject,
+  saveProject,
+  setProjectsRoot
+} from './projects'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
@@ -255,6 +265,32 @@ function registerIpc(): void {
     const full = resolve(String(raw))
     if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
     return renameProject(full, String(newName))
+  })
+
+  ipcMain.handle('project:upgrade', async (_e, raw: string) => {
+    const dir = resolve(String(raw))
+    if (!isAllowed(dir)) return { ok: false, error: 'Folder is not registered.' }
+    return migrateProjectToV2(dir)
+  })
+
+  ipcMain.handle('projects:storage', () => getStorage())
+
+  ipcMain.handle('projects:set-root', async (_e, raw: unknown) => {
+    const res = await setProjectsRoot(typeof raw === 'string' && raw ? resolve(raw) : null)
+    if (res.ok) allowRoot(res.root)
+    return res
+  })
+
+  ipcMain.handle('projects:choose-root', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const picked = await dialog.showOpenDialog(win ?? BrowserWindow.getAllWindows()[0], {
+      title: 'Choose where SingZ keeps your projects',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (picked.canceled || picked.filePaths.length === 0) return { ok: false, cancelled: true }
+    const res = await setProjectsRoot(picked.filePaths[0])
+    if (res.ok) allowRoot(res.root)
+    return res
   })
 
   ipcMain.handle('app:version', () => (app.isPackaged ? app.getVersion() : 'dev'))

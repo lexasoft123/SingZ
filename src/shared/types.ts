@@ -67,10 +67,18 @@ export interface ProjectSettings {
 export interface ProjectInfo {
   dir: string
   name: string
+  /** 1 = WAV stems (pre-0.7), 2 = FLAC stems. Missing on old metas = 1. */
+  formatVersion?: number
   settings: ProjectSettings
   /** Stem files on disk (at least the core four), when the project has them. */
   stems?: Partial<Record<StemName6, string>>
   hasLyrics: boolean
+}
+
+/** A cloud-synced folder detected on this machine (offered as a library home). */
+export interface CloudRoot {
+  label: string
+  path: string
 }
 
 export interface ProjectListItem {
@@ -242,4 +250,20 @@ export interface SingzApi {
   listProjects(): Promise<{ root: string; projects: ProjectListItem[] }>
   /** Rename a saved project's folder + metadata; returns the moved paths. */
   renameProject(songPath: string, newName: string): Promise<RenameResult>
+  /**
+   * Upgrade a v1 project (WAV stems) to v2 (FLAC, ~4x smaller) in place.
+   * Runs after a v1 project opens; WAVs are deleted only once every stem
+   * converted.
+   */
+  upgradeProject(dir: string): Promise<{ ok: boolean; converted?: boolean; error?: string }>
+  /** Where the library lives + cloud folders detected on this machine. */
+  getStorage(): Promise<{ root: string; isDefault: boolean; cloud: CloudRoot[] }>
+  /** Move the library (null = back to Documents/SingZ); existing projects are copied over. */
+  setProjectsRoot(
+    path: string | null
+  ): Promise<{ ok: true; root: string; copied: number } | { ok: false; error: string }>
+  /** OS folder picker for a custom library location. */
+  chooseProjectsRoot(): Promise<
+    { ok: true; root: string; copied: number } | { ok: false; cancelled?: boolean; error?: string }
+  >
 }

@@ -381,6 +381,22 @@ export default function App(): React.JSX.Element {
           setSaveState('saved')
           setPhase('ready')
           void prepLyricsRef.current?.()
+          if ((proj.formatVersion ?? 1) < 2) {
+            // Old WAV project: repack stems as FLAC in the background (the
+            // buffers above are already in memory, so nothing here notices).
+            void window.singz.upgradeProject(proj.dir).then((r) => {
+              if (r.ok && r.converted) {
+                setStemFiles((prev) => {
+                  if (!prev) return prev
+                  const next: Record<string, string> = {}
+                  for (const [s, p] of Object.entries(prev)) {
+                    next[s] = p.replace(/\.wav$/, '.flac')
+                  }
+                  return next
+                })
+              }
+            })
+          }
           return
         }
 

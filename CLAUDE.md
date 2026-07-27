@@ -74,6 +74,14 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
 - **zsh**: `status` is a read-only variable in scripts.
 - **npm majors**: `@vitejs/plugin-react` must match electron-vite's supported
   Vite major (currently plugin ^5 with electron-vite 5 / Vite 7).
+- **Project format v2 = FLAC stems** (~4x smaller, lossless; splitter cache
+  stays WAV). v1 WAV projects auto-upgrade on open (`migrateProjectToV2`);
+  readers must keep accepting both (`stemFile()` prefers .flac). Encoding uses
+  libflacjs's **asm.js** build in main — the wasm build `fetch()`es its binary
+  and cannot boot under node. Projects root is relocatable (settings.json →
+  cloud folders like iCloud Drive); `allowRoot` the new root after switching.
+  The `mobile/` RN player reads the same folders (v1 and v2) via its
+  FolderAccess pod.
 
 ## Conventions
 

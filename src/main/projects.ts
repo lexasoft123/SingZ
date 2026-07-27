@@ -1,21 +1,104 @@
 import { app } from 'electron'
-import { access, copyFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { existsSync, readdirSync } from 'node:fs'
+import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
 import {
   STEMS,
   STEMS_6,
+  type CloudRoot,
   type ProjectInfo,
   type ProjectListItem,
   type ProjectSettings,
   type StemName6
 } from '../shared/types'
+import { wavToFlac } from './flac'
 import { log } from './log'
 import { stemsRoot } from './media'
 import { hashFile } from './separation'
+import { readSettings, writeSettings } from './settings'
 
-/** User-visible project library: ~/Documents/SingZ/<song name>/ */
+/**
+ * User-visible project library: ~/Documents/SingZ/<song name>/ by default,
+ * relocatable (settings.json) into a cloud-synced folder — iCloud Drive /
+ * Google Drive / OneDrive are plain folders to us; their apps do the syncing.
+ */
 export function projectsRoot(): string {
+  const custom = readSettings().projectsRoot
+  if (custom && existsSync(custom)) return custom
   return join(app.getPath('documents'), 'SingZ')
+}
+
+/** Cloud-synced folders present on this machine (each proposes a SingZ subfolder). */
+export function listCloudRoots(): CloudRoot[] {
+  const home = app.getPath('home')
+  const candidates: { label: string; base: string }[] = [
+    { label: 'iCloud Drive', base: join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs') },
+    { label: 'iCloud Drive', base: join(home, 'iCloudDrive') },
+    { label: 'OneDrive', base: process.env.OneDrive ?? join(home, 'OneDrive') },
+    { label: 'Google Drive', base: 'G:/My Drive' },
+    { label: 'Google Drive', base: join(home, 'Google Drive') }
+  ]
+  // Modern Google Drive on macOS mounts under ~/Library/CloudStorage/GoogleDrive-<account>/
+  try {
+    const cloudStorage = join(home, 'Library', 'CloudStorage')
+    for (const entry of readdirSync(cloudStorage)) {
+      if (entry.startsWith('GoogleDrive-')) {
+        candidates.push({ label: 'Google Drive', base: join(cloudStorage, entry, 'My Drive') })
+      }
+    }
+  } catch {
+    // no CloudStorage dir (non-mac or none mounted)
+  }
+  const seen = new Set<string>()
+  const out: CloudRoot[] = []
+  for (const c of candidates) {
+    if (!existsSync(c.base) || seen.has(c.label)) continue
+    seen.add(c.label)
+    out.push({ label: c.label, path: join(c.base, 'SingZ') })
+  }
+  return out
+}
+
+export function getStorage(): { root: string; isDefault: boolean; cloud: CloudRoot[] } {
+  const root = projectsRoot()
+  return {
+    root,
+    isDefault: root === join(app.getPath('documents'), 'SingZ'),
+    cloud: listCloudRoots()
+  }
+}
+
+/**
+ * Move the library to a new folder (null = back to Documents/SingZ).
+ * Existing projects are copied (never deleted) so a half-synced cloud folder
+ * can't lose anything; collisions keep whatever the target already has.
+ */
+export async function setProjectsRoot(
+  path: string | null
+): Promise<{ ok: true; root: string; copied: number } | { ok: false; error: string }> {
+  try {
+    const oldRoot = projectsRoot()
+    const newRoot = path ?? join(app.getPath('documents'), 'SingZ')
+    if (newRoot === oldRoot) return { ok: true, root: newRoot, copied: 0 }
+    await mkdir(newRoot, { recursive: true })
+    let copied = 0
+    if (existsSync(oldRoot)) {
+      for (const entry of await readdir(oldRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const src = join(oldRoot, entry.name)
+        const dst = join(newRoot, entry.name)
+        if (!(await exists(join(src, 'project.json'))) || (await exists(dst))) continue
+        await cp(src, dst, { recursive: true })
+        copied++
+        log('app', `project copied to new library: ${entry.name}`)
+      }
+    }
+    writeSettings({ projectsRoot: path ?? undefined })
+    log('app', `project library is now ${newRoot}${copied ? ` (${copied} copied over)` : ''}`)
+    return { ok: true, root: newRoot, copied }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 /** Projects lived in ~/Music/SingZ before 0.2.4 — move them over once. */
@@ -60,11 +143,69 @@ function safeName(name: string): string {
 }
 
 interface ProjectFile {
-  version: 1
+  /** 1 = WAV stems (pre-0.7), 2 = FLAC stems (~4x smaller, cloud-friendly). */
+  version: 1 | 2
   name: string
   songFile: string
   savedAt: string
   settings: ProjectSettings
+}
+
+/** Resolve a stem on disk: FLAC (v2) wins over WAV (v1) when both exist. */
+async function stemFile(dir: string, stem: string): Promise<string | null> {
+  const flac = join(dir, 'stems', `${stem}.flac`)
+  if (await exists(flac)) return flac
+  const wav = join(dir, 'stems', `${stem}.wav`)
+  return (await exists(wav)) ? wav : null
+}
+
+/**
+ * Convert every WAV stem to FLAC; the WAVs are deleted only after each
+ * conversion verified (encoder writes .part then renames), so an interrupted
+ * run leaves a playable project. Returns true when the project ends up
+ * all-FLAC.
+ */
+async function convertStemsToFlac(dir: string): Promise<boolean> {
+  let allFlac = true
+  for (const s of STEMS_6) {
+    const wav = join(dir, 'stems', `${s}.wav`)
+    const flac = join(dir, 'stems', `${s}.flac`)
+    if (!(await exists(wav))) continue
+    if (!(await exists(flac))) {
+      const res = await wavToFlac(wav, flac)
+      if (!res.ok) {
+        log('app', `stem ${s}: FLAC conversion failed — keeping WAV (${res.error})`, 'warn')
+        allFlac = false
+        continue
+      }
+      log('app', `stem ${s}: ${(res.bytes / 1e6).toFixed(1)} MB as FLAC`)
+    }
+    await rm(wav, { force: true })
+  }
+  return allFlac
+}
+
+/**
+ * Upgrade a saved project to v2 (FLAC stems) in place. Safe to call on any
+ * project: v2 and stemless projects return immediately.
+ */
+export async function migrateProjectToV2(
+  dir: string
+): Promise<{ ok: true; converted: boolean } | { ok: false; error: string }> {
+  try {
+    const meta = await readMeta(dir)
+    if (!meta) return { ok: false, error: 'not a project folder' }
+    if (meta.version >= 2) return { ok: true, converted: false }
+    const hadWavs = await exists(join(dir, 'stems', 'vocals.wav'))
+    const allFlac = await convertStemsToFlac(dir)
+    if (!allFlac) return { ok: false, error: 'some stems could not be converted' }
+    meta.version = 2
+    await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+    if (hadWavs) log('app', `project upgraded to compact stems: ${dir}`)
+    return { ok: true, converted: hadWavs }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 async function readMeta(dir: string): Promise<ProjectFile | null> {
@@ -89,7 +230,7 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
       if (!(await exists(songPath))) continue
       let hasStems = true
       for (const s of STEMS) {
-        if (!(await exists(join(dir, 'stems', `${s}.wav`)))) hasStems = false
+        if ((await stemFile(dir, s)) === null) hasStems = false
       }
       projects.push({
         dir,
@@ -116,13 +257,14 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
     const meta = JSON.parse(await readFile(metaPath, 'utf8')) as ProjectFile
     const stems: Partial<Record<StemName6, string>> = {}
     for (const s of STEMS_6) {
-      const p = join(dir, 'stems', `${s}.wav`)
-      if (await exists(p)) stems[s] = p
+      const p = await stemFile(dir, s)
+      if (p) stems[s] = p
     }
     const coreThere = STEMS.every((s) => Boolean(stems[s]))
     return {
       dir,
       name: meta.name ?? basename(dir),
+      formatVersion: meta.version ?? 1,
       settings: meta.settings ?? { transpose: 0, tracks: {} },
       stems: coreThere ? stems : undefined,
       hasLyrics: await exists(join(dir, 'lyrics.json'))
@@ -162,8 +304,14 @@ export async function saveProject(
     for (const s of useSix ? STEMS_6 : STEMS) {
       const src = join(cacheDir, `${s}.wav`)
       const dst = join(dir, 'stems', `${s}.wav`)
-      if ((await exists(src)) && !(await exists(dst))) await copyFile(src, dst)
+      // an existing FLAC already carries this stem — don't resurrect the WAV
+      if ((await exists(src)) && !(await exists(dst)) && !(await stemFile(dir, s))) {
+        await copyFile(src, dst)
+      }
     }
+
+    // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
+    const allFlac = await convertStemsToFlac(dir)
 
     // lyrics from the hash cache (project-local lyrics stay as they are)
     const cachedLyrics = join(stemsRoot(), await hashFile(songPath), 'lyrics.json')
@@ -173,7 +321,7 @@ export async function saveProject(
     }
 
     const meta: ProjectFile = {
-      version: 1,
+      version: allFlac ? 2 : 1,
       name: safeName(name),
       songFile,
       savedAt: new Date().toISOString(),
@@ -218,8 +366,8 @@ export async function renameProject(
     await writeFile(join(newDir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
     const stems: Partial<Record<StemName6, string>> = {}
     for (const s of STEMS_6) {
-      const p = join(newDir, 'stems', `${s}.wav`)
-      if (await exists(p)) stems[s] = p
+      const p = await stemFile(newDir, s)
+      if (p) stems[s] = p
     }
     const coreThere = STEMS.every((s) => Boolean(stems[s]))
     log('app', `project renamed: ${oldDir} → ${newDir}`)

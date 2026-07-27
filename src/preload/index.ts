@@ -113,7 +113,12 @@ const api: SingzApi = {
 
   listProjects: () => ipcRenderer.invoke('projects:list'),
 
-  renameProject: (songPath, newName) => ipcRenderer.invoke('project:rename', songPath, newName)
+  renameProject: (songPath, newName) => ipcRenderer.invoke('project:rename', songPath, newName),
+
+  upgradeProject: (dir) => ipcRenderer.invoke('project:upgrade', dir),
+  getStorage: () => ipcRenderer.invoke('projects:storage'),
+  setProjectsRoot: (path) => ipcRenderer.invoke('projects:set-root', path),
+  chooseProjectsRoot: () => ipcRenderer.invoke('projects:choose-root')
 }
 
 contextBridge.exposeInMainWorld('singz', api)

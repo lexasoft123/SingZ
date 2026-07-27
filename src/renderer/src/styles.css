@@ -1727,6 +1727,27 @@ button.chip-status:hover {
   margin-bottom: 0;
 }
 
+/* Library-location controls at the picker's foot (cloud folders are just folders). */
+.picker-storage {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.picker-storage .picker-root {
+  margin-top: 0;
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 /* ---------- drop-screen project shortcuts ---------- */
 
 .drop-projects {
