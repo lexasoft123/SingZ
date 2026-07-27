@@ -36,7 +36,14 @@ import {
   type ProjectEntry,
   type RootInfo
 } from './src/projects'
-import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from './src/latency'
+import {
+  getCrumb,
+  getRouteLatency,
+  getTrimMs,
+  setCrumb,
+  setTrimMs,
+  type RouteLatency
+} from './src/latency'
 
 /* Bundled sample project — playable before any folder is set up. */
 const SAMPLE_PROJECT = require('./assets/sample/project.json') as ProjectDoc
@@ -203,6 +210,14 @@ function ListScreen({
 
   useEffect(() => {
     void refresh()
+    // A breadcrumb left behind means the last open never finished — the app
+    // is its own crash reporter.
+    void getCrumb().then((c) => {
+      if (c) {
+        setError(`The last open crashed while ${c} — please report this.`)
+        void setCrumb('')
+      }
+    })
   }, [refresh])
 
   useEffect(() => {
@@ -221,9 +236,11 @@ function ListScreen({
     setBusy('Opening…')
     setError(null)
     try {
-      const loaded = await loadProject(entry, engine.sampleRate, setBusy)
+      const loaded = await loadProject(entry, engine.sampleRate, setBusy, setCrumb)
+      await setCrumb('')
       onLoaded(loaded)
     } catch (e) {
+      await setCrumb('')
       setError(String(e instanceof Error ? e.message : e))
     } finally {
       setBusy(null)
@@ -256,8 +273,17 @@ function ListScreen({
   }
 
   const changeFolder = async (): Promise<void> => {
-    const picked = await pickFolder()
-    if (picked) await refresh()
+    try {
+      const picked = await pickFolder()
+      if (picked) {
+        await refresh()
+        // Cloud folder metadata can land moments after the pick — settle pass.
+        setTimeout(() => void refresh(), 1500)
+      }
+    } catch (e) {
+      // Surface native failures on screen — the phone is its own console.
+      setError(`Folder picker: ${String(e instanceof Error ? e.message : e)}`)
+    }
   }
 
   return (
@@ -391,10 +417,11 @@ function PlayerScreen({
         engine.setSolo(id, t.solo)
         engine.setVolume(id, t.volume)
       }
-      if (st.selection) {
-        engine.setRegion({ start: st.selection.s, end: st.selection.e }, st.loop === true)
-        setLoop(st.loop === true)
-      }
+      // The saved practice loop is NOT auto-armed here: with no waveform on
+      // the phone an invisible 8-second loop reads as "song starts in the
+      // middle" (and audio-api's looped sources begin at loopStart rather
+      // than playing into the region). The Loop chip arms it on demand.
+      setLoop(false)
       const tn = st.training
       if (tn) {
         setTrainCfg(sanitizeTraining(tn))
@@ -538,10 +565,16 @@ function PlayerScreen({
             activeColor={C.amber}
             disabled={!project.doc.settings?.selection}
             onPress={() => {
+              const sel = project.doc.settings?.selection
+              if (!sel) return
               const next = !loop
               setLoop(next)
-              const sel = project.doc.settings?.selection
-              engine.setRegion(sel ? { start: sel.s, end: sel.e } : null, next)
+              engine.setRegion(next ? { start: sel.s, end: sel.e } : null, next)
+              if (next) {
+                // Arming means "practice this section" — jump into it.
+                const p = engine.position
+                if (p < sel.s - 0.05 || p >= sel.e - 0.05) engine.seek(sel.s)
+              }
             }}
           />
           <Chip

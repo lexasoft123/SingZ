@@ -78,17 +78,21 @@ export interface LoadedProject {
 export async function loadProject(
   entry: ProjectEntry,
   sampleRate: number,
-  onStep: (msg: string) => void
+  onStep: (msg: string) => void,
+  crumb?: (note: string) => Promise<void>
 ): Promise<LoadedProject> {
   const ids = STEM_ORDER_ALL.filter((s) => entry.stems[s])
   const stems: { id: string; buffer: AudioBuffer }[] = []
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i]
     onStep(`Fetching ${id} (${i + 1}/${ids.length})…`)
+    await crumb?.(`fetching ${id}`)
     const path = await Folder.localFile(entry.dir, `stems/${id}.${entry.stems[id]}`)
     onStep(`Decoding ${id} (${i + 1}/${ids.length})…`)
+    await crumb?.(`decoding ${id}`)
     stems.push({ id, buffer: await decodeAudioData(path, sampleRate) })
   }
+  await crumb?.('lyrics')
   let lyrics: LyricsDoc | null = null
   if (entry.hasLyrics) {
     onStep('Fetching lyrics…')

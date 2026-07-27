@@ -34,6 +34,12 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
   private func activateRoot() -> (url: URL, kind: String, name: String) {
     if let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) {
       var stale = false
+      do {
+        let probe = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale)
+        NSLog("SingZ root: bookmark resolved to %@ (stale=%d)", probe.path, stale ? 1 : 0)
+      } catch {
+        NSLog("SingZ root: bookmark resolve FAILED — %@", error.localizedDescription)
+      }
       if let url = try? URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale) {
         if rootURL?.path != url.path {
           if rootScoped { rootURL?.stopAccessingSecurityScopedResource() }
@@ -52,20 +58,44 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     return (rootURL!, "documents", "On My iPhone")
   }
 
-  /** Wait for an iCloud item to be fully local (no-op for regular files). */
+  /**
+   * Wait for an iCloud item to be fully local (no-op for regular files).
+   * An undownloaded item exists only as a ".name.icloud" placeholder — the
+   * logical URL has no readable attributes yet, so materialization must be
+   * requested unconditionally and completion judged by the real file
+   * appearing with a settled downloading status.
+   */
   private func ensureDownloaded(_ url: URL, timeout: TimeInterval) throws {
-    let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
-    guard (try? url.resourceValues(forKeys: keys))?.isUbiquitousItem == true else { return }
-    if (try? url.resourceValues(forKeys: keys))?.ubiquitousItemDownloadingStatus == .current {
-      return
+    let fm = FileManager.default
+    let path = url.path
+    let placeholderPath = url.deletingLastPathComponent()
+      .appendingPathComponent(".\(url.lastPathComponent).icloud").path
+    // URL instances cache resourceValues — a fresh URL per poll is mandatory,
+    // or the downloading status never appears to change.
+    func settled() -> Bool {
+      guard fm.fileExists(atPath: path) else { return false }
+      let st = (try? URL(fileURLWithPath: path)
+        .resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]))?
+        .ubiquitousItemDownloadingStatus
+      return st == nil || st == .current
     }
-    try FileManager.default.startDownloadingUbiquitousItem(at: url)
+    if settled() { return }
+    guard fm.fileExists(atPath: path) || fm.fileExists(atPath: placeholderPath) else {
+      throw NSError(
+        domain: "SingZ", code: 3,
+        userInfo: [NSLocalizedDescriptionKey: "\(url.lastPathComponent) is not in this folder"]
+      )
+    }
+    do {
+      try fm.startDownloadingUbiquitousItem(at: url)
+    } catch {
+      NSLog("SingZ download: start failed for %@ — %@", url.lastPathComponent,
+            error.localizedDescription)
+    }
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
-      if (try? url.resourceValues(forKeys: keys))?.ubiquitousItemDownloadingStatus == .current {
-        return
-      }
-      Thread.sleep(forTimeInterval: 0.25)
+      if settled() { return }
+      Thread.sleep(forTimeInterval: 0.3)
     }
     throw NSError(
       domain: "SingZ", code: 1,
@@ -100,12 +130,27 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
 
   // MARK: - Exported API
 
+  /** RCTPresentedViewController can be nil under the bridgeless new arch — walk the scenes. */
+  private func topViewController() -> UIViewController? {
+    if let vc = RCTPresentedViewController() { return vc }
+    for scene in UIApplication.shared.connectedScenes {
+      guard let ws = scene as? UIWindowScene else { continue }
+      for window in ws.windows where window.isKeyWindow {
+        var top = window.rootViewController
+        while let presented = top?.presentedViewController { top = presented }
+        if top != nil { return top }
+      }
+    }
+    return nil
+  }
+
   @objc func pickFolder(
     _ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock
   ) {
     DispatchQueue.main.async {
-      guard let host = RCTPresentedViewController() else {
-        reject("no_ui", "no view controller to present from", nil)
+      guard let host = self.topViewController() else {
+        NSLog("SingZ pick: no view controller to present from")
+        reject("no_ui", "could not open the folder picker (no window)", nil)
         return
       }
       self.pickResolve = resolve
@@ -125,8 +170,12 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
       return
     }
     let scoped = url.startAccessingSecurityScopedResource()
-    if let bookmark = try? url.bookmarkData() {
+    do {
+      let bookmark = try url.bookmarkData()
       UserDefaults.standard.set(bookmark, forKey: Self.bookmarkKey)
+      NSLog("SingZ pick: bookmarked %@ (scoped=%d, %d bytes)", url.path, scoped ? 1 : 0, bookmark.count)
+    } catch {
+      NSLog("SingZ pick: bookmarkData FAILED for %@ — %@", url.path, error.localizedDescription)
     }
     if rootScoped { rootURL?.stopAccessingSecurityScopedResource() }
     rootURL = url
@@ -165,14 +214,21 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
         at: root, includingPropertiesForKeys: [.isDirectoryKey],
         options: [.skipsHiddenFiles]
       )
+      NSLog("SingZ list: %d entries in %@", entries.count, root.path)
       for dir in entries {
+        NSLog("SingZ list: entry %@ dir=%d pj=%d", dir.lastPathComponent,
+          ((try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true) ? 1 : 0,
+          present(dir, "project.json") ? 1 : 0)
         guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
           present(dir, "project.json")
         else { continue }
         let metaURL = dir.appendingPathComponent("project.json")
         guard let metaData = try? coordinatedRead(metaURL),
           let metaText = String(data: metaData, encoding: .utf8)
-        else { continue }
+        else {
+          NSLog("SingZ list: meta read failed for %@", dir.lastPathComponent)
+          continue
+        }
         var stems: [String: String] = [:]
         let stemsDir = dir.appendingPathComponent("stems", isDirectory: true)
         for s in ["vocals", "drums", "bass", "guitar", "piano", "other"] {
@@ -191,6 +247,7 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
       }
       resolve(out)
     } catch {
+      NSLog("SingZ list: enumeration FAILED — %@", error.localizedDescription)
       reject("list_failed", error.localizedDescription, error)
     }
   }

@@ -41,4 +41,21 @@ class AudioRouteInfo: NSObject {
     UserDefaults.standard.set(value, forKey: key as String)
     resolve(nil)
   }
+
+  @objc func getTextPref(
+    _ key: NSString, resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    resolve(UserDefaults.standard.string(forKey: key as String))
+  }
+
+  /** Synchronous flush — breadcrumbs must hit disk before a crash can eat them. */
+  @objc func setTextPref(
+    _ key: NSString, value: NSString, resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    UserDefaults.standard.set(value as String, forKey: key as String)
+    UserDefaults.standard.synchronize()
+    resolve(nil)
+  }
 }

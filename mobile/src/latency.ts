@@ -18,6 +18,8 @@ interface AudioRouteInfoApi {
   }>
   getPref(key: string): Promise<number | null>
   setPref(key: string, value: number): Promise<void>
+  getTextPref(key: string): Promise<string | null>
+  setTextPref(key: string, value: string): Promise<void>
 }
 
 const Native = NativeModules.AudioRouteInfo as AudioRouteInfoApi
@@ -61,3 +63,7 @@ export async function getTrimMs(key: string): Promise<number> {
 export async function setTrimMs(key: string, ms: number): Promise<void> {
   await Native.setPref(key, ms)
 }
+
+/** Crash breadcrumbs: flushed to UserDefaults before each risky step. */
+export const getCrumb = (): Promise<string | null> => Native.getTextPref('singz.crumb')
+export const setCrumb = (note: string): Promise<void> => Native.setTextPref('singz.crumb', note)
