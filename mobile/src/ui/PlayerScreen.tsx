@@ -265,9 +265,11 @@ export default function PlayerScreen({
                       <Text
                         key={j}
                         style={
-                          pos >= w.s
+                          pos >= w.e
                             ? { color: isSing ? '#ffd97a' : C.amber }
-                            : { color: 'rgba(255,255,255,0.40)' }
+                            : pos >= w.s
+                              ? [{ color: isSing ? '#ffd97a' : C.amber }, s.nowGlow]
+                              : { color: 'rgba(255,255,255,0.40)' }
                         }
                       >
                         {w.w + (j < ln.words.length - 1 ? ' ' : '')}
@@ -578,6 +580,12 @@ const s = StyleSheet.create({
   youChipText: { color: C.amberInk, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
 
   line: { fontSize: 30, lineHeight: 37, fontWeight: '800', letterSpacing: -0.4 },
+  /* desktop karaoke halo: .lyr-line.current span.now */
+  nowGlow: {
+    textShadowColor: 'rgba(255,160,40,0.75)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 14
+  },
   noLyrics: { color: C.faint, fontSize: 15, marginTop: 40 },
 
   foot: {
