@@ -212,6 +212,10 @@ export class MultitrackEngine {
   }
 
   load(list: EngineTrackInput[], opts: { position?: number; play?: boolean } = {}): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
     this.stopSources()
     this.ducked.clear() // fresh tracks start unducked; the schedule re-applies on play
     for (const t of this.tracks) t.gain.disconnect()
@@ -267,6 +271,12 @@ export class MultitrackEngine {
   }
 
   pause(): void {
+    if (this.restartTimer) {
+      // pause during a pending post-seek restart cancels the restart
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+      this.emit()
+    }
     if (!this._playing) return
     this.startOffset = this.position
     this._playing = false
@@ -281,13 +291,25 @@ export class MultitrackEngine {
     else void this.play()
   }
 
+  /** Pending post-seek restart — rapid seeks coalesce into one rebuild. */
+  private restartTimer: ReturnType<typeof setTimeout> | null = null
+
   seek(t: number): void {
     const clamped = Math.max(0, Math.min(t, this.duration))
-    if (this._playing) {
+    if (this._playing || this.restartTimer !== null) {
+      // Tearing down and instantly recreating every source per seek can
+      // wedge the native render thread on device — stop now, restart once
+      // the scrubbing settles.
       this.stopSources()
       this._playing = false
       this.startOffset = clamped
-      void this.play()
+      if (this.restartTimer) clearTimeout(this.restartTimer)
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null
+        void this.play()
+      }, 80)
+      this.trainTick()
+      this.emit()
     } else {
       this.startOffset = clamped
       this.trainTick() // keep the ducked-lane preview honest while paused

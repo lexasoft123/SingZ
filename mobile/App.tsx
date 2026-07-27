@@ -245,6 +245,8 @@ function ListScreen({
       return entry ? openEntry(entry) : Promise.reject(new Error(`no project ${dir}`))
     }
     TEST.projects = (projects ?? []).map((p) => p.dir)
+    TEST.listError = error
+    TEST.busy = busy
   })
 
   const openEntry = async (entry: ProjectEntry): Promise<void> => {
