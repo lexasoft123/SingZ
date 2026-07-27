@@ -166,7 +166,7 @@ export default function PlayerScreen({
   useEffect(() => {
     const y = lineYs.current[currentLine]
     if (currentLine >= 0 && y !== undefined) {
-      scrollRef.current?.scrollTo({ y: Math.max(0, y - 170), animated: true })
+      scrollRef.current?.scrollTo({ y: Math.max(0, y - 250), animated: true })
     }
   }, [currentLine])
 
@@ -227,7 +227,7 @@ export default function PlayerScreen({
   /* ------- lyric line coloring ------- */
   const lineColor = (i: number, isSing: boolean): string => {
     if (i === currentLine) return C.bright
-    if (isSing) return 'rgba(242,193,78,0.30)'
+    if (isSing) return 'rgba(245,199,88,0.42)'
     if (i < currentLine) return 'rgba(255,255,255,0.18)'
     return Math.abs(i - currentLine) === 1 ? 'rgba(255,255,255,0.34)' : 'rgba(255,255,255,0.25)'
   }
@@ -240,7 +240,7 @@ export default function PlayerScreen({
       <ScrollView
         ref={scrollRef}
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingTop: 130, paddingBottom: 260, paddingHorizontal: 26 }}
+        contentContainerStyle={{ paddingTop: 250, paddingBottom: 300, paddingHorizontal: 26 }}
       >
         {lines.map((ln, i) => {
           const isCurrent = i === currentLine
