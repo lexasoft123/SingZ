@@ -74,27 +74,40 @@ const TEST: Record<string, unknown> | null = __DEV__
   ? ((globalThis as Record<string, unknown>).__test = { engine })
   : null
 
-/** Horizontal drag/tap bar (seek + volume). Value is 0..1 of its width. */
+/**
+ * Horizontal drag/tap bar (seek + volume). Value is 0..1 of its width.
+ * onChange fires per move (cheap preview/volume); onCommit fires once at
+ * finger-up — expensive actions (engine seeks restart every stem source)
+ * belong there, never in onChange.
+ */
 function Bar({
   value,
   onChange,
+  onCommit,
   color,
   height = 26,
   track = '#2a231b'
 }: {
   value: number
   onChange: (v: number) => void
+  onCommit?: (v: number) => void
   color: string
   height?: number
   track?: string
 }): React.JSX.Element {
   const width = useRef(1)
+  const last = useRef(0)
   const handle = useCallback(
     (e: GestureResponderEvent) => {
-      onChange(Math.max(0, Math.min(1, e.nativeEvent.locationX / width.current)))
+      const v = Math.max(0, Math.min(1, e.nativeEvent.locationX / width.current))
+      last.current = v
+      onChange(v)
     },
     [onChange]
   )
+  const commit = useCallback(() => {
+    onCommit?.(last.current)
+  }, [onCommit])
   return (
     <View
       style={[styles.bar, { height, backgroundColor: track }]}
@@ -105,6 +118,8 @@ function Bar({
       onMoveShouldSetResponder={() => true}
       onResponderGrant={handle}
       onResponderMove={handle}
+      onResponderRelease={commit}
+      onResponderTerminate={commit}
     >
       <View
         pointerEvents="none"
@@ -364,6 +379,8 @@ function PlayerScreen({
   const [route, setRoute] = useState<RouteLatency | null>(null)
   const [trimMs, setTrim] = useState(0)
   const [showSync, setShowSync] = useState(false)
+  /** Seek preview while the finger is down (0..1); the engine seeks on release. */
+  const [dragPos, setDragPos] = useState<number | null>(null)
 
   /* Route-latency compensation: highlights shift to match what the ear hears
      (CarPlay/BT). Auto part from AVAudioSession, user trim persisted per
@@ -540,8 +557,12 @@ function PlayerScreen({
       {/* Seek */}
       <View style={styles.seekWrap}>
         <Bar
-          value={engine.duration > 0 ? pos / engine.duration : 0}
-          onChange={(v) => engine.seek(v * engine.duration)}
+          value={dragPos ?? (engine.duration > 0 ? pos / engine.duration : 0)}
+          onChange={setDragPos}
+          onCommit={(v) => {
+            setDragPos(null)
+            engine.seek(v * engine.duration)
+          }}
           color={C.amber}
           height={30}
         />
