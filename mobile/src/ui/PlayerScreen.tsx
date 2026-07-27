@@ -266,8 +266,8 @@ export default function PlayerScreen({
                         key={j}
                         style={
                           pos >= w.s
-                            ? { color: isSing ? C.amber : C.bright }
-                            : { color: 'rgba(255,255,255,0.38)' }
+                            ? { color: isSing ? '#ffd97a' : C.amber }
+                            : { color: 'rgba(255,255,255,0.40)' }
                         }
                       >
                         {w.w + (j < ln.words.length - 1 ? ' ' : '')}
