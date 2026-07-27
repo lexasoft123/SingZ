@@ -89,9 +89,26 @@ export class MultitrackEngine {
     return this.ctx.sampleRate
   }
 
+  /**
+   * Output-route latency (CarPlay/Bluetooth): what the listener hears trails
+   * the context clock, so position — which drives lyrics and training ducks —
+   * reports what is audible *now* (desktop parity: its engine subtracts
+   * ctx.outputLatency the same way).
+   */
+  private displayLag = 0
+
+  setDisplayLatency(sec: number): void {
+    this.displayLag = Math.max(0, Math.min(3, sec))
+    this.emit()
+  }
+
+  get displayLatency(): number {
+    return this.displayLag
+  }
+
   get position(): number {
     if (!this._playing) return this.startOffset
-    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt)
+    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt - this.displayLag)
     const r = this.regionLoop ? this.region : null
     if (r && this.startOffset < r.end && elapsed > r.end) {
       // Sources loop natively at r.end -> r.start; fold the linear clock.

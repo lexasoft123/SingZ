@@ -36,6 +36,7 @@ import {
   type ProjectEntry,
   type RootInfo
 } from './src/projects'
+import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from './src/latency'
 
 /* Bundled sample project — playable before any folder is set up. */
 const SAMPLE_PROJECT = require('./assets/sample/project.json') as ProjectDoc
@@ -334,6 +335,48 @@ function PlayerScreen({
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
   const [showTrain, setShowTrain] = useState(false)
   const [loop, setLoop] = useState(false)
+  const [route, setRoute] = useState<RouteLatency | null>(null)
+  const [trimMs, setTrim] = useState(0)
+  const [showSync, setShowSync] = useState(false)
+
+  /* Route-latency compensation: highlights shift to match what the ear hears
+     (CarPlay/BT). Auto part from AVAudioSession, user trim persisted per
+     route; re-read on route changes (session values settle asynchronously). */
+  useEffect(() => {
+    let alive = true
+    const load = async (): Promise<void> => {
+      try {
+        const r = await getRouteLatency()
+        const t = await getTrimMs(r.key)
+        if (!alive) return
+        setRoute(r)
+        setTrim(t)
+        engine.setDisplayLatency(r.autoSec + t / 1000)
+      } catch {
+        // no native module (fresh pod not built yet) — play uncompensated
+      }
+    }
+    void load()
+    const sub = AudioManager.addSystemEventListener('routeChange', () => {
+      setTimeout(() => void load(), 400)
+    })
+    return () => {
+      alive = false
+      sub?.remove()
+    }
+  }, [])
+
+  const applyTrim = useCallback(
+    (ms: number) => {
+      const clamped = Math.max(-2000, Math.min(2000, Math.round(ms)))
+      setTrim(clamped)
+      if (route) {
+        void setTrimMs(route.key, clamped)
+        engine.setDisplayLatency(route.autoSec + clamped / 1000)
+      }
+    },
+    [route]
+  )
 
   const lines = useMemo(() => project.lyrics?.lines ?? [], [project])
   const stemIds = useMemo(() => project.stems.map((s) => s.id), [project])
@@ -442,6 +485,14 @@ function PlayerScreen({
     TEST.trainingOn = training
     TEST.setTrainMode = (mode: 'time' | 'lines') => setTrainCfg((c) => ({ ...c, mode }))
     TEST.showTrainPanel = () => setShowTrain(true)
+    TEST.latency = () => ({
+      route: route?.label ?? null,
+      autoMs: route ? Math.round(route.autoSec * 1000) : null,
+      trimMs,
+      appliedMs: Math.round(engine.displayLatency * 1000)
+    })
+    TEST.setTrim = applyTrim
+    TEST.showSyncPanel = () => setShowSync(true)
   })
 
   return (
@@ -499,8 +550,43 @@ function PlayerScreen({
             activeColor={C.amber}
             onPress={() => setShowTrain((v) => !v)}
           />
+          <Chip
+            label="Sync"
+            active={showSync || trimMs !== 0}
+            activeColor={C.amber}
+            onPress={() => setShowSync((v) => !v)}
+          />
         </View>
       </View>
+
+      {/* Lyric-sync panel: route latency compensation + per-route trim */}
+      {showSync && (
+        <View style={styles.trainPanel}>
+          <View style={styles.trainHead}>
+            <Text style={styles.trainTitle}>Lyric timing</Text>
+            <Text style={styles.caption}>
+              {route ? `${route.label} · auto ${Math.round(route.autoSec * 1000)} ms` : '…'}
+            </Text>
+          </View>
+          <Stepper
+            label="Trim"
+            value={trimMs}
+            min={-2000}
+            max={2000}
+            step={25}
+            onChange={applyTrim}
+          />
+          <Text style={styles.caption}>
+            Highlights are shifted {Math.round(engine.displayLatency * 1000)} ms to match what you
+            hear. If words light up before you hear them (car audio, Bluetooth), add more.
+          </Text>
+          {trimMs !== 0 && (
+            <View style={styles.segRow}>
+              <Chip label="Reset" active={false} activeColor={C.amber} onPress={() => applyTrim(0)} />
+            </View>
+          )}
+        </View>
+      )}
 
       {/* Training panel */}
       {showTrain && (

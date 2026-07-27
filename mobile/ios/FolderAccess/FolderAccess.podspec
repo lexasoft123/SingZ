@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'FolderAccess'
-  s.version      = '1.0.0'
+  s.version      = '1.0.1'
   s.summary      = 'SingZ project-folder access: document picker, bookmarks, iCloud downloads'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
