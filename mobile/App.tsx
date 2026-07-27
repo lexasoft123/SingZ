@@ -61,6 +61,11 @@ const C = {
 
 const engine = new MultitrackEngine()
 
+/** Dev-only driver hooks (the mobile analog of desktop's window.__engine). */
+const TEST: Record<string, unknown> | null = __DEV__
+  ? ((globalThis as Record<string, unknown>).__test = { engine })
+  : null
+
 /** Horizontal drag/tap bar (seek + volume). Value is 0..1 of its width. */
 function Bar({
   value,
@@ -198,6 +203,18 @@ function ListScreen({
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  useEffect(() => {
+    if (!TEST) return
+    TEST.screen = 'list'
+    TEST.refresh = refresh
+    TEST.openSample = openSample
+    TEST.openProject = (dir: string) => {
+      const entry = (projects ?? []).find((p) => p.dir === dir)
+      return entry ? openEntry(entry) : Promise.reject(new Error(`no project ${dir}`))
+    }
+    TEST.projects = (projects ?? []).map((p) => p.dir)
+  })
 
   const openEntry = async (entry: ProjectEntry): Promise<void> => {
     setBusy('Opening…')
@@ -417,6 +434,15 @@ function PlayerScreen({
     if (!training) for (const id of trainCfg.stems) engine.setMuted(id, false)
     setTraining(!training)
   }
+
+  useEffect(() => {
+    if (!TEST) return
+    TEST.screen = 'player'
+    TEST.armTraining = armTraining
+    TEST.trainingOn = training
+    TEST.setTrainMode = (mode: 'time' | 'lines') => setTrainCfg((c) => ({ ...c, mode }))
+    TEST.showTrainPanel = () => setShowTrain(true)
+  })
 
   return (
     <>
