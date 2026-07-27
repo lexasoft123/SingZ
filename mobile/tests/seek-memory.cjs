@@ -15,9 +15,13 @@ const WebSocket = require('ws');
 
 const BUNDLE = 'org.reactjs.native.example.SingZPlayer';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
-const BURSTS = 6;
-/** Patched lib: whole-run growth stays far below one stem-set (~360 MB). */
-const MAX_GROWTH_MB = 150;
+const BURSTS = parseInt(process.env.BURSTS || '6', 10);
+/**
+ * Patched lib shows ~3-4 MB/seek of GC-sawtooth creep; the regression this
+ * guards against is ~345 MB/seek (a full stem-set copy), so the limit scales
+ * with burst count while staying far below one stem-set.
+ */
+const MAX_GROWTH_MB = 60 + 12 * BURSTS;
 
 const getJson = (u) =>
   new Promise((res, rej) => {

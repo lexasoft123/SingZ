@@ -17,20 +17,39 @@ const file = path.join(
   'node_modules/react-native-audio-api/common/cpp/audioapi/HostObjects/sources/AudioBufferSourceNodeHostObject.cpp'
 );
 const COPY = 'copiedBuffer = std::make_shared<AudioBuffer>(*buffer);';
-const SHARE = `// SingZ patch (scripts/patch-audio-api.js): share instead of deep-copying.
+const SHARE = `// SingZ patch 1 (scripts/patch-audio-api.js): share instead of deep-copying.
       copiedBuffer = buffer;`;
+// With sharing, a source owns no PCM — declaring the full buffer size as
+// external pressure per source stacks per seek until Hermes GC hits its heap
+// ceiling and hard-OOMs (hermes::vm::GCBase::oom, seen on device). The
+// AudioBuffer host object still accounts the real memory once.
+const PRESSURE =
+  'thisValue.asObject(runtime).setExternalMemoryPressure(\n' +
+  '        runtime, bufferHostObject->getSizeInBytes());';
+const PRESSURE_FIXED =
+  '/* SingZ patch 2: shared buffer — the source owns no PCM copy. */\n' +
+  '    thisValue.asObject(runtime).setExternalMemoryPressure(runtime, 1024);';
 
-const src = fs.readFileSync(file, 'utf8');
-if (src.includes('SingZ patch')) {
+let src = fs.readFileSync(file, 'utf8');
+let applied = 0;
+if (src.includes(COPY)) {
+  src = src.replace(COPY, SHARE);
+  applied++;
+}
+if (src.includes(PRESSURE)) {
+  src = src.replace(PRESSURE, PRESSURE_FIXED);
+  applied++;
+}
+if (applied > 0) {
+  fs.writeFileSync(file, src);
+  console.log(`audio-api patch: applied ${applied} change(s)`);
+} else if (src.includes('SingZ patch') && src.includes('SingZ patch 2')) {
   console.log('audio-api patch: already applied');
-} else if (src.includes(COPY)) {
-  fs.writeFileSync(file, src.replace(COPY, SHARE));
-  console.log('audio-api patch: applied (shared AudioBuffer on setBuffer)');
 } else {
   console.error(
     'audio-api patch: target code not found — upstream changed ' +
-      'AudioBufferSourceNodeHostObject.cpp; re-check the copy-per-setBuffer ' +
-      'behavior before shipping.'
+      'AudioBufferSourceNodeHostObject.cpp; re-check copy-per-setBuffer and ' +
+      'external-pressure behavior before shipping.'
   );
   process.exit(1);
 }
