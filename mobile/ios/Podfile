@@ -17,6 +17,10 @@ end
 target 'SingZPlayer' do
   config = use_native_modules!
 
+  # Project-folder access (document picker, iCloud downloads) — local pod so
+  # no pbxproj surgery is needed.
+  pod 'FolderAccess', :path => './FolderAccess'
+
   use_react_native!(
     :path => config[:reactNativePath],
     # An absolute path to your application root.

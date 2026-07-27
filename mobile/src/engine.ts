@@ -84,6 +84,11 @@ export class MultitrackEngine {
     return this._playing
   }
 
+  /** Context rate — decode stems at this rate to avoid runtime resampling. */
+  get sampleRate(): number {
+    return this.ctx.sampleRate
+  }
+
   get position(): number {
     if (!this._playing) return this.startOffset
     const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt)
