@@ -18,6 +18,8 @@ import { perf } from './perf'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/player.png')
+const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
+const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 
 export default function PlayerScreen({
   engine,
@@ -279,7 +281,13 @@ export default function PlayerScreen({
         {lines.length === 0 && <Text style={s.noLyrics}>No lyrics in this project yet.</Text>}
       </ScrollView>
 
-      {/* header */}
+      {/* header (scrim fades into the lyrics — no hard edge) */}
+      <View
+        pointerEvents="none"
+        style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 215 }}
+      >
+        <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
+      </View>
       <View style={s.hdr} pointerEvents="box-none">
         <Pressable onPress={onBack} hitSlop={12}>
           <Text style={s.back}>‹</Text>
@@ -303,7 +311,13 @@ export default function PlayerScreen({
         )}
       </View>
 
-      {/* footer controls */}
+      {/* footer controls (scrim rises out of the lyrics) */}
+      <View
+        pointerEvents="none"
+        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 360 }}
+      >
+        <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
+      </View>
       <View style={s.foot}>
         <View style={s.scrubRow}>
           <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
@@ -553,8 +567,7 @@ const s = StyleSheet.create({
     gap: 12,
     paddingTop: 58,
     paddingHorizontal: 18,
-    paddingBottom: 14,
-    backgroundColor: 'rgba(20,14,7,0.86)'
+    paddingBottom: 14
   },
   back: { color: 'rgba(255,255,255,0.85)', fontSize: 30, fontWeight: '600', paddingRight: 4, marginTop: -4 },
   hTitle: { color: C.bright, fontSize: 15.5, fontWeight: '700' },
@@ -574,8 +587,7 @@ const s = StyleSheet.create({
     bottom: 0,
     paddingTop: 26,
     paddingHorizontal: 22,
-    paddingBottom: 30,
-    backgroundColor: 'rgba(13,10,6,0.97)'
+    paddingBottom: 30
   },
   scrubRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
   tm: { color: 'rgba(255,255,255,0.45)', fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
