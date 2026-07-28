@@ -40,6 +40,7 @@ jobs:
       # only needs the require()d files to exist, so feed it silence
       - name: Placeholder sample stems
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           mkdir -p mobile/assets/sample/stems
           for s in vocals drums bass guitar piano other; do
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 1 \
