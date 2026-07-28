@@ -257,9 +257,12 @@ export default function CatalogScreen({
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
-      <View style={s.wrap}>
-        <Text style={s.brand}>SingZ</Text>
-        <Text style={s.brandSub}>Your practice library</Text>
+      <View style={[s.wrap, { paddingTop: insets.top + 6 }]}>
+        {/* eyebrow brand row: logo + wordmark tucked beside the cutout */}
+        <View style={s.brandRow}>
+          <StemTile hue={0} size={26} />
+          <Text style={s.brand}>SingZ</Text>
+        </View>
         <View style={s.folders}>
           {driveAvailable() && (
             <Chip
@@ -347,10 +350,10 @@ export default function CatalogScreen({
 }
 
 const s = StyleSheet.create({
-  wrap: { flex: 1, paddingTop: 58, paddingHorizontal: 20 },
-  brand: { color: C.amber, fontSize: 34, fontWeight: '800', letterSpacing: -0.5 },
-  brandSub: { color: 'rgba(255,255,255,0.42)', fontSize: 13.5, marginTop: 3 },
-  folders: { flexDirection: 'row', gap: 8, marginTop: 18, marginBottom: 20, flexWrap: 'wrap' },
+  wrap: { flex: 1, paddingHorizontal: 20 },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+  brand: { color: C.amber, fontSize: 20, fontWeight: '800', letterSpacing: -0.3 },
+  folders: { flexDirection: 'row', gap: 8, marginTop: 14, marginBottom: 18, flexWrap: 'wrap' },
   card: {
     flexDirection: 'row',
     alignItems: 'center',
