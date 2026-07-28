@@ -705,10 +705,13 @@ button.chip-status:hover {
 
 .drop-screen {
   flex: 1;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   padding: 40px;
+  min-height: 0;
 }
 
 .drop-inner {
@@ -1797,6 +1800,7 @@ button.chip-status:hover {
   border-top: 1px solid var(--line);
   width: min(880px, calc(100vw - 80px));
   text-align: left;
+  animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) 0.08s backwards;
 }
 
 .lib-head {

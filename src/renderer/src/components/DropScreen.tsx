@@ -163,85 +163,85 @@ export default function DropScreen({
               Browse files…
             </button>
             <span className="drop-hint">or drag it anywhere into this window</span>
-            {projects.length > 0 && (
-              <div className="lib">
-                <div className="lib-head">
-                  <span className="drop-projects-title">Your projects</span>
-                  {projects.length > 6 && (
-                    <input
-                      className="lib-search"
-                      placeholder="Search projects…"
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                    />
-                  )}
-                </div>
-                <div className="src-line">
-                  <span aria-hidden>📁</span>
-                  <span className="src-who" title={root}>
-                    {root.includes('Mobile Documents')
-                      ? `iCloud Drive / ${root.split('/').pop()}`
-                      : root.split('/').slice(-2).join('/')}
-                  </span>
-                  <span className="src-dim">· {folderCloud(root)}</span>
-                  <button type="button" className="src-link" onClick={onManageStorage}>
-                    Change…
-                  </button>
-                  {gdrive.configured && (
-                    <>
-                      <span className="src-dim">·</span>
-                      <img className="src-ic" src={gdriveIcon} alt="" />
-                      {gdrive.signedIn ? (
-                        <>
-                          <span className="src-who">
-                            Synced to Google Drive{lastSyncLabel ? ` · ${lastSyncLabel}` : ''}
-                          </span>
-                          <button type="button" className="src-link" onClick={() => void onDrive()}>
-                            Sync now
-                          </button>
-                        </>
-                      ) : (
-                        <button type="button" className="src-link" onClick={() => void onDrive()}>
-                          Connect Google Drive…
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-                {driveMsg && <p className="fine src-msg">{driveMsg}</p>}
-                <div className="lib-grid">
-                  {filtered.map((p, i) => (
-                    <button
-                      type="button"
-                      key={p.dir}
-                      className="lib-card"
-                      onClick={() => onOpenProject(p.songPath)}
-                    >
-                      <span className="lib-tile" aria-hidden>
-                        {TILE_HUES[i % 3].map((c) => (
-                          <i key={c} style={{ background: c }} />
-                        ))}
-                      </span>
-                      <span className="lib-body">
-                        <span className="lib-name">{p.name}</span>
-                        <span className="lib-meta">
-                          {p.stemCount > 0 ? `${p.stemCount} stems` : 'no stems'}
-                          {p.hasLyrics ? ' · lyrics' : ''}
-                          {p.savedAt ? ` · ${fmtDate(p.savedAt)}` : ''}
-                        </span>
-                      </span>
-                      {cardBadge(p)}
-                    </button>
-                  ))}
-                  {filtered.length === 0 && (
-                    <p className="fine">Nothing matches “{query}”.</p>
-                  )}
-                </div>
-              </div>
-            )}
           </>
         )}
       </div>
+      {!loading && projects.length > 0 && (
+        <div className="lib">
+          <div className="lib-head">
+            <span className="drop-projects-title">Your projects</span>
+            {projects.length > 6 && (
+              <input
+                className="lib-search"
+                placeholder="Search projects…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            )}
+          </div>
+          <div className="src-line">
+            <span aria-hidden>📁</span>
+            <span className="src-who" title={root}>
+              {root.includes('Mobile Documents')
+                ? `iCloud Drive / ${root.split('/').pop()}`
+                : root.split('/').slice(-2).join('/')}
+            </span>
+            <span className="src-dim">· {folderCloud(root)}</span>
+            <button type="button" className="src-link" onClick={onManageStorage}>
+              Change…
+            </button>
+            {gdrive.configured && (
+              <>
+                <span className="src-dim">·</span>
+                <img className="src-ic" src={gdriveIcon} alt="" />
+                {gdrive.signedIn ? (
+                  <>
+                    <span className="src-who">
+                      Synced to Google Drive{lastSyncLabel ? ` · ${lastSyncLabel}` : ''}
+                    </span>
+                    <button type="button" className="src-link" onClick={() => void onDrive()}>
+                      Sync now
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="src-link" onClick={() => void onDrive()}>
+                    Connect Google Drive…
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+          {driveMsg && <p className="fine src-msg">{driveMsg}</p>}
+          <div className="lib-grid">
+            {filtered.map((p, i) => (
+              <button
+                type="button"
+                key={p.dir}
+                className="lib-card"
+                onClick={() => onOpenProject(p.songPath)}
+              >
+                <span className="lib-tile" aria-hidden>
+                  {TILE_HUES[i % 3].map((c) => (
+                    <i key={c} style={{ background: c }} />
+                  ))}
+                </span>
+                <span className="lib-body">
+                  <span className="lib-name">{p.name}</span>
+                  <span className="lib-meta">
+                    {p.stemCount > 0 ? `${p.stemCount} stems` : 'no stems'}
+                    {p.hasLyrics ? ' · lyrics' : ''}
+                    {p.savedAt ? ` · ${fmtDate(p.savedAt)}` : ''}
+                  </span>
+                </span>
+                {cardBadge(p)}
+              </button>
+            ))}
+            {filtered.length === 0 && (
+              <p className="fine">Nothing matches “{query}”.</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
