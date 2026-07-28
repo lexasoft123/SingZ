@@ -181,8 +181,20 @@ export default function PlayerScreen({
     })
   }
 
+  /** Mute states the singer had before arming — restored on disarm. */
+  const preTrainMutes = useRef<Record<string, boolean> | null>(null)
+
   const armTraining = (): void => {
-    if (!training) for (const id of trainCfg.stems) engine.setMuted(id, false)
+    if (!training) {
+      // ducks need the train stems live, but remember what was muted
+      preTrainMutes.current = Object.fromEntries(
+        trainCfg.stems.map((id) => [id, tracks.find((t) => t.id === id)?.muted ?? false])
+      )
+      for (const id of trainCfg.stems) engine.setMuted(id, false)
+    } else if (preTrainMutes.current) {
+      for (const [id, m] of Object.entries(preTrainMutes.current)) engine.setMuted(id, m)
+      preTrainMutes.current = null
+    }
     setTraining(!training)
   }
 
@@ -243,6 +255,12 @@ export default function PlayerScreen({
         {lines.map((ln, i) => {
           const isCurrent = i === currentLine
           const isSing = mask?.[i] === true
+          // count-in dots during the last 3s of a long gap before this line
+          // (desktop parity: gap >= 3s, dots = ceil(seconds left))
+          const gapStart = i === 0 ? 0 : lines[i - 1].end
+          const dt = ln.start - pos
+          const countIn =
+            ln.start - gapStart >= 3 && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
           return (
             <Pressable
               key={i}
@@ -256,6 +274,9 @@ export default function PlayerScreen({
                 pressed && { opacity: 0.6 }
               ]}
             >
+              {countIn > 0 && (
+                <Text style={s.countIn}>{Array(countIn).fill('●').join(' ')}</Text>
+              )}
               <Text style={[s.line, { color: lineColor(i, isSing) }]}>
                 {isSing ? <Text style={{ fontSize: 19 }}>🎤 </Text> : null}
                 {isCurrent
@@ -563,6 +584,15 @@ const s = StyleSheet.create({
   youChipText: { color: C.amberInk, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
 
   line: { fontSize: 30, lineHeight: 37, fontWeight: '800', letterSpacing: -0.4 },
+  countIn: {
+    color: C.amber,
+    fontSize: 11,
+    letterSpacing: 5,
+    marginBottom: 4,
+    textShadowColor: 'rgba(255,160,40,0.6)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10
+  },
   /* desktop karaoke halo: .lyr-line.current span.now */
   nowGlow: {
     textShadowColor: 'rgba(255,160,40,0.75)',
