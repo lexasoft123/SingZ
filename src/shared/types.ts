@@ -87,6 +87,7 @@ export interface ProjectListItem {
   songPath: string
   savedAt: string
   hasStems: boolean
+  stemCount: number
   hasLyrics: boolean
 }
 

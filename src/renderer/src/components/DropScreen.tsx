@@ -225,7 +225,7 @@ export default function DropScreen({
                       <span className="lib-body">
                         <span className="lib-name">{p.name}</span>
                         <span className="lib-meta">
-                          {p.hasStems ? 'stems' : 'no stems'}
+                          {p.stemCount > 0 ? `${p.stemCount} stems` : 'no stems'}
                           {p.hasLyrics ? ' · lyrics' : ''}
                           {p.savedAt ? ` · ${fmtDate(p.savedAt)}` : ''}
                         </span>

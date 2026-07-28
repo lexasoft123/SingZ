@@ -1870,8 +1870,9 @@ button.chip-status:hover {
 
 .lib-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
-  gap: 11px;
+  grid-template-columns: repeat(auto-fill, 268px);
+  justify-content: center;
+  gap: 12px;
   max-height: 38vh;
   overflow-y: auto;
   padding-right: 4px;
@@ -1880,11 +1881,11 @@ button.chip-status:hover {
 .lib-card {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 10px;
+  gap: 12px;
+  padding: 11px;
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 14px;
+  border-radius: 15px;
   color: var(--text);
   font: inherit;
   text-align: left;
@@ -1898,21 +1899,21 @@ button.chip-status:hover {
 }
 
 .lib-tile {
-  width: 42px;
-  height: 42px;
-  border-radius: 10px;
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
   background: #171310;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 3px;
-  padding: 8px;
+  gap: 3.5px;
+  padding: 9px;
   flex: none;
 }
 
 .lib-tile i {
-  height: 4px;
-  border-radius: 2px;
+  height: 4.5px;
+  border-radius: 2.5px;
   display: block;
 }
 
@@ -1924,7 +1925,7 @@ button.chip-status:hover {
 }
 
 .lib-name {
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: 700;
   letter-spacing: -0.2px;
   white-space: nowrap;
@@ -1934,26 +1935,27 @@ button.chip-status:hover {
 
 .lib-meta {
   color: var(--dim);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .lib-badge {
   margin-left: auto;
-  color: var(--dim);
-  font-size: 11.5px;
+  color: var(--text);
+  opacity: 0.75;
+  font-size: 12.5px;
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   flex: none;
 }
 
 .lib-badge.dim {
-  opacity: 0.55;
+  opacity: 0.45;
 }
 
 .lib-badge img {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
 }
 
 .wiz-installed {

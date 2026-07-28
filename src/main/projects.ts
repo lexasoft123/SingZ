@@ -228,16 +228,18 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
       if (!meta) continue
       const songPath = join(dir, meta.songFile)
       if (!(await exists(songPath))) continue
-      let hasStems = true
-      for (const s of STEMS) {
-        if ((await stemFile(dir, s)) === null) hasStems = false
+      const found = new Set<string>()
+      for (const s of STEMS_6) {
+        if ((await stemFile(dir, s)) !== null) found.add(s)
       }
       projects.push({
         dir,
         name: meta.name ?? entry.name,
         songPath,
         savedAt: meta.savedAt ?? '',
-        hasStems,
+        // playable = the core four exist; guitar/piano may be silent-hidden
+        hasStems: STEMS.every((s) => found.has(s)),
+        stemCount: found.size,
         hasLyrics: await exists(join(dir, 'lyrics.json'))
       })
     }

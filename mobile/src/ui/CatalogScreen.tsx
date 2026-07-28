@@ -439,7 +439,7 @@ export default function CatalogScreen({
 
 const s = StyleSheet.create({
   wrap: { flex: 1, paddingHorizontal: 20 },
-  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 14 },
   brand: { color: C.amber, fontSize: 20, fontWeight: '800', letterSpacing: -0.3 },
   ctx: {
     flexDirection: 'row',
