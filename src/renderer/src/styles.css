@@ -1792,7 +1792,9 @@ button.chip-status:hover {
 /* ——— project explorer (approved card-grid redesign) ——— */
 
 .lib {
-  margin-top: 34px;
+  margin-top: 30px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
   width: min(880px, calc(100vw - 80px));
   text-align: left;
 }
@@ -1870,8 +1872,7 @@ button.chip-status:hover {
 
 .lib-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, 268px);
-  justify-content: center;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 12px;
   max-height: 38vh;
   overflow-y: auto;
