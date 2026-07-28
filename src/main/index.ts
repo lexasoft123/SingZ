@@ -34,6 +34,13 @@ if (process.env.SINGZ_FAKE_MIC) {
   app.commandLine.appendSwitch('use-fake-ui-for-media-capture')
 }
 
+// Test hook: isolate userData — concurrent E2E drivers (or a driver next to
+// a dev instance) sharing the default "Electron" profile crash each other's
+// renderers. Shared caches (models, GPU pack) stay in appData/SingZ.
+if (process.env.SINGZ_USERDATA_DIR) {
+  app.setPath('userData', resolve(process.env.SINGZ_USERDATA_DIR))
+}
+
 const AUDIO_EXT = new Set([
   '.mp3',
   '.wav',

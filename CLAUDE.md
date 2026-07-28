@@ -58,8 +58,13 @@ Simulator — run them after engine or loading changes.
   (DirectML on Windows with a `dml-disabled.json` marker after failures —
   including pathologically slow sessions caught by the chunk-pace watchdog
   (WARP/remote-desktop adapters); CPU
-  on Intel Macs — CoreML crashes compiling the graph). ONNX packs get a
-  renderer-rendered 44.1 kHz WAV (`needsPcm`). Packs are versioned via
+  on Intel Macs — CoreML crashes compiling the graph). Every downloaded
+  pack gets a renderer-rendered 44.1 kHz WAV (`needsPcm`) — demucs 4.1
+  decodes via sphn (no m4a/aac) with an ffmpeg-CLI fallback end users lack,
+  and torchaudio ≥2.9 load/save is torchcodec-only (unused by demucs 4.1,
+  not shipped); pack deps are pinned in build-gpu-pack.sh, which smoke-splits
+  an mp3 with a bare PATH + `HF_HUB_OFFLINE=1` at build time. System demucs
+  (dev machines) still splits the original file. Packs are versioned via
   `python/pack.json` — bump `PACK_FORMAT_REQUIRED` (models.ts) with the
   build-script stamp to force everyone onto a new pack.
 - **HF hub caches checkpoints as extension-less blobs** — never glob for

@@ -49,6 +49,7 @@ Rules learned the hard way:
 | Variable | Effect |
 |---|---|
 | `SINGZ_NO_SYSTEM_ENGINES=1` | ignore system demucs — simulate a clean OS |
+| `SINGZ_USERDATA_DIR` | isolate userData (drivers sharing "Electron" crash each other) |
 | `SINGZ_MODELS_DIR` | relocate the shared model cache |
 | `SINGZ_PACK_DIR` | relocate the GPU pack install dir |
 | `SINGZ_GPU_PACK_URL` | pack download URL (point at a local http server) |
@@ -86,6 +87,12 @@ run. `scripts/build-gpu-pack.sh` builds the Apple Silicon torch/MPS pack;
 Pack tarballs must contain no symlinks in the model cache (Windows tar
 can't extract them without admin rights) — the script materializes and
 asserts this, then re-verifies the cache resolves fully offline.
+
+The torch pack's python deps are pinned (torch/demucs/sphn/numpy — no
+torchaudio: unused by demucs 4.1, and its IO needs torchcodec since 2.9).
+The build ends with a smoke split of a generated mp3 under
+`PATH=/usr/bin:/bin` + `HF_HUB_OFFLINE=1`, so CI fails rather than ship a
+pack that cannot split on a machine without homebrew or network.
 
 ### Signing status
 

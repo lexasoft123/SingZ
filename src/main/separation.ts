@@ -21,7 +21,9 @@ const PROBE_TIMEOUT_MS = 45_000
 /** Formats the ONNX engine's soundfile loader can read directly. */
 const DIRECT_INPUT_EXT = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga'])
 
-type ResolvedEngine = { kind: 'python'; cmd: string[] } | { kind: 'onnx'; cmd: string[] }
+type ResolvedEngine =
+  | { kind: 'python'; cmd: string[]; pcm?: boolean }
+  | { kind: 'onnx'; cmd: string[] }
 
 /** Console-script wrappers embed absolute paths; -c keeps the pack relocatable. */
 const ONNX_SHIM = 'import sys; from demucs_onnx.cli import main; sys.exit(main())'
@@ -148,6 +150,10 @@ function friendlyError(tail: string): string {
     return 'The graphics driver could not run this model (GPU device removed).'
   if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
     return 'The splitter is missing its model — open the model manager (splitter chip) and download it again.'
+  // Before the generic module check: this error arrives chained from
+  // "No module named 'torchcodec'" (torchaudio >=2.9 without torchcodec).
+  if (/TorchCodec is required|No module named 'torchcodec'/i.test(tail))
+    return 'This demucs install cannot read audio any more (torchaudio now needs TorchCodec). Update it (pipx upgrade demucs) or install ffmpeg (brew install ffmpeg).'
   if (/ModuleNotFoundError|No module named/i.test(tail))
     return 'The demucs install looks broken (missing Python module). Try: pipx reinstall demucs && pipx inject demucs numpy'
   if (/ffmpeg|torchaudio.*backend|Could not load|soundfile/i.test(tail))
@@ -207,13 +213,16 @@ export class Separator {
         const cmd = [packPython(), '-m', 'demucs']
         const res = await probeDetailed(cmd)
         if (res.ok) {
-          this.engine = { kind: 'python', cmd }
+          // needsPcm: demucs 4.1 decodes with sphn (no m4a/aac) and falls
+          // back to an ffmpeg CLI end-user machines don't have — the
+          // renderer-rendered WAV covers every format the app can play.
+          this.engine = { kind: 'python', cmd, pcm: true }
           this.extraEnv = {
             TORCH_HOME: join(packDir(), 'python', 'torch-home'),
             HF_HOME: join(packDir(), 'python', 'hf-home')
           }
           log('splitter', `engine: splitter pack (${cmd.join(' ')})`)
-          return { ok: true, command: this.describe(this.engine) }
+          return { ok: true, command: this.describe(this.engine), needsPcm: true }
         }
         log('splitter', `pack python would not run (${res.detail}) — Reinstall in the model manager may fix it`, 'error')
       }
@@ -260,11 +269,14 @@ export class Separator {
     const hash = await hashFile(input)
     const outDir = join(stemsRoot(), hash)
     const stems = this.stemPaths(outDir)
+    // WAV the renderer may have rendered from its decoded buffer (needsPcm).
+    const provided = join(outDir, 'input44k.wav')
 
     const allThere = (
       await Promise.all(STEMS_6.map((s) => exists(stems[s] as string)))
     ).every(Boolean)
     if (allThere) {
+      await rm(provided, { force: true })
       log('splitter', `split of ${basename(input)}: stems already cached (${hash})`)
       return { ok: true, cached: true, stems }
     }
@@ -278,14 +290,17 @@ export class Separator {
     this.cancelled = false
 
     if (engine.kind === 'python') {
-      const res = await this.runPython(engine.cmd, input, outDir, stems, onProgress)
+      // Pack engines split the rendered WAV; system demucs (dev machines,
+      // ffmpeg on PATH) keeps the original file.
+      let fileInput = input
+      if (engine.pcm && (await exists(provided))) fileInput = provided
+      const res = await this.runPython(engine.cmd, fileInput, outDir, stems, onProgress)
+      if (res.ok) await rm(provided, { force: true })
       this.logResult(res)
       return res
     }
-    // The ONNX engine wants a plain audio file: prefer the WAV the renderer
-    // rendered from its decoded buffer (any source format), else the original
-    // file when the format is directly readable.
-    const provided = join(outDir, 'input44k.wav')
+    // The ONNX engine wants a plain audio file: prefer the rendered WAV,
+    // else the original file when the format is directly readable.
     let fileInput = input
     if (await exists(provided)) {
       fileInput = provided
