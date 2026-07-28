@@ -159,3 +159,58 @@ JSI_HOST_FUNCTION_IMPL(BaseAudioContextHostObject, createSingzStretch) {
   'host impl'
 );
 console.log(p3 > 0 ? `audio-api patch 3: applied ${p3} insertion(s) + files` : 'audio-api patch 3: already applied (files refreshed)');
+
+/*
+ * Patch 4: AudioBuffer.release() — hand back decoded PCM on command.
+ * Nothing in the library frees a decoded buffer before its host object is
+ * GC-finalized, and a six-stem song is 630-845 MB. Hermes sees only the tiny
+ * wrapper (external pressure notwithstanding) and collects whenever it likes,
+ * so closing songs back to back stacks whole songs: measured 850-1260 MB
+ * still resident after close, and on device a per-process-limit jetsam kill
+ * on the fifth song. Clearing channels_ keeps the size/rate metadata valid,
+ * so the getters stay safe; only sample access (getChannelData) is invalid
+ * afterwards, and callers release exactly when they are done.
+ * Regression test: mobile/tests/open-close-memory.cjs.
+ */
+let p4 = 0;
+p4 += insertOnce(
+  'utils/AudioBuffer.hpp',
+  '  explicit AlignedAudioBuffer() = default;',
+  `
+
+  /// SingZ patch 4: free the PCM now instead of at GC finalization.
+  /// Metadata (size, rate, channel count) stays valid; samples do not.
+  void releaseChannels() {
+    channels_.clear();
+  }`,
+  'releaseChannels'
+);
+p4 += insertOnce(
+  'HostObjects/sources/AudioBufferHostObject.h',
+  'JSI_HOST_FUNCTION_DECL(getChannelData);',
+  '\n  JSI_HOST_FUNCTION_DECL(release); // SingZ patch 4',
+  'release decl'
+);
+p4 += insertOnce(
+  'HostObjects/sources/AudioBufferHostObject.cpp',
+  'JSI_EXPORT_FUNCTION(AudioBufferHostObject, getChannelData),',
+  '\n      JSI_EXPORT_FUNCTION(AudioBufferHostObject, release), // SingZ patch 4',
+  'release export'
+);
+p4 += insertOnce(
+  'HostObjects/sources/AudioBufferHostObject.cpp',
+  `JSI_PROPERTY_GETTER_IMPL(AudioBufferHostObject, numberOfChannels) {
+  return {static_cast<int>(audioBuffer_->getNumberOfChannels())};
+}`,
+  `
+
+// SingZ patch 4
+JSI_HOST_FUNCTION_IMPL(AudioBufferHostObject, release) {
+  if (audioBuffer_ != nullptr) {
+    audioBuffer_->releaseChannels();
+  }
+  return jsi::Value::undefined();
+}`,
+  'release impl'
+);
+console.log(p4 > 0 ? `audio-api patch 4: applied ${p4} insertion(s)` : 'audio-api patch 4: already applied');

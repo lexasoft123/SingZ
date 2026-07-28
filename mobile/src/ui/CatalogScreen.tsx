@@ -27,6 +27,8 @@ import {
   listProjects,
   loadProject,
   pickFolder,
+  releaseProject,
+  releaseStems,
   type LoadedProject,
   type ProjectEntry,
   type RootInfo
@@ -177,7 +179,10 @@ export default function CatalogScreen({
           },
           setCrumb
         )
-        if (tok !== token.current) return // superseded by another tap
+        if (tok !== token.current) {
+          releaseProject(loaded) // superseded by another tap — don't strand its stems
+          return
+        }
         await setCrumb('')
         setLoading(null)
         onLoaded(loaded)
@@ -199,7 +204,7 @@ export default function CatalogScreen({
       const ids = STEM_ORDER_ALL.filter((s) => s in SAMPLE_STEMS)
       const stems: LoadedProject['stems'] = []
       for (let i = 0; i < ids.length; i++) {
-        if (tok !== token.current) return
+        if (tok !== token.current) return releaseStems(stems)
         setLoading({ dir: SAMPLE_DIR, msg: `Decoding ${ids[i]} · ${i + 1}/${ids.length}`, frac: i / ids.length })
         stems.push({ id: ids[i], buffer: await decodeAudioData(SAMPLE_STEMS[ids[i]], sampleRate) })
       }

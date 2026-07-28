@@ -44,14 +44,19 @@ Metro against the iOS Simulator — run them after engine or loading changes.
   `~/Library/Application Support/SingZ/` via `modelsDir()`/`packDir()`.
 - **Never `fetch()` custom protocols from `file://` pages** — blocked in prod
   builds. Audio bytes go over IPC (`media:read`).
-- **Mobile stems must be released explicitly** — decoded stems are ~138 MB
-  per minute of song (six lanes, 48 kHz float32) and the native audio graph
-  pins every source node it created until the render thread retires it, which
-  never happens once playback stops. Dropping JS references is not enough:
-  null `source.buffer` before discarding a source (audio-api's release hook),
-  and call `engine.unload()` + `releaseProject()` when leaving a song. Without
-  it the iPhone climbed to 3.5 GB and took a per-process-limit jetsam kill.
-  Guarded by `mobile/tests/open-close-memory.cjs`.
+- **Mobile stems must be freed explicitly — GC is far too late** — decoded
+  stems are ~138 MB per minute of song (six lanes, 48 kHz float32), so a
+  4-6 min song is 630-845 MB while Hermes sees only a small wrapper and
+  collects whenever it likes. Two separate pins, both needed: the native
+  graph holds every source node it created until the render thread retires
+  it (never, once playback stops) — null `source.buffer` before discarding a
+  source; and the buffer's host object owns the PCM until finalization —
+  `AudioBuffer.release()` (**audio-api patch 4**) hands it back on the spot.
+  Leaving a song must call `engine.unload()` then `releaseProject()`, in that
+  order. References-only was measured at ~1 GB still resident per closed
+  song; on device that was a per-process-limit jetsam kill on the fifth song.
+  Guarded by `mobile/tests/open-close-memory.cjs` — note RSS only moves for
+  song-sized blocks, sample-sized ones stay in the allocator's cache.
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —
@@ -141,3 +146,11 @@ that. Superseded same-ref runs auto-cancel. Bump `package.json` version to match
 the tag (artifact names use it). Engine steps are cached keyed on the vendor
 scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
 `releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.
+
+After pushing a tag, write the release notes yourself: diff against the
+previous tag (`git log <prev>..<tag> --oneline` plus what you know shipped),
+then `gh release edit <tag> --notes` with user-facing, genuinely funny notes —
+singer's-eye view, not commit prose: what they can do now, what stopped being
+annoying, sizes/time costs where they matter. Group by platform when it helps.
+The CI workflows create the release with empty notes; filling them is part of
+cutting the release, not optional polish.

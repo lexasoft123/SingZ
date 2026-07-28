@@ -94,9 +94,31 @@ export function decodedBytes(stems: { buffer: AudioBuffer }[]): number {
  */
 export const MAX_DECODED_BYTES = 1_250_000_000
 
-/** Free the stems: see MultitrackEngine.unload() for why this is explicit. */
+/**
+ * Free the stems. Dropping references is not enough: Hermes sees a small
+ * wrapper over hundreds of megabytes of native PCM and collects whenever it
+ * likes, so back-to-back songs stack whole stem sets (measured ~1 GB still
+ * resident after close) until the phone jetsam-kills the app mid-decode.
+ * release() (audio-api patch 4) hands the PCM back on the spot. Always
+ * unload the engine first — a source node still pointing at the buffer must
+ * not outlive its samples.
+ */
 export function releaseProject(p: LoadedProject | null): void {
-  if (p) p.stems = []
+  if (!p) return
+  releaseStems(p.stems)
+  p.stems = []
+}
+
+/** @see releaseProject — same release hook, for a half-built stem list. */
+export function releaseStems(stems: { buffer: AudioBuffer }[]): void {
+  for (const s of stems) {
+    const host = (s.buffer as unknown as { buffer?: { release?: () => void } }).buffer
+    try {
+      host?.release?.()
+    } catch {
+      // unpatched audio-api — GC remains the only path
+    }
+  }
 }
 
 /**
@@ -137,6 +159,7 @@ export async function loadProject(
     // six stems are already resident is refusing too late.
     const projected = (decodedBytes(stems) / stems.length) * ids.length
     if (projected > MAX_DECODED_BYTES) {
+      releaseStems(stems)
       stems.length = 0
       const gb = (projected / 1e9).toFixed(1)
       throw new Error(

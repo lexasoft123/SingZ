@@ -1,18 +1,23 @@
 /*
- * Memory regression test for the open/close path (run on macOS against the
- * iOS Simulator): closing a song has to give its stems back. It did not —
- * the engine dropped its references and left the rest to GC, while the
- * native graph kept every stopped source node (each holding a shared_ptr to
- * its decoded buffer) until the render thread retired it, which never
- * happens once playback stops. Songs stacked up at ~94 MB per open of the
- * bundled sample, and on device the app took a per-process-limit jetsam kill
- * at 3.5 GB (JetsamEvent-2026-07-28-012852) plus a Hermes heap OOM minutes
- * later. The sim never dies (macOS has no jetsam) but the growth is
- * measurable from the host.
+ * Memory regression test for closing a song (run on macOS against the iOS
+ * Simulator). Closing has to hand the stems back, and handing them back may
+ * not wait for GC: a six-stem song is 630-845 MB, Hermes sees only the small
+ * wrapper, and on device the app took a per-process-limit jetsam kill at
+ * 3.5 GB on the fifth song (JetsamEvent-2026-07-28-012852) with a Hermes
+ * heap OOM minutes later.
+ *
+ * Two parts, because the bundled sample alone cannot prove this: at 94 MB a
+ * set, GC keeps up either way and RSS says nothing (measured: leaking and
+ * not-leaking both plateau over 12 cycles).
+ *   1. release: decode a big pile of stems, release them, watch RSS fall.
+ *      This is the mechanism the whole fix rests on — AudioBuffer.release()
+ *      from audio-api patch 4 — and it fails loudly if that patch drifts.
+ *   2. flow: open/close the sample a few times, asserting the app survives
+ *      and lands back on the catalog (the wiring around the mechanism).
  *
  * Prereqs: app built+installed in a booted sim (Debug), Metro running.
- *   node mobile/tests/open-close-memory.cjs            # asserts bounded growth
- *   STRICT=0 node mobile/tests/open-close-memory.cjs   # report only, no assert
+ *   node mobile/tests/open-close-memory.cjs            # asserts
+ *   STRICT=0 node mobile/tests/open-close-memory.cjs   # report only
  */
 const http = require('http');
 const { execSync } = require('child_process');
@@ -20,13 +25,17 @@ const WebSocket = require('ws');
 
 const BUNDLE = 'com.lexasoft.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
-const CYCLES = parseInt(process.env.CYCLES || '5', 10);
+const CYCLES = parseInt(process.env.CYCLES || '3', 10);
 /**
- * The bundled sample decodes to ~94 MB (six stems, ~41 s, 48 kHz stereo
- * float32). Leaking one set per cycle would show ~94 MB of growth per
- * cycle; healthy behaviour is GC sawtooth well under a single set.
+ * Song-sized buffers, deliberately: 5 minutes of 48 kHz stereo is 115 MB, the
+ * scale at which freeing actually returns pages to the OS. Anything sample-
+ * sized (7.8 MB a stem) stays in the allocator's cache and RSS won't move,
+ * which is why this part synthesizes buffers instead of decoding the sample.
  */
-const MAX_GROWTH_MB = 150;
+const BUFFERS = parseInt(process.env.BUFFERS || '4', 10);
+const BUFFER_SECONDS = 300;
+/** Releasing ~460 MB must return most of it; allocator retention eats some. */
+const MIN_RECLAIM_FRAC = 0.6;
 
 const getJson = (u) =>
   new Promise((res, rej) => {
@@ -109,8 +118,44 @@ function rssMb() {
   const idle = rssMb();
   console.log(`catalog idle: ${idle} MB`);
 
-  let base = null;
-  let peak = 0;
+  /* 1. the mechanism: hold song-sized PCM, then hand it back. */
+  const held = await val(`(() => {
+    globalThis.__mem = [];
+    const ctx = __test.engine.ctx;
+    for (let i = 0; i < ${BUFFERS}; i++) {
+      const b = ctx.createBuffer(2, ctx.sampleRate * ${BUFFER_SECONDS}, ctx.sampleRate);
+      b.getChannelData(0)[0] = 1; // touch it so the pages are real
+      globalThis.__mem.push(b);
+    }
+    return __mem.reduce((n, b) => n + b.length * b.numberOfChannels * 4, 0);
+  })()`);
+  const mb = Math.round(held / 1e6);
+  await sleep(1500);
+  const allocated = rssMb();
+  console.log(`held ${BUFFERS} song-sized buffers (${mb} MB of PCM): rss=${allocated} MB`);
+
+  const hooked = await val('__mem.filter((b) => b.buffer && b.buffer.release).length');
+  if (hooked !== BUFFERS) {
+    console.log(`FAIL: AudioBuffer.release missing on ${BUFFERS - hooked} buffers — audio-api patch 4 did not apply`);
+    process.exit(1);
+  }
+  await ev('__mem.forEach((b) => b.buffer.release())');
+  await sleep(2500);
+  const after = rssMb();
+  const reclaimed = allocated - after;
+  console.log(`released: rss=${after} MB (gave back ${reclaimed} of ${mb} MB)`);
+  await ev('globalThis.__mem = []');
+
+  if (process.env.STRICT !== '0' && reclaimed < mb * MIN_RECLAIM_FRAC) {
+    console.log(
+      `FAIL: release() gave back only ${reclaimed} MB of ${mb} MB — audio-api patch 4 ` +
+        '(AudioBuffer.release) no longer frees the channels'
+    );
+    process.exit(1);
+  }
+
+  /* 2. the wiring: open and close for real. */
+  const closes = [];
   for (let cycle = 1; cycle <= CYCLES; cycle++) {
     await ev('void __test.openSample()');
     await waitFor("__test.screen==='player' && __test.engine.duration>0", 'sample to open');
@@ -126,19 +171,13 @@ function rssMb() {
     await sleep(2500); // destructor thread + a GC pass
     const closed = rssMb();
 
-    if (base === null) base = closed; // first open pays warm-up costs
-    peak = Math.max(peak, closed);
-    console.log(
-      `cycle ${cycle}: loaded=${loaded} MB closed=${closed} MB (+${closed - base} vs first close)`
-    );
+    closes.push(closed);
+    console.log(`cycle ${cycle}: loaded=${loaded} MB closed=${closed} MB`);
   }
 
-  const growth = peak - base;
-  console.log(`RESULT idle=${idle} firstClose=${base} peakClose=${peak} growth=${growth} MB`);
-  if (process.env.STRICT !== '0' && growth > MAX_GROWTH_MB) {
-    console.log(`FAIL: ${CYCLES} open/close cycles grew memory by ${growth} MB (limit ${MAX_GROWTH_MB})`);
-    process.exit(1);
-  }
+  console.log(
+    `RESULT idle=${idle} reclaimed=${reclaimed}/${mb} MB closes=${closes.join('/')}`
+  );
   console.log('PASS');
   process.exit(0);
 })().catch((e) => {
