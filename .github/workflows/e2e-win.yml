@@ -21,6 +21,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Unit tests (FLAC roundtrip, v1->v2 migration)
+        run: npm test
+
       - run: npm run build
 
       - name: Smoke E2E (built app)

@@ -11,6 +11,7 @@ Deeper docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 ```bash
 npm run dev          # electron-vite dev (HMR; restarts main on src/main changes)
 npm run typecheck    # tsc over node (main/preload) + web (renderer) configs
+npm test             # vitest unit tests (FLAC roundtrip, v1->v2 migration; electron stubbed)
 npm run build        # bundle into out/  — ALWAYS build before driving E2E
 npm run dist         # package installer for current platform
 npx electron .       # run the built app (out/) without packaging
@@ -26,9 +27,14 @@ All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; the one permanent CI harness is `tests/e2e/win-smoke.cjs`, run by
-the E2E Windows workflow). Load files through the hidden `<input type=file>` — same code
+the E2E Windows workflow, which also runs `npm test` — vitest unit tests in
+`tests/unit/` covering the v2 FLAC format with electron aliased to a stub).
+Load files through the hidden `<input type=file>` — same code
 path as drag-drop. Read the screenshots you take. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Mobile has its own permanent sim-driven tests in `mobile/tests/`
+(`seek-memory.cjs`, `loop-region.cjs`): CDP over Metro against the iOS
+Simulator — run them after engine or loading changes.
 
 ## Hard-won gotchas (do not re-learn these)
 

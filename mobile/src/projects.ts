@@ -98,7 +98,10 @@ export async function loadProject(
     const path = await Folder.localFile(entry.dir, `stems/${id}.${entry.stems[id]}`)
     onStep(`Decoding ${id} · ${i + 1}/${ids.length}`, (i + 0.5) / ids.length)
     await crumb?.(`decoding ${id}`)
-    stems.push({ id, buffer: await decodeAudioData(path, sampleRate) })
+    // file:// matters: audio-api's Android RELEASE builds treat bare strings
+    // as APK asset names ("Could not read asset bytes"); the scheme routes
+    // them to the file decoder and is stripped on every other platform.
+    stems.push({ id, buffer: await decodeAudioData(`file://${path}`, sampleRate) })
   }
   onStep('Lyrics…', 0.98)
   await crumb?.('lyrics')
