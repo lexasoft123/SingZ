@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
 import { getCrumb, setCrumb } from '../latency'
 import { STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
@@ -220,7 +220,7 @@ export default function CatalogScreen({
             onPress={() => void changeFolder()}
           />
           <Chip
-            label="On this iPhone"
+            label={Platform.OS === 'ios' ? 'On this iPhone' : 'On this phone'}
             active={root?.kind === 'documents'}
             onPress={() => void clearRoot().then(() => refresh())}
           />

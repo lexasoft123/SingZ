@@ -79,7 +79,7 @@ android {
 
     namespace "com.singzplayer"
     defaultConfig {
-        applicationId "com.singzplayer"
+        applicationId "com.lexasoft.singz"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
@@ -110,6 +110,8 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    // SAF folder trees (picked project roots, incl. Google Drive)
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
