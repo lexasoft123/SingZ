@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
 import {
@@ -39,6 +40,11 @@ export default function PlayerScreen({
   const [route, setRoute] = useState<RouteLatency | null>(null)
   const [trimMs, setTrim] = useState(0)
   const [sheet, setSheet] = useState<'none' | 'mixer' | 'practice'>('none')
+  const insets = useSafeAreaInsets()
+  /* Android 15 draws edge-to-edge: keep controls clear of the system bar.
+   * iOS keeps its hand-tuned paddings. */
+  const navPad = Platform.OS === 'android' ? { paddingBottom: Math.max(30, insets.bottom + 14) } : null
+  const sheetPad = Platform.OS === 'android' ? { paddingBottom: Math.max(34, insets.bottom + 18) } : null
   const [dragPos, setDragPos] = useState<number | null>(null)
   /** Key & speed — UI + persistence-ready; audio lands with the pitch engine. */
   const [ktPitch, setKtPitch] = useState(0)
@@ -307,7 +313,7 @@ export default function PlayerScreen({
       >
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
-      <View style={s.foot}>
+      <View style={[s.foot, navPad]}>
         <View style={s.scrubRow}>
           <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
           <View style={{ flex: 1 }}>
@@ -351,7 +357,7 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={b.sheet} onPress={() => {}}>
+          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
             <View style={b.grab} />
             <Text style={b.sheetTitle}>Mixer</Text>
             {tracks.map((t) => {
@@ -406,7 +412,7 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={[b.sheet]} onPress={() => {}}>
+          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
             <ScrollView bounces={false}>
               <View style={b.grab} />
               <Text style={b.sheetTitle}>Practice</Text>

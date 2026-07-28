@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { getCrumb, setCrumb } from '../latency'
 import { STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
@@ -42,6 +43,7 @@ export default function CatalogScreen({
   sampleRate: number
   onLoaded: (p: LoadedProject) => void
 }): React.JSX.Element {
+  const insets = useSafeAreaInsets()
   const [root, setRoot] = useState<RootInfo | null>(null)
   const [projects, setProjects] = useState<ProjectEntry[] | null>(null)
   const [loading, setLoading] = useState<Loading | null>(null)
@@ -226,7 +228,10 @@ export default function CatalogScreen({
           />
           <Chip label="↻" active={false} onPress={() => void refresh()} />
         </View>
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 40 }}>
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
+        >
           {(projects ?? []).map((p) =>
             card({
               key: p.dir,
