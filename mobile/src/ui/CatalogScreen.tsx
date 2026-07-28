@@ -192,6 +192,8 @@ export default function CatalogScreen({
     TEST.cancelLoad = cancelLoad
     TEST.openDrive = openDrive
     TEST.libMode = mode
+    TEST.setPref = setStoredText
+    TEST.getPref = getStoredText
     TEST.projects = (projects ?? []).map((p) => p.dir)
     TEST.listError = error
     TEST.busy = loading?.msg ?? null

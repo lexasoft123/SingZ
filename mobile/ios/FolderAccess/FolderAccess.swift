@@ -1,4 +1,6 @@
+import AuthenticationServices
 import Foundation
+import Network
 import React
 import UIKit
 import UniformTypeIdentifiers
@@ -305,5 +307,201 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     } catch {
       reject("local_failed", "\(file): \(error.localizedDescription)", error)
     }
+  }
+
+  // ------------------------------------------------- Google Drive helpers --
+
+  private var oauthListener: NWListener?
+  private var oauthWaitResolve: RCTPromiseResolveBlock?
+  private var oauthWaitReject: RCTPromiseRejectBlock?
+  private var authSession: ASWebAuthenticationSession?
+
+  /**
+   * Loopback OAuth, iOS flavor: the listener catches Google's redirect while
+   * ASWebAuthenticationSession keeps the app foreground (a Safari bounce
+   * would suspend us and kill the socket mid-consent). One Desktop-type
+   * client therefore serves every platform.
+   */
+  @objc func oauthStart(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    oauthListener?.cancel()
+    do {
+      let listener = try NWListener(using: .tcp, on: .any)
+      oauthListener = listener
+      var settled = false
+      listener.newConnectionHandler = { [weak self] conn in self?.handleOAuthConnection(conn) }
+      listener.stateUpdateHandler = { state in
+        switch state {
+        case .ready:
+          if !settled {
+            settled = true
+            resolve(Int(listener.port?.rawValue ?? 0))
+          }
+        case .failed(let err):
+          if !settled {
+            settled = true
+            reject("oauth", err.localizedDescription, err)
+          }
+        default:
+          break
+        }
+      }
+      listener.start(queue: .global())
+    } catch {
+      reject("oauth", "Cannot open the sign-in listener: \(error.localizedDescription)", error)
+    }
+  }
+
+  @objc func oauthWait(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    guard oauthListener != nil else {
+      reject("oauth", "Sign-in listener is not running", nil)
+      return
+    }
+    oauthWaitResolve = resolve
+    oauthWaitReject = reject
+    DispatchQueue.global().asyncAfter(deadline: .now() + 300) { [weak self] in
+      guard let self, let rej = self.oauthWaitReject else { return }
+      self.oauthWaitResolve = nil
+      self.oauthWaitReject = nil
+      self.oauthListener?.cancel()
+      self.oauthListener = nil
+      DispatchQueue.main.async {
+        self.authSession?.cancel()
+        self.authSession = nil
+      }
+      rej("oauth", "Sign-in was not completed", nil)
+    }
+  }
+
+  private func handleOAuthConnection(_ conn: NWConnection) {
+    conn.start(queue: .global())
+    conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, _ in
+      guard let self else { return }
+      let request = String(data: data ?? Data(), encoding: .utf8) ?? ""
+      let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+      let body = "<html><body style=\"font-family:sans-serif;padding:40px\">"
+        + "<h3>SingZ is signed in</h3>You can close this and go back to the app.</body></html>"
+      let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: \(body.utf8.count)\r\n"
+        + "Connection: close\r\n\r\n" + body
+      conn.send(content: resp.data(using: .utf8), completion: .contentProcessed { _ in conn.cancel() })
+      let port = self.oauthListener?.port?.rawValue ?? 0
+      DispatchQueue.main.async {
+        self.authSession?.cancel()
+        self.authSession = nil
+      }
+      if let res = self.oauthWaitResolve {
+        self.oauthWaitResolve = nil
+        self.oauthWaitReject = nil
+        res("http://127.0.0.1:\(port)\(path)")
+      }
+      self.oauthListener?.cancel()
+      self.oauthListener = nil
+    }
+  }
+
+  /** Present Google consent in the in-app auth sheet (app stays active). */
+  @objc func oauthPresent(
+    _ url: String,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let authUrl = URL(string: url) else {
+      reject("oauth", "Bad sign-in URL", nil)
+      return
+    }
+    DispatchQueue.main.async {
+      // callbackURLScheme never fires — the loopback listener finishes the
+      // flow and cancels the sheet; the scheme only satisfies the API.
+      let session = ASWebAuthenticationSession(url: authUrl, callbackURLScheme: "singz") {
+        [weak self] _, error in
+        guard let self else { return }
+        if error != nil, let rej = self.oauthWaitReject {
+          // user dismissed the sheet before completing
+          self.oauthWaitResolve = nil
+          self.oauthWaitReject = nil
+          self.oauthListener?.cancel()
+          self.oauthListener = nil
+          rej("oauth", "Google sign-in was cancelled", nil)
+        }
+      }
+      session.prefersEphemeralWebBrowserSession = false
+      session.presentationContextProvider = self
+      self.authSession = session
+      if session.start() {
+        resolve(nil)
+      } else {
+        reject("oauth", "Cannot present the sign-in sheet", nil)
+      }
+    }
+  }
+
+  /**
+   * Stream an authorized URL into the project cache (Drive media downloads).
+   * Same cache layout and skip-on-matching-size behavior as localFile.
+   */
+  @objc func fetchToCache(
+    _ project: String,
+    file: String,
+    url: String,
+    auth: String,
+    expectedBytes: NSNumber,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let remote = URL(string: url) else {
+      reject("fetch", "Bad download URL for \(file)", nil)
+      return
+    }
+    let out = cachesURL().appendingPathComponent(project, isDirectory: true)
+      .appendingPathComponent(file)
+    let fm = FileManager.default
+    if fm.fileExists(atPath: out.path), expectedBytes.int64Value > 0,
+      let size = try? fm.attributesOfItem(atPath: out.path)[.size] as? Int64,
+      size == expectedBytes.int64Value
+    {
+      resolve(out.path)
+      return
+    }
+    var req = URLRequest(url: remote)
+    req.setValue(auth, forHTTPHeaderField: "Authorization")
+    req.timeoutInterval = 120
+    let task = URLSession.shared.downloadTask(with: req) { tmp, response, error in
+      if let error {
+        reject("fetch", "\(file): \(error.localizedDescription)", error)
+        return
+      }
+      let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+      guard status / 100 == 2, let tmp else {
+        reject("fetch", "Drive download failed (\(status)) for \(file)", nil)
+        return
+      }
+      do {
+        try fm.createDirectory(
+          at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: out.path) { try fm.removeItem(at: out) }
+        try fm.moveItem(at: tmp, to: out)
+        resolve(out.path)
+      } catch {
+        reject("fetch", "Cannot cache \(file): \(error.localizedDescription)", error)
+      }
+    }
+    task.resume()
+  }
+}
+
+extension FolderAccess: ASWebAuthenticationPresentationContextProviding {
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    for scene in UIApplication.shared.connectedScenes {
+      guard let ws = scene as? UIWindowScene else { continue }
+      if let win = ws.windows.first(where: { $0.isKeyWindow }) ?? ws.windows.first {
+        return win
+      }
+    }
+    return ASPresentationAnchor()
   }
 }

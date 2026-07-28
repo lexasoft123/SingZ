@@ -1,4 +1,4 @@
-import { Linking, NativeModules } from 'react-native'
+import { Linking, NativeModules, Platform } from 'react-native'
 import { STEM_ORDER_ALL } from './model'
 import type { ProjectEntry } from './projects'
 
@@ -23,6 +23,8 @@ const API = (): string => cfg?.apiBase || 'https://www.googleapis.com'
 interface FolderNative {
   oauthStart(): Promise<number>
   oauthWait(): Promise<string>
+  /** iOS only: in-app auth sheet — a Safari bounce would suspend the app. */
+  oauthPresent?(url: string): Promise<void>
   fetchToCache(project: string, file: string, url: string, auth: string, expectedBytes: number): Promise<string>
 }
 const Native = NativeModules.FolderAccess as FolderNative
@@ -73,7 +75,11 @@ export async function driveSignIn(): Promise<void> {
     '&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file' +
     '&access_type=offline&prompt=consent' +
     `&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain`
-  await Linking.openURL(url)
+  if (Platform.OS === 'ios' && Native.oauthPresent) {
+    await Native.oauthPresent(url)
+  } else {
+    await Linking.openURL(url)
+  }
   const back = await Native.oauthWait()
   const code = /[?&]code=([^&]+)/.exec(back)?.[1]
   if (!code) throw new Error('Google sign-in was cancelled')
