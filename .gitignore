@@ -5,3 +5,6 @@ vendor/
 .engines-src/
 *.log
 .DS_Store
+
+# session worktrees are never repo content
+.claude/worktrees/
