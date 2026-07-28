@@ -218,6 +218,8 @@ export class MultitrackEngine {
     }
     this.stopSources()
     this.ducked.clear() // fresh tracks start unducked; the schedule re-applies on play
+    this.region = null // a loop armed for one song must never bound the next
+    this.regionLoop = false
     for (const t of this.tracks) t.gain.disconnect()
     this.tracks = list.map((t) => {
       const gain = this.ctx.createGain()

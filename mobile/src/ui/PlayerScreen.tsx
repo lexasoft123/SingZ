@@ -36,7 +36,6 @@ export default function PlayerScreen({
   const [pos, setPos] = useState(0)
   const [training, setTraining] = useState(false)
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
-  const [loop, setLoop] = useState(false)
   const [route, setRoute] = useState<RouteLatency | null>(null)
   const [trimMs, setTrim] = useState(0)
   const [sheet, setSheet] = useState<'none' | 'mixer' | 'practice'>('none')
@@ -60,8 +59,6 @@ export default function PlayerScreen({
         engine.setSolo(id, t.solo)
         engine.setVolume(id, t.volume)
       }
-      // saved loops don't auto-arm on the phone (no waveform to see them)
-      setLoop(false)
       const tn = st.training
       if (tn) {
         setTrainCfg(sanitizeTraining(tn))
@@ -183,17 +180,6 @@ export default function PlayerScreen({
     setTraining(!training)
   }
 
-  const sel = project.doc.settings?.selection
-  const toggleLoop = (): void => {
-    if (!sel) return
-    const next = !loop
-    setLoop(next)
-    engine.setRegion(next ? { start: sel.s, end: sel.e } : null, next)
-    if (next) {
-      const p = engine.position
-      if (p < sel.s - 0.05 || p >= sel.e - 0.05) engine.seek(sel.s)
-    }
-  }
 
   useEffect(() => {
     if (!TEST) return
@@ -208,6 +194,7 @@ export default function PlayerScreen({
     TEST.closeSheets = () => setSheet('none')
     TEST.sheet = sheet
     TEST.tapLine = (i: number) => lines[i] && engine.seek(lines[i].start)
+    TEST.back = onBack
     TEST.latency = () => ({
       route: route?.label ?? null,
       autoMs: route ? Math.round(route.autoSec * 1000) : null,
@@ -513,21 +500,6 @@ export default function PlayerScreen({
                     />
                   ))}
                 </View>
-              </View>
-
-              <View style={b.sec}>
-                <Text style={b.secLab}>Loop</Text>
-                {sel ? (
-                  <View style={b.segs}>
-                    <Chip
-                      label={`Practice section ${fmtTime(sel.s)}–${fmtTime(sel.e)}`}
-                      active={loop}
-                      onPress={toggleLoop}
-                    />
-                  </View>
-                ) : (
-                  <Text style={b.hint}>No saved section — select one on the desktop.</Text>
-                )}
               </View>
 
               <View style={b.sec}>
