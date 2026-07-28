@@ -213,6 +213,18 @@ describe('transcriptionUsable', () => {
     const ref = refLines(SONG)
     expect(transcriptionUsable(sungWords(ref, 0), ref.flatMap((l) => l.words).length)).toBe(true)
   })
+
+  it('accepts refrain-heavy songs — tiny vocabulary is not a hallucination', () => {
+    // Nothing Else Matters shape: few unique words, refrains distributed
+    const refrain = refLines(
+      Array.from({ length: 10 }, (_, i) =>
+        i % 2 ? 'and nothing else matters' : 'never cared for what they know'
+      )
+    )
+    const sung = sungWords(refrain, 0.5)
+    const total = refrain.flatMap((l) => l.words).length
+    expect(transcriptionUsable(sung, total)).toBe(true)
+  })
 })
 
 describe('romanize', () => {

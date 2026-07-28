@@ -493,15 +493,30 @@ export function guessLanguage(ref: LyricLine[]): string | null {
 }
 
 /**
- * A transcription that is mostly repeats of a few tokens, or far shorter
- * than the lyrics, is a whisper hallucination/collapse — evidence of
- * nothing. Checking lyrics against it would cry "mismatch" on good text.
+ * A collapsed transcription is a whisper hallucination — evidence of
+ * nothing; checking lyrics against it would cry "mismatch" on good text.
+ * The tell is CONSECUTIVE repetition of one short phrase ("Продолжение
+ * следует" ×10, "Thank you." ×40) — never overall vocabulary size, which
+ * is legitimately tiny on refrain-heavy songs (Nothing Else Matters).
  */
 export function transcriptionUsable(hyp: LyricWord[], refWordCount: number): boolean {
   const words = sanitizeHyp(hyp)
   if (words.length < Math.max(12, refWordCount * 0.2)) return false
-  const unique = new Set(words.map((w) => norm(w.w))).size
-  return unique / words.length >= 0.3
+  const toks = words.map((w) => norm(w.w))
+  // longest back-to-back run of an identical 1- or 2-word pattern
+  for (const n of [1, 2]) {
+    let run = 1
+    for (let i = n; i < toks.length; i++) {
+      if (toks[i] === toks[i - n]) {
+        run++
+        // 1-grams: 12+ identical words in a row; 2-grams: 6+ phrase repeats
+        if (run >= 12) return false
+      } else {
+        run = 1
+      }
+    }
+  }
+  return true
 }
 
 // ——— romanization for the CTC aligner (MMS labels are a-z and ') ————————
