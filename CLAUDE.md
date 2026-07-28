@@ -102,6 +102,10 @@ Simulator — run them after engine or loading changes.
 
 ## Conventions
 
+- **Parallel feature work happens in git worktrees** (one per feature, e.g.
+  under `.claude/worktrees/<feature>`), never as concurrent edits to the same
+  checkout — two sessions on one tree fight over builds, caches and
+  half-staged files. Merge back to main when the feature lands.
 - IPC handlers return result objects (`{ ok: false, error }`), never throw
   (avoids the "Error invoking remote method" prefix in the renderer).
 - File access from the renderer is allowlisted in `src/main/media.ts` —
@@ -128,3 +132,11 @@ that. Superseded same-ref runs auto-cancel. Bump `package.json` version to match
 the tag (artifact names use it). Engine steps are cached keyed on the vendor
 scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
 `releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.
+
+After pushing a tag, write the release notes yourself: diff against the
+previous tag (`git log <prev>..<tag> --oneline` plus what you know shipped),
+then `gh release edit <tag> --notes` with user-facing, genuinely funny notes —
+singer's-eye view, not commit prose: what they can do now, what stopped being
+annoying, sizes/time costs where they matter. Group by platform when it helps.
+The CI workflows create the release with empty notes; filling them is part of
+cutting the release, not optional polish.
