@@ -53,3 +53,109 @@ if (applied > 0) {
   );
   process.exit(1);
 }
+
+/*
+ * Patch 3: SingzStretchNode — a master-bus pitch shifter (Signalsmith
+ * Stretch, vendored in mobile/patches-src/singz) grafted into the library's
+ * node graph. New self-contained files are copied in (both platforms glob
+ * common/cpp recursively); creation plumbing is four anchored insertions.
+ * iOS: run `pod install` after this changes (the podspec glob is evaluated
+ * at install time).
+ */
+const root = path.join(__dirname, '..', 'node_modules/react-native-audio-api/common/cpp/audioapi');
+const srcDir = path.join(__dirname, '..', 'patches-src', 'singz');
+const nodeDir = path.join(root, 'core', 'singz');
+
+fs.mkdirSync(path.join(nodeDir, 'signalsmith-linear'), { recursive: true });
+for (const f of ['SingzStretchNode.h', 'SingzStretchNode.cpp', 'SingzStretchNodeHostObject.h', 'signalsmith-stretch.h', 'VENDORED.txt']) {
+  fs.copyFileSync(path.join(srcDir, f), path.join(nodeDir, f));
+}
+for (const f of fs.readdirSync(path.join(srcDir, 'signalsmith-linear'))) {
+  fs.copyFileSync(path.join(srcDir, 'signalsmith-linear', f), path.join(nodeDir, 'signalsmith-linear', f));
+}
+
+function insertOnce(rel, anchor, addition, label) {
+  const p = path.join(root, rel);
+  let s = fs.readFileSync(p, 'utf8');
+  if (s.includes(addition)) return false;
+  if (!s.includes(anchor)) {
+    console.error(`audio-api patch 3: anchor missing in ${rel} (${label}) — upstream changed shape.`);
+    process.exit(1);
+  }
+  fs.writeFileSync(p, s.replace(anchor, anchor + addition));
+  return true;
+}
+
+let p3 = 0;
+p3 += insertOnce(
+  'core/BaseAudioContext.h',
+  'class GainNode;',
+  '\nclass SingzStretchNode; // SingZ patch 3\nstruct AudioNodeOptions; // SingZ patch 3',
+  'forward decl'
+);
+p3 += insertOnce(
+  'core/BaseAudioContext.h',
+  'std::shared_ptr<GainNode> createGain(const GainOptions &options);',
+  '\n  std::shared_ptr<SingzStretchNode> createSingzStretch(const AudioNodeOptions &options); // SingZ patch 3',
+  'create decl'
+);
+p3 += insertOnce(
+  'core/BaseAudioContext.cpp',
+  '#include <audioapi/core/effects/GainNode.h>',
+  '\n#include <audioapi/core/singz/SingzStretchNode.h> // SingZ patch 3',
+  'include'
+);
+p3 += insertOnce(
+  'core/BaseAudioContext.cpp',
+  `std::shared_ptr<GainNode> BaseAudioContext::createGain(const GainOptions &options) {
+  auto gain = std::make_shared<GainNode>(shared_from_this(), options);
+  graphManager_->addProcessingNode(gain);
+  return gain;
+}`,
+  `
+
+// SingZ patch 3
+std::shared_ptr<SingzStretchNode> BaseAudioContext::createSingzStretch(
+    const AudioNodeOptions &options) {
+  auto stretch = std::make_shared<SingzStretchNode>(shared_from_this(), options);
+  graphManager_->addProcessingNode(stretch);
+  return stretch;
+}`,
+  'create impl'
+);
+p3 += insertOnce(
+  'HostObjects/BaseAudioContextHostObject.h',
+  'JSI_HOST_FUNCTION_DECL(createGain);',
+  '\n  JSI_HOST_FUNCTION_DECL(createSingzStretch); // SingZ patch 3',
+  'host decl'
+);
+p3 += insertOnce(
+  'HostObjects/BaseAudioContextHostObject.cpp',
+  '#include <audioapi/HostObjects/effects/GainNodeHostObject.h>',
+  '\n#include <audioapi/core/singz/SingzStretchNodeHostObject.h> // SingZ patch 3',
+  'host include'
+);
+p3 += insertOnce(
+  'HostObjects/BaseAudioContextHostObject.cpp',
+  'JSI_EXPORT_FUNCTION(BaseAudioContextHostObject, createGain),',
+  '\n      JSI_EXPORT_FUNCTION(BaseAudioContextHostObject, createSingzStretch), // SingZ patch 3',
+  'host export'
+);
+p3 += insertOnce(
+  'HostObjects/BaseAudioContextHostObject.cpp',
+  `JSI_HOST_FUNCTION_IMPL(BaseAudioContextHostObject, createGain) {
+  const auto options = args[0].asObject(runtime);
+  const auto gainOptions = audioapi::option_parser::parseGainOptions(runtime, options);
+  auto gainHostObject = std::make_shared<GainNodeHostObject>(context_, gainOptions);
+  return jsi::Object::createFromHostObject(runtime, gainHostObject);
+}`,
+  `
+
+// SingZ patch 3
+JSI_HOST_FUNCTION_IMPL(BaseAudioContextHostObject, createSingzStretch) {
+  auto hostObject = std::make_shared<SingzStretchNodeHostObject>(context_, AudioNodeOptions());
+  return jsi::Object::createFromHostObject(runtime, hostObject);
+}`,
+  'host impl'
+);
+console.log(p3 > 0 ? `audio-api patch 3: applied ${p3} insertion(s) + files` : 'audio-api patch 3: already applied (files refreshed)');

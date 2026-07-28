@@ -41,6 +41,13 @@ export type TrainingSpec =
 
 const START_DELAY = 0.04 // scheduling headroom so all stems start sample-locked
 
+/** SingzStretchNode host object (patch 3 in scripts/patch-audio-api.js). */
+interface StretchHost {
+  setSemitones(semitones: number): void
+  getLatencySeconds(): number
+  connect(node: unknown): void
+}
+
 export class MultitrackEngine {
   private ctx = new AudioContext()
   private master = this.ctx.createGain()
@@ -60,8 +67,28 @@ export class MultitrackEngine {
 
   duration = 0
 
+  private stretchHost: StretchHost | null = null
+  private stretchLatency = 0
+  private rate = 1
+  private pitchSemis = 0
+
   constructor() {
-    this.master.connect(this.ctx.destination)
+    // Master bus: tracks -> master -> [SingzStretch] -> destination. The
+    // stretch node (patched into audio-api) corrects varispeed pitch and
+    // applies transpose; at 0 semitones it bypasses with zero latency.
+    const ctxHost = (this.ctx as unknown as { context: { createSingzStretch?: () => StretchHost } })
+      .context
+    if (typeof ctxHost.createSingzStretch === 'function') {
+      this.stretchHost = ctxHost.createSingzStretch()
+      ;(this.master as unknown as { node: { connect(n: unknown): void } }).node.connect(
+        this.stretchHost
+      )
+      this.stretchHost.connect(
+        (this.ctx.destination as unknown as { node: unknown }).node
+      )
+    } else {
+      this.master.connect(this.ctx.destination)
+    }
   }
 
   /** Decode stem bytes/asset at the context rate (no runtime resampling). */
@@ -106,9 +133,48 @@ export class MultitrackEngine {
     return this.displayLag
   }
 
+  /**
+   * Key & speed (desktop semantics): tempo is source varispeed, and the
+   * master-bus stretch corrects its pitch plus the user's transpose —
+   * semitones = transpose − 12·log2(rate). Rate changes while playing
+   * re-anchor the clock through the coalesced-restart seek path.
+   */
+  setPitchTempo(semitones: number, rate: number): void {
+    const r = Math.max(0.5, Math.min(1.5, rate))
+    const rateChanged = Math.abs(r - this.rate) > 0.001
+    const changed = rateChanged || semitones !== this.pitchSemis
+    this.pitchSemis = semitones
+    this.rate = r
+    if (!changed) return
+    this.applyStretch()
+    if (rateChanged && (this._playing || this.restartTimer !== null)) {
+      this.seek(this.audioPosition)
+    } else {
+      this.emit()
+    }
+  }
+
+  get pitchTempo(): { semitones: number; rate: number } {
+    return { semitones: this.pitchSemis, rate: this.rate }
+  }
+
+  private applyStretch(): void {
+    if (!this.stretchHost) return
+    const semis = this.pitchSemis - 12 * Math.log2(this.rate)
+    this.stretchHost.setSemitones(Math.abs(semis) < 0.01 ? 0 : semis)
+    // engagement happens on the audio thread; read the latency it settles on
+    setTimeout(() => {
+      if (this.stretchHost) {
+        this.stretchLatency = this.stretchHost.getLatencySeconds()
+        this.emit()
+      }
+    }, 400)
+  }
+
   private clockPosition(lag: number): number {
     if (!this._playing) return this.startOffset
-    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt - lag)
+    // real seconds scale by the varispeed rate to give song seconds
+    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt - lag) * this.rate
     const r = this.regionLoop ? this.region : null
     if (r && this.startOffset < r.end && elapsed > r.end) {
       // Sources loop natively at r.end -> r.start; fold the linear clock.
@@ -119,7 +185,7 @@ export class MultitrackEngine {
 
   /** What the listener hears right now — drives lyrics and other visuals. */
   get position(): number {
-    return this.clockPosition(this.displayLag)
+    return this.clockPosition(this.displayLag + this.stretchLatency)
   }
 
   /**
@@ -237,6 +303,10 @@ export class MultitrackEngine {
     this.ducked.clear() // fresh tracks start unducked; the schedule re-applies on play
     this.region = null // a loop armed for one song must never bound the next
     this.regionLoop = false
+    this.rate = 1 // neutral until the project's saved key/speed applies
+    this.pitchSemis = 0
+    this.stretchLatency = 0
+    this.applyStretch()
     for (const t of this.tracks) t.gain.disconnect()
     this.tracks = list.map((t) => {
       const gain = this.ctx.createGain()
@@ -263,6 +333,7 @@ export class MultitrackEngine {
     this.tracks.forEach((t, i) => {
       const src = this.ctx.createBufferSource()
       src.buffer = t.buffer
+      src.playbackRate.value = this.rate
       this.applyLoop(src)
       src.connect(t.gain)
       src.start(when, Math.min(this.startOffset, t.buffer.duration))

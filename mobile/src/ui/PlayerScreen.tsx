@@ -213,6 +213,11 @@ export default function PlayerScreen({
     TEST.perfStop = () => perf.stop()
   })
 
+  /* Key & speed apply live: varispeed sources + master-bus stretch. */
+  useEffect(() => {
+    engine.setPitchTempo(ktPitch, ktTempo / 100)
+  }, [engine, ktPitch, ktTempo])
+
   const ktBadge: string[] = []
   if (ktPitch !== 0) ktBadge.push(ktPitch > 0 ? `+${ktPitch}♯` : `${ktPitch}♭`)
   if (ktTempo !== 100) ktBadge.push(`${ktTempo}%`)
@@ -442,8 +447,8 @@ export default function PlayerScreen({
                   )}
                 </View>
                 <Text style={b.hint}>
-                  Settings preview — the pitch engine arrives in the next update; your desktop
-                  values show here meanwhile.
+                  Pitch shifts the key without changing speed; tempo changes speed without
+                  changing pitch. Applied live to playback.
                 </Text>
               </View>
 

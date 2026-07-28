@@ -1,0 +1,3 @@
+Vendored: signalsmith-stretch @57b93f4, signalsmith-linear @7f53cdd (MIT).
+Plain-C++ FFT path (no SIGNALSMITH_USE_* defines). Copied into
+react-native-audio-api common/cpp by scripts/patch-audio-api.js.
