@@ -4,6 +4,7 @@ import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
+import { preciseCapable } from './align-mms'
 import { Transcriber } from './lyrics'
 import { ModelManager } from './models'
 import {
@@ -199,11 +200,13 @@ function registerIpc(): void {
         full,
         Number(durationSec) || 0,
         Boolean(allowDownload),
-        prefer === 'whisper' ? 'whisper' : prefer === 'align' ? 'align' : 'auto',
+        prefer === 'whisper' || prefer === 'align' || prefer === 'precise' ? prefer : 'auto',
         send
       )
     }
   )
+
+  ipcMain.handle('lyrics:align-caps', async () => ({ precise: await preciseCapable() }))
 
   ipcMain.handle(
     'lyrics:search',

@@ -19,6 +19,20 @@ interface FlacApi {
   ): boolean
   FLAC__stream_encoder_finish(encoder: number): boolean
   FLAC__stream_encoder_delete(encoder: number): void
+  create_libflac_decoder(verify?: boolean): number
+  init_decoder_stream(
+    decoder: number,
+    read: (bytes: number) => { buffer?: Uint8Array; readDataLength: number; error: boolean },
+    write: (
+      data: Uint8Array[],
+      frameInfo: { blocksize: number; channels: number; bitsPerSample: number; sampleRate?: number }
+    ) => void,
+    error: (code: number, description: string) => void,
+    metadata?: (m: { data?: { sampleRate?: number } }) => void
+  ): number
+  FLAC__stream_decoder_process_until_end_of_stream(decoder: number): boolean
+  FLAC__stream_decoder_finish(decoder: number): boolean
+  FLAC__stream_decoder_delete(decoder: number): void
 }
 
 let flacPromise: Promise<FlacApi> | null = null
@@ -122,6 +136,87 @@ export async function wavToFlac(wavPath: string, flacPath: string): Promise<Flac
     await writeFile(flacPath + '.part', out)
     await rename(flacPath + '.part', flacPath)
     return { ok: true, bytes: out.length }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Decode a 16-bit FLAC stem back into a canonical PCM WAV (for tools that
+ * read WAV only, e.g. the pack-python forced aligner). Atomic like wavToFlac.
+ */
+export async function flacToWav(flacPath: string, wavPath: string): Promise<FlacResult> {
+  try {
+    const Flac = await flacReady()
+    const flac = await readFile(flacPath)
+    const dec = Flac.create_libflac_decoder(false)
+    if (!dec) return { ok: false, error: 'FLAC decoder unavailable' }
+    let offset = 0
+    const blocks: Int16Array[] = []
+    let channels = 2
+    let sampleRate = 44100
+    const errors: string[] = []
+    const init = Flac.init_decoder_stream(
+      dec,
+      (bytes) => {
+        if (offset >= flac.length) return { readDataLength: 0, error: false }
+        const end = Math.min(offset + bytes, flac.length)
+        const chunk = new Uint8Array(flac.subarray(offset, end))
+        offset = end
+        return { buffer: chunk, readDataLength: chunk.length, error: false }
+      },
+      (data, frameInfo) => {
+        channels = frameInfo.channels
+        if (frameInfo.sampleRate) sampleRate = frameInfo.sampleRate
+        const bytesPer = frameInfo.bitsPerSample / 8
+        const n = frameInfo.blocksize
+        const inter = new Int16Array(n * data.length)
+        data.forEach((chan, c) => {
+          const view = new DataView(chan.buffer, chan.byteOffset, n * bytesPer)
+          for (let i = 0; i < n; i++) inter[i * data.length + c] = view.getInt16(i * bytesPer, true)
+        })
+        blocks.push(inter)
+      },
+      (code, description) => {
+        errors.push(`${code}: ${description}`)
+      },
+      (m) => {
+        if (m?.data?.sampleRate) sampleRate = m.data.sampleRate
+      }
+    )
+    if (init !== 0) {
+      Flac.FLAC__stream_decoder_delete(dec)
+      return { ok: false, error: `FLAC decoder init failed (${init})` }
+    }
+    const processed = Flac.FLAC__stream_decoder_process_until_end_of_stream(dec)
+    Flac.FLAC__stream_decoder_finish(dec)
+    Flac.FLAC__stream_decoder_delete(dec)
+    if (!processed || errors.length > 0) {
+      return { ok: false, error: `FLAC decode failed: ${errors[0] ?? 'stream error'}` }
+    }
+    const total = blocks.reduce((s, b) => s + b.length, 0)
+    const pcm = Buffer.alloc(total * 2)
+    let at = 0
+    for (const b of blocks) {
+      Buffer.from(b.buffer, b.byteOffset, b.length * 2).copy(pcm, at)
+      at += b.length * 2
+    }
+    const header = Buffer.alloc(44)
+    header.write('RIFF', 0)
+    header.writeUInt32LE(36 + pcm.length, 4)
+    header.write('WAVEfmt ', 8)
+    header.writeUInt32LE(16, 16)
+    header.writeUInt16LE(1, 20)
+    header.writeUInt16LE(channels, 22)
+    header.writeUInt32LE(sampleRate, 24)
+    header.writeUInt32LE(sampleRate * channels * 2, 28)
+    header.writeUInt16LE(channels * 2, 32)
+    header.writeUInt16LE(16, 34)
+    header.write('data', 36)
+    header.writeUInt32LE(pcm.length, 40)
+    await writeFile(wavPath + '.part', Buffer.concat([header, pcm]))
+    await rename(wavPath + '.part', wavPath)
+    return { ok: true, bytes: 44 + pcm.length }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }

@@ -60,6 +60,8 @@ const api: SingzApi = {
   getLyrics: (songPath, durationSec, allowDownload, prefer) =>
     ipcRenderer.invoke('lyrics:get', songPath, durationSec, Boolean(allowDownload), prefer ?? 'auto'),
 
+  alignCaps: () => ipcRenderer.invoke('lyrics:align-caps'),
+
   searchLyrics: (query, durationSec) => ipcRenderer.invoke('lyrics:search', query, durationSec),
 
   applyLyrics: (songPath, id, durationSec) =>
