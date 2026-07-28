@@ -35,6 +35,14 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`): CDP over
 Metro against the iOS Simulator — run them after engine or loading changes.
+Driving **Android** over CDP: never evaluate JS while a decode is in flight —
+the Hermes inspector segfaults the app mid-`decodeAudioData` (looks exactly
+like an OOM: SIGSEGV at 0x0 on `mqt_v_js` in libhermesvm, ~9 s into loading a
+long song, 3/3 reproducible; the same load never fails unpolled, 4/4). Poll
+the `singz.crumb` pref over `adb run-as` instead, which touches no JS. Debug
+builds only — release APKs have no inspector. Metro also lists *every*
+connected app, so pick the target by `deviceName` or a stray simulator will
+answer your evals while you measure the phone.
 
 ## Hard-won gotchas (do not re-learn these)
 
@@ -120,6 +128,10 @@ Metro against the iOS Simulator — run them after engine or loading changes.
 
 ## Conventions
 
+- **Parallel feature work happens in git worktrees** (one per feature, e.g.
+  under `.claude/worktrees/<feature>`), never as concurrent edits to the same
+  checkout — two sessions on one tree fight over builds, caches and
+  half-staged files. Merge back to main when the feature lands.
 - IPC handlers return result objects (`{ ok: false, error }`), never throw
   (avoids the "Error invoking remote method" prefix in the renderer).
 - File access from the renderer is allowlisted in `src/main/media.ts` —
