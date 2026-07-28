@@ -135,7 +135,8 @@ async function exists(path: string): Promise<boolean> {
 
 function safeName(name: string): string {
   const cleaned = name
-    .replace(/\.[^.]+$/, '')
+    // strip only real audio extensions — "Mr. Crowley" must keep its second half
+    .replace(/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$/i, '')
     .replace(/[/\\:*?"<>|]/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim()

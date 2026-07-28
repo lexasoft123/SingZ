@@ -194,6 +194,18 @@ interface RegistryEntry {
   platforms?: string[]
 }
 
+/** MMS forced-alignment checkpoint (precise word timing) — torch-hub layout. */
+export const MMS_MODEL_MB = 1200
+export function torchHome(): string {
+  return join(modelsDir(), 'torch-home')
+}
+export function mmsModelPath(): string {
+  return join(torchHome(), 'hub', 'checkpoints', 'model.pt')
+}
+export function mmsModelUrl(): string {
+  return 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt'
+}
+
 const REGISTRY: RegistryEntry[] = [
   {
     id: 'gpu-splitter',
@@ -211,6 +223,29 @@ const REGISTRY: RegistryEntry[] = [
       `https://github.com/lexasoft123/SingZ/releases/latest/download/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
     optional: false,
     platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
+  },
+  {
+    id: 'whisper',
+    label: 'Speech model · lyrics',
+    description:
+      'Hears the vocals: transcribes lyrics when none are online, and checks & aligns downloaded lyrics against what is actually sung.',
+    sizeMb: 1620,
+    kind: 'file',
+    file: 'ggml-large-v3-turbo.bin',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
+    optional: true
+  },
+  {
+    id: 'aligner',
+    label: 'Precise word aligner',
+    description:
+      'Snaps every lyric word to the exact moment it is sung — the sharpest karaoke timing, in 1,100+ languages. Runs through the stem splitter.',
+    sizeMb: MMS_MODEL_MB,
+    kind: 'file',
+    file: join('torch-home', 'hub', 'checkpoints', 'model.pt'),
+    url: mmsModelUrl(),
+    optional: true,
+    platforms: ['darwin-arm64']
   }
 ]
 

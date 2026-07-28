@@ -159,11 +159,14 @@ export default function PlayerScreen({
     [training, trainCfg, lines.length]
   )
 
+  // Karaoke anticipates: words light a breath BEFORE they are sung so the
+  // singer can catch the entry (marking on/after onset reads as lagging).
+  const lpos = pos + 0.15
   const currentLine = useMemo(() => {
     let cur = -1
-    for (let i = 0; i < lines.length; i++) if (lines[i].start <= pos + 0.05) cur = i
+    for (let i = 0; i < lines.length; i++) if (lines[i].start <= lpos + 0.05) cur = i
     return cur
-  }, [lines, pos])
+  }, [lines, lpos])
 
   const scrollRef = useRef<ScrollView>(null)
   const lineYs = useRef<number[]>([])
@@ -285,9 +288,9 @@ export default function PlayerScreen({
                       <Text
                         key={j}
                         style={
-                          pos >= w.e
+                          lpos >= w.e
                             ? { color: isSing ? '#ffd97a' : C.amber }
-                            : pos >= w.s
+                            : lpos >= w.s
                               ? [{ color: isSing ? '#ffd97a' : C.amber }, s.nowGlow]
                               : { color: 'rgba(255,255,255,0.40)' }
                         }

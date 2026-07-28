@@ -19,7 +19,7 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
-export type ModelId = 'gpu-splitter'
+export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner'
 
 export interface ModelInfo {
   id: ModelId
@@ -129,6 +129,28 @@ export interface LyricsProgress {
 
 export type LyricsSource = 'lrclib' | 'whisper'
 
+/** How word timing was produced: whisper transcription match or CTC forced alignment. */
+export type AlignMethod = 'whisper' | 'ctc'
+
+/**
+ * Verdict of checking database lyrics against what is actually sung.
+ * - match: text fits the recording and the original timing was already close
+ * - retimed: text fits; word timing was re-snapped to the recording
+ * - mismatch: the text largely is not what is sung — lyrics left untouched
+ */
+export interface AlignCheck {
+  verdict: 'match' | 'retimed' | 'mismatch'
+  method: AlignMethod
+  /** Percent of lyric words confidently heard in the vocals (0-100). */
+  matchedPct: number
+  /** Median start shift applied to lines, seconds (signed; retimed vs original). */
+  medianShift: number
+  /** Indexes of lines where most words were not heard as written. */
+  badLines: number[]
+  /** A long sung passage has no counterpart in the lyrics (missing verse?). */
+  extraSung?: boolean
+}
+
 export interface LyricsCandidate {
   id: number
   artist: string
@@ -145,16 +167,18 @@ export type LyricsResult =
       lines: LyricLine[]
       source: LyricsSource
       credit?: string
-      /** Word timing was refined against a Whisper transcription of the vocals. */
+      /** Word timing was refined against the vocals stem. */
       aligned?: boolean
+      /** Result of the words-vs-recording check (align runs only). */
+      check?: AlignCheck
     }
   | {
       ok: false
       cancelled?: boolean
       /** The bundled whisper-cli binary is missing (broken build / dev without vendor). */
       needsEngine?: boolean
-      /** No online lyrics found; AI transcription needs model weights — ask the user first. */
-      needsModel?: { sizeMb: number }
+      /** A model download is needed first — ask the user (what tells which). */
+      needsModel?: { sizeMb: number; what?: 'speech' | 'aligner' }
       error: string
     }
 
@@ -208,8 +232,10 @@ export interface SingzApi {
     songPath: string,
     durationSec: number,
     allowDownload?: boolean,
-    prefer?: 'auto' | 'whisper' | 'align'
+    prefer?: 'auto' | 'whisper' | 'align' | 'precise'
   ): Promise<LyricsResult>
+  /** Whether the precise (CTC forced-alignment) aligner can run on this machine. */
+  alignCaps(): Promise<{ precise: boolean }>
   /** Manual LRCLIB search for the variant picker. */
   searchLyrics(
     query: { artist?: string; title?: string; free?: string },
