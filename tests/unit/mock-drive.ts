@@ -45,6 +45,14 @@ export function startMockDrive(port = 0): Promise<MockDrive> {
         return json(200, { access_token: 'mock-access', refresh_token: 'mock-refresh', expires_in: 3600 })
       }
 
+      // headless consent: bounce straight back with a code so the full
+      // sign-in flow (browser round-trip included) runs with no human
+      if (url.pathname === '/o/oauth2/v2/auth') {
+        const redirect = url.searchParams.get('redirect_uri') ?? ''
+        res.writeHead(302, { Location: `${redirect}?code=mock-code` })
+        return res.end()
+      }
+
       if (url.pathname === '/drive/v3/files' && req.method === 'GET') {
         const q = url.searchParams.get('q') ?? ''
         let list = [...files.values()]

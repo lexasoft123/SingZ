@@ -112,6 +112,8 @@ dependencies {
     implementation("com.facebook.react:react-android")
     // SAF folder trees (picked project roots, incl. Google Drive)
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // Custom Tabs: Google consent inside the app's own task (self-closing)
+    implementation("androidx.browser:browser:1.8.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

@@ -297,6 +297,28 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
     }
   }
 
+  /** Google consent in a Custom Tab riding the app's own task. */
+  @ReactMethod
+  fun oauthPresent(url: String, promise: Promise) {
+    val activity = ctx.currentActivity
+      ?: return promise.reject("oauth", "Nothing to present the sign-in from")
+    try {
+      val tab = androidx.browser.customtabs.CustomTabsIntent.Builder()
+        .setShowTitle(true)
+        .build()
+      tab.launchUrl(activity, android.net.Uri.parse(url))
+      promise.resolve(null)
+    } catch (e: Exception) {
+      // no Custom Tabs provider — plain browser still works, tab just lingers
+      try {
+        activity.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+        promise.resolve(null)
+      } catch (e2: Exception) {
+        promise.reject("oauth", e2.message ?: "Cannot open the sign-in page")
+      }
+    }
+  }
+
   /** Wait for the browser redirect; resolves the full local URL (with ?code=). */
   @ReactMethod
   fun oauthWait(promise: Promise) {
@@ -309,13 +331,23 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
           val line = client.getInputStream().bufferedReader().readLine() ?: ""
           val path = line.split(" ").getOrNull(1) ?: "/"
           val body = "<html><body style=\"font-family:sans-serif;padding:40px\">" +
-            "<h3>SingZ is signed in</h3>You can close this tab and go back to the app." +
-            "</body></html>"
+            "<h3>SingZ is signed in</h3>Taking you back to the app…" +
+            "<script>setTimeout(function(){window.close()},800)</script></body></html>"
           client.getOutputStream().write(
             ("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\n" +
               "Connection: close\r\n\r\n$body").toByteArray()
           )
           client.getOutputStream().flush()
+          // Bring SingZ back to front — the Custom Tab above it finishes.
+          // Legal from the background: the app owns an activity in the
+          // foreground task's back stack.
+          try {
+            val intent = Intent(ctx, MainActivity::class.java)
+              .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            (ctx.currentActivity ?: ctx).startActivity(intent)
+          } catch (_: Exception) {
+            // fine — the redirect page asked the tab to close itself
+          }
           promise.resolve("http://127.0.0.1:${socket.localPort}$path")
         }
       } catch (e: Exception) {

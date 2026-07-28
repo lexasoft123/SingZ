@@ -52,7 +52,7 @@ async function fetchRetry(url: string, init: RequestInit): Promise<Response> {
 interface FolderNative {
   oauthStart(): Promise<number>
   oauthWait(): Promise<string>
-  /** iOS only: in-app auth sheet — a Safari bounce would suspend the app. */
+  /** In-app consent: iOS auth sheet / Android Custom Tab — both self-close. */
   oauthPresent?(url: string): Promise<void>
   fetchToCache(project: string, file: string, url: string, auth: string, expectedBytes: number): Promise<string>
 }
@@ -104,7 +104,7 @@ export async function driveSignIn(): Promise<void> {
     '&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file' +
     '&access_type=offline&prompt=consent' +
     `&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain`
-  if (Platform.OS === 'ios' && Native.oauthPresent) {
+  if (Native.oauthPresent) {
     await Native.oauthPresent(url)
   } else {
     await Linking.openURL(url)
