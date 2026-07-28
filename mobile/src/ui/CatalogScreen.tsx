@@ -251,8 +251,9 @@ export default function CatalogScreen({
           )}
           {projects !== null && projects.length === 0 && (
             <Text style={s.empty}>
-              No projects here yet. Save one on your computer into the shared folder (iCloud
-              Drive/SingZ), or pick a different folder above.
+              {Platform.OS === 'ios'
+                ? 'No projects here yet. Save one on your computer into the shared folder (iCloud Drive/SingZ), or pick a different folder above.'
+                : 'No projects here yet. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
             </Text>
           )}
           {card({
