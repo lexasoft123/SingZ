@@ -106,15 +106,32 @@ export class MultitrackEngine {
     return this.displayLag
   }
 
-  get position(): number {
+  private clockPosition(lag: number): number {
     if (!this._playing) return this.startOffset
-    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt - this.displayLag)
+    const elapsed = this.startOffset + (this.ctx.currentTime - this.startedAt - lag)
     const r = this.regionLoop ? this.region : null
     if (r && this.startOffset < r.end && elapsed > r.end) {
       // Sources loop natively at r.end -> r.start; fold the linear clock.
       return r.start + ((elapsed - r.end) % (r.end - r.start))
     }
     return Math.min(this.duration, Math.max(this.startOffset, elapsed))
+  }
+
+  /** What the listener hears right now — drives lyrics and other visuals. */
+  get position(): number {
+    return this.clockPosition(this.displayLag)
+  }
+
+  /**
+   * What the engine is rendering right now. Gain flips, duck decisions and
+   * stop/pause captures must use THIS clock: their effect rides the same
+   * output pipeline as the stems, so both reach the ear displayLag later and
+   * cancel exactly. Deciding them on the display clock leaks displayLag of
+   * un-ducked vocal into every sing line (a full word on high-latency
+   * Android routes).
+   */
+  get audioPosition(): number {
+    return this.clockPosition(0)
   }
 
   /**
@@ -151,7 +168,7 @@ export class MultitrackEngine {
       this.boundTimer = setInterval(() => {
         const r = this.region
         if (!this._playing || !r || this.regionLoop) return
-        if (this.startOffset < r.end && this.position >= r.end - 0.015) {
+        if (this.startOffset < r.end && this.audioPosition >= r.end - 0.015) {
           this.pause()
           this.startOffset = Math.min(r.end, this.duration)
           this.emit()
@@ -190,7 +207,7 @@ export class MultitrackEngine {
   /** Apply the schedule at the current position; a no-op while nothing changes. */
   private trainTick(): void {
     const tr = this.training
-    const want = tr && this.duckAt(this.position) ? tr.stems : []
+    const want = tr && this.duckAt(this.audioPosition) ? tr.stems : []
     if (want.length === this.ducked.size && want.every((id) => this.ducked.has(id))) return
     this.ducked = new Set(want)
     this.applyGains()
@@ -280,7 +297,7 @@ export class MultitrackEngine {
       this.emit()
     }
     if (!this._playing) return
-    this.startOffset = this.position
+    this.startOffset = this.audioPosition
     this._playing = false
     this.stopSources()
     this.syncBoundWatcher()
@@ -320,7 +337,7 @@ export class MultitrackEngine {
   }
 
   seekBy(dt: number): void {
-    this.seek(this.position + dt)
+    this.seek(this.audioPosition + dt)
   }
 
   setMuted(id: string, muted: boolean): void {

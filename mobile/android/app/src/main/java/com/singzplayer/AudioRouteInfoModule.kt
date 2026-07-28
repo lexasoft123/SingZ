@@ -69,10 +69,13 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
       var written = 0L
       val ts = AudioTimestamp()
       var best = -1.0
-      val deadline = System.nanoTime() + 800_000_000L
+      // non-blocking writes only: a blocking write on a track another engine
+      // (our Oboe stream) contends with can wedge forever and the promise
+      // would never resolve — the exact bug this replaces
+      val deadline = System.nanoTime() + 900_000_000L
       while (System.nanoTime() < deadline) {
-        val n = track.write(silence, 0, silence.size, AudioTrack.WRITE_BLOCKING)
-        if (n > 0) written += (n / 2).toLong()
+        val n = track.write(silence, 0, silence.size, AudioTrack.WRITE_NON_BLOCKING)
+        if (n > 0) written += (n / 2).toLong() else Thread.sleep(10)
         // let the pipeline reach steady state before trusting the timestamp
         if (written > sr / 5 && track.getTimestamp(ts)) {
           val presented = ts.framePosition +

@@ -44,7 +44,18 @@ const PORT_LABELS: Record<string, string> = {
 }
 
 export async function getRouteLatency(): Promise<RouteLatency> {
-  const o = await Native.getOutput()
+  // A wedged native probe must degrade to "no compensation", never to a
+  // player with no route (that also hides the trim control).
+  const o = await Promise.race([
+    Native.getOutput(),
+    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('route probe timeout')), 3000))
+  ]).catch(() => ({
+    outputLatency: 0,
+    ioBufferDuration: 0.02,
+    portType: 'Speaker',
+    portName: 'Speaker',
+    portUid: 'fallback'
+  }))
   const pretty = PORT_LABELS[o.portType] ?? o.portType
   // A named external device beats the generic port label (e.g. "Kia Soul").
   const external = !['Speaker', 'Headphones'].includes(o.portType)
