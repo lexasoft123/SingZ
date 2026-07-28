@@ -12,8 +12,44 @@ on:
 permissions:
   contents: write
 
+# Superseded runs of the same ref are cancelled (tags each get their own ref,
+# so release builds are never cancelled).
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Every mobile push: the cheap canary only. npm ci runs postinstall, which
+  # applies the audio-api C++ patches (fails loud on upstream drift),
+  # synthesizes the bundled sample song, and bakes the Drive config —
+  # everything that can rot does so here, in ~3 min, without an NDK build.
+  canary:
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      # make-sample.js (postinstall) encodes the synthesized sample via ffmpeg
+      - name: ffmpeg for the sample-song generator
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - run: npm ci
+        working-directory: mobile
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+        working-directory: mobile
+
+  # Full APK: only on v* release tags and manual dispatch.
   apk:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -44,9 +80,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
       # postinstall applies the audio-api C++ patches and fails loud on
-      # upstream drift — this is the patch-drift canary as much as a build
-      # step. It also synthesizes the bundled sample project (an original
-      # composition; the repo carries no audio).
+      # upstream drift. It also synthesizes the bundled sample project (an
+      # original composition; the repo carries no audio).
       - run: npm ci
         working-directory: mobile
 
