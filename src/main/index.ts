@@ -18,6 +18,7 @@ import {
   setProjectsRoot
 } from './projects'
 import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
+import { readSettings } from './settings'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
@@ -271,7 +272,8 @@ function registerIpc(): void {
 
   ipcMain.handle('gdrive:status', () => ({
     configured: gdriveConfigured(),
-    signedIn: gdriveConfigured() && gdriveSignedIn()
+    signedIn: gdriveConfigured() && gdriveSignedIn(),
+    lastSync: (readSettings() as { gdriveLastSync?: number }).gdriveLastSync ?? null
   }))
   ipcMain.handle('gdrive:signin', () => gdriveSignIn())
   ipcMain.handle('gdrive:signout', () => {

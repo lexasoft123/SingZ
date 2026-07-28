@@ -1789,6 +1789,173 @@ button.chip-status:hover {
   background: var(--accent-soft);
 }
 
+/* ——— project explorer (approved card-grid redesign) ——— */
+
+.lib {
+  margin-top: 34px;
+  width: min(880px, calc(100vw - 80px));
+  text-align: left;
+}
+
+.lib-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 6px;
+}
+
+.lib-search {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  width: 200px;
+}
+
+.lib-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.src-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dim);
+  font-size: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.src-who {
+  color: var(--text);
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+.src-dim {
+  opacity: 0.6;
+}
+
+.src-ic {
+  width: 13px;
+  height: 13px;
+}
+
+.src-link {
+  background: none;
+  border: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+
+.src-link:hover {
+  text-decoration: underline;
+}
+
+.src-msg {
+  margin: -6px 0 10px;
+}
+
+.lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
+  gap: 11px;
+  max-height: 38vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.lib-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 14px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  min-width: 0;
+}
+
+.lib-card:hover {
+  border-color: var(--accent);
+}
+
+.lib-tile {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: #171310;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 8px;
+  flex: none;
+}
+
+.lib-tile i {
+  height: 4px;
+  border-radius: 2px;
+  display: block;
+}
+
+.lib-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lib-name {
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lib-meta {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.lib-badge {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+
+.lib-badge.dim {
+  opacity: 0.55;
+}
+
+.lib-badge img {
+  width: 12px;
+  height: 12px;
+}
+
 .wiz-installed {
   display: flex;
   align-items: center;

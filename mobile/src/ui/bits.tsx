@@ -173,6 +173,38 @@ export function Stepper({
  * Horizontal drag/tap bar. onChange per move (cheap preview / volume);
  * onCommit once at finger-up — expensive actions belong there.
  */
+/** Segmented source switcher (the approved catalog prototype). */
+export function Seg({
+  segments,
+  active,
+  onSelect
+}: {
+  segments: { key: string; label: string; icon?: ImageSourcePropType; emoji?: string }[]
+  active: string
+  onSelect: (key: string) => void
+}): React.JSX.Element {
+  return (
+    <View style={b.segTrack}>
+      {segments.map((s) => {
+        const on = s.key === active
+        return (
+          <Pressable
+            key={s.key}
+            onPress={() => onSelect(s.key)}
+            style={[b.segBtn, on && { backgroundColor: C.amber }]}
+          >
+            {s.icon != null && <Image source={s.icon} style={{ width: 13, height: 13 }} />}
+            {s.emoji != null && <Text style={{ fontSize: 12 }}>{s.emoji}</Text>}
+            <Text style={[b.segText, on && { color: C.amberInk }]} numberOfLines={1}>
+              {s.label}
+            </Text>
+          </Pressable>
+        )
+      })}
+    </View>
+  )
+}
+
 export function Bar({
   value,
   onChange,
@@ -230,6 +262,26 @@ export function Bar({
 }
 
 export const b = StyleSheet.create({
+  segTrack: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255,255,255,0.055)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.09)',
+    borderRadius: 14,
+    padding: 3,
+    gap: 3
+  },
+  segBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 9,
+    paddingHorizontal: 4,
+    borderRadius: 11
+  },
+  segText: { color: 'rgba(255,255,255,0.45)', fontSize: 13.5, fontWeight: '700' },
   chip: {
     borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.16)',

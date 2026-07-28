@@ -333,6 +333,9 @@ export async function gdriveSync(
     }
     onProgress?.('Drive is up to date', 1)
     log('gdrive', `sync done: ${uploaded} uploaded, ${unchanged} unchanged`)
+    const s = readSettings() as Record<string, unknown>
+    s.gdriveLastSync = Date.now()
+    writeSettings(s)
     return { ok: true, uploaded, unchanged, projects: projectDirs.length }
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err)

@@ -101,7 +101,9 @@ export async function driveSignIn(): Promise<void> {
   const url =
     `${AUTH()}/o/oauth2/v2/auth?client_id=${encodeURIComponent(cfg.clientId)}` +
     `&redirect_uri=${encodeURIComponent(redirect)}` +
-    '&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file' +
+    '&response_type=code' +
+    '&scope=' +
+    encodeURIComponent('https://www.googleapis.com/auth/drive.file openid email') +
     '&access_type=offline&prompt=consent' +
     `&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain`
   if (Native.oauthPresent) {
@@ -128,6 +130,7 @@ export async function driveSignIn(): Promise<void> {
     access_token?: string
     refresh_token?: string
     expires_in?: number
+    id_token?: string
     error_description?: string
   }
   if (!tok.access_token || !tok.refresh_token) {
@@ -138,6 +141,42 @@ export async function driveSignIn(): Promise<void> {
     refresh: tok.refresh_token,
     expiresAt: Date.now() + (tok.expires_in ?? 3600) * 1000 - 60000
   })
+  // the id_token carries the account email for the source context line
+  try {
+    const payload = tok.id_token?.split('.')[1]
+    const email = payload
+      ? (JSON.parse(b64decode(payload.replace(/-/g, '+').replace(/_/g, '/'))) as {
+          email?: string
+        }).email
+      : undefined
+    await Prefs.setTextPref('singz.gdrive.email', email ?? '')
+  } catch {
+    await Prefs.setTextPref('singz.gdrive.email', '')
+  }
+}
+
+/** Hermes ships no atob; JWT payloads are ASCII JSON so this suffices. */
+function b64decode(s: string): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  let out = ''
+  let buffer = 0
+  let bits = 0
+  for (const ch of s.replace(/=+$/, '')) {
+    const v = chars.indexOf(ch)
+    if (v < 0) continue
+    buffer = (buffer << 6) | v
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      out += String.fromCharCode((buffer >> bits) & 0xff)
+    }
+  }
+  return out
+}
+
+export const driveAccountEmail = async (): Promise<string | null> => {
+  const e = await Prefs.getTextPref('singz.gdrive.email')
+  return e || null
 }
 
 async function accessToken(): Promise<string> {

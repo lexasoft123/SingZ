@@ -268,7 +268,7 @@ export interface SingzApi {
   >
 
   /** Google Drive sync (drive.file scope — no Drive client needed anywhere). */
-  gdriveStatus(): Promise<{ configured: boolean; signedIn: boolean }>
+  gdriveStatus(): Promise<{ configured: boolean; signedIn: boolean; lastSync?: number | null }>
   gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
   gdriveSignOut(): Promise<{ ok: boolean }>
   gdriveSync(): Promise<{

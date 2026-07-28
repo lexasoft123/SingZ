@@ -1112,6 +1112,7 @@ export default function App(): React.JSX.Element {
           songName={song?.name}
           onBrowse={openPicker}
           onOpenProject={(p) => void loadPath(p)}
+          onManageStorage={() => setShowProjects(true)}
         />
       )}
 

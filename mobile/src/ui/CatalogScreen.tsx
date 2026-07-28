@@ -1,8 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import {
+  Image,
+  Platform,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View
+} from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
+  driveAccountEmail,
   driveAvailable,
   driveListProjects,
   driveSignedIn,
@@ -21,7 +31,7 @@ import {
   type ProjectEntry,
   type RootInfo
 } from '../projects'
-import { C, Chip, StemTile } from './bits'
+import { C, Seg, StemTile } from './bits'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/catalog.png')
@@ -56,8 +66,11 @@ export default function CatalogScreen({
   const [projects, setProjects] = useState<ProjectEntry[] | null>(null)
   const [loading, setLoading] = useState<Loading | null>(null)
   const [error, setError] = useState<string | null>(null)
-  /** 'folder' = device/SAF roots via FolderAccess; 'gdrive' = Drive API. */
-  const [mode, setMode] = useState<'folder' | 'gdrive'>('folder')
+  /** Library source: Drive API / picked folder (SAF, iCloud) / on-device. */
+  const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>('phone')
+  const [driveEmail, setDriveEmail] = useState<string | null>(null)
+  const [driveOn, setDriveOn] = useState(false)
+  const [pulling, setPulling] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
 
@@ -66,6 +79,13 @@ export default function CatalogScreen({
       setError(null)
       if (mode === 'gdrive') {
         setRoot({ kind: 'picked', path: 'gdrive', name: 'Google Drive' })
+        const signed = await driveSignedIn()
+        setDriveOn(signed)
+        if (!signed) {
+          setProjects([])
+          return
+        }
+        setDriveEmail(await driveAccountEmail())
         setProjects(await driveListProjects())
       } else {
         setRoot(await getRoot())
@@ -84,6 +104,11 @@ export default function CatalogScreen({
   useEffect(() => {
     void getStoredText('singz.libMode').then((m) => {
       if (m === 'gdrive' && driveAvailable()) setMode('gdrive')
+      else if (m === 'folder') setMode('folder')
+      else {
+        // no stored choice: land on the folder root if one was picked
+        void getRoot().then((r) => setMode(r.kind === 'picked' ? 'folder' : 'phone'))
+      }
     })
     void getCrumb().then((c) => {
       if (c) {
@@ -93,25 +118,45 @@ export default function CatalogScreen({
     })
   }, [])
 
-  const openDrive = useCallback(async () => {
+  const selectMode = useCallback(
+    (next: 'gdrive' | 'folder' | 'phone'): void => {
+      void (async () => {
+        try {
+          setError(null)
+          if (next === 'phone') await clearRoot()
+          if (next === 'folder') {
+            const r = await getRoot()
+            if (r.kind !== 'picked') {
+              const picked = await pickFolder()
+              if (!picked) return // kept the current source
+            }
+          }
+          setMode(next)
+          void setStoredText('singz.libMode', next)
+        } catch (e) {
+          setError(String(e instanceof Error ? e.message : e))
+        }
+      })()
+    },
+    [mode, root]
+  )
+
+  const driveSignInFlow = useCallback(async () => {
     try {
       setError(null)
-      if (!(await driveSignedIn())) {
-        setError('Finish signing in to Google in the browser…')
-        await driveSignIn()
-        setError(null)
-      }
-      setMode('gdrive')
-      void setStoredText('singz.libMode', 'gdrive')
+      await driveSignIn()
+      setDriveOn(true)
+      await refresh()
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e))
     }
-  }, [])
+  }, [refresh])
 
-  const leaveDrive = useCallback((): void => {
-    setMode('folder')
-    void setStoredText('singz.libMode', 'folder')
-  }, [])
+  const openDrive = useCallback(async () => {
+    setMode('gdrive')
+    void setStoredText('singz.libMode', 'gdrive')
+    if (!(await driveSignedIn())) await driveSignInFlow()
+  }, [driveSignInFlow])
 
   const cancelLoad = useCallback(() => {
     token.current++
@@ -192,6 +237,7 @@ export default function CatalogScreen({
     }
     TEST.cancelLoad = cancelLoad
     TEST.openDrive = openDrive
+    TEST.selectMode = selectMode
     TEST.libMode = mode
     TEST.setPref = setStoredText
     TEST.getPref = getStoredText
@@ -263,45 +309,87 @@ export default function CatalogScreen({
           <StemTile hue={0} size={26} />
           <Text style={s.brand}>SingZ</Text>
         </View>
-        <View style={s.folders}>
-          {driveAvailable() && (
-            <Chip
-              label="Google Drive"
-              icon={GDRIVE_ICON}
-              active={mode === 'gdrive'}
-              onPress={() => void openDrive()}
-            />
+        <Seg
+          segments={[
+            ...(driveAvailable() ? [{ key: 'gdrive', label: 'Drive', icon: GDRIVE_ICON }] : []),
+            { key: 'folder', label: 'Folder', emoji: '📁' },
+            {
+              key: 'phone',
+              label: Platform.OS === 'ios' ? 'This iPhone' : 'This phone',
+              emoji: '📱'
+            }
+          ]}
+          active={mode}
+          onSelect={(k) => {
+            if (k === 'gdrive') void openDrive()
+            else selectMode(k as 'folder' | 'phone')
+          }}
+        />
+        <View style={s.ctx}>
+          {mode === 'gdrive' &&
+            (driveOn ? (
+              <>
+                <Text style={s.ctxWho} numberOfLines={1}>
+                  {driveEmail ?? 'Signed in to Google Drive'}
+                </Text>
+                <Text style={s.ctxDot}>·</Text>
+                <Pressable
+                  hitSlop={8}
+                  onPress={() => {
+                    void driveSignOut().then(() => {
+                      setDriveOn(false)
+                      setDriveEmail(null)
+                      void refresh()
+                    })
+                  }}
+                >
+                  <Text style={s.ctxLink}>Sign out</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={s.ctxWho} numberOfLines={1}>
+                  Your projects, synced from the desktop
+                </Text>
+                <Text style={s.ctxDot}>·</Text>
+                <Pressable hitSlop={8} onPress={() => void driveSignInFlow()}>
+                  <Text style={s.ctxLink}>Sign in</Text>
+                </Pressable>
+              </>
+            ))}
+          {mode === 'folder' && (
+            <>
+              <Text style={s.ctxWho} numberOfLines={1}>
+                {root?.kind === 'picked' ? root.name : 'No folder picked yet'}
+              </Text>
+              <Text style={s.ctxDot}>·</Text>
+              <Pressable hitSlop={8} onPress={() => void changeFolder()}>
+                <Text style={s.ctxLink}>Change…</Text>
+              </Pressable>
+            </>
           )}
-          <Chip
-            label={mode === 'folder' && root?.kind === 'picked' ? `☁ ${root.name}` : '☁ Choose folder…'}
-            active={mode === 'folder' && root?.kind === 'picked'}
-            onPress={() => {
-              leaveDrive()
-              void changeFolder()
-            }}
-          />
-          <Chip
-            label={Platform.OS === 'ios' ? 'On this iPhone' : 'On this phone'}
-            active={mode === 'folder' && root?.kind === 'documents'}
-            onPress={() => {
-              leaveDrive()
-              void clearRoot().then(() => refresh())
-            }}
-          />
-          <Chip label="↻" active={false} onPress={() => void refresh()} />
-          {mode === 'gdrive' && (
-            <Chip
-              label="Sign out"
-              active={false}
-              onPress={() => {
-                void driveSignOut().then(() => leaveDrive())
-              }}
-            />
+          {mode === 'phone' && (
+            <Text style={s.ctxWho} numberOfLines={1}>
+              {Platform.OS === 'ios'
+                ? 'Files you copied onto this iPhone'
+                : 'Files you copied onto this phone'}
+            </Text>
           )}
         </View>
         <ScrollView
           style={{ flex: 1 }}
           contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
+          refreshControl={
+            <RefreshControl
+              refreshing={pulling}
+              tintColor={C.amber}
+              colors={[C.amber]}
+              onRefresh={() => {
+                setPulling(true)
+                void refresh().finally(() => setPulling(false))
+              }}
+            />
+          }
         >
           {(projects ?? []).map((p) =>
             card({
@@ -353,7 +441,18 @@ const s = StyleSheet.create({
   wrap: { flex: 1, paddingHorizontal: 20 },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
   brand: { color: C.amber, fontSize: 20, fontWeight: '800', letterSpacing: -0.3 },
-  folders: { flexDirection: 'row', gap: 8, marginTop: 14, marginBottom: 18, flexWrap: 'wrap' },
+  ctx: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    minHeight: 30,
+    marginTop: 9,
+    marginBottom: 12,
+    paddingHorizontal: 2
+  },
+  ctxWho: { color: 'rgba(255,255,255,0.6)', fontSize: 12.5, flexShrink: 1 },
+  ctxDot: { color: 'rgba(255,255,255,0.3)', fontSize: 12.5 },
+  ctxLink: { color: C.amber, fontSize: 12.5, fontWeight: '800' },
   card: {
     flexDirection: 'row',
     alignItems: 'center',
