@@ -43,6 +43,8 @@ export interface ProjectEntry {
   /** Total bytes of materialized stems (0 while everything is still in the cloud). */
   bytes: number
   hasLyrics: boolean
+  /** Where the files live — a picked/local folder or the Google Drive API. */
+  source?: 'folder' | 'gdrive'
 }
 
 const Folder = NativeModules.FolderAccess as FolderAccessApi
@@ -89,13 +91,23 @@ export async function loadProject(
   onStep: (msg: string, frac: number) => void,
   crumb?: (note: string) => Promise<void>
 ): Promise<LoadedProject> {
+  const gdrive = entry.source === 'gdrive'
+  const fetchFile = (file: string): Promise<string> =>
+    gdrive
+      ? import('./gdrive').then((g) => g.driveLocalFile(entry.dir, file))
+      : Folder.localFile(entry.dir, file)
+  const readText = (file: string): Promise<string> =>
+    gdrive
+      ? import('./gdrive').then((g) => g.driveReadText(entry.dir, file))
+      : Folder.readText(entry.dir, file)
+
   const ids = STEM_ORDER_ALL.filter((s) => entry.stems[s])
   const stems: { id: string; buffer: AudioBuffer }[] = []
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i]
     onStep(`Fetching ${id} · ${i + 1}/${ids.length}`, i / ids.length)
     await crumb?.(`fetching ${id}`)
-    const path = await Folder.localFile(entry.dir, `stems/${id}.${entry.stems[id]}`)
+    const path = await fetchFile(`stems/${id}.${entry.stems[id]}`)
     onStep(`Decoding ${id} · ${i + 1}/${ids.length}`, (i + 0.5) / ids.length)
     await crumb?.(`decoding ${id}`)
     // file:// matters: audio-api's Android RELEASE builds treat bare strings
@@ -109,7 +121,7 @@ export async function loadProject(
   if (entry.hasLyrics) {
     onStep('Fetching lyrics…', 0.99)
     try {
-      lyrics = JSON.parse(await Folder.readText(entry.dir, 'lyrics.json')) as LyricsDoc
+      lyrics = JSON.parse(await readText('lyrics.json')) as LyricsDoc
     } catch {
       lyrics = null
     }

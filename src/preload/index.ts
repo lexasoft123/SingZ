@@ -118,7 +118,17 @@ const api: SingzApi = {
   upgradeProject: (dir) => ipcRenderer.invoke('project:upgrade', dir),
   getStorage: () => ipcRenderer.invoke('projects:storage'),
   setProjectsRoot: (path) => ipcRenderer.invoke('projects:set-root', path),
-  chooseProjectsRoot: () => ipcRenderer.invoke('projects:choose-root')
+  chooseProjectsRoot: () => ipcRenderer.invoke('projects:choose-root'),
+
+  gdriveStatus: () => ipcRenderer.invoke('gdrive:status'),
+  gdriveSignIn: () => ipcRenderer.invoke('gdrive:signin'),
+  gdriveSignOut: () => ipcRenderer.invoke('gdrive:signout'),
+  gdriveSync: () => ipcRenderer.invoke('gdrive:sync'),
+  onGdriveProgress: (cb) => {
+    const listener = (_e: IpcRendererEvent, p: { msg: string; frac: number }): void => cb(p)
+    ipcRenderer.on('gdrive:progress', listener)
+    return () => ipcRenderer.removeListener('gdrive:progress', listener)
+  }
 }
 
 contextBridge.exposeInMainWorld('singz', api)

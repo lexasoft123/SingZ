@@ -78,3 +78,8 @@ export async function setTrimMs(key: string, ms: number): Promise<void> {
 /** Crash breadcrumbs: flushed to UserDefaults before each risky step. */
 export const getCrumb = (): Promise<string | null> => Native.getTextPref('singz.crumb')
 export const setCrumb = (note: string): Promise<void> => Native.setTextPref('singz.crumb', note)
+
+/** Generic persisted text (same native store as trims and crumbs). */
+export const getStoredText = (key: string): Promise<string | null> => Native.getTextPref(key)
+export const setStoredText = (key: string, value: string): Promise<void> =>
+  Native.setTextPref(key, value)

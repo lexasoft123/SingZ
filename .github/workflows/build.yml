@@ -31,6 +31,15 @@ jobs:
 
       - run: npm run typecheck
 
+      - name: Inject Google Drive OAuth client
+        if: env.GDRIVE_CONFIG != ''
+        shell: bash
+        env:
+          GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
+        run: |
+          mkdir -p mobile
+          printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
+
       - run: npm run build
 
       - name: Cache built engines (outputs)

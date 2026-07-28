@@ -266,4 +266,17 @@ export interface SingzApi {
   chooseProjectsRoot(): Promise<
     { ok: true; root: string; copied: number } | { ok: false; cancelled?: boolean; error?: string }
   >
+
+  /** Google Drive sync (drive.file scope — no Drive client needed anywhere). */
+  gdriveStatus(): Promise<{ configured: boolean; signedIn: boolean }>
+  gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
+  gdriveSignOut(): Promise<{ ok: boolean }>
+  gdriveSync(): Promise<{
+    ok: boolean
+    uploaded: number
+    unchanged: number
+    projects: number
+    error?: string
+  }>
+  onGdriveProgress(cb: (p: { msg: string; frac: number }) => void): () => void
 }

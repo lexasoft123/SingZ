@@ -13,7 +13,11 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableMap
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.ServerSocket
+import java.net.URL
 import java.util.concurrent.Executors
+import kotlin.concurrent.thread
 
 /**
  * Android counterpart of the iOS FolderAccess pod. The library root is either
@@ -268,6 +272,89 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
         promise.resolve(out.absolutePath)
       } catch (e: Exception) {
         promise.reject("file", e.message ?: "Cannot fetch $file")
+      }
+    }
+  }
+
+  // ------------------------------------------------- Google Drive helpers --
+
+  private var oauthSocket: ServerSocket? = null
+
+  /**
+   * Loopback OAuth (Google installed-app flow): bind an ephemeral local port
+   * for the browser to redirect back to. One Desktop-type OAuth client then
+   * serves every platform — no custom schemes, no SHA-1 binding.
+   */
+  @ReactMethod
+  fun oauthStart(promise: Promise) {
+    try {
+      oauthSocket?.close()
+      val socket = ServerSocket(0)
+      oauthSocket = socket
+      promise.resolve(socket.localPort)
+    } catch (e: Exception) {
+      promise.reject("oauth", e.message ?: "Cannot open the sign-in listener")
+    }
+  }
+
+  /** Wait for the browser redirect; resolves the full local URL (with ?code=). */
+  @ReactMethod
+  fun oauthWait(promise: Promise) {
+    val socket = oauthSocket
+      ?: return promise.reject("oauth", "Sign-in listener is not running")
+    thread(name = "singz-oauth") {
+      try {
+        socket.soTimeout = 5 * 60 * 1000
+        socket.accept().use { client ->
+          val line = client.getInputStream().bufferedReader().readLine() ?: ""
+          val path = line.split(" ").getOrNull(1) ?: "/"
+          val body = "<html><body style=\"font-family:sans-serif;padding:40px\">" +
+            "<h3>SingZ is signed in</h3>You can close this tab and go back to the app." +
+            "</body></html>"
+          client.getOutputStream().write(
+            ("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\n" +
+              "Connection: close\r\n\r\n$body").toByteArray()
+          )
+          client.getOutputStream().flush()
+          promise.resolve("http://127.0.0.1:${socket.localPort}$path")
+        }
+      } catch (e: Exception) {
+        promise.reject("oauth", e.message ?: "Sign-in was not completed")
+      } finally {
+        try { socket.close() } catch (_: Exception) {}
+        if (oauthSocket === socket) oauthSocket = null
+      }
+    }
+  }
+
+  /**
+   * Stream an authorized URL into the project cache (Drive media downloads —
+   * stems are too big for the JS bridge). Same .part+rename discipline as
+   * the SAF copies; skipped when the cached size already matches.
+   */
+  @ReactMethod
+  fun fetchToCache(project: String, file: String, url: String, auth: String, expectedBytes: Double, promise: Promise) {
+    exec.execute {
+      try {
+        val out = cacheFile(project, file)
+        if (out.isFile && expectedBytes > 0 && out.length() == expectedBytes.toLong()) {
+          promise.resolve(out.absolutePath)
+          return@execute
+        }
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("Authorization", auth)
+        conn.connectTimeout = 20000
+        conn.readTimeout = 60000
+        if (conn.responseCode / 100 != 2) {
+          throw Exception("Drive download failed (${conn.responseCode}) for $file")
+        }
+        out.parentFile?.mkdirs()
+        val tmp = File(out.path + ".part")
+        conn.inputStream.use { input -> tmp.outputStream().use { o -> input.copyTo(o) } }
+        if (!tmp.renameTo(out)) throw Exception("Cannot cache $file")
+        promise.resolve(out.absolutePath)
+      } catch (e: Exception) {
+        promise.reject("fetch", e.message ?: "Cannot fetch $file")
       }
     }
   }

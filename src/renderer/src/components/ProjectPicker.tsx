@@ -22,6 +22,11 @@ export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): Rea
   const [isDefault, setIsDefault] = useState(true)
   const [moving, setMoving] = useState(false)
   const [storageMsg, setStorageMsg] = useState<string | null>(null)
+  const [gdrive, setGdrive] = useState<{ configured: boolean; signedIn: boolean }>({
+    configured: false,
+    signedIn: false
+  })
+  const [gdriveMsg, setGdriveMsg] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
     void window.singz.listProjects().then((res) => {
@@ -32,11 +37,34 @@ export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): Rea
       setCloud(s.cloud)
       setIsDefault(s.isDefault)
     })
+    void window.singz.gdriveStatus().then(setGdrive)
   }, [])
 
   useEffect(() => {
     refresh()
+    return window.singz.onGdriveProgress((p) => {
+      setGdriveMsg(p.frac >= 1 ? p.msg : `${p.msg} ${Math.round(p.frac * 100)}%`)
+    })
   }, [refresh])
+
+  const onDrive = useCallback(async () => {
+    if (!gdrive.signedIn) {
+      setGdriveMsg('Finish signing in to Google in your browser…')
+      const res = await window.singz.gdriveSignIn()
+      if (!res.ok) {
+        setGdriveMsg(`Google sign-in failed: ${res.error}`)
+        return
+      }
+      setGdrive({ configured: true, signedIn: true })
+    }
+    setGdriveMsg('Syncing your projects to Drive…')
+    const rep = await window.singz.gdriveSync()
+    setGdriveMsg(
+      rep.ok
+        ? `Drive is up to date — ${rep.uploaded} uploaded, ${rep.unchanged} unchanged. Your phones see them under Google Drive.`
+        : `Sync failed: ${rep.error ?? 'unknown error'}`
+    )
+  }, [gdrive.signedIn])
 
   const applyRoot = useCallback(
     async (run: () => Promise<{ ok: boolean; copied?: number; error?: string; cancelled?: boolean }>) => {
@@ -119,6 +147,32 @@ export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): Rea
                 {root === c.path ? `In ${c.label} ✓` : `Use ${c.label}`}
               </button>
             ))}
+            {gdrive.configured && (
+              <button
+                type="button"
+                className="pill ghost small"
+                disabled={moving}
+                title="Push your projects to a SingZ folder in Google Drive — phones stream them from there, no Drive app needed"
+                onClick={() => void onDrive()}
+              >
+                {gdrive.signedIn ? 'Sync to Google Drive' : 'Connect Google Drive…'}
+              </button>
+            )}
+            {gdrive.configured && gdrive.signedIn && (
+              <button
+                type="button"
+                className="pill ghost small"
+                disabled={moving}
+                onClick={() => {
+                  void window.singz.gdriveSignOut().then(() => {
+                    setGdrive({ configured: true, signedIn: false })
+                    setGdriveMsg('Signed out of Google Drive.')
+                  })
+                }}
+              >
+                Sign out
+              </button>
+            )}
             <button
               type="button"
               className="pill ghost small"
@@ -140,6 +194,7 @@ export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): Rea
           </div>
           {moving && <p className="fine">Copying your projects over — existing files stay put…</p>}
           {storageMsg && <p className="fine">{storageMsg}</p>}
+          {gdriveMsg && <p className="fine">{gdriveMsg}</p>}
         </div>
       </div>
     </div>

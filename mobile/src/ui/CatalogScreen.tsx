@@ -2,7 +2,14 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { getCrumb, setCrumb } from '../latency'
+import {
+  driveAvailable,
+  driveListProjects,
+  driveSignedIn,
+  driveSignIn,
+  driveSignOut
+} from '../gdrive'
+import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
   clearRoot,
@@ -48,29 +55,62 @@ export default function CatalogScreen({
   const [projects, setProjects] = useState<ProjectEntry[] | null>(null)
   const [loading, setLoading] = useState<Loading | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** 'folder' = device/SAF roots via FolderAccess; 'gdrive' = Drive API. */
+  const [mode, setMode] = useState<'folder' | 'gdrive'>('folder')
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
 
   const refresh = useCallback(async () => {
     try {
       setError(null)
-      setRoot(await getRoot())
-      setProjects(await listProjects())
+      if (mode === 'gdrive') {
+        setRoot({ kind: 'picked', path: 'gdrive', name: 'Google Drive' })
+        setProjects(await driveListProjects())
+      } else {
+        setRoot(await getRoot())
+        setProjects(await listProjects())
+      }
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e))
       setProjects([])
     }
-  }, [])
+  }, [mode])
 
   useEffect(() => {
     void refresh()
+  }, [refresh])
+
+  useEffect(() => {
+    void getStoredText('singz.libMode').then((m) => {
+      if (m === 'gdrive' && driveAvailable()) setMode('gdrive')
+    })
     void getCrumb().then((c) => {
       if (c) {
         setError(`The last open crashed while ${c} — please report this.`)
         void setCrumb('')
       }
     })
-  }, [refresh])
+  }, [])
+
+  const openDrive = useCallback(async () => {
+    try {
+      setError(null)
+      if (!(await driveSignedIn())) {
+        setError('Finish signing in to Google in the browser…')
+        await driveSignIn()
+        setError(null)
+      }
+      setMode('gdrive')
+      void setStoredText('singz.libMode', 'gdrive')
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e))
+    }
+  }, [])
+
+  const leaveDrive = useCallback((): void => {
+    setMode('folder')
+    void setStoredText('singz.libMode', 'folder')
+  }, [])
 
   const cancelLoad = useCallback(() => {
     token.current++
@@ -150,6 +190,8 @@ export default function CatalogScreen({
       return entry ? openEntry(entry) : Promise.reject(new Error(`no project ${dir}`))
     }
     TEST.cancelLoad = cancelLoad
+    TEST.openDrive = openDrive
+    TEST.libMode = mode
     TEST.projects = (projects ?? []).map((p) => p.dir)
     TEST.listError = error
     TEST.busy = loading?.msg ?? null
@@ -216,17 +258,35 @@ export default function CatalogScreen({
         <Text style={s.brand}>SingZ</Text>
         <Text style={s.brandSub}>Your practice library</Text>
         <View style={s.folders}>
+          {driveAvailable() && (
+            <Chip label="◢ Google Drive" active={mode === 'gdrive'} onPress={() => void openDrive()} />
+          )}
           <Chip
-            label={root?.kind === 'picked' ? `☁ ${root.name}` : '☁ Choose folder…'}
-            active={root?.kind === 'picked'}
-            onPress={() => void changeFolder()}
+            label={mode === 'folder' && root?.kind === 'picked' ? `☁ ${root.name}` : '☁ Choose folder…'}
+            active={mode === 'folder' && root?.kind === 'picked'}
+            onPress={() => {
+              leaveDrive()
+              void changeFolder()
+            }}
           />
           <Chip
             label={Platform.OS === 'ios' ? 'On this iPhone' : 'On this phone'}
-            active={root?.kind === 'documents'}
-            onPress={() => void clearRoot().then(() => refresh())}
+            active={mode === 'folder' && root?.kind === 'documents'}
+            onPress={() => {
+              leaveDrive()
+              void clearRoot().then(() => refresh())
+            }}
           />
           <Chip label="↻" active={false} onPress={() => void refresh()} />
+          {mode === 'gdrive' && (
+            <Chip
+              label="Sign out"
+              active={false}
+              onPress={() => {
+                void driveSignOut().then(() => leaveDrive())
+              }}
+            />
+          )}
         </View>
         <ScrollView
           style={{ flex: 1 }}

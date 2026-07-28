@@ -88,6 +88,17 @@ Simulator — run them after engine or loading changes.
   cloud folders like iCloud Drive); `allowRoot` the new root after switching.
   The `mobile/` RN player reads the same folders (v1 and v2) via its
   FolderAccess pod.
+- **Google Drive sync needs no Drive clients**: drive.file scope (no Google
+  verification), one Desktop-type OAuth client for every platform (loopback
+  flow — Android listens on 127.0.0.1 natively). Desktop pushes the library
+  to a visible SingZ Drive folder (md5-diffed resumable uploads, auto after
+  save); phones list over REST and stream stems via FolderAccess
+  fetchToCache. OAuth client config: mobile/gdrive.config.json (gitignored;
+  CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
+  bake it into the committed-EMPTY gdrive-config.ts modules — never commit
+  filled ones). Tests: tests/unit/mock-drive.ts is a mini Drive v3 used by
+  gdrive-sync.test.ts AND the emulator streaming E2E (config apiBase →
+  http://10.0.2.2:8765, tokens seeded via run-as into shared_prefs).
 
 ## Conventions
 

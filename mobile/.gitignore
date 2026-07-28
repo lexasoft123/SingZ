@@ -80,3 +80,4 @@ yarn-error.log
 
 # device build output
 ios/build-device/
+gdrive.config.json

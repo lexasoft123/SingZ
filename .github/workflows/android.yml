@@ -31,6 +31,14 @@ jobs:
           cache: npm
           cache-dependency-path: mobile/package-lock.json
 
+      # Real builds carry the Google OAuth client (drive.file scope) — the
+      # repo never does. Absent secret -> Drive simply hides in the app.
+      - name: Inject Google Drive OAuth client
+        if: env.GDRIVE_CONFIG != ''
+        env:
+          GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
+        run: printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
+
       # postinstall applies the audio-api C++ patches and fails loud on
       # upstream drift — this is the patch-drift canary as much as a build
       - run: npm ci

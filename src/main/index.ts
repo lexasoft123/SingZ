@@ -17,6 +17,7 @@ import {
   saveProject,
   setProjectsRoot
 } from './projects'
+import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
@@ -256,8 +257,32 @@ function registerIpc(): void {
   ipcMain.handle('project:save', async (_e, raw: string, name: string, settings: ProjectSettings) => {
     const full = resolve(String(raw))
     if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
-    return saveProject(full, String(name), settings)
+    const res = await saveProject(full, String(name), settings)
+    // signed-in Drive users get their library pushed after every save
+    if (res.ok && gdriveConfigured() && gdriveSignedIn()) {
+      void gdriveSync((msg, frac) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send('gdrive:progress', { msg, frac })
+        }
+      })
+    }
+    return res
   })
+
+  ipcMain.handle('gdrive:status', () => ({
+    configured: gdriveConfigured(),
+    signedIn: gdriveConfigured() && gdriveSignedIn()
+  }))
+  ipcMain.handle('gdrive:signin', () => gdriveSignIn())
+  ipcMain.handle('gdrive:signout', () => {
+    gdriveSignOut()
+    return { ok: true }
+  })
+  ipcMain.handle('gdrive:sync', (e) =>
+    gdriveSync((msg, frac) => {
+      if (!e.sender.isDestroyed()) e.sender.send('gdrive:progress', { msg, frac })
+    })
+  )
 
   ipcMain.handle('projects:list', () => listProjects())
 

@@ -1,0 +1,8 @@
+{
+  "comment": "Copy to gdrive.config.json (gitignored) and fill in the OAuth client from console.cloud.google.com — one 'Desktop app' client serves desktop and Android. Optional authBase/apiBase/uploadBase override Google endpoints for the mock-server E2E.",
+  "clientId": "",
+  "clientSecret": "",
+  "authBase": "",
+  "apiBase": "",
+  "uploadBase": ""
+}
