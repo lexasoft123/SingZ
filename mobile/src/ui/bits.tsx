@@ -1,10 +1,12 @@
 import React, { useCallback, useRef } from 'react'
 import {
+  Image,
   Pressable,
   StyleSheet,
   Text,
   View,
   type GestureResponderEvent,
+  type ImageSourcePropType,
   type LayoutChangeEvent
 } from 'react-native'
 
@@ -113,13 +115,15 @@ export function Chip({
   active,
   activeColor = C.amber,
   onPress,
-  disabled
+  disabled,
+  icon
 }: {
   label: string
   active: boolean
   activeColor?: string
   onPress: () => void
   disabled?: boolean
+  icon?: ImageSourcePropType
 }): React.JSX.Element {
   return (
     <Pressable
@@ -128,10 +132,12 @@ export function Chip({
       hitSlop={6}
       style={[
         b.chip,
+        icon != null && { flexDirection: 'row', alignItems: 'center', gap: 6 },
         active && { backgroundColor: activeColor, borderColor: activeColor },
         disabled && { opacity: 0.4 }
       ]}
     >
+      {icon != null && <Image source={icon} style={{ width: 13, height: 13 }} />}
       <Text style={[b.chipText, active && { color: C.amberInk }]}>{label}</Text>
     </Pressable>
   )

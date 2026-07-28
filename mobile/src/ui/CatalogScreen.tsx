@@ -25,6 +25,7 @@ import { C, Chip, StemTile } from './bits'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/catalog.png')
+const GDRIVE_ICON = require('../../assets/gdrive.png')
 const SAMPLE_PROJECT = require('../../assets/sample/project.json') as ProjectDoc
 const SAMPLE_LYRICS = require('../../assets/sample/lyrics.json') as LyricsDoc
 const SAMPLE_STEMS: Record<string, number> = {
@@ -261,7 +262,12 @@ export default function CatalogScreen({
         <Text style={s.brandSub}>Your practice library</Text>
         <View style={s.folders}>
           {driveAvailable() && (
-            <Chip label="◢ Google Drive" active={mode === 'gdrive'} onPress={() => void openDrive()} />
+            <Chip
+              label="Google Drive"
+              icon={GDRIVE_ICON}
+              active={mode === 'gdrive'}
+              onPress={() => void openDrive()}
+            />
           )}
           <Chip
             label={mode === 'folder' && root?.kind === 'picked' ? `☁ ${root.name}` : '☁ Choose folder…'}

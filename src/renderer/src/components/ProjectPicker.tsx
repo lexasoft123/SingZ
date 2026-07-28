@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { CloudRoot, ProjectListItem } from '../../../shared/types'
+import gdriveIcon from '../assets/gdrive.png'
 
 function fmtDate(iso: string): string {
   if (!iso) return ''
@@ -155,6 +156,11 @@ export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): Rea
                 title="Push your projects to a SingZ folder in Google Drive — phones stream them from there, no Drive app needed"
                 onClick={() => void onDrive()}
               >
+                <img
+                  src={gdriveIcon}
+                  alt=""
+                  style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }}
+                />
                 {gdrive.signedIn ? 'Sync to Google Drive' : 'Connect Google Drive…'}
               </button>
             )}
