@@ -3,11 +3,13 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { cpus } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import type { LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
+import type { AlignCheck, LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
+import { alignToTranscription, ctcOutcome, guessLanguage, transcriptionUsable } from './align'
+import { preciseCapable, runMmsAlign } from './align-mms'
 import { lookupLyrics, lyricsById, metaFromFilename, type TrackMeta } from './lrclib'
 import { stemsRoot } from './media'
 import { log } from './log'
-import { downloadFile, modelsDir } from './models'
+import { MMS_MODEL_MB, downloadFile, mmsModelPath, mmsModelUrl, modelsDir } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
 
@@ -109,118 +111,8 @@ interface LyricsCache {
   source: LyricsSource
   credit?: string
   aligned?: boolean
+  check?: AlignCheck
   lines: LyricLine[]
-}
-
-function levenshtein(a: string, b: string): number {
-  if (a === b) return 0
-  const m = a.length
-  const n = b.length
-  if (m === 0 || n === 0) return Math.max(m, n)
-  let prev = Array.from({ length: n + 1 }, (_, j) => j)
-  for (let i = 1; i <= m; i++) {
-    const cur = [i]
-    for (let j = 1; j <= n; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
-    }
-    prev = cur
-  }
-  return prev[n]
-}
-
-const normWord = (w: string): string => w.toLowerCase().replace(/[^\p{L}\p{N}']/gu, '')
-
-function wordsMatch(a: string, b: string): boolean {
-  const na = normWord(a)
-  const nb = normWord(b)
-  if (!na || !nb) return false
-  if (na === nb) return true
-  return Math.min(na.length, nb.length) >= 4 && levenshtein(na, nb) <= 1
-}
-
-/**
- * Snap known-correct lyrics onto whisper's word timestamps: per line, anchor
- * matching words to their recognized times and interpolate the rest. Lines
- * where recognition failed keep their estimated timing.
- */
-function alignLines(ref: LyricLine[], hypRaw: LyricWord[]): LyricLine[] {
-  // whisper.cpp occasionally emits zero/backward offsets — sanitize first.
-  const hyp: LyricWord[] = []
-  let lastS = 0
-  for (const w of hypRaw) {
-    let e = w.e
-    if (!(e > w.s)) e = w.s + 0.15
-    if (w.s < lastS - 0.5) continue
-    lastS = Math.max(lastS, w.s)
-    hyp.push({ w: w.w, s: w.s, e })
-  }
-  return ref.map((line) => {
-    const est = line.end - line.start
-    const windowWords = hyp.filter((w) => w.s >= line.start - 4 && w.s <= line.start + est + 8)
-    if (windowWords.length === 0) return line
-
-    const anchors: { i: number; s: number; e: number }[] = []
-    let cursor = 0
-    line.words.forEach((rw, i) => {
-      for (let j = cursor; j < windowWords.length; j++) {
-        if (wordsMatch(rw.w, windowWords[j].w)) {
-          anchors.push({ i, s: windowWords[j].s, e: windowWords[j].e })
-          cursor = j + 1
-          break
-        }
-      }
-    })
-    if (anchors.length < Math.max(2, Math.ceil(line.words.length * 0.4))) return line
-
-    const words: LyricWord[] = line.words.map((w) => ({ ...w }))
-    for (const a of anchors) {
-      words[a.i].s = a.s
-      words[a.i].e = a.e
-    }
-    // interpolate the unanchored words between neighbouring anchors
-    const rate = 12 // chars/sec fallback for edges
-    const first = anchors[0]
-    let t = first.s
-    for (let i = first.i - 1; i >= 0; i--) {
-      const dur = Math.max(0.12, (words[i].w.length + 1) / rate)
-      words[i].e = t
-      words[i].s = Math.max(line.start - 2, t - dur)
-      t = words[i].s
-    }
-    for (let k = 0; k < anchors.length - 1; k++) {
-      const a = anchors[k]
-      const b = anchors[k + 1]
-      const between = words.slice(a.i + 1, b.i)
-      const total = between.reduce((sum, w) => sum + w.w.length + 1, 0)
-      let cur = a.e
-      const spanT = Math.max(0, b.s - a.e)
-      for (const w of between) {
-        const dur = total > 0 ? (spanT * (w.w.length + 1)) / total : 0
-        w.s = cur
-        w.e = cur + dur
-        cur = w.e
-      }
-    }
-    const last = anchors[anchors.length - 1]
-    let t2 = last.e
-    for (let i = last.i + 1; i < words.length; i++) {
-      const dur = Math.max(0.12, (words[i].w.length + 1) / rate)
-      words[i].s = t2
-      words[i].e = t2 + dur
-      t2 = words[i].e
-    }
-    // Validate: reject the alignment when it came out non-monotonic (bad
-    // anchors across repeated phrases), then enforce clean word ordering.
-    const sane = words.every(
-      (w, i) => w.e >= w.s && (i === 0 || w.s >= words[i - 1].s - 0.01)
-    )
-    if (!sane) return line
-    for (let i = 1; i < words.length; i++) {
-      if (words[i].s < words[i - 1].e - 0.01) words[i].s = words[i - 1].e
-      if (words[i].e < words[i].s + 0.05) words[i].e = words[i].s + 0.05
-    }
-    return { ...line, start: words[0].s, end: words[words.length - 1].e, words }
-  })
 }
 
 async function readTrackMeta(songPath: string, durationSec: number): Promise<TrackMeta> {
@@ -264,7 +156,13 @@ export class Transcriber {
     try {
       const raw = JSON.parse(await readFile(file, 'utf8')) as Partial<LyricsCache>
       if (!Array.isArray(raw.lines) || raw.lines.length === 0) return null
-      return { source: raw.source ?? 'whisper', credit: raw.credit, lines: raw.lines }
+      return {
+        source: raw.source ?? 'whisper',
+        credit: raw.credit,
+        aligned: raw.aligned,
+        check: raw.check,
+        lines: raw.lines
+      }
     } catch {
       return null
     }
@@ -306,7 +204,7 @@ export class Transcriber {
     songPath: string,
     durationSec: number,
     allowDownload: boolean,
-    prefer: 'auto' | 'whisper' | 'align',
+    prefer: 'auto' | 'whisper' | 'align' | 'precise',
     onProgress: (p: LyricsProgress) => void
   ): Promise<LyricsResult> {
     if (this.busy) return { ok: false, error: 'A lyrics job is already running.' }
@@ -316,11 +214,12 @@ export class Transcriber {
     const lyricsPath = await this.lyricsFile(songPath)
 
     const cached = await this.readCache(lyricsPath)
-    // Alignment refines existing online lyrics; without them, behave like auto.
+    // Alignment refines existing online lyrics (re-running is fine — the
+    // global aligner never reads the current timing); without them, auto.
     let alignBase: LyricsCache | null = null
-    if (prefer === 'align') {
-      if (cached?.source === 'lrclib' && !cached.aligned) alignBase = cached
-      else prefer = cached?.source === 'lrclib' ? 'auto' : 'auto'
+    if (prefer === 'align' || prefer === 'precise') {
+      if (cached?.source === 'lrclib') alignBase = cached
+      else prefer = 'auto'
     }
     if (
       cached &&
@@ -334,6 +233,7 @@ export class Transcriber {
         source: cached.source,
         credit: cached.credit,
         aligned: cached.aligned,
+        check: cached.check,
         lines: cached.lines
       }
     }
@@ -353,9 +253,12 @@ export class Transcriber {
     }
 
     // 2) Fallback: on-device transcription of the vocals stem (project-local
-    // stems first, then the hash cache — either split model)
+    // stems first — v2 projects store FLAC — then the hash cache's WAVs)
+    const isProject = (await projectLyricsPath(songPath)) !== null
     const vocalsCandidates = [
-      ...((await projectLyricsPath(songPath)) ? [join(dirname(songPath), 'stems', 'vocals.wav')] : []),
+      ...(isProject
+        ? [join(dirname(songPath), 'stems', 'vocals.flac'), join(dirname(songPath), 'stems', 'vocals.wav')]
+        : []),
       join(dir, 'htdemucs', 'vocals.wav'),
       join(dir, 'htdemucs_6s', 'vocals.wav')
     ]
@@ -368,6 +271,45 @@ export class Transcriber {
     }
     if (!(await exists(vocals))) {
       return { ok: false, error: 'Split the song into stems first — lyrics are read from the vocals track.' }
+    }
+
+    // Precise tier: CTC forced alignment through the torch splitter pack.
+    if (prefer === 'precise' && alignBase) {
+      return this.preciseAlign(
+        vocals,
+        alignBase,
+        lyricsPath,
+        join(dir, 'whisper-words.json'),
+        durationSec,
+        allowDownload,
+        onProgress
+      )
+    }
+
+    // A cached transcription makes re-align (e.g. after switching the lyrics
+    // variant) instant — no second whisper run over the same song. The cache
+    // remembers its model: words from `small` are superseded once the
+    // stronger default model is available on disk.
+    const wordsFile = join(dir, 'whisper-words.json')
+    if (alignBase && (await exists(wordsFile))) {
+      try {
+        const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as {
+          model?: string
+          words?: LyricWord[]
+        }
+        const words = raw.words ?? []
+        const available = await bestAvailableModel()
+        const fresher = available && raw.model && !available.includes(raw.model)
+        const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
+        // a hallucinated cache (language-detect gone wrong) must not stick —
+        // fall through and listen again instead of "mismatching" forever
+        if (words.length > 0 && !fresher && transcriptionUsable(words, refCount)) {
+          log('lyrics', `align: reusing cached transcription (${words.length} words, ${raw.model ?? '?'})`)
+          return await this.finishAlign(alignBase, words, lyricsPath, durationSec)
+        }
+      } catch {
+        // corrupt cache — fall through to a fresh transcription
+      }
     }
 
     const engine = await resolveEngine()
@@ -385,7 +327,7 @@ export class Transcriber {
       if (!allowDownload) {
         return {
           ok: false,
-          needsModel: { sizeMb: whisperModelSizeMb() },
+          needsModel: { sizeMb: whisperModelSizeMb(), what: 'speech' },
           error: 'No online lyrics found — transcribing needs the speech model.'
         }
       }
@@ -407,6 +349,11 @@ export class Transcriber {
 
     return new Promise<LyricsResult>((resolve) => {
       const threads = Math.min(8, Math.max(2, cpus().length - 2))
+      // Cross-attention DTW timestamps are noticeably tighter than the
+      // default segment-split times; the preset must match the model.
+      const dtwPreset = /large-v3-turbo/.test(model)
+        ? 'large.v3.turbo'
+        : /-(tiny|base|small|medium)\.bin$/.exec(model)?.[1]
       const args = [
         ...engine.slice(1),
         '-m',
@@ -414,13 +361,24 @@ export class Transcriber {
         '-f',
         vocals,
         '-l',
-        'auto',
+        // whisper's auto-detect reads the first 30s — organ intros make it
+        // hallucinate in a random language; the lyrics know better
+        (alignBase && guessLanguage(alignBase.lines)) ?? 'auto',
         '-oj',
         '-of',
         join(outDir, 'vocals'),
         '-ml',
         '1',
+        // no text context between 30s windows: carried context turns one bad
+        // window into a whole-song hallucination loop on reverb-heavy vocals
+        // (Mr. Crowley's organ intro), and singing has no cross-window
+        // grammar worth keeping. Also makes decodes reproducible in practice.
+        '-mc',
+        '0',
         '--split-on-word',
+        // DTW token timestamps need flash-attn off (silently disabled
+        // otherwise); the accuracy is worth the ~30% slower decode.
+        ...(dtwPreset ? ['-dtw', dtwPreset, '-nfa', '-ojf'] : []),
         '-t',
         String(threads)
       ]
@@ -461,33 +419,43 @@ export class Transcriber {
           try {
             if (code !== 0) throw new Error(tail.split('\n').filter(Boolean).slice(-3).join(' — ').slice(0, 400))
             const raw = JSON.parse(await readFile(join(outDir, 'vocals.json'), 'utf8')) as {
-              transcription?: { offsets?: { from?: number; to?: number }; text?: string }[]
+              transcription?: {
+                offsets?: { from?: number; to?: number }
+                text?: string
+                tokens?: { text?: string; t_dtw?: number }[]
+              }[]
             }
             const words: LyricWord[] = []
             for (const seg of raw.transcription ?? []) {
               const w = String(seg.text ?? '').trim()
               if (!w || /^[[(♪]/.test(w)) continue
-              words.push({ w, s: (seg.offsets?.from ?? 0) / 1000, e: (seg.offsets?.to ?? 0) / 1000 })
+              // Segment offsets at segment heads are interpolated guesses
+              // ("But I know So" all stamped alike); DTW token times track
+              // the audio — prefer them when present (t_dtw centiseconds).
+              const dtw = (seg.tokens ?? [])
+                .filter((t) => !String(t.text ?? '').startsWith('[_'))
+                .map((t) => t.t_dtw ?? -1)
+                .filter((t) => t >= 0)
+              // DTW attention peaks mid-vowel — pull starts back ~100ms
+              // toward the true onset (legato songs otherwise trail).
+              const s = dtw.length > 0 ? Math.max(0, dtw[0] / 100 - 0.1) : (seg.offsets?.from ?? 0) / 1000
+              const eOff = (seg.offsets?.to ?? 0) / 1000
+              const e = dtw.length > 0 ? Math.max(dtw[dtw.length - 1] / 100 + 0.05, s + 0.1) : eOff
+              words.push({ w, s, e })
+            }
+            // keep the transcription — re-aligning another variant reuses it
+            // (unless it collapsed into hallucination: never cache those, or
+            // every later check would inherit the garbage instantly)
+            if (transcriptionUsable(words, alignBase ? alignBase.lines.reduce((s, l) => s + l.words.length, 0) : 0)) {
+              await writeFile(
+                wordsFile,
+                JSON.stringify({ model: basename(model, '.bin').replace(/^ggml-/, ''), words }),
+                'utf8'
+              )
             }
             if (alignBase) {
-              const lines = alignLines(alignBase.lines, words)
-              log('lyrics', `aligned ${lines.length} lines against ${words.length} transcribed words`)
-              const cache: LyricsCache = {
-                source: 'lrclib',
-                credit: alignBase.credit,
-                aligned: true,
-                lines
-              }
-              await writeFile(lyricsPath, JSON.stringify(cache), 'utf8')
               await rm(outDir, { recursive: true, force: true })
-              resolve({
-                ok: true,
-                cached: false,
-                source: 'lrclib',
-                credit: alignBase.credit,
-                aligned: true,
-                lines
-              })
+              resolve(await this.finishAlign(alignBase, words, lyricsPath, durationSec))
               return
             }
             const lines = groupWords(words)
@@ -507,6 +475,151 @@ export class Transcriber {
         })()
       })
     })
+  }
+
+  /** Shared tail of the whisper align path: judge the fit, retime, cache. */
+  private async finishAlign(
+    alignBase: LyricsCache,
+    words: LyricWord[],
+    lyricsPath: string,
+    durationSec: number
+  ): Promise<LyricsResult> {
+    const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
+    if (!transcriptionUsable(words, refCount)) {
+      // hallucinated/collapsed transcription — evidence of nothing; a
+      // "mismatch" here would slander perfectly good lyrics
+      return {
+        ok: false,
+        error:
+          'Could not make out the vocals well enough to check the words. Precise alignment may still work.'
+      }
+    }
+    const { lines, check } = alignToTranscription(alignBase.lines, words, durationSec)
+    log(
+      'lyrics',
+      `align: ${check.verdict} — ${check.matchedPct}% words heard, median shift ${check.medianShift}s, ${check.badLines.length} off lines`
+    )
+    if (check.verdict === 'mismatch') {
+      // Do not touch the cached lyrics — the text is not what is being sung.
+      return {
+        ok: true,
+        cached: false,
+        source: 'lrclib',
+        credit: alignBase.credit,
+        aligned: alignBase.aligned,
+        check,
+        lines: alignBase.lines
+      }
+    }
+    const cache: LyricsCache = {
+      source: 'lrclib',
+      credit: alignBase.credit,
+      aligned: true,
+      check,
+      lines
+    }
+    await writeFile(lyricsPath, JSON.stringify(cache), 'utf8')
+    return { ok: true, cached: false, source: 'lrclib', credit: alignBase.credit, aligned: true, check, lines }
+  }
+
+  /** CTC forced alignment via the torch splitter pack (word-level, scored). */
+  private async preciseAlign(
+    vocals: string,
+    alignBase: LyricsCache,
+    lyricsPath: string,
+    wordsFile: string,
+    durationSec: number,
+    allowDownload: boolean,
+    onProgress: (p: LyricsProgress) => void
+  ): Promise<LyricsResult> {
+    if (!(await preciseCapable())) {
+      return {
+        ok: false,
+        error: 'Precise alignment runs through the splitter pack — install it in the model manager first.'
+      }
+    }
+    if (!(await exists(mmsModelPath()))) {
+      if (!allowDownload) {
+        return {
+          ok: false,
+          needsModel: { sizeMb: MMS_MODEL_MB, what: 'aligner' },
+          error: 'Precise alignment needs the multilingual aligner model.'
+        }
+      }
+      this.cancelled = false
+      this.abort = new AbortController()
+      try {
+        await downloadFile(
+          mmsModelUrl(),
+          mmsModelPath(),
+          MMS_MODEL_MB * 1e6,
+          (pct) => onProgress({ stage: 'downloading-model', percent: pct }),
+          this.abort.signal
+        )
+      } catch (err) {
+        if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+        const msg = err instanceof Error ? err.message : String(err)
+        return { ok: false, error: `Could not download the aligner model: ${msg}` }
+      } finally {
+        this.abort = null
+      }
+    }
+
+    this.cancelled = false
+    onProgress({ stage: 'transcribing', percent: 0 })
+    try {
+      const run = await runMmsAlign(vocals, alignBase.lines, onProgress)
+      this.child = run.child
+      const ctcWords = await run.done
+      const outcome = ctcOutcome(alignBase.lines, ctcWords, durationSec)
+      let { check } = outcome
+      const { lines } = outcome
+      // CTC scores cannot tell wrong text from hard vocals on singing — when
+      // a whisper transcription is cached, its text check is authoritative.
+      try {
+        const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as
+          | { words?: LyricWord[] }
+          | LyricWord[]
+        const words = Array.isArray(raw) ? raw : (raw.words ?? [])
+        const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
+        if (words.length > 0 && transcriptionUsable(words, refCount) && check.verdict !== 'mismatch') {
+          const textCheck = alignToTranscription(alignBase.lines, words, durationSec).check
+          check = { ...textCheck, method: 'ctc', medianShift: check.medianShift }
+        }
+      } catch {
+        // no transcription cached — the CTC-relative check stands alone
+      }
+      log(
+        'lyrics',
+        `precise align: ${check.verdict} — ${check.matchedPct}% words heard, median shift ${check.medianShift}s`
+      )
+      if (check.verdict === 'mismatch') {
+        return {
+          ok: true,
+          cached: false,
+          source: 'lrclib',
+          credit: alignBase.credit,
+          aligned: alignBase.aligned,
+          check,
+          lines: alignBase.lines
+        }
+      }
+      const cache: LyricsCache = {
+        source: 'lrclib',
+        credit: alignBase.credit,
+        aligned: true,
+        check,
+        lines
+      }
+      await writeFile(lyricsPath, JSON.stringify(cache), 'utf8')
+      return { ok: true, cached: false, source: 'lrclib', credit: alignBase.credit, aligned: true, check, lines }
+    } catch (err) {
+      if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `Precise alignment failed: ${msg}` }
+    } finally {
+      this.child = null
+    }
   }
 
   cancel(): void {

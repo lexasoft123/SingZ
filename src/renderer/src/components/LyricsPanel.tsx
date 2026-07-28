@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type {
+  AlignCheck,
   LyricLine,
   LyricsCandidate,
   LyricsProgress,
@@ -11,9 +12,16 @@ import { fmtTime, modalCoversApp } from '../model'
 
 export type LyricsState =
   | { status: 'idle' }
-  | { status: 'consent'; sizeMb: number }
+  | { status: 'consent'; sizeMb: number; what?: 'speech' | 'aligner' }
   | { status: 'loading'; progress: LyricsProgress | null }
-  | { status: 'ready'; lines: LyricLine[]; source: LyricsSource; credit?: string; aligned?: boolean }
+  | {
+      status: 'ready'
+      lines: LyricLine[]
+      source: LyricsSource
+      credit?: string
+      aligned?: boolean
+      check?: AlignCheck
+    }
   | { status: 'error'; error: string }
 
 const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
@@ -36,6 +44,8 @@ interface Props {
   onDownloadModel: () => void
   onUseWhisper: () => void
   onRefineTiming: () => void
+  /** CTC forced alignment through the splitter pack (null = unavailable here). */
+  onPreciseAlign: (() => void) | null
   onResult: (res: LyricsResult) => void
   onCancel: () => void
 }
@@ -66,6 +76,7 @@ export default function LyricsPanel({
   onDownloadModel,
   onUseWhisper,
   onRefineTiming,
+  onPreciseAlign,
   onResult,
   onCancel
 }: Props): React.JSX.Element {
@@ -95,7 +106,8 @@ export default function LyricsPanel({
         raf = requestAnimationFrame(tick)
         return
       }
-      const pos = engine.position
+      // Karaoke anticipates: light words a breath before they are sung.
+      const pos = engine.position + 0.15
       const li = findLine(lines, pos, last)
       if (li !== last) {
         last = li
@@ -194,14 +206,24 @@ export default function LyricsPanel({
             {lyrics.source === 'lrclib' ? (lyrics.credit ?? 'LRCLIB') : 'from the vocals stem'}
             {lyrics.aligned ? ' · AI-aligned' : ''}
           </span>
-          {lyrics.source === 'lrclib' && !lyrics.aligned && (
+          {lyrics.source === 'lrclib' && (
             <button
               type="button"
               className="linkish"
-              title="Listen to the vocals with Whisper and snap the word timing to what is actually sung"
+              title="Listen to the vocals and check these lyrics against what is actually sung, snapping every word's timing to the recording"
               onClick={onRefineTiming}
             >
-              Refine timing
+              Check &amp; align
+            </button>
+          )}
+          {lyrics.source === 'lrclib' && onPreciseAlign && (
+            <button
+              type="button"
+              className="linkish"
+              title="Word-by-word forced alignment with the multilingual speech model (sharpest timing; one-time 1.2 GB download)"
+              onClick={onPreciseAlign}
+            >
+              Precise
             </button>
           )}
           <button
@@ -214,6 +236,26 @@ export default function LyricsPanel({
           >
             Change…
           </button>
+        </div>
+      )}
+
+      {lyrics.status === 'ready' && view === 'lyrics' && lyrics.check && (
+        <div className={`lp-check${lyrics.check.verdict === 'mismatch' ? ' warn' : ''}`}>
+          {lyrics.check.verdict === 'mismatch'
+            ? `These lyrics don't seem to match this recording — only ${lyrics.check.matchedPct}% of the words were heard. Try Change… or AI transcription.`
+            : lyrics.check.verdict === 'match'
+              ? `Words match the recording · ${lyrics.check.matchedPct}% heard${lyrics.check.method === 'ctc' ? ' · precise' : ''}`
+              : `Re-timed to the recording · ${lyrics.check.matchedPct}% of words heard` +
+                (Math.abs(lyrics.check.medianShift) >= 0.8
+                  ? ` · timing was ${Math.abs(lyrics.check.medianShift).toFixed(1)}s off`
+                  : '') +
+                (lyrics.check.badLines.length > 0
+                  ? ` · ${lyrics.check.badLines.length} ${lyrics.check.badLines.length === 1 ? 'line differs' : 'lines differ'} from what's sung`
+                  : '') +
+                (lyrics.check.extraSung && lyrics.check.badLines.length === 0
+                  ? ' · the singer has parts these lyrics are missing'
+                  : '') +
+                (lyrics.check.method === 'ctc' ? ' · precise' : '')}
         </div>
       )}
 
@@ -266,16 +308,25 @@ export default function LyricsPanel({
           <>
             {lyrics.status === 'consent' && (
               <div className="lp-state">
-                <p>
-                  No online lyrics found for this song. SingZ can read them out of the vocals with{' '}
-                  <strong>Whisper</strong>, running entirely on your machine.
-                </p>
+                {lyrics.what === 'aligner' ? (
+                  <p>
+                    Precise alignment listens with a <strong>multilingual word aligner</strong> (Meta
+                    MMS) and pins every word to the exact moment it is sung — entirely on your
+                    machine, through the stem splitter.
+                  </p>
+                ) : (
+                  <p>
+                    SingZ listens to the vocals with <strong>Whisper</strong>, running entirely on
+                    your machine — to transcribe lyrics when none are online, and to check &amp;
+                    align the ones that are.
+                  </p>
+                )}
                 <p className="fine">
-                  That needs the speech model — a one-time download of about {lyrics.sizeMb} MB,
-                  stored locally and reused for every song.
+                  One-time download of about {lyrics.sizeMb} MB, stored locally and reused for
+                  every song. Also available later in the model manager.
                 </p>
                 <button type="button" className="pill primary" onClick={onDownloadModel}>
-                  Download model &amp; transcribe
+                  {lyrics.what === 'aligner' ? 'Download & align precisely' : 'Download model & continue'}
                 </button>
                 <button
                   type="button"

@@ -588,7 +588,7 @@ export default function App(): React.JSX.Element {
         res.cancelled
           ? { status: 'idle' }
           : res.needsModel
-            ? { status: 'consent', sizeMb: res.needsModel.sizeMb }
+            ? { status: 'consent', sizeMb: res.needsModel.sizeMb, what: res.needsModel.what }
             : { status: 'error', error: res.error }
       )
       return
@@ -600,19 +600,25 @@ export default function App(): React.JSX.Element {
             lines: res.lines,
             source: res.source,
             credit: res.credit,
-            aligned: res.aligned
+            aligned: res.aligned,
+            check: res.check
           }
         : { status: 'error', error: 'No words were detected in the vocals.' }
     )
   }, [])
 
-  const preferRef = useRef<'auto' | 'whisper' | 'align'>('auto')
+  const [preciseCap, setPreciseCap] = useState(false)
+  useEffect(() => {
+    void window.singz.alignCaps().then((c) => setPreciseCap(c.precise))
+  }, [])
+
+  const preferRef = useRef<'auto' | 'whisper' | 'align' | 'precise'>('auto')
   const prepLyricsRef = useRef<
-    ((allowDownload?: boolean, prefer?: 'auto' | 'whisper' | 'align') => Promise<void>) | null
+    ((allowDownload?: boolean, prefer?: 'auto' | 'whisper' | 'align' | 'precise') => Promise<void>) | null
   >(null)
 
   const prepLyrics = useCallback(
-    async (allowDownload = false, prefer?: 'auto' | 'whisper' | 'align') => {
+    async (allowDownload = false, prefer?: 'auto' | 'whisper' | 'align' | 'precise') => {
       if (!song) return
       if (prefer) preferRef.current = prefer
       const cur = lyricsRef.current.status
@@ -1070,6 +1076,7 @@ export default function App(): React.JSX.Element {
                 onDownloadModel={() => void prepLyrics(true)}
                 onUseWhisper={() => void prepLyrics(false, 'whisper')}
                 onRefineTiming={() => void prepLyrics(false, 'align')}
+                onPreciseAlign={preciseCap ? () => void prepLyrics(false, 'precise') : null}
                 onResult={applyLyricsResult}
                 onCancel={() => void window.singz.cancelLyrics()}
               />
