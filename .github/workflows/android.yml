@@ -39,21 +39,16 @@ jobs:
           GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
         run: printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
 
+      # make-sample.js (postinstall) encodes the synthesized sample via ffmpeg
+      - name: ffmpeg for the sample-song generator
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       # postinstall applies the audio-api C++ patches and fails loud on
       # upstream drift — this is the patch-drift canary as much as a build
+      # step. It also synthesizes the bundled sample project (an original
+      # composition; the repo carries no audio).
       - run: npm ci
         working-directory: mobile
-
-      # sample stems are gitignored (real audio); Metro's release bundling
-      # only needs the require()d files to exist, so feed it silence
-      - name: Placeholder sample stems
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          mkdir -p mobile/assets/sample/stems
-          for s in vocals drums bass guitar piano other; do
-            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 1 \
-              -sample_fmt s16 -c:a flac "mobile/assets/sample/stems/$s.flac" </dev/null
-          done
 
       - name: Pinned NDK + CMake
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1" > /dev/null

@@ -8,7 +8,7 @@
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
-    "postinstall": "node scripts/patch-audio-api.js && node scripts/apply-gdrive-config.js"
+    "postinstall": "node scripts/patch-audio-api.js && node scripts/apply-gdrive-config.js && node scripts/make-sample.js"
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.86.0",

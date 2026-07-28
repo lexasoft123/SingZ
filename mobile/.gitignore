@@ -39,9 +39,10 @@ local.properties
 #
 node_modules/
 
-# Sample project stems (42 MB) — regenerate from any desktop project:
-#   afconvert -f flac -d flac <project>/stems/<stem>.wav assets/sample/stems/<stem>.flac
-assets/sample/stems/
+# Bundled sample project ("Sing with me") — an original composition
+# synthesized deterministically by scripts/make-sample.js (postinstall);
+# nothing copyrighted ships in the repo or the app bundle.
+assets/sample/
 npm-debug.log
 yarn-error.log
 

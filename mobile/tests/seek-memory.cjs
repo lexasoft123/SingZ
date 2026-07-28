@@ -104,7 +104,11 @@ function rssMb() {
   const base = rssMb();
   console.log(`baseline after open: ${base} MB`);
 
-  await ev('__test.engine.seek(60)');
+  // Seek targets scale with the sample's duration (~41 s) so the test
+  // never chases positions past the end of the bundled song.
+  const D = await val('__test.engine.duration');
+  console.log(`sample duration: ${Math.round(D * 10) / 10} s`);
+  await ev(`__test.engine.seek(${0.55 * D})`);
   await ev('void __test.engine.play()');
   await sleep(1500);
   const afterPlay = rssMb();
@@ -113,7 +117,7 @@ function rssMb() {
 
   let peak = afterPlay;
   for (let round = 0; round < BURSTS; round++) {
-    for (const t of [30 + round, 95 - round, 52 + round]) {
+    for (const t of [0.3 * D + round, 0.9 * D - round, 0.5 * D + round]) {
       await ev(`__test.engine.seek(${t})`);
       await sleep(100);
     }
