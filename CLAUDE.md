@@ -108,7 +108,11 @@ Simulator — run them after engine or loading changes.
 Push to main freely once the user approves pushes; **releases are cut by
 tagging `v*`** — CI builds mac (arm64+x64 dmg) + win (NSIS) + all three
 splitter packs and attaches everything to the GitHub Release (gh-based
-attach step, race-safe). Bump `package.json` version to match
+attach step, race-safe). The Android workflow additionally builds the
+player APK on every mobile/** push (silent placeholder stems stand in for
+the gitignored sample audio; npm postinstall doubles as the audio-api
+patch-drift canary) and attaches `SingZ-<tag>-android.apk` to `v*`
+releases — the family fleet sideloads that. Bump `package.json` version to match
 the tag (artifact names use it). Engine steps are cached keyed on the vendor
 scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
 `releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.
