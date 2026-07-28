@@ -41,7 +41,7 @@ export function startMockDrive(port = 0): Promise<MockDrive> {
         res.end(JSON.stringify(data))
       }
 
-      if (url.pathname === '/oauth2/v4/token') {
+      if (url.pathname === '/oauth2/v4/token' || url.pathname === '/token') {
         return json(200, { access_token: 'mock-access', refresh_token: 'mock-refresh', expires_in: 3600 })
       }
 

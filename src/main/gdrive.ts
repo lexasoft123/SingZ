@@ -34,6 +34,7 @@ const AUTH = (): string => cfg?.authBase || 'https://accounts.google.com'
 const API = (): string => cfg?.apiBase || 'https://www.googleapis.com'
 
 export const gdriveConfigured = (): boolean => cfg !== null
+const TOKEN = (): string => (cfg?.apiBase ? `${cfg.apiBase}/token` : 'https://oauth2.googleapis.com/token')
 
 interface Tokens {
   access: string
@@ -97,7 +98,7 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
         server.on('error', reject)
       }
     )
-    const res = await fetch(`${API()}/oauth2/v4/token`, {
+    const res = await fetch(TOKEN(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body:
@@ -133,7 +134,7 @@ async function accessToken(): Promise<string> {
   const t = readTokens()
   if (!t) throw new Error('Not signed in to Google Drive')
   if (Date.now() < t.expiresAt) return t.access
-  const res = await fetch(`${API()}/oauth2/v4/token`, {
+  const res = await fetch(TOKEN(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:

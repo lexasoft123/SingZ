@@ -1,4 +1,4 @@
-import { Linking, NativeModules, Platform } from 'react-native'
+import { AppState, Linking, NativeModules, Platform } from 'react-native'
 import { STEM_ORDER_ALL } from './model'
 import type { ProjectEntry } from './projects'
 
@@ -19,6 +19,35 @@ export const driveAvailable = (): boolean => cfg !== null
 
 const AUTH = (): string => cfg?.authBase || 'https://accounts.google.com'
 const API = (): string => cfg?.apiBase || 'https://www.googleapis.com'
+const TOKEN = (): string => (cfg?.apiBase ? `${cfg.apiBase}/token` : 'https://oauth2.googleapis.com/token')
+
+/**
+ * MIUI (and friends) cut background network for apps without battery
+ * exemptions — the token exchange right after the browser redirect fails
+ * with "Network request failed" while the user is still looking at the
+ * "close this tab" page. Wait until the app is foreground again, settle,
+ * and retry once for good measure.
+ */
+const whenForeground = (): Promise<void> =>
+  AppState.currentState === 'active'
+    ? Promise.resolve()
+    : new Promise<void>((res) => {
+        const sub = AppState.addEventListener('change', (s) => {
+          if (s === 'active') {
+            sub.remove()
+            res()
+          }
+        })
+      })
+
+async function fetchRetry(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch {
+    await new Promise<void>((r) => setTimeout(r, 1200))
+    return await fetch(url, init)
+  }
+}
 
 interface FolderNative {
   oauthStart(): Promise<number>
@@ -83,7 +112,9 @@ export async function driveSignIn(): Promise<void> {
   const back = await Native.oauthWait()
   const code = /[?&]code=([^&]+)/.exec(back)?.[1]
   if (!code) throw new Error('Google sign-in was cancelled')
-  const res = await fetch(`${API()}/oauth2/v4/token`, {
+  await whenForeground()
+  await new Promise<void>((r) => setTimeout(r, 350))
+  const res = await fetchRetry(TOKEN(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
@@ -114,7 +145,7 @@ async function accessToken(): Promise<string> {
   const t = await readTokens()
   if (!t) throw new Error('Not signed in to Google Drive')
   if (Date.now() < t.expiresAt) return t.access
-  const res = await fetch(`${API()}/oauth2/v4/token`, {
+  const res = await fetchRetry(TOKEN(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
