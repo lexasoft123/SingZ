@@ -295,19 +295,13 @@ export class MultitrackEngine {
   }
 
   load(list: EngineTrackInput[], opts: { position?: number; play?: boolean } = {}): void {
-    if (this.restartTimer) {
-      clearTimeout(this.restartTimer)
-      this.restartTimer = null
-    }
-    this.stopSources()
-    this.ducked.clear() // fresh tracks start unducked; the schedule re-applies on play
-    this.region = null // a loop armed for one song must never bound the next
-    this.regionLoop = false
+    // teardown releases the outgoing project's stems: fresh tracks start
+    // unducked, and a loop armed for one song must never bound the next.
+    this.teardown()
     this.rate = 1 // neutral until the project's saved key/speed applies
     this.pitchSemis = 0
     this.stretchLatency = 0
     this.applyStretch()
-    for (const t of this.tracks) t.gain.disconnect()
     this.tracks = list.map((t) => {
       const gain = this.ctx.createGain()
       gain.connect(this.master)
@@ -458,7 +452,53 @@ export class MultitrackEngine {
         // never started or already stopped
       }
       s.disconnect()
+      // Hand the stem PCM back now. The native graph keeps every source node
+      // it created until the render thread retires it (use_count 1 AND
+      // finished), and each node holds a shared_ptr to its decoded buffer —
+      // so a stopped-but-not-yet-retired source pins ~90 MB per stem per four
+      // minutes of song for as long as the graph feels like it. Nulling the
+      // buffer is the library's release hook: it queues the buffer for
+      // destruction immediately, and the render path already no-ops on empty
+      // sources. Safe here because these sources are being discarded.
+      try {
+        s.buffer = null
+      } catch {
+        // older audio-api without the null setter — GC will get there
+      }
     }
     this.sources = []
+  }
+
+  /** Stop everything and drop the graph state; leaves the master bus intact. */
+  private teardown(): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
+    this.stopSources()
+    for (const t of this.tracks) t.gain.disconnect()
+    this.tracks = []
+    this.ducked.clear()
+    this.region = null
+    this.regionLoop = false
+    this._playing = false
+    this.syncBoundWatcher()
+    this.syncTrainWatcher()
+  }
+
+  /**
+   * Let go of the loaded project. Stem buffers are the app's whole memory
+   * budget (six stems ≈ 138 MB per minute of song at 48 kHz float32), and
+   * nothing frees them until every reference — engine tracks, source nodes,
+   * the LoadedProject itself — is gone. Dropping that on the floor for GC to
+   * find is what let the iPhone build climb to 3.5 GB and take a
+   * per-process-limit jetsam kill after a few songs.
+   */
+  unload(): void {
+    this.teardown()
+    this.training = null
+    this.duration = 0
+    this.startOffset = 0
+    this.emit()
   }
 }

@@ -33,8 +33,8 @@ Load files through the hidden `<input type=file>` — same code
 path as drag-drop. Read the screenshots you take. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
-(`seek-memory.cjs`, `loop-region.cjs`): CDP over Metro against the iOS
-Simulator — run them after engine or loading changes.
+(`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`): CDP over
+Metro against the iOS Simulator — run them after engine or loading changes.
 
 ## Hard-won gotchas (do not re-learn these)
 
@@ -44,6 +44,14 @@ Simulator — run them after engine or loading changes.
   `~/Library/Application Support/SingZ/` via `modelsDir()`/`packDir()`.
 - **Never `fetch()` custom protocols from `file://` pages** — blocked in prod
   builds. Audio bytes go over IPC (`media:read`).
+- **Mobile stems must be released explicitly** — decoded stems are ~138 MB
+  per minute of song (six lanes, 48 kHz float32) and the native audio graph
+  pins every source node it created until the render thread retires it, which
+  never happens once playback stops. Dropping JS references is not enough:
+  null `source.buffer` before discarding a source (audio-api's release hook),
+  and call `engine.unload()` + `releaseProject()` when leaving a song. Without
+  it the iPhone climbed to 3.5 GB and took a per-process-limit jetsam kill.
+  Guarded by `mobile/tests/open-close-memory.cjs`.
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —

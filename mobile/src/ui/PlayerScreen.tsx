@@ -74,8 +74,9 @@ export default function PlayerScreen({
       setKtTempo(Math.round((st.tempo ?? 1) * 100))
     }
     return () => {
-      engine.pause()
-      engine.setTraining(null)
+      // unload, not pause: leaving the player must release the stems (see
+      // MultitrackEngine.unload) — a paused engine still pins every buffer.
+      engine.unload()
     }
   }, [engine, project])
 

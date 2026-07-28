@@ -81,6 +81,24 @@ export interface LoadedProject {
   stems: { id: string; buffer: AudioBuffer }[]
 }
 
+/** Decoded size of a stem set — float32 per channel, no compression in RAM. */
+export function decodedBytes(stems: { buffer: AudioBuffer }[]): number {
+  return stems.reduce((n, s) => n + s.buffer.length * s.buffer.numberOfChannels * 4, 0)
+}
+
+/**
+ * Ceiling for one project's decoded stems. Six stems at 48 kHz stereo cost
+ * ~138 MB per minute of song, so this is a ~9-minute song — past that the
+ * phone is heading for a per-process-limit kill, and dying silently mid-load
+ * is worse than saying so.
+ */
+export const MAX_DECODED_BYTES = 1_250_000_000
+
+/** Free the stems: see MultitrackEngine.unload() for why this is explicit. */
+export function releaseProject(p: LoadedProject | null): void {
+  if (p) p.stems = []
+}
+
 /**
  * Pull a project into memory: stems download (if in iCloud) into the app
  * cache, then decode natively — FLAC (v2) and WAV (v1) both play.
@@ -114,6 +132,18 @@ export async function loadProject(
     // as APK asset names ("Could not read asset bytes"); the scheme routes
     // them to the file decoder and is stripped on every other platform.
     stems.push({ id, buffer: await decodeAudioData(`file://${path}`, sampleRate) })
+    // Stems are all the same length, so one decoded stem projects the whole
+    // set. Bail on the projection rather than on the total: refusing after
+    // six stems are already resident is refusing too late.
+    const projected = (decodedBytes(stems) / stems.length) * ids.length
+    if (projected > MAX_DECODED_BYTES) {
+      stems.length = 0
+      const gb = (projected / 1e9).toFixed(1)
+      throw new Error(
+        `This song needs about ${gb} GB of memory to play — too long for this phone. ` +
+          'Try a shorter song, or split it up on the computer.'
+      )
+    }
   }
   onStep('Lyrics…', 0.98)
   await crumb?.('lyrics')
