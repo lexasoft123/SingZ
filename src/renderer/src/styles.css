@@ -1101,7 +1101,8 @@ button.chip-status:hover {
 
 .lyr-line.count-1::before,
 .lyr-line.count-2::before,
-.lyr-line.count-3::before {
+.lyr-line.count-3::before,
+.lyr-line.count-sec::before {
   display: block;
   font-size: 11px;
   letter-spacing: 5px;
@@ -1110,6 +1111,12 @@ button.chip-status:hover {
   color: var(--accent);
   text-shadow: 0 0 10px rgba(255, 160, 40, 0.6);
   animation: pulse 1s ease-in-out infinite;
+}
+
+/* long pause: remaining seconds tick down until the dots take over */
+.lyr-line.count-sec::before {
+  content: attr(data-count-sec);
+  letter-spacing: 1px;
 }
 
 .lyr-line.count-3::before {

@@ -131,40 +131,53 @@ export default function LyricsPanel({
           }
         }
       }
-      // count-in dots during the last 3s of a long gap before the next line
+      // count-in dots during the last 3s of a long gap before the next line;
+      // long pauses (>5s) tick the remaining seconds down until the dots engage
       const nextIdx = li === -1 ? 0 : li + 1
       const target = nextIdx < lines.length ? lines[nextIdx] : null
       let countEl: HTMLElement | null = null
       let count = 0
+      let sec = 0
       if (target) {
         const gapStart = li === -1 ? 0 : lines[li].end
         const dt = target.start - pos
+        const gapLen = li === -1 ? target.start : target.start - gapStart
         // the first line always counts in when there is any runway
-        const gapOk = li === -1 ? target.start >= 1.2 : target.start - gapStart >= 3
+        const gapOk = li === -1 ? target.start >= 1.2 : gapLen >= 3
         if (gapOk && dt > 0 && dt <= 3) {
           count = Math.min(3, Math.ceil(dt))
+          countEl = lineRefs.current[nextIdx]
+        } else if (gapLen > 5 && dt > 3 && (li === -1 || pos >= gapStart)) {
+          sec = Math.ceil(dt)
           countEl = lineRefs.current[nextIdx]
         }
       }
       // Re-assert every frame: React re-renders rewrite the managed className
       // and would silently wipe an imperatively added count class.
       if (countRef.current.el && countRef.current.el !== countEl) {
-        countRef.current.el.classList.remove('count-1', 'count-2', 'count-3')
+        countRef.current.el.classList.remove('count-1', 'count-2', 'count-3', 'count-sec')
       }
       if (countEl && count > 0) {
         const want = `count-${count}`
         if (!countEl.classList.contains(want)) {
-          countEl.classList.remove('count-1', 'count-2', 'count-3')
+          countEl.classList.remove('count-1', 'count-2', 'count-3', 'count-sec')
           countEl.classList.add(want)
         }
+      } else if (countEl && sec > 0) {
+        if (!countEl.classList.contains('count-sec')) {
+          countEl.classList.remove('count-1', 'count-2', 'count-3')
+          countEl.classList.add('count-sec')
+        }
+        const txt = `${sec} s`
+        if (countEl.dataset.countSec !== txt) countEl.dataset.countSec = txt
       }
-      countRef.current = { el: countEl, n: count }
+      countRef.current = { el: countEl, n: count > 0 ? count : -sec }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => {
       cancelAnimationFrame(raf)
-      countRef.current.el?.classList.remove('count-1', 'count-2', 'count-3')
+      countRef.current.el?.classList.remove('count-1', 'count-2', 'count-3', 'count-sec')
       countRef.current = { el: null, n: 0 }
     }
   }, [engine, lines, view])
