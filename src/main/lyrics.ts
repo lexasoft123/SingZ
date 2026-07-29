@@ -9,7 +9,7 @@ import { preciseCapable, runMmsAlign } from './align-mms'
 import { lookupLyrics, lyricsById, metaFromFilename, type TrackMeta } from './lrclib'
 import { stemsRoot } from './media'
 import { log } from './log'
-import { MMS_MODEL_MB, downloadFile, mmsModelPath, mmsModelUrl, modelsDir } from './models'
+import { downloadFile, mmsModelMb, mmsModelPath, mmsModelUrl, modelsDir } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
 
@@ -542,7 +542,7 @@ export class Transcriber {
       if (!allowDownload) {
         return {
           ok: false,
-          needsModel: { sizeMb: MMS_MODEL_MB, what: 'aligner' },
+          needsModel: { sizeMb: mmsModelMb(), what: 'aligner' },
           error: 'Precise alignment needs the multilingual aligner model.'
         }
       }
@@ -552,7 +552,7 @@ export class Transcriber {
         await downloadFile(
           mmsModelUrl(),
           mmsModelPath(),
-          MMS_MODEL_MB * 1e6,
+          mmsModelMb() * 1e6,
           (pct) => onProgress({ stage: 'downloading-model', percent: pct }),
           this.abort.signal
         )

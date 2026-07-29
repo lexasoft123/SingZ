@@ -194,16 +194,27 @@ interface RegistryEntry {
   platforms?: string[]
 }
 
-/** MMS forced-alignment checkpoint (precise word timing) — torch-hub layout. */
-export const MMS_MODEL_MB = 1200
+/**
+ * MMS forced-alignment checkpoint (precise word timing). The torch pack
+ * (Apple Silicon) loads Meta's original .pt via a torch-hub layout; the
+ * ONNX pack (Windows, Intel Macs) uses our exported mms-fa.onnx, attached
+ * to the pinned `models-1` GitHub release.
+ */
 export function torchHome(): string {
   return join(modelsDir(), 'torch-home')
 }
+export function mmsModelMb(): number {
+  return isOnnxPack() ? 1263 : 1200
+}
 export function mmsModelPath(): string {
-  return join(torchHome(), 'hub', 'checkpoints', 'model.pt')
+  return isOnnxPack()
+    ? join(modelsDir(), 'mms-fa.onnx')
+    : join(torchHome(), 'hub', 'checkpoints', 'model.pt')
 }
 export function mmsModelUrl(): string {
-  return 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt'
+  return isOnnxPack()
+    ? 'https://github.com/lexasoft123/SingZ/releases/download/models-1/mms-fa.onnx'
+    : 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt'
 }
 
 const REGISTRY: RegistryEntry[] = [
@@ -240,12 +251,24 @@ const REGISTRY: RegistryEntry[] = [
     label: 'Precise word aligner',
     description:
       'Snaps every lyric word to the exact moment it is sung — the sharpest karaoke timing, in 1,100+ languages. Runs through the stem splitter.',
-    sizeMb: MMS_MODEL_MB,
+    sizeMb: 1200,
     kind: 'file',
     file: join('torch-home', 'hub', 'checkpoints', 'model.pt'),
-    url: mmsModelUrl(),
+    url: 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt',
     optional: true,
     platforms: ['darwin-arm64']
+  },
+  {
+    id: 'aligner',
+    label: 'Precise word aligner',
+    description:
+      'Snaps every lyric word to the exact moment it is sung — the sharpest karaoke timing, in 1,100+ languages. Runs through the stem splitter.',
+    sizeMb: 1263,
+    kind: 'file',
+    file: 'mms-fa.onnx',
+    url: 'https://github.com/lexasoft123/SingZ/releases/download/models-1/mms-fa.onnx',
+    optional: true,
+    platforms: ['win32-x64', 'darwin-x64']
   }
 ]
 
