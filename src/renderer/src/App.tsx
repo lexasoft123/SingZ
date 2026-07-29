@@ -798,7 +798,11 @@ export default function App(): React.JSX.Element {
       setIsProject(true)
       setInLibrary(res.inLibrary)
       setProjectDir(res.dir)
-      setNotice(`Saved to ${res.dir}`)
+      setNotice(
+        res.driveSignedOut
+          ? `Saved to ${res.dir} — Google Drive is signed out on this computer, so your phones won't see this until you sign in (Open… screen).`
+          : `Saved to ${res.dir}`
+      )
       setTimeout(() => setSaveState('idle'), 2500)
     } else {
       setSaveState('idle')

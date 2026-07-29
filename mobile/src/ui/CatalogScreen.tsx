@@ -15,7 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   driveAccountEmail,
   driveAvailable,
-  driveListIsFresh,
+  driveListCached,
   driveListProjects,
   driveSignedIn,
   driveSignIn,
@@ -77,8 +77,11 @@ export default function CatalogScreen({
   const [pulling, setPulling] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
+  /** Bumping this drops a superseded listing (mode switched mid-flight). */
+  const listSeq = useRef(0)
 
   const refresh = useCallback(async (force = false) => {
+    const my = ++listSeq.current
     try {
       setError(null)
       if (mode === 'gdrive') {
@@ -90,19 +93,30 @@ export default function CatalogScreen({
           return
         }
         setDriveEmail(await driveAccountEmail())
-        // clear the previous mode's cards only when the list will actually
-        // hit the network — coming back from a song serves the cache and
-        // must not flash a spinner (a stale list with no spinner reads as
-        // a frozen screen; a spinner on every return reads as re-downloading)
-        if (force || !driveListIsFresh()) setProjects(null)
-        setProjects(await driveListProjects(force))
+        // Stale-while-revalidate: coming back from a song shows whatever
+        // listing we have INSTANTLY (a song outlives the freshness window,
+        // and a spinner on every exit reads as the library re-downloading);
+        // the network then replaces it quietly. The full-screen spinner is
+        // ONLY for an empty screen — on pull-to-refresh the pull indicator
+        // is already spinning, and clearing the list added a second one.
+        const cached = driveListCached()
+        if (cached) setProjects(cached)
+        else setProjects(null)
+        const fresh = await driveListProjects(force)
+        if (my === listSeq.current) setProjects(fresh)
       } else {
-        setRoot(await getRoot())
-        setProjects(await listProjects())
+        const r = await getRoot()
+        const list = await listProjects()
+        if (my === listSeq.current) {
+          setRoot(r)
+          setProjects(list)
+        }
       }
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e))
-      setProjects([])
+      if (my === listSeq.current) {
+        setError(String(e instanceof Error ? e.message : e))
+        setProjects([])
+      }
     }
   }, [mode])
 

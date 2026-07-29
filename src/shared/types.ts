@@ -320,7 +320,15 @@ export interface SingzApi {
     name: string,
     settings: ProjectSettings
   ): Promise<
-    { ok: true; dir: string; songPath: string; inLibrary: boolean } | { ok: false; error: string }
+    | {
+        ok: true
+        dir: string
+        songPath: string
+        inLibrary: boolean
+        /** Drive is configured but signed out — the library did NOT sync. */
+        driveSignedOut?: boolean
+      }
+    | { ok: false; error: string }
   >
   /** Saved-project library for the in-app Open screen. */
   listProjects(): Promise<{ root: string; projects: ProjectListItem[] }>

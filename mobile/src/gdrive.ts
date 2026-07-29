@@ -271,6 +271,16 @@ export function driveListIsFresh(): boolean {
   return listCache !== null && Date.now() - listCache.at < LIST_TTL_MS
 }
 
+/**
+ * Whatever listing we have, fresh or stale. The catalog shows it instantly
+ * and lets the network replace it quietly — after a five-minute song the
+ * TTL has always lapsed, and a spinner on every exit reads as the library
+ * re-downloading itself.
+ */
+export function driveListCached(): ProjectEntry[] | null {
+  return listCache ? listCache.entries : null
+}
+
 export async function driveListProjects(force = false): Promise<ProjectEntry[]> {
   if (!force && driveListIsFresh() && listCache) return listCache.entries
   const rootId = await singzRootId()

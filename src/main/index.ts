@@ -263,6 +263,11 @@ function registerIpc(): void {
         }
       })
     }
+    // A quiet skip here cost a real debugging session: the save "worked" but
+    // phones kept the old project — surface the signed-out state instead.
+    if (res.ok && gdriveConfigured() && !gdriveSignedIn()) {
+      return { ...res, driveSignedOut: true }
+    }
     return res
   })
 
