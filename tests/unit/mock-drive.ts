@@ -15,6 +15,7 @@ interface MockFile {
   mimeType: string
   parents: string[]
   bytes?: Buffer
+  trashed?: boolean
 }
 
 export interface MockDrive {
@@ -58,6 +59,7 @@ export function startMockDrive(port = 0): Promise<MockDrive> {
         let list = [...files.values()]
         const nameMatch = /name='([^']+)'/.exec(q)
         const parentMatch = /'([^']+)' in parents/.exec(q)
+        list = list.filter((f) => !f.trashed)
         if (nameMatch) list = list.filter((f) => f.name === nameMatch[1])
         if (parentMatch) list = list.filter((f) => f.parents.includes(parentMatch[1]))
         if (/mimeType='application\/vnd\.google-apps\.folder'/.test(q)) {
@@ -75,6 +77,14 @@ export function startMockDrive(port = 0): Promise<MockDrive> {
       }
 
       const mediaMatch = /^\/drive\/v3\/files\/([^/]+)$/.exec(url.pathname)
+      if (mediaMatch && req.method === 'PATCH') {
+        const f = files.get(mediaMatch[1])
+        if (!f) return json(404, { error: 'not found' })
+        const meta = JSON.parse(body.toString() || '{}')
+        if (typeof meta.trashed === 'boolean') f.trashed = meta.trashed
+        if (typeof meta.name === 'string') f.name = meta.name
+        return json(200, { id: f.id })
+      }
       if (mediaMatch && req.method === 'GET' && url.searchParams.get('alt') === 'media') {
         const f = files.get(mediaMatch[1])
         if (!f || !f.bytes) return json(404, { error: 'not found' })

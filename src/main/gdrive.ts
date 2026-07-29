@@ -331,6 +331,25 @@ export async function gdriveSync(
         }
       }
     }
+    // Reconcile: a renamed or deleted local project must not haunt Drive
+    // (phones would list both the old and the new name). Trash — never
+    // hard-delete — remote project folders with no local counterpart;
+    // drive.file scope means we only ever see folders this app created.
+    let removed = 0
+    const remoteTop = await listChildren(singzId)
+    const local = new Set(projectDirs)
+    for (const f of remoteTop) {
+      if (f.mimeType !== FOLDER || local.has(f.name)) continue
+      onProgress?.(`Removing ${f.name} from Drive (renamed or deleted here)…`, 0.99)
+      await api(`/drive/v3/files/${f.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trashed: true })
+      })
+      removed++
+    }
+    if (removed > 0) log('gdrive', `reconcile: ${removed} orphaned project folder(s) moved to Drive trash`)
+
     onProgress?.('Drive is up to date', 1)
     log('gdrive', `sync done: ${uploaded} uploaded, ${unchanged} unchanged`)
     const s = readSettings() as Record<string, unknown>

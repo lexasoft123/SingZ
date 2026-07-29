@@ -70,6 +70,31 @@ describe('gdriveSync (against the mock Drive)', () => {
 })
 
 describe('planSync', () => {
+  it('trashes remote folders for renamed or deleted local projects', async () => {
+    const { readSettings, writeSettings } = await import('../../src/main/settings')
+    const { rename } = await import('node:fs/promises')
+    const root = await mkdtemp(join(tmpdir(), 'singz-gdrive-'))
+    await seedProject(root, 'Ozzy Osbourne — Mr')
+    const s = readSettings() as Record<string, unknown>
+    s.projectsRoot = root
+    s.gdrive = { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 }
+    writeSettings(s)
+
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    expect(await gdriveSync()).toMatchObject({ ok: true, projects: 1 })
+
+    // the rename-pencil flow: local folder moves, then the next sync runs
+    await rename(join(root, 'Ozzy Osbourne — Mr'), join(root, 'Mr Crowley'))
+    expect(await gdriveSync()).toMatchObject({ ok: true, projects: 1 })
+
+    const live = [...mock.files.values()].filter((f) => !f.trashed).map((f) => f.name)
+    expect(live).toContain('Mr Crowley')
+    expect(live).not.toContain('Ozzy Osbourne — Mr')
+    // trashed, never hard-deleted — recoverable from Drive trash
+    const ghost = [...mock.files.values()].find((f) => f.name === 'Ozzy Osbourne — Mr')
+    expect(ghost?.trashed).toBe(true)
+  })
+
   it('diffs by md5, treating missing remotes as uploads', async () => {
     const { planSync } = await import('../../src/main/gdrive')
     const plan = planSync(

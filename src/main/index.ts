@@ -13,6 +13,7 @@ import {
   listProjects,
   migrateProjects,
   migrateProjectToV2,
+  projectLyricsPath,
   projectsRoot,
   renameProject,
   saveProject,
@@ -203,13 +204,31 @@ function registerIpc(): void {
       const send = (p: LyricsProgress): void => {
         if (!e.sender.isDestroyed()) e.sender.send('lyrics:progress', p)
       }
-      return transcriber.resolve(
+      const res = await transcriber.resolve(
         full,
         Number(durationSec) || 0,
         Boolean(allowDownload),
         prefer === 'whisper' || prefer === 'align' || prefer === 'precise' ? prefer : 'auto',
         send
       )
+      // Aligning rewrites a project's lyrics.json outside the save flow —
+      // push it so Drive-synced phones get the new timing without waiting
+      // for the next manual save (md5-diffed: uploads just the one file).
+      if (
+        res.ok &&
+        res.aligned &&
+        !res.cached &&
+        (await projectLyricsPath(full)) !== null &&
+        gdriveConfigured() &&
+        gdriveSignedIn()
+      ) {
+        void gdriveSync((msg, frac) => {
+          for (const win of BrowserWindow.getAllWindows()) {
+            if (!win.isDestroyed()) win.webContents.send('gdrive:progress', { msg, frac })
+          }
+        })
+      }
+      return res
     }
   )
 
