@@ -29,6 +29,36 @@ it and no pack is needed. Otherwise build/install the pack for your platform:
 embed the htdemucs_6s model and stamp `python/pack.json` with the format
 version the app requires).
 
+## Worktrees
+
+Every parallel feature gets its own worktree (`git worktree add
+.claude/worktrees/<feature> -b worktree-<feature> main`). A fresh worktree
+has none of the machine-local, gitignored artifacts — bootstrap it with:
+
+```bash
+scripts/worktree-setup.sh                 # desktop + mobile (pods on a Mac)
+scripts/worktree-setup.sh --desktop-only  # skip mobile deps + pods
+```
+
+It symlinks what must be shared from the main checkout (`vendor/` with
+whisper-cli, `mobile/gdrive.config.json` so the baked gdrive-config modules
+come out filled instead of EMPTY, `mobile/android/local.properties`), runs
+`npm ci` in both roots (postinstall bakes configs, patches audio-api,
+synthesizes the sample song), restores the electron binary when npm's cache
+skipped its postinstall (the "Electron failed to install correctly" launch
+error), arms ccache's `compiler_check=content` (see above), and pod-installs
+iOS with a UTF-8 `LANG` — CocoaPods crashes in non-interactive shells
+without one. Build products (`out/`, `Pods/`, `.gradle/`) stay per-worktree;
+the global npm / CocoaPods / ccache caches are what make the second worktree
+fast (pods ~30 s warm).
+
+One trap the script cannot fix: `pod install` in a worktree rewrites the
+tracked `mobile/ios/Podfile.lock` (hermes checksum). Leave that rewrite
+uncommitted — but do NOT `git restore` it either: that desyncs it from
+`Pods/Manifest.lock` and the next Xcode build fails at "[CP] Check Pods
+Manifest.lock". If it was restored, re-sync with
+`cp Pods/Manifest.lock Podfile.lock`.
+
 ## E2E testing pattern
 
 The app is verified by driving the real Electron binary with

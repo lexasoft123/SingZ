@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Bootstrap a fresh git worktree: symlink the machine-local, gitignored
+# artifacts from the main checkout, install deps, bake configs. Idempotent —
+# safe to re-run after linking more things or pulling. Run from anywhere
+# inside the worktree:
+#
+#   scripts/worktree-setup.sh                 # desktop + mobile (pods on a Mac)
+#   scripts/worktree-setup.sh --desktop-only  # skip mobile deps + pods
+#
+# Build products (out/, mobile/ios/Pods+build, mobile/android/.gradle) stay
+# per-worktree on purpose — that isolation is why worktrees exist. Speed
+# comes from the global caches instead: npm cache, CocoaPods cache, ccache.
+set -euo pipefail
+
+WT="$(cd "$(dirname "$0")/.." && pwd)"
+MAIN="$(git -C "$WT" worktree list --porcelain | head -1 | sed 's/^worktree //')"
+MODE="${1:-}"
+
+link() { # link <relpath> — symlink main's copy when the worktree lacks it
+  local rel="$1"
+  [ -e "$WT/$rel" ] && return 0
+  if [ ! -e "$MAIN/$rel" ]; then
+    echo "  skip  $rel (absent in main checkout too)"
+    return 0
+  fi
+  ln -s "$MAIN/$rel" "$WT/$rel"
+  echo "  linked $rel"
+}
+
+if [ "$WT" = "$MAIN" ]; then
+  echo "Main checkout — nothing to link, running installs only."
+else
+  echo "Linking machine-local artifacts from $MAIN:"
+  link vendor                          # whisper-cli + pack build outputs
+  link mobile/gdrive.config.json       # OAuth client -> configs bake FILLED
+  link mobile/android/local.properties # Android SDK path
+fi
+
+# Content hashing lets the global ccache hit across worktrees — a fresh
+# checkout re-stamps every mtime, so the default timestamp check misses 100%.
+if command -v ccache >/dev/null 2>&1; then
+  ccache --set-config compiler_check=content
+  echo "ccache: compiler_check=content (global, shared by all worktrees)"
+fi
+
+echo "Desktop deps (npm ci; postinstall bakes gdrive-config + checks patches):"
+(cd "$WT" && npm ci)
+# npm sometimes restores electron from cache without running its postinstall;
+# the app then dies with "Electron failed to install correctly".
+if [ ! -f "$WT/node_modules/electron/path.txt" ]; then
+  echo "electron binary missing — running its install script"
+  (cd "$WT/node_modules/electron" && node install.js)
+fi
+
+if [ "$MODE" != "--desktop-only" ]; then
+  echo "Mobile deps:"
+  (cd "$WT/mobile" && npm ci)
+  if [ "$(uname)" = "Darwin" ] && command -v pod >/dev/null 2>&1; then
+    echo "iOS pods (CocoaPods global cache + ccache make repeats quick):"
+    # LANG: CocoaPods crashes in non-interactive shells (agent sessions)
+    # with "Unicode Normalization not appropriate for ASCII-8BIT" otherwise
+    (cd "$WT/mobile/ios" && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install)
+  fi
+fi
+
+echo "Worktree ready: npm run dev / typecheck / test all work here."

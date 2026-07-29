@@ -164,7 +164,13 @@ answer your evals while you measure the phone.
 - **Parallel feature work happens in git worktrees** (one per feature, e.g.
   under `.claude/worktrees/<feature>`), never as concurrent edits to the same
   checkout — two sessions on one tree fight over builds, caches and
-  half-staged files. Merge back to main when the feature lands.
+  half-staged files. Bootstrap every fresh worktree with
+  `scripts/worktree-setup.sh` (`--desktop-only` skips mobile): links vendor/,
+  gdrive.config.json and local.properties from the main checkout, npm-ci's
+  both roots, restores a cache-skipped electron binary, arms ccache content
+  hashing, and pod-installs with the UTF-8 LANG CocoaPods needs in
+  non-interactive shells (details: docs/DEVELOPMENT.md § Worktrees). Merge
+  back to main when the feature lands.
 - IPC handlers return result objects (`{ ok: false, error }`), never throw
   (avoids the "Error invoking remote method" prefix in the renderer).
 - File access from the renderer is allowlisted in `src/main/media.ts` —
