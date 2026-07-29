@@ -3,6 +3,8 @@
  * a constant beat track into the engine, then asserts that a one-bar count-in
  * holds the playhead while clicking exactly four times, hands over into
  * playback, and that the playback click keeps scheduling on the beat.
+ * Ends grid-less (rubato): with no beat track a count-in must still run —
+ * three ticks one second apart — and the playback click must stay silent.
  *
  * Prereqs: app built+installed in a booted sim (Debug), Metro running.
  *   node mobile/tests/metronome.cjs
@@ -205,6 +207,70 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (okDots < (okDots + badDots) * 0.8) throw new Error('dots do not follow the audible clock');
   if (!lastCounting || lastCounting.now < audibleStart - 0.25)
     throw new Error('dots vanished before the music was audible');
+  await ev('__test.engine.pause()');
+
+  // Rubato: no beat track at all — the count-in degrades to the clock
+  // (bars×3 ticks, one per second) and the playback click stays silent.
+  await ev(`(() => {
+    __test.engine.displayLag = 0;
+    __test.engine.setBeats(null);
+    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0.4 });
+  })()`);
+  await ev('__test.engine.seek(0)');
+  await sleep(400);
+  const rClicks0 = await val('__test.engine.clickCount');
+  await ev('void __test.engine.play()');
+  const rT0 = Date.now();
+  let rSaw = null;
+  let rInfo = null;
+  let rAdvanceAt = null;
+  let rPosEarly = 0;
+  while (Date.now() - rT0 < 7000) {
+    const st = await val(`(() => {
+      const e = __test.engine;
+      const c = e.countInfo;
+      return JSON.stringify({
+        p: e.audioPosition, c: e.countInStatus, pl: e.playing,
+        per: c ? c.periodCtx : null, span: c ? e.startedAt + e.stretchLatency - c.firstCtx : null
+      });
+    })()`);
+    const { p, c, pl, per, span } = JSON.parse(st);
+    if (c && !rSaw) rSaw = c;
+    if (per !== null && !rInfo) rInfo = { per, span };
+    if (Date.now() - rT0 < 2400) rPosEarly = Math.max(rPosEarly, p);
+    if (p > 0.1 && pl) {
+      rAdvanceAt = Date.now() - rT0;
+      break;
+    }
+    await sleep(150);
+  }
+  const rClicks1 = await val('__test.engine.clickCount');
+  console.log(
+    `rubato count-in: status=${JSON.stringify(rSaw)} info=${JSON.stringify(rInfo)} heldPos=${rPosEarly.toFixed(3)} advanceAt=${rAdvanceAt}ms ticks=${rClicks1 - rClicks0}`
+  );
+  if (!rSaw || rSaw.total !== 3 || rSaw.perBar !== 3)
+    throw new Error('rubato count-in status wrong');
+  if (!rInfo || Math.abs(rInfo.per - 1) > 1e-6 || Math.abs(rInfo.span - 3) > 0.01)
+    throw new Error('rubato ticks not one second apart');
+  if (rPosEarly > 0.05) throw new Error(`position moved during rubato count-in (${rPosEarly})`);
+  if (rAdvanceAt === null || rAdvanceAt < 2600 || rAdvanceAt > 4600)
+    throw new Error(`music entered at ${rAdvanceAt} ms (expected ~3000)`);
+  if (rClicks1 - rClicks0 !== 3) throw new Error(`rubato ticked ${rClicks1 - rClicks0}x (want 3)`);
+  await ev('__test.engine.pause()');
+
+  // Click-on without a grid: the count-in still runs, nothing clicks after.
+  await ev(`__test.engine.setMetronome({ click: true, countInBars: 1, volume: 0.4 })`);
+  await ev('__test.engine.seek(0)');
+  await sleep(300);
+  const rClicks2 = await val('__test.engine.clickCount');
+  await ev('void __test.engine.play()');
+  await sleep(5500);
+  const rClicks3 = await val('__test.engine.clickCount');
+  const rPlaying = await val('__test.engine.playing');
+  console.log(`rubato click-on: ${rClicks3 - rClicks2} ticks in 5.5 s, playing=${rPlaying}`);
+  if (rPlaying !== true) throw new Error('not playing (rubato click-on)');
+  if (rClicks3 - rClicks2 !== 3)
+    throw new Error(`grid-less playback clicked ${rClicks3 - rClicks2}x (want 3 count-in only)`);
   await ev('__test.engine.pause()');
 
   console.log('PASS');

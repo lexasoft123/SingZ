@@ -530,52 +530,49 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>Metronome</Text>
-                {beatInfo ? (
-                  <>
-                    <View style={b.segs}>
-                      <Chip
-                        label={met.click ? 'Click on' : 'Click off'}
-                        active={met.click}
-                        onPress={() => setMet((m) => ({ ...m, click: !m.click }))}
-                      />
-                      <Chip
-                        label="No count-in"
-                        active={met.countInBars === 0}
-                        onPress={() => setMet((m) => ({ ...m, countInBars: 0 }))}
-                      />
-                      <Chip
-                        label="1 bar"
-                        active={met.countInBars === 1}
-                        onPress={() => setMet((m) => ({ ...m, countInBars: 1 }))}
-                      />
-                      <Chip
-                        label="2 bars"
-                        active={met.countInBars === 2}
-                        onPress={() => setMet((m) => ({ ...m, countInBars: 2 }))}
-                      />
-                    </View>
-                    <Stepper
-                      label="Loudness"
-                      valueText={`${Math.round(met.volume * 100)}%`}
-                      onStep={(d) => {
-                        setMet((m) => ({
-                          ...m,
-                          volume: Math.max(0, Math.min(1, m.volume + d * 0.1))
-                        }))
-                        engine.previewClick(true)
-                      }}
+                <View style={b.segs}>
+                  {beatInfo != null && (
+                    <Chip
+                      label={met.click ? 'Click on' : 'Click off'}
+                      active={met.click}
+                      onPress={() => setMet((m) => ({ ...m, click: !m.click }))}
                     />
-                    <Text style={b.hint}>
-                      {Math.round(beatInfo.bpm)} bpm from the project — clicks and the count-in
-                      follow the song's own beat, drift and all.
-                    </Text>
-                  </>
-                ) : (
-                  <Text style={b.hint}>
-                    No beat track in this project yet — open the song on desktop (it reads the
-                    beat from the drums) and save the project again.
-                  </Text>
-                )}
+                  )}
+                  <Chip
+                    label="No count-in"
+                    active={met.countInBars === 0}
+                    onPress={() => setMet((m) => ({ ...m, countInBars: 0 }))}
+                  />
+                  <Chip
+                    label={beatInfo ? '1 bar' : '3 s'}
+                    active={met.countInBars === 1}
+                    onPress={() => setMet((m) => ({ ...m, countInBars: 1 }))}
+                  />
+                  <Chip
+                    label={beatInfo ? '2 bars' : '6 s'}
+                    active={met.countInBars === 2}
+                    onPress={() => setMet((m) => ({ ...m, countInBars: 2 }))}
+                  />
+                </View>
+                <Stepper
+                  label="Loudness"
+                  valueText={`${Math.round(met.volume * 100)}%`}
+                  onStep={(d) => {
+                    setMet((m) => ({
+                      ...m,
+                      volume: Math.max(0, Math.min(1, m.volume + d * 0.1))
+                    }))
+                    engine.previewClick(true)
+                  }}
+                />
+                <Text style={b.hint}>
+                  {beatInfo
+                    ? `${Math.round(beatInfo.bpm)} bpm from the project — clicks and the ` +
+                      `count-in follow the song's own beat, drift and all.`
+                    : 'No beat track — the count-in ticks once a second before playback ' +
+                      'starts. If the song has a steady beat, opening it on desktop reads ' +
+                      'one from the drums.'}
+                </Text>
               </View>
 
               <View style={b.sec}>
