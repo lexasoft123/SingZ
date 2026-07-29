@@ -1365,10 +1365,19 @@ button.chip-status:hover {
   letter-spacing: 0.03em;
 }
 
-.lp-variants-foot {
+.lp-variants-top {
   display: flex;
-  justify-content: space-between;
-  padding: 10px 4px 0;
+  gap: 6px;
+  padding: 2px 0 0;
+}
+
+.lp-variants-top .chip {
+  width: auto;
+  padding: 0 10px;
+  height: 26px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
 }
 
 /* pitch strip zoom chips + transpose control */
@@ -2314,6 +2323,60 @@ body.win.maximized .app {
   color: var(--accent);
   border-color: rgba(255, 160, 40, 0.55);
   background: var(--accent-soft);
+}
+
+/* ---- Metronome --------------------------------------------------------- */
+
+.round-ghost.met.active {
+  color: var(--accent);
+  border-color: rgba(255, 160, 40, 0.55);
+  background: var(--accent-soft);
+  box-shadow: 0 0 14px rgba(255, 160, 40, 0.15);
+}
+
+.train-pop.met-pop {
+  width: 324px;
+}
+
+.met-pop .tp-row {
+  margin-bottom: 8px;
+}
+
+.met-pop .mode-seg button {
+  padding: 5px 10px;
+}
+
+.met-pop .tp-label {
+  min-width: 74px;
+}
+
+.met-pop .bpm-entry input {
+  width: 44px;
+}
+
+.met-pop .chip {
+  width: auto;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+}
+
+.mode-seg button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Count-in dots: fill beat by beat next to the clock while the pre-roll clicks. */
+.countin-dots {
+  display: none;
+  color: var(--accent);
+  font-size: 12px;
+  letter-spacing: 2px;
+  white-space: nowrap;
+}
+
+.countin-dots.on {
+  display: inline;
 }
 
 /* Ducked lane: the band plays on, this part is yours. */

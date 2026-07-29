@@ -125,6 +125,5 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
   recall; pYIN port ties it for free, so shelved — infer script exists).
 - DirectML adapter targeting for Optimus laptops (proven manually via Windows
   per-app Graphics preference; needs a device_id ladder in the pack shim).
-- Half/double-time disambiguation for the tempo estimate.
 - A–B loop for phrase practice; export karaoke mix to file.
 - Whisper model picker in the model manager UI.
