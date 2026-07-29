@@ -601,9 +601,9 @@ const s = StyleSheet.create({
   },
   /* desktop karaoke halo: .lyr-line.current span.now */
   nowGlow: {
-    textShadowColor: 'rgba(255,160,40,0.75)',
+    textShadowColor: 'rgba(255,160,40,0.6)',
     textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 14
+    textShadowRadius: 7
   },
   noLyrics: { color: C.faint, fontSize: 15, marginTop: 40 },
 
