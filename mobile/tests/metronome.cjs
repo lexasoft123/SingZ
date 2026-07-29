@@ -146,6 +146,67 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (clicks3 - clicks2 < 8) throw new Error(`only ${clicks3 - clicks2} clicks with click on`);
   await ev('__test.engine.pause()');
 
+  // Latency-following dots: on a 0.3 s output route (Bluetooth-ish), each dot
+  // must fill only when its click becomes AUDIBLE (schedule + route lag), and
+  // the dots must persist until the music itself is audible.
+  const LAG = 0.3;
+  await ev(`(() => {
+    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0.4 });
+    __test.engine.setDisplayLatency = () => {}; // pin against route events
+    __test.engine.displayLag = ${LAG};
+  })()`);
+  await ev('__test.engine.seek(0)');
+  await sleep(300);
+  await ev('void __test.engine.play()');
+  const samples = [];
+  const tL = Date.now();
+  while (Date.now() - tL < 5200) {
+    const s = JSON.parse(
+      await val(`(() => {
+        const e = __test.engine;
+        const c = e.countInfo;
+        return JSON.stringify({
+          now: e.ctx.currentTime,
+          st: e.countInStatus,
+          first: c ? c.firstCtx : null,
+          per: c ? c.periodCtx : null,
+          started: e.startedAt,
+          stretch: e.stretchLatency,
+          pl: e.playing
+        });
+      })()`)
+    );
+    samples.push(s);
+    if (!s.pl) break;
+    await sleep(70);
+  }
+  const info = samples.find((s) => s.first !== null);
+  if (!info) throw new Error('no countInfo captured');
+  let okDots = 0;
+  let badDots = 0;
+  let early = 0;
+  let lastCounting = null;
+  for (const s of samples) {
+    if (s.st === null) continue;
+    lastCounting = s;
+    const exp = Math.max(
+      0,
+      Math.min(s.st.total, Math.floor((s.now - LAG - info.first) / info.per) + 1)
+    );
+    if (s.st.done === exp) okDots++;
+    else badDots++;
+    if (s.now - LAG < info.first && s.st.done > 0) early++;
+  }
+  const audibleStart = info.started + info.stretch + LAG;
+  console.log(
+    `latency dots: ${okDots} ok / ${badDots} off, early=${early}, lastCounting=${lastCounting ? lastCounting.now.toFixed(3) : 'none'} audibleStart=${audibleStart.toFixed(3)}`
+  );
+  if (early > 0) throw new Error('a dot filled before its click was audible');
+  if (okDots < (okDots + badDots) * 0.8) throw new Error('dots do not follow the audible clock');
+  if (!lastCounting || lastCounting.now < audibleStart - 0.25)
+    throw new Error('dots vanished before the music was audible');
+  await ev('__test.engine.pause()');
+
   console.log('PASS');
   process.exit(0);
 })().catch((e) => {
