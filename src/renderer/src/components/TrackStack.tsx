@@ -17,6 +17,10 @@ interface Props {
   onMute: (id: string, muted: boolean) => void
   onSolo: (id: string, solo: boolean) => void
   onVolume: (id: string, volume: number) => void
+  /** Open the picker for audio files to add as extra lanes. */
+  onAddTrack: () => void
+  /** Drop one of those added lanes again. */
+  onRemoveTrack: (id: string) => void
 }
 
 function SelectionRange({
@@ -79,7 +83,9 @@ export default function TrackStack({
   onResetZoom,
   onMute,
   onSolo,
-  onVolume
+  onVolume,
+  onAddTrack,
+  onRemoveTrack
 }: Props): React.JSX.Element {
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
@@ -198,7 +204,20 @@ export default function TrackStack({
       ref={stackRef}
       style={{ gridTemplateRows: `30px repeat(${tracks.length}, minmax(64px, 1fr))` }}
     >
-      <div className="ruler-spacer" style={{ gridRow: 1 }} />
+      <div className="ruler-spacer" style={{ gridRow: 1 }}>
+        <button
+          type="button"
+          className="add-track no-drag"
+          data-testid="add-track"
+          title="Add an audio file as an extra lane — a backing track, a harmony you recorded, a click. It plays from 0:00 and is copied into the project when you save."
+          onClick={(e) => {
+            e.currentTarget.blur()
+            onAddTrack()
+          }}
+        >
+          + Add track…
+        </button>
+      </div>
       <div className="ruler" style={{ gridRow: 1 }}>
         {ticks.map((t) => (
           <span key={t.time} className="tick" style={{ left: `${t.left}%` }}>
@@ -242,21 +261,28 @@ export default function TrackStack({
         </div>
       </div>
 
-      {tracks.map((t, i) => (
-        <TrackLane
-          key={t.id}
-          track={t}
-          index={i}
-          dimmed={anySolo && !t.solo}
-          ducked={ducked.includes(t.id)}
-          showSolo={tracks.length > 1}
-          viewStart={vs}
-          viewEnd={ve}
-          onMute={onMute}
-          onSolo={onSolo}
-          onVolume={onVolume}
-        />
-      ))}
+      {tracks.map((t, i) => {
+        // Waveform view fractions are per buffer, not per song: an added track
+        // may be shorter or longer than the stems, and its wave has to sit
+        // under the same seconds as everyone else's.
+        const d = t.buffer.duration
+        return (
+          <TrackLane
+            key={t.id}
+            track={t}
+            index={i}
+            dimmed={anySolo && !t.solo}
+            ducked={ducked.includes(t.id)}
+            showSolo={tracks.length > 1}
+            viewStart={d > 0 ? viewS / d : vs}
+            viewEnd={d > 0 ? viewE / d : ve}
+            onMute={onMute}
+            onSolo={onSolo}
+            onVolume={onVolume}
+            onRemove={t.custom ? onRemoveTrack : undefined}
+          />
+        )
+      })}
 
       <div
         className="scrub-overlay"

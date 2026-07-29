@@ -103,6 +103,20 @@ restores everything; `listProjects` powers the in-app Open… library and the
 drop-screen shortcuts; `renameProject` renames the folder + metadata (the title
 pencil). Legacy `~/Music/SingZ` migrates on startup.
 
+**Custom tracks** are audio files the singer adds as extra lanes ("+ Add track…"
+above the lane names): a backing track, a harmony they recorded, a click. They
+play from 0:00 alongside the stems, carry the same mute/solo/volume (stored in
+`settings.tracks` under their id), can be longer or shorter than the song (the
+timeline follows the longest lane, and each waveform is drawn against its own
+duration), and survive a split — the stems replace the full-mix lane, added
+lanes stay. Saving copies each file into the project's `stems/` folder as
+`custom-<slug>.<ext>`, keeping its original format: `stems/` is the folder
+Drive sync uploads and the phones fetch, and the prefix keeps a track named
+"vocals" clear of the stem. `project.json` stores them project-relative
+(`settings.custom`), resolved to absolute paths on the way out so the folder
+stays portable; removing a lane and saving prunes its copy. The phones ignore
+lanes they don't know, so they play the stems and skip these for now.
+
 A project folder does not have to live under the library root — copied, shared
 and other-machine folders open from anywhere. Those save and rename **in
 place**; `importProject` (the header's "Add to library…") is the only thing

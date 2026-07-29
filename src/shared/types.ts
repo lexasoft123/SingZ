@@ -68,6 +68,26 @@ export interface MetronomeConfig {
   volume: number
 }
 
+/**
+ * An audio file the singer added to the project themselves — a backing track,
+ * a harmony they recorded, a click, a spoken cue. It plays as one more lane
+ * alongside the stems; its mute/solo/volume live in `settings.tracks` under
+ * the same id, exactly like a stem's.
+ *
+ * `file` is **absolute** everywhere in memory and over IPC, and
+ * **project-relative** (`stems/custom-harmony.mp3`) inside project.json — the
+ * project folder moves (rename, import, another machine, a cloud library) and
+ * absolute paths saved into it would rot. Custom tracks live in `stems/` on
+ * purpose: that is the folder Drive sync uploads and the phones already fetch.
+ */
+export interface CustomTrack {
+  /** `custom-<slug>`; unique per project and the mixer key in settings.tracks. */
+  id: string
+  label: string
+  color: string
+  file: string
+}
+
 export interface ProjectSettings {
   transpose: number
   /** Playback speed (1 = original); optional for projects saved before it existed. */
@@ -91,6 +111,8 @@ export interface ProjectSettings {
     sing: number
     stems: string[]
   }
+  /** Audio files the singer added as extra lanes (absolute over IPC). */
+  custom?: CustomTrack[]
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
@@ -134,6 +156,8 @@ export type RenameResult =
       dir: string
       songPath: string
       stems?: Partial<Record<StemName6, string>>
+      /** Custom-track paths under the new folder (the old ones no longer exist). */
+      custom?: CustomTrack[]
     }
   | { ok: false; error: string }
 
@@ -144,6 +168,8 @@ export type ImportResult =
       dir: string
       songPath: string
       stems?: Partial<Record<StemName6, string>>
+      /** Custom-track paths in the library copy. */
+      custom?: CustomTrack[]
       /** True when the original folder was relocated, false when it was copied. */
       moved: boolean
     }
@@ -264,6 +290,14 @@ export interface SingzApi {
   /** Read a registered audio file's bytes (source song or produced stem). */
   readAudio(path: string): Promise<ArrayBuffer>
   registerSource(path: string): Promise<RegisterResult>
+  /**
+   * Make an audio file readable as an extra lane. Unlike registerSource this
+   * allowlists the one file only — a custom track picked from inside someone
+   * else's project folder must not open that folder up.
+   */
+  registerTrack(
+    path: string
+  ): Promise<{ ok: true; path: string; name: string; size: number } | { ok: false; error: string }>
   checkEngine(force?: boolean): Promise<EngineStatus>
   separate(path: string): Promise<SeparateResult>
   cancelSeparation(): Promise<void>
@@ -327,6 +361,8 @@ export interface SingzApi {
         dir: string
         songPath: string
         inLibrary: boolean
+        /** Custom tracks as they now live inside the project folder. */
+        custom?: CustomTrack[]
         /** Drive is configured but signed out — the library did NOT sync. */
         driveSignedOut?: boolean
       }

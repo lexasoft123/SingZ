@@ -11,6 +11,12 @@ export interface UITrack {
   muted: boolean
   solo: boolean
   volume: number
+  /**
+   * Set on lanes the singer added themselves from an audio file (not a stem):
+   * `file` is where that audio lives right now — the picked file until the
+   * project is saved, the project's own copy afterwards.
+   */
+  custom?: { file: string }
 }
 
 export const STEM_ORDER: StemName[] = ['vocals', 'drums', 'bass', 'other']
@@ -93,6 +99,38 @@ export const TRACK_META: Record<string, { label: string; color: string }> = {
   guitar: { label: 'Guitar', color: '#e0873f' },
   piano: { label: 'Piano', color: '#b48ead' },
   other: { label: 'Instruments', color: '#45d6b5' }
+}
+
+/**
+ * Lane colors for the singer's own tracks. Every hue here is far from all six
+ * stem colors above — an added track next to Bass must not read as another
+ * shade of Bass.
+ */
+export const CUSTOM_COLORS = ['#c7e06a', '#ff9ad5', '#6fd8ff', '#e8dcc0', '#a98cff']
+
+/** "harmony take 2.wav" → "Harmony take 2" (the lane's name). */
+export function trackLabel(name: string): string {
+  const clean = name.replace(/[_-]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
+  if (!clean) return 'Track'
+  return clean[0].toUpperCase() + clean.slice(1)
+}
+
+/**
+ * Lane id for an added track: `custom-<slug>`, unique among `taken`. It is the
+ * mixer key in project.json AND the file name inside the project's stems/
+ * folder, so it must stay slug-shaped.
+ */
+export function customTrackId(name: string, taken: Iterable<string>): string {
+  const slug =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'track'
+  const used = new Set(taken)
+  let id = `custom-${slug}`
+  for (let n = 2; used.has(id); n++) id = `custom-${slug}-${n}`
+  return id
 }
 
 /** Display order for any stem set — filter by what a split produced. */

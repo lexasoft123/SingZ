@@ -24,7 +24,7 @@ import { readSettings } from './settings'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
-import { registerSource } from './source'
+import { registerSource, registerTrack } from './source'
 import { log, logEntries, saveLog } from './log'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
@@ -140,6 +140,8 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('source:register', (_e, raw: string) => registerSource(String(raw)))
+
+  ipcMain.handle('track:register', (_e, raw: string) => registerTrack(String(raw)))
 
   // Audio bytes travel over IPC (fetch() from a file:// page can't reach
   // custom protocols, so a URL-based approach breaks in production builds).

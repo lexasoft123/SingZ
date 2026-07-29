@@ -2,12 +2,35 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
 import { projectsRoot } from './projects'
 import { readSettings, writeSettings } from './settings'
+import { AUDIO_EXT } from './source'
+
+/** Drive stores what we tell it; a wrong type makes phones refuse the stream. */
+function audioMime(name: string): string {
+  switch (extname(name).toLowerCase()) {
+    case '.flac':
+      return 'audio/flac'
+    case '.mp3':
+      return 'audio/mpeg'
+    case '.m4a':
+    case '.aac':
+      return 'audio/mp4'
+    case '.ogg':
+    case '.oga':
+    case '.opus':
+      return 'audio/ogg'
+    case '.aif':
+    case '.aiff':
+      return 'audio/aiff'
+    default:
+      return 'audio/wav'
+  }
+}
 
 /**
  * Google Drive as the sync transport — no Drive desktop client needed. The
@@ -304,12 +327,14 @@ export async function gdriveSync(
           /* optional file */
         }
       }
+      // Split stems are FLAC/WAV; the singer's own custom tracks keep whatever
+      // format they came in, so every audio extension we accept syncs.
       const stems = readdirSync(join(root, dir, 'stems'), { withFileTypes: true })
-        .filter((d) => d.isFile() && /\.(flac|wav)$/.test(d.name))
+        .filter((d) => d.isFile() && AUDIO_EXT.has(extname(d.name).toLowerCase()))
         .map((d) => ({
           path: join(root, dir, 'stems', d.name),
           name: d.name,
-          mime: d.name.endsWith('.flac') ? 'audio/flac' : 'audio/wav'
+          mime: audioMime(d.name)
         }))
 
       for (const group of [

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { EngineStatus, LyricLine, SeparationProgress } from '../../shared/types'
+import type {
+  CustomTrack,
+  EngineStatus,
+  LyricLine,
+  ProjectSettings,
+  SeparationProgress
+} from '../../shared/types'
 import { BEAT_DETECT_VERSION, detectBeats, estimateKey, type KeyGuess } from './audio/analysis'
 import {
   MET_DEFAULTS,
@@ -23,8 +29,12 @@ import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
 import {
   cleanSongName,
+  customTrackId,
+  CUSTOM_COLORS,
+  fmtTime,
   orderedStems,
   sanitizeTraining,
+  trackLabel,
   TRACK_META,
   TRAIN_DEFAULTS,
   trainingWindows,
@@ -60,10 +70,14 @@ function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[
   return { order: keptOrder, buffers: keptBuffers }
 }
 
-function makeTrack(id: string, buffer: AudioBuffer): UITrack {
+function makeTrack(
+  id: string,
+  buffer: AudioBuffer,
+  over?: Partial<Pick<UITrack, 'label' | 'color' | 'custom'>>
+): UITrack {
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
   const { peaks, scale } = computePeaks(buffer)
-  return { id, ...meta, peaks, buffer, scale, muted: false, solo: false, volume: 1 }
+  return { id, ...meta, peaks, buffer, scale, muted: false, solo: false, volume: 1, ...over }
 }
 
 function EngineChip({
@@ -170,6 +184,7 @@ export default function App(): React.JSX.Element {
   const drumsBufRef = useRef<AudioBuffer | null>(null)
   const loadSeq = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const trackInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
@@ -355,6 +370,32 @@ export default function App(): React.JSX.Element {
       setProjectDir(reg.project?.dir ?? null)
       setEditName(null)
       setShowProjects(false)
+      /** Decode the project's added tracks into lanes; a missing one is skipped. */
+      const decodeCustom = async (defs?: CustomTrack[]): Promise<UITrack[]> => {
+        const out: UITrack[] = []
+        for (const c of defs ?? []) {
+          try {
+            const buf = await engine.decode(await window.singz.readAudio(c.file))
+            out.push(makeTrack(c.id, buf, { label: c.label, color: c.color, custom: { file: c.file } }))
+          } catch {
+            setNotice(`“${c.label}” could not be read — that lane is missing from the mix.`)
+          }
+        }
+        return out
+      }
+      /** Re-apply a project's saved mute/solo/volume to whichever lanes it has. */
+      const applySavedMix = (lanes: UITrack[], saved?: ProjectSettings['tracks']): void => {
+        for (const t of lanes) {
+          const s = saved?.[t.id]
+          if (!s) continue
+          t.muted = s.muted
+          t.solo = s.solo
+          t.volume = s.volume
+          engine.setMuted(t.id, s.muted)
+          engine.setSolo(t.id, s.solo)
+          engine.setVolume(t.id, s.volume)
+        }
+      }
       try {
         // Saved project with stems: load them directly and restore settings.
         if (reg.project?.stems) {
@@ -372,21 +413,16 @@ export default function App(): React.JSX.Element {
           `Split into six stems — ${hidden.join(' and ')} ${hidden.length > 1 ? 'are' : 'is'} silent in this song, so ${hidden.length > 1 ? 'their lanes are' : 'its lane is'} hidden.`
         )
       }
-          engine.load(order.map((s, i) => ({ id: s, buffer: buffers[i] })))
-          const uiTracks = order.map((s, i) => {
-            const t = makeTrack(s, buffers[i])
-            const saved = proj.settings.tracks[s]
-            if (saved) {
-              t.muted = saved.muted
-              t.solo = saved.solo
-              t.volume = saved.volume
-              engine.setMuted(s, saved.muted)
-              engine.setSolo(s, saved.solo)
-              engine.setVolume(s, saved.volume)
-            }
-            return t
-          })
-          setTracks(uiTracks)
+          // Tracks the singer added themselves decode after the stems and sit
+          // below them; one that no longer decodes must not sink the song.
+          const lanes = [
+            ...order.map((s, i) => makeTrack(s, buffers[i])),
+            ...(await decodeCustom(proj.settings.custom))
+          ]
+          if (seq !== loadSeq.current) return
+          engine.load(lanes.map((t) => ({ id: t.id, buffer: t.buffer })))
+          applySavedMix(lanes, proj.settings.tracks)
+          setTracks(lanes)
           setSplit(true)
           setStemFiles(stems)
           setIsProject(true)
@@ -454,8 +490,16 @@ export default function App(): React.JSX.Element {
         const audio = await engine.decode(buf)
         if (seq !== loadSeq.current) return
         originalBufRef.current = audio
-        engine.load([{ id: 'original', buffer: audio }])
-        setTracks([makeTrack('original', audio)])
+        // A project saved before it was ever split has no stems, but it can
+        // still carry tracks the singer added — those lanes come back here.
+        const lanes = [
+          makeTrack('original', audio),
+          ...(await decodeCustom(reg.project?.settings.custom))
+        ]
+        if (seq !== loadSeq.current) return
+        engine.load(lanes.map((t) => ({ id: t.id, buffer: t.buffer })))
+        applySavedMix(lanes, reg.project?.settings.tracks)
+        setTracks(lanes)
         try {
           const mem = JSON.parse(localStorage.getItem(`singz.sel:${reg.path}`) ?? 'null') as {
             s: number
@@ -527,6 +571,30 @@ export default function App(): React.JSX.Element {
     }
   }, [loadFile])
 
+  /**
+   * Swap the engine's lane set — adding, removing or replacing a lane rebuilds
+   * every source. engine.load() hands back fresh lanes (unmuted, full volume),
+   * so each lane's mixer state is re-applied here, and the playhead and
+   * whether it was playing survive the swap.
+   */
+  const loadLanes = useCallback(
+    (list: UITrack[]) => {
+      const position = engine.position
+      const play = engine.playing
+      engine.load(
+        list.map((t) => ({ id: t.id, buffer: t.buffer })),
+        { position, play }
+      )
+      for (const t of list) {
+        if (t.muted) engine.setMuted(t.id, true)
+        if (t.solo) engine.setSolo(t.id, true)
+        if (t.volume !== 1) engine.setVolume(t.id, t.volume)
+      }
+      setTracks(list)
+    },
+    [engine]
+  )
+
   const startSplit = useCallback(async () => {
     if (!song || sepRunningRef.current) return
     let status = engineStatus
@@ -575,13 +643,11 @@ export default function App(): React.JSX.Element {
         rawOrder.map(async (s) => engine.decode(await window.singz.readAudio(stems[s])))
       )
       const { order, buffers } = audibleStems(rawOrder, decoded)
-      const position = engine.position
-      const wasPlaying = engine.playing
-      engine.load(
-        order.map((s, i) => ({ id: s, buffer: buffers[i] })),
-        { position, play: wasPlaying }
-      )
-      setTracks(order.map((s, i) => makeTrack(s, buffers[i])))
+      // The stems replace the full-mix lane; tracks the singer added stay.
+      loadLanes([
+        ...order.map((s, i) => makeTrack(s, buffers[i])),
+        ...tracksRef.current.filter((t) => t.custom)
+      ])
       setStemFiles(stems)
       setSplit(true)
       // Fresh stems in an open project are unsaved content.
@@ -599,7 +665,7 @@ export default function App(): React.JSX.Element {
       setError('Separation finished, but loading the stem files failed.')
     }
     setSep(null)
-  }, [song, engineStatus, engine])
+  }, [song, engineStatus, engine, loadLanes])
 
   /** Any settings change marks an open project as having unsaved changes. */
   const touchSettings = useCallback(() => {
@@ -631,6 +697,83 @@ export default function App(): React.JSX.Element {
     },
     [engine, touchSettings]
   )
+
+  /**
+   * Add audio files of the singer's own as extra lanes — a backing track, a
+   * harmony they recorded, a click, a spoken cue. They play from 0:00 next to
+   * the stems and are copied into the project folder on the next save.
+   */
+  const addTracks = useCallback(
+    async (files: File[]) => {
+      const before = engine.duration
+      const taken = new Set(tracksRef.current.map((t) => t.id))
+      const customSoFar = tracksRef.current.filter((t) => t.custom).length
+      const added: UITrack[] = []
+      for (const file of files) {
+        const path = window.singz.pathForFile(file)
+        if (!path) {
+          setError('Could not resolve that file on disk.')
+          continue
+        }
+        const reg = await window.singz.registerTrack(path)
+        if (!reg.ok) {
+          setError(reg.error)
+          continue
+        }
+        try {
+          const buf = await engine.decode(await window.singz.readAudio(reg.path))
+          const id = customTrackId(reg.name, taken)
+          taken.add(id)
+          added.push(
+            makeTrack(id, buf, {
+              label: trackLabel(reg.name),
+              color: CUSTOM_COLORS[(customSoFar + added.length) % CUSTOM_COLORS.length],
+              custom: { file: reg.path }
+            })
+          )
+        } catch {
+          setError(`Could not decode ${reg.name} — try an MP3, WAV, FLAC or M4A.`)
+        }
+      }
+      if (added.length === 0) return
+      loadLanes([...tracksRef.current, ...added])
+      touchSettings()
+      const names = added.map((t) => t.label).join(', ')
+      const longest = Math.max(...added.map((t) => t.buffer.duration))
+      setNotice(
+        longest > before + 0.05
+          ? `Added ${names} — it starts at 0:00 and runs past the song, so the timeline now ends at ${fmtTime(longest)}. Save the project to keep it.`
+          : `Added ${names} — it starts at 0:00, alongside the stems. Save the project to keep it.`
+      )
+    },
+    [engine, loadLanes, touchSettings]
+  )
+
+  /** Drop a lane the singer added; its copy in the project goes on next save. */
+  const removeTrack = useCallback(
+    (id: string) => {
+      const next = tracksRef.current.filter((t) => t.id !== id)
+      if (next.length === tracksRef.current.length) return
+      loadLanes(next)
+      touchSettings()
+    },
+    [loadLanes, touchSettings]
+  )
+
+  /**
+   * Re-point added lanes at the project's own copies after a save, rename or
+   * import — the paths they were added from (or lived at) are not where the
+   * files are now.
+   */
+  const reanchorCustom = useCallback((list: CustomTrack[] | undefined) => {
+    if (!list || list.length === 0) return
+    setTracks((ts) =>
+      ts.map((t) => {
+        const c = t.custom ? list.find((x) => x.id === t.id) : undefined
+        return c ? { ...t, custom: { file: c.file } } : t
+      })
+    )
+  }, [])
 
   const vocalsMuted = tracks.find((t) => t.id === 'vocals')?.muted ?? false
 
@@ -781,6 +924,7 @@ export default function App(): React.JSX.Element {
   }, [karaoke, split, openKaraoke])
 
   const openPicker = useCallback(() => fileInputRef.current?.click(), [])
+  const openTrackPicker = useCallback(() => trackInputRef.current?.click(), [])
 
   const handleSaveProject = useCallback(async () => {
     if (!song || saveState === 'saving') return
@@ -797,6 +941,9 @@ export default function App(): React.JSX.Element {
         ? { ...beatInfo, beats: beatInfo.beats.map((b) => Math.round(b * 1000) / 1000) }
         : undefined,
       metronome: metCfg,
+      custom: tracks
+        .filter((t) => t.custom)
+        .map((t) => ({ id: t.id, label: t.label, color: t.color, file: t.custom!.file })),
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
@@ -811,17 +958,25 @@ export default function App(): React.JSX.Element {
       setIsProject(true)
       setInLibrary(res.inLibrary)
       setProjectDir(res.dir)
+      reanchorCustom(res.custom)
+      // A track whose file disappeared between adding and saving is still
+      // playing here but is not in the project — say so rather than let the
+      // next open be quietly short of a lane.
+      const kept = new Set((res.custom ?? []).map((c) => c.id))
+      const lost = settings.custom.filter((c) => !kept.has(c.id)).map((c) => c.label)
       setNotice(
-        res.driveSignedOut
-          ? `Saved to ${res.dir} — Google Drive is signed out on this computer, so your phones won't see this until you sign in (Open… screen).`
-          : `Saved to ${res.dir}`
+        lost.length > 0
+          ? `Saved to ${res.dir} — but ${lost.join(', ')} could not be copied in (the file is no longer where you added it from).`
+          : res.driveSignedOut
+            ? `Saved to ${res.dir} — Google Drive is signed out on this computer, so your phones won't see this until you sign in (Open… screen).`
+            : `Saved to ${res.dir}`
       )
       setTimeout(() => setSaveState('idle'), 2500)
     } else {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, metCfg, tracks])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, metCfg, tracks, reanchorCustom])
 
   /** Bring a project opened from outside the library in, and follow it there. */
   const handleImport = useCallback(
@@ -838,6 +993,7 @@ export default function App(): React.JSX.Element {
       // the copy in the library is the one we keep working on from here
       setSong((s) => (s ? { ...s, path: res.songPath } : s))
       if (res.stems) setStemFiles(res.stems)
+      reanchorCustom(res.custom)
       setInLibrary(true)
       setProjectDir(res.dir)
       setShowImport(false)
@@ -847,7 +1003,7 @@ export default function App(): React.JSX.Element {
           : `Copied into your library — ${res.dir}. The original folder is untouched.`
       )
     },
-    [song, importing]
+    [song, importing, reanchorCustom]
   )
 
   const commitRename = useCallback(
@@ -863,6 +1019,7 @@ export default function App(): React.JSX.Element {
         }
         setSong({ path: res.songPath, name: res.name })
         if (res.stems) setStemFiles(res.stems)
+        reanchorCustom(res.custom)
         setProjectDir(res.dir)
         setNotice(`Renamed — the project folder is now ${res.dir}`)
       } else {
@@ -870,7 +1027,7 @@ export default function App(): React.JSX.Element {
         setSaveState('idle')
       }
     },
-    [song, isProject]
+    [song, isProject, reanchorCustom]
   )
 
   const handleTranspose = useCallback(
@@ -1221,6 +1378,8 @@ export default function App(): React.JSX.Element {
                 onMute={handleMute}
                 onSolo={handleSolo}
                 onVolume={handleVolume}
+                onAddTrack={openTrackPicker}
+                onRemoveTrack={removeTrack}
               />
               {karaoke && (
                 <PitchStrip
@@ -1357,6 +1516,20 @@ export default function App(): React.JSX.Element {
         onChange={(e) => {
           const file = e.target.files?.[0]
           if (file) void loadFile(file)
+          e.target.value = ''
+        }}
+      />
+
+      <input
+        ref={trackInputRef}
+        type="file"
+        accept={ACCEPT}
+        multiple
+        hidden
+        data-testid="add-track-input"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? [])
+          if (files.length > 0) void addTracks(files)
           e.target.value = ''
         }}
       />

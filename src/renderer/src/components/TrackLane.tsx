@@ -9,6 +9,8 @@ interface Props {
   onMute: (id: string, muted: boolean) => void
   onSolo: (id: string, solo: boolean) => void
   onVolume: (id: string, volume: number) => void
+  /** Set for lanes the singer added themselves — stems can't be removed. */
+  onRemove?: (id: string) => void
   showSolo: boolean
   index: number
   viewStart: number
@@ -22,6 +24,7 @@ export default function TrackLane({
   onMute,
   onSolo,
   onVolume,
+  onRemove,
   showSolo,
   index,
   viewStart,
@@ -41,6 +44,16 @@ export default function TrackLane({
           <span className="lane-dot" />
           <span className="lane-name">{track.label}</span>
           {ducked && <span className="lane-you">your turn</span>}
+          {onRemove && (
+            <button
+              type="button"
+              className="lane-remove"
+              title={`Remove ${track.label} from this project (the file you added it from stays where it is)`}
+              onClick={() => onRemove(track.id)}
+            >
+              ✕
+            </button>
+          )}
         </div>
         <div className="lane-buttons">
           <button
