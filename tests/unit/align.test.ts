@@ -265,4 +265,29 @@ describe('ctcOutcome', () => {
     expect(check.verdict).toBe('mismatch')
     expect(lines).toBe(ref)
   })
+
+  it('words parked in vocal silence never anchor — tail lines keep the sync times', () => {
+    // The WDOA failure: the trellis crams the last lines into dead air after
+    // the music ends. Their words carry voiced≈0 and must not drag the
+    // retime; unanchored tail lines ride the last real anchor's shift over
+    // the reference (whisper-checked) phrasing instead.
+    const ctc: CtcWord[] = ref.flatMap((l, li) => {
+      const lastTwo = li >= ref.length - 2
+      return l.words.map((w, wi) =>
+        lastTwo
+          ? { li, wi, s: 55 + li * 0.5 + wi * 0.1, e: 55.1 + li * 0.5 + wi * 0.1, score: 0.02, voiced: 0.0 }
+          : { li, wi, s: w.s + 2, e: w.e + 2, score: 0.8, voiced: 0.7 }
+      )
+    })
+    const { lines, check } = ctcOutcome(ref, ctc, 60)
+    expect(check.verdict).toBe('retimed')
+    for (let li = ref.length - 2; li < ref.length; li++) {
+      // shifted by the last anchor's +2s, never crammed at 55+
+      expect(lines[li].words[0].s).toBeCloseTo(ref[li].words[0].s + 2, 1)
+      expect(lines[li].start).toBeLessThan(50)
+    }
+    // voiced words with no flag still anchor (older pack output)
+    const legacy = goodCtc()
+    expect(ctcOutcome(ref, legacy, 60).lines[0].words[0].s).toBeCloseTo(ref[0].words[0].s + 2, 2)
+  })
 })

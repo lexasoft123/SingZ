@@ -400,7 +400,12 @@ export interface CtcWord {
   s: number
   e: number
   score: number
+  /** Mean vocal energy over the word span vs the song's loud level (0-1ish). */
+  voiced?: number
 }
+
+/** Words the trellis parked in vocal silence never anchor the retime. */
+export const CTC_VOICED_MIN = 0.06
 
 /**
  * Judge + retime from CTC forced alignment. Absolute CTC scores on singing
@@ -434,8 +439,15 @@ export function ctcOutcome(ref: LyricLine[], ctc: CtcWord[], durationSec: number
     }
   }
 
-  // forced alignment is monotonic by construction — every word anchors
-  const anchors: Anchor[] = ctc.map((c) => ({ li: c.li, wi: c.wi, s: c.s, e: c.e, sim: c.score }))
+  // Forced alignment is monotonic by construction, but the trellis can park
+  // words in vocal SILENCE when the wildcard eats hard singing (stacked
+  // outro choirs) — squeezing a line into dead air costs less than fighting
+  // the acoustics. Silent words must not anchor: without them, retime rides
+  // the surrounding anchors over the reference phrasing (the whisper-checked
+  // or LRC times), which is exactly the right fallback.
+  const anchors: Anchor[] = ctc
+    .filter((c) => c.voiced === undefined || c.voiced >= CTC_VOICED_MIN)
+    .map((c) => ({ li: c.li, wi: c.wi, s: c.s, e: c.e, sim: c.score }))
   const lines = retime(ref, anchors, durationSec)
   const shifts = lines
     .map((l, i) => l.start - ref[i].start)

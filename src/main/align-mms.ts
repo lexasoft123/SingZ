@@ -162,6 +162,14 @@ try:
                 # keep scanning back — we want the earliest rise of this note
         if best is not None and best < w["s"]:
             w["s"] = round(max(prev_e + 0.01, best), 3)
+    # per-word voiced ratio vs the song's loud level: words the trellis parked
+    # in vocal silence (choir/talk-box outros overwhelm the letter models and
+    # the wildcard eats the real singing) must not anchor the retime
+    for w in out:
+        i0 = int(w["s"] * 100)
+        i1 = max(i0 + 1, int(w["e"] * 100))
+        seg = env[i0 : min(i1, m)]
+        w["v"] = round(float(seg.mean() / loud), 3) if (loud > 0 and len(seg) > 0) else 0.0
     p(100)
     print(json.dumps({"words": out}))
 except Exception as ex:
@@ -337,6 +345,11 @@ try:
                 best = i / 100.0  # keep scanning back - earliest rise of this note
         if best is not None and best < w["s"]:
             w["s"] = round(max(prev_e + 0.01, best), 3)
+    for w in out:
+        i0 = int(w["s"] * 100)
+        i1 = max(i0 + 1, int(w["e"] * 100))
+        seg = env[i0 : min(i1, m)]
+        w["v"] = round(float(seg.mean() / loud), 3) if (loud > 0 and len(seg) > 0) else 0.0
     p(100)
     print(json.dumps({"words": out}))
 except Exception as ex:
@@ -413,7 +426,7 @@ export async function runMmsAlign(
       void rm(dir, { recursive: true, force: true })
       try {
         const parsed = JSON.parse(out.trim().split('\n').pop() ?? '') as {
-          words?: { i: number; s: number; e: number; score: number }[]
+          words?: { i: number; s: number; e: number; score: number; v?: number }[]
           error?: string
         }
         if (parsed.error || !parsed.words) throw new Error(parsed.error ?? 'no output')
@@ -421,7 +434,7 @@ export async function runMmsAlign(
         for (const w of parsed.words) {
           const src = flat[w.i]
           if (!src) continue
-          words.push({ li: src.li, wi: src.wi, s: w.s, e: w.e, score: w.score })
+          words.push({ li: src.li, wi: src.wi, s: w.s, e: w.e, score: w.score, voiced: w.v })
         }
         resolve(words)
       } catch (err) {
