@@ -7,6 +7,13 @@ TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$ROOT/.engines-src/whisper.cpp"
 
+# Compiler cache when the machine has one: repeat builds (fresh worktrees,
+# wiped build dirs) hit ccache instead of clang. CMake >= 3.17 picks the
+# launchers up from the environment — same mechanism the Android CI uses.
+if command -v ccache >/dev/null 2>&1; then
+  export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+fi
+
 EXT=""
 case "$TARGET" in win32-*) EXT=".exe" ;; esac
 if [ -f "$ROOT/vendor/$TARGET/whisper-cli$EXT" ]; then
