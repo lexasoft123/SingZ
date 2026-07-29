@@ -1842,23 +1842,90 @@ button.chip-status:hover {
   border-color: var(--accent);
 }
 
-.src-line {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--dim);
-  font-size: 12px;
+/* the two storage cards: where the library lives + the Drive mirror */
+.src-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
   margin-bottom: 14px;
-  flex-wrap: wrap;
 }
 
-.src-who {
+.src-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 13px;
+  min-width: 0;
+}
+
+.src-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.src-card-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.src-card-value {
   color: var(--text);
-  opacity: 0.75;
+  opacity: 0.9;
+  font-size: 12.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 280px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.src-card-value.warn {
+  color: var(--accent);
+  white-space: normal;
+}
+
+.src-card-value.dim {
+  opacity: 0.55;
+}
+
+.src-card-sub {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.src-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.src-dot.ok {
+  background: #58d68a;
+  box-shadow: 0 0 6px rgba(88, 214, 138, 0.5);
+}
+
+.src-dot.busy {
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 50%, transparent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+body.modal-open .src-dot.busy {
+  animation-play-state: paused;
 }
 
 .src-dim {
@@ -1883,6 +1950,12 @@ button.chip-status:hover {
 
 .src-link:hover {
   text-decoration: underline;
+}
+
+.src-link:disabled {
+  opacity: 0.4;
+  cursor: default;
+  text-decoration: none;
 }
 
 .src-msg {

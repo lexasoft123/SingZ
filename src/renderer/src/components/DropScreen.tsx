@@ -31,9 +31,9 @@ function fmtDate(iso: string): string {
 
 /** Which cloud the library folder itself lives in (said once, not per card). */
 function folderCloud(root: string): string {
-  if (root.includes('Mobile Documents')) return 'syncs via iCloud'
-  if (root.includes('OneDrive')) return 'syncs via OneDrive'
-  return 'this computer only'
+  if (root.includes('Mobile Documents')) return 'Syncs across your devices via iCloud'
+  if (root.includes('OneDrive')) return 'Syncs across your devices via OneDrive'
+  return 'On this computer only'
 }
 
 interface Props {
@@ -60,6 +60,7 @@ export default function DropScreen({
     lastSync?: number | null
   }>({ configured: false, signedIn: false })
   const [syncingDir, setSyncingDir] = useState<string | null>(null)
+  const [syncProg, setSyncProg] = useState<{ msg: string; frac: number } | null>(null)
   const [driveMsg, setDriveMsg] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
@@ -75,6 +76,7 @@ export default function DropScreen({
     return window.singz.onGdriveProgress((p) => {
       const m = /^(?:Syncing|Uploading) ([^/…]+)/.exec(p.msg)
       setSyncingDir(p.frac >= 1 ? null : (m?.[1]?.trim() ?? null))
+      setSyncProg(p.frac >= 1 ? null : p)
       if (p.frac >= 1) refresh()
     })
   }, [refresh])
@@ -179,39 +181,60 @@ export default function DropScreen({
               />
             )}
           </div>
-          <div className="src-line">
-            <span aria-hidden>📁</span>
-            <span className="src-who" title={root}>
-              {root.includes('Mobile Documents')
-                ? `iCloud Drive / ${root.split('/').pop()}`
-                : root.split('/').slice(-2).join('/')}
-            </span>
-            <span className="src-dim">· {folderCloud(root)}</span>
-            <button type="button" className="src-link" onClick={onManageStorage}>
-              Change…
-            </button>
+          <div className="src-cards">
+            <div className="src-card">
+              <div className="src-card-body">
+                <span className="src-card-label">Library folder</span>
+                <span className="src-card-value" title={root}>
+                  <span aria-hidden>📁 </span>
+                  {root.includes('Mobile Documents')
+                    ? `iCloud Drive › ${root.split('/').pop()}`
+                    : root.split('/').slice(-2).join(' › ')}
+                </span>
+                <span className="src-card-sub">{folderCloud(root)}</span>
+              </div>
+              <button type="button" className="src-link" onClick={onManageStorage}>
+                Change…
+              </button>
+            </div>
             {gdrive.configured && (
-              <>
-                <span className="src-dim">·</span>
-                <img className="src-ic" src={gdriveIcon} alt="" />
-                {gdrive.signedIn ? (
-                  <>
-                    <span className="src-who">
-                      Synced to Google Drive{lastSyncLabel ? ` · ${lastSyncLabel}` : ''}
+              <div className="src-card">
+                <div className="src-card-body">
+                  <span className="src-card-label">
+                    <img className="src-ic" src={gdriveIcon} alt="" /> Google Drive backup
+                  </span>
+                  {driveMsg ? (
+                    <span className="src-card-value warn">{driveMsg}</span>
+                  ) : syncProg ? (
+                    <span className="src-card-value">
+                      <span className="src-dot busy" /> {syncProg.msg}{' '}
+                      {Math.round(syncProg.frac * 100)}%
                     </span>
-                    <button type="button" className="src-link" onClick={() => void onDrive()}>
-                      Sync now
-                    </button>
-                  </>
-                ) : (
-                  <button type="button" className="src-link" onClick={() => void onDrive()}>
-                    Connect Google Drive…
-                  </button>
-                )}
-              </>
+                  ) : gdrive.signedIn ? (
+                    <span className="src-card-value">
+                      <span className="src-dot ok" /> Up to date
+                      {lastSyncLabel ? ` · synced ${lastSyncLabel}` : ''}
+                    </span>
+                  ) : (
+                    <span className="src-card-value dim">Off</span>
+                  )}
+                  <span className="src-card-sub">
+                    {gdrive.signedIn
+                      ? 'A copy of this library, for your phones'
+                      : 'Keeps a copy in your Drive so phones can stream it'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="src-link"
+                  disabled={syncProg !== null}
+                  onClick={() => void onDrive()}
+                >
+                  {gdrive.signedIn ? 'Sync now' : 'Connect…'}
+                </button>
+              </div>
             )}
           </div>
-          {driveMsg && <p className="fine src-msg">{driveMsg}</p>}
           <div className="lib-grid">
             {filtered.map((p, i) => (
               <button
