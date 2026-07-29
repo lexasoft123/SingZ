@@ -125,12 +125,14 @@ export function sanitizeBeatInfo(raw: unknown): BeatInfo | null {
   const bpb = Number(r.beatsPerBar)
   const beatsPerBar = (BEATS_PER_BAR_CHOICES as readonly number[]).includes(bpb) ? bpb : 4
   const db = Math.round(Number(r.downbeat))
+  const dv = Number(r.detVersion)
   return {
     beats,
     bpm,
     beatsPerBar,
     downbeat: Number.isFinite(db) ? ((db % beatsPerBar) + beatsPerBar) % beatsPerBar : 0,
-    source: r.source === 'auto' ? 'auto' : 'manual'
+    source: r.source === 'auto' ? 'auto' : 'manual',
+    ...(Number.isFinite(dv) ? { detVersion: dv } : {})
   }
 }
 

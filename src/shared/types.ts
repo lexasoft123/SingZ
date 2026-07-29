@@ -57,6 +57,8 @@ export interface BeatInfo {
   downbeat: number
   /** auto = tracked from the drums stem; manual = tapped, typed or nudged. */
   source: 'auto' | 'manual'
+  /** Detector stamp for auto tracks — older stamps re-detect on load. */
+  detVersion?: number
 }
 
 /** Metronome preferences: click along playback, count-in bars, click loudness. */

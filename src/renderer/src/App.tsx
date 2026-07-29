@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { EngineStatus, SeparationProgress } from '../../shared/types'
-import { detectBeats, estimateKey, type KeyGuess } from './audio/analysis'
+import type { EngineStatus, LyricLine, SeparationProgress } from '../../shared/types'
+import { BEAT_DETECT_VERSION, detectBeats, estimateKey, type KeyGuess } from './audio/analysis'
 import {
   MET_DEFAULTS,
   sanitizeBeatInfo,
@@ -173,6 +173,8 @@ export default function App(): React.JSX.Element {
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
+  const bassBufRef = useRef<AudioBuffer | null>(null)
+  const linesRef = useRef<LyricLine[] | null>(null)
   const originalBufRef = useRef<AudioBuffer | null>(null)
   const lyricsRef = useRef(lyrics)
   lyricsRef.current = lyrics
@@ -328,6 +330,7 @@ export default function App(): React.JSX.Element {
       setMelody({ status: 'none' })
       vocalsBufRef.current = null
       drumsBufRef.current = null
+      bassBufRef.current = null
       originalBufRef.current = null
       setSongInfo({ key: null, bpm: null })
       setBeatInfo(null)
@@ -389,6 +392,7 @@ export default function App(): React.JSX.Element {
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
+          bassBufRef.current = buffers[order.indexOf('bass')] ?? null
           // Restore training BEFORE karaoke may reopen: its auto-mute must
           // know training governs the vocals (the ref is set synchronously —
           // state alone would land a render too late).
@@ -585,6 +589,7 @@ export default function App(): React.JSX.Element {
       setSaveState((st) => (st === 'saved' ? 'idle' : st))
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
+      bassBufRef.current = buffers[order.indexOf('bass')] ?? null
       // Analyze right away (melody, key, bpm) so karaoke opens warm and the
       // bpm box fills in without a trip through karaoke mode. If karaoke was
       // open last session, reopen it.
@@ -714,20 +719,28 @@ export default function App(): React.JSX.Element {
           hopSec: e.data.hopSec
         }
         setMelody({ status: 'ready', f0: e.data.f0, hopSec: e.data.hopSec })
-        // Beat track from the drums (once per song — a restored or hand-tuned
-        // track wins over re-detection).
+        // Beat track from the drums (once per song — a hand-tuned track wins
+        // over re-detection; restored auto tracks from an older detector are
+        // silently re-tracked so downbeat fixes reach saved projects).
         let info = beatInfoRef.current
-        if (!info && drumsBufRef.current) {
-          const det = detectBeats(drumsBufRef.current)
+        const stale = info?.source === 'auto' && info.detVersion !== BEAT_DETECT_VERSION
+        if ((!info || stale) && drumsBufRef.current) {
+          const det = detectBeats(drumsBufRef.current, {
+            bass: bassBufRef.current,
+            vocals: vocalsBufRef.current,
+            lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
+          })
           if (det) {
             info = {
               beats: det.beats,
               bpm: det.bpm,
-              beatsPerBar: 4,
+              beatsPerBar: det.beatsPerBar,
               downbeat: det.downbeat,
-              source: 'auto'
+              source: 'auto',
+              detVersion: BEAT_DETECT_VERSION
             }
             setBeatInfo(info)
+            if (stale) touchSettings()
           }
         }
         setSongInfo({
@@ -940,15 +953,20 @@ export default function App(): React.JSX.Element {
   const redetectBeat = useCallback(() => {
     const buf = drumsBufRef.current
     if (!buf) return
-    const det = detectBeats(buf)
+    const det = detectBeats(buf, {
+      bass: bassBufRef.current,
+      vocals: vocalsBufRef.current,
+      lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
+    })
     if (det) {
       touchSettings()
       setBeatInfo({
         beats: det.beats,
         bpm: det.bpm,
-        beatsPerBar: beatInfoRef.current?.beatsPerBar ?? 4,
+        beatsPerBar: det.beatsPerBar,
         downbeat: det.downbeat,
-        source: 'auto'
+        source: 'auto',
+        detVersion: BEAT_DETECT_VERSION
       })
       setSongInfo((s) => ({ ...s, bpm: det.bpm }))
     } else {
@@ -970,6 +988,7 @@ export default function App(): React.JSX.Element {
   )
 
   const lines = lyrics.status === 'ready' ? lyrics.lines : null
+  linesRef.current = lines
 
   /** Arm/disarm vocal training; arming un-mutes the stems it alternates. */
   const toggleTraining = useCallback(() => {

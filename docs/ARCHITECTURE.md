@@ -136,10 +136,28 @@ of pre-click-track recordings — then snapped to nearby onsets. Rejection
 gates, tuned on real stems: impulsive-flux share (pads/noise), window
 consistency (rubato), onset support + active fraction (sparse anchors), and
 median interval roughness (onset-chasing without a pulse) — clicks that
-fight the music are worse than none. The result drives the metronome,
-count-in and bpm readout, and is saved in `project.json` (`settings.beat`,
-millisecond-rounded) where hand edits (tap tempo, nudges, ×½/×2) win over
-re-detection. Vocal range: p5–p95 of melody notes. All displayed
+fight the music are worse than none.
+Bar phase & meter: kick energy alone is a coin flip between beats 1 and 3
+(both carry kick in most grooves — Soldier Of Fortune and Wanted Dead Or
+Alive shipped half a bar off this way), so the downbeat is a weighted vote
+of sharp events instead: mean windowed kick, band entrances out of silence,
+the biggest well-separated low-band slams, bass chord changes (energy-gated
+chroma novelty over the bass stem), vocal phrase entries after ≥2-bar rests
+(vocals stem), and lyric lines sitting on a beat — weights calibrated
+against a 12-song ground-truth set from the user's library. Votes are
+counted per segment (drum-active stretches split by ≥2-bar gaps): silent
+intros never vote, and when a song re-enters after a fermata on a different
+bar parity (Turn The Page's last chorus), the gap's filler beats are
+re-spaced so one downbeat index is right on both sides. Meter: when 3-beat
+periodicity of the onset envelope dwarfs 4-beat (windowed-lag max — the
+median period is a fraction of a frame off and by ×4 lands between sharp
+peaks), the tracked pulse is a compound song's eighth and accents group in
+6 (Nothing Else Matters), with drum cues muted for the rotation (the
+mid-bar tom is idiomatic there) in favor of bass/lyrics. The result drives
+the metronome, count-in and bpm readout, and is saved in `project.json`
+(`settings.beat`, millisecond-rounded) where hand edits (tap tempo, nudges,
+×½/×2) win over re-detection; auto tracks carry `detVersion` and are
+silently re-tracked on load when the detector has since improved. Vocal range: p5–p95 of melody notes. All displayed
 transpose-aware in the pitch strip's info card.
 
 ## On-disk layout

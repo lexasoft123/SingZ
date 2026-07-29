@@ -62,13 +62,31 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
 
 /* ---- Beat tracking ------------------------------------------------------ */
 
+/**
+ * Bump when downbeat/meter estimation changes: stored auto tracks with an
+ * older stamp are silently re-detected on load so fixes reach saved projects.
+ */
+export const BEAT_DETECT_VERSION = 2
+
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
   beats: number[]
   /** Median tempo (display + target-rate math). */
   bpm: number
-  /** Index into beats of a downbeat (kick-band accent), assuming 4/4. */
+  /** Beats per bar the accents assume: 4, or 6 for compound (6/8) songs. */
+  beatsPerBar: number
+  /** Index into beats of a downbeat. */
   downbeat: number
+}
+
+/** Optional extra evidence for the downbeat — pass whatever is loaded. */
+export interface BeatAux {
+  /** Bass stem: chord changes vote for bar starts. */
+  bass?: AudioBuffer | null
+  /** Vocals stem: phrase entries after rests vote for bar starts. */
+  vocals?: AudioBuffer | null
+  /** Lyric line start times in seconds: lines sitting on a beat vote. */
+  lineStarts?: number[] | null
 }
 
 const HOP = 512
@@ -89,6 +107,7 @@ const HOP = 512
  */
 export function detectBeats(
   buffer: AudioBuffer,
+  aux?: BeatAux,
   debug?: Record<string, unknown>
 ): DetectedBeats | null {
   const sr = buffer.sampleRate
@@ -410,28 +429,355 @@ export function detectBeats(
     if (beatsSec[i] <= beatsSec[i - 1]) beatsSec[i] = beatsSec[i - 1] + 0.001
   }
 
-  // Downbeat: the rotation with the most kick-band onset energy (4/4 assumed).
-  let downbeat = 0
+  const iv = beatsSec.slice(1).map((b, i) => b - beatsSec[i]).sort((a, b) => a - b)
+  const medSec = iv[Math.floor(iv.length / 2)]
+
+  /* ---- Bar phase & meter -------------------------------------------------
+   * Kick energy alone is a coin flip between beats 1 and 3 (both carry kick in
+   * most grooves), so bar rotation is voted by sharp musical events instead:
+   * mean kick, band entrances out of silence, the biggest well-separated
+   * low-band slams, bass chord changes, vocal phrase entries, and lyric lines
+   * sitting on a beat. Votes are counted per SEGMENT (stretches of drum
+   * activity split by ≥2-bar gaps): silent intros never vote, and when a song
+   * re-enters after a fermata on a different bar parity, the gap's filler
+   * beats are re-spaced so one downbeat index is right on both sides. */
+  const beatFrames = beatsSec.map((b) => Math.round((b * sr) / HOP))
+  const active = new Array<boolean>(beatsSec.length).fill(false)
   {
-    let bestRot = -Infinity
-    for (let rot = 0; rot < 4; rot++) {
+    let pi = 0
+    const tol = 0.3 * medSec * fps
+    for (let k = 0; k < beatsSec.length; k++) {
+      while (pi < peaks.length && peaks[pi] < beatFrames[k] - tol) pi++
+      if (pi < peaks.length && Math.abs(peaks[pi] - beatFrames[k]) < tol) active[k] = true
+    }
+  }
+  const kickE = beatsSec.map((_, k) => {
+    const w = Math.max(1, Math.round(0.035 * fps))
+    let s = 0
+    for (let f = Math.max(1, beatFrames[k] - w); f <= Math.min(frames - 1, beatFrames[k] + w); f++) {
+      s += lowFlux[f]
+    }
+    return s
+  })
+  const kickMax = Math.max(...kickE, 1e-12)
+
+  // Meter: dominant 3-beat periodicity means the tracked pulse is the eighth
+  // of a compound (6/8) song — accents then group in 6, not 4. Each multiple
+  // takes the best lag in a small window: the median period is a fraction of
+  // a frame off, and by ×4 that lands between sharp onset peaks.
+  const acAt = (mult: number): number => {
+    const center = medSec * mult * fps
+    let best = 0
+    for (let lag = Math.floor(center) - 3; lag <= Math.ceil(center) + 3; lag++) {
+      if (lag < 1 || lag >= frames - 1) continue
       let s = 0
-      let n = 0
-      for (let k = rot; k < chosen.beatsF.length; k += 4) {
-        const f = Math.round(chosen.beatsF[k])
-        if (f > 0 && f < frames) {
-          s += lowFlux[f]
-          n++
-        }
+      for (let i = lag; i < frames; i++) s += O[i] * O[i - lag]
+      best = Math.max(best, s / (frames - lag))
+    }
+    return best
+  }
+  const bpb = acAt(3) > 1.5 * acAt(4) ? 6 : 4
+
+  // Segments: maximal active stretches split by gaps of ≥ 2 bars.
+  const segs: { a: number; b: number }[] = []
+  {
+    const gapLen = 2 * bpb
+    let i = 0
+    while (i < beatsSec.length) {
+      if (!active[i]) {
+        i++
+        continue
       }
-      if (n > 0 && s / n > bestRot) {
-        bestRot = s / n
-        downbeat = rot
+      let j = i
+      let lastAct = i
+      while (j < beatsSec.length) {
+        if (active[j]) lastAct = j
+        else if (j - lastAct >= gapLen) break
+        j++
       }
+      segs.push({ a: i, b: lastAct })
+      i = lastAct + 1
+      while (i < beatsSec.length && !active[i]) i++
     }
   }
 
-  const iv = beatsSec.slice(1).map((b, i) => b - beatsSec[i]).sort((a, b) => a - b)
-  const medSec = iv[Math.floor(iv.length / 2)]
-  return { beats: beatsSec, bpm: 60 / medSec, downbeat }
+  // Bass chord-change strength per beat (0 = no confident change here).
+  const bassNov = bassChangeVotes(aux?.bass ?? null, beatsSec, bpb)
+  // Vocal phrase entries: loudest moment after each ≥2-bar rest, on a beat.
+  const vocHits = vocalEntryVotes(aux?.vocals ?? null, beatsSec, medSec, bpb)
+  // Lyric lines that start on a beat.
+  const lineHits: number[] = []
+  if (aux?.lineStarts && aux.lineStarts.length >= 6) {
+    for (const t of aux.lineStarts) {
+      const bk = nearestBeatIdx(beatsSec, t)
+      if (bk >= 0 && Math.abs(beatsSec[bk] - t) < 0.2 * medSec) lineHits.push(bk)
+    }
+  }
+
+  const uniform = (): number[] => new Array(bpb).fill(1 / bpb)
+  const normDist = (a: number[]): number[] => {
+    const s = a.reduce((x, y) => x + y, 0)
+    return s > 1e-12 ? a.map((x) => x / s) : uniform()
+  }
+  const scoreSegment = (seg: { a: number; b: number }): { rot: number; conf: number } => {
+    const { a, b } = seg
+    const kick = ((): number[] => {
+      const sums = new Array<number>(bpb).fill(0)
+      const ns = new Array<number>(bpb).fill(0)
+      for (let k = a; k <= b; k++) {
+        if (!active[k]) continue
+        sums[k % bpb] += kickE[k]
+        ns[k % bpb]++
+      }
+      if (ns.filter((n) => n > 2).length < bpb) return uniform()
+      return normDist(sums.map((s, i) => (ns[i] ? s / ns[i] : 0)))
+    })()
+    const ent = ((): number[] => {
+      // the heaviest hit in the segment's first bar — only when it truly
+      // enters out of silence (a real intro also counts at the track edge)
+      let quiet = 0
+      for (let j = a - 1; j >= 0 && !active[j]; j--) quiet++
+      const edge = a - quiet === 0
+      if (quiet < bpb || (edge && quiet < 2 * bpb)) return uniform()
+      let best = a
+      let nAct = 0
+      for (let j = a; j < Math.min(beatsSec.length, a + bpb); j++) {
+        if (active[j]) nAct++
+        if (kickE[j] > kickE[best]) best = j
+      }
+      if (nAct < 2 || kickE[best] < 0.2 * kickMax) return uniform()
+      const votes = new Array<number>(bpb).fill(0)
+      votes[best % bpb] = 1
+      return votes
+    })()
+    const slam = ((): number[] => {
+      const idx: number[] = []
+      for (let k = a; k <= b; k++) if (active[k]) idx.push(k)
+      idx.sort((x, y) => kickE[y] - kickE[x])
+      const votes = new Array<number>(bpb).fill(0)
+      const taken: number[] = []
+      for (const k of idx) {
+        if (taken.length >= 6) break
+        if (taken.some((t) => Math.abs(t - k) < 2 * bpb)) continue
+        taken.push(k)
+        votes[k % bpb] += kickE[k] / kickMax
+      }
+      if (taken.length < 3) return uniform()
+      return normDist(votes)
+    })()
+    const inSeg = (dist: number[], events: { k: number; w: number }[], min: number): number[] => {
+      let used = 0
+      for (const e of events) {
+        if (e.k >= a && e.k <= b) {
+          dist[e.k % bpb] += e.w
+          used++
+        }
+      }
+      return used < min ? uniform() : normDist(dist)
+    }
+    const bass = bassNov
+      ? inSeg(new Array<number>(bpb).fill(0), bassNov.map((w, k) => ({ k, w })).filter((e) => e.w > 0), bpb)
+      : uniform()
+    const voc = vocHits ? inSeg(new Array<number>(bpb).fill(0), vocHits, 2) : uniform()
+    const line = inSeg(new Array<number>(bpb).fill(0), lineHits.map((k) => ({ k, w: 1 })), 4)
+    // compound meter: the mid-bar accent is idiomatic — drums stop deciding
+    const W =
+      bpb === 6
+        ? { kick: 0.05, ent: 0.05, slam: 0.05, bass: 0.45, voc: 0.1, line: 0.3 }
+        : { kick: 0.2, ent: 0.18, slam: 0.15, bass: 0.15, voc: 0.05, line: 0.15 }
+    const cues = { kick, ent, slam, bass, voc, line }
+    const score = new Array<number>(bpb).fill(0)
+    let total = 0
+    for (const [name, dist] of Object.entries(cues)) {
+      const wc = W[name as keyof typeof W]
+      total += wc
+      for (let r = 0; r < bpb; r++) score[r] += wc * dist[r]
+    }
+    let rot = 0
+    for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
+    const sorted = [...score].sort((x, y) => y - x)
+    return { rot, conf: (sorted[0] - sorted[1]) / total }
+  }
+
+  // Confident segments pin their own downbeat; the first sets the global
+  // phase, later ones may re-space the silent gap before them to match.
+  const MIN_BARS = 4
+  const REPAIR_CONF = 0.08
+  const scored = segs.map((s) => ({ ...s, ...scoreSegment(s) }))
+  const anchors = scored.filter((s) => (s.b - s.a) / bpb >= MIN_BARS && s.conf >= REPAIR_CONF)
+  let outBeats = beatsSec
+  let downbeat = 0
+  if (anchors.length > 0) {
+    const out: number[] = []
+    let cursor = 0
+    let db = -1
+    for (const s of anchors) {
+      // beats from s.a to its first downbeat — invariant under renumbering
+      const off = (((s.rot - (s.a % bpb)) % bpb) + bpb) % bpb
+      let prevAct = s.a - 1
+      while (prevAct >= 0 && !active[prevAct]) prevAct--
+      while (cursor <= prevAct) out.push(beatsSec[cursor++])
+      const fillCount = s.a - prevAct - 1
+      if (db < 0) {
+        while (cursor < s.a) out.push(beatsSec[cursor++])
+        db = (out.length + off) % bpb
+      } else {
+        const have = (out.length + fillCount + off) % bpb
+        let add = (((db - have) % bpb) + bpb) % bpb
+        if (add > bpb / 2) add -= bpb
+        const tA = prevAct >= 0 ? beatsSec[prevAct] : 0
+        const tB = beatsSec[s.a]
+        const n = fillCount + add
+        const step = prevAct >= 0 && n >= 1 ? (tB - tA) / (n + 1) : 0
+        if (add !== 0 && step > 0.5 * medSec && step < 1.9 * medSec) {
+          for (let f = 1; f <= n; f++) out.push(tA + f * step)
+          cursor = s.a
+        } else {
+          while (cursor < s.a) out.push(beatsSec[cursor++])
+        }
+      }
+      while (cursor <= s.b) out.push(beatsSec[cursor++])
+    }
+    while (cursor < beatsSec.length) out.push(beatsSec[cursor++])
+    outBeats = out
+    downbeat = db
+  } else if (scored.length > 0) {
+    downbeat = scored.reduce((m, s) => (s.conf > m.conf ? s : m)).rot % bpb
+  }
+
+  return { beats: outBeats, bpm: 60 / medSec, beatsPerBar: bpb, downbeat }
+}
+
+/** Bass chord-change strength per beat window: energy-gated chroma-novelty
+ *  local maxima, weighted by how confidently the new window names a root. */
+function bassChangeVotes(bass: AudioBuffer | null, beats: number[], bpb: number): number[] | null {
+  if (!bass) return null
+  const sr = bass.sampleRate
+  const data = bass.getChannelData(0)
+  const chromas: number[][] = []
+  const eng: number[] = []
+  for (let k = 0; k + 1 < beats.length; k++) {
+    const a = Math.max(0, Math.round(beats[k] * sr))
+    const b = Math.min(data.length, Math.round(beats[k + 1] * sr))
+    const ch = new Array<number>(12).fill(0)
+    let e = 0
+    if (b - a > 1024) {
+      for (let s = 0; s < 24; s++) ch[s % 12] += goertzel(data, a, b, 41.2 * Math.pow(2, s / 12), sr)
+      for (let i = a; i < b; i += 4) e += data[i] * data[i]
+      e /= (b - a) / 4
+    }
+    chromas.push(ch)
+    eng.push(e)
+  }
+  const engSorted = eng.filter((x) => x > 0).sort((a, b) => a - b)
+  if (engSorted.length < bpb * 4) return null
+  const eMed = engSorted[Math.floor(engSorted.length / 2)]
+  const nov = new Array<number>(chromas.length).fill(0)
+  for (let k = 1; k < chromas.length; k++) {
+    if (eng[k] < 0.15 * eMed || eng[k - 1] < 0.15 * eMed) continue
+    let num = 0
+    let dx = 0
+    let dy = 0
+    for (let i = 0; i < 12; i++) {
+      num += chromas[k][i] * chromas[k - 1][i]
+      dx += chromas[k][i] * chromas[k][i]
+      dy += chromas[k - 1][i] * chromas[k - 1][i]
+    }
+    if (dx > 1e-12 && dy > 1e-12) nov[k] = 1 - num / Math.sqrt(dx * dy)
+  }
+  const gated = nov.filter((x) => x > 0).sort((a, b) => a - b)
+  if (gated.length < bpb * 2) return null
+  const nMed = gated[Math.floor(gated.length / 2)]
+  const votes = new Array<number>(chromas.length).fill(0)
+  for (let k = 1; k < nov.length - 1; k++) {
+    if (nov[k] > 1.5 * nMed && nov[k] >= nov[k - 1] && nov[k] >= nov[k + 1]) {
+      const ch = chromas[k]
+      let tot = 0
+      let mx = 0
+      for (let i = 0; i < 12; i++) {
+        tot += ch[i]
+        if (ch[i] > mx) mx = ch[i]
+      }
+      votes[k] = nov[k] * (tot > 1e-12 ? mx / tot : 0)
+    }
+  }
+  return votes
+}
+
+/** Vocal phrase entries: the loudest moment shortly after each ≥2-bar rest,
+ *  when it lands on a beat (title hooks and verse entries mark bar starts). */
+function vocalEntryVotes(
+  vocals: AudioBuffer | null,
+  beats: number[],
+  med: number,
+  bpb: number
+): { k: number; w: number }[] | null {
+  if (!vocals) return null
+  const sr = vocals.sampleRate
+  const data = vocals.getChannelData(0)
+  const fps = sr / HOP
+  const n = Math.floor(data.length / HOP)
+  const env = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    let s = 0
+    const off = i * HOP
+    for (let j = 0; j < HOP; j += 4) s += data[off + j] * data[off + j]
+    env[i] = s
+  }
+  for (let i = 1; i < n; i++) env[i] = 0.6 * env[i] + 0.4 * env[i - 1]
+  const sorted = [...env].sort((a, b) => a - b)
+  const p90 = sorted[Math.floor(n * 0.9)] || 0
+  if (p90 <= 0) return null
+  const thr = 0.15 * p90
+  const restF = Math.round(2 * bpb * med * fps)
+  const hits: { k: number; w: number }[] = []
+  let below = restF
+  let i = 0
+  while (i < n) {
+    if (env[i] < thr) {
+      below++
+      i++
+      continue
+    }
+    if (below >= restF) {
+      const end = Math.min(n, i + Math.round(1.5 * bpb * med * fps))
+      let best = i
+      for (let j = i; j < end; j++) if (env[j] > env[best]) best = j
+      const t = (best * HOP) / sr
+      const bk = nearestBeatIdx(beats, t)
+      if (bk >= 0 && Math.abs(beats[bk] - t) < 0.35 * med) {
+        hits.push({ k: bk, w: env[best] / (sorted[n - 1] || 1) })
+      }
+    }
+    below = 0
+    i++
+  }
+  return hits
+}
+
+function nearestBeatIdx(beats: number[], t: number): number {
+  let lo = 0
+  let hi = beats.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (beats[mid] < t) lo = mid + 1
+    else hi = mid
+  }
+  if (lo > 0 && Math.abs(beats[lo - 1] - t) < Math.abs(beats[lo] - t)) lo--
+  return lo
+}
+
+function goertzel(data: Float32Array, start: number, end: number, freq: number, sr: number): number {
+  const stride = 4
+  const w = (2 * Math.PI * freq) / (sr / stride)
+  const c = 2 * Math.cos(w)
+  let s0 = 0
+  let s1 = 0
+  let s2 = 0
+  for (let i = start; i < end; i += stride) {
+    s0 = data[i] + c * s1 - s2
+    s2 = s1
+    s1 = s0
+  }
+  return s1 * s1 + s2 * s2 - c * s1 * s2
 }

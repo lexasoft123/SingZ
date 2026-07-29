@@ -217,14 +217,6 @@ describe('detectBeats', () => {
 
   it('returns null on silence, pads and noise', () => {
     const quiet = new Float32Array(SR * 30)
-    const wrap = (d: Float32Array): AudioBuffer =>
-      ({
-        sampleRate: SR,
-        length: d.length,
-        duration: d.length / SR,
-        numberOfChannels: 1,
-        getChannelData: () => d
-      }) as unknown as AudioBuffer
     expect(detectBeats(wrap(quiet))).toBeNull()
     const pad = new Float32Array(SR * 30)
     for (let i = 0; i < pad.length; i++) pad[i] = 0.3 * Math.sin((2 * Math.PI * 220 * i) / SR)
@@ -232,5 +224,125 @@ describe('detectBeats', () => {
     const noise = new Float32Array(SR * 30)
     for (let i = 0; i < noise.length; i++) noise[i] = 0.2 * (rnd() * 2 - 1)
     expect(detectBeats(wrap(noise))).toBeNull()
+  })
+})
+
+const wrap = (d: Float32Array): AudioBuffer =>
+  ({
+    sampleRate: SR,
+    length: d.length,
+    duration: d.length / SR,
+    numberOfChannels: 1,
+    getChannelData: () => d
+  }) as unknown as AudioBuffer
+
+/** Sustained bass root (for chord-change downbeat votes). */
+function addRoot(data: Float32Array, from: number, to: number, freq: number): void {
+  const a = Math.max(0, Math.round(from * SR))
+  const b = Math.min(data.length, Math.round(to * SR))
+  for (let i = a; i < b; i++) data[i] += 0.25 * Math.sin((2 * Math.PI * freq * (i - a)) / SR)
+}
+
+/** Bar position (0 = downbeat) of the detected beat nearest to time t. */
+function accentAt(det: { beats: number[]; beatsPerBar: number; downbeat: number }, t: number): number {
+  let k = 0
+  for (let i = 0; i < det.beats.length; i++) {
+    if (Math.abs(det.beats[i] - t) < Math.abs(det.beats[k] - t)) k = i
+  }
+  expect(Math.abs(det.beats[k] - t)).toBeLessThan(0.08)
+  return (((k - det.downbeat) % det.beatsPerBar) + det.beatsPerBar) % det.beatsPerBar
+}
+
+describe('detectBeats downbeat & meter', () => {
+  it('follows the bass chord changes when the kick is a 1-vs-3 coin flip', () => {
+    // kick equally strong on beats 1 and 3, loud snare backbeat — only the
+    // per-bar bass root changes say which kick is "1"
+    const p = 60 / 110
+    const barLen = 4 * p
+    const drums = new Float32Array(Math.floor(SR * 70))
+    const bass = new Float32Array(drums.length)
+    const roots = [82.4, 110, 73.4, 98]
+    let bar = 0
+    for (let t = 0.5; t + barLen < 69; t += barLen, bar++) {
+      addHit(drums, t, 55, 0.9, 0.09, 0.1)
+      addHit(drums, t + 2 * p, 55, 0.9, 0.09, 0.1)
+      addHit(drums, t + 1 * p, 220, 1.0, 0.05, 1.2)
+      addHit(drums, t + 3 * p, 220, 1.0, 0.05, 1.2)
+      addRoot(bass, t, t + barLen, roots[bar % 4])
+    }
+    for (let i = 0; i < drums.length; i++) drums[i] += 0.002 * (rnd() * 2 - 1)
+    const det = detectBeats(wrap(drums), { bass: wrap(bass) })
+    expect(det).not.toBeNull()
+    expect(det!.beatsPerBar).toBe(4)
+    for (const m of [4, 8, 12]) expect(accentAt(det!, 0.5 + m * barLen)).toBe(0)
+  })
+
+  it('pins the downbeat on a band entrance out of silence', () => {
+    const p = 60 / 100
+    const barLen = 4 * p
+    const start = 14.5
+    const drums = new Float32Array(Math.floor(SR * 75))
+    for (let t = start; t + barLen < 74; t += barLen) {
+      addHit(drums, t, 55, t === start ? 1.3 : 1.0, 0.09, 0.1)
+      addHit(drums, t + 2 * p, 55, 0.55, 0.09, 0.1)
+      addHit(drums, t + 1 * p, 220, 0.5, 0.05, 1.2)
+      addHit(drums, t + 3 * p, 220, 0.5, 0.05, 1.2)
+    }
+    for (let i = 0; i < drums.length; i++) drums[i] += 0.002 * (rnd() * 2 - 1)
+    const det = detectBeats(wrap(drums))
+    expect(det).not.toBeNull()
+    for (const m of [2, 6, 10]) expect(accentAt(det!, start + m * barLen)).toBe(0)
+  })
+
+  it('recognizes 6/8 and accents its bars, not the mid-bar tom', () => {
+    // eighths at 140: kick on 1, big tom mid-bar (the NEM pattern), hats on
+    // every eighth, chords changing per 6-eighth bar
+    const p = 60 / 140
+    const barLen = 6 * p
+    const drums = new Float32Array(Math.floor(SR * 70))
+    const bass = new Float32Array(drums.length)
+    const roots = [82.4, 110, 73.4, 98]
+    let bar = 0
+    for (let t = 0.4; t + barLen < 69; t += barLen, bar++) {
+      addHit(drums, t, 55, 1.0, 0.09, 0.1)
+      addHit(drums, t + 3 * p, 90, 1.1, 0.09, 0.3)
+      for (let e = 0; e < 6; e++) addHit(drums, t + e * p, 900, 0.18, 0.015, 1.5)
+      addRoot(bass, t, t + barLen, roots[bar % 4])
+    }
+    for (let i = 0; i < drums.length; i++) drums[i] += 0.002 * (rnd() * 2 - 1)
+    const det = detectBeats(wrap(drums), { bass: wrap(bass) })
+    expect(det).not.toBeNull()
+    expect(det!.beatsPerBar).toBe(6)
+    for (const m of [4, 10, 16]) expect(accentAt(det!, 0.4 + m * barLen)).toBe(0)
+  })
+
+  it('re-phases across a fermata so both halves accent their own bars', () => {
+    // section B re-enters shifted by half a bar relative to section A's grid —
+    // the silent gap's filler beats must absorb the difference
+    const p = 60 / 100
+    const barLen = 4 * p
+    const drums = new Float32Array(Math.floor(SR * 75))
+    const bass = new Float32Array(drums.length)
+    const roots = [82.4, 110, 73.4, 98]
+    const mkSection = (start: number, until: number): void => {
+      let bar = 0
+      for (let t = start; t + barLen < until; t += barLen, bar++) {
+        addHit(drums, t, 55, 1.0, 0.09, 0.1)
+        addHit(drums, t + 2 * p, 55, 0.5, 0.09, 0.1)
+        addHit(drums, t + 1 * p, 220, 0.5, 0.05, 1.2)
+        addHit(drums, t + 3 * p, 220, 0.5, 0.05, 1.2)
+        addRoot(bass, t, t + barLen, roots[bar % 4])
+      }
+    }
+    const aStart = 0.5
+    mkSection(aStart, 30)
+    const bStart = aStart + 62 * p // 62 beats on = grid, but ≡ +2 beats in bar phase
+    mkSection(bStart, 74)
+    for (let i = 0; i < drums.length; i++) drums[i] += 0.002 * (rnd() * 2 - 1)
+    const det = detectBeats(wrap(drums), { bass: wrap(bass) })
+    expect(det).not.toBeNull()
+    expect(Math.abs(det!.bpm - 100)).toBeLessThan(1)
+    for (const m of [2, 6, 10]) expect(accentAt(det!, aStart + m * barLen)).toBe(0)
+    for (const m of [1, 4, 8]) expect(accentAt(det!, bStart + m * barLen)).toBe(0)
   })
 })
