@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Platform,
   Pressable,
@@ -19,11 +20,14 @@ import {
   driveListProjects,
   driveSignedIn,
   driveSignIn,
-  driveSignOut
+  driveSignOut,
+  driveStoredProjects
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
+  cacheUsage,
+  clearCache,
   clearRoot,
   getRoot,
   listProjects,
@@ -58,6 +62,9 @@ interface Loading {
   frac: number
 }
 
+const fmtSize = (bytes: number): string =>
+  bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`
+
 export default function CatalogScreen({
   sampleRate,
   onLoaded
@@ -75,36 +82,64 @@ export default function CatalogScreen({
   const [driveEmail, setDriveEmail] = useState<string | null>(null)
   const [driveOn, setDriveOn] = useState(false)
   const [pulling, setPulling] = useState(false)
+  /** Bytes each project occupies on this phone — 0/absent means not downloaded. */
+  const [usage, setUsage] = useState<Record<string, number>>({})
+  /** The listing on screen is the stored one; the refresh behind it failed. */
+  const [offline, setOffline] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
 
-  const refresh = useCallback(async (force = false) => {
-    try {
-      setError(null)
-      if (mode === 'gdrive') {
-        setRoot({ kind: 'picked', path: 'gdrive', name: 'Google Drive' })
-        const signed = await driveSignedIn()
-        setDriveOn(signed)
-        if (!signed) {
-          setProjects([])
-          return
+  const loadUsage = useCallback(async () => {
+    const rows = await cacheUsage()
+    const map: Record<string, number> = {}
+    for (const r of rows) map[r.project] = r.bytes
+    setUsage(map)
+  }, [])
+
+  const refresh = useCallback(
+    async (force = false) => {
+      try {
+        setError(null)
+        if (mode === 'gdrive') {
+          setRoot({ kind: 'picked', path: 'gdrive', name: 'Google Drive' })
+          const signed = await driveSignedIn()
+          setDriveOn(signed)
+          if (!signed) {
+            setProjects([])
+            return
+          }
+          setDriveEmail(await driveAccountEmail())
+          // Last sync first, always: a cold start — and every start without
+          // signal — lands on a usable library instead of a spinner, and the
+          // refresh happens underneath it.
+          const stored = await driveStoredProjects()
+          if (stored?.length) setProjects(stored)
+          // nothing stored: clear the previous mode's cards only when the list
+          // will actually hit the network (coming back from a song serves the
+          // in-memory cache and must not flash a spinner)
+          else if (force || !driveListIsFresh()) setProjects(null)
+          try {
+            setProjects(await driveListProjects(force))
+            setOffline(false)
+          } catch (e) {
+            // No signal is not an error when the phone already knows the
+            // library — say so quietly rather than replacing a working
+            // catalog with red text.
+            if (!stored?.length) throw e
+            setOffline(true)
+          }
+        } else {
+          setRoot(await getRoot())
+          setProjects(await listProjects())
         }
-        setDriveEmail(await driveAccountEmail())
-        // clear the previous mode's cards only when the list will actually
-        // hit the network — coming back from a song serves the cache and
-        // must not flash a spinner (a stale list with no spinner reads as
-        // a frozen screen; a spinner on every return reads as re-downloading)
-        if (force || !driveListIsFresh()) setProjects(null)
-        setProjects(await driveListProjects(force))
-      } else {
-        setRoot(await getRoot())
-        setProjects(await listProjects())
+        void loadUsage()
+      } catch (e) {
+        setError(String(e instanceof Error ? e.message : e))
+        setProjects([])
       }
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e))
-      setProjects([])
-    }
-  }, [mode])
+    },
+    [mode, loadUsage]
+  )
 
   useEffect(() => {
     void refresh()
@@ -171,6 +206,51 @@ export default function CatalogScreen({
     token.current++
     setLoading(null)
   }, [])
+
+  const forget = useCallback(
+    async (project: string) => {
+      try {
+        await clearCache(project)
+        await loadUsage()
+      } catch (e) {
+        setError(String(e instanceof Error ? e.message : e))
+      }
+    },
+    [loadUsage]
+  )
+
+  /** Long-press a downloaded song: drop its files, keep it in the library. */
+  const confirmForget = useCallback(
+    (entry: ProjectEntry) => {
+      const have = usage[entry.dir] ?? 0
+      if (have <= 0) return
+      Alert.alert(
+        entry.doc.name ?? entry.dir,
+        `Remove ${fmtSize(have)} from this phone? The song stays in your library — ` +
+          'opening it again downloads it back.',
+        [
+          { text: 'Keep it', style: 'cancel' },
+          { text: 'Remove', style: 'destructive', onPress: () => void forget(entry.dir) }
+        ]
+      )
+    },
+    [forget, usage]
+  )
+
+  const confirmForgetAll = useCallback(
+    (total: number) => {
+      Alert.alert(
+        'Free up space',
+        `Delete ${fmtSize(total)} of downloaded songs? They stay in your library — ` +
+          'you can download them again whenever you have signal.',
+        [
+          { text: 'Keep them', style: 'cancel' },
+          { text: 'Delete', style: 'destructive', onPress: () => void forget('') }
+        ]
+      )
+    },
+    [forget]
+  )
 
   const openEntry = useCallback(
     async (entry: ProjectEntry) => {
@@ -257,6 +337,9 @@ export default function CatalogScreen({
     TEST.listError = error
     TEST.busy = loading?.msg ?? null
     TEST.loadingFrac = loading?.frac ?? null
+    TEST.usage = usage
+    TEST.offline = offline
+    TEST.forget = forget
   })
 
   const card = (opts: {
@@ -268,12 +351,14 @@ export default function CatalogScreen({
     right: React.ReactNode
     sample?: boolean
     onPress: () => void
+    onLongPress?: () => void
   }): React.JSX.Element => {
     const isLoading = loading?.dir === opts.dir
     return (
       <Pressable
         key={opts.key}
         onPress={opts.onPress}
+        onLongPress={opts.onLongPress}
         style={({ pressed }) => [
           s.card,
           opts.sample && s.cardSample,
@@ -342,7 +427,9 @@ export default function CatalogScreen({
             (driveOn ? (
               <>
                 <Text style={s.ctxWho} numberOfLines={1}>
-                  {driveEmail ?? 'Signed in to Google Drive'}
+                  {offline
+                    ? 'No signal — showing your last sync'
+                    : (driveEmail ?? 'Signed in to Google Drive')}
                 </Text>
                 <Text style={s.ctxDot}>·</Text>
                 <Pressable
@@ -403,8 +490,12 @@ export default function CatalogScreen({
             />
           }
         >
-          {(projects ?? []).map((p) =>
-            card({
+          {(projects ?? []).map((p) => {
+            // A song counts as downloaded once its files are all here; a
+            // half-finished fetch keeps the cloud mark and its remaining size.
+            const have = usage[p.dir] ?? 0
+            const downloaded = p.cached || (p.bytes > 0 && have + 1024 >= p.bytes)
+            return card({
               key: p.dir,
               dir: p.dir,
               hue: Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3,
@@ -418,13 +509,14 @@ export default function CatalogScreen({
                 </>
               ),
               right: (
-                <Text style={s.status}>
-                  {p.cached ? '✓' : p.bytes > 0 ? `☁ ${Math.max(1, Math.round(p.bytes / 1e6))} MB` : '☁'}
+                <Text style={[s.status, downloaded && s.statusHave]}>
+                  {downloaded ? '✓' : p.bytes > 0 ? `☁ ${fmtSize(p.bytes)}` : '☁'}
                 </Text>
               ),
-              onPress: () => void openEntry(p)
+              onPress: () => void openEntry(p),
+              onLongPress: () => confirmForget(p)
             })
-          )}
+          })}
           {projects === null && (
             <View style={{ alignItems: 'center', paddingVertical: 36 }}>
               <ActivityIndicator color={C.amber} />
@@ -450,6 +542,22 @@ export default function CatalogScreen({
             sample: true,
             onPress: () => void openSample()
           })}
+          {(() => {
+            const dirs = Object.keys(usage).filter((d) => usage[d] > 0)
+            const total = dirs.reduce((n, d) => n + usage[d], 0)
+            if (total <= 0) return null
+            return (
+              <View style={s.storage}>
+                <Text style={s.storageText}>
+                  {dirs.length} song{dirs.length > 1 ? 's' : ''} on this phone · {fmtSize(total)} —
+                  playable without internet
+                </Text>
+                <Pressable hitSlop={8} onPress={() => confirmForgetAll(total)}>
+                  <Text style={s.ctxLink}>Free up space</Text>
+                </Pressable>
+              </View>
+            )
+          })()}
           {error && <Text style={s.err}>{error}</Text>}
         </ScrollView>
       </View>
@@ -495,6 +603,16 @@ const s = StyleSheet.create({
   cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
   cardMeta: { color: 'rgba(255,255,255,0.42)', fontSize: 12.5, marginTop: 3 },
   status: { color: 'rgba(255,255,255,0.35)', fontSize: 12, fontWeight: '600' },
+  statusHave: { color: 'rgba(255,255,255,0.62)' },
+  storage: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginTop: 6,
+    paddingHorizontal: 2
+  },
+  storageText: { color: 'rgba(255,255,255,0.35)', fontSize: 12, flexShrink: 1 },
   cancelBtn: {
     width: 30,
     height: 30,

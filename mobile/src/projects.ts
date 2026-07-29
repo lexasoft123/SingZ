@@ -16,6 +16,15 @@ interface FolderAccessApi {
   listProjects(): Promise<NativeProject[]>
   readText(project: string, file: string): Promise<string>
   localFile(project: string, file: string): Promise<string>
+  cacheUsage(): Promise<CacheUsage[]>
+  clearCache(project: string): Promise<boolean>
+}
+
+/** What one project's downloaded files occupy on this phone. */
+export interface CacheUsage {
+  project: string
+  bytes: number
+  files: number
 }
 
 export interface RootInfo {
@@ -52,6 +61,21 @@ const Folder = NativeModules.FolderAccess as FolderAccessApi
 export const getRoot = (): Promise<RootInfo> => Folder.getRoot()
 export const pickFolder = (): Promise<RootInfo | null> => Folder.pickFolder()
 export const clearRoot = (): Promise<RootInfo> => Folder.clearRoot()
+
+/** Downloaded songs on this phone — older builds have no such native method. */
+export const cacheUsage = (): Promise<CacheUsage[]> =>
+  Folder.cacheUsage ? Folder.cacheUsage().catch(() => []) : Promise.resolve([])
+
+/**
+ * Delete one project's downloaded files ('' = all of them), and forget the
+ * hashes that go with them so the next open fetches rather than trusting a
+ * file that is no longer there.
+ */
+export async function clearCache(project = ''): Promise<void> {
+  await Folder.clearCache(project)
+  const { driveForgetCached } = await import('./gdrive')
+  await driveForgetCached(project)
+}
 
 export async function listProjects(): Promise<ProjectEntry[]> {
   const raw = await Folder.listProjects()

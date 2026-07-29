@@ -36,8 +36,14 @@ Load files through the hidden `<input type=file>` — same code
 path as drag-drop. Read the screenshots you take. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
-(`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`): CDP over
-Metro against the iOS Simulator — run them after engine or loading changes.
+(`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
+`offline-cache.cjs`): CDP over Metro against the iOS Simulator — run them
+after engine or loading changes. Pure-JS mobile logic that no device can show
+(the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
+— needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
+our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
+and `jest.setup.js` to stub audio-api + the pods (they throw on import with no
+native module).
 Driving **Android** over CDP: never evaluate JS while a decode is in flight —
 the Hermes inspector segfaults the app mid-`decodeAudioData` (looks exactly
 like an OOM: SIGSEGV at 0x0 on `mqt_v_js` in libhermesvm, ~9 s into loading a
@@ -125,6 +131,20 @@ answer your evals while you measure the phone.
   rename act **in place**; `importProject` is the only thing that relocates a
   project, and only when the user asks. Anything that moves a project folder
   has to `allowRoot` the destination — the old entry does not follow it.
+- **The phone's copy of a song is durable, and re-fetch is decided by md5** —
+  downloaded stems live in `Library/Application Support/singz-projects` (iOS,
+  excluded from backup) and `filesDir/singz-projects` (Android), NOT in
+  Caches/cacheDir: the OS empties those under storage pressure and the song
+  silently downloads again. Both natives adopt the old cache dir once on first
+  use. `fetchToCache` only short-circuits on a size match, which is the wrong
+  question — a re-split WAV is the same length and different audio — so JS
+  keeps the md5 of every file it fetched (`singz.gdrive.have`) and passes
+  `expectedBytes: 0` to force a real download when it differs. The Drive
+  listing is persisted too (`singz.gdrive.catalog`, file ids included), so the
+  catalog opens instantly, works with no signal, and refreshes silently behind
+  what is already on screen; `driveLocalFile` tolerates a token it cannot
+  refresh offline, because the native short-circuit happens before the URL is
+  used. Anything that deletes cached files must also `driveForgetCached`.
 - **Google Drive sync needs no Drive clients**: drive.file scope (no Google
   verification), one Desktop-type OAuth client for every platform (loopback
   flow — Android listens on 127.0.0.1 natively). Desktop pushes the library

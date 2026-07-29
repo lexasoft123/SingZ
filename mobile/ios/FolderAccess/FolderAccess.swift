@@ -27,9 +27,44 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
   }
 
-  private func cachesURL() -> URL {
-    FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+  /**
+   * Downloaded stems live in Application Support, NOT Caches: iOS evicts
+   * Caches under storage pressure, and re-fetching a song the phone already
+   * has is exactly what an offline library exists to prevent. Excluded from
+   * iCloud backup — these are reproducible copies of files that live in Drive
+   * or a synced folder, and a few hundred MB a song has no business in a
+   * device backup. Whatever the old cache still holds is adopted once rather
+   * than downloaded again.
+   */
+  private func cacheRootURL() -> URL {
+    let fm = FileManager.default
+    var base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("singz-projects", isDirectory: true)
+    if !fm.fileExists(atPath: base.path) {
+      try? fm.createDirectory(
+        at: base.deletingLastPathComponent(), withIntermediateDirectories: true)
+      let old = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("singz-projects", isDirectory: true)
+      if fm.fileExists(atPath: old.path) {
+        try? fm.moveItem(at: old, to: base)
+        NSLog("SingZ cache: adopted %@ into Application Support", old.path)
+      }
+      if !fm.fileExists(atPath: base.path) {
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+      }
+      var vals = URLResourceValues()
+      vals.isExcludedFromBackup = true
+      try? base.setResourceValues(vals)
+    }
+    return base
+  }
+
+  /** Cache folder for one project, or nil when the name is not a plain child. */
+  private func cacheDirFor(_ project: String) -> URL? {
+    guard !project.isEmpty, !project.contains("/"), project != "..", project != "." else {
+      return nil
+    }
+    return cacheRootURL().appendingPathComponent(project, isDirectory: true)
   }
 
   /** Resolve + retain the active root (picked bookmark if present, else Documents). */
@@ -288,10 +323,19 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     _ project: NSString, file: NSString,
     resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock
   ) {
-    let src = activateRoot().url
+    let root = activateRoot()
+    let src = root.url
       .appendingPathComponent(project as String, isDirectory: true)
       .appendingPathComponent(file as String)
-    let dstDir = cachesURL().appendingPathComponent(project as String, isDirectory: true)
+    // Files in the app's own Documents are already plain local paths, so hand
+    // one straight back (Android has always done this). Copying them into the
+    // download folder would now duplicate every stem for good, that folder no
+    // longer being something the OS clears out.
+    if root.kind == "documents", FileManager.default.fileExists(atPath: src.path) {
+      resolve(src.path)
+      return
+    }
+    let dstDir = cacheRootURL().appendingPathComponent(project as String, isDirectory: true)
     let dst = dstDir.appendingPathComponent((file as String).replacingOccurrences(of: "/", with: "_"))
     let fm = FileManager.default
     do {
@@ -306,6 +350,64 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
       resolve(dst.path)
     } catch {
       reject("local_failed", "\(file): \(error.localizedDescription)", error)
+    }
+  }
+
+  /** What each project occupies on this phone — powers the ✓ and the size line. */
+  @objc func cacheUsage(
+    _ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let fm = FileManager.default
+    let root = cacheRootURL()
+    var out: [[String: Any]] = []
+    let dirs =
+      (try? fm.contentsOfDirectory(
+        at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [])) ?? []
+    for dir in dirs {
+      guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else {
+        continue
+      }
+      var bytes: Int64 = 0
+      var files = 0
+      if let walk = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
+        for case let f as URL in walk {
+          if let size = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+            bytes += Int64(size)
+            files += 1
+          }
+        }
+      }
+      if files > 0 {
+        out.append(["project": dir.lastPathComponent, "bytes": bytes, "files": files])
+      }
+    }
+    resolve(out)
+  }
+
+  /** Drop one project's downloaded files, or everything when project is "". */
+  @objc func clearCache(
+    _ project: NSString,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let name = project as String
+    let target: URL
+    if name.isEmpty {
+      target = cacheRootURL()
+    } else {
+      guard let dir = cacheDirFor(name) else {
+        reject("clear", "Bad project name", nil)
+        return
+      }
+      target = dir
+    }
+    do {
+      if FileManager.default.fileExists(atPath: target.path) {
+        try FileManager.default.removeItem(at: target)
+      }
+      resolve(true)
+    } catch {
+      reject("clear", "Could not free that space: \(error.localizedDescription)", error)
     }
   }
 
@@ -457,7 +559,7 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
       reject("fetch", "Bad download URL for \(file)", nil)
       return
     }
-    let out = cachesURL().appendingPathComponent(project, isDirectory: true)
+    let out = cacheRootURL().appendingPathComponent(project, isDirectory: true)
       .appendingPathComponent(file)
     let fm = FileManager.default
     if fm.fileExists(atPath: out.path), expectedBytes.int64Value > 0,

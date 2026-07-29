@@ -88,9 +88,14 @@ export async function driveSignedIn(): Promise<boolean> {
   return (await readTokens()) !== null
 }
 
-export const driveSignOut = (): Promise<void> => {
+export const driveSignOut = async (): Promise<void> => {
   listCache = null
-  return writeTokens(null)
+  restored = true // nothing on disk to fall back to any more
+  projectFiles.clear()
+  await Prefs.setTextPref(CATALOG_KEY, '')
+  // downloaded stems stay: signing back into the same account should not
+  // re-fetch a library the phone already holds
+  await writeTokens(null)
 }
 
 /** Sign in with the system browser + loopback redirect. Resolves when done. */
@@ -214,6 +219,58 @@ interface DriveFile {
   name: string
   mimeType: string
   size?: string
+  /** Drive's content hash — "same bytes?" that size alone cannot answer. */
+  md5Checksum?: string
+}
+
+const CATALOG_KEY = 'singz.gdrive.catalog'
+const HAVE_KEY = 'singz.gdrive.have'
+const TEXT_KEY = 'singz.gdrive.text'
+
+async function readJson<T>(key: string, fallback: T): Promise<T> {
+  try {
+    const raw = await Prefs.getTextPref(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+const writeJson = (key: string, value: unknown): Promise<void> =>
+  Prefs.setTextPref(key, JSON.stringify(value))
+
+/**
+ * md5 of every file this phone has actually downloaded, keyed "<project>/<file>".
+ * The native fetch skips a download when the cached file's size matches, which
+ * is not the same question: a re-split WAV is byte-for-byte the same length and
+ * completely different audio. Kept in memory too — one open asks six times.
+ */
+let haveCache: Record<string, string> | null = null
+
+async function haveMap(): Promise<Record<string, string>> {
+  if (!haveCache) haveCache = await readJson<Record<string, string>>(HAVE_KEY, {})
+  return haveCache
+}
+
+async function rememberHave(key: string, md5: string): Promise<void> {
+  const map = await haveMap()
+  map[key] = md5
+  await writeJson(HAVE_KEY, map)
+}
+
+/** Forget what we had of a project — pairs with clearing its files. */
+export async function driveForgetCached(project: string): Promise<void> {
+  const map = await haveMap()
+  const prefix = project ? `${project}/` : ''
+  for (const key of Object.keys(map)) {
+    if (!project || key.startsWith(prefix)) delete map[key]
+  }
+  await writeJson(HAVE_KEY, map)
+  const texts = await readJson<Record<string, string>>(TEXT_KEY, {})
+  for (const key of Object.keys(texts)) {
+    if (!project || key.startsWith(prefix)) delete texts[key]
+  }
+  await writeJson(TEXT_KEY, texts)
 }
 
 async function api<T>(path: string): Promise<T> {
@@ -232,7 +289,7 @@ async function listChildren(parentId: string): Promise<DriveFile[]> {
   do {
     const page = await api<{ files: DriveFile[]; nextPageToken?: string }>(
       `/drive/v3/files?q=${q(`'${parentId}' in parents and trashed=false`)}` +
-        `&fields=nextPageToken,files(id,name,mimeType,size)&pageSize=1000` +
+        `&fields=nextPageToken,files(id,name,mimeType,size,md5Checksum)&pageSize=1000` +
         (pageToken ? `&pageToken=${pageToken}` : '')
     )
     out.push(...page.files)
@@ -269,6 +326,59 @@ let listCache: { at: number; entries: ProjectEntry[] } | null = null
 
 export function driveListIsFresh(): boolean {
   return listCache !== null && Date.now() - listCache.at < LIST_TTL_MS
+}
+
+interface StoredCatalog {
+  entries: ProjectEntry[]
+  /** Drive ids per project — without these a restored catalog cannot stream. */
+  files: Record<string, { byName: Record<string, DriveFile>; stemsByName: Record<string, DriveFile> }>
+}
+
+let restored = false
+
+/**
+ * The last listing, as persisted on this device. Serves the catalog instantly
+ * on a cold start and is the whole library when there is no signal — the file
+ * ids come back with it, so an already-downloaded song still opens offline.
+ * Deliberately not marked fresh: whoever shows it also refreshes underneath.
+ */
+export async function driveStoredProjects(): Promise<ProjectEntry[] | null> {
+  if (restored) return listCache?.entries ?? null
+  restored = true
+  try {
+    const doc = await readJson<StoredCatalog | null>(CATALOG_KEY, null)
+    if (!doc?.entries?.length) return null
+    for (const [dir, f] of Object.entries(doc.files ?? {})) {
+      projectFiles.set(dir, {
+        byName: new Map(Object.entries(f.byName ?? {})),
+        stemsByName: new Map(Object.entries(f.stemsByName ?? {}))
+      })
+    }
+    listCache = { at: 0, entries: doc.entries }
+    return doc.entries
+  } catch {
+    return null
+  }
+}
+
+async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
+  const files: StoredCatalog['files'] = {}
+  for (const entry of entries) {
+    const f = projectFiles.get(entry.dir)
+    // only what is still listed — a project deleted on the desktop must not
+    // linger in the offline catalog forever
+    if (f) {
+      files[entry.dir] = {
+        byName: Object.fromEntries(f.byName),
+        stemsByName: Object.fromEntries(f.stemsByName)
+      }
+    }
+  }
+  try {
+    await writeJson(CATALOG_KEY, { entries, files } satisfies StoredCatalog)
+  } catch {
+    // a catalog we cannot persist is not worth failing a refresh over
+  }
 }
 
 export async function driveListProjects(force = false): Promise<ProjectEntry[]> {
@@ -326,6 +436,8 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
   }
   out.sort((a, b) => ((a.doc.savedAt ?? '') < (b.doc.savedAt ?? '') ? 1 : -1))
   listCache = { at: Date.now(), entries: out }
+  restored = true // this listing supersedes anything on disk
+  await persistCatalog(out)
   return out
 }
 
@@ -336,25 +448,74 @@ export async function driveLocalFile(project: string, file: string): Promise<str
   const name = file.startsWith('stems/') ? file.slice(6) : file
   const entry = file.startsWith('stems/') ? files.stemsByName.get(name) : files.byName.get(name)
   if (!entry) throw new Error(`${file} is missing from Drive`)
-  const token = await accessToken()
-  return Native.fetchToCache(
+
+  // Same bytes as the copy we already fetched? Then hand the native side the
+  // expected size and its short-circuit serves the cached file untouched.
+  // Different (or never fetched) forces a real download: passing 0 defeats
+  // that short-circuit, which is what a same-size-different-audio re-split
+  // needs. With no md5 at all, fall back to the plain size check.
+  const key = `${project}/${file}`
+  const want = entry.md5Checksum ?? ''
+  const fresh = want === '' || (await haveMap())[key] === want
+
+  // The short-circuit happens before the URL is ever used, so a cached stem
+  // opens with no signal at all — but only if we don't insist on a token
+  // first. An expired one can't be refreshed offline.
+  let auth = ''
+  try {
+    auth = `Bearer ${await accessToken()}`
+  } catch (e) {
+    if (!fresh) throw e
+  }
+
+  const path = await Native.fetchToCache(
     project,
     file,
     `${API()}/drive/v3/files/${entry.id}?alt=media`,
-    `Bearer ${token}`,
-    Number(entry.size ?? 0)
+    auth,
+    fresh ? Number(entry.size ?? 0) : 0
   )
+  if (want && !fresh) await rememberHave(key, want)
+  return path
 }
 
+/**
+ * Small text members (lyrics.json). Kept on the phone after a successful read
+ * so an offline open of a downloaded song still gets its words — the stems
+ * being cached and the lyrics silently vanishing would be a poor trade.
+ */
 export async function driveReadText(project: string, file: string): Promise<string> {
   const files = projectFiles.get(project)
   if (!files) throw new Error(`Project ${project} was not listed from Drive`)
   const entry = files.byName.get(file)
   if (!entry) throw new Error(`${file} is missing from Drive`)
-  const token = await accessToken()
-  const res = await fetch(`${API()}/drive/v3/files/${entry.id}?alt=media`, {
-    headers: { Authorization: `Bearer ${token}` }
-  })
-  if (!res.ok) throw new Error(`Drive read failed (${res.status}) for ${file}`)
-  return await res.text()
+  const key = `${project}/${file}`
+  try {
+    const token = await accessToken()
+    const res = await fetch(`${API()}/drive/v3/files/${entry.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    if (!res.ok) throw new Error(`Drive read failed (${res.status}) for ${file}`)
+    const text = await res.text()
+    void keepText(key, text)
+    return text
+  } catch (e) {
+    const kept = (await readJson<Record<string, string>>(TEXT_KEY, {}))[key]
+    if (kept !== undefined) return kept
+    throw e
+  }
+}
+
+/** Lyrics for the most recently opened songs; older ones fall off the end. */
+async function keepText(key: string, text: string): Promise<void> {
+  try {
+    const all = await readJson<Record<string, string>>(TEXT_KEY, {})
+    delete all[key] // re-insert so the freshest sits last
+    all[key] = text
+    const keys = Object.keys(all)
+    for (const stale of keys.slice(0, Math.max(0, keys.length - 40))) delete all[stale]
+    await writeJson(TEXT_KEY, all)
+  } catch {
+    // a lyrics copy we cannot keep is not worth failing the read over
+  }
 }

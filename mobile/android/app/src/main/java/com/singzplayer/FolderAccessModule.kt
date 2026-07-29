@@ -127,8 +127,80 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   private fun index(dir: DocumentFile): Map<String, DocumentFile> =
     dir.listFiles().mapNotNull { f -> f.name?.let { it to f } }.toMap()
 
+  /**
+   * Downloaded stems live in filesDir, NOT cacheDir: Android reclaims the
+   * cache under storage pressure, and re-fetching a song the phone already
+   * has is exactly what an offline library exists to prevent. Whatever the
+   * old cache still holds is adopted once rather than downloaded again.
+   */
+  private fun cacheRoot(): File {
+    val base = File(ctx.filesDir, "singz-projects")
+    if (!base.exists()) {
+      val old = File(ctx.cacheDir, "singz-projects")
+      if (old.isDirectory) old.renameTo(base)
+      if (!base.exists()) base.mkdirs()
+    }
+    return base
+  }
+
+  /** Cache folder for one project, or null when the name is not a plain child. */
+  private fun cacheDirFor(project: String): File? =
+    if (project.isEmpty() || project.contains("/") || project == ".." || project == ".") null
+    else File(cacheRoot(), project)
+
   private fun cacheFile(project: String, file: String): File =
-    File(File(File(ctx.cacheDir, "singz-projects"), project), file)
+    File(File(cacheRoot(), project), file)
+
+  /** What each project occupies on this phone — powers the ✓ and the size line. */
+  @ReactMethod
+  fun cacheUsage(promise: Promise) {
+    exec.execute {
+      try {
+        val arr = Arguments.createArray()
+        for (dir in cacheRoot().listFiles().orEmpty()) {
+          if (!dir.isDirectory) continue
+          var bytes = 0L
+          var files = 0
+          dir.walkTopDown().forEach { f ->
+            if (f.isFile) {
+              bytes += f.length()
+              files++
+            }
+          }
+          if (files > 0) {
+            val m = Arguments.createMap()
+            m.putString("project", dir.name)
+            m.putDouble("bytes", bytes.toDouble())
+            m.putInt("files", files)
+            arr.pushMap(m)
+          }
+        }
+        promise.resolve(arr)
+      } catch (e: Exception) {
+        promise.reject("usage", e.message ?: "Cannot measure the download folder")
+      }
+    }
+  }
+
+  /** Drop one project's downloaded files, or everything when project is "". */
+  @ReactMethod
+  fun clearCache(project: String, promise: Promise) {
+    exec.execute {
+      try {
+        val target = if (project.isEmpty()) cacheRoot() else cacheDirFor(project)
+        if (target == null) {
+          promise.reject("clear", "Bad project name")
+          return@execute
+        }
+        if (target.exists() && !target.deleteRecursively()) {
+          throw Exception("Could not free that space")
+        }
+        promise.resolve(true)
+      } catch (e: Exception) {
+        promise.reject("clear", e.message ?: "Could not free that space")
+      }
+    }
+  }
 
   @ReactMethod
   fun listProjects(promise: Promise) {

@@ -19,6 +19,12 @@ RCT_EXTERN_METHOD(localFile : (NSString *)project
                   resolve : (RCTPromiseResolveBlock)resolve
                   reject : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(cacheUsage : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(clearCache : (NSString *)project
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(oauthStart : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(oauthWait : (RCTPromiseResolveBlock)resolve
