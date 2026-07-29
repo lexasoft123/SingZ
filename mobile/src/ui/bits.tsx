@@ -294,7 +294,7 @@ export const b = StyleSheet.create({
   },
   chipText: { color: 'rgba(255,255,255,0.6)', fontSize: 13.5, fontWeight: '700' },
   stepRow: { flexDirection: 'row', alignItems: 'center', gap: 13, marginTop: 12 },
-  stepLabel: { color: C.text, fontSize: 14.5, width: 56 },
+  stepLabel: { color: C.text, fontSize: 14.5, width: 78 }, // "Loudness"/"Interval" must not wrap
   stepBtn: {
     width: 33,
     height: 33,

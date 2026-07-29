@@ -6,11 +6,16 @@ import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
 import {
   fmtTime,
+  MET_DEFAULTS,
+  sanitizeBeatInfo,
+  sanitizeMetronome,
   sanitizeTraining,
   singMask,
   trainingWindows,
   TRACK_META,
   TRAIN_DEFAULTS,
+  type BeatInfo,
+  type MetronomeConfig,
   type TrainingConfig
 } from '../model'
 import type { LoadedProject } from '../projects'
@@ -49,6 +54,12 @@ export default function PlayerScreen({
   /** Key & speed — UI + persistence-ready; audio lands with the pitch engine. */
   const [ktPitch, setKtPitch] = useState(0)
   const [ktTempo, setKtTempo] = useState(100)
+  /** Beat track from the project (desktop-saved) + metronome session prefs. */
+  const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(null)
+  const [met, setMet] = useState<MetronomeConfig>(MET_DEFAULTS)
+  const [countInSt, setCountInSt] = useState<{ total: number; done: number; perBar: number } | null>(
+    null
+  )
 
   perf.commit()
 
@@ -72,6 +83,8 @@ export default function PlayerScreen({
       }
       setKtPitch(Math.round(st.transpose ?? 0))
       setKtTempo(Math.round((st.tempo ?? 1) * 100))
+      setBeatInfo(sanitizeBeatInfo(st.beat))
+      setMet(st.metronome ? sanitizeMetronome(st.metronome) : MET_DEFAULTS)
     }
     return () => {
       // unload, not pause: leaving the player must release the stems (see
@@ -86,14 +99,27 @@ export default function PlayerScreen({
       setDucked(engine.duckedStems)
       setPlaying(engine.playing)
       setPos(engine.position)
+      setCountInSt(engine.countInStatus)
     })
   }, [engine])
 
   useEffect(() => {
     if (!playing) return
-    const t = setInterval(() => setPos(engine.position), 100)
+    const t = setInterval(() => {
+      setPos(engine.position)
+      setCountInSt(engine.countInStatus)
+    }, 100)
     return () => clearInterval(t)
   }, [engine, playing])
+
+  /* Beat track + metronome prefs -> engine. */
+  useEffect(() => {
+    engine.setBeats(beatInfo)
+  }, [engine, beatInfo])
+
+  useEffect(() => {
+    engine.setMetronome(met)
+  }, [engine, met])
 
   /* Route-latency compensation (auto + persisted per-route trim). */
   useEffect(() => {
@@ -346,6 +372,17 @@ export default function PlayerScreen({
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
       <View style={[s.foot, navPad]}>
+        {countInSt && (
+          <Text style={s.countInFoot}>
+            {Array.from({ length: countInSt.total }, (_, i) =>
+              i < countInSt.done ? '●' : '○'
+            ).reduce<string[]>((acc, d, i) => {
+              if (i > 0 && i % countInSt.perBar === 0) acc.push(' ')
+              acc.push(d)
+              return acc
+            }, []).join('')}
+          </Text>
+        )}
         <View style={s.scrubRow}>
           <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
           <View style={{ flex: 1 }}>
@@ -365,6 +402,10 @@ export default function PlayerScreen({
         <View style={s.btnRow}>
           <RoundBtn onPress={() => setSheet('mixer')}>
             <MixGlyph />
+          </RoundBtn>
+          <RoundBtn onPress={() => engine.seek(0)}>
+            {/* ︎ keeps the glyph monochrome (no emoji rendering) */}
+            <Text style={s.toStartText}>{'⏮︎'}</Text>
           </RoundBtn>
           <RoundBtn onPress={() => engine.seekBy(-5)}>
             <Text style={s.skipText}>−5s</Text>
@@ -480,6 +521,56 @@ export default function PlayerScreen({
               </View>
 
               <View style={b.sec}>
+                <Text style={b.secLab}>Metronome</Text>
+                {beatInfo ? (
+                  <>
+                    <View style={b.segs}>
+                      <Chip
+                        label={met.click ? 'Click on' : 'Click off'}
+                        active={met.click}
+                        onPress={() => setMet((m) => ({ ...m, click: !m.click }))}
+                      />
+                      <Chip
+                        label="No count-in"
+                        active={met.countInBars === 0}
+                        onPress={() => setMet((m) => ({ ...m, countInBars: 0 }))}
+                      />
+                      <Chip
+                        label="1 bar"
+                        active={met.countInBars === 1}
+                        onPress={() => setMet((m) => ({ ...m, countInBars: 1 }))}
+                      />
+                      <Chip
+                        label="2 bars"
+                        active={met.countInBars === 2}
+                        onPress={() => setMet((m) => ({ ...m, countInBars: 2 }))}
+                      />
+                    </View>
+                    <Stepper
+                      label="Loudness"
+                      valueText={`${Math.round(met.volume * 100)}%`}
+                      onStep={(d) => {
+                        setMet((m) => ({
+                          ...m,
+                          volume: Math.max(0, Math.min(1, m.volume + d * 0.1))
+                        }))
+                        engine.previewClick(true)
+                      }}
+                    />
+                    <Text style={b.hint}>
+                      {Math.round(beatInfo.bpm)} bpm from the project — clicks and the count-in
+                      follow the song's own beat, drift and all.
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={b.hint}>
+                    No beat track in this project yet — open the song on desktop (it reads the
+                    beat from the drums) and save the project again.
+                  </Text>
+                )}
+              </View>
+
+              <View style={b.sec}>
                 <Text style={b.secLab}>Vocal training</Text>
                 <View style={b.segs}>
                   <Chip label={training ? 'On' : 'Off'} active={training} onPress={armTraining} />
@@ -590,6 +681,17 @@ const s = StyleSheet.create({
   youChipText: { color: C.amberInk, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
 
   line: { fontSize: 30, lineHeight: 37, fontWeight: '800', letterSpacing: -0.4 },
+  /* metronome count-in: dots fill beat by beat above the scrubber */
+  countInFoot: {
+    color: C.amber,
+    fontSize: 13,
+    letterSpacing: 6,
+    textAlign: 'center',
+    marginBottom: 8,
+    textShadowColor: 'rgba(255,160,40,0.6)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10
+  },
   countIn: {
     color: C.amber,
     fontSize: 11,
@@ -620,6 +722,7 @@ const s = StyleSheet.create({
   tm: { color: 'rgba(255,255,255,0.45)', fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
   btnRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   skipText: { color: 'rgba(255,255,255,0.85)', fontSize: 12.5, fontWeight: '700' },
+  toStartText: { color: 'rgba(255,255,255,0.85)', fontSize: 20, marginTop: -2 },
   play: {
     width: 66,
     height: 66,
