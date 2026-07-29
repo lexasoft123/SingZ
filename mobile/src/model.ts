@@ -25,6 +25,28 @@ export interface LyricsDoc {
   lines: LyricLine[]
 }
 
+/**
+ * The song's beat track (desktop `BeatInfo`): every beat's time in seconds,
+ * ascending — tracked from the drums on desktop, constant when tapped/typed.
+ */
+export interface BeatInfo {
+  beats: number[]
+  bpm: number
+  beatsPerBar: number
+  /** Index into beats of a downbeat — bar accents count from it. */
+  downbeat: number
+  source: 'auto' | 'manual'
+}
+
+/** Metronome preferences (desktop `MetronomeConfig`). */
+export interface MetronomeConfig {
+  click: boolean
+  countInBars: number
+  volume: number
+}
+
+export const MET_DEFAULTS: MetronomeConfig = { click: false, countInBars: 0, volume: 0.7 }
+
 export interface ProjectSettings {
   transpose: number
   tempo?: number
@@ -39,6 +61,10 @@ export interface ProjectSettings {
     sing: number
     stems: string[]
   }
+  /** Beat track driving the metronome and count-in (desktop-saved). */
+  beat?: BeatInfo
+  /** Metronome preferences saved with the project. */
+  metronome?: MetronomeConfig
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
@@ -65,6 +91,43 @@ export const TRAIN_DEFAULTS: TrainingConfig = {
   hear: 1,
   sing: 1,
   stems: ['vocals']
+}
+
+/** Clamp a stored beat track into a valid one (null = unusable/absent). */
+export function sanitizeBeatInfo(raw: unknown): BeatInfo | null {
+  const r = (raw ?? {}) as Record<string, unknown>
+  if (!Array.isArray(r.beats)) return null
+  const beats = r.beats
+    .map(Number)
+    .filter((b) => Number.isFinite(b))
+    .sort((a, b) => a - b)
+    .filter((b, i, arr) => i === 0 || b - arr[i - 1] > 0.05)
+  if (beats.length < 2 || beats.length > 20000) return null
+  const iv = beats.slice(1).map((b, i) => b - beats[i]).sort((a, b) => a - b)
+  const bpm = 60 / iv[Math.floor(iv.length / 2)]
+  if (!(bpm >= 30 && bpm <= 300)) return null
+  const bpb = Number(r.beatsPerBar)
+  const beatsPerBar = [2, 3, 4, 6].includes(bpb) ? bpb : 4
+  const db = Math.round(Number(r.downbeat))
+  return {
+    beats,
+    bpm,
+    beatsPerBar,
+    downbeat: Number.isFinite(db) ? ((db % beatsPerBar) + beatsPerBar) % beatsPerBar : 0,
+    source: r.source === 'auto' ? 'auto' : 'manual'
+  }
+}
+
+/** Clamp stored metronome preferences into valid ones. */
+export function sanitizeMetronome(raw: unknown): MetronomeConfig {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const vol = Number(r.volume)
+  const bars = Math.round(Number(r.countInBars))
+  return {
+    click: r.click === true,
+    countInBars: Number.isFinite(bars) ? Math.max(0, Math.min(2, bars)) : 0,
+    volume: Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : MET_DEFAULTS.volume
+  }
 }
 
 /** Clamp any stored/saved training config into a valid one. */

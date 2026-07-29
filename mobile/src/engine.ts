@@ -5,6 +5,8 @@ import {
   type AudioBufferSourceNode,
   type GainNode
 } from 'react-native-audio-api'
+import { accentIndex, beatIndexAtOrAfter, beatTime } from './beat'
+import { MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
 
 /**
  * Port of the desktop MultitrackEngine (src/renderer/src/audio/engine.ts) onto
@@ -40,6 +42,8 @@ export type TrainingSpec =
   | { mode: 'windows'; windows: { s: number; e: number }[]; stems: string[] }
 
 const START_DELAY = 0.04 // scheduling headroom so all stems start sample-locked
+const CLICK_LOOKAHEAD = 0.18 // clicks are queued this far ahead on the audio clock
+const CLICK_TICK_MS = 60
 
 /** SingzStretchNode host object (patch 3 in scripts/patch-audio-api.js). */
 interface StretchHost {
@@ -64,6 +68,24 @@ export class MultitrackEngine {
   private training: TrainingSpec | null = null
   private ducked = new Set<string>()
   private trainTimer: ReturnType<typeof setInterval> | null = null
+
+  private beatsInfo: BeatInfo | null = null
+  private met: MetronomeConfig = { ...MET_DEFAULTS }
+  private clickGain: GainNode | null = null
+  private clickBufs: { accent: AudioBuffer; beat: AudioBuffer } | null = null
+  private clickNodes: { node: AudioBufferSourceNode; at: number }[] = []
+  private clickTimer: ReturnType<typeof setInterval> | null = null
+  /** Beat index of the next click (negative during a count-in), null = none due. */
+  private nextClickIdx: number | null = null
+  /** How many times the loop region has wrapped since play() for the click walker. */
+  private clickLap = 0
+  /** First beat index at/after the play position — where a count-in hands over. */
+  private startBeatIdx: number | null = null
+  private countInfo: { firstCtx: number; periodCtx: number; total: number; perBar: number } | null =
+    null
+
+  /** Clicks scheduled since launch (diagnostics/tests). */
+  clickCount = 0
 
   duration = 0
 
@@ -166,6 +188,11 @@ export class MultitrackEngine {
     setTimeout(() => {
       if (this.stretchHost) {
         this.stretchLatency = this.stretchHost.getLatencySeconds()
+        // click times include the stretch latency — re-derive queued ones
+        if (this._playing && this.ctx.currentTime >= this.startedAt) {
+          this.cancelPendingClicks()
+          this.armClicksFromCurrent()
+        }
         this.emit()
       }
     }, 400)
@@ -210,6 +237,10 @@ export class MultitrackEngine {
     this.regionLoop = loop
     for (const src of this.sources) this.applyLoop(src)
     this.syncBoundWatcher()
+    if (this._playing && this.ctx.currentTime >= this.startedAt) {
+      this.cancelPendingClicks()
+      this.armClicksFromCurrent()
+    }
   }
 
   get regionState(): { start: number; end: number; loop: boolean } | null {
@@ -290,6 +321,247 @@ export class MultitrackEngine {
     }
   }
 
+  /* ---- Metronome click pipeline (desktop parity, audio-clock based) ----- */
+
+  get beats(): BeatInfo | null {
+    return this.beatsInfo
+  }
+
+  get metronome(): MetronomeConfig {
+    return this.met
+  }
+
+  /** Live count-in progress for the footer dots (null when not counting). */
+  get countInStatus(): { total: number; done: number; perBar: number } | null {
+    const c = this.countInfo
+    if (c === null || !this._playing) return null
+    const now = this.ctx.currentTime
+    if (now >= this.startedAt) return null
+    const done = Math.max(0, Math.min(c.total, Math.floor((now - c.firstCtx) / c.periodCtx) + 1))
+    return { total: c.total, done, perBar: c.perBar }
+  }
+
+  setBeats(info: BeatInfo | null): void {
+    this.beatsInfo = info
+    if (!this.restartPendingStart() && this._playing) {
+      this.cancelPendingClicks()
+      this.armClicksFromCurrent()
+    }
+    this.emit()
+  }
+
+  setMetronome(m: MetronomeConfig): void {
+    const structural = m.click !== this.met.click || m.countInBars !== this.met.countInBars
+    this.met = m
+    if (this.clickGain) {
+      this.clickGain.gain.setTargetAtTime(m.volume, this.ctx.currentTime, 0.02)
+    }
+    if (structural && !this.restartPendingStart() && this._playing) {
+      this.cancelPendingClicks()
+      this.armClicksFromCurrent()
+    }
+    this.emit()
+  }
+
+  /** One immediate click — loudness preview in the practice sheet. */
+  previewClick(accent = false): void {
+    if (this.ctx.state === 'suspended') void this.ctx.resume()
+    this.scheduleClick(this.ctx.currentTime, accent)
+  }
+
+  /** Woodblock-ish clicks, synthesized once (no assets). Null if the runtime
+   *  cannot create buffers — the metronome then simply stays silent. */
+  private ensureClickAudio(): boolean {
+    if (this.clickBufs !== null && this.clickGain !== null) return true
+    try {
+      const sr = this.ctx.sampleRate
+      const mk = (freq: number, amp: number): AudioBuffer => {
+        const n = Math.round(sr * 0.055)
+        const buf = this.ctx.createBuffer(1, n, sr)
+        const d = buf.getChannelData(0)
+        for (let i = 0; i < n; i++) {
+          const t = i / sr
+          d[i] =
+            amp * Math.min(1, t / 0.0015) * Math.exp(-t / 0.012) * Math.sin(2 * Math.PI * freq * t)
+        }
+        return buf
+      }
+      // Clicks bypass the master bus: transpose/tempo correction and stem
+      // gains must never color the metronome.
+      const gain = this.ctx.createGain()
+      gain.gain.value = this.met.volume
+      gain.connect(this.ctx.destination)
+      this.clickGain = gain
+      this.clickBufs = { accent: mk(1568, 0.9), beat: mk(1046.5, 0.62) }
+      return true
+    } catch {
+      this.clickBufs = null
+      this.clickGain = null
+      return false
+    }
+  }
+
+  private scheduleClick(at: number, accent: boolean): void {
+    if (!this.ensureClickAudio() || this.clickBufs === null || this.clickGain === null) return
+    const src = this.ctx.createBufferSource()
+    src.buffer = accent ? this.clickBufs.accent : this.clickBufs.beat
+    src.connect(this.clickGain)
+    src.onEnded = () => {
+      this.retireClickSource(src)
+    }
+    src.start(Math.max(at, this.ctx.currentTime))
+    this.clickNodes.push({ node: src, at })
+    this.clickCount++
+  }
+
+  /** Same discipline as stems: nulling the buffer is the graph's release hook
+   *  for the source's grip (the shared click PCM stays alive via clickBufs). */
+  private retireClickSource(src: AudioBufferSourceNode): void {
+    src.onEnded = null
+    try {
+      src.disconnect()
+    } catch {
+      // already disconnected
+    }
+    try {
+      src.buffer = null
+    } catch {
+      // older audio-api without the null setter
+    }
+    this.clickNodes = this.clickNodes.filter((c) => c.node !== src)
+  }
+
+  private cancelPendingClicks(): void {
+    const now = this.ctx.currentTime
+    for (const c of [...this.clickNodes]) {
+      if (c.at > now + 0.002) {
+        try {
+          c.node.stop()
+        } catch {
+          // raced its own end
+        }
+        this.retireClickSource(c.node)
+      }
+    }
+  }
+
+  /**
+   * Context time when song time `songT` renders, `lap` region-loop wraps in.
+   * Clicks bypass the stretch node, so its latency is added back to stay
+   * simultaneous with the (delayed) stems; the output-route latency delays
+   * both alike and needs no correction. Valid for pre-start (count-in) song
+   * times too: they map to the pre-roll before `startedAt`.
+   */
+  private clickCtxTime(songT: number, lap: number): number {
+    const r = this.regionLoop ? this.region : null
+    const linear = r && lap > 0 ? r.end + (lap - 1) * (r.end - r.start) + (songT - r.start) : songT
+    return this.startedAt + (linear - this.startOffset) / this.rate + this.stretchLatency
+  }
+
+  /** Step the click walker one beat forward (loop wraps, region/song ends). */
+  private advanceClick(): void {
+    const g = this.beatsInfo
+    if (g === null || this.nextClickIdx === null) return
+    const idx = this.nextClickIdx + 1
+    // A count-in without the playback click ends where the music enters.
+    if (!this.met.click && this.startBeatIdx !== null && idx >= this.startBeatIdx) {
+      this.nextClickIdx = null
+      return
+    }
+    const t = beatTime(g, idx)
+    const r = this.region
+    if (r && this.startOffset < r.end && t > r.end - 1e-6) {
+      if (this.regionLoop) {
+        const wrapped = beatIndexAtOrAfter(g, r.start)
+        if (beatTime(g, wrapped) < r.end - 1e-6) {
+          this.clickLap++
+          this.nextClickIdx = wrapped
+        } else {
+          this.nextClickIdx = null // no beat inside the loop
+        }
+      } else {
+        this.nextClickIdx = null // playback stops at the selection end
+      }
+      return
+    }
+    this.nextClickIdx = t > this.duration ? null : idx
+  }
+
+  /** Re-derive the next click from what renders right now (seek/region/beat edits). */
+  private armClicksFromCurrent(): void {
+    const g = this.beatsInfo
+    this.countInfo = null
+    this.startBeatIdx = null
+    this.nextClickIdx = null
+    if (this._playing && g !== null && this.met.click) {
+      const linear = this.startOffset + (this.ctx.currentTime - this.startedAt) * this.rate
+      const r = this.regionLoop ? this.region : null
+      let lap = 0
+      let pos = linear
+      if (r && this.startOffset < r.end && linear > r.end) {
+        const len = r.end - r.start
+        lap = 1 + Math.floor((linear - r.end) / len)
+        pos = r.start + ((linear - r.end) % len)
+      }
+      let idx = beatIndexAtOrAfter(g, Math.max(0, pos))
+      if (r && beatTime(g, idx) > r.end - 1e-6) {
+        const wrapped = beatIndexAtOrAfter(g, r.start)
+        if (beatTime(g, wrapped) < r.end - 1e-6) {
+          lap++
+          idx = wrapped
+        } else {
+          idx = Number.NaN
+        }
+      }
+      if (Number.isFinite(idx) && beatTime(g, idx) <= this.duration) {
+        this.nextClickIdx = idx
+        this.clickLap = lap
+      }
+    }
+    this.syncClickWatcher()
+  }
+
+  private clickTick(): void {
+    if (!this._playing || this.beatsInfo === null) return
+    const now = this.ctx.currentTime
+    const horizon = now + CLICK_LOOKAHEAD
+    let guard = 96 // hard cap per tick (degenerate region/beat combinations)
+    while (this.nextClickIdx !== null && guard-- > 0) {
+      const at = this.clickCtxTime(beatTime(this.beatsInfo, this.nextClickIdx), this.clickLap)
+      if (at > horizon) return
+      if (at >= now - 0.02) {
+        this.scheduleClick(at, accentIndex(this.beatsInfo, this.nextClickIdx) === 0)
+      }
+      this.advanceClick()
+    }
+    if (this.nextClickIdx === null) this.syncClickWatcher()
+  }
+
+  private syncClickWatcher(): void {
+    const active = this._playing && this.beatsInfo !== null && this.nextClickIdx !== null
+    if (active && this.clickTimer === null) {
+      this.clickTimer = setInterval(() => this.clickTick(), CLICK_TICK_MS)
+    } else if (!active && this.clickTimer !== null) {
+      clearInterval(this.clickTimer)
+      this.clickTimer = null
+    }
+  }
+
+  /** A beat/metronome change while the pre-roll is pending: rebuild the start. */
+  private restartPendingStart(): boolean {
+    if (!this._playing || this.ctx.currentTime >= this.startedAt - 1e-3) return false
+    const off = this.startOffset
+    this.stopSources()
+    this.cancelPendingClicks()
+    this._playing = false
+    this.countInfo = null
+    this.startBeatIdx = null
+    this.nextClickIdx = null
+    this.startOffset = off
+    void this.play()
+    return true
+  }
+
   getTrackStates(): TrackState[] {
     return this.tracks.map(({ id, muted, solo, volume }) => ({ id, muted, solo, volume }))
   }
@@ -312,16 +584,38 @@ export class MultitrackEngine {
     this._playing = false
     this.applyGains(true)
     this.emit()
-    if (opts.play) void this.play()
+    if (opts.play) void this.play({ countIn: false })
   }
 
-  async play(): Promise<void> {
+  async play(opts: { countIn?: boolean } = {}): Promise<void> {
     if (this._playing || this.tracks.length === 0) return
     if (this.ctx.state === 'suspended') await this.ctx.resume()
     if (this.startOffset >= this.duration - 0.01) this.startOffset = 0
 
     const gen = ++this.generation
-    const when = this.ctx.currentTime + START_DELAY
+    let when = this.ctx.currentTime + START_DELAY
+    // Metronome pipeline (desktop parity): a count-in pushes the music start
+    // out and clicks through the beats leading up to it — real preceding
+    // beats mid-song, extrapolated ones before the track begins.
+    this.countInfo = null
+    this.startBeatIdx = null
+    this.nextClickIdx = null
+    this.clickLap = 0
+    const g = this.beatsInfo
+    const bars = this.met.countInBars
+    const countIn = opts.countIn !== false && bars > 0 && g !== null
+    if (g !== null && (countIn || this.met.click)) {
+      const i0 = beatIndexAtOrAfter(g, this.startOffset)
+      this.startBeatIdx = i0
+      if (countIn) {
+        const beats = bars * g.beatsPerBar
+        const first = i0 - beats
+        when += (this.startOffset - beatTime(g, first)) / this.rate
+        this.nextClickIdx = first
+      } else if (beatTime(g, i0) <= this.duration) {
+        this.nextClickIdx = i0
+      }
+    }
     this.sources = []
     let longestIdx = 0
     this.tracks.forEach((t, i) => {
@@ -340,17 +634,31 @@ export class MultitrackEngine {
         if (gen === this.generation && this._playing) {
           this._playing = false
           this.startOffset = this.duration
+          this.nextClickIdx = null
           this.syncBoundWatcher()
           this.syncTrainWatcher()
+          this.syncClickWatcher()
           this.emit()
         }
       }
     }
     this.startedAt = when
     this._playing = true
+    if (countIn && g !== null && this.nextClickIdx !== null && this.startBeatIdx !== null) {
+      const total = bars * g.beatsPerBar
+      const span = this.startOffset - beatTime(g, this.nextClickIdx)
+      this.countInfo = {
+        firstCtx: this.clickCtxTime(beatTime(g, this.nextClickIdx), 0),
+        periodCtx: span / total / this.rate,
+        total,
+        perBar: g.beatsPerBar
+      }
+    }
     this.syncBoundWatcher()
     this.syncTrainWatcher()
     this.trainTick() // duck state must be right before the first sample sounds
+    this.syncClickWatcher()
+    this.clickTick() // first clicks must land inside the initial lookahead
     this.emit()
   }
 
@@ -365,8 +673,13 @@ export class MultitrackEngine {
     this.startOffset = this.audioPosition
     this._playing = false
     this.stopSources()
+    this.cancelPendingClicks()
+    this.nextClickIdx = null
+    this.countInfo = null
+    this.startBeatIdx = null
     this.syncBoundWatcher()
     this.syncTrainWatcher()
+    this.syncClickWatcher()
     this.emit()
   }
 
@@ -385,12 +698,17 @@ export class MultitrackEngine {
       // wedge the native render thread on device — stop now, restart once
       // the scrubbing settles.
       this.stopSources()
+      this.cancelPendingClicks()
+      this.nextClickIdx = null
+      this.countInfo = null
       this._playing = false
       this.startOffset = clamped
       if (this.restartTimer) clearTimeout(this.restartTimer)
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null
-        void this.play()
+        // Seeks restart playback in place — a count-in belongs to a
+        // deliberate play, not to scrubbing around.
+        void this.play({ countIn: false })
       }, 80)
       this.trainTick()
       this.emit()
@@ -476,6 +794,12 @@ export class MultitrackEngine {
       this.restartTimer = null
     }
     this.stopSources()
+    this.cancelPendingClicks()
+    this.beatsInfo = null // the next project brings its own beat track
+    this.nextClickIdx = null
+    this.countInfo = null
+    this.startBeatIdx = null
+    this.syncClickWatcher()
     for (const t of this.tracks) t.gain.disconnect()
     this.tracks = []
     this.ducked.clear()

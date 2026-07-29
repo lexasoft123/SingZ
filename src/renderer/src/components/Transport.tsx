@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SeparationProgress } from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
+import {
+  BEATS_PER_BAR_CHOICES,
+  constantBeats,
+  doubleTempo,
+  halveTempo,
+  shiftBeats,
+  tapBpm,
+  type BeatInfo,
+  type MetronomeConfig
+} from '../audio/beat'
 import { fmtClock, fmtTime, modalCoversApp, TRACK_META, type TrainingConfig } from '../model'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
@@ -22,6 +32,48 @@ function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
     return () => cancelAnimationFrame(raf)
   }, [engine])
   return <span className="clock" ref={ref} />
+}
+
+/**
+ * Count-in dots by the clock: one dot per beat, grouped by bar, filling as
+ * the pre-roll clicks by. Imperative rAF updates (TimeCode pattern); the
+ * class is re-asserted every frame because React re-renders wipe it.
+ */
+function CountInDots({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
+  const ref = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    let raf = 0
+    let last = ''
+    const tick = (): void => {
+      if (ref.current && !modalCoversApp()) {
+        const st = engine.countInStatus
+        let text = ''
+        if (st) {
+          const bars: string[] = []
+          for (let b = 0; b < st.total; b += st.perBar) {
+            let bar = ''
+            for (let i = b; i < Math.min(b + st.perBar, st.total); i++) {
+              bar += i < st.done ? '●' : '○'
+            }
+            bars.push(bar)
+          }
+          text = bars.join(' ')
+        }
+        if (text !== last) {
+          last = text
+          ref.current.textContent = text
+        }
+        const wantOn = text !== ''
+        if (wantOn !== ref.current.classList.contains('on')) {
+          ref.current.classList.toggle('on', wantOn)
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [engine])
+  return <span className="countin-dots" ref={ref} />
 }
 
 const STAGE_LABEL: Record<SeparationProgress['stage'], string> = {
@@ -53,6 +105,12 @@ interface Props {
   tempo: number
   onTempo: (rate: number) => void
   bpm: number | null
+  beat: BeatInfo | null
+  met: MetronomeConfig
+  canDetectBeat: boolean
+  onMetCfg: (m: MetronomeConfig) => void
+  onBeat: (g: BeatInfo) => void
+  onRedetectBeat: () => void
   onToggleKaraoke: () => void
   onSplit: () => void
   onResplit: (() => void) | null
@@ -126,6 +184,270 @@ function BpmEntry({
         +
       </button>
     </>
+  )
+}
+
+/** Metronome setup: click on/off + loudness, count-in, and the beat grid itself. */
+function MetPopover({
+  engine,
+  grid,
+  met,
+  canDetect,
+  onMet,
+  onGrid,
+  onRedetect,
+  onClose
+}: {
+  engine: MultitrackEngine
+  grid: BeatInfo | null
+  met: MetronomeConfig
+  canDetect: boolean
+  onMet: (m: MetronomeConfig) => void
+  onGrid: (g: BeatInfo) => void
+  onRedetect: () => void
+  onClose: () => void
+}): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null)
+  const [bpmDraft, setBpmDraft] = useState<string | null>(null)
+  const tapsRef = useRef<number[]>([])
+  const [tapCount, setTapCount] = useState(0)
+
+  useEffect(() => {
+    const onDown = (e: PointerEvent): void => {
+      // The wrapper includes the metronome button — its own click handles closing.
+      if (!ref.current?.parentElement?.contains(e.target as Node)) onClose()
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.code === 'Escape') {
+        e.stopPropagation() // the app-level Esc must not also clear the selection
+        onClose()
+      }
+    }
+    document.addEventListener('pointerdown', onDown)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [onClose])
+
+  const commitBpm = (): void => {
+    if (bpmDraft !== null) {
+      const v = Number(bpmDraft)
+      if (Number.isFinite(v) && v >= 30 && v <= 300) {
+        onGrid(constantBeats(v, engine.position, engine.duration, grid?.beatsPerBar ?? 4))
+      }
+    }
+    setBpmDraft(null)
+  }
+
+  /** Each tap clicks back and (while playing) re-anchors the beats to the tap. */
+  const tap = (): void => {
+    engine.previewClick(false)
+    const now = performance.now() / 1000
+    const taps = tapsRef.current
+    if (taps.length > 0 && now - taps[taps.length - 1] > 2.5) taps.length = 0
+    taps.push(now)
+    if (taps.length > 12) taps.shift()
+    setTapCount(taps.length)
+    const bpm = tapBpm(taps)
+    if (bpm !== null) {
+      onGrid(constantBeats(bpm, engine.position, engine.duration, grid?.beatsPerBar ?? 4))
+    }
+  }
+
+  const bpmShown = bpmDraft ?? (grid ? String(Math.round(grid.bpm * 10) / 10) : '—')
+  const caption = !grid
+    ? tapCount > 0 && tapCount < 3
+      ? 'Keep tapping — three steady taps set the tempo.'
+      : canDetect
+        ? 'No steady beat found in the drums — tap the tempo yourself, or try Re-detect.'
+        : 'Tap the tempo to set one, or split the song and it is read from the drums.'
+    : `${Math.round(grid.bpm * 10) / 10} bpm · ${
+        grid.source === 'auto'
+          ? 'following the drums, drift and all'
+          : 'set by hand'
+      } — tap along during playback to re-anchor.`
+
+  return (
+    <div className="train-pop met-pop" ref={ref}>
+      <div className="tp-head">
+        <span className="tp-title">Metronome</span>
+        <div className="mode-seg">
+          <button
+            type="button"
+            className={met.click ? '' : 'on'}
+            onClick={met.click ? () => onMet({ ...met, click: false }) : undefined}
+          >
+            Off
+          </button>
+          <button
+            type="button"
+            className={met.click ? 'on' : ''}
+            disabled={!grid}
+            title={grid ? 'Click on every beat during playback' : 'Needs a tempo first'}
+            onClick={met.click || !grid ? undefined : () => onMet({ ...met, click: true })}
+          >
+            On
+          </button>
+        </div>
+      </div>
+      <div className="tp-row">
+        <span className="tp-label">Loudness</span>
+        <input
+          type="range"
+          className="vol"
+          min={0}
+          max={1}
+          step={0.01}
+          value={met.volume}
+          style={{ '--stem': 'var(--accent)' } as React.CSSProperties}
+          title="How loud the click is — release to hear it"
+          onChange={(e) => onMet({ ...met, volume: Number(e.target.value) })}
+          onPointerUp={() => engine.previewClick(true)}
+        />
+      </div>
+      <div className="tp-row">
+        <span className="tp-label">Count-in</span>
+        <div className="mode-seg">
+          <button
+            type="button"
+            className={met.countInBars === 0 ? 'on' : ''}
+            onClick={() => onMet({ ...met, countInBars: 0 })}
+          >
+            Off
+          </button>
+          <button
+            type="button"
+            className={met.countInBars === 1 ? 'on' : ''}
+            disabled={!grid}
+            title={grid ? 'One bar of clicks before playback starts' : 'Needs a tempo first'}
+            onClick={grid ? () => onMet({ ...met, countInBars: 1 }) : undefined}
+          >
+            1 bar
+          </button>
+          <button
+            type="button"
+            className={met.countInBars === 2 ? 'on' : ''}
+            disabled={!grid}
+            title={grid ? 'Two bars of clicks before playback starts' : 'Needs a tempo first'}
+            onClick={grid ? () => onMet({ ...met, countInBars: 2 }) : undefined}
+          >
+            2 bars
+          </button>
+        </div>
+      </div>
+      <div className="tp-row">
+        <span className="tp-label">Tempo</span>
+        <label className="bpm-entry met-bpm" title="The song's own tempo (playback speed stays put)">
+          <input
+            type="text"
+            inputMode="decimal"
+            value={bpmShown}
+            onChange={(e) => setBpmDraft(e.target.value.replace(/[^0-9.]/g, ''))}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={commitBpm}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+              if (e.key === 'Escape') {
+                setBpmDraft(null)
+                ;(e.target as HTMLInputElement).blur()
+              }
+            }}
+          />
+          <span className="tr-unit">bpm</span>
+        </label>
+        <button type="button" className="pill ghost small" title="Tap the beat to set the tempo (and lock the phase while playing)" onClick={tap}>
+          Tap
+        </button>
+        <button
+          type="button"
+          className="chip"
+          disabled={!grid || grid.bpm / 2 < 30}
+          title="Half time"
+          onClick={() => grid && onGrid(halveTempo(grid))}
+        >
+          ½
+        </button>
+        <button
+          type="button"
+          className="chip"
+          disabled={!grid || grid.bpm * 2 > 300}
+          title="Double time"
+          onClick={() => grid && onGrid(doubleTempo(grid))}
+        >
+          ×2
+        </button>
+      </div>
+      <div className="tp-row">
+        <span className="tp-label">Beats per bar</span>
+        <div className="mode-seg">
+          {BEATS_PER_BAR_CHOICES.map((n) => (
+            <button
+              type="button"
+              key={n}
+              className={grid?.beatsPerBar === n ? 'on' : ''}
+              disabled={!grid}
+              onClick={
+                grid
+                  ? () => onGrid({ ...grid, beatsPerBar: n, downbeat: grid.downbeat % n })
+                  : undefined
+              }
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="tp-row">
+        <span className="tp-label">Align</span>
+        <button
+          type="button"
+          className="chip nudge"
+          disabled={!grid}
+          title="Clicks 10 ms earlier"
+          onClick={() => grid && onGrid(shiftBeats(grid, -0.01))}
+        >
+          −10
+        </button>
+        <button
+          type="button"
+          className="chip nudge"
+          disabled={!grid}
+          title="Clicks 10 ms later"
+          onClick={() => grid && onGrid(shiftBeats(grid, 0.01))}
+        >
+          +10
+        </button>
+        <button
+          type="button"
+          className="chip nudge"
+          disabled={!grid}
+          title="Move the accent to the next beat (when the “1” lands wrong)"
+          onClick={() =>
+            grid &&
+            onGrid({
+              ...grid,
+              downbeat: (grid.downbeat + 1) % grid.beatsPerBar,
+              source: 'manual'
+            })
+          }
+        >
+          1→
+        </button>
+        {canDetect && (
+          <button
+            type="button"
+            className="pill ghost small"
+            title="Read the tempo and beat from the drums again"
+            onClick={onRedetect}
+          >
+            Re-detect
+          </button>
+        )}
+      </div>
+      <p className="fine tp-caption">{caption}</p>
+    </div>
   )
 }
 
@@ -305,6 +627,12 @@ export default function Transport({
   tempo,
   onTempo,
   bpm,
+  beat,
+  met,
+  canDetectBeat,
+  onMetCfg,
+  onBeat,
+  onRedetectBeat,
   onToggleKaraoke,
   onSplit,
   onResplit,
@@ -312,6 +640,7 @@ export default function Transport({
   onReveal
 }: Props): React.JSX.Element {
   const [trainOpen, setTrainOpen] = useState(false)
+  const [metOpen, setMetOpen] = useState(false)
   return (
     <footer className="transport">
       {sep && (
@@ -354,6 +683,7 @@ export default function Transport({
           <TimeCode engine={engine} />
           <span className="clock-total">/ {fmtTime(engine.duration)}</span>
         </div>
+        <CountInDots engine={engine} />
         <button
           type="button"
           className={`round-ghost loop${loopOn ? ' active' : ''}`}
@@ -365,6 +695,34 @@ export default function Transport({
             <path d="M3.5 6.5v-1a2 2 0 0 1 2-2h7l-1.8-1.8M12.5 9.5v1a2 2 0 0 1-2 2h-7l1.8 1.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
+        <div className="train-wrap">
+          <button
+            type="button"
+            className={`round-ghost met${met.click ? ' active' : ''}`}
+            aria-pressed={met.click}
+            title="Metronome — click on the beat, count-in before play"
+            disabled={engine.duration === 0}
+            onClick={() => setMetOpen((o) => !o)}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+              <path d="M6.1 2h3.8l2.3 11.2H3.8Z" strokeLinejoin="round" />
+              <path d="M8 10.2 11.3 4.2" strokeLinecap="round" />
+              <circle cx="11.5" cy="3.8" r="1.1" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+          {metOpen && (
+            <MetPopover
+              engine={engine}
+              grid={beat}
+              met={met}
+              canDetect={canDetectBeat}
+              onMet={onMetCfg}
+              onGrid={onBeat}
+              onRedetect={onRedetectBeat}
+              onClose={() => setMetOpen(false)}
+            />
+          )}
+        </div>
         {split && (
           <div className="train-wrap">
             <button
