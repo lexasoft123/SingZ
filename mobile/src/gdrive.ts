@@ -262,17 +262,20 @@ export async function driveListProjects(): Promise<ProjectEntry[]> {
   const rootId = await singzRootId()
   const token = await accessToken()
   const dirs = (await listChildren(rootId)).filter((f) => f.mimeType === FOLDER)
-  const out: ProjectEntry[] = []
-  for (const dir of dirs) {
+
+  // One project = three REST round-trips; done one after another a ten-song
+  // library took 15-18s of dead-looking screen. Five folders in flight cut
+  // it to a few seconds without upsetting Drive's rate limits.
+  const one = async (dir: DriveFile): Promise<ProjectEntry | null> => {
     try {
       const kids = await listChildren(dir.id)
       const byName = new Map(kids.map((f) => [f.name, f]))
       const meta = byName.get('project.json')
-      if (!meta) continue
+      if (!meta) return null
       const metaRes = await fetch(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
         headers: { Authorization: `Bearer ${token}` }
       })
-      if (!metaRes.ok) continue
+      if (!metaRes.ok) return null
       const doc = await metaRes.json()
       const stemsDir = kids.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
       const stemKids = stemsDir ? await listChildren(stemsDir.id) : []
@@ -285,9 +288,9 @@ export async function driveListProjects(): Promise<ProjectEntry[]> {
         stems[id] = f.name.endsWith('.flac') ? 'flac' : 'wav'
         bytes += Number(f.size ?? 0)
       }
-      if (Object.keys(stems).length === 0) continue
+      if (Object.keys(stems).length === 0) return null
       projectFiles.set(dir.name, { byName, stemsByName })
-      out.push({
+      return {
         dir: dir.name,
         doc,
         stems,
@@ -295,10 +298,17 @@ export async function driveListProjects(): Promise<ProjectEntry[]> {
         bytes,
         hasLyrics: byName.has('lyrics.json'),
         source: 'gdrive'
-      })
+      }
     } catch {
-      // unreadable project folder — skip it
+      return null // unreadable project folder — skip it
     }
+  }
+
+  const out: ProjectEntry[] = []
+  const POOL = 5
+  for (let i = 0; i < dirs.length; i += POOL) {
+    const batch = await Promise.all(dirs.slice(i, i + POOL).map(one))
+    for (const entry of batch) if (entry) out.push(entry)
   }
   out.sort((a, b) => ((a.doc.savedAt ?? '') < (b.doc.savedAt ?? '') ? 1 : -1))
   return out

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   Image,
   Platform,
   Pressable,
@@ -88,6 +89,9 @@ export default function CatalogScreen({
           return
         }
         setDriveEmail(await driveAccountEmail())
+        // clear the previous mode's cards while Drive lists — a stale list
+        // with no spinner reads as a frozen screen on a slow connection
+        setProjects(null)
         setProjects(await driveListProjects())
       } else {
         setRoot(await getRoot())
@@ -417,6 +421,14 @@ export default function CatalogScreen({
               ),
               onPress: () => void openEntry(p)
             })
+          )}
+          {projects === null && (
+            <View style={{ alignItems: 'center', paddingVertical: 36 }}>
+              <ActivityIndicator color={C.amber} />
+              <Text style={[s.empty, { marginTop: 12 }]}>
+                {mode === 'gdrive' ? 'Loading your library from Google Drive…' : 'Loading…'}
+              </Text>
+            </View>
           )}
           {projects !== null && projects.length === 0 && (
             <Text style={s.empty}>
