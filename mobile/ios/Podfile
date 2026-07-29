@@ -32,7 +32,10 @@ target 'SingZPlayer' do
       installer,
       config[:reactNativePath],
       :mac_catalyst_enabled => false,
-      # :ccache_enabled => true
+      # Compiler cache when the machine has one (brew install ccache) —
+      # pod rebuilds drop from minutes to seconds. Machines without ccache
+      # keep building plain clang.
+      :ccache_enabled => system('command -v ccache >/dev/null 2>&1')
     )
   end
 end
