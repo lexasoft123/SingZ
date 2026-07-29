@@ -52,6 +52,14 @@ without one. Build products (`out/`, `Pods/`, `.gradle/`) stay per-worktree;
 the global npm / CocoaPods / ccache caches are what make the second worktree
 fast (pods ~30 s warm).
 
+The links are files (symlinks), and a committed `vendor` symlink once merged
+into main and clobbered the real `vendor/` on checkout — `.gitignore`'s old
+`vendor/` pattern only matched the directory form, and worktrees branched
+before that fix still carry the old pattern. The script therefore also
+registers its link names in the shared `.git/info/exclude` (covers every
+worktree, any checkout vintage) and aborts if a provisioned path is not
+ignored.
+
 One trap the script cannot fix: `pod install` in a worktree rewrites the
 tracked `mobile/ios/Podfile.lock` (hermes checksum). Leave that rewrite
 uncommitted — but do NOT `git restore` it either: that desyncs it from

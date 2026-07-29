@@ -36,6 +36,25 @@ else
   link mobile/android/local.properties # Android SDK path
 fi
 
+# The links are FILES (symlinks). Register them in the repo-wide exclude —
+# shared by every worktree, whatever its checkout's .gitignore vintage — so
+# a `git add -A` can never commit them: a committed vendor symlink once
+# merged into main and silently CLOBBERED the real vendor/ on checkout.
+EXCLUDE="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+if ! grep -qs 'worktree-setup provisioning' "$EXCLUDE"; then
+  mkdir -p "$(dirname "$EXCLUDE")"
+  printf '%s\n' '# worktree-setup provisioning links (machine-local, every worktree)' \
+    'vendor' 'gdrive.config.json' 'local.properties' >>"$EXCLUDE"
+  echo "Registered provisioning links in $(basename "$(dirname "$(dirname "$EXCLUDE")")")/info/exclude"
+fi
+for rel in vendor mobile/gdrive.config.json mobile/android/local.properties; do
+  if [ -e "$WT/$rel" ] && ! git -C "$WT" check-ignore -q "$rel"; then
+    echo "FATAL: $rel is NOT gitignored here — a git add -A would commit it (and a" >&2
+    echo "committed vendor symlink clobbers the real vendor/ when merged). Aborting." >&2
+    exit 1
+  fi
+done
+
 # Content hashing lets the global ccache hit across worktrees — a fresh
 # checkout re-stamps every mtime, so the default timestamp check misses 100%.
 if command -v ccache >/dev/null 2>&1; then
