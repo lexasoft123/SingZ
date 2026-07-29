@@ -82,3 +82,4 @@ yarn-error.log
 # device build output
 ios/build-device/
 gdrive.config.json
+ios/build-sim/

@@ -124,8 +124,10 @@ answer your evals while you measure the phone.
   save); phones list over REST and stream stems via FolderAccess
   fetchToCache. OAuth client config: mobile/gdrive.config.json (gitignored;
   CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
-  bake it into the committed-EMPTY gdrive-config.ts modules — never commit
-  filled ones). Tests: tests/unit/mock-drive.ts is a mini Drive v3 used by
+  generate the gdrive-config.ts modules from it — both are gitignored, never
+  in the repo, EMPTY when the json is absent, so a fresh checkout needs
+  npm install before typecheck). Tests: tests/unit/mock-drive.ts is a mini
+  Drive v3 used by
   gdrive-sync.test.ts AND the emulator streaming E2E (config apiBase →
   http://10.0.2.2:8765, tokens seeded via run-as into shared_prefs).
 
