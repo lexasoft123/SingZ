@@ -152,8 +152,12 @@ export class MultitrackEngine {
   get countInStatus(): { total: number; done: number; perBar: number } | null {
     const c = this.countInfo
     if (c === null || !this._playing) return null
-    const now = this.ctx.currentTime
-    if (now >= this.startedAt) return null
+    // Dots flip when clicks are HEARD: the render clock leads the ear by the
+    // output-route latency (Bluetooth headphones bite on desktop too). Click
+    // times carry the stretch-bus latency already; the music start does not,
+    // so the cutoff adds it before comparing.
+    const now = this.ctx.currentTime - (this.ctx.outputLatency || 0)
+    if (now >= this.startedAt + (this.stretchOn ? this.stretchLatency : 0)) return null
     const done = Math.max(0, Math.min(c.total, Math.floor((now - c.firstCtx) / c.periodCtx) + 1))
     return { total: c.total, done, perBar: c.perBar }
   }

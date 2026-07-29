@@ -293,6 +293,11 @@ export default function PlayerScreen({
           const dt = ln.start - pos
           const gapOk = i === 0 ? ln.start >= 1.2 : ln.start - gapStart >= 3
           const countIn = gapOk && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
+          // long instrumental pause: tick the seconds down until the dots
+          // engage at 3 s (only for the gap the playhead is actually in)
+          const longGap = (i === 0 ? ln.start : ln.start - gapStart) > 5
+          const waitSec =
+            longGap && dt > 3 && (i === 0 || pos >= gapStart) ? Math.ceil(dt) : 0
           return (
             <Pressable
               key={i}
@@ -308,6 +313,9 @@ export default function PlayerScreen({
             >
               {countIn > 0 && (
                 <Text style={s.countIn}>{Array(countIn).fill('●').join(' ')}</Text>
+              )}
+              {waitSec > 0 && (
+                <Text style={[s.countIn, { letterSpacing: 1 }]}>{waitSec} s</Text>
               )}
               <Text style={[s.line, { color: lineColor(i, isSing) }]}>
                 {isSing ? <Text style={{ fontSize: 19 }}>🎤 </Text> : null}

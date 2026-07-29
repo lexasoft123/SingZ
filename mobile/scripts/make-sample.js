@@ -56,7 +56,7 @@ const LINES = [
   [['Let', C4], ['the', D4], ['chorus', E4, G4], ['do', E4], ['the', D4], ['rest', C4]],
   [['You', A3], ['were', C4], ['born', D4], ['to', E4], ['make', D4], ['this', C4], ['sound', A3]]
 ]
-const VOX_START_BAR = 2 // >3 s of intro so the count-in dots show
+const VOX_START_BAR = 3 // >5 s of intro so the wait countdown AND the dots show
 
 // ——— tiny DSP toolbox ——————————————————————————————————————————————————
 let seed = 20260728
