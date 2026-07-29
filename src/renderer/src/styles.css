@@ -333,6 +333,73 @@ button.chip-status:hover {
 
 .ruler-spacer {
   grid-column: 1;
+  display: flex;
+  align-items: center;
+  padding-left: 14px;
+}
+
+/* "+ Add track…" — sits in the controls column, above the lane names. */
+.add-track {
+  height: 22px;
+  padding: 0 11px;
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--dim);
+  background: transparent;
+  transition:
+    color 0.12s,
+    border-color 0.12s,
+    background 0.12s;
+}
+
+.add-track:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: rgba(255, 240, 214, 0.05);
+}
+
+.add-track:focus-visible {
+  outline: none;
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Only lanes the singer added carry one — stems have no remove button. */
+.lane-remove {
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 6px;
+  font-size: 10px;
+  color: var(--faint);
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition:
+    opacity 0.12s,
+    color 0.12s,
+    background 0.12s;
+}
+
+.lane-controls:hover .lane-remove,
+.lane-remove:focus-visible {
+  opacity: 1;
+}
+
+.lane-remove:hover {
+  color: var(--text);
+  background: rgba(255, 240, 214, 0.08);
+}
+
+.lane-remove:focus-visible {
+  outline: none;
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .ruler {

@@ -123,6 +123,16 @@ answer your evals while you measure the phone.
   cloud folders like iCloud Drive); `allowRoot` the new root after switching.
   The `mobile/` RN player reads the same folders (v1 and v2) via its
   FolderAccess pod.
+- **Custom tracks (the singer's own audio as extra lanes) live in `stems/`**,
+  named `custom-<slug>.<ext>` in whatever format they came in — NOT in a
+  `tracks/` folder: Drive sync only walks `project.json`, `lyrics.json` and
+  `stems/` (extension-filtered — widen that filter, not the layout), and both
+  phone natives enumerate `stems/` by the six known stem names, so anything
+  else there is ignored rather than broken. `project.json` keeps them
+  project-relative (`settings.custom`); main resolves them to absolute on the
+  way out and back to relative on save, because a moved project folder (rename,
+  import, another machine's cloud library) would rot absolute paths. Lanes may
+  now differ in length: waveform view fractions are per buffer, not per song.
 - **Projects open from anywhere and stay where they are** — a project folder
   need not sit under the library root (copied, shared, another machine's cloud
   library). `registerSource` must `allowRoot` the detected project dir or

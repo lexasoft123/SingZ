@@ -4,7 +4,7 @@ import type { RegisterResult } from '../shared/types'
 import { allowFile, allowRoot } from './media'
 import { detectProject } from './projects'
 
-const AUDIO_EXT = new Set([
+export const AUDIO_EXT = new Set([
   '.mp3',
   '.wav',
   '.flac',
@@ -45,6 +45,30 @@ export async function registerSource(raw: string): Promise<RegisterResult> {
       size: info.size,
       project: project ?? undefined
     }
+  } catch {
+    return { ok: false, error: 'Could not read that file.' }
+  }
+}
+
+/**
+ * Make one audio file readable as a custom track (an extra lane). Deliberately
+ * narrower than registerSource: no project detection and no allowRoot, because
+ * the file the singer picks may well sit inside another project's folder or
+ * anywhere else on disk, and adding a lane is no reason to open a directory up.
+ */
+export async function registerTrack(
+  raw: string
+): Promise<{ ok: true; path: string; name: string; size: number } | { ok: false; error: string }> {
+  try {
+    const full = resolve(String(raw))
+    const ext = extname(full).toLowerCase()
+    if (!AUDIO_EXT.has(ext)) {
+      return { ok: false, error: `Can't use ${ext || 'that file'} — pick an MP3, WAV, FLAC or M4A.` }
+    }
+    const info = await stat(full)
+    if (!info.isFile()) return { ok: false, error: 'That is not a file.' }
+    allowFile(full)
+    return { ok: true, path: full, name: basename(full, ext), size: info.size }
   } catch {
     return { ok: false, error: 'Could not read that file.' }
   }

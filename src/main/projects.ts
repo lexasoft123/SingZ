@@ -1,11 +1,12 @@
 import { app } from 'electron'
 import { existsSync, readdirSync } from 'node:fs'
 import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, join, sep } from 'node:path'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import {
   STEMS,
   STEMS_6,
   type CloudRoot,
+  type CustomTrack,
   type ImportResult,
   type ProjectInfo,
   type ProjectListItem,
@@ -172,6 +173,106 @@ async function stemFile(dir: string, stem: string): Promise<string | null> {
 }
 
 /**
+ * Custom tracks live in `stems/` under this prefix: that folder is what Drive
+ * sync uploads and what the phones fetch, and the prefix keeps a track called
+ * "vocals" from ever being mistaken for the stem of that name.
+ */
+const CUSTOM_PREFIX = 'custom-'
+
+/**
+ * File-name stem for a custom track. Ids come from project.json, which people
+ * do hand-edit, so this both slugifies and confines the result to one path
+ * segment — a `../` in there would write outside the project folder.
+ */
+function customBase(id: string, index: number): string {
+  const slug = String(id)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/^custom-/, '')
+  return `${CUSTOM_PREFIX}${slug || index + 1}`
+}
+
+/**
+ * project.json → memory: project-relative files become absolute paths, and
+ * entries whose file is not there (pruned stems/, a half-synced cloud folder,
+ * a hand-edited path pointing outside the project) are dropped rather than
+ * handed to a renderer that would fail to decode them.
+ */
+async function resolveCustom(
+  dir: string,
+  list: CustomTrack[] | undefined
+): Promise<CustomTrack[] | undefined> {
+  if (!Array.isArray(list) || list.length === 0) return undefined
+  const out: CustomTrack[] = []
+  const root = resolve(dir)
+  for (const t of list) {
+    if (!t || typeof t.file !== 'string' || typeof t.id !== 'string') continue
+    const abs = resolve(root, t.file)
+    if (!abs.startsWith(root + sep)) continue
+    if (!(await exists(abs))) {
+      log('app', `custom track "${t.label ?? t.id}" is missing from ${dir} — dropped`, 'warn')
+      continue
+    }
+    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: abs })
+  }
+  return out.length > 0 ? out : undefined
+}
+
+/**
+ * Memory → project.json: copy each custom track into the project's stems/
+ * folder (files already there stay put) and return the project-relative
+ * entries to store. Custom tracks keep their original format — an MP3 is
+ * already small, and re-encoding someone's own recording buys nothing.
+ *
+ * A source file that vanished between adding and saving is dropped with a
+ * warning: the rest of the project is still worth saving.
+ */
+async function storeCustomTracks(
+  dir: string,
+  list: CustomTrack[] | undefined
+): Promise<CustomTrack[] | undefined> {
+  const entries = Array.isArray(list) ? list : []
+  const stemsDir = join(dir, 'stems')
+  const out: CustomTrack[] = []
+  const used = new Set<string>()
+  for (let i = 0; i < entries.length; i++) {
+    const t = entries[i]
+    if (!t || typeof t.file !== 'string') continue
+    const src = resolve(t.file)
+    if (!(await exists(src))) {
+      log('app', `custom track "${t.label ?? t.id}": ${src} is gone — not saved`, 'warn')
+      continue
+    }
+    let name = `${customBase(t.id, i)}${extname(src).toLowerCase()}`
+    for (let n = 2; used.has(name); n++) {
+      name = `${customBase(t.id, i)}-${n}${extname(src).toLowerCase()}`
+    }
+    used.add(name)
+    const dst = join(stemsDir, name)
+    if (src !== dst) {
+      await copyFile(src, dst)
+      log('app', `custom track "${t.label ?? t.id}" copied into the project as stems/${name}`)
+    }
+    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: join('stems', name) })
+  }
+  // Tracks the singer removed leave their copy behind; it would keep syncing
+  // to Drive and reappear in nobody's mix. Only our own prefix is touched,
+  // and only inside this project — the file the user picked is elsewhere.
+  try {
+    const keep = new Set(out.map((t) => basename(t.file)))
+    for (const entry of await readdir(stemsDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.startsWith(CUSTOM_PREFIX) || keep.has(entry.name)) continue
+      await rm(join(stemsDir, entry.name), { force: true })
+      log('app', `removed custom track file stems/${entry.name} (no longer in the project)`)
+    }
+  } catch {
+    // no stems folder yet — nothing to prune
+  }
+  return out.length > 0 ? out : undefined
+}
+
+/**
  * Convert every WAV stem to FLAC; the WAVs are deleted only after each
  * conversion verified (encoder writes .part then renames), so an interrupted
  * run leaves a playable project. Returns true when the project ends up
@@ -275,11 +376,12 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
       if (p) stems[s] = p
     }
     const coreThere = STEMS.every((s) => Boolean(stems[s]))
+    const settings = meta.settings ?? { transpose: 0, tracks: {} }
     return {
       dir,
       name: meta.name ?? basename(dir),
       formatVersion: meta.version ?? 1,
-      settings: meta.settings ?? { transpose: 0, tracks: {} },
+      settings: { ...settings, custom: await resolveCustom(dir, settings.custom) },
       stems: coreThere ? stems : undefined,
       hasLyrics: await exists(join(dir, 'lyrics.json')),
       inLibrary: inLibrary(dir)
@@ -300,7 +402,8 @@ export async function saveProject(
   name: string,
   settings: ProjectSettings
 ): Promise<
-  { ok: true; dir: string; songPath: string; inLibrary: boolean } | { ok: false; error: string }
+  | { ok: true; dir: string; songPath: string; inLibrary: boolean; custom?: CustomTrack[] }
+  | { ok: false; error: string }
 > {
   try {
     // A song already inside a project folder saves in place, wherever that
@@ -336,6 +439,10 @@ export async function saveProject(
     // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
     const allFlac = await convertStemsToFlac(dir)
 
+    // The singer's own tracks land in stems/ too (Drive syncs that folder),
+    // keeping whatever format they came in.
+    const stored = await storeCustomTracks(dir, settings.custom)
+
     // lyrics from the hash cache (project-local lyrics stay as they are)
     const cachedLyrics = join(stemsRoot(), await hashFile(songPath), 'lyrics.json')
     const projLyrics = join(dir, 'lyrics.json')
@@ -348,11 +455,19 @@ export async function saveProject(
       name: safeName(name),
       songFile,
       savedAt: new Date().toISOString(),
-      settings
+      // project.json keeps custom tracks project-relative so the folder stays
+      // portable; the renderer gets absolute paths back below.
+      settings: { ...settings, custom: stored }
     }
     await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
     log('app', `project saved: ${dir}`)
-    return { ok: true, dir, songPath: songDest, inLibrary: inLibrary(dir) }
+    return {
+      ok: true,
+      dir,
+      songPath: songDest,
+      inLibrary: inLibrary(dir),
+      custom: await resolveCustom(dir, stored)
+    }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -372,6 +487,7 @@ export async function renameProject(
       dir: string
       songPath: string
       stems?: Partial<Record<StemName6, string>>
+      custom?: CustomTrack[]
     }
   | { ok: false; error: string }
 > {
@@ -404,7 +520,8 @@ export async function renameProject(
       name,
       dir: newDir,
       songPath: join(newDir, meta.songFile),
-      stems: coreThere ? stems : undefined
+      stems: coreThere ? stems : undefined,
+      custom: await resolveCustom(newDir, meta.settings?.custom)
     }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -460,6 +577,7 @@ export async function importProject(
       dir: dst,
       songPath: join(dst, meta.songFile),
       stems: coreThere ? stems : undefined,
+      custom: await resolveCustom(dst, meta.settings?.custom),
       moved: mode === 'move'
     }
   } catch (err) {

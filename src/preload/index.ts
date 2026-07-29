@@ -39,6 +39,8 @@ const api: SingzApi = {
 
   registerSource: (path) => ipcRenderer.invoke('source:register', path),
 
+  registerTrack: (path) => ipcRenderer.invoke('track:register', path),
+
   checkEngine: (force) => ipcRenderer.invoke('engine:check', force),
 
   separate: (path) => ipcRenderer.invoke('separation:start', path),
