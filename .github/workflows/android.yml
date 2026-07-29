@@ -75,9 +75,20 @@ jobs:
           GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
         run: printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
 
-      # make-sample.js (postinstall) encodes the synthesized sample via ffmpeg
-      - name: ffmpeg for the sample-song generator
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      # make-sample.js (postinstall) encodes the synthesized sample via
+      # ffmpeg; ccache makes the NDK compile of the audio engine incremental
+      # across tag builds (the gradle cache only covers dependencies).
+      - name: ffmpeg + ccache
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg ccache
+
+      - name: ccache store
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          # audio-api version or our C++ patches changing invalidates most
+          # objects anyway; restore-keys keeps partial hits across bumps
+          key: ccache-apk-${{ hashFiles('mobile/package-lock.json', 'mobile/scripts/patch-audio-api.js') }}
+          restore-keys: ccache-apk-
 
       # postinstall applies the audio-api C++ patches and fails loud on
       # upstream drift. It also synthesizes the bundled sample project (an
@@ -89,7 +100,16 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1" > /dev/null
 
       - name: Build release APK
-        run: ./gradlew assembleRelease --no-daemon
+        env:
+          # CMake picks these up from the environment (>=3.17), so every
+          # native module gets ccache without touching its build files
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_DIR: /home/runner/.ccache
+        run: |
+          ccache -z
+          ./gradlew assembleRelease --no-daemon
+          ccache -s | head -8
         working-directory: mobile/android
 
       - uses: actions/upload-artifact@v4
