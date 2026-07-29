@@ -89,8 +89,14 @@ Archives are untarred with the system `tar`. URLs point at
 mute/solo/volume) into `~/Documents/SingZ/<name>/` with a `project.json`
 (saving re-anchors the session inside the project). Opening the project's song
 restores everything; `listProjects` powers the in-app Open… library and the
-drop-screen shortcuts; `renameProject` moves the folder + metadata (the title
+drop-screen shortcuts; `renameProject` renames the folder + metadata (the title
 pencil). Legacy `~/Music/SingZ` migrates on startup.
+
+A project folder does not have to live under the library root — copied, shared
+and other-machine folders open from anywhere. Those save and rename **in
+place**; `importProject` (the header's "Add to library…") is the only thing
+that relocates one, copying or moving on explicit user action. `detectProject`
+reports `inLibrary` so the UI knows which it is.
 
 ## Diagnostics (`main/log.ts`)
 

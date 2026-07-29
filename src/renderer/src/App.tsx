@@ -6,6 +6,7 @@ import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
 import LogPanel from './components/LogPanel'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+import LibraryImport from './components/LibraryImport'
 import ProjectPicker from './components/ProjectPicker'
 import SetupWizard from './components/SetupWizard'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
@@ -111,6 +112,11 @@ export default function App(): React.JSX.Element {
   const [ver, setVer] = useState('')
   const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
   const [isProject, setIsProject] = useState(false)
+  /** A project folder opened from outside the library can be brought into it. */
+  const [inLibrary, setInLibrary] = useState(true)
+  const [projectDir, setProjectDir] = useState<string | null>(null)
+  const [showImport, setShowImport] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [editName, setEditName] = useState<string | null>(null)
   const [wizard, setWizard] = useState<{
     models: import('../../shared/types').ModelInfo[]
@@ -224,9 +230,9 @@ export default function App(): React.JSX.Element {
   // Background animation loops pause while a modal covers the app (the
   // scrim's backdrop blur re-rasters the whole window on every change).
   useEffect(() => {
-    const open = Boolean(showLog || showProjects || showSetup || wizard)
+    const open = Boolean(showLog || showProjects || showSetup || showImport || wizard)
     document.body.classList.toggle('modal-open', open)
-  }, [showLog, showProjects, showSetup, wizard])
+  }, [showLog, showProjects, showSetup, showImport, wizard])
 
   useEffect(() => {
     if (!error) return
@@ -310,6 +316,8 @@ export default function App(): React.JSX.Element {
       setPhase('loading')
       setSong({ path: reg.path, name: reg.name })
       setIsProject(Boolean(reg.project))
+      setInLibrary(reg.project?.inLibrary ?? true)
+      setProjectDir(reg.project?.dir ?? null)
       setEditName(null)
       setShowProjects(false)
       try {
@@ -728,6 +736,8 @@ export default function App(): React.JSX.Element {
       // renaming and future saves act on the project, not the original file.
       setSong((s) => (s ? { ...s, path: res.songPath } : s))
       setIsProject(true)
+      setInLibrary(res.inLibrary)
+      setProjectDir(res.dir)
       setNotice(`Saved to ${res.dir}`)
       setTimeout(() => setSaveState('idle'), 2500)
     } else {
@@ -735,6 +745,33 @@ export default function App(): React.JSX.Element {
       setError(`Could not save the project: ${res.error}`)
     }
   }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, tracks])
+
+  /** Bring a project opened from outside the library in, and follow it there. */
+  const handleImport = useCallback(
+    async (mode: 'copy' | 'move') => {
+      if (!song || importing) return
+      setImporting(true)
+      const res = await window.singz.importProject(song.path, mode)
+      setImporting(false)
+      if (!res.ok) {
+        setShowImport(false)
+        setError(res.error)
+        return
+      }
+      // the copy in the library is the one we keep working on from here
+      setSong((s) => (s ? { ...s, path: res.songPath } : s))
+      if (res.stems) setStemFiles(res.stems)
+      setInLibrary(true)
+      setProjectDir(res.dir)
+      setShowImport(false)
+      setNotice(
+        res.moved
+          ? `Moved into your library — the project now lives in ${res.dir}`
+          : `Copied into your library — ${res.dir}. The original folder is untouched.`
+      )
+    },
+    [song, importing]
+  )
 
   const commitRename = useCallback(
     async (raw: string) => {
@@ -749,6 +786,7 @@ export default function App(): React.JSX.Element {
         }
         setSong({ path: res.songPath, name: res.name })
         if (res.stems) setStemFiles(res.stems)
+        setProjectDir(res.dir)
         setNotice(`Renamed — the project folder is now ${res.dir}`)
       } else {
         setSong({ ...song, name })
@@ -987,7 +1025,11 @@ export default function App(): React.JSX.Element {
             <button
               type="button"
               className="pill ghost small"
-              title="Save song, stems, lyrics and settings into ~/Documents/SingZ"
+              title={
+                isProject
+                  ? 'Save stems, lyrics and settings into this project folder'
+                  : 'Save song, stems, lyrics and settings into your project library'
+              }
               disabled={saveState === 'saving'}
               onClick={() => void handleSaveProject()}
             >
@@ -1001,6 +1043,16 @@ export default function App(): React.JSX.Element {
                   {isProject && dirty && <span className="dirty-dot" title="Unsaved changes" />}
                 </>
               )}
+            </button>
+          )}
+          {phase === 'ready' && isProject && !inLibrary && (
+            <button
+              type="button"
+              className="pill ghost small"
+              title="This project sits outside your library — copy or move it in"
+              onClick={() => setShowImport(true)}
+            >
+              Add to library…
             </button>
           )}
           {phase === 'ready' && (
@@ -1159,6 +1211,15 @@ export default function App(): React.JSX.Element {
             openPicker()
           }}
           onClose={() => setShowProjects(false)}
+        />
+      )}
+
+      {showImport && projectDir && (
+        <LibraryImport
+          dir={projectDir}
+          busy={importing}
+          onImport={(mode) => void handleImport(mode)}
+          onClose={() => !importing && setShowImport(false)}
         />
       )}
 

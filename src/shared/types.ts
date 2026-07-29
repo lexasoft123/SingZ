@@ -73,6 +73,12 @@ export interface ProjectInfo {
   /** Stem files on disk (at least the core four), when the project has them. */
   stems?: Partial<Record<StemName6, string>>
   hasLyrics: boolean
+  /**
+   * False for a project folder opened from outside the library root — a copied,
+   * shared or other-machine folder. It saves and renames where it lives; the
+   * Add-to-library action is what brings it in.
+   */
+  inLibrary: boolean
 }
 
 /** A cloud-synced folder detected on this machine (offered as a library home). */
@@ -98,6 +104,18 @@ export type RenameResult =
       dir: string
       songPath: string
       stems?: Partial<Record<StemName6, string>>
+    }
+  | { ok: false; error: string }
+
+/** Result of bringing an outside project folder into the library. */
+export type ImportResult =
+  | {
+      ok: true
+      dir: string
+      songPath: string
+      stems?: Partial<Record<StemName6, string>>
+      /** True when the original folder was relocated, false when it was copied. */
+      moved: boolean
     }
   | { ok: false; error: string }
 
@@ -265,18 +283,26 @@ export interface SingzApi {
   /** App version for the titlebar ("dev" outside packaged builds). */
   appVersion(): Promise<string>
   /**
-   * Save the current song + stems + lyrics + settings into
-   * ~/Documents/SingZ/<name>/; the song then lives at the returned songPath.
+   * Save the current song + stems + lyrics + settings. A loose song lands in a
+   * new folder under the library root; a song already inside a project folder
+   * is saved in place, wherever that folder lives.
    */
   saveProject(
     songPath: string,
     name: string,
     settings: ProjectSettings
-  ): Promise<{ ok: true; dir: string; songPath: string } | { ok: false; error: string }>
+  ): Promise<
+    { ok: true; dir: string; songPath: string; inLibrary: boolean } | { ok: false; error: string }
+  >
   /** Saved-project library for the in-app Open screen. */
   listProjects(): Promise<{ root: string; projects: ProjectListItem[] }>
-  /** Rename a saved project's folder + metadata; returns the moved paths. */
+  /** Rename a saved project's folder + metadata in place; returns the moved paths. */
   renameProject(songPath: string, newName: string): Promise<RenameResult>
+  /**
+   * Bring a project opened from outside the library into it — 'copy' leaves the
+   * original folder alone, 'move' relocates it. Returns the project's new home.
+   */
+  importProject(songPath: string, mode: 'copy' | 'move'): Promise<ImportResult>
   /**
    * Upgrade a v1 project (WAV stems) to v2 (FLAC, ~4x smaller) in place.
    * Runs after a v1 project opens; WAVs are deleted only once every stem

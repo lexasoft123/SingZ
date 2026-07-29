@@ -14,7 +14,9 @@ export function allowFile(path: string): void {
 }
 
 export function allowRoot(dir: string): void {
-  allowedRoots.push(resolve(dir))
+  const full = resolve(dir)
+  // every project open registers its folder, so re-opening must not grow the list
+  if (!allowedRoots.includes(full)) allowedRoots.push(full)
 }
 
 export function isAllowed(path: string): boolean {

@@ -879,6 +879,11 @@ button.chip-status:hover {
   color: var(--text);
 }
 
+/* full folder paths have no spaces to break at — let them wrap anywhere */
+.modal-card p strong.path {
+  overflow-wrap: anywhere;
+}
+
 .cmd {
   display: flex;
   align-items: center;

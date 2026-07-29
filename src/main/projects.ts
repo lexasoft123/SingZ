@@ -1,11 +1,12 @@
 import { app } from 'electron'
 import { existsSync, readdirSync } from 'node:fs'
 import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, join } from 'node:path'
+import { basename, dirname, extname, join, sep } from 'node:path'
 import {
   STEMS,
   STEMS_6,
   type CloudRoot,
+  type ImportResult,
   type ProjectInfo,
   type ProjectListItem,
   type ProjectSettings,
@@ -13,7 +14,7 @@ import {
 } from '../shared/types'
 import { wavToFlac } from './flac'
 import { log } from './log'
-import { stemsRoot } from './media'
+import { allowRoot, stemsRoot } from './media'
 import { hashFile } from './separation'
 import { readSettings, writeSettings } from './settings'
 
@@ -26,6 +27,16 @@ export function projectsRoot(): string {
   const custom = readSettings().projectsRoot
   if (custom && existsSync(custom)) return custom
   return join(app.getPath('documents'), 'SingZ')
+}
+
+/**
+ * Does this project folder sit inside the library root? Copied, shared and
+ * other-machine folders open fine from anywhere, but they are not ours to
+ * reorganise: they save and rename where they are until the user imports them.
+ */
+export function inLibrary(dir: string): boolean {
+  const root = projectsRoot()
+  return dir === root || dir.startsWith(root + sep)
 }
 
 /** Cloud-synced folders present on this machine (each proposes a SingZ subfolder). */
@@ -270,7 +281,8 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
       formatVersion: meta.version ?? 1,
       settings: meta.settings ?? { transpose: 0, tracks: {} },
       stems: coreThere ? stems : undefined,
-      hasLyrics: await exists(join(dir, 'lyrics.json'))
+      hasLyrics: await exists(join(dir, 'lyrics.json')),
+      inLibrary: inLibrary(dir)
     }
   } catch {
     return null
@@ -287,12 +299,20 @@ export async function saveProject(
   songPath: string,
   name: string,
   settings: ProjectSettings
-): Promise<{ ok: true; dir: string; songPath: string } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; dir: string; songPath: string; inLibrary: boolean } | { ok: false; error: string }
+> {
   try {
-    const dir = join(projectsRoot(), safeName(name))
+    // A song already inside a project folder saves in place, wherever that
+    // folder lives — saving a shared or cloud project must never fork a second
+    // copy into the library. Only a loose song gets a new folder made for it.
+    const own = dirname(songPath)
+    const inPlace = await exists(join(own, 'project.json'))
+    const dir = inPlace ? own : join(projectsRoot(), safeName(name))
     await mkdir(join(dir, 'stems'), { recursive: true })
 
-    const songFile = `song${extname(songPath).toLowerCase()}`
+    // in place, the opened song IS the project's song — keep its filename
+    const songFile = inPlace ? basename(songPath) : `song${extname(songPath).toLowerCase()}`
     const songDest = join(dir, songFile)
     if (songDest !== songPath && !(await exists(songDest))) {
       await copyFile(songPath, songDest)
@@ -332,7 +352,7 @@ export async function saveProject(
     }
     await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
     log('app', `project saved: ${dir}`)
-    return { ok: true, dir, songPath: songDest }
+    return { ok: true, dir, songPath: songDest, inLibrary: inLibrary(dir) }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -360,11 +380,16 @@ export async function renameProject(
     const meta = await readMeta(oldDir)
     if (!meta) return { ok: false, error: 'This song is not a saved project yet.' }
     const name = safeName(newName)
-    const newDir = join(projectsRoot(), name)
+    // rename where the project lives (for a library project that is the root
+    // itself) — renaming must never double as a move out of a shared folder
+    const newDir = join(dirname(oldDir), name)
     if (newDir !== oldDir && (await exists(newDir))) {
       return { ok: false, error: `A project called “${name}” already exists.` }
     }
     if (newDir !== oldDir) await rename(oldDir, newDir)
+    // the folder just moved — outside the library that lands on an unregistered
+    // path, and every stem read after this would be refused
+    allowRoot(newDir)
     meta.name = name
     await writeFile(join(newDir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
     const stems: Partial<Record<StemName6, string>> = {}
@@ -380,6 +405,62 @@ export async function renameProject(
       dir: newDir,
       songPath: join(newDir, meta.songFile),
       stems: coreThere ? stems : undefined
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Bring a project opened from outside the library into it. 'copy' leaves the
+ * original folder untouched (the safe default for a shared or cloud folder
+ * someone else also uses); 'move' relocates it.
+ */
+export async function importProject(
+  songPath: string,
+  mode: 'copy' | 'move'
+): Promise<ImportResult> {
+  try {
+    const src = dirname(songPath)
+    const meta = await readMeta(src)
+    if (!meta) return { ok: false, error: 'This song is not a saved project yet.' }
+    if (inLibrary(src)) return { ok: false, error: 'This project is already in your library.' }
+
+    const name = safeName(meta.name ?? basename(src))
+    const dst = join(projectsRoot(), name)
+    if (await exists(dst)) {
+      return { ok: false, error: `A project called “${name}” is already in your library.` }
+    }
+    await mkdir(projectsRoot(), { recursive: true })
+
+    if (mode === 'move') {
+      try {
+        await rename(src, dst)
+      } catch (err) {
+        // iCloud, a network share or a USB stick is a different volume, where
+        // rename() can't reach — copy over, then drop the original.
+        if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
+        await cp(src, dst, { recursive: true })
+        await rm(src, { recursive: true, force: true })
+      }
+    } else {
+      await cp(src, dst, { recursive: true })
+    }
+
+    allowRoot(dst)
+    const stems: Partial<Record<StemName6, string>> = {}
+    for (const s of STEMS_6) {
+      const p = await stemFile(dst, s)
+      if (p) stems[s] = p
+    }
+    const coreThere = STEMS.every((s) => Boolean(stems[s]))
+    log('app', `project ${mode === 'move' ? 'moved' : 'copied'} into the library: ${src} → ${dst}`)
+    return {
+      ok: true,
+      dir: dst,
+      songPath: join(dst, meta.songFile),
+      stems: coreThere ? stems : undefined,
+      moved: mode === 'move'
     }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }

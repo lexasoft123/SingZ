@@ -1,15 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, systemPreferences } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
-import { readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, extname, join, resolve } from 'node:path'
-import type { LyricsProgress, RegisterResult, SeparationProgress } from '../shared/types'
+import { readFile, rm, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import type { LyricsProgress, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
 import { preciseCapable } from './align-mms'
 import { Transcriber } from './lyrics'
 import { ModelManager } from './models'
 import {
-  detectProject,
   getStorage,
+  importProject,
   listProjects,
   migrateProjects,
   migrateProjectToV2,
@@ -23,7 +23,8 @@ import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSy
 import { readSettings } from './settings'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
-import { allowFile, allowRoot, isAllowed, stemsRoot } from './media'
+import { allowRoot, isAllowed, stemsRoot } from './media'
+import { registerSource } from './source'
 import { log, logEntries, saveLog } from './log'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
@@ -42,19 +43,6 @@ if (process.env.SINGZ_FAKE_MIC) {
 if (process.env.SINGZ_USERDATA_DIR) {
   app.setPath('userData', resolve(process.env.SINGZ_USERDATA_DIR))
 }
-
-const AUDIO_EXT = new Set([
-  '.mp3',
-  '.wav',
-  '.flac',
-  '.m4a',
-  '.aac',
-  '.ogg',
-  '.oga',
-  '.opus',
-  '.aif',
-  '.aiff'
-])
 
 const separator = new Separator()
 const transcriber = new Transcriber()
@@ -151,28 +139,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('source:register', async (_e, raw: string): Promise<RegisterResult> => {
-    try {
-      const full = resolve(String(raw))
-      const ext = extname(full).toLowerCase()
-      if (!AUDIO_EXT.has(ext)) {
-        return { ok: false, error: `Can't use ${ext || 'that file'} — drop an MP3, WAV, FLAC or M4A.` }
-      }
-      const info = await stat(full)
-      if (!info.isFile()) return { ok: false, error: 'That is not a file.' }
-      allowFile(full)
-      const project = await detectProject(full)
-      return {
-        ok: true,
-        path: full,
-        name: project?.name ?? basename(full, ext),
-        size: info.size,
-        project: project ?? undefined
-      }
-    } catch {
-      return { ok: false, error: 'Could not read that file.' }
-    }
-  })
+  ipcMain.handle('source:register', (_e, raw: string) => registerSource(String(raw)))
 
   // Audio bytes travel over IPC (fetch() from a file:// page can't reach
   // custom protocols, so a URL-based approach breaks in production builds).
@@ -321,6 +288,12 @@ function registerIpc(): void {
     const full = resolve(String(raw))
     if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
     return renameProject(full, String(newName))
+  })
+
+  ipcMain.handle('project:import', async (_e, raw: string, mode: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    return importProject(full, mode === 'move' ? 'move' : 'copy')
   })
 
   ipcMain.handle('project:upgrade', async (_e, raw: string) => {

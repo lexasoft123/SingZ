@@ -117,6 +117,8 @@ const api: SingzApi = {
 
   renameProject: (songPath, newName) => ipcRenderer.invoke('project:rename', songPath, newName),
 
+  importProject: (songPath, mode) => ipcRenderer.invoke('project:import', songPath, mode),
+
   upgradeProject: (dir) => ipcRenderer.invoke('project:upgrade', dir),
   getStorage: () => ipcRenderer.invoke('projects:storage'),
   setProjectsRoot: (path) => ipcRenderer.invoke('projects:set-root', path),

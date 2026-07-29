@@ -10,6 +10,9 @@ export default defineConfig({
   test: {
     include: ['tests/unit/**/*.test.ts'],
     environment: 'node',
-    testTimeout: 30000
+    testTimeout: 30000,
+    // every file shares the one stubbed userData, so they take turns with
+    // settings.json (which is where the projects root is switched)
+    fileParallelism: false
   }
 })

@@ -117,6 +117,14 @@ answer your evals while you measure the phone.
   cloud folders like iCloud Drive); `allowRoot` the new root after switching.
   The `mobile/` RN player reads the same folders (v1 and v2) via its
   FolderAccess pod.
+- **Projects open from anywhere and stay where they are** — a project folder
+  need not sit under the library root (copied, shared, another machine's cloud
+  library). `registerSource` must `allowRoot` the detected project dir or
+  media:read refuses its stems and the load dies as the misleading "Could not
+  decode that audio file."; `project:upgrade` fails the same way. Save and
+  rename act **in place**; `importProject` is the only thing that relocates a
+  project, and only when the user asks. Anything that moves a project folder
+  has to `allowRoot` the destination — the old entry does not follow it.
 - **Google Drive sync needs no Drive clients**: drive.file scope (no Google
   verification), one Desktop-type OAuth client for every platform (loopback
   flow — Android listens on 127.0.0.1 natively). Desktop pushes the library
