@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   driveAccountEmail,
   driveAvailable,
+  driveListIsFresh,
   driveListProjects,
   driveSignedIn,
   driveSignIn,
@@ -77,7 +78,7 @@ export default function CatalogScreen({
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     try {
       setError(null)
       if (mode === 'gdrive') {
@@ -89,10 +90,12 @@ export default function CatalogScreen({
           return
         }
         setDriveEmail(await driveAccountEmail())
-        // clear the previous mode's cards while Drive lists — a stale list
-        // with no spinner reads as a frozen screen on a slow connection
-        setProjects(null)
-        setProjects(await driveListProjects())
+        // clear the previous mode's cards only when the list will actually
+        // hit the network — coming back from a song serves the cache and
+        // must not flash a spinner (a stale list with no spinner reads as
+        // a frozen screen; a spinner on every return reads as re-downloading)
+        if (force || !driveListIsFresh()) setProjects(null)
+        setProjects(await driveListProjects(force))
       } else {
         setRoot(await getRoot())
         setProjects(await listProjects())
@@ -395,7 +398,7 @@ export default function CatalogScreen({
               colors={[C.amber]}
               onRefresh={() => {
                 setPulling(true)
-                void refresh().finally(() => setPulling(false))
+                void refresh(true).finally(() => setPulling(false))
               }}
             />
           }

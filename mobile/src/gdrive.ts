@@ -88,7 +88,10 @@ export async function driveSignedIn(): Promise<boolean> {
   return (await readTokens()) !== null
 }
 
-export const driveSignOut = (): Promise<void> => writeTokens(null)
+export const driveSignOut = (): Promise<void> => {
+  listCache = null
+  return writeTokens(null)
+}
 
 /** Sign in with the system browser + loopback redirect. Resolves when done. */
 export async function driveSignIn(): Promise<void> {
@@ -258,7 +261,18 @@ interface DriveProjectFiles {
 
 const projectFiles = new Map<string, DriveProjectFiles>()
 
-export async function driveListProjects(): Promise<ProjectEntry[]> {
+// Coming back from a song must not hit the network: the listing is cached
+// for a few minutes (pull-to-refresh forces). projectFiles (file ids for
+// streaming) lives at module scope and survives with it.
+const LIST_TTL_MS = 5 * 60_000
+let listCache: { at: number; entries: ProjectEntry[] } | null = null
+
+export function driveListIsFresh(): boolean {
+  return listCache !== null && Date.now() - listCache.at < LIST_TTL_MS
+}
+
+export async function driveListProjects(force = false): Promise<ProjectEntry[]> {
+  if (!force && driveListIsFresh() && listCache) return listCache.entries
   const rootId = await singzRootId()
   const token = await accessToken()
   const dirs = (await listChildren(rootId)).filter((f) => f.mimeType === FOLDER)
@@ -311,6 +325,7 @@ export async function driveListProjects(): Promise<ProjectEntry[]> {
     for (const entry of batch) if (entry) out.push(entry)
   }
   out.sort((a, b) => ((a.doc.savedAt ?? '') < (b.doc.savedAt ?? '') ? 1 : -1))
+  listCache = { at: Date.now(), entries: out }
   return out
 }
 
