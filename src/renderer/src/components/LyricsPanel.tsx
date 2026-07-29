@@ -139,7 +139,9 @@ export default function LyricsPanel({
       if (target) {
         const gapStart = li === -1 ? 0 : lines[li].end
         const dt = target.start - pos
-        if (target.start - gapStart >= 3 && dt > 0 && dt <= 3) {
+        // the first line always counts in when there is any runway
+        const gapOk = li === -1 ? target.start >= 1.2 : target.start - gapStart >= 3
+        if (gapOk && dt > 0 && dt <= 3) {
           count = Math.min(3, Math.ceil(dt))
           countEl = lineRefs.current[nextIdx]
         }

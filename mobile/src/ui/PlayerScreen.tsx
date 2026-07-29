@@ -260,11 +260,13 @@ export default function PlayerScreen({
           const isCurrent = i === currentLine
           const isSing = mask?.[i] === true
           // count-in dots during the last 3s of a long gap before this line
-          // (desktop parity: gap >= 3s, dots = ceil(seconds left))
+          // (desktop parity: gap >= 3s, dots = ceil(seconds left)). The FIRST
+          // line always counts in when there is any runway — the singer just
+          // pressed play and needs orientation even on a quick start.
           const gapStart = i === 0 ? 0 : lines[i - 1].end
           const dt = ln.start - pos
-          const countIn =
-            ln.start - gapStart >= 3 && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
+          const gapOk = i === 0 ? ln.start >= 1.2 : ln.start - gapStart >= 3
+          const countIn = gapOk && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
           return (
             <Pressable
               key={i}
