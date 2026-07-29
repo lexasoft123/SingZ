@@ -1842,23 +1842,35 @@ button.chip-status:hover {
   border-color: var(--accent);
 }
 
-/* the two storage cards: where the library lives + the Drive mirror */
-.src-cards {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+/* one storage panel: the folder is the home; Drive is its subordinate copy */
+.src-panel {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 13px;
   margin-bottom: 14px;
 }
 
-.src-card {
+.src-row {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 13px;
   min-width: 0;
+}
+
+.src-row.sub {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.src-row.sub .src-card-value {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.src-dim2 {
+  color: var(--dim);
 }
 
 .src-card-body {
@@ -1869,16 +1881,6 @@ button.chip-status:hover {
   flex: 1;
 }
 
-.src-card-label {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--faint);
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
 
 .src-card-value {
   color: var(--text);

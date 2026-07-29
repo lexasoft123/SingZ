@@ -181,48 +181,51 @@ export default function DropScreen({
               />
             )}
           </div>
-          <div className="src-cards">
-            <div className="src-card">
+          <div className="src-panel">
+            <div className="src-row">
               <div className="src-card-body">
-                <span className="src-card-label">Library folder</span>
                 <span className="src-card-value" title={root}>
                   <span aria-hidden>📁 </span>
                   {root.includes('Mobile Documents')
                     ? `iCloud Drive › ${root.split('/').pop()}`
                     : root.split('/').slice(-2).join(' › ')}
                 </span>
-                <span className="src-card-sub">{folderCloud(root)}</span>
+                <span className="src-card-sub">
+                  Your library lives here · {folderCloud(root)}
+                </span>
               </div>
               <button type="button" className="src-link" onClick={onManageStorage}>
                 Change…
               </button>
             </div>
             {gdrive.configured && (
-              <div className="src-card">
+              <div className="src-row sub">
                 <div className="src-card-body">
-                  <span className="src-card-label">
-                    <img className="src-ic" src={gdriveIcon} alt="" /> Google Drive backup
-                  </span>
                   {driveMsg ? (
-                    <span className="src-card-value warn">{driveMsg}</span>
+                    <span className="src-card-value warn">
+                      <img className="src-ic" src={gdriveIcon} alt="" /> {driveMsg}
+                    </span>
                   ) : syncProg ? (
                     <span className="src-card-value">
-                      <span className="src-dot busy" /> {syncProg.msg}{' '}
+                      <img className="src-ic" src={gdriveIcon} alt="" />
+                      Copying to your Google Drive… {syncProg.msg}{' '}
                       {Math.round(syncProg.frac * 100)}%
                     </span>
                   ) : gdrive.signedIn ? (
                     <span className="src-card-value">
-                      <span className="src-dot ok" /> Up to date
-                      {lastSyncLabel ? ` · synced ${lastSyncLabel}` : ''}
+                      <img className="src-ic" src={gdriveIcon} alt="" />
+                      A copy also lives in your Google Drive
+                      <span className="src-dot ok" />
+                      <span className="src-dim2">
+                        up to date{lastSyncLabel ? ` · ${lastSyncLabel}` : ''}
+                      </span>
                     </span>
                   ) : (
-                    <span className="src-card-value dim">Off</span>
+                    <span className="src-card-value dim">
+                      <img className="src-ic" src={gdriveIcon} alt="" />
+                      Keep a copy in your Google Drive, so phones can stream it
+                    </span>
                   )}
-                  <span className="src-card-sub">
-                    {gdrive.signedIn
-                      ? 'A copy of this library, for your phones'
-                      : 'Keeps a copy in your Drive so phones can stream it'}
-                  </span>
                 </div>
                 <button
                   type="button"
