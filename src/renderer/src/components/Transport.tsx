@@ -261,8 +261,8 @@ function MetPopover({
     ? tapCount > 0 && tapCount < 3
       ? 'Keep tapping — three steady taps set the tempo.'
       : canDetect
-        ? 'No steady beat found in the drums — tap the tempo yourself, or try Re-detect.'
-        : 'Tap the tempo to set one, or split the song and it is read from the drums.'
+        ? 'No steady beat found in the drums — the count-in ticks once a second instead. Tap the tempo yourself, or try Re-detect.'
+        : 'No tempo yet — the count-in ticks once a second instead. Tap one, or split the song and it is read from the drums.'
     : `${Math.round(grid.bpm * 10) / 10} bpm · ${
         grid.source === 'auto'
           ? 'following the drums, drift and all'
@@ -320,20 +320,26 @@ function MetPopover({
           <button
             type="button"
             className={met.countInBars === 1 ? 'on' : ''}
-            disabled={!grid}
-            title={grid ? 'One bar of clicks before playback starts' : 'Needs a tempo first'}
-            onClick={grid ? () => onMet({ ...met, countInBars: 1 }) : undefined}
+            title={
+              grid
+                ? 'One bar of clicks before playback starts'
+                : 'Three ticks, one per second, before playback starts'
+            }
+            onClick={() => onMet({ ...met, countInBars: 1 })}
           >
-            1 bar
+            {grid ? '1 bar' : '3 s'}
           </button>
           <button
             type="button"
             className={met.countInBars === 2 ? 'on' : ''}
-            disabled={!grid}
-            title={grid ? 'Two bars of clicks before playback starts' : 'Needs a tempo first'}
-            onClick={grid ? () => onMet({ ...met, countInBars: 2 }) : undefined}
+            title={
+              grid
+                ? 'Two bars of clicks before playback starts'
+                : 'Six ticks, one per second, before playback starts'
+            }
+            onClick={() => onMet({ ...met, countInBars: 2 })}
           >
-            2 bars
+            {grid ? '2 bars' : '6 s'}
           </button>
         </div>
       </div>

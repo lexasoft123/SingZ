@@ -44,6 +44,10 @@ export type TrainingSpec =
 const START_DELAY = 0.04 // scheduling headroom so all stems start sample-locked
 const CLICK_LOOKAHEAD = 0.18 // clicks are queued this far ahead on the audio clock
 const CLICK_TICK_MS = 60
+// Grid-less (rubato) count-in: each chosen "bar" is 3 ticks, one per second
+// of wall clock — free-tempo songs have no beat to count on.
+const SEC_COUNT_TICKS = 3
+const SEC_COUNT_PERIOD = 1
 
 /** SingzStretchNode host object (patch 3 in scripts/patch-audio-api.js). */
 interface StretchHost {
@@ -620,6 +624,11 @@ export class MultitrackEngine {
         this.nextClickIdx = i0
       }
     }
+    // No grid (rubato) — count in by the clock instead: bars×3 ticks, one per
+    // second, the music entering one second after the last tick. Wall-clock
+    // pre-roll: the playback rate has no bearing on how humans count seconds.
+    const secTicks = opts.countIn !== false && bars > 0 && g === null ? bars * SEC_COUNT_TICKS : 0
+    when += secTicks * SEC_COUNT_PERIOD
     this.sources = []
     let longestIdx = 0
     this.tracks.forEach((t, i) => {
@@ -656,6 +665,20 @@ export class MultitrackEngine {
         periodCtx: span / total / this.rate,
         total,
         perBar: g.beatsPerBar
+      }
+    } else if (secTicks > 0) {
+      // Short and bounded — schedule every tick now, no walker involved.
+      // Ticks carry the stretch-bus latency like beat clicks do, so the
+      // last-tick→music gap is exactly one second at the ear.
+      const firstCtx = when + this.stretchLatency - secTicks * SEC_COUNT_PERIOD
+      for (let k = 0; k < secTicks; k++) {
+        this.scheduleClick(firstCtx + k * SEC_COUNT_PERIOD, k % SEC_COUNT_TICKS === 0)
+      }
+      this.countInfo = {
+        firstCtx,
+        periodCtx: SEC_COUNT_PERIOD,
+        total: secTicks,
+        perBar: SEC_COUNT_TICKS
       }
     }
     this.syncBoundWatcher()

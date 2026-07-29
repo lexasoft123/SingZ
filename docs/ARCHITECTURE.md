@@ -36,7 +36,11 @@ re-derive the walker. A count-in is a pre-roll in `play()`: the stems'
 shared start time moves out past whole beats — the song's real preceding
 beats when starting mid-song, extrapolated ones before the first beat — so
 the music enters on a bar accent; `position` holds at the start point until
-it does. Seeks and post-split hot-swaps restart without a count-in.
+it does. Without a beat track (rubato — detection rejects free-tempo songs)
+the count-in still works, degraded to the clock: 3 or 6 ticks at one per
+wall-clock second (rate-independent, scheduled upfront — no walker), the
+music entering one second after the last tick. Seeks and post-split
+hot-swaps restart without a count-in.
 
 ## Timeline & zoom
 
