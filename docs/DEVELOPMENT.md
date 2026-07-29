@@ -9,6 +9,19 @@ scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
 npm run dev
 ```
 
+Local clang builds pick up **ccache** automatically when it is installed
+(`brew install ccache`): `vendor-whisper.sh` and `npm run android` export
+CMake's compiler-launcher env (the mechanism the Android CI uses), and the
+iOS Podfile turns on React Native's `ccache_enabled` wrappers at pod install.
+One-time setup so hashes beat timestamps (fresh worktrees re-stamp mtimes):
+
+```bash
+ccache --set-config compiler_check=content
+```
+
+Running `mobile/android/gradlew` directly instead of `npm run android`? Prefix
+`CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache`.
+
 A system `demucs` (pipx) is the easiest dev splitter — the app auto-prefers
 it and no pack is needed. Otherwise build/install the pack for your platform:
 `scripts/build-gpu-pack.sh` (Apple Silicon torch/MPS) or
@@ -125,6 +138,5 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
   recall; pYIN port ties it for free, so shelved — infer script exists).
 - DirectML adapter targeting for Optimus laptops (proven manually via Windows
   per-app Graphics preference; needs a device_id ladder in the pack shim).
-- Half/double-time disambiguation for the tempo estimate.
 - A–B loop for phrase practice; export karaoke mix to file.
 - Whisper model picker in the model manager UI.

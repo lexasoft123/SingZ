@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { EngineStatus, SeparationProgress } from '../../shared/types'
-import { estimateKey, estimateTempo, type KeyGuess } from './audio/analysis'
+import type { EngineStatus, LyricLine, SeparationProgress } from '../../shared/types'
+import { BEAT_DETECT_VERSION, detectBeats, estimateKey, type KeyGuess } from './audio/analysis'
+import {
+  MET_DEFAULTS,
+  sanitizeBeatInfo,
+  sanitizeMetronome,
+  type BeatInfo,
+  type MetronomeConfig
+} from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
@@ -149,12 +156,25 @@ export default function App(): React.JSX.Element {
     key: null,
     bpm: null
   })
+  const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(null)
+  const [metCfg, setMetCfg] = useState<MetronomeConfig>(() => {
+    try {
+      const raw = localStorage.getItem('singz.met')
+      return raw ? sanitizeMetronome(JSON.parse(raw)) : MET_DEFAULTS
+    } catch {
+      return MET_DEFAULTS
+    }
+  })
+  const beatInfoRef = useRef(beatInfo)
+  beatInfoRef.current = beatInfo
   const drumsBufRef = useRef<AudioBuffer | null>(null)
   const loadSeq = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
+  const bassBufRef = useRef<AudioBuffer | null>(null)
+  const linesRef = useRef<LyricLine[] | null>(null)
   const originalBufRef = useRef<AudioBuffer | null>(null)
   const lyricsRef = useRef(lyrics)
   lyricsRef.current = lyrics
@@ -174,6 +194,19 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     localStorage.setItem('singz.train', JSON.stringify(trainCfg))
   }, [trainCfg])
+
+  // Metronome prefs follow the singer across songs too (projects override on open).
+  useEffect(() => {
+    localStorage.setItem('singz.met', JSON.stringify(metCfg))
+  }, [metCfg])
+
+  useEffect(() => {
+    engine.setBeats(beatInfo)
+  }, [engine, beatInfo])
+
+  useEffect(() => {
+    engine.setMetronome(metCfg)
+  }, [engine, metCfg])
 
   // Mirror the engine's ducked set (lane dimming + the pulsing train button).
   useEffect(
@@ -297,8 +330,10 @@ export default function App(): React.JSX.Element {
       setMelody({ status: 'none' })
       vocalsBufRef.current = null
       drumsBufRef.current = null
+      bassBufRef.current = null
       originalBufRef.current = null
       setSongInfo({ key: null, bpm: null })
+      setBeatInfo(null)
       preferRef.current = 'auto'
       setTranspose(0)
       void engine.setTranspose(0)
@@ -357,6 +392,7 @@ export default function App(): React.JSX.Element {
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
+          bassBufRef.current = buffers[order.indexOf('bass')] ?? null
           // Restore training BEFORE karaoke may reopen: its auto-mute must
           // know training governs the vocals (the ref is set synchronously —
           // state alone would land a render too late).
@@ -376,6 +412,12 @@ export default function App(): React.JSX.Element {
           const tr = proj.settings.tempo ?? 1
           setTempoRate(tr)
           void engine.setTempo(tr)
+          const bg = sanitizeBeatInfo(proj.settings.beat)
+          if (bg) {
+            setBeatInfo(bg)
+            setSongInfo({ key: null, bpm: bg.bpm })
+          }
+          if (proj.settings.metronome) setMetCfg(sanitizeMetronome(proj.settings.metronome))
           const v = proj.settings.view
           if (v && Number.isFinite(v.s) && Number.isFinite(v.e) && v.e - v.s > 0.05) {
             setView({ s: Math.max(0, v.s), e: v.e })
@@ -432,7 +474,8 @@ export default function App(): React.JSX.Element {
         // Look for lyrics right away (cache/online only — never triggers the
         // model download without consent), so karaoke opens with answers ready.
         void prepLyricsRef.current?.()
-      } catch {
+      } catch (err) {
+        console.error('song load failed:', err) // E2E drivers read this; the toast hides the cause
         if (seq !== loadSeq.current) return
         setPhase('empty')
         setSong(null)
@@ -546,6 +589,7 @@ export default function App(): React.JSX.Element {
       setSaveState((st) => (st === 'saved' ? 'idle' : st))
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
+      bassBufRef.current = buffers[order.indexOf('bass')] ?? null
       // Analyze right away (melody, key, bpm) so karaoke opens warm and the
       // bpm box fills in without a trip through karaoke mode. If karaoke was
       // open last session, reopen it.
@@ -675,9 +719,33 @@ export default function App(): React.JSX.Element {
           hopSec: e.data.hopSec
         }
         setMelody({ status: 'ready', f0: e.data.f0, hopSec: e.data.hopSec })
+        // Beat track from the drums (once per song — a hand-tuned track wins
+        // over re-detection; restored auto tracks from an older detector are
+        // silently re-tracked so downbeat fixes reach saved projects).
+        let info = beatInfoRef.current
+        const stale = info?.source === 'auto' && info.detVersion !== BEAT_DETECT_VERSION
+        if ((!info || stale) && drumsBufRef.current) {
+          const det = detectBeats(drumsBufRef.current, {
+            bass: bassBufRef.current,
+            vocals: vocalsBufRef.current,
+            lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
+          })
+          if (det) {
+            info = {
+              beats: det.beats,
+              bpm: det.bpm,
+              beatsPerBar: det.beatsPerBar,
+              downbeat: det.downbeat,
+              source: 'auto',
+              detVersion: BEAT_DETECT_VERSION
+            }
+            setBeatInfo(info)
+            if (stale) touchSettings()
+          }
+        }
         setSongInfo({
           key: estimateKey(e.data.f0),
-          bpm: drumsBufRef.current ? estimateTempo(drumsBufRef.current) : null
+          bpm: info?.bpm ?? null
         })
         worker.terminate()
       }
@@ -724,6 +792,11 @@ export default function App(): React.JSX.Element {
       selection: selection ?? undefined,
       loop: loopOn || undefined,
       training: { on: training || undefined, ...trainCfg },
+      // Beat times rounded to the millisecond keep project.json readable.
+      beat: beatInfo
+        ? { ...beatInfo, beats: beatInfo.beats.map((b) => Math.round(b * 1000) / 1000) }
+        : undefined,
+      metronome: metCfg,
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
@@ -738,13 +811,17 @@ export default function App(): React.JSX.Element {
       setIsProject(true)
       setInLibrary(res.inLibrary)
       setProjectDir(res.dir)
-      setNotice(`Saved to ${res.dir}`)
+      setNotice(
+        res.driveSignedOut
+          ? `Saved to ${res.dir} — Google Drive is signed out on this computer, so your phones won't see this until you sign in (Open… screen).`
+          : `Saved to ${res.dir}`
+      )
       setTimeout(() => setSaveState('idle'), 2500)
     } else {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, tracks])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, metCfg, tracks])
 
   /** Bring a project opened from outside the library in, and follow it there. */
   const handleImport = useCallback(
@@ -855,6 +932,48 @@ export default function App(): React.JSX.Element {
     })
   }, [engine, selection, touchSettings])
 
+  const handleMetCfg = useCallback(
+    (m: MetronomeConfig) => {
+      touchSettings()
+      setMetCfg(m)
+    },
+    [touchSettings]
+  )
+
+  const handleBeat = useCallback(
+    (g: BeatInfo) => {
+      touchSettings()
+      setBeatInfo(g)
+      setSongInfo((s) => ({ ...s, bpm: g.bpm }))
+    },
+    [touchSettings]
+  )
+
+  /** Re-track the beats from the drums stem (the popover's Re-detect). */
+  const redetectBeat = useCallback(() => {
+    const buf = drumsBufRef.current
+    if (!buf) return
+    const det = detectBeats(buf, {
+      bass: bassBufRef.current,
+      vocals: vocalsBufRef.current,
+      lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
+    })
+    if (det) {
+      touchSettings()
+      setBeatInfo({
+        beats: det.beats,
+        bpm: det.bpm,
+        beatsPerBar: det.beatsPerBar,
+        downbeat: det.downbeat,
+        source: 'auto',
+        detVersion: BEAT_DETECT_VERSION
+      })
+      setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+    } else {
+      setNotice('No steady beat found in the drums — tap the tempo instead.')
+    }
+  }, [touchSettings])
+
   const handleTempo = useCallback(
     (rate: number) => {
       const clamped = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
@@ -869,6 +988,7 @@ export default function App(): React.JSX.Element {
   )
 
   const lines = lyrics.status === 'ready' ? lyrics.lines : null
+  linesRef.current = lines
 
   /** Arm/disarm vocal training; arming un-mutes the stems it alternates. */
   const toggleTraining = useCallback(() => {
@@ -1156,6 +1276,12 @@ export default function App(): React.JSX.Element {
             tempo={tempoRate}
             onTempo={handleTempo}
             bpm={songInfo.bpm}
+            beat={beatInfo}
+            met={metCfg}
+            canDetectBeat={drumsBufRef.current !== null}
+            onMetCfg={handleMetCfg}
+            onBeat={handleBeat}
+            onRedetectBeat={redetectBeat}
             onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
             onResplit={split && !sep ? () => void startSplit() : null}

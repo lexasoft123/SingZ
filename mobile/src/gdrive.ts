@@ -337,10 +337,13 @@ interface StoredCatalog {
 let restored = false
 
 /**
- * The last listing, as persisted on this device. Serves the catalog instantly
- * on a cold start and is the whole library when there is no signal — the file
- * ids come back with it, so an already-downloaded song still opens offline.
- * Deliberately not marked fresh: whoever shows it also refreshes underneath.
+ * Whatever listing we have, in memory or on disk — shown instantly and left
+ * for the network to replace quietly. After a five-minute song the freshness
+ * window has always lapsed, and a spinner on every exit reads as the library
+ * re-downloading itself; on a cold start, or with no signal at all, the copy
+ * on disk is the whole library. The Drive file ids come back with it, so a
+ * song already downloaded still opens offline. Deliberately not counted as
+ * fresh: whoever shows it also refreshes underneath.
  */
 export async function driveStoredProjects(): Promise<ProjectEntry[] | null> {
   if (restored) return listCache?.entries ?? null

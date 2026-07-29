@@ -16,7 +16,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   driveAccountEmail,
   driveAvailable,
-  driveListIsFresh,
   driveListProjects,
   driveSignedIn,
   driveSignIn,
@@ -88,6 +87,8 @@ export default function CatalogScreen({
   const [offline, setOffline] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
+  /** Bumping this drops a superseded listing (mode switched mid-flight). */
+  const listSeq = useRef(0)
 
   const loadUsage = useCallback(async () => {
     const rows = await cacheUsage()
@@ -98,6 +99,7 @@ export default function CatalogScreen({
 
   const refresh = useCallback(
     async (force = false) => {
+      const my = ++listSeq.current
       try {
         setError(null)
         if (mode === 'gdrive') {
@@ -109,33 +111,42 @@ export default function CatalogScreen({
             return
           }
           setDriveEmail(await driveAccountEmail())
-          // Last sync first, always: a cold start — and every start without
-          // signal — lands on a usable library instead of a spinner, and the
-          // refresh happens underneath it.
-          const stored = await driveStoredProjects()
-          if (stored?.length) setProjects(stored)
-          // nothing stored: clear the previous mode's cards only when the list
-          // will actually hit the network (coming back from a song serves the
-          // in-memory cache and must not flash a spinner)
-          else if (force || !driveListIsFresh()) setProjects(null)
+          // Stale-while-revalidate, and the stale copy outlives the process:
+          // whatever listing we have shows INSTANTLY (a song outlives the
+          // freshness window, and a spinner on every exit reads as the
+          // library re-downloading), then the network replaces it quietly.
+          // The full-screen spinner is ONLY for an empty screen — on
+          // pull-to-refresh the pull indicator is already spinning.
+          const cached = await driveStoredProjects()
+          if (my !== listSeq.current) return
+          setProjects(cached?.length ? cached : null)
           try {
-            setProjects(await driveListProjects(force))
-            setOffline(false)
+            const fresh = await driveListProjects(force)
+            if (my === listSeq.current) {
+              setProjects(fresh)
+              setOffline(false)
+            }
           } catch (e) {
             // No signal is not an error when the phone already knows the
             // library — say so quietly rather than replacing a working
             // catalog with red text.
-            if (!stored?.length) throw e
-            setOffline(true)
+            if (!cached?.length) throw e
+            if (my === listSeq.current) setOffline(true)
           }
         } else {
-          setRoot(await getRoot())
-          setProjects(await listProjects())
+          const r = await getRoot()
+          const list = await listProjects()
+          if (my === listSeq.current) {
+            setRoot(r)
+            setProjects(list)
+          }
         }
         void loadUsage()
       } catch (e) {
-        setError(String(e instanceof Error ? e.message : e))
-        setProjects([])
+        if (my === listSeq.current) {
+          setError(String(e instanceof Error ? e.message : e))
+          setProjects([])
+        }
       }
     },
     [mode, loadUsage]

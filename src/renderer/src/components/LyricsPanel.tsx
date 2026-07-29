@@ -264,6 +264,25 @@ export default function LyricsPanel({
       <div className="lp-body">
         {view === 'variants' ? (
           <div className="lp-variants">
+            <div className="lp-variants-top">
+              <button type="button" className="chip" onClick={() => setView('lyrics')}>
+                ‹ Back
+              </button>
+              <button
+                type="button"
+                className="chip"
+                title="Listen to the vocals with Whisper and transcribe the lyrics from the recording itself"
+                onClick={() => {
+                  // Back to the lyrics view first: progress, the model-consent
+                  // card and the result all live there — staying on the search
+                  // list made this action look dead while it worked underneath.
+                  setView('lyrics')
+                  onUseWhisper()
+                }}
+              >
+                ✦ AI transcription
+              </button>
+            </div>
             <div className="lp-search">
               <input
                 value={query}
@@ -297,14 +316,6 @@ export default function LyricsPanel({
                 </span>
               </button>
             ))}
-            <div className="lp-variants-foot">
-              <button type="button" className="linkish" onClick={onUseWhisper}>
-                Use AI transcription instead
-              </button>
-              <button type="button" className="linkish" onClick={() => setView('lyrics')}>
-                Back
-              </button>
-            </div>
           </div>
         ) : (
           <>

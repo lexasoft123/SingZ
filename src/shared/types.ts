@@ -42,10 +42,40 @@ export interface SeparationProgress {
   detail?: string
 }
 
+/**
+ * The song's beat track: every beat's time in seconds, ascending. Real
+ * recordings drift, so beats are tracked (auto, from the drums stem) rather
+ * than derived from one constant tempo; tapped/typed tempos materialize to
+ * a constant track. bpm is the median tempo, kept fractional for display
+ * and target-rate math.
+ */
+export interface BeatInfo {
+  beats: number[]
+  bpm: number
+  beatsPerBar: number
+  /** Index into beats of a downbeat — bar accents count from it. */
+  downbeat: number
+  /** auto = tracked from the drums stem; manual = tapped, typed or nudged. */
+  source: 'auto' | 'manual'
+  /** Detector stamp for auto tracks — older stamps re-detect on load. */
+  detVersion?: number
+}
+
+/** Metronome preferences: click along playback, count-in bars, click loudness. */
+export interface MetronomeConfig {
+  click: boolean
+  countInBars: number
+  volume: number
+}
+
 export interface ProjectSettings {
   transpose: number
   /** Playback speed (1 = original); optional for projects saved before it existed. */
   tempo?: number
+  /** Beat track driving the metronome and count-in. */
+  beat?: BeatInfo
+  /** Metronome preferences (click on/off, count-in bars, loudness 0–1). */
+  metronome?: MetronomeConfig
   /** Saved timeline zoom viewport (seconds). */
   view?: { s: number; e: number }
   /** Saved loop/selection range (seconds). */
@@ -292,7 +322,15 @@ export interface SingzApi {
     name: string,
     settings: ProjectSettings
   ): Promise<
-    { ok: true; dir: string; songPath: string; inLibrary: boolean } | { ok: false; error: string }
+    | {
+        ok: true
+        dir: string
+        songPath: string
+        inLibrary: boolean
+        /** Drive is configured but signed out — the library did NOT sync. */
+        driveSignedOut?: boolean
+      }
+    | { ok: false; error: string }
   >
   /** Saved-project library for the in-app Open screen. */
   listProjects(): Promise<{ root: string; projects: ProjectListItem[] }>

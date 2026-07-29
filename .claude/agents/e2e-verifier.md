@@ -47,6 +47,9 @@ iOS:
 
 Android:
 1. Boot the AVD if `adb devices` is empty (nohup the emulator binary; wait for sys.boot_completed).
-2. `cd mobile/android && ./gradlew installDebug > /tmp/droid.log 2>&1; echo EXIT=$?`
-3. `adb -s <serial> shell am start -n com.lexasoft.singz/.MainActivity`, wait ~10s.
+2. `cd mobile/android && ./gradlew installDebug > /tmp/droid.log 2>&1; echo EXIT=$?` — in a fresh
+   worktree there is no gitignored `local.properties`; pass `ANDROID_HOME=~/Library/Android/sdk`
+   in the environment instead of writing one.
+3. `adb -s <serial> shell am start -n com.lexasoft.singz/com.singzplayer.MainActivity` (the code
+   package differs from the applicationId — `/.MainActivity` does not resolve), wait ~10s.
 4. Drive over CDP (pattern: read mobile/tests/loop-region.cjs for the ws/eval plumbing, but launch via adb, filter gphone): `__test.openSample()` → poll player+duration → `play()` → 3s → `position > 2` → `pause()` → `__test.back()` → poll catalog → `openSample()` again and confirm it loads (release-on-close path).

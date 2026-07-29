@@ -27,6 +27,17 @@ the stretch node's latency so UI (lyrics/playhead) matches what is heard.
 Playback progress drives a single `--p` CSS variable from one rAF loop; the
 "played" waveform layer is a clipped bright canvas — progress costs no redraws.
 
+The metronome (`audio/beat.ts` + engine) walks the song's beat track (an
+array of beat times — see Analysis) with a lookahead scheduler: synthesized
+click buffers, scheduled on the context clock, bypassing the master bus
+(never transposed/ducked) with the stretch node's latency added back so
+clicks stay on the delayed stems. Loop-region wraps, varispeed and seeks
+re-derive the walker. A count-in is a pre-roll in `play()`: the stems'
+shared start time moves out past whole beats — the song's real preceding
+beats when starting mid-song, extrapolated ones before the first beat — so
+the music enters on a bar accent; `position` holds at the start point until
+it does. Seeks and post-split hot-swaps restart without a count-in.
+
 ## Timeline & zoom
 
 One shared viewport `{s, e}` (App state) feeds the lanes and the pitch strip:
@@ -115,9 +126,39 @@ voiced/unvoiced states decodes the melody path, then octave errors fold to a
 running median and incredible runs drop (`pyin.ts` + `pitch.worker.ts`;
 tuned against synced-lyrics ground truth). Key: Krumhansl-Schmuckler over the
 melody's pitch-class histogram.
-Tempo: onset-flux autocorrelation over the drums stem (60–200 BPM, folded to
-70–180 — can pick double-time on busy hats). Vocal range: p5–p95 of melody
-notes. All displayed transpose-aware in the pitch strip's info card.
+Beat track (`detectBeats`): onset flux over the drums stem, local-mean
+normalized, then windowed autocorrelation peaks voted into one tempo family
+(single-peak picks land on dotted/compound relatives on real drums), the
+tempo octave chosen by onset support × interval steadiness × strong/weak
+alternation (subdivisions lose) × a singable-tempo prior, and beats placed
+by Ellis-style dynamic programming — following the few-percent tempo drift
+of pre-click-track recordings — then snapped to nearby onsets. Rejection
+gates, tuned on real stems: impulsive-flux share (pads/noise), window
+consistency (rubato), onset support + active fraction (sparse anchors), and
+median interval roughness (onset-chasing without a pulse) — clicks that
+fight the music are worse than none.
+Bar phase & meter: kick energy alone is a coin flip between beats 1 and 3
+(both carry kick in most grooves — Soldier Of Fortune and Wanted Dead Or
+Alive shipped half a bar off this way), so the downbeat is a weighted vote
+of sharp events instead: mean windowed kick, band entrances out of silence,
+the biggest well-separated low-band slams, bass chord changes (energy-gated
+chroma novelty over the bass stem), vocal phrase entries after ≥2-bar rests
+(vocals stem), and lyric lines sitting on a beat — weights calibrated
+against a 12-song ground-truth set from the user's library. Votes are
+counted per segment (drum-active stretches split by ≥2-bar gaps): silent
+intros never vote, and when a song re-enters after a fermata on a different
+bar parity (Turn The Page's last chorus), the gap's filler beats are
+re-spaced so one downbeat index is right on both sides. Meter: when 3-beat
+periodicity of the onset envelope dwarfs 4-beat (windowed-lag max — the
+median period is a fraction of a frame off and by ×4 lands between sharp
+peaks), the tracked pulse is a compound song's eighth and accents group in
+6 (Nothing Else Matters), with drum cues muted for the rotation (the
+mid-bar tom is idiomatic there) in favor of bass/lyrics. The result drives
+the metronome, count-in and bpm readout, and is saved in `project.json`
+(`settings.beat`, millisecond-rounded) where hand edits (tap tempo, nudges,
+×½/×2) win over re-detection; auto tracks carry `detVersion` and are
+silently re-tracked on load when the detector has since improved. Vocal range: p5–p95 of melody notes. All displayed
+transpose-aware in the pitch strip's info card.
 
 ## On-disk layout
 
