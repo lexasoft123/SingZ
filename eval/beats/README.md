@@ -65,9 +65,10 @@ detected-only columns.
   detector gets a demucs drums stem plus bass/vocals/lyric aux; here it gets
   a raw 30 s mix and no aux. Numbers are for comparing detectors and
   revisions, not for judging absolute app quality.
-- **The current detector only emits 4 or 6 beats per bar**, so signature
-  accuracy on 3/4 material (Waltz, VienneseWaltz — 173 of 685 tracks) is
-  structurally 0 today. That is a finding, not a harness bug.
+- **The homegrown detector only emits 4 or 6 beats per bar**, so its solo
+  signature accuracy on 3/4 material (Waltz, VienneseWaltz — 173 of 685
+  tracks) is structurally 0. That finding drove phase 2: the fused detector
+  (`--ml`) takes the model's lattice for dominant-3 bars and emits bpb 3.
 - **Library aux stems are decoded as a true downmix** — `detectBeats`
   averages all channels internally (`monoOf`) since the harness caught the
   original bug: the app used to read `getChannelData(0)` (left only) for
