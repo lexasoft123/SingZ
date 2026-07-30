@@ -322,34 +322,6 @@ describe('detectBeats downbeat & meter', () => {
     for (const m of [4, 10, 16]) expect(accentAt(det!, 0.4 + m * barLen)).toBe(0)
   })
 
-  it('reads pickup phrasing: lines entering a beat early still accent the bar', () => {
-    // the NEM shape: 6/8 with the idiomatic mid-bar tom, split-bar harmony
-    // (a chord change lands on the one AND mid-bar, so bass novelty is a
-    // coin flip), and every sung line entering on the pickup eighth before
-    // the bar — the folded phrase cue must put the accent on the bar line,
-    // not on the pickup and not on the tom.
-    const p = 60 / 140
-    const barLen = 6 * p
-    const drums = new Float32Array(Math.floor(SR * 70))
-    const bass = new Float32Array(drums.length)
-    const roots = [82.4, 110, 73.4, 98]
-    const lineStarts: number[] = []
-    let bar = 0
-    for (let t = 0.4; t + barLen < 69; t += barLen, bar++) {
-      addHit(drums, t, 55, 1.0, 0.09, 0.1)
-      addHit(drums, t + 3 * p, 90, 1.1, 0.09, 0.3)
-      for (let e = 0; e < 6; e++) addHit(drums, t + e * p, 900, 0.18, 0.015, 1.5)
-      addRoot(bass, t, t + 3 * p, roots[bar % 4])
-      addRoot(bass, t + 3 * p, t + barLen, roots[(bar + 2) % 4])
-      if (bar % 2 === 1) lineStarts.push(t + barLen - p)
-    }
-    for (let i = 0; i < drums.length; i++) drums[i] += 0.002 * (rnd() * 2 - 1)
-    const det = detectBeats(wrap(drums), { bass: wrap(bass), lineStarts })
-    expect(det).not.toBeNull()
-    expect(det!.beatsPerBar).toBe(6)
-    for (const m of [4, 10, 16]) expect(accentAt(det!, 0.4 + m * barLen)).toBe(0)
-  })
-
   it('re-phases across a fermata so both halves accent their own bars', () => {
     // section B re-enters shifted by half a bar relative to section A's grid —
     // the silent gap's filler beats must absorb the difference

@@ -66,7 +66,7 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * Bump when downbeat/meter estimation changes: stored auto tracks with an
  * older stamp are silently re-detected on load so fixes reach saved projects.
  */
-export const BEAT_DETECT_VERSION = 3
+export const BEAT_DETECT_VERSION = 4
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -580,19 +580,19 @@ export function detectBeats(
     const bass = bassNov
       ? inSeg(new Array<number>(bpb).fill(0), bassNov.map((w, k) => ({ k, w })).filter((e) => e.w > 0), bpb)
       : uniform()
-    // Sung phrases start on the one — or one beat early (pickup: NEM enters
-    // every line on the "and" before the bar) — so each rotation also claims
-    // most of the mass sitting one beat ahead of it.
-    const pickupFold = (d: number[]): number[] =>
-      normDist(d.map((x, r) => x + 0.8 * d[(r + bpb - 1) % bpb]))
-    const voc = pickupFold(vocHits ? inSeg(new Array<number>(bpb).fill(0), vocHits, 2) : uniform())
-    const line = pickupFold(inSeg(new Array<number>(bpb).fill(0), lineHits.map((k) => ({ k, w: 1 })), 4))
-    // compound meter: the mid-bar accent is idiomatic — drums stop deciding.
-    // Split-bar harmony (|Em D|) also puts chord changes mid-bar, so the
-    // folded phrase cues outrank raw bass novelty there.
+    // Phrase starts are weak downbeat evidence — NEM's verses enter two to
+    // three eighths AFTER the bar line (the band entrance at 0:59.94 is the
+    // one; "So close…" floats over it), so no pickup folding: raw positions,
+    // low weights, never decisive.
+    const voc = vocHits ? inSeg(new Array<number>(bpb).fill(0), vocHits, 2) : uniform()
+    const line = inSeg(new Array<number>(bpb).fill(0), lineHits.map((k) => ({ k, w: 1 })), 4)
+    // compound meter: the per-beat kick pattern stops deciding (the mid-bar
+    // tom is idiomatic) — but entrances and separated slams are structural
+    // events, not groove, and stay meaningful: NEM's band lands ON the bar
+    // (0:59.94) and both cues point there while lines float after the one.
     const W =
       bpb === 6
-        ? { kick: 0.05, ent: 0.05, slam: 0.05, bass: 0.4, voc: 0.1, line: 0.35 }
+        ? { kick: 0.05, ent: 0.15, slam: 0.1, bass: 0.4, voc: 0.05, line: 0.25 }
         : { kick: 0.2, ent: 0.18, slam: 0.15, bass: 0.15, voc: 0.05, line: 0.15 }
     const cues = { kick, ent, slam, bass, voc, line }
     const score = new Array<number>(bpb).fill(0)
