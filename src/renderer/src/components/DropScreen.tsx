@@ -151,7 +151,16 @@ export default function DropScreen({
         </div>
         {loading ? (
           <>
-            <h1>Reading {songName ? `“${songName}”` : 'song'}…</h1>
+            {/* raw file stems can be 50+ chars of underscore soup — those
+                go on a small line instead of a five-row 52px heading */}
+            {!songName || songName.length > 28 ? (
+              <>
+                <h1>Reading…</h1>
+                {songName && <p className="drop-file">“{songName}”</p>}
+              </>
+            ) : (
+              <h1>Reading “{songName}”…</h1>
+            )}
             <p>Decoding audio and drawing the timeline.</p>
           </>
         ) : (

@@ -829,6 +829,9 @@ button.chip-status:hover {
   letter-spacing: -0.01em;
   font-variation-settings: 'wdth' 85;
   margin-bottom: 14px;
+  /* underscore-soup filenames are one unbreakable token — without this the
+     overflowing line pins to the box's left edge and spills right, off-center */
+  overflow-wrap: anywhere;
 }
 
 .drop-screen p {
@@ -836,6 +839,12 @@ button.chip-status:hover {
   font-size: 15px;
   line-height: 1.6;
   margin-bottom: 28px;
+}
+
+.drop-screen .drop-file {
+  font-size: 17px;
+  margin: -2px 0 12px;
+  overflow-wrap: anywhere;
 }
 
 .browse {
