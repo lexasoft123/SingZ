@@ -41,6 +41,8 @@ const opt = (name) => {
 const dataset = opt('--dataset')
 const limit = opt('--limit') ? Number.parseInt(opt('--limit'), 10) : Infinity
 const jsonOut = opt('--json')
+// Reproduce the pre-monoOf app bug (aux read as left channel only).
+const CH0 = args.includes('--channel0')
 if (dataset !== 'ballroom' && dataset !== 'library') {
   console.error('usage: node run-current.mjs --dataset ballroom|library [--limit N] [--json out.json]')
   process.exit(2)
@@ -163,8 +165,10 @@ async function runLibrary(detect) {
     const drumsBuf = audioBuffer(decodeF32(drums))
     const bassP = stemPath(dir, 'bass')
     const vocalsP = stemPath(dir, 'vocals')
-    const bass = bassP ? audioBuffer(decodeF32(bassP, { channel0: true })) : null
-    const vocals = vocalsP ? audioBuffer(decodeF32(vocalsP, { channel0: true })) : null
+    // detectBeats downmixes internally since monoOf landed — faithful aux is
+    // a true downmix now (pass --channel0 to reproduce the pre-fix left-only bug).
+    const bass = bassP ? audioBuffer(decodeF32(bassP, { channel0: CH0 })) : null
+    const vocals = vocalsP ? audioBuffer(decodeF32(vocalsP, { channel0: CH0 })) : null
     let lineStarts = null
     const lyricsP = join(dir, 'lyrics.json')
     if (existsSync(lyricsP)) {

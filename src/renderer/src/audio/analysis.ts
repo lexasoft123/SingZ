@@ -661,12 +661,28 @@ export function detectBeats(
   }
 }
 
+/** All channels averaged — the app hands stereo stems, and judging only the
+ *  left channel skews votes (WDOA's intro anchored a wrong rotation off it;
+ *  the drums path always downmixed, the aux readers must too). */
+function monoOf(buffer: AudioBuffer): Float32Array {
+  const ch0 = buffer.getChannelData(0)
+  if (buffer.numberOfChannels < 2) return ch0
+  const out = new Float32Array(ch0.length)
+  out.set(ch0)
+  for (let c = 1; c < buffer.numberOfChannels; c++) {
+    const ch = buffer.getChannelData(c)
+    for (let i = 0; i < out.length; i++) out[i] += ch[i]
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= buffer.numberOfChannels
+  return out
+}
+
 /** Bass chord-change strength per beat window: energy-gated chroma-novelty
  *  local maxima, weighted by how confidently the new window names a root. */
 function bassChangeVotes(bass: AudioBuffer | null, beats: number[], bpb: number): number[] | null {
   if (!bass) return null
   const sr = bass.sampleRate
-  const data = bass.getChannelData(0)
+  const data = monoOf(bass)
   const chromas: number[][] = []
   const eng: number[] = []
   for (let k = 0; k + 1 < beats.length; k++) {
@@ -727,7 +743,7 @@ function vocalEntryVotes(
 ): { k: number; w: number }[] | null {
   if (!vocals) return null
   const sr = vocals.sampleRate
-  const data = vocals.getChannelData(0)
+  const data = monoOf(vocals)
   const fps = sr / HOP
   const n = Math.floor(data.length / HOP)
   const env = new Float32Array(n)

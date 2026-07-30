@@ -68,12 +68,13 @@ detected-only columns.
 - **The current detector only emits 4 or 6 beats per bar**, so signature
   accuracy on 3/4 material (Waltz, VienneseWaltz — 173 of 685 tracks) is
   structurally 0 today. That is a finding, not a harness bug.
-- **Library aux stems are decoded channel-0, not downmixed** — the app passes
-  stereo AudioBuffers and `detectBeats` reads `getChannelData(0)` for
-  bass/vocals, so channel 0 is what ships. This is not a technicality:
-  Wanted Dead Or Alive's downbeat flips between rot 2 (channel 0, what the
-  app hears — wrong per ear) and rot 3 (downmix — correct) because the intro
-  segment's bass cue sits right on the anchor-confidence threshold.
+- **Library aux stems are decoded as a true downmix** — `detectBeats`
+  averages all channels internally (`monoOf`) since the harness caught the
+  original bug: the app used to read `getChannelData(0)` (left only) for
+  bass/vocals, and Wanted Dead Or Alive's downbeat flipped between rot 2
+  (left channel — wrong per ear) and rot 3 (downmix — correct) because the
+  intro segment's bass cue sits right on the anchor-confidence threshold.
+  Pass `--channel0` to reproduce the pre-fix behavior.
 - The app decodes at the device rate (44.1 or 48 kHz, `AudioContext`
   default); the harness uses 44.1 kHz. Rotations checked here reproduced the
   app's saved grids at both rates for all 14 library songs.
