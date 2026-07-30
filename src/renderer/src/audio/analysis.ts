@@ -65,18 +65,22 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
 /**
  * Bump when downbeat/meter estimation changes: stored auto tracks with an
  * older stamp are silently re-detected on load so fixes reach saved projects.
+ * v5: explicit `downbeats` replace the global rotation — beat times are never
+ * mutated to force one phase (the old fermata gap re-spacing).
  */
-export const BEAT_DETECT_VERSION = 4
+export const BEAT_DETECT_VERSION = 5
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
   beats: number[]
   /** Median tempo (display + target-rate math). */
   bpm: number
-  /** Beats per bar the accents assume: 4, or 6 for compound (6/8) songs. */
+  /** Dominant beats per bar: 4, or 6 for compound (6/8) songs. */
   beatsPerBar: number
-  /** Index into beats of a downbeat. */
+  /** Legacy uniform view for old readers: downbeats[0] % beatsPerBar. */
   downbeat: number
+  /** Bar starts as beat indices (BeatInfo contract) — phase changes live here. */
+  downbeats?: number[]
 }
 
 /** Optional extra evidence for the downbeat — pass whatever is loaded. */
@@ -439,8 +443,9 @@ export function detectBeats(
    * low-band slams, bass chord changes, vocal phrase entries, and lyric lines
    * sitting on a beat. Votes are counted per SEGMENT (stretches of drum
    * activity split by ≥2-bar gaps): silent intros never vote, and when a song
-   * re-enters after a fermata on a different bar parity, the gap's filler
-   * beats are re-spaced so one downbeat index is right on both sides. */
+   * re-enters after a fermata on a different bar parity, each side keeps its
+   * own phase in `downbeats` — the boundary bar is simply an odd length. Beat
+   * times are never touched by phase logic. */
   const beatFrames = beatsSec.map((b) => Math.round((b * sr) / HOP))
   const active = new Array<boolean>(beatsSec.length).fill(false)
   {
@@ -611,10 +616,15 @@ export function detectBeats(
     return { rot, conf: (sorted[0] - sorted[1]) / total, cues: rounded }
   }
 
-  // Confident segments pin their own downbeat; the first sets the global
-  // phase, later ones may re-space the silent gap before them to match.
+  // Confident segments pin their own downbeat. Each anchor's rotation owns
+  // the beats from its start to the next anchor's start (the first also owns
+  // everything before it; the last runs out the track), and its bars land on
+  // indices ≡ rotation (mod bpb) inside that span. Agreeing neighbours chain
+  // into one uniform grid; a phase change just leaves the boundary bar an odd
+  // length — representable now, so the beat TIMES stay exactly as tracked
+  // (the old code re-spaced the silent gap to force one global rotation).
   const MIN_BARS = 4
-  const REPAIR_CONF = 0.08
+  const ANCHOR_CONF = 0.08
   const scored = segs.map((s) => ({ ...s, ...scoreSegment(s) }))
   if (debug) {
     debug.segCues = scored.map((s) => ({
@@ -625,48 +635,30 @@ export function detectBeats(
       cues: s.cues
     }))
   }
-  const anchors = scored.filter((s) => (s.b - s.a) / bpb >= MIN_BARS && s.conf >= REPAIR_CONF)
-  let outBeats = beatsSec
+  const anchors = scored.filter((s) => (s.b - s.a) / bpb >= MIN_BARS && s.conf >= ANCHOR_CONF)
   let downbeat = 0
+  let downbeats: number[] | undefined
   if (anchors.length > 0) {
-    const out: number[] = []
-    let cursor = 0
-    let db = -1
-    for (const s of anchors) {
-      // beats from s.a to its first downbeat — invariant under renumbering
-      const off = (((s.rot - (s.a % bpb)) % bpb) + bpb) % bpb
-      let prevAct = s.a - 1
-      while (prevAct >= 0 && !active[prevAct]) prevAct--
-      while (cursor <= prevAct) out.push(beatsSec[cursor++])
-      const fillCount = s.a - prevAct - 1
-      if (db < 0) {
-        while (cursor < s.a) out.push(beatsSec[cursor++])
-        db = (out.length + off) % bpb
-      } else {
-        const have = (out.length + fillCount + off) % bpb
-        let add = (((db - have) % bpb) + bpb) % bpb
-        if (add > bpb / 2) add -= bpb
-        const tA = prevAct >= 0 ? beatsSec[prevAct] : 0
-        const tB = beatsSec[s.a]
-        const n = fillCount + add
-        const step = prevAct >= 0 && n >= 1 ? (tB - tA) / (n + 1) : 0
-        if (add !== 0 && step > 0.5 * medSec && step < 1.9 * medSec) {
-          for (let f = 1; f <= n; f++) out.push(tA + f * step)
-          cursor = s.a
-        } else {
-          while (cursor < s.a) out.push(beatsSec[cursor++])
-        }
-      }
-      while (cursor <= s.b) out.push(beatsSec[cursor++])
+    downbeats = []
+    for (let i = 0; i < anchors.length; i++) {
+      const rot = anchors[i].rot % bpb
+      const from = i === 0 ? 0 : anchors[i].a
+      const to = i + 1 < anchors.length ? anchors[i + 1].a : beatsSec.length
+      for (let k = from + (((rot - from) % bpb) + bpb) % bpb; k < to; k += bpb) downbeats.push(k)
     }
-    while (cursor < beatsSec.length) out.push(beatsSec[cursor++])
-    outBeats = out
-    downbeat = db
+    if (downbeats.length === 0) downbeats = undefined
+    downbeat = downbeats ? downbeats[0] % bpb : anchors[0].rot % bpb
   } else if (scored.length > 0) {
     downbeat = scored.reduce((m, s) => (s.conf > m.conf ? s : m)).rot % bpb
   }
 
-  return { beats: outBeats, bpm: 60 / medSec, beatsPerBar: bpb, downbeat }
+  return {
+    beats: beatsSec,
+    bpm: 60 / medSec,
+    beatsPerBar: bpb,
+    downbeat,
+    ...(downbeats ? { downbeats } : {})
+  }
 }
 
 /** Bass chord-change strength per beat window: energy-gated chroma-novelty

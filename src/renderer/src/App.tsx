@@ -897,6 +897,7 @@ export default function App(): React.JSX.Element {
               bpm: det.bpm,
               beatsPerBar: det.beatsPerBar,
               downbeat: det.downbeat,
+              ...(det.downbeats ? { downbeats: det.downbeats } : {}),
               source: 'auto',
               detVersion: BEAT_DETECT_VERSION
             }
@@ -1154,6 +1155,7 @@ export default function App(): React.JSX.Element {
         bpm: det.bpm,
         beatsPerBar: det.beatsPerBar,
         downbeat: det.downbeat,
+        ...(det.downbeats ? { downbeats: det.downbeats } : {}),
         source: 'auto',
         detVersion: BEAT_DETECT_VERSION
       })

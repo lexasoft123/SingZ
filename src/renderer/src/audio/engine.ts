@@ -1,6 +1,7 @@
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
 import {
   accentIndex,
+  barLengthAt,
   beatIndexAtOrAfter,
   beatTime,
   MET_DEFAULTS,
@@ -621,7 +622,8 @@ export class MultitrackEngine {
       const i0 = beatIndexAtOrAfter(g, this.startOffset)
       this.startBeatIdx = i0
       if (countIn) {
-        const beats = bars * g.beatsPerBar
+        // Bar length AT the entry beat: a count-in into a 3-beat bar counts 3.
+        const beats = bars * barLengthAt(g, i0)
         const first = i0 - beats
         when += (this.startOffset - beatTime(g, first)) / this.rate
         this.nextClickIdx = first
@@ -661,13 +663,14 @@ export class MultitrackEngine {
     this.startedAt = when
     this._playing = true
     if (countIn && g !== null && this.nextClickIdx !== null && this.startBeatIdx !== null) {
-      const total = bars * g.beatsPerBar
+      const perBar = barLengthAt(g, this.startBeatIdx)
+      const total = bars * perBar
       const span = this.startOffset - beatTime(g, this.nextClickIdx)
       this.countInfo = {
         firstCtx: this.clickCtxTime(beatTime(g, this.nextClickIdx), 0),
         periodCtx: span / total / this.rate,
         total,
-        perBar: g.beatsPerBar
+        perBar
       }
     } else if (secTicks > 0) {
       // Short and bounded — schedule every tick now, no walker involved.

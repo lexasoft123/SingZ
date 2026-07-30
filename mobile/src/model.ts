@@ -35,6 +35,15 @@ export interface BeatInfo {
   beatsPerBar: number
   /** Index into beats of a downbeat — bar accents count from it. */
   downbeat: number
+  /**
+   * Explicit bar starts (desktop contract): strictly increasing beat INDICES
+   * into `beats`, each starting a bar; bar length = distance to the next
+   * entry, continuing outward at the first/last bar's length beyond the ends.
+   * When present it is the truth for accents and count-in sizing (phase and
+   * meter changes); the legacy pair stays a best-effort uniform view so
+   * builds that predate the field still click something sensible.
+   */
+  downbeats?: number[]
   source: 'auto' | 'manual'
 }
 
@@ -132,11 +141,23 @@ export function sanitizeBeatInfo(raw: unknown): BeatInfo | null {
   const bpb = Number(r.beatsPerBar)
   const beatsPerBar = [2, 3, 4, 6].includes(bpb) ? bpb : 4
   const db = Math.round(Number(r.downbeat))
+  // Explicit bar starts: kept only when wholly valid (finite ints, strictly
+  // increasing, in range) — anything off drops the field and the legacy
+  // uniform pair takes over (mirror of the desktop sanitize).
+  let downbeats: number[] | undefined
+  if (Array.isArray(r.downbeats) && r.downbeats.length > 0) {
+    const ds = r.downbeats.map(Number)
+    const valid = ds.every(
+      (d, i) => Number.isInteger(d) && d >= 0 && d < beats.length && (i === 0 || d > ds[i - 1])
+    )
+    if (valid) downbeats = ds
+  }
   return {
     beats,
     bpm,
     beatsPerBar,
     downbeat: Number.isFinite(db) ? ((db % beatsPerBar) + beatsPerBar) % beatsPerBar : 0,
+    ...(downbeats ? { downbeats } : {}),
     source: r.source === 'auto' ? 'auto' : 'manual'
   }
 }

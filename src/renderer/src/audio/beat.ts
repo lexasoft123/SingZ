@@ -58,10 +58,50 @@ export function beatIndexAtOrAfter(info: BeatInfo, t: number): number {
   return lo
 }
 
-/** Beat's position inside its bar (0 = downbeat); virtual indexes count on. */
+/** Latest downbeats[] entry at or before idx (binary search), or -1. */
+function downbeatAtOrBefore(d: number[], idx: number): number {
+  if (idx < d[0]) return -1
+  let lo = 0
+  let hi = d.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (d[mid] <= idx) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+
+/**
+ * Beat's position inside its bar (0 = downbeat); virtual indexes count on.
+ * With explicit `downbeats` those are the truth: before the first entry bars
+ * extrapolate backward at the first bar's length, after the last they count
+ * on modulo the last bar's length. Without them, the uniform legacy pair.
+ */
 export function accentIndex(info: BeatInfo, idx: number): number {
+  const d = info.downbeats
+  if (d && d.length > 0) {
+    const firstLen = d.length >= 2 ? d[1] - d[0] : info.beatsPerBar
+    const lastLen = d.length >= 2 ? d[d.length - 1] - d[d.length - 2] : info.beatsPerBar
+    if (idx < d[0]) return (((idx - d[0]) % firstLen) + firstLen) % firstLen
+    if (idx >= d[d.length - 1]) return (idx - d[d.length - 1]) % lastLen
+    return idx - d[downbeatAtOrBefore(d, idx)]
+  }
   const n = info.beatsPerBar
   return (((idx - info.downbeat) % n) + n) % n
+}
+
+/**
+ * Beats in the bar containing beat `idx` — what a count-in into that spot
+ * should count. Uniform tracks: beatsPerBar; with `downbeats`, the local gap
+ * (edges extend the first/last bar's length outward).
+ */
+export function barLengthAt(info: BeatInfo, idx: number): number {
+  const d = info.downbeats
+  if (!d || d.length < 2) return info.beatsPerBar
+  if (idx < d[0]) return d[1] - d[0]
+  if (idx >= d[d.length - 1]) return d[d.length - 1] - d[d.length - 2]
+  const j = downbeatAtOrBefore(d, idx)
+  return d[j + 1] - d[j]
 }
 
 /** Constant-tempo track from a tapped/typed tempo; `anchor` becomes a downbeat. */
@@ -94,13 +134,26 @@ export function shiftBeats(info: BeatInfo, dt: number): BeatInfo {
 export function halveTempo(info: BeatInfo): BeatInfo {
   if (info.beats.length < 3) return info
   const keep = info.downbeat % 2
-  return {
+  const beats = info.beats.filter((_, i) => i % 2 === keep)
+  const out: BeatInfo = {
     ...info,
-    beats: info.beats.filter((_, i) => i % 2 === keep),
+    beats,
     bpm: info.bpm / 2,
     downbeat: (info.downbeat - keep) / 2,
     source: 'manual'
   }
+  if (info.downbeats) {
+    // Old index i survives as (i - keep) / 2; a bar start whose beat was
+    // thinned away lands on the surviving beat before it (floor), so every
+    // musical bar keeps a start. Dedupe collapses bars squeezed together.
+    const ds: number[] = []
+    for (const d of info.downbeats) {
+      const m = Math.min(beats.length - 1, Math.max(0, Math.floor((d - keep) / 2)))
+      if (ds.length === 0 || m > ds[ds.length - 1]) ds.push(m)
+    }
+    out.downbeats = ds
+  }
+  return out
 }
 
 /** Double time: a beat between every pair (keeps any tracked drift). */
@@ -110,7 +163,15 @@ export function doubleTempo(info: BeatInfo): BeatInfo {
     beats.push(info.beats[i])
     if (i + 1 < info.beats.length) beats.push((info.beats[i] + info.beats[i + 1]) / 2)
   }
-  return { ...info, beats, bpm: info.bpm * 2, downbeat: info.downbeat * 2, source: 'manual' }
+  const out: BeatInfo = {
+    ...info,
+    beats,
+    bpm: info.bpm * 2,
+    downbeat: info.downbeat * 2,
+    source: 'manual'
+  }
+  if (info.downbeats) out.downbeats = info.downbeats.map((d) => d * 2)
+  return out
 }
 
 /** Clamp a stored beat track into a valid one (null = unusable/absent). */
@@ -131,11 +192,23 @@ export function sanitizeBeatInfo(raw: unknown): BeatInfo | null {
   const beatsPerBar = (BEATS_PER_BAR_CHOICES as readonly number[]).includes(bpb) ? bpb : 4
   const db = Math.round(Number(r.downbeat))
   const dv = Number(r.detVersion)
+  // Explicit bar starts: kept only when wholly valid (finite ints, strictly
+  // increasing, in range) — anything off drops the field and the legacy
+  // uniform pair takes over, never a half-trusted bar map.
+  let downbeats: number[] | undefined
+  if (Array.isArray(r.downbeats) && r.downbeats.length > 0) {
+    const ds = r.downbeats.map(Number)
+    const valid = ds.every(
+      (d, i) => Number.isInteger(d) && d >= 0 && d < beats.length && (i === 0 || d > ds[i - 1])
+    )
+    if (valid) downbeats = ds
+  }
   return {
     beats,
     bpm,
     beatsPerBar,
     downbeat: Number.isFinite(db) ? ((db % beatsPerBar) + beatsPerBar) % beatsPerBar : 0,
+    ...(downbeats ? { downbeats } : {}),
     source: r.source === 'auto' ? 'auto' : 'manual',
     ...(Number.isFinite(dv) ? { detVersion: dv } : {})
   }

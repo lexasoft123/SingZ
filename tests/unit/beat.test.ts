@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   accentIndex,
+  barLengthAt,
   beatIndexAtOrAfter,
   beatTime,
   constantBeats,
@@ -66,6 +67,76 @@ describe('beat track math', () => {
     expect(dbl.beats[1]).toBeCloseTo((info.beats[0] + info.beats[1]) / 2, 9)
   })
 
+  /** 20 beats at 0.5 s; bars [2,6) [6,9) [9,13) then 4s on — one 3-beat bar. */
+  const vinfo: BeatInfo = {
+    beats: Array.from({ length: 20 }, (_, i) => i * 0.5),
+    bpm: 120,
+    beatsPerBar: 4,
+    downbeat: 2,
+    downbeats: [2, 6, 9, 13],
+    source: 'auto'
+  }
+
+  it('accents variable bars from explicit downbeats', () => {
+    expect(accentIndex(vinfo, 2)).toBe(0)
+    expect(accentIndex(vinfo, 5)).toBe(3)
+    expect(accentIndex(vinfo, 6)).toBe(0)
+    expect(accentIndex(vinfo, 8)).toBe(2) // last beat of the 3-beat bar
+    expect(accentIndex(vinfo, 9)).toBe(0)
+    expect(accentIndex(vinfo, 12)).toBe(3)
+    expect(accentIndex(vinfo, 13)).toBe(0)
+    // Before the first entry: extrapolate backward at the first bar's length.
+    expect(accentIndex(vinfo, 1)).toBe(3)
+    expect(accentIndex(vinfo, 0)).toBe(2)
+    expect(accentIndex(vinfo, -2)).toBe(0) // a virtual downbeat one bar back
+    // After the last entry: count on modulo the last bar's length (4).
+    expect(accentIndex(vinfo, 16)).toBe(3)
+    expect(accentIndex(vinfo, 17)).toBe(0)
+    expect(accentIndex(vinfo, 25)).toBe(0) // virtual, past the track
+    // A single entry behaves like the uniform legacy view anchored there.
+    const one: BeatInfo = { ...vinfo, downbeats: [2] }
+    expect(accentIndex(one, 2)).toBe(0)
+    expect(accentIndex(one, 6)).toBe(0)
+    expect(accentIndex(one, 1)).toBe(3)
+  })
+
+  it('reports the local bar length (count-in sizing)', () => {
+    expect(barLengthAt(vinfo, 0)).toBe(4) // before the first: first bar's length
+    expect(barLengthAt(vinfo, 2)).toBe(4)
+    expect(barLengthAt(vinfo, 6)).toBe(3)
+    expect(barLengthAt(vinfo, 8)).toBe(3)
+    expect(barLengthAt(vinfo, 9)).toBe(4)
+    expect(barLengthAt(vinfo, 30)).toBe(4) // past the last: last bar's length
+    const { downbeats: _d, ...uniform } = vinfo
+    expect(barLengthAt(uniform, 6)).toBe(4)
+  })
+
+  it('remaps downbeat indices through half and double time', () => {
+    const twelve: BeatInfo = {
+      beats: Array.from({ length: 12 }, (_, i) => i * 0.5),
+      bpm: 120,
+      beatsPerBar: 4,
+      downbeat: 0,
+      downbeats: [0, 4, 6, 10],
+      source: 'auto'
+    }
+    const half = halveTempo(twelve)
+    expect(half.downbeats).toEqual([0, 2, 3, 5])
+    // Surviving entries keep their musical position (same time).
+    expect(beatTime(half, 2)).toBeCloseTo(beatTime(twelve, 4), 9)
+    const dbl = doubleTempo(twelve)
+    expect(dbl.downbeats).toEqual([0, 8, 12, 20])
+    expect(beatTime(dbl, 8)).toBeCloseTo(beatTime(twelve, 4), 9)
+    // Odd-parity thinning: entries floor onto the surviving beat before them,
+    // never below 0, and squeezed-together bars deduplicate.
+    const odd: BeatInfo = { ...twelve, downbeat: 1, downbeats: [0, 5, 9] }
+    expect(halveTempo(odd).downbeats).toEqual([0, 2, 4])
+    const squeeze: BeatInfo = { ...twelve, downbeats: [4, 5, 9] }
+    expect(halveTempo(squeeze).downbeats).toEqual([2, 4])
+    // shiftBeats moves times only — indices (and the bar map) are untouched.
+    expect(shiftBeats(twelve, 0.01).downbeats).toEqual([0, 4, 6, 10])
+  })
+
   it('sanitizes stored tracks and metronome prefs', () => {
     expect(sanitizeBeatInfo(null)).toBeNull()
     expect(sanitizeBeatInfo({ beats: [] })).toBeNull()
@@ -82,6 +153,7 @@ describe('beat track math', () => {
     expect(ok!.beatsPerBar).toBe(3)
     expect(ok!.downbeat).toBe(1) // 7 mod 3
     expect(ok!.source).toBe('auto')
+    expect(ok!.downbeats).toBeUndefined()
     expect(sanitizeMetronome({})).toEqual({
       click: false,
       countInBars: 0,
@@ -94,6 +166,34 @@ describe('beat track math', () => {
       volume: 1,
       accent: false
     })
+  })
+
+  it('round-trips valid downbeats and drops broken ones whole', () => {
+    const base = {
+      beats: Array.from({ length: 20 }, (_, i) => i * 0.5),
+      bpm: 120,
+      beatsPerBar: 4,
+      downbeat: 2,
+      source: 'auto'
+    }
+    // Valid bar map survives a save/load cycle untouched.
+    const good = sanitizeBeatInfo(JSON.parse(JSON.stringify({ ...base, downbeats: [2, 6, 9, 13] })))
+    expect(good!.downbeats).toEqual([2, 6, 9, 13])
+    expect(good!.downbeat).toBe(2) // legacy pair untouched alongside
+    // Any flaw drops the FIELD (never the track): the uniform pair takes over.
+    for (const bad of [
+      [], // empty says nothing
+      [2, 6, 6, 9], // not strictly increasing
+      [2, 6.5], // fractional index
+      [-1, 3], // negative
+      [2, 25], // beyond beats.length
+      ['a', 2] // junk
+    ]) {
+      const s = sanitizeBeatInfo({ ...base, downbeats: bad })
+      expect(s).not.toBeNull()
+      expect(s!.downbeats).toBeUndefined()
+      expect(s!.beats.length).toBe(20)
+    }
   })
 
   it('tap tempo takes the median of the trailing run', () => {
@@ -249,14 +349,19 @@ function addRoot(data: Float32Array, from: number, to: number, freq: number): vo
   for (let i = a; i < b; i++) data[i] += 0.25 * Math.sin((2 * Math.PI * freq * (i - a)) / SR)
 }
 
-/** Bar position (0 = downbeat) of the detected beat nearest to time t. */
-function accentAt(det: { beats: number[]; beatsPerBar: number; downbeat: number }, t: number): number {
+/** Bar position (0 = downbeat) of the detected beat nearest to time t —
+ *  through accentIndex, so explicit downbeats rule when the detector emitted
+ *  them and the legacy pair rules when stripped. */
+function accentAt(
+  det: { beats: number[]; beatsPerBar: number; downbeat: number; downbeats?: number[] },
+  t: number
+): number {
   let k = 0
   for (let i = 0; i < det.beats.length; i++) {
     if (Math.abs(det.beats[i] - t) < Math.abs(det.beats[k] - t)) k = i
   }
   expect(Math.abs(det.beats[k] - t)).toBeLessThan(0.08)
-  return (((k - det.downbeat) % det.beatsPerBar) + det.beatsPerBar) % det.beatsPerBar
+  return accentIndex({ ...det, bpm: 0, source: 'auto' }, k)
 }
 
 describe('detectBeats downbeat & meter', () => {
@@ -322,9 +427,10 @@ describe('detectBeats downbeat & meter', () => {
     for (const m of [4, 10, 16]) expect(accentAt(det!, 0.4 + m * barLen)).toBe(0)
   })
 
-  it('re-phases across a fermata so both halves accent their own bars', () => {
+  it('carries a fermata phase change in downbeats without touching the beats', () => {
     // section B re-enters shifted by half a bar relative to section A's grid —
-    // the silent gap's filler beats must absorb the difference
+    // representable as one odd-length boundary bar; the tracked beat times
+    // must come through unmutated (the old code re-spaced the silent gap)
     const p = 60 / 100
     const barLen = 4 * p
     const drums = new Float32Array(Math.floor(SR * 75))
@@ -340,6 +446,13 @@ describe('detectBeats downbeat & meter', () => {
         addRoot(bass, t, t + barLen, roots[bar % 4])
       }
     }
+    const truthOf = (start: number, until: number): number[] => {
+      const out: number[] = []
+      for (let t = start; t + barLen < until; t += barLen) {
+        for (let k = 0; k < 4; k++) out.push(t + k * p)
+      }
+      return out
+    }
     const aStart = 0.5
     mkSection(aStart, 30)
     const bStart = aStart + 62 * p // 62 beats on = grid, but ≡ +2 beats in bar phase
@@ -348,7 +461,35 @@ describe('detectBeats downbeat & meter', () => {
     const det = detectBeats(wrap(drums), { bass: wrap(bass) })
     expect(det).not.toBeNull()
     expect(Math.abs(det!.bpm - 100)).toBeLessThan(1)
+    // Beats are NOT re-spaced: monotone, and every interval — the silent gap
+    // included — stays on the tracked period. The old repair squeezed two
+    // extra beats into the gap (~70 ms interval error); frame granularity
+    // alone stays under ~25 ms.
+    const iv = det!.beats.slice(1).map((b, i) => b - det!.beats[i])
+    const med = [...iv].sort((a, b) => a - b)[Math.floor(iv.length / 2)]
+    for (const x of iv) {
+      expect(x).toBeGreaterThan(0)
+      expect(Math.abs(x - med)).toBeLessThan(0.04)
+    }
+    // Both sections' true beats are all tracked, in place.
+    expect(maxMiss(truthOf(aStart, 30), det!.beats)).toBeLessThan(0.03)
+    expect(maxMiss(truthOf(bStart, 74), det!.beats)).toBeLessThan(0.03)
+    // Each half accents its own bars — via downbeats; one rotation cannot
+    // fit both, which is exactly what the old code moved beats to fake.
     for (const m of [2, 6, 10]) expect(accentAt(det!, aStart + m * barLen)).toBe(0)
     for (const m of [1, 4, 8]) expect(accentAt(det!, bStart + m * barLen)).toBe(0)
+    // The phase change is in the bar map: uniform 4s except one odd boundary
+    // bar absorbing the +2 shift.
+    const d = det!.downbeats!
+    expect(d).toBeDefined()
+    const gaps = d.slice(1).map((x, i) => x - d[i])
+    const odd = gaps.filter((g) => g !== 4)
+    expect(odd.length).toBe(1)
+    expect([2, 6]).toContain(odd[0])
+    // Legacy view: the first anchored segment's rotation still surfaces in
+    // `downbeat`, so pre-downbeats readers accent section A correctly.
+    expect(det!.downbeat).toBe(d[0] % det!.beatsPerBar)
+    const { downbeats: _d, ...legacy } = det!
+    for (const m of [2, 6, 10]) expect(accentAt(legacy, aStart + m * barLen)).toBe(0)
   })
 })

@@ -38,8 +38,9 @@ count-ins included, sounds identical. Loop-region wraps, varispeed and seeks
 re-derive the walker. A count-in is a pre-roll in `play()`: the stems'
 shared start time moves out past whole beats — the song's real preceding
 beats when starting mid-song, extrapolated ones before the first beat — so
-the music enters on a bar accent; `position` holds at the start point until
-it does. Without a beat track (rubato — detection rejects free-tempo songs)
+the music enters on a bar accent, sized by the bar length at the entry beat
+(`barLengthAt` — a count-in into a 3-beat bar counts 3); `position` holds at
+the start point until it does. Without a beat track (rubato — detection rejects free-tempo songs)
 the count-in still works, degraded to the clock: 3 or 6 ticks at one per
 wall-clock second (rate-independent, scheduled upfront — no walker), the
 music entering one second after the last tick. Seeks and post-split
@@ -184,8 +185,11 @@ chroma novelty over the bass stem), vocal phrase entries after ≥2-bar rests
 against a 12-song ground-truth set from the user's library. Votes are
 counted per segment (drum-active stretches split by ≥2-bar gaps): silent
 intros never vote, and when a song re-enters after a fermata on a different
-bar parity (Turn The Page's last chorus), the gap's filler beats are
-re-spaced so one downbeat index is right on both sides. Meter: when 3-beat
+bar parity (Turn The Page's last chorus), each side keeps its own phase via
+explicit `downbeats` (bar starts as beat indices) — the boundary bar is
+simply an odd length, and beat times are never mutated to force one global
+rotation (the pre-v5 detector re-spaced the silent gap's beats instead,
+falsifying their times). Meter: when 3-beat
 periodicity of the onset envelope dwarfs 4-beat (windowed-lag max — the
 median period is a fraction of a frame off and by ×4 lands between sharp
 peaks), the tracked pulse is a compound song's eighth and accents group in
@@ -198,8 +202,14 @@ pickups-onto-the-one inverted the song's accent and was reverted; the ear
 test for the rotation is the band entrance, which the entrance/slam cues
 already vote. The result drives
 the metronome, count-in and bpm readout, and is saved in `project.json`
-(`settings.beat`, millisecond-rounded) where hand edits (tap tempo, nudges,
-×½/×2) win over re-detection; auto tracks carry `detVersion` and are
+(`settings.beat`, millisecond-rounded: beat times plus, when detection
+anchored more than a single uniform grid, `downbeats` — strictly increasing
+beat indices, each starting a bar, bar length = distance to the next entry;
+the legacy `beatsPerBar`/`downbeat` pair stays populated as the dominant
+uniform view so old phone builds still click) where hand edits (tap tempo,
+nudges, ×½/×2) win over re-detection — picking a meter or rotating the "1"
+by hand clears `downbeats` (a uniform manual override); auto tracks carry
+`detVersion` and are
 silently re-tracked on load when the detector has since improved — and the
 corrected grid saves itself into an existing project (never creating one),
 because phones render whatever `settings.beat` says: they have no detector,

@@ -55,6 +55,23 @@ export interface BeatInfo {
   beatsPerBar: number
   /** Index into beats of a downbeat — bar accents count from it. */
   downbeat: number
+  /**
+   * Explicit bar starts: strictly increasing beat INDICES into `beats`, each
+   * starting a bar. A bar's length is the distance to the next entry; bars
+   * continue past the last entry at the last bar's length, and bars before
+   * `downbeats[0]` extrapolate backward at the first bar's length. Absent =
+   * uniform bars (every manual track; auto tracks from detectors ≤ v4).
+   *
+   * When present this is the source of truth for accents and bar lengths —
+   * it can say what the legacy pair cannot: phase changes (a song re-entering
+   * after a fermata on a different bar parity gets one odd-length boundary
+   * bar, with the beat times left honest) and, later, real meter changes.
+   * The legacy pair MUST stay populated for old readers (phones in the
+   * field, which drop unknown fields): `beatsPerBar` = the dominant bar
+   * length (mode of the gaps), `downbeat` = `downbeats[0] % beatsPerBar` —
+   * a best-effort uniform view that is exact up to the first phase change.
+   */
+  downbeats?: number[]
   /** auto = tracked from the drums stem; manual = tapped, typed or nudged. */
   source: 'auto' | 'manual'
   /** Detector stamp for auto tracks — older stamps re-detect on load. */

@@ -417,7 +417,17 @@ function MetPopover({
               disabled={!grid}
               onClick={
                 grid
-                  ? () => onGrid({ ...grid, beatsPerBar: n, downbeat: grid.downbeat % n })
+                  ? () => {
+                      // A hand-picked meter is a uniform override: drop any
+                      // detected bar map and let the legacy pair rule alone.
+                      const { downbeats: _dropped, ...uniform } = grid
+                      onGrid({
+                        ...uniform,
+                        beatsPerBar: n,
+                        downbeat: grid.downbeat % n,
+                        source: 'manual'
+                      })
+                    }
                   : undefined
               }
             >
@@ -451,14 +461,17 @@ function MetPopover({
           className="chip nudge"
           disabled={!grid}
           title="Move the accent to the next beat (when the “1” lands wrong)"
-          onClick={() =>
-            grid &&
+          onClick={() => {
+            if (!grid) return
+            // Rotating the "1" by hand overrides any detected bar map too —
+            // the user is declaring the bars uniform and where they start.
+            const { downbeats: _dropped, ...uniform } = grid
             onGrid({
-              ...grid,
+              ...uniform,
               downbeat: (grid.downbeat + 1) % grid.beatsPerBar,
               source: 'manual'
             })
-          }
+          }}
         >
           1→
         </button>

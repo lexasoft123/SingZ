@@ -52,8 +52,48 @@ export function beatIndexAtOrAfter(info: BeatInfo, t: number): number {
   return lo
 }
 
-/** Beat's position inside its bar (0 = downbeat); virtual indexes count on. */
+/** Latest downbeats[] entry at or before idx (binary search), or -1. */
+function downbeatAtOrBefore(d: number[], idx: number): number {
+  if (idx < d[0]) return -1
+  let lo = 0
+  let hi = d.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (d[mid] <= idx) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+
+/**
+ * Beat's position inside its bar (0 = downbeat); virtual indexes count on.
+ * With explicit `downbeats` those are the truth: before the first entry bars
+ * extrapolate backward at the first bar's length, after the last they count
+ * on modulo the last bar's length. Without them, the uniform legacy pair.
+ */
 export function accentIndex(info: BeatInfo, idx: number): number {
+  const d = info.downbeats
+  if (d && d.length > 0) {
+    const firstLen = d.length >= 2 ? d[1] - d[0] : info.beatsPerBar
+    const lastLen = d.length >= 2 ? d[d.length - 1] - d[d.length - 2] : info.beatsPerBar
+    if (idx < d[0]) return (((idx - d[0]) % firstLen) + firstLen) % firstLen
+    if (idx >= d[d.length - 1]) return (idx - d[d.length - 1]) % lastLen
+    return idx - d[downbeatAtOrBefore(d, idx)]
+  }
   const n = info.beatsPerBar
   return (((idx - info.downbeat) % n) + n) % n
+}
+
+/**
+ * Beats in the bar containing beat `idx` — what a count-in into that spot
+ * should count. Uniform tracks: beatsPerBar; with `downbeats`, the local gap
+ * (edges extend the first/last bar's length outward).
+ */
+export function barLengthAt(info: BeatInfo, idx: number): number {
+  const d = info.downbeats
+  if (!d || d.length < 2) return info.beatsPerBar
+  if (idx < d[0]) return d[1] - d[0]
+  if (idx >= d[d.length - 1]) return d[d.length - 1] - d[d.length - 2]
+  const j = downbeatAtOrBefore(d, idx)
+  return d[j + 1] - d[j]
 }
