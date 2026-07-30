@@ -66,6 +66,9 @@ export interface MetronomeConfig {
   click: boolean
   countInBars: number
   volume: number
+  /** Ring the "1" brighter. Off = every click identical (wrong-downbeat
+   *  escape hatch, and some singers just prefer a flat click). */
+  accent: boolean
 }
 
 /**

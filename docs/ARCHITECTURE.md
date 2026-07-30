@@ -31,7 +31,10 @@ The metronome (`audio/beat.ts` + engine) walks the song's beat track (an
 array of beat times — see Analysis) with a lookahead scheduler: synthesized
 click buffers, scheduled on the context clock, bypassing the master bus
 (never transposed/ducked) with the stretch node's latency added back so
-clicks stay on the delayed stems. Loop-region wraps, varispeed and seeks
+clicks stay on the delayed stems. Bar starts ring a brighter accent click
+unless `metronome.accent` is off — the escape hatch when a song's downbeat
+is contested (and a preference in its own right); off means every click,
+count-ins included, sounds identical. Loop-region wraps, varispeed and seeks
 re-derive the walker. A count-in is a pre-roll in `play()`: the stems'
 shared start time moves out past whole beats — the song's real preceding
 beats when starting mid-song, extrapolated ones before the first beat — so

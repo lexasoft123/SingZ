@@ -43,9 +43,16 @@ export interface MetronomeConfig {
   click: boolean
   countInBars: number
   volume: number
+  /** Ring the "1" brighter. Off = every click identical. */
+  accent: boolean
 }
 
-export const MET_DEFAULTS: MetronomeConfig = { click: false, countInBars: 0, volume: 0.7 }
+export const MET_DEFAULTS: MetronomeConfig = {
+  click: false,
+  countInBars: 0,
+  volume: 0.7,
+  accent: true
+}
 
 /**
  * An audio file the singer added to the project on the desktop — a backing
@@ -142,7 +149,8 @@ export function sanitizeMetronome(raw: unknown): MetronomeConfig {
   return {
     click: r.click === true,
     countInBars: Number.isFinite(bars) ? Math.max(0, Math.min(2, bars)) : 0,
-    volume: Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : MET_DEFAULTS.volume
+    volume: Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : MET_DEFAULTS.volume,
+    accent: r.accent !== false // absent (older saves) means on
   }
 }
 

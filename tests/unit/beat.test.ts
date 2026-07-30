@@ -82,11 +82,17 @@ describe('beat track math', () => {
     expect(ok!.beatsPerBar).toBe(3)
     expect(ok!.downbeat).toBe(1) // 7 mod 3
     expect(ok!.source).toBe('auto')
-    expect(sanitizeMetronome({})).toEqual({ click: false, countInBars: 0, volume: 0.7 })
-    expect(sanitizeMetronome({ click: true, countInBars: 9, volume: 3 })).toEqual({
+    expect(sanitizeMetronome({})).toEqual({
+      click: false,
+      countInBars: 0,
+      volume: 0.7,
+      accent: true // absent on older saves — accents stay on
+    })
+    expect(sanitizeMetronome({ click: true, countInBars: 9, volume: 3, accent: false })).toEqual({
       click: true,
       countInBars: 2,
-      volume: 1
+      volume: 1,
+      accent: false
     })
   })
 

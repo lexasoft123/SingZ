@@ -582,6 +582,11 @@ export default function PlayerScreen({
                     active={met.countInBars === 2}
                     onPress={() => setMet((m) => ({ ...m, countInBars: 2 }))}
                   />
+                  <Chip
+                    label={met.accent ? 'Accent on' : 'Accent off'}
+                    active={met.accent}
+                    onPress={() => setMet((m) => ({ ...m, accent: !m.accent }))}
+                  />
                 </View>
                 <Stepper
                   label="Loudness"
@@ -591,7 +596,7 @@ export default function PlayerScreen({
                       ...m,
                       volume: Math.max(0, Math.min(1, m.volume + d * 0.1))
                     }))
-                    engine.previewClick(true)
+                    engine.previewClick(met.accent)
                   }}
                 />
                 <Text style={b.hint}>

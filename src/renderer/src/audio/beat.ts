@@ -2,7 +2,12 @@ import type { BeatInfo, MetronomeConfig } from '../../../shared/types'
 
 export type { BeatInfo, MetronomeConfig }
 
-export const MET_DEFAULTS: MetronomeConfig = { click: false, countInBars: 0, volume: 0.7 }
+export const MET_DEFAULTS: MetronomeConfig = {
+  click: false,
+  countInBars: 0,
+  volume: 0.7,
+  accent: true
+}
 
 export const BEATS_PER_BAR_CHOICES = [2, 3, 4, 6] as const
 
@@ -144,7 +149,8 @@ export function sanitizeMetronome(raw: unknown): MetronomeConfig {
   return {
     click: r.click === true,
     countInBars: Number.isFinite(bars) ? Math.max(0, Math.min(2, bars)) : 0,
-    volume: Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : MET_DEFAULTS.volume
+    volume: Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : MET_DEFAULTS.volume,
+    accent: r.accent !== false // absent (older saves) means on
   }
 }
 
