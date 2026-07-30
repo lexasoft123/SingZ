@@ -30,6 +30,7 @@ import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
 import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir } from './models'
 import { Separator } from './separation'
+import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -164,6 +165,9 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('separation:cancel', () => separator.cancel())
+
+  // ML beat/downbeat analysis (Beat This! runner inside the splitter pack)
+  registerBeatsIpc()
 
   ipcMain.handle(
     'lyrics:get',
@@ -388,10 +392,12 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => {
   separator.cancel()
   transcriber.cancel()
+  cancelBeatsMl()
 })
 
 app.on('window-all-closed', () => {
   separator.cancel()
   transcriber.cancel()
+  cancelBeatsMl()
   if (process.platform !== 'darwin') app.quit()
 })

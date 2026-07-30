@@ -276,6 +276,23 @@ export type LyricsResult =
       error: string
     }
 
+/**
+ * ML beat analysis from the splitter pack's Beat This! runner: peak-picked
+ * beat/downbeat times (downbeats snapped onto beats) plus the framewise
+ * sigmoid head probabilities at `fps` (50) — the phase arbiter samples those
+ * as one cue among the stem votes.
+ */
+export type BeatsMlResult =
+  | {
+      ok: true
+      beats: number[]
+      downbeats: number[]
+      beatProb: number[]
+      downbeatProb: number[]
+      fps: number
+    }
+  | { ok: false; error: string }
+
 export type UpdateState =
   | { state: 'none' }
   | { state: 'checking' }
@@ -321,6 +338,10 @@ export interface SingzApi {
   checkEngine(force?: boolean): Promise<EngineStatus>
   separate(path: string): Promise<SeparateResult>
   cancelSeparation(): Promise<void>
+  /** Does the installed splitter pack include the Beat This! beat model? */
+  beatsMlAvailable(): Promise<{ ok: true; available: boolean }>
+  /** Run ML beat/downbeat detection on raw mono float32 PCM at `sr` (22050). */
+  beatsMlDetect(pcm: ArrayBuffer, sr: number): Promise<BeatsMlResult>
   revealInFolder(path: string): Promise<void>
   openExternal(url: string): Promise<void>
   /** Subscribe to separation progress. Returns an unsubscribe function. */

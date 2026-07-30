@@ -47,6 +47,10 @@ const api: SingzApi = {
 
   cancelSeparation: () => ipcRenderer.invoke('separation:cancel'),
 
+  beatsMlAvailable: () => ipcRenderer.invoke('beats:mlAvailable'),
+
+  beatsMlDetect: (pcm, sr) => ipcRenderer.invoke('beats:mlDetect', pcm, sr),
+
   revealInFolder: (path) => ipcRenderer.invoke('stems:reveal', path),
 
   openExternal: (url) => ipcRenderer.invoke('open-external', url),

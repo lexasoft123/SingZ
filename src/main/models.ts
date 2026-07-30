@@ -66,9 +66,30 @@ export async function packOnnxModel(
  * wizard re-downloads it and the installer wipes the old directory. Legacy
  * packs without pack.json count as version 0.
  */
-// Windows requires v3 (bundled MSVC runtime DLLs — clean installs lack the
-// system redistributable); Mac v2 packs remain fully valid.
-const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 3 : 2
+// v4 everywhere: packs now ship the Beat This! beat/downbeat model
+// (python/beat_runner.py + python/models/beat_this) — v3 packs lack it.
+// (v3 added the bundled MSVC runtime on Windows, but BOTH mac pack scripts
+// stamped 3 since then too, so the mac requirement jumps straight past 3 —
+// requiring 3 would leave installed mac packs looking current.)
+const PACK_FORMAT_REQUIRED = 4
+
+/** First pack format that ships the Beat This! runner + weights. */
+const PACK_FORMAT_WITH_BEATS = 4
+
+/**
+ * Can `python/beat_runner.py` actually run here? True only for packs new
+ * enough to include the beat model, with the runner and weights really on
+ * disk (a half-extracted pack must not look beat-capable).
+ */
+export async function packBeatsAvailable(): Promise<boolean> {
+  if (!(await exists(packPython()))) return false
+  if ((await packFormatVersion()) < PACK_FORMAT_WITH_BEATS) return false
+  const modelFile = isOnnxPack() ? 'beat_this.onnx' : 'final0.ckpt'
+  return (
+    (await exists(join(packDir(), 'python', 'beat_runner.py'))) &&
+    (await exists(join(packDir(), 'python', 'models', 'beat_this', modelFile)))
+  )
+}
 
 async function packFormatVersion(): Promise<number> {
   try {
@@ -227,7 +248,7 @@ const REGISTRY: RegistryEntry[] = [
         : process.arch === 'arm64'
           ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
-    sizeMb: process.platform === 'win32' ? 201 : process.arch === 'arm64' ? 192 : 177,
+    sizeMb: process.platform === 'win32' ? 283 : process.arch === 'arm64' ? 272 : 259,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??

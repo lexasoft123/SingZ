@@ -31,6 +31,23 @@ case "$TARGET" in
 esac
 PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${PBS_PY}"
 
+# Beat This! beat/downbeat model (MIT, code AND weights): exported to ONNX at
+# build time from the sha-pinned final0 checkpoint, shipped with a numpy +
+# onnxruntime runner (python/beat_runner.py). CPU provider only — 6 s/song;
+# the DirectML fragility class stays quarantined to demucs.
+BEAT_THIS_COMMIT="b95c8ab0c58c2d9fcfd40508ae8dffbc05ac4f5c"
+BEAT_THIS_PIN="beat_this @ git+https://github.com/CPJKU/beat_this@${BEAT_THIS_COMMIT}"
+TORCH_EXPORT_PIN="torch==2.13.0"
+TORCHAUDIO_PIN="torchaudio==2.11.0"
+NUMPY_PIN="numpy==2.5.1"
+EINOPS_PIN="einops==0.8.2"
+ROTARY_PIN="rotary-embedding-torch==0.9.1"
+SOXR_PIN="soxr==1.1.0"
+ONNX_PIN="onnx==1.22.0"             # the legacy exporter needs onnx…
+ONNXSCRIPT_PIN="onnxscript==0.7.1"  # …and the dynamo fallback needs onnxscript
+BEAT_CKPT_SHA256="8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331"
+BEAT_CKPT_URL="https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt"
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$ROOT/.engines-src/onnx-pack-$TARGET"
 OUT="$ROOT/vendor/packs"
@@ -111,12 +128,202 @@ HF_HUB_OFFLINE=1 "$PY" -c "import sys; from demucs_onnx.cli import main; sys.exi
   prewarm --models htdemucs_6s --precision fp16weights --providers cpu \
   --cache-dir "$WORK/python/model-cache"
 
+# ---- Beat This! ---------------------------------------------------------
+# The export needs a TORCH-capable python (the pack itself never ships
+# torch). On macOS reuse the gpu pack's work python — build-gpu-pack.sh runs
+# first, locally and in CI. On Windows CI there is no gpu pack, so bootstrap
+# a scratch venv off the pack python (torch CPU wheels; ~2 min).
+sha_of() { "$PY" -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$1"; }
+BEAT_CKPT="$ROOT/.engines-src/beat-models/final0.ckpt"
+mkdir -p "$(dirname "$BEAT_CKPT")"
+if [ -f "$BEAT_CKPT" ] && [ "$(sha_of "$BEAT_CKPT")" != "$BEAT_CKPT_SHA256" ]; then
+  echo "cached beat checkpoint has a wrong sha256 — refetching"
+  rm -f "$BEAT_CKPT"
+fi
+if [ ! -f "$BEAT_CKPT" ]; then
+  curl -L --fail -o "$BEAT_CKPT" "$BEAT_CKPT_URL"
+fi
+[ "$(sha_of "$BEAT_CKPT")" = "$BEAT_CKPT_SHA256" ] || { echo "beat checkpoint sha256 mismatch" >&2; exit 1; }
+
+# The export runs in a venv so onnx/onnxscript (exporter-only deps) never
+# leak into any shipped pack. On macOS the venv layers over the gpu pack's
+# work python (--system-site-packages: torch + beat_this come from there);
+# on Windows it is self-contained off the pack python (torch CPU wheels).
+EXPORT_VENV="$ROOT/.engines-src/beat-export-$TARGET"
+if [ "$TARGET" = win32-x64 ]; then
+  EXPORT_PY="$EXPORT_VENV/Scripts/python.exe"
+else
+  EXPORT_PY="$EXPORT_VENV/bin/python3"
+fi
+if ! "$EXPORT_PY" -c "import torch, beat_this, onnx, onnxscript" >/dev/null 2>&1; then
+  rm -rf "$EXPORT_VENV"
+  if [ "$TARGET" = win32-x64 ]; then
+    "$PY" -m venv "$EXPORT_VENV"
+    "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
+    "$EXPORT_PY" -m pip install --no-cache-dir "$TORCH_EXPORT_PIN" "$NUMPY_PIN" \
+      "$TORCHAUDIO_PIN" "$EINOPS_PIN" "$ROTARY_PIN" "$SOXR_PIN" "$BEAT_THIS_PIN" \
+      "$ONNX_PIN" "$ONNXSCRIPT_PIN"
+  else
+    GPU_PY="$ROOT/.engines-src/gpu-pack/python/bin/python3"
+    if ! { [ -x "$GPU_PY" ] && "$GPU_PY" -c "import torch, beat_this" >/dev/null 2>&1; }; then
+      echo "ERROR: no torch python for the Beat This ONNX export —" >&2
+      echo "       run scripts/build-gpu-pack.sh first (it provides one)" >&2
+      exit 1
+    fi
+    "$GPU_PY" -m venv --system-site-packages "$EXPORT_VENV"
+    "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
+    "$EXPORT_PY" -m pip install --no-cache-dir "$ONNX_PIN" "$ONNXSCRIPT_PIN"
+  fi
+fi
+
+# Export the two graphs (recipe: CPJKU/beat_this#12): the 20M model with a
+# FIXED (1,1500,128) input — the runner chunks and zero-pads — plus the mel
+# front-end as matmul-DFT (no STFT op: bulletproof across exporters and EPs),
+# verified against torchaudio.transforms.MelSpectrogram before it ships.
+BEAT_ONNX_DIR="$WORK/python/models/beat_this"
+mkdir -p "$BEAT_ONNX_DIR"
+"$EXPORT_PY" - "$BEAT_CKPT" "$BEAT_ONNX_DIR" << 'PYEOF'
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from beat_this.inference import load_model
+from beat_this.preprocessing import LogMelSpect
+
+ckpt, outdir = sys.argv[1], Path(sys.argv[2])
+torch.manual_seed(0)
+
+
+def export(module, args_t, path, in_names, out_names, dyn=None):
+    try:
+        torch.onnx.export(module, args_t, str(path), opset_version=17,
+                          do_constant_folding=True, input_names=in_names,
+                          output_names=out_names, dynamic_axes=dyn,
+                          dynamo=False)
+        return "legacy"
+    except Exception as err:
+        print(f"legacy exporter failed ({type(err).__name__}: {err}); "
+              "retrying with dynamo", file=sys.stderr)
+        torch.onnx.export(module, args_t, str(path), opset_version=17,
+                          input_names=in_names, output_names=out_names,
+                          dynamic_axes=dyn, dynamo=True)
+        return "dynamo"
+
+
+class HeadsToTuple(nn.Module):
+    """BeatThis returns {'beat','downbeat'} — fix the output order for ONNX."""
+
+    def __init__(self, m):
+        super().__init__()
+        self.m = m
+
+    def forward(self, x):
+        out = self.m(x)
+        return out["beat"], out["downbeat"]
+
+
+model = HeadsToTuple(load_model(ckpt, device="cpu")).eval()
+mode = export(model, (torch.randn(1, 1500, 128),), outdir / "beat_this.onnx",
+              ["spect"], ["beat", "downbeat"])
+print(f"beat_this.onnx exported ({mode} exporter, opset 17, fixed 1500 frames)")
+
+N_FFT, HOP = 1024, 441
+
+
+class MelFrontend(nn.Module):
+    """LogMelSpect minus the framing (the runner frames in numpy): windowed
+    frames -> DFT as two matmuls -> magnitude / sqrt(n_fft) -> mel -> log1p."""
+
+    def __init__(self, fb):
+        super().__init__()
+        n = torch.arange(N_FFT, dtype=torch.float64)
+        k = torch.arange(N_FFT // 2 + 1, dtype=torch.float64)
+        ang = 2 * torch.pi * k[None, :] * n[:, None] / N_FFT
+        self.register_buffer("cos_m", torch.cos(ang).float())
+        self.register_buffer("sin_m", torch.sin(ang).float())
+        self.register_buffer("window", torch.hann_window(N_FFT).float())
+        self.register_buffer("fb", fb.float())  # (513, 128) from torchaudio
+        self.scale = float(N_FFT) ** -0.5       # normalized="frame_length"
+
+    def forward(self, frames):                  # (N, 1024) windowed below
+        w = frames * self.window
+        re = w @ self.cos_m
+        im = w @ self.sin_m
+        mag = (re * re + im * im).sqrt() * self.scale
+        return torch.log1p(1000.0 * (mag @ self.fb))
+
+
+ref = LogMelSpect(device="cpu")
+mel = MelFrontend(ref.spect_class.mel_scale.fb).eval()
+
+# prove the matmul front-end + the runner's numpy framing == torchaudio
+rng = np.random.default_rng(1)
+sig = (rng.standard_normal(22050 * 20) * 0.1).astype(np.float32)
+with torch.no_grad():
+    want = ref(torch.tensor(sig))
+    padded = np.pad(sig, N_FFT // 2, mode="reflect")
+    frames = np.lib.stride_tricks.sliding_window_view(padded, N_FFT)[::HOP]
+    got = mel(torch.tensor(np.ascontiguousarray(frames)))
+assert want.shape == got.shape, (want.shape, got.shape)
+diff = (want - got).abs().max().item()
+print(f"mel front-end vs torchaudio: max abs log-mel diff {diff:.2e}")
+assert diff < 2e-3, f"mel front-end mismatch: {diff}"
+
+mode = export(mel, (torch.randn(2100, N_FFT),), outdir / "logmel.onnx",
+              ["frames"], ["logmel"],
+              dyn={"frames": {0: "n"}, "logmel": {0: "n"}})
+print(f"logmel.onnx exported ({mode} exporter, opset 17, dynamic frames)")
+PYEOF
+
+cp "$ROOT/scripts/beat_runner_onnx.py" "$WORK/python/beat_runner.py"
+
+# PARITY GATE: the shipped ONNX runner must reproduce the torch flavor on a
+# fixture clip — every beat within one frame (0.02 s), downbeats identical —
+# and pass the same tempo/meter sanity checks as the gpu pack's beat smoke.
+PARITY="$WORK/beat-parity"
+rm -rf "$PARITY"
+mkdir -p "$PARITY"
+"$PY" "$ROOT/scripts/beat_runner_fixture.py" --out "$PARITY/click.f32" --sr 22050 --secs 60
+HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 "$EXPORT_PY" "$ROOT/scripts/beat_runner.py" \
+  --f32 "$PARITY/click.f32" --sr 22050 --device cpu \
+  --models "$(dirname "$BEAT_CKPT")" > "$PARITY/torch.json"
+HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 "$PY" "$WORK/python/beat_runner.py" \
+  --f32 "$PARITY/click.f32" --sr 22050 > "$PARITY/onnx.json"
+"$PY" "$ROOT/scripts/beat_runner_check.py" "$PARITY/onnx.json"
+"$PY" - "$PARITY/torch.json" "$PARITY/onnx.json" << 'PYEOF'
+import json
+import sys
+
+t = json.load(open(sys.argv[1]))
+o = json.load(open(sys.argv[2]))
+assert len(t["beat_prob"]) == len(o["beat_prob"]), \
+    f"frame count differs: torch {len(t['beat_prob'])} vs onnx {len(o['beat_prob'])}"
+assert len(t["beats"]) == len(o["beats"]), \
+    f"beat count differs: torch {len(t['beats'])} vs onnx {len(o['beats'])}"
+db = max((abs(a - b) for a, b in zip(t["beats"], o["beats"])), default=0.0)
+assert db <= 0.02, f"beat time drift {db:.3f}s > 0.02s (one frame)"
+assert len(t["downbeats"]) == len(o["downbeats"]), \
+    f"downbeat count differs: torch {len(t['downbeats'])} vs onnx {len(o['downbeats'])}"
+dd = max((abs(a - b) for a, b in zip(t["downbeats"], o["downbeats"])), default=0.0)
+assert dd <= 0.02, f"downbeat drift {dd:.3f}s > 0.02s"
+mp = max(abs(a - b) for a, b in zip(t["beat_prob"], o["beat_prob"]))
+print(f"parity OK: {len(t['beats'])} beats (max dt {db:.3f}s), "
+      f"{len(t['downbeats'])} downbeats (max dt {dd:.3f}s), "
+      f"max framewise prob diff {mp:.3f}")
+PYEOF
+rm -rf "$PARITY"
+
 find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
 
 # version stamp: the app refuses packs older than its required format
+# (v4 = the pack ships the Beat This runner + ONNX models — keep in sync
+# with PACK_FORMAT_REQUIRED in src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 3, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 4, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python
