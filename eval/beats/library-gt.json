@@ -1,0 +1,19 @@
+{
+  "comment": "Ground truth for the user's own library (established by ear + analysis). Values are DETECTOR-relative: rot = allowed values of (downbeat index % beatsPerBar) on the detector's own beat grid; bpb = expected beatsPerBar. null = no stable ground truth, report only. reject:true = the detector must return null (no steady pulse deserves a metronome).",
+  "songs": {
+    "Dreamer": { "bpb": 4, "rot": [0] },
+    "Going To The Run": { "bpb": 4, "rot": [2] },
+    "Mr Crowley": null,
+    "Nothing Else Matters": { "bpb": 6, "rot": [3] },
+    "Panzerkampf": { "bpb": 4, "rot": [2] },
+    "Primo Victoria": { "bpb": 4, "rot": [0] },
+    "Puppe": { "bpb": 4, "rot": [3] },
+    "Sixteen Tons": { "bpb": 4, "rot": [0] },
+    "Soldier Of Fortune": { "bpb": 4, "rot": [1] },
+    "Stirb Nicht Vor Mir": { "bpb": 4, "rot": [2] },
+    "The Music Of The Night": { "reject": true },
+    "Turn The Page": { "bpb": 4, "rot": [3] },
+    "Wanted Dead Or Alive": { "bpb": 4, "rot": [3] },
+    "Zeit": { "bpb": 4, "rot": [0] }
+  }
+}
