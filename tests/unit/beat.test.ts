@@ -669,3 +669,72 @@ describe('detectBeats neural lattice (v10)', () => {
     expect(b).toEqual(a)
   })
 })
+
+describe('detectBeats interior-void splice (v11)', () => {
+  it('replaces coasting beats with the model inside a refused interior void', () => {
+    // WDOA shape: steady band with a 42 s stretch where the drums drop out
+    // and only LOOSE strums remain (they honestly fail the fill gates),
+    // while the (model-tracked) tempo wobbles — the DP coasts straight
+    // through and drifts; the splice must follow the model instead.
+    const truth: number[] = []
+    let t = 0.4
+    let k = 0
+    while (t < 99) {
+      truth.push(t)
+      const inVoid = t >= 30 && t < 72
+      const bpm = inVoid ? 120 + 6 * Math.sin((k / 14) * Math.PI) : 120
+      t += 60 / bpm
+      k++
+    }
+    const played = truth.filter((x) => x < 30 || x >= 72)
+    const voidBeats = truth.filter((x) => x >= 32 && x < 70)
+    // every played beat carries energy (kick 1/3, snare 2/4) so the tracker
+    // holds the quarter-note octave
+    const band = (beats: number[], strums: number[]): AudioBuffer => {
+      const data = new Float32Array(SR * 100)
+      for (let b = 0; b < beats.length; b++) {
+        const f = b % 2 === 0 ? 55 : 200
+        const amp = b % 4 === 0 ? 1.0 : 0.6
+        const at = Math.round(beats[b] * SR)
+        for (let i = 0; i < 3500 && at + i < data.length; i++) {
+          data[at + i] += amp * Math.exp(-i / 700) * Math.sin((2 * Math.PI * f * i) / SR)
+        }
+      }
+      for (const st of strums) {
+        const at = Math.round(st * SR)
+        for (let i = 0; i < 3000 && at + i < data.length; i++) {
+          data[at + i] += 0.8 * Math.exp(-i / 600) * Math.sin((2 * Math.PI * 330 * i) / SR)
+        }
+      }
+      return wrap(data)
+    }
+    const strums: number[] = []
+    for (let st = 30.3; st < 71.5; st += 0.4 + 0.5 * rnd()) strums.push(st)
+    const drums = band(played, [])
+    const inst = band(played, strums)
+    const ml = {
+      beats: truth,
+      downbeats: truth.filter((_, i) => i % 4 === 0)
+    }
+    const miss = (det: { beats: number[] } | null): number => {
+      expect(det).not.toBeNull()
+      let worst = 0
+      for (const tv of voidBeats) {
+        let best = Infinity
+        for (const d of det!.beats) best = Math.min(best, Math.abs(d - tv))
+        worst = Math.max(worst, best)
+      }
+      return worst
+    }
+    const coastDet = detectBeats(drums, { inst: [inst] })
+    expect(Math.abs(coastDet!.bpm - 120)).toBeLessThan(3)
+    const coast = miss(coastDet)
+    const dbg: Record<string, unknown> = {}
+    const spliced = miss(detectBeats(drums, { inst: [inst], ml }, dbg))
+    expect(dbg.mlSplice).toBeTruthy()
+    // coasting drifts audibly against the wobble; the splice follows it
+    expect(coast).toBeGreaterThan(0.1)
+    expect(spliced).toBeLessThan(0.05)
+    expect(spliced).toBeLessThan(coast / 3)
+  })
+})

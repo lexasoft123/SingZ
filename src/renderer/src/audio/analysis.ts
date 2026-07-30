@@ -73,8 +73,11 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * v10: neural lattice — when the splitter pack's Beat This! model has run,
  * its beats replace the flux-DP tracker (aux.ml); octave, meter, bar phase
  * and rejection still come from the stem cues here.
+ * v11: interior drum-voids the fill gate refused splice in the neural
+ * lattice instead of coasting on an empty envelope (WDOA's verse drifted
+ * half a beat); leading/trailing spans keep the v8 refusal policy.
  */
-export const BEAT_DETECT_VERSION = 10
+export const BEAT_DETECT_VERSION = 11
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -239,7 +242,13 @@ export function detectBeats(
       ...(dbI.length >= 2 ? { downbeats: dbI } : {})
     }
   }
-  let lat: { beatsSec: number[]; medSec: number; O: Float32Array; doubled?: boolean } | null = null
+  let lat: {
+    beatsSec: number[]
+    medSec: number
+    O: Float32Array
+    doubled?: boolean
+    voids?: { aSec: number; bSec: number; leading: boolean; trailing: boolean; filled: boolean }[]
+  } | null = null
   let mlPhase = false
   if (mlChoice && !mlChoice.doubled && mlDom === 3) {
     lat = mlChoice
@@ -251,6 +260,48 @@ export function detectBeats(
     mlPhase = !mlChoice.doubled
   }
   if (!lat) return null
+  // v11: an INTERIOR drum-void the fill gate refused leaves the DP coasting
+  // on an empty envelope — WDOA's second verse (48–93 s) drifted half a
+  // beat against the band this way, and the drums-only probe cannot even
+  // see it. When the model's lattice is level-compatible, its beats replace
+  // exactly the coasting stretch (strictly inside the void). Leading and
+  // trailing spans keep the v8 policy untouched: a refused rubato intro
+  // (Mr Crowley's organ) still gets no invented grid. Any beat-count change
+  // at the seams is absorbed by the phase machinery below — the void has no
+  // drum activity, so each side anchors its own segment and the boundary
+  // bar simply comes out an odd length, the fermata mechanics.
+  if (lat && lat !== mlChoice && mlChoice && lat.voids && lat.voids.length > 0) {
+    const ratio = lat.medSec / mlChoice.medSec
+    if (ratio > 0.9 && ratio < 1.1) {
+      const mlB = mlChoice.beatsSec
+      const spliceDbg: { aSec: number; bSec: number; removed: number; added: number }[] = []
+      for (const v of lat.voids) {
+        if (v.leading || v.trailing || v.filled) continue
+        const lo = v.aSec + 0.5 * lat.medSec
+        const hi = v.bSec - 0.5 * lat.medSec
+        if (hi <= lo) continue
+        const ins = mlB.filter((t) => t > lo && t < hi)
+        // the model must have actually tracked the stretch — a void it also
+        // gave up on keeps the old path
+        if (ins.length < (0.5 * (v.bSec - v.aSec)) / lat.medSec) continue
+        const before = lat.beatsSec.length
+        const kept = lat.beatsSec.filter((t) => t <= lo || t >= hi)
+        const merged = [...kept, ...ins].sort((x, y) => x - y)
+        const out: number[] = []
+        for (const t of merged) {
+          if (out.length === 0 || t - out[out.length - 1] >= 0.5 * lat.medSec) out.push(t)
+        }
+        lat.beatsSec = out
+        spliceDbg.push({
+          aSec: Math.round(v.aSec * 10) / 10,
+          bSec: Math.round(v.bSec * 10) / 10,
+          removed: before - kept.length,
+          added: ins.length
+        })
+      }
+      if (debug && spliceDbg.length > 0) debug.mlSplice = spliceDbg
+    }
+  }
   if (debug) debug.lattice = lat === mlChoice ? 'ml' : 'drums'
   const beatsSec = lat.beatsSec
   const medSec = lat.medSec
@@ -778,7 +829,13 @@ function trackFromDrums(
   drumPeaks: number[],
   aux: BeatAux | undefined,
   debug?: Record<string, unknown>
-): { beatsSec: number[]; medSec: number; O: Float32Array; doubled?: boolean } | null {
+): {
+  beatsSec: number[]
+  medSec: number
+  O: Float32Array
+  doubled?: boolean
+  voids?: { aSec: number; bSec: number; leading: boolean; trailing: boolean; filled: boolean }[]
+} | null {
   const sr = ANALYSIS_SR
   // Instrument fill: where the drums are silent for seconds at a stretch,
   // the other stems' IMPULSIVE onsets carry the pulse (picked intros,
@@ -789,6 +846,10 @@ function trackFromDrums(
   /** Drum-free spans (frame units) the fill was applied to — placement is
    *  spliced to these, everything outside stays the drums-only path. */
   const fillSpans: { a: number; b: number }[] = []
+  /** Per-span verdicts of the v8 quality gate, kept for the caller: a
+   *  refused INTERIOR span means the DP coasted through it on an empty
+   *  envelope — the neural lattice may replace exactly that stretch. */
+  let spanOkOut: boolean[] | null = null
   // Bass is deliberately NOT a fill source: its sustained eighth-note motion
   // in short breaks flipped WDOA to a double-tempo octave when it fed the
   // envelope. It keeps its role as a downbeat VOTER only.
@@ -1208,6 +1269,7 @@ function trackFromDrums(
         return dev[Math.floor(dev.length * 0.9)] <= 0.15
       })
       if (debug) debug.spanOk = fillSpans.map((sp, i) => ({ a: sp.a, b: sp.b, ok: spanOk[i] }))
+      spanOkOut = spanOk
       const inKeptSpan = (f: number): boolean =>
         fillSpans.some((sp, i) => spanOk[i] && f > sp.a + 1 && f < sp.b - 1)
       const inAnySpan = (f: number): boolean =>
@@ -1260,7 +1322,14 @@ function trackFromDrums(
   const iv = beatsSec.slice(1).map((b, i) => b - beatsSec[i]).sort((a, b) => a - b)
   const medSec = iv[Math.floor(iv.length / 2)]
 
-  return { beatsSec, medSec, O }
+  const voids = fillSpans.map((sp, i) => ({
+    aSec: (Math.max(0, sp.a + 1) * HOP) / sr,
+    bSec: (Math.min(frames, sp.b) * HOP) / sr,
+    leading: sp.a < 0,
+    trailing: sp.b >= frames,
+    filled: spanOkOut ? spanOkOut[i] === true : false
+  }))
+  return { beatsSec, medSec, O, voids }
 }
 
 /** Dominant bar length (in beats) of the model's own bar marks — measured on
