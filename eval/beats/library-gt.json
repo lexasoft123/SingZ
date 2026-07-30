@@ -86,7 +86,12 @@
     3
    ],
    "barAt": 186.549,
-   "note": "v9 re-phases the 204.8s breakdown (+0.33 harmonic gain); EAR-CHECK PENDING"
+   "beatAtMl": [
+    64.22,
+    70.66,
+    77.16
+   ],
+   "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there — ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen."
   },
   "Zeit": {
    "bpb": 4,

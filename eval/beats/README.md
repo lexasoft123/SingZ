@@ -16,7 +16,14 @@ Nothing here ships: `eval/*` is excluded in `electron-builder.yml`, and
 - `run-current.mjs` — esbuild-bundles the app's `analysis.ts`, decodes audio
   with ffmpeg (f32le mono 44.1 kHz), calls `detectBeats`
 - `library-gt.json` — committed ground truth for the user's own split
-  projects (downbeat rotation + beats-per-bar, established by ear)
+  projects (downbeat rotation + beats-per-bar, established by ear).
+  Besides `barAt` (a bar-START time anchor), a song may carry
+  `beatAtMl: [times]` — ear-approved BEAT times inside stretches only the
+  fused detector can track (drum-voids the v8 gate refuses; the WDOA drift
+  regression). Checked only under `--ml`, and at the beat level on purpose:
+  two model runs on near-identical mixes legitimately differ by a whole
+  beat in loose material, which shifts the bar extension across a void,
+  while beat times agree within ~20 ms.
 - `fetch-annotations.sh` — clones CPJKU/beat_this_annotations into `data/`
   (16 datasets; `.beats` TSV: time + beat counter, counter 1 = downbeat)
 - `fetch-ballroom.sh` — downloads the Ballroom audio set (ISMIR04 tempo

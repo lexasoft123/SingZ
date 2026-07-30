@@ -240,7 +240,35 @@ async function runLibrary(detect) {
     }
     if (status === 'pass') pass++
     if (status === 'FAIL') fail++
-    rows.push({ name, status, expected, detected: got, reject: det ? undefined : (dbg.reject ?? 'no tempo family') })
+    // beatAtMl: ear-approved BEAT times (fused mode only) inside stretches
+    // the drums-only path cannot track — the WDOA drift regression. Checked
+    // at the beat level, not the bar level: two model runs on near-identical
+    // mixes legitimately differ by a beat in loose material, which shifts
+    // the bar extension across a void, while beat times agree within ~20 ms.
+    let mlStatus = null
+    if (Array.isArray(spec?.beatAtMl) && spec.beatAtMl.length > 0) {
+      if (ml && det) {
+        checkable++
+        const med = 60 / det.bpm
+        const deltas = spec.beatAtMl.map((a) =>
+          det.beats.reduce((m, t) => Math.min(m, Math.abs(t - a)), Infinity)
+        )
+        mlStatus = deltas.every((d) => d < 0.25 * med) ? 'pass' : 'FAIL'
+        if (mlStatus === 'pass') pass++
+        else fail++
+        console.log(
+          `${''.padEnd(24)} ${mlStatus.padEnd(12)} beatAtMl deltas: ${deltas.map((d) => `${Math.round(d * 1000)}ms`).join(' ')} (tol ${Math.round(250 * med)}ms)`
+        )
+      } else if (ml) {
+        checkable++
+        mlStatus = 'FAIL'
+        fail++
+        console.log(`${''.padEnd(24)} FAIL         beatAtMl: detector returned null`)
+      } else {
+        console.log(`${''.padEnd(24)} skipped      beatAtMl needs --ml (fused-only anchors)`)
+      }
+    }
+    rows.push({ name, status, mlStatus, expected, detected: got, reject: det ? undefined : (dbg.reject ?? 'no tempo family') })
     const gotStr = got ? `rot ${got.rot} / ${got.bpb}  ${got.bpm} bpm` : `null (${dbg.reject ?? 'no tempo family'})`
     console.log(`${name.padEnd(24)} ${status.padEnd(12)} got: ${gotStr.padEnd(28)} want: ${expected}  (${secs}s)`)
   }

@@ -12,13 +12,20 @@ STAMP="$(date +%Y-%m-%d)-$SHA"
 mkdir -p out/tmp
 
 LIB_JSON=out/tmp/run-all-library.json
+LIB_ML_JSON=out/tmp/run-all-library-ml.json
 BR_JSON=out/tmp/run-all-ballroom.json
-rm -f "$LIB_JSON" "$BR_JSON"
+rm -f "$LIB_JSON" "$LIB_ML_JSON" "$BR_JSON"
 
 LIB_ROOT="${SINGZ_EVAL_LIBRARY:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/SingZ}"
 if [ -d "$LIB_ROOT" ]; then
   echo "=== library ==="
   node run-current.mjs --dataset library --json "$LIB_JSON" || true
+  if [ -f out/beat-this-final0-raw.jsonl ]; then
+    echo "=== library (fused: --ml) ==="
+    node run-current.mjs --dataset library --ml out/beat-this-final0-raw.jsonl --json "$LIB_ML_JSON" || true
+  else
+    echo "no out/beat-this-final0-raw.jsonl — skipping fused library run (see README, Beat This! section)"
+  fi
 else
   echo "library root not found ($LIB_ROOT) — skipping library"
 fi
