@@ -71,7 +71,7 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * v7: instrument fill — where drums are silent the other stems' onsets carry
  * the pulse, so drumless intros get tracked beats instead of extrapolation.
  */
-export const BEAT_DETECT_VERSION = 8
+export const BEAT_DETECT_VERSION = 9
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -743,7 +743,23 @@ export function detectBeats(
   }
 
   // Bass chord-change strength per beat (0 = no confident change here).
-  const bassNov = bassChangeVotes(aux?.bass ?? null, beatsSec, bpb)
+  // Chord changes are downbeat evidence wherever ANY harmonic instrument
+  // plays them — the organ that carries Mr Crowley lives in `other`, not
+  // bass. Sum every harmonic stem for the chroma-novelty cue.
+  const harmParts: Float32Array[] = []
+  if (aux?.bass) harmParts.push(monoAt44k(aux.bass))
+  for (const fb of aux?.inst ?? []) if (fb) harmParts.push(monoAt44k(fb))
+  let harmData: Float32Array | null = null
+  if (harmParts.length > 0) {
+    const hLen = Math.max(...harmParts.map((d) => d.length))
+    harmData = new Float32Array(hLen)
+    for (const d of harmParts) for (let i = 0; i < d.length; i++) harmData[i] += d[i]
+  }
+  // Segment votes keep the CALIBRATED bass-only chroma (walking bass and
+  // comping churn were tuned around); the all-stems sum feeds only the
+  // slip-detection windows below, where organ/guitar changes are the point.
+  const bassNov = harmonicChangeVotes(aux?.bass ? monoAt44k(aux.bass) : null, beatsSec, bpb)
+  const harmNov = harmParts.length > 1 ? harmonicChangeVotes(harmData, beatsSec, bpb) : bassNov
   // Vocal phrase entries: loudest moment after each ≥2-bar rest, on a beat.
   const vocHits = vocalEntryVotes(aux?.vocals ?? null, beatsSec, medSec, bpb)
   // Lyric lines that start on a beat.
@@ -874,16 +890,155 @@ export function detectBeats(
   const anchors = scored.filter((s) => (s.b - s.a) / bpb >= MIN_BARS && s.conf >= ANCHOR_CONF)
   let downbeat = 0
   let downbeats: number[] | undefined
+  /** Rotation vote over one index window: kick pattern + chord changes +
+   *  lyric lines. Chord changes vote regardless of drum activity — a slip
+   *  is visible in the harmony even where the kit is thin. */
+  const windowRot = (a: number, b: number): { rot: number; margin: number } | null => {
+    const W2 = bpb === 6 ? { kick: 0.1, harm: 0.6, line: 0.3 } : { kick: 0.3, harm: 0.45, line: 0.25 }
+    const kick = new Array<number>(bpb).fill(0)
+    const kn = new Array<number>(bpb).fill(0)
+    for (let k = a; k < b; k++) {
+      if (!active[k]) continue
+      kick[k % bpb] += kickE[k]
+      kn[k % bpb]++
+    }
+    const kickD = kn.every((n) => n > 1) ? normDist(kick.map((x, i) => (kn[i] ? x / kn[i] : 0))) : uniform()
+    const harm = new Array<number>(bpb).fill(0)
+    let hUsed = 0
+    if (harmNov) {
+      for (let k = a; k < b && k < harmNov.length; k++) {
+        if (harmNov[k] > 0) {
+          harm[k % bpb] += harmNov[k]
+          hUsed++
+        }
+      }
+    }
+    const harmD = hUsed >= bpb ? normDist(harm) : uniform()
+    const line = new Array<number>(bpb).fill(0)
+    let lUsed = 0
+    for (const k of lineHits) {
+      if (k >= a && k < b) {
+        line[k % bpb] += 1
+        lUsed++
+      }
+    }
+    const lineD = lUsed >= 2 ? normDist(line) : uniform()
+    if (hUsed < bpb && lUsed < 2) return null // nothing but drums — undecided
+    const score = new Array<number>(bpb).fill(0)
+    for (let r = 0; r < bpb; r++) {
+      score[r] = W2.kick * kickD[r] + W2.harm * harmD[r] + W2.line * lineD[r]
+    }
+    let rot = 0
+    for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
+    const sorted = [...score].sort((x, y) => y - x)
+    const margin = sorted[0] - sorted[1]
+    return margin >= 0.1 ? { rot, margin } : null
+  }
+
+  /** Detect stable rotation flips inside [from,to): returns phase pieces
+   *  [{ start, rot }] beginning with the anchor's own rotation. */
+  const phasePieces = (from: number, to: number, rot0: number): { start: number; rot: number }[] => {
+    const pieces = [{ start: from, rot: rot0 }]
+    const winB = 12 * bpb
+    const hopB = 4 * bpb
+    if (to - from < winB * 2) return pieces
+    const wins: { center: number; rot: number }[] = []
+    for (let a = from; a + winB <= to; a += hopB) {
+      const v = windowRot(a, a + winB)
+      if (v) wins.push({ center: a + winB / 2, rot: v.rot })
+    }
+    const RUN = 4
+    let cur = rot0
+    let i = 0
+    while (i + RUN <= wins.length) {
+      const r = wins[i].rot
+      if (r !== cur && wins.slice(i, i + RUN).every((w) => w.rot === r)) {
+        // stable flip: boundary at the biggest interval anomaly between the
+        // previous window's center and this run's center (slips live at
+        // tracked-interval defects), else at the run's first center.
+        const lo = i > 0 ? Math.round(wins[i - 1].center) : from
+        const hi = Math.round(wins[i].center)
+        let cut = hi
+        let worst = 0
+        for (let k = Math.max(from + 1, lo); k < Math.min(hi, beatsSec.length - 1); k++) {
+          const d = Math.abs(beatsSec[k + 1] - beatsSec[k] - medSec) / medSec
+          if (d > worst) {
+            worst = d
+            cut = k + 1
+          }
+        }
+        // A real phase slip leaves a physical defect in the tracked
+        // intervals at the cut (Mr Crowley's measure 0.26); harmonic
+        // ambiguity over a clean grid (SoF's half-bar chorus 0.05, NEM's
+        // section hiccup 0.17) must never re-phase.
+        if (worst < 0.2) {
+          i += RUN
+          continue
+        }
+        pieces.push({ start: cut, rot: r })
+        phaseCutsDbg.push(cut)
+        cur = r
+        i += RUN
+      } else {
+        i++
+      }
+    }
+    return pieces
+  }
+
+  const phaseCutsDbg: number[] = []
   if (anchors.length > 0) {
-    downbeats = []
-    for (let i = 0; i < anchors.length; i++) {
-      const rot = anchors[i].rot % bpb
-      const from = i === 0 ? 0 : anchors[i].a
-      const to = i + 1 < anchors.length ? anchors[i + 1].a : beatsSec.length
-      for (let k = from + (((rot - from) % bpb) + bpb) % bpb; k < to; k += bpb) downbeats.push(k)
+    const buildBars = (withCuts: boolean): number[] => {
+      const out: number[] = []
+      for (let i = 0; i < anchors.length; i++) {
+        const rot = anchors[i].rot % bpb
+        const from = i === 0 ? 0 : anchors[i].a
+        const to = i + 1 < anchors.length ? anchors[i + 1].a : beatsSec.length
+        const pieces = withCuts ? phasePieces(from, to, rot) : [{ start: from, rot }]
+        for (const piece of pieces.map((pc, j, arr) => ({
+          ...pc,
+          end: j + 1 < arr.length ? arr[j + 1].start : to
+        }))) {
+          const r = piece.rot % bpb
+          for (let k = piece.start + (((r - piece.start) % bpb) + bpb) % bpb; k < piece.end; k += bpb) {
+            out.push(k)
+          }
+        }
+      }
+      return out
+    }
+    // Cuts must pay for themselves globally: the fraction of chord-change
+    // mass landing ON downbeats has to improve by a WIDE margin — measured
+    // gains: Mr Crowley +0.63, Sixteen Tons +0.54, WDOA breakdown +0.33
+    // (all kept), TTP's ambiguous mid-section +0.16 (reverted). Threshold
+    // 0.3: only re-phase when the harmony overwhelmingly demands it.
+    const harmOnBars = (bars: number[]): number => {
+      if (!harmNov) return 0
+      const barSet = new Set(bars)
+      let on = 0
+      let tot = 0
+      for (let k = 0; k < harmNov.length; k++) {
+        if (harmNov[k] > 0) {
+          tot += harmNov[k]
+          if (barSet.has(k)) on += harmNov[k]
+        }
+      }
+      return tot > 0 ? on / tot : 0
+    }
+    const plain = buildBars(false)
+    const cut = buildBars(true)
+    if (debug && phaseCutsDbg.length > 0) {
+      debug.harmGain = { plain: harmOnBars(plain), cut: harmOnBars(cut) }
+    }
+    if (phaseCutsDbg.length > 0 && harmNov && harmOnBars(cut) >= harmOnBars(plain) + 0.3) {
+      downbeats = cut
+    } else {
+      phaseCutsDbg.length = 0
+      downbeats = plain
     }
     if (downbeats.length === 0) downbeats = undefined
     downbeat = downbeats ? downbeats[0] % bpb : anchors[0].rot % bpb
+    if (debug) debug.phaseCuts = phaseCutsDbg
   } else if (scored.length > 0) {
     downbeat = scored.reduce((m, s) => (s.conf > m.conf ? s : m)).rot % bpb
   }
@@ -936,10 +1091,13 @@ function monoAt44k(buffer: AudioBuffer): Float32Array {
 
 /** Bass chord-change strength per beat window: energy-gated chroma-novelty
  *  local maxima, weighted by how confidently the new window names a root. */
-function bassChangeVotes(bass: AudioBuffer | null, beats: number[], bpb: number): number[] | null {
-  if (!bass) return null
+function harmonicChangeVotes(
+  data: Float32Array | null,
+  beats: number[],
+  bpb: number
+): number[] | null {
+  if (!data) return null
   const sr = ANALYSIS_SR
-  const data = monoAt44k(bass)
   const chromas: number[][] = []
   const eng: number[] = []
   for (let k = 0; k + 1 < beats.length; k++) {
@@ -948,7 +1106,7 @@ function bassChangeVotes(bass: AudioBuffer | null, beats: number[], bpb: number)
     const ch = new Array<number>(12).fill(0)
     let e = 0
     if (b - a > 1024) {
-      for (let s = 0; s < 24; s++) ch[s % 12] += goertzel(data, a, b, 41.2 * Math.pow(2, s / 12), sr)
+      for (let s = 0; s < 36; s++) ch[s % 12] += goertzel(data, a, b, 41.2 * Math.pow(2, s / 12), sr)
       for (let i = a; i < b; i += 4) e += data[i] * data[i]
       e /= (b - a) / 4
     }

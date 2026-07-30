@@ -17,8 +17,8 @@
   },
   "Mr Crowley": {
    "bpb": 4,
-   "barAt": 176.483,
-   "note": "slip-class: no stable rotation GT; anchor pins the user-lived-with v6 grid so fill regressions cannot slip through as report-only"
+   "barAt": 177.621,
+   "note": "slip-class song; two harmonic phase slips (126.6s, 166.5s) re-phased since v9 \u2014 anchor minted from the harmonically-validated grid (chord changes 86% on bar starts)"
   },
   "Nothing Else Matters": {
    "bpb": 6,
@@ -53,7 +53,8 @@
    "rot": [
     0
    ],
-   "barAt": 93.158
+   "barAt": 93.658,
+   "note": "harmonic re-phase v9: plain grid explained 4.6% of chord changes, re-phased 59% \u2014 anchor from the harmonically-validated grid; EAR-CHECK PENDING"
   },
   "Soldier Of Fortune": {
    "bpb": 4,
@@ -84,7 +85,8 @@
    "rot": [
     3
    ],
-   "barAt": 186.549
+   "barAt": 186.549,
+   "note": "v9 re-phases the 204.8s breakdown (+0.33 harmonic gain); EAR-CHECK PENDING"
   },
   "Zeit": {
    "bpb": 4,
