@@ -1,7 +1,7 @@
 import { NativeModules } from 'react-native'
 import { decodeAudioData, type AudioBuffer } from 'react-native-audio-api'
 import type { LyricsDoc, ProjectDoc } from './model'
-import { STEM_ORDER_ALL } from './model'
+import { customTracks, STEM_ORDER_ALL } from './model'
 
 /**
  * Bridge to the FolderAccess native module: the library root is either the
@@ -98,11 +98,25 @@ export async function listProjects(): Promise<ProjectEntry[]> {
   return out
 }
 
+/**
+ * One playable lane. Split stems get their name and color from TRACK_META;
+ * tracks the singer added carry their own (the desktop saved them), and are
+ * flagged so the UI can say so.
+ */
+export interface LoadedLane {
+  id: string
+  buffer: AudioBuffer
+  label?: string
+  color?: string
+  custom?: boolean
+}
+
 export interface LoadedProject {
   name: string
   doc: ProjectDoc
   lyrics: LyricsDoc | null
-  stems: { id: string; buffer: AudioBuffer }[]
+  /** Stems first, in display order, then the tracks the singer added. */
+  stems: LoadedLane[]
 }
 
 /** Decoded size of a stem set — float32 per channel, no compression in RAM. */
@@ -166,13 +180,23 @@ export async function loadProject(
       : Folder.readText(entry.dir, file)
 
   const ids = STEM_ORDER_ALL.filter((s) => entry.stems[s])
-  const stems: { id: string; buffer: AudioBuffer }[] = []
+  const added = customTracks(entry.doc?.settings)
+  const total = ids.length + added.length
+  const stems: LoadedLane[] = []
+  const tooBig = (bytes: number): never => {
+    releaseStems(stems)
+    stems.length = 0
+    throw new Error(
+      `This song needs about ${(bytes / 1e9).toFixed(1)} GB of memory to play — too long ` +
+        'for this phone. Try a shorter song, or split it up on the computer.'
+    )
+  }
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i]
-    onStep(`Fetching ${id} · ${i + 1}/${ids.length}`, i / ids.length)
+    onStep(`Fetching ${id} · ${i + 1}/${total}`, i / total)
     await crumb?.(`fetching ${id}`)
     const path = await fetchFile(`stems/${id}.${entry.stems[id]}`)
-    onStep(`Decoding ${id} · ${i + 1}/${ids.length}`, (i + 0.5) / ids.length)
+    onStep(`Decoding ${id} · ${i + 1}/${total}`, (i + 0.5) / total)
     await crumb?.(`decoding ${id}`)
     // file:// matters: audio-api's Android RELEASE builds treat bare strings
     // as APK asset names ("Could not read asset bytes"); the scheme routes
@@ -182,15 +206,28 @@ export async function loadProject(
     // set. Bail on the projection rather than on the total: refusing after
     // six stems are already resident is refusing too late.
     const projected = (decodedBytes(stems) / stems.length) * ids.length
-    if (projected > MAX_DECODED_BYTES) {
-      releaseStems(stems)
-      stems.length = 0
-      const gb = (projected / 1e9).toFixed(1)
-      throw new Error(
-        `This song needs about ${gb} GB of memory to play — too long for this phone. ` +
-          'Try a shorter song, or split it up on the computer.'
-      )
+    if (projected > MAX_DECODED_BYTES) tooBig(projected)
+  }
+  // Tracks the singer added on the desktop. They can be any length, so there
+  // is nothing to project from — each one is checked against the budget as it
+  // lands, and a track this phone cannot fetch or decode is skipped rather
+  // than allowed to sink a song whose stems are all there.
+  for (let i = 0; i < added.length; i++) {
+    const t = added[i]
+    const at = ids.length + i
+    onStep(`Fetching ${t.label} · ${at + 1}/${total}`, at / total)
+    await crumb?.(`fetching ${t.id}`)
+    try {
+      const path = await fetchFile(t.file)
+      onStep(`Decoding ${t.label} · ${at + 1}/${total}`, (at + 0.5) / total)
+      await crumb?.(`decoding ${t.id}`)
+      const buffer = await decodeAudioData(`file://${path}`, sampleRate)
+      stems.push({ id: t.id, buffer, label: t.label, color: t.color, custom: true })
+    } catch (err) {
+      console.warn(`SingZ: added track "${t.label}" skipped — ${String(err)}`)
+      continue
     }
+    if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
   }
   onStep('Lyrics…', 0.98)
   await crumb?.('lyrics')

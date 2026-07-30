@@ -47,6 +47,20 @@ export interface MetronomeConfig {
 
 export const MET_DEFAULTS: MetronomeConfig = { click: false, countInBars: 0, volume: 0.7 }
 
+/**
+ * An audio file the singer added to the project on the desktop — a backing
+ * track, a harmony they recorded, a click. It plays as one more lane, with its
+ * mute/solo/volume in `settings.tracks` under the same id. `file` is
+ * project-relative (`stems/custom-harmony.mp3`), which is exactly what both
+ * FolderAccess and the Drive reader take.
+ */
+export interface CustomTrack {
+  id: string
+  label: string
+  color: string
+  file: string
+}
+
 export interface ProjectSettings {
   transpose: number
   tempo?: number
@@ -65,6 +79,8 @@ export interface ProjectSettings {
   beat?: BeatInfo
   /** Metronome preferences saved with the project. */
   metronome?: MetronomeConfig
+  /** Audio files the singer added as extra lanes (desktop-saved). */
+  custom?: CustomTrack[]
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
@@ -147,6 +163,36 @@ export function sanitizeTraining(raw: unknown): TrainingConfig {
     sing: int(r.sing, 1, 8, 1),
     stems: stems.length > 0 ? stems : ['vocals']
   }
+}
+
+/**
+ * The project's added tracks, as far as this phone can trust them. project.json
+ * is written by the desktop but is also plain text anyone can edit, and only a
+ * `stems/<name>` file is meaningful here: an absolute path (what the desktop
+ * holds in memory) points at somebody's computer, and `..` points outside the
+ * project. Ids that collide with a real stem, or with each other, are dropped
+ * so a custom lane can never shadow the vocals.
+ */
+export function customTracks(settings: ProjectSettings | undefined): CustomTrack[] {
+  const list = Array.isArray(settings?.custom) ? settings.custom : []
+  const stems = new Set<string>(STEM_ORDER_ALL)
+  const seen = new Set<string>()
+  const out: CustomTrack[] = []
+  for (const t of list) {
+    const id = typeof t?.id === 'string' ? t.id : ''
+    const file = typeof t?.file === 'string' ? t.file : ''
+    if (!id || stems.has(id) || seen.has(id)) continue
+    const m = /^stems\/([^/\\]+)$/.exec(file)
+    if (!m || m[1] === '.' || m[1] === '..') continue
+    seen.add(id)
+    out.push({
+      id,
+      label: typeof t.label === 'string' && t.label ? t.label : id,
+      color: typeof t.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(t.color) ? t.color : '#c7e06a',
+      file
+    })
+  }
+  return out
 }
 
 /**

@@ -223,6 +223,46 @@ describe('stems are fetched once', () => {
     expect(fetchToCache.mock.calls[0][4]).toBe(100)
   })
 
+  it('counts and streams the tracks the singer added', async () => {
+    const drive = newDrive()
+    drive.children.S1.push({
+      id: 'C1',
+      name: 'custom-harmony.mp3',
+      mimeType: 'audio/mpeg',
+      size: '50',
+      md5Checksum: 'c-1'
+    })
+    drive.media.M1 = JSON.stringify({
+      name: 'Song One',
+      savedAt: '2026-01-01T00:00:00.000Z',
+      settings: {
+        transpose: 0,
+        tracks: {},
+        custom: [
+          {
+            id: 'custom-harmony',
+            label: 'Harmony',
+            color: '#c7e06a',
+            file: 'stems/custom-harmony.mp3'
+          }
+        ]
+      }
+    })
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    const entries = await g.driveListProjects()
+    // the added track is part of the download, or the ✓ lights up too early
+    expect(entries[0].bytes).toBe(350)
+
+    await g.driveLocalFile('Song One', 'stems/custom-harmony.mp3')
+    expect(fetchToCache.mock.calls[0][1]).toBe('stems/custom-harmony.mp3')
+    expect(fetchToCache.mock.calls[0][4]).toBe(0) // never seen: real download
+    fetchToCache.mockClear()
+    await g.driveLocalFile('Song One', 'stems/custom-harmony.mp3')
+    expect(fetchToCache.mock.calls[0][4]).toBe(50) // unchanged md5: cached copy
+  })
+
   it('forgets what it had when the files are cleared', async () => {
     const drive = newDrive()
     install(drive)
