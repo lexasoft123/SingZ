@@ -304,8 +304,29 @@ function MetPopover({
           style={{ '--stem': 'var(--accent)' } as React.CSSProperties}
           title="How loud the click is — release to hear it"
           onChange={(e) => onMet({ ...met, volume: Number(e.target.value) })}
-          onPointerUp={() => engine.previewClick(true)}
+          onPointerUp={() => engine.previewClick(met.accent)}
         />
+      </div>
+      <div className="tp-row">
+        <span className="tp-label">Accent</span>
+        <div className="mode-seg">
+          <button
+            type="button"
+            className={met.accent ? 'on' : ''}
+            title="The first beat of every bar rings brighter"
+            onClick={() => onMet({ ...met, accent: true })}
+          >
+            On the 1
+          </button>
+          <button
+            type="button"
+            className={met.accent ? '' : 'on'}
+            title="Every click identical — nothing marks the bar"
+            onClick={() => onMet({ ...met, accent: false })}
+          >
+            Off
+          </button>
+        </div>
       </div>
       <div className="tp-row">
         <span className="tp-label">Count-in</span>

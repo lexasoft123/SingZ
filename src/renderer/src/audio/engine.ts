@@ -415,7 +415,10 @@ export class MultitrackEngine {
       const at = this.clickCtxTime(beatTime(this.beatsInfo, this.nextClickIdx), this.clickLap)
       if (at > horizon) return
       if (at >= now - 0.02) {
-        this.scheduleClick(at, accentIndex(this.beatsInfo, this.nextClickIdx) === 0)
+        this.scheduleClick(
+          at,
+          this.met.accent && accentIndex(this.beatsInfo, this.nextClickIdx) === 0
+        )
       }
       this.advanceClick()
     }
@@ -672,7 +675,7 @@ export class MultitrackEngine {
       // last-tick→music gap is exactly one second at the ear.
       const firstCtx = when + (this.stretchOn ? this.stretchLatency : 0) - secTicks * SEC_COUNT_PERIOD
       for (let k = 0; k < secTicks; k++) {
-        this.scheduleClick(firstCtx + k * SEC_COUNT_PERIOD, k % SEC_COUNT_TICKS === 0)
+        this.scheduleClick(firstCtx + k * SEC_COUNT_PERIOD, this.met.accent && k % SEC_COUNT_TICKS === 0)
       }
       this.countInfo = {
         firstCtx,
