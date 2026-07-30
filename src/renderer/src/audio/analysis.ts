@@ -76,8 +76,13 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * v11: interior drum-voids the fill gate refused splice in the neural
  * lattice instead of coasting on an empty envelope (WDOA's verse drifted
  * half a beat); leading/trailing spans keep the v8 refusal policy.
+ * v12: the splice extends to steady-model LEADING spans (Mr Crowley's
+ * organ intro gets clicks at its own 88 bpm — free-time intros stay
+ * silent) and to DEFECT zones — tracked-interval jumps the model glides
+ * through smoothly (Crowley's 23 body defects seeded its weird verse
+ * phase and seam bars).
  */
-export const BEAT_DETECT_VERSION = 11
+export const BEAT_DETECT_VERSION = 12
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -260,44 +265,93 @@ export function detectBeats(
     mlPhase = !mlChoice.doubled
   }
   if (!lat) return null
-  // v11: an INTERIOR drum-void the fill gate refused leaves the DP coasting
-  // on an empty envelope — WDOA's second verse (48–93 s) drifted half a
-  // beat against the band this way, and the drums-only probe cannot even
-  // see it. When the model's lattice is level-compatible, its beats replace
-  // exactly the coasting stretch (strictly inside the void). Leading and
-  // trailing spans keep the v8 policy untouched: a refused rubato intro
-  // (Mr Crowley's organ) still gets no invented grid. Any beat-count change
-  // at the seams is absorbed by the phase machinery below — the void has no
-  // drum activity, so each side anchors its own segment and the boundary
-  // bar simply comes out an odd length, the fermata mechanics.
-  if (lat && lat !== mlChoice && mlChoice && lat.voids && lat.voids.length > 0) {
+  // v11/v12: where the drums-first lattice has NOTHING (refused voids) or
+  // is physically SUSPECT (interval defects), the model's beats replace the
+  // stretch. Three sources, one splice, each with its own gate:
+  // - interior refused voids (v11): the DP coasts on an empty envelope and
+  //   drifts (WDOA's verse slid half a beat).
+  // - leading refused voids (v12): silence was the old policy, but a model
+  //   lattice STRICTLY steady across the span is a real pulse at the
+  //   intro's own tempo (Mr Crowley's organ: 88 bpm under a 107 bpm body,
+  //   100% steady) — clicks that breathe with the intro. True free-time
+  //   intros stay silent: the model is unsteady there and fails the gate.
+  // - defect zones (v12): a tracked interval jumping ≥20% in a drummed
+  //   stretch means our DP glitched or the drummer pushed — Crowley's body
+  //   carries 23 of these (bleed + pushed fills) and they seeded a wrong
+  //   verse phase plus 5-beat/1-beat seam bars the user heard. Where the
+  //   model glides through the same spot smoothly, its beats replace ±2
+  //   bars. Where the model is ALSO anomalous, the defect is real music
+  //   (the intro-to-band tempo seam, WDOA's outro fade) and the lattice
+  //   stands. Beat-count changes at any seam are absorbed by the fermata
+  //   segment mechanics below.
+  /** End (seconds) of an ML-spliced leading span — its bars follow the
+   *  model's own marks below (backward extension from the band entrance
+   *  accents the wrong "1" over an intro at its own tempo: 2/27 agreement
+   *  measured on Mr Crowley). */
+  let mlLeadEnd = -1
+  if (lat && lat !== mlChoice && mlChoice && lat.beatsSec.length >= 16) {
     const ratio = lat.medSec / mlChoice.medSec
     if (ratio > 0.9 && ratio < 1.1) {
+      const L = lat
       const mlB = mlChoice.beatsSec
-      const spliceDbg: { aSec: number; bSec: number; removed: number; added: number }[] = []
-      for (const v of lat.voids) {
-        if (v.leading || v.trailing || v.filled) continue
-        const lo = v.aSec + 0.5 * lat.medSec
-        const hi = v.bSec - 0.5 * lat.medSec
-        if (hi <= lo) continue
+      const med = L.medSec
+      /** Fraction of the model's intervals within tol of their own median
+       *  across [a,b] — the local "is this a real pulse" gate. */
+      const mlSteadyIn = (a: number, b: number, tol: number): number => {
+        const seg = mlB.filter((t) => t >= a && t <= b)
+        if (seg.length < 5) return 0
+        const iv = seg.slice(1).map((t, i) => t - seg[i])
+        const m = [...iv].sort((x, y) => x - y)[iv.length >> 1]
+        return iv.filter((x) => Math.abs(x - m) <= tol * m).length / iv.length
+      }
+      const spliceDbg: { aSec: number; bSec: number; removed: number; added: number; why: string }[] = []
+      const splice = (aSec: number, bSec: number, why: string): void => {
+        const lo = aSec + 0.5 * med
+        const hi = bSec - 0.5 * med
+        if (hi <= lo) return
         const ins = mlB.filter((t) => t > lo && t < hi)
-        // the model must have actually tracked the stretch — a void it also
+        // the model must have actually tracked the stretch — one it also
         // gave up on keeps the old path
-        if (ins.length < (0.5 * (v.bSec - v.aSec)) / lat.medSec) continue
-        const before = lat.beatsSec.length
-        const kept = lat.beatsSec.filter((t) => t <= lo || t >= hi)
+        if (ins.length < (0.5 * (bSec - aSec)) / med) return
+        const before = L.beatsSec.length
+        const kept = L.beatsSec.filter((t) => t <= lo || t >= hi)
         const merged = [...kept, ...ins].sort((x, y) => x - y)
         const out: number[] = []
         for (const t of merged) {
-          if (out.length === 0 || t - out[out.length - 1] >= 0.5 * lat.medSec) out.push(t)
+          if (out.length === 0 || t - out[out.length - 1] >= 0.5 * med) out.push(t)
         }
-        lat.beatsSec = out
+        L.beatsSec = out
         spliceDbg.push({
-          aSec: Math.round(v.aSec * 10) / 10,
-          bSec: Math.round(v.bSec * 10) / 10,
+          aSec: Math.round(aSec * 10) / 10,
+          bSec: Math.round(bSec * 10) / 10,
           removed: before - kept.length,
-          added: ins.length
+          added: ins.length,
+          why
         })
+      }
+      for (const v of L.voids ?? []) {
+        if (v.trailing || v.filled) continue
+        if (v.leading) {
+          if (mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) {
+            splice(v.aSec, v.bSec, 'leading')
+            mlLeadEnd = Math.max(mlLeadEnd, v.bSec)
+          }
+          continue
+        }
+        splice(v.aSec, v.bSec, 'void')
+      }
+      const zones: { a: number; b: number }[] = []
+      const bs = L.beatsSec
+      for (let i = 1; i < bs.length; i++) {
+        const d = Math.abs(bs[i] - bs[i - 1] - med) / med
+        if (d < 0.2) continue
+        const a = bs[i] - 8 * med
+        const b = bs[i] + 8 * med
+        if (zones.length > 0 && a <= zones[zones.length - 1].b) zones[zones.length - 1].b = b
+        else zones.push({ a, b })
+      }
+      for (const z of zones) {
+        if (mlSteadyIn(z.a, z.b, 0.15) >= 0.85) splice(z.a, z.b, 'defect')
       }
       if (debug && spliceDbg.length > 0) debug.mlSplice = spliceDbg
     }
@@ -770,6 +824,28 @@ export function detectBeats(
     } else {
       phaseCutsDbg.length = 0
       downbeats = plain
+    }
+    // Spliced leading span: the model's own bar marks rule the intro — the
+    // only downbeat evidence over a drum-free intro at its own tempo. The
+    // boundary bar into the first anchored region comes out odd, which is
+    // honest: the intro-to-body seam is a real tempo change.
+    if (mlLeadEnd > 0 && aux?.ml && downbeats.length > 0 && anchors.length > 0) {
+      const firstOwn = anchors[0].a
+      const boundarySec = Math.min(mlLeadEnd, beatsSec[firstOwn] ?? mlLeadEnd)
+      const intro: number[] = []
+      let prevI = -1
+      for (const t of aux.ml.downbeats) {
+        if (t >= boundarySec - 0.2) break
+        const i = nearestBeatIdx(beatsSec, t)
+        if (i > prevI && Math.abs(beatsSec[i] - t) < 0.15) {
+          intro.push(i)
+          prevI = i
+        }
+      }
+      if (intro.length >= 2) {
+        const keep = downbeats.filter((k) => k >= firstOwn && k > intro[intro.length - 1])
+        downbeats = [...intro, ...keep]
+      }
     }
     if (downbeats.length === 0) downbeats = undefined
     downbeat = downbeats ? downbeats[0] % bpb : anchors[0].rot % bpb

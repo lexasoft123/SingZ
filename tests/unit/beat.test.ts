@@ -738,3 +738,43 @@ describe('detectBeats interior-void splice (v11)', () => {
     expect(spliced).toBeLessThan(coast / 3)
   })
 })
+
+describe('detectBeats leading-span splice (v12)', () => {
+  it('steady-model intros get beats AND the model own bar marks', () => {
+    // drums silent for 40 s (intro at its own pulse), then a played body;
+    // the model tracks everything and marks intro bars on an offset the
+    // backward extension would never pick
+    const truth: number[] = []
+    for (let t = 0.25; t < 99; t += 0.5) truth.push(t)
+    const played = truth.filter((x) => x >= 40)
+    const band = (beats: number[]): AudioBuffer => {
+      const data = new Float32Array(SR * 100)
+      for (let b = 0; b < beats.length; b++) {
+        const f = b % 2 === 0 ? 55 : 200
+        const amp = b % 4 === 0 ? 1.0 : 0.6
+        const at = Math.round(beats[b] * SR)
+        for (let i = 0; i < 3500 && at + i < data.length; i++) {
+          data[at + i] += amp * Math.exp(-i / 700) * Math.sin((2 * Math.PI * f * i) / SR)
+        }
+      }
+      return wrap(data)
+    }
+    const ml = {
+      beats: truth,
+      downbeats: truth.map((_, i) => i).filter((i) => i % 4 === 2).map((i) => truth[i])
+    }
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(band(played), { inst: [band(played)], ml }, dbg)
+    expect(det).not.toBeNull()
+    const splices = dbg.mlSplice as { why: string }[] | undefined
+    expect(splices?.some((s) => s.why === 'leading')).toBe(true)
+    // intro beats exist from the top
+    expect(det!.beats[0]).toBeLessThan(1)
+    // intro bars are the model marks (offset 2), not the extension
+    const introMarks = ml.downbeats.filter((t) => t < 38)
+    const detBars = det!.downbeats!.map((i) => det!.beats[i])
+    for (const m of introMarks.slice(1)) {
+      expect(Math.min(...detBars.map((b) => Math.abs(b - m)))).toBeLessThan(0.06)
+    }
+  })
+})
