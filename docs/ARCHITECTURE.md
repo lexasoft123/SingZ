@@ -118,7 +118,11 @@ lanes stay. Saving copies each file into the project's `stems/` folder as
 Drive sync uploads and the phones fetch, and the prefix keeps a track named
 "vocals" clear of the stem. `project.json` stores them project-relative
 (`settings.custom`), resolved to absolute paths on the way out so the folder
-stays portable; removing a lane and saving prunes its copy.
+stays portable; removing a lane and saving prunes its copy. Lanes rename inline
+(pencil or double-click on the name) — that changes the **label only**: the id
+stays, and the id is both the mixer key in `settings.tracks` and the file name
+in `stems/`, so a rename moves no audio, re-uploads nothing to Drive, costs the
+phones no re-download, and keeps the lane's mute/solo/volume.
 
 The phones play them too. `customTracks()` (mobile/src/model.ts) is the trust
 boundary: only a plain `stems/<name>` entry is used — an absolute path (what the

@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import type { UITrack } from '../model'
 import Waveform from './Waveform'
 
@@ -11,6 +12,8 @@ interface Props {
   onVolume: (id: string, volume: number) => void
   /** Set for lanes the singer added themselves — stems can't be removed. */
   onRemove?: (id: string) => void
+  /** Likewise for renaming: a stem is called what it is. */
+  onRename?: (id: string, label: string) => void
   showSolo: boolean
   index: number
   viewStart: number
@@ -25,12 +28,27 @@ export default function TrackLane({
   onSolo,
   onVolume,
   onRemove,
+  onRename,
   showSolo,
   index,
   viewStart,
   viewEnd
 }: Props): React.JSX.Element {
   const off = track.muted || dimmed
+  /** Non-null while this lane's name is being edited (added lanes only). */
+  const [draft, setDraft] = useState<string | null>(null)
+  const editing = draft !== null
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (editing) inputRef.current?.select()
+  }, [editing])
+
+  const commit = (): void => {
+    const name = (draft ?? '').trim()
+    setDraft(null)
+    // An emptied name means "never mind" — a nameless lane helps nobody.
+    if (name && name !== track.label) onRename?.(track.id, name)
+  }
   // Explicit grid rows: the scrub overlay is definitely-placed and would
   // otherwise push auto-placed lanes into implicit rows below it.
   const row = index + 2
@@ -42,9 +60,41 @@ export default function TrackLane({
       >
         <div className="lane-title">
           <span className="lane-dot" />
-          <span className="lane-name">{track.label}</span>
-          {ducked && <span className="lane-you">your turn</span>}
-          {onRemove && (
+          {editing ? (
+            <input
+              ref={inputRef}
+              className="lane-name-input"
+              value={draft}
+              spellCheck={false}
+              aria-label={`Name of the ${track.label} track`}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commit()
+                else if (e.key === 'Escape') setDraft(null)
+              }}
+              onBlur={commit}
+            />
+          ) : (
+            <span
+              className={`lane-name${onRename ? ' renamable' : ''}`}
+              title={onRename ? 'Double-click to rename this track' : undefined}
+              onDoubleClick={onRename ? () => setDraft(track.label) : undefined}
+            >
+              {track.label}
+            </span>
+          )}
+          {ducked && !editing && <span className="lane-you">your turn</span>}
+          {onRename && !editing && (
+            <button
+              type="button"
+              className="lane-edit"
+              title={`Rename ${track.label}`}
+              onClick={() => setDraft(track.label)}
+            >
+              ✎
+            </button>
+          )}
+          {onRemove && !editing && (
             <button
               type="button"
               className="lane-remove"

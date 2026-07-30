@@ -749,6 +749,20 @@ export default function App(): React.JSX.Element {
     [engine, loadLanes, touchSettings]
   )
 
+  /**
+   * Rename a lane the singer added. The label is all that changes: the id is
+   * the mixer key AND the file name inside the project, so renaming leaves the
+   * audio exactly where it is — no re-upload to Drive, no re-download on the
+   * phones, which pick up the new name with the next sync.
+   */
+  const renameTrack = useCallback(
+    (id: string, label: string) => {
+      setTracks((ts) => ts.map((t) => (t.id === id && t.custom ? { ...t, label } : t)))
+      touchSettings()
+    },
+    [touchSettings]
+  )
+
   /** Drop a lane the singer added; its copy in the project goes on next save. */
   const removeTrack = useCallback(
     (id: string) => {
@@ -1380,6 +1394,7 @@ export default function App(): React.JSX.Element {
                 onVolume={handleVolume}
                 onAddTrack={openTrackPicker}
                 onRemoveTrack={removeTrack}
+                onRenameTrack={renameTrack}
               />
               {karaoke && (
                 <PitchStrip

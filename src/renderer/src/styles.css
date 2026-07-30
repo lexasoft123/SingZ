@@ -368,7 +368,32 @@ button.chip-status:hover {
   background: var(--accent-soft);
 }
 
-/* Only lanes the singer added carry one — stems have no remove button. */
+.lane-name.renamable {
+  cursor: text;
+}
+
+/* Inline rename, sized like the name it replaces so the lane doesn't jump. */
+.lane-name-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 240, 214, 0.06);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font: inherit;
+  font-weight: 700;
+  font-size: 14.5px;
+  font-variation-settings: 'wdth' 92;
+  color: var(--text);
+}
+
+.lane-name-input:focus {
+  outline: none;
+  border-color: var(--stem, var(--accent));
+}
+
+/* Only lanes the singer added carry these — stems are what they are. */
+.lane-edit,
 .lane-remove {
   margin-left: auto;
   width: 18px;
@@ -386,16 +411,25 @@ button.chip-status:hover {
     background 0.12s;
 }
 
+/* The pencil takes the free space; the ✕ tucks in beside it. */
+.lane-edit + .lane-remove {
+  margin-left: 2px;
+}
+
+.lane-controls:hover .lane-edit,
 .lane-controls:hover .lane-remove,
+.lane-edit:focus-visible,
 .lane-remove:focus-visible {
   opacity: 1;
 }
 
+.lane-edit:hover,
 .lane-remove:hover {
   color: var(--text);
   background: rgba(255, 240, 214, 0.08);
 }
 
+.lane-edit:focus-visible,
 .lane-remove:focus-visible {
   outline: none;
   color: var(--accent);
