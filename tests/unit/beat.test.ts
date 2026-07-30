@@ -427,6 +427,60 @@ describe('detectBeats downbeat & meter', () => {
     for (const m of [4, 10, 16]) expect(accentAt(det!, 0.4 + m * barLen)).toBe(0)
   })
 
+  it('is sample-rate invariant: 48 kHz input yields the 44.1 kHz grid', () => {
+    // The app decodes at the DEVICE rate; grids must not depend on it (WDOA's
+    // segments swapped anchor confidences between 44.1 k and 48 k before
+    // analysis pinned itself to 44.1 k internally).
+    const p = 60 / 110
+    const barLen = 4 * p
+    const mk = (sr: number): { drums: AudioBuffer; bass: AudioBuffer } => {
+      const drums = new Float32Array(Math.floor(sr * 70))
+      const bass = new Float32Array(drums.length)
+      const roots = [82.4, 110, 73.4, 98]
+      let bar = 0
+      const hit = (at: number, freq: number, amp: number, dur: number, noise: number): void => {
+        const start = Math.round(at * sr)
+        for (let i = 0; i < Math.round(dur * sr) && start + i < drums.length; i++) {
+          const t = i / sr
+          drums[start + i] +=
+            amp * Math.exp(-t / (dur / 4)) * (Math.sin(2 * Math.PI * freq * t) + noise * (rnd() * 2 - 1))
+        }
+      }
+      for (let t = 0.5; t + barLen < 69; t += barLen, bar++) {
+        hit(t, 55, 0.9, 0.09, 0.1)
+        hit(t + 2 * p, 55, 0.9, 0.09, 0.1)
+        hit(t + 1 * p, 220, 1.0, 0.05, 1.2)
+        hit(t + 3 * p, 220, 1.0, 0.05, 1.2)
+        const a = Math.round(t * sr)
+        const b = Math.min(bass.length, Math.round((t + barLen) * sr))
+        for (let i = a; i < b; i++) {
+          bass[i] += 0.25 * Math.sin((2 * Math.PI * roots[bar % 4] * (i - a)) / sr)
+        }
+      }
+      const wrapAt = (d: Float32Array): AudioBuffer =>
+        ({
+          sampleRate: sr,
+          length: d.length,
+          duration: d.length / sr,
+          numberOfChannels: 1,
+          getChannelData: () => d
+        }) as unknown as AudioBuffer
+      return { drums: wrapAt(drums), bass: wrapAt(bass) }
+    }
+    const a = mk(44100)
+    const b = mk(48000)
+    const da = detectBeats(a.drums, { bass: a.bass })
+    const db = detectBeats(b.drums, { bass: b.bass })
+    expect(da).not.toBeNull()
+    expect(db).not.toBeNull()
+    expect(db!.beatsPerBar).toBe(da!.beatsPerBar)
+    expect(db!.downbeat).toBe(da!.downbeat)
+    expect(db!.beats.length).toBe(da!.beats.length)
+    for (let i = 0; i < da!.beats.length; i++) {
+      expect(Math.abs(db!.beats[i] - da!.beats[i])).toBeLessThan(0.015)
+    }
+  })
+
   it('carries a fermata phase change in downbeats without touching the beats', () => {
     // section B re-enters shifted by half a bar relative to section A's grid —
     // representable as one odd-length boundary bar; the tracked beat times

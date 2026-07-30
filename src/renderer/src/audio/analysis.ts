@@ -68,7 +68,7 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * v5: explicit `downbeats` replace the global rotation — beat times are never
  * mutated to force one phase (the old fermata gap re-spacing).
  */
-export const BEAT_DETECT_VERSION = 5
+export const BEAT_DETECT_VERSION = 6
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -114,11 +114,10 @@ export function detectBeats(
   aux?: BeatAux,
   debug?: Record<string, unknown>
 ): DetectedBeats | null {
-  const sr = buffer.sampleRate
+  const sr = ANALYSIS_SR
   const fps = sr / HOP
-  const ch0 = buffer.getChannelData(0)
-  const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null
-  const frames = Math.floor(buffer.length / HOP) - 1
+  const mono = monoAt44k(buffer)
+  const frames = Math.floor(mono.length / HOP) - 1
   if (frames < 400) return null
 
   // Broadband energy (any onset) + low band (kick — used for the downbeat).
@@ -131,7 +130,7 @@ export function detectBeats(
     let low = 0
     const off = i * HOP
     for (let j = 0; j < HOP; j += 2) {
-      const v = ch1 ? (ch0[off + j] + ch1[off + j]) * 0.5 : ch0[off + j]
+      const v = mono[off + j]
       if (j % 4 === 0) sum += v * v
       lp += lpA * (v - lp)
       low += lp * lp
@@ -661,19 +660,40 @@ export function detectBeats(
   }
 }
 
-/** All channels averaged — the app hands stereo stems, and judging only the
- *  left channel skews votes (WDOA's intro anchored a wrong rotation off it;
- *  the drums path always downmixed, the aux readers must too). */
-function monoOf(buffer: AudioBuffer): Float32Array {
+/** Analysis always runs at this rate. The app decodes at the DEVICE context
+ *  rate (44.1 or 48 kHz depending on the machine), and the cue math is not
+ *  rate-neutral — WDOA's two segments literally swap anchor confidences
+ *  between 44.1 k and 48 k, so the same song got different grids on
+ *  different fleet machines. Pinning the rate makes grids deterministic. */
+const ANALYSIS_SR = 44100
+
+/** All channels averaged and resampled to ANALYSIS_SR (linear interpolation
+ *  — plenty for energy/chroma features). The app hands stereo device-rate
+ *  stems; judging only the left channel skewed votes (WDOA again). */
+function monoAt44k(buffer: AudioBuffer): Float32Array {
+  const n = buffer.numberOfChannels
   const ch0 = buffer.getChannelData(0)
-  if (buffer.numberOfChannels < 2) return ch0
-  const out = new Float32Array(ch0.length)
-  out.set(ch0)
-  for (let c = 1; c < buffer.numberOfChannels; c++) {
-    const ch = buffer.getChannelData(c)
-    for (let i = 0; i < out.length; i++) out[i] += ch[i]
+  let mono: Float32Array
+  if (n < 2) {
+    mono = ch0
+  } else {
+    mono = new Float32Array(ch0.length)
+    mono.set(ch0)
+    for (let c = 1; c < n; c++) {
+      const ch = buffer.getChannelData(c)
+      for (let i = 0; i < mono.length; i++) mono[i] += ch[i]
+    }
+    for (let i = 0; i < mono.length; i++) mono[i] /= n
   }
-  for (let i = 0; i < out.length; i++) out[i] /= buffer.numberOfChannels
+  if (buffer.sampleRate === ANALYSIS_SR) return mono
+  const ratio = buffer.sampleRate / ANALYSIS_SR
+  const out = new Float32Array(Math.floor(mono.length / ratio))
+  for (let i = 0; i < out.length; i++) {
+    const x = i * ratio
+    const k = Math.floor(x)
+    const f = x - k
+    out[i] = mono[k] * (1 - f) + (k + 1 < mono.length ? mono[k + 1] : mono[k]) * f
+  }
   return out
 }
 
@@ -681,8 +701,8 @@ function monoOf(buffer: AudioBuffer): Float32Array {
  *  local maxima, weighted by how confidently the new window names a root. */
 function bassChangeVotes(bass: AudioBuffer | null, beats: number[], bpb: number): number[] | null {
   if (!bass) return null
-  const sr = bass.sampleRate
-  const data = monoOf(bass)
+  const sr = ANALYSIS_SR
+  const data = monoAt44k(bass)
   const chromas: number[][] = []
   const eng: number[] = []
   for (let k = 0; k + 1 < beats.length; k++) {
@@ -742,8 +762,8 @@ function vocalEntryVotes(
   bpb: number
 ): { k: number; w: number }[] | null {
   if (!vocals) return null
-  const sr = vocals.sampleRate
-  const data = monoOf(vocals)
+  const sr = ANALYSIS_SR
+  const data = monoAt44k(vocals)
   const fps = sr / HOP
   const n = Math.floor(data.length / HOP)
   const env = new Float32Array(n)
