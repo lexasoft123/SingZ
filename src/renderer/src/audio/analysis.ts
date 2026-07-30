@@ -66,7 +66,7 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * Bump when downbeat/meter estimation changes: stored auto tracks with an
  * older stamp are silently re-detected on load so fixes reach saved projects.
  */
-export const BEAT_DETECT_VERSION = 2
+export const BEAT_DETECT_VERSION = 3
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -519,7 +519,9 @@ export function detectBeats(
     const s = a.reduce((x, y) => x + y, 0)
     return s > 1e-12 ? a.map((x) => x / s) : uniform()
   }
-  const scoreSegment = (seg: { a: number; b: number }): { rot: number; conf: number } => {
+  const scoreSegment = (
+    seg: { a: number; b: number }
+  ): { rot: number; conf: number; cues: Record<string, number[]> } => {
     const { a, b } = seg
     const kick = ((): number[] => {
       const sums = new Array<number>(bpb).fill(0)
@@ -578,12 +580,19 @@ export function detectBeats(
     const bass = bassNov
       ? inSeg(new Array<number>(bpb).fill(0), bassNov.map((w, k) => ({ k, w })).filter((e) => e.w > 0), bpb)
       : uniform()
-    const voc = vocHits ? inSeg(new Array<number>(bpb).fill(0), vocHits, 2) : uniform()
-    const line = inSeg(new Array<number>(bpb).fill(0), lineHits.map((k) => ({ k, w: 1 })), 4)
-    // compound meter: the mid-bar accent is idiomatic — drums stop deciding
+    // Sung phrases start on the one — or one beat early (pickup: NEM enters
+    // every line on the "and" before the bar) — so each rotation also claims
+    // most of the mass sitting one beat ahead of it.
+    const pickupFold = (d: number[]): number[] =>
+      normDist(d.map((x, r) => x + 0.8 * d[(r + bpb - 1) % bpb]))
+    const voc = pickupFold(vocHits ? inSeg(new Array<number>(bpb).fill(0), vocHits, 2) : uniform())
+    const line = pickupFold(inSeg(new Array<number>(bpb).fill(0), lineHits.map((k) => ({ k, w: 1 })), 4))
+    // compound meter: the mid-bar accent is idiomatic — drums stop deciding.
+    // Split-bar harmony (|Em D|) also puts chord changes mid-bar, so the
+    // folded phrase cues outrank raw bass novelty there.
     const W =
       bpb === 6
-        ? { kick: 0.05, ent: 0.05, slam: 0.05, bass: 0.45, voc: 0.1, line: 0.3 }
+        ? { kick: 0.05, ent: 0.05, slam: 0.05, bass: 0.4, voc: 0.1, line: 0.35 }
         : { kick: 0.2, ent: 0.18, slam: 0.15, bass: 0.15, voc: 0.05, line: 0.15 }
     const cues = { kick, ent, slam, bass, voc, line }
     const score = new Array<number>(bpb).fill(0)
@@ -596,7 +605,10 @@ export function detectBeats(
     let rot = 0
     for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
     const sorted = [...score].sort((x, y) => y - x)
-    return { rot, conf: (sorted[0] - sorted[1]) / total }
+    const rounded = Object.fromEntries(
+      Object.entries(cues).map(([n, d]) => [n, d.map((x) => Math.round(x * 100) / 100)])
+    )
+    return { rot, conf: (sorted[0] - sorted[1]) / total, cues: rounded }
   }
 
   // Confident segments pin their own downbeat; the first sets the global
@@ -604,6 +616,15 @@ export function detectBeats(
   const MIN_BARS = 4
   const REPAIR_CONF = 0.08
   const scored = segs.map((s) => ({ ...s, ...scoreSegment(s) }))
+  if (debug) {
+    debug.segCues = scored.map((s) => ({
+      a: s.a,
+      b: s.b,
+      rot: s.rot,
+      conf: Math.round(s.conf * 1000) / 1000,
+      cues: s.cues
+    }))
+  }
   const anchors = scored.filter((s) => (s.b - s.a) / bpb >= MIN_BARS && s.conf >= REPAIR_CONF)
   let outBeats = beatsSec
   let downbeat = 0
