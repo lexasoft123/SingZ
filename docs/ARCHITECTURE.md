@@ -187,11 +187,19 @@ periodicity of the onset envelope dwarfs 4-beat (windowed-lag max — the
 median period is a fraction of a frame off and by ×4 lands between sharp
 peaks), the tracked pulse is a compound song's eighth and accents group in
 6 (Nothing Else Matters), with drum cues muted for the rotation (the
-mid-bar tom is idiomatic there) in favor of bass/lyrics. The result drives
+mid-bar tom is idiomatic there) in favor of bass/lyrics. The vocal and
+lyric-line cues fold pickup mass forward — singers enter on the one or one
+beat early (every NEM line is a pickup), so each rotation also claims most
+of the mass on the beat before it; without the fold, split-bar harmony
+(|Em D|: a chord change mid-bar too) plus pickup phrasing voted the tom's
+half of the bar. The result drives
 the metronome, count-in and bpm readout, and is saved in `project.json`
 (`settings.beat`, millisecond-rounded) where hand edits (tap tempo, nudges,
 ×½/×2) win over re-detection; auto tracks carry `detVersion` and are
-silently re-tracked on load when the detector has since improved. Vocal range: p5–p95 of melody notes. All displayed
+silently re-tracked on load when the detector has since improved — and the
+corrected grid saves itself into an existing project (never creating one),
+because phones render whatever `settings.beat` says: they have no detector,
+and without the auto-save a healed grid would never leave the desktop. Vocal range: p5–p95 of melody notes. All displayed
 transpose-aware in the pitch strip's info card.
 
 ## On-disk layout

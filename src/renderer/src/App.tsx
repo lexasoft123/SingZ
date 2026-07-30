@@ -171,6 +171,9 @@ export default function App(): React.JSX.Element {
     bpm: null
   })
   const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(null)
+  /** Set when detection just (re)stamped an auto grid — consumed by an effect
+   *  that saves the project so phones (which have no detector) get it too. */
+  const [beatAutoSave, setBeatAutoSave] = useState(false)
   const [metCfg, setMetCfg] = useState<MetronomeConfig>(() => {
     try {
       const raw = localStorage.getItem('singz.met')
@@ -880,8 +883,9 @@ export default function App(): React.JSX.Element {
         // over re-detection; restored auto tracks from an older detector are
         // silently re-tracked so downbeat fixes reach saved projects).
         let info = beatInfoRef.current
+        const fresh = !info
         const stale = info?.source === 'auto' && info.detVersion !== BEAT_DETECT_VERSION
-        if ((!info || stale) && drumsBufRef.current) {
+        if ((fresh || stale) && drumsBufRef.current) {
           const det = detectBeats(drumsBufRef.current, {
             bass: bassBufRef.current,
             vocals: vocalsBufRef.current,
@@ -898,6 +902,11 @@ export default function App(): React.JSX.Element {
             }
             setBeatInfo(info)
             if (stale) touchSettings()
+            // The corrected grid must reach the project file — and through
+            // Drive the phones, which have no detector of their own — without
+            // waiting for a manual save. Deferred via state so the save
+            // handler's closure sees the new grid.
+            setBeatAutoSave(true)
           }
         }
         setSongInfo({
@@ -991,6 +1000,15 @@ export default function App(): React.JSX.Element {
       setError(`Could not save the project: ${res.error}`)
     }
   }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, metCfg, tracks, reanchorCustom])
+
+  /** A silently (re)detected grid saves itself — but only into an existing
+   *  project (never creating one under a raw file), and after the commit so
+   *  the save closure already sees the new beats. */
+  useEffect(() => {
+    if (!beatAutoSave) return
+    setBeatAutoSave(false)
+    if (song && isProject) void handleSaveProject()
+  }, [beatAutoSave, song, isProject, handleSaveProject])
 
   /** Bring a project opened from outside the library in, and follow it there. */
   const handleImport = useCallback(
