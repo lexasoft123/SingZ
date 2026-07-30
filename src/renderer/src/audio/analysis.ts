@@ -71,7 +71,7 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * v7: instrument fill — where drums are silent the other stems' onsets carry
  * the pulse, so drumless intros get tracked beats instead of extrapolation.
  */
-export const BEAT_DETECT_VERSION = 7
+export const BEAT_DETECT_VERSION = 8
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -551,17 +551,95 @@ export function detectBeats(
   if (fillBufs.length > 0 && fillSpans.length > 0) {
     const placed = track(chosen.bpm, O)
     if (placed.length >= 24) {
-      const inSpan = (f: number): boolean => fillSpans.some((sp) => f > sp.a + 1 && f < sp.b - 1)
-      const merged = [
-        ...chosen.beatsF.filter((f) => !inSpan(f)),
-        ...placed.filter((f) => inSpan(f))
-      ].sort((x, y) => x - y)
-      const minGap = ((60 * fps) / chosen.bpm) * 0.5
-      const spliced: number[] = []
-      for (const f of merged) {
-        if (spliced.length === 0 || f - spliced[spliced.length - 1] >= minGap) spliced.push(f)
+      // Per-span quality gate: a filled span is kept only when its material
+      // agrees with the SONG's tempo family — the same autocorrelation test
+      // the detector trusts globally. An in-tempo picked intro (NEM, Zeit)
+      // agrees; material in its own tempo or rubato (Mr Crowley's organ
+      // intro) does not, and the span reverts to the old path rather than
+      // force the body tempo onto music that fights it.
+      const spanOk = fillSpans.map((sp) => {
+        const len = sp.b - sp.a
+        if (len < lagMax * 3) return false
+        const winLen = Math.min(len, winF)
+        let agree = 0
+        let total = 0
+        for (let ws = sp.a; ws + winLen <= sp.b || ws === sp.a; ws += hopF) {
+          const w0 = Math.max(0, ws) // leading spans start at frame −1
+          const we = Math.min(sp.b, w0 + winLen)
+          const ac = new Float32Array(lagMax + 1)
+          let acMean = 0
+          for (let lag = lagMin; lag <= lagMax; lag++) {
+            let sum = 0
+            for (let i = w0 + lag; i < we; i++) sum += O[i] * O[i - lag]
+            ac[lag] = sum / Math.max(1, we - w0 - lag)
+            acMean += ac[lag]
+          }
+          acMean /= lagMax - lagMin + 1
+          let ok = false
+          for (let lag = lagMin + 1; lag < lagMax && !ok; lag++) {
+            if (ac[lag] > ac[lag - 1] && ac[lag] >= ac[lag + 1] && ac[lag] > acMean) {
+              const r = fold((60 * fps) / lag) / tau
+              if (r > 0.975 && r < 1.026) ok = true
+            }
+          }
+          total++
+          if (ok) agree++
+        }
+        if (!(total > 0 && agree / total >= 0.6)) return false
+        // …and the beats must form a steady pulse AFTER snapping to the
+        // material's real onsets — the DP grid itself is smooth by
+        // construction; snapping is what exposes free-time playing (Mr
+        // Crowley's organ measures p90 deviation 0.19 snapped vs 0.09–0.13
+        // for genuinely in-time intros).
+        const inBeats = placed.filter((f) => f > sp.a + 1 && f < sp.b - 1)
+        if (inBeats.length < 5) return false
+        const medRaw = ((): number => {
+          const iv0: number[] = []
+          for (let i = 1; i < inBeats.length; i++) iv0.push(inBeats[i] - inBeats[i - 1])
+          return [...iv0].sort((x, y) => x - y)[Math.floor(iv0.length / 2)]
+        })()
+        const tol = Math.min(0.045 * fps, medRaw * 0.2)
+        let pi = 0
+        const snapped = inBeats.map((b) => {
+          while (pi < peaks.length - 1 && peaks[pi + 1] <= b) pi++
+          let f = b
+          let bestD = tol
+          for (const k of [pi, pi + 1]) {
+            if (k < peaks.length && Math.abs(peaks[k] - b) < bestD) {
+              bestD = Math.abs(peaks[k] - b)
+              f = peaks[k]
+            }
+          }
+          return f
+        })
+        const iv: number[] = []
+        for (let i = 1; i < snapped.length; i++) iv.push(Math.max(1, snapped[i] - snapped[i - 1]))
+        const sorted = [...iv].sort((x, y) => x - y)
+        const med = sorted[Math.floor(sorted.length / 2)]
+        const dev = iv.map((x) => Math.abs(x - med) / med).sort((x, y) => x - y)
+        return dev[Math.floor(dev.length * 0.9)] <= 0.15
+      })
+      if (debug) debug.spanOk = fillSpans.map((sp, i) => ({ a: sp.a, b: sp.b, ok: spanOk[i] }))
+      const inKeptSpan = (f: number): boolean =>
+        fillSpans.some((sp, i) => spanOk[i] && f > sp.a + 1 && f < sp.b - 1)
+      const inAnySpan = (f: number): boolean =>
+        fillSpans.some((sp) => f > sp.a + 1 && f < sp.b - 1)
+      if (spanOk.some(Boolean)) {
+        const merged = [
+          ...chosen.beatsF.filter((f) => !inKeptSpan(f)),
+          ...placed.filter((f) => inKeptSpan(f))
+        ].sort((x, y) => x - y)
+        const minGap = ((60 * fps) / chosen.bpm) * 0.5
+        const spliced: number[] = []
+        for (const f of merged) {
+          if (spliced.length === 0 || f - spliced[spliced.length - 1] >= minGap) spliced.push(f)
+        }
+        chosen = { ...chosen, beatsF: spliced, q: evaluate(spliced) }
       }
-      chosen = { ...chosen, beatsF: spliced, q: evaluate(spliced) }
+      // Rejected spans keep the drums-only path — for a span the old
+      // detector never covered (leading silence), those beats simply do not
+      // exist, exactly as before the fill.
+      void inAnySpan
     }
   }
 

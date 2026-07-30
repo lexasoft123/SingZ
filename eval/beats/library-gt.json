@@ -15,7 +15,11 @@
    ],
    "barAt": 144.033
   },
-  "Mr Crowley": null,
+  "Mr Crowley": {
+   "bpb": 4,
+   "barAt": 176.483,
+   "note": "slip-class: no stable rotation GT; anchor pins the user-lived-with v6 grid so fill regressions cannot slip through as report-only"
+  },
   "Nothing Else Matters": {
    "bpb": 6,
    "rot": [

@@ -488,15 +488,18 @@ describe('detectBeats downbeat & meter', () => {
     const p = 60 / 110
     const drums = new Float32Array(Math.floor(SR * 70))
     const inst = new Float32Array(drums.length)
-    // Human-played intro: the pulse breathes ±4% before the kit locks it in —
-    // constant-tempo extension from the body cannot land on these.
+    // Human-played intro: the pulse breathes ±2.5% before the kit locks it
+    // in — enough accumulated phase for constant-tempo extension from the
+    // body to miss, while staying inside the tempo family the span gate
+    // demands (a span drifting beyond ~±2.6% is out-of-family BY DESIGN and
+    // gets dropped rather than tracked — that is the Mr Crowley rule).
     const truth: number[] = []
     {
       let t = 0.5
       let k = 0
       while (t < 69.5) {
         truth.push(t)
-        t += t < 20 ? p * (1 + 0.04 * Math.sin(k / 4)) : p
+        t += t < 20 ? p * (1 + 0.025 * Math.sin(k / 4)) : p
         k++
       }
     }
@@ -515,10 +518,13 @@ describe('detectBeats downbeat & meter', () => {
       introTruth.filter((t) => det.beats.some((b) => Math.abs(b - t) < 0.07)).length /
       introTruth.length
     // Drums alone: whatever the DP lays over the intro (noise-chasing or
-    // nothing) does not track the picking.
+    // nothing) tracks the picking distinctly worse than the fill does —
+    // the CONTRAST is the feature, gentle drift keeps blind extension from
+    // scoring zero.
     const bare = detectBeats(wrap(drums))
     expect(bare).not.toBeNull()
-    expect(alignedFrac(bare!)).toBeLessThan(0.6)
+    const bareFrac = alignedFrac(bare!)
+    expect(bareFrac).toBeLessThan(0.75)
     // With the fill, the intro rides the guitar (the ramp at the span edge
     // may soften the last beat before the kit enters — 90% is tracking,
     // 100% is luck).
@@ -526,6 +532,7 @@ describe('detectBeats downbeat & meter', () => {
     expect(filled).not.toBeNull()
     expect(filled!.beats[0]).toBeLessThan(2)
     expect(alignedFrac(filled!)).toBeGreaterThan(0.9)
+    expect(alignedFrac(filled!) - bareFrac).toBeGreaterThan(0.2)
   })
 
   it('carries a fermata phase change in downbeats without touching the beats', () => {
