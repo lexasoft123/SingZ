@@ -3,7 +3,7 @@
 Measures any beat/downbeat detector against annotated datasets, so engine
 changes are measured before shipping. Today it evaluates the current
 homegrown detector (`src/renderer/src/audio/analysis.ts`); neural candidates
-(Beat This! etc.) get their own `run-<name>.mjs` later — anything that
+(Beat This! etc.) get their own `run-<name>.mjs` — anything that
 produces `{ beats, beatsPerBar, downbeat }` (plus optional `downbeats`
 indices for variable meter) plugs into the same metrics.
 
@@ -78,3 +78,29 @@ detected-only columns.
 - The app decodes at the device rate (44.1 or 48 kHz, `AudioContext`
   default); the harness uses 44.1 kHz. Rotations checked here reproduced the
   app's saved grids at both rates for all 14 library songs.
+
+## Beat This! backend + the hybrid (phase 2)
+
+`run-beat-this.mjs` scores the raw CPJKU model (`runner-beat-this.py` over a
+`$BEAT_THIS_PY` venv python — see that file's header for setup; checkpoints
+land in `$TORCH_HOME`). `run-current.mjs --ml <raw.jsonl>` scores the SHIPPED
+fusion: the app's detector fed the same model output as `aux.ml`, exactly as
+the pack + `beats:mlDetect` IPC feed it in production.
+
+Generate raw grids once per dataset (`runner-beat-this.py --jobs …` — the
+library-mode mixes are cached in `out/tmp/mix-*.f32`), then:
+
+```
+node run-current.mjs --dataset library                      # no pack — must stay 14/14
+node run-current.mjs --dataset library  --ml out/beat-this-final0-raw.jsonl   # fused — 14/14
+node run-current.mjs --dataset ballroom --ml out/beat-this-final0-ballroom-raw.jsonl
+```
+
+Measured 2026-07-30 (final0, MPS): raw model alone on the library is 10/14 —
+every GT anchor exists in its beat lattice within ≤22 ms, but bar level and
+phase miss (half-bars, half-tempo, one smoothed-away eighth) and Music Of The
+Night gets a chaotic grid instead of a rejection. The fusion measures 14/14
+on the library (byte-identical homegrown grids — stems win there) and
+det 0.99 / beatF 0.978 / downbeatF 0.976 / signature 0.988 on Ballroom, with
+3/4 signature 0.981 vs the homegrown 0.000. Both raw jsonl files are small
+enough to keep in `out/` between revisions; delete them to re-run the model.

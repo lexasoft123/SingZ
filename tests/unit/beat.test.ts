@@ -601,3 +601,71 @@ describe('detectBeats downbeat & meter', () => {
     for (const m of [2, 6, 10]) expect(accentAt(legacy, aStart + m * barLen)).toBe(0)
   })
 })
+
+describe('detectBeats neural lattice (v10)', () => {
+  const mkMl = (beats: number[], every: number, offset = 0): { beats: number[]; downbeats: number[] } => ({
+    beats,
+    downbeats: beats.map((_, i) => i).filter((i) => i % every === offset).map((i) => beats[i])
+  })
+
+  it('mix-only input takes the model verbatim — nothing to verify with', () => {
+    const truth = gridTimes(120, 0.3, 75)
+    const ml = mkMl(truth, 4, 1)
+    const det = detectBeats(synthPattern(truth, 75), { ml })
+    expect(det).not.toBeNull()
+    expect(det!.beats).toEqual(truth)
+    expect(det!.beatsPerBar).toBe(4)
+    expect(det!.downbeats![0] % 4).toBe(1)
+    const gaps = det!.downbeats!.slice(1).map((d, i) => d - det!.downbeats![i])
+    expect(new Set(gaps)).toEqual(new Set([4]))
+  })
+
+  it('drumless song with stems: lattice adopted, model bars stand', () => {
+    const truth = gridTimes(110, 0.4, 75)
+    const ml = mkMl(truth, 4, 2)
+    const silent = (): AudioBuffer => wrap(new Float32Array(SR * 75))
+    const det = detectBeats(silent(), { ml, bass: silent() })
+    expect(det).not.toBeNull()
+    expect(det!.beats).toEqual(truth)
+    expect(det!.downbeats?.[0]).toBe(2)
+  })
+
+  it('doubles a half-note lattice under the singable prior', () => {
+    const truth = gridTimes(60, 0.5, 90)
+    const ml = mkMl(truth, 4, 0)
+    const silent = (): AudioBuffer => wrap(new Float32Array(SR * 90))
+    const det = detectBeats(silent(), { ml, bass: silent() })
+    expect(det).not.toBeNull()
+    expect(Math.abs(det!.bpm - 120)).toBeLessThan(2)
+    expect(det!.beats.length).toBe(truth.length * 2 - 1)
+  })
+
+  it('refuses an unsteady lattice — rubato keeps its silence', () => {
+    const beats: number[] = []
+    let k = 0
+    for (let t = 0.5; t < 74; k++) {
+      beats.push(t)
+      t += 0.75 * (1 + 0.25 * Math.sin(k / 3))
+    }
+    const ml = { beats, downbeats: beats.filter((_, i) => i % 4 === 0) }
+    expect(detectBeats(wrap(new Float32Array(SR * 75)), { ml })).toBeNull()
+  })
+
+  it('waltz override: dominant 3-beat model bars beat the 4/6 assumption', () => {
+    const truth = gridTimes(140, 0.3, 75)
+    const ml = mkMl(truth, 3, 0)
+    const det = detectBeats(synthPattern(truth, 75), { ml, bass: wrap(new Float32Array(SR * 75)) })
+    expect(det).not.toBeNull()
+    expect(det!.beatsPerBar).toBe(3)
+    expect(det!.beats).toEqual(truth)
+  })
+
+  it('without aux.ml nothing changes — v9 grid bit for bit', () => {
+    const truth = gridTimes(123.7, 0.4, 75)
+    const buf = synthPattern(truth, 75)
+    const a = detectBeats(buf)
+    const b = detectBeats(buf, {})
+    expect(a).not.toBeNull()
+    expect(b).toEqual(a)
+  })
+})

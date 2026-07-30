@@ -43,6 +43,24 @@ const limit = opt('--limit') ? Number.parseInt(opt('--limit'), 10) : Infinity
 const jsonOut = opt('--json')
 // Reproduce the pre-monoOf app bug (aux read as left channel only).
 const CH0 = args.includes('--channel0')
+// --ml <raw.jsonl>: feed Beat This! grids (runner-beat-this.py output) as
+// aux.ml — the hybrid path the app takes when a splitter pack is installed.
+const mlPath = opt('--ml')
+const mlById = new Map()
+if (mlPath) {
+  for (const line of readFileSync(mlPath, 'utf8').trim().split('\n')) {
+    if (!line.startsWith('{')) continue
+    const r = JSON.parse(line)
+    mlById.set(r.id, {
+      beats: r.beats,
+      downbeats: r.downbeats,
+      beatProb: r.beat_prob,
+      downbeatProb: r.downbeat_prob,
+      fps: r.fps
+    })
+  }
+  console.log(`ml grids: ${mlById.size} from ${mlPath}`)
+}
 if (dataset !== 'ballroom' && dataset !== 'library') {
   console.error('usage: node run-current.mjs --dataset ballroom|library [--limit N] [--json out.json]')
   process.exit(2)
@@ -185,7 +203,8 @@ async function runLibrary(detect) {
       }
     }
     const dbg = {}
-    const det = detect(drumsBuf, { bass, vocals, inst, lineStarts }, dbg)
+    const ml = mlById.get(name.replace(/[^\w-]+/g, '_')) ?? null
+    const det = detect(drumsBuf, { bass, vocals, inst, lineStarts, ml }, dbg)
     const secs = ((Date.now() - t0) / 1000).toFixed(1)
     const got = det
       ? { bpm: Math.round(det.bpm * 10) / 10, bpb: det.beatsPerBar, rot: ((det.downbeat % det.beatsPerBar) + det.beatsPerBar) % det.beatsPerBar }
@@ -292,7 +311,8 @@ async function runBallroom(detect) {
     }
     const genre = basename(dirname(wav))
     const dbg = {}
-    const det = detect(audioBuffer(decodeF32(wav)), undefined, dbg)
+    const ml = mlById.get(base) ?? null
+    const det = detect(audioBuffer(decodeF32(wav)), ml ? { ml } : undefined, dbg)
     const r = evaluateTrack(ann, det)
     tracks.push({
       name: base,

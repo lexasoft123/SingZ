@@ -209,7 +209,30 @@ all accept/reject gates stay drums-only (fill evidence once octave-doubled
 a song), the filled placement is spliced in strictly inside the drum-free
 spans, sustained-only material contributes nothing (rubato rejection intact),
 and bass is a downbeat voter but never fill. The grid then covers the intro
-with real tracked beats instead of constant-tempo extrapolation. It is
+with real tracked beats instead of constant-tempo extrapolation.
+Neural lattice (v10): when a splitter pack is installed it also carries the
+Beat This! model (CPJKU, MIT; 77 MB final0 checkpoint — torch on the MPS
+pack, a 1500-frame ONNX export with a matmul-DFT log-mel graph on the ONNX
+packs, CPU-only there by design), spawned by main as `python/beat_runner.py`
+over the `beats:mlDetect` IPC; the renderer offline-renders the loaded stems
+to a 22.05 kHz mono mix and passes the model's beats/downbeats plus framewise
+head probabilities into `detectBeats` as `aux.ml`. Fusion is by measurement,
+not ideology: on drum-strong songs the homegrown lattice wins outright (its
+beat count follows real drum onsets through musical seams the model smooths
+away — NEM crosses 414 true eighths in 413 model beats), so the entire user
+library keeps byte-identical v9 grids; the model's lattice takes over where
+homegrown rejects (drumless, soft material — steadiness-gated so true rubato
+still falls through to rejection and the wall-clock count-in), and where
+homegrown cannot even express the answer — a steady lattice whose bars are
+dominantly 3 beats is a waltz, bpb 3 (Ballroom 3/4 signature accuracy: 0.000
+homegrown, 0.98 fused). On adopted ML lattices the model's downbeat head
+votes as one weighted cue among the stems (token weight in 6/8 — its bar
+sits an eighth off drummers' notation there), lattice hiccups the model
+marks (odd bar lengths) cut segments so each side re-votes its phase, and
+the v9 slip machinery may cut without a physical interval defect (smooth
+lattices have none) under the same global chord-mass arbiter. With no
+harmonic stems at all (bare-mix input: the eval datasets) there is nothing
+to verify with and the model's own bars stand verbatim. It is
 saved as `settings.beat` (millisecond-rounded: beat times plus, when detection
 anchored more than a single uniform grid, `downbeats` — strictly increasing
 beat indices, each starting a bar, bar length = distance to the next entry;

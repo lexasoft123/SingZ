@@ -70,8 +70,11 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * v6: analysis pinned to 44.1 kHz; every input downmixed (device-independent).
  * v7: instrument fill — where drums are silent the other stems' onsets carry
  * the pulse, so drumless intros get tracked beats instead of extrapolation.
+ * v10: neural lattice — when the splitter pack's Beat This! model has run,
+ * its beats replace the flux-DP tracker (aux.ml); octave, meter, bar phase
+ * and rejection still come from the stem cues here.
  */
-export const BEAT_DETECT_VERSION = 9
+export const BEAT_DETECT_VERSION = 10
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -84,6 +87,19 @@ export interface DetectedBeats {
   downbeat: number
   /** Bar starts as beat indices (BeatInfo contract) — phase changes live here. */
   downbeats?: number[]
+}
+
+/** Beat This! output for this song (from the splitter pack runner): beat and
+ *  downbeat TIMES plus the framewise head probabilities. Full-mix evidence —
+ *  the model heard every stem summed, which is why its lattice survives
+ *  drumless stretches the drums-first tracker cannot. */
+export interface MlGrid {
+  beats: number[]
+  downbeats: number[]
+  /** Sigmoid of the framewise beat/downbeat logits at `fps` (50). */
+  beatProb?: number[]
+  downbeatProb?: number[]
+  fps?: number
 }
 
 /** Optional extra evidence for the downbeat — pass whatever is loaded. */
@@ -99,6 +115,10 @@ export interface BeatAux {
    *  Else Matters spends 41 s drumless), breakdowns, instrument-only parts.
    *  Never consulted while drums are active, never part of the vote. */
   inst?: AudioBuffer[] | null
+  /** Neural beat lattice from the pack model — replaces the DP tracker when
+   *  steady (latticeFromMl); its downbeat head votes bar phase at a low
+   *  weight. Absent = no pack installed = the homegrown path, unchanged. */
+  ml?: MlGrid | null
 }
 
 const HOP = 512
@@ -179,6 +199,587 @@ export function detectBeats(
     }
   }
 
+  // Neural lattice (Beat This!, shipped in the splitter packs) + the
+  // homegrown tracker, fused by measurement, not ideology:
+  // - On drum-strong songs the HOMEGROWN lattice wins outright: its beat
+  //   count follows real drum onsets through musical seams (NEM eats an
+  //   eighth mid-song — 414 true eighths crossed in 413 model beats, no
+  //   interval defect anywhere) that the model smooths away, shifting
+  //   every downstream bar by one. 12/14 ML-first vs 14/14 this way.
+  // - ML takes over where homegrown FAILS (rejects) — drumless songs,
+  //   soft material — and where homegrown cannot even express the answer:
+  //   a steady lattice whose dominant bar is 3 beats is a waltz, a meter
+  //   the drums-first path structurally mislabels as 4/4 (Ballroom 3/4
+  //   signature: 0.000 homegrown, 0.992 model).
+  // - An unsteady lattice (true rubato — The Music Of The Night) is
+  //   refused, and homegrown rejection then stands: no grid, wall-clock
+  //   count-in. No pack, no change: trackFromDrums is the v9 pipeline
+  //   verbatim, and without aux.ml nothing below alters a single vote.
+  const mlChoice = latticeFromMl(aux?.ml, frames, fps, drumFlux, debug)
+  const mlDom = mlChoice && aux?.ml ? dominantMlBarLen(aux.ml) : 0
+  // No harmonic stems = nothing to verify WITH: the stem-vote machinery's
+  // authority comes entirely from bass/instrument evidence, and on bare
+  // mixes it degrades badly (Ballroom 4/4 downbeat F 0.60 re-voted vs 0.985
+  // taking the model's word). Mix-only inputs get the model verbatim.
+  // Every real project has all six stems and takes the verified path below.
+  if (mlChoice && !mlChoice.doubled && aux?.ml && !aux.bass && !(aux.inst && aux.inst.length > 0)) {
+    const beats = mlChoice.beatsSec
+    const dbI: number[] = []
+    for (const t of aux.ml.downbeats) {
+      const i = nearestBeatIdx(beats, t)
+      if (i >= 0 && (dbI.length === 0 || i > dbI[dbI.length - 1])) dbI.push(i)
+    }
+    const bpbMl = mlDom === 3 || mlDom === 4 || mlDom === 6 ? mlDom : 4
+    if (debug) debug.lattice = 'ml-verbatim'
+    return {
+      beats,
+      bpm: 60 / mlChoice.medSec,
+      beatsPerBar: bpbMl,
+      downbeat: dbI.length > 0 ? dbI[0] % bpbMl : 0,
+      ...(dbI.length >= 2 ? { downbeats: dbI } : {})
+    }
+  }
+  let lat: { beatsSec: number[]; medSec: number; O: Float32Array; doubled?: boolean } | null = null
+  let mlPhase = false
+  if (mlChoice && !mlChoice.doubled && mlDom === 3) {
+    lat = mlChoice
+    mlPhase = true
+  }
+  if (!lat) lat = trackFromDrums(frames, fps, drumFlux, drumPeaks, aux, debug)
+  if (!lat && mlChoice) {
+    lat = mlChoice
+    mlPhase = !mlChoice.doubled
+  }
+  if (!lat) return null
+  if (debug) debug.lattice = lat === mlChoice ? 'ml' : 'drums'
+  const beatsSec = lat.beatsSec
+  const medSec = lat.medSec
+  const O = lat.O
+
+  /* ---- Bar phase & meter -------------------------------------------------
+   * Kick energy alone is a coin flip between beats 1 and 3 (both carry kick in
+   * most grooves), so bar rotation is voted by sharp musical events instead:
+   * mean kick, band entrances out of silence, the biggest well-separated
+   * low-band slams, bass chord changes, vocal phrase entries, and lyric lines
+   * sitting on a beat. Votes are counted per SEGMENT (stretches of drum
+   * activity split by ≥2-bar gaps): silent intros never vote, and when a song
+   * re-enters after a fermata on a different bar parity, each side keeps its
+   * own phase in `downbeats` — the boundary bar is simply an odd length. Beat
+   * times are never touched by phase logic. */
+  const beatFrames = beatsSec.map((b) => Math.round((b * sr) / HOP))
+  const active = new Array<boolean>(beatsSec.length).fill(false)
+  {
+    let pi = 0
+    const tol = 0.3 * medSec * fps
+    for (let k = 0; k < beatsSec.length; k++) {
+      while (pi < drumPeaks.length && drumPeaks[pi] < beatFrames[k] - tol) pi++
+      if (pi < drumPeaks.length && Math.abs(drumPeaks[pi] - beatFrames[k]) < tol) active[k] = true
+    }
+  }
+  const kickE = beatsSec.map((_, k) => {
+    const w = Math.max(1, Math.round(0.035 * fps))
+    let s = 0
+    for (let f = Math.max(1, beatFrames[k] - w); f <= Math.min(frames - 1, beatFrames[k] + w); f++) {
+      s += lowFlux[f]
+    }
+    return s
+  })
+  const kickMax = Math.max(...kickE, 1e-12)
+
+  // Meter: dominant 3-beat periodicity means the tracked pulse is the eighth
+  // of a compound (6/8) song — accents then group in 6, not 4. Each multiple
+  // takes the best lag in a small window: the median period is a fraction of
+  // a frame off, and by ×4 that lands between sharp onset peaks.
+  const acAt = (mult: number): number => {
+    const center = medSec * mult * fps
+    let best = 0
+    for (let lag = Math.floor(center) - 3; lag <= Math.ceil(center) + 3; lag++) {
+      if (lag < 1 || lag >= frames - 1) continue
+      let s = 0
+      for (let i = lag; i < frames; i++) s += O[i] * O[i - lag]
+      best = Math.max(best, s / (frames - lag))
+    }
+    return best
+  }
+  const bpb = ((): number => {
+    // Waltz: the model's own bars are 3 beats with real dominance — a meter
+    // the drums-first autocorrelation test cannot even emit (it knows 4
+    // and 6). Ballroom 3/4 signature: 0.000 without this, 0.99 with.
+    if (mlPhase && mlDom === 3) return 3
+    const activeN = active.filter(Boolean).length
+    if (activeN / Math.max(1, active.length) >= 0.3 || !mlPhase || !aux?.ml) {
+      return acAt(3) > 1.5 * acAt(4) ? 6 : 4
+    }
+    // Too little drumming for the autocorrelation meter test (the envelope
+    // is bleed) — count the model's own bars instead: dominant bar length,
+    // clamped to meters the app renders. This is the drumless-waltz path;
+    // every drummed song keeps the proven test above.
+    const hist = new Map<number, number>()
+    let prev = -1
+    for (const t of aux.ml.downbeats) {
+      const i = nearestBeatIdx(beatsSec, t)
+      if (i > prev) {
+        if (prev >= 0) hist.set(i - prev, (hist.get(i - prev) ?? 0) + 1)
+        prev = i
+      }
+    }
+    const dom = [...hist.entries()].sort((x, y) => y[1] - x[1])[0]?.[0]
+    return dom === 3 || dom === 4 || dom === 6 ? dom : 4
+  })()
+
+  // Segments: maximal active stretches split by gaps of ≥ 2 bars.
+  const segs: { a: number; b: number }[] = []
+  {
+    const gapLen = 2 * bpb
+    let i = 0
+    while (i < beatsSec.length) {
+      if (!active[i]) {
+        i++
+        continue
+      }
+      let j = i
+      let lastAct = i
+      while (j < beatsSec.length) {
+        if (active[j]) lastAct = j
+        else if (j - lastAct >= gapLen) break
+        j++
+      }
+      segs.push({ a: i, b: lastAct })
+      i = lastAct + 1
+      while (i < beatsSec.length && !active[i]) i++
+    }
+  }
+
+  // ML lattices occasionally insert or drop a beat MUSICALLY — a push, a
+  // fill (NEM hides one mid-song; Zeit has a dozen) — leaving no interval
+  // defect, but flipping every index class downstream, and one rotation per
+  // segment cannot hold across the flip. The model's own bar marks expose
+  // these seams: a bar whose length is neither the meter nor its half
+  // (half-bar marks are its normal habit) is a lattice hiccup — cut the
+  // segment there so each side votes its own rotation; the seam bar simply
+  // comes out an odd length, exactly like a fermata bar.
+  if (mlPhase && aux?.ml) {
+    const seams: number[] = []
+    let prev = -1
+    for (const t of aux.ml.downbeats) {
+      const i = nearestBeatIdx(beatsSec, t)
+      if (i <= prev) continue
+      if (prev >= 0) {
+        const len = i - prev
+        const normal = len === bpb || (bpb % 2 === 0 && len === bpb / 2)
+        if (!normal) seams.push(i)
+      }
+      prev = i
+    }
+    if (seams.length > 0) {
+      const cutSegs: { a: number; b: number }[] = []
+      for (const s of segs) {
+        let a = s.a
+        for (const c of seams) {
+          if (c > a && c <= s.b) {
+            cutSegs.push({ a, b: c - 1 })
+            a = c
+          }
+        }
+        cutSegs.push({ a, b: s.b })
+      }
+      segs.length = 0
+      for (const s of cutSegs) if (s.b > s.a) segs.push(s)
+      if (debug) debug.mlSeams = seams
+    }
+  }
+
+  // Bass chord-change strength per beat (0 = no confident change here).
+  // Chord changes are downbeat evidence wherever ANY harmonic instrument
+  // plays them — the organ that carries Mr Crowley lives in `other`, not
+  // bass. Sum every harmonic stem for the chroma-novelty cue.
+  const harmParts: Float32Array[] = []
+  if (aux?.bass) harmParts.push(monoAt44k(aux.bass))
+  for (const fb of aux?.inst ?? []) if (fb) harmParts.push(monoAt44k(fb))
+  let harmData: Float32Array | null = null
+  if (harmParts.length > 0) {
+    const hLen = Math.max(...harmParts.map((d) => d.length))
+    harmData = new Float32Array(hLen)
+    for (const d of harmParts) for (let i = 0; i < d.length; i++) harmData[i] += d[i]
+  }
+  // Segment votes keep the CALIBRATED bass-only chroma (walking bass and
+  // comping churn were tuned around); the all-stems sum feeds only the
+  // slip-detection windows below, where organ/guitar changes are the point.
+  const bassNov = harmonicChangeVotes(aux?.bass ? monoAt44k(aux.bass) : null, beatsSec, bpb)
+  const harmNov = harmParts.length > 1 ? harmonicChangeVotes(harmData, beatsSec, bpb) : bassNov
+  // Vocal phrase entries: loudest moment after each ≥2-bar rest, on a beat.
+  const vocHits = vocalEntryVotes(aux?.vocals ?? null, beatsSec, medSec, bpb)
+  // Neural downbeat head sampled on the lattice (only when the lattice is
+  // the model's own, untransposed — after octave doubling its bar opinions
+  // describe a different level and are dropped).
+  const mlDownE: number[] | null =
+    mlPhase && aux?.ml?.downbeatProb && aux.ml.fps
+      ? beatsSec.map((t) => {
+          const p = aux.ml!.downbeatProb!
+          const f = Math.round(t * aux.ml!.fps!)
+          let best = 0
+          for (const g of [f - 1, f, f + 1]) if (g >= 0 && g < p.length && p[g] > best) best = p[g]
+          return best
+        })
+      : null
+  // Lyric lines that start on a beat.
+  const lineHits: number[] = []
+  if (aux?.lineStarts && aux.lineStarts.length >= 6) {
+    for (const t of aux.lineStarts) {
+      const bk = nearestBeatIdx(beatsSec, t)
+      if (bk >= 0 && Math.abs(beatsSec[bk] - t) < 0.2 * medSec) lineHits.push(bk)
+    }
+  }
+
+  const uniform = (): number[] => new Array(bpb).fill(1 / bpb)
+  const normDist = (a: number[]): number[] => {
+    const s = a.reduce((x, y) => x + y, 0)
+    return s > 1e-12 ? a.map((x) => x / s) : uniform()
+  }
+  const scoreSegment = (
+    seg: { a: number; b: number }
+  ): { rot: number; conf: number; cues: Record<string, number[]> } => {
+    const { a, b } = seg
+    const kick = ((): number[] => {
+      const sums = new Array<number>(bpb).fill(0)
+      const ns = new Array<number>(bpb).fill(0)
+      for (let k = a; k <= b; k++) {
+        if (!active[k]) continue
+        sums[k % bpb] += kickE[k]
+        ns[k % bpb]++
+      }
+      if (ns.filter((n) => n > 2).length < bpb) return uniform()
+      return normDist(sums.map((s, i) => (ns[i] ? s / ns[i] : 0)))
+    })()
+    const ent = ((): number[] => {
+      // the heaviest hit in the segment's first bar — only when it truly
+      // enters out of silence (a real intro also counts at the track edge)
+      let quiet = 0
+      for (let j = a - 1; j >= 0 && !active[j]; j--) quiet++
+      const edge = a - quiet === 0
+      if (quiet < bpb || (edge && quiet < 2 * bpb)) return uniform()
+      let best = a
+      let nAct = 0
+      for (let j = a; j < Math.min(beatsSec.length, a + bpb); j++) {
+        if (active[j]) nAct++
+        if (kickE[j] > kickE[best]) best = j
+      }
+      if (nAct < 2 || kickE[best] < 0.2 * kickMax) return uniform()
+      const votes = new Array<number>(bpb).fill(0)
+      votes[best % bpb] = 1
+      return votes
+    })()
+    const slam = ((): number[] => {
+      const idx: number[] = []
+      for (let k = a; k <= b; k++) if (active[k]) idx.push(k)
+      idx.sort((x, y) => kickE[y] - kickE[x])
+      const votes = new Array<number>(bpb).fill(0)
+      const taken: number[] = []
+      for (const k of idx) {
+        if (taken.length >= 6) break
+        if (taken.some((t) => Math.abs(t - k) < 2 * bpb)) continue
+        taken.push(k)
+        votes[k % bpb] += kickE[k] / kickMax
+      }
+      if (taken.length < 3) return uniform()
+      return normDist(votes)
+    })()
+    const inSeg = (dist: number[], events: { k: number; w: number }[], min: number): number[] => {
+      let used = 0
+      for (const e of events) {
+        if (e.k >= a && e.k <= b) {
+          dist[e.k % bpb] += e.w
+          used++
+        }
+      }
+      return used < min ? uniform() : normDist(dist)
+    }
+    const bass = bassNov
+      ? inSeg(new Array<number>(bpb).fill(0), bassNov.map((w, k) => ({ k, w })).filter((e) => e.w > 0), bpb)
+      : uniform()
+    // Phrase starts are weak downbeat evidence — NEM's verses enter two to
+    // three eighths AFTER the bar line (the band entrance at 0:59.94 is the
+    // one; "So close…" floats over it), so no pickup folding: raw positions,
+    // low weights, never decisive.
+    const voc = vocHits ? inSeg(new Array<number>(bpb).fill(0), vocHits, 2) : uniform()
+    const line = inSeg(new Array<number>(bpb).fill(0), lineHits.map((k) => ({ k, w: 1 })), 4)
+    // Neural downbeat head: one voter among the stems. Reliable on straight
+    // meters (dead-on Sixteen Tons' re-phased bar), but its 6/8 bar sits a
+    // beat off the drummer's notation (NEM +1 eighth), so compound weight is
+    // token — never decisive against the band-entrance/chord evidence.
+    const mld = ((): number[] => {
+      if (!mlDownE) return uniform()
+      const sums = new Array<number>(bpb).fill(0)
+      let mass = 0
+      for (let k = a; k <= b && k < mlDownE.length; k++) {
+        sums[k % bpb] += mlDownE[k]
+        mass += mlDownE[k]
+      }
+      return mass >= 1 ? normDist(sums) : uniform()
+    })()
+    // compound meter: the per-beat kick pattern stops deciding (the mid-bar
+    // tom is idiomatic) — but entrances and separated slams are structural
+    // events, not groove, and stay meaningful: NEM's band lands ON the bar
+    // (0:59.94) and both cues point there while lines float after the one.
+    const W =
+      bpb === 6
+        ? { kick: 0.05, ent: 0.15, slam: 0.1, bass: 0.4, voc: 0.05, line: 0.25, mld: 0.05 }
+        : { kick: 0.2, ent: 0.18, slam: 0.15, bass: 0.15, voc: 0.05, line: 0.15, mld: 0.2 }
+    // Without ML data the cue is OMITTED (not uniform): conf divides by the
+    // summed weights, and diluting it would shift every calibrated v9
+    // confidence against ANCHOR_CONF on the no-pack path.
+    const cues: Record<string, number[]> = { kick, ent, slam, bass, voc, line }
+    if (mlDownE) cues.mld = mld
+    const score = new Array<number>(bpb).fill(0)
+    let total = 0
+    for (const [name, dist] of Object.entries(cues)) {
+      const wc = W[name as keyof typeof W]
+      total += wc
+      for (let r = 0; r < bpb; r++) score[r] += wc * dist[r]
+    }
+    let rot = 0
+    for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
+    const sorted = [...score].sort((x, y) => y - x)
+    const rounded = Object.fromEntries(
+      Object.entries(cues).map(([n, d]) => [n, d.map((x) => Math.round(x * 100) / 100)])
+    )
+    return { rot, conf: (sorted[0] - sorted[1]) / total, cues: rounded }
+  }
+
+  // Confident segments pin their own downbeat. Each anchor's rotation owns
+  // the beats from its start to the next anchor's start (the first also owns
+  // everything before it; the last runs out the track), and its bars land on
+  // indices ≡ rotation (mod bpb) inside that span. Agreeing neighbours chain
+  // into one uniform grid; a phase change just leaves the boundary bar an odd
+  // length — representable now, so the beat TIMES stay exactly as tracked
+  // (the old code re-spaced the silent gap to force one global rotation).
+  const MIN_BARS = 4
+  const ANCHOR_CONF = 0.08
+  const scored = segs.map((s) => ({ ...s, ...scoreSegment(s) }))
+  if (debug) {
+    debug.segCues = scored.map((s) => ({
+      a: s.a,
+      b: s.b,
+      rot: s.rot,
+      conf: Math.round(s.conf * 1000) / 1000,
+      cues: s.cues
+    }))
+  }
+  const anchors = scored.filter((s) => (s.b - s.a) / bpb >= MIN_BARS && s.conf >= ANCHOR_CONF)
+  let downbeat = 0
+  let downbeats: number[] | undefined
+  /** Rotation vote over one index window: kick pattern + chord changes +
+   *  lyric lines. Chord changes vote regardless of drum activity — a slip
+   *  is visible in the harmony even where the kit is thin. */
+  const windowRot = (a: number, b: number): { rot: number; margin: number } | null => {
+    const W2 = bpb === 6 ? { kick: 0.1, harm: 0.6, line: 0.3 } : { kick: 0.3, harm: 0.45, line: 0.25 }
+    const kick = new Array<number>(bpb).fill(0)
+    const kn = new Array<number>(bpb).fill(0)
+    for (let k = a; k < b; k++) {
+      if (!active[k]) continue
+      kick[k % bpb] += kickE[k]
+      kn[k % bpb]++
+    }
+    const kickD = kn.every((n) => n > 1) ? normDist(kick.map((x, i) => (kn[i] ? x / kn[i] : 0))) : uniform()
+    const harm = new Array<number>(bpb).fill(0)
+    let hUsed = 0
+    if (harmNov) {
+      for (let k = a; k < b && k < harmNov.length; k++) {
+        if (harmNov[k] > 0) {
+          harm[k % bpb] += harmNov[k]
+          hUsed++
+        }
+      }
+    }
+    const harmD = hUsed >= bpb ? normDist(harm) : uniform()
+    const line = new Array<number>(bpb).fill(0)
+    let lUsed = 0
+    for (const k of lineHits) {
+      if (k >= a && k < b) {
+        line[k % bpb] += 1
+        lUsed++
+      }
+    }
+    const lineD = lUsed >= 2 ? normDist(line) : uniform()
+    if (hUsed < bpb && lUsed < 2) return null // nothing but drums — undecided
+    const score = new Array<number>(bpb).fill(0)
+    for (let r = 0; r < bpb; r++) {
+      score[r] = W2.kick * kickD[r] + W2.harm * harmD[r] + W2.line * lineD[r]
+    }
+    let rot = 0
+    for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
+    const sorted = [...score].sort((x, y) => y - x)
+    const margin = sorted[0] - sorted[1]
+    return margin >= 0.1 ? { rot, margin } : null
+  }
+
+  /** Detect stable rotation flips inside [from,to): returns phase pieces
+   *  [{ start, rot }] beginning with the anchor's own rotation. */
+  const phasePieces = (from: number, to: number, rot0: number): { start: number; rot: number }[] => {
+    const pieces = [{ start: from, rot: rot0 }]
+    const winB = 12 * bpb
+    const hopB = 4 * bpb
+    if (to - from < winB * 2) return pieces
+    const wins: { center: number; rot: number }[] = []
+    for (let a = from; a + winB <= to; a += hopB) {
+      const v = windowRot(a, a + winB)
+      if (v) wins.push({ center: a + winB / 2, rot: v.rot })
+    }
+    const RUN = 4
+    let cur = rot0
+    let i = 0
+    while (i + RUN <= wins.length) {
+      const r = wins[i].rot
+      if (r !== cur && wins.slice(i, i + RUN).every((w) => w.rot === r)) {
+        // stable flip: boundary at the biggest interval anomaly between the
+        // previous window's center and this run's center (slips live at
+        // tracked-interval defects), else at the run's first center.
+        const lo = i > 0 ? Math.round(wins[i - 1].center) : from
+        const hi = Math.round(wins[i].center)
+        let cut = hi
+        let worst = 0
+        for (let k = Math.max(from + 1, lo); k < Math.min(hi, beatsSec.length - 1); k++) {
+          const d = Math.abs(beatsSec[k + 1] - beatsSec[k] - medSec) / medSec
+          if (d > worst) {
+            worst = d
+            cut = k + 1
+          }
+        }
+        // A real phase slip leaves a physical defect in the tracked
+        // intervals at the cut (Mr Crowley's measure 0.26); harmonic
+        // ambiguity over a clean grid (SoF's half-bar chorus 0.05, NEM's
+        // section hiccup 0.17) must never re-phase.
+        // ML lattices are smooth by construction even at REAL musical
+        // seams — NEM loses an eighth mid-song (414 true eighths crossed
+        // in 413 model beats) with no interval defect anywhere — so for
+        // them the physical-defect gate is void and the global harmonic
+        // arbiter below is the only judge. Homegrown grids keep the gate:
+        // their slips leave measurable defects (Crowley 0.26).
+        if (worst < 0.2 && !mlPhase) {
+          i += RUN
+          continue
+        }
+        pieces.push({ start: cut, rot: r })
+        phaseCutsDbg.push(cut)
+        cur = r
+        i += RUN
+      } else {
+        i++
+      }
+    }
+    return pieces
+  }
+
+  const phaseCutsDbg: number[] = []
+  if (anchors.length > 0) {
+    const buildBars = (withCuts: boolean): number[] => {
+      const out: number[] = []
+      for (let i = 0; i < anchors.length; i++) {
+        const rot = anchors[i].rot % bpb
+        const from = i === 0 ? 0 : anchors[i].a
+        const to = i + 1 < anchors.length ? anchors[i + 1].a : beatsSec.length
+        const pieces = withCuts ? phasePieces(from, to, rot) : [{ start: from, rot }]
+        for (const piece of pieces.map((pc, j, arr) => ({
+          ...pc,
+          end: j + 1 < arr.length ? arr[j + 1].start : to
+        }))) {
+          const r = piece.rot % bpb
+          for (let k = piece.start + (((r - piece.start) % bpb) + bpb) % bpb; k < piece.end; k += bpb) {
+            out.push(k)
+          }
+        }
+      }
+      return out
+    }
+    // Cuts must pay for themselves globally: the fraction of chord-change
+    // mass landing ON downbeats has to improve by a WIDE margin — measured
+    // gains: Mr Crowley +0.63, Sixteen Tons +0.54, WDOA breakdown +0.33
+    // (all kept), TTP's ambiguous mid-section +0.16 (reverted). Threshold
+    // 0.3: only re-phase when the harmony overwhelmingly demands it.
+    const harmOnBars = (bars: number[]): number => {
+      if (!harmNov) return 0
+      const barSet = new Set(bars)
+      let on = 0
+      let tot = 0
+      for (let k = 0; k < harmNov.length; k++) {
+        if (harmNov[k] > 0) {
+          tot += harmNov[k]
+          if (barSet.has(k)) on += harmNov[k]
+        }
+      }
+      return tot > 0 ? on / tot : 0
+    }
+    const plain = buildBars(false)
+    const cut = buildBars(true)
+    if (debug && phaseCutsDbg.length > 0) {
+      debug.harmGain = { plain: harmOnBars(plain), cut: harmOnBars(cut) }
+    }
+    if (phaseCutsDbg.length > 0 && harmNov && harmOnBars(cut) >= harmOnBars(plain) + 0.3) {
+      downbeats = cut
+    } else {
+      phaseCutsDbg.length = 0
+      downbeats = plain
+    }
+    if (downbeats.length === 0) downbeats = undefined
+    downbeat = downbeats ? downbeats[0] % bpb : anchors[0].rot % bpb
+    if (debug) debug.phaseCuts = phaseCutsDbg
+  } else if (scored.length > 0) {
+    downbeat = scored.reduce((m, s) => (s.conf > m.conf ? s : m)).rot % bpb
+  } else if (mlPhase && aux?.ml) {
+    // No segments at all (drumless song on the ML lattice): the stems offer
+    // zero phase evidence, so the model's own bar marks stand rather than a
+    // downbeat of 0 by luck.
+    const dbI: number[] = []
+    for (const t of aux.ml.downbeats) {
+      const i = nearestBeatIdx(beatsSec, t)
+      if (i >= 0 && (dbI.length === 0 || i > dbI[dbI.length - 1])) dbI.push(i)
+    }
+    if (dbI.length >= 2) downbeats = dbI
+    downbeat = dbI.length > 0 ? dbI[0] % bpb : 0
+  }
+
+  return {
+    beats: beatsSec,
+    bpm: 60 / medSec,
+    beatsPerBar: bpb,
+    downbeat,
+    ...(downbeats ? { downbeats } : {})
+  }
+}
+
+function normStrength(
+src: Float32Array,
+srcMean: number,
+frames: number,
+fps: number
+): Float32Array {
+  const out = new Float32Array(frames)
+  const W = Math.round(fps)
+  const pref = new Float64Array(frames + 1)
+  for (let i = 0; i < frames; i++) pref[i + 1] = pref[i] + src[i]
+  for (let i = 0; i < frames; i++) {
+    const a = Math.max(0, i - W)
+    const b = Math.min(frames, i + W)
+    const local = (pref[b] - pref[a]) / (b - a)
+    out[i] = Math.min(10, src[i] / (local * 0.8 + srcMean * 0.2 + 1e-12))
+  }
+  return out
+}
+
+/** The original drums-first pipeline: instrument fill, tempo family and
+ *  octave, DP placement, span quality gates, onset snap. Returns the beat
+ *  lattice plus the (fill-aware) meter envelope, or null when no steady
+ *  pulse deserves a metronome. Extracted verbatim in v10 when the neural
+ *  lattice arrived — this is the no-pack fallback and the rubato rejector. */
+function trackFromDrums(
+  frames: number,
+  fps: number,
+  drumFlux: Float32Array,
+  drumPeaks: number[],
+  aux: BeatAux | undefined,
+  debug?: Record<string, unknown>
+): { beatsSec: number[]; medSec: number; O: Float32Array; doubled?: boolean } | null {
+  const sr = ANALYSIS_SR
   // Instrument fill: where the drums are silent for seconds at a stretch,
   // the other stems' IMPULSIVE onsets carry the pulse (picked intros,
   // breakdowns). Gated by distance to the nearest drum onset — never inside
@@ -311,23 +912,10 @@ export function detectBeats(
   // Local-mean normalized onset strength. The tempo/octave DECISION reads
   // the drums alone (fill must never re-vote the tempo family — bass motion
   // once octave-doubled WDOA); beat PLACEMENT reads the filled envelope.
-  const normStrength = (src: Float32Array, srcMean: number): Float32Array => {
-    const out = new Float32Array(frames)
-    const W = Math.round(fps)
-    const pref = new Float64Array(frames + 1)
-    for (let i = 0; i < frames; i++) pref[i + 1] = pref[i] + src[i]
-    for (let i = 0; i < frames; i++) {
-      const a = Math.max(0, i - W)
-      const b = Math.min(frames, i + W)
-      const local = (pref[b] - pref[a]) / (b - a)
-      out[i] = Math.min(10, src[i] / (local * 0.8 + srcMean * 0.2 + 1e-12))
-    }
-    return out
-  }
-  const O = normStrength(flux, fluxMean)
+  const O = normStrength(flux, fluxMean, frames, fps)
   let drumMeanSum = 0
   for (let i = 1; i < frames; i++) drumMeanSum += drumFlux[i]
-  const Otempo = fillBufs.length > 0 ? normStrength(drumFlux, drumMeanSum / frames) : O
+  const Otempo = fillBufs.length > 0 ? normStrength(drumFlux, drumMeanSum / frames, frames, fps) : O
 
   // Windowed autocorrelation peaks voted into one tempo family.
   const winF = Math.round(20 * fps)
@@ -672,383 +1260,111 @@ export function detectBeats(
   const iv = beatsSec.slice(1).map((b, i) => b - beatsSec[i]).sort((a, b) => a - b)
   const medSec = iv[Math.floor(iv.length / 2)]
 
-  /* ---- Bar phase & meter -------------------------------------------------
-   * Kick energy alone is a coin flip between beats 1 and 3 (both carry kick in
-   * most grooves), so bar rotation is voted by sharp musical events instead:
-   * mean kick, band entrances out of silence, the biggest well-separated
-   * low-band slams, bass chord changes, vocal phrase entries, and lyric lines
-   * sitting on a beat. Votes are counted per SEGMENT (stretches of drum
-   * activity split by ≥2-bar gaps): silent intros never vote, and when a song
-   * re-enters after a fermata on a different bar parity, each side keeps its
-   * own phase in `downbeats` — the boundary bar is simply an odd length. Beat
-   * times are never touched by phase logic. */
-  const beatFrames = beatsSec.map((b) => Math.round((b * sr) / HOP))
-  const active = new Array<boolean>(beatsSec.length).fill(false)
-  {
-    let pi = 0
-    const tol = 0.3 * medSec * fps
-    for (let k = 0; k < beatsSec.length; k++) {
-      while (pi < drumPeaks.length && drumPeaks[pi] < beatFrames[k] - tol) pi++
-      if (pi < drumPeaks.length && Math.abs(drumPeaks[pi] - beatFrames[k]) < tol) active[k] = true
-    }
-  }
-  const kickE = beatsSec.map((_, k) => {
-    const w = Math.max(1, Math.round(0.035 * fps))
-    let s = 0
-    for (let f = Math.max(1, beatFrames[k] - w); f <= Math.min(frames - 1, beatFrames[k] + w); f++) {
-      s += lowFlux[f]
-    }
-    return s
-  })
-  const kickMax = Math.max(...kickE, 1e-12)
+  return { beatsSec, medSec, O }
+}
 
-  // Meter: dominant 3-beat periodicity means the tracked pulse is the eighth
-  // of a compound (6/8) song — accents then group in 6, not 4. Each multiple
-  // takes the best lag in a small window: the median period is a fraction of
-  // a frame off, and by ×4 that lands between sharp onset peaks.
-  const acAt = (mult: number): number => {
-    const center = medSec * mult * fps
-    let best = 0
-    for (let lag = Math.floor(center) - 3; lag <= Math.ceil(center) + 3; lag++) {
-      if (lag < 1 || lag >= frames - 1) continue
-      let s = 0
-      for (let i = lag; i < frames; i++) s += O[i] * O[i - lag]
-      best = Math.max(best, s / (frames - lag))
-    }
-    return best
+/** Dominant bar length (in beats) of the model's own bar marks — measured on
+ *  the raw times, independent of any lattice transform. Requires real
+ *  dominance: NEM's 6/8 marks are a 104:86 mix of 6s and half-bar 3s and
+ *  must NOT read as a waltz; a Ballroom waltz marks 3s near-unanimously. */
+function dominantMlBarLen(ml: MlGrid): number {
+  if (!Array.isArray(ml.downbeats) || ml.downbeats.length < 8 || !Array.isArray(ml.beats)) return 0
+  const hist = new Map<number, number>()
+  let bi = 0
+  let prev = -1
+  for (const t of ml.downbeats) {
+    while (bi < ml.beats.length && ml.beats[bi] < t - 1e-3) bi++
+    if (prev >= 0 && bi > prev) hist.set(bi - prev, (hist.get(bi - prev) ?? 0) + 1)
+    if (bi > prev) prev = bi
   }
-  const bpb = acAt(3) > 1.5 * acAt(4) ? 6 : 4
+  let dom = 0
+  let domN = 0
+  let total = 0
+  for (const [len, n] of hist) {
+    total += n
+    if (n > domN) {
+      dom = len
+      domN = n
+    }
+  }
+  return total > 0 && domN / total >= 0.6 ? dom : 0
+}
 
-  // Segments: maximal active stretches split by gaps of ≥ 2 bars.
-  const segs: { a: number; b: number }[] = []
-  {
-    const gapLen = 2 * bpb
-    let i = 0
-    while (i < beatsSec.length) {
-      if (!active[i]) {
-        i++
-        continue
-      }
-      let j = i
-      let lastAct = i
-      while (j < beatsSec.length) {
-        if (active[j]) lastAct = j
-        else if (j - lastAct >= gapLen) break
-        j++
-      }
-      segs.push({ a: i, b: lastAct })
-      i = lastAct + 1
-      while (i < beatsSec.length && !active[i]) i++
-    }
+/**
+ * Adopt the neural beat lattice when it is usable. Two guards, both from
+ * measurement on the library:
+ * - Octave: the model happily rides the half note when a ballad's drums do
+ *   (Soldier Of Fortune at 66.7 bpm) — double via midpoints when the
+ *   singable-tempo prior clearly prefers it (+0.2 margin: only genuinely
+ *   too-slow lattices cross it; WDOA at 75 and Dreamer at 79 stay put).
+ * - Steadiness: windowed interval test (16-interval windows, hop 8; a
+ *   window is steady when ≥75% of its intervals sit within 12% of its own
+ *   median). Real songs measure ≥0.75 even with rubato edges; The Music Of
+ *   The Night measures 0.31. Below 0.55 the lattice is refused and the
+ *   homegrown tracker decides — for true rubato it rejects, and grid-less
+ *   tracks keep their wall-clock count-in.
+ */
+function latticeFromMl(
+  ml: MlGrid | null | undefined,
+  frames: number,
+  fps: number,
+  drumFlux: Float32Array,
+  debug?: Record<string, unknown>
+): { beatsSec: number[]; medSec: number; O: Float32Array; doubled: boolean } | null {
+  if (!ml || !Array.isArray(ml.beats) || ml.beats.length < 16) return null
+  let beats: number[] = []
+  for (const t of ml.beats) {
+    if (typeof t !== 'number' || !Number.isFinite(t) || t < 0) continue
+    if (beats.length === 0 || t > beats[beats.length - 1] + 1e-3) beats.push(t)
   }
-
-  // Bass chord-change strength per beat (0 = no confident change here).
-  // Chord changes are downbeat evidence wherever ANY harmonic instrument
-  // plays them — the organ that carries Mr Crowley lives in `other`, not
-  // bass. Sum every harmonic stem for the chroma-novelty cue.
-  const harmParts: Float32Array[] = []
-  if (aux?.bass) harmParts.push(monoAt44k(aux.bass))
-  for (const fb of aux?.inst ?? []) if (fb) harmParts.push(monoAt44k(fb))
-  let harmData: Float32Array | null = null
-  if (harmParts.length > 0) {
-    const hLen = Math.max(...harmParts.map((d) => d.length))
-    harmData = new Float32Array(hLen)
-    for (const d of harmParts) for (let i = 0; i < d.length; i++) harmData[i] += d[i]
+  if (beats.length < 16) return null
+  const median = (xs: number[]): number => {
+    const s = [...xs].sort((a, b) => a - b)
+    return s[s.length >> 1]
   }
-  // Segment votes keep the CALIBRATED bass-only chroma (walking bass and
-  // comping churn were tuned around); the all-stems sum feeds only the
-  // slip-detection windows below, where organ/guitar changes are the point.
-  const bassNov = harmonicChangeVotes(aux?.bass ? monoAt44k(aux.bass) : null, beatsSec, bpb)
-  const harmNov = harmParts.length > 1 ? harmonicChangeVotes(harmData, beatsSec, bpb) : bassNov
-  // Vocal phrase entries: loudest moment after each ≥2-bar rest, on a beat.
-  const vocHits = vocalEntryVotes(aux?.vocals ?? null, beatsSec, medSec, bpb)
-  // Lyric lines that start on a beat.
-  const lineHits: number[] = []
-  if (aux?.lineStarts && aux.lineStarts.length >= 6) {
-    for (const t of aux.lineStarts) {
-      const bk = nearestBeatIdx(beatsSec, t)
-      if (bk >= 0 && Math.abs(beatsSec[bk] - t) < 0.2 * medSec) lineHits.push(bk)
+  const ivs = beats.slice(1).map((t, i) => t - beats[i])
+  let med = median(ivs)
+  if (!(med > 0)) return null
+  const prior = (bpm: number): number =>
+    Math.exp(-0.5 * Math.pow(Math.log2(bpm / 105) / 0.6, 2))
+  const bpm0 = 60 / med
+  let doubled = false
+  if (bpm0 * 2 <= 220 && prior(bpm0 * 2) > prior(bpm0) + 0.2) {
+    const dbl: number[] = []
+    for (let i = 0; i < beats.length; i++) {
+      dbl.push(beats[i])
+      // subdivide steady gaps only — never bridge a silence with midpoints
+      if (i + 1 < beats.length && beats[i + 1] - beats[i] < 1.8 * med) {
+        dbl.push((beats[i] + beats[i + 1]) / 2)
+      }
     }
+    beats = dbl
+    med = med / 2
+    doubled = true
   }
-
-  const uniform = (): number[] => new Array(bpb).fill(1 / bpb)
-  const normDist = (a: number[]): number[] => {
-    const s = a.reduce((x, y) => x + y, 0)
-    return s > 1e-12 ? a.map((x) => x / s) : uniform()
+  const iv2 = beats.slice(1).map((t, i) => t - beats[i])
+  let wins = 0
+  let steady = 0
+  for (let s = 0; s + 16 <= iv2.length; s += 8) {
+    const w = iv2.slice(s, s + 16)
+    const wMed = median(w)
+    const ok = w.filter((x) => Math.abs(x - wMed) <= 0.12 * wMed).length / w.length
+    wins++
+    if (ok >= 0.75) steady++
   }
-  const scoreSegment = (
-    seg: { a: number; b: number }
-  ): { rot: number; conf: number; cues: Record<string, number[]> } => {
-    const { a, b } = seg
-    const kick = ((): number[] => {
-      const sums = new Array<number>(bpb).fill(0)
-      const ns = new Array<number>(bpb).fill(0)
-      for (let k = a; k <= b; k++) {
-        if (!active[k]) continue
-        sums[k % bpb] += kickE[k]
-        ns[k % bpb]++
-      }
-      if (ns.filter((n) => n > 2).length < bpb) return uniform()
-      return normDist(sums.map((s, i) => (ns[i] ? s / ns[i] : 0)))
-    })()
-    const ent = ((): number[] => {
-      // the heaviest hit in the segment's first bar — only when it truly
-      // enters out of silence (a real intro also counts at the track edge)
-      let quiet = 0
-      for (let j = a - 1; j >= 0 && !active[j]; j--) quiet++
-      const edge = a - quiet === 0
-      if (quiet < bpb || (edge && quiet < 2 * bpb)) return uniform()
-      let best = a
-      let nAct = 0
-      for (let j = a; j < Math.min(beatsSec.length, a + bpb); j++) {
-        if (active[j]) nAct++
-        if (kickE[j] > kickE[best]) best = j
-      }
-      if (nAct < 2 || kickE[best] < 0.2 * kickMax) return uniform()
-      const votes = new Array<number>(bpb).fill(0)
-      votes[best % bpb] = 1
-      return votes
-    })()
-    const slam = ((): number[] => {
-      const idx: number[] = []
-      for (let k = a; k <= b; k++) if (active[k]) idx.push(k)
-      idx.sort((x, y) => kickE[y] - kickE[x])
-      const votes = new Array<number>(bpb).fill(0)
-      const taken: number[] = []
-      for (const k of idx) {
-        if (taken.length >= 6) break
-        if (taken.some((t) => Math.abs(t - k) < 2 * bpb)) continue
-        taken.push(k)
-        votes[k % bpb] += kickE[k] / kickMax
-      }
-      if (taken.length < 3) return uniform()
-      return normDist(votes)
-    })()
-    const inSeg = (dist: number[], events: { k: number; w: number }[], min: number): number[] => {
-      let used = 0
-      for (const e of events) {
-        if (e.k >= a && e.k <= b) {
-          dist[e.k % bpb] += e.w
-          used++
-        }
-      }
-      return used < min ? uniform() : normDist(dist)
-    }
-    const bass = bassNov
-      ? inSeg(new Array<number>(bpb).fill(0), bassNov.map((w, k) => ({ k, w })).filter((e) => e.w > 0), bpb)
-      : uniform()
-    // Phrase starts are weak downbeat evidence — NEM's verses enter two to
-    // three eighths AFTER the bar line (the band entrance at 0:59.94 is the
-    // one; "So close…" floats over it), so no pickup folding: raw positions,
-    // low weights, never decisive.
-    const voc = vocHits ? inSeg(new Array<number>(bpb).fill(0), vocHits, 2) : uniform()
-    const line = inSeg(new Array<number>(bpb).fill(0), lineHits.map((k) => ({ k, w: 1 })), 4)
-    // compound meter: the per-beat kick pattern stops deciding (the mid-bar
-    // tom is idiomatic) — but entrances and separated slams are structural
-    // events, not groove, and stay meaningful: NEM's band lands ON the bar
-    // (0:59.94) and both cues point there while lines float after the one.
-    const W =
-      bpb === 6
-        ? { kick: 0.05, ent: 0.15, slam: 0.1, bass: 0.4, voc: 0.05, line: 0.25 }
-        : { kick: 0.2, ent: 0.18, slam: 0.15, bass: 0.15, voc: 0.05, line: 0.15 }
-    const cues = { kick, ent, slam, bass, voc, line }
-    const score = new Array<number>(bpb).fill(0)
-    let total = 0
-    for (const [name, dist] of Object.entries(cues)) {
-      const wc = W[name as keyof typeof W]
-      total += wc
-      for (let r = 0; r < bpb; r++) score[r] += wc * dist[r]
-    }
-    let rot = 0
-    for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
-    const sorted = [...score].sort((x, y) => y - x)
-    const rounded = Object.fromEntries(
-      Object.entries(cues).map(([n, d]) => [n, d.map((x) => Math.round(x * 100) / 100)])
-    )
-    return { rot, conf: (sorted[0] - sorted[1]) / total, cues: rounded }
+  const steadyFrac = wins > 0 ? steady / wins : 0
+  if (debug) debug.mlLattice = { bpm0: Math.round(bpm0 * 10) / 10, doubled, steadyFrac: Math.round(steadyFrac * 100) / 100, wins }
+  if (wins < 3 || steadyFrac < 0.55) {
+    if (debug) debug.mlReject = `lattice unsteady (${Math.round(steadyFrac * 100)}% of windows)`
+    return null
   }
-
-  // Confident segments pin their own downbeat. Each anchor's rotation owns
-  // the beats from its start to the next anchor's start (the first also owns
-  // everything before it; the last runs out the track), and its bars land on
-  // indices ≡ rotation (mod bpb) inside that span. Agreeing neighbours chain
-  // into one uniform grid; a phase change just leaves the boundary bar an odd
-  // length — representable now, so the beat TIMES stay exactly as tracked
-  // (the old code re-spaced the silent gap to force one global rotation).
-  const MIN_BARS = 4
-  const ANCHOR_CONF = 0.08
-  const scored = segs.map((s) => ({ ...s, ...scoreSegment(s) }))
-  if (debug) {
-    debug.segCues = scored.map((s) => ({
-      a: s.a,
-      b: s.b,
-      rot: s.rot,
-      conf: Math.round(s.conf * 1000) / 1000,
-      cues: s.cues
-    }))
-  }
-  const anchors = scored.filter((s) => (s.b - s.a) / bpb >= MIN_BARS && s.conf >= ANCHOR_CONF)
-  let downbeat = 0
-  let downbeats: number[] | undefined
-  /** Rotation vote over one index window: kick pattern + chord changes +
-   *  lyric lines. Chord changes vote regardless of drum activity — a slip
-   *  is visible in the harmony even where the kit is thin. */
-  const windowRot = (a: number, b: number): { rot: number; margin: number } | null => {
-    const W2 = bpb === 6 ? { kick: 0.1, harm: 0.6, line: 0.3 } : { kick: 0.3, harm: 0.45, line: 0.25 }
-    const kick = new Array<number>(bpb).fill(0)
-    const kn = new Array<number>(bpb).fill(0)
-    for (let k = a; k < b; k++) {
-      if (!active[k]) continue
-      kick[k % bpb] += kickE[k]
-      kn[k % bpb]++
-    }
-    const kickD = kn.every((n) => n > 1) ? normDist(kick.map((x, i) => (kn[i] ? x / kn[i] : 0))) : uniform()
-    const harm = new Array<number>(bpb).fill(0)
-    let hUsed = 0
-    if (harmNov) {
-      for (let k = a; k < b && k < harmNov.length; k++) {
-        if (harmNov[k] > 0) {
-          harm[k % bpb] += harmNov[k]
-          hUsed++
-        }
-      }
-    }
-    const harmD = hUsed >= bpb ? normDist(harm) : uniform()
-    const line = new Array<number>(bpb).fill(0)
-    let lUsed = 0
-    for (const k of lineHits) {
-      if (k >= a && k < b) {
-        line[k % bpb] += 1
-        lUsed++
-      }
-    }
-    const lineD = lUsed >= 2 ? normDist(line) : uniform()
-    if (hUsed < bpb && lUsed < 2) return null // nothing but drums — undecided
-    const score = new Array<number>(bpb).fill(0)
-    for (let r = 0; r < bpb; r++) {
-      score[r] = W2.kick * kickD[r] + W2.harm * harmD[r] + W2.line * lineD[r]
-    }
-    let rot = 0
-    for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
-    const sorted = [...score].sort((x, y) => y - x)
-    const margin = sorted[0] - sorted[1]
-    return margin >= 0.1 ? { rot, margin } : null
-  }
-
-  /** Detect stable rotation flips inside [from,to): returns phase pieces
-   *  [{ start, rot }] beginning with the anchor's own rotation. */
-  const phasePieces = (from: number, to: number, rot0: number): { start: number; rot: number }[] => {
-    const pieces = [{ start: from, rot: rot0 }]
-    const winB = 12 * bpb
-    const hopB = 4 * bpb
-    if (to - from < winB * 2) return pieces
-    const wins: { center: number; rot: number }[] = []
-    for (let a = from; a + winB <= to; a += hopB) {
-      const v = windowRot(a, a + winB)
-      if (v) wins.push({ center: a + winB / 2, rot: v.rot })
-    }
-    const RUN = 4
-    let cur = rot0
-    let i = 0
-    while (i + RUN <= wins.length) {
-      const r = wins[i].rot
-      if (r !== cur && wins.slice(i, i + RUN).every((w) => w.rot === r)) {
-        // stable flip: boundary at the biggest interval anomaly between the
-        // previous window's center and this run's center (slips live at
-        // tracked-interval defects), else at the run's first center.
-        const lo = i > 0 ? Math.round(wins[i - 1].center) : from
-        const hi = Math.round(wins[i].center)
-        let cut = hi
-        let worst = 0
-        for (let k = Math.max(from + 1, lo); k < Math.min(hi, beatsSec.length - 1); k++) {
-          const d = Math.abs(beatsSec[k + 1] - beatsSec[k] - medSec) / medSec
-          if (d > worst) {
-            worst = d
-            cut = k + 1
-          }
-        }
-        // A real phase slip leaves a physical defect in the tracked
-        // intervals at the cut (Mr Crowley's measure 0.26); harmonic
-        // ambiguity over a clean grid (SoF's half-bar chorus 0.05, NEM's
-        // section hiccup 0.17) must never re-phase.
-        if (worst < 0.2) {
-          i += RUN
-          continue
-        }
-        pieces.push({ start: cut, rot: r })
-        phaseCutsDbg.push(cut)
-        cur = r
-        i += RUN
-      } else {
-        i++
-      }
-    }
-    return pieces
-  }
-
-  const phaseCutsDbg: number[] = []
-  if (anchors.length > 0) {
-    const buildBars = (withCuts: boolean): number[] => {
-      const out: number[] = []
-      for (let i = 0; i < anchors.length; i++) {
-        const rot = anchors[i].rot % bpb
-        const from = i === 0 ? 0 : anchors[i].a
-        const to = i + 1 < anchors.length ? anchors[i + 1].a : beatsSec.length
-        const pieces = withCuts ? phasePieces(from, to, rot) : [{ start: from, rot }]
-        for (const piece of pieces.map((pc, j, arr) => ({
-          ...pc,
-          end: j + 1 < arr.length ? arr[j + 1].start : to
-        }))) {
-          const r = piece.rot % bpb
-          for (let k = piece.start + (((r - piece.start) % bpb) + bpb) % bpb; k < piece.end; k += bpb) {
-            out.push(k)
-          }
-        }
-      }
-      return out
-    }
-    // Cuts must pay for themselves globally: the fraction of chord-change
-    // mass landing ON downbeats has to improve by a WIDE margin — measured
-    // gains: Mr Crowley +0.63, Sixteen Tons +0.54, WDOA breakdown +0.33
-    // (all kept), TTP's ambiguous mid-section +0.16 (reverted). Threshold
-    // 0.3: only re-phase when the harmony overwhelmingly demands it.
-    const harmOnBars = (bars: number[]): number => {
-      if (!harmNov) return 0
-      const barSet = new Set(bars)
-      let on = 0
-      let tot = 0
-      for (let k = 0; k < harmNov.length; k++) {
-        if (harmNov[k] > 0) {
-          tot += harmNov[k]
-          if (barSet.has(k)) on += harmNov[k]
-        }
-      }
-      return tot > 0 ? on / tot : 0
-    }
-    const plain = buildBars(false)
-    const cut = buildBars(true)
-    if (debug && phaseCutsDbg.length > 0) {
-      debug.harmGain = { plain: harmOnBars(plain), cut: harmOnBars(cut) }
-    }
-    if (phaseCutsDbg.length > 0 && harmNov && harmOnBars(cut) >= harmOnBars(plain) + 0.3) {
-      downbeats = cut
-    } else {
-      phaseCutsDbg.length = 0
-      downbeats = plain
-    }
-    if (downbeats.length === 0) downbeats = undefined
-    downbeat = downbeats ? downbeats[0] % bpb : anchors[0].rot % bpb
-    if (debug) debug.phaseCuts = phaseCutsDbg
-  } else if (scored.length > 0) {
-    downbeat = scored.reduce((m, s) => (s.conf > m.conf ? s : m)).rot % bpb
-  }
-
+  let dSum = 0
+  for (let i = 1; i < frames; i++) dSum += drumFlux[i]
   return {
-    beats: beatsSec,
-    bpm: 60 / medSec,
-    beatsPerBar: bpb,
-    downbeat,
-    ...(downbeats ? { downbeats } : {})
+    beatsSec: beats,
+    medSec: med,
+    O: normStrength(drumFlux, dSum / frames, frames, fps),
+    doubled
   }
 }
 

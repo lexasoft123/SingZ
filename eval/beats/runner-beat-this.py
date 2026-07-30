@@ -6,8 +6,13 @@ Usage: python runner-beat-this.py --jobs jobs.json [--checkpoint final0]
 
 jobs.json: [{"id": str, "f32": path, "sr": int}, ...] — f32 is raw float32le
 mono PCM at sr. One JSON line per job on stdout:
-  {"id", "beats": [...s], "downbeats": [...s], "infer_s", "audio_s"}
-Progress lines go to stderr. The model is loaded once for the whole batch.
+  {"id", "beats": [...s], "downbeats": [...s],
+   "beat_prob": [...], "downbeat_prob": [...], "fps": 50,
+   "infer_s", "audio_s"}
+beat_prob/downbeat_prob are the model's framewise head probabilities at fps
+(sigmoid of the logits, 3 decimals) — the app's phase arbiter samples them as
+one cue among the stem votes. Progress lines go to stderr. The model is
+loaded once for the whole batch.
 
 Needs a python with beat_this installed (pip install
 git+https://github.com/CPJKU/beat_this — MIT, pulls torch/torchaudio/soxr);
@@ -34,21 +39,30 @@ def main():
         jobs = json.load(f)
 
     t0 = time.time()
-    from beat_this.inference import Audio2Beats
+    import torch
+    from beat_this.inference import Audio2Frames
+    from beat_this.model.postprocessor import Postprocessor
 
-    a2b = Audio2Beats(checkpoint_path=args.checkpoint, device=args.device)
+    a2f = Audio2Frames(checkpoint_path=args.checkpoint, device=args.device)
+    postp = Postprocessor(type="minimal")
     print(f"model {args.checkpoint} on {args.device} loaded in {time.time()-t0:.1f}s",
           file=sys.stderr, flush=True)
 
     for job in jobs:
         signal = np.fromfile(job["f32"], dtype=np.float32)
         t1 = time.time()
-        beats, downbeats = a2b(signal, job["sr"])
+        beat_logits, downbeat_logits = a2f(signal, job["sr"])
+        beats, downbeats = postp(beat_logits, downbeat_logits)
+        beat_prob = torch.sigmoid(beat_logits).cpu().numpy()
+        downbeat_prob = torch.sigmoid(downbeat_logits).cpu().numpy()
         dt = time.time() - t1
         print(json.dumps({
             "id": job["id"],
             "beats": [round(float(b), 3) for b in beats],
             "downbeats": [round(float(d), 3) for d in downbeats],
+            "beat_prob": [round(float(p), 3) for p in beat_prob],
+            "downbeat_prob": [round(float(p), 3) for p in downbeat_prob],
+            "fps": 50,
             "infer_s": round(dt, 2),
             "audio_s": round(len(signal) / job["sr"], 1),
         }), flush=True)

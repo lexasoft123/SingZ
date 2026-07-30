@@ -6,7 +6,7 @@ import type {
   ProjectSettings,
   SeparationProgress
 } from '../../shared/types'
-import { BEAT_DETECT_VERSION, detectBeats, estimateKey, type KeyGuess } from './audio/analysis'
+import { BEAT_DETECT_VERSION, detectBeats, estimateKey, type KeyGuess, type MlGrid } from './audio/analysis'
 import {
   MET_DEFAULTS,
   sanitizeBeatInfo,
@@ -891,35 +891,43 @@ export default function App(): React.JSX.Element {
         setMelody({ status: 'ready', f0: e.data.f0, hopSec: e.data.hopSec })
         // Beat track from the drums (once per song — a hand-tuned track wins
         // over re-detection; restored auto tracks from an older detector are
-        // silently re-tracked so downbeat fixes reach saved projects).
-        let info = beatInfoRef.current
+        // silently re-tracked so downbeat fixes reach saved projects). The
+        // pack's neural grid is fetched first when available — detectBeats
+        // fuses it with the stem cues; without a pack it changes nothing.
+        const info = beatInfoRef.current
         const fresh = !info
         const stale = info?.source === 'auto' && info.detVersion !== BEAT_DETECT_VERSION
         if ((fresh || stale) && drumsBufRef.current) {
-          const det = detectBeats(drumsBufRef.current, {
-            bass: bassBufRef.current,
-            vocals: vocalsBufRef.current,
-            inst: instBufsRef.current,
-            lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
-          })
-          if (det) {
-            info = {
-              beats: det.beats,
-              bpm: det.bpm,
-              beatsPerBar: det.beatsPerBar,
-              downbeat: det.downbeat,
-              ...(det.downbeats ? { downbeats: det.downbeats } : {}),
-              source: 'auto',
-              detVersion: BEAT_DETECT_VERSION
+          const drums = drumsBufRef.current
+          void (async () => {
+            const ml = await fetchMlGridRef.current?.()
+            if (drumsBufRef.current !== drums) return // song changed mid-flight
+            const det = detectBeats(drums, {
+              bass: bassBufRef.current,
+              vocals: vocalsBufRef.current,
+              inst: instBufsRef.current,
+              lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+              ml
+            })
+            if (det) {
+              setBeatInfo({
+                beats: det.beats,
+                bpm: det.bpm,
+                beatsPerBar: det.beatsPerBar,
+                downbeat: det.downbeat,
+                ...(det.downbeats ? { downbeats: det.downbeats } : {}),
+                source: 'auto',
+                detVersion: BEAT_DETECT_VERSION
+              })
+              if (stale) touchSettings()
+              // The corrected grid must reach the project file — and through
+              // Drive the phones, which have no detector of their own — without
+              // waiting for a manual save. Deferred via state so the save
+              // handler's closure sees the new grid.
+              setBeatAutoSave(true)
+              setSongInfo((s) => ({ ...s, bpm: det.bpm }))
             }
-            setBeatInfo(info)
-            if (stale) touchSettings()
-            // The corrected grid must reach the project file — and through
-            // Drive the phones, which have no detector of their own — without
-            // waiting for a manual save. Deferred via state so the save
-            // handler's closure sees the new grid.
-            setBeatAutoSave(true)
-          }
+          })()
         }
         setSongInfo({
           key: estimateKey(e.data.f0),
@@ -1150,32 +1158,79 @@ export default function App(): React.JSX.Element {
     [touchSettings]
   )
 
-  /** Re-track the beats from the drums stem (the popover's Re-detect). */
+  /** Full-mix neural beat grid from the splitter pack (null without a pack —
+   *  the detector then takes its homegrown path unchanged). The mix is
+   *  rendered offline at the model's 22.05 kHz from whatever stems are
+   *  loaded: the model wants what the singer hears, not one stem. */
+  const fetchMlGrid = useCallback(async (): Promise<MlGrid | null> => {
+    try {
+      const avail = await window.singz.beatsMlAvailable()
+      if (!avail.ok || !avail.available) return null
+      const bufs: AudioBuffer[] = []
+      for (const b of [drumsBufRef.current, bassBufRef.current, vocalsBufRef.current, ...instBufsRef.current]) {
+        if (b) bufs.push(b)
+      }
+      if (bufs.length === 0) return null
+      const dur = Math.max(...bufs.map((b) => b.duration))
+      const ctx = new OfflineAudioContext(1, Math.ceil(dur * 22050), 22050)
+      for (const b of bufs) {
+        const s = ctx.createBufferSource()
+        s.buffer = b
+        s.connect(ctx.destination)
+        s.start(0)
+      }
+      const mix = await ctx.startRendering()
+      const pcm = mix.getChannelData(0)
+      const res = await window.singz.beatsMlDetect(
+        pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength),
+        22050
+      )
+      if (!res.ok) return null
+      return {
+        beats: res.beats,
+        downbeats: res.downbeats,
+        beatProb: res.beatProb,
+        downbeatProb: res.downbeatProb,
+        fps: res.fps
+      }
+    } catch {
+      return null
+    }
+  }, [])
+  const fetchMlGridRef = useRef<typeof fetchMlGrid | null>(null)
+  fetchMlGridRef.current = fetchMlGrid
+
+  /** Re-track the beats from the stems (the popover's Re-detect). */
   const redetectBeat = useCallback(() => {
     const buf = drumsBufRef.current
     if (!buf) return
-    const det = detectBeats(buf, {
-      bass: bassBufRef.current,
-      vocals: vocalsBufRef.current,
-      inst: instBufsRef.current,
-      lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
-    })
-    if (det) {
-      touchSettings()
-      setBeatInfo({
-        beats: det.beats,
-        bpm: det.bpm,
-        beatsPerBar: det.beatsPerBar,
-        downbeat: det.downbeat,
-        ...(det.downbeats ? { downbeats: det.downbeats } : {}),
-        source: 'auto',
-        detVersion: BEAT_DETECT_VERSION
+    void (async () => {
+      const ml = await fetchMlGrid()
+      if (drumsBufRef.current !== buf) return // song changed mid-flight
+      const det = detectBeats(buf, {
+        bass: bassBufRef.current,
+        vocals: vocalsBufRef.current,
+        inst: instBufsRef.current,
+        lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+        ml
       })
-      setSongInfo((s) => ({ ...s, bpm: det.bpm }))
-    } else {
-      setNotice('No steady beat found in the drums — tap the tempo instead.')
-    }
-  }, [touchSettings])
+      if (det) {
+        touchSettings()
+        setBeatInfo({
+          beats: det.beats,
+          bpm: det.bpm,
+          beatsPerBar: det.beatsPerBar,
+          downbeat: det.downbeat,
+          ...(det.downbeats ? { downbeats: det.downbeats } : {}),
+          source: 'auto',
+          detVersion: BEAT_DETECT_VERSION
+        })
+        setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+      } else {
+        setNotice('No steady beat found — tap the tempo instead.')
+      }
+    })()
+  }, [touchSettings, fetchMlGrid])
 
   const handleTempo = useCallback(
     (rate: number) => {
