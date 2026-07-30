@@ -65,6 +65,23 @@ export default function PlayerScreen({
 
   const lines = useMemo(() => project.lyrics?.lines ?? [], [project])
   const stemIds = useMemo(() => project.stems.map((st) => st.id), [project])
+  /**
+   * Lane name + color by id. Split stems come from TRACK_META; tracks the
+   * singer added on the desktop bring their own, so the mixer shows "Harmony"
+   * in its own color rather than the raw `custom-harmony` id.
+   */
+  const laneMeta = useMemo(() => {
+    const map: Record<string, { label: string; color: string }> = {}
+    for (const st of project.stems) {
+      const meta = TRACK_META[st.id]
+      map[st.id] = {
+        label: st.label ?? meta?.label ?? st.id,
+        color: st.color ?? meta?.color ?? C.dim
+      }
+    }
+    return map
+  }, [project])
+  const addedCount = useMemo(() => project.stems.filter((st) => st.custom).length, [project])
 
   /* Feed the engine + apply the project's saved settings. */
   useEffect(() => {
@@ -253,6 +270,15 @@ export default function PlayerScreen({
     TEST.showSyncPanel = () => setSheet('practice')
     TEST.perfStart = () => perf.start()
     TEST.perfStop = () => perf.stop()
+    /** Lane names/colors as the mixer shows them (added tracks bring their own). */
+    TEST.lanes = () =>
+      project.stems.map((st) => ({
+        id: st.id,
+        label: laneMeta[st.id]?.label ?? st.id,
+        color: laneMeta[st.id]?.color ?? null,
+        custom: st.custom === true,
+        seconds: Math.round(st.buffer.duration * 10) / 10
+      }))
   })
 
   /* Key & speed apply live: varispeed sources + master-bus stretch. */
@@ -358,7 +384,10 @@ export default function PlayerScreen({
           <Text style={s.hTitle} numberOfLines={1}>
             {project.name}
           </Text>
-          <Text style={s.hSub}>SingZ project · {stemIds.length} stems</Text>
+          <Text style={s.hSub}>
+            SingZ project · {stemIds.length - addedCount} stems
+            {addedCount > 0 ? ` · ${addedCount} added` : ''}
+          </Text>
         </View>
         {ktBadge.length > 0 && (
           <View style={s.ktBadge}>
@@ -442,7 +471,7 @@ export default function PlayerScreen({
             <View style={b.grab} />
             <Text style={b.sheetTitle}>Mixer</Text>
             {tracks.map((t) => {
-              const meta = TRACK_META[t.id] ?? { label: t.id, color: C.dim }
+              const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
               return (
                 <View key={t.id} style={s.mixRow}>
@@ -631,7 +660,7 @@ export default function PlayerScreen({
                   {stemIds.map((id) => (
                     <Chip
                       key={id}
-                      label={TRACK_META[id]?.label ?? id}
+                      label={laneMeta[id]?.label ?? TRACK_META[id]?.label ?? id}
                       active={trainCfg.stems.includes(id)}
                       onPress={() => toggleTrainStem(id)}
                     />

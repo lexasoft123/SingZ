@@ -114,8 +114,20 @@ lanes stay. Saving copies each file into the project's `stems/` folder as
 Drive sync uploads and the phones fetch, and the prefix keeps a track named
 "vocals" clear of the stem. `project.json` stores them project-relative
 (`settings.custom`), resolved to absolute paths on the way out so the folder
-stays portable; removing a lane and saving prunes its copy. The phones ignore
-lanes they don't know, so they play the stems and skip these for now.
+stays portable; removing a lane and saving prunes its copy.
+
+The phones play them too. `customTracks()` (mobile/src/model.ts) is the trust
+boundary: only a plain `stems/<name>` entry is used — an absolute path (what the
+desktop holds in memory) or a `..` is dropped, as is an id that would shadow a
+stem. `loadProject` fetches each one after the six stems, through the same
+FolderAccess/Drive readers (both take a project-relative path, so no native
+change was needed), and skips one it cannot fetch or decode rather than sinking
+a song whose stems are all there. Lanes carry their desktop label and colour
+into the mixer and the training picker. Memory: stems are projected from the
+first decoded one, but an added track can be any length, so each is measured
+against the budget as it lands. The Drive listing counts their bytes, so the
+catalog's ✓ waits for them; a *folder* library's ✓ still comes from the natives'
+six-stem scan, so it can turn green a moment early there.
 
 A project folder does not have to live under the library root — copied, shared
 and other-machine folders open from anywhere. Those save and rename **in

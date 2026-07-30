@@ -25,6 +25,10 @@ const WebSocket = require('ws');
 
 const BUNDLE = 'com.lexasoft.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
+/* Another worktree's Metro on 8081 would hand us ITS app: keep them apart with
+ * a second simulator, RCT_METRO_PORT=8082 + the RCT_jsLocation default, and
+ * METRO_PORT here (see offline-cache.cjs). */
+const PORT = process.env.METRO_PORT || '8081';
 const CYCLES = parseInt(process.env.CYCLES || '3', 10);
 /**
  * Song-sized buffers, deliberately: 5 minutes of 48 kHz stereo is 115 MB, the
@@ -53,27 +57,31 @@ const getJson = (u) =>
   });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* The pid `simctl launch` reported. Never pgrep for it: two simulators running
+ * (this tree next to another worktree's) give two SingZPlayer processes, and
+ * measuring the other one reads as "release() freed nothing". */
+let appPid = null;
+
 function rssMb() {
-  const pid = execSync(`pgrep -f "SingZPlayer.app/SingZPlayer" | head -1`).toString().trim();
-  if (!pid) throw new Error('sim app process not found');
-  return Math.round(parseInt(execSync(`ps -o rss= -p ${pid}`).toString().trim(), 10) / 1024);
+  if (!appPid) throw new Error('sim app process not found');
+  return Math.round(parseInt(execSync(`ps -o rss= -p ${appPid}`).toString().trim(), 10) / 1024);
 }
 
 (async () => {
   execSync(`xcrun simctl terminate ${UDID} ${BUNDLE} 2>/dev/null || true`);
-  execSync(`xcrun simctl launch ${UDID} ${BUNDLE}`);
+  appPid = /:\s*(\d+)/.exec(execSync(`xcrun simctl launch ${UDID} ${BUNDLE}`).toString())?.[1] ?? null;
   await sleep(9000);
 
   let target = null;
   for (let i = 0; i < 40 && !target; i++) {
     try {
-      const l = await getJson('http://localhost:8081/json');
+      const l = await getJson(`http://localhost:${PORT}/json`);
       target = l.find((t) => t.webSocketDebuggerUrl) ?? null;
     } catch {}
     if (!target) await sleep(1000);
   }
   if (!target) throw new Error('no debugger target');
-  const ws = new WebSocket(target.webSocketDebuggerUrl, { origin: 'http://localhost:8081' });
+  const ws = new WebSocket(target.webSocketDebuggerUrl, { origin: `http://localhost:${PORT}` });
   await new Promise((res, rej) => {
     ws.on('open', res);
     ws.on('error', rej);

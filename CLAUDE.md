@@ -37,13 +37,24 @@ path as drag-drop. Read the screenshots you take. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
-`offline-cache.cjs`): CDP over Metro against the iOS Simulator — run them
+`offline-cache.cjs`, `custom-track.cjs`): CDP over Metro against the iOS
+Simulator — run them
 after engine or loading changes. Pure-JS mobile logic that no device can show
 (the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
 — needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
 our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
 and `jest.setup.js` to stub audio-api + the pods (they throw on import with no
 native module).
+**Two sessions, one Mac**: another worktree's Metro already on 8081 will happily
+serve ITS bundle to your app, so a parallel run needs its own simulator *and* its
+own port — boot a second device, build with `RCT_METRO_PORT=8082`, and then set
+the runtime bundle host too:
+`xcrun simctl spawn <udid> defaults write com.lexasoft.singz RCT_jsLocation -string localhost:8082`
+(the build-time port alone does NOT move the Debug app off 8081 — it silently
+attached to the neighbour's Metro). Pass `SIM_UDID`/`METRO_PORT` to the tests.
+And never `pgrep` for the app: with two simulators up there are two SingZPlayer
+processes, and measuring the wrong one made the memory test report
+"release() freed nothing" — take the pid `simctl launch` prints.
 Driving **Android** over CDP: never evaluate JS while a decode is in flight —
 the Hermes inspector segfaults the app mid-`decodeAudioData` (looks exactly
 like an OOM: SIGSEGV at 0x0 on `mqt_v_js` in libhermesvm, ~9 s into loading a
@@ -126,9 +137,12 @@ answer your evals while you measure the phone.
 - **Custom tracks (the singer's own audio as extra lanes) live in `stems/`**,
   named `custom-<slug>.<ext>` in whatever format they came in — NOT in a
   `tracks/` folder: Drive sync only walks `project.json`, `lyrics.json` and
-  `stems/` (extension-filtered — widen that filter, not the layout), and both
-  phone natives enumerate `stems/` by the six known stem names, so anything
-  else there is ignored rather than broken. `project.json` keeps them
+  `stems/` (extension-filtered — widen that filter, not the layout), and the
+  phones reach them with no native change at all: `FolderAccess.localFile` and
+  `driveLocalFile` both take a project-relative path, so mobile JS fetches
+  exactly what `settings.custom` names. What the natives DO enumerate by the six
+  stem names is `listProjects`' `cached`/`bytes`, so a folder library's ✓ ignores
+  added tracks (the Drive listing counts them in JS). `project.json` keeps them
   project-relative (`settings.custom`); main resolves them to absolute on the
   way out and back to relative on save, because a moved project folder (rename,
   import, another machine's cloud library) would rot absolute paths. Lanes may

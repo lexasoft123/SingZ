@@ -1,5 +1,6 @@
 import { AppState, Linking, NativeModules, Platform } from 'react-native'
-import { STEM_ORDER_ALL } from './model'
+import { customTracks, STEM_ORDER_ALL } from './model'
+import type { ProjectDoc } from './model'
 import type { ProjectEntry } from './projects'
 
 /**
@@ -414,6 +415,11 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
         if (!f) continue
         stems[id] = f.name.endsWith('.flac') ? 'flac' : 'wav'
         bytes += Number(f.size ?? 0)
+      }
+      // The singer's own tracks are part of what this song costs to download —
+      // leave them out and the ✓ lights up while one is still in the cloud.
+      for (const t of customTracks((doc as ProjectDoc)?.settings)) {
+        bytes += Number(stemsByName.get(t.file.slice('stems/'.length))?.size ?? 0)
       }
       if (Object.keys(stems).length === 0) return null
       projectFiles.set(dir.name, { byName, stemsByName })

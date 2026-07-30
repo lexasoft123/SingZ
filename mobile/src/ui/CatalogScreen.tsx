@@ -23,7 +23,7 @@ import {
   driveStoredProjects
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
-import { STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
+import { customTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
   cacheUsage,
   clearCache,
@@ -506,6 +506,7 @@ export default function CatalogScreen({
             // half-finished fetch keeps the cloud mark and its remaining size.
             const have = usage[p.dir] ?? 0
             const downloaded = p.cached || (p.bytes > 0 && have + 1024 >= p.bytes)
+            const added = customTracks(p.doc?.settings).length
             return card({
               key: p.dir,
               dir: p.dir,
@@ -513,7 +514,9 @@ export default function CatalogScreen({
               title: p.doc.name ?? p.dir,
               meta: (
                 <>
-                  {Object.keys(p.stems).length} stems{p.hasLyrics ? ' · lyrics' : ''}
+                  {Object.keys(p.stems).length} stems
+                  {added > 0 ? ` · ${added} added` : ''}
+                  {p.hasLyrics ? ' · lyrics' : ''}
                   {Object.values(p.stems).some((f) => f === 'wav') ? (
                     <Text style={{ color: C.amber }}> · update on desktop</Text>
                   ) : null}
