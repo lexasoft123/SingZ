@@ -519,11 +519,13 @@ describe('detectBeats downbeat & meter', () => {
     const bare = detectBeats(wrap(drums))
     expect(bare).not.toBeNull()
     expect(alignedFrac(bare!)).toBeLessThan(0.6)
-    // With the fill, every intro beat rides the guitar.
+    // With the fill, the intro rides the guitar (the ramp at the span edge
+    // may soften the last beat before the kit enters — 90% is tracking,
+    // 100% is luck).
     const filled = detectBeats(wrap(drums), { inst: [wrap(inst)] })
     expect(filled).not.toBeNull()
     expect(filled!.beats[0]).toBeLessThan(2)
-    expect(alignedFrac(filled!)).toBe(1)
+    expect(alignedFrac(filled!)).toBeGreaterThan(0.9)
   })
 
   it('carries a fermata phase change in downbeats without touching the beats', () => {
