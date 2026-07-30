@@ -1185,7 +1185,14 @@ export default function App(): React.JSX.Element {
         pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength),
         22050
       )
-      if (!res.ok) return null
+      if (!res.ok) {
+        // A failed model run is a silent quality downgrade (the detector
+        // falls back to drums-only) — it must at least be diagnosable.
+        console.warn('beat model failed:', res.error)
+        ;(window as { __mlGrid?: unknown }).__mlGrid = { ok: false, error: res.error }
+        return null
+      }
+      ;(window as { __mlGrid?: unknown }).__mlGrid = { ok: true, beats: res.beats.length }
       return {
         beats: res.beats,
         downbeats: res.downbeats,
@@ -1193,7 +1200,9 @@ export default function App(): React.JSX.Element {
         downbeatProb: res.downbeatProb,
         fps: res.fps
       }
-    } catch {
+    } catch (e) {
+      console.warn('beat model unavailable:', e)
+      ;(window as { __mlGrid?: unknown }).__mlGrid = { ok: false, error: String(e) }
       return null
     }
   }, [])
