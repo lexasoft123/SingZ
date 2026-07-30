@@ -67,8 +67,11 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * older stamp are silently re-detected on load so fixes reach saved projects.
  * v5: explicit `downbeats` replace the global rotation — beat times are never
  * mutated to force one phase (the old fermata gap re-spacing).
+ * v6: analysis pinned to 44.1 kHz; every input downmixed (device-independent).
+ * v7: instrument fill — where drums are silent the other stems' onsets carry
+ * the pulse, so drumless intros get tracked beats instead of extrapolation.
  */
-export const BEAT_DETECT_VERSION = 6
+export const BEAT_DETECT_VERSION = 7
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -85,12 +88,17 @@ export interface DetectedBeats {
 
 /** Optional extra evidence for the downbeat — pass whatever is loaded. */
 export interface BeatAux {
-  /** Bass stem: chord changes vote for bar starts. */
+  /** Bass stem: chord changes vote for bar starts (and fills quiet drums). */
   bass?: AudioBuffer | null
   /** Vocals stem: phrase entries after rests vote for bar starts. */
   vocals?: AudioBuffer | null
   /** Lyric line start times in seconds: lines sitting on a beat vote. */
   lineStarts?: number[] | null
+  /** Remaining instrument stems (other/guitar/piano): their onsets keep the
+   *  tracker honest where the drums fall silent — picked intros (Nothing
+   *  Else Matters spends 41 s drumless), breakdowns, instrument-only parts.
+   *  Never consulted while drums are active, never part of the vote. */
+  inst?: AudioBuffer[] | null
 }
 
 const HOP = 512
@@ -138,14 +146,130 @@ export function detectBeats(
     energy[i] = sum
     lowEnergy[i] = low
   }
-  const flux = new Float32Array(frames)
+  const drumFlux = new Float32Array(frames)
   const lowFlux = new Float32Array(frames)
-  let fluxSum = 0
   for (let i = 1; i < frames; i++) {
-    flux[i] = Math.max(0, energy[i] - energy[i - 1])
+    drumFlux[i] = Math.max(0, energy[i] - energy[i - 1])
     lowFlux[i] = Math.max(0, lowEnergy[i] - lowEnergy[i - 1])
-    fluxSum += flux[i]
   }
+
+  // Drum-only onsets — they gate the instrument fill below, and later the
+  // downbeat vote's activity mask (a filled guitar intro is not playing drums).
+  const drumPeaks: number[] = []
+  {
+    let dSum = 0
+    for (let i = 1; i < frames; i++) dSum += drumFlux[i]
+    const dMean = dSum / frames
+    const minSep = Math.round(0.12 * fps)
+    let last = -minSep
+    for (let i = 2; i < frames - 2; i++) {
+      const f = drumFlux[i]
+      if (
+        dMean > 0 &&
+        f > 4 * dMean &&
+        f >= drumFlux[i - 1] &&
+        f > drumFlux[i + 1] &&
+        f > drumFlux[i - 2] &&
+        f > drumFlux[i + 2] &&
+        i - last >= minSep
+      ) {
+        drumPeaks.push(i)
+        last = i
+      }
+    }
+  }
+
+  // Instrument fill: where the drums are silent for seconds at a stretch,
+  // the other stems' IMPULSIVE onsets carry the pulse (picked intros,
+  // breakdowns). Gated by distance to the nearest drum onset — never inside
+  // playing drums — and skipped outright when the fill material has no sharp
+  // attacks to offer (sustained pads/strings must not fabricate a pulse).
+  const flux = drumFlux.slice()
+  /** Drum-free spans (frame units) the fill was applied to — placement is
+   *  spliced to these, everything outside stays the drums-only path. */
+  const fillSpans: { a: number; b: number }[] = []
+  // Bass is deliberately NOT a fill source: its sustained eighth-note motion
+  // in short breaks flipped WDOA to a double-tempo octave when it fed the
+  // envelope. It keeps its role as a downbeat VOTER only.
+  const fillBufs = (aux?.inst ?? []).filter((b): b is AudioBuffer => !!b)
+  if (fillBufs.length > 0 && drumPeaks.length > 0) {
+    const instFlux = new Float32Array(frames)
+    for (const fb of fillBufs) {
+      const d = monoAt44k(fb)
+      const fFrames = Math.min(frames, Math.floor(d.length / HOP) - 1)
+      let prev = 0
+      for (let i = 0; i < fFrames; i++) {
+        let sum = 0
+        const off = i * HOP
+        for (let j = 0; j < HOP; j += 4) {
+          const v = d[off + j]
+          sum += v * v
+        }
+        if (i > 0) instFlux[i] += Math.max(0, sum - prev)
+        prev = sum
+      }
+    }
+    // The fill's own impulsive maxima — both the evidence that there is
+    // anything worth tracking and the level reference for scaling.
+    let iSum = 0
+    for (let i = 1; i < frames; i++) iSum += instFlux[i]
+    const iMean = iSum / frames
+    const instMaxima: number[] = []
+    for (let i = 2; i < frames - 2; i++) {
+      const f = instFlux[i]
+      if (f > 4 * iMean && f >= instFlux[i - 1] && f > instFlux[i + 1]) instMaxima.push(f)
+    }
+    const topMean = (xs: number[], k: number): number => {
+      const top = [...xs].sort((a, b) => b - a).slice(0, k)
+      return top.length > 0 ? top.reduce((a, b) => a + b, 0) / top.length : 0
+    }
+    const dTop = topMean(drumPeaks.map((i) => drumFlux[i]), 32)
+    const iTop = topMean(instMaxima, 32)
+    let gSum = 0
+    if (instMaxima.length >= 8 && dTop > 0 && iTop > 0) {
+      const alpha = dTop / iTop
+      // Fill only inside DRUM-FREE SPANS of at least 8 s (intros, outros,
+      // long breakdowns) — a two-bar break must not attract fill, and the
+      // 1 s→2 s ramp keeps span edges gentle. Span edges use a PERMISSIVE
+      // presence threshold (1.5× vs the vote-worthy 4×): lightly-drummed
+      // verses (WDOA's intro rimshots) are drums, not a vacuum.
+      const presence: number[] = []
+      {
+        let dSum2 = 0
+        for (let i = 1; i < frames; i++) dSum2 += drumFlux[i]
+        const dMean2 = dSum2 / frames
+        const minSep = Math.round(0.12 * fps)
+        let last = -minSep
+        for (let i = 1; i < frames - 1; i++) {
+          const f = drumFlux[i]
+          if (dMean2 > 0 && f > 1.5 * dMean2 && f >= drumFlux[i - 1] && f > drumFlux[i + 1] && i - last >= minSep) {
+            presence.push(i)
+            last = i
+          }
+        }
+      }
+      const edges = [-1, ...presence, frames]
+      for (let e = 1; e < edges.length; e++) {
+        if (edges[e] - edges[e - 1] > 8 * fps) fillSpans.push({ a: edges[e - 1], b: edges[e] })
+      }
+      for (const sp of fillSpans) {
+        for (let i = Math.max(0, sp.a + 1); i < Math.min(frames, sp.b); i++) {
+          const dNear = Math.min(i - sp.a, sp.b - i)
+          const g = Math.max(0, Math.min(1, (dNear - fps) / fps))
+          if (g > 0) {
+            flux[i] += g * alpha * instFlux[i]
+            gSum += g
+          }
+        }
+      }
+      if (debug) debug.fill = { alpha, dTop, iTop, instMaxima: instMaxima.length, gSum, frames }
+    } else if (debug) {
+      debug.fill = { skipped: true, instMaxima: instMaxima.length }
+    }
+  }
+
+  let fluxSum = 0
+  for (let i = 1; i < frames; i++) fluxSum += flux[i]
   if (fluxSum <= 1e-9) return null
   const fluxMean = fluxSum / frames
   // Beat-like flux is sparse impulses; dense low ripple (pads, noise) can be
@@ -184,19 +308,26 @@ export function detectBeats(
     return null
   }
 
-  // Local-mean normalized onset strength.
-  const O = new Float32Array(frames)
-  {
+  // Local-mean normalized onset strength. The tempo/octave DECISION reads
+  // the drums alone (fill must never re-vote the tempo family — bass motion
+  // once octave-doubled WDOA); beat PLACEMENT reads the filled envelope.
+  const normStrength = (src: Float32Array, srcMean: number): Float32Array => {
+    const out = new Float32Array(frames)
     const W = Math.round(fps)
     const pref = new Float64Array(frames + 1)
-    for (let i = 0; i < frames; i++) pref[i + 1] = pref[i] + flux[i]
+    for (let i = 0; i < frames; i++) pref[i + 1] = pref[i] + src[i]
     for (let i = 0; i < frames; i++) {
       const a = Math.max(0, i - W)
       const b = Math.min(frames, i + W)
       const local = (pref[b] - pref[a]) / (b - a)
-      O[i] = Math.min(10, flux[i] / (local * 0.8 + fluxMean * 0.2 + 1e-12))
+      out[i] = Math.min(10, src[i] / (local * 0.8 + srcMean * 0.2 + 1e-12))
     }
+    return out
   }
+  const O = normStrength(flux, fluxMean)
+  let drumMeanSum = 0
+  for (let i = 1; i < frames; i++) drumMeanSum += drumFlux[i]
+  const Otempo = fillBufs.length > 0 ? normStrength(drumFlux, drumMeanSum / frames) : O
 
   // Windowed autocorrelation peaks voted into one tempo family.
   const winF = Math.round(20 * fps)
@@ -215,7 +346,7 @@ export function detectBeats(
     let mean = 0
     for (let lag = lagMin; lag <= lagMax; lag++) {
       let sum = 0
-      for (let i = s + lag; i < e; i++) sum += O[i] * O[i - lag]
+      for (let i = s + lag; i < e; i++) sum += Otempo[i] * Otempo[i - lag]
       ac[lag] = sum / Math.max(1, e - s - lag)
       mean += ac[lag]
     }
@@ -275,7 +406,7 @@ export function detectBeats(
 
   // DP beat placement at a candidate tempo; alpha holds the pulse steady
   // against gallops and section changes while still following slow drift.
-  const track = (bpm: number): number[] => {
+  const track = (bpm: number, env: Float32Array): number[] => {
     const P = (60 * fps) / bpm
     const alpha = 50
     const score = new Float32Array(frames)
@@ -295,7 +426,7 @@ export function detectBeats(
           bestJ = j
         }
       }
-      score[i] = O[i] + bestS
+      score[i] = env[i] + bestS
       bp[i] = bestJ
     }
     let end = frames - 1
@@ -326,16 +457,20 @@ export function detectBeats(
     const iv = [...ivRaw].sort((a, b) => a - b)
     const med = iv[Math.floor(iv.length / 2)] || 1
     const tol = Math.min(0.045 * fps, med * 0.2)
+    // Judged against DRUM onsets only: the tempo octave and the accept/reject
+    // gates must be blind to fill onsets, or picking subdivisions in fill
+    // spans buy a double-tempo octave its support (WDOA did exactly that).
+    const judge = drumPeaks.length > 0 ? drumPeaks : peaks
     let active = 0
     let hit = 0
     let pi = 0
     for (const b of beatsF) {
-      while (pi < peaks.length && peaks[pi] < b - med * 0.75) pi++
+      while (pi < judge.length && judge[pi] < b - med * 0.75) pi++
       let near = false
       let on = false
-      for (let k = pi; k < peaks.length && peaks[k] <= b + med * 0.75; k++) {
+      for (let k = pi; k < judge.length && judge[k] <= b + med * 0.75; k++) {
         near = true
-        if (Math.abs(peaks[k] - b) < tol) on = true
+        if (Math.abs(judge[k] - b) < tol) on = true
       }
       if (near) {
         active++
@@ -358,7 +493,7 @@ export function detectBeats(
     let oddS = 0
     for (let k = 0; k < beatsF.length; k++) {
       const f = Math.round(beatsF[k])
-      const v = f > 0 && f < frames ? O[f] : 0
+      const v = f > 0 && f < frames ? Otempo[f] : 0
       if (k % 2 === 0) evenS += v
       else oddS += v
     }
@@ -375,16 +510,18 @@ export function detectBeats(
   }
 
   // Tempo octave: support × steadiness × a gentle singable-tempo prior.
-  let chosen: { beatsF: number[]; q: ReturnType<typeof evaluate>; score: number } | null = null
+  let chosen: { bpm: number; beatsF: number[]; q: ReturnType<typeof evaluate>; score: number } | null = null
   for (const mult of [1, 2, 0.5]) {
     const bpm = tau * mult
     if (bpm < 50 || bpm > 220) continue
-    const beatsF = track(bpm)
+    // Octave SELECTION runs on the drums-only envelope — with identical
+    // inputs to the fill-less detector, the chosen octave cannot change.
+    const beatsF = track(bpm, Otempo)
     if (beatsF.length < 24) continue
     const q = evaluate(beatsF)
     const prior = Math.exp(-0.5 * Math.pow(Math.log2(bpm / 105) / 0.6, 2))
     const s = q.support * q.steadiness * (0.5 + 0.5 * prior) * (0.55 + 0.45 * q.alternation)
-    if (!chosen || s > chosen.score) chosen = { beatsF, q, score: s }
+    if (!chosen || s > chosen.score) chosen = { bpm, beatsF, q, score: s }
   }
   if (!chosen) return null
   if (debug) {
@@ -404,6 +541,28 @@ export function detectBeats(
   if (chosen.q.rough > 0.05) {
     if (debug) debug.reject = 'no steady pulse (intervals jump around)'
     return null
+  }
+
+  // PLACEMENT re-tracks the winning tempo on the filled envelope, then
+  // SPLICES: only beats inside fill spans come from the filled path — the
+  // global DP would otherwise bend the path across lightly-drummed verses
+  // neighbouring a span (WDOA's early bars drifted ~90 s deep). Outside the
+  // spans the drums-only path is kept bit-for-bit.
+  if (fillBufs.length > 0 && fillSpans.length > 0) {
+    const placed = track(chosen.bpm, O)
+    if (placed.length >= 24) {
+      const inSpan = (f: number): boolean => fillSpans.some((sp) => f > sp.a + 1 && f < sp.b - 1)
+      const merged = [
+        ...chosen.beatsF.filter((f) => !inSpan(f)),
+        ...placed.filter((f) => inSpan(f))
+      ].sort((x, y) => x - y)
+      const minGap = ((60 * fps) / chosen.bpm) * 0.5
+      const spliced: number[] = []
+      for (const f of merged) {
+        if (spliced.length === 0 || f - spliced[spliced.length - 1] >= minGap) spliced.push(f)
+      }
+      chosen = { ...chosen, beatsF: spliced, q: evaluate(spliced) }
+    }
   }
 
   // Snap each beat to an adjacent strong onset (frame grid is ~12 ms coarse);
@@ -451,8 +610,8 @@ export function detectBeats(
     let pi = 0
     const tol = 0.3 * medSec * fps
     for (let k = 0; k < beatsSec.length; k++) {
-      while (pi < peaks.length && peaks[pi] < beatFrames[k] - tol) pi++
-      if (pi < peaks.length && Math.abs(peaks[pi] - beatFrames[k]) < tol) active[k] = true
+      while (pi < drumPeaks.length && drumPeaks[pi] < beatFrames[k] - tol) pi++
+      if (pi < drumPeaks.length && Math.abs(drumPeaks[pi] - beatFrames[k]) < tol) active[k] = true
     }
   }
   const kickE = beatsSec.map((_, k) => {

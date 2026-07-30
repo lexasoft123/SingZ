@@ -201,8 +201,16 @@ two-three eighths AFTER the bar line ("So close…" floats over the one at
 pickups-onto-the-one inverted the song's accent and was reverted; the ear
 test for the rotation is the band entrance, which the entrance/slam cues
 already vote. The result drives
-the metronome, count-in and bpm readout, and is saved in `project.json`
-(`settings.beat`, millisecond-rounded: beat times plus, when detection
+the metronome, count-in and bpm readout, and is saved in `project.json`.
+Where the drums fall silent for 8+ s (picked intros — Nothing Else Matters
+is drumless for 41 s — outros, long breakdowns) the OTHER instrument stems'
+impulsive onsets fill the tracking envelope: the tempo/octave decision and
+all accept/reject gates stay drums-only (fill evidence once octave-doubled
+a song), the filled placement is spliced in strictly inside the drum-free
+spans, sustained-only material contributes nothing (rubato rejection intact),
+and bass is a downbeat voter but never fill. The grid then covers the intro
+with real tracked beats instead of constant-tempo extrapolation. It is
+saved as `settings.beat` (millisecond-rounded: beat times plus, when detection
 anchored more than a single uniform grid, `downbeats` — strictly increasing
 beat indices, each starting a bar, bar length = distance to the next entry;
 the legacy `beatsPerBar`/`downbeat` pair stays populated as the dominant

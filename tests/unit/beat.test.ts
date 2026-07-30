@@ -481,6 +481,51 @@ describe('detectBeats downbeat & meter', () => {
     }
   })
 
+  it('tracks a drumless intro from the other instruments', () => {
+    // NEM shape: 20 s of picked guitar alone, then the kit enters. Without
+    // the fill the grid starts where the drums do; with it the intro's own
+    // onsets carry the pulse.
+    const p = 60 / 110
+    const drums = new Float32Array(Math.floor(SR * 70))
+    const inst = new Float32Array(drums.length)
+    // Human-played intro: the pulse breathes ±4% before the kit locks it in —
+    // constant-tempo extension from the body cannot land on these.
+    const truth: number[] = []
+    {
+      let t = 0.5
+      let k = 0
+      while (t < 69.5) {
+        truth.push(t)
+        t += t < 20 ? p * (1 + 0.04 * Math.sin(k / 4)) : p
+        k++
+      }
+    }
+    for (const t of truth) {
+      if (t >= 20) {
+        const b = truth.indexOf(t) % 4
+        if (b === 0 || b === 2) addHit(drums, t, 55, 0.9, 0.09, 0.1)
+        else addHit(drums, t, 220, 0.9, 0.05, 1.2)
+      }
+      // picked guitar throughout — sharp attacks, quiet vs the kit
+      addHit(inst, t, 660, 0.5, 0.03, 0.4)
+    }
+    for (let i = 0; i < drums.length; i++) drums[i] += 0.002 * (rnd() * 2 - 1)
+    const introTruth = truth.filter((x) => x < 20)
+    const alignedFrac = (det: { beats: number[] }): number =>
+      introTruth.filter((t) => det.beats.some((b) => Math.abs(b - t) < 0.07)).length /
+      introTruth.length
+    // Drums alone: whatever the DP lays over the intro (noise-chasing or
+    // nothing) does not track the picking.
+    const bare = detectBeats(wrap(drums))
+    expect(bare).not.toBeNull()
+    expect(alignedFrac(bare!)).toBeLessThan(0.6)
+    // With the fill, every intro beat rides the guitar.
+    const filled = detectBeats(wrap(drums), { inst: [wrap(inst)] })
+    expect(filled).not.toBeNull()
+    expect(filled!.beats[0]).toBeLessThan(2)
+    expect(alignedFrac(filled!)).toBe(1)
+  })
+
   it('carries a fermata phase change in downbeats without touching the beats', () => {
     // section B re-enters shifted by half a bar relative to section A's grid —
     // representable as one odd-length boundary bar; the tracked beat times

@@ -169,6 +169,11 @@ async function runLibrary(detect) {
     // a true downmix now (pass --channel0 to reproduce the pre-fix left-only bug).
     const bass = bassP ? audioBuffer(decodeF32(bassP, { channel0: CH0 })) : null
     const vocals = vocalsP ? audioBuffer(decodeF32(vocalsP, { channel0: CH0 })) : null
+    // Instrument fill (v7): every remaining stem, mirroring the app.
+    const inst = ['other', 'guitar', 'piano']
+      .map((n) => stemPath(dir, n))
+      .filter(Boolean)
+      .map((p) => audioBuffer(decodeF32(p, { channel0: CH0 })))
     let lineStarts = null
     const lyricsP = join(dir, 'lyrics.json')
     if (existsSync(lyricsP)) {
@@ -180,7 +185,7 @@ async function runLibrary(detect) {
       }
     }
     const dbg = {}
-    const det = detect(drumsBuf, { bass, vocals, lineStarts }, dbg)
+    const det = detect(drumsBuf, { bass, vocals, inst, lineStarts }, dbg)
     const secs = ((Date.now() - t0) / 1000).toFixed(1)
     const got = det
       ? { bpm: Math.round(det.bpm * 10) / 10, bpb: det.beatsPerBar, rot: ((det.downbeat % det.beatsPerBar) + det.beatsPerBar) % det.beatsPerBar }
@@ -195,6 +200,20 @@ async function runLibrary(detect) {
       checkable++
       status = det === null ? 'pass' : 'FAIL'
       expected = 'reject (null)'
+    } else if (spec.barAt != null) {
+      // Time-anchored check: a bar start must land on the ear-verified bar
+      // time (index-based rotations shift whenever newly-tracked intro beats
+      // prepend — bar TIMES are the invariant that matters).
+      checkable++
+      expected = `bar @ ${spec.barAt}s / ${spec.bpb}`
+      if (!det || !got || got.bpb !== spec.bpb) {
+        status = 'FAIL'
+      } else {
+        const med = 60 / det.bpm
+        const bars = (det.downbeats ?? det.beats.map((_, i) => i).filter((i) => (((i - det.downbeat) % det.beatsPerBar) + det.beatsPerBar) % det.beatsPerBar === 0)).map((i) => det.beats[i])
+        const near = bars.reduce((m, t) => Math.min(m, Math.abs(t - spec.barAt)), Infinity)
+        status = near < 0.25 * med ? 'pass' : 'FAIL'
+      }
     } else {
       checkable++
       expected = `rot ${JSON.stringify(spec.rot)} / ${spec.bpb}`

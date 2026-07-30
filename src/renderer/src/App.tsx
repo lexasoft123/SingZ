@@ -192,6 +192,9 @@ export default function App(): React.JSX.Element {
   sepRunningRef.current = sep !== null
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
   const bassBufRef = useRef<AudioBuffer | null>(null)
+  /** Non-drum, non-bass, non-vocal stems (other/guitar/piano) — the beat
+   *  tracker's fill where drums are silent. */
+  const instBufsRef = useRef<AudioBuffer[]>([])
   const linesRef = useRef<LyricLine[] | null>(null)
   const originalBufRef = useRef<AudioBuffer | null>(null)
   const lyricsRef = useRef(lyrics)
@@ -348,6 +351,7 @@ export default function App(): React.JSX.Element {
       setMelody({ status: 'none' })
       vocalsBufRef.current = null
       drumsBufRef.current = null
+      instBufsRef.current = []
       bassBufRef.current = null
       originalBufRef.current = null
       setSongInfo({ key: null, bpm: null })
@@ -432,6 +436,9 @@ export default function App(): React.JSX.Element {
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
           bassBufRef.current = buffers[order.indexOf('bass')] ?? null
+          instBufsRef.current = order
+            .map((s, i) => (s !== 'vocals' && s !== 'drums' && s !== 'bass' ? buffers[i] : null))
+            .filter((b): b is AudioBuffer => !!b)
           // Restore training BEFORE karaoke may reopen: its auto-mute must
           // know training governs the vocals (the ref is set synchronously —
           // state alone would land a render too late).
@@ -659,6 +666,9 @@ export default function App(): React.JSX.Element {
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
       bassBufRef.current = buffers[order.indexOf('bass')] ?? null
+      instBufsRef.current = order
+        .map((s, i) => (s !== 'vocals' && s !== 'drums' && s !== 'bass' ? buffers[i] : null))
+        .filter((b): b is AudioBuffer => !!b)
       // Analyze right away (melody, key, bpm) so karaoke opens warm and the
       // bpm box fills in without a trip through karaoke mode. If karaoke was
       // open last session, reopen it.
@@ -889,6 +899,7 @@ export default function App(): React.JSX.Element {
           const det = detectBeats(drumsBufRef.current, {
             bass: bassBufRef.current,
             vocals: vocalsBufRef.current,
+            inst: instBufsRef.current,
             lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
           })
           if (det) {
@@ -1146,6 +1157,7 @@ export default function App(): React.JSX.Element {
     const det = detectBeats(buf, {
       bass: bassBufRef.current,
       vocals: vocalsBufRef.current,
+      inst: instBufsRef.current,
       lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null
     })
     if (det) {
