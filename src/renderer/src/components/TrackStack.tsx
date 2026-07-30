@@ -21,6 +21,8 @@ interface Props {
   onAddTrack: () => void
   /** Drop one of those added lanes again. */
   onRemoveTrack: (id: string) => void
+  /** Rename one of those added lanes (the label only — files stay put). */
+  onRenameTrack: (id: string, label: string) => void
 }
 
 function SelectionRange({
@@ -85,7 +87,8 @@ export default function TrackStack({
   onSolo,
   onVolume,
   onAddTrack,
-  onRemoveTrack
+  onRemoveTrack,
+  onRenameTrack
 }: Props): React.JSX.Element {
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
@@ -280,6 +283,7 @@ export default function TrackStack({
             onSolo={onSolo}
             onVolume={onVolume}
             onRemove={t.custom ? onRemoveTrack : undefined}
+            onRename={t.custom ? onRenameTrack : undefined}
           />
         )
       })}

@@ -176,6 +176,43 @@ describe('saving custom tracks', () => {
     expect((await metaOf(dir)).settings.custom).toBeUndefined()
   })
 
+  it('renaming a track is a label change — the audio stays exactly where it is', async () => {
+    const root = await makeLibrary()
+    const dir = await makeProject(root, 'My Song')
+    const picked = await looseTrack('take 3.mp3', 'the-take')
+
+    const first = await saveProject(join(dir, 'song.mp3'), 'My Song', {
+      transpose: 0,
+      custom: [track('custom-take-3', picked, 'Take 3')],
+      tracks: {}
+    })
+    if (!first.ok) throw new Error('first save failed')
+    const stored = join(dir, 'stems', 'custom-take-3.mp3')
+
+    // the singer renames the lane to "Second voice" and saves again
+    const renamed = await saveProject(join(dir, 'song.mp3'), 'My Song', {
+      transpose: 0,
+      custom: [{ ...first.custom![0], label: 'Second voice' }],
+      tracks: {}
+    })
+
+    expect(renamed.ok).toBe(true)
+    expect((await metaOf(dir)).settings.custom).toEqual([
+      {
+        id: 'custom-take-3',
+        label: 'Second voice',
+        color: '#8fd3ff',
+        file: join('stems', 'custom-take-3.mp3')
+      }
+    ])
+    // the file keeps its name and its bytes: nothing to re-upload to Drive,
+    // nothing for the phones to download again
+    expect(await readFile(stored, 'utf8')).toBe('the-take')
+    expect((await readdir(join(dir, 'stems'))).filter((f) => f.startsWith('custom-'))).toEqual([
+      'custom-take-3.mp3'
+    ])
+  })
+
   it('never writes outside the project folder, whatever the id says', async () => {
     const root = await makeLibrary()
     const dir = await makeProject(root, 'My Song')

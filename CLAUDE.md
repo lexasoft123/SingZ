@@ -147,6 +147,9 @@ answer your evals while you measure the phone.
   way out and back to relative on save, because a moved project folder (rename,
   import, another machine's cloud library) would rot absolute paths. Lanes may
   now differ in length: waveform view fractions are per buffer, not per song.
+  **Renaming one changes `label` and nothing else** — the id is the mixer key
+  AND the file name, so deriving either from the display name would move audio
+  on every rename (Drive re-upload, phone re-download, orphaned mixer state).
 - **Projects open from anywhere and stay where they are** — a project folder
   need not sit under the library root (copied, shared, another machine's cloud
   library). `registerSource` must `allowRoot` the detected project dir or
