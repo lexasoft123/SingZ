@@ -55,12 +55,12 @@ for rel in vendor mobile/gdrive.config.json mobile/android/local.properties; do
   fi
 done
 
-# Content hashing lets the global ccache hit across worktrees — a fresh
-# checkout re-stamps every mtime, so the default timestamp check misses 100%.
-if command -v ccache >/dev/null 2>&1; then
-  ccache --set-config compiler_check=content
-  echo "ccache: compiler_check=content (global, shared by all worktrees)"
-fi
+# ccache needs no setup here: every worktree already shares one cache dir
+# (it is per-user, not per-checkout), and what makes a SIBLING worktree
+# actually hit — base_dir + hash_dir, against absolute paths and -g — is
+# passed per build by vendor-whisper.sh, run-with-ccache.js and, for Xcode,
+# mobile/scripts/ccache-xcode-conf.js at postinstall. Nothing outside the
+# project is written; see docs/DEVELOPMENT.md.
 
 echo "Desktop deps (npm ci; postinstall bakes gdrive-config + checks patches):"
 (cd "$WT" && npm ci)

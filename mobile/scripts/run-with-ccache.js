@@ -6,12 +6,21 @@
  * same mechanism). Without ccache the command runs untouched.
  */
 const { spawnSync } = require('child_process')
+const path = require('path')
 
 const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['ccache'])
 const env = { ...process.env }
 if (probe.status === 0) {
   env.CMAKE_C_COMPILER_LAUNCHER = env.CMAKE_C_COMPILER_LAUNCHER || 'ccache'
   env.CMAKE_CXX_COMPILER_LAUNCHER = env.CMAKE_CXX_COMPILER_LAUNCHER || 'ccache'
+  // Cross-worktree hits: the NDK compiles with absolute paths and Debug adds
+  // -g (which hashes the CWD), so without these a sibling checkout shares the
+  // cache dir and hits nothing in it. base_dir is this checkout's own root —
+  // paths under it hash relative, so every worktree agrees. Env only: we set
+  // no ccache config file, the machine's own settings stay untouched.
+  env.CCACHE_BASEDIR = env.CCACHE_BASEDIR || path.resolve(__dirname, '..', '..')
+  env.CCACHE_NOHASHDIR = env.CCACHE_NOHASHDIR || '1'
+  env.CCACHE_COMPILERCHECK = env.CCACHE_COMPILERCHECK || 'content'
 } else {
   console.log('ccache not found — native builds run without a compiler cache')
 }
