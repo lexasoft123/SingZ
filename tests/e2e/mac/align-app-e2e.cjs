@@ -25,7 +25,11 @@ const LYRICS = join(ROOT, PROJECT, 'lyrics.json');
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js');
 
 (async () => {
-  const app = await _electron.launch({ executablePath: require('electron'), args: [APP] });
+  const app = await _electron.launch({
+    executablePath: require('electron'),
+    args: [APP],
+    env: { ...process.env, SINGZ_MUTE: '1' } // automated runs are silent
+  });
   const win = await app.firstWindow();
   await win.waitForLoadState('domcontentloaded');
   await win.waitForSelector('.lib-card', { timeout: 20000 });

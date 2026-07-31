@@ -152,6 +152,7 @@ const du = (dir) => {
     (await val('typeof __test.forget')) === 'function',
     `metro :${PORT}`
   );
+  await ev('__test.engine.master.gain.value = 0'); // automated runs are silent
 
   // --- the phone library lists the seeded project
   await ev("void __test.selectMode('phone')");

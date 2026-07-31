@@ -33,7 +33,17 @@ agent in `.claude/agents/` — launch one instance per platform in parallel
 for cross-platform verification) — vitest unit tests in
 `tests/unit/` covering the v2 FLAC format with electron aliased to a stub).
 Load files through the hidden `<input type=file>` — same code
-path as drag-drop. Read the screenshots you take. Details + env hooks:
+path as drag-drop. Read the screenshots you take.
+**Automated runs are silent** — sound is only for a human listening
+(end-user checks/demos). Desktop drivers launch with `SINGZ_MUTE=1`
+(→ Chromium mute-audio; analysers, sinkId and timing behave exactly as
+audible — permanent drivers set it themselves, scratchpad drivers must
+too); sim tests zero `__test.engine.master.gain` after the hook-wait
+(metronome clicks bypass master, so that test passes `volume: 0` —
+`clickCount` still counts); the Android emulator gets
+`adb shell cmd media_session volume --stream 3 --set 0` (the old
+`media volume` is gone on API 36; `--set 10` to hear it again for a
+human demo). Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,

@@ -27,11 +27,11 @@ const feed = process.env.E2E_FEED_URL ?? null
 const launch = (env = {}) =>
   _electron.launch(
     packaged
-      ? { executablePath: packaged, args: [], env: { ...process.env, ...env } }
+      ? { executablePath: packaged, args: [], env: { ...process.env, SINGZ_MUTE: '1', ...env } }
       : {
           args: [path.resolve('out/main/index.js')],
           executablePath: require('electron'),
-          env: { ...process.env, ...env }
+          env: { ...process.env, SINGZ_MUTE: '1', ...env }
         }
   )
 

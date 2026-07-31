@@ -24,7 +24,11 @@ const MMS = join(
   if (!existsSync(MMS)) throw new Error('MMS checkpoint not installed — nothing to hide');
   renameSync(MMS, MMS + '.bak');
   try {
-    const app = await _electron.launch({ executablePath: require('electron'), args: [APP] });
+    const app = await _electron.launch({
+      executablePath: require('electron'),
+      args: [APP],
+      env: { ...process.env, SINGZ_MUTE: '1' } // automated runs are silent
+    });
     const win = await app.firstWindow();
     await win.waitForLoadState('domcontentloaded');
     await win.waitForSelector('.chip-status', { timeout: 20000 });

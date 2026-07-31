@@ -38,6 +38,12 @@ if (process.env.SINGZ_FAKE_MIC) {
   app.commandLine.appendSwitch('use-fake-ui-for-media-capture')
 }
 
+// Test hook: automated runs are silent — Chromium mutes the audio device
+// while the graph (analysers, sinkId, timing) behaves exactly as audible.
+if (process.env.SINGZ_MUTE) {
+  app.commandLine.appendSwitch('mute-audio')
+}
+
 // Test hook: isolate userData — concurrent E2E drivers (or a driver next to
 // a dev instance) sharing the default "Electron" profile crash each other's
 // renderers. Shared caches (models, GPU pack) stay in appData/SingZ.

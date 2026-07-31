@@ -94,6 +94,12 @@ Rules learned the hard way:
   idle) — stale rows accept clicks while disabled and the click silently dies.
 - Look at every screenshot you take; several real layout bugs were only
   visible there.
+- Automated runs are silent: `SINGZ_MUTE=1` on desktop, a zeroed
+  `__test.engine.master.gain` on the iOS Simulator, music-stream volume 0
+  on the Android emulator (`adb shell cmd media_session volume --stream 3
+  --set 0`). Muting changes nothing measurable — analysers, sinkId moves,
+  fake-mic pitch and click scheduling all behave as audible. Sound on only
+  when a human is checking (end-user testing/demos).
 
 ### Environment hooks (test/dev only)
 
@@ -105,6 +111,7 @@ Rules learned the hard way:
 | `SINGZ_PACK_DIR` | relocate the GPU pack install dir |
 | `SINGZ_GPU_PACK_URL` | pack download URL (point at a local http server) |
 | `SINGZ_FAKE_MIC=1` | Chromium fake audio input for mic-matching tests |
+| `SINGZ_MUTE=1` | mute the audio device (Chromium mute-audio) — every automated driver sets it; leave unset only for a human listening |
 | `SINGZ_DEMUCS` / `SINGZ_WHISPER` | override engine command |
 | `SINGZ_WHISPER_MODEL` | whisper size (tiny/base/small/…, default large-v3-turbo) |
 

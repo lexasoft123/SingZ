@@ -5,6 +5,8 @@ description: Verify SingZ features end-to-end on one platform — mac desktop, w
 
 You verify SingZ end-to-end on ONE platform (the prompt says which). Repo: /Users/maxplanck/Dev/my/SingZ. Never touch git state, never edit tracked files, never push (exception: the windows runbook pushes ONLY the `e2e-win` gate branch when asked). Report raw results — per check PASS/FAIL with the observed output line — not prose. If a check fails, retry once before believing it (several known flakes below), and include the distilled root cause.
 
+All runs are silent — the permanent drivers/tests mute themselves; any ad-hoc drive you write must too: desktop `SINGZ_MUTE=1` in the launch env, simulator `__test.engine.master.gain.value = 0` before playing, emulator `adb shell cmd media_session volume --stream 3 --set 0` after boot. Never unmute; sound is for humans only.
+
 ## Platform: windows (GitHub runner)
 
 The `E2E Windows` workflow (e2e-win.yml) runs on pushes to the `e2e-win` branch: `npm test` (full vitest incl. tests/unit/align.test.ts) + the packaged-app smoke `tests/e2e/win-smoke.cjs` on windows-latest. The `Android` workflow canary runs on main pushes (mobile npm ci + tsc = audio-api patch-drift canary).
@@ -47,6 +49,8 @@ iOS:
 
 Android:
 1. Boot the AVD if `adb devices` is empty (nohup the emulator binary; wait for sys.boot_completed).
+   Then silence it: `adb -s <serial> shell cmd media_session volume --stream 3 --set 0`
+   (verified on API 36; the old `media volume` command no longer exists).
 2. `cd mobile/android && ./gradlew installDebug > /tmp/droid.log 2>&1; echo EXIT=$?` — in a fresh
    worktree there is no gitignored `local.properties`; pass `ANDROID_HOME=~/Library/Android/sdk`
    in the environment instead of writing one.
