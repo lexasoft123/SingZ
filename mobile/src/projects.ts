@@ -1,5 +1,8 @@
 import { NativeModules } from 'react-native'
 import { decodeAudioData, type AudioBuffer } from 'react-native-audio-api'
+// static on purpose: CatalogScreen already loads gdrive at startup, and a
+// dynamic import() here is the one thing jest cannot execute
+import { driveForgetCached, driveLocalFile, driveReadText } from './gdrive'
 import type { LyricsDoc, ProjectDoc } from './model'
 import { customTracks, STEM_ORDER_ALL } from './model'
 
@@ -73,7 +76,6 @@ export const cacheUsage = (): Promise<CacheUsage[]> =>
  */
 export async function clearCache(project = ''): Promise<void> {
   await Folder.clearCache(project)
-  const { driveForgetCached } = await import('./gdrive')
   await driveForgetCached(project)
 }
 
@@ -171,16 +173,27 @@ export async function loadProject(
 ): Promise<LoadedProject> {
   const gdrive = entry.source === 'gdrive'
   const fetchFile = (file: string): Promise<string> =>
-    gdrive
-      ? import('./gdrive').then((g) => g.driveLocalFile(entry.dir, file))
-      : Folder.localFile(entry.dir, file)
+    gdrive ? driveLocalFile(entry.dir, file) : Folder.localFile(entry.dir, file)
   const readText = (file: string): Promise<string> =>
-    gdrive
-      ? import('./gdrive').then((g) => g.driveReadText(entry.dir, file))
-      : Folder.readText(entry.dir, file)
+    gdrive ? driveReadText(entry.dir, file) : Folder.readText(entry.dir, file)
+
+  // A Drive listing's doc is a summary — the catalog manifest carries no
+  // player state (beat grid, mixer, transpose). The real project.json rides
+  // with the song; driveReadText keeps a copy, so a song opened once still
+  // opens offline with everything. Falling back to the summary means a
+  // never-opened song with no signal plays, just without those settings.
+  let doc = entry.doc
+  if (gdrive) {
+    await crumb?.('fetching project.json')
+    try {
+      doc = JSON.parse(await readText('project.json')) as ProjectDoc
+    } catch {
+      doc = entry.doc
+    }
+  }
 
   const ids = STEM_ORDER_ALL.filter((s) => entry.stems[s])
-  const added = customTracks(entry.doc?.settings)
+  const added = customTracks(doc?.settings)
   const total = ids.length + added.length
   const stems: LoadedLane[] = []
   const tooBig = (bytes: number): never => {
@@ -240,5 +253,5 @@ export async function loadProject(
       lyrics = null
     }
   }
-  return { name: entry.doc.name ?? entry.dir, doc: entry.doc, lyrics, stems }
+  return { name: doc.name ?? entry.dir, doc, lyrics, stems }
 }

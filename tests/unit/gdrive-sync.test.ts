@@ -25,7 +25,20 @@ afterAll(async () => {
 
 async function seedProject(root: string, name: string): Promise<void> {
   await mkdir(join(root, name, 'stems'), { recursive: true })
-  await writeFile(join(root, name, 'project.json'), JSON.stringify({ version: 2, name }))
+  await writeFile(
+    join(root, name, 'project.json'),
+    JSON.stringify({
+      version: 2,
+      name,
+      savedAt: '2026-07-30T00:00:00.000Z',
+      settings: {
+        transpose: 1,
+        tracks: { vocals: { gain: 0.5 } },
+        beat: { beats: [0.5, 1.0, 1.5], beatsPerBar: 4, downbeat: 0 },
+        custom: [{ id: 'custom-x', label: 'X', color: '#ffffff', file: 'stems/custom-x.mp3' }]
+      }
+    })
+  )
   await writeFile(join(root, name, 'lyrics.json'), JSON.stringify({ lines: [] }))
   await writeFile(join(root, name, 'stems', 'vocals.flac'), Buffer.from('fLaC-fake-vocals'))
   await writeFile(join(root, name, 'stems', 'drums.flac'), Buffer.from('fLaC-fake-drums'))
@@ -74,6 +87,13 @@ describe('gdriveSync (against the mock Drive)', () => {
       'lyrics.json',
       'project.json'
     ])
+    // the doc is a listing summary — player state (beat grids alone were two
+    // thirds of the manifest) stays in each project's own project.json
+    expect(manifest.projects[0].doc.savedAt).toBe('2026-07-30T00:00:00.000Z')
+    expect(manifest.projects[0].doc.settings.custom).toHaveLength(1)
+    expect(manifest.projects[0].doc.settings.beat).toBeUndefined()
+    expect(manifest.projects[0].doc.settings.tracks).toBeUndefined()
+    expect(manifest.projects[0].doc.version).toBeUndefined()
 
     const second = await gdriveSync()
     expect(second).toMatchObject({ ok: true, uploaded: 0, unchanged: 4 })

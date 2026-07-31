@@ -62,15 +62,17 @@ const ok = (body: unknown): unknown => ({
   text: async () => JSON.stringify(body)
 })
 
-/** What the desktop's catalog.json holds for newDrive()'s library. */
+/** What the desktop's catalog.json holds for newDrive()'s library. The doc
+ *  is the listing summary the desktop writes — never the full project.json. */
 function addManifest(drive: DriveState, overrides: Partial<Record<string, unknown>> = {}): void {
   drive.children.ROOT.push({ id: 'CAT', name: 'catalog.json', mimeType: 'application/json' })
+  const full = JSON.parse(drive.media.M1)
   drive.media.CAT = JSON.stringify({
     format: 1,
     projects: [
       {
         dir: 'Song One',
-        doc: JSON.parse(drive.media.M1),
+        doc: { name: full.name, savedAt: full.savedAt, settings: { custom: full.settings?.custom } },
         files: [
           { id: 'M1', name: 'project.json', mimeType: 'application/json', size: '40', md5Checksum: 'm-1' },
           { id: 'L1', name: 'lyrics.json', mimeType: 'application/json', size: '30', md5Checksum: 'l-1' }
@@ -274,6 +276,32 @@ describe('the desktop-written manifest', () => {
     fetchToCache.mockClear()
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
     expect(fetchToCache.mock.calls[0][4]).toBe(100) // unchanged md5: cached
+  })
+
+  it('opening a song fetches the player state the summary omits', async () => {
+    const drive = newDrive()
+    drive.media.M1 = JSON.stringify({
+      name: 'Song One',
+      savedAt: '2026-01-01T00:00:00.000Z',
+      settings: { transpose: 2, beat: { beats: [0.5, 1, 1.5], beatsPerBar: 4, downbeat: 0 } }
+    })
+    addManifest(drive)
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    const entries = await g.driveListProjects()
+    // the listing carries no beat grid...
+    expect((entries[0].doc.settings as { beat?: unknown })?.beat).toBeUndefined()
+
+    // ...an open fetches the real project.json, with everything
+    const { loadProject } = require('../src/projects') as typeof import('../src/projects')
+    const first = await loadProject(entries[0], 48000, () => {})
+    expect((first.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
+
+    // and a song opened once keeps its settings with no signal at all
+    drive.offline = true
+    const again = await loadProject(entries[0], 48000, () => {})
+    expect((again.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
   })
 
   it('ignores a stale manifest and walks the folders instead', async () => {

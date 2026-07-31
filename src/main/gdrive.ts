@@ -403,7 +403,16 @@ export async function gdriveSync(
         }
       }
       try {
-        proj.doc = JSON.parse(await readFile(join(root, dir, 'project.json'), 'utf8'))
+        const doc = JSON.parse(await readFile(join(root, dir, 'project.json'), 'utf8')) as {
+          name?: unknown
+          savedAt?: unknown
+          settings?: { custom?: unknown }
+        }
+        // Only what the phone's catalog screen shows: name, sort key, and the
+        // singer's added tracks (their files count toward the download size).
+        // The full project.json — beat grids alone were two thirds of the
+        // manifest — stays per project and is fetched when a song is opened.
+        proj.doc = { name: doc?.name, savedAt: doc?.savedAt, settings: { custom: doc?.settings?.custom } }
         catalog.push(proj)
       } catch {
         // unreadable project.json — left out of the manifest; phones notice
