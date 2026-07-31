@@ -116,11 +116,21 @@ async function packComplete(): Promise<boolean> {
 
 /** Files older app versions downloaded that nothing uses any more. */
 export async function cleanupObsoleteModels(): Promise<void> {
-  for (const name of [
+  const names = [
     'ggml-model-htdemucs-4s-f16.bin',
     'ggml-model-htdemucs-4s-f16.bin.part',
     'htdemucs_6s.ok'
-  ]) {
+  ]
+  if (isOnnxPack()) {
+    // 0.10.0 resolved the aligner install to the Apple-Silicon torch entry
+    // (registry id collision) — ONNX-pack machines got a 1.26 GB checkpoint
+    // nothing here can load. The real aligner is mms-fa.onnx in modelsDir.
+    names.push(
+      join('torch-home', 'hub', 'checkpoints', 'model.pt'),
+      join('torch-home', 'hub', 'checkpoints', 'model.pt.part')
+    )
+  }
+  for (const name of names) {
     const p = join(modelsDir(), name)
     if (await exists(p)) {
       await rm(p, { force: true })
@@ -293,9 +303,18 @@ const REGISTRY: RegistryEntry[] = [
   }
 ]
 
-function forThisPlatform(): RegistryEntry[] {
-  const here = `${process.platform}-${process.arch}`
+function forThisPlatform(here = `${process.platform}-${process.arch}`): RegistryEntry[] {
   return REGISTRY.filter((e) => !e.platforms || e.platforms.includes(here))
+}
+
+/**
+ * Ids repeat across platform flavors (both aligner entries are 'aligner'), so
+ * an install must resolve through the platform filter — a raw REGISTRY.find
+ * handed Windows the Apple-Silicon torch checkpoint: 1.26 GB downloaded, tile
+ * still "not installed", forever.
+ */
+export function registryEntryFor(id: string, here?: string): RegistryEntry | undefined {
+  return forThisPlatform(here).find((e) => e.id === id)
 }
 
 export class ModelManager {
@@ -336,7 +355,7 @@ export class ModelManager {
       // lever for installs that exist on disk but fail to run)
       const wanted = all.filter((m) => (ids ? ids.includes(m.id) : m.required && !m.present))
       for (const m of wanted) {
-        const entry = REGISTRY.find((e) => e.id === m.id)
+        const entry = registryEntryFor(m.id)
         if (!entry) continue
         onProgress({ id: entry.id, percent: 0 })
         if (entry.kind === 'file') {
@@ -347,6 +366,8 @@ export class ModelManager {
             (pct) => onProgress({ id: entry.id, percent: pct }),
             this.abort.signal
           )
+          log('models', `${entry.id} installed (${entry.file})`)
+          onProgress({ id: entry.id, percent: 100 })
         } else {
           const archive = join(packDir(), '..', `${entry.id}.tar.gz`)
           await downloadFile(

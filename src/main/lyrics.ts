@@ -6,7 +6,14 @@ import { basename, dirname, join } from 'node:path'
 import type { AlignCheck, LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
 import { alignToTranscription, ctcOutcome, guessLanguage, transcriptionUsable } from './align'
 import { preciseCapable, runMmsAlign } from './align-mms'
-import { lookupLyrics, lyricsById, metaFromFilename, type TrackMeta } from './lrclib'
+import {
+  fixTagEncoding,
+  lookupLyrics,
+  lyricsById,
+  metaFromFilename,
+  realArtist,
+  type TrackMeta
+} from './lrclib'
 import { stemsRoot } from './media'
 import { log } from './log'
 import { downloadFile, mmsModelMb, mmsModelPath, mmsModelUrl, modelsDir } from './models'
@@ -112,25 +119,37 @@ interface LyricsCache {
   credit?: string
   aligned?: boolean
   check?: AlignCheck
+  /** Transcribed while LRCLIB was unanswering — ask again on a later open. */
+  lrclibPending?: boolean
   lines: LyricLine[]
 }
 
-async function readTrackMeta(songPath: string, durationSec: number): Promise<TrackMeta> {
-  const fromName = metaFromFilename(basename(songPath))
+/**
+ * Tag meta plus the filename reading kept separately — junk tags (placeholder
+ * artists, mojibake) are common on old rips, and the filename is often the
+ * only truthful copy of artist/title.
+ */
+export async function readTrackMeta(
+  songPath: string,
+  durationSec: number
+): Promise<{ meta: TrackMeta; fromFile: TrackMeta }> {
+  const fromFile: TrackMeta = { ...metaFromFilename(basename(songPath)), durationSec }
   try {
     const mm = await import('music-metadata')
     const parsed = await mm.parseFile(songPath, { duration: false })
-    const title = parsed.common.title?.trim()
+    const artist = realArtist(fixTagEncoding(parsed.common.artist?.trim()))
+    const title = fixTagEncoding(parsed.common.title?.trim())
     const cleaned = title ? metaFromFilename(title) : null
-    return {
-      artist: parsed.common.artist?.trim() || cleaned?.artist || fromName.artist,
-      title: cleaned?.title || fromName.title,
-      altTitle: cleaned?.title ? cleaned.altTitle : fromName.altTitle,
-      album: parsed.common.album?.trim(),
+    const meta: TrackMeta = {
+      artist: artist || cleaned?.artist || fromFile.artist,
+      title: cleaned?.title || fromFile.title,
+      altTitle: cleaned?.title ? cleaned.altTitle : fromFile.altTitle,
+      album: fixTagEncoding(parsed.common.album?.trim()),
       durationSec
     }
+    return { meta, fromFile }
   } catch {
-    return { ...fromName, durationSec }
+    return { meta: fromFile, fromFile }
   }
 }
 
@@ -161,6 +180,7 @@ export class Transcriber {
         credit: raw.credit,
         aligned: raw.aligned,
         check: raw.check,
+        lrclibPending: raw.lrclibPending,
         lines: raw.lines
       }
     } catch {
@@ -171,6 +191,26 @@ export class Transcriber {
   private async writeCache(file: string, cache: LyricsCache): Promise<void> {
     await mkdir(join(file, '..'), { recursive: true })
     await writeFile(file, JSON.stringify(cache), 'utf8')
+  }
+
+  /**
+   * LRCLIB by tag meta, then by the filename when the tags led elsewhere —
+   * the filename is often the only truthful copy on junk-tagged rips.
+   */
+  private async searchOnline(
+    songPath: string,
+    durationSec: number
+  ): Promise<{ hit?: { lines: LyricLine[]; credit: string }; down: boolean }> {
+    const { meta, fromFile } = await readTrackMeta(songPath, durationSec)
+    log('lyrics', `LRCLIB search: ${meta.artist ?? '?'} — ${meta.title ?? '?'} (${Math.round(durationSec)}s)`)
+    let out = await lookupLyrics(meta)
+    if (out === 'miss' && (fromFile.artist !== meta.artist || fromFile.title !== meta.title)) {
+      log('lyrics', `LRCLIB retry from the file name: ${fromFile.artist ?? '?'} — ${fromFile.title}`)
+      out = await lookupLyrics(fromFile)
+    }
+    if (out === 'miss') return { down: false }
+    if (out === 'down') return { down: true }
+    return { hit: out.hit, down: false }
   }
 
   /** Apply a manually chosen LRCLIB record and cache it for this song. */
@@ -226,6 +266,35 @@ export class Transcriber {
       !alignBase &&
       (prefer === 'auto' || (prefer === 'whisper' && cached.source === 'whisper'))
     ) {
+      // Whisper lyrics born during an LRCLIB outage are provisional — ask
+      // again now, and either upgrade to synced lyrics or settle the matter.
+      if (prefer === 'auto' && cached.lrclibPending) {
+        log('lyrics', 'cached lyrics were transcribed while LRCLIB was unanswering — asking again')
+        onProgress({ stage: 'searching', percent: 10 })
+        const found = await this.searchOnline(songPath, durationSec)
+        if (found.hit) {
+          log(
+            'lyrics',
+            `LRCLIB answered this time: ${found.hit.credit} — synced lyrics replace the transcription`
+          )
+          await this.writeCache(lyricsPath, {
+            source: 'lrclib',
+            credit: found.hit.credit,
+            lines: found.hit.lines
+          })
+          return {
+            ok: true,
+            cached: false,
+            source: 'lrclib',
+            credit: found.hit.credit,
+            lines: found.hit.lines
+          }
+        }
+        if (!found.down) {
+          // a real miss this time — keep the transcription and stop asking
+          await this.writeCache(lyricsPath, { ...cached, lrclibPending: undefined })
+        }
+      }
       log('lyrics', `using cached lyrics for ${basename(songPath)} (${cached.source}${cached.aligned ? ', aligned' : ''}) from ${lyricsPath}`)
       return {
         ok: true,
@@ -239,17 +308,26 @@ export class Transcriber {
     }
 
     // 1) Online synced lyrics (no stems, no model needed)
+    let lrclibDown = false
     if (prefer === 'auto' && !alignBase) {
       onProgress({ stage: 'searching', percent: 10 })
-      const meta = await readTrackMeta(songPath, durationSec)
-      log('lyrics', `LRCLIB search: ${meta.artist ?? '?'} — ${meta.title ?? '?'} (${Math.round(durationSec)}s)`)
-      const hit = await lookupLyrics(meta)
-      if (hit) {
-        log('lyrics', `LRCLIB hit: ${hit.credit ?? 'synced lyrics'}`)
-        await this.writeCache(lyricsPath, { source: 'lrclib', credit: hit.credit, lines: hit.lines })
-        return { ok: true, cached: false, source: 'lrclib', credit: hit.credit, lines: hit.lines }
+      const found = await this.searchOnline(songPath, durationSec)
+      if (found.hit) {
+        log('lyrics', `LRCLIB hit: ${found.hit.credit ?? 'synced lyrics'}`)
+        await this.writeCache(lyricsPath, {
+          source: 'lrclib',
+          credit: found.hit.credit,
+          lines: found.hit.lines
+        })
+        return { ok: true, cached: false, source: 'lrclib', credit: found.hit.credit, lines: found.hit.lines }
       }
-      log('lyrics', 'LRCLIB: no match')
+      lrclibDown = found.down
+      log(
+        'lyrics',
+        lrclibDown
+          ? 'LRCLIB: no answer (down or unreachable from here) — will ask again another time'
+          : 'LRCLIB: no match'
+      )
     }
 
     // 2) Fallback: on-device transcription of the vocals stem (project-local
@@ -461,7 +539,13 @@ export class Transcriber {
             const lines = groupWords(words)
             await writeFile(
               lyricsPath,
-              JSON.stringify({ source: 'whisper', lines } satisfies LyricsCache),
+              JSON.stringify({
+                source: 'whisper',
+                lines,
+                // an outage is not a verdict — flag the cache so a later
+                // open asks LRCLIB again instead of keeping these forever
+                lrclibPending: lrclibDown || undefined
+              } satisfies LyricsCache),
               'utf8'
             )
             await rm(outDir, { recursive: true, force: true })

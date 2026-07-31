@@ -25,18 +25,83 @@ interface LrclibRecord {
   plainLyrics?: string | null
 }
 
-async function apiJson(path: string): Promise<unknown | null> {
+/**
+ * 'miss' is LRCLIB saying "no such record"; 'down' is LRCLIB not answering —
+ * timeout, Cloudflare shield, 5xx. The two must stay distinct: a miss is a
+ * final verdict, a non-answer is not (the 2026-07-30 outage turned a day of
+ * lookups into whisper lyrics that stuck forever).
+ */
+type ApiAnswer = { json: unknown } | 'miss' | 'down'
+
+// One non-answer usually means the service is down or blocking this network —
+// remember briefly so a batch of songs doesn't each queue 20s of dead waits.
+const DOWN_TTL_MS = 5 * 60_000
+let downUntil = 0
+
+async function apiJson(path: string): Promise<ApiAnswer> {
+  if (Date.now() < downUntil) return 'down'
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), 10_000)
   try {
     const res = await net.fetch(`${API}${path}`, { headers: HEADERS, signal: ac.signal })
-    if (!res.ok) return null
-    return await res.json()
+    if (res.status === 404) return 'miss'
+    if (!res.ok) {
+      downUntil = Date.now() + DOWN_TTL_MS
+      return 'down'
+    }
+    // a bot-check HTML page with status 200 lands here — treat it as down too
+    try {
+      return { json: await res.json() }
+    } catch {
+      downUntil = Date.now() + DOWN_TTL_MS
+      return 'down'
+    }
   } catch {
-    return null
+    downUntil = Date.now() + DOWN_TTL_MS
+    return 'down'
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * CP1251 tag bytes read as Latin-1 ("Àðèÿ" for "Ария") — the standard ailment
+ * of old Russian rips, whose ID3v2.3 frames claim ISO-8859-1. Only strings
+ * that are clearly that soup are converted: no real Cyrillic yet, nothing
+ * outside Latin-1, and the suspicious range outweighs plain ASCII letters
+ * (so "Motörhead" and "Für Elise" pass through untouched).
+ */
+export function fixTagEncoding(s: string | undefined): string | undefined {
+  if (!s || /[\u0400-\u04ff]/.test(s) || !/^[\u0000-\u00ff]*$/.test(s)) return s
+  const suspicious = (s.match(/[\u0080-\u00ff]/g) ?? []).length
+  const ascii = (s.match(/[A-Za-z]/g) ?? []).length
+  if (suspicious < 3 || suspicious < ascii) return s
+  try {
+    const fixed = new TextDecoder('windows-1251').decode(Buffer.from(s, 'latin1'))
+    return /[\u0400-\u04ff]/.test(fixed) ? fixed : s
+  } catch {
+    return s
+  }
+}
+
+const PLACEHOLDER_ARTISTS = new Set([
+  'artist',
+  'unknown',
+  'unknown artist',
+  'va',
+  'various',
+  'various artists',
+  'артист',
+  'исполнитель',
+  'неизвестен',
+  'неизвестный',
+  'неизвестный исполнитель'
+])
+
+/** Ripper placeholders ("Артист", "Unknown") — worse than no artist for search. */
+export function realArtist(s: string | undefined): string | undefined {
+  if (!s || PLACEHOLDER_ARTISTS.has(s.toLowerCase())) return undefined
+  return s
 }
 
 /** "08. Sixteen Tons [Am +2st]" / "Sixteen Tons (Am, +2)" → artist?/title. */
@@ -144,9 +209,9 @@ export async function searchCandidates(
     if (query.title) q.set('track_name', query.title)
     if (query.artist) q.set('artist_name', query.artist)
   }
-  const found = (await apiJson(`/search?${q}`)) as LrclibRecord[] | null
-  if (!Array.isArray(found)) return []
-  return found
+  const answer = await apiJson(`/search?${q}`)
+  if (answer === 'miss' || answer === 'down' || !Array.isArray(answer.json)) return []
+  return (answer.json as LrclibRecord[])
     .map(toCandidate)
     .sort(
       (a, b) =>
@@ -161,18 +226,26 @@ export async function lyricsById(
   id: number,
   durationSec: number
 ): Promise<{ lines: LyricLine[]; credit: string } | null> {
-  const rec = (await apiJson(`/get/${id}`)) as LrclibRecord | null
+  const answer = await apiJson(`/get/${id}`)
+  if (answer === 'miss' || answer === 'down') return null
+  const rec = answer.json as LrclibRecord | null
   if (!rec?.syncedLyrics) return null
   const lines = parseLrc(rec.syncedLyrics, durationSec)
   if (lines.length === 0) return null
   return { lines, credit: [rec.artistName, rec.trackName].filter(Boolean).join(' — ') }
 }
 
-/** Look up synced lyrics; null when nothing trustworthy is found. */
-export async function lookupLyrics(
-  meta: TrackMeta
-): Promise<{ lines: LyricLine[]; credit: string } | null> {
+/**
+ * 'miss' means LRCLIB answered and has nothing trustworthy; 'down' means at
+ * least one query went unanswered, so the verdict is unknown — callers must
+ * not treat it as final.
+ */
+export type LookupOutcome = { hit: { lines: LyricLine[]; credit: string } } | 'miss' | 'down'
+
+/** Look up synced lyrics by meta (exact triple first, then search). */
+export async function lookupLyrics(meta: TrackMeta): Promise<LookupOutcome> {
   let best: LrclibRecord | null = null
+  let sawDown = false
 
   if (meta.artist) {
     const q = new URLSearchParams({
@@ -181,25 +254,33 @@ export async function lookupLyrics(
       duration: String(Math.round(meta.durationSec))
     })
     if (meta.album) q.set('album_name', meta.album)
-    const exact = (await apiJson(`/get?${q}`)) as LrclibRecord | null
-    if (exact && !exact.instrumental && exact.syncedLyrics) best = exact
+    const answer = await apiJson(`/get?${q}`)
+    if (answer === 'down') sawDown = true
+    else if (answer !== 'miss') {
+      const exact = answer.json as LrclibRecord | null
+      if (exact && !exact.instrumental && exact.syncedLyrics) best = exact
+    }
   }
 
   if (!best) {
     const q = new URLSearchParams({ track_name: meta.title })
     if (meta.artist) q.set('artist_name', meta.artist)
-    const found = (await apiJson(`/search?${q}`)) as LrclibRecord[] | null
-    if (Array.isArray(found)) best = pickBest(found, meta.durationSec)
+    const answer = await apiJson(`/search?${q}`)
+    if (answer === 'down') sawDown = true
+    else if (answer !== 'miss' && Array.isArray(answer.json)) {
+      best = pickBest(answer.json as LrclibRecord[], meta.durationSec)
+    }
   }
 
   if (!best?.syncedLyrics && meta.altTitle && meta.altTitle !== meta.title) {
     log('lyrics', `retrying LRCLIB with unstripped title: ${meta.altTitle}`)
-    return lookupLyrics({ ...meta, title: meta.altTitle, altTitle: undefined })
+    const retry = await lookupLyrics({ ...meta, title: meta.altTitle, altTitle: undefined })
+    if (retry !== 'miss') return retry
   }
 
-  if (!best?.syncedLyrics) return null
+  if (!best?.syncedLyrics) return sawDown ? 'down' : 'miss'
   const lines = parseLrc(best.syncedLyrics, meta.durationSec)
-  if (lines.length === 0) return null
+  if (lines.length === 0) return 'miss'
   const credit = [best.artistName, best.trackName].filter(Boolean).join(' — ')
-  return { lines, credit }
+  return { hit: { lines, credit } }
 }

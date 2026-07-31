@@ -12,6 +12,10 @@ export const app = {
   getName: (): string => 'SingZ'
 }
 export const dialog = {}
+// lrclib.ts pulls net at import time; unit tests never actually fetch
+export const net = {
+  fetch: (): Promise<never> => Promise.reject(new Error('no network in unit tests'))
+}
 export class BrowserWindow {
   static getAllWindows(): BrowserWindow[] {
     return []

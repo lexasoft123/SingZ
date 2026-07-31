@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, delimiter, extname, join } from 'node:path'
@@ -247,7 +247,12 @@ export class Separator {
 
   private describe(e: ResolvedEngine): string {
     if (e.kind === 'onnx') {
-      return process.platform === 'win32' ? 'splitter pack (DirectML)' : 'splitter pack (ONNX)'
+      if (process.platform !== 'win32') return 'splitter pack (ONNX)'
+      // The marker flips the actual provider to CPU — a label still claiming
+      // DirectML misled every field log read after a GPU failure.
+      return existsSync(dmlFlagPath())
+        ? 'splitter pack (CPU — DirectML is switched off here)'
+        : 'splitter pack (DirectML)'
     }
     return e.cmd.join(' ')
   }
