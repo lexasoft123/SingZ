@@ -778,3 +778,68 @@ describe('detectBeats leading-span splice (v12)', () => {
     }
   })
 })
+
+describe('detectBeats level-matched splice view (v13)', () => {
+  it('a model lattice on eighths still repairs a quarter-level void', () => {
+    // same shape as the v11 void test, but the model tracks EIGHTHS for the
+    // whole song (TTP's habit) — the raw interval ratio (~2) used to disable
+    // every splice; the halved view must repair the void at quarter level
+    const truth: number[] = []
+    let t = 0.4
+    let k = 0
+    while (t < 99) {
+      truth.push(t)
+      const inVoid = t >= 30 && t < 72
+      const bpm = inVoid ? 120 + 6 * Math.sin((k / 14) * Math.PI) : 120
+      t += 60 / bpm
+      k++
+    }
+    const eighths: number[] = []
+    for (let i = 0; i < truth.length; i++) {
+      eighths.push(truth[i])
+      if (i + 1 < truth.length) eighths.push((truth[i] + truth[i + 1]) / 2)
+    }
+    const played = truth.filter((x) => x < 30 || x >= 72)
+    const voidBeats = truth.filter((x) => x >= 32 && x < 70)
+    const band = (beats: number[], strums: number[]): AudioBuffer => {
+      const data = new Float32Array(SR * 100)
+      for (let b = 0; b < beats.length; b++) {
+        const f = b % 2 === 0 ? 55 : 200
+        const amp = b % 4 === 0 ? 1.0 : 0.6
+        const at = Math.round(beats[b] * SR)
+        for (let i = 0; i < 3500 && at + i < data.length; i++) {
+          data[at + i] += amp * Math.exp(-i / 700) * Math.sin((2 * Math.PI * f * i) / SR)
+        }
+      }
+      for (const st of strums) {
+        const at = Math.round(st * SR)
+        for (let i = 0; i < 3000 && at + i < data.length; i++) {
+          data[at + i] += 0.8 * Math.exp(-i / 600) * Math.sin((2 * Math.PI * 330 * i) / SR)
+        }
+      }
+      return wrap(data)
+    }
+    const strums: number[] = []
+    for (let st = 30.3; st < 71.5; st += 0.4 + 0.5 * rnd()) strums.push(st)
+    const ml = {
+      beats: eighths,
+      downbeats: eighths.filter((_, i) => i % 8 === 0)
+    }
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(band(played, []), { inst: [band(played, strums)], ml }, dbg)
+    expect(det).not.toBeNull()
+    expect(dbg.mlSplice).toBeTruthy()
+    // spliced beats sit at QUARTER level on the wobble, not eighths
+    const inVoid = det!.beats.filter((x) => x >= 34 && x < 68)
+    const iv = inVoid.slice(1).map((x, i) => x - inVoid[i])
+    const med = [...iv].sort((a, b) => a - b)[iv.length >> 1]
+    expect(med).toBeGreaterThan(0.4)
+    let worst = 0
+    for (const tv of voidBeats) {
+      let best = Infinity
+      for (const d of det!.beats) best = Math.min(best, Math.abs(d - tv))
+      worst = Math.max(worst, best)
+    }
+    expect(worst).toBeLessThan(0.05)
+  })
+})
