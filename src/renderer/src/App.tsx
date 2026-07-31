@@ -74,6 +74,46 @@ function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[
   return { order: keptOrder, buffers: keptBuffers }
 }
 
+/** Diagnostics hook (same idea as __melody/__mlGrid): every in-app beat
+ *  detection publishes its inputs and debug trail so E2E drivers can diff the
+ *  app run against the eval harness — app-vs-harness grid divergences are
+ *  invisible without this. */
+function publishBeatDbg(
+  why: string,
+  drums: AudioBuffer,
+  aux: {
+    bass: AudioBuffer | null
+    vocals: AudioBuffer | null
+    inst: AudioBuffer[]
+    lineStarts: number[] | null
+    ml: MlGrid | null | undefined
+  },
+  det: ReturnType<typeof detectBeats>,
+  dbg: Record<string, unknown>
+): void {
+  const stat = (b: AudioBuffer | null): { sr: number; n: number; ch: number } | null =>
+    b ? { sr: b.sampleRate, n: b.length, ch: b.numberOfChannels } : null
+  ;(window as { __beatDbg?: unknown }).__beatDbg = {
+    why,
+    drums: stat(drums),
+    bass: stat(aux.bass),
+    vocals: stat(aux.vocals),
+    inst: aux.inst.map((b) => stat(b)),
+    lineStarts: aux.lineStarts?.length ?? null,
+    ml: aux.ml ? { beats: aux.ml.beats.length, downbeats: aux.ml.downbeats.length } : null,
+    det: det
+      ? {
+          bpm: det.bpm,
+          beatsPerBar: det.beatsPerBar,
+          downbeat: det.downbeat,
+          beats: det.beats,
+          downbeats: det.downbeats ?? null
+        }
+      : null,
+    dbg
+  }
+}
+
 function makeTrack(
   id: string,
   buffer: AudioBuffer,
@@ -1041,13 +1081,16 @@ export default function App(): React.JSX.Element {
               // let the bar paint before the synchronous tracker blocks
               setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
               await new Promise((r) => setTimeout(r, 30))
-              const det = detectBeats(drums, {
+              const aux = {
                 bass: bassBufRef.current,
                 vocals: vocalsBufRef.current,
                 inst: instBufsRef.current,
                 lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
                 ml
-              })
+              }
+              const dbg = {}
+              const det = detectBeats(drums, aux, dbg)
+              publishBeatDbg('auto', drums, aux, det, dbg)
               if (det) {
                 setBeatInfo({
                   beats: det.beats,
@@ -1369,13 +1412,16 @@ export default function App(): React.JSX.Element {
         if (drumsBufRef.current !== buf) return // song changed mid-flight
         setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
         await new Promise((r) => setTimeout(r, 30))
-        const det = detectBeats(buf, {
+        const aux = {
           bass: bassBufRef.current,
           vocals: vocalsBufRef.current,
           inst: instBufsRef.current,
           lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
           ml
-        })
+        }
+        const dbg = {}
+        const det = detectBeats(buf, aux, dbg)
+        publishBeatDbg('redetect', buf, aux, det, dbg)
         if (det) {
           touchSettings()
           setBeatInfo({

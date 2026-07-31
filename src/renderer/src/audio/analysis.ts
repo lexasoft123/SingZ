@@ -88,8 +88,13 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * v14: interior spliced spans re-vote their bar rotation from chord-change
  * mass + the model's downbeat head (margin-gated) — extension across a
  * span nothing ever voted accented TTP's bass solo on the wrong "1".
+ * v15: octave near-ties break on acoustic evidence alone (decoder noise
+ * flipped Puppe between 117.8 in the harness and 58.9 in the app), and
+ * halved-view splices pick the alternate set PER SPAN by which one carries
+ * the model's bar lines (one global parity clicked Puppe's whole verse on
+ * the off-beat after the body re-locked phase across the quiet stretch).
  */
-export const BEAT_DETECT_VERSION = 14
+export const BEAT_DETECT_VERSION = 15
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -313,6 +318,8 @@ export function detectBeats(
     // compatibility. Doubling views (model on half notes) are not built:
     // no song has needed one; the adopted-lattice path handles SoF's case.
     let mlB: number[] | null = null
+    let thinViews: { a: number[]; b: number[] } | null = null
+    let mlBarTimes: number[] | null = null
     if (ratio > 0.9 && ratio < 1.1) {
       mlB = mlChoice.beatsSec
     } else if (ratio > 1.7 && ratio < 2.3) {
@@ -339,7 +346,61 @@ export function detectBeats(
       }
       const a = thin(0)
       const b = thin(1)
-      mlB = score(a) <= score(b) ? a : b
+      const sa = score(a)
+      const sb = score(b)
+      mlB = sa <= sb ? a : b
+      // v15: parity views for the PER-SPAN choice below. Greedy thin(0)/
+      // thin(1) converge onto one subsequence at the first interval anomaly
+      // (an ornament, an odd bar) — measured IDENTICAL through Puppe's
+      // verse, so they cannot express "the other parity" there. Partition
+      // instead by offset from the PRECEDING model bar line: even offsets
+      // are the half-rate beat that carries the "1", odd offsets are the
+      // off-beat. Re-anchoring at every bar line survives ornaments and odd
+      // bars (the phase shift lands exactly at a bar line, where music puts
+      // it). The GLOBAL view keeps the greedy thin — its silence-healing
+      // matters for whole-song repairs and v13 behavior stays byte-stable.
+      const dts0 = aux?.ml?.downbeats
+      if (dts0 && dts0.length >= 2) {
+        mlBarTimes = dts0
+        const evenV: number[] = []
+        const oddV: number[] = []
+        const tolD = 0.25 * mlChoice.medSec
+        let j0 = -1
+        {
+          let best = Infinity
+          for (let i = 0; i < src.length; i++) {
+            const d = Math.abs(src[i] - dts0[0])
+            if (d < best) {
+              best = d
+              j0 = i
+            }
+          }
+          if (best > tolD) j0 = -1
+        }
+        let di = 0
+        let k = -1
+        for (let i = 0; i < src.length; i++) {
+          while (di < dts0.length && dts0[di] < src[i] - tolD) di++
+          if (di < dts0.length && Math.abs(dts0[di] - src[i]) <= tolD) {
+            k = 0
+            di++
+          } else if (k >= 0) {
+            k++
+          }
+          const par = k >= 0 ? k % 2 : j0 >= 0 ? (j0 - i) % 2 : 0
+          if (par === 0) evenV.push(src[i])
+          else oddV.push(src[i])
+        }
+        if (evenV.length >= 8 && oddV.length >= 8) thinViews = { a: evenV, b: oddV }
+      }
+      if (debug) {
+        debug.mlView = {
+          ratio: Math.round(ratio * 100) / 100,
+          scoreA: Math.round(sa * 1000),
+          scoreB: Math.round(sb * 1000),
+          picked: mlB === a ? 0 : 1
+        }
+      }
     }
     if (mlB && mlB.length >= 16) {
       /** Fraction of the model's intervals within tol of their own median
@@ -352,12 +413,60 @@ export function detectBeats(
         const m = [...iv].sort((x, y) => x - y)[iv.length >> 1]
         return iv.filter((x) => Math.abs(x - m) <= tol * m).length / iv.length
       }
-      const spliceDbg: { aSec: number; bSec: number; removed: number; added: number; why: string }[] = []
+      /** v15: which alternate set to insert for THIS span. When the
+       *  surviving lattice at BOTH span edges agrees with the global view,
+       *  the body's phase is continuous across the span and the v13 pick
+       *  stands — TTP's ear-approved bridge and solo repairs live here.
+       *  When the edges DISAGREE (Puppe free-runs a 43 s verse and re-locks
+       *  half a beat off at 67 s — pre-edge and post-edge on opposite
+       *  parities), continuity cannot decide, and the model's bar lines do:
+       *  the alternate set that carries them is the beat, the other is the
+       *  off-beat (Puppe's verse clicked 2-and-4 of every model bar for
+       *  34 s — the drift the singer heard). Bar-less spans keep the global
+       *  pick. */
+      const viewFor = (aSec: number, bSec: number): number[] => {
+        if (!thinViews) return view
+        const lo = aSec + 0.5 * med
+        const hi = bSec - 0.5 * med
+        const pre = L.beatsSec.filter((t) => t <= lo && t > lo - 4 * med)
+        const post = L.beatsSec.filter((t) => t >= hi && t < hi + 4 * med)
+        const sideOk = (v: number[], side: number[]): boolean => {
+          if (side.length === 0) return true // no evidence = no veto
+          const ds = side
+            .map((e) => v.reduce((m, t) => Math.min(m, Math.abs(t - e)), Infinity))
+            .sort((x, y) => x - y)
+          return ds[ds.length >> 1] < 0.3 * med
+        }
+        if (sideOk(view, pre) && sideOk(view, post)) return view
+        const dts = mlBarTimes
+        if (!dts || dts.length === 0) return view
+        const tol = 0.25 * mlChoice.medSec
+        const carry = (v: number[]): number => {
+          let c = 0
+          for (const d of dts) {
+            if (d < aSec || d > bSec) continue
+            let best = Infinity
+            for (const t of v) {
+              const x = Math.abs(t - d)
+              if (x < best) best = x
+            }
+            if (best < tol) c++
+          }
+          return c
+        }
+        const ca = carry(thinViews.a)
+        const cb = carry(thinViews.b)
+        lastCarry = { ca, cb }
+        if (ca === cb) return view
+        return ca > cb ? thinViews.a : thinViews.b
+      }
+      let lastCarry: { ca: number; cb: number } | null = null
+      const spliceDbg: { aSec: number; bSec: number; removed: number; added: number; why: string; ca?: number; cb?: number }[] = []
       const splice = (aSec: number, bSec: number, why: string): void => {
         const lo = aSec + 0.5 * med
         const hi = bSec - 0.5 * med
         if (hi <= lo) return
-        const ins = view.filter((t) => t > lo && t < hi)
+        const ins = viewFor(aSec, bSec).filter((t) => t > lo && t < hi)
         // the model must have actually tracked the stretch — one it also
         // gave up on keeps the old path
         if (ins.length < (0.5 * (bSec - aSec)) / med) return
@@ -374,8 +483,10 @@ export function detectBeats(
           bSec: Math.round(bSec * 10) / 10,
           removed: before - kept.length,
           added: ins.length,
-          why
+          why,
+          ...(lastCarry ?? {})
         })
+        lastCarry = null
       }
       for (const v of L.voids ?? []) {
         if (v.trailing) continue
@@ -417,7 +528,18 @@ export function detectBeats(
       if (debug && spliceDbg.length > 0) debug.mlSplice = spliceDbg
     }
   }
-  if (debug) debug.lattice = lat === mlChoice ? 'ml' : 'drums'
+  if (debug) {
+    debug.lattice = lat === mlChoice ? 'ml' : 'drums'
+    if (lat.voids?.length) {
+      debug.voids = lat.voids.map((v) => ({
+        aSec: Math.round(v.aSec * 10) / 10,
+        bSec: Math.round(v.bSec * 10) / 10,
+        leading: v.leading,
+        trailing: v.trailing,
+        filled: v.filled
+      }))
+    }
+  }
   const beatsSec = lat.beatsSec
   const medSec = lat.medSec
   const O = lat.O
@@ -1352,7 +1474,8 @@ function trackFromDrums(
   }
 
   // Tempo octave: support × steadiness × a gentle singable-tempo prior.
-  let chosen: { bpm: number; beatsF: number[]; q: ReturnType<typeof evaluate>; score: number } | null = null
+  const cands: { bpm: number; beatsF: number[]; q: ReturnType<typeof evaluate>; score: number }[] = []
+  const octavesDbg: { bpm: number; support: number; steadiness: number; alternation: number; rough: number; prior: number; score: number }[] = []
   for (const mult of [1, 2, 0.5]) {
     const bpm = tau * mult
     if (bpm < 50 || bpm > 220) continue
@@ -1363,7 +1486,32 @@ function trackFromDrums(
     const q = evaluate(beatsF)
     const prior = Math.exp(-0.5 * Math.pow(Math.log2(bpm / 105) / 0.6, 2))
     const s = q.support * q.steadiness * (0.5 + 0.5 * prior) * (0.55 + 0.45 * q.alternation)
-    if (!chosen || s > chosen.score) chosen = { bpm, beatsF, q, score: s }
+    octavesDbg.push({
+      bpm: Math.round(bpm * 10) / 10,
+      support: Math.round(q.support * 1000) / 1000,
+      steadiness: Math.round(q.steadiness * 1000) / 1000,
+      alternation: Math.round(q.alternation * 1000) / 1000,
+      rough: Math.round(q.rough * 1000) / 1000,
+      prior: Math.round(prior * 1000) / 1000,
+      score: Math.round(s * 10000) / 10000
+    })
+    cands.push({ bpm, beatsF, q, score: s })
+  }
+  if (debug) debug.octaves = octavesDbg
+  cands.sort((x, y) => y.score - x.score)
+  let chosen: { bpm: number; beatsF: number[]; q: ReturnType<typeof evaluate>; score: number } | null =
+    cands[0] ?? null
+  // v15: near-ties resolve on acoustic evidence alone. WebAudio and ffmpeg
+  // decode the same FLACs a hair apart, and Puppe's octave race measured
+  // 0.48% — the SAME code shipped a 117.8 bpm grid from the eval harness
+  // and a 58.9 bpm grid from the app. Within a 3% tie the prior is opinion
+  // at noise level; support × alternation measured a 2x gap (0.41 vs 0.83)
+  // and survives any decoder. The margin must stay well under Sixteen
+  // Tons' 11% — its steadiness win over a 0.19-alternation half-time
+  // candidate is real and must not be re-litigated acoustically.
+  if (cands.length >= 2 && cands[0].score - cands[1].score < 0.03 * cands[0].score) {
+    const acoustic = (c: { q: ReturnType<typeof evaluate> }): number => c.q.support * c.q.alternation
+    chosen = acoustic(cands[1]) > acoustic(cands[0]) ? cands[1] : cands[0]
   }
   if (!chosen) return null
   if (debug) {

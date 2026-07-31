@@ -900,3 +900,135 @@ describe('detectBeats span-phase vote (v14)', () => {
     }
   })
 })
+
+describe('detectBeats octave tiebreak (v15)', () => {
+  it('a knife-edge octave race resolves on acoustic evidence, not the prior', () => {
+    // Puppe shape distilled: half-time kit (every strong beat carries a hit)
+    // with soft off-beat hats tuned so the DOUBLE octave's score edges ahead
+    // by well under 3% only through the singable prior. WebAudio vs ffmpeg
+    // decode the same file a hair apart, and this margin flipped Puppe's
+    // whole grid between the app (58.9) and the harness (117.8). Inside the
+    // tie window the acoustically dominant octave (full support, no
+    // alternation penalty) must win deterministically.
+    const data = new Float32Array(SR * 80)
+    for (let b = 0; b * 1.0 + 0.4 < 79; b++) {
+      const at = Math.round((0.4 + b) * SR)
+      const f = b % 2 === 0 ? 55 : 200
+      const amp = b % 4 === 0 ? 1.0 : 0.7
+      for (let i = 0; i < 3500 && at + i < data.length; i++) {
+        data[at + i] += amp * Math.exp(-i / 700) * Math.sin((2 * Math.PI * f * i) / SR)
+      }
+      const at2 = Math.round((0.9 + b) * SR)
+      for (let i = 0; i < 2000 && at2 + i < data.length; i++) {
+        data[at2 + i] += 0.17 * Math.exp(-i / 500) * Math.sin((2 * Math.PI * 900 * i) / SR)
+      }
+    }
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(wrap(data), undefined, dbg)
+    expect(det).not.toBeNull()
+    const oc = dbg.octaves as { bpm: number; score: number }[]
+    expect(oc.length).toBeGreaterThanOrEqual(2)
+    const sorted = [...oc].sort((x, y) => y.score - x.score)
+    // self-check the fixture still exercises the tiebreak: the raw score
+    // winner is the DOUBLE octave, by less than the 3% window
+    expect(Math.abs(sorted[0].bpm - 120)).toBeLessThan(3)
+    expect(sorted[0].score - sorted[1].score).toBeLessThan(0.03 * sorted[0].score)
+    // ...and the detector still picks the half-time family
+    expect(Math.abs(det!.bpm - 60)).toBeLessThan(2)
+  })
+})
+
+describe('detectBeats per-span parity (v15)', () => {
+  // Shared shape: quarters at 0.5 s, a drumless 48–84 s stretch bridged only
+  // by loose strums (the fill gate honestly refuses), and a model that rides
+  // EIGHTHS throughout (ratio 2 → halved view) with bar lines every 8
+  // eighths on the ODD eighth parity. The pre-body is the LONGER side so the
+  // v13 global parity follows it — exactly Puppe's geometry.
+  const eighthAt = (i: number): number => 0.4 + 0.25 * i
+  const bandOf = (beats: number[], strums: number[]): AudioBuffer => {
+    const data = new Float32Array(SR * 100)
+    for (let b = 0; b < beats.length; b++) {
+      const f = b % 2 === 0 ? 55 : 200
+      const amp = b % 4 === 0 ? 1.0 : 0.6
+      const at = Math.round(beats[b] * SR)
+      for (let i = 0; i < 3500 && at + i < data.length; i++) {
+        data[at + i] += amp * Math.exp(-i / 700) * Math.sin((2 * Math.PI * f * i) / SR)
+      }
+    }
+    for (const st of strums) {
+      const at = Math.round(st * SR)
+      for (let i = 0; i < 3000 && at + i < data.length; i++) {
+        data[at + i] += 0.8 * Math.exp(-i / 600) * Math.sin((2 * Math.PI * 330 * i) / SR)
+      }
+    }
+    return wrap(data)
+  }
+  const mkStrums = (): number[] => {
+    const out: number[] = []
+    for (let st = 48.3; st < 83.5; st += 0.4 + 0.5 * rnd()) out.push(st)
+    return out
+  }
+  const eighths: number[] = []
+  for (let i = 0; eighthAt(i) < 99; i++) eighths.push(eighthAt(i))
+  const ml = {
+    beats: eighths,
+    downbeats: eighths.filter((_, i) => i % 8 === 7)
+  }
+  const parityMiss = (
+    det: { beats: number[] } | null,
+    par: number
+  ): { on: number; off: number } => {
+    // worst distance from in-span detected beats to the given eighth parity
+    expect(det).not.toBeNull()
+    let on = 0
+    let off = Infinity
+    for (const t of det!.beats.filter((x) => x > 52 && x < 80)) {
+      const d = (p: number): number => {
+        let best = Infinity
+        for (let i = p; ; i += 2) {
+          const e = eighthAt(i)
+          if (e > t + 0.6) break
+          best = Math.min(best, Math.abs(e - t))
+        }
+        return best
+      }
+      on = Math.max(on, d(par))
+      off = Math.min(off, d(1 - par))
+    }
+    return { on, off }
+  }
+
+  it('edges that DISAGREE hand the span to the model bar carrier (Puppe)', () => {
+    // the body re-enters half a beat off after the quiet stretch — the coast
+    // phase and the re-locked phase cannot both be right, and the model's
+    // bar lines (odd parity) must pick the span's alternate set
+    const pre = eighths.filter((_, i) => i % 2 === 0).filter((t) => t < 48)
+    const post = eighths.filter((_, i) => i % 2 === 1).filter((t) => t >= 84)
+    const played = [...pre, ...post]
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(bandOf(played, []), { inst: [bandOf(played, mkStrums())], ml }, dbg)
+    expect(det).not.toBeNull()
+    expect(Math.abs(det!.bpm - 120)).toBeLessThan(3)
+    expect(dbg.mlSplice).toBeTruthy()
+    const { on, off } = parityMiss(det, 1)
+    expect(on).toBeLessThan(0.06) // in-span beats ride the bar-carrying odd set
+    expect(off).toBeGreaterThan(0.15) // and not the even coast extension
+  })
+
+  it('edges that AGREE keep the global parity — model bars do not hijack (TTP)', () => {
+    // same span, but the body is phase-continuous straight through; the
+    // model still marks bars on the odd parity, and must NOT move the span
+    const played = eighths.filter((_, i) => i % 2 === 0)
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(bandOf(played.filter((t) => t < 48 || t >= 84), []), {
+      inst: [bandOf(played.filter((t) => t < 48 || t >= 84), mkStrums())],
+      ml
+    }, dbg)
+    expect(det).not.toBeNull()
+    expect(Math.abs(det!.bpm - 120)).toBeLessThan(3)
+    expect(dbg.mlSplice).toBeTruthy()
+    const { on, off } = parityMiss(det, 0)
+    expect(on).toBeLessThan(0.06) // continuous even parity kept
+    expect(off).toBeGreaterThan(0.15) // bar lines did not drag it to odd
+  })
+})
