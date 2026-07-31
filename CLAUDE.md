@@ -186,7 +186,15 @@ answer your evals while you measure the phone.
   nothing changed. Phones list from it in three requests instead of three
   per song; they trust it only while it names exactly the root's project
   folders (an older desktop pushing leaves it stale) and fall back to
-  walking the folders otherwise, so old apps and old desktops keep working. OAuth client config: mobile/gdrive.config.json (gitignored;
+  walking the folders otherwise, so old apps and old desktops keep working.
+  Its docs are listing summaries (name, savedAt, settings.custom) — players
+  fetch the project's own project.json on open, kept offline like lyrics
+  (beat grids alone were two thirds of the manifest). Stem md5s ride in
+  project.json (`stemHashes`: md5+size+mtimeMs per stems/ file,
+  save-maintained, sync-backfilled) so a clean sync reads no stem bytes:
+  hashing evicted iCloud stems re-downloaded the whole library each sync,
+  which read as "sync re-uploads my media". The desktop also reconciles on
+  launch, not only after saves — a sync killed mid-run self-heals next start. OAuth client config: mobile/gdrive.config.json (gitignored;
   CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
   generate the gdrive-config.ts modules from it — both are gitignored, never
   in the repo, EMPTY when the json is absent, so a fresh checkout needs

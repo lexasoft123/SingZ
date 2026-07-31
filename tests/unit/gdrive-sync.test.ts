@@ -1,9 +1,24 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { startMockDrive, type MockDrive } from './mock-drive'
+
+/** Every fs read of a stem file — the whole point of stored stem hashes is
+ *  that a clean sync performs none (hashing evicted iCloud stems downloads
+ *  them, which read as "sync re-uploads my library"). */
+const { stemReads } = vi.hoisted(() => ({ stemReads: { count: 0 } }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...real,
+    readFile: (async (...a: Parameters<typeof real.readFile>) => {
+      if (/stems[/\\]/.test(String(a[0]))) stemReads.count++
+      return real.readFile(...a)
+    }) as typeof real.readFile
+  }
+})
 
 let mock: MockDrive
 
@@ -95,10 +110,20 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(manifest.projects[0].doc.settings.tracks).toBeUndefined()
     expect(manifest.projects[0].doc.version).toBeUndefined()
 
+    // the first sync hashed the stems once and folded the hashes into
+    // project.json (uploaded in the same run)
+    const saved = JSON.parse(await readFile(join(root, 'Mock Song', 'project.json'), 'utf8'))
+    expect(Object.keys(saved.stemHashes).sort()).toEqual(['drums.flac', 'vocals.flac'])
+    const remoteMeta = [...mock.files.values()].find((f) => f.name === 'project.json')
+    expect(JSON.parse(remoteMeta!.bytes!.toString()).stemHashes).toEqual(saved.stemHashes)
+
+    stemReads.count = 0
     const second = await gdriveSync()
     expect(second).toMatchObject({ ok: true, uploaded: 0, unchanged: 4 })
     // identical library => identical manifest bytes => the rewrite is skipped
     expect([...mock.files.values()].find((f) => f.name === 'catalog.json')!.bytes).toBe(cat!.bytes)
+    // ...and a clean sync opened no stem file at all
+    expect(stemReads.count).toBe(0)
   })
 
   it('re-uploads only what changed', async () => {
@@ -107,7 +132,8 @@ describe('gdriveSync (against the mock Drive)', () => {
     await writeFile(join(root, 'Mock Song', 'stems', 'vocals.flac'), Buffer.from('fLaC-new-take'))
     const { gdriveSync } = await import('../../src/main/gdrive')
     const rep = await gdriveSync()
-    expect(rep).toMatchObject({ ok: true, uploaded: 1, unchanged: 3 })
+    // two uploads: the new take, and the project.json now carrying its hash
+    expect(rep).toMatchObject({ ok: true, uploaded: 2, unchanged: 2 })
     const vocals = [...mock.files.values()].find((f) => f.name === 'vocals.flac')
     expect(vocals?.bytes?.toString()).toBe('fLaC-new-take')
     // the manifest follows: phones compare its md5s to decide re-downloads
@@ -116,6 +142,18 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(manifest.projects[0].stems.find((f: { name: string }) => f.name === 'vocals.flac').md5Checksum).toBe(
       createHash('md5').update('fLaC-new-take').digest('hex')
     )
+
+    // same length, different audio — the re-split WAV trap: the stored-hash
+    // shortcut must not trust size alone (mtime moves, so it re-hashes)
+    await writeFile(join(root, 'Mock Song', 'stems', 'vocals.flac'), Buffer.from('fLaC-mew-take'))
+    const again = await gdriveSync()
+    expect(again).toMatchObject({ ok: true, uploaded: 2, unchanged: 2 })
+    const cat2 = [...mock.files.values()].find((f) => f.name === 'catalog.json')
+    expect(
+      JSON.parse(cat2!.bytes!.toString()).projects[0].stems.find(
+        (f: { name: string }) => f.name === 'vocals.flac'
+      ).md5Checksum
+    ).toBe(createHash('md5').update('fLaC-mew-take').digest('hex'))
   })
 })
 

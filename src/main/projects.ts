@@ -1,6 +1,7 @@
 import { app } from 'electron'
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import {
   STEMS,
@@ -18,6 +19,7 @@ import { log } from './log'
 import { allowRoot, stemsRoot } from './media'
 import { hashFile } from './separation'
 import { readSettings, writeSettings } from './settings'
+import { AUDIO_EXT } from './source'
 
 /**
  * User-visible project library: ~/Documents/SingZ/<song name>/ by default,
@@ -162,6 +164,47 @@ interface ProjectFile {
   songFile: string
   savedAt: string
   settings: ProjectSettings
+  /** md5 of every file in stems/ — Drive sync diffs from these instead of
+   *  reading stem bytes (hashing an evicted iCloud stem downloads it all). */
+  stemHashes?: Record<string, StemHash>
+}
+
+export interface StemHash {
+  md5: string
+  size: number
+  /** mtime closes the same-size trap (a re-split WAV is byte-for-byte the
+   *  same length); iCloud eviction round-trips keep modification times. */
+  mtimeMs: number
+}
+
+/**
+ * Current hashes of everything in stems/, reusing `prev` entries whose size
+ * and mtime still match — those files are never opened. New or changed stems
+ * are hashed here, freshly written by the splitter or an import, so the read
+ * is warm and local.
+ */
+export async function refreshStemHashes(
+  dir: string,
+  prev: Record<string, StemHash> | undefined
+): Promise<Record<string, StemHash>> {
+  const out: Record<string, StemHash> = {}
+  for (const e of await readdir(join(dir, 'stems'), { withFileTypes: true })) {
+    if (!e.isFile() || !AUDIO_EXT.has(extname(e.name).toLowerCase())) continue
+    const path = join(dir, 'stems', e.name)
+    const st = await stat(path)
+    const old = prev?.[e.name]
+    if (old && old.size === st.size && old.mtimeMs === st.mtimeMs) {
+      out[e.name] = old
+      continue
+    }
+    const bytes = await readFile(path)
+    out[e.name] = {
+      md5: createHash('md5').update(bytes).digest('hex'),
+      size: st.size,
+      mtimeMs: st.mtimeMs
+    }
+  }
+  return out
 }
 
 /** Resolve a stem on disk: FLAC (v2) wins over WAV (v1) when both exist. */
@@ -450,6 +493,10 @@ export async function saveProject(
       await copyFile(cachedLyrics, projLyrics)
     }
 
+    // hashes carry over from the previous save — a settings-only save reads
+    // no stem bytes; whatever this save (re)wrote gets hashed while it is
+    // still warm and local
+    const prevMeta = await readMeta(dir)
     const meta: ProjectFile = {
       version: allFlac ? 2 : 1,
       name: safeName(name),
@@ -457,7 +504,8 @@ export async function saveProject(
       savedAt: new Date().toISOString(),
       // project.json keeps custom tracks project-relative so the folder stays
       // portable; the renderer gets absolute paths back below.
-      settings: { ...settings, custom: stored }
+      settings: { ...settings, custom: stored },
+      stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes)
     }
     await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
     log('app', `project saved: ${dir}`)

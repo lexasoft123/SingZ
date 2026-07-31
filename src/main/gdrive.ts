@@ -1,14 +1,13 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readdirSync } from 'node:fs'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, stat, writeFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
-import { projectsRoot } from './projects'
+import { projectsRoot, refreshStemHashes, type StemHash } from './projects'
 import { readSettings, writeSettings } from './settings'
-import { AUDIO_EXT } from './source'
 
 /** Drive stores what we tell it; a wrong type makes phones refuse the stream. */
 function audioMime(name: string): string {
@@ -306,6 +305,14 @@ interface CatalogProject {
   stems: CatalogFile[]
 }
 
+/** The slice of project.json the sync reads and (for stemHashes) maintains. */
+interface SyncDoc {
+  name?: unknown
+  savedAt?: unknown
+  settings?: { custom?: unknown }
+  stemHashes?: Record<string, StemHash>
+}
+
 export interface SyncReport {
   ok: boolean
   uploaded: number
@@ -361,62 +368,67 @@ export async function gdriveSync(
           /* optional file */
         }
       }
-      // Split stems are FLAC/WAV; the singer's own custom tracks keep whatever
-      // format they came in, so every audio extension we accept syncs.
-      const stems = readdirSync(join(root, dir, 'stems'), { withFileTypes: true })
-        .filter((d) => d.isFile() && AUDIO_EXT.has(extname(d.name).toLowerCase()))
-        .sort((a, b) => (a.name < b.name ? -1 : 1))
-        .map((d) => ({
-          path: join(root, dir, 'stems', d.name),
-          name: d.name,
-          mime: audioMime(d.name)
-        }))
+      // Stems diff from the hashes project.json carries: reading an evicted
+      // iCloud stem just to hash it downloads the whole file, which made a
+      // clean sync look like the library re-uploading itself. Hashes for new
+      // or changed stems are computed here and folded back into project.json
+      // BEFORE that file is hashed below — this same sync uploads the
+      // updated doc, and the next one opens no stem bytes at all.
+      let doc: SyncDoc | null = null
+      try {
+        doc = JSON.parse(await readFile(join(root, dir, 'project.json'), 'utf8')) as SyncDoc
+      } catch {
+        doc = null // unreadable — sync the raw bytes, keep it out of the manifest
+      }
+      const hashes = await refreshStemHashes(join(root, dir), doc?.stemHashes)
+      if (doc && JSON.stringify(doc.stemHashes ?? null) !== JSON.stringify(hashes)) {
+        doc.stemHashes = hashes
+        await writeFile(join(root, dir, 'project.json'), JSON.stringify(doc, null, 2), 'utf8')
+      }
+      // The hash set is the one source of what stems/ holds (FLAC/WAV splits
+      // and the singer's own tracks alike), sorted so the manifest is
+      // byte-stable run to run.
+      const stems = Object.keys(hashes)
+        .sort()
+        .map((name) => ({ path: join(root, dir, 'stems', name), name, mime: audioMime(name) }))
 
       const proj: CatalogProject = { dir, doc: null, files: [], stems: [] }
+      const topMd5 = await Promise.all(
+        top.map(async (f) => {
+          const bytes = await readFile(f.path)
+          return { ...f, md5: createHash('md5').update(bytes).digest('hex'), size: bytes.length }
+        })
+      )
+      const stemMd5 = stems.map((f) => ({ ...f, md5: hashes[f.name].md5, size: hashes[f.name].size }))
       for (const group of [
-        { files: top, parent: projId, existing: remote, into: proj.files },
-        { files: stems, parent: stemsId, existing: remoteStems, into: proj.stems }
+        { local: topMd5, parent: projId, existing: remote, into: proj.files },
+        { local: stemMd5, parent: stemsId, existing: remoteStems, into: proj.stems }
       ]) {
-        const localMd5 = await Promise.all(
-          group.files.map(async (f) => {
-            // hash and size in one read; the buffer dies here (stems are big)
-            const bytes = await readFile(f.path)
-            return { ...f, md5: createHash('md5').update(bytes).digest('hex'), size: bytes.length }
-          })
-        )
-        const plan = planSync(localMd5, group.existing)
+        const plan = planSync(group.local, group.existing)
         unchanged += plan.unchanged.length
         const ids = new Map<string, string>()
         for (const name of plan.upload) {
-          const f = localMd5.find((x) => x.name === name)
+          const f = group.local.find((x) => x.name === name)
           if (!f) continue
           onProgress?.(`Uploading ${dir}/${name}…`, (i + 0.5) / projectDirs.length)
           const existing = group.existing.find((r) => r.name === name)
           ids.set(name, await uploadFile(f.path, f.name, group.parent, existing?.id, f.mime))
           uploaded++
         }
-        for (const f of localMd5) {
+        for (const f of group.local) {
           const id = ids.get(f.name) ?? group.existing.find((r) => r.name === f.name)?.id
           if (id) {
             group.into.push({ id, name: f.name, mimeType: f.mime, size: String(f.size), md5Checksum: f.md5 })
           }
         }
       }
-      try {
-        const doc = JSON.parse(await readFile(join(root, dir, 'project.json'), 'utf8')) as {
-          name?: unknown
-          savedAt?: unknown
-          settings?: { custom?: unknown }
-        }
+      if (doc) {
         // Only what the phone's catalog screen shows: name, sort key, and the
         // singer's added tracks (their files count toward the download size).
         // The full project.json — beat grids alone were two thirds of the
         // manifest — stays per project and is fetched when a song is opened.
-        proj.doc = { name: doc?.name, savedAt: doc?.savedAt, settings: { custom: doc?.settings?.custom } }
+        proj.doc = { name: doc.name, savedAt: doc.savedAt, settings: { custom: doc.settings?.custom } }
         catalog.push(proj)
-      } catch {
-        // unreadable project.json — left out of the manifest; phones notice
-        // the folder/manifest mismatch and fall back to walking the folders
       }
     }
     // Reconcile: a renamed or deleted local project must not haunt Drive
