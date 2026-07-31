@@ -384,6 +384,21 @@ app.whenReady().then(async () => {
   registerIpc()
   createWindow()
 
+  // Signed-in libraries reconcile on launch, not only after saves: analysis
+  // rewrites project.json outside the save flow, and a sync killed mid-run
+  // (quit, crash, sleep) leaves pending uploads and a stale phone catalog
+  // until someone presses Sync. Delayed so startup isn't competing with the
+  // window and engine probes; gdriveSync itself refuses to run twice.
+  if (gdriveConfigured() && gdriveSignedIn()) {
+    setTimeout(() => {
+      void gdriveSync((msg, frac) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send('gdrive:progress', { msg, frac })
+        }
+      })
+    }, 8000)
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
