@@ -162,6 +162,60 @@ const launch = (env = {}) =>
   check(/^Get v\d/.test(chip), `update chip offers download (got "${chip}")`)
   await app.close()
 
+  // ---- settings: audio device pickers (fake capture devices) ----
+  app = await launch({ SINGZ_FAKE_MIC: '1' })
+  page = await app.firstWindow()
+  await page.waitForSelector('.pill.gear', { timeout: 60000 })
+  await page.evaluate(() => localStorage.removeItem('singz.audio'))
+  await page.click('.pill.gear')
+  await page.waitForSelector('.settings-card', { timeout: 20000 })
+  // the pickers fill asynchronously — done when the loading hint clears
+  await page.waitForFunction(
+    () =>
+      ![...document.querySelectorAll('.settings-hint')].some((el) =>
+        el.textContent?.includes('Looking for audio devices')
+      ),
+    null,
+    { timeout: 20000 }
+  )
+  const inOpts = await page.$$eval('#settings-input option', (os) =>
+    os.map((o) => ({ v: o.value, t: o.textContent ?? '' }))
+  )
+  const outOpts = await page.$$eval('#settings-output option', (os) =>
+    os.map((o) => ({ v: o.value, t: o.textContent ?? '' }))
+  )
+  check(
+    ![...inOpts, ...outOpts].some((o) => o.v === 'default' || o.v === 'communications'),
+    'no synthetic default/communications rows in the pickers'
+  )
+  // CI runners often expose no audio hardware at all (and the fake-capture
+  // flag fakes streams, not enumeration) — device asserts adapt to the list.
+  const ins = inOpts.filter((o) => o.v)
+  if (ins.length > 0) {
+    await page.selectOption('#settings-input', ins[0].v)
+    const storedAudio = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('singz.audio') ?? '{}')
+    )
+    check(storedAudio.inputId === ins[0].v, 'microphone pick persisted to singz.audio')
+  } else {
+    console.log('skip mic pick (runner exposes no audio inputs)')
+  }
+  // output devices are runner hardware — often absent on CI, so only assert
+  // the sink actually moves when there is something to move it to
+  const realOuts = outOpts.filter((o) => o.v)
+  if (realOuts.length > 0) {
+    await page.selectOption('#settings-output', realOuts[0].v)
+    await page.waitForFunction(
+      (id) => window.__engine.context.sinkId === id,
+      realOuts[0].v,
+      { timeout: 10000 }
+    )
+    check(true, 'engine context re-pointed at the picked output')
+  } else {
+    console.log('skip output pick (runner exposes no audio outputs)')
+  }
+  await app.close()
+
   // ---- full electron-updater flow (packaged + local feed only) ----
   if (packaged && feed) {
     app = await launch({ SINGZ_UPDATE_URL: feed })

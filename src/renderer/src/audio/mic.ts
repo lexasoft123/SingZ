@@ -35,8 +35,13 @@ export class MicPitch {
         audio: opts.deviceId ? { ...base, deviceId: { exact: opts.deviceId } } : base
       })
     } catch (err) {
+      // Missing (OverconstrainedError/NotFoundError) or busy (NotReadable/
+      // Abort — exclusive-mode holds are everyday life on Windows): drop the
+      // pick and sing on the default rather than not at all. NotAllowedError
+      // stays fatal — no constraint change can fix a permission denial.
       const name = err instanceof DOMException ? err.name : ''
-      if (!opts.deviceId || (name !== 'OverconstrainedError' && name !== 'NotFoundError')) {
+      const recoverable = ['OverconstrainedError', 'NotFoundError', 'NotReadableError', 'AbortError']
+      if (!opts.deviceId || !recoverable.includes(name)) {
         throw err
       }
       stream = await navigator.mediaDevices.getUserMedia({ audio: base })
