@@ -64,6 +64,15 @@ export function sanitizeTraining(raw: unknown): TrainingConfig {
   }
 }
 
+/** Pitch strip height in px — drag-resizable, remembered per machine. */
+export const PITCH_H_DEFAULT = 172
+
+export function sanitizePitchHeight(raw: unknown): number {
+  if (raw === null || raw === undefined || raw === '') return PITCH_H_DEFAULT
+  const n = Math.round(Number(raw))
+  return Number.isFinite(n) ? Math.max(120, Math.min(420, n)) : PITCH_H_DEFAULT
+}
+
 /** Chosen audio devices; absent = system default. Ids are Chromium's. */
 export interface AudioPrefs {
   outputId?: string

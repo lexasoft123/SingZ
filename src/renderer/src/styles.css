@@ -1262,6 +1262,29 @@ button.chip-status:hover {
   animation: fade 0.25s;
 }
 
+.ps-resize {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 9px;
+  cursor: ns-resize;
+  z-index: 5;
+  touch-action: none;
+}
+
+/* a hairline appears while grabbing so the handle is discoverable */
+.ps-resize:hover::after,
+.ps-resize:active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 4px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
 .pitch-strip canvas {
   position: relative;
   display: block;
