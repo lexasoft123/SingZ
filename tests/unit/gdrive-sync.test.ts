@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -49,12 +50,35 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(first).toMatchObject({ ok: true, projects: 1, uploaded: 4 })
 
     const names = [...mock.files.values()].map((f) => f.name).sort()
-    expect(names).toEqual(['Mock Song', 'SingZ', 'drums.flac', 'lyrics.json', 'project.json', 'stems', 'vocals.flac'].sort())
+    expect(names).toEqual(
+      ['Mock Song', 'SingZ', 'catalog.json', 'drums.flac', 'lyrics.json', 'project.json', 'stems', 'vocals.flac'].sort()
+    )
     const vocals = [...mock.files.values()].find((f) => f.name === 'vocals.flac')
     expect(vocals?.bytes?.toString()).toBe('fLaC-fake-vocals')
 
+    // the phone-facing manifest: whole library, with the ids/sizes/md5s the
+    // phone needs to list and stream without walking the folders
+    const cat = [...mock.files.values()].find((f) => f.name === 'catalog.json')
+    const manifest = JSON.parse(cat!.bytes!.toString())
+    expect(manifest.format).toBe(1)
+    expect(manifest.projects).toHaveLength(1)
+    expect(manifest.projects[0].dir).toBe('Mock Song')
+    expect(manifest.projects[0].doc.name).toBe('Mock Song')
+    const mVocals = manifest.projects[0].stems.find((f: { name: string }) => f.name === 'vocals.flac')
+    expect(mVocals).toMatchObject({
+      id: vocals!.id,
+      size: String(Buffer.from('fLaC-fake-vocals').length),
+      md5Checksum: createHash('md5').update('fLaC-fake-vocals').digest('hex')
+    })
+    expect(manifest.projects[0].files.map((f: { name: string }) => f.name).sort()).toEqual([
+      'lyrics.json',
+      'project.json'
+    ])
+
     const second = await gdriveSync()
     expect(second).toMatchObject({ ok: true, uploaded: 0, unchanged: 4 })
+    // identical library => identical manifest bytes => the rewrite is skipped
+    expect([...mock.files.values()].find((f) => f.name === 'catalog.json')!.bytes).toBe(cat!.bytes)
   })
 
   it('re-uploads only what changed', async () => {
@@ -66,6 +90,12 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(rep).toMatchObject({ ok: true, uploaded: 1, unchanged: 3 })
     const vocals = [...mock.files.values()].find((f) => f.name === 'vocals.flac')
     expect(vocals?.bytes?.toString()).toBe('fLaC-new-take')
+    // the manifest follows: phones compare its md5s to decide re-downloads
+    const cat = [...mock.files.values()].find((f) => f.name === 'catalog.json')
+    const manifest = JSON.parse(cat!.bytes!.toString())
+    expect(manifest.projects[0].stems.find((f: { name: string }) => f.name === 'vocals.flac').md5Checksum).toBe(
+      createHash('md5').update('fLaC-new-take').digest('hex')
+    )
   })
 })
 
@@ -93,6 +123,10 @@ describe('planSync', () => {
     // trashed, never hard-deleted — recoverable from Drive trash
     const ghost = [...mock.files.values()].find((f) => f.name === 'Ozzy Osbourne — Mr')
     expect(ghost?.trashed).toBe(true)
+    // the manifest is written after the reconcile, so the ghost is not in it
+    const cat = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)
+    const manifest = JSON.parse(cat!.bytes!.toString())
+    expect(manifest.projects.map((p: { dir: string }) => p.dir)).toEqual(['Mr Crowley'])
   })
 
   it('diffs by md5, treating missing remotes as uploads', async () => {

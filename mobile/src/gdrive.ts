@@ -393,12 +393,112 @@ async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
   }
 }
 
+/** Assemble one listing entry from a project's Drive files (null = not a
+ *  project worth showing). Registers the ids streaming needs as it goes.
+ *  Shared by the folder walk and the manifest path so they cannot drift. */
+function buildEntry(
+  dir: string,
+  doc: ProjectDoc,
+  byName: Map<string, DriveFile>,
+  stemsByName: Map<string, DriveFile>
+): ProjectEntry | null {
+  const stems: ProjectEntry['stems'] = {}
+  let bytes = 0
+  for (const id of STEM_ORDER_ALL) {
+    const f = stemsByName.get(`${id}.flac`) ?? stemsByName.get(`${id}.wav`)
+    if (!f) continue
+    stems[id] = f.name.endsWith('.flac') ? 'flac' : 'wav'
+    bytes += Number(f.size ?? 0)
+  }
+  // The singer's own tracks are part of what this song costs to download —
+  // leave them out and the ✓ lights up while one is still in the cloud.
+  for (const t of customTracks(doc?.settings)) {
+    bytes += Number(stemsByName.get(t.file.slice('stems/'.length))?.size ?? 0)
+  }
+  if (Object.keys(stems).length === 0) return null
+  projectFiles.set(dir, { byName, stemsByName })
+  return {
+    dir,
+    doc,
+    stems,
+    cached: false, // native cache check happens per-file on open
+    bytes,
+    hasLyrics: byName.has('lyrics.json'),
+    source: 'gdrive'
+  }
+}
+
+/** A finished listing becomes the one everybody sees, on screen and on disk. */
+async function adopt(entries: ProjectEntry[]): Promise<ProjectEntry[]> {
+  entries.sort((a, b) => ((a.doc.savedAt ?? '') < (b.doc.savedAt ?? '') ? 1 : -1))
+  listCache = { at: Date.now(), entries }
+  await persistCatalog(entries)
+  return entries
+}
+
+/** What the desktop writes into catalog.json after every sync. */
+interface CatalogManifest {
+  format: number
+  projects: { dir: string; doc: ProjectDoc; files: DriveFile[]; stems: DriveFile[] }[]
+}
+
+/**
+ * The whole library from the desktop-written catalog.json in ONE download —
+ * docs, stem sizes, md5s and the Drive ids streaming needs — instead of
+ * three REST calls per song. Trusted only while it names exactly the project
+ * folders the root listing just showed: an older desktop pushing without
+ * rewriting it leaves it stale, and then the walk decides (null). A manifest
+ * that FAILS to download throws like any other fetch — aborting the refresh
+ * keeps the catalog we already have; "no/unusable manifest" walks instead.
+ */
+async function manifestEntries(
+  kids: DriveFile[],
+  dirs: DriveFile[],
+  token: string
+): Promise<ProjectEntry[] | null> {
+  const file = kids.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
+  if (!file) return null
+  const res = await fetch(`${API()}/drive/v3/files/${file.id}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  if (!res.ok) throw new Error(`Drive API ${res.status} reading catalog.json`)
+  let m: CatalogManifest
+  try {
+    m = (await res.json()) as CatalogManifest
+  } catch {
+    return null // unreadable manifest — the walk still works
+  }
+  if (m?.format !== 1 || !Array.isArray(m.projects)) return null
+  const folders = new Set(dirs.map((d) => d.name))
+  if (m.projects.length !== folders.size || m.projects.some((p) => !folders.has(p.dir))) {
+    return null
+  }
+  const out: ProjectEntry[] = []
+  for (const p of m.projects) {
+    // half-shaped project => distrust the whole file, the walk decides
+    if (typeof p?.dir !== 'string' || !p.doc || typeof p.doc !== 'object') return null
+    const entry = buildEntry(
+      p.dir,
+      p.doc,
+      new Map((p.files ?? []).map((f) => [f.name, f])),
+      new Map((p.stems ?? []).map((f) => [f.name, f]))
+    )
+    if (entry) out.push(entry)
+  }
+  return out
+}
+
 export async function driveListProjects(force = false): Promise<ProjectEntry[]> {
   if (!force && driveListIsFresh() && listCache) return listCache.entries
   const rootId = await singzRootId()
   const token = await accessToken()
-  const dirs = (await listChildren(rootId)).filter((f) => f.mimeType === FOLDER)
+  const kids = await listChildren(rootId)
+  const dirs = kids.filter((f) => f.mimeType === FOLDER)
 
+  const fromManifest = await manifestEntries(kids, dirs, token)
+  if (fromManifest) return adopt(fromManifest)
+
+  // No manifest (older desktop, or one the folder listing disowned): walk.
   // One project = three REST round-trips; done one after another a ten-song
   // library took 15-18s of dead-looking screen. Five folders in flight cut
   // it to a few seconds without upsetting Drive's rate limits.
@@ -409,8 +509,8 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
   // wiped the offline catalog, and the next cold start re-listed the whole
   // library from Drive on a spinner.
   const one = async (dir: DriveFile): Promise<ProjectEntry | null> => {
-    const kids = await listChildren(dir.id)
-    const byName = new Map(kids.map((f) => [f.name, f]))
+    const kid = await listChildren(dir.id)
+    const byName = new Map(kid.map((f) => [f.name, f]))
     const meta = byName.get('project.json')
     if (!meta) return null
     const metaRes = await fetch(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
@@ -419,33 +519,9 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
     if (metaRes.status === 404) return null // deleted while we were listing
     if (!metaRes.ok) throw new Error(`Drive API ${metaRes.status} reading ${dir.name}/project.json`)
     const doc = await metaRes.json()
-    const stemsDir = kids.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
+    const stemsDir = kid.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
     const stemKids = stemsDir ? await listChildren(stemsDir.id) : []
-    const stemsByName = new Map(stemKids.map((f) => [f.name, f]))
-    const stems: ProjectEntry['stems'] = {}
-    let bytes = 0
-    for (const id of STEM_ORDER_ALL) {
-      const f = stemsByName.get(`${id}.flac`) ?? stemsByName.get(`${id}.wav`)
-      if (!f) continue
-      stems[id] = f.name.endsWith('.flac') ? 'flac' : 'wav'
-      bytes += Number(f.size ?? 0)
-    }
-    // The singer's own tracks are part of what this song costs to download —
-    // leave them out and the ✓ lights up while one is still in the cloud.
-    for (const t of customTracks((doc as ProjectDoc)?.settings)) {
-      bytes += Number(stemsByName.get(t.file.slice('stems/'.length))?.size ?? 0)
-    }
-    if (Object.keys(stems).length === 0) return null
-    projectFiles.set(dir.name, { byName, stemsByName })
-    return {
-      dir: dir.name,
-      doc,
-      stems,
-      cached: false, // native cache check happens per-file on open
-      bytes,
-      hasLyrics: byName.has('lyrics.json'),
-      source: 'gdrive'
-    }
+    return buildEntry(dir.name, doc as ProjectDoc, byName, new Map(stemKids.map((f) => [f.name, f])))
   }
 
   const out: ProjectEntry[] = []
@@ -454,10 +530,7 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
     const batch = await Promise.all(dirs.slice(i, i + POOL).map(one))
     for (const entry of batch) if (entry) out.push(entry)
   }
-  out.sort((a, b) => ((a.doc.savedAt ?? '') < (b.doc.savedAt ?? '') ? 1 : -1))
-  listCache = { at: Date.now(), entries: out }
-  await persistCatalog(out)
-  return out
+  return adopt(out)
 }
 
 /** Drive counterpart of FolderAccess.localFile: stream into the cache. */

@@ -180,7 +180,13 @@ answer your evals while you measure the phone.
   flow — Android listens on 127.0.0.1 natively). Desktop pushes the library
   to a visible SingZ Drive folder (md5-diffed resumable uploads, auto after
   save); phones list over REST and stream stems via FolderAccess
-  fetchToCache. OAuth client config: mobile/gdrive.config.json (gitignored;
+  fetchToCache. After every sync the desktop writes `catalog.json` at the
+  SingZ root — the whole library (docs, Drive ids, sizes, md5s), written
+  LAST so it never names missing files, byte-stable + md5-skipped when
+  nothing changed. Phones list from it in three requests instead of three
+  per song; they trust it only while it names exactly the root's project
+  folders (an older desktop pushing leaves it stale) and fall back to
+  walking the folders otherwise, so old apps and old desktops keep working. OAuth client config: mobile/gdrive.config.json (gitignored;
   CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
   generate the gdrive-config.ts modules from it — both are gitignored, never
   in the repo, EMPTY when the json is absent, so a fresh checkout needs

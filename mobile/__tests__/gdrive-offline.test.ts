@@ -29,6 +29,8 @@ interface DriveState {
   offline: boolean
   /** Folder ids whose children queries 500 — a network that dies mid-listing. */
   failChildren?: Set<string>
+  /** File ids whose alt=media reads 500 — a download that dies instead. */
+  failMedia?: Set<string>
 }
 
 function newDrive(md5 = { vocals: 'v-1', drums: 'd-1' }): DriveState {
@@ -60,6 +62,26 @@ const ok = (body: unknown): unknown => ({
   text: async () => JSON.stringify(body)
 })
 
+/** What the desktop's catalog.json holds for newDrive()'s library. */
+function addManifest(drive: DriveState, overrides: Partial<Record<string, unknown>> = {}): void {
+  drive.children.ROOT.push({ id: 'CAT', name: 'catalog.json', mimeType: 'application/json' })
+  drive.media.CAT = JSON.stringify({
+    format: 1,
+    projects: [
+      {
+        dir: 'Song One',
+        doc: JSON.parse(drive.media.M1),
+        files: [
+          { id: 'M1', name: 'project.json', mimeType: 'application/json', size: '40', md5Checksum: 'm-1' },
+          { id: 'L1', name: 'lyrics.json', mimeType: 'application/json', size: '30', md5Checksum: 'l-1' }
+        ],
+        stems: drive.children.S1
+      }
+    ],
+    ...overrides
+  })
+}
+
 function install(drive: DriveState): void {
   jest.resetModules()
   const { NativeModules } = require('react-native')
@@ -88,6 +110,9 @@ function install(drive: DriveState): void {
     }
     const media = /\/drive\/v3\/files\/([^?]+)\?alt=media/.exec(u)
     if (media) {
+      if (drive.failMedia?.has(media[1])) {
+        return { ok: false, status: 500, json: async () => ({}), text: async () => '' }
+      }
       const body = drive.media[media[1]]
       return {
         ok: body !== undefined,
@@ -217,6 +242,91 @@ describe('catalog without internet', () => {
     const g2 = require('../src/gdrive') as typeof import('../src/gdrive')
     await g2.driveStoredProjects()
     expect(JSON.parse(await g2.driveReadText('Song One', 'lyrics.json')).lines).toHaveLength(1)
+  })
+})
+
+describe('the desktop-written manifest', () => {
+  it('lists the library in three requests, and its ids stream', async () => {
+    const drive = newDrive()
+    addManifest(drive)
+    install(drive)
+    signIn()
+    let calls = 0
+    const inner = globalThis.fetch
+    globalThis.fetch = ((...a: Parameters<typeof fetch>) => {
+      calls++
+      return inner(...a)
+    }) as typeof fetch
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    const entries = await g.driveListProjects()
+    // SingZ root + root children + catalog.json — never three per song
+    expect(calls).toBe(3)
+    expect(entries.map((p) => p.dir)).toEqual(['Song One'])
+    expect(entries[0].stems).toEqual({ vocals: 'flac', drums: 'flac' })
+    expect(entries[0].bytes).toBe(300)
+    expect(entries[0].hasLyrics).toBe(true)
+    expect(prefs['singz.gdrive.catalog']).toBeTruthy()
+
+    // the manifest's file ids feed the same md5-aware streaming
+    await g.driveLocalFile('Song One', 'stems/vocals.flac')
+    expect(fetchToCache.mock.calls[0][2]).toContain('/drive/v3/files/V1')
+    expect(fetchToCache.mock.calls[0][4]).toBe(0) // never fetched before
+    fetchToCache.mockClear()
+    await g.driveLocalFile('Song One', 'stems/vocals.flac')
+    expect(fetchToCache.mock.calls[0][4]).toBe(100) // unchanged md5: cached
+  })
+
+  it('ignores a stale manifest and walks the folders instead', async () => {
+    const drive = newDrive()
+    addManifest(drive) // knows only Song One...
+    drive.children.ROOT.push({ id: 'D2', name: 'Song Two', mimeType: FOLDER })
+    drive.children.D2 = [
+      { id: 'M2', name: 'project.json', mimeType: 'application/json' },
+      { id: 'S2', name: 'stems', mimeType: FOLDER }
+    ]
+    drive.children.S2 = [
+      { id: 'V2', name: 'vocals.flac', mimeType: 'audio/flac', size: '70', md5Checksum: 'v2-1' }
+    ]
+    drive.media.M2 = JSON.stringify({ name: 'Song Two', savedAt: '2026-02-01T00:00:00.000Z' })
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    // ...an older desktop then pushed Song Two without rewriting it
+    const entries = await g.driveListProjects()
+    expect(entries.map((p) => p.dir).sort()).toEqual(['Song One', 'Song Two'])
+  })
+
+  it('walks when the manifest speaks a newer format', async () => {
+    const drive = newDrive()
+    // a future format whose (imaginary) content would list nothing — only
+    // the walk can still produce Song One, so this fails if format is ignored
+    addManifest(drive, {
+      format: 2,
+      projects: [{ dir: 'Song One', doc: JSON.parse(drive.media.M1), files: [], stems: [] }]
+    })
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    const entries = await g.driveListProjects()
+    expect(entries.map((p) => p.dir)).toEqual(['Song One'])
+    expect(entries[0].stems).toEqual({ vocals: 'flac', drums: 'flac' })
+  })
+
+  it('a manifest download that fails aborts the refresh, keeping the catalog', async () => {
+    const drive = newDrive()
+    addManifest(drive)
+    install(drive)
+    signIn()
+    await (require('../src/gdrive') as typeof import('../src/gdrive')).driveListProjects()
+    expect(JSON.parse(prefs['singz.gdrive.catalog']).entries).toHaveLength(1)
+
+    drive.failMedia = new Set(['CAT'])
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await expect(g.driveListProjects(true)).rejects.toThrow()
+    expect(JSON.parse(prefs['singz.gdrive.catalog']).entries).toHaveLength(1)
+    expect((await g.driveStoredProjects())?.map((p) => p.dir)).toEqual(['Song One'])
   })
 })
 

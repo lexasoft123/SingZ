@@ -243,19 +243,16 @@ export function planSync(
   return { upload, unchanged }
 }
 
-async function md5File(path: string): Promise<string> {
-  return createHash('md5').update(await readFile(path)).digest('hex')
-}
-
-async function uploadFile(
-  localPath: string,
+/** Resumable upload; resolves to the file's Drive id (a fresh POST has no
+ *  other way to learn it, and the catalog manifest needs every id). */
+async function uploadBytes(
+  bytes: Buffer,
   name: string,
   parentId: string,
   existingId: string | undefined,
   mime: string
-): Promise<void> {
+): Promise<string> {
   const token = await accessToken()
-  const bytes = await readFile(localPath)
   const base = (cfg?.uploadBase || API()) + '/upload/drive/v3/files'
   const initRes = await fetch(
     existingId ? `${base}/${existingId}?uploadType=resumable` : `${base}?uploadType=resumable`,
@@ -274,6 +271,39 @@ async function uploadFile(
     body: bytes
   })
   if (!put.ok) throw new Error(`Drive upload ${put.status} for ${name}`)
+  const done = (await put.json().catch(() => ({}))) as { id?: string }
+  return done.id ?? existingId ?? ''
+}
+
+const uploadFile = async (
+  localPath: string,
+  name: string,
+  parentId: string,
+  existingId: string | undefined,
+  mime: string
+): Promise<string> => uploadBytes(await readFile(localPath), name, parentId, existingId, mime)
+
+/**
+ * catalog.json at the SingZ root: the whole library — docs, per-file sizes,
+ * md5s and Drive ids — in one phone-sized download, so phones stop walking
+ * every project folder (three REST calls per song just to list). Shapes
+ * mirror what Drive's own listings return; sizes are strings for the same
+ * reason. No timestamp inside: identical libraries must hash identically,
+ * so a clean sync skips the rewrite.
+ */
+interface CatalogFile {
+  id: string
+  name: string
+  mimeType: string
+  size: string
+  md5Checksum: string
+}
+
+interface CatalogProject {
+  dir: string
+  doc: unknown
+  files: CatalogFile[]
+  stems: CatalogFile[]
 }
 
 export interface SyncReport {
@@ -295,9 +325,12 @@ export async function gdriveSync(
   syncing = true
   try {
     const root = projectsRoot()
+    // sorted so the manifest is byte-stable — readdir order is not, and a
+    // reshuffled manifest would defeat its own md5 skip
     const dirs = readdirSync(root, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
+      .sort()
     const projectDirs: string[] = []
     for (const dir of dirs) {
       try {
@@ -310,6 +343,7 @@ export async function gdriveSync(
     const singzId = await ensureFolder('SingZ', null)
     let uploaded = 0
     let unchanged = 0
+    const catalog: CatalogProject[] = []
     for (let i = 0; i < projectDirs.length; i++) {
       const dir = projectDirs[i]
       onProgress?.(`Syncing ${dir}…`, i / projectDirs.length)
@@ -331,29 +365,49 @@ export async function gdriveSync(
       // format they came in, so every audio extension we accept syncs.
       const stems = readdirSync(join(root, dir, 'stems'), { withFileTypes: true })
         .filter((d) => d.isFile() && AUDIO_EXT.has(extname(d.name).toLowerCase()))
+        .sort((a, b) => (a.name < b.name ? -1 : 1))
         .map((d) => ({
           path: join(root, dir, 'stems', d.name),
           name: d.name,
           mime: audioMime(d.name)
         }))
 
+      const proj: CatalogProject = { dir, doc: null, files: [], stems: [] }
       for (const group of [
-        { files: top, parent: projId, existing: remote },
-        { files: stems, parent: stemsId, existing: remoteStems }
+        { files: top, parent: projId, existing: remote, into: proj.files },
+        { files: stems, parent: stemsId, existing: remoteStems, into: proj.stems }
       ]) {
         const localMd5 = await Promise.all(
-          group.files.map(async (f) => ({ ...f, md5: await md5File(f.path) }))
+          group.files.map(async (f) => {
+            // hash and size in one read; the buffer dies here (stems are big)
+            const bytes = await readFile(f.path)
+            return { ...f, md5: createHash('md5').update(bytes).digest('hex'), size: bytes.length }
+          })
         )
         const plan = planSync(localMd5, group.existing)
         unchanged += plan.unchanged.length
+        const ids = new Map<string, string>()
         for (const name of plan.upload) {
           const f = localMd5.find((x) => x.name === name)
           if (!f) continue
           onProgress?.(`Uploading ${dir}/${name}…`, (i + 0.5) / projectDirs.length)
           const existing = group.existing.find((r) => r.name === name)
-          await uploadFile(f.path, f.name, group.parent, existing?.id, f.mime)
+          ids.set(name, await uploadFile(f.path, f.name, group.parent, existing?.id, f.mime))
           uploaded++
         }
+        for (const f of localMd5) {
+          const id = ids.get(f.name) ?? group.existing.find((r) => r.name === f.name)?.id
+          if (id) {
+            group.into.push({ id, name: f.name, mimeType: f.mime, size: String(f.size), md5Checksum: f.md5 })
+          }
+        }
+      }
+      try {
+        proj.doc = JSON.parse(await readFile(join(root, dir, 'project.json'), 'utf8'))
+        catalog.push(proj)
+      } catch {
+        // unreadable project.json — left out of the manifest; phones notice
+        // the folder/manifest mismatch and fall back to walking the folders
       }
     }
     // Reconcile: a renamed or deleted local project must not haunt Drive
@@ -374,6 +428,17 @@ export async function gdriveSync(
       removed++
     }
     if (removed > 0) log('gdrive', `reconcile: ${removed} orphaned project folder(s) moved to Drive trash`)
+
+    // The manifest is written LAST — after every upload and the reconcile —
+    // so it never names files that are not on Drive yet; md5-diffed like
+    // everything else so a clean sync leaves it untouched.
+    const manifest = Buffer.from(JSON.stringify({ format: 1, projects: catalog }))
+    const manifestMd5 = createHash('md5').update(manifest).digest('hex')
+    const prev = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
+    if (prev?.md5Checksum !== manifestMd5) {
+      onProgress?.('Updating the phone catalog…', 0.995)
+      await uploadBytes(manifest, 'catalog.json', singzId, prev?.id, 'application/json')
+    }
 
     onProgress?.('Drive is up to date', 1)
     log('gdrive', `sync done: ${uploaded} uploaded, ${unchanged} unchanged`)
