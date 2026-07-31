@@ -246,6 +246,32 @@ async function runLibrary(detect) {
     // mixes legitimately differ by a beat in loose material, which shifts
     // the bar extension across a void, while beat times agree within ~20 ms.
     let mlStatus = null
+    // barAtMl: ear-approved BAR times inside spliced spans (fused only) —
+    // the span-phase vote's regression net (TTP's bass solo). Bar times are
+    // chord-anchored by the vote, so they hold across model runs even where
+    // the lattice itself can shift a beat.
+    if (Array.isArray(spec?.barAtMl) && spec.barAtMl.length > 0) {
+      if (ml && det) {
+        checkable++
+        const med = 60 / det.bpm
+        const bars = (det.downbeats ?? []).map((i) => det.beats[i])
+        const deltas = spec.barAtMl.map((a) =>
+          bars.reduce((m, t) => Math.min(m, Math.abs(t - a)), Infinity)
+        )
+        const ok = deltas.every((d) => d < 0.25 * med)
+        if (ok) pass++
+        else fail++
+        console.log(
+          `${''.padEnd(24)} ${(ok ? 'pass' : 'FAIL').padEnd(12)} barAtMl deltas: ${deltas.map((d) => `${Math.round(d * 1000)}ms`).join(' ')} (tol ${Math.round(250 * med)}ms)`
+        )
+      } else if (ml) {
+        checkable++
+        fail++
+        console.log(`${''.padEnd(24)} FAIL         barAtMl: detector returned null`)
+      } else {
+        console.log(`${''.padEnd(24)} skipped      barAtMl needs --ml (fused-only anchors)`)
+      }
+    }
     if (Array.isArray(spec?.beatAtMl) && spec.beatAtMl.length > 0) {
       if (ml && det) {
         checkable++

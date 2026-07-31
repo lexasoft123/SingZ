@@ -78,7 +78,13 @@
    "rot": [
     3
    ],
-   "barAt": 226.592
+   "barAt": 226.592,
+   "barAtMl": [
+    207.28,
+    213.7,
+    220.14
+   ],
+   "note": "barAtMl = the bass-solo bars (201-227s spliced span), ear-approved 2026-08-01: the v14 span-phase vote lands them on the bass chord changes (margin 0.73; blind extension missed by ~1.5 beats; the model alone only half-bar-marks here). The 225s +2-beat re-entry odd bar remains the v5 fermata case."
   },
   "Wanted Dead Or Alive": {
    "bpb": 4,
@@ -91,7 +97,7 @@
     70.66,
     77.16
    ],
-   "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there — ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen."
+   "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there \u2014 ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen."
   },
   "Zeit": {
    "bpb": 4,
