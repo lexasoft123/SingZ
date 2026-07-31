@@ -64,6 +64,32 @@ export function sanitizeTraining(raw: unknown): TrainingConfig {
   }
 }
 
+/** Pitch strip height in px — drag-resizable, remembered per machine. */
+export const PITCH_H_DEFAULT = 172
+
+export function sanitizePitchHeight(raw: unknown): number {
+  if (raw === null || raw === undefined || raw === '') return PITCH_H_DEFAULT
+  const n = Math.round(Number(raw))
+  return Number.isFinite(n) ? Math.max(120, Math.min(420, n)) : PITCH_H_DEFAULT
+}
+
+/** Chosen audio devices; absent = system default. Ids are Chromium's. */
+export interface AudioPrefs {
+  outputId?: string
+  inputId?: string
+}
+
+/** Clamp stored audio prefs — ids are opaque non-empty strings, and the
+ *  'default' pseudo-id must never persist (it IS the absent state). */
+export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const id = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 && v !== 'default' && v !== 'communications'
+      ? v
+      : undefined
+  return { outputId: id(r.outputId), inputId: id(r.inputId) }
+}
+
 /**
  * Duck windows for line-based training: cycle hear+sing through the lyric
  * lines; each run of sing lines ducks from its first line until the next

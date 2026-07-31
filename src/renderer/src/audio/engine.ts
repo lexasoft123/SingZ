@@ -122,6 +122,22 @@ export class MultitrackEngine {
     return this.ctx
   }
 
+  /** Current output device id ('' = system default). */
+  get outputDeviceId(): string {
+    return this.ctx.sinkId
+  }
+
+  /**
+   * Route everything audible to another device. Mix, metronome and the
+   * stretch path all terminate at ctx.destination, so one sinkId move
+   * carries them together; '' returns to the system default.
+   */
+  async setOutput(deviceId: string): Promise<void> {
+    if (!('setSinkId' in this.ctx)) throw new Error('Changing outputs is not supported here.')
+    if (this.ctx.sinkId === deviceId) return
+    await this.ctx.setSinkId(deviceId)
+  }
+
   get position(): number {
     if (!this._playing) return this.startOffset
     // Track what the listener hears: stretch-node latency plus device output

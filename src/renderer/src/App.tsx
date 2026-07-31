@@ -15,6 +15,7 @@ import {
   type MetronomeConfig
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
+import type { MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
 import LogPanel from './components/LogPanel'
@@ -23,6 +24,7 @@ import LibraryImport from './components/LibraryImport'
 import ProjectPicker from './components/ProjectPicker'
 import SetupWizard from './components/SetupWizard'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
+import SettingsModal from './components/SettingsModal'
 import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
@@ -33,11 +35,13 @@ import {
   CUSTOM_COLORS,
   fmtTime,
   orderedStems,
+  sanitizeAudioPrefs,
   sanitizeTraining,
   trackLabel,
   TRACK_META,
   TRAIN_DEFAULTS,
   trainingWindows,
+  type AudioPrefs,
   type TimeView,
   type TrainingConfig,
   type UITrack
@@ -129,6 +133,19 @@ export default function App(): React.JSX.Element {
   const [showSetup, setShowSetup] = useState(false)
   const [showLog, setShowLog] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+  const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
+    try {
+      const raw = localStorage.getItem('singz.audio')
+      return raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
+    } catch {
+      return {}
+    }
+  })
+  /** App-level verdict on the saved output ("not connected", "not allowed"). */
+  const [outputStatus, setOutputStatus] = useState<string | null>(null)
+  /** What the mic is actually listening through, when it's on. */
+  const [micDevice, setMicDevice] = useState<MicDevice | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [ver, setVer] = useState('')
   const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
@@ -238,6 +255,83 @@ export default function App(): React.JSX.Element {
     localStorage.setItem('singz.met', JSON.stringify(metCfg))
   }, [metCfg])
 
+  // Device picks follow the machine, not the song.
+  useEffect(() => {
+    localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
+  }, [audioPrefs])
+
+  // Keep the context's sink pointed at the saved output. Single-flight,
+  // last-wins: BT headsets fire devicechange in bursts. The saved id is
+  // never cleared here — plugging the device back in restores it.
+  const outputSeq = useRef(0)
+  const reconcileOutput = useCallback(
+    async (wantId: string | undefined) => {
+      const seq = ++outputSeq.current
+      try {
+        if (wantId) {
+          const devs = await navigator.mediaDevices.enumerateDevices()
+          if (seq !== outputSeq.current) return
+          if (!devs.some((d) => d.kind === 'audiooutput' && d.deviceId === wantId)) {
+            await engine.setOutput('')
+            if (seq === outputSeq.current) {
+              setOutputStatus('Saved playback device not connected — using the system default')
+            }
+            return
+          }
+        }
+        await engine.setOutput(wantId ?? '')
+        if (seq === outputSeq.current) setOutputStatus(null)
+      } catch (err) {
+        if (seq !== outputSeq.current) return
+        const name = err instanceof DOMException ? err.name : ''
+        setOutputStatus(
+          name === 'NotAllowedError'
+            ? "SingZ wasn't allowed to switch playback devices"
+            : 'Could not switch to the saved playback device — using the system default'
+        )
+      }
+    },
+    [engine]
+  )
+
+  useEffect(() => {
+    void reconcileOutput(audioPrefs.outputId)
+    const onChange = (): void => void reconcileOutput(audioPrefs.outputId)
+    navigator.mediaDevices.addEventListener('devicechange', onChange)
+    return () => navigator.mediaDevices.removeEventListener('devicechange', onChange)
+  }, [audioPrefs.outputId, reconcileOutput])
+
+  // Apply-then-commit: a pick that fails never lands in the prefs, so the
+  // dropdown (valued from them) snaps back by itself.
+  const changeOutput = useCallback(
+    async (id: string | undefined) => {
+      if (!id) {
+        setAudioPrefs((p) => ({ ...p, outputId: undefined }))
+        setOutputStatus(null)
+        return
+      }
+      try {
+        await engine.setOutput(id)
+        setAudioPrefs((p) => ({ ...p, outputId: id }))
+        setOutputStatus(null)
+      } catch (err) {
+        const name = err instanceof DOMException ? err.name : ''
+        setOutputStatus(
+          name === 'NotAllowedError'
+            ? "SingZ wasn't allowed to switch playback devices"
+            : 'Could not switch to that device — still on the previous one'
+        )
+      }
+    },
+    [engine]
+  )
+
+  const changeInput = useCallback((id: string | undefined) => {
+    // stored right away; PitchStrip restarts a running mic and validation
+    // surfaces through micDevice when the mic next starts
+    setAudioPrefs((p) => ({ ...p, inputId: id }))
+  }, [])
+
   useEffect(() => {
     engine.setBeats(beatInfo)
   }, [engine, beatInfo])
@@ -301,9 +395,9 @@ export default function App(): React.JSX.Element {
   // Background animation loops pause while a modal covers the app (the
   // scrim's backdrop blur re-rasters the whole window on every change).
   useEffect(() => {
-    const open = Boolean(showLog || showProjects || showSetup || showImport || wizard)
+    const open = Boolean(showLog || showProjects || showSetup || showImport || showSettings || wizard)
     document.body.classList.toggle('modal-open', open)
-  }, [showLog, showProjects, showSetup, showImport, wizard])
+  }, [showLog, showProjects, showSetup, showImport, showSettings, wizard])
 
   useEffect(() => {
     if (!error) return
@@ -319,6 +413,11 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      if (e.code === 'Comma' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        setShowSettings(true)
+        return
+      }
       const tgt = e.target as HTMLElement
       const inText =
         (tgt instanceof HTMLInputElement && tgt.type !== 'range') ||
@@ -1497,6 +1596,17 @@ export default function App(): React.JSX.Element {
               }
             }}
           />
+          <button
+            type="button"
+            className="pill ghost small gear"
+            title="Settings"
+            aria-label="Settings"
+            onClick={() => setShowSettings(true)}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+              <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z" />
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -1535,6 +1645,8 @@ export default function App(): React.JSX.Element {
                   onZoom={zoomBy}
                   onViewShift={shiftView}
                   info={songInfo}
+                  inputId={audioPrefs.inputId}
+                  onMicDevice={setMicDevice}
                 />
               )}
             </div>
@@ -1632,6 +1744,17 @@ export default function App(): React.JSX.Element {
       )}
 
       {showLog && <LogPanel onClose={() => setShowLog(false)} />}
+
+      {showSettings && (
+        <SettingsModal
+          audio={audioPrefs}
+          onChangeOutput={(id) => void changeOutput(id)}
+          onChangeInput={changeInput}
+          outputStatus={outputStatus}
+          micDevice={micDevice}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
 
       {showProjects && (
         <ProjectPicker

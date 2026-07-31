@@ -1,22 +1,66 @@
 import { yinPitch } from './pitch'
 
+export interface MicDevice {
+  id: string
+  label: string
+  /** The asked-for device was unavailable — this is the default instead. */
+  fallback: boolean
+}
+
 /**
  * Live microphone pitch: mic → AnalyserNode, polled from the UI's rAF loop.
  * Echo cancellation stays on so the speakers' backing track doesn't leak into
  * the analysis; AGC/noise-suppression stay off to keep the voice unprocessed.
+ * A chosen device is asked for exactly, then dropped for the default rather
+ * than not singing at all (`device.fallback` says which one answered).
  */
 export class MicPitch {
   private stream: MediaStream | null = null
   private source: MediaStreamAudioSourceNode | null = null
   private analyser: AnalyserNode | null = null
   private buf: Float32Array<ArrayBuffer> | null = null
+  private dev: MicDevice | null = null
+  private onEnded: (() => void) | null = null
 
-  async start(ctx: AudioContext): Promise<void> {
+  async start(
+    ctx: AudioContext,
+    opts: { deviceId?: string; onEnded?: () => void } = {}
+  ): Promise<void> {
     if (this.stream) return
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
-    })
-    this.source = ctx.createMediaStreamSource(this.stream)
+    const base = { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
+    let fallback = false
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: opts.deviceId ? { ...base, deviceId: { exact: opts.deviceId } } : base
+      })
+    } catch (err) {
+      // Missing (OverconstrainedError/NotFoundError) or busy (NotReadable/
+      // Abort — exclusive-mode holds are everyday life on Windows): drop the
+      // pick and sing on the default rather than not at all. NotAllowedError
+      // stays fatal — no constraint change can fix a permission denial.
+      const name = err instanceof DOMException ? err.name : ''
+      const recoverable = ['OverconstrainedError', 'NotFoundError', 'NotReadableError', 'AbortError']
+      if (!opts.deviceId || !recoverable.includes(name)) {
+        throw err
+      }
+      stream = await navigator.mediaDevices.getUserMedia({ audio: base })
+      fallback = true
+    }
+    this.stream = stream
+    this.onEnded = opts.onEnded ?? null
+    const track = stream.getAudioTracks()[0]
+    if (track) {
+      this.dev = { id: track.getSettings().deviceId ?? '', label: track.label, fallback }
+      // unplugged mid-song: release everything and tell the UI, instead of
+      // leaving a silent "Mic on" state
+      track.addEventListener('ended', () => {
+        const cb = this.onEnded
+        this.stop()
+        cb?.()
+      })
+    }
+    this.source = ctx.createMediaStreamSource(stream)
     this.analyser = ctx.createAnalyser()
     this.analyser.fftSize = 2048
     this.source.connect(this.analyser)
@@ -25,6 +69,11 @@ export class MicPitch {
 
   get active(): boolean {
     return this.stream !== null
+  }
+
+  /** The device actually answering (from the live track); null when off. */
+  get device(): MicDevice | null {
+    return this.dev
   }
 
   /** Current sung pitch in Hz (0 = silent/unvoiced). */
@@ -42,5 +91,7 @@ export class MicPitch {
     this.source = null
     this.analyser = null
     this.buf = null
+    this.dev = null
+    this.onEnded = null
   }
 }

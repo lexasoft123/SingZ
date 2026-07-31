@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyGuess } from '../audio/analysis'
 import type { MultitrackEngine } from '../audio/engine'
-import { MicPitch } from '../audio/mic'
-import { CONTROLS_W, fmtTime, type TimeView } from '../model'
+import { MicPitch, type MicDevice } from '../audio/mic'
+import { CONTROLS_W, fmtTime, sanitizePitchHeight, type TimeView } from '../model'
 import { modalCoversApp } from '../model'
 
 export type MelodyState =
@@ -66,6 +66,10 @@ interface Props {
   onZoom: (factor: number, center?: number) => void
   onViewShift: (s: number, e: number) => void
   info: { key: KeyGuess | null; bpm: number | null }
+  /** Chosen microphone (settings) — absent = system default. */
+  inputId?: string
+  /** Reports the device actually in use after every mic start/stop. */
+  onMicDevice?: (d: MicDevice | null) => void
 }
 
 const keyName = (k: KeyGuess, shift: number): string =>
@@ -80,7 +84,9 @@ export default function PitchStrip({
   view,
   onZoom,
   onViewShift,
-  info
+  info,
+  inputId,
+  onMicDevice
 }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -90,6 +96,13 @@ export default function PitchStrip({
   const scoreAcc = useRef({ hit: 0, total: 0 })
   const [mic, setMic] = useState<'off' | 'starting' | 'on' | 'denied'>('off')
   const [fit, setFit] = useState(true)
+  const [stripH, setStripH] = useState(() =>
+    sanitizePitchHeight(localStorage.getItem('singz.pitchH'))
+  )
+
+  useEffect(() => {
+    localStorage.setItem('singz.pitchH', String(stripH))
+  }, [stripH])
 
   const segments = useMemo(
     () => (melody.status === 'ready' ? toNoteSegments(melody.f0, melody.hopSec) : []),
@@ -123,11 +136,14 @@ export default function PitchStrip({
   zoomRef.current = onZoom
   const shiftRef = useRef(onViewShift)
   shiftRef.current = onViewShift
+  const onMicDeviceRef = useRef(onMicDevice)
+  onMicDeviceRef.current = onMicDevice
 
   useEffect(() => {
     return () => {
       micRef.current?.stop()
       micRef.current = null
+      onMicDeviceRef.current?.(null)
     }
   }, [])
 
@@ -210,8 +226,14 @@ export default function PitchStrip({
           const rollW = w - x0
           const xOf = (t: number): number => x0 + ((t - vs) / span) * rollW
 
+          // Everything readable scales with the row height, so dragging the
+          // strip taller genuinely enlarges the view (field report: "мелко").
+          const kbFont = Math.round(Math.min(12, Math.max(8, rowH * 0.7)))
+          const segFont = Math.round(Math.min(13, Math.max(9, rowH * 0.75)))
+          const dotR = Math.min(4.5, Math.max(2.5, rowH * 0.22))
+
           // ——— piano-roll row striping + keyboard on the left
-          ctx.font = '8px "Martian Mono Variable", monospace'
+          ctx.font = `${kbFont}px "Martian Mono Variable", monospace`
           for (let m = Math.floor(lo); m <= Math.ceil(hi); m++) {
             const pc = ((m % 12) + 12) % 12
             const yTop = yOf(m) - rowH / 2
@@ -240,7 +262,7 @@ export default function PitchStrip({
               if (pc === 0 && rowH >= 7) {
                 ctx.fillStyle = '#4a4336'
                 ctx.textAlign = 'right'
-                ctx.fillText(noteName(m), x0 - 5, yOf(m) + 2.5)
+                ctx.fillText(noteName(m), x0 - 5, yOf(m) + kbFont * 0.31)
                 ctx.textAlign = 'left'
               }
             }
@@ -255,9 +277,9 @@ export default function PitchStrip({
           ctx.rect(x0, 0, rollW, h)
           ctx.clip()
 
-          const barH = Math.min(7, Math.max(3, rowH - 2))
+          const barH = Math.min(16, Math.max(3, rowH - 3))
           let lastLabelX = -100
-          ctx.font = '9px "Martian Mono Variable", monospace'
+          ctx.font = `${segFont}px "Martian Mono Variable", monospace`
           for (const seg of segments) {
             if (seg.e < vs || seg.s > ve) continue
             const midi = seg.midi + transpose
@@ -304,7 +326,7 @@ export default function PitchStrip({
             for (const p of trailRef.current) {
               if (p.t < vs || p.t > ve || p.midi < lo - 1 || p.midi > hi + 1) continue
               ctx.beginPath()
-              ctx.arc(xOf(p.t), yOf(p.midi), 2.5, 0, Math.PI * 2)
+              ctx.arc(xOf(p.t), yOf(p.midi), dotR, 0, Math.PI * 2)
               ctx.fillStyle = p.hit ? '#58d68a' : 'rgba(255,122,92,0.7)'
               if (p.hit) {
                 ctx.shadowColor = '#58d68a'
@@ -327,11 +349,33 @@ export default function PitchStrip({
     return () => cancelAnimationFrame(raf)
   }, [engine])
 
+  /** Start a MicPitch on the chosen device; the caller owns the instance. */
+  const startMic = async (deviceId?: string): Promise<MicPitch | null> => {
+    const m = new MicPitch()
+    try {
+      await m.start(engine.context, {
+        deviceId,
+        onEnded: () => {
+          // the device vanished mid-song (unplugged, BT died)
+          if (micRef.current === m) {
+            micRef.current = null
+            setMic('off')
+            onMicDeviceRef.current?.(null)
+          }
+        }
+      })
+      return m
+    } catch {
+      return null
+    }
+  }
+
   const toggleMic = async (): Promise<void> => {
     if (micRef.current?.active) {
       micRef.current.stop()
       micRef.current = null
       setMic('off')
+      onMicDeviceRef.current?.(null)
       return
     }
     setMic('starting')
@@ -340,21 +384,69 @@ export default function PitchStrip({
       setMic('denied')
       return
     }
-    try {
-      const m = new MicPitch()
-      await m.start(engine.context)
-      micRef.current = m
-      trailRef.current = []
-      scoreAcc.current = { hit: 0, total: 0 }
-      if (scoreRef.current) scoreRef.current.textContent = 'sing!'
-      setMic('on')
-    } catch {
+    const m = await startMic(inputId)
+    if (!m) {
       setMic('denied')
+      return
     }
+    micRef.current = m
+    trailRef.current = []
+    scoreAcc.current = { hit: 0, total: 0 }
+    if (scoreRef.current) scoreRef.current.textContent = 'sing!'
+    setMic('on')
+    onMicDeviceRef.current?.(m.device)
   }
 
+  // Live device switch: restart an active mic when settings change the pick.
+  const micGen = useRef(0)
+  const inputIdRef = useRef(inputId)
+  useEffect(() => {
+    if (inputId === inputIdRef.current) return
+    inputIdRef.current = inputId
+    if (!micRef.current?.active) return
+    const gen = ++micGen.current
+    micRef.current.stop()
+    micRef.current = null
+    void startMic(inputId).then((m) => {
+      if (gen !== micGen.current) {
+        // a newer switch already won — this stream is stale
+        m?.stop()
+        return
+      }
+      micRef.current = m
+      if (m) {
+        onMicDeviceRef.current?.(m.device)
+      } else {
+        setMic('off')
+        onMicDeviceRef.current?.(null)
+      }
+    })
+  }, [inputId])
+
   return (
-    <div className="pitch-strip" ref={stripRef}>
+    <div className="pitch-strip" ref={stripRef} style={{ height: stripH }}>
+      <div
+        className="ps-resize"
+        title="Drag to resize the pitch view"
+        onPointerDown={(e) => {
+          e.preventDefault()
+          const startY = e.clientY
+          const startH = stripH
+          const el = e.currentTarget
+          el.setPointerCapture(e.pointerId)
+          const move = (ev: PointerEvent): void => {
+            setStripH(sanitizePitchHeight(startH + (startY - ev.clientY)))
+          }
+          const up = (): void => {
+            el.removeEventListener('pointermove', move)
+            el.removeEventListener('pointerup', up)
+            el.removeEventListener('pointercancel', up)
+          }
+          el.addEventListener('pointermove', move)
+          el.addEventListener('pointerup', up)
+          el.addEventListener('pointercancel', up)
+        }}
+      />
       <canvas ref={canvasRef} />
       <div className="ps-info">
         <div className="psi-row">
