@@ -102,7 +102,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" --title "$TAG" --notes "" 2>/dev/null || true
+          # docs/release-notes/<tag>.md (committed before tagging; first line
+          # is the release title) makes the release public with real notes
+          # from the first attach — no file falls back to the bare create
+          NOTES="docs/release-notes/$TAG.md"
+          if [ -f "$NOTES" ]; then
+            tail -n +2 "$NOTES" > /tmp/relnotes-body.md
+            gh release create "$TAG" --title "$(head -n 1 "$NOTES")" --notes-file /tmp/relnotes-body.md 2>/dev/null || true
+          else
+            gh release create "$TAG" --title "$TAG" --notes "" 2>/dev/null || true
+          fi
           # nullglob: each matrix job only has its own platform's files
           shopt -s nullglob
           FILES=(dist/*.dmg dist/*.exe dist/latest*.yml dist/*.blockmap vendor/packs/*.tar.gz)

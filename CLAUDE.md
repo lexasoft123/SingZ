@@ -252,10 +252,15 @@ the tag (artifact names use it). Engine steps are cached keyed on the vendor
 scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
 `releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.
 
-After pushing a tag, write the release notes yourself: diff against the
-previous tag (`git log <prev>..<tag> --oneline` plus what you know shipped),
-then `gh release edit <tag> --notes` with user-facing, genuinely funny notes —
-singer's-eye view, not commit prose: what they can do now, what stopped being
-annoying, sizes/time costs where they matter. Group by platform when it helps.
-The CI workflows create the release with empty notes; filling them is part of
-cutting the release, not optional polish.
+Release notes are written BEFORE tagging, as part of cutting the release:
+diff against the previous tag (`git log <prev>..HEAD --oneline` plus what
+you know shipped) and commit `docs/release-notes/v<version>.md` together
+with the version bump — first line `v<version> — <tagline>` becomes the
+release title, the rest (after a blank line) the body. Both workflows'
+attach steps read that file at create time, so the release goes public
+already titled and noted while artifacts stream in; a tag without its file
+falls back to the bare create (fix it with `gh release edit`). Notes are
+user-facing and genuinely funny — singer's-eye view, not commit prose: what
+they can do now, what stopped being annoying, sizes/time costs where they
+matter. Group by platform when it helps. Writing them is part of cutting
+the release, not optional polish.
