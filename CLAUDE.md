@@ -181,7 +181,8 @@ answer your evals while you measure the phone.
   to a visible SingZ Drive folder (md5-diffed resumable uploads, auto after
   save); phones list over REST and stream stems via FolderAccess
   fetchToCache. After every sync the desktop writes `catalog.json` at the
-  SingZ root — the whole library (docs, Drive ids, sizes, md5s), written
+  SingZ root — the whole library (doc summaries, Drive ids, sizes; md5s on
+  project.json/lyrics.json only — stem bytes are vouched by stemHashes), written
   LAST so it never names missing files, byte-stable + md5-skipped when
   nothing changed. Phones list from it in three requests instead of three
   per song; they trust it only while it names exactly the root's project

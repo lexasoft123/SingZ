@@ -106,6 +106,9 @@ export interface ProjectDoc {
   songFile: string
   savedAt: string
   settings: ProjectSettings
+  /** md5 (+size/mtime) per stems/ file, written by the desktop — the
+   *  authority on whether a downloaded copy is still the right bytes. */
+  stemHashes?: Record<string, { md5: string; size: number; mtimeMs: number }>
 }
 
 /** Vocal-training setup (what alternates, how often, which stems the singer carries). */

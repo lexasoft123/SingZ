@@ -533,8 +533,11 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
   return adopt(out)
 }
 
-/** Drive counterpart of FolderAccess.localFile: stream into the cache. */
-export async function driveLocalFile(project: string, file: string): Promise<string> {
+/** Drive counterpart of FolderAccess.localFile: stream into the cache.
+ *  expectedMd5 is the project.json stemHashes value — the authority on stem
+ *  bytes; the catalog manifest stopped carrying per-stem md5s (they only
+ *  duplicated it). Listing-supplied md5s (the folder walk) still work. */
+export async function driveLocalFile(project: string, file: string, expectedMd5?: string): Promise<string> {
   const files = projectFiles.get(project)
   if (!files) throw new Error(`Project ${project} was not listed from Drive`)
   const name = file.startsWith('stems/') ? file.slice(6) : file
@@ -547,7 +550,7 @@ export async function driveLocalFile(project: string, file: string): Promise<str
   // that short-circuit, which is what a same-size-different-audio re-split
   // needs. With no md5 at all, fall back to the plain size check.
   const key = `${project}/${file}`
-  const want = entry.md5Checksum ?? ''
+  const want = expectedMd5 || entry.md5Checksum || ''
   const fresh = want === '' || (await haveMap())[key] === want
 
   // The short-circuit happens before the URL is ever used, so a cached stem

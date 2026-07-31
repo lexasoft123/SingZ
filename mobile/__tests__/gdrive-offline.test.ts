@@ -77,7 +77,9 @@ function addManifest(drive: DriveState, overrides: Partial<Record<string, unknow
           { id: 'M1', name: 'project.json', mimeType: 'application/json', size: '40', md5Checksum: 'm-1' },
           { id: 'L1', name: 'lyrics.json', mimeType: 'application/json', size: '30', md5Checksum: 'l-1' }
         ],
-        stems: drive.children.S1
+        // like the desktop, stems carry ids and sizes but no md5s — the
+        // authority on stem bytes is project.json's stemHashes
+        stems: drive.children.S1.map(({ md5Checksum: _drop, ...keep }) => keep)
       }
     ],
     ...overrides
@@ -269,12 +271,13 @@ describe('the desktop-written manifest', () => {
     expect(entries[0].hasLyrics).toBe(true)
     expect(prefs['singz.gdrive.catalog']).toBeTruthy()
 
-    // the manifest's file ids feed the same md5-aware streaming
-    await g.driveLocalFile('Song One', 'stems/vocals.flac')
+    // the manifest's file ids feed the streaming; the md5 arrives separately,
+    // from the opened project.json's stemHashes (loadProject plumbs it)
+    await g.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
     expect(fetchToCache.mock.calls[0][2]).toContain('/drive/v3/files/V1')
     expect(fetchToCache.mock.calls[0][4]).toBe(0) // never fetched before
     fetchToCache.mockClear()
-    await g.driveLocalFile('Song One', 'stems/vocals.flac')
+    await g.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
     expect(fetchToCache.mock.calls[0][4]).toBe(100) // unchanged md5: cached
   })
 
@@ -283,7 +286,11 @@ describe('the desktop-written manifest', () => {
     drive.media.M1 = JSON.stringify({
       name: 'Song One',
       savedAt: '2026-01-01T00:00:00.000Z',
-      settings: { transpose: 2, beat: { beats: [0.5, 1, 1.5], beatsPerBar: 4, downbeat: 0 } }
+      settings: { transpose: 2, beat: { beats: [0.5, 1, 1.5], beatsPerBar: 4, downbeat: 0 } },
+      stemHashes: {
+        'vocals.flac': { md5: 'v-1', size: 100, mtimeMs: 1 },
+        'drums.flac': { md5: 'd-1', size: 200, mtimeMs: 1 }
+      }
     })
     addManifest(drive)
     install(drive)
@@ -297,11 +304,17 @@ describe('the desktop-written manifest', () => {
     const { loadProject } = require('../src/projects') as typeof import('../src/projects')
     const first = await loadProject(entries[0], 48000, () => {})
     expect((first.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
+    // stems streamed under the doc's md5s: both fetched for real once
+    expect(fetchToCache.mock.calls.filter((c) => c[4] === 0)).toHaveLength(2)
+    fetchToCache.mockClear()
 
     // and a song opened once keeps its settings with no signal at all
     drive.offline = true
     const again = await loadProject(entries[0], 48000, () => {})
     expect((again.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
+    // the cached copies stand — unchanged md5s let the size check serve them
+    expect(fetchToCache.mock.calls.length).toBeGreaterThan(0)
+    expect(fetchToCache.mock.calls.every((c) => (c[4] as number) > 0)).toBe(true)
   })
 
   it('serves an unchanged text member without a request', async () => {
@@ -312,7 +325,7 @@ describe('the desktop-written manifest', () => {
     const g = require('../src/gdrive') as typeof import('../src/gdrive')
     await g.driveListProjects()
     expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('hello') // fetched + kept
-    await new Promise((r) => setTimeout(r, 0)) // the keep is fire-and-forget
+    await new Promise<void>((r) => setTimeout(() => r(), 0)) // the keep is fire-and-forget
     let calls = 0
     const inner = globalThis.fetch
     globalThis.fetch = ((...a: Parameters<typeof fetch>) => {
