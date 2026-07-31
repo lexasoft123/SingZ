@@ -843,3 +843,60 @@ describe('detectBeats level-matched splice view (v13)', () => {
     expect(worst).toBeLessThan(0.05)
   })
 })
+
+describe('detectBeats span-phase vote (v14)', () => {
+  it('chord changes pick the "1" inside a spliced void', () => {
+    // v11 void shape + a bass that changes root every 4 beats starting at
+    // beat index 2 — the extension from the surrounding 0-parity anchors
+    // would accent the wrong beat; the chroma vote must land on the changes
+    const truth: number[] = []
+    for (let t = 0.4; t < 99; t += 0.5) truth.push(t)
+    const played = truth.filter((x) => x < 30 || x >= 72)
+    const band = (beats: number[], strums: number[]): AudioBuffer => {
+      const data = new Float32Array(SR * 100)
+      for (let b = 0; b < beats.length; b++) {
+        const f = b % 2 === 0 ? 55 : 200
+        const amp = b % 4 === 0 ? 1.0 : 0.6
+        const at = Math.round(beats[b] * SR)
+        for (let i = 0; i < 3500 && at + i < data.length; i++) {
+          data[at + i] += amp * Math.exp(-i / 700) * Math.sin((2 * Math.PI * f * i) / SR)
+        }
+      }
+      for (const st of strums) {
+        const at = Math.round(st * SR)
+        for (let i = 0; i < 3000 && at + i < data.length; i++) {
+          data[at + i] += 0.8 * Math.exp(-i / 600) * Math.sin((2 * Math.PI * 330 * i) / SR)
+        }
+      }
+      return wrap(data)
+    }
+    const strums: number[] = []
+    for (let st = 30.3; st < 71.5; st += 0.4 + 0.5 * rnd()) strums.push(st)
+    // sustained bass roots through the void, chord change every 4 beats at
+    // parity 2 (indices 2, 6, 10, … of the truth grid)
+    const bassData = new Float32Array(SR * 100)
+    const roots = [82.4, 110, 98, 73.4]
+    let ri = 0
+    for (let i = 2; i < truth.length; i += 4) {
+      if (truth[i] < 29 || truth[i] > 73) continue
+      const a = Math.round(truth[i] * SR)
+      const b = Math.round(Math.min(truth[i] + 2, 100) * SR)
+      const f = roots[ri++ % roots.length]
+      for (let j = a; j < b && j < bassData.length; j++) {
+        bassData[j] += 0.3 * Math.sin((2 * Math.PI * f * (j - a)) / SR)
+      }
+    }
+    const ml = { beats: truth, downbeats: truth.filter((_, i) => i % 4 === 0) }
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(band(played, []), { inst: [band(played, strums)], bass: wrap(bassData), ml }, dbg)
+    expect(det).not.toBeNull()
+    const votes = dbg.spanPhase as { rot: number }[] | undefined
+    expect(votes?.length).toBeGreaterThan(0)
+    // bars in the void sit on the chord changes (parity 2), not extension
+    const voidBars = det!.downbeats!.map((i) => det!.beats[i]).filter((t) => t > 34 && t < 68)
+    for (const bar of voidBars) {
+      const nearestChange = truth.filter((_, i) => i % 4 === 2).reduce((m, t) => (Math.abs(t - bar) < Math.abs(m - bar) ? t : m))
+      expect(Math.abs(bar - nearestChange)).toBeLessThan(0.06)
+    }
+  })
+})

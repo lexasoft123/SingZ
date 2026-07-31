@@ -85,8 +85,11 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * rides our eighths no longer disables every repair — TTP's bridge), and
  * fill-accepted interior voids may be overridden by a strictly steady
  * model (fill-tracking through TTP's bridge sat 130-190 ms off the pulse).
+ * v14: interior spliced spans re-vote their bar rotation from chord-change
+ * mass + the model's downbeat head (margin-gated) — extension across a
+ * span nothing ever voted accented TTP's bass solo on the wrong "1".
  */
-export const BEAT_DETECT_VERSION = 13
+export const BEAT_DETECT_VERSION = 14
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -293,6 +296,10 @@ export function detectBeats(
    *  accents the wrong "1" over an intro at its own tempo: 2/27 agreement
    *  measured on Mr Crowley). */
   let mlLeadEnd = -1
+  /** Interior ML-spliced spans (seconds) — their bars get a harmonic
+   *  re-vote below: extension across a span nothing drum-anchored ever
+   *  voted is blind (TTP's bass solo accented the wrong "1"). */
+  const mlSpliceRanges: { aSec: number; bSec: number }[] = []
   if (lat && lat !== mlChoice && mlChoice && lat.beatsSec.length >= 16) {
     const L = lat
     const med = L.medSec
@@ -385,10 +392,14 @@ export function detectBeats(
           // fill-tracked interior spans are usually fine — but TTP's bridge
           // is fill-ACCEPTED yet sits 130-190 ms off the model's pulse. When
           // the model is clearly steady across the span, its beats win.
-          if (mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) splice(v.aSec, v.bSec, 'void-filled')
+          if (mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) {
+            splice(v.aSec, v.bSec, 'void-filled')
+            mlSpliceRanges.push({ aSec: v.aSec, bSec: v.bSec })
+          }
           continue
         }
         splice(v.aSec, v.bSec, 'void')
+        mlSpliceRanges.push({ aSec: v.aSec, bSec: v.bSec })
       }
       const zones: { a: number; b: number }[] = []
       const bs = L.beatsSec
@@ -896,6 +907,62 @@ export function detectBeats(
         const keep = downbeats.filter((k) => k >= firstOwn && k > intro[intro.length - 1])
         downbeats = [...intro, ...keep]
       }
+    }
+    // Interior spliced spans: the model repaired their TIMING, but the "1"
+    // was blind extension from the surrounding anchors — nothing musical
+    // ever voted it (TTP's bass solo walks chord changes on bars the
+    // extension missed). Chord-change mass plus the model's downbeat head
+    // re-vote the rotation per span; only a confident margin overrides,
+    // and the boundary bars come out odd — the fermata mechanics.
+    if (mlSpliceRanges.length > 0 && downbeats.length > 0) {
+      const dbp = aux?.ml?.downbeatProb
+      const mfps = aux?.ml?.fps
+      for (const rg of mlSpliceRanges) {
+        const a = Math.max(0, nearestBeatIdx(beatsSec, rg.aSec))
+        const b = Math.min(beatsSec.length - 1, nearestBeatIdx(beatsSec, rg.bSec))
+        if (b - a < 2 * bpb) continue
+        const harm = new Array<number>(bpb).fill(0)
+        const mld2 = new Array<number>(bpb).fill(0)
+        let hMass = 0
+        for (let k = a; k <= b; k++) {
+          const hv = harmNov && k < harmNov.length ? harmNov[k] : 0
+          if (hv > 0) {
+            harm[k % bpb] += hv
+            hMass += hv
+          }
+          if (dbp && mfps) {
+            const f = Math.round(beatsSec[k] * mfps)
+            let best = 0
+            for (const g of [f - 1, f, f + 1]) {
+              if (g >= 0 && g < dbp.length && dbp[g] > best) best = dbp[g]
+            }
+            mld2[k % bpb] += best
+          }
+        }
+        if (hMass <= 0) continue
+        const norm = (xs: number[]): number[] => {
+          const t = xs.reduce((x, y) => x + y, 0)
+          return t > 1e-9 ? xs.map((x) => x / t) : xs.map(() => 1 / bpb)
+        }
+        const hd = norm(harm)
+        const md = norm(mld2)
+        const score = hd.map((h, r) => 0.7 * h + 0.3 * md[r])
+        let rot = 0
+        for (let r = 1; r < bpb; r++) if (score[r] > score[rot]) rot = r
+        const sorted = [...score].sort((x, y) => y - x)
+        const margin = sorted[0] - sorted[1]
+        if (margin < 0.15) continue
+        const keep: number[] = downbeats.filter((k) => k < a || k > b)
+        const add: number[] = []
+        for (let k = a + ((((rot - a) % bpb) + bpb) % bpb); k <= b; k += bpb) add.push(k)
+        downbeats = [...keep, ...add].sort((x, y) => x - y).filter((k, i, arr) => i === 0 || k > arr[i - 1])
+        if (debug) {
+          const arr = (debug.spanPhase as unknown[] | undefined) ?? []
+          arr.push({ aSec: rg.aSec, bSec: rg.bSec, rot, margin: Math.round(margin * 100) / 100 })
+          debug.spanPhase = arr
+        }
+      }
+      downbeat = downbeats.length > 0 ? downbeats[0] % bpb : downbeat
     }
     if (downbeats.length === 0) downbeats = undefined
     downbeat = downbeats ? downbeats[0] % bpb : anchors[0].rot % bpb
