@@ -58,6 +58,8 @@ function toNoteSegments(f0: Float32Array, hopSec: number): NoteSeg[] {
 interface Props {
   engine: MultitrackEngine
   melody: MelodyState
+  /** Beat-detection progress (0..1) — null when idle. */
+  beatProg?: number | null
   transpose: number
   tempo: number
   view: TimeView | null
@@ -72,6 +74,7 @@ const keyName = (k: KeyGuess, shift: number): string =>
 export default function PitchStrip({
   engine,
   melody,
+  beatProg,
   transpose,
   tempo,
   view,
@@ -382,7 +385,20 @@ export default function PitchStrip({
       </div>
       <div className="ps-hud">
         {melody.status === 'computing' && (
-          <span className="ps-note">reading melody… {Math.round(melody.p * 100)}%</span>
+          <span className="ps-note">
+            reading melody… {Math.round(melody.p * 100)}%
+            <i className="ps-bar">
+              <i style={{ width: `${Math.round(melody.p * 100)}%` }} />
+            </i>
+          </span>
+        )}
+        {beatProg != null && melody.status !== 'computing' && (
+          <span className="ps-note">
+            finding the beat… {Math.round(beatProg * 100)}%
+            <i className="ps-bar">
+              <i style={{ width: `${Math.round(beatProg * 100)}%` }} />
+            </i>
+          </span>
         )}
         <button
           type="button"

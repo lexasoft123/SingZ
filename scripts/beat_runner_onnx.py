@@ -65,6 +65,7 @@ def run_model(spect: np.ndarray, sess) -> tuple[np.ndarray, np.ndarray]:
     beat = np.full(n_frames, -1000.0, dtype=np.float32)
     down = np.full(n_frames, -1000.0, dtype=np.float32)
     # keep_first: write in reverse order so earlier chunks overwrite later ones
+    done = 0
     for start in starts[::-1].tolist():
         chunk = spect[max(start, 0):min(start + CHUNK, n_frames)]
         left = max(0, -start)
@@ -80,6 +81,8 @@ def run_model(spect: np.ndarray, sess) -> tuple[np.ndarray, np.ndarray]:
         hi = min(start + CHUNK - BORDER, n_frames)
         beat[lo:hi] = b_seg[:hi - lo]
         down[lo:hi] = d_seg[:hi - lo]
+        done += 1
+        print(f"PROG {0.30 + 0.65 * done / len(starts):.3f}", file=sys.stderr, flush=True)
     return beat, down
 
 
@@ -162,9 +165,11 @@ def main() -> int:
     providers = ["CPUExecutionProvider"]  # CPU ONLY — never DirectML/CoreML here
     mel_sess = ort.InferenceSession(str(logmel_path), opts, providers=providers)
     model_sess = ort.InferenceSession(str(model_path), opts, providers=providers)
+    print("PROG 0.15", file=sys.stderr, flush=True)
     print("running Beat This (ONNX, cpu)", file=sys.stderr, flush=True)
 
     spect = compute_logmel(signal, mel_sess)
+    print("PROG 0.28", file=sys.stderr, flush=True)
     beat_logits, downbeat_logits = run_model(spect, model_sess)
     beats, downbeats = postprocess(beat_logits, downbeat_logits)
     beat_prob = sigmoid(beat_logits)

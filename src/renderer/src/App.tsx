@@ -151,6 +151,23 @@ export default function App(): React.JSX.Element {
   const [karaoke, setKaraoke] = useState(false)
   const [lyrics, setLyrics] = useState<LyricsState>({ status: 'idle' })
   const [melody, setMelody] = useState<MelodyState>({ status: 'none' })
+  /** Beat-detection progress (0..1) — the HUD's second analysis phase.
+   *  Driven by the pack runner's PROG lines; null = not detecting. */
+  const [beatProg, setBeatProg] = useState<number | null>(null)
+  useEffect(
+    () =>
+      window.singz.onBeatsProgress((p) => {
+        // only track while a detection this renderer started is active
+        setBeatProg((cur) => (cur === null ? cur : Math.max(cur, p)))
+      }),
+    []
+  )
+  const analysisNote =
+    melody.status === 'computing'
+      ? { label: 'Reading the melody', p: melody.p }
+      : beatProg !== null
+        ? { label: 'Finding the beat', p: beatProg }
+        : null
   const [transpose, setTranspose] = useState(0)
   const [tempoRate, setTempoRate] = useState(1)
   const [view, setView] = useState<TimeView | null>(null)
@@ -900,32 +917,40 @@ export default function App(): React.JSX.Element {
         if ((fresh || stale) && drumsBufRef.current) {
           const drums = drumsBufRef.current
           void (async () => {
-            const ml = await fetchMlGridRef.current?.()
-            if (drumsBufRef.current !== drums) return // song changed mid-flight
-            const det = detectBeats(drums, {
-              bass: bassBufRef.current,
-              vocals: vocalsBufRef.current,
-              inst: instBufsRef.current,
-              lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
-              ml
-            })
-            if (det) {
-              setBeatInfo({
-                beats: det.beats,
-                bpm: det.bpm,
-                beatsPerBar: det.beatsPerBar,
-                downbeat: det.downbeat,
-                ...(det.downbeats ? { downbeats: det.downbeats } : {}),
-                source: 'auto',
-                detVersion: BEAT_DETECT_VERSION
+            setBeatProg(0.02)
+            try {
+              const ml = await fetchMlGridRef.current?.()
+              if (drumsBufRef.current !== drums) return // song changed mid-flight
+              // let the bar paint before the synchronous tracker blocks
+              setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
+              await new Promise((r) => setTimeout(r, 30))
+              const det = detectBeats(drums, {
+                bass: bassBufRef.current,
+                vocals: vocalsBufRef.current,
+                inst: instBufsRef.current,
+                lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+                ml
               })
-              if (stale) touchSettings()
-              // The corrected grid must reach the project file — and through
-              // Drive the phones, which have no detector of their own — without
-              // waiting for a manual save. Deferred via state so the save
-              // handler's closure sees the new grid.
-              setBeatAutoSave(true)
-              setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+              if (det) {
+                setBeatInfo({
+                  beats: det.beats,
+                  bpm: det.bpm,
+                  beatsPerBar: det.beatsPerBar,
+                  downbeat: det.downbeat,
+                  ...(det.downbeats ? { downbeats: det.downbeats } : {}),
+                  source: 'auto',
+                  detVersion: BEAT_DETECT_VERSION
+                })
+                if (stale) touchSettings()
+                // The corrected grid must reach the project file — and through
+                // Drive the phones, which have no detector of their own — without
+                // waiting for a manual save. Deferred via state so the save
+                // handler's closure sees the new grid.
+                setBeatAutoSave(true)
+                setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+              }
+            } finally {
+              setBeatProg(null)
             }
           })()
         }
@@ -1214,29 +1239,36 @@ export default function App(): React.JSX.Element {
     const buf = drumsBufRef.current
     if (!buf) return
     void (async () => {
-      const ml = await fetchMlGrid()
-      if (drumsBufRef.current !== buf) return // song changed mid-flight
-      const det = detectBeats(buf, {
-        bass: bassBufRef.current,
-        vocals: vocalsBufRef.current,
-        inst: instBufsRef.current,
-        lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
-        ml
-      })
-      if (det) {
-        touchSettings()
-        setBeatInfo({
-          beats: det.beats,
-          bpm: det.bpm,
-          beatsPerBar: det.beatsPerBar,
-          downbeat: det.downbeat,
-          ...(det.downbeats ? { downbeats: det.downbeats } : {}),
-          source: 'auto',
-          detVersion: BEAT_DETECT_VERSION
+      setBeatProg(0.02)
+      try {
+        const ml = await fetchMlGrid()
+        if (drumsBufRef.current !== buf) return // song changed mid-flight
+        setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
+        await new Promise((r) => setTimeout(r, 30))
+        const det = detectBeats(buf, {
+          bass: bassBufRef.current,
+          vocals: vocalsBufRef.current,
+          inst: instBufsRef.current,
+          lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+          ml
         })
-        setSongInfo((s) => ({ ...s, bpm: det.bpm }))
-      } else {
-        setNotice('No steady beat found — tap the tempo instead.')
+        if (det) {
+          touchSettings()
+          setBeatInfo({
+            beats: det.beats,
+            bpm: det.bpm,
+            beatsPerBar: det.beatsPerBar,
+            downbeat: det.downbeat,
+            ...(det.downbeats ? { downbeats: det.downbeats } : {}),
+            source: 'auto',
+            detVersion: BEAT_DETECT_VERSION
+          })
+          setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+        } else {
+          setNotice('No steady beat found — tap the tempo instead.')
+        }
+      } finally {
+        setBeatProg(null)
       }
     })()
   }, [touchSettings, fetchMlGrid])
@@ -1496,6 +1528,7 @@ export default function App(): React.JSX.Element {
                 <PitchStrip
                   engine={engine}
                   melody={melody}
+                  beatProg={beatProg}
                   transpose={transpose}
                   tempo={tempoRate}
                   view={view}
@@ -1546,6 +1579,7 @@ export default function App(): React.JSX.Element {
             tempo={tempoRate}
             onTempo={handleTempo}
             bpm={songInfo.bpm}
+            analysis={analysisNote}
             beat={beatInfo}
             met={metCfg}
             canDetectBeat={drumsBufRef.current !== null}

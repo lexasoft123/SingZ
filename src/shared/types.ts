@@ -342,6 +342,8 @@ export interface SingzApi {
   beatsMlAvailable(): Promise<{ ok: true; available: boolean }>
   /** Run ML beat/downbeat detection on raw mono float32 PCM at `sr` (22050). */
   beatsMlDetect(pcm: ArrayBuffer, sr: number): Promise<BeatsMlResult>
+  /** Beat-model progress (0..1) while beatsMlDetect runs. Returns unsubscribe. */
+  onBeatsProgress(cb: (p: number) => void): () => void
   revealInFolder(path: string): Promise<void>
   openExternal(url: string): Promise<void>
   /** Subscribe to separation progress. Returns an unsubscribe function. */

@@ -26,6 +26,34 @@ import time
 from pathlib import Path
 
 
+def run_chunked(a2f, signal, sr):
+    """Audio2Frames.__call__, unrolled for per-chunk PROG lines on stderr —
+    the app renders these as the beat-detection progress bar. Numerically
+    identical to upstream spect2frames (same split/border/keep_first)."""
+    import torch
+    from beat_this.inference import aggregate_prediction, split_piece
+
+    spect = a2f.signal2spect(signal, sr)
+    print("PROG 0.30", file=sys.stderr, flush=True)
+    chunk_size = 1500
+    border = 6
+    with torch.inference_mode():
+        chunks, starts = split_piece(
+            spect, chunk_size, border_size=border, avoid_short_end=True
+        )
+        preds = []
+        for i, chunk in enumerate(chunks):
+            pred = a2f.model(chunk.unsqueeze(0))
+            preds.append({"beat": pred["beat"][0], "downbeat": pred["downbeat"][0]})
+            print(f"PROG {0.30 + 0.65 * (i + 1) / len(chunks):.3f}",
+                  file=sys.stderr, flush=True)
+        beat, downbeat = aggregate_prediction(
+            preds, list(starts), spect.shape[0], chunk_size, border,
+            "keep_first", spect.device
+        )
+    return beat.float(), downbeat.float()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--f32", required=True)
@@ -51,6 +79,7 @@ def main() -> int:
         print(f"empty or unreadable f32 input: {args.f32}", file=sys.stderr)
         return 2
 
+    print("PROG 0.05", file=sys.stderr, flush=True)
     t0 = time.time()
     import torch
     from beat_this.inference import Audio2Frames
@@ -63,7 +92,8 @@ def main() -> int:
 
     try:
         a2f = Audio2Frames(checkpoint_path=str(ckpt), device=device)
-        beat_logits, downbeat_logits = a2f(signal, args.sr)
+        print("PROG 0.15", file=sys.stderr, flush=True)
+        beat_logits, downbeat_logits = run_chunked(a2f, signal, args.sr)
     except Exception as err:  # MPS can lack ops on old macOS — CPU always works
         if device == "cpu":
             raise
@@ -71,7 +101,7 @@ def main() -> int:
               file=sys.stderr, flush=True)
         device = "cpu"
         a2f = Audio2Frames(checkpoint_path=str(ckpt), device=device)
-        beat_logits, downbeat_logits = a2f(signal, args.sr)
+        beat_logits, downbeat_logits = run_chunked(a2f, signal, args.sr)
 
     postp = Postprocessor(type="minimal")
     beats, downbeats = postp(beat_logits, downbeat_logits)

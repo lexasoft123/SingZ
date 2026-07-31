@@ -1,4 +1,4 @@
-import { app, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -84,6 +84,7 @@ class BeatsMl {
 
       let out = ''
       let errTail = ''
+      let progBuf = ''
       const timer = setTimeout(() => {
         log('beats', `beat detection exceeded ${TIMEOUT_MS / 1000}s — killing it`, 'error')
         child.kill('SIGKILL')
@@ -95,7 +96,24 @@ class BeatsMl {
       child.stderr?.on('data', (c: Buffer) => {
         const text = c.toString('utf8')
         errTail = (errTail + text).slice(-4000)
-        logChunk('beats', text)
+        // PROG <0..1> lines drive the renderer's beat-detection progress
+        // bar; they are protocol, not log noise. Older packs never emit
+        // them — the bar just stays text-only there.
+        progBuf += text
+        let nl: number
+        while ((nl = progBuf.indexOf('\n')) >= 0) {
+          const line = progBuf.slice(0, nl).trim()
+          progBuf = progBuf.slice(nl + 1)
+          const m = /^PROG ([\d.]+)$/.exec(line)
+          if (!m) continue
+          const p = Number.parseFloat(m[1])
+          if (Number.isFinite(p)) {
+            for (const win of BrowserWindow.getAllWindows()) {
+              if (!win.isDestroyed()) win.webContents.send('beats:progress', Math.min(1, p))
+            }
+          }
+        }
+        logChunk('beats', text, /^PROG /)
       })
 
       child.on('error', (err) => {

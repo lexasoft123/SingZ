@@ -63,6 +63,14 @@ const api: SingzApi = {
     }
   },
 
+  onBeatsProgress: (cb) => {
+    const listener = (_e: IpcRendererEvent, p: number): void => cb(p)
+    ipcRenderer.on('beats:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('beats:progress', listener)
+    }
+  },
+
   getLyrics: (songPath, durationSec, allowDownload, prefer) =>
     ipcRenderer.invoke('lyrics:get', songPath, durationSec, Boolean(allowDownload), prefer ?? 'auto'),
 

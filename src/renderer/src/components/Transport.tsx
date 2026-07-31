@@ -105,6 +105,8 @@ interface Props {
   tempo: number
   onTempo: (rate: number) => void
   bpm: number | null
+  /** Active analysis phase shown in place of the bpm readout while null. */
+  analysis?: { label: string; p: number } | null
   beat: BeatInfo | null
   met: MetronomeConfig
   canDetectBeat: boolean
@@ -122,11 +124,13 @@ interface Props {
 function BpmEntry({
   bpm,
   tempo,
-  onTempo
+  onTempo,
+  analysis
 }: {
   bpm: number | null
   tempo: number
   onTempo: (rate: number) => void
+  analysis?: { label: string; p: number } | null
 }): React.JSX.Element {
   const [draft, setDraft] = useState<string | null>(null)
   const shown = bpm === null ? '—' : (draft ?? String(Math.round(bpm * tempo)))
@@ -141,13 +145,37 @@ function BpmEntry({
     if (bpm === null) return
     onTempo((Math.round(bpm * tempo) + d) / bpm)
   }
+  // Analysis in flight (melody, then the beat model) takes the readout over —
+  // stale grids re-detect with the OLD bpm still on screen, so this must not
+  // hide behind the bpm-less branch.
+  if (analysis) {
+    return (
+      <>
+        <button type="button" className="chip" disabled>
+          −
+        </button>
+        <label className="bpm-entry disabled bpm-analysis" title={analysis.label}>
+          <i className="ps-bar">
+            <i style={{ width: `${Math.round(analysis.p * 100)}%` }} />
+          </i>
+          <span className="tr-unit">{Math.round(analysis.p * 100)}%</span>
+        </label>
+        <button type="button" className="chip" disabled>
+          +
+        </button>
+      </>
+    )
+  }
   if (bpm === null) {
     return (
       <>
         <button type="button" className="chip" disabled>
           −
         </button>
-        <label className="bpm-entry disabled" title="Beats per minute — detected once the song is split and analyzed">
+        <label
+          className="bpm-entry disabled"
+          title="Beats per minute — detected once the song is split and analyzed"
+        >
           <input type="text" value="—" disabled readOnly />
           <span className="tr-unit">bpm</span>
         </label>
@@ -667,6 +695,7 @@ export default function Transport({
   tempo,
   onTempo,
   bpm,
+  analysis,
   beat,
   met,
   canDetectBeat,
@@ -829,7 +858,7 @@ export default function Transport({
             <button type="button" className="chip" onClick={() => onTempo(tempo + 0.05)}>
               +
             </button>
-            <BpmEntry bpm={bpm} tempo={tempo} onTempo={onTempo} />
+            <BpmEntry bpm={bpm} tempo={tempo} onTempo={onTempo} analysis={analysis} />
           </div>
         )}
         {sep ? (

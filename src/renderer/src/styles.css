@@ -1330,6 +1330,37 @@ button.chip-status:hover {
   letter-spacing: 0.04em;
 }
 
+/* Tiny analysis progress bar riding next to the ps-note text — static
+   width updates only, no animations (weak-iGPU fleet). */
+.ps-bar {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 6px;
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--faint) 25%, transparent);
+  overflow: hidden;
+}
+
+.ps-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--faint);
+}
+
+.bpm-entry.bpm-analysis {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bpm-entry.bpm-analysis .ps-bar {
+  margin-left: 0;
+  width: 42px;
+}
+
 .score {
   font-family: var(--font-mono);
   font-size: 12px;
