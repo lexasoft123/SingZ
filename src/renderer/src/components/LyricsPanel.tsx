@@ -138,7 +138,9 @@ export default function LyricsPanel({
       let countEl: HTMLElement | null = null
       let count = 0
       let sec = 0
-      if (target) {
+      // Paused, a countdown is a lie (nothing counts down) — and its pulse
+      // is an infinite animation burning an idle iGPU at 60 Hz.
+      if (target && engine.playing) {
         const gapStart = li === -1 ? 0 : lines[li].end
         const dt = target.start - pos
         const gapLen = li === -1 ? target.start : target.start - gapStart

@@ -89,6 +89,7 @@ export default function PitchStrip({
   onMicDevice
 }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const nowRef = useRef<HTMLDivElement>(null)
   const stripRef = useRef<HTMLDivElement>(null)
   const scoreRef = useRef<HTMLSpanElement>(null)
   const micRef = useRef<MicPitch | null>(null)
@@ -130,8 +131,11 @@ export default function PitchStrip({
     ]
   }, [segments])
 
-  const stateRef = useRef({ segments, fitRange, fit, transpose, melody, view })
-  stateRef.current = { segments, fitRange, fit, transpose, melody, view }
+  // Sorted bar ends: the repaint key counts how many the clock has passed,
+  // so a tick repaints the canvas only when a bar's played-state flips.
+  const segEnds = useMemo(() => segments.map((s) => s.e).sort((a, b) => a - b), [segments])
+  const stateRef = useRef({ segments, segEnds, fitRange, fit, transpose, melody, view })
+  stateRef.current = { segments, segEnds, fitRange, fit, transpose, melody, view }
   const zoomRef = useRef(onZoom)
   zoomRef.current = onZoom
   const shiftRef = useRef(onViewShift)
@@ -187,13 +191,48 @@ export default function PitchStrip({
       }
       const canvas = canvasRef.current
       if (!canvas) return
-      const { segments, fitRange, fit, transpose, melody, view } = stateRef.current
+      const { segments, segEnds, fitRange, fit, transpose, melody, view } = stateRef.current
       const w = canvas.clientWidth
       const h = canvas.clientHeight
+      const pos = engine.position
+      const dpr = Math.min(2, window.devicePixelRatio || 1)
+      const kvs = view?.s ?? 0
+      const kve = view?.e ?? Math.max(engine.duration, 1)
+      const kspan = Math.max(0.001, kve - kvs)
+
+      // The now-line is a 1px DOM layer slid by transform — never a reason
+      // to touch the canvas. Quantized to device pixels + change-gated.
+      const nowEl = nowRef.current
+      if (nowEl && w > 0) {
+        const frac = (pos - kvs) / kspan
+        const xCss = CONTROLS_W + frac * Math.max(0, w - CONTROLS_W)
+        const on = frac >= 0 && frac <= 1 && xCss >= CONTROLS_W
+        const xq = Math.round((canvas.offsetLeft + xCss) * dpr) / dpr
+        if (nowEl.dataset.x !== String(on ? xq : -1)) {
+          nowEl.dataset.x = String(on ? xq : -1)
+          nowEl.style.visibility = on ? 'visible' : 'hidden'
+          if (on) nowEl.style.transform = `translateX(${xq}px)`
+        }
+      }
+
       // Paused with the mic off, nothing on this canvas changes — a full
-      // repaint every frame kept an idle iGPU busy (field report). The mic
-      // trail fades with time, so any trail keeps frames flowing.
-      const key = `${engine.position.toFixed(3)}|${view?.s ?? -1}|${view?.e ?? -1}|${w}|${h}|${transpose}|${fit ? 1 : 0}|${melody.status}|${segments.length}`
+      // repaint every frame kept an idle iGPU busy (field report). Playing,
+      // the clock only dims bars it passes, so key on how many are passed,
+      // not on the clock itself (a full-canvas repaint per tick kept weak
+      // iGPUs at 25%+ with nothing but the line moving). The mic trail
+      // fades with time, so any trail keeps frames flowing.
+      let played = 0
+      {
+        let lo = 0
+        let hi = segEnds.length
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1
+          if (segEnds[mid] < pos) lo = mid + 1
+          else hi = mid
+        }
+        played = lo
+      }
+      const key = `${played}|${view?.s ?? -1}|${view?.e ?? -1}|${w}|${h}|${transpose}|${fit ? 1 : 0}|${melody.status}|${segments.length}`
       if (
         key === lastKey &&
         !micRef.current &&
@@ -204,7 +243,6 @@ export default function PitchStrip({
       }
       lastKey = key
       if (w > 0 && h > 0) {
-        const dpr = Math.min(2, window.devicePixelRatio || 1)
         if (canvas.width !== Math.round(w * dpr)) canvas.width = Math.round(w * dpr)
         if (canvas.height !== Math.round(h * dpr)) canvas.height = Math.round(h * dpr)
         const ctx = canvas.getContext('2d')
@@ -218,10 +256,9 @@ export default function PitchStrip({
           const rowH = h / (hi - lo)
           const yOf = (midi: number): number => h - ((midi - lo) / (hi - lo)) * h
 
-          const pos = engine.position
-          const vs = view?.s ?? 0
-          const ve = view?.e ?? Math.max(engine.duration, 1)
-          const span = Math.max(0.001, ve - vs)
+          const vs = kvs
+          const ve = kve
+          const span = kspan
           const x0 = CONTROLS_W
           const rollW = w - x0
           const xOf = (t: number): number => x0 + ((t - vs) / span) * rollW
@@ -337,9 +374,6 @@ export default function PitchStrip({
             }
           }
 
-          // now line
-          ctx.fillStyle = 'rgba(255,244,224,0.85)'
-          ctx.fillRect(xOf(pos), 0, 1, h)
           ctx.restore()
         }
       }
@@ -448,6 +482,7 @@ export default function PitchStrip({
         }}
       />
       <canvas ref={canvasRef} />
+      <div className="ps-now" ref={nowRef} />
       <div className="ps-info">
         <div className="psi-row">
           <span className="psi-label">key</span>

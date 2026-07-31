@@ -125,8 +125,13 @@ export default function TrackStack({
           }
         }
         const pct = span > 0 ? ((pos - v.s) / span) * 100 : 0
-        // quantized + change-gated: identical values must not invalidate paint
-        const next = `${(Math.max(0, Math.min(100, pct))).toFixed(3)}%`
+        // quantized to whole device pixels + change-gated: every --p change
+        // damages the frame (playhead strip, six reveal clips, any glass
+        // above them re-blurs), so step only when the playhead moves a real
+        // pixel — ~5 Hz across a full-length view instead of 60 Hz.
+        const stepPct = 100 / Math.max(1, el.clientWidth * (window.devicePixelRatio || 1))
+        const clamped = Math.max(0, Math.min(100, pct))
+        const next = `${(Math.round(clamped / stepPct) * stepPct).toFixed(4)}%`
         if (next !== lastP) {
           lastP = next
           el.style.setProperty('--p', next)
