@@ -104,22 +104,25 @@ export default function CatalogScreen({
         setError(null)
         if (mode === 'gdrive') {
           setRoot({ kind: 'picked', path: 'gdrive', name: 'Google Drive' })
-          const signed = await driveSignedIn()
-          setDriveOn(signed)
-          if (!signed) {
-            setProjects([])
-            return
-          }
-          setDriveEmail(await driveAccountEmail())
           // Stale-while-revalidate, and the stale copy outlives the process:
           // whatever listing we have shows INSTANTLY (a song outlives the
           // freshness window, and a spinner on every exit reads as the
           // library re-downloading), then the network replaces it quietly.
           // The full-screen spinner is ONLY for an empty screen — on
           // pull-to-refresh the pull indicator is already spinning.
+          // The catalog goes up BEFORE the sign-in probes: those are pref
+          // reads too, and holding a ready catalog behind three bridge hops
+          // is a visible "loading from Google Drive" flash on a cold start.
           const cached = await driveStoredProjects()
           if (my !== listSeq.current) return
           setProjects(cached?.length ? cached : null)
+          const signed = await driveSignedIn()
+          setDriveOn(signed)
+          if (!signed) {
+            if (my === listSeq.current) setProjects([])
+            return
+          }
+          setDriveEmail(await driveAccountEmail())
           try {
             const fresh = await driveListProjects(force)
             if (my === listSeq.current) {

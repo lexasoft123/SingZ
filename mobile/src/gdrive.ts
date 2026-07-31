@@ -90,8 +90,10 @@ export async function driveSignedIn(): Promise<boolean> {
 }
 
 export const driveSignOut = async (): Promise<void> => {
+  // let the boot-time restore settle first, so it cannot repopulate the
+  // in-memory catalog after this clears it
+  await restoreOnce().catch(() => {})
   listCache = null
-  restored = true // nothing on disk to fall back to any more
   projectFiles.clear()
   await Prefs.setTextPref(CATALOG_KEY, '')
   // downloaded stems stay: signing back into the same account should not
@@ -335,7 +337,26 @@ interface StoredCatalog {
   files: Record<string, { byName: Record<string, DriveFile>; stemsByName: Record<string, DriveFile> }>
 }
 
-let restored = false
+/** The one disk read of the stored catalog — shared by every caller. */
+let restore: Promise<void> | null = null
+
+const restoreOnce = (): Promise<void> =>
+  (restore ??= (async () => {
+    try {
+      const doc = await readJson<StoredCatalog | null>(CATALOG_KEY, null)
+      // a live listing that landed first is fresher than the disk copy
+      if (listCache || !doc?.entries?.length) return
+      for (const [dir, f] of Object.entries(doc.files ?? {})) {
+        projectFiles.set(dir, {
+          byName: new Map(Object.entries(f.byName ?? {})),
+          stemsByName: new Map(Object.entries(f.stemsByName ?? {}))
+        })
+      }
+      listCache = { at: 0, entries: doc.entries }
+    } catch {
+      // unreadable catalog — the network listing remains the only source
+    }
+  })())
 
 /**
  * Whatever listing we have, in memory or on disk — shown instantly and left
@@ -344,26 +365,13 @@ let restored = false
  * re-downloading itself; on a cold start, or with no signal at all, the copy
  * on disk is the whole library. The Drive file ids come back with it, so a
  * song already downloaded still opens offline. Deliberately not counted as
- * fresh: whoever shows it also refreshes underneath.
+ * fresh: whoever shows it also refreshes underneath. The read is a memoized
+ * promise kicked off at import, so the catalog is memory-resident by the
+ * time the first render asks — the boolean latch this replaces answered
+ * whoever asked second with null while the first read was still in flight.
  */
-export async function driveStoredProjects(): Promise<ProjectEntry[] | null> {
-  if (restored) return listCache?.entries ?? null
-  restored = true
-  try {
-    const doc = await readJson<StoredCatalog | null>(CATALOG_KEY, null)
-    if (!doc?.entries?.length) return null
-    for (const [dir, f] of Object.entries(doc.files ?? {})) {
-      projectFiles.set(dir, {
-        byName: new Map(Object.entries(f.byName ?? {})),
-        stemsByName: new Map(Object.entries(f.stemsByName ?? {}))
-      })
-    }
-    listCache = { at: 0, entries: doc.entries }
-    return doc.entries
-  } catch {
-    return null
-  }
-}
+export const driveStoredProjects = (): Promise<ProjectEntry[] | null> =>
+  restoreOnce().then(() => listCache?.entries ?? null)
 
 async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
   const files: StoredCatalog['files'] = {}
@@ -394,46 +402,49 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
   // One project = three REST round-trips; done one after another a ten-song
   // library took 15-18s of dead-looking screen. Five folders in flight cut
   // it to a few seconds without upsetting Drive's rate limits.
+  // Only "this folder is not a project" may return null. A folder we FAILED
+  // to read throws instead, aborting the whole listing — the caller keeps the
+  // catalog it already has. Skipping it used to persist "couldn't fetch" as
+  // "doesn't exist": a wifi handover (or iOS suspending the app) mid-refresh
+  // wiped the offline catalog, and the next cold start re-listed the whole
+  // library from Drive on a spinner.
   const one = async (dir: DriveFile): Promise<ProjectEntry | null> => {
-    try {
-      const kids = await listChildren(dir.id)
-      const byName = new Map(kids.map((f) => [f.name, f]))
-      const meta = byName.get('project.json')
-      if (!meta) return null
-      const metaRes = await fetch(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-      if (!metaRes.ok) return null
-      const doc = await metaRes.json()
-      const stemsDir = kids.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
-      const stemKids = stemsDir ? await listChildren(stemsDir.id) : []
-      const stemsByName = new Map(stemKids.map((f) => [f.name, f]))
-      const stems: ProjectEntry['stems'] = {}
-      let bytes = 0
-      for (const id of STEM_ORDER_ALL) {
-        const f = stemsByName.get(`${id}.flac`) ?? stemsByName.get(`${id}.wav`)
-        if (!f) continue
-        stems[id] = f.name.endsWith('.flac') ? 'flac' : 'wav'
-        bytes += Number(f.size ?? 0)
-      }
-      // The singer's own tracks are part of what this song costs to download —
-      // leave them out and the ✓ lights up while one is still in the cloud.
-      for (const t of customTracks((doc as ProjectDoc)?.settings)) {
-        bytes += Number(stemsByName.get(t.file.slice('stems/'.length))?.size ?? 0)
-      }
-      if (Object.keys(stems).length === 0) return null
-      projectFiles.set(dir.name, { byName, stemsByName })
-      return {
-        dir: dir.name,
-        doc,
-        stems,
-        cached: false, // native cache check happens per-file on open
-        bytes,
-        hasLyrics: byName.has('lyrics.json'),
-        source: 'gdrive'
-      }
-    } catch {
-      return null // unreadable project folder — skip it
+    const kids = await listChildren(dir.id)
+    const byName = new Map(kids.map((f) => [f.name, f]))
+    const meta = byName.get('project.json')
+    if (!meta) return null
+    const metaRes = await fetch(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    if (metaRes.status === 404) return null // deleted while we were listing
+    if (!metaRes.ok) throw new Error(`Drive API ${metaRes.status} reading ${dir.name}/project.json`)
+    const doc = await metaRes.json()
+    const stemsDir = kids.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
+    const stemKids = stemsDir ? await listChildren(stemsDir.id) : []
+    const stemsByName = new Map(stemKids.map((f) => [f.name, f]))
+    const stems: ProjectEntry['stems'] = {}
+    let bytes = 0
+    for (const id of STEM_ORDER_ALL) {
+      const f = stemsByName.get(`${id}.flac`) ?? stemsByName.get(`${id}.wav`)
+      if (!f) continue
+      stems[id] = f.name.endsWith('.flac') ? 'flac' : 'wav'
+      bytes += Number(f.size ?? 0)
+    }
+    // The singer's own tracks are part of what this song costs to download —
+    // leave them out and the ✓ lights up while one is still in the cloud.
+    for (const t of customTracks((doc as ProjectDoc)?.settings)) {
+      bytes += Number(stemsByName.get(t.file.slice('stems/'.length))?.size ?? 0)
+    }
+    if (Object.keys(stems).length === 0) return null
+    projectFiles.set(dir.name, { byName, stemsByName })
+    return {
+      dir: dir.name,
+      doc,
+      stems,
+      cached: false, // native cache check happens per-file on open
+      bytes,
+      hasLyrics: byName.has('lyrics.json'),
+      source: 'gdrive'
     }
   }
 
@@ -445,7 +456,6 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
   }
   out.sort((a, b) => ((a.doc.savedAt ?? '') < (b.doc.savedAt ?? '') ? 1 : -1))
   listCache = { at: Date.now(), entries: out }
-  restored = true // this listing supersedes anything on disk
   await persistCatalog(out)
   return out
 }
@@ -528,3 +538,8 @@ async function keepText(key: string, text: string): Promise<void> {
     // a lyrics copy we cannot keep is not worth failing the read over
   }
 }
+
+// The catalog restore starts at import: a cold start reads and parses the
+// stored listing while the bundle is still booting, not inside the first
+// render's await. (Errors are swallowed inside restoreOnce.)
+void restoreOnce()

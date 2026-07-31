@@ -169,7 +169,10 @@ answer your evals while you measure the phone.
   `expectedBytes: 0` to force a real download when it differs. The Drive
   listing is persisted too (`singz.gdrive.catalog`, file ids included), so the
   catalog opens instantly, works with no signal, and refreshes silently behind
-  what is already on screen; `driveLocalFile` tolerates a token it cannot
+  what is already on screen. A refresh that fails mid-listing must abort, not
+  persist: skipping unreadable folders once persisted a half-listed library —
+  a wifi handover during the silent revalidate wiped the catalog and the next
+  cold start re-listed everything on a "loading from Google Drive" spinner; `driveLocalFile` tolerates a token it cannot
   refresh offline, because the native short-circuit happens before the URL is
   used. Anything that deletes cached files must also `driveForgetCached`.
 - **Google Drive sync needs no Drive clients**: drive.file scope (no Google

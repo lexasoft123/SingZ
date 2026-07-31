@@ -27,6 +27,8 @@ interface DriveState {
   children: Record<string, Node[]>
   media: Record<string, string>
   offline: boolean
+  /** Folder ids whose children queries 500 — a network that dies mid-listing. */
+  failChildren?: Set<string>
 }
 
 function newDrive(md5 = { vocals: 'v-1', drums: 'd-1' }): DriveState {
@@ -96,7 +98,12 @@ function install(drive: DriveState): void {
     }
     if (u.includes("name='SingZ'")) return ok({ files: [{ id: 'ROOT', name: 'SingZ' }] })
     const parent = /'([^']+)' in parents/.exec(u)
-    if (parent) return ok({ files: drive.children[parent[1]] ?? [] })
+    if (parent) {
+      if (drive.failChildren?.has(parent[1])) {
+        return { ok: false, status: 500, json: async () => ({}), text: async () => '' }
+      }
+      return ok({ files: drive.children[parent[1]] ?? [] })
+    }
     return { ok: false, status: 404, json: async () => ({}), text: async () => '' }
   }) as unknown as typeof fetch
 }
@@ -135,6 +142,37 @@ describe('catalog without internet', () => {
     expect(stored?.[0].stems).toEqual({ vocals: 'flac', drums: 'flac' })
     // ...while a live listing genuinely cannot be had
     await expect(g.driveListProjects(true)).rejects.toThrow()
+  })
+
+  it('keeps the stored catalog when a refresh dies mid-listing', async () => {
+    const drive = newDrive()
+    install(drive)
+    signIn()
+    await (require('../src/gdrive') as typeof import('../src/gdrive')).driveListProjects()
+    expect(JSON.parse(prefs['singz.gdrive.catalog']).entries).toHaveLength(1)
+
+    // Next session: the root query still answers, then the network drops out
+    // from under the per-folder fetches (wifi handover, app suspended right
+    // after launch). The refresh must abort — persisted as "empty library",
+    // the next cold start re-lists everything from Drive on a spinner.
+    drive.failChildren = new Set(['D1'])
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await expect(g.driveListProjects(true)).rejects.toThrow()
+    expect(JSON.parse(prefs['singz.gdrive.catalog']).entries).toHaveLength(1)
+    const stored = await g.driveStoredProjects()
+    expect(stored?.map((p) => p.dir)).toEqual(['Song One'])
+  })
+
+  it('skips a folder that is not a project without failing the listing', async () => {
+    const drive = newDrive()
+    drive.children.ROOT.push({ id: 'X1', name: 'Random Folder', mimeType: FOLDER })
+    drive.children.X1 = [{ id: 'X2', name: 'notes.txt', mimeType: 'text/plain' }]
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    expect((await g.driveListProjects()).map((p) => p.dir)).toEqual(['Song One'])
   })
 
   it('restores the file ids, so a downloaded song still opens offline', async () => {
