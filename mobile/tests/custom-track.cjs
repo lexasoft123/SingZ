@@ -146,6 +146,7 @@ function seedProject() {
     if ((await val('typeof __test')) === 'object') break;
     await sleep(500);
   }
+  await ev('__test.engine.master.gain.value = 0'); // automated runs are silent
 
   // --- open the seeded project ------------------------------------------
   await ev('void __test.refresh()');

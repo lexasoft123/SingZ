@@ -80,6 +80,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     if ((await val('typeof __test')) === 'object') break;
     await sleep(500);
   }
+  // Automated runs are silent: master bus for the song; clicks bypass it,
+  // so every setMetronome below passes volume 0 (clickCount still counts).
+  await ev('__test.engine.master.gain.value = 0');
   await ev('void __test.openSample()');
   let ready = false;
   for (let i = 0; i < 120 && !ready; i++) {
@@ -94,7 +97,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const beats = [];
     for (let t = 0.2; t < __test.engine.duration - 0.2; t += 0.5) beats.push(t);
     __test.engine.setBeats({ beats, bpm: 120, beatsPerBar: 4, downbeat: 0, source: 'manual' });
-    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0.4, accent: true });
+    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0, accent: true });
     return __test.engine.beats !== null;
   })()`);
   if (armed !== true) throw new Error('beat track injection failed');
@@ -135,7 +138,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if ((await val('__test.engine.countInStatus')) !== null) throw new Error('counting after pause');
 
   // Playback click: count-in hands over into on-beat clicks that keep coming.
-  await ev(`__test.engine.setMetronome({ click: true, countInBars: 1, volume: 0.4, accent: true })`);
+  await ev(`__test.engine.setMetronome({ click: true, countInBars: 1, volume: 0, accent: true })`);
   await ev('__test.engine.seek(0)');
   await sleep(300);
   const clicks2 = await val('__test.engine.clickCount');
@@ -153,7 +156,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // the dots must persist until the music itself is audible.
   const LAG = 0.3;
   await ev(`(() => {
-    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0.4, accent: true });
+    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0, accent: true });
     __test.engine.setDisplayLatency = () => {}; // pin against route events
     __test.engine.displayLag = ${LAG};
   })()`);
@@ -214,7 +217,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await ev(`(() => {
     __test.engine.displayLag = 0;
     __test.engine.setBeats(null);
-    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0.4, accent: true });
+    __test.engine.setMetronome({ click: false, countInBars: 1, volume: 0, accent: true });
   })()`);
   await ev('__test.engine.seek(0)');
   await sleep(400);
@@ -259,7 +262,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await ev('__test.engine.pause()');
 
   // Click-on without a grid: the count-in still runs, nothing clicks after.
-  await ev(`__test.engine.setMetronome({ click: true, countInBars: 1, volume: 0.4, accent: true })`);
+  await ev(`__test.engine.setMetronome({ click: true, countInBars: 1, volume: 0, accent: true })`);
   await ev('__test.engine.seek(0)');
   await sleep(300);
   const rClicks2 = await val('__test.engine.clickCount');

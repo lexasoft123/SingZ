@@ -62,7 +62,9 @@ const launch = () =>
   _electron.launch({
     executablePath: require('electron'),
     args: [APP],
-    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE }
+    // SINGZ_MUTE silences the device only — enumeration, sinkId moves and the
+    // fake-mic pitch path stay real, so every assertion here is mute-proof.
+    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1' }
   })
 
 ;(async () => {

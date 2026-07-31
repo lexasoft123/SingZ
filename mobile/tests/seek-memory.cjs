@@ -93,6 +93,7 @@ function rssMb() {
     if ((await val('typeof __test')) === 'object') break;
     await sleep(500);
   }
+  await ev('__test.engine.master.gain.value = 0'); // automated runs are silent
   await ev('void __test.openSample()');
   let ready = false;
   for (let i = 0; i < 120 && !ready; i++) {
