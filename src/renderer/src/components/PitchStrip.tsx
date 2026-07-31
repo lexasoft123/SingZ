@@ -219,8 +219,10 @@ export default function PitchStrip({
       // repaint every frame kept an idle iGPU busy (field report). Playing,
       // the clock only dims bars it passes, so key on how many are passed,
       // not on the clock itself (a full-canvas repaint per tick kept weak
-      // iGPUs at 25%+ with nothing but the line moving). The mic trail
-      // fades with time, so any trail keeps frames flowing.
+      // iGPUs at 25%+ with nothing but the line moving). A live mic keeps
+      // frames flowing; every mic-off path clears the trail, and its length
+      // rides in the key so that clear paints one erasing frame (a leftover
+      // trail once kept full-rate repaints for the whole song).
       let played = 0
       {
         let lo = 0
@@ -232,12 +234,8 @@ export default function PitchStrip({
         }
         played = lo
       }
-      const key = `${played}|${view?.s ?? -1}|${view?.e ?? -1}|${w}|${h}|${transpose}|${fit ? 1 : 0}|${melody.status}|${segments.length}`
-      if (
-        key === lastKey &&
-        !micRef.current &&
-        trailRef.current.length === 0
-      ) {
+      const key = `${played}|${view?.s ?? -1}|${view?.e ?? -1}|${w}|${h}|${transpose}|${fit ? 1 : 0}|${melody.status}|${segments.length}|${trailRef.current.length}`
+      if (key === lastKey && !micRef.current) {
         raf = requestAnimationFrame(tick)
         return
       }
@@ -393,6 +391,7 @@ export default function PitchStrip({
           // the device vanished mid-song (unplugged, BT died)
           if (micRef.current === m) {
             micRef.current = null
+            trailRef.current = []
             setMic('off')
             onMicDeviceRef.current?.(null)
           }
@@ -408,6 +407,7 @@ export default function PitchStrip({
     if (micRef.current?.active) {
       micRef.current.stop()
       micRef.current = null
+      trailRef.current = []
       setMic('off')
       onMicDeviceRef.current?.(null)
       return
@@ -451,6 +451,7 @@ export default function PitchStrip({
       if (m) {
         onMicDeviceRef.current?.(m.device)
       } else {
+        trailRef.current = []
         setMic('off')
         onMicDeviceRef.current?.(null)
       }
