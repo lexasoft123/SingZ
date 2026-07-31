@@ -23,7 +23,11 @@ Nothing here ships: `eval/*` is excluded in `electron-builder.yml`, and
   regression). Checked only under `--ml`, and at the beat level on purpose:
   two model runs on near-identical mixes legitimately differ by a whole
   beat in loose material, which shifts the bar extension across a void,
-  while beat times agree within ~20 ms.
+  while beat times agree within ~20 ms. `barAtMl: [times]` is the
+  BAR-level variant for spans where the v14 span-phase vote owns the
+  accents (TTP's bass solo): those bars are chord-anchored by the vote
+  itself, so they hold across model runs even where the lattice can
+  shift a beat.
 - `fetch-annotations.sh` — clones CPJKU/beat_this_annotations into `data/`
   (16 datasets; `.beats` TSV: time + beat counter, counter 1 = downbeat)
 - `fetch-ballroom.sh` — downloads the Ballroom audio set (ISMIR04 tempo
