@@ -191,9 +191,17 @@ answer your evals while you measure the phone.
   fetch the project's own project.json on open, kept offline like lyrics
   (beat grids alone were two thirds of the manifest). Stem md5s ride in
   project.json (`stemHashes`: md5+size+mtimeMs per stems/ file,
-  save-maintained, sync-backfilled) so a clean sync reads no stem bytes:
-  hashing evicted iCloud stems re-downloaded the whole library each sync,
-  which read as "sync re-uploads my media". The desktop also reconciles on
+  save-maintained, sync-backfilled; mtimes compare with ~2ms tolerance —
+  iCloud rehydration truncates them ~300ns) so a clean sync reads no stem
+  bytes: hashing evicted iCloud stems re-downloaded the whole library each
+  sync, which read as "sync re-uploads my media". The sync is incremental
+  on top: project.json's md5 fingerprints the whole project (stemHashes
+  embedded), so projects whose project.json+lyrics.json md5s match the
+  previous catalog skip their per-project round-trips — a clean sync is 3
+  requests (lyrics.json checked separately: the aligner rewrites it alone).
+  Phones likewise serve unchanged project.json/lyrics from kept copies by
+  listing md5, so opening a downloaded song makes zero requests. The
+  desktop also reconciles on
   launch, not only after saves — a sync killed mid-run self-heals next start. OAuth client config: mobile/gdrive.config.json (gitignored;
   CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
   generate the gdrive-config.ts modules from it — both are gitignored, never

@@ -571,10 +571,16 @@ export async function driveLocalFile(project: string, file: string): Promise<str
   return path
 }
 
+/** A kept copy remembers the md5 the listing reported when it was fetched;
+ *  older installs stored the bare string (treated as md5-unknown). */
+type KeptText = string | { m: string; t: string }
+
 /**
- * Small text members (lyrics.json). Kept on the phone after a successful read
- * so an offline open of a downloaded song still gets its words — the stems
- * being cached and the lyrics silently vanishing would be a poor trade.
+ * Small text members (project.json, lyrics.json). Kept on the phone after a
+ * successful read so an offline open of a downloaded song still gets its
+ * settings and words — and when the listing's md5 says the copy is current,
+ * it is served with no request at all: opening an unchanged downloaded song
+ * touches the network zero times.
  */
 export async function driveReadText(project: string, file: string): Promise<string> {
   const files = projectFiles.get(project)
@@ -582,6 +588,11 @@ export async function driveReadText(project: string, file: string): Promise<stri
   const entry = files.byName.get(file)
   if (!entry) throw new Error(`${file} is missing from Drive`)
   const key = `${project}/${file}`
+  const want = entry.md5Checksum ?? ''
+  const kept = (await readJson<Record<string, KeptText>>(TEXT_KEY, {}))[key]
+  const keptText = typeof kept === 'string' ? kept : kept?.t
+  const keptMd5 = typeof kept === 'string' ? '' : (kept?.m ?? '')
+  if (keptText !== undefined && want !== '' && keptMd5 === want) return keptText
   try {
     const token = await accessToken()
     const res = await fetch(`${API()}/drive/v3/files/${entry.id}?alt=media`, {
@@ -589,26 +600,25 @@ export async function driveReadText(project: string, file: string): Promise<stri
     })
     if (!res.ok) throw new Error(`Drive read failed (${res.status}) for ${file}`)
     const text = await res.text()
-    void keepText(key, text)
+    void keepText(key, text, want)
     return text
   } catch (e) {
-    const kept = (await readJson<Record<string, string>>(TEXT_KEY, {}))[key]
-    if (kept !== undefined) return kept
+    if (keptText !== undefined) return keptText
     throw e
   }
 }
 
-/** Lyrics for the most recently opened songs; older ones fall off the end. */
-async function keepText(key: string, text: string): Promise<void> {
+/** Texts for the most recently opened songs; older ones fall off the end. */
+async function keepText(key: string, text: string, md5: string): Promise<void> {
   try {
-    const all = await readJson<Record<string, string>>(TEXT_KEY, {})
+    const all = await readJson<Record<string, KeptText>>(TEXT_KEY, {})
     delete all[key] // re-insert so the freshest sits last
-    all[key] = text
+    all[key] = { m: md5, t: text }
     const keys = Object.keys(all)
     for (const stale of keys.slice(0, Math.max(0, keys.length - 40))) delete all[stale]
     await writeJson(TEXT_KEY, all)
   } catch {
-    // a lyrics copy we cannot keep is not worth failing the read over
+    // a copy we cannot keep is not worth failing the read over
   }
 }
 
