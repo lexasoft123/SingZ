@@ -436,20 +436,53 @@ async function adopt(entries: ProjectEntry[]): Promise<ProjectEntry[]> {
   return entries
 }
 
-/** What the desktop writes into catalog.json after every sync. */
+/** What the desktop writes into catalog.json (format 2): one row per
+ *  project — just project.json and lyrics.json with ids and md5s. The
+ *  project's contents live in project.json itself. */
 interface CatalogManifest {
   format: number
-  projects: { dir: string; doc: ProjectDoc; files: DriveFile[]; stems: DriveFile[] }[]
+  projects: { dir: string; files: DriveFile[] }[]
+}
+
+/** Build a listing entry from the project's own doc — stemHashes carries the
+ *  stem list, formats and sizes (the singer's added tracks included), so the
+ *  catalog screen needs no stems listing at all. */
+function entryFromDoc(
+  dir: string,
+  doc: ProjectDoc,
+  byName: Map<string, DriveFile>,
+  stemsByName: Map<string, DriveFile>
+): ProjectEntry | null {
+  const hashes = doc?.stemHashes ?? {}
+  const stems: ProjectEntry['stems'] = {}
+  let bytes = 0
+  for (const id of STEM_ORDER_ALL) {
+    if (hashes[`${id}.flac`]) stems[id] = 'flac'
+    else if (hashes[`${id}.wav`]) stems[id] = 'wav'
+  }
+  for (const h of Object.values(hashes)) bytes += Number(h.size ?? 0)
+  if (Object.keys(stems).length === 0) return null
+  projectFiles.set(dir, { byName, stemsByName })
+  return {
+    dir,
+    doc,
+    stems,
+    cached: false, // native cache check happens per-file on open
+    bytes,
+    hasLyrics: byName.has('lyrics.json'),
+    source: 'gdrive'
+  }
 }
 
 /**
- * The whole library from the desktop-written catalog.json in ONE download —
- * docs, stem sizes, md5s and the Drive ids streaming needs — instead of
- * three REST calls per song. Trusted only while it names exactly the project
- * folders the root listing just showed: an older desktop pushing without
- * rewriting it leaves it stale, and then the walk decides (null). A manifest
- * that FAILS to download throws like any other fetch — aborting the refresh
- * keeps the catalog we already have; "no/unusable manifest" walks instead.
+ * The library from the desktop-written catalog.json: rows of project.json
+ * fingerprints. Whatever the stored catalog already built is reused while a
+ * project's project.json and lyrics md5s still match — only the CHANGED
+ * projects talk to Drive (the doc for what the project holds, the folder
+ * listing for the ids), so a quiet refresh is three requests however big
+ * the library. Trusted only while it names exactly the root's project
+ * folders (an older desktop pushing leaves it stale; the walk decides), and
+ * a download that FAILS throws — aborting keeps the catalog we have.
  */
 async function manifestEntries(
   kids: DriveFile[],
@@ -468,22 +501,53 @@ async function manifestEntries(
   } catch {
     return null // unreadable manifest — the walk still works
   }
-  if (m?.format !== 1 || !Array.isArray(m.projects)) return null
-  const folders = new Set(dirs.map((d) => d.name))
-  if (m.projects.length !== folders.size || m.projects.some((p) => !folders.has(p.dir))) {
+  if (m?.format !== 2 || !Array.isArray(m.projects)) return null
+  const folders = new Map(dirs.map((d) => [d.name, d]))
+  if (m.projects.length !== folders.size || m.projects.some((p) => !folders.has(p?.dir as string))) {
     return null
   }
+
+  const prevEntries = new Map((listCache?.entries ?? []).map((e) => [e.dir, e]))
   const out: ProjectEntry[] = []
+  const changed: { row: Map<string, DriveFile>; dir: string; dirId: string }[] = []
   for (const p of m.projects) {
-    // half-shaped project => distrust the whole file, the walk decides
-    if (typeof p?.dir !== 'string' || !p.doc || typeof p.doc !== 'object') return null
-    const entry = buildEntry(
-      p.dir,
-      p.doc,
-      new Map((p.files ?? []).map((f) => [f.name, f])),
-      new Map((p.stems ?? []).map((f) => [f.name, f]))
-    )
-    if (entry) out.push(entry)
+    const row = new Map((p.files ?? []).map((f) => [f.name, f]))
+    const have = projectFiles.get(p.dir)
+    const prev = prevEntries.get(p.dir)
+    const same =
+      prev &&
+      have &&
+      row.get('project.json')?.md5Checksum !== undefined &&
+      have.byName.get('project.json')?.md5Checksum === row.get('project.json')?.md5Checksum &&
+      (have.byName.get('lyrics.json')?.md5Checksum ?? '') === (row.get('lyrics.json')?.md5Checksum ?? '')
+    if (same) out.push(prev)
+    else changed.push({ row, dir: p.dir, dirId: folders.get(p.dir)!.id })
+  }
+
+  // Changed or never seen: one GET for the doc, one folder listing for the
+  // ids. Failures abort the refresh (the fingerprints promised these exist);
+  // only a project.json deleted mid-listing is quietly skipped.
+  const one = async (c: (typeof changed)[number]): Promise<ProjectEntry | null> => {
+    const meta = c.row.get('project.json')
+    if (!meta) return null
+    const metaRes = await fetch(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    if (metaRes.status === 404) return null
+    if (!metaRes.ok) throw new Error(`Drive API ${metaRes.status} reading ${c.dir}/project.json`)
+    const text = await metaRes.text()
+    const doc = JSON.parse(text) as ProjectDoc
+    void keepText(`${c.dir}/project.json`, text, meta.md5Checksum ?? '')
+    const kid = await listChildren(c.dirId)
+    const byName = new Map(kid.map((f) => [f.name, f]))
+    const stemsDir = kid.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
+    const stemKids = stemsDir ? await listChildren(stemsDir.id) : []
+    return entryFromDoc(c.dir, doc, byName, new Map(stemKids.map((f) => [f.name, f])))
+  }
+  const POOL = 5
+  for (let i = 0; i < changed.length; i += POOL) {
+    const batch = await Promise.all(changed.slice(i, i + POOL).map(one))
+    for (const entry of batch) if (entry) out.push(entry)
   }
   return out
 }

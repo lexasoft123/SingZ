@@ -180,28 +180,26 @@ answer your evals while you measure the phone.
   flow — Android listens on 127.0.0.1 natively). Desktop pushes the library
   to a visible SingZ Drive folder (md5-diffed resumable uploads, auto after
   save); phones list over REST and stream stems via FolderAccess
-  fetchToCache. After every sync the desktop writes `catalog.json` at the
-  SingZ root — the whole library (doc summaries, Drive ids, sizes; md5s on
-  project.json/lyrics.json only — stem bytes are vouched by stemHashes), written
-  LAST so it never names missing files, byte-stable + md5-skipped when
-  nothing changed. Phones list from it in three requests instead of three
-  per song; they trust it only while it names exactly the root's project
-  folders (an older desktop pushing leaves it stale) and fall back to
-  walking the folders otherwise, so old apps and old desktops keep working.
-  Its docs are listing summaries (name, savedAt, settings.custom) — players
-  fetch the project's own project.json on open, kept offline like lyrics
-  (beat grids alone were two thirds of the manifest). Stem md5s ride in
-  project.json (`stemHashes`: md5+size+mtimeMs per stems/ file,
-  save-maintained, sync-backfilled; mtimes compare with ~2ms tolerance —
-  iCloud rehydration truncates them ~300ns) so a clean sync reads no stem
-  bytes: hashing evicted iCloud stems re-downloaded the whole library each
-  sync, which read as "sync re-uploads my media". The sync is incremental
-  on top: project.json's md5 fingerprints the whole project (stemHashes
-  embedded), so projects whose project.json+lyrics.json md5s match the
-  previous catalog skip their per-project round-trips — a clean sync is 3
-  requests (lyrics.json checked separately: the aligner rewrites it alone).
-  Phones likewise serve unchanged project.json/lyrics from kept copies by
-  listing md5, so opening a downloaded song makes zero requests. The
+  fetchToCache. **Two-level hashing**: a project IS its project.json —
+  `stemHashes` (md5+size+mtimeMs per stems/ file, save-maintained,
+  sync-backfilled; mtimes compare with ~2ms tolerance — iCloud rehydration
+  truncates them ~300ns) carries the stem list, formats, sizes and md5s, so
+  a clean sync reads no stem bytes (hashing evicted iCloud stems used to
+  re-download the whole library, which read as "sync re-uploads my media").
+  After every sync the desktop writes `catalog.json` (format 2) at the
+  SingZ root: one row per project — project.json and lyrics.json with Drive
+  ids and md5s, nothing else (lyrics.json rides separately because the
+  aligner rewrites it without touching the doc). Written LAST so it never
+  names missing files, byte-stable + md5-skipped when nothing changed.
+  Both sides diff against it: the desktop skips per-project round-trips for
+  fingerprint-matched projects (a clean sync is 3 requests), and phones
+  reuse their stored entries, refetching only changed projects (the doc +
+  that folder's listings) — a quiet refresh is 3 requests however big the
+  library, and a downloaded song opens with zero (doc and lyrics kept
+  offline by md5, stems by the native cache). Phones trust the catalog only
+  while it names exactly the root's project folders (an older desktop
+  pushing leaves it stale) and fall back to walking the folders otherwise,
+  so old apps and old desktops keep working. The
   desktop also reconciles on
   launch, not only after saves — a sync killed mid-run self-heals next start;
   E2E drivers on a signed-in dev machine must launch with
