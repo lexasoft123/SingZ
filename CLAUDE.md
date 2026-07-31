@@ -203,7 +203,10 @@ answer your evals while you measure the phone.
   Phones likewise serve unchanged project.json/lyrics from kept copies by
   listing md5, so opening a downloaded song makes zero requests. The
   desktop also reconciles on
-  launch, not only after saves — a sync killed mid-run self-heals next start. OAuth client config: mobile/gdrive.config.json (gitignored;
+  launch, not only after saves — a sync killed mid-run self-heals next start;
+  E2E drivers on a signed-in dev machine must launch with
+  SINGZ_NO_LAUNCH_SYNC=1 or every test run syncs the real Drive (two dev
+  builds of different vintages then rewrite the catalog at each other). OAuth client config: mobile/gdrive.config.json (gitignored;
   CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
   generate the gdrive-config.ts modules from it — both are gitignored, never
   in the repo, EMPTY when the json is absent, so a fresh checkout needs

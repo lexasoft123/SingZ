@@ -389,7 +389,11 @@ app.whenReady().then(async () => {
   // (quit, crash, sleep) leaves pending uploads and a stale phone catalog
   // until someone presses Sync. Delayed so startup isn't competing with the
   // window and engine probes; gdriveSync itself refuses to run twice.
-  if (gdriveConfigured() && gdriveSignedIn()) {
+  // SINGZ_NO_LAUNCH_SYNC opts out — E2E harnesses launch the app dozens of
+  // times, and on a signed-in dev machine every one of those would write to
+  // the real Drive (two dev builds of different vintages then rewrite the
+  // catalog back and forth at each other).
+  if (!process.env.SINGZ_NO_LAUNCH_SYNC && gdriveConfigured() && gdriveSignedIn()) {
     setTimeout(() => {
       void gdriveSync((msg, frac) => {
         for (const win of BrowserWindow.getAllWindows()) {
