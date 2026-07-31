@@ -193,7 +193,11 @@ export async function refreshStemHashes(
     const path = join(dir, 'stems', e.name)
     const st = await stat(path)
     const old = prev?.[e.name]
-    if (old && old.size === st.size && old.mtimeMs === st.mtimeMs) {
+    // Tolerance, not equality: iCloud rehydration rewrites mtime with sub-ms
+    // truncation (measured ~300 ns drift on the first evict/materialize
+    // round-trip; dataless files keep it exact). A real write moves mtime by
+    // far more, and the size check stands on its own for length changes.
+    if (old && old.size === st.size && Math.abs(old.mtimeMs - st.mtimeMs) < 2) {
       out[e.name] = old
       continue
     }
