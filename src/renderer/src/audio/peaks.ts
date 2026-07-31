@@ -19,19 +19,21 @@ export function computePeaks(buffer: AudioBuffer, buckets = 2400): PeakData {
   }
 
   const step = length / buckets
-  for (let b = 0; b < buckets; b++) {
-    const start = Math.floor(b * step)
-    const end = Math.min(length, Math.max(start + 1, Math.floor((b + 1) * step)))
-    // Sample within the bucket instead of scanning every frame — plenty for pixels.
-    const inc = Math.max(1, Math.floor((end - start) / 64))
-    let max = 0
-    for (const data of channels) {
-      for (let i = start; i < end; i += inc) {
-        const v = Math.abs(data[i])
+  // Every sample, not a strided lattice: millisecond drum/consonant attacks
+  // fall between stride points, which drew identical hits at wildly different
+  // heights (measured 97% under on 1.5 ms hits). Sequential full scan is
+  // ~25 ms per 4-min stereo stem, once per song load.
+  for (const data of channels) {
+    for (let b = 0; b < buckets; b++) {
+      const start = Math.floor(b * step)
+      const end = b + 1 < buckets ? Math.max(start + 1, Math.floor((b + 1) * step)) : length
+      let max = peaks[b]
+      for (let i = start; i < end; i++) {
+        const v = data[i] < 0 ? -data[i] : data[i]
         if (v > max) max = v
       }
+      peaks[b] = max
     }
-    peaks[b] = max
   }
 
   let overall = 0

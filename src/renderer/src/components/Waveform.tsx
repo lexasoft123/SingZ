@@ -41,17 +41,29 @@ function drawWave(
     const total = buffer.length
     const s0 = Math.max(0, Math.floor(viewStart * total))
     const s1 = Math.min(total, Math.ceil(viewEnd * total))
-    const spanS = Math.max(1, s1 - s0)
+    if (s1 <= s0) {
+      // View is entirely past this (shorter) track — silence line.
+      ctx.fillRect(0, mid - 0.75, w, 1.5)
+      return
+    }
+    const spanS = s1 - s0
     for (let x = 0; x < w; x++) {
       const a = s0 + Math.floor((x / w) * spanS)
       const b = Math.min(s1, Math.max(a + 1, s0 + Math.floor(((x + 1) / w) * spanS)))
-      const stride = Math.max(1, Math.floor((b - a) / 64))
+      const stride = Math.max(1, Math.floor((b - a) / 256))
+      // Per-channel extremes, matching the envelope layer's max-of-channels —
+      // averaging L+R made wide-stereo content collapse at this zoom level.
       let mn = 0
       let mx = 0
       for (let i = a; i < b; i += stride) {
-        const v = ch1 ? (ch0[i] + ch1[i]) * 0.5 : ch0[i]
-        if (v > mx) mx = v
-        if (v < mn) mn = v
+        const v0 = ch0[i]
+        if (v0 > mx) mx = v0
+        if (v0 < mn) mn = v0
+        if (ch1) {
+          const v1 = ch1[i]
+          if (v1 > mx) mx = v1
+          if (v1 < mn) mn = v1
+        }
       }
       const top = mid - Math.min(1, mx * scale) * amp
       const bot = mid - Math.max(-1, mn * scale) * amp
