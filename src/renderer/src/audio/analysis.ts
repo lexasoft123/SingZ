@@ -81,8 +81,12 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * silent) and to DEFECT zones — tracked-interval jumps the model glides
  * through smoothly (Crowley's 23 body defects seeded its weird verse
  * phase and seam bars).
+ * v13: splices see a LEVEL-MATCHED model view (a song whose model lattice
+ * rides our eighths no longer disables every repair — TTP's bridge), and
+ * fill-accepted interior voids may be overridden by a strictly steady
+ * model (fill-tracking through TTP's bridge sat 130-190 ms off the pulse).
  */
-export const BEAT_DETECT_VERSION = 12
+export const BEAT_DETECT_VERSION = 13
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -290,15 +294,52 @@ export function detectBeats(
    *  measured on Mr Crowley). */
   let mlLeadEnd = -1
   if (lat && lat !== mlChoice && mlChoice && lat.beatsSec.length >= 16) {
-    const ratio = lat.medSec / mlChoice.medSec
+    const L = lat
+    const med = L.medSec
+    const ratio = med / mlChoice.medSec
+    // Level-matched view of the model lattice. The model sometimes rides
+    // our eighths for a WHOLE song (Turn The Page subdivides its bridge and
+    // the model stays on eighths throughout, ratio 1.88) — a raw ratio gate
+    // would disable every repair for such songs. A halved view — every
+    // other model beat, greedily thinned so silence gaps self-heal, parity
+    // picked by which one lands on our drum-anchored body — restores level
+    // compatibility. Doubling views (model on half notes) are not built:
+    // no song has needed one; the adopted-lattice path handles SoF's case.
+    let mlB: number[] | null = null
     if (ratio > 0.9 && ratio < 1.1) {
-      const L = lat
-      const mlB = mlChoice.beatsSec
-      const med = L.medSec
+      mlB = mlChoice.beatsSec
+    } else if (ratio > 1.7 && ratio < 2.3) {
+      const src = mlChoice.beatsSec
+      const thin = (start: number): number[] => {
+        const out: number[] = []
+        for (let i = start; i < src.length; i++) {
+          if (out.length === 0 || src[i] - out[out.length - 1] >= 0.7 * med) out.push(src[i])
+        }
+        return out
+      }
+      const score = (view: number[]): number => {
+        const ds: number[] = []
+        for (let i = 0; i < view.length; i += 4) {
+          let best = Infinity
+          for (const t of L.beatsSec) {
+            const d = Math.abs(t - view[i])
+            if (d < best) best = d
+          }
+          ds.push(best)
+        }
+        ds.sort((x, y) => x - y)
+        return ds[ds.length >> 1] ?? Infinity
+      }
+      const a = thin(0)
+      const b = thin(1)
+      mlB = score(a) <= score(b) ? a : b
+    }
+    if (mlB && mlB.length >= 16) {
       /** Fraction of the model's intervals within tol of their own median
        *  across [a,b] — the local "is this a real pulse" gate. */
+      const view = mlB
       const mlSteadyIn = (a: number, b: number, tol: number): number => {
-        const seg = mlB.filter((t) => t >= a && t <= b)
+        const seg = view.filter((t) => t >= a && t <= b)
         if (seg.length < 5) return 0
         const iv = seg.slice(1).map((t, i) => t - seg[i])
         const m = [...iv].sort((x, y) => x - y)[iv.length >> 1]
@@ -309,7 +350,7 @@ export function detectBeats(
         const lo = aSec + 0.5 * med
         const hi = bSec - 0.5 * med
         if (hi <= lo) return
-        const ins = mlB.filter((t) => t > lo && t < hi)
+        const ins = view.filter((t) => t > lo && t < hi)
         // the model must have actually tracked the stretch — one it also
         // gave up on keeps the old path
         if (ins.length < (0.5 * (bSec - aSec)) / med) return
@@ -330,12 +371,21 @@ export function detectBeats(
         })
       }
       for (const v of L.voids ?? []) {
-        if (v.trailing || v.filled) continue
+        if (v.trailing) continue
         if (v.leading) {
-          if (mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) {
+          // filled leading spans are the proven fill-tracked intros (NEM) —
+          // untouched; refused ones splice when the model is strictly steady
+          if (!v.filled && mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) {
             splice(v.aSec, v.bSec, 'leading')
             mlLeadEnd = Math.max(mlLeadEnd, v.bSec)
           }
+          continue
+        }
+        if (v.filled) {
+          // fill-tracked interior spans are usually fine — but TTP's bridge
+          // is fill-ACCEPTED yet sits 130-190 ms off the model's pulse. When
+          // the model is clearly steady across the span, its beats win.
+          if (mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) splice(v.aSec, v.bSec, 'void-filled')
           continue
         }
         splice(v.aSec, v.bSec, 'void')

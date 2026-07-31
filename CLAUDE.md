@@ -233,9 +233,15 @@ answer your evals while you measure the phone.
   are cancellable; caches key on the 16-hex sha1 of the source file.
 - `--controls-w` in styles.css must equal `CONTROLS_W` in model.ts.
 - User-visible copy is sentence-case, friendly, and states sizes/time costs.
-- Renderer perf rules (weak-iGPU fleet): rAF loops are change-gated and skip
-  under `body.modal-open`; every infinite CSS animation needs a modal-open
-  pause rule; Windows keeps the solid (blur-free) modal scrim.
+- Renderer perf rules (weak-iGPU fleet): rAF loops are change-gated to whole
+  device pixels (value-identity gating still damages every vsync — sub-pixel
+  `--p` steps kept the QHD+ Dell at 60%+ GPU) and skip under
+  `body.modal-open`; canvases repaint on visible-state flips, never on the
+  clock (pitch strip keys on bars-passed; its now-line is a 1px DOM layer);
+  every infinite CSS animation needs a modal-open pause rule and must not
+  outlive the state that justifies it (a paused count-in pulse held 20% GPU
+  forever); `body.win` keeps solid, blur-free surfaces — modal scrim AND
+  transport (any per-frame damage re-runs a backdrop blur above it).
 
 ## Releasing
 

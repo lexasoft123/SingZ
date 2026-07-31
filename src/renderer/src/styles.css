@@ -1292,6 +1292,21 @@ button.chip-status:hover {
   animation: fade 0.25s;
 }
 
+/* The moving now-line is a 1px composited layer, not canvas ink — the
+   canvas repaints only when a bar's played-state flips (a full-canvas
+   repaint per clock tick kept weak iGPUs at 25%+ during playback). */
+.pitch-strip .ps-now {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: rgba(255, 244, 224, 0.85);
+  pointer-events: none;
+  will-change: transform;
+  visibility: hidden;
+}
+
 .ps-resize {
   position: absolute;
   top: -4px;
@@ -2379,6 +2394,24 @@ body.modal-open .src-dot.busy {
 body.win .modal-scrim {
   backdrop-filter: none;
   background: rgba(8, 6, 3, 0.82);
+}
+
+/* Same deal during playback: the playhead damages a frame region every
+   step, and that re-runs the transport's blur(20px) over a full-width
+   strip (measured 15-18pp of GPU on the HD 4600). Solid mix instead. */
+body.win .transport {
+  backdrop-filter: none;
+  background: color-mix(in srgb, var(--panel) 72%, var(--bg));
+}
+
+/* The count-in pulse repaints a full-width glowing text row at 60 Hz
+   (~20pp on the HD 4600 during lyric gaps) — hold it steady here; the
+   seconds still tick down and the dots still appear. */
+body.win .lyr-line.count-1::before,
+body.win .lyr-line.count-2::before,
+body.win .lyr-line.count-3::before,
+body.win .lyr-line.count-sec::before {
+  animation: none;
 }
 
 /* Infinite animations behind an open modal each force a full-window
