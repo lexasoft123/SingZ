@@ -10,8 +10,13 @@ SRC="$ROOT/.engines-src/whisper.cpp"
 # Compiler cache when the machine has one: repeat builds (fresh worktrees,
 # wiped build dirs) hit ccache instead of clang. CMake >= 3.17 picks the
 # launchers up from the environment — same mechanism the Android CI uses.
+# BASEDIR+NOHASHDIR are what make a *sibling worktree* hit: CMake compiles
+# with absolute paths and -g hashes the CWD, so a second checkout otherwise
+# shares the cache directory while hitting nothing in it (measured: 0%).
+# Env only — ccache's own config files stay the machine owner's business.
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+  export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
 fi
 
 EXT=""

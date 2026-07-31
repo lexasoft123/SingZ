@@ -231,10 +231,16 @@ answer your evals while you measure the phone.
   half-staged files. Bootstrap every fresh worktree with
   `scripts/worktree-setup.sh` (`--desktop-only` skips mobile): links vendor/,
   gdrive.config.json and local.properties from the main checkout, npm-ci's
-  both roots, restores a cache-skipped electron binary, arms ccache content
-  hashing, and pod-installs with the UTF-8 LANG CocoaPods needs in
-  non-interactive shells (details: docs/DEVELOPMENT.md § Worktrees). Merge
-  back to main when the feature lands.
+  both roots, restores a cache-skipped electron binary, and pod-installs with
+  the UTF-8 LANG CocoaPods needs in non-interactive shells (details:
+  docs/DEVELOPMENT.md § Worktrees). Merge back to main when the feature
+  lands. **ccache settings ride with the build, never with the machine** —
+  a sibling worktree only hits when `base_dir` (this checkout) and
+  `hash_dir=false` are passed, because CMake/Xcode compile with absolute
+  paths and `-g` hashes the CWD; sharing the cache dir alone hits 0%.
+  vendor-whisper.sh and run-with-ccache.js export them; Xcode gets them via
+  mobile/scripts/ccache-xcode-conf.js (RN's wrapper replaces the machine
+  config with its own, and GUI builds inherit no shell env).
 - IPC handlers return result objects (`{ ok: false, error }`), never throw
   (avoids the "Error invoking remote method" prefix in the renderer).
 - File access from the renderer is allowlisted in `src/main/media.ts` —
