@@ -119,9 +119,22 @@ interface LyricsCache {
   credit?: string
   aligned?: boolean
   check?: AlignCheck
-  /** Transcribed while LRCLIB was unanswering — ask again on a later open. */
+  /**
+   * true: transcribed while LRCLIB was unanswering — ask again on a later
+   * open. false: LRCLIB answered "no match" — settled, stop asking. Absent:
+   * written before 0.10.1 tracked outages (the 2026-07-30 outage scarred a
+   * day of songs with whisper lyrics) — treat as pending, never as settled.
+   */
   lrclibPending?: boolean
   lines: LyricLine[]
+}
+
+/** Whisper lyrics stay provisional until LRCLIB has actually answered once. */
+export function shouldReaskLrclib(c: {
+  source: LyricsSource
+  lrclibPending?: boolean
+}): boolean {
+  return c.source === 'whisper' && c.lrclibPending !== false
 }
 
 /**
@@ -266,9 +279,10 @@ export class Transcriber {
       !alignBase &&
       (prefer === 'auto' || (prefer === 'whisper' && cached.source === 'whisper'))
     ) {
-      // Whisper lyrics born during an LRCLIB outage are provisional — ask
-      // again now, and either upgrade to synced lyrics or settle the matter.
-      if (prefer === 'auto' && cached.lrclibPending) {
+      // Whisper lyrics born during an LRCLIB outage (or before outages were
+      // tracked) are provisional — ask again now, and either upgrade to
+      // synced lyrics or settle the matter.
+      if (prefer === 'auto' && shouldReaskLrclib(cached)) {
         log('lyrics', 'cached lyrics were transcribed while LRCLIB was unanswering — asking again')
         onProgress({ stage: 'searching', percent: 10 })
         const found = await this.searchOnline(songPath, durationSec)
@@ -292,7 +306,8 @@ export class Transcriber {
         }
         if (!found.down) {
           // a real miss this time — keep the transcription and stop asking
-          await this.writeCache(lyricsPath, { ...cached, lrclibPending: undefined })
+          // (false survives JSON; deleting the field would read as legacy)
+          await this.writeCache(lyricsPath, { ...cached, lrclibPending: false })
         }
       }
       log('lyrics', `using cached lyrics for ${basename(songPath)} (${cached.source}${cached.aligned ? ', aligned' : ''}) from ${lyricsPath}`)
@@ -542,9 +557,9 @@ export class Transcriber {
               JSON.stringify({
                 source: 'whisper',
                 lines,
-                // an outage is not a verdict — flag the cache so a later
-                // open asks LRCLIB again instead of keeping these forever
-                lrclibPending: lrclibDown || undefined
+                // an outage is not a verdict — true makes a later open ask
+                // LRCLIB again; false records that it really answered "miss"
+                lrclibPending: lrclibDown
               } satisfies LyricsCache),
               'utf8'
             )
