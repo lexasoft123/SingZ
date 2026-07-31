@@ -304,6 +304,33 @@ describe('the desktop-written manifest', () => {
     expect((again.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
   })
 
+  it('serves an unchanged text member without a request', async () => {
+    const drive = newDrive()
+    addManifest(drive)
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+    expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('hello') // fetched + kept
+    await new Promise((r) => setTimeout(r, 0)) // the keep is fire-and-forget
+    let calls = 0
+    const inner = globalThis.fetch
+    globalThis.fetch = ((...a: Parameters<typeof fetch>) => {
+      calls++
+      return inner(...a)
+    }) as typeof fetch
+    expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('hello')
+    expect(calls).toBe(0) // the listing's md5 matched the kept copy
+
+    // the desktop re-aligned: a new md5 in the listing forces a real read
+    drive.media.CAT = drive.media.CAT.replace('"md5Checksum":"l-1"', '"md5Checksum":"l-2"')
+    drive.media.L1 = JSON.stringify({ lines: [{ t: 0, text: 'goodbye' }] })
+    await g.driveListProjects(true)
+    calls = 0
+    expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('goodbye')
+    expect(calls).toBe(1)
+  })
+
   it('ignores a stale manifest and walks the folders instead', async () => {
     const drive = newDrive()
     addManifest(drive) // knows only Song One...

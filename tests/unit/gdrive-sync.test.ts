@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -118,12 +118,35 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(JSON.parse(remoteMeta!.bytes!.toString()).stemHashes).toEqual(saved.stemHashes)
 
     stemReads.count = 0
+    mock.hits.length = 0
     const second = await gdriveSync()
     expect(second).toMatchObject({ ok: true, uploaded: 0, unchanged: 4 })
     // identical library => identical manifest bytes => the rewrite is skipped
     expect([...mock.files.values()].find((f) => f.name === 'catalog.json')!.bytes).toBe(cat!.bytes)
     // ...and a clean sync opened no stem file at all
     expect(stemReads.count).toBe(0)
+    // ...and never asked Drive about individual projects: the fingerprints in
+    // the previous catalog said everything matches — root query, its
+    // children, the catalog itself, nothing more
+    const singzMockId = [...mock.files.values()].find((f) => f.name === 'SingZ')!.id
+    expect(mock.hits.filter((h) => h.includes('in parents') && !h.includes(`'${singzMockId}'`))).toEqual([])
+    expect(mock.hits.some((h) => h.includes('uploadType'))).toBe(false)
+  })
+
+  it('a lyrics-only change (the aligner) resyncs just that file', async () => {
+    const { readSettings } = await import('../../src/main/settings')
+    const root = (readSettings() as { projectsRoot: string }).projectsRoot
+    await writeFile(
+      join(root, 'Mock Song', 'lyrics.json'),
+      JSON.stringify({ lines: [{ t: 1, text: 'realigned' }] })
+    )
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    // lyrics.json is the one file project.json's hash does not cover — the
+    // catalog's own lyrics md5 must catch this, or aligned timing never syncs
+    const rep = await gdriveSync()
+    expect(rep).toMatchObject({ ok: true, uploaded: 1, unchanged: 3 })
+    const lyr = [...mock.files.values()].find((f) => f.name === 'lyrics.json')
+    expect(lyr?.bytes?.toString()).toContain('realigned')
   })
 
   it('re-uploads only what changed', async () => {
@@ -154,6 +177,23 @@ describe('gdriveSync (against the mock Drive)', () => {
         (f: { name: string }) => f.name === 'vocals.flac'
       ).md5Checksum
     ).toBe(createHash('md5').update('fLaC-mew-take').digest('hex'))
+  })
+})
+
+describe('refreshStemHashes', () => {
+  it('tolerates iCloud rehydration mtime drift, re-hashes real changes', async () => {
+    const { refreshStemHashes } = await import('../../src/main/projects')
+    const dir = await mkdtemp(join(tmpdir(), 'singz-hash-'))
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    await writeFile(join(dir, 'stems', 'vocals.flac'), Buffer.from('fLaC-x'))
+    const st = await stat(join(dir, 'stems', 'vocals.flac'))
+    // rehydrating an evicted iCloud file truncates mtime by ~300ns (measured
+    // 2026-07-31 on APFS) — that must not invalidate the stored hash
+    const drifted = { 'vocals.flac': { md5: 'sentinel', size: st.size, mtimeMs: st.mtimeMs + 0.5 } }
+    expect((await refreshStemHashes(dir, drifted))['vocals.flac'].md5).toBe('sentinel')
+    // a genuine write lands whole milliseconds away — that must re-hash
+    const moved = { 'vocals.flac': { md5: 'sentinel', size: st.size, mtimeMs: st.mtimeMs + 5000 } }
+    expect((await refreshStemHashes(dir, moved))['vocals.flac'].md5).not.toBe('sentinel')
   })
 })
 

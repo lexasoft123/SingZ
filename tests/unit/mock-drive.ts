@@ -22,6 +22,9 @@ export interface MockDrive {
   server: Server
   port: number
   files: Map<string, MockFile>
+  /** Every request served, "METHOD /path?decoded-query" — reset and count to
+   *  assert how much traffic an operation really needs. */
+  hits: string[]
   close(): Promise<void>
 }
 
@@ -30,6 +33,7 @@ export function startMockDrive(port = 0): Promise<MockDrive> {
   let nextId = 1
   const newId = (): string => `mock${nextId++}`
   const sessions = new Map<string, { id: string }>()
+  const hits: string[] = []
 
   const server = createServer((req, res) => {
     const chunks: Buffer[] = []
@@ -37,6 +41,7 @@ export function startMockDrive(port = 0): Promise<MockDrive> {
     req.on('end', () => {
       const body = Buffer.concat(chunks)
       const url = new URL(req.url ?? '/', 'http://mock')
+      hits.push(`${req.method} ${url.pathname}${decodeURIComponent(url.search)}`)
       const json = (code: number, data: unknown): void => {
         res.writeHead(code, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(data))
@@ -151,6 +156,7 @@ export function startMockDrive(port = 0): Promise<MockDrive> {
         server,
         port: actual,
         files,
+        hits,
         close: () => new Promise((r) => server.close(() => r()))
       })
     })

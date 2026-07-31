@@ -348,16 +348,38 @@ export async function gdriveSync(
       }
     }
     const singzId = await ensureFolder('SingZ', null)
+    const remoteTop = await listChildren(singzId)
+
+    // The previous catalog is the remote state the last completed sync left.
+    // With stemHashes riding in project.json, that file's md5 fingerprints
+    // the whole project — except lyrics.json, which the aligner rewrites on
+    // its own, so its md5 is checked alongside. A project whose fingerprints
+    // match skips its per-project round-trips entirely: a clean library
+    // syncs in three requests total.
+    const prevCatFile = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
+    const prevByDir = new Map<string, CatalogProject>()
+    if (prevCatFile) {
+      try {
+        const token = await accessToken()
+        const res = await fetch(`${API()}/drive/v3/files/${prevCatFile.id}?alt=media`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+        if (res.ok) {
+          const cat = (await res.json()) as { format?: number; projects?: CatalogProject[] }
+          if (cat?.format === 1 && Array.isArray(cat.projects)) {
+            for (const p of cat.projects) prevByDir.set(p.dir, p)
+          }
+        }
+      } catch {
+        // unreadable previous catalog — every project takes the full walk
+      }
+    }
+
     let uploaded = 0
     let unchanged = 0
     const catalog: CatalogProject[] = []
     for (let i = 0; i < projectDirs.length; i++) {
       const dir = projectDirs[i]
-      onProgress?.(`Syncing ${dir}…`, i / projectDirs.length)
-      const projId = await ensureFolder(dir, singzId)
-      const remote = await listChildren(projId)
-      const stemsId = await ensureFolder('stems', projId)
-      const remoteStems = await listChildren(stemsId)
 
       const top: { path: string; name: string; mime: string }[] = []
       for (const f of ['project.json', 'lyrics.json']) {
@@ -385,6 +407,33 @@ export async function gdriveSync(
         doc.stemHashes = hashes
         await writeFile(join(root, dir, 'project.json'), JSON.stringify(doc, null, 2), 'utf8')
       }
+      const topMd5 = await Promise.all(
+        top.map(async (f) => {
+          const bytes = await readFile(f.path)
+          return { ...f, md5: createHash('md5').update(bytes).digest('hex'), size: bytes.length }
+        })
+      )
+
+      // Fingerprints unchanged since the catalog was written => nothing to
+      // ask Drive about; the previous entry (ids, sizes, md5s) is reused.
+      const prev = prevByDir.get(dir)
+      if (
+        doc &&
+        prev &&
+        topMd5.length === (prev.files?.length ?? -1) &&
+        topMd5.every((f) => prev.files.find((r) => r.name === f.name)?.md5Checksum === f.md5)
+      ) {
+        unchanged += prev.files.length + prev.stems.length
+        catalog.push(prev)
+        continue
+      }
+
+      onProgress?.(`Syncing ${dir}…`, i / projectDirs.length)
+      const projId = await ensureFolder(dir, singzId)
+      const remote = await listChildren(projId)
+      const stemsId = await ensureFolder('stems', projId)
+      const remoteStems = await listChildren(stemsId)
+
       // The hash set is the one source of what stems/ holds (FLAC/WAV splits
       // and the singer's own tracks alike), sorted so the manifest is
       // byte-stable run to run.
@@ -393,12 +442,6 @@ export async function gdriveSync(
         .map((name) => ({ path: join(root, dir, 'stems', name), name, mime: audioMime(name) }))
 
       const proj: CatalogProject = { dir, doc: null, files: [], stems: [] }
-      const topMd5 = await Promise.all(
-        top.map(async (f) => {
-          const bytes = await readFile(f.path)
-          return { ...f, md5: createHash('md5').update(bytes).digest('hex'), size: bytes.length }
-        })
-      )
       const stemMd5 = stems.map((f) => ({ ...f, md5: hashes[f.name].md5, size: hashes[f.name].size }))
       for (const group of [
         { local: topMd5, parent: projId, existing: remote, into: proj.files },
@@ -436,7 +479,6 @@ export async function gdriveSync(
     // hard-delete — remote project folders with no local counterpart;
     // drive.file scope means we only ever see folders this app created.
     let removed = 0
-    const remoteTop = await listChildren(singzId)
     const local = new Set(projectDirs)
     for (const f of remoteTop) {
       if (f.mimeType !== FOLDER || local.has(f.name)) continue
@@ -455,10 +497,9 @@ export async function gdriveSync(
     // everything else so a clean sync leaves it untouched.
     const manifest = Buffer.from(JSON.stringify({ format: 1, projects: catalog }))
     const manifestMd5 = createHash('md5').update(manifest).digest('hex')
-    const prev = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
-    if (prev?.md5Checksum !== manifestMd5) {
+    if (prevCatFile?.md5Checksum !== manifestMd5) {
       onProgress?.('Updating the phone catalog…', 0.995)
-      await uploadBytes(manifest, 'catalog.json', singzId, prev?.id, 'application/json')
+      await uploadBytes(manifest, 'catalog.json', singzId, prevCatFile?.id, 'application/json')
     }
 
     onProgress?.('Drive is up to date', 1)
