@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyGuess } from '../audio/analysis'
 import type { MultitrackEngine } from '../audio/engine'
-import { MicPitch } from '../audio/mic'
+import { MicPitch, type MicDevice } from '../audio/mic'
 import { CONTROLS_W, fmtTime, type TimeView } from '../model'
 import { modalCoversApp } from '../model'
 
@@ -66,6 +66,10 @@ interface Props {
   onZoom: (factor: number, center?: number) => void
   onViewShift: (s: number, e: number) => void
   info: { key: KeyGuess | null; bpm: number | null }
+  /** Chosen microphone (settings) — absent = system default. */
+  inputId?: string
+  /** Reports the device actually in use after every mic start/stop. */
+  onMicDevice?: (d: MicDevice | null) => void
 }
 
 const keyName = (k: KeyGuess, shift: number): string =>
@@ -80,7 +84,9 @@ export default function PitchStrip({
   view,
   onZoom,
   onViewShift,
-  info
+  info,
+  inputId,
+  onMicDevice
 }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -123,11 +129,14 @@ export default function PitchStrip({
   zoomRef.current = onZoom
   const shiftRef = useRef(onViewShift)
   shiftRef.current = onViewShift
+  const onMicDeviceRef = useRef(onMicDevice)
+  onMicDeviceRef.current = onMicDevice
 
   useEffect(() => {
     return () => {
       micRef.current?.stop()
       micRef.current = null
+      onMicDeviceRef.current?.(null)
     }
   }, [])
 
@@ -327,11 +336,33 @@ export default function PitchStrip({
     return () => cancelAnimationFrame(raf)
   }, [engine])
 
+  /** Start a MicPitch on the chosen device; the caller owns the instance. */
+  const startMic = async (deviceId?: string): Promise<MicPitch | null> => {
+    const m = new MicPitch()
+    try {
+      await m.start(engine.context, {
+        deviceId,
+        onEnded: () => {
+          // the device vanished mid-song (unplugged, BT died)
+          if (micRef.current === m) {
+            micRef.current = null
+            setMic('off')
+            onMicDeviceRef.current?.(null)
+          }
+        }
+      })
+      return m
+    } catch {
+      return null
+    }
+  }
+
   const toggleMic = async (): Promise<void> => {
     if (micRef.current?.active) {
       micRef.current.stop()
       micRef.current = null
       setMic('off')
+      onMicDeviceRef.current?.(null)
       return
     }
     setMic('starting')
@@ -340,18 +371,44 @@ export default function PitchStrip({
       setMic('denied')
       return
     }
-    try {
-      const m = new MicPitch()
-      await m.start(engine.context)
-      micRef.current = m
-      trailRef.current = []
-      scoreAcc.current = { hit: 0, total: 0 }
-      if (scoreRef.current) scoreRef.current.textContent = 'sing!'
-      setMic('on')
-    } catch {
+    const m = await startMic(inputId)
+    if (!m) {
       setMic('denied')
+      return
     }
+    micRef.current = m
+    trailRef.current = []
+    scoreAcc.current = { hit: 0, total: 0 }
+    if (scoreRef.current) scoreRef.current.textContent = 'sing!'
+    setMic('on')
+    onMicDeviceRef.current?.(m.device)
   }
+
+  // Live device switch: restart an active mic when settings change the pick.
+  const micGen = useRef(0)
+  const inputIdRef = useRef(inputId)
+  useEffect(() => {
+    if (inputId === inputIdRef.current) return
+    inputIdRef.current = inputId
+    if (!micRef.current?.active) return
+    const gen = ++micGen.current
+    micRef.current.stop()
+    micRef.current = null
+    void startMic(inputId).then((m) => {
+      if (gen !== micGen.current) {
+        // a newer switch already won — this stream is stale
+        m?.stop()
+        return
+      }
+      micRef.current = m
+      if (m) {
+        onMicDeviceRef.current?.(m.device)
+      } else {
+        setMic('off')
+        onMicDeviceRef.current?.(null)
+      }
+    })
+  }, [inputId])
 
   return (
     <div className="pitch-strip" ref={stripRef}>
