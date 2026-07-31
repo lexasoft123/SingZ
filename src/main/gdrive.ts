@@ -295,8 +295,13 @@ interface CatalogFile {
   name: string
   mimeType: string
   size: string
-  md5Checksum: string
+  /** files[] only — the sync fingerprint and the phones' text md5-skip.
+   *  Stems carry none: project.json's stemHashes is the authority, and a
+   *  copy here would only be one more thing to keep consistent. */
+  md5Checksum?: string
 }
+
+const stripMd5 = ({ md5Checksum: _drop, ...keep }: CatalogFile): CatalogFile => keep
 
 interface CatalogProject {
   dir: string
@@ -424,7 +429,8 @@ export async function gdriveSync(
         topMd5.every((f) => prev.files.find((r) => r.name === f.name)?.md5Checksum === f.md5)
       ) {
         unchanged += prev.files.length + prev.stems.length
-        catalog.push(prev)
+        // strip stem md5s a pre-slimming catalog may still carry
+        catalog.push({ ...prev, stems: (prev.stems ?? []).map(stripMd5) })
         continue
       }
 
@@ -444,8 +450,8 @@ export async function gdriveSync(
       const proj: CatalogProject = { dir, doc: null, files: [], stems: [] }
       const stemMd5 = stems.map((f) => ({ ...f, md5: hashes[f.name].md5, size: hashes[f.name].size }))
       for (const group of [
-        { local: topMd5, parent: projId, existing: remote, into: proj.files },
-        { local: stemMd5, parent: stemsId, existing: remoteStems, into: proj.stems }
+        { local: topMd5, parent: projId, existing: remote, into: proj.files, md5s: true },
+        { local: stemMd5, parent: stemsId, existing: remoteStems, into: proj.stems, md5s: false }
       ]) {
         const plan = planSync(group.local, group.existing)
         unchanged += plan.unchanged.length
@@ -461,7 +467,13 @@ export async function gdriveSync(
         for (const f of group.local) {
           const id = ids.get(f.name) ?? group.existing.find((r) => r.name === f.name)?.id
           if (id) {
-            group.into.push({ id, name: f.name, mimeType: f.mime, size: String(f.size), md5Checksum: f.md5 })
+            group.into.push({
+              id,
+              name: f.name,
+              mimeType: f.mime,
+              size: String(f.size),
+              ...(group.md5s ? { md5Checksum: f.md5 } : {})
+            })
           }
         }
       }

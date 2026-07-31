@@ -172,8 +172,8 @@ export async function loadProject(
   crumb?: (note: string) => Promise<void>
 ): Promise<LoadedProject> {
   const gdrive = entry.source === 'gdrive'
-  const fetchFile = (file: string): Promise<string> =>
-    gdrive ? driveLocalFile(entry.dir, file) : Folder.localFile(entry.dir, file)
+  const fetchFile = (file: string, md5?: string): Promise<string> =>
+    gdrive ? driveLocalFile(entry.dir, file, md5) : Folder.localFile(entry.dir, file)
   const readText = (file: string): Promise<string> =>
     gdrive ? driveReadText(entry.dir, file) : Folder.readText(entry.dir, file)
 
@@ -208,7 +208,10 @@ export async function loadProject(
     const id = ids[i]
     onStep(`Fetching ${id} · ${i + 1}/${total}`, i / total)
     await crumb?.(`fetching ${id}`)
-    const path = await fetchFile(`stems/${id}.${entry.stems[id]}`)
+    const path = await fetchFile(
+      `stems/${id}.${entry.stems[id]}`,
+      doc?.stemHashes?.[`${id}.${entry.stems[id]}`]?.md5
+    )
     onStep(`Decoding ${id} · ${i + 1}/${total}`, (i + 0.5) / total)
     await crumb?.(`decoding ${id}`)
     // file:// matters: audio-api's Android RELEASE builds treat bare strings
@@ -231,7 +234,7 @@ export async function loadProject(
     onStep(`Fetching ${t.label} · ${at + 1}/${total}`, at / total)
     await crumb?.(`fetching ${t.id}`)
     try {
-      const path = await fetchFile(t.file)
+      const path = await fetchFile(t.file, doc?.stemHashes?.[t.file.slice('stems/'.length)]?.md5)
       onStep(`Decoding ${t.label} · ${at + 1}/${total}`, (at + 0.5) / total)
       await crumb?.(`decoding ${t.id}`)
       const buffer = await decodeAudioData(`file://${path}`, sampleRate)

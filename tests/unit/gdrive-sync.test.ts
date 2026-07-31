@@ -93,11 +93,13 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(manifest.projects[0].dir).toBe('Mock Song')
     expect(manifest.projects[0].doc.name).toBe('Mock Song')
     const mVocals = manifest.projects[0].stems.find((f: { name: string }) => f.name === 'vocals.flac')
-    expect(mVocals).toMatchObject({
-      id: vocals!.id,
-      size: String(Buffer.from('fLaC-fake-vocals').length),
-      md5Checksum: createHash('md5').update('fLaC-fake-vocals').digest('hex')
-    })
+    expect(mVocals).toMatchObject({ id: vocals!.id, size: String(Buffer.from('fLaC-fake-vocals').length) })
+    // stems carry no md5 here — project.json's stemHashes is the authority;
+    // files[] keep theirs (the sync fingerprint and the phones' text skip)
+    expect(mVocals.md5Checksum).toBeUndefined()
+    expect(
+      manifest.projects[0].files.find((f: { name: string }) => f.name === 'project.json').md5Checksum
+    ).toBeTruthy()
     expect(manifest.projects[0].files.map((f: { name: string }) => f.name).sort()).toEqual([
       'lyrics.json',
       'project.json'
@@ -159,10 +161,10 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(rep).toMatchObject({ ok: true, uploaded: 2, unchanged: 2 })
     const vocals = [...mock.files.values()].find((f) => f.name === 'vocals.flac')
     expect(vocals?.bytes?.toString()).toBe('fLaC-new-take')
-    // the manifest follows: phones compare its md5s to decide re-downloads
-    const cat = [...mock.files.values()].find((f) => f.name === 'catalog.json')
-    const manifest = JSON.parse(cat!.bytes!.toString())
-    expect(manifest.projects[0].stems.find((f: { name: string }) => f.name === 'vocals.flac').md5Checksum).toBe(
+    // phones decide re-downloads from project.json's stemHashes — the synced
+    // copy must carry the new md5
+    const meta = [...mock.files.values()].find((f) => f.name === 'project.json')
+    expect(JSON.parse(meta!.bytes!.toString()).stemHashes['vocals.flac'].md5).toBe(
       createHash('md5').update('fLaC-new-take').digest('hex')
     )
 
@@ -171,12 +173,10 @@ describe('gdriveSync (against the mock Drive)', () => {
     await writeFile(join(root, 'Mock Song', 'stems', 'vocals.flac'), Buffer.from('fLaC-mew-take'))
     const again = await gdriveSync()
     expect(again).toMatchObject({ ok: true, uploaded: 2, unchanged: 2 })
-    const cat2 = [...mock.files.values()].find((f) => f.name === 'catalog.json')
-    expect(
-      JSON.parse(cat2!.bytes!.toString()).projects[0].stems.find(
-        (f: { name: string }) => f.name === 'vocals.flac'
-      ).md5Checksum
-    ).toBe(createHash('md5').update('fLaC-mew-take').digest('hex'))
+    const meta2 = [...mock.files.values()].find((f) => f.name === 'project.json')
+    expect(JSON.parse(meta2!.bytes!.toString()).stemHashes['vocals.flac'].md5).toBe(
+      createHash('md5').update('fLaC-mew-take').digest('hex')
+    )
   })
 })
 
