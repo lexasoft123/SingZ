@@ -78,6 +78,8 @@ export class MultitrackEngine {
   private beatsInfo: BeatInfo | null = null
   private met: MetronomeConfig = { ...MET_DEFAULTS }
   private clickGain = this.ctx.createGain()
+  /** Output level for everything the singer hears, mix and click alike. */
+  private masterVol = 1
   private clickBufs: { accent: AudioBuffer; beat: AudioBuffer } | null = null
   private clickNodes: { node: AudioBufferSourceNode; at: number }[] = []
   private clickTimer: ReturnType<typeof setInterval> | null = null
@@ -192,10 +194,26 @@ export class MultitrackEngine {
     this.emit()
   }
 
+  get masterVolume(): number {
+    return this.masterVol
+  }
+
+  /**
+   * Master output level. The click bypasses the master bus (so tempo/pitch
+   * processing never colors it) but not the master *volume* — pulling
+   * everything down has to take the metronome with it.
+   */
+  setMasterVolume(v: number): void {
+    this.masterVol = Math.max(0, Math.min(1, v))
+    this.master.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
+    this.clickGain.gain.setTargetAtTime(this.met.volume * this.masterVol, this.ctx.currentTime, 0.02)
+    this.emit()
+  }
+
   setMetronome(m: MetronomeConfig): void {
     const structural = m.click !== this.met.click || m.countInBars !== this.met.countInBars
     this.met = m
-    this.clickGain.gain.setTargetAtTime(m.volume, this.ctx.currentTime, 0.02)
+    this.clickGain.gain.setTargetAtTime(m.volume * this.masterVol, this.ctx.currentTime, 0.02)
     if (structural && !this.restartPendingStart() && this._playing) {
       this.cancelPendingClicks()
       this.armClicksFromCurrent()

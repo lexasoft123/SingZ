@@ -77,6 +77,8 @@ export function sanitizePitchHeight(raw: unknown): number {
 export interface AudioPrefs {
   outputId?: string
   inputId?: string
+  /** Master output level 0..1 — belongs to the machine, not to a project. */
+  master?: number
 }
 
 /** Clamp stored audio prefs — ids are opaque non-empty strings, and the
@@ -87,7 +89,13 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     typeof v === 'string' && v.length > 0 && v !== 'default' && v !== 'communications'
       ? v
       : undefined
-  return { outputId: id(r.outputId), inputId: id(r.inputId) }
+  // A corrupt level must not leave the app permanently silent — only a real
+  // number in range survives; anything else means "full".
+  const master =
+    typeof r.master === 'number' && Number.isFinite(r.master)
+      ? Math.max(0, Math.min(1, r.master))
+      : undefined
+  return { outputId: id(r.outputId), inputId: id(r.inputId), master }
 }
 
 /**

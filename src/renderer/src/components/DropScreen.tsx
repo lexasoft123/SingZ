@@ -39,6 +39,8 @@ function folderCloud(root: string): string {
 interface Props {
   loading: boolean
   songName?: string
+  /** Song still open behind this page (Catalog view) — softens the hero copy. */
+  openName?: string
   onBrowse: () => void
   onOpenProject: (songPath: string) => void
   onManageStorage: () => void
@@ -47,6 +49,7 @@ interface Props {
 export default function DropScreen({
   loading,
   songName,
+  openName,
   onBrowse,
   onOpenProject,
   onManageStorage
@@ -162,6 +165,18 @@ export default function DropScreen({
               <h1>Reading “{songName}”…</h1>
             )}
             <p>Decoding audio and drawing the timeline.</p>
+          </>
+        ) : openName ? (
+          <>
+            <h1>Your catalog.</h1>
+            <p>
+              Pick a project below, or drop another song anywhere in this window — “{openName}”
+              stays loaded until you do.
+            </p>
+            <button type="button" className="pill ghost browse" onClick={onBrowse}>
+              Browse files…
+            </button>
+            <span className="drop-hint">or press Esc to go back to your song</span>
           </>
         ) : (
           <>

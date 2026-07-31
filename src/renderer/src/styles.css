@@ -131,6 +131,36 @@ body.win .titlebar {
   margin-left: 1px;
 }
 
+/* Sits next to the logo: the library is a place you go, not a song action */
+.catalog-btn {
+  gap: 6px;
+  color: var(--dim);
+  margin-left: -4px;
+}
+
+.catalog-btn svg {
+  display: block;
+  opacity: 0.75;
+}
+
+.catalog-btn:hover {
+  color: var(--text);
+}
+
+.catalog-btn:hover svg {
+  opacity: 1;
+}
+
+.catalog-btn.active {
+  background: var(--accent-soft);
+  border-color: rgba(255, 160, 40, 0.55);
+  color: var(--accent);
+}
+
+.catalog-btn.active svg {
+  opacity: 1;
+}
+
 .song-title {
   position: absolute;
   left: 50%;
@@ -2599,6 +2629,48 @@ body.win.maximized .app {
   color: var(--accent);
   border-color: rgba(255, 160, 40, 0.55);
   background: var(--accent-soft);
+}
+
+/* ---- Master volume ----------------------------------------------------- */
+
+/* Muted is a state the singer must spot instantly — "why is nothing playing?" */
+.round-ghost.vol-btn.muted {
+  color: var(--accent);
+  border-color: rgba(255, 160, 40, 0.55);
+  background: var(--accent-soft);
+}
+
+.train-pop.vol-pop {
+  width: 236px;
+}
+
+.vol-pop .tp-row {
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.vol-pop .vol {
+  height: 4px;
+}
+
+.vol-pop .vol::-webkit-slider-thumb {
+  width: 13px;
+  height: 13px;
+}
+
+.round-ghost.vol-mute {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  color: var(--dim);
+}
+
+.round-ghost.vol-mute:hover {
+  color: var(--text);
+}
+
+.vol-pop .tp-caption {
+  margin: 12px 2px 0;
 }
 
 /* ---- Metronome --------------------------------------------------------- */

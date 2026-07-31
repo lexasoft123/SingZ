@@ -133,6 +133,8 @@ export default function App(): React.JSX.Element {
   const [showSetup, setShowSetup] = useState(false)
   const [showLog, setShowLog] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
+  /** Catalog page shown over a loaded song — the song stays live underneath. */
+  const [showCatalog, setShowCatalog] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
     try {
@@ -237,6 +239,8 @@ export default function App(): React.JSX.Element {
   melodyRef.current = melody
   const selectionRef = useRef(selection)
   selectionRef.current = selection
+  const showCatalogRef = useRef(showCatalog)
+  showCatalogRef.current = showCatalog
   const selMemReadyRef = useRef(false)
   const trainingRef = useRef(training)
   trainingRef.current = training
@@ -255,10 +259,19 @@ export default function App(): React.JSX.Element {
     localStorage.setItem('singz.met', JSON.stringify(metCfg))
   }, [metCfg])
 
-  // Device picks follow the machine, not the song.
+  // Device picks and the output level follow the machine, not the song.
   useEffect(() => {
     localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
   }, [audioPrefs])
+
+  const masterVol = audioPrefs.master ?? 1
+  useEffect(() => {
+    engine.setMasterVolume(masterVol)
+  }, [engine, masterVol])
+
+  const changeMasterVol = useCallback((v: number) => {
+    setAudioPrefs((p) => ({ ...p, master: Math.max(0, Math.min(1, v)) }))
+  }, [])
 
   // Keep the context's sink pointed at the saved output. Single-flight,
   // last-wins: BT headsets fire devicechange in bursts. The saved id is
@@ -424,6 +437,10 @@ export default function App(): React.JSX.Element {
         tgt instanceof HTMLTextAreaElement
       if (inText) return
       if (e.code === 'Escape') {
+        if (showCatalogRef.current) {
+          setShowCatalog(false)
+          return
+        }
         if (selectionRef.current) {
           setSelection(null)
           setSaveState((st) => (st === 'saved' ? 'idle' : st))
@@ -493,6 +510,7 @@ export default function App(): React.JSX.Element {
       setProjectDir(reg.project?.dir ?? null)
       setEditName(null)
       setShowProjects(false)
+      setShowCatalog(false)
       /** Decode the project's added tracks into lanes; a missing one is skipped. */
       const decodeCustom = async (defs?: CustomTrack[]): Promise<UITrack[]> => {
         const out: UITrack[] = []
@@ -1253,6 +1271,13 @@ export default function App(): React.JSX.Element {
   const togglePlayRef = useRef(togglePlay)
   togglePlayRef.current = togglePlay
 
+  /** Catalog covers the transport, so nothing may be left playing behind it. */
+  const toggleCatalog = useCallback(() => {
+    const opening = !showCatalogRef.current
+    if (opening) engine.pause()
+    setShowCatalog(opening)
+  }, [engine])
+
   const toggleLoop = useCallback(() => {
     touchSettings()
     setLoopOn((on) => {
@@ -1483,6 +1508,27 @@ export default function App(): React.JSX.Element {
           Sing<span>Z</span>
           {ver && <em className="ver">{ver}</em>}
         </div>
+        {phase === 'ready' && (
+          <button
+            type="button"
+            className={`pill ghost small catalog-btn${showCatalog ? ' active' : ''}`}
+            title={
+              showCatalog
+                ? 'Back to your song (Esc)'
+                : 'Browse your project library — this song stays loaded'
+            }
+            aria-pressed={showCatalog}
+            onClick={toggleCatalog}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+              <rect x="1.5" y="1.5" width="5.4" height="5.4" rx="1.3" />
+              <rect x="9.1" y="1.5" width="5.4" height="5.4" rx="1.3" />
+              <rect x="1.5" y="9.1" width="5.4" height="5.4" rx="1.3" />
+              <rect x="9.1" y="9.1" width="5.4" height="5.4" rx="1.3" />
+            </svg>
+            Catalog
+          </button>
+        )}
         {update.state === 'ready' && (
           <button
             type="button"
@@ -1573,7 +1619,8 @@ export default function App(): React.JSX.Element {
               Add to library…
             </button>
           )}
-          {phase === 'ready' && (
+          {/* the catalog page already lists the library — no second door to it */}
+          {phase === 'ready' && !showCatalog && (
             <button type="button" className="pill ghost small" onClick={() => setShowProjects(true)}>
               Open…
             </button>
@@ -1610,7 +1657,7 @@ export default function App(): React.JSX.Element {
         </div>
       </header>
 
-      {phase === 'ready' ? (
+      {phase === 'ready' && !showCatalog ? (
         <>
           <div className="main-row">
             <div className="main-col">
@@ -1679,6 +1726,8 @@ export default function App(): React.JSX.Element {
             loopOn={loopOn}
             onToggleLoop={toggleLoop}
             hasSelection={selection !== null}
+            volume={masterVol}
+            onVolume={changeMasterVol}
             training={training}
             trainCfg={trainCfg}
             onToggleTraining={toggleTraining}
@@ -1711,6 +1760,7 @@ export default function App(): React.JSX.Element {
         <DropScreen
           loading={phase === 'loading'}
           songName={song?.name}
+          openName={showCatalog ? song?.name : undefined}
           onBrowse={openPicker}
           onOpenProject={(p) => void loadPath(p)}
           onManageStorage={() => setShowProjects(true)}
