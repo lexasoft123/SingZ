@@ -293,21 +293,22 @@ const uploadFile = async (
 interface CatalogFile {
   id: string
   name: string
-  mimeType: string
   size: string
-  /** files[] only — the sync fingerprint and the phones' text md5-skip.
-   *  Stems carry none: project.json's stemHashes is the authority, and a
-   *  copy here would only be one more thing to keep consistent. */
-  md5Checksum?: string
+  /** The sync fingerprint and the phones' skip signal. Stem hashes live in
+   *  project.json — the catalog never repeats what a doc can carry. */
+  md5Checksum: string
 }
 
-const stripMd5 = ({ md5Checksum: _drop, ...keep }: CatalogFile): CatalogFile => keep
-
+/**
+ * One catalog row (format 2): a project is its project.json — the doc itself
+ * carries the stem list, hashes and sizes — so the catalog holds only the
+ * two files a phone must be able to judge without fetching: project.json
+ * (the project's fingerprint) and lyrics.json (the aligner rewrites it
+ * without touching the doc). Ids ride along so a changed doc is one GET.
+ */
 interface CatalogProject {
   dir: string
-  doc: unknown
   files: CatalogFile[]
-  stems: CatalogFile[]
 }
 
 /** The slice of project.json the sync reads and (for stemHashes) maintains. */
@@ -371,7 +372,9 @@ export async function gdriveSync(
         })
         if (res.ok) {
           const cat = (await res.json()) as { format?: number; projects?: CatalogProject[] }
-          if (cat?.format === 1 && Array.isArray(cat.projects)) {
+          // format 1 rows carry extra fields (doc, stems) — the fingerprint
+          // md5s live in files[] either way, so both serve as the baseline
+          if ((cat?.format === 1 || cat?.format === 2) && Array.isArray(cat.projects)) {
             for (const p of cat.projects) prevByDir.set(p.dir, p)
           }
         }
@@ -428,9 +431,12 @@ export async function gdriveSync(
         topMd5.length === (prev.files?.length ?? -1) &&
         topMd5.every((f) => prev.files.find((r) => r.name === f.name)?.md5Checksum === f.md5)
       ) {
-        unchanged += prev.files.length + prev.stems.length
-        // strip stem md5s a pre-slimming catalog may still carry
-        catalog.push({ ...prev, stems: (prev.stems ?? []).map(stripMd5) })
+        unchanged += topMd5.length + Object.keys(hashes).length
+        // normalize on the way through — a format-1 row carried doc/stems
+        catalog.push({
+          dir,
+          files: prev.files.map((f) => ({ id: f.id, name: f.name, size: f.size, md5Checksum: f.md5Checksum }))
+        })
         continue
       }
 
@@ -441,17 +447,16 @@ export async function gdriveSync(
       const remoteStems = await listChildren(stemsId)
 
       // The hash set is the one source of what stems/ holds (FLAC/WAV splits
-      // and the singer's own tracks alike), sorted so the manifest is
-      // byte-stable run to run.
+      // and the singer's own tracks alike).
       const stems = Object.keys(hashes)
         .sort()
         .map((name) => ({ path: join(root, dir, 'stems', name), name, mime: audioMime(name) }))
 
-      const proj: CatalogProject = { dir, doc: null, files: [], stems: [] }
+      const proj: CatalogProject = { dir, files: [] }
       const stemMd5 = stems.map((f) => ({ ...f, md5: hashes[f.name].md5, size: hashes[f.name].size }))
       for (const group of [
-        { local: topMd5, parent: projId, existing: remote, into: proj.files, md5s: true },
-        { local: stemMd5, parent: stemsId, existing: remoteStems, into: proj.stems, md5s: false }
+        { local: topMd5, parent: projId, existing: remote, row: true },
+        { local: stemMd5, parent: stemsId, existing: remoteStems, row: false }
       ]) {
         const plan = planSync(group.local, group.existing)
         unchanged += plan.unchanged.length
@@ -464,27 +469,13 @@ export async function gdriveSync(
           ids.set(name, await uploadFile(f.path, f.name, group.parent, existing?.id, f.mime))
           uploaded++
         }
+        if (!group.row) continue // stems live in project.json, not the catalog
         for (const f of group.local) {
           const id = ids.get(f.name) ?? group.existing.find((r) => r.name === f.name)?.id
-          if (id) {
-            group.into.push({
-              id,
-              name: f.name,
-              mimeType: f.mime,
-              size: String(f.size),
-              ...(group.md5s ? { md5Checksum: f.md5 } : {})
-            })
-          }
+          if (id) proj.files.push({ id, name: f.name, size: String(f.size), md5Checksum: f.md5 })
         }
       }
-      if (doc) {
-        // Only what the phone's catalog screen shows: name, sort key, and the
-        // singer's added tracks (their files count toward the download size).
-        // The full project.json — beat grids alone were two thirds of the
-        // manifest — stays per project and is fetched when a song is opened.
-        proj.doc = { name: doc.name, savedAt: doc.savedAt, settings: { custom: doc.settings?.custom } }
-        catalog.push(proj)
-      }
+      if (doc) catalog.push(proj)
     }
     // Reconcile: a renamed or deleted local project must not haunt Drive
     // (phones would list both the old and the new name). Trash — never
@@ -507,7 +498,7 @@ export async function gdriveSync(
     // The manifest is written LAST — after every upload and the reconcile —
     // so it never names files that are not on Drive yet; md5-diffed like
     // everything else so a clean sync leaves it untouched.
-    const manifest = Buffer.from(JSON.stringify({ format: 1, projects: catalog }))
+    const manifest = Buffer.from(JSON.stringify({ format: 2, projects: catalog }))
     const manifestMd5 = createHash('md5').update(manifest).digest('hex')
     if (prevCatFile?.md5Checksum !== manifestMd5) {
       onProgress?.('Updating the phone catalog…', 0.995)

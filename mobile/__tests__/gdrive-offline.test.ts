@@ -38,8 +38,8 @@ function newDrive(md5 = { vocals: 'v-1', drums: 'd-1' }): DriveState {
     children: {
       ROOT: [{ id: 'D1', name: 'Song One', mimeType: FOLDER }],
       D1: [
-        { id: 'M1', name: 'project.json', mimeType: 'application/json' },
-        { id: 'L1', name: 'lyrics.json', mimeType: 'application/json' },
+        { id: 'M1', name: 'project.json', mimeType: 'application/json', size: '40', md5Checksum: 'm-1' },
+        { id: 'L1', name: 'lyrics.json', mimeType: 'application/json', size: '30', md5Checksum: 'l-1' },
         { id: 'S1', name: 'stems', mimeType: FOLDER }
       ],
       S1: [
@@ -48,7 +48,14 @@ function newDrive(md5 = { vocals: 'v-1', drums: 'd-1' }): DriveState {
       ]
     },
     media: {
-      M1: JSON.stringify({ name: 'Song One', savedAt: '2026-01-01T00:00:00.000Z' }),
+      M1: JSON.stringify({
+        name: 'Song One',
+        savedAt: '2026-01-01T00:00:00.000Z',
+        stemHashes: {
+          'vocals.flac': { md5: md5.vocals, size: 100, mtimeMs: 1 },
+          'drums.flac': { md5: md5.drums, size: 200, mtimeMs: 1 }
+        }
+      }),
       L1: JSON.stringify({ lines: [{ t: 0, text: 'hello' }] })
     },
     offline: false
@@ -62,24 +69,20 @@ const ok = (body: unknown): unknown => ({
   text: async () => JSON.stringify(body)
 })
 
-/** What the desktop's catalog.json holds for newDrive()'s library. The doc
- *  is the listing summary the desktop writes — never the full project.json. */
+/** What the desktop's catalog.json holds for newDrive()'s library: format-2
+ *  rows — a project is its project.json (plus lyrics.json, which the aligner
+ *  rewrites without touching the doc). Everything else lives in the doc. */
 function addManifest(drive: DriveState, overrides: Partial<Record<string, unknown>> = {}): void {
   drive.children.ROOT.push({ id: 'CAT', name: 'catalog.json', mimeType: 'application/json' })
-  const full = JSON.parse(drive.media.M1)
   drive.media.CAT = JSON.stringify({
-    format: 1,
+    format: 2,
     projects: [
       {
         dir: 'Song One',
-        doc: { name: full.name, savedAt: full.savedAt, settings: { custom: full.settings?.custom } },
         files: [
-          { id: 'M1', name: 'project.json', mimeType: 'application/json', size: '40', md5Checksum: 'm-1' },
-          { id: 'L1', name: 'lyrics.json', mimeType: 'application/json', size: '30', md5Checksum: 'l-1' }
-        ],
-        // like the desktop, stems carry ids and sizes but no md5s — the
-        // authority on stem bytes is project.json's stemHashes
-        stems: drive.children.S1.map(({ md5Checksum: _drop, ...keep }) => keep)
+          { id: 'M1', name: 'project.json', size: '40', md5Checksum: 'm-1' },
+          { id: 'L1', name: 'lyrics.json', size: '30', md5Checksum: 'l-1' }
+        ]
       }
     ],
     ...overrides
@@ -250,7 +253,7 @@ describe('catalog without internet', () => {
 })
 
 describe('the desktop-written manifest', () => {
-  it('lists the library in three requests, and its ids stream', async () => {
+  it('fetches a project once, then every quiet refresh is three requests', async () => {
     const drive = newDrive()
     addManifest(drive)
     install(drive)
@@ -263,25 +266,44 @@ describe('the desktop-written manifest', () => {
     }) as typeof fetch
     const g = require('../src/gdrive') as typeof import('../src/gdrive')
     const entries = await g.driveListProjects()
-    // SingZ root + root children + catalog.json — never three per song
-    expect(calls).toBe(3)
+    // never-seen project: root + children + catalog, then its doc + two
+    // folder listings — and the entry is built from the doc's stemHashes
+    expect(calls).toBe(6)
     expect(entries.map((p) => p.dir)).toEqual(['Song One'])
     expect(entries[0].stems).toEqual({ vocals: 'flac', drums: 'flac' })
     expect(entries[0].bytes).toBe(300)
     expect(entries[0].hasLyrics).toBe(true)
     expect(prefs['singz.gdrive.catalog']).toBeTruthy()
 
-    // the manifest's file ids feed the streaming; the md5 arrives separately,
-    // from the opened project.json's stemHashes (loadProject plumbs it)
-    await g.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
+    // fingerprints unchanged => the refresh never asks about projects
+    calls = 0
+    await g.driveListProjects(true)
+    expect(calls).toBe(3)
+
+    // a restart restores the built catalog, and fingerprints still hold
+    install(drive)
+    signIn()
+    const g2 = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g2.driveStoredProjects()
+    calls = 0
+    const inner2 = globalThis.fetch
+    globalThis.fetch = ((...a: Parameters<typeof fetch>) => {
+      calls++
+      return inner2(...a)
+    }) as typeof fetch
+    await g2.driveListProjects(true)
+    expect(calls).toBe(3)
+
+    // the ids stream; the md5 arrives from project.json's stemHashes
+    await g2.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
     expect(fetchToCache.mock.calls[0][2]).toContain('/drive/v3/files/V1')
     expect(fetchToCache.mock.calls[0][4]).toBe(0) // never fetched before
     fetchToCache.mockClear()
-    await g.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
+    await g2.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
     expect(fetchToCache.mock.calls[0][4]).toBe(100) // unchanged md5: cached
   })
 
-  it('opening a song fetches the player state the summary omits', async () => {
+  it('a song opens with zero requests once listed, offline included', async () => {
     const drive = newDrive()
     drive.media.M1 = JSON.stringify({
       name: 'Song One',
@@ -297,21 +319,32 @@ describe('the desktop-written manifest', () => {
     signIn()
     const g = require('../src/gdrive') as typeof import('../src/gdrive')
     const entries = await g.driveListProjects()
-    // the listing carries no beat grid...
-    expect((entries[0].doc.settings as { beat?: unknown })?.beat).toBeUndefined()
+    // the listing already holds the full doc (fetched and kept as the row's
+    // fingerprint changed) — beat grid included
+    expect((entries[0].doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
 
-    // ...an open fetches the real project.json, with everything
+    // first open: the doc is served from the kept copy; only lyrics fetches
     const { loadProject } = require('../src/projects') as typeof import('../src/projects')
+    let calls = 0
+    const inner = globalThis.fetch
+    globalThis.fetch = ((...a: Parameters<typeof fetch>) => {
+      calls++
+      return inner(...a)
+    }) as typeof fetch
     const first = await loadProject(entries[0], 48000, () => {})
     expect((first.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
+    expect(calls).toBe(1) // lyrics.json, kept from here on
     // stems streamed under the doc's md5s: both fetched for real once
     expect(fetchToCache.mock.calls.filter((c) => c[4] === 0)).toHaveLength(2)
     fetchToCache.mockClear()
+    await new Promise<void>((r) => setTimeout(() => r(), 0)) // keeps settle
 
-    // and a song opened once keeps its settings with no signal at all
+    // reopening — even with no signal — touches the network zero times
     drive.offline = true
+    calls = 0
     const again = await loadProject(entries[0], 48000, () => {})
     expect((again.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
+    expect(calls).toBe(0)
     // the cached copies stand — unchanged md5s let the size check serve them
     expect(fetchToCache.mock.calls.length).toBeGreaterThan(0)
     expect(fetchToCache.mock.calls.every((c) => (c[4] as number) > 0)).toBe(true)
@@ -335,8 +368,10 @@ describe('the desktop-written manifest', () => {
     expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('hello')
     expect(calls).toBe(0) // the listing's md5 matched the kept copy
 
-    // the desktop re-aligned: a new md5 in the listing forces a real read
+    // the desktop re-aligned: a new md5 in the row (and the folder listing
+    // behind it) forces a real read
     drive.media.CAT = drive.media.CAT.replace('"md5Checksum":"l-1"', '"md5Checksum":"l-2"')
+    drive.children.D1.find((f) => f.id === 'L1')!.md5Checksum = 'l-2'
     drive.media.L1 = JSON.stringify({ lines: [{ t: 0, text: 'goodbye' }] })
     await g.driveListProjects(true)
     calls = 0
@@ -368,10 +403,18 @@ describe('the desktop-written manifest', () => {
     const drive = newDrive()
     // a future format whose (imaginary) content would list nothing — only
     // the walk can still produce Song One, so this fails if format is ignored
-    addManifest(drive, {
-      format: 2,
-      projects: [{ dir: 'Song One', doc: JSON.parse(drive.media.M1), files: [], stems: [] }]
-    })
+    addManifest(drive, { format: 3, projects: [{ dir: 'Song One', files: [] }] })
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    const entries = await g.driveListProjects()
+    expect(entries.map((p) => p.dir)).toEqual(['Song One'])
+    expect(entries[0].stems).toEqual({ vocals: 'flac', drums: 'flac' })
+  })
+
+  it('walks a format-1 manifest from an older desktop', async () => {
+    const drive = newDrive()
+    addManifest(drive, { format: 1 })
     install(drive)
     signIn()
     const g = require('../src/gdrive') as typeof import('../src/gdrive')

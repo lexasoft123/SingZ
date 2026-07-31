@@ -84,33 +84,23 @@ describe('gdriveSync (against the mock Drive)', () => {
     const vocals = [...mock.files.values()].find((f) => f.name === 'vocals.flac')
     expect(vocals?.bytes?.toString()).toBe('fLaC-fake-vocals')
 
-    // the phone-facing manifest: whole library, with the ids/sizes/md5s the
-    // phone needs to list and stream without walking the folders
+    // the phone-facing manifest: one row per project — its two judgeable
+    // files with ids and md5s. Everything else lives in project.json.
     const cat = [...mock.files.values()].find((f) => f.name === 'catalog.json')
     const manifest = JSON.parse(cat!.bytes!.toString())
-    expect(manifest.format).toBe(1)
+    expect(manifest.format).toBe(2)
     expect(manifest.projects).toHaveLength(1)
     expect(manifest.projects[0].dir).toBe('Mock Song')
-    expect(manifest.projects[0].doc.name).toBe('Mock Song')
-    const mVocals = manifest.projects[0].stems.find((f: { name: string }) => f.name === 'vocals.flac')
-    expect(mVocals).toMatchObject({ id: vocals!.id, size: String(Buffer.from('fLaC-fake-vocals').length) })
-    // stems carry no md5 here — project.json's stemHashes is the authority;
-    // files[] keep theirs (the sync fingerprint and the phones' text skip)
-    expect(mVocals.md5Checksum).toBeUndefined()
-    expect(
-      manifest.projects[0].files.find((f: { name: string }) => f.name === 'project.json').md5Checksum
-    ).toBeTruthy()
+    expect(manifest.projects[0].doc).toBeUndefined()
+    expect(manifest.projects[0].stems).toBeUndefined()
     expect(manifest.projects[0].files.map((f: { name: string }) => f.name).sort()).toEqual([
       'lyrics.json',
       'project.json'
     ])
-    // the doc is a listing summary — player state (beat grids alone were two
-    // thirds of the manifest) stays in each project's own project.json
-    expect(manifest.projects[0].doc.savedAt).toBe('2026-07-30T00:00:00.000Z')
-    expect(manifest.projects[0].doc.settings.custom).toHaveLength(1)
-    expect(manifest.projects[0].doc.settings.beat).toBeUndefined()
-    expect(manifest.projects[0].doc.settings.tracks).toBeUndefined()
-    expect(manifest.projects[0].doc.version).toBeUndefined()
+    for (const f of manifest.projects[0].files) {
+      expect(f.id).toBeTruthy()
+      expect(f.md5Checksum).toMatch(/^[0-9a-f]{32}$/)
+    }
 
     // the first sync hashed the stems once and folded the hashes into
     // project.json (uploaded in the same run)
