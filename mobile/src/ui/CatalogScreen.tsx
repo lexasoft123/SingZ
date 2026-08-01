@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Modal,
   Platform,
   Pressable,
   RefreshControl,
@@ -23,17 +24,21 @@ import {
   driveStoredProjects
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
+import { log } from '../log'
+import LogPanel from './LogPanel'
 import { customTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
   cacheUsage,
   clearCache,
   clearRoot,
   getRoot,
+  isDownloaded,
   listProjects,
   loadProject,
   pickFolder,
   releaseProject,
   releaseStems,
+  type CacheUsage,
   type LoadedProject,
   type ProjectEntry,
   type RootInfo
@@ -81,10 +86,13 @@ export default function CatalogScreen({
   const [driveEmail, setDriveEmail] = useState<string | null>(null)
   const [driveOn, setDriveOn] = useState(false)
   const [pulling, setPulling] = useState(false)
-  /** Bytes each project occupies on this phone — 0/absent means not downloaded. */
-  const [usage, setUsage] = useState<Record<string, number>>({})
+  /** What each project holds on this phone: total bytes and the size of every
+   *  file present, which is what the ✓ compares against project.json. */
+  const [usage, setUsage] = useState<Record<string, CacheUsage>>({})
   /** The listing on screen is the stored one; the refresh behind it failed. */
   const [offline, setOffline] = useState(false)
+  /** The diagnostic log — the only evidence a release build leaves behind. */
+  const [logOpen, setLogOpen] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
@@ -92,8 +100,8 @@ export default function CatalogScreen({
 
   const loadUsage = useCallback(async () => {
     const rows = await cacheUsage()
-    const map: Record<string, number> = {}
-    for (const r of rows) map[r.project] = r.bytes
+    const map: Record<string, CacheUsage> = {}
+    for (const r of rows) map[r.project] = r
     setUsage(map)
   }, [])
 
@@ -236,7 +244,7 @@ export default function CatalogScreen({
   /** Long-press a downloaded song: drop its files, keep it in the library. */
   const confirmForget = useCallback(
     (entry: ProjectEntry) => {
-      const have = usage[entry.dir] ?? 0
+      const have = usage[entry.dir]?.bytes ?? 0
       if (have <= 0) return
       Alert.alert(
         entry.doc.name ?? entry.dir,
@@ -419,6 +427,11 @@ export default function CatalogScreen({
         <View style={s.brandRow}>
           <StemTile hue={0} size={26} />
           <Text style={s.brand}>SingZ</Text>
+          {/* where the desktop keeps it: in the header, always reachable —
+              a log you can only open when things are going well is no use */}
+          <Pressable hitSlop={10} style={{ marginLeft: 'auto' }} onPress={() => setLogOpen(true)}>
+            <Text style={s.ctxLink}>Log</Text>
+          </Pressable>
         </View>
         <Seg
           segments={[
@@ -505,10 +518,7 @@ export default function CatalogScreen({
           }
         >
           {(projects ?? []).map((p) => {
-            // A song counts as downloaded once its files are all here; a
-            // half-finished fetch keeps the cloud mark and its remaining size.
-            const have = usage[p.dir] ?? 0
-            const downloaded = p.cached || (p.bytes > 0 && have + 1024 >= p.bytes)
+            const downloaded = isDownloaded(p, usage[p.dir])
             const added = customTracks(p.doc?.settings).length
             return card({
               key: p.dir,
@@ -560,8 +570,8 @@ export default function CatalogScreen({
             onPress: () => void openSample()
           })}
           {(() => {
-            const dirs = Object.keys(usage).filter((d) => usage[d] > 0)
-            const total = dirs.reduce((n, d) => n + usage[d], 0)
+            const dirs = Object.keys(usage).filter((d) => usage[d].bytes > 0)
+            const total = dirs.reduce((n, d) => n + usage[d].bytes, 0)
             if (total <= 0) return null
             return (
               <View style={s.storage}>
@@ -577,6 +587,7 @@ export default function CatalogScreen({
           })()}
           {error && <Text style={s.err}>{error}</Text>}
         </ScrollView>
+        <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
       </View>
     </View>
   )
@@ -584,6 +595,12 @@ export default function CatalogScreen({
 
 const s = StyleSheet.create({
   wrap: { flex: 1, paddingHorizontal: 20 },
+  logSheet: { flex: 1, backgroundColor: C.bg, paddingHorizontal: 20, paddingTop: 60 },
+  logHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  logTitle: { color: C.text, fontSize: 20, fontWeight: '700' },
+  logRow: { paddingVertical: 7, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#ffffff14' },
+  logWhen: { color: C.dim, fontSize: 11, marginBottom: 2 },
+  logMsg: { color: C.text, fontSize: 13 },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 14 },
   brand: { color: C.amber, fontSize: 20, fontWeight: '800', letterSpacing: -0.3 },
   ctx: {

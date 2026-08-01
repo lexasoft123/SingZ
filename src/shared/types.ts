@@ -144,6 +144,10 @@ export interface ProjectInfo {
   settings: ProjectSettings
   /** Stem files on disk (at least the core four), when the project has them. */
   stems?: Partial<Record<StemName6, string>>
+  /** Files project.json names that are there at the wrong size — a half-copied
+   *  folder, an interrupted cloud materialization. Named so the failure can be
+   *  reported as itself instead of as a decode error. */
+  damaged?: string[]
   hasLyrics: boolean
   /**
    * False for a project folder opened from outside the library root — a copied,
@@ -438,7 +442,14 @@ export interface SingzApi {
   >
 
   /** Google Drive sync (drive.file scope — no Drive client needed anywhere). */
-  gdriveStatus(): Promise<{ configured: boolean; signedIn: boolean; lastSync?: number | null }>
+  gdriveStatus(): Promise<{
+    configured: boolean
+    signedIn: boolean
+    lastSync?: number | null
+    sync: SyncStatus
+    /** Absolute dirs waiting to reach Drive — what the per-song badges read. */
+    dirtyDirs: string[]
+  }>
   gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
   gdriveSignOut(): Promise<{ ok: boolean }>
   gdriveSync(): Promise<{
@@ -449,4 +460,31 @@ export interface SingzApi {
     error?: string
   }>
   onGdriveProgress(cb: (p: { msg: string; frac: number }) => void): () => void
+  /** Pushed whenever the sync's state changes — the UI stops inferring it
+   *  from progress strings. */
+  onGdriveState(cb: (s: SyncStatus) => void): () => void
+}
+
+/** What the sync is doing, for the library's badges and its status line.
+ *  Declared here because both the main process and the renderer narrow on
+ *  these string unions — two copies would drift silently. */
+export type SyncPhase = 'idle' | 'pending' | 'syncing' | 'retrying' | 'blocked' | 'off'
+export type SyncErrorKind = 'auth' | 'offline' | 'transient' | 'config' | 'fatal'
+
+export interface SyncStatus {
+  phase: SyncPhase
+  /** Projects waiting; -1 when the whole library is. */
+  dirty: number
+  runAt?: number
+  attempt: number
+  lastError?: string
+  lastErrorKind?: SyncErrorKind
+  lastSync?: number
+}
+
+/** One line of the persistent sync record. */
+export interface SyncLogEntry {
+  at: number
+  kind: 'run' | 'upload' | 'trash' | 'error'
+  msg: string
 }

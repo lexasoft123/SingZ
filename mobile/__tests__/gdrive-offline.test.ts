@@ -17,10 +17,35 @@ const FOLDER = 'application/vnd.google-apps.folder'
 
 /** Prefs survive "restarts" — that is the whole point of the persisted catalog. */
 let prefs: Record<string, string> = {}
-/** Mirrors the native signature — the 5th argument is the assertion target. */
+/** What the phone is holding, keyed "<project>/<file>" → the file's md5+size. */
+let onDisk: Record<string, { md5: string; size: number }> = {}
+
+/**
+ * The native, playing by its own contract: serve the copy on disk when it IS
+ * the file JS asked for (size, then md5), otherwise download. Tests assert on
+ * `downloads` — the only thing that costs a singer anything.
+ */
+let downloads: string[] = []
 const fetchToCache = jest.fn(
-  (project: string, file: string, _url: string, _auth: string, _expectedBytes: number) =>
-    `/cache/${project}/${file}`
+  async (
+    project: string,
+    file: string,
+    _url: string,
+    _auth: string,
+    expectedMd5: string,
+    expectedBytes: number
+  ) => {
+    const key = `${project}/${file}`
+    // the app's own rule, not a re-statement of it: a fake that re-implements
+    // the ladder is a fourth copy that can drift from the three real ones
+    const { isCurrent } = require('../src/current') as typeof import('../src/current')
+    const downloaded = !isCurrent(onDisk[key], { size: expectedBytes, md5: expectedMd5 })
+    if (downloaded) {
+      downloads.push(key)
+      onDisk[key] = { md5: expectedMd5 || 'downloaded', size: expectedBytes || 1 }
+    }
+    return { path: `/cache/${key}`, downloaded }
+  }
 )
 
 interface DriveState {
@@ -151,6 +176,8 @@ function signIn(expiresInMs = 3600_000): void {
 
 beforeEach(() => {
   prefs = {}
+  onDisk = {}
+  downloads = []
   fetchToCache.mockClear()
 })
 
@@ -221,18 +248,21 @@ describe('catalog without internet', () => {
     const g2 = require('../src/gdrive') as typeof import('../src/gdrive')
     await g2.driveStoredProjects()
     fetchToCache.mockClear()
+    downloads.length = 0
 
     const path = await g2.driveLocalFile('Song One', 'stems/vocals.flac')
     expect(path).toBe('/cache/Song One/stems/vocals.flac')
-    // expected size passed => the native side serves the cached copy, and no
+    // md5 + size handed over so the native serves the copy on disk, and no
     // Authorization was demanded (it could not be refreshed offline anyway)
     expect(fetchToCache).toHaveBeenCalledWith(
       'Song One',
       'stems/vocals.flac',
       expect.any(String),
       '',
+      'v-1',
       100
     )
+    expect(downloads).toEqual([])
   })
 
   it('keeps lyrics for a downloaded song', async () => {
@@ -297,10 +327,11 @@ describe('the desktop-written manifest', () => {
     // the ids stream; the md5 arrives from project.json's stemHashes
     await g2.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
     expect(fetchToCache.mock.calls[0][2]).toContain('/drive/v3/files/V1')
-    expect(fetchToCache.mock.calls[0][4]).toBe(0) // never fetched before
-    fetchToCache.mockClear()
+    expect(fetchToCache.mock.calls[0][4]).toBe('v-1') // what it must be
+    expect(fetchToCache.mock.calls[0][5]).toBe(100) // ...and how big
+    expect(downloads).toHaveLength(1) // never fetched before
     await g2.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
-    expect(fetchToCache.mock.calls[0][4]).toBe(100) // unchanged md5: cached
+    expect(downloads).toHaveLength(1) // unchanged: the copy on disk stands
   })
 
   it('a song opens with zero requests once listed, offline included', async () => {
@@ -335,8 +366,7 @@ describe('the desktop-written manifest', () => {
     expect((first.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
     expect(calls).toBe(1) // lyrics.json, kept from here on
     // stems streamed under the doc's md5s: both fetched for real once
-    expect(fetchToCache.mock.calls.filter((c) => c[4] === 0)).toHaveLength(2)
-    fetchToCache.mockClear()
+    expect(downloads).toEqual(['Song One/stems/vocals.flac', 'Song One/stems/drums.flac'])
     await new Promise<void>((r) => setTimeout(() => r(), 0)) // keeps settle
 
     // reopening — even with no signal — touches the network zero times
@@ -345,9 +375,8 @@ describe('the desktop-written manifest', () => {
     const again = await loadProject(entries[0], 48000, () => {})
     expect((again.doc.settings as { beat?: { beats: number[] } }).beat?.beats).toHaveLength(3)
     expect(calls).toBe(0)
-    // the cached copies stand — unchanged md5s let the size check serve them
-    expect(fetchToCache.mock.calls.length).toBeGreaterThan(0)
-    expect(fetchToCache.mock.calls.every((c) => (c[4] as number) > 0)).toBe(true)
+    // the copies on disk stand — nothing was fetched a second time
+    expect(downloads).toHaveLength(2)
   })
 
   it('serves an unchanged text member without a request', async () => {
@@ -377,6 +406,39 @@ describe('the desktop-written manifest', () => {
     calls = 0
     expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('goodbye')
     expect(calls).toBe(1)
+  })
+
+  it('an unchanged catalog.json is never even downloaded', async () => {
+    const drive = newDrive()
+    addManifest(drive)
+    // the root listing reports the catalog's md5, the same way it reports
+    // every other file's — level one of the same comparison
+    drive.children.ROOT[1].md5Checksum = 'cat-1'
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+
+    let calls = 0
+    const inner = globalThis.fetch
+    globalThis.fetch = ((...a: Parameters<typeof fetch>) => {
+      calls++
+      return inner(...a)
+    }) as typeof fetch
+    expect((await g.driveListProjects(true)).map((p) => p.dir)).toEqual(['Song One'])
+    expect(calls).toBe(2) // the root query and its children, and nothing else
+
+    // a desktop that syncs something rewrites it, and the library follows
+    drive.children.ROOT[1].md5Checksum = 'cat-2'
+    drive.media.CAT = drive.media.CAT.replace('"md5Checksum":"m-1"', '"md5Checksum":"m-2"')
+    // a fresh node, not a mutation: the listing maps hold these by reference
+    drive.children.D1[0] = { ...drive.children.D1[0], md5Checksum: 'm-2' }
+    drive.media.M1 = JSON.stringify({
+      name: 'Song One Renamed',
+      savedAt: '2026-01-02T00:00:00.000Z',
+      stemHashes: { 'vocals.flac': { md5: 'v-1', size: 100, mtimeMs: 1 } }
+    })
+    expect((await g.driveListProjects(true))[0].doc.name).toBe('Song One Renamed')
   })
 
   it('ignores a stale manifest and walks the folders instead', async () => {
@@ -449,26 +511,23 @@ describe('stems are fetched once', () => {
     const g = require('../src/gdrive') as typeof import('../src/gdrive')
     await g.driveListProjects()
 
-    // never seen before: force a real download (0 defeats the size check)
+    // never seen before: a real download
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    expect(fetchToCache.mock.calls[0][4]).toBe(0)
+    expect(downloads).toHaveLength(1)
 
-    // same md5 => hand over the expected size and let the cached file stand
-    fetchToCache.mockClear()
+    // same md5 => the copy on disk stands
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    expect(fetchToCache.mock.calls[0][4]).toBe(100)
+    expect(downloads).toHaveLength(1)
 
     // re-split on the desktop: same 100 bytes, different audio
     drive.children.S1[0].md5Checksum = 'v-2'
-    fetchToCache.mockClear()
     await g.driveListProjects(true)
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    expect(fetchToCache.mock.calls[0][4]).toBe(0)
+    expect(downloads).toHaveLength(2)
 
     // and once fetched, it settles back to re-use
-    fetchToCache.mockClear()
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    expect(fetchToCache.mock.calls[0][4]).toBe(100)
+    expect(downloads).toHaveLength(2)
   })
 
   it('survives a Drive that reports no checksum, falling back to size', async () => {
@@ -479,7 +538,8 @@ describe('stems are fetched once', () => {
     const g = require('../src/gdrive') as typeof import('../src/gdrive')
     await g.driveListProjects()
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    expect(fetchToCache.mock.calls[0][4]).toBe(100)
+    expect(fetchToCache.mock.calls[0][4]).toBe('') // nothing better to compare
+    expect(fetchToCache.mock.calls[0][5]).toBe(100)
   })
 
   it('counts and streams the tracks the singer added', async () => {
@@ -516,13 +576,38 @@ describe('stems are fetched once', () => {
 
     await g.driveLocalFile('Song One', 'stems/custom-harmony.mp3')
     expect(fetchToCache.mock.calls[0][1]).toBe('stems/custom-harmony.mp3')
-    expect(fetchToCache.mock.calls[0][4]).toBe(0) // never seen: real download
-    fetchToCache.mockClear()
+    expect(downloads).toEqual(['Song One/stems/custom-harmony.mp3'])
     await g.driveLocalFile('Song One', 'stems/custom-harmony.mp3')
-    expect(fetchToCache.mock.calls[0][4]).toBe(50) // unchanged md5: cached copy
+    expect(downloads).toHaveLength(1) // unchanged md5: the cached copy
   })
 
-  it('forgets what it had when the files are cleared', async () => {
+  it('keeps a copy no JS ever downloaded — the files answer, not a ledger', async () => {
+    // Fetched by an older build, or under a project.json that carried no
+    // stemHashes: nothing in this app's memory says so. The song sat in the
+    // library ticked and re-downloaded every stem to prove it.
+    const drive = newDrive()
+    install(drive)
+    signIn()
+    onDisk['Song One/stems/vocals.flac'] = { md5: 'v-1', size: 100 }
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+
+    await g.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
+    expect(downloads).toEqual([])
+  })
+
+  it('still fetches when the copy on disk is different audio', async () => {
+    const drive = newDrive()
+    install(drive)
+    signIn()
+    onDisk['Song One/stems/vocals.flac'] = { md5: 'v-0', size: 100 } // a re-split
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+    await g.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
+    expect(downloads).toEqual(['Song One/stems/vocals.flac'])
+  })
+
+  it('fetches again after the downloads are cleared', async () => {
     const drive = newDrive()
     install(drive)
     signIn()
@@ -530,10 +615,8 @@ describe('stems are fetched once', () => {
     await g.driveListProjects()
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
 
-    await g.driveForgetCached('Song One')
-    fetchToCache.mockClear()
+    delete onDisk['Song One/stems/vocals.flac'] // the files were cleared
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    // the files are gone, so trusting the size check would hand back nothing
-    expect(fetchToCache.mock.calls[0][4]).toBe(0)
+    expect(downloads).toHaveLength(2) // fetched again, nothing to forget
   })
 })

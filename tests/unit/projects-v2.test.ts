@@ -30,6 +30,21 @@ async function makeV1Project(opts: { corrupt?: string[] } = {}): Promise<string>
 }
 
 describe('migrateProjectToV2 (v1 WAV -> v2 FLAC, crash-safe)', () => {
+  it('leaves project.json describing the files it just wrote', async () => {
+    // the upgrade deletes the WAVs; a doc still naming them describes files
+    // that no longer exist, and a phone reading it asks Drive for them
+    const dir = await makeV1Project()
+    await migrateProjectToV2(dir)
+    const doc = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8')) as {
+      stemHashes?: Record<string, { md5: string; size: number }>
+    }
+    expect(Object.keys(doc.stemHashes ?? {}).sort()).toEqual(STEMS.map((s) => `${s}.flac`).sort())
+    for (const [name, h] of Object.entries(doc.stemHashes ?? {})) {
+      const bytes = await readFile(join(dir, 'stems', name))
+      expect(h.size).toBe(bytes.length)
+    }
+  })
+
   it('converts every stem, deletes WAVs, flips version last', async () => {
     const dir = await makeV1Project()
     const res = await migrateProjectToV2(dir)

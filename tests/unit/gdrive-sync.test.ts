@@ -117,11 +117,11 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect([...mock.files.values()].find((f) => f.name === 'catalog.json')!.bytes).toBe(cat!.bytes)
     // ...and a clean sync opened no stem file at all
     expect(stemReads.count).toBe(0)
-    // ...and never asked Drive about individual projects: the fingerprints in
-    // the previous catalog said everything matches — root query, its
-    // children, the catalog itself, nothing more
-    const singzMockId = [...mock.files.values()].find((f) => f.name === 'SingZ')!.id
-    expect(mock.hits.filter((h) => h.includes('in parents') && !h.includes(`'${singzMockId}'`))).toEqual([])
+    // ...and asked Drive itself what it holds rather than trusting the catalog
+    // it wrote last time: the SingZ folder, its children, then one batched
+    // listing for the project folders and one for their stems/. Four requests
+    // for a library of any size, and not a byte uploaded.
+    expect(mock.hits).toHaveLength(4)
     expect(mock.hits.some((h) => h.includes('uploadType'))).toBe(false)
   })
 
@@ -133,12 +133,19 @@ describe('gdriveSync (against the mock Drive)', () => {
       JSON.stringify({ lines: [{ t: 1, text: 'realigned' }] })
     )
     const { gdriveSync } = await import('../../src/main/gdrive')
-    // lyrics.json is the one file project.json's hash does not cover — the
-    // catalog's own lyrics md5 must catch this, or aligned timing never syncs
+    // project.json states every file the project is made of, lyrics included,
+    // so the aligner's rewrite moves the doc too: two uploads, and one
+    // checksum in the catalog still tells the phones the whole story.
     const rep = await gdriveSync()
-    expect(rep).toMatchObject({ ok: true, uploaded: 1, unchanged: 3 })
+    expect(rep).toMatchObject({ ok: true, uploaded: 2, unchanged: 2 })
     const lyr = [...mock.files.values()].find((f) => f.name === 'lyrics.json')
     expect(lyr?.bytes?.toString()).toContain('realigned')
+    const doc = JSON.parse(
+      await readFile(join(root, 'Mock Song', 'project.json'), 'utf8')
+    ) as { lyricsHash?: { md5: string; size: number } }
+    expect(doc.lyricsHash?.md5).toBe(
+      createHash('md5').update(lyr!.bytes as Buffer).digest('hex')
+    )
   })
 
   it('re-uploads only what changed', async () => {
@@ -187,6 +194,35 @@ describe('refreshStemHashes', () => {
   })
 })
 
+describe('the dirty ledger and the sync', () => {
+  it('goes clean after a sync, and the sync\'s own writes do not re-dirty it', async () => {
+    const { readSettings, writeSettings } = await import('../../src/main/settings')
+    const { clearDirty, dirtySeq, isDirty, markProjectDirty } = await import('../../src/main/sync-dirty')
+    const root = await mkdtemp(join(tmpdir(), 'singz-dirty-sync-'))
+    await seedProject(root, 'Dirty Song')
+    const s = readSettings() as Record<string, unknown>
+    s.projectsRoot = root
+    s.gdriveDirty = undefined
+    writeSettings(s)
+
+    markProjectDirty(join(root, 'Dirty Song'), 'save')
+    expect(isDirty()).toBe(true)
+
+    // what the scheduler does: capture, run, clear only what the run covered
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const captured = dirtySeq()
+    expect(await gdriveSync()).toMatchObject({ ok: true })
+    clearDirty(captured)
+
+    // the sync folded stemHashes + lyricsHash into project.json as it went;
+    // if that write marked the project again the library would never be clean
+    expect(isDirty()).toBe(false)
+    const second = await gdriveSync()
+    expect(second).toMatchObject({ ok: true, uploaded: 0 })
+    expect(isDirty()).toBe(false)
+  })
+})
+
 describe('planSync', () => {
   it('trashes remote folders for renamed or deleted local projects', async () => {
     const { readSettings, writeSettings } = await import('../../src/main/settings')
@@ -218,7 +254,7 @@ describe('planSync', () => {
   })
 
   it('diffs by md5, treating missing remotes as uploads', async () => {
-    const { planSync } = await import('../../src/main/gdrive')
+    const { planSync } = await import('../../src/main/sync-plan')
     const plan = planSync(
       [
         { name: 'a', md5: '111' },

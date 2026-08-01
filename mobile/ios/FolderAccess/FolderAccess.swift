@@ -1,4 +1,5 @@
 import AuthenticationServices
+import CryptoKit
 import Foundation
 import Network
 import React
@@ -369,19 +370,65 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
       }
       var bytes: Int64 = 0
       var files = 0
+      var sizes: [String: Int64] = [:]
       if let walk = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
         for case let f as URL in walk {
+          // a fetch in flight is not bytes the phone has (Android stages here;
+          // the rule belongs to the module, not to one platform)
+          if f.pathExtension == "part" { continue }
           if let size = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
             bytes += Int64(size)
             files += 1
+            let rel = f.path.hasPrefix(dir.path + "/")
+              ? String(f.path.dropFirst(dir.path.count + 1)) : f.lastPathComponent
+            sizes[rel] = Int64(size)
           }
         }
       }
       if files > 0 {
-        out.append(["project": dir.lastPathComponent, "bytes": bytes, "files": files])
+        out.append([
+          "project": dir.lastPathComponent, "bytes": bytes, "files": files, "sizes": sizes
+        ])
       }
     }
     resolve(out)
+  }
+
+  /**
+   * "Do we already have this file?" — asked of the file itself, never of a
+   * record of past downloads: a ledger has no row for a copy fetched by an
+   * older build, and the phone would re-download a song it is plainly holding.
+   * Missing, wrong size, wrong bytes → fetch. With no md5 to compare against
+   * (an older desktop's project.json) the size is all there is.
+   */
+  private func isCurrent(_ url: URL, _ md5: String, _ size: Int64) -> Bool {
+    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+    let have = (attrs?[.size] as? Int64) ?? -1
+    return CacheCurrency.isCurrent(haveSize: have, wantSize: size, wantMd5: md5) {
+      attrs.map { hashOf(url, $0) }
+    }
+  }
+
+  /** md5 of a file, remembered against its own identity (size + mtime) so a
+   *  song hashes once and not on every open. A rewrite moves the mtime, so a
+   *  stale row cannot outlive the bytes it describes. The read is chunked —
+   *  these are whole stems, and a song's worth will not fit in memory twice. */
+  private func hashOf(_ url: URL, _ attrs: [FileAttributeKey: Any]) -> String {
+    let size = (attrs[.size] as? Int64) ?? 0
+    let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    let stamp = "\(size):\(Int64(mtime * 1000))"
+    let key = "singz.hash.\(url.path)"
+    let kept = UserDefaults.standard.string(forKey: key)?.split(separator: ":", maxSplits: 2)
+    if let kept, kept.count == 3, "\(kept[0]):\(kept[1])" == stamp { return String(kept[2]) }
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+    defer { try? handle.close() }
+    var md5 = Insecure.MD5()
+    while let chunk = try? handle.read(upToCount: 1 << 16), !chunk.isEmpty {
+      md5.update(data: chunk)
+    }
+    let hex = md5.finalize().map { String(format: "%02x", $0) }.joined()
+    UserDefaults.standard.set("\(stamp):\(hex)", forKey: key)
+    return hex
   }
 
   /** Drop one project's downloaded files, or everything when project is "". */
@@ -404,6 +451,13 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     do {
       if FileManager.default.fileExists(atPath: target.path) {
         try FileManager.default.removeItem(at: target)
+      }
+      // the memo describes files that no longer exist; left alone it is parsed
+      // into memory at every launch, forever
+      let stale = "singz.hash.\(target.path)"
+      for key in UserDefaults.standard.dictionaryRepresentation().keys
+      where key == stale || key.hasPrefix(stale + "/") {
+        UserDefaults.standard.removeObject(forKey: key)
       }
       resolve(true)
     } catch {
@@ -544,13 +598,15 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
 
   /**
    * Stream an authorized URL into the project cache (Drive media downloads).
-   * Same cache layout and skip-on-matching-size behavior as localFile.
+   * The copy on disk is served whenever it IS the wanted file — see isCurrent;
+   * the URL is not touched then, so a downloaded song opens with no signal.
    */
   @objc func fetchToCache(
     _ project: String,
     file: String,
     url: String,
     auth: String,
+    expectedMd5: String,
     expectedBytes: NSNumber,
     resolver resolve: @escaping RCTPromiseResolveBlock,
     rejecter reject: @escaping RCTPromiseRejectBlock
@@ -562,11 +618,8 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     let out = cacheRootURL().appendingPathComponent(project, isDirectory: true)
       .appendingPathComponent(file)
     let fm = FileManager.default
-    if fm.fileExists(atPath: out.path), expectedBytes.int64Value > 0,
-      let size = try? fm.attributesOfItem(atPath: out.path)[.size] as? Int64,
-      size == expectedBytes.int64Value
-    {
-      resolve(out.path)
+    if isCurrent(out, expectedMd5, expectedBytes.int64Value) {
+      resolve(["path": out.path, "downloaded": false])
       return
     }
     var req = URLRequest(url: remote)
@@ -587,7 +640,18 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
           at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
         if fm.fileExists(atPath: out.path) { try fm.removeItem(at: out) }
         try fm.moveItem(at: tmp, to: out)
-        resolve(out.path)
+        // What landed must be what was asked for — a connection cut halfway
+        // leaves a plausible file, and caching it would poison every later
+        // open with audio that decodes to silence or noise.
+        if !expectedMd5.isEmpty,
+          let attrs = try? fm.attributesOfItem(atPath: out.path),
+          self.hashOf(out, attrs) != expectedMd5
+        {
+          try? fm.removeItem(at: out)
+          reject("fetch", "\(file) arrived damaged — try again", nil)
+          return
+        }
+        resolve(["path": out.path, "downloaded": true])
       } catch {
         reject("fetch", "Cannot cache \(file): \(error.localizedDescription)", error)
       }
