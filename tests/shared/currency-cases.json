@@ -1,0 +1,270 @@
+{
+  "_comment": [
+    "The one question the whole sync turns on: is the copy we have the file we want?",
+    "It is answered in four places — TypeScript (mobile/src/current.ts, used by the",
+    "library tick and the test harness), Kotlin (FolderAccessModule), Swift",
+    "(FolderAccess), and the desktop's mtime rule. Three implementations of five",
+    "lines is how the phone came to show a song as downloaded and then download it,",
+    "so every one of them runs this table.",
+    "have.size -1 means: no such file."
+  ],
+  "isCurrent": [
+    {
+      "name": "nothing on disk",
+      "have": {
+        "size": -1
+      },
+      "want": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "expect": false
+    },
+    {
+      "name": "the file we want, byte for byte",
+      "have": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "want": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "expect": true
+    },
+    {
+      "name": "right length, different audio — the re-split trap",
+      "have": {
+        "size": 100,
+        "md5": "bbb"
+      },
+      "want": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "expect": false
+    },
+    {
+      "name": "wrong length: no need to hash it",
+      "have": {
+        "size": 60,
+        "md5": "aaa"
+      },
+      "want": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "expect": false
+    },
+    {
+      "name": "half-written download of the right file",
+      "have": {
+        "size": 1,
+        "md5": "ccc"
+      },
+      "want": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "expect": false
+    },
+    {
+      "name": "no md5 stated (an older desktop's doc): the size is all there is",
+      "have": {
+        "size": 100
+      },
+      "want": {
+        "size": 100,
+        "md5": ""
+      },
+      "expect": true
+    },
+    {
+      "name": "no md5 stated and the size disagrees",
+      "have": {
+        "size": 99
+      },
+      "want": {
+        "size": 100,
+        "md5": ""
+      },
+      "expect": false
+    },
+    {
+      "name": "nothing stated at all: only a fetch can settle it",
+      "have": {
+        "size": 100
+      },
+      "want": {
+        "size": 0,
+        "md5": ""
+      },
+      "expect": false
+    },
+    {
+      "name": "md5 stated, size unknown, and the bytes match",
+      "have": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "want": {
+        "size": 0,
+        "md5": "aaa"
+      },
+      "expect": true
+    },
+    {
+      "name": "md5 stated, size unknown, and the bytes do not",
+      "have": {
+        "size": 100,
+        "md5": "bbb"
+      },
+      "want": {
+        "size": 0,
+        "md5": "aaa"
+      },
+      "expect": false
+    },
+    {
+      "name": "the library tick: size matches, nobody hashed anything",
+      "have": {
+        "size": 100
+      },
+      "want": {
+        "size": 100
+      },
+      "expect": true
+    },
+    {
+      "name": "the library tick on a file that is not there",
+      "have": {
+        "size": -1
+      },
+      "want": {
+        "size": 100
+      },
+      "expect": false
+    },
+    {
+      "name": "an md5 was wanted but the copy was never hashed",
+      "have": {
+        "size": 100
+      },
+      "want": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "expect": false
+    },
+    {
+      "name": "an empty file where an empty file was expected",
+      "have": {
+        "size": 0,
+        "md5": "d41d8cd98f00b204e9800998ecf8427e"
+      },
+      "want": {
+        "size": 0,
+        "md5": "d41d8cd98f00b204e9800998ecf8427e"
+      },
+      "expect": true
+    },
+    {
+      "name": "the tick's shape for a missing file: a size of -1 with no md5 asked for",
+      "have": {
+        "size": -1
+      },
+      "want": {
+        "size": 100
+      },
+      "expect": false
+    },
+    {
+      "name": "a copy that cannot be hashed is not the copy we want",
+      "have": {
+        "size": 100,
+        "md5": null
+      },
+      "want": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "expect": false
+    },
+    {
+      "name": "a file present where the doc states nothing at all",
+      "have": {
+        "size": 100,
+        "md5": "aaa"
+      },
+      "want": {
+        "size": 0
+      },
+      "expect": false
+    }
+  ],
+  "_isFreshComment": [
+    "The desktop's re-hash rule: an unchanged size and an mtime within tolerance",
+    "means the stored hash still describes the file, so the bytes are never read.",
+    "iCloud rehydration truncates mtime by a few hundred nanoseconds; a real write",
+    "moves it by far more."
+  ],
+  "isFresh": [
+    {
+      "name": "same size, same mtime",
+      "prev": {
+        "size": 100,
+        "mtimeMs": 1000
+      },
+      "now": {
+        "size": 100,
+        "mtimeMs": 1000
+      },
+      "expect": true
+    },
+    {
+      "name": "iCloud truncation",
+      "prev": {
+        "size": 100,
+        "mtimeMs": 1000.0003
+      },
+      "now": {
+        "size": 100,
+        "mtimeMs": 1000
+      },
+      "expect": true
+    },
+    {
+      "name": "a real write",
+      "prev": {
+        "size": 100,
+        "mtimeMs": 1000
+      },
+      "now": {
+        "size": 100,
+        "mtimeMs": 6000
+      },
+      "expect": false
+    },
+    {
+      "name": "same mtime, different length",
+      "prev": {
+        "size": 100,
+        "mtimeMs": 1000
+      },
+      "now": {
+        "size": 120,
+        "mtimeMs": 1000
+      },
+      "expect": false
+    },
+    {
+      "name": "never hashed before",
+      "prev": null,
+      "now": {
+        "size": 100,
+        "mtimeMs": 1000
+      },
+      "expect": false
+    }
+  ]
+}

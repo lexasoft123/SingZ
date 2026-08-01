@@ -1,0 +1,32 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "types": ["node"],
+    "noUnusedLocals": false
+  },
+  // The shared harness is the module BOTH roots now depend on, and vitest
+  // transpiles without typechecking — so nothing checked it. The older
+  // renderer-facing suites (audio-devices, beat) need DOM types and are left
+  // to the runtime for now; this covers the sync work and everything it pulls in.
+  "include": [
+    "tests/shared/**/*",
+    "tests/unit/fake-drive.test.ts",
+    "tests/unit/current.test.ts",
+    "tests/unit/project-state.test.ts",
+    "tests/unit/sync-dirty.test.ts",
+    "tests/unit/sync-scheduler.test.ts",
+    "tests/unit/sync-log.test.ts",
+    "tests/unit/gdrive-sync.test.ts",
+    "tests/unit/electron-stub.ts",
+    "src/main/**/*",
+    "src/preload/**/*",
+    "src/shared/**/*"
+  ],
+  // the phone's modules (and tests/roundtrip, which imports them) come with
+  // react-native's ambient types — those re-type setTimeout and AbortSignal
+  // and would fight the main process's node types. mobile/tsconfig.json checks
+  // that side, tests/shared included.
+  "exclude": ["tests/roundtrip/**/*"]
+}
