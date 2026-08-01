@@ -67,6 +67,9 @@ const GLOW_BLUR = 7
 /** Far enough outside that neither the feather nor the bloom reaches back in. */
 const OFF = 1e5
 
+/** How much bigger the line being sung sits than its neighbours. */
+const GROW = [{ scale: 1.03 }]
+
 const LIT_GLOW = 'rgba(255,170,60,0.92)'
 const NO_GLOW = 'rgba(255,160,40,0)'
 const CUE = '#f5c758'
@@ -315,7 +318,7 @@ export default function SkiaLyrics({
   width,
   height,
   left,
-  scrollY,
+  scrollTop,
   clock,
   lead
 }: {
@@ -331,7 +334,8 @@ export default function SkiaLyrics({
   height: number
   /** column's left inset inside the viewport */
   left: number
-  scrollY: SharedValue<number>
+  /** how far the column has scrolled under the still canvas */
+  scrollTop: number
   clock: SharedValue<number>
   lead: number
 }): React.JSX.Element | null {
@@ -340,36 +344,36 @@ export default function SkiaLyrics({
     const m = line.getMetrics()
     return (LINE_H - (m.descent - m.ascent)) / 2 - m.ascent
   }, [line])
-  const scroll = useDerivedValue(() => [{ translateY: -scrollY.value }])
   if (width <= 0 || height <= 0) return null
   const cueBox = cue.line >= 0 ? boxes[cue.line] : undefined
   return (
     <Canvas style={{ position: 'absolute', left: 0, top: 0, width, height }} pointerEvents="none">
-      <Group transform={scroll}>
+      <Group>
         {boxes.map((b, i) => {
           // The sung line is a touch bigger, the way it used to be scaled by a
-          // transform on its view. About the line's own middle, so it grows
-          // into the gaps rather than shoving its neighbours.
-          const grow =
-            i === current
-              ? [
-                  { translateX: left + width / 2 },
-                  { scale: 1.03 },
-                  { translateX: -(left + width / 2) },
-                  { translateY: b.y + b.height / 2 },
-                  { scale: 1.03 },
-                  { translateY: -(b.y + b.height / 2) }
-                ]
-              : undefined
+          // transform on its view — about its own middle, so it grows into the
+          // gaps rather than shoving its neighbours.
+          //
+          // Via `origin`, NOT a hand-rolled translate/scale/untranslate: the
+          // hand-rolled version needs the scale ONCE, and centring x and y with
+          // a triple each put two scales in the list. They compounded to 1.0609
+          // and dragged the line ~6% of its absolute y out of place, so on a
+          // real song the sung line climbed out of its row and sat on top of
+          // the next one. Near the top of a short sample it is a few pixels and
+          // invisible, which is exactly why it shipped.
           return (
-            <Group key={i} transform={grow}>
+            <Group
+              key={i}
+              origin={{ x: left + width / 2, y: b.y - scrollTop + b.height / 2 }}
+              transform={i === current ? GROW : undefined}
+            >
               {i === current && words[i].length > 0 ? (
                 b.rows.map((r, ri) => (
                   <SweepRow
                     key={ri}
                     row={r}
                     x={left}
-                    y={b.y + baseOff + ri * LINE_H}
+                    y={b.y - scrollTop + baseOff + ri * LINE_H}
                     clock={clock}
                     lead={lead}
                     lit={sing?.[i] ? '#ffd97a' : CUE}
@@ -377,7 +381,7 @@ export default function SkiaLyrics({
                   />
                 ))
               ) : (
-                <PlainLine box={b} x={left} baseline={b.y + baseOff} color={color(i)} />
+                <PlainLine box={b} x={left} baseline={b.y - scrollTop + baseOff} color={color(i)} />
               )}
             </Group>
           )
@@ -391,7 +395,7 @@ export default function SkiaLyrics({
               <Circle
                 key={d}
                 cx={left + 4 + d * 14}
-                cy={cueBox.y - 12}
+                cy={cueBox.y - scrollTop - 12}
                 r={3.5 * FONT_SCALE}
                 color={CUE}
               >
@@ -401,7 +405,7 @@ export default function SkiaLyrics({
           </Group>
         )}
         {cueBox && cue.wait > 0 && (
-          <SkText x={left} y={cueBox.y - 8} text={`${cue.wait} s`} font={small} color={CUE} />
+          <SkText x={left} y={cueBox.y - scrollTop - 8} text={`${cue.wait} s`} font={small} color={CUE} />
         )}
       </Group>
     </Canvas>

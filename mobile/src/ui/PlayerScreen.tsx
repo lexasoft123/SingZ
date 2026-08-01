@@ -2,8 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
-  useAnimatedScrollHandler,
+  runOnUI,
+  scrollTo,
+  useAnimatedRef,
+  useDerivedValue,
   useFrameCallback,
+  useScrollOffset,
   useSharedValue
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -391,16 +395,49 @@ export default function PlayerScreen({
     [wordSpecs, lyrW, micW, mask]
   )
 
-  const scrollRef = useRef<ScrollView>(null)
-  /** Scroll offset on the UI thread — the canvas stays put and the column moves. */
+  /**
+   * An animated ref, and reanimated's own scrollTo. A plain ref on an
+   * Animated.ScrollView is NOT the ScrollView — `.scrollTo` is simply absent on
+   * it, so the auto-scroll became a silent no-op and the lyrics stopped
+   * following the song. (It was cast to keep TypeScript quiet, which is what
+   * hid it.)
+   */
+  const scrollRef = useAnimatedRef<Animated.ScrollView>()
+  /**
+   * Scroll offset on the UI thread — the canvas stays put and the column moves.
+   *
+   * useScrollOffset, NOT an onScroll handler: reanimated's scrollTo drives the
+   * view natively and emits no scroll event, so a handler-fed offset went stale
+   * the moment the song scrolled itself. The canvas then drew the column two
+   * lines away from where the tap targets actually were — tapping a line seeked
+   * to a different one, and the sung line appeared to climb out of its row.
+   *
+   * And it writes into a value WE own rather than returning its own: the value
+   * it hands back does not keep its identity across the ref attaching, so the
+   * canvas's mapper captured one nobody was updating any more and drew the
+   * column at offset zero however far the song had scrolled.
+   */
   const scrollY = useSharedValue(0)
-  const onScroll = useAnimatedScrollHandler((e) => {
-    scrollY.value = e.contentOffset.y
-  })
+  useScrollOffset(scrollRef, scrollY)
+  /**
+   * The offset the canvas draws the column at. React state, not the shared
+   * value, because Skia does NOT apply a shared value handed to a Group's
+   * `transform` — measured: with scrollT.value sitting at exactly
+   * [{translateY:-239.64}] the canvas kept drawing at 0, while the same Group
+   * takes a plain array fine and shader props take shared values fine. So the
+   * offset rides a commit. It is affordable because every line that is not
+   * being sung is a memoized node whose props do not change while scrolling —
+   * only the group's transform does.
+   */
+  const [scrollTop, setScrollTop] = useState(0)
   useEffect(() => {
     const b = column.boxes[currentLine]
     if (currentLine >= 0 && b) {
-      scrollRef.current?.scrollTo({ y: Math.max(0, b.y - LYR_TOP), animated: true })
+      const to = Math.max(0, b.y - LYR_TOP)
+      runOnUI(() => {
+        'worklet'
+        scrollTo(scrollRef, 0, to, true)
+      })()
     }
   }, [currentLine, column])
 
@@ -454,6 +491,15 @@ export default function PlayerScreen({
     TEST.showSyncPanel = () => setSheet('practice')
     TEST.perfStart = () => perf.start()
     TEST.perfStop = () => perf.stop()
+    /** Column geometry vs where the ScrollView actually is — the canvas and the
+     *  tap targets must agree, and only numbers can say whether they do. */
+    TEST.lyrDiag = () => ({
+      current: currentLine,
+      scrollY: scrollY.value,
+      lineY: column.boxes[currentLine]?.y ?? null,
+      colH: column.height,
+      view
+    })
     /** Lines with their sweep windows — lets a driver aim at a mid-word instant. */
     TEST.lines = () =>
       lines.map((l, i) => ({
@@ -549,9 +595,9 @@ export default function PlayerScreen({
         }}
       >
         <Animated.ScrollView
-          ref={scrollRef as React.Ref<never>}
-          onScroll={onScroll}
+          ref={scrollRef}
           scrollEventThrottle={16}
+          onScroll={(e) => setScrollTop(e.nativeEvent.contentOffset.y)}
         >
           <View style={{ height: column.height + LYR_BOTTOM }}>
             {column.boxes.map((b, i) => (
@@ -585,7 +631,7 @@ export default function PlayerScreen({
           width={view.w}
           height={view.h}
           left={LYR_PAD}
-          scrollY={scrollY}
+          scrollTop={scrollTop}
           clock={clock}
           lead={LEAD_S}
         />
