@@ -7,6 +7,16 @@ import { defineConfig } from 'vitest/config'
 // writer, real mobile reader, one fake Drive between them — which is what the
 // react-native aliases are for; nothing under tests/unit imports them.
 export default defineConfig({
+  // The round-trip suite transforms files from BOTH roots, and
+  // mobile/tsconfig.json extends @react-native/typescript-config — a package
+  // that exists only once mobile's deps are installed. CI installs the desktop
+  // root alone, so the lookup threw TSConfckParseError and the two suites that
+  // reach into mobile/src failed there while passing on a dev machine. A
+  // STRING tsconfigRaw is the one form Vite reads as "do not look for a
+  // tsconfig at all" (an object still triggers the lookup, then merges); the
+  // values below are what every tsconfig in this repo already agrees on, so
+  // the transform is unchanged.
+  esbuild: { tsconfigRaw: '{"compilerOptions":{"target":"ES2022","useDefineForClassFields":true}}' },
   resolve: {
     alias: {
       electron: resolve(__dirname, 'tests/unit/electron-stub.ts'),
