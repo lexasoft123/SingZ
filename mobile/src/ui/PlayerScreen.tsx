@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
+import Animated, {
+  useAnimatedStyle,
+  useFrameCallback,
+  useSharedValue,
+  type SharedValue
+} from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
@@ -11,6 +17,7 @@ import {
   sanitizeMetronome,
   sanitizeTraining,
   singMask,
+  sweepEnds,
   trainingWindows,
   TRACK_META,
   TRAIN_DEFAULTS,
@@ -26,6 +33,153 @@ import { TEST } from './testhooks'
 const BG = require('../../assets/bg/player.png')
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
+
+/**
+ * Karaoke anticipates: words light a breath BEFORE they are sung so the
+ * singer can catch the entry (marking on/after onset reads as lagging).
+ */
+const LEAD_S = 0.15
+
+/** Space between words, in place of the ' ' that used to ride inside them. */
+const WORD_GAP = 8
+/**
+ * Width of one step of the soft edge, in px. Desktop feathers the sweep over
+ * 0.4em with a real gradient; RN has no gradient without a native dep, so the
+ * edge is approximated by clipped copies at falling opacity. Four steps of
+ * 5px ≈ a 20px ramp — about desktop's 0.8em gradient span at this font size.
+ */
+const FEATHER = 5
+/** Number of soft-edge steps; the animated clip overshoots by this many. */
+const FEATHER_STEPS = 4
+
+/**
+ * Pure math for the sweep — top-level worklets that take plain numbers and
+ * capture NO shared values, so they are safe to call from any style body
+ * (the .value reads stay in the caller, where the capture analysis sees them).
+ */
+function fillWidth(t: number, w: number, start: number, end: number, step: number): number {
+  'worklet'
+  const p = Math.min(1, Math.max(0, (t - start) / (end - start)))
+  if (p <= 0) return 0
+  // Deliberately NOT clamped to w: the nested steps each give back FEATHER
+  // from the right, so the outer clip has to overshoot the word by exactly
+  // what they take. Clamping it cost the last step*FEATHER px of every word —
+  // a fully sung word kept an unlit last letter.
+  return p * w + step * FEATHER
+}
+
+function glowEnv(t: number, start: number, end: number): number {
+  'worklet'
+  const p = Math.min(1, Math.max(0, (t - start) / (end - start)))
+  if (p <= 0 || p >= 1) return 0
+  const env = 0.45 + 0.55 * (1 - Math.abs(2 * p - 1))
+  // Quantized: every opacity write re-renders the shadow stack offscreen;
+  // sixteen levels still read as breathing at a fraction of the writes.
+  return Math.round(env * 16) / 16
+}
+
+/**
+ * One word of the line being sung, filling left to right as it is sung.
+ *
+ * The bright copy sits on top of the dim one and is revealed by a clip whose
+ * width reanimated drives on the UI thread, so the fill runs at display rate
+ * instead of the 100ms position poll — the poll only has to keep the clock
+ * honest. The clip is a percentage of the word's own box, which is why none
+ * of this needs the word measured. The halo goes on the dim layer underneath:
+ * on the bright copy the clip would slice it off mid-word.
+ */
+const SweepWord = React.memo(function SweepWord({
+  word,
+  start,
+  end,
+  lead,
+  lit,
+  dark,
+  clock
+}: {
+  word: string
+  start: number
+  end: number
+  lead: number
+  lit: string
+  dark: string
+  clock: SharedValue<number>
+}): React.JSX.Element {
+  // measured once per line activation; the feather is in px, not percent
+  const boxW = useSharedValue(0)
+  // EVERY style below reads clock.value and boxW.value in its own body, then
+  // hands plain numbers to the pure helpers. Do NOT factor the .value reads
+  // into a shared helper worklet: reanimated's dependency capture loses a
+  // shared value read behind an indirection, the mapper never re-fires, and
+  // the fill freezes at whatever the mount frame held. That shipped once —
+  // first word lit, nothing moved — and it passed review because per-word
+  // React commits had been re-creating the styles and faking motion at poll
+  // rate the whole time.
+  // ONE mapper drives the whole feather. Creating and destroying a
+  // useAnimatedStyle costs ~26ms per line change across a line's words
+  // (measured: 1 mapper/word 52ms, 2 → 80, 3 → 106, 5 → 148), and a line
+  // change churns every word at once — that was the 218ms stall on device.
+  // So the steps are NESTED instead of stacked: each inner clip is inset
+  // FEATHER px from its parent's right edge, so all five edges track the one
+  // animated width for free.
+  const fill = useAnimatedStyle(() => ({
+    width: fillWidth(clock.value + lead, boxW.value, start, end, FEATHER_STEPS)
+  }))
+  // The bloom breathes with the word — live only while the sweep is inside it,
+  // decided HERE on the UI thread. Deciding it in React was the phone's jerk:
+  // every word onset committed, re-rendered the line and remounted these
+  // layers, stalling the very frame the singer is watching. Now nothing
+  // mounts at word boundaries; opacity just moves.
+  const breathe = useAnimatedStyle(() => ({
+    // Yoga caps an absolute child at its parent's width, and the padded twin
+    // is wider than the word — without an explicit width the text WRAPS and a
+    // glowing fragment renders on a phantom second line. boxW is measured, so
+    // the width rides along in this worklet (4px slack against rounding).
+    width: boxW.value + 2 * 18 + 4,
+    opacity: glowEnv(clock.value + lead, start, end)
+  }))
+  return (
+    <View
+      style={{ marginRight: WORD_GAP }}
+      onLayout={(e) => {
+        boxW.value = e.nativeEvent.layout.width
+      }}
+    >
+      <Text style={[s.line, { color: dark }]}>{word}</Text>
+      {/* Glyph-shaped glow. RN clips textShadow to the Text frame — but the
+          frame is the border box, so padding buys the blur runway to fade out
+          BEFORE the edge (negative offsets put the glyphs back in place).
+          A twin of the word carries the shadow; its opacity breathes on the
+          UI thread. Rasterized: without it the shadow re-renders offscreen
+          whenever an animated sibling repaints the region. */}
+      <Animated.View style={[s.glowWrap, breathe]} pointerEvents="none">
+        <Text style={[s.line, s.glowTwin, { color: dark }]}>{word}</Text>
+      </Animated.View>
+      {/* Soft edge, nested: the animated clip reaches FEATHER_STEPS*FEATHER
+          past the sung point, and each level trims one FEATHER off its
+          parent's right edge (left:0 + right:FEATHER tracks an animated
+          parent for free). Faintest outermost, opaque innermost — the same
+          ramp the flat stack drew, from a single animated style.
+          numberOfLines/clip: an absolute child is width-capped by its parent,
+          so inside a narrowing clip the text would otherwise wrap. */}
+      <Animated.View style={[s.sweepClip, fill]} pointerEvents="none">
+        <Text style={[s.line, s.sweepText, s.fade4, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
+        <View style={s.sweepStep}>
+          <Text style={[s.line, s.sweepText, s.fade3, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
+          <View style={s.sweepStep}>
+            <Text style={[s.line, s.sweepText, s.fade2, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
+            <View style={s.sweepStep}>
+              <Text style={[s.line, s.sweepText, s.fade1, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
+              <View style={s.sweepStep}>
+                <Text style={[s.line, s.sweepText, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Animated.View>
+    </View>
+  )
+})
 
 export default function PlayerScreen({
   engine,
@@ -64,6 +218,118 @@ export default function PlayerScreen({
   perf.commit()
 
   const lines = useMemo(() => project.lyrics?.lines ?? [], [project])
+  const wordEnds = useMemo(() => sweepEnds(lines), [lines])
+
+  /**
+   * Playback clock on the UI thread. The 100ms poll resyncs it; between polls
+   * the frame callback extrapolates, so the word fill moves every frame while
+   * React keeps committing at its own unhurried pace. The rate is derived from
+   * consecutive samples rather than read off the engine, so tempo changes,
+   * pitch shifting and stalls all land here without this knowing about them.
+   */
+  const clock = useSharedValue(0)
+  const sample = useSharedValue({ seq: 0, pos: 0, rate: 0 })
+  const seenSeq = useSharedValue(-1)
+  const uiFrames = useSharedValue(0)
+  const uiWrites = useSharedValue(0)
+  const pendingMs = useSharedValue(0)
+  const sinceSample = useSharedValue(0)
+  const lastTs = useSharedValue(0)
+  const lastSample = useRef({ t: 0, pos: 0 })
+  const smoothRate = useRef(0)
+  useFrameCallback((info) => {
+    'worklet'
+    uiFrames.value += 1
+    const s0 = sample.value
+    if (s0.seq !== seenSeq.value) {
+      seenSeq.value = s0.seq
+      sinceSample.value = 0
+    }
+    // dt comes from the timestamp delta, never from timeSincePreviousFrame:
+    // that field reads null on some Android runtimes (measured on API 36),
+    // and the old `?? 8` fallback then banked 8ms per callback while the real
+    // interval was ~1.2ms — the clock ran ~7x fast and sat in the seek-jump
+    // branch. Clamped so a stalled or first frame cannot lurch the sweep.
+    const prev = lastTs.value
+    lastTs.value = info.timestamp
+    const frameMs = prev > 0 ? Math.min(100, Math.max(0, info.timestamp - prev)) : 0
+    // Android fires this callback ~11x per display frame (measured 695/s on a
+    // 60Hz panel) — writing the clock that often re-runs every word's animated
+    // style for frames no one can see. Bank the time instead. The threshold is
+    // half a 120Hz frame so ProMotion still gets a write every frame; it only
+    // ever coalesces callbacks that outrun the display.
+    pendingMs.value += frameMs
+    if (pendingMs.value < 4) return
+    const dt = pendingMs.value / 1000
+    pendingMs.value = 0
+    sinceSample.value += dt
+
+    // Where the last poll says we should be by now. Snapping the clock onto
+    // the raw sample was the bug: the clock free-runs ahead between polls, so
+    // every poll yanked it back 20-80ms — a backwards jump ten times a second,
+    // which is exactly what "not smooth" looks like on a word 350ms long.
+    const want = s0.pos + sinceSample.value * s0.rate
+    const err = want - clock.value
+    if (err > 0.25 || err < -0.25) {
+      clock.value = want // a seek, a stall, or the first sample: jump is right
+    } else {
+      clock.value += dt * s0.rate + err * 0.15 // otherwise close the gap gently
+    }
+    uiWrites.value += 1
+  })
+
+  /**
+   * Everything the screen draws that moves with the playhead: which line is
+   * current, which word wears the halo, the count-in tick, and a 2Hz pulse for
+   * the clock readout and scrub bar. The word fill is deliberately absent — it
+   * lives on the UI thread now, so React has no reason to commit for it.
+   */
+  const renderKey = useCallback(
+    (p: number): string => {
+      // No word index in here — word-level visuals are the UI thread's job
+      // now, and committing per word was the audible-frame jerk on device.
+      const lp = p + LEAD_S
+      let li = -1
+      for (let i = 0; i < lines.length; i++) if (lines[i].start <= lp + 0.05) li = i
+      const next = li + 1 < lines.length ? lines[li + 1] : null
+      const cue = next ? Math.ceil(Math.min(next.start - p, 60)) : 0
+      return `${li}|${cue}|${Math.round(p * 2)}`
+    },
+    [lines]
+  )
+  const lastKey = useRef('')
+
+  const pushPos = useCallback(
+    (p: number): void => {
+      const now = Date.now()
+      const prev = lastSample.current
+      const dt = (now - prev.t) / 1000
+      let rate = 0
+      if (engine.playing && dt > 0.02 && dt < 1) {
+        const r = (p - prev.pos) / dt
+        // a seek makes this meaningless for one sample — coast at 0 and let
+        // the next sample pick the real rate back up
+        if (r > 0.1 && r < 3) {
+          // Date.now() jitter alone swings this ±6% sample to sample, and the
+          // sweep speed rides on it directly — average it down.
+          const prevRate = smoothRate.current
+          rate = prevRate > 0 ? prevRate * 0.7 + r * 0.3 : r
+          smoothRate.current = rate
+        }
+      }
+      if (rate === 0) smoothRate.current = 0
+      const jumped = Math.abs(p - prev.pos) > 0.4
+      lastSample.current = { t: now, pos: p }
+      // the clock always takes the fresh sample — that is what keeps it honest
+      sample.value = { seq: sample.value.seq + 1, pos: p, rate }
+      const k = renderKey(p)
+      if (jumped || k !== lastKey.current) {
+        lastKey.current = k
+        setPos(p)
+      }
+    },
+    [engine, sample, renderKey]
+  )
   const stemIds = useMemo(() => project.stems.map((st) => st.id), [project])
   /**
    * Lane name + color by id. Split stems come from TRACK_META; tracks the
@@ -115,19 +381,19 @@ export default function PlayerScreen({
       setTracks(engine.getTrackStates())
       setDucked(engine.duckedStems)
       setPlaying(engine.playing)
-      setPos(engine.position)
+      pushPos(engine.position)
       setCountInSt(engine.countInStatus)
     })
-  }, [engine])
+  }, [engine, pushPos])
 
   useEffect(() => {
     if (!playing) return
     const t = setInterval(() => {
-      setPos(engine.position)
+      pushPos(engine.position)
       setCountInSt(engine.countInStatus)
     }, 100)
     return () => clearInterval(t)
-  }, [engine, playing])
+  }, [engine, playing, pushPos])
 
   /* Beat track + metronome prefs -> engine. */
   useEffect(() => {
@@ -202,9 +468,7 @@ export default function PlayerScreen({
     [training, trainCfg, lines.length]
   )
 
-  // Karaoke anticipates: words light a breath BEFORE they are sung so the
-  // singer can catch the entry (marking on/after onset reads as lagging).
-  const lpos = pos + 0.15
+  const lpos = pos + LEAD_S
   const currentLine = useMemo(() => {
     let cur = -1
     for (let i = 0; i < lines.length; i++) if (lines[i].start <= lpos + 0.05) cur = i
@@ -270,6 +534,27 @@ export default function PlayerScreen({
     TEST.showSyncPanel = () => setSheet('practice')
     TEST.perfStart = () => perf.start()
     TEST.perfStop = () => perf.stop()
+    TEST.clockDiag = () => ({
+      pos,
+      playing,
+      enginePlaying: engine.playing,
+      clock: clock.value,
+      sample: sample.value
+    })
+    /**
+     * UI-thread frame callbacks since the last call, and how many of those
+     * actually moved the clock — the gap is the work the frame gate skips.
+     */
+    TEST.uiFrames = () => {
+      const n = uiFrames.value
+      uiFrames.value = 0
+      return n
+    }
+    TEST.uiWrites = () => {
+      const n = uiWrites.value
+      uiWrites.value = 0
+      return n
+    }
     /** Lane names/colors as the mixer shows them (added tracks bring their own). */
     TEST.lanes = () =>
       project.stems.map((st) => ({
@@ -343,25 +628,39 @@ export default function PlayerScreen({
               {waitSec > 0 && (
                 <Text style={[s.countIn, { letterSpacing: 1 }]}>{waitSec} s</Text>
               )}
-              <Text style={[s.line, { color: lineColor(i, isSing) }]}>
-                {isSing ? <Text style={{ fontSize: 19 }}>🎤 </Text> : null}
-                {isCurrent
-                  ? ln.words.map((w, j) => (
+              {/* Every line is a wrapping row of word boxes, not one Text with
+                  inline children: RN can only clip a View, so a word has to be
+                  a box of its own for the sweep. All lines are built this way,
+                  current or not — mixing the two made a line re-wrap the
+                  moment it lit up. */}
+              <View style={s.lineRow}>
+                {isSing && <Text style={[s.line, { fontSize: 19 }]}>🎤</Text>}
+                {ln.words.length === 0 ? (
+                  <Text style={[s.line, { color: lineColor(i, isSing) }]}>{ln.text}</Text>
+                ) : (
+                  ln.words.map((w, j) =>
+                    isCurrent ? (
+                      <SweepWord
+                        key={j}
+                        word={w.w}
+                        start={w.s}
+                        end={wordEnds[i][j]}
+                        lead={LEAD_S}
+                        lit={isSing ? '#ffd97a' : C.amber}
+                        dark="rgba(255,255,255,0.40)"
+                        clock={clock}
+                      />
+                    ) : (
                       <Text
                         key={j}
-                        style={
-                          lpos >= w.e
-                            ? { color: isSing ? '#ffd97a' : C.amber }
-                            : lpos >= w.s
-                              ? [{ color: isSing ? '#ffd97a' : C.amber }, s.nowGlow]
-                              : { color: 'rgba(255,255,255,0.40)' }
-                        }
+                        style={[s.line, { color: lineColor(i, isSing), marginRight: WORD_GAP }]}
                       >
-                        {w.w + (j < ln.words.length - 1 ? ' ' : '')}
+                        {w.w}
                       </Text>
-                    ))
-                  : ln.text}
-              </Text>
+                    )
+                  )
+                )}
+              </View>
             </Pressable>
           )
         })}
@@ -720,6 +1019,14 @@ const s = StyleSheet.create({
   youChipText: { color: C.amberInk, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
 
   line: { fontSize: 30, lineHeight: 37, fontWeight: '800', letterSpacing: -0.4 },
+  /* one lyric line = a row of word boxes that wraps like text used to */
+  lineRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end' },
+  /* the reveal: width is animated on the UI thread, 0%..100% of the word */
+  sweepClip: { position: 'absolute', left: 0, top: 0, bottom: 0, overflow: 'hidden' },
+  /* one step of the nested soft edge: inset FEATHER from the parent's right */
+  sweepStep: { position: 'absolute', left: 0, top: 0, bottom: 0, right: FEATHER, overflow: 'hidden' },
+  /* absolute so the narrowing clip can never re-wrap or squeeze the glyphs */
+  sweepText: { position: 'absolute', left: 0, top: 0 },
   /* metronome count-in: dots fill beat by beat above the scrubber */
   countInFoot: {
     color: C.amber,
@@ -740,12 +1047,25 @@ const s = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10
   },
-  /* desktop karaoke halo: .lyr-line.current span.now */
-  nowGlow: {
-    textShadowColor: 'rgba(255,160,40,0.6)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 7
+  /* Desktop's .now halo: an amber text-shadow shaped like the glyphs. The
+     18px of padding is the blur's runway — a 12px radius is ~3% intensity by
+     the time it reaches the frame edge, so the clip never shows. */
+  glowWrap: {
+    position: 'absolute',
+    left: -18,
+    top: -18
   },
+  glowTwin: {
+    padding: 18,
+    textShadowColor: 'rgba(255,160,40,0.85)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12
+  },
+  /* the intermediate steps of the soft sweep edge */
+  fade1: { opacity: 0.78 },
+  fade2: { opacity: 0.55 },
+  fade3: { opacity: 0.34 },
+  fade4: { opacity: 0.16 },
   noLyrics: { color: C.faint, fontSize: 15, marginTop: 40 },
 
   foot: {

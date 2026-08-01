@@ -44,6 +44,23 @@ jest.mock('./src/engine', () => ({
 }));
 
 /** The FolderAccess/AudioRouteInfo pods, likewise absent under jest. */
+/**
+ * Reanimated reaches for its worklets native module at import time, which no
+ * jest process has — and its own mock drags the same module in. Stub just the
+ * hooks the karaoke sweep uses.
+ * How the sweep actually moves is a simulator question (mobile/tests/).
+ */
+jest.mock('react-native-reanimated', () => {
+  const { View } = require('react-native');
+  return {
+    __esModule: true,
+    default: { View },
+    useSharedValue: (v) => ({ value: v }),
+    useAnimatedStyle: (fn) => fn(),
+    useFrameCallback: () => ({ setActive: () => {} }),
+  };
+});
+
 const { NativeModules } = require('react-native');
 NativeModules.FolderAccess ??= {
   getRoot: () => Promise.resolve({ kind: 'documents', path: '/', name: 'On My iPhone' }),
