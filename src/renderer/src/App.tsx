@@ -3,6 +3,7 @@ import type {
   CustomTrack,
   EngineStatus,
   LyricLine,
+  MelodyInfo,
   ProjectSettings,
   SeparationProgress
 } from '../../shared/types'
@@ -15,6 +16,7 @@ import {
   type MetronomeConfig
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
+import { decodeMelody, encodeMelody, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
@@ -247,9 +249,13 @@ export default function App(): React.JSX.Element {
     bpm: null
   })
   const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(null)
-  /** Set when detection just (re)stamped an auto grid — consumed by an effect
-   *  that saves the project so phones (which have no detector) get it too. */
-  const [beatAutoSave, setBeatAutoSave] = useState(false)
+  /** The stored form of the melody line, written back on every save so a
+   *  tracked song never pays for its pitch line twice. */
+  const [melodyInfo, setMelodyInfo] = useState<MelodyInfo | null>(null)
+  /** Set when analysis just produced something a saved project should keep —
+   *  a fresh pitch line, a (re)stamped auto grid — consumed by an effect that
+   *  saves the project so phones (which have neither detector) get it too. */
+  const [analysisAutoSave, setAnalysisAutoSave] = useState(false)
   const [metCfg, setMetCfg] = useState<MetronomeConfig>(() => {
     try {
       const raw = localStorage.getItem('singz.met')
@@ -277,6 +283,9 @@ export default function App(): React.JSX.Element {
   lyricsRef.current = lyrics
   const melodyRef = useRef(melody)
   melodyRef.current = melody
+  /** A saved project's stored pitch line, waiting for prepMelody to adopt it
+   *  (or throw it away as the work of an older tracker). */
+  const storedMelodyRef = useRef<{ info: MelodyInfo; f0: Float32Array } | null>(null)
   const selectionRef = useRef(selection)
   selectionRef.current = selection
   const showCatalogRef = useRef(showCatalog)
@@ -522,6 +531,8 @@ export default function App(): React.JSX.Element {
       setKaraoke(false)
       setLyrics({ status: 'idle' })
       setMelody({ status: 'none' })
+      setMelodyInfo(null)
+      storedMelodyRef.current = null
       vocalsBufRef.current = null
       drumsBufRef.current = null
       instBufsRef.current = []
@@ -624,6 +635,21 @@ export default function App(): React.JSX.Element {
               trainingRef.current = true
             }
           }
+          // The saved analysis is restored BEFORE karaoke may reopen: adopting
+          // a stored pitch line is synchronous, and it asks in the same breath
+          // whether this song still needs its beat grid tracked. The refs are
+          // assigned by hand for the same reason training's is — state alone
+          // would land a render too late, and the answer would be "no grid
+          // saved, track it again" on every open.
+          const bg = sanitizeBeatInfo(proj.settings.beat)
+          beatInfoRef.current = bg
+          if (bg) {
+            setBeatInfo(bg)
+            setSongInfo({ key: null, bpm: bg.bpm })
+          }
+          const md = decodeMelody(proj.settings.melody)
+          storedMelodyRef.current = md
+          setMelodyInfo(md?.info ?? null)
           if (localStorage.getItem('singz.karaoke') === '1') openKaraokeRef.current?.()
           else prepMelodyRef.current?.()
           const st = proj.settings.transpose ?? 0
@@ -632,11 +658,6 @@ export default function App(): React.JSX.Element {
           const tr = proj.settings.tempo ?? 1
           setTempoRate(tr)
           void engine.setTempo(tr)
-          const bg = sanitizeBeatInfo(proj.settings.beat)
-          if (bg) {
-            setBeatInfo(bg)
-            setSongInfo({ key: null, bpm: bg.bpm })
-          }
           if (proj.settings.metronome) setMetCfg(sanitizeMetronome(proj.settings.metronome))
           const v = proj.settings.view
           if (v && Number.isFinite(v.s) && Number.isFinite(v.e) && v.e - v.s > 0.05) {
@@ -843,6 +864,15 @@ export default function App(): React.JSX.Element {
       instBufsRef.current = order
         .map((s, i) => (s !== 'vocals' && s !== 'drums' && s !== 'bass' ? buffers[i] : null))
         .filter((b): b is AudioBuffer => !!b)
+      // These are different stems than any line already on screen was tracked
+      // from (re-splitting an open project), so that line — and the stored one
+      // it came from — is retired here rather than left to be saved as this
+      // song's melody. The ref goes with it: prepMelody consults it below,
+      // before the render.
+      setMelody({ status: 'none' })
+      melodyRef.current = { status: 'none' }
+      setMelodyInfo(null)
+      storedMelodyRef.current = null
       // Analyze right away (melody, key, bpm) so karaoke opens warm and the
       // bpm box fills in without a trip through karaoke mode. If karaoke was
       // open last session, reopen it.
@@ -1036,9 +1066,98 @@ export default function App(): React.JSX.Element {
   )
   prepLyricsRef.current = prepLyrics
 
+  /**
+   * Hand a finished melody line to the app: the pitch strip, the key readout,
+   * and — once per song — the beat track that rides on the same analysis pass.
+   * `tracked` says pYIN just ran, so the line is new to this project and has
+   * to be written down; a line adopted from project.json is already there.
+   */
+  const applyMelody = useCallback(
+    (f0: Float32Array, hopSec: number, tracked: boolean) => {
+      const next: MelodyState = { status: 'ready', f0, hopSec }
+      melodyRef.current = next // prepMelody may re-enter before the render
+      setMelody(next)
+      if (tracked) setMelodyInfo(encodeMelody(f0, hopSec))
+      // Beat track from the drums (once per song — a hand-tuned track wins
+      // over re-detection; restored auto tracks from an older detector are
+      // silently re-tracked so downbeat fixes reach saved projects). The
+      // pack's neural grid is fetched first when available — detectBeats
+      // fuses it with the stem cues; without a pack it changes nothing.
+      const info = beatInfoRef.current
+      const fresh = !info
+      const stale = info?.source === 'auto' && info.detVersion !== BEAT_DETECT_VERSION
+      if ((fresh || stale) && drumsBufRef.current) {
+        const drums = drumsBufRef.current
+        void (async () => {
+          setBeatProg(0.02)
+          try {
+            const ml = await fetchMlGridRef.current?.()
+            if (drumsBufRef.current !== drums) return // song changed mid-flight
+            // let the bar paint before the synchronous tracker blocks
+            setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
+            await new Promise((r) => setTimeout(r, 30))
+            const aux = {
+              bass: bassBufRef.current,
+              vocals: vocalsBufRef.current,
+              inst: instBufsRef.current,
+              lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+              ml
+            }
+            const dbg = {}
+            const det = detectBeats(drums, aux, dbg)
+            publishBeatDbg('auto', drums, aux, det, dbg)
+            if (det) {
+              setBeatInfo({
+                beats: det.beats,
+                bpm: det.bpm,
+                beatsPerBar: det.beatsPerBar,
+                downbeat: det.downbeat,
+                ...(det.downbeats ? { downbeats: det.downbeats } : {}),
+                source: 'auto',
+                detVersion: BEAT_DETECT_VERSION
+              })
+              if (stale) touchSettings()
+              setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+            }
+            // What analysis just worked out must reach the project file — and
+            // through Drive the phones, which have neither detector of their
+            // own — without waiting for a manual save. One save for the whole
+            // pass, deferred via state so the save handler's closure sees both
+            // the new grid and the new line.
+            if (tracked || det) setAnalysisAutoSave(true)
+          } finally {
+            setBeatProg(null)
+          }
+        })()
+      } else if (tracked) {
+        setAnalysisAutoSave(true)
+      }
+      setSongInfo({ key: estimateKey(f0), bpm: info?.bpm ?? null })
+    },
+    [touchSettings]
+  )
+
   const prepMelody = useCallback(() => {
     if (melodyRef.current.status !== 'none') return
+    const stored = storedMelodyRef.current
     const buf = vocalsBufRef.current
+    // A stored line tracked by THIS detector is adopted as it is — the pitch
+    // strip draws instantly instead of after seconds of pYIN, and the phones'
+    // copy of the song stays the line the singer already practised against.
+    // An older stamp is re-tracked, unless there is no vocals stem to track
+    // from (a project whose stems went missing), when the old line still
+    // beats no line at all.
+    if (stored && (stored.info.detVersion === PITCH_DETECT_VERSION || !buf)) {
+      storedMelodyRef.current = null
+      ;(window as { __melody?: unknown }).__melody = {
+        f0: stored.f0,
+        hopSec: stored.info.hopSec,
+        stored: true
+      }
+      applyMelody(stored.f0, stored.info.hopSec, false)
+      return
+    }
+    storedMelodyRef.current = null
     if (!buf) return
     const chans = Math.min(2, buf.numberOfChannels)
     const mono = new Float32Array(buf.length)
@@ -1062,67 +1181,12 @@ export default function App(): React.JSX.Element {
           rms: e.data.rms,
           hopSec: e.data.hopSec
         }
-        setMelody({ status: 'ready', f0: e.data.f0, hopSec: e.data.hopSec })
-        // Beat track from the drums (once per song — a hand-tuned track wins
-        // over re-detection; restored auto tracks from an older detector are
-        // silently re-tracked so downbeat fixes reach saved projects). The
-        // pack's neural grid is fetched first when available — detectBeats
-        // fuses it with the stem cues; without a pack it changes nothing.
-        const info = beatInfoRef.current
-        const fresh = !info
-        const stale = info?.source === 'auto' && info.detVersion !== BEAT_DETECT_VERSION
-        if ((fresh || stale) && drumsBufRef.current) {
-          const drums = drumsBufRef.current
-          void (async () => {
-            setBeatProg(0.02)
-            try {
-              const ml = await fetchMlGridRef.current?.()
-              if (drumsBufRef.current !== drums) return // song changed mid-flight
-              // let the bar paint before the synchronous tracker blocks
-              setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
-              await new Promise((r) => setTimeout(r, 30))
-              const aux = {
-                bass: bassBufRef.current,
-                vocals: vocalsBufRef.current,
-                inst: instBufsRef.current,
-                lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
-                ml
-              }
-              const dbg = {}
-              const det = detectBeats(drums, aux, dbg)
-              publishBeatDbg('auto', drums, aux, det, dbg)
-              if (det) {
-                setBeatInfo({
-                  beats: det.beats,
-                  bpm: det.bpm,
-                  beatsPerBar: det.beatsPerBar,
-                  downbeat: det.downbeat,
-                  ...(det.downbeats ? { downbeats: det.downbeats } : {}),
-                  source: 'auto',
-                  detVersion: BEAT_DETECT_VERSION
-                })
-                if (stale) touchSettings()
-                // The corrected grid must reach the project file — and through
-                // Drive the phones, which have no detector of their own — without
-                // waiting for a manual save. Deferred via state so the save
-                // handler's closure sees the new grid.
-                setBeatAutoSave(true)
-                setSongInfo((s) => ({ ...s, bpm: det.bpm }))
-              }
-            } finally {
-              setBeatProg(null)
-            }
-          })()
-        }
-        setSongInfo({
-          key: estimateKey(e.data.f0),
-          bpm: info?.bpm ?? null
-        })
+        applyMelody(e.data.f0, e.data.hopSec, true)
         worker.terminate()
       }
     }
     worker.postMessage({ mono, sampleRate: buf.sampleRate }, [mono.buffer])
-  }, [])
+  }, [applyMelody])
   const prepMelodyRef = useRef<(() => void) | null>(null)
   prepMelodyRef.current = prepMelody
 
@@ -1168,6 +1232,7 @@ export default function App(): React.JSX.Element {
       beat: beatInfo
         ? { ...beatInfo, beats: beatInfo.beats.map((b) => Math.round(b * 1000) / 1000) }
         : undefined,
+      melody: melodyInfo ?? undefined,
       metronome: metCfg,
       custom: tracks
         .filter((t) => t.custom)
@@ -1204,16 +1269,16 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, metCfg, tracks, reanchorCustom])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, metCfg, tracks, reanchorCustom])
 
-  /** A silently (re)detected grid saves itself — but only into an existing
-   *  project (never creating one under a raw file), and after the commit so
-   *  the save closure already sees the new beats. */
+  /** A silently tracked pitch line or (re)detected grid saves itself — but
+   *  only into an existing project (never creating one under a raw file), and
+   *  after the commit so the save closure already sees them. */
   useEffect(() => {
-    if (!beatAutoSave) return
-    setBeatAutoSave(false)
+    if (!analysisAutoSave) return
+    setAnalysisAutoSave(false)
     if (song && isProject) void handleSaveProject()
-  }, [beatAutoSave, song, isProject, handleSaveProject])
+  }, [analysisAutoSave, song, isProject, handleSaveProject])
 
   /** Bring a project opened from outside the library in, and follow it there. */
   const handleImport = useCallback(
