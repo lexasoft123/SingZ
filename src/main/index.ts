@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -13,7 +13,6 @@ import {
   listProjects,
   migrateProjects,
   migrateProjectToV2,
-  projectLyricsPath,
   projectsRoot,
   renameProject,
   saveProject,
@@ -26,6 +25,9 @@ import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
 import { registerSource, registerTrack } from './source'
 import { log, logEntries, saveLog } from './log'
+import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
+import { replaySyncLog, syncLog } from './sync-log'
+import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
 import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir } from './models'
@@ -54,6 +56,53 @@ if (process.env.SINGZ_USERDATA_DIR) {
 const separator = new Separator()
 const transcriber = new Transcriber()
 const modelManager = new ModelManager()
+
+/** Every window hears about Drive: progress while a sync runs, and the state
+ *  the badges read. One helper, because three copies of this loop drifted. */
+function sendGdrive(channel: 'gdrive:progress' | 'gdrive:state', payload: unknown): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload)
+  }
+}
+
+/**
+ * The one thing that decides when to push. Nothing else in the app calls
+ * gdriveSync: triggers mark the library dirty (sync-dirty.ts) and this
+ * coalesces, retries and reports.
+ */
+const scheduler = new SyncScheduler({
+  run: (onProgress) => gdriveSync({ onProgress, dirtyDirs: dirtyDirs() }),
+  enabled: () => gdriveConfigured() && gdriveSignedIn(),
+  dirty: {
+    seq: dirtySeq,
+    isDirty,
+    count: () => (dirtyState().allSeq > 0 ? -1 : dirtyDirs().length),
+    clear: clearDirty,
+    remark: (dirs) => {
+      for (const dir of dirs) markProjectDirty(dir, 'outside the library root')
+    }
+  },
+  lastSync: () => readSettings().gdriveLastSync ?? null,
+  now: () => Date.now(),
+  // unref: a pending push must never be the reason the app stays alive
+  timer: (ms, fn) => {
+    const t = setTimeout(fn, ms)
+    t.unref?.()
+    return () => clearTimeout(t)
+  },
+  onStatus: (s) => {
+    if (s.phase === 'retrying') {
+      syncLog('run', `retrying in ${Math.max(1, Math.round(((s.runAt ?? 0) - Date.now()) / 1000))}s — ${s.lastError}`)
+    }
+    if (s.phase === 'blocked') syncLog('error', `waiting for you: ${s.lastError}`)
+    sendGdrive('gdrive:state', s)
+  },
+  onProgress: (msg, frac) => sendGdrive('gdrive:progress', { msg, frac }),
+  debounceMs: process.env.SINGZ_SYNC_DEBOUNCE_MS ? Number(process.env.SINGZ_SYNC_DEBOUNCE_MS) : undefined
+})
+
+// a mark from anywhere (a save, the aligner, an import) wakes it
+onDirty(() => scheduler.notifyDirty())
 
 function createWindow(): void {
   const st = loadWindowState({ width: 1240, height: 820 })
@@ -193,20 +242,6 @@ function registerIpc(): void {
       // Aligning rewrites a project's lyrics.json outside the save flow —
       // push it so Drive-synced phones get the new timing without waiting
       // for the next manual save (md5-diffed: uploads just the one file).
-      if (
-        res.ok &&
-        res.aligned &&
-        !res.cached &&
-        (await projectLyricsPath(full)) !== null &&
-        gdriveConfigured() &&
-        gdriveSignedIn()
-      ) {
-        void gdriveSync((msg, frac) => {
-          for (const win of BrowserWindow.getAllWindows()) {
-            if (!win.isDestroyed()) win.webContents.send('gdrive:progress', { msg, frac })
-          }
-        })
-      }
       return res
     }
   )
@@ -268,13 +303,6 @@ function registerIpc(): void {
     if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
     const res = await saveProject(full, String(name), settings)
     // signed-in Drive users get their library pushed after every save
-    if (res.ok && gdriveConfigured() && gdriveSignedIn()) {
-      void gdriveSync((msg, frac) => {
-        for (const win of BrowserWindow.getAllWindows()) {
-          if (!win.isDestroyed()) win.webContents.send('gdrive:progress', { msg, frac })
-        }
-      })
-    }
     // A quiet skip here cost a real debugging session: the save "worked" but
     // phones kept the old project — surface the signed-out state instead.
     if (res.ok && gdriveConfigured() && !gdriveSignedIn()) {
@@ -286,18 +314,22 @@ function registerIpc(): void {
   ipcMain.handle('gdrive:status', () => ({
     configured: gdriveConfigured(),
     signedIn: gdriveConfigured() && gdriveSignedIn(),
-    lastSync: (readSettings() as { gdriveLastSync?: number }).gdriveLastSync ?? null
+    lastSync: readSettings().gdriveLastSync ?? null,
+    sync: scheduler.status(),
+    dirtyDirs: dirtyDirs()
   }))
-  ipcMain.handle('gdrive:signin', () => gdriveSignIn())
+  ipcMain.handle('gdrive:signin', async () => {
+    const res = await gdriveSignIn()
+    // the scheduler arms nothing while signed out; this is where a session that
+    // started that way gets its launch reconcile and its sweep
+    if (res.ok) scheduler.start()
+    return res
+  })
   ipcMain.handle('gdrive:signout', () => {
     gdriveSignOut()
     return { ok: true }
   })
-  ipcMain.handle('gdrive:sync', (e) =>
-    gdriveSync((msg, frac) => {
-      if (!e.sender.isDestroyed()) e.sender.send('gdrive:progress', { msg, frac })
-    })
-  )
+  ipcMain.handle('gdrive:sync', () => scheduler.syncNow())
 
   ipcMain.handle('projects:list', () => listProjects())
 
@@ -391,23 +423,18 @@ app.whenReady().then(async () => {
   createWindow()
 
   // Signed-in libraries reconcile on launch, not only after saves: analysis
-  // rewrites project.json outside the save flow, and a sync killed mid-run
-  // (quit, crash, sleep) leaves pending uploads and a stale phone catalog
-  // until someone presses Sync. Delayed so startup isn't competing with the
-  // window and engine probes; gdriveSync itself refuses to run twice.
-  // SINGZ_NO_LAUNCH_SYNC opts out — E2E harnesses launch the app dozens of
-  // times, and on a signed-in dev machine every one of those would write to
-  // the real Drive (two dev builds of different vintages then rewrite the
-  // catalog back and forth at each other).
-  if (!process.env.SINGZ_NO_LAUNCH_SYNC && gdriveConfigured() && gdriveSignedIn()) {
-    setTimeout(() => {
-      void gdriveSync((msg, frac) => {
-        for (const win of BrowserWindow.getAllWindows()) {
-          if (!win.isDestroyed()) win.webContents.send('gdrive:progress', { msg, frac })
-        }
-      })
-    }, 8000)
-  }
+  // The scheduler owns every automatic push from here: the launch reconcile
+  // (a sync killed mid-run self-heals next start), the debounce that turns a
+  // song-open burst into one run, backoff when Drive is unreachable, and a
+  // periodic sweep for anything no writer thought to mark.
+  // SINGZ_NO_SYNC keeps E2E runs off a dev machine's real Drive entirely;
+  // SINGZ_NO_LAUNCH_SYNC is the older, narrower opt-out.
+  // what previous sessions pushed, in the same dialog as everything else
+  replaySyncLog()
+  if (!process.env.SINGZ_NO_SYNC && !process.env.SINGZ_NO_LAUNCH_SYNC) scheduler.start()
+  // Back from sleep: whatever backoff is armed was sized for a network that is
+  // probably now fine, and waiting 30 minutes to find out is the wrong answer.
+  powerMonitor.on('resume', () => scheduler.notifyWake())
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -415,6 +442,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  scheduler.stop()
   separator.cancel()
   transcriber.cancel()
   cancelBeatsMl()

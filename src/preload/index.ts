@@ -4,7 +4,8 @@ import type {
   LyricsProgress,
   ModelsProgress,
   SeparationProgress,
-  SingzApi
+  SingzApi,
+  SyncStatus
 } from '../shared/types'
 
 const api: SingzApi = {
@@ -142,6 +143,11 @@ const api: SingzApi = {
   gdriveSignIn: () => ipcRenderer.invoke('gdrive:signin'),
   gdriveSignOut: () => ipcRenderer.invoke('gdrive:signout'),
   gdriveSync: () => ipcRenderer.invoke('gdrive:sync'),
+  onGdriveState: (cb) => {
+    const listener = (_e: IpcRendererEvent, s: SyncStatus): void => cb(s)
+    ipcRenderer.on('gdrive:state', listener)
+    return () => ipcRenderer.removeListener('gdrive:state', listener)
+  },
   onGdriveProgress: (cb) => {
     const listener = (_e: IpcRendererEvent, p: { msg: string; frac: number }): void => cb(p)
     ipcRenderer.on('gdrive:progress', listener)

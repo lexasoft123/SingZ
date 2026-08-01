@@ -47,6 +47,25 @@ jobs:
         run: npx tsc --noEmit
         working-directory: mobile
 
+      # The phone's Drive logic no device can show: the protocol, the offline
+      # fallbacks, and the ✓ agreeing with the download rule.
+      - name: Jest
+        run: npx jest
+        working-directory: mobile
+
+      # "Is this copy current?" is one table read by three runners. The Kotlin
+      # one needs a JDK but no emulator; the Swift one is macOS-only and runs
+      # in the E2E workflow.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Cache-currency conformance (Kotlin)
+        run: ./gradlew :app:testDebugUnitTest
+        working-directory: mobile/android
+
   # Full APK: only on v* release tags and manual dispatch.
   apk:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'

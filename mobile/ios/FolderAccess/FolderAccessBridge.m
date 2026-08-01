@@ -36,6 +36,7 @@ RCT_EXTERN_METHOD(fetchToCache : (NSString *)project
                   file : (NSString *)file
                   url : (NSString *)url
                   auth : (NSString *)auth
+                  expectedMd5 : (NSString *)expectedMd5
                   expectedBytes : (nonnull NSNumber *)expectedBytes
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)

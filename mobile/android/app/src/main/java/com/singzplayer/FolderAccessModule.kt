@@ -16,6 +16,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
@@ -40,6 +41,10 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
 
   private val prefs
     get() = ctx.getSharedPreferences("singz", Context.MODE_PRIVATE)
+
+  /** md5 per downloaded file, keyed by path and stamped with size + mtime. */
+  private val hashPrefs
+    get() = ctx.getSharedPreferences("singz-hashes", Context.MODE_PRIVATE)
 
   // ---------------------------------------------------------------- roots --
 
@@ -151,7 +156,13 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   private fun cacheFile(project: String, file: String): File =
     File(File(cacheRoot(), project), file)
 
-  /** What each project occupies on this phone — powers the ✓ and the size line. */
+  /**
+   * What each project holds on this phone: the total for the storage line and
+   * the size of every file for the ✓. Sizes per file, never a sum — a sum lets
+   * a leftover stem cover for a missing one, which is how a song reads as
+   * downloaded and then downloads. A .part is a fetch in flight, not bytes the
+   * phone has, so it counts for neither.
+   */
   @ReactMethod
   fun cacheUsage(promise: Promise) {
     exec.execute {
@@ -161,10 +172,12 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
           if (!dir.isDirectory) continue
           var bytes = 0L
           var files = 0
+          val sizes = Arguments.createMap()
           dir.walkTopDown().forEach { f ->
-            if (f.isFile) {
+            if (f.isFile && !f.name.endsWith(".part")) {
               bytes += f.length()
               files++
+              sizes.putDouble(f.relativeTo(dir).path, f.length().toDouble())
             }
           }
           if (files > 0) {
@@ -172,6 +185,7 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
             m.putString("project", dir.name)
             m.putDouble("bytes", bytes.toDouble())
             m.putInt("files", files)
+            m.putMap("sizes", sizes)
             arr.pushMap(m)
           }
         }
@@ -179,6 +193,45 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
       } catch (e: Exception) {
         promise.reject("usage", e.message ?: "Cannot measure the download folder")
       }
+    }
+  }
+
+  /**
+   * "Do we already have this file?" — asked of the file itself, never of a
+   * record of past downloads: a ledger has no row for a copy fetched by an
+   * older build, and the phone would re-download a song it is plainly holding.
+   * Missing, wrong size, wrong bytes → fetch. With no md5 to compare against
+   * (an older desktop's project.json) the size is all there is.
+   */
+  private fun isCurrent(f: File, md5: String, size: Long): Boolean =
+    CacheCurrency.isCurrent(if (f.isFile) f.length() else -1L, size, md5) { hashOf(f) }
+
+  /** md5 of a file, remembered against its own identity (size + mtime) so a
+   *  song hashes once and not on every open. A rewrite moves the mtime, so a
+   *  stale row cannot outlive the bytes it describes. */
+  private fun hashOf(f: File): String? {
+    val stamp = "${f.length()}:${f.lastModified()}"
+    hashPrefs.getString(f.path, null)?.let {
+      val parts = it.split(":")
+      if (parts.size == 3 && "${parts[0]}:${parts[1]}" == stamp) return parts[2]
+    }
+    return try {
+      val digest = MessageDigest.getInstance("MD5")
+      f.inputStream().use { input ->
+        val buf = ByteArray(1 shl 16)
+        while (true) {
+          val n = input.read(buf)
+          if (n <= 0) break
+          digest.update(buf, 0, n)
+        }
+      }
+      val md5 = digest.digest().joinToString("") { "%02x".format(it) }
+      hashPrefs.edit().putString(f.path, "$stamp:$md5").apply()
+      md5
+    } catch (e: Exception) {
+      // present but unreadable is not the file we want — fetch it again,
+      // rather than failing the open the way a thrown exception would
+      null
     }
   }
 
@@ -195,6 +248,13 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
         if (target.exists() && !target.deleteRecursively()) {
           throw Exception("Could not free that space")
         }
+        // the hashes describe files that no longer exist
+        val edit = hashPrefs.edit()
+        val prefix = target.path + File.separator
+        for (path in hashPrefs.all.keys) {
+          if (path == target.path || path.startsWith(prefix)) edit.remove(path)
+        }
+        edit.apply()
         promise.resolve(true)
       } catch (e: Exception) {
         promise.reject("clear", e.message ?: "Could not free that space")
@@ -437,12 +497,20 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
    * the SAF copies; skipped when the cached size already matches.
    */
   @ReactMethod
-  fun fetchToCache(project: String, file: String, url: String, auth: String, expectedBytes: Double, promise: Promise) {
+  fun fetchToCache(
+    project: String,
+    file: String,
+    url: String,
+    auth: String,
+    expectedMd5: String,
+    expectedBytes: Double,
+    promise: Promise
+  ) {
     exec.execute {
       try {
         val out = cacheFile(project, file)
-        if (out.isFile && expectedBytes > 0 && out.length() == expectedBytes.toLong()) {
-          promise.resolve(out.absolutePath)
+        if (isCurrent(out, expectedMd5, expectedBytes.toLong())) {
+          promise.resolve(result(out, false))
           return@execute
         }
         val conn = URL(url).openConnection() as HttpURLConnection
@@ -456,11 +524,31 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
         val tmp = File(out.path + ".part")
         conn.inputStream.use { input -> tmp.outputStream().use { o -> input.copyTo(o) } }
         if (!tmp.renameTo(out)) throw Exception("Cannot cache $file")
-        promise.resolve(out.absolutePath)
+        // What landed must be what was asked for — a connection cut halfway
+        // leaves a plausible file, and caching it would poison every later
+        // open with audio that decodes to silence or noise.
+        if (expectedMd5.isNotEmpty() && hashOf(out) != expectedMd5) {
+          out.delete()
+          throw Exception("$file arrived damaged — try again")
+        }
+        promise.resolve(result(out, true))
       } catch (e: Exception) {
+        // a dead .part would otherwise sit there counting against nothing and
+        // be mistaken for progress on the next attempt
+        cacheFile(project, "$file.part").delete()
         promise.reject("fetch", e.message ?: "Cannot fetch $file")
       }
     }
+  }
+
+  /** The path, and whether bytes actually came over the network — the phone's
+   *  sync log used to infer that from elapsed time, which reads "downloaded"
+   *  for every file on the first open after an update (cold hash memo). */
+  private fun result(out: File, downloaded: Boolean): WritableMap {
+    val m = Arguments.createMap()
+    m.putString("path", out.absolutePath)
+    m.putBoolean("downloaded", downloaded)
+    return m
   }
 
   companion object {

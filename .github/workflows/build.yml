@@ -31,6 +31,15 @@ jobs:
 
       - run: npm run typecheck
 
+      - run: npm test
+
+      # The Swift end of the shared cache-currency table (the Kotlin and TS
+      # ends run in the Android and desktop suites). swiftc only — no
+      # simulator, no Pods.
+      - name: Cache-currency conformance (Swift)
+        if: runner.os == 'macOS'
+        run: mobile/scripts/test-swift-currency.sh
+
       - name: Inject Google Drive OAuth client
         if: env.GDRIVE_CONFIG != ''
         shell: bash

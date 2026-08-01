@@ -110,6 +110,11 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+
+    // JVM unit tests: the cache-currency rule is checked against the same
+    // table TypeScript and Swift run (tests/shared/currency-cases.json)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     // SAF folder trees (picked project roots, incl. Google Drive)
     implementation("androidx.documentfile:documentfile:1.0.1")
     // Custom Tabs: Google consent inside the app's own task (self-closing)

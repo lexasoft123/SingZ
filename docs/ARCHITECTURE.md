@@ -147,13 +147,74 @@ place**; `importProject` (the header's "Add to library…") is the only thing
 that relocates one, copying or moving on explicit user action. `detectProject`
 reports `inLibrary` so the UI knows which it is.
 
+## Cloud sync (`main/gdrive.ts`, `sync-plan.ts`, `sync-dirty.ts`, `sync-scheduler.ts`)
+
+The desktop publishes the library to a visible "SingZ" folder in the singer's
+own Google Drive; the phones read it. drive.file scope (the app only ever sees
+files it created, so no Google verification), one Desktop-type OAuth client for
+every platform, loopback redirect.
+
+**One rule, three levels.** Everything — both directions — asks the same
+question: *does what I have match the checksum the level above states?*
+
+| level | the thing | who states its checksum |
+|---|---|---|
+| 1 | `catalog.json` | Drive's own listing of the root |
+| 2 | `project.json` | the catalog's row for that project |
+| 3 | every stem, and `lyrics.json` | `project.json` (`stemHashes`, `lyricsHash`) |
+
+So `project.json` names every file a project is made of, and the catalog needs
+exactly one checksum per project. A phone whose catalog md5 is unchanged spends
+2 requests on a refresh and asks about no project at all; a changed row costs
+that project's doc plus its two folder listings, and nothing else.
+
+**"Do I have this file?" is asked of the file, never of a record.** The natives
+(`CacheCurrency.kt` / `.swift`) compare size, then md5 — hashes memoised
+against size+mtime so a song hashes once — and the library ✓ (`isDownloaded`)
+runs the same comparison minus the hashing. The rule lives in one shared table
+(`tests/shared/currency-cases.json`) that TypeScript, Kotlin and Swift all run,
+because it was implemented three times and drifted, which is how a song came to
+sit in the library ticked while every open re-downloaded it.
+
+**Writing.** `gdriveSync` diffs against **Drive's own listing**, never against
+the catalog it wrote last time: the root, then two batched
+`('a' in parents or 'b' in parents)` queries (chunked 50) covering every project
+folder and every `stems/`. A clean library is 4 requests whatever its size, and
+drift — a file edited or deleted on Drive, a second desktop — is actually
+noticed. Stems upload before the doc, so an interrupted run leaves Drive
+*behind* `project.json` rather than ahead of it (a doc naming bytes Drive cannot
+serve makes phones delete a good stem and refuse to open the song). Orphan files
+and folders are trashed, never hard-deleted. `catalog.json` is written last and
+is pure output.
+
+**When to sync.** Writers mark the library dirty (`sync-dirty.ts`: a seq counter
+in `settings.json`, marked on *both* edges of long operations so a save that
+overlaps a run stays dirty) and `sync-scheduler.ts` owns everything else — a 4 s
+debounce with a 60 s max wait, single-flight, backoff on offline/5xx, `blocked`
+on auth, a sweep, and the launch reconcile. The ledger decides *whether* to run,
+never *what* to upload: the scope stays the whole root, diffed against Drive,
+because a ledger is only ever as complete as our memory of every writer.
+`gdrive.ts` must not import it — the sync's own `stemHashes` backfill would
+re-dirty every project forever.
+
 ## Diagnostics (`main/log.ts`)
 
-A ring buffer (4000 entries) in the main process; engines, downloads and
-lyrics log every move (spawn command lines, child output with progress spam
-filtered, exit codes). Streamed live to the renderer's Log panel
+A ring buffer (4000 entries) in the main process; engines, downloads, lyrics
+and the Drive sync log every move (spawn command lines, child output with
+progress spam filtered, exit codes). Streamed live to the renderer's Log panel
 (header button), saveable to a text file — field bugs get diagnosed from
 user-saved logs. Probe failures record the child's stderr.
+
+The sync also appends to `userData/sync-log.jsonl` (one line per run, upload,
+trash and failure) and **replays it into the same panel at launch**, because
+"the phone is showing yesterday's mix" is always a question about a previous
+session and a ring buffer starts every launch empty. One dialog, not two.
+
+The phone has the same panel (`mobile/src/log.ts`, `ui/LogPanel.tsx`, opened
+from the header), with Share where the desktop has Copy. It persists its whole
+log in prefs, because phones are killed rather than quit — and because a
+release APK has no inspector and no `run-as`, what the app wrote down is the
+only evidence a field report can carry.
 
 ## Analysis (renderer)
 
@@ -256,7 +317,22 @@ transpose-aware in the pitch strip's info card.
 
 ```
 <userData>/stems/<sha1-16>/         per-song cache (stems, lyrics.json)
+<userData>/settings.json            library root, Drive tokens, gdriveDirty ledger
+<userData>/sync-log.jsonl           what has gone to Drive, across restarts
 <appData>/SingZ/models/             shared model weights (whisper)
 <appData>/SingZ/gpu-splitter/       splitter pack (python/, model caches, pack.json)
 ~/Documents/SingZ/<name>/           saved projects (song, stems/, lyrics.json, project.json)
 ```
+
+On Drive (written by the desktop, read by the phones):
+
+```
+SingZ/catalog.json                  one row per project: project.json + lyrics.json, ids + md5s
+SingZ/<name>/project.json           the project, and the checksum of every file it is made of
+SingZ/<name>/lyrics.json
+SingZ/<name>/stems/                 six stems + the singer's own added tracks
+```
+
+On a phone: `Application Support/singz-projects/<name>/stems/…` (iOS, excluded
+from backup) or `filesDir/singz-projects/…` (Android) — never Caches/cacheDir,
+which the OS empties under storage pressure.

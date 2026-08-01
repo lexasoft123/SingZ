@@ -2,12 +2,20 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readdirSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
-import { extname, join } from 'node:path'
+import { extname, join, sep } from 'node:path'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
-import { projectsRoot, refreshStemHashes, type StemHash } from './projects'
+import { projectsRoot, refreshFileHash, refreshStemHashes, type StemHash } from './projects'
+import {
+  chunkParents,
+  parentsQuery,
+  planProject,
+  type LocalEntry,
+  type ProjectPlan
+} from './sync-plan'
 import { readSettings, writeSettings } from './settings'
+import { syncLog } from './sync-log'
 
 /** Drive stores what we tell it; a wrong type makes phones refuse the stream. */
 function audioMime(name: string): string {
@@ -182,9 +190,17 @@ interface RemoteFile {
   name: string
   mimeType: string
   md5Checksum?: string
+  size?: string
+  /** Only when the projection asks for it — what makes a batched listing
+   *  groupable back to the folder each file came from. */
+  parents?: string[]
 }
 
 const FOLDER = 'application/vnd.google-apps.folder'
+
+/** Drive's q is a little language, and a project called "Don't Stop Believin'"
+ *  is a syntax error in it — which used to 400 the whole run, forever. */
+const qStr = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await accessToken()
@@ -211,10 +227,41 @@ async function listChildren(parentId: string): Promise<RemoteFile[]> {
   return out
 }
 
+/**
+ * Children of many folders in one request. A library of any size costs two of
+ * these (the project folders, then their stems/), which is what lets the sync
+ * diff against Drive itself instead of against the catalog it wrote last time.
+ */
+async function listByParents(parentIds: string[]): Promise<RemoteFile[]> {
+  if (parentIds.length === 0) return []
+  const out: RemoteFile[] = []
+  let pageToken = ''
+  do {
+    const page = await api<{ files: RemoteFile[]; nextPageToken?: string }>(
+      `/drive/v3/files?q=${encodeURIComponent(parentsQuery(parentIds))}` +
+        '&fields=nextPageToken,files(id,name,mimeType,md5Checksum,size,parents)&pageSize=1000' +
+        (pageToken ? `&pageToken=${pageToken}` : '')
+    )
+    out.push(...page.files)
+    pageToken = page.nextPageToken ?? ''
+  } while (pageToken)
+  return out
+}
+
+/** The catalog's two rows for a project, with whatever ids we now know. */
+function rowsOf(plan: ProjectPlan, fresh?: Map<string, string>): CatalogFile[] {
+  const out: CatalogFile[] = []
+  for (const row of plan.rows) {
+    const id = fresh?.get(row.name) || row.id
+    if (id) out.push({ id, name: row.name, size: row.size, md5Checksum: row.md5Checksum })
+  }
+  return out
+}
+
 async function ensureFolder(name: string, parentId: string | null): Promise<string> {
   const q = parentId
-    ? `name='${name}' and mimeType='${FOLDER}' and '${parentId}' in parents and trashed=false`
-    : `name='${name}' and mimeType='${FOLDER}' and trashed=false`
+    ? `name='${qStr(name)}' and mimeType='${FOLDER}' and '${parentId}' in parents and trashed=false`
+    : `name='${qStr(name)}' and mimeType='${FOLDER}' and trashed=false`
   const found = await api<{ files: RemoteFile[] }>(
     `/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&pageSize=5`
   )
@@ -227,20 +274,6 @@ async function ensureFolder(name: string, parentId: string | null): Promise<stri
   return created.id
 }
 
-/** Pure diff: which local files need uploading against remote md5s. */
-export function planSync(
-  local: { name: string; md5: string }[],
-  remote: { name: string; md5Checksum?: string }[]
-): { upload: string[]; unchanged: string[] } {
-  const remoteByName = new Map(remote.map((f) => [f.name, f.md5Checksum]))
-  const upload: string[] = []
-  const unchanged: string[] = []
-  for (const f of local) {
-    if (remoteByName.get(f.name) === f.md5) unchanged.push(f.name)
-    else upload.push(f.name)
-  }
-  return { upload, unchanged }
-}
 
 /** Resumable upload; resolves to the file's Drive id (a fresh POST has no
  *  other way to learn it, and the catalog manifest needs every id). */
@@ -311,12 +344,13 @@ interface CatalogProject {
   files: CatalogFile[]
 }
 
-/** The slice of project.json the sync reads and (for stemHashes) maintains. */
+/** The slice of project.json the sync reads and (for the hashes) maintains. */
 interface SyncDoc {
   name?: unknown
   savedAt?: unknown
   settings?: { custom?: unknown }
   stemHashes?: Record<string, StemHash>
+  lyricsHash?: StemHash
 }
 
 export interface SyncReport {
@@ -325,19 +359,31 @@ export interface SyncReport {
   unchanged: number
   projects: number
   error?: string
+  /** Dirty projects outside the library root — this walks only the root, so
+   *  they were never pushed and must not be marked clean. */
+  outsideLibrary?: string[]
 }
 
 let syncing = false
 
 /** Push every local project to Drive; md5-diffed so clean runs are cheap. */
-export async function gdriveSync(
+export interface SyncOptions {
+  /** Absolute dirs the caller has marked dirty — used only to report the ones
+   *  this run cannot reach. Never used to decide what to upload. */
+  dirtyDirs?: string[]
+  /** The library to push. Defaults to the configured root; passing it lets a
+   *  test drive a temp library without going through the shared settings file. */
+  root?: string
   onProgress?: (msg: string, frac: number) => void
-): Promise<SyncReport> {
+}
+
+export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
+  const { onProgress } = opts
   if (!cfg) return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'not configured' }
   if (syncing) return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'sync already running' }
   syncing = true
   try {
-    const root = projectsRoot()
+    const root = opts.root ?? projectsRoot()
     // sorted so the manifest is byte-stable — readdir order is not, and a
     // reshuffled manifest would defeat its own md5 skip
     const dirs = readdirSync(root, { withFileTypes: true })
@@ -356,164 +402,248 @@ export async function gdriveSync(
     const singzId = await ensureFolder('SingZ', null)
     const remoteTop = await listChildren(singzId)
 
-    // The previous catalog is the remote state the last completed sync left.
-    // With stemHashes riding in project.json, that file's md5 fingerprints
-    // the whole project — except lyrics.json, which the aligner rewrites on
-    // its own, so its md5 is checked alongside. A project whose fingerprints
-    // match skips its per-project round-trips entirely: a clean library
-    // syncs in three requests total.
-    const prevCatFile = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
-    const prevByDir = new Map<string, CatalogProject>()
-    if (prevCatFile) {
-      try {
-        const token = await accessToken()
-        const res = await fetch(`${API()}/drive/v3/files/${prevCatFile.id}?alt=media`, {
-          headers: { Authorization: `Bearer ${token}` }
-        })
-        if (res.ok) {
-          const cat = (await res.json()) as { format?: number; projects?: CatalogProject[] }
-          // format 1 rows carry extra fields (doc, stems) — the fingerprint
-          // md5s live in files[] either way, so both serve as the baseline
-          if ((cat?.format === 1 || cat?.format === 2) && Array.isArray(cat.projects)) {
-            for (const p of cat.projects) prevByDir.set(p.dir, p)
-          }
+    // What Drive actually holds, in two batched listings however big the
+    // library: the children of every project folder, then the children of
+    // every stems/ folder. Drive's own state is the only baseline — the
+    // previous catalog described what a past run MEANT to leave behind, which
+    // says nothing about a file edited, deleted or half-uploaded since.
+    const remoteDirs = new Map<string, RemoteFile>()
+    const duplicateDirs: RemoteFile[] = []
+    for (const f of remoteTop) {
+      if (f.mimeType !== FOLDER) continue
+      if (remoteDirs.has(f.name)) duplicateDirs.push(f)
+      else remoteDirs.set(f.name, f)
+    }
+
+    const childrenOf = async (ids: string[]): Promise<Map<string, RemoteFile[]>> => {
+      const out = new Map<string, RemoteFile[]>()
+      for (const id of ids) out.set(id, [])
+      for (const chunk of chunkParents(ids)) {
+        for (const f of await listByParents(chunk)) {
+          for (const parent of f.parents ?? []) out.get(parent)?.push(f)
         }
-      } catch {
-        // unreadable previous catalog — every project takes the full walk
+      }
+      return out
+    }
+
+    const projectFolderIds = projectDirs.map((d) => remoteDirs.get(d)?.id).filter((id): id is string => !!id)
+    const projectChildren = await childrenOf(projectFolderIds)
+    const stemsFolderIds: string[] = []
+    const stemsFolderOf = new Map<string, string>()
+    for (const [id, kids] of projectChildren) {
+      const stems = kids.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
+      if (stems) {
+        stemsFolderIds.push(stems.id)
+        stemsFolderOf.set(id, stems.id)
       }
     }
+    const stemsChildren = await childrenOf(stemsFolderIds)
 
     let uploaded = 0
     let unchanged = 0
+    let trashed = 0
     const catalog: CatalogProject[] = []
     for (let i = 0; i < projectDirs.length; i++) {
       const dir = projectDirs[i]
 
-      const top: { path: string; name: string; mime: string }[] = []
-      for (const f of ['project.json', 'lyrics.json']) {
-        try {
-          await stat(join(root, dir, f))
-          top.push({ path: join(root, dir, f), name: f, mime: 'application/json' })
-        } catch {
-          /* optional file */
-        }
-      }
       // Stems diff from the hashes project.json carries: reading an evicted
       // iCloud stem just to hash it downloads the whole file, which made a
       // clean sync look like the library re-uploading itself. Hashes for new
       // or changed stems are computed here and folded back into project.json
-      // BEFORE that file is hashed below — this same sync uploads the
-      // updated doc, and the next one opens no stem bytes at all.
+      // BEFORE that file is hashed below — this same sync uploads the updated
+      // doc, and the next one opens no stem bytes at all.
       let doc: SyncDoc | null = null
       try {
         doc = JSON.parse(await readFile(join(root, dir, 'project.json'), 'utf8')) as SyncDoc
       } catch {
         doc = null // unreadable — sync the raw bytes, keep it out of the manifest
       }
-      const hashes = await refreshStemHashes(join(root, dir), doc?.stemHashes)
-      if (doc && JSON.stringify(doc.stemHashes ?? null) !== JSON.stringify(hashes)) {
-        doc.stemHashes = hashes
-        await writeFile(join(root, dir, 'project.json'), JSON.stringify(doc, null, 2), 'utf8')
+      // A project folder with no stems/ at all (hand-copied, half-synced from
+      // a cloud folder, or pre-stems) must cost that project, not the run.
+      let hashes: Record<string, StemHash> = {}
+      let stemsReadable = true
+      try {
+        hashes = await refreshStemHashes(join(root, dir), doc?.stemHashes)
+      } catch {
+        hashes = doc?.stemHashes ?? {}
+        stemsReadable = false
       }
-      const topMd5 = await Promise.all(
-        top.map(async (f) => {
-          const bytes = await readFile(f.path)
-          return { ...f, md5: createHash('md5').update(bytes).digest('hex'), size: bytes.length }
-        })
-      )
-
-      // Fingerprints unchanged since the catalog was written => nothing to
-      // ask Drive about; the previous entry (ids, sizes, md5s) is reused.
-      const prev = prevByDir.get(dir)
+      // An empty local stems/ is not evidence that the song has no stems — a
+      // cloud folder mid-download, an unplugged volume and a genuinely empty
+      // project look identical from here, and the difference is whether the
+      // next few lines trash the only copy on Drive. Only a stems/ we could
+      // read AND that still holds files may drive the orphan logic.
+      const mayTrash = stemsReadable && Object.keys(hashes).length > 0
+      // lyrics.json rides in the doc as well: the aligner rewrites it without
+      // going through a save, and the phones must learn about that from the
+      // one checksum the catalog carries for this project.
+      let lyricsHash: StemHash | undefined
+      try {
+        lyricsHash = await refreshFileHash(join(root, dir, 'lyrics.json'), doc?.lyricsHash)
+      } catch {
+        // evicted-and-offline iCloud, or bad permissions: keep what the doc says
+        lyricsHash = doc?.lyricsHash
+      }
       if (
         doc &&
-        prev &&
-        topMd5.length === (prev.files?.length ?? -1) &&
-        topMd5.every((f) => prev.files.find((r) => r.name === f.name)?.md5Checksum === f.md5)
+        (JSON.stringify(doc.stemHashes ?? null) !== JSON.stringify(hashes) ||
+          JSON.stringify(doc.lyricsHash ?? null) !== JSON.stringify(lyricsHash ?? null))
       ) {
-        unchanged += topMd5.length + Object.keys(hashes).length
-        // normalize on the way through — a format-1 row carried doc/stems
-        catalog.push({
-          dir,
-          files: prev.files.map((f) => ({ id: f.id, name: f.name, size: f.size, md5Checksum: f.md5Checksum }))
-        })
+        doc.stemHashes = hashes
+        if (lyricsHash) doc.lyricsHash = lyricsHash
+        else delete doc.lyricsHash
+        await writeFile(join(root, dir, 'project.json'), JSON.stringify(doc, null, 2), 'utf8')
+      }
+
+      const top: LocalEntry[] = []
+      for (const name of ['project.json', 'lyrics.json']) {
+        const path = join(root, dir, name)
+        try {
+          const bytes = await readFile(path)
+          top.push({
+            name,
+            path,
+            mime: 'application/json',
+            md5: createHash('md5').update(bytes).digest('hex'),
+            size: bytes.length
+          })
+        } catch {
+          /* optional file */
+        }
+      }
+      const stems: LocalEntry[] = Object.keys(hashes)
+        .sort()
+        .map((name) => ({
+          name,
+          path: join(root, dir, 'stems', name),
+          mime: audioMime(name),
+          md5: hashes[name].md5,
+          size: hashes[name].size
+        }))
+
+      const folderId = remoteDirs.get(dir)?.id
+      const stemsId = folderId ? stemsFolderOf.get(folderId) : undefined
+      const remoteStems = stemsId
+        ? (stemsChildren.get(stemsId) ?? []).filter((f) => f.mimeType !== FOLDER)
+        : []
+      const plan = planProject(
+        { dir, top, stems },
+        {
+          folderId,
+          stemsId,
+          top: folderId ? (projectChildren.get(folderId) ?? []).filter((f) => f.mimeType !== FOLDER) : [],
+          stems: remoteStems
+        }
+      )
+      if (!mayTrash && plan.trash.length > 0) {
+        syncLog(
+          'error',
+          `${dir}: stems/ is empty or unreadable here — leaving ${plan.trash.length} file(s) on Drive alone`
+        )
+        plan.trash = []
+      }
+      unchanged += plan.unchanged
+      if (plan.upload.length === 0 && plan.trash.length === 0) {
+        if (doc) catalog.push({ dir, files: rowsOf(plan) })
         continue
       }
 
       onProgress?.(`Syncing ${dir}…`, i / projectDirs.length)
-      const projId = await ensureFolder(dir, singzId)
-      const remote = await listChildren(projId)
-      const stemsId = await ensureFolder('stems', projId)
-      const remoteStems = await listChildren(stemsId)
+      const projId = folderId ?? (await ensureFolder(dir, singzId))
+      const stemsParent =
+        stemsId ?? (plan.upload.some((u) => u.where === 'stems') ? await ensureFolder('stems', projId) : undefined)
 
-      // The hash set is the one source of what stems/ holds (FLAC/WAV splits
-      // and the singer's own tracks alike).
-      const stems = Object.keys(hashes)
-        .sort()
-        .map((name) => ({ path: join(root, dir, 'stems', name), name, mime: audioMime(name) }))
-
-      const proj: CatalogProject = { dir, files: [] }
-      const stemMd5 = stems.map((f) => ({ ...f, md5: hashes[f.name].md5, size: hashes[f.name].size }))
-      for (const group of [
-        { local: topMd5, parent: projId, existing: remote, row: true },
-        { local: stemMd5, parent: stemsId, existing: remoteStems, row: false }
-      ]) {
-        const plan = planSync(group.local, group.existing)
-        unchanged += plan.unchanged.length
-        const ids = new Map<string, string>()
-        for (const name of plan.upload) {
-          const f = group.local.find((x) => x.name === name)
-          if (!f) continue
-          onProgress?.(`Uploading ${dir}/${name}…`, (i + 0.5) / projectDirs.length)
-          const existing = group.existing.find((r) => r.name === name)
-          ids.set(name, await uploadFile(f.path, f.name, group.parent, existing?.id, f.mime))
-          uploaded++
-        }
-        if (!group.row) continue // stems live in project.json, not the catalog
-        for (const f of group.local) {
-          const id = ids.get(f.name) ?? group.existing.find((r) => r.name === f.name)?.id
-          if (id) proj.files.push({ id, name: f.name, size: String(f.size), md5Checksum: f.md5 })
-        }
+      const freshIds = new Map<string, string>()
+      // Stems first, then project.json/lyrics.json. The doc is the fingerprint
+      // for everything else, so a run interrupted between the two must leave
+      // Drive BEHIND the doc, never ahead of it: a phone that meets a doc
+      // naming md5s Drive cannot serve deletes the stem it just fetched and
+      // the song stops opening at all.
+      const ordered = [...plan.upload].sort((a, b) => (a.where === b.where ? 0 : a.where === 'stems' ? -1 : 1))
+      for (const step of ordered) {
+        onProgress?.(`Uploading ${dir}/${step.name}…`, (i + 0.5) / projectDirs.length)
+        const parent = step.where === 'top' ? projId : (stemsParent as string)
+        freshIds.set(step.name, await uploadFile(step.path, step.name, parent, step.existingId, step.mime))
+        uploaded++
+        syncLog('upload', `${dir}/${step.name} → Drive${step.existingId ? ' (replaced)' : ''}`)
       }
-      if (doc) catalog.push(proj)
+      // Files Drive still holds that the project no longer has — a lane a
+      // re-split dropped, a custom track the singer removed. Trashed, never
+      // hard-deleted: drive.file scope means these are all files this app
+      // created, and Drive's trash keeps them recoverable for 30 days.
+      for (const gone of plan.trash) {
+        onProgress?.(`Removing ${dir}/${gone.name} from Drive…`, (i + 0.75) / projectDirs.length)
+        await api(`/drive/v3/files/${gone.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trashed: true })
+        })
+        trashed++
+        syncLog('trash', `${dir}/stems/${gone.name} is no longer in the library — moved to Drive trash`)
+      }
+      if (doc) catalog.push({ dir, files: rowsOf(plan, freshIds) })
     }
     // Reconcile: a renamed or deleted local project must not haunt Drive
     // (phones would list both the old and the new name). Trash — never
     // hard-delete — remote project folders with no local counterpart;
     // drive.file scope means we only ever see folders this app created.
-    let removed = 0
     const local = new Set(projectDirs)
-    for (const f of remoteTop) {
-      if (f.mimeType !== FOLDER || local.has(f.name)) continue
+    // Zero local projects and a populated Drive is far more likely to be a
+    // library that has not arrived (a cloud folder still syncing, an external
+    // volume, a root pointed somewhere new) than a deliberate "delete all".
+    // Refuse rather than empty someone's Drive on a launch sync.
+    const remoteProjectFolders = remoteTop.filter((f) => f.mimeType === FOLDER).length
+    if (projectDirs.length === 0 && remoteProjectFolders > 0) {
+      syncLog(
+        'error',
+        `no projects found in ${root} — leaving ${remoteProjectFolders} folder(s) on Drive untouched`
+      )
+      return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'the library looks empty — nothing was synced' }
+    }
+    // a second folder of the same name is never the one we sync into, and
+    // phones would list the song twice
+    for (const f of [...remoteTop, ...duplicateDirs]) {
+      if (f.mimeType !== FOLDER || (local.has(f.name) && !duplicateDirs.includes(f))) continue
       onProgress?.(`Removing ${f.name} from Drive (renamed or deleted here)…`, 0.99)
       await api(`/drive/v3/files/${f.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ trashed: true })
       })
-      removed++
+      trashed++
     }
-    if (removed > 0) log('gdrive', `reconcile: ${removed} orphaned project folder(s) moved to Drive trash`)
+    if (trashed > 0) log('gdrive', `reconcile: ${trashed} orphaned file(s)/folder(s) moved to Drive trash`)
 
     // The manifest is written LAST — after every upload and the reconcile —
     // so it never names files that are not on Drive yet; md5-diffed like
     // everything else so a clean sync leaves it untouched.
     const manifest = Buffer.from(JSON.stringify({ format: 2, projects: catalog }))
     const manifestMd5 = createHash('md5').update(manifest).digest('hex')
-    if (prevCatFile?.md5Checksum !== manifestMd5) {
+    const catFile = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
+    if (catFile?.md5Checksum !== manifestMd5) {
       onProgress?.('Updating the phone catalog…', 0.995)
-      await uploadBytes(manifest, 'catalog.json', singzId, prevCatFile?.id, 'application/json')
+      await uploadBytes(manifest, 'catalog.json', singzId, catFile?.id, 'application/json')
     }
 
+    // gdrive.ts must not import the ledger (its own doc rewrites would re-dirty
+    // forever), so the caller passes in what it knows is waiting.
+    const outside = (opts.dirtyDirs ?? []).filter((d) => d !== root && !d.startsWith(root + sep))
+    if (outside.length) {
+      syncLog('error', `${outside.length} project(s) outside ${root} were not synced: ${outside.join(', ')}`)
+    }
     onProgress?.('Drive is up to date', 1)
-    log('gdrive', `sync done: ${uploaded} uploaded, ${unchanged} unchanged`)
+    syncLog(
+      'run',
+      `done — ${projectDirs.length} songs, ${uploaded} uploaded, ${unchanged} unchanged` +
+        (trashed ? `, ${trashed} trashed` : '')
+    )
     const s = readSettings() as Record<string, unknown>
     s.gdriveLastSync = Date.now()
     writeSettings(s)
-    return { ok: true, uploaded, unchanged, projects: projectDirs.length }
+    return { ok: true, uploaded, unchanged, projects: projectDirs.length, outsideLibrary: outside }
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err)
-    log('gdrive', `sync failed: ${error}`, 'warn')
+    syncLog('error', `sync failed: ${error}`)
     return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error }
   } finally {
     syncing = false

@@ -16,6 +16,7 @@ import {
 } from './lrclib'
 import { stemsRoot } from './media'
 import { log } from './log'
+import { markFileDirty } from './sync-dirty'
 import { downloadFile, mmsModelMb, mmsModelPath, mmsModelUrl, modelsDir } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
@@ -201,9 +202,17 @@ export class Transcriber {
     }
   }
 
+  /**
+   * Every lyrics write goes through here — LRCLIB hits, the variant picker,
+   * whisper, both aligners. It is also where the project is marked for Drive:
+   * four of these writers used to have no sync trigger at all, so a fresh
+   * LRCLIB fetch or a transcription reached the phones only when some later
+   * save happened to push it.
+   */
   private async writeCache(file: string, cache: LyricsCache): Promise<void> {
     await mkdir(join(file, '..'), { recursive: true })
     await writeFile(file, JSON.stringify(cache), 'utf8')
+    markFileDirty(file, 'lyrics')
   }
 
   /**
@@ -552,17 +561,13 @@ export class Transcriber {
               return
             }
             const lines = groupWords(words)
-            await writeFile(
-              lyricsPath,
-              JSON.stringify({
-                source: 'whisper',
-                lines,
-                // an outage is not a verdict — true makes a later open ask
-                // LRCLIB again; false records that it really answered "miss"
-                lrclibPending: lrclibDown
-              } satisfies LyricsCache),
-              'utf8'
-            )
+            await this.writeCache(lyricsPath, {
+              source: 'whisper',
+              lines,
+              // an outage is not a verdict — true makes a later open ask
+              // LRCLIB again; false records that it really answered "miss"
+              lrclibPending: lrclibDown
+            })
             await rm(outDir, { recursive: true, force: true })
             resolve({ ok: true, cached: false, source: 'whisper', lines })
           } catch (err) {
@@ -617,7 +622,7 @@ export class Transcriber {
       check,
       lines
     }
-    await writeFile(lyricsPath, JSON.stringify(cache), 'utf8')
+    await this.writeCache(lyricsPath, cache)
     return { ok: true, cached: false, source: 'lrclib', credit: alignBase.credit, aligned: true, check, lines }
   }
 
@@ -710,7 +715,7 @@ export class Transcriber {
         check,
         lines
       }
-      await writeFile(lyricsPath, JSON.stringify(cache), 'utf8')
+      await this.writeCache(lyricsPath, cache)
       return { ok: true, cached: false, source: 'lrclib', credit: alignBase.credit, aligned: true, check, lines }
     } catch (err) {
       if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }

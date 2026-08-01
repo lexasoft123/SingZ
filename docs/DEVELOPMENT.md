@@ -92,6 +92,29 @@ uncommitted — but do NOT `git restore` it either: that desyncs it from
 Manifest.lock". If it was restored, re-sync with
 `cp Pods/Manifest.lock Podfile.lock`.
 
+## Test suites
+
+| command | covers |
+|---|---|
+| `npm test` | vitest: the desktop unit suites **and** `tests/roundtrip/` — the real `gdriveSync` writing to a fake Drive and the real phone code reading it back out of the same store |
+| `npm run typecheck` | node + web configs, plus `tsconfig.tests.json` over `tests/shared/` (the harness both roots import — vitest transpiles without typechecking, so nothing else checks it) |
+| `cd mobile && npx jest` | the phone's Drive protocol, offline fallbacks, ✓ rule and log |
+| `cd mobile/android && ./gradlew :app:testDebugUnitTest` | Kotlin's half of the shared cache-currency table |
+| `mobile/scripts/test-swift-currency.sh` | Swift's half — swiftc only, no simulator, no Pods |
+
+`tests/shared/` is one fake Drive (`serveRequest` as a pure function, with an
+http adapter for the desktop/emulator and a `fetch` adapter for jest), one
+reference `FolderAccess` over a temp dir, and fixtures whose md5s come from
+hashing real bytes. Two divergent fakes is how a format change on one side
+broke no test on the other; the round-trip is what makes each side meet the
+other's actual output.
+
+Cases worth keeping green because they were all real: a name that is a syntax
+error in Drive's `q` language, a library that does not fit in one page, a run
+that dies mid-upload, bytes changed on Drive behind the app's back, a stem
+deleted on Drive, a re-split dropping a lane, and a library that has not
+arrived yet (which must never be read as "delete everything on Drive").
+
 ## E2E testing pattern
 
 The app is verified by driving the real Electron binary with
@@ -131,6 +154,10 @@ Rules learned the hard way:
 | Variable | Effect |
 |---|---|
 | `SINGZ_NO_SYSTEM_ENGINES=1` | ignore system demucs — simulate a clean OS |
+| `SINGZ_NO_SYNC=1` | no automatic Drive push at all (launch, debounce, sweep) — **every driver on a signed-in machine wants this**, or a test run rewrites the real library's catalog |
+| `SINGZ_NO_LAUNCH_SYNC=1` | the older, narrower opt-out: skips only the launch reconcile |
+| `SINGZ_SYNC_DEBOUNCE_MS` | shrink the 4 s coalescing window so a driver need not wait for it |
+| `SINGZ_GDRIVE_CONFIG` | JSON OAuth config — point the app at a fake Drive (`tests/shared/fake-drive-http.ts`) |
 | `SINGZ_USERDATA_DIR` | isolate userData (drivers sharing "Electron" crash each other) |
 | `SINGZ_MODELS_DIR` | relocate the shared model cache |
 | `SINGZ_PACK_DIR` | relocate the GPU pack install dir |

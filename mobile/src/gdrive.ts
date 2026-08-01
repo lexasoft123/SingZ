@@ -1,4 +1,6 @@
 import { AppState, Linking, NativeModules, Platform } from 'react-native'
+import { filesOfProject } from './current'
+import { fmtBytes, fmtMs, log } from './log'
 import { customTracks, STEM_ORDER_ALL } from './model'
 import type { ProjectDoc } from './model'
 import type { ProjectEntry } from './projects'
@@ -55,7 +57,16 @@ interface FolderNative {
   oauthWait(): Promise<string>
   /** In-app consent: iOS auth sheet / Android Custom Tab — both self-close. */
   oauthPresent?(url: string): Promise<void>
-  fetchToCache(project: string, file: string, url: string, auth: string, expectedBytes: number): Promise<string>
+  /** Serves the copy on disk when it IS this file (size, then md5), else
+   *  downloads. The native decides — JS states what it wants, not what to do. */
+  fetchToCache(
+    project: string,
+    file: string,
+    url: string,
+    auth: string,
+    expectedMd5: string,
+    expectedBytes: number
+  ): Promise<{ path: string; downloaded: boolean }>
 }
 const Native = NativeModules.FolderAccess as FolderNative
 
@@ -94,6 +105,7 @@ export const driveSignOut = async (): Promise<void> => {
   // in-memory catalog after this clears it
   await restoreOnce().catch(() => {})
   listCache = null
+  catalogMd5 = ''
   projectFiles.clear()
   await Prefs.setTextPref(CATALOG_KEY, '')
   // downloaded stems stay: signing back into the same account should not
@@ -227,7 +239,6 @@ interface DriveFile {
 }
 
 const CATALOG_KEY = 'singz.gdrive.catalog'
-const HAVE_KEY = 'singz.gdrive.have'
 const TEXT_KEY = 'singz.gdrive.text'
 
 async function readJson<T>(key: string, fallback: T): Promise<T> {
@@ -241,40 +252,6 @@ async function readJson<T>(key: string, fallback: T): Promise<T> {
 
 const writeJson = (key: string, value: unknown): Promise<void> =>
   Prefs.setTextPref(key, JSON.stringify(value))
-
-/**
- * md5 of every file this phone has actually downloaded, keyed "<project>/<file>".
- * The native fetch skips a download when the cached file's size matches, which
- * is not the same question: a re-split WAV is byte-for-byte the same length and
- * completely different audio. Kept in memory too — one open asks six times.
- */
-let haveCache: Record<string, string> | null = null
-
-async function haveMap(): Promise<Record<string, string>> {
-  if (!haveCache) haveCache = await readJson<Record<string, string>>(HAVE_KEY, {})
-  return haveCache
-}
-
-async function rememberHave(key: string, md5: string): Promise<void> {
-  const map = await haveMap()
-  map[key] = md5
-  await writeJson(HAVE_KEY, map)
-}
-
-/** Forget what we had of a project — pairs with clearing its files. */
-export async function driveForgetCached(project: string): Promise<void> {
-  const map = await haveMap()
-  const prefix = project ? `${project}/` : ''
-  for (const key of Object.keys(map)) {
-    if (!project || key.startsWith(prefix)) delete map[key]
-  }
-  await writeJson(HAVE_KEY, map)
-  const texts = await readJson<Record<string, string>>(TEXT_KEY, {})
-  for (const key of Object.keys(texts)) {
-    if (!project || key.startsWith(prefix)) delete texts[key]
-  }
-  await writeJson(TEXT_KEY, texts)
-}
 
 async function api<T>(path: string): Promise<T> {
   const token = await accessToken()
@@ -335,7 +312,13 @@ interface StoredCatalog {
   entries: ProjectEntry[]
   /** Drive ids per project — without these a restored catalog cannot stream. */
   files: Record<string, { byName: Record<string, DriveFile>; stemsByName: Record<string, DriveFile> }>
+  /** md5 of the catalog.json these entries were built from — see level one. */
+  md5?: string
 }
+
+/** What the last adopted listing was built from, so an unchanged catalog.json
+ *  is never downloaded again (the root listing already reports its md5). */
+let catalogMd5 = ''
 
 /** The one disk read of the stored catalog — shared by every caller. */
 let restore: Promise<void> | null = null
@@ -352,7 +335,14 @@ const restoreOnce = (): Promise<void> =>
           stemsByName: new Map(Object.entries(f.stemsByName ?? {}))
         })
       }
+      // A catalog written before entries carried their file list: the doc is
+      // right there and states it, so rebuild rather than make the phone wait
+      // for a refresh to know what it already has.
+      for (const e of doc.entries) {
+        if (!e.expect || Object.keys(e.expect).length === 0) e.expect = expectFromDoc(e.doc)
+      }
       listCache = { at: 0, entries: doc.entries }
+      catalogMd5 = doc.md5 ?? ''
     } catch {
       // unreadable catalog — the network listing remains the only source
     }
@@ -387,7 +377,7 @@ async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
     }
   }
   try {
-    await writeJson(CATALOG_KEY, { entries, files } satisfies StoredCatalog)
+    await writeJson(CATALOG_KEY, { entries, files, md5: catalogMd5 } satisfies StoredCatalog)
   } catch {
     // a catalog we cannot persist is not worth failing a refresh over
   }
@@ -403,17 +393,18 @@ function buildEntry(
   stemsByName: Map<string, DriveFile>
 ): ProjectEntry | null {
   const stems: ProjectEntry['stems'] = {}
-  let bytes = 0
+  const expect: Record<string, number> = {}
   for (const id of STEM_ORDER_ALL) {
     const f = stemsByName.get(`${id}.flac`) ?? stemsByName.get(`${id}.wav`)
     if (!f) continue
     stems[id] = f.name.endsWith('.flac') ? 'flac' : 'wav'
-    bytes += Number(f.size ?? 0)
+    expect[`stems/${f.name}`] = Number(f.size ?? 0)
   }
   // The singer's own tracks are part of what this song costs to download —
   // leave them out and the ✓ lights up while one is still in the cloud.
   for (const t of customTracks(doc?.settings)) {
-    bytes += Number(stemsByName.get(t.file.slice('stems/'.length))?.size ?? 0)
+    const f = stemsByName.get(t.file.slice('stems/'.length))
+    if (f) expect[t.file] = Number(f.size ?? 0)
   }
   if (Object.keys(stems).length === 0) return null
   projectFiles.set(dir, { byName, stemsByName })
@@ -421,11 +412,23 @@ function buildEntry(
     dir,
     doc,
     stems,
-    cached: false, // native cache check happens per-file on open
-    bytes,
+    cached: false, // the phone's own files answer this — see isDownloaded
+    expect,
+    bytes: totalOf(expect),
     hasLyrics: byName.has('lyrics.json'),
     source: 'gdrive'
   }
+}
+
+const totalOf = (expect: Record<string, number>): number =>
+  Object.values(expect).reduce((n, size) => n + size, 0)
+
+/** Every file the doc names, by project-relative path → size. The list itself
+ *  comes from `filesOfProject`, so the ✓, the open path and this agree. */
+function expectFromDoc(doc: ProjectDoc): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const f of filesOfProject(doc)) out[f.path] = f.size
+  return out
 }
 
 /** A finished listing becomes the one everybody sees, on screen and on disk. */
@@ -445,8 +448,9 @@ interface CatalogManifest {
 }
 
 /** Build a listing entry from the project's own doc — stemHashes carries the
- *  stem list, formats and sizes (the singer's added tracks included), so the
- *  catalog screen needs no stems listing at all. */
+ *  stem list, formats and sizes (the singer's added tracks included), and
+ *  lyricsHash says whether there are words, so the catalog screen needs no
+ *  stems listing at all. */
 function entryFromDoc(
   dir: string,
   doc: ProjectDoc,
@@ -455,21 +459,22 @@ function entryFromDoc(
 ): ProjectEntry | null {
   const hashes = doc?.stemHashes ?? {}
   const stems: ProjectEntry['stems'] = {}
-  let bytes = 0
+  const expect: Record<string, number> = {}
   for (const id of STEM_ORDER_ALL) {
     if (hashes[`${id}.flac`]) stems[id] = 'flac'
     else if (hashes[`${id}.wav`]) stems[id] = 'wav'
   }
-  for (const h of Object.values(hashes)) bytes += Number(h.size ?? 0)
+  Object.assign(expect, expectFromDoc(doc))
   if (Object.keys(stems).length === 0) return null
   projectFiles.set(dir, { byName, stemsByName })
   return {
     dir,
     doc,
     stems,
-    cached: false, // native cache check happens per-file on open
-    bytes,
-    hasLyrics: byName.has('lyrics.json'),
+    cached: false, // the phone's own files answer this — see isDownloaded
+    expect,
+    bytes: totalOf(expect),
+    hasLyrics: doc?.lyricsHash ? true : byName.has('lyrics.json'),
     source: 'gdrive'
   }
 }
@@ -491,6 +496,14 @@ async function manifestEntries(
 ): Promise<ProjectEntry[] | null> {
   const file = kids.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
   if (!file) return null
+  // Level one, and the same rule as every level below it: the root listing
+  // already reported this file's md5, so an unchanged catalog means an
+  // unchanged library — nothing to download, nothing to compare per project.
+  // A quiet refresh is then two requests however big the library.
+  if (file.md5Checksum && file.md5Checksum === catalogMd5 && listCache?.entries.length) {
+    log('gdrive', `unchanged — ${listCache.entries.length} songs, nothing fetched`)
+    return listCache.entries
+  }
   const res = await fetch(`${API()}/drive/v3/files/${file.id}?alt=media`, {
     headers: { Authorization: `Bearer ${token}` }
   })
@@ -549,6 +562,11 @@ async function manifestEntries(
     const batch = await Promise.all(changed.slice(i, i + POOL).map(one))
     for (const entry of batch) if (entry) out.push(entry)
   }
+  catalogMd5 = file.md5Checksum ?? ''
+  log(
+    'gdrive',
+    `refreshed — ${out.length} songs, ${changed.length} re-read (${changed.map((c) => c.dir).join(', ') || 'none'})`
+  )
   return out
 }
 
@@ -561,6 +579,10 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
 
   const fromManifest = await manifestEntries(kids, dirs, token)
   if (fromManifest) return adopt(fromManifest)
+  // Walked, so no catalog stands behind these entries — the next refresh must
+  // read whatever catalog.json is there rather than trusting its md5.
+  catalogMd5 = ''
+  log('gdrive', `walked ${dirs.length} folders (no usable catalog.json)`)
 
   // No manifest (older desktop, or one the folder listing disowned): walk.
   // One project = three REST round-trips; done one after another a ten-song
@@ -597,45 +619,71 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
   return adopt(out)
 }
 
-/** Drive counterpart of FolderAccess.localFile: stream into the cache.
- *  expectedMd5 is the project.json stemHashes value — the authority on stem
- *  bytes; the catalog manifest stopped carrying per-stem md5s (they only
- *  duplicated it). Listing-supplied md5s (the folder walk) still work. */
-export async function driveLocalFile(project: string, file: string, expectedMd5?: string): Promise<string> {
+/**
+ * Drive counterpart of FolderAccess.localFile. JS states what the file should
+ * be — project.json's stemHashes md5 (the folder walk's listing md5 when there
+ * is no doc to ask) and its size — and the native compares that against the
+ * copy on disk. Nothing here remembers what was downloaded before: a record of
+ * past downloads is silent about a copy some older build fetched, and the
+ * phone would re-download a song it is plainly holding.
+ */
+export async function driveLocalFile(
+  project: string,
+  file: string,
+  expectedMd5?: string,
+  expectedBytes?: number
+): Promise<string> {
   const files = projectFiles.get(project)
   if (!files) throw new Error(`Project ${project} was not listed from Drive`)
   const name = file.startsWith('stems/') ? file.slice(6) : file
   const entry = file.startsWith('stems/') ? files.stemsByName.get(name) : files.byName.get(name)
   if (!entry) throw new Error(`${file} is missing from Drive`)
 
-  // Same bytes as the copy we already fetched? Then hand the native side the
-  // expected size and its short-circuit serves the cached file untouched.
-  // Different (or never fetched) forces a real download: passing 0 defeats
-  // that short-circuit, which is what a same-size-different-audio re-split
-  // needs. With no md5 at all, fall back to the plain size check.
-  const key = `${project}/${file}`
-  const want = expectedMd5 || entry.md5Checksum || ''
-  const fresh = want === '' || (await haveMap())[key] === want
-
-  // The short-circuit happens before the URL is ever used, so a cached stem
-  // opens with no signal at all — but only if we don't insist on a token
-  // first. An expired one can't be refreshed offline.
+  // A file already on the phone is served before the URL is ever used, so a
+  // downloaded song opens with no signal — which means not insisting on a
+  // token first. An expired one cannot be refreshed offline; if the native
+  // then turns out to need the network, that failure is the one worth
+  // reporting, so the token error is held and rethrown in its place.
   let auth = ''
+  let tokenError: unknown = null
   try {
     auth = `Bearer ${await accessToken()}`
   } catch (e) {
-    if (!fresh) throw e
+    tokenError = e
   }
-
-  const path = await Native.fetchToCache(
-    project,
-    file,
-    `${API()}/drive/v3/files/${entry.id}?alt=media`,
-    auth,
-    fresh ? Number(entry.size ?? 0) : 0
-  )
-  if (want && !fresh) await rememberHave(key, want)
-  return path
+  // The doc first, the listing only as a fallback. The ✓ compares against the
+  // doc's size; if the download compared against the listing's, the two could
+  // disagree and the song would re-download on every open while showing a tick
+  // — the exact shape of the bug this rewrite exists to remove.
+  const size = expectedBytes ?? Number(entry.size ?? 0)
+  const started = Date.now()
+  try {
+    const res = await Native.fetchToCache(
+      project,
+      file,
+      `${API()}/drive/v3/files/${entry.id}?alt=media`,
+      auth,
+      expectedMd5 || entry.md5Checksum || '',
+      size
+    )
+    // The native says whether bytes actually crossed the network. Inferring it
+    // from elapsed time called every file "downloaded" on the first open after
+    // an update, when the hash memo is cold and a 40 MB stem is read and hashed
+    // before being served — a false positive in the one place this log exists
+    // to be trusted.
+    log(
+      'gdrive',
+      `${project}/${file} · ${fmtBytes(size)} · ${fmtMs(Date.now() - started)} · ` +
+        (res.downloaded ? 'downloaded' : 'already here')
+    )
+    return res.path
+  } catch (e) {
+    // the token error only explains a failure that needed the network; a
+    // "cannot cache" or "arrived damaged" must be reported as itself
+    const reported = tokenError && String(e).includes('Drive download failed') ? tokenError : e
+    log('gdrive', `${project}/${file} — ${String(reported)}`, 'error')
+    throw reported
+  }
 }
 
 /** A kept copy remembers the md5 the listing reported when it was fetched;
@@ -649,13 +697,19 @@ type KeptText = string | { m: string; t: string }
  * it is served with no request at all: opening an unchanged downloaded song
  * touches the network zero times.
  */
-export async function driveReadText(project: string, file: string): Promise<string> {
+export async function driveReadText(
+  project: string,
+  file: string,
+  expectedMd5?: string
+): Promise<string> {
   const files = projectFiles.get(project)
   if (!files) throw new Error(`Project ${project} was not listed from Drive`)
   const entry = files.byName.get(file)
   if (!entry) throw new Error(`${file} is missing from Drive`)
   const key = `${project}/${file}`
-  const want = entry.md5Checksum ?? ''
+  // project.json states what lyrics.json should be, the same way it states
+  // every stem; the listing's own md5 answers for project.json itself.
+  const want = expectedMd5 || entry.md5Checksum || ''
   const kept = (await readJson<Record<string, KeptText>>(TEXT_KEY, {}))[key]
   const keptText = typeof kept === 'string' ? kept : kept?.t
   const keptMd5 = typeof kept === 'string' ? '' : (kept?.m ?? '')
@@ -667,7 +721,10 @@ export async function driveReadText(project: string, file: string): Promise<stri
     })
     if (!res.ok) throw new Error(`Drive read failed (${res.status}) for ${file}`)
     const text = await res.text()
-    void keepText(key, text, want)
+    // labelled with what Drive says it just served, NOT with what the doc
+    // expected: storing content under a hash it does not have makes every
+    // later read serve the wrong bytes with no request and no way to notice
+    void keepText(key, text, entry.md5Checksum ?? want)
     return text
   } catch (e) {
     if (keptText !== undefined) return keptText
@@ -682,7 +739,8 @@ async function keepText(key: string, text: string, md5: string): Promise<void> {
     delete all[key] // re-insert so the freshest sits last
     all[key] = { m: md5, t: text }
     const keys = Object.keys(all)
-    for (const stale of keys.slice(0, Math.max(0, keys.length - 40))) delete all[stale]
+    // two texts per song: this is ~60 songs kept, well past a phone's library
+    for (const stale of keys.slice(0, Math.max(0, keys.length - 120))) delete all[stale]
     await writeJson(TEXT_KEY, all)
   } catch {
     // a copy we cannot keep is not worth failing the read over

@@ -16,6 +16,8 @@ import {
 } from '../shared/types'
 import { wavToFlac } from './flac'
 import { log } from './log'
+import { describeProject } from './project-state'
+import { markLibraryDirty, markProjectDirty, withDirty } from './sync-dirty'
 import { allowRoot, stemsRoot } from './media'
 import { hashFile } from './separation'
 import { readSettings, writeSettings } from './settings'
@@ -108,6 +110,8 @@ export async function setProjectsRoot(
       }
     }
     writeSettings({ projectsRoot: path ?? undefined })
+    // the sync's whole scope moved; nothing about the old marks still applies
+    markLibraryDirty('library moved')
     log('app', `project library is now ${newRoot}${copied ? ` (${copied} copied over)` : ''}`)
     return { ok: true, root: newRoot, copied }
   } catch (err) {
@@ -122,6 +126,7 @@ export async function migrateProjects(): Promise<void> {
   try {
     if (!(await exists(projectsRoot()))) {
       await rename(legacy, projectsRoot())
+      markLibraryDirty('legacy library migrated')
       log('app', `moved project library ${legacy} → ${projectsRoot()}`)
       return
     }
@@ -131,6 +136,7 @@ export async function migrateProjects(): Promise<void> {
       const dest = join(projectsRoot(), entry.name)
       if (await exists(dest)) continue
       await rename(join(legacy, entry.name), dest)
+      markProjectDirty(dest, 'legacy library migrated')
       log('app', `moved project "${entry.name}" to ${projectsRoot()}`)
     }
   } catch (err) {
@@ -167,6 +173,9 @@ interface ProjectFile {
   /** md5 of every file in stems/ — Drive sync diffs from these instead of
    *  reading stem bytes (hashing an evicted iCloud stem downloads it all). */
   stemHashes?: Record<string, StemHash>
+  /** The same for lyrics.json, so this doc states every file the project is
+   *  made of and the catalog needs one checksum per project, not three. */
+  lyricsHash?: StemHash
 }
 
 export interface StemHash {
@@ -207,6 +216,45 @@ export async function refreshStemHashes(
       size: st.size,
       mtimeMs: st.mtimeMs
     }
+  }
+  return out
+}
+
+/**
+ * The same fingerprint for one file beside the stems — lyrics.json. Reuses
+ * `prev` on an unchanged size and mtime (same tolerance as the stems), and
+ * answers undefined when the file is not there at all.
+ */
+export async function refreshFileHash(
+  path: string,
+  prev: StemHash | undefined
+): Promise<StemHash | undefined> {
+  let st
+  try {
+    st = await stat(path)
+  } catch {
+    return undefined
+  }
+  if (prev && prev.size === st.size && Math.abs(prev.mtimeMs - st.mtimeMs) < 2) return prev
+  const bytes = await readFile(path)
+  return { md5: createHash('md5').update(bytes).digest('hex'), size: st.size, mtimeMs: st.mtimeMs }
+}
+
+/** Every file in stems/, by name → size. The one disk read behind both the
+ *  library listing and the open path; an unreadable folder is simply empty. */
+export async function stemsPresent(dir: string): Promise<Record<string, number>> {
+  const out: Record<string, number> = {}
+  try {
+    for (const e of await readdir(join(dir, 'stems'), { withFileTypes: true })) {
+      if (!e.isFile()) continue
+      try {
+        out[e.name] = (await stat(join(dir, 'stems', e.name))).size
+      } catch {
+        /* vanished between the listing and the stat */
+      }
+    }
+  } catch {
+    /* no stems/ at all — a project mid-import, or one that never had them */
   }
   return out
 }
@@ -360,7 +408,13 @@ export async function migrateProjectToV2(
     const allFlac = await convertStemsToFlac(dir)
     if (!allFlac) return { ok: false, error: 'some stems could not be converted' }
     meta.version = 2
+    // the WAVs it just deleted are still what stemHashes names — leave that in
+    // and project.json describes files that no longer exist (and a phone
+    // reading it would ask Drive for them)
+    meta.stemHashes = await refreshStemHashes(dir, undefined)
     await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+    // every stem is a different file now — Drive is holding the WAVs
+    markProjectDirty(dir, 'upgraded to compact stems')
     if (hadWavs) log('app', `project upgraded to compact stems: ${dir}`)
     return { ok: true, converted: hadWavs }
   } catch (err) {
@@ -388,9 +442,13 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
       if (!meta) continue
       const songPath = join(dir, meta.songFile)
       if (!(await exists(songPath))) continue
-      const found = new Set<string>()
-      for (const s of STEMS_6) {
-        if ((await stemFile(dir, s)) !== null) found.add(s)
+      const facts = describeProject(meta, await stemsPresent(dir))
+      if (facts.damaged.length || facts.missing.length) {
+        log(
+          'app',
+          `${entry.name}: ${[...facts.missing.map((f) => `${f} missing`), ...facts.damaged.map((f) => `${f} the wrong size`)].join(', ')}`,
+          'warn'
+        )
       }
       projects.push({
         dir,
@@ -398,8 +456,8 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
         songPath,
         savedAt: meta.savedAt ?? '',
         // playable = the core four exist; guitar/piano may be silent-hidden
-        hasStems: STEMS.every((s) => found.has(s)),
-        stemCount: found.size,
+        hasStems: facts.playable,
+        stemCount: Object.keys(facts.stems).length,
         hasLyrics: await exists(join(dir, 'lyrics.json'))
       })
     }
@@ -417,12 +475,13 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
   if (!(await exists(metaPath))) return null
   try {
     const meta = JSON.parse(await readFile(metaPath, 'utf8')) as ProjectFile
+    const facts = describeProject(meta, await stemsPresent(dir))
     const stems: Partial<Record<StemName6, string>> = {}
     for (const s of STEMS_6) {
-      const p = await stemFile(dir, s)
-      if (p) stems[s] = p
+      const format = facts.stems[s]
+      if (format) stems[s] = join(dir, 'stems', `${s}.${format}`)
     }
-    const coreThere = STEMS.every((s) => Boolean(stems[s]))
+    const coreThere = facts.playable
     const settings = meta.settings ?? { transpose: 0, tracks: {} }
     return {
       dir,
@@ -430,6 +489,9 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
       formatVersion: meta.version ?? 1,
       settings: { ...settings, custom: await resolveCustom(dir, settings.custom) },
       stems: coreThere ? stems : undefined,
+      // named here so a truncated stem is reported as itself, rather than as
+      // the decoder's "Could not decode that audio file" two layers later
+      damaged: facts.damaged.length ? facts.damaged : undefined,
       hasLyrics: await exists(join(dir, 'lyrics.json')),
       inLibrary: inLibrary(dir)
     }
@@ -459,7 +521,8 @@ export async function saveProject(
     const own = dirname(songPath)
     const inPlace = await exists(join(own, 'project.json'))
     const dir = inPlace ? own : join(projectsRoot(), safeName(name))
-    await mkdir(join(dir, 'stems'), { recursive: true })
+    return await withDirty(dir, 'save', async () => {
+      await mkdir(join(dir, 'stems'), { recursive: true })
 
     // in place, the opened song IS the project's song — keep its filename
     const songFile = inPlace ? basename(songPath) : `song${extname(songPath).toLowerCase()}`
@@ -509,17 +572,19 @@ export async function saveProject(
       // project.json keeps custom tracks project-relative so the folder stays
       // portable; the renderer gets absolute paths back below.
       settings: { ...settings, custom: stored },
-      stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes)
+      stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
+      lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
     }
-    await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
-    log('app', `project saved: ${dir}`)
-    return {
-      ok: true,
-      dir,
-      songPath: songDest,
-      inLibrary: inLibrary(dir),
-      custom: await resolveCustom(dir, stored)
-    }
+      await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+      log('app', `project saved: ${dir}`)
+      return {
+        ok: true as const,
+        dir,
+        songPath: songDest,
+        inLibrary: inLibrary(dir),
+        custom: await resolveCustom(dir, stored)
+      }
+    })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -566,6 +631,10 @@ export async function renameProject(
       if (p) stems[s] = p
     }
     const coreThere = STEMS.every((s) => Boolean(stems[s]))
+    // both ends: the old folder is what Drive must stop carrying, the new one
+    // is what it must start with
+    markProjectDirty(oldDir, 'rename')
+    markProjectDirty(newDir, 'rename')
     log('app', `project renamed: ${oldDir} → ${newDir}`)
     return {
       ok: true,
@@ -623,6 +692,7 @@ export async function importProject(
       if (p) stems[s] = p
     }
     const coreThere = STEMS.every((s) => Boolean(stems[s]))
+    markProjectDirty(dst, 'imported into the library')
     log('app', `project ${mode === 'move' ? 'moved' : 'copied'} into the library: ${src} → ${dst}`)
     return {
       ok: true,

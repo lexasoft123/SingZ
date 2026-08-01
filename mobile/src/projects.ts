@@ -2,8 +2,10 @@ import { NativeModules } from 'react-native'
 import { decodeAudioData, type AudioBuffer } from 'react-native-audio-api'
 // static on purpose: CatalogScreen already loads gdrive at startup, and a
 // dynamic import() here is the one thing jest cannot execute
-import { driveForgetCached, driveLocalFile, driveReadText } from './gdrive'
+import { driveLocalFile, driveReadText } from './gdrive'
 import type { LyricsDoc, ProjectDoc } from './model'
+import { isCurrent } from './current'
+import { log } from './log'
 import { customTracks, STEM_ORDER_ALL } from './model'
 
 /**
@@ -28,6 +30,8 @@ export interface CacheUsage {
   project: string
   bytes: number
   files: number
+  /** Size of each file present, by project-relative path — what the ✓ reads. */
+  sizes?: Record<string, number>
 }
 
 export interface RootInfo {
@@ -52,11 +56,29 @@ export interface ProjectEntry {
   stems: Record<string, 'flac' | 'wav'>
   /** Every stem is materialized on this device (no iCloud download needed). */
   cached: boolean
-  /** Total bytes of materialized stems (0 while everything is still in the cloud). */
+  /** Every file this song is made of, by project-relative path → size, as
+   *  project.json states it. The download rule and the ✓ read this same list. */
+  expect?: Record<string, number>
+  /** What the whole song costs to download — the "☁ 95 MB" line. */
   bytes: number
   hasLyrics: boolean
   /** Where the files live — a picked/local folder or the Google Drive API. */
   source?: 'folder' | 'gdrive'
+}
+
+/**
+ * Does this phone hold the whole song? The same ladder the natives run on open
+ * (`isCurrent`), minus the hashing: every file the project names, present at
+ * its stated size — per file, never a byte total, because a sum lets a leftover
+ * stem stand in for a missing one, and that is exactly how a song came to sit
+ * in the library ticked and then download itself. Folder libraries answer for
+ * themselves; the native walked them already.
+ */
+export function isDownloaded(entry: ProjectEntry, have?: CacheUsage): boolean {
+  if (entry.source !== 'gdrive') return entry.cached
+  const want = Object.entries(entry.expect ?? {})
+  if (want.length === 0) return false
+  return want.every(([path, size]) => isCurrent({ size: have?.sizes?.[path] ?? -1 }, { size }))
 }
 
 const Folder = NativeModules.FolderAccess as FolderAccessApi
@@ -69,15 +91,10 @@ export const clearRoot = (): Promise<RootInfo> => Folder.clearRoot()
 export const cacheUsage = (): Promise<CacheUsage[]> =>
   Folder.cacheUsage ? Folder.cacheUsage().catch(() => []) : Promise.resolve([])
 
-/**
- * Delete one project's downloaded files ('' = all of them), and forget the
- * hashes that go with them so the next open fetches rather than trusting a
- * file that is no longer there.
- */
-export async function clearCache(project = ''): Promise<void> {
-  await Folder.clearCache(project)
-  await driveForgetCached(project)
-}
+/** Delete one project's downloaded files ('' = all of them). Nothing else to
+ *  forget: what the phone has is answered by the files, so removing them is
+ *  the whole of it. */
+export const clearCache = (project = ''): Promise<boolean> => Folder.clearCache(project)
 
 export async function listProjects(): Promise<ProjectEntry[]> {
   const raw = await Folder.listProjects()
@@ -172,10 +189,10 @@ export async function loadProject(
   crumb?: (note: string) => Promise<void>
 ): Promise<LoadedProject> {
   const gdrive = entry.source === 'gdrive'
-  const fetchFile = (file: string, md5?: string): Promise<string> =>
-    gdrive ? driveLocalFile(entry.dir, file, md5) : Folder.localFile(entry.dir, file)
-  const readText = (file: string): Promise<string> =>
-    gdrive ? driveReadText(entry.dir, file) : Folder.readText(entry.dir, file)
+  const fetchFile = (file: string, md5?: string, size?: number): Promise<string> =>
+    gdrive ? driveLocalFile(entry.dir, file, md5, size) : Folder.localFile(entry.dir, file)
+  const readText = (file: string, md5?: string): Promise<string> =>
+    gdrive ? driveReadText(entry.dir, file, md5) : Folder.readText(entry.dir, file)
 
   // A Drive listing's doc is a summary — the catalog manifest carries no
   // player state (beat grid, mixer, transpose). The real project.json rides
@@ -208,10 +225,8 @@ export async function loadProject(
     const id = ids[i]
     onStep(`Fetching ${id} · ${i + 1}/${total}`, i / total)
     await crumb?.(`fetching ${id}`)
-    const path = await fetchFile(
-      `stems/${id}.${entry.stems[id]}`,
-      doc?.stemHashes?.[`${id}.${entry.stems[id]}`]?.md5
-    )
+    const want = doc?.stemHashes?.[`${id}.${entry.stems[id]}`]
+    const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size)
     onStep(`Decoding ${id} · ${i + 1}/${total}`, (i + 0.5) / total)
     await crumb?.(`decoding ${id}`)
     // file:// matters: audio-api's Android RELEASE builds treat bare strings
@@ -234,24 +249,26 @@ export async function loadProject(
     onStep(`Fetching ${t.label} · ${at + 1}/${total}`, at / total)
     await crumb?.(`fetching ${t.id}`)
     try {
-      const path = await fetchFile(t.file, doc?.stemHashes?.[t.file.slice('stems/'.length)]?.md5)
+      const wantTrack = doc?.stemHashes?.[t.file.slice('stems/'.length)]
+      const path = await fetchFile(t.file, wantTrack?.md5, wantTrack?.size)
       onStep(`Decoding ${t.label} · ${at + 1}/${total}`, (at + 0.5) / total)
       await crumb?.(`decoding ${t.id}`)
       const buffer = await decodeAudioData(`file://${path}`, sampleRate)
       stems.push({ id: t.id, buffer, label: t.label, color: t.color, custom: true })
     } catch (err) {
-      console.warn(`SingZ: added track "${t.label}" skipped — ${String(err)}`)
+      log('song', `added track "${t.label}" skipped — ${String(err)}`, 'warn')
       continue
     }
     if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
   }
+  log('song', `opened ${doc.name ?? entry.dir} — ${stems.length} lanes from ${gdrive ? 'Drive' : 'the folder'}`)
   onStep('Lyrics…', 0.98)
   await crumb?.('lyrics')
   let lyrics: LyricsDoc | null = null
   if (entry.hasLyrics) {
     onStep('Fetching lyrics…', 0.99)
     try {
-      lyrics = JSON.parse(await readText('lyrics.json')) as LyricsDoc
+      lyrics = JSON.parse(await readText('lyrics.json', doc?.lyricsHash?.md5)) as LyricsDoc
     } catch {
       lyrics = null
     }

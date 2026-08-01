@@ -10,14 +10,17 @@ Deeper docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 
 ```bash
 npm run dev          # electron-vite dev (HMR; restarts main on src/main changes)
-npm run typecheck    # tsc over node (main/preload) + web (renderer) configs
-npm test             # vitest unit tests (FLAC roundtrip, v1->v2 migration; electron stubbed)
+npm run typecheck    # tsc over node (main/preload) + web (renderer) + tests configs
+npm test             # vitest: unit suites + tests/roundtrip (real sync -> fake Drive -> real phone code)
 npm run build        # bundle into out/  — ALWAYS build before driving E2E
 npm run dist         # package installer for current platform
 npx electron .       # run the built app (out/) without packaging
 scripts/vendor-whisper.sh   # build whisper-cli into vendor/<platform>-<arch>/
 scripts/build-gpu-pack.sh   # torch/MPS splitter pack (Apple Silicon)
 scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
+cd mobile && npx jest                                  # phone-side Drive logic
+cd mobile/android && ./gradlew :app:testDebugUnitTest   # Kotlin cache-currency table
+mobile/scripts/test-swift-currency.sh                   # Swift cache-currency table
 ```
 
 All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
@@ -155,6 +158,29 @@ answer your evals while you measure the phone.
 - **macOS ad-hoc signing is mandatory** (scripts/afterPack.cjs): repacked
   Electron has a broken signature and quarantined downloads show the
   unrecoverable "app is damaged" dialog. Hook skips itself when CSC_* is set.
+- **One log per platform, and it outlives the process** — everything goes
+  through `log(source, line, level)`: `src/main/log.ts` on the desktop (shown
+  in the existing Log dialog) and `mobile/src/log.ts` on the phone (the same
+  dialog ported — `mobile/src/ui/LogPanel.tsx`, opened from the header, Share
+  where the desktop has Copy). A second, sync-only panel was the wrong answer:
+  two viewers of one truth is the same mistake as two answers to "do I have
+  this file?". The desktop's sync record also persists to
+  `userData/sync-log.jsonl` (leading newline per append, so a kill mid-write
+  cannot merge two records) and is REPLAYED into the dialog at launch, so it
+  covers previous sessions; the phone persists its whole log in prefs
+  (`singz.log`, 400 lines) because phones are killed rather than quit. On a
+  release APK there is no inspector and no `run-as`, so what the app wrote down
+  is the only evidence there is — which is exactly how long the "✓ but it
+  re-downloads" hunt took without one.
+- **CocoaPods can leave the sandbox linking a React framework that no longer
+  satisfies RNGestureHandler** — symptom is a link failure on
+  `facebook::react::Props::~Props()` / `vtable for DebugStringConvertible`,
+  with the app's OTHER_LDFLAGS carrying `-framework React` and no Fabric libs.
+  It survives a clean DerivedData and is NOT caused by app sources (proved by
+  building the last-known-good sources against it). Fix: `rm -rf Pods && pod
+  install`. Adding a `test_spec` to the FolderAccess podspec is what triggered
+  it here — and it generates no test target anyway, which is why the Swift
+  conformance runner is plain swiftc.
 - **zsh**: `status` is a read-only variable in scripts.
 - **npm majors**: `@vitejs/plugin-react` must match electron-vite's supported
   Vite major (currently plugin ^5 with electron-vite 5 / Vite 7).
@@ -195,10 +221,20 @@ answer your evals while you measure the phone.
   excluded from backup) and `filesDir/singz-projects` (Android), NOT in
   Caches/cacheDir: the OS empties those under storage pressure and the song
   silently downloads again. Both natives adopt the old cache dir once on first
-  use. `fetchToCache` only short-circuits on a size match, which is the wrong
-  question — a re-split WAV is the same length and different audio — so JS
-  keeps the md5 of every file it fetched (`singz.gdrive.have`) and passes
-  `expectedBytes: 0` to force a real download when it differs. The Drive
+  use. **"Do we have this file?" is asked of the file, never of a record of
+  past downloads** — JS hands `fetchToCache` the md5 and size the doc states
+  and the native decides: missing or wrong size or wrong md5 → download,
+  else serve the copy on disk (md5s memoized per path against size+mtime, so
+  a song hashes once, and verified after every download so a half-arrived
+  file is never cached). The ledger this replaced (`singz.gdrive.have`)
+  recorded downloads, not files: it had no row for a copy fetched by an older
+  build, nor for one fetched under a project.json with no `stemHashes` — and
+  since the ✓ counted bytes on disk, those songs sat in the library ticked
+  while every open re-downloaded all six stems. Two answers to one question is
+  the bug; the ✓ now runs the same comparison minus the hashing
+  (`isDownloaded`: every file the doc names, present at its size — per file,
+  never a byte sum, or a leftover stem covers for a missing one; `.part` files
+  count for neither). The Drive
   listing is persisted too (`singz.gdrive.catalog`, file ids included), so the
   catalog opens instantly, works with no signal, and refreshes silently behind
   what is already on screen. A refresh that fails mid-listing must abort, not
@@ -218,25 +254,53 @@ answer your evals while you measure the phone.
   truncates them ~300ns) carries the stem list, formats, sizes and md5s, so
   a clean sync reads no stem bytes (hashing evicted iCloud stems used to
   re-download the whole library, which read as "sync re-uploads my media").
-  After every sync the desktop writes `catalog.json` (format 2) at the
-  SingZ root: one row per project — project.json and lyrics.json with Drive
-  ids and md5s, nothing else (lyrics.json rides separately because the
-  aligner rewrites it without touching the doc). Written LAST so it never
-  names missing files, byte-stable + md5-skipped when nothing changed.
-  Both sides diff against it: the desktop skips per-project round-trips for
-  fingerprint-matched projects (a clean sync is 3 requests), and phones
-  reuse their stored entries, refetching only changed projects (the doc +
-  that folder's listings) — a quiet refresh is 3 requests however big the
-  library, and a downloaded song opens with zero (doc and lyrics kept
-  offline by md5, stems by the native cache). Phones trust the catalog only
+  `lyricsHash` states lyrics.json the same way, so **the doc names every file
+  the project is made of** — the aligner's rewrite moves project.json with it
+  (sync backfills both before hashing the doc), and one checksum per project
+  is enough for the catalog. After every sync the desktop writes
+  `catalog.json` (format 2) at the SingZ root: one row per project —
+  project.json and lyrics.json with Drive ids and md5s, nothing else. Written
+  LAST so it never names missing files, byte-stable + md5-skipped when
+  nothing changed. **The same comparison runs at all three levels**:
+  catalog.json against the root listing's md5 (unchanged → the whole refresh
+  is 2 requests and no project is asked about), project.json against the
+  catalog row, each file against the doc. **The desktop diffs against Drive's
+  own listing, never against the catalog it wrote last time** — two batched
+  `('a' in parents or 'b' in parents)` queries (chunked 50, `fields=…,parents`)
+  cover a library of any size, so a clean sync is 4 requests and drift (a file
+  edited or deleted on Drive, a second desktop) is actually noticed. The
+  catalog is pure output. Orphan FILES are trashed like orphan folders — a lane
+  a re-split dropped would otherwise sit on Drive forever, and phones would
+  keep listing it. Phones reuse their stored entries, refetching only changed
+  projects (the doc + that folder's listings), so a downloaded song opens with
+  zero requests (doc and lyrics kept offline by md5, stems by the native
+  cache). Phones trust the catalog only
   while it names exactly the root's project folders (an older desktop
   pushing leaves it stale) and fall back to walking the folders otherwise,
   so old apps and old desktops keep working. The
   desktop also reconciles on
-  launch, not only after saves — a sync killed mid-run self-heals next start;
-  E2E drivers on a signed-in dev machine must launch with
-  SINGZ_NO_LAUNCH_SYNC=1 or every test run syncs the real Drive (two dev
-  builds of different vintages then rewrite the catalog at each other). OAuth client config: mobile/gdrive.config.json (gitignored;
+  launch, not only after saves — a sync killed mid-run self-heals next start.
+  **Nothing calls `gdriveSync` directly any more**: writers mark the library
+  dirty (`sync-dirty.ts` — a seq counter in settings.json, marked on both edges
+  of long operations so a save overlapping a sync stays dirty) and
+  `sync-scheduler.ts` owns the single-flight, a 4 s debounce with a 60 s max
+  wait, backoff on offline/5xx, `blocked` on auth, and a sweep. `gdrive.ts`
+  must never import the ledger — its own stemHashes/lyricsHash backfill would
+  re-dirty every project forever. **The "is this copy current?" rule is one
+  table, three runners**: `tests/shared/currency-cases.json` is read by
+  `tests/unit/current.test.ts` (TS + the desktop mtime rule),
+  `mobile/android/app/src/test/.../CacheCurrencyTest.kt`
+  (`./gradlew :app:testDebugUnitTest`) and
+  `mobile/scripts/test-swift-currency.sh` (swiftc, no simulator needed — a
+  CocoaPods `test_spec` does NOT generate a test target for this pod). The
+  rule itself lives in `CacheCurrency.kt`/`CacheCurrency.swift`/`current.ts`,
+  apart from the file handling, so it can be tested without a device. The ledger decides WHETHER to sync, never
+  WHAT to upload: scope stays the whole root, diffed against Drive. Every
+  lyrics writer goes through `writeCache` (four of the seven used to reach
+  Drive only by accident). E2E drivers on a signed-in dev machine must launch
+  with SINGZ_NO_SYNC=1 (SINGZ_NO_LAUNCH_SYNC is the older, narrower opt-out)
+  or every test run syncs the real Drive (two dev builds of different vintages
+  then rewrite the catalog at each other). OAuth client config: mobile/gdrive.config.json (gitignored;
   CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
   generate the gdrive-config.ts modules from it — both are gitignored, never
   in the repo, EMPTY when the json is absent, so a fresh checkout needs

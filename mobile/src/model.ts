@@ -109,6 +109,9 @@ export interface ProjectDoc {
   /** md5 (+size/mtime) per stems/ file, written by the desktop — the
    *  authority on whether a downloaded copy is still the right bytes. */
   stemHashes?: Record<string, { md5: string; size: number; mtimeMs: number }>
+  /** The same, for lyrics.json: the doc states every file the project is made
+   *  of, so one checksum per project in catalog.json covers the lot. */
+  lyricsHash?: { md5: string; size: number; mtimeMs: number }
 }
 
 /** Vocal-training setup (what alternates, how often, which stems the singer carries). */
