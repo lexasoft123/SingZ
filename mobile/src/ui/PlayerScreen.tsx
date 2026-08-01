@@ -2,10 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
-  useAnimatedStyle,
+  runOnUI,
+  scrollTo,
+  useAnimatedRef,
+  useDerivedValue,
   useFrameCallback,
-  useSharedValue,
-  type SharedValue
+  useScrollOffset,
+  useSharedValue
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
@@ -28,6 +31,12 @@ import {
 import type { LoadedProject } from '../projects'
 import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper } from './bits'
 import { perf } from './perf'
+import SkiaLyrics, {
+  layoutColumn,
+  useLyricFonts,
+  type LyricsCue,
+  type SkWord
+} from './SkiaLyrics'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/player.png')
@@ -40,146 +49,10 @@ const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
  */
 const LEAD_S = 0.15
 
-/** Space between words, in place of the ' ' that used to ride inside them. */
-const WORD_GAP = 8
-/**
- * Width of one step of the soft edge, in px. Desktop feathers the sweep over
- * 0.4em with a real gradient; RN has no gradient without a native dep, so the
- * edge is approximated by clipped copies at falling opacity. Four steps of
- * 5px ≈ a 20px ramp — about desktop's 0.8em gradient span at this font size.
- */
-const FEATHER = 5
-/** Number of soft-edge steps; the animated clip overshoots by this many. */
-const FEATHER_STEPS = 4
-
-/**
- * Pure math for the sweep — top-level worklets that take plain numbers and
- * capture NO shared values, so they are safe to call from any style body
- * (the .value reads stay in the caller, where the capture analysis sees them).
- */
-function fillWidth(t: number, w: number, start: number, end: number, step: number): number {
-  'worklet'
-  const p = Math.min(1, Math.max(0, (t - start) / (end - start)))
-  if (p <= 0) return 0
-  // Deliberately NOT clamped to w: the nested steps each give back FEATHER
-  // from the right, so the outer clip has to overshoot the word by exactly
-  // what they take. Clamping it cost the last step*FEATHER px of every word —
-  // a fully sung word kept an unlit last letter.
-  return p * w + step * FEATHER
-}
-
-function glowEnv(t: number, start: number, end: number): number {
-  'worklet'
-  const p = Math.min(1, Math.max(0, (t - start) / (end - start)))
-  if (p <= 0 || p >= 1) return 0
-  const env = 0.45 + 0.55 * (1 - Math.abs(2 * p - 1))
-  // Quantized: every opacity write re-renders the shadow stack offscreen;
-  // sixteen levels still read as breathing at a fraction of the writes.
-  return Math.round(env * 16) / 16
-}
-
-/**
- * One word of the line being sung, filling left to right as it is sung.
- *
- * The bright copy sits on top of the dim one and is revealed by a clip whose
- * width reanimated drives on the UI thread, so the fill runs at display rate
- * instead of the 100ms position poll — the poll only has to keep the clock
- * honest. The clip is a percentage of the word's own box, which is why none
- * of this needs the word measured. The halo goes on the dim layer underneath:
- * on the bright copy the clip would slice it off mid-word.
- */
-const SweepWord = React.memo(function SweepWord({
-  word,
-  start,
-  end,
-  lead,
-  lit,
-  dark,
-  clock
-}: {
-  word: string
-  start: number
-  end: number
-  lead: number
-  lit: string
-  dark: string
-  clock: SharedValue<number>
-}): React.JSX.Element {
-  // measured once per line activation; the feather is in px, not percent
-  const boxW = useSharedValue(0)
-  // EVERY style below reads clock.value and boxW.value in its own body, then
-  // hands plain numbers to the pure helpers. Do NOT factor the .value reads
-  // into a shared helper worklet: reanimated's dependency capture loses a
-  // shared value read behind an indirection, the mapper never re-fires, and
-  // the fill freezes at whatever the mount frame held. That shipped once —
-  // first word lit, nothing moved — and it passed review because per-word
-  // React commits had been re-creating the styles and faking motion at poll
-  // rate the whole time.
-  // ONE mapper drives the whole feather. Creating and destroying a
-  // useAnimatedStyle costs ~26ms per line change across a line's words
-  // (measured: 1 mapper/word 52ms, 2 → 80, 3 → 106, 5 → 148), and a line
-  // change churns every word at once — that was the 218ms stall on device.
-  // So the steps are NESTED instead of stacked: each inner clip is inset
-  // FEATHER px from its parent's right edge, so all five edges track the one
-  // animated width for free.
-  const fill = useAnimatedStyle(() => ({
-    width: fillWidth(clock.value + lead, boxW.value, start, end, FEATHER_STEPS)
-  }))
-  // The bloom breathes with the word — live only while the sweep is inside it,
-  // decided HERE on the UI thread. Deciding it in React was the phone's jerk:
-  // every word onset committed, re-rendered the line and remounted these
-  // layers, stalling the very frame the singer is watching. Now nothing
-  // mounts at word boundaries; opacity just moves.
-  const breathe = useAnimatedStyle(() => ({
-    // Yoga caps an absolute child at its parent's width, and the padded twin
-    // is wider than the word — without an explicit width the text WRAPS and a
-    // glowing fragment renders on a phantom second line. boxW is measured, so
-    // the width rides along in this worklet (4px slack against rounding).
-    width: boxW.value + 2 * 18 + 4,
-    opacity: glowEnv(clock.value + lead, start, end)
-  }))
-  return (
-    <View
-      style={{ marginRight: WORD_GAP }}
-      onLayout={(e) => {
-        boxW.value = e.nativeEvent.layout.width
-      }}
-    >
-      <Text style={[s.line, { color: dark }]}>{word}</Text>
-      {/* Glyph-shaped glow. RN clips textShadow to the Text frame — but the
-          frame is the border box, so padding buys the blur runway to fade out
-          BEFORE the edge (negative offsets put the glyphs back in place).
-          A twin of the word carries the shadow; its opacity breathes on the
-          UI thread. Rasterized: without it the shadow re-renders offscreen
-          whenever an animated sibling repaints the region. */}
-      <Animated.View style={[s.glowWrap, breathe]} pointerEvents="none">
-        <Text style={[s.line, s.glowTwin, { color: dark }]}>{word}</Text>
-      </Animated.View>
-      {/* Soft edge, nested: the animated clip reaches FEATHER_STEPS*FEATHER
-          past the sung point, and each level trims one FEATHER off its
-          parent's right edge (left:0 + right:FEATHER tracks an animated
-          parent for free). Faintest outermost, opaque innermost — the same
-          ramp the flat stack drew, from a single animated style.
-          numberOfLines/clip: an absolute child is width-capped by its parent,
-          so inside a narrowing clip the text would otherwise wrap. */}
-      <Animated.View style={[s.sweepClip, fill]} pointerEvents="none">
-        <Text style={[s.line, s.sweepText, s.fade4, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-        <View style={s.sweepStep}>
-          <Text style={[s.line, s.sweepText, s.fade3, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-          <View style={s.sweepStep}>
-            <Text style={[s.line, s.sweepText, s.fade2, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-            <View style={s.sweepStep}>
-              <Text style={[s.line, s.sweepText, s.fade1, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-              <View style={s.sweepStep}>
-                <Text style={[s.line, s.sweepText, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-              </View>
-            </View>
-          </View>
-        </View>
-      </Animated.View>
-    </View>
-  )
-})
+/** Lyric column inset, and the runway above it the current line scrolls to. */
+const LYR_PAD = 26
+const LYR_TOP = 250
+const LYR_BOTTOM = 300
 
 export default function PlayerScreen({
   engine,
@@ -214,11 +87,42 @@ export default function PlayerScreen({
   const [countInSt, setCountInSt] = useState<{ total: number; done: number; perBar: number } | null>(
     null
   )
+  /** Lyric viewport — the canvas is this size and the column scrolls under it. */
+  const [view, setView] = useState({ w: 0, h: 0 })
+  const lyrW = Math.max(0, view.w - 2 * LYR_PAD)
+  /** Width of the training mic, which shares the first row of a sung line. */
+  const [micW, setMicW] = useState(0)
 
   perf.commit()
 
   const lines = useMemo(() => project.lyrics?.lines ?? [], [project])
   const wordEnds = useMemo(() => sweepEnds(lines), [lines])
+  /**
+   * Word + sweep window per line, built once. Skia's row layout and its edge
+   * worklets key off this array's identity, so handing them a freshly mapped
+   * one every commit would tear down and rebuild every mapper twice a second.
+   */
+  const wordSpecs = useMemo<SkWord[][]>(
+    () =>
+      lines.map((ln, i) => {
+        if (ln.words.length > 0) {
+          return ln.words.map((w, j) => ({ w: w.w, s: w.s, e: wordEnds[i][j] }))
+        }
+        // A line the aligner left without word times still has to wrap and
+        // still has to sweep: split it and give each piece a share of the line
+        // proportional to its length.
+        const parts = ln.text.split(/\s+/).filter(Boolean)
+        const chars = parts.reduce((n, p) => n + p.length, 0) || 1
+        const span = Math.max(0.05, ln.end - ln.start)
+        let t = ln.start
+        return parts.map((p) => {
+          const s0 = t
+          t += (p.length / chars) * span
+          return { w: p, s: s0, e: t }
+        })
+      }),
+    [lines, wordEnds]
+  )
 
   /**
    * Playback clock on the UI thread. The 100ms poll resyncs it; between polls
@@ -475,14 +379,68 @@ export default function PlayerScreen({
     return cur
   }, [lines, lpos])
 
-  const scrollRef = useRef<ScrollView>(null)
-  const lineYs = useRef<number[]>([])
+  /**
+   * The whole column, laid out once per song (and per width / mic change).
+   * Static by design: the canvas draws from it, the tap targets sit on it and
+   * the auto-scroll aims at it, so a line change moves nothing.
+   */
+  const fonts = useLyricFonts()
+  const column = useMemo(
+    () =>
+      lyrW > 0 && fonts
+        ? layoutColumn(wordSpecs, fonts.line, lyrW, {
+            top: LYR_TOP,
+            indents: mask ? mask.map((m) => (m ? micW : 0)) : undefined
+          })
+        : { boxes: [], height: 0 },
+    [wordSpecs, lyrW, micW, mask, fonts]
+  )
+
+  /**
+   * An animated ref, and reanimated's own scrollTo. A plain ref on an
+   * Animated.ScrollView is NOT the ScrollView — `.scrollTo` is simply absent on
+   * it, so the auto-scroll became a silent no-op and the lyrics stopped
+   * following the song. (It was cast to keep TypeScript quiet, which is what
+   * hid it.)
+   */
+  const scrollRef = useAnimatedRef<Animated.ScrollView>()
+  /**
+   * Scroll offset on the UI thread — the canvas stays put and the column moves.
+   *
+   * useScrollOffset, NOT an onScroll handler: reanimated's scrollTo drives the
+   * view natively and emits no scroll event, so a handler-fed offset went stale
+   * the moment the song scrolled itself. The canvas then drew the column two
+   * lines away from where the tap targets actually were — tapping a line seeked
+   * to a different one, and the sung line appeared to climb out of its row.
+   *
+   * And it writes into a value WE own rather than returning its own: the value
+   * it hands back does not keep its identity across the ref attaching, so the
+   * canvas's mapper captured one nobody was updating any more and drew the
+   * column at offset zero however far the song had scrolled.
+   */
+  const scrollY = useSharedValue(0)
+  useScrollOffset(scrollRef, scrollY)
+  /**
+   * The offset the canvas draws the column at. React state, not the shared
+   * value, because Skia does NOT apply a shared value handed to a Group's
+   * `transform` — measured: with scrollT.value sitting at exactly
+   * [{translateY:-239.64}] the canvas kept drawing at 0, while the same Group
+   * takes a plain array fine and shader props take shared values fine. So the
+   * offset rides a commit. It is affordable because every line that is not
+   * being sung is a memoized node whose props do not change while scrolling —
+   * only the group's transform does.
+   */
+  const [scrollTop, setScrollTop] = useState(0)
   useEffect(() => {
-    const y = lineYs.current[currentLine]
-    if (currentLine >= 0 && y !== undefined) {
-      scrollRef.current?.scrollTo({ y: Math.max(0, y - 250), animated: true })
+    const b = column.boxes[currentLine]
+    if (currentLine >= 0 && b) {
+      const to = Math.max(0, b.y - LYR_TOP)
+      runOnUI(() => {
+        'worklet'
+        scrollTo(scrollRef, 0, to, true)
+      })()
     }
-  }, [currentLine])
+  }, [currentLine, column])
 
   const toggleTrainStem = (id: string): void => {
     setTrainCfg((c) => {
@@ -534,6 +492,22 @@ export default function PlayerScreen({
     TEST.showSyncPanel = () => setSheet('practice')
     TEST.perfStart = () => perf.start()
     TEST.perfStop = () => perf.stop()
+    /** Column geometry vs where the ScrollView actually is — the canvas and the
+     *  tap targets must agree, and only numbers can say whether they do. */
+    TEST.lyrDiag = () => ({
+      current: currentLine,
+      scrollY: scrollY.value,
+      lineY: column.boxes[currentLine]?.y ?? null,
+      colH: column.height,
+      view
+    })
+    /** Lines with their sweep windows — lets a driver aim at a mid-word instant. */
+    TEST.lines = () =>
+      lines.map((l, i) => ({
+        start: l.start,
+        end: l.end,
+        words: l.words.map((w, j) => [w.w, w.s, wordEnds[i][j]] as [string, number, number])
+      }))
     TEST.clockDiag = () => ({
       pos,
       playing,
@@ -575,6 +549,27 @@ export default function PlayerScreen({
   if (ktPitch !== 0) ktBadge.push(ktPitch > 0 ? `+${ktPitch}♯` : `${ktPitch}♭`)
   if (ktTempo !== 100) ktBadge.push(`${ktTempo}%`)
 
+  /**
+   * The count-in above the line the singer is waiting for: dots through the
+   * last 3s of a long gap (desktop parity: gap >= 3s, dots = ceil(seconds
+   * left)), and before that a plain countdown on a long instrumental. The FIRST
+   * line always counts in when there is any runway — play was just pressed and
+   * the singer needs orientation even on a quick start. Only one gap can be
+   * live at a time, so the column carries one of these, not one per line.
+   */
+  const cue = useMemo<LyricsCue>(() => {
+    for (let i = 0; i < lines.length; i++) {
+      const gapStart = i === 0 ? 0 : lines[i - 1].end
+      const dt = lines[i].start - pos
+      const gapOk = i === 0 ? lines[i].start >= 1.2 : lines[i].start - gapStart >= 3
+      const dots = gapOk && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
+      const longGap = (i === 0 ? lines[i].start : lines[i].start - gapStart) > 5
+      const wait = longGap && dt > 3 && (i === 0 || pos >= gapStart) ? Math.ceil(dt) : 0
+      if (dots > 0 || wait > 0) return { line: i, dots, wait }
+    }
+    return { line: -1, dots: 0, wait: 0 }
+  }, [lines, pos])
+
   /* ------- lyric line coloring ------- */
   const lineColor = (i: number, isSing: boolean): string => {
     if (i === currentLine) return C.bright
@@ -587,85 +582,65 @@ export default function PlayerScreen({
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
 
-      {/* lyrics */}
-      <ScrollView
-        ref={scrollRef}
+      {/* Lyrics. The column is ONE canvas the size of the viewport, held
+          still while a transform moves the lines under it — a canvas as tall as
+          a real song would be a 13000px surface, past what plenty of these
+          phones will allocate. What actually scrolls is a spacer carrying the
+          tap targets, so the sweep costs no views at all. */}
+      <View
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingTop: 250, paddingBottom: 300, paddingHorizontal: 26 }}
+        onLayout={(e) => {
+          const { width, height } = e.nativeEvent.layout
+          if (width !== view.w || height !== view.h)
+            setView({ w: Math.round(width), h: Math.round(height) })
+        }}
       >
-        {lines.map((ln, i) => {
-          const isCurrent = i === currentLine
-          const isSing = mask?.[i] === true
-          // count-in dots during the last 3s of a long gap before this line
-          // (desktop parity: gap >= 3s, dots = ceil(seconds left)). The FIRST
-          // line always counts in when there is any runway — the singer just
-          // pressed play and needs orientation even on a quick start.
-          const gapStart = i === 0 ? 0 : lines[i - 1].end
-          const dt = ln.start - pos
-          const gapOk = i === 0 ? ln.start >= 1.2 : ln.start - gapStart >= 3
-          const countIn = gapOk && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
-          // long instrumental pause: tick the seconds down until the dots
-          // engage at 3 s (only for the gap the playhead is actually in)
-          const longGap = (i === 0 ? ln.start : ln.start - gapStart) > 5
-          const waitSec =
-            longGap && dt > 3 && (i === 0 || pos >= gapStart) ? Math.ceil(dt) : 0
-          return (
-            <Pressable
-              key={i}
-              onPress={() => engine.seek(ln.start)}
-              onLayout={(e) => {
-                lineYs.current[i] = e.nativeEvent.layout.y
-              }}
-              style={({ pressed }) => [
-                { marginBottom: 28 },
-                isCurrent && { transform: [{ scale: 1.03 }] },
-                pressed && { opacity: 0.6 }
-              ]}
-            >
-              {countIn > 0 && (
-                <Text style={s.countIn}>{Array(countIn).fill('●').join(' ')}</Text>
-              )}
-              {waitSec > 0 && (
-                <Text style={[s.countIn, { letterSpacing: 1 }]}>{waitSec} s</Text>
-              )}
-              {/* Every line is a wrapping row of word boxes, not one Text with
-                  inline children: RN can only clip a View, so a word has to be
-                  a box of its own for the sweep. All lines are built this way,
-                  current or not — mixing the two made a line re-wrap the
-                  moment it lit up. */}
-              <View style={s.lineRow}>
-                {isSing && <Text style={[s.line, { fontSize: 19 }]}>🎤</Text>}
-                {ln.words.length === 0 ? (
-                  <Text style={[s.line, { color: lineColor(i, isSing) }]}>{ln.text}</Text>
-                ) : (
-                  ln.words.map((w, j) =>
-                    isCurrent ? (
-                      <SweepWord
-                        key={j}
-                        word={w.w}
-                        start={w.s}
-                        end={wordEnds[i][j]}
-                        lead={LEAD_S}
-                        lit={isSing ? '#ffd97a' : C.amber}
-                        dark="rgba(255,255,255,0.40)"
-                        clock={clock}
-                      />
-                    ) : (
-                      <Text
-                        key={j}
-                        style={[s.line, { color: lineColor(i, isSing), marginRight: WORD_GAP }]}
-                      >
-                        {w.w}
-                      </Text>
-                    )
-                  )
+        <Animated.ScrollView
+          ref={scrollRef}
+          scrollEventThrottle={16}
+          onScroll={(e) => setScrollTop(e.nativeEvent.contentOffset.y)}
+        >
+          <View style={{ height: column.height + LYR_BOTTOM }}>
+            {column.boxes.map((b, i) => (
+              <Pressable
+                key={i}
+                onPress={() => engine.seek(lines[i].start)}
+                style={{ position: 'absolute', left: LYR_PAD, right: LYR_PAD, top: b.y, height: b.height }}
+              >
+                {mask?.[i] === true && (
+                  <Text
+                    style={s.micMark}
+                    onLayout={(e) => {
+                      const w = Math.round(e.nativeEvent.layout.width)
+                      if (w > 0 && w !== micW) setMicW(w)
+                    }}
+                  >
+                    🎤
+                  </Text>
                 )}
-              </View>
-            </Pressable>
-          )
-        })}
+              </Pressable>
+            ))}
+          </View>
+        </Animated.ScrollView>
+        {fonts && (
+          <SkiaLyrics
+            fonts={fonts}
+            boxes={column.boxes}
+            words={wordSpecs}
+            current={currentLine}
+            sing={mask}
+            color={(i) => lineColor(i, mask?.[i] === true)}
+            cue={cue}
+            width={view.w}
+            height={view.h}
+            left={LYR_PAD}
+            scrollTop={scrollTop}
+            clock={clock}
+            lead={LEAD_S}
+          />
+        )}
         {lines.length === 0 && <Text style={s.noLyrics}>No lyrics in this project yet.</Text>}
-      </ScrollView>
+      </View>
 
       {/* header (scrim fades into the lyrics — no hard edge) */}
       <View
@@ -1018,15 +993,9 @@ const s = StyleSheet.create({
   youChip: { backgroundColor: C.amber, borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },
   youChipText: { color: C.amberInk, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
 
-  line: { fontSize: 30, lineHeight: 37, fontWeight: '800', letterSpacing: -0.4 },
-  /* one lyric line = a row of word boxes that wraps like text used to */
-  lineRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end' },
-  /* the reveal: width is animated on the UI thread, 0%..100% of the word */
-  sweepClip: { position: 'absolute', left: 0, top: 0, bottom: 0, overflow: 'hidden' },
-  /* one step of the nested soft edge: inset FEATHER from the parent's right */
-  sweepStep: { position: 'absolute', left: 0, top: 0, bottom: 0, right: FEATHER, overflow: 'hidden' },
-  /* absolute so the narrowing clip can never re-wrap or squeeze the glyphs */
-  sweepText: { position: 'absolute', left: 0, top: 0 },
+  /* the training mic, sharing the first row of a sung line with the canvas —
+     the only lyric glyph left in RN, because a system face has no emoji */
+  micMark: { position: 'absolute', left: 0, top: 0, fontSize: 19, lineHeight: 37 },
   /* metronome count-in: dots fill beat by beat above the scrubber */
   countInFoot: {
     color: C.amber,
@@ -1047,25 +1016,6 @@ const s = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10
   },
-  /* Desktop's .now halo: an amber text-shadow shaped like the glyphs. The
-     18px of padding is the blur's runway — a 12px radius is ~3% intensity by
-     the time it reaches the frame edge, so the clip never shows. */
-  glowWrap: {
-    position: 'absolute',
-    left: -18,
-    top: -18
-  },
-  glowTwin: {
-    padding: 18,
-    textShadowColor: 'rgba(255,160,40,0.85)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 12
-  },
-  /* the intermediate steps of the soft sweep edge */
-  fade1: { opacity: 0.78 },
-  fade2: { opacity: 0.55 },
-  fade3: { opacity: 0.34 },
-  fade4: { opacity: 0.16 },
   noLyrics: { color: C.faint, fontSize: 15, marginTop: 40 },
 
   foot: {

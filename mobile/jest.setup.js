@@ -57,7 +57,38 @@ jest.mock('react-native-reanimated', () => {
     default: { View },
     useSharedValue: (v) => ({ value: v }),
     useAnimatedStyle: (fn) => fn(),
+    useDerivedValue: (fn) => ({ value: fn() }),
     useFrameCallback: () => ({ setActive: () => {} }),
+  };
+});
+
+/**
+ * Skia loads its native bindings at import time (the Canvas the karaoke sweep
+ * draws into). Same deal as audio: what it paints is a device question, so the
+ * stub only has to let the module graph resolve. Fonts answer a fixed advance
+ * so line wrapping stays deterministic.
+ */
+jest.mock('@shopify/react-native-skia', () => {
+  const { View } = require('react-native');
+  const node = () => null;
+  return {
+    __esModule: true,
+    Canvas: View,
+    Group: node,
+    Text: node,
+    LinearGradient: node,
+    BlurMask: node,
+    Glyphs: node,
+    Circle: node,
+    vec: (x, y) => ({ x, y }),
+    useFonts: () => ({}),
+    // A fixed 16px advance per character keeps the wrap arithmetic checkable.
+    matchFont: () => ({
+      getGlyphIDs: (t) => [...t].map((ch) => ch.charCodeAt(0)),
+      getGlyphWidths: (ids) => ids.map(() => 16),
+      getTextWidth: (t) => t.length * 16,
+      getMetrics: () => ({ ascent: -24, descent: 7 }),
+    }),
   };
 });
 

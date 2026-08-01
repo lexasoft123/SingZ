@@ -99,6 +99,28 @@ answer your evals while you measure the phone.
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —
   re-assert per frame (count-in dots pattern in LyricsPanel).
+- **The mobile lyrics are one Skia canvas** (`SkiaLyrics.tsx`): the whole
+  column, the sung line painted with a gradient whose edge travels along x —
+  desktop's `background-clip: text` a layer down. The canvas is
+  viewport-sized and held still while a transform scrolls the column under it
+  (a canvas as tall as a real song is a ~13000px surface, past what many
+  phones will allocate); what actually scrolls is a spacer carrying the tap
+  targets. It replaced ~7 nested clipped Views per
+  word, which on a 120 Hz phone fed the display 58 fps (19.6% janky) against
+  Skia's 121 (0.2%). Matching an RN `<Text>` glyph-for-glyph is fiddly and every
+  bit was measured, not guessed: multiply fontSize/lineHeight/letterSpacing by
+  `PixelRatio.getFontScale()`; wrap on the OUTER box (word **+** its
+  marginRight, the way Yoga does); Android's letter spacing widens every glyph,
+  iOS's only the gaps between them; and the face is `sans-serif`/'900' on
+  Android but `System`/'bold' on iOS — `SF Pro Text` silently does not resolve
+  (it measures ~2 px a word), and Skia's font manager matches a *static* face
+  where RN interpolates a variable one. Get any of these wrong and the line
+  re-wraps or resizes the instant it lights up. The JS frame at a line change is
+  the React commit, not the mount: the iOS sim barely noticed the whole-column
+  move (40.1 -> 38.5 ms, noise) while the phone did (56.5 -> 42, and >33ms
+  frames 41 -> 19) — measure on the phone, the sim's 60Hz hides this. Keeping
+  every line's sweep mappers alive to remove the commit entirely is much worse
+  (p95 19 -> 27 ms, dropped frames 4 -> 26). Don't chase it again.
 - **whisper.cpp `-ml 1` emits occasional backward word offsets** — sanitize
   before aligning (see `alignLines`).
 - **LRC gives line starts only** — word timing is estimated at ~12 chars/sec,
