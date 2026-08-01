@@ -8,7 +8,15 @@
  * spacing is -0.4 x the system font scale, which is 1 under jest.
  */
 import { PixelRatio, Platform } from 'react-native'
-import { edgeAt, layout, layoutColumn, LINE_GAP, LINE_H, type SkWord } from '../src/ui/SkiaLyrics'
+import {
+  edgeAt,
+  layout,
+  layoutColumn,
+  LINE_GAP,
+  LINE_H,
+  wordGap,
+  type SkWord
+} from '../src/ui/SkiaLyrics'
 import { matchFont } from '@shopify/react-native-skia'
 
 const font = matchFont()
@@ -59,6 +67,14 @@ describe('layout', () => {
   it('emits one glyph per character, advancing by width + letter spacing', () => {
     const [row] = layout([w('abc', 0, 1)], font, 500, GAP)
     expect(row.glyphs.map((g) => g.pos.x)).toEqual([0, CH, 2 * CH])
+  })
+})
+
+describe('wordGap', () => {
+  it("is the font's own space, not a fixed margin", () => {
+    // words used to be separate <Text> boxes with marginRight: 8; drawn text
+    // wants a space, and at this weight a fixed 8 read as a gappy line
+    expect(wordGap(font)).toBeCloseTo(16 + LS, 6)
   })
 })
 

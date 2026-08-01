@@ -54,8 +54,15 @@ export const LINE_H = 37 * FONT_SCALE
 export const LINE_GAP = 28
 /** Letter spacing, applied per glyph by hand since an SkFont has none. */
 const LETTER_SPACING = -0.4 * FONT_SCALE
-/** Space between two words on a row. */
-export const WORD_GAP = 8
+/**
+ * Space between two words is the FONT'S space, measured — not a fixed margin.
+ * The old layout gave every word its own <Text> with marginRight: 8, which is
+ * what a wrapping row of boxes needs; drawn text just wants a space, and at
+ * this weight 8 read as a gappy line.
+ */
+export function wordGap(font: SkFont): number {
+  return font.getGlyphWidths(font.getGlyphIDs(' '))[0] + LETTER_SPACING
+}
 
 /**
  * Half-width of the soft edge, px. Desktop feathers over 0.4em each way; here
@@ -133,8 +140,7 @@ export function useLyricFonts(): { line: SkFont; small: SkFont } | null {
 
 /**
  * Wrap one line's words to `width`, positioning every glyph by hand — an SkFont
- * has no letter spacing, and drawing a whole string would use the font's own
- * space advance between words rather than WORD_GAP.
+ * has no letter spacing, so every glyph is placed by hand.
  *
  * `indent` is whatever shares the first row (the training mic): it pushes that
  * row along without narrowing the rest, which is what a wrapping flex row does
@@ -189,9 +195,10 @@ export function layoutColumn(
   opts: { top: number; indents?: number[] }
 ): { boxes: LineBox[]; height: number } {
   const boxes: LineBox[] = []
+  const gap = wordGap(font)
   let y = opts.top
   for (let i = 0; i < lines.length; i++) {
-    const rows = layout(lines[i], font, width, WORD_GAP, opts.indents?.[i] ?? 0)
+    const rows = layout(lines[i], font, width, gap, opts.indents?.[i] ?? 0)
     const height = Math.max(1, rows.length) * LINE_H
     boxes.push({ y, height, rows })
     y += height + LINE_GAP
