@@ -847,10 +847,16 @@ button.chip-status:hover {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* safe: a centered flex column with too much content overflows BOTH ends,
+     and the top half is unreachable however you scroll. Below the fit point
+     it packs to the start instead. */
+  justify-content: safe center;
   text-align: center;
   padding: 40px;
   min-height: 0;
+  /* Last resort for a window too short even for the hero — the library sizes
+     itself to fit (see .lib), so this stays dormant at normal sizes. */
+  overflow-y: auto;
 }
 
 .drop-inner {
@@ -2163,6 +2169,15 @@ button.chip-status:hover {
   width: min(880px, calc(100vw - 80px));
   text-align: left;
   animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) 0.08s backwards;
+  /* Take whatever the hero leaves and no more: the grid scrolls inside this,
+     so the library always ends exactly at the window's bottom edge. Sized by
+     a viewport fraction instead, the page overflowed a centered flex column —
+     which clips at BOTH ends and cannot be scrolled to (measured: 49px of
+     cards unreachable in an 820px window, worse in a shorter one). */
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .lib-head {
@@ -2314,8 +2329,11 @@ body.modal-open .src-dot.busy {
 .lib-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-auto-rows: min-content;
   gap: 12px;
-  max-height: 38vh;
+  /* fills what .lib was given; min-height:0 is what lets it actually shrink */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
 }
