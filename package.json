@@ -8,7 +8,7 @@
   "private": true,
   "scripts": {
     "dev": "electron-vite dev",
-    "postinstall": "node scripts/apply-gdrive-config.cjs",
+    "postinstall": "node scripts/apply-gdrive-config.cjs && node mobile/scripts/apply-gdrive-config.js",
     "build": "node scripts/apply-gdrive-config.cjs && electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json",
