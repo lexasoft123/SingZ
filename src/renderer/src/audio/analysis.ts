@@ -93,8 +93,14 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * halved-view splices pick the alternate set PER SPAN by which one carries
  * the model's bar lines (one global parity clicked Puppe's whole verse on
  * the off-beat after the body re-locked phase across the quiet stretch).
+ * v16: the model's beat LEVEL is read per span, not per song — Wild World
+ * tracks eighths through its choruses and quarters through its verses, and
+ * a strictly alternating view halved 55 s of it. Beats already at our
+ * level join both parity sets, no insert may click at a rate that isn't
+ * ours, and a model this ambivalent widens the octave tie window (the same
+ * race shipped 156.6 from the app and 77.4 from the harness).
  */
-export const BEAT_DETECT_VERSION = 15
+export const BEAT_DETECT_VERSION = 16
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -377,6 +383,22 @@ export function detectBeats(
           }
           if (best > tolD) j0 = -1
         }
+        /** v16: the model's beat level can change INSIDE one song. Wild
+         *  World's model rides 0.39 s eighths through the choruses and
+         *  0.78 s quarters through the verses, all under bars 1.57 s
+         *  apart — one global "halve it" then clicks the verses at half
+         *  tempo (55 s of 1.56 s gaps, which is what the singer heard).
+         *  A beat whose own neighbourhood is ALREADY our interval is not
+         *  a subdivision of anything: it belongs to both alternate sets,
+         *  so whichever one a span picks still clicks at our rate. */
+        const localIv = (i: number): number => {
+          const from = Math.max(1, i - 3)
+          const to = Math.min(src.length - 1, i + 3)
+          const w: number[] = []
+          for (let k2 = from; k2 <= to; k2++) w.push(src[k2] - src[k2 - 1])
+          w.sort((x, y) => x - y)
+          return w[w.length >> 1] ?? 0
+        }
         let di = 0
         let k = -1
         for (let i = 0; i < src.length; i++) {
@@ -388,7 +410,10 @@ export function detectBeats(
             k++
           }
           const par = k >= 0 ? k % 2 : j0 >= 0 ? (j0 - i) % 2 : 0
-          if (par === 0) evenV.push(src[i])
+          if (localIv(i) > 0.7 * med) {
+            evenV.push(src[i])
+            oddV.push(src[i])
+          } else if (par === 0) evenV.push(src[i])
           else oddV.push(src[i])
         }
         if (evenV.length >= 8 && oddV.length >= 8) thinViews = { a: evenV, b: oddV }
@@ -470,6 +495,19 @@ export function detectBeats(
         // the model must have actually tracked the stretch — one it also
         // gave up on keeps the old path
         if (ins.length < (0.5 * (bSec - aSec)) / med) return
+        // v16: and it must click at OUR rate. A view sitting at the wrong
+        // level passes every steadiness gate — it is perfectly steady at
+        // half the tempo — and the count gate above missed Wild World's
+        // halved last third by a single beat. Genuine tempo seams stay in
+        // (Mr Crowley's 88 bpm intro under a 107 bpm body is 1.22x).
+        if (ins.length >= 3) {
+          const iv = ins
+            .slice(1)
+            .map((t, i) => t - ins[i])
+            .sort((a, b) => a - b)
+          const m = iv[iv.length >> 1]
+          if (!(m > 0.6 * med && m < 1.6 * med)) return
+        }
         const before = L.beatsSec.length
         const kept = L.beatsSec.filter((t) => t <= lo || t >= hi)
         const merged = [...kept, ...ins].sort((x, y) => x - y)
@@ -1509,7 +1547,25 @@ function trackFromDrums(
   // and survives any decoder. The margin must stay well under Sixteen
   // Tons' 11% — its steadiness win over a 0.19-alternation half-time
   // candidate is real and must not be re-litigated acoustically.
-  if (cands.length >= 2 && cands[0].score - cands[1].score < 0.03 * cands[0].score) {
+  // v16: how wide "near" is depends on whether the MODEL could decide
+  // either. When a large minority of its intervals sit at twice its own
+  // modal one, it tracked both levels in one song and is telling us, in
+  // its own voice, that the race is real — Wild World measured 44% (the
+  // library's next-steadiest model is 4%, Sixteen Tons 0%). There a 3%
+  // window is far too narrow for a race decode noise swings by 8%: the
+  // same code shipped 156.6 bpm from the app and 77.4 from the harness.
+  const mlBimodal = ((): number => {
+    const mb = aux?.ml?.beats
+    if (!mb || mb.length < 24) return 0
+    const iv: number[] = []
+    for (let i = 1; i < mb.length; i++) iv.push(mb[i] - mb[i - 1])
+    const m = [...iv].sort((a, b) => a - b)[iv.length >> 1]
+    if (!(m > 0)) return 0
+    return iv.filter((x) => Math.abs(x - 2 * m) <= 0.3 * m).length / iv.length
+  })()
+  const tieWin = mlBimodal >= 0.25 ? 0.12 : 0.03
+  if (debug) debug.octaveTie = { win: tieWin, mlBimodal: Math.round(mlBimodal * 100) / 100 }
+  if (cands.length >= 2 && cands[0].score - cands[1].score < tieWin * cands[0].score) {
     const acoustic = (c: { q: ReturnType<typeof evaluate> }): number => c.q.support * c.q.alternation
     chosen = acoustic(cands[1]) > acoustic(cands[0]) ? cands[1] : cands[0]
   }

@@ -1031,4 +1031,122 @@ describe('detectBeats per-span parity (v15)', () => {
     expect(on).toBeLessThan(0.06) // continuous even parity kept
     expect(off).toBeGreaterThan(0.15) // bar lines did not drag it to odd
   })
+
+  it('a model that drops to OUR level mid-song is not halved again (Wild World)', () => {
+    // Same geometry, but the model gives up its eighths exactly where the
+    // drums do: through 56-80 s it emits only the bar-carrying set, already
+    // at our quarter level. Alternating that set again clicks the stretch at
+    // half tempo — 55 s of it on the real song. No-regression guard: this
+    // geometry lets the GREEDY view self-heal (its phase jumps with the
+    // model's level), so v15 passes it too. What v15 cannot do is the same
+    // repair once the span edges disagree and the strictly-alternating
+    // carrier takes over — that path is measured on the song itself, where
+    // it halved 55 s of the last third (eval/beats, 19% -> 3% bad intervals).
+    const pre = eighths.filter((_, i) => i % 2 === 0).filter((t) => t < 48)
+    const post = eighths.filter((_, i) => i % 2 === 1).filter((t) => t >= 84)
+    const played = [...pre, ...post]
+    const coarse = ml.beats.filter((t, i) => t < 56 || t >= 80 || i % 2 === 1)
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(bandOf(played, []), {
+      inst: [bandOf(played, mkStrums())],
+      ml: { beats: coarse, downbeats: ml.downbeats }
+    }, dbg)
+    expect(det).not.toBeNull()
+    expect(Math.abs(det!.bpm - 120)).toBeLessThan(3)
+    expect(dbg.mlSplice).toBeTruthy()
+    const inSpan = det!.beats.filter((t) => t > 52 && t < 80)
+    const iv = inSpan.slice(1).map((t, i) => t - inSpan[i])
+    const med = [...iv].sort((a, b) => a - b)[iv.length >> 1]
+    expect(med).toBeGreaterThan(0.4) // our rate, not the halved 1.0 s
+    expect(med).toBeLessThan(0.6)
+    expect(Math.max(...iv)).toBeLessThan(0.8) // and no half-tempo stretch
+    // and they are the model's own beats, not a coast through the stretch
+    for (const m of coarse.filter((t) => t > 58 && t < 78)) {
+      let best = Infinity
+      for (const t of det!.beats) best = Math.min(best, Math.abs(t - m))
+      expect(best).toBeLessThan(0.06)
+    }
+  })
+
+  it('an insert that would click at the wrong rate is refused outright', () => {
+    // The model tracks OUR level everywhere (ratio 1, no halving in play)
+    // but across the void it drifts to a pulse 1.8x our interval. Nothing
+    // in the steadiness gates notices — that pulse is perfectly steady —
+    // and the count gate clears it, so the level has to be checked where
+    // the beats are actually inserted.
+    const quarters = eighths.filter((_, i) => i % 2 === 0)
+    const played = quarters.filter((t) => t < 48 || t >= 84)
+    const slow: number[] = []
+    for (const t of quarters) {
+      if (t < 46) slow.push(t)
+      else if (t >= 86) slow.push(t)
+    }
+    for (let t = 46.4; t < 86; t += 0.9) slow.push(t)
+    slow.sort((a, b) => a - b)
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(bandOf(played, []), {
+      inst: [bandOf(played, mkStrums())],
+      ml: { beats: slow, downbeats: quarters.filter((_, i) => i % 4 === 0) }
+    }, dbg)
+    expect(det).not.toBeNull()
+    const spliced = (dbg.mlSplice as { aSec: number; bSec: number }[] | undefined) ?? []
+    expect(spliced.some((s) => s.aSec < 60 && s.bSec > 70)).toBe(false)
+    const inSpan = det!.beats.filter((t) => t > 52 && t < 80)
+    const iv = inSpan.slice(1).map((t, i) => t - inSpan[i])
+    expect(Math.max(...iv)).toBeLessThan(0.8) // coasting beats, at our rate
+  })
+})
+
+describe('detectBeats octave tie window (v16)', () => {
+  // A kit whose off-beats are strong enough that the double octave wins the
+  // raw score by 7% — outside the v15 tie window, so the prior decides. That
+  // is a race decode noise swings by 8%: Wild World shipped 156.6 bpm from
+  // the app and 77.4 from the eval harness, same code, same file.
+  const kit = (): AudioBuffer => {
+    const data = new Float32Array(SR * 80)
+    for (let b = 0; 0.4 + b < 79; b++) {
+      const at = Math.round((0.4 + b) * SR)
+      const f = b % 2 === 0 ? 55 : 200
+      const amp = b % 4 === 0 ? 1.0 : 0.7
+      for (let i = 0; i < 3500 && at + i < data.length; i++) {
+        data[at + i] += amp * Math.exp(-i / 700) * Math.sin((2 * Math.PI * f * i) / SR)
+      }
+      const at2 = Math.round((0.9 + b) * SR)
+      for (let i = 0; i < 2000 && at2 + i < data.length; i++) {
+        data[at2 + i] += 0.2 * Math.exp(-i / 500) * Math.sin((2 * Math.PI * 900 * i) / SR)
+      }
+    }
+    return wrap(data)
+  }
+  const quiet = (): AudioBuffer => wrap(new Float32Array(SR * 80))
+  const grid = (coarseFrom: number): { beats: number[]; downbeats: number[] } => {
+    const beats: number[] = []
+    for (let t = 0.4; t < coarseFrom; t += 0.5) beats.push(t)
+    for (let t = coarseFrom; t < 79; t += 1.0) beats.push(t)
+    return { beats, downbeats: beats.filter((_, i) => i % 4 === 0) }
+  }
+
+  it('a model that tracked both levels widens the window and the acoustics decide', () => {
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(kit(), { inst: [quiet()], ml: grid(40) }, dbg)
+    expect(det).not.toBeNull()
+    const tie = dbg.octaveTie as { win: number; mlBimodal: number }
+    expect(tie.mlBimodal).toBeGreaterThanOrEqual(0.25)
+    expect(tie.win).toBe(0.12)
+    const oc = [...(dbg.octaves as { bpm: number; score: number }[])].sort((x, y) => y.score - x.score)
+    // fixture self-check: the race is genuinely outside the old window
+    expect(oc[0].score - oc[1].score).toBeGreaterThan(0.03 * oc[0].score)
+    expect(oc[0].score - oc[1].score).toBeLessThan(0.12 * oc[0].score)
+    expect(Math.abs(det!.bpm - 60)).toBeLessThan(2)
+  })
+
+  it('a model that stayed on one level leaves the window at 3%', () => {
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(kit(), { inst: [quiet()], ml: grid(99) }, dbg)
+    expect(det).not.toBeNull()
+    const tie = dbg.octaveTie as { win: number; mlBimodal: number }
+    expect(tie.mlBimodal).toBeLessThan(0.25)
+    expect(tie.win).toBe(0.03)
+    expect(Math.abs(det!.bpm - 120)).toBeLessThan(3)
+  })
 })
