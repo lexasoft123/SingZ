@@ -13,14 +13,39 @@ Local clang builds pick up **ccache** automatically when it is installed
 (`brew install ccache`): `vendor-whisper.sh` and `npm run android` export
 CMake's compiler-launcher env (the mechanism the Android CI uses), and the
 iOS Podfile turns on React Native's `ccache_enabled` wrappers at pod install.
-One-time setup so hashes beat timestamps (fresh worktrees re-stamp mtimes):
+No setup step — the settings ride with the build, never with the machine.
 
-```bash
-ccache --set-config compiler_check=content
-```
+**Sharing the cache across worktrees takes more than one cache dir.** The dir
+already is shared (`cache_dir` is per-user, nothing to pass), but CMake and
+Xcode compile with absolute paths, and `-g` hashes the working directory too,
+so a second checkout hits *nothing* in it — measured 0% of a real CMake Debug
+build, and 5.6% overall on this machine before the fix. Two settings fix it,
+and both are needed for Debug builds (`base_dir` alone was still 0%):
+
+| Setting | Why |
+|---|---|
+| `base_dir` = this checkout's root | hashes paths under it relative, so worktrees agree |
+| `hash_dir = false` | drops the CWD from `-g` compilations |
+| `compiler_check = content` | survives an Xcode/CLT update re-stamping clang (unrelated to worktrees, cheap) |
+
+They are passed **per build, never written to the machine's ccache config**:
+`vendor-whisper.sh` exports them, `run-with-ccache.js` puts them in the child
+env, and `mobile/scripts/ccache-xcode-conf.js` appends them to react-native's
+`scripts/xcode/ccache.conf` at postinstall — that last one because RN's
+`ccache-clang.sh` sets `CCACHE_CONFIGPATH` to that file, which *replaces* the
+machine's config (so `ccache --set-config` never reaches a pod build), and a
+build started from Xcode.app inherits no shell env either. It lives in
+`node_modules`, so it is disposable and re-applied by every `npm ci`.
+
+The cost of `hash_dir = false`: a reused object carries the debug info of
+whichever worktree compiled it first, so lldb may open a sibling's copy of a
+source file — invisible while they agree, confusing when they differ. Drop
+`CCACHE_NOHASHDIR` (or the conf line) if you are stepping through native code
+in two diverged worktrees at once.
 
 Running `mobile/android/gradlew` directly instead of `npm run android`? Prefix
-`CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache`.
+`CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+CCACHE_BASEDIR=$PWD/../.. CCACHE_NOHASHDIR=1`.
 
 A system `demucs` (pipx) is the easiest dev splitter — the app auto-prefers
 it and no pack is needed. Otherwise build/install the pack for your platform:
@@ -46,11 +71,11 @@ come out filled instead of EMPTY, `mobile/android/local.properties`), runs
 `npm ci` in both roots (postinstall bakes configs, patches audio-api,
 synthesizes the sample song), restores the electron binary when npm's cache
 skipped its postinstall (the "Electron failed to install correctly" launch
-error), arms ccache's `compiler_check=content` (see above), and pod-installs
-iOS with a UTF-8 `LANG` — CocoaPods crashes in non-interactive shells
-without one. Build products (`out/`, `Pods/`, `.gradle/`) stay per-worktree;
-the global npm / CocoaPods / ccache caches are what make the second worktree
-fast (pods ~30 s warm).
+error), and pod-installs iOS with a UTF-8 `LANG` — CocoaPods crashes in
+non-interactive shells without one. It touches no ccache config: the
+cross-worktree settings ride with each build (see above). Build products
+(`out/`, `Pods/`, `.gradle/`) stay per-worktree; the global npm / CocoaPods /
+ccache caches are what make the second worktree fast (pods ~30 s warm).
 
 The links are files (symlinks), and a committed `vendor` symlink once merged
 into main and clobbered the real `vendor/` on checkout — `.gitignore`'s old
