@@ -114,6 +114,15 @@ Stages, each with its scar tissue:
   being decided by decoder noise (§6). The 3% window must stay under Sixteen
   Tons' 11% margin: its steadiness win over a 0.19-alternation half-time
   candidate is real and must not be re-litigated acoustically.
+  **v16: the window widens to 12% when the model itself could not decide** —
+  when ≥25% of the model's own intervals sit at 2× its modal one, it tracked
+  both levels inside one song and the race is real by its own testimony.
+  Measured across the library: Wild World 0.44, TTP 0.37, Puppe 0.26, Zeit
+  0.12, everything else ≤0.04 and **Sixteen Tons 0.00** — so the widened
+  window cannot reach the one song whose margin the acoustics must not
+  re-litigate. Wild World's race was 8.4% in the app and 1.4% in the harness:
+  the same code shipped 156.6 bpm to the singer and 77.4 to the gate.
+  `debug.octaveTie` records `{win, mlBimodal}` for every run.
 - **DP placement**: log-period deviation penalty (α=50) holds the pulse
   against gallops while following slow drift. The DP is smooth *by
   construction* — quality gates that need to detect loose playing must snap
@@ -178,7 +187,7 @@ Rejection is a feature. MotN-class rubato gets no grid and must keep getting
 none — grid-less play() degrades to wall-clock count-in ticks. Never "fix" a
 reject by inventing a grid.
 
-## 4. The splice family (v11–v15): where the model repairs the lattice
+## 4. The splice family (v11–v16): where the model repairs the lattice
 
 Each mechanism exists because a singer heard a specific defect. In order:
 
@@ -231,10 +240,30 @@ Each mechanism exists because a singer heard a specific defect. In order:
   other clicked "2-and-4 of every model bar" for 34 s, which is precisely
   what the singer reported as drift.
 
+- **v16 — the model's level is per span, not per song** (Wild World, "bpm
+  detection and grid are wrong"): v13 asked *once* whether the model rides
+  our eighths, and Wild World's model rides them through the choruses and
+  our quarters through the verses (bars a steady 1.57 s throughout; per-10 s
+  medians alternate 0.40/0.80 six times). The v15 bar-anchored parity views
+  alternate *strictly*, so wherever the model was already at our level the
+  carrier clicked every second beat — 55 s of the last third at half tempo,
+  19% of all intervals off by >15%. Fix: a model beat whose own
+  neighbourhood (7-interval median) is already >0.7·med joins **both**
+  alternate sets, so whichever one a span picks clicks at our rate. The
+  greedy global view was always level-adaptive by construction (that is why
+  only carrier-picked spans broke) — which also means synthetic fixtures
+  self-heal too easily to reproduce this; it is measured on the song.
+
 Splice hygiene shared by all: inserted beats come only where the model
 actually tracked (≥0.5 beats per med of span length), seams keep a 0.5·med
 minimum gap, and beat-count changes at seams are absorbed by the fermata
-segment mechanics. `debug.mlSplice` records every splice with its reason.
+segment mechanics. **v16 adds a level check at the insert**: the median
+inserted interval must land in (0.6·med, 1.6·med) or the span is refused —
+a view at the wrong level passes every steadiness gate (it is perfectly
+steady at half the tempo) and Wild World's halved last third cleared the
+count gate by a single beat. Genuine tempo seams stay in (Crowley's 88 bpm
+intro under a 107 body is 1.22×). `debug.mlSplice` records every splice with
+its reason.
 
 ## 5. The neural side: packaging and runners
 
@@ -263,7 +292,7 @@ file.
 
 The stack, cheapest first:
 
-1. **Unit fixtures** (`tests/unit/beat.test.ts`, 114): synthetic patterns
+1. **Unit fixtures** (`tests/unit/beat.test.ts`, 118): synthetic patterns
    through the real `detectBeats`. Traps found: the seeded `rnd()` is
    stateful, so building "the same" fixture twice yields different buffers —
    build once, reuse; alternate-beat synth hits once handed the tracker a
@@ -273,7 +302,13 @@ The stack, cheapest first:
    (swap `analysis.ts`, run, restore) — two of the three v15 tests passed on
    v14 at first attempt because the fixture geometry accidentally made the
    old code right; fixtures need the *failing* geometry (for v15: the
-   pre-span body must dominate the global parity pick).
+   pre-span body must dominate the global parity pick). Sometimes no
+   synthetic geometry does: v16's parity-level defect needs the *carrier*
+   branch, and every fixture that switches the model's level mid-song also
+   lets the greedy view's phase jump with it, which repairs the span on the
+   old code too. When that happens, say so in the test (keep it as a
+   no-regression guard) and put the real proof on the song — do not tune a
+   fixture until it fails for a reason you cannot name.
 2. **Library harness** (`eval/beats/run-current.mjs --dataset library`):
    the user's real projects, read-only, against `library-gt.json`. GT anchor
    types, in order of invention: `rot` (bar rotation — fragile across
@@ -316,6 +351,13 @@ The traps, each paid for:
   sacrificial-copy driver and diff `__beatDbg` against the harness debug
   dump; (c) never assume bit-determinism across decode paths, only within
   one.
+- **The model's beat level is not constant within a song.** Its *bar* head
+  is far steadier than its *beat* head: Wild World keeps 1.57 s bars from
+  end to end while its beats alternate between 0.40 s and 0.80 s six times
+  (44% of its intervals at 2× the modal one). Anything that asks "what level
+  is the model on?" must ask per span. The same statistic is also a usable
+  signal — it is exactly the songs where the model wobbles that are
+  genuinely octave-ambiguous (§3, v16).
 - **Cross-run model variance**: Beat This! emits *different grids on
   near-identical mixes* in loose material — whole beats appear and drop
   (the cached WDOA run drops two verse beats the app's own run tracks; a
@@ -342,13 +384,16 @@ The traps, each paid for:
   with whichever ran last — the "fixed" clip once rendered the *old* grid.
   Print click counts; 2× the expected count is the tell.
 
-## 7. Known-good numbers (fused, v15)
+## 7. Known-good numbers (fused, v16)
 
 - Library: no-ml 14/14, fused 16/16 (includes WDOA `beatAtMl` 0 ms ×3, TTP
-  `barAtMl` 0 ms ×3). Full-grid diff v14→v15: 13/14 songs byte-identical;
-  only Puppe changes (by design).
-- Ballroom fused: see §6 item 3. (Re-measured for v15 — the tiebreak can
-  only act inside <3% ties.)
+  `barAtMl` 0 ms ×3). Full-grid diff v15→v16: 15/16 songs byte-identical;
+  only Wild World changes (by design) — 208→242 beats, 19%→3% of intervals
+  off by >15%, and app vs harness within 20 ms end to end (was: a different
+  octave).
+- Ballroom, both modes: **identical to v15, genre for genre** — v16's octave
+  window needs a model that changed level mid-track, which 30 s clips do
+  not, and its splice level check never fires there.
 - Speed: homegrown ~2 s/song; model 0.5–1.5 s MPS.
 
 ## 8. Open problems and the research road
@@ -364,9 +409,15 @@ The traps, each paid for:
   drop-outs and give the defect-zone logic musical context.
 - **Half-time vs double-time is taste, not truth.** Puppe at 58.9 or 117.8
   is a *feel* question (the user's ear endorsed 58.9 clicks against the
-  drums). The current answer (acoustic evidence at ties, singable prior
-  otherwise) is a heuristic; a real solution would expose the octave in the
-  UI as a one-tap toggle and remember the singer's preference per song.
+  drums). Wild World is the sharper case: its drums argue for 155 (snare
+  every 0.78 s = 2 and 4 of a 1.57 s bar) while its lyric lines, its bass
+  pattern and the singer argue for 77 (one line per 3.13 s bar), and the
+  model tracked *both* for tens of seconds at a time. The current answer
+  (acoustic evidence at ties, wider tie window when the model wobbled,
+  singable prior otherwise) is a heuristic that has now been steered twice
+  by ear; a real solution would expose the octave in the UI as a one-tap
+  toggle and remember the singer's preference per song. Until it exists,
+  every octave complaint costs a detector version.
 - **The model's own limits, measured**: smooths real seams (NEM's absorbed
   eighth), half-bar-marks some songs (TTP), +1-eighth compound-meter offset,
   ornament pairs mid-lattice (Puppe 35 s), whole-beat cross-run variance in
@@ -394,3 +445,4 @@ The traps, each paid for:
 | 13 | Level-matched (halved) view, filled-interior override | TTP bridge |
 | 14 | Span-phase harmonic vote for spliced bars | TTP bass solo |
 | 15 | Acoustic octave tiebreak, per-span bar-anchored parity, `__beatDbg` | Puppe drift + app/harness divergence |
+| 16 | Per-span model level (both-set membership + insert level check), model-ambivalence-gated octave window | Wild World: wrong bpm, half-tempo last third |

@@ -307,9 +307,9 @@ the v9 slip machinery may cut without a physical interval defect (smooth
 lattices have none) under the same global chord-mass arbiter. With no
 harmonic stems at all (bare-mix input: the eval datasets) there is nothing
 to verify with and the model's own bars stand verbatim. The splice family
-(v11–v15: interior voids, leading spans, defect zones, the level-matched
-halved view, per-span parity, the span-phase bar vote), the octave
-tiebreak, and every measured trap behind them are documented in
+(v11–v16: interior voids, leading spans, defect zones, the level-matched
+halved view, per-span parity and per-span level, the span-phase bar vote),
+the octave tiebreak, and every measured trap behind them are documented in
 [BEAT-DETECTION.md](BEAT-DETECTION.md) — read that before touching
 `detectBeats`. It is
 saved as `settings.beat` (millisecond-rounded: beat times plus, when detection
