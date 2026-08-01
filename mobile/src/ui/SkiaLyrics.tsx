@@ -37,6 +37,7 @@ import {
   LinearGradient,
   matchFont,
   Text as SkText,
+  useFonts,
   type SkFont
 } from '@shopify/react-native-skia'
 import { useDerivedValue, type SharedValue } from 'react-native-reanimated'
@@ -103,28 +104,31 @@ export interface LineBox {
   rows: Row[]
 }
 
-let cachedLine: SkFont | null = null
-let cachedSmall: SkFont | null = null
 /**
- * Whatever an RN <Text> at this weight resolves to. Both halves were measured
- * against a real <Text> rather than guessed: on iOS 'System' is the name
- * CoreText answers with SF Pro ('SF Pro Text' silently does NOT resolve — it
- * measures ~2px a word), and on Android Skia's font manager matches the closest
- * STATIC face in fonts.xml where RN interpolates a variable one, so the weight
- * that renders the same stroke is a notch higher than the one asked for.
+ * The lyrics own their face rather than borrowing the system's.
+ *
+ * Asking a font manager for a weight is a lottery across the fleet: Skia
+ * matches the closest STATIC face it can find, so `800` came back a visible
+ * notch lighter than an RN <Text> at the same weight (RN interpolates a real
+ * 800 out of the variable face), and a phone whose owner has changed the
+ * system font would render the lyrics in it. This is Roboto instanced at
+ * exactly wght=800 — one file, one weight, identical on every device, Latin +
+ * Cyrillic + Greek, 155 KB, SIL Open Font License (assets/fonts/OFL.txt).
  */
-export function lyricFont(): SkFont {
-  return faces().line
-}
+const FACE = require('../../assets/fonts/Roboto-ExtraBold.ttf')
 
-function faces(): { line: SkFont; small: SkFont } {
-  if (!cachedLine) {
-    const fam = Platform.OS === 'ios' ? 'System' : 'sans-serif'
-    const weight = Platform.OS === 'ios' ? ('bold' as const) : ('900' as const)
-    cachedLine = matchFont({ fontFamily: fam, fontSize: FONT_SIZE, fontWeight: weight })
-    cachedSmall = matchFont({ fontFamily: fam, fontSize: 11 * FONT_SCALE, fontWeight: '700' })
-  }
-  return { line: cachedLine, small: cachedSmall as SkFont }
+/**
+ * Loads once and stays loaded — but not synchronously, so the column has
+ * nothing to lay out on the first frame or two after launch. Callers wait.
+ */
+export function useLyricFonts(): { line: SkFont; small: SkFont } | null {
+  const mgr = useFonts({ SingZLyric: [FACE] })
+  return useMemo(() => {
+    if (!mgr) return null
+    const pick = (size: number): SkFont =>
+      matchFont({ fontFamily: 'SingZLyric', fontSize: size }, mgr)
+    return { line: pick(FONT_SIZE), small: pick(11 * FONT_SCALE) }
+  }, [mgr])
 }
 
 /**
@@ -224,6 +228,7 @@ export function edgeAt(t: number, words: Placed[], pad: number): number {
 
 /** A row of the line being sung: the bloom, then the gradient-filled glyphs. */
 function SweepRow({
+  font,
   row,
   x,
   y,
@@ -232,6 +237,7 @@ function SweepRow({
   lit,
   dark
 }: {
+  font: SkFont
   row: Row
   x: number
   y: number
@@ -240,7 +246,6 @@ function SweepRow({
   lit: string
   dark: string
 }): React.JSX.Element {
-  const { line } = faces()
   const words = row.words
   // Every one of these reads clock.value in its OWN body. Reading it inside a
   // shared helper worklet loses reanimated's dependency capture and the mapper
@@ -256,7 +261,7 @@ function SweepRow({
       {/* The bloom: the same glyphs, blurred, lit only in a window that rides
           the fill edge. Glyph-shaped by construction — nothing here is a box,
           so there is no frame to clip it square. */}
-      <Glyphs x={x} y={y} glyphs={row.glyphs} font={line}>
+      <Glyphs x={x} y={y} glyphs={row.glyphs} font={font}>
         <BlurMask blur={GLOW_BLUR} style="normal" />
         <LinearGradient
           start={glowStart}
@@ -265,7 +270,7 @@ function SweepRow({
           positions={[0, 0.5, 1]}
         />
       </Glyphs>
-      <Glyphs x={x} y={y} glyphs={row.glyphs} font={line}>
+      <Glyphs x={x} y={y} glyphs={row.glyphs} font={font}>
         <LinearGradient start={fillStart} end={fillEnd} colors={[lit, dark]} />
       </Glyphs>
     </Group>
@@ -274,21 +279,22 @@ function SweepRow({
 
 /** Any line the sweep is not on: one flat draw per row. */
 const PlainLine = React.memo(function PlainLine({
+  font,
   box,
   x,
   baseline,
   color
 }: {
+  font: SkFont
   box: LineBox
   x: number
   baseline: number
   color: string
 }): React.JSX.Element {
-  const { line } = faces()
   return (
     <Group>
       {box.rows.map((r, i) => (
-        <Glyphs key={i} x={x} y={baseline + i * LINE_H} glyphs={r.glyphs} font={line} color={color} />
+        <Glyphs key={i} x={x} y={baseline + i * LINE_H} glyphs={r.glyphs} font={font} color={color} />
       ))}
     </Group>
   )
@@ -319,6 +325,7 @@ export default function SkiaLyrics({
   height,
   left,
   scrollTop,
+  fonts,
   clock,
   lead
 }: {
@@ -336,10 +343,12 @@ export default function SkiaLyrics({
   left: number
   /** how far the column has scrolled under the still canvas */
   scrollTop: number
+  /** the loaded faces — the column draws nothing until they arrive */
+  fonts: { line: SkFont; small: SkFont }
   clock: SharedValue<number>
   lead: number
 }): React.JSX.Element | null {
-  const { line, small } = faces()
+  const { line, small } = fonts
   const baseOff = useMemo(() => {
     const m = line.getMetrics()
     return (LINE_H - (m.descent - m.ascent)) / 2 - m.ascent
@@ -371,6 +380,7 @@ export default function SkiaLyrics({
                 b.rows.map((r, ri) => (
                   <SweepRow
                     key={ri}
+                    font={line}
                     row={r}
                     x={left}
                     y={b.y - scrollTop + baseOff + ri * LINE_H}
@@ -381,7 +391,7 @@ export default function SkiaLyrics({
                   />
                 ))
               ) : (
-                <PlainLine box={b} x={left} baseline={b.y - scrollTop + baseOff} color={color(i)} />
+                <PlainLine font={line} box={b} x={left} baseline={b.y - scrollTop + baseOff} color={color(i)} />
               )}
             </Group>
           )

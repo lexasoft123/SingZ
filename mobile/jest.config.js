@@ -3,7 +3,7 @@ module.exports = {
   setupFiles: ['<rootDir>/jest.setup.js'],
   // the bundled sample's stems and the background art are Metro assets
   moduleNameMapper: {
-    '\\.(flac|wav|mp3|png|jpg|jpeg|gif|webp)$': '<rootDir>/jest.asset.js',
+    '\\.(flac|wav|mp3|png|jpg|jpeg|gif|webp|ttf|otf)$': '<rootDir>/jest.asset.js',
   },
   // Our RN dependencies ship untranspiled ESM in lib/module; the preset's
   // pattern only exempts react-native itself, so jest chokes on the first

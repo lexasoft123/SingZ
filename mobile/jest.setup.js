@@ -81,6 +81,7 @@ jest.mock('@shopify/react-native-skia', () => {
     Glyphs: node,
     Circle: node,
     vec: (x, y) => ({ x, y }),
+    useFonts: () => ({}),
     // A fixed 16px advance per character keeps the wrap arithmetic checkable.
     matchFont: () => ({
       getGlyphIDs: (t) => [...t].map((ch) => ch.charCodeAt(0)),

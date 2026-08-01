@@ -33,7 +33,7 @@ import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper } from './bits'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
-  lyricFont,
+  useLyricFonts,
   type LyricsCue,
   type SkWord
 } from './SkiaLyrics'
@@ -384,15 +384,16 @@ export default function PlayerScreen({
    * Static by design: the canvas draws from it, the tap targets sit on it and
    * the auto-scroll aims at it, so a line change moves nothing.
    */
+  const fonts = useLyricFonts()
   const column = useMemo(
     () =>
-      lyrW > 0
-        ? layoutColumn(wordSpecs, lyricFont(), lyrW, {
+      lyrW > 0 && fonts
+        ? layoutColumn(wordSpecs, fonts.line, lyrW, {
             top: LYR_TOP,
             indents: mask ? mask.map((m) => (m ? micW : 0)) : undefined
           })
         : { boxes: [], height: 0 },
-    [wordSpecs, lyrW, micW, mask]
+    [wordSpecs, lyrW, micW, mask, fonts]
   )
 
   /**
@@ -621,20 +622,23 @@ export default function PlayerScreen({
             ))}
           </View>
         </Animated.ScrollView>
-        <SkiaLyrics
-          boxes={column.boxes}
-          words={wordSpecs}
-          current={currentLine}
-          sing={mask}
-          color={(i) => lineColor(i, mask?.[i] === true)}
-          cue={cue}
-          width={view.w}
-          height={view.h}
-          left={LYR_PAD}
-          scrollTop={scrollTop}
-          clock={clock}
-          lead={LEAD_S}
-        />
+        {fonts && (
+          <SkiaLyrics
+            fonts={fonts}
+            boxes={column.boxes}
+            words={wordSpecs}
+            current={currentLine}
+            sing={mask}
+            color={(i) => lineColor(i, mask?.[i] === true)}
+            cue={cue}
+            width={view.w}
+            height={view.h}
+            left={LYR_PAD}
+            scrollTop={scrollTop}
+            clock={clock}
+            lead={LEAD_S}
+          />
+        )}
         {lines.length === 0 && <Text style={s.noLyrics}>No lyrics in this project yet.</Text>}
       </View>
 
