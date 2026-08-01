@@ -99,6 +99,19 @@ answer your evals while you measure the phone.
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —
   re-assert per frame (count-in dots pattern in LyricsPanel).
+- **The mobile karaoke sweep is Skia** (`SkiaLine.tsx`): the sung line is one
+  gradient-painted text, edge travelling along x — desktop's
+  `background-clip: text` a layer down. It replaced ~7 nested clipped Views per
+  word, which on a 120 Hz phone fed the display 58 fps (19.6% janky) against
+  Skia's 121 (0.2%). Matching an RN `<Text>` glyph-for-glyph is fiddly and every
+  bit was measured, not guessed: multiply fontSize/lineHeight/letterSpacing by
+  `PixelRatio.getFontScale()`; wrap on the OUTER box (word **+** its
+  marginRight, the way Yoga does); Android's letter spacing widens every glyph,
+  iOS's only the gaps between them; and the face is `sans-serif`/'900' on
+  Android but `System`/'bold' on iOS — `SF Pro Text` silently does not resolve
+  (it measures ~2 px a word), and Skia's font manager matches a *static* face
+  where RN interpolates a variable one. Get any of these wrong and the line
+  re-wraps or resizes the instant it lights up.
 - **whisper.cpp `-ml 1` emits occasional backward word offsets** — sanitize
   before aligning (see `alignLines`).
 - **LRC gives line starts only** — word timing is estimated at ~12 chars/sec,

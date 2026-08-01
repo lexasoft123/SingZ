@@ -1,12 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
-import Animated, {
-  useAnimatedStyle,
-  useFrameCallback,
-  useSharedValue,
-  type SharedValue
-} from 'react-native-reanimated'
+import { useFrameCallback, useSharedValue } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
@@ -28,6 +23,7 @@ import {
 import type { LoadedProject } from '../projects'
 import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper } from './bits'
 import { perf } from './perf'
+import SkiaLine from './SkiaLine'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/player.png')
@@ -42,145 +38,6 @@ const LEAD_S = 0.15
 
 /** Space between words, in place of the ' ' that used to ride inside them. */
 const WORD_GAP = 8
-/**
- * Width of one step of the soft edge, in px. Desktop feathers the sweep over
- * 0.4em with a real gradient; RN has no gradient without a native dep, so the
- * edge is approximated by clipped copies at falling opacity. Four steps of
- * 5px ≈ a 20px ramp — about desktop's 0.8em gradient span at this font size.
- */
-const FEATHER = 5
-/** Number of soft-edge steps; the animated clip overshoots by this many. */
-const FEATHER_STEPS = 4
-
-/**
- * Pure math for the sweep — top-level worklets that take plain numbers and
- * capture NO shared values, so they are safe to call from any style body
- * (the .value reads stay in the caller, where the capture analysis sees them).
- */
-function fillWidth(t: number, w: number, start: number, end: number, step: number): number {
-  'worklet'
-  const p = Math.min(1, Math.max(0, (t - start) / (end - start)))
-  if (p <= 0) return 0
-  // Deliberately NOT clamped to w: the nested steps each give back FEATHER
-  // from the right, so the outer clip has to overshoot the word by exactly
-  // what they take. Clamping it cost the last step*FEATHER px of every word —
-  // a fully sung word kept an unlit last letter.
-  return p * w + step * FEATHER
-}
-
-function glowEnv(t: number, start: number, end: number): number {
-  'worklet'
-  const p = Math.min(1, Math.max(0, (t - start) / (end - start)))
-  if (p <= 0 || p >= 1) return 0
-  const env = 0.45 + 0.55 * (1 - Math.abs(2 * p - 1))
-  // Quantized: every opacity write re-renders the shadow stack offscreen;
-  // sixteen levels still read as breathing at a fraction of the writes.
-  return Math.round(env * 16) / 16
-}
-
-/**
- * One word of the line being sung, filling left to right as it is sung.
- *
- * The bright copy sits on top of the dim one and is revealed by a clip whose
- * width reanimated drives on the UI thread, so the fill runs at display rate
- * instead of the 100ms position poll — the poll only has to keep the clock
- * honest. The clip is a percentage of the word's own box, which is why none
- * of this needs the word measured. The halo goes on the dim layer underneath:
- * on the bright copy the clip would slice it off mid-word.
- */
-const SweepWord = React.memo(function SweepWord({
-  word,
-  start,
-  end,
-  lead,
-  lit,
-  dark,
-  clock
-}: {
-  word: string
-  start: number
-  end: number
-  lead: number
-  lit: string
-  dark: string
-  clock: SharedValue<number>
-}): React.JSX.Element {
-  // measured once per line activation; the feather is in px, not percent
-  const boxW = useSharedValue(0)
-  // EVERY style below reads clock.value and boxW.value in its own body, then
-  // hands plain numbers to the pure helpers. Do NOT factor the .value reads
-  // into a shared helper worklet: reanimated's dependency capture loses a
-  // shared value read behind an indirection, the mapper never re-fires, and
-  // the fill freezes at whatever the mount frame held. That shipped once —
-  // first word lit, nothing moved — and it passed review because per-word
-  // React commits had been re-creating the styles and faking motion at poll
-  // rate the whole time.
-  // ONE mapper drives the whole feather. Creating and destroying a
-  // useAnimatedStyle costs ~26ms per line change across a line's words
-  // (measured: 1 mapper/word 52ms, 2 → 80, 3 → 106, 5 → 148), and a line
-  // change churns every word at once — that was the 218ms stall on device.
-  // So the steps are NESTED instead of stacked: each inner clip is inset
-  // FEATHER px from its parent's right edge, so all five edges track the one
-  // animated width for free.
-  const fill = useAnimatedStyle(() => ({
-    width: fillWidth(clock.value + lead, boxW.value, start, end, FEATHER_STEPS)
-  }))
-  // The bloom breathes with the word — live only while the sweep is inside it,
-  // decided HERE on the UI thread. Deciding it in React was the phone's jerk:
-  // every word onset committed, re-rendered the line and remounted these
-  // layers, stalling the very frame the singer is watching. Now nothing
-  // mounts at word boundaries; opacity just moves.
-  const breathe = useAnimatedStyle(() => ({
-    // Yoga caps an absolute child at its parent's width, and the padded twin
-    // is wider than the word — without an explicit width the text WRAPS and a
-    // glowing fragment renders on a phantom second line. boxW is measured, so
-    // the width rides along in this worklet (4px slack against rounding).
-    width: boxW.value + 2 * 18 + 4,
-    opacity: glowEnv(clock.value + lead, start, end)
-  }))
-  return (
-    <View
-      style={{ marginRight: WORD_GAP }}
-      onLayout={(e) => {
-        boxW.value = e.nativeEvent.layout.width
-      }}
-    >
-      <Text style={[s.line, { color: dark }]}>{word}</Text>
-      {/* Glyph-shaped glow. RN clips textShadow to the Text frame — but the
-          frame is the border box, so padding buys the blur runway to fade out
-          BEFORE the edge (negative offsets put the glyphs back in place).
-          A twin of the word carries the shadow; its opacity breathes on the
-          UI thread. Rasterized: without it the shadow re-renders offscreen
-          whenever an animated sibling repaints the region. */}
-      <Animated.View style={[s.glowWrap, breathe]} pointerEvents="none">
-        <Text style={[s.line, s.glowTwin, { color: dark }]}>{word}</Text>
-      </Animated.View>
-      {/* Soft edge, nested: the animated clip reaches FEATHER_STEPS*FEATHER
-          past the sung point, and each level trims one FEATHER off its
-          parent's right edge (left:0 + right:FEATHER tracks an animated
-          parent for free). Faintest outermost, opaque innermost — the same
-          ramp the flat stack drew, from a single animated style.
-          numberOfLines/clip: an absolute child is width-capped by its parent,
-          so inside a narrowing clip the text would otherwise wrap. */}
-      <Animated.View style={[s.sweepClip, fill]} pointerEvents="none">
-        <Text style={[s.line, s.sweepText, s.fade4, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-        <View style={s.sweepStep}>
-          <Text style={[s.line, s.sweepText, s.fade3, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-          <View style={s.sweepStep}>
-            <Text style={[s.line, s.sweepText, s.fade2, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-            <View style={s.sweepStep}>
-              <Text style={[s.line, s.sweepText, s.fade1, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-              <View style={s.sweepStep}>
-                <Text style={[s.line, s.sweepText, { color: lit }]} numberOfLines={1} ellipsizeMode="clip">{word}</Text>
-              </View>
-            </View>
-          </View>
-        </View>
-      </Animated.View>
-    </View>
-  )
-})
-
 export default function PlayerScreen({
   engine,
   project,
@@ -214,11 +71,24 @@ export default function PlayerScreen({
   const [countInSt, setCountInSt] = useState<{ total: number; done: number; perBar: number } | null>(
     null
   )
+  /** Width the lyrics get, measured off a line — Skia lays out its own wrap. */
+  const [lyrW, setLyrW] = useState(0)
+  /** Width of the training mic, which shares the first row of a sung line. */
+  const [micW, setMicW] = useState(0)
 
   perf.commit()
 
   const lines = useMemo(() => project.lyrics?.lines ?? [], [project])
   const wordEnds = useMemo(() => sweepEnds(lines), [lines])
+  /**
+   * Word + sweep window per line, built once. Skia's row layout and its edge
+   * worklets key off this array's identity, so handing them a freshly mapped
+   * one every commit would tear down and rebuild every mapper twice a second.
+   */
+  const wordSpecs = useMemo(
+    () => lines.map((ln, i) => ln.words.map((w, j) => ({ w: w.w, s: w.s, e: wordEnds[i][j] }))),
+    [lines, wordEnds]
+  )
 
   /**
    * Playback clock on the UI thread. The 100ms poll resyncs it; between polls
@@ -534,6 +404,13 @@ export default function PlayerScreen({
     TEST.showSyncPanel = () => setSheet('practice')
     TEST.perfStart = () => perf.start()
     TEST.perfStop = () => perf.stop()
+    /** Lines with their sweep windows — lets a driver aim at a mid-word instant. */
+    TEST.lines = () =>
+      lines.map((l, i) => ({
+        start: l.start,
+        end: l.end,
+        words: l.words.map((w, j) => [w.w, w.s, wordEnds[i][j]] as [string, number, number])
+      }))
     TEST.clockDiag = () => ({
       pos,
       playing,
@@ -609,12 +486,17 @@ export default function PlayerScreen({
           const longGap = (i === 0 ? ln.start : ln.start - gapStart) > 5
           const waitSec =
             longGap && dt > 3 && (i === 0 || pos >= gapStart) ? Math.ceil(dt) : 0
+          /* The line the sweep is on — a canvas instead of word boxes. Needs a
+             measured width to lay out, which the first render does not have. */
+          const sweeping = isCurrent && ln.words.length > 0 && lyrW > 0
           return (
             <Pressable
               key={i}
               onPress={() => engine.seek(ln.start)}
               onLayout={(e) => {
                 lineYs.current[i] = e.nativeEvent.layout.y
+                const w = Math.round(e.nativeEvent.layout.width)
+                if (w > 0 && w !== lyrW) setLyrW(w)
               }}
               style={({ pressed }) => [
                 { marginBottom: 28 },
@@ -628,37 +510,48 @@ export default function PlayerScreen({
               {waitSec > 0 && (
                 <Text style={[s.countIn, { letterSpacing: 1 }]}>{waitSec} s</Text>
               )}
-              {/* Every line is a wrapping row of word boxes, not one Text with
-                  inline children: RN can only clip a View, so a word has to be
-                  a box of its own for the sweep. All lines are built this way,
-                  current or not — mixing the two made a line re-wrap the
-                  moment it lit up. */}
+              {/* Every line is a wrapping row of word boxes rather than one
+                  Text with inline children — the line being sung is a Skia
+                  canvas laid out to land on exactly the same wrap points, so
+                  nothing shifts at the moment it lights up. */}
               <View style={s.lineRow}>
-                {isSing && <Text style={[s.line, { fontSize: 19 }]}>🎤</Text>}
-                {ln.words.length === 0 ? (
+                {isSing && (
+                  <Text
+                    /* On the sung line the canvas spans the full width and
+                       indents its first row past this, so the mic overlays
+                       instead of pushing — otherwise a full-width canvas
+                       placed after it wraps to a row of its own. */
+                    style={[s.line, { fontSize: 19 }, sweeping && s.micLead]}
+                    onLayout={(e) => {
+                      const w = Math.round(e.nativeEvent.layout.width)
+                      if (w > 0 && w !== micW) setMicW(w)
+                    }}
+                  >
+                    🎤
+                  </Text>
+                )}
+                {sweeping ? (
+                  <SkiaLine
+                    words={wordSpecs[i]}
+                    width={lyrW}
+                    gap={WORD_GAP}
+                    indent={isSing ? micW : 0}
+                    clock={clock}
+                    lead={LEAD_S}
+                    lit={isSing ? '#ffd97a' : C.amber}
+                    dark="rgba(255,255,255,0.40)"
+                  />
+                ) : ln.words.length === 0 ? (
                   <Text style={[s.line, { color: lineColor(i, isSing) }]}>{ln.text}</Text>
                 ) : (
-                  ln.words.map((w, j) =>
-                    isCurrent ? (
-                      <SweepWord
-                        key={j}
-                        word={w.w}
-                        start={w.s}
-                        end={wordEnds[i][j]}
-                        lead={LEAD_S}
-                        lit={isSing ? '#ffd97a' : C.amber}
-                        dark="rgba(255,255,255,0.40)"
-                        clock={clock}
-                      />
-                    ) : (
-                      <Text
-                        key={j}
-                        style={[s.line, { color: lineColor(i, isSing), marginRight: WORD_GAP }]}
-                      >
-                        {w.w}
-                      </Text>
-                    )
-                  )
+                  ln.words.map((w, j) => (
+                    <Text
+                      key={j}
+                      style={[s.line, { color: lineColor(i, isSing), marginRight: WORD_GAP }]}
+                    >
+                      {w.w}
+                    </Text>
+                  ))
                 )}
               </View>
             </Pressable>
@@ -1021,12 +914,8 @@ const s = StyleSheet.create({
   line: { fontSize: 30, lineHeight: 37, fontWeight: '800', letterSpacing: -0.4 },
   /* one lyric line = a row of word boxes that wraps like text used to */
   lineRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end' },
-  /* the reveal: width is animated on the UI thread, 0%..100% of the word */
-  sweepClip: { position: 'absolute', left: 0, top: 0, bottom: 0, overflow: 'hidden' },
-  /* one step of the nested soft edge: inset FEATHER from the parent's right */
-  sweepStep: { position: 'absolute', left: 0, top: 0, bottom: 0, right: FEATHER, overflow: 'hidden' },
-  /* absolute so the narrowing clip can never re-wrap or squeeze the glyphs */
-  sweepText: { position: 'absolute', left: 0, top: 0 },
+  /* the training mic on the line being sung: over the canvas, not before it */
+  micLead: { position: 'absolute', left: 0, top: 0, zIndex: 1 },
   /* metronome count-in: dots fill beat by beat above the scrubber */
   countInFoot: {
     color: C.amber,
@@ -1047,25 +936,6 @@ const s = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10
   },
-  /* Desktop's .now halo: an amber text-shadow shaped like the glyphs. The
-     18px of padding is the blur's runway — a 12px radius is ~3% intensity by
-     the time it reaches the frame edge, so the clip never shows. */
-  glowWrap: {
-    position: 'absolute',
-    left: -18,
-    top: -18
-  },
-  glowTwin: {
-    padding: 18,
-    textShadowColor: 'rgba(255,160,40,0.85)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 12
-  },
-  /* the intermediate steps of the soft sweep edge */
-  fade1: { opacity: 0.78 },
-  fade2: { opacity: 0.55 },
-  fade3: { opacity: 0.34 },
-  fade4: { opacity: 0.16 },
   noLyrics: { color: C.faint, fontSize: 15, marginTop: 40 },
 
   foot: {
