@@ -72,6 +72,8 @@ const FEATHER = 10
 /** Half-width of the bloom window riding the fill edge, and its blur. */
 const GLOW_SPAN = 38
 const GLOW_BLUR = 7
+/** How far outside the viewport a line is still worth drawing. */
+const CULL = 120
 /** Far enough outside that neither the feather nor the bloom reaches back in. */
 const OFF = 1e5
 
@@ -366,6 +368,10 @@ export default function SkiaLyrics({
     <Canvas style={{ position: 'absolute', left: 0, top: 0, width, height }} pointerEvents="none">
       <Group>
         {boxes.map((b, i) => {
+          // Off-screen lines cost a node, a memo check and a reconcile on every
+          // commit, and while a finger is dragging there is a commit per frame.
+          // A whole song's worth of them made scrolling cost 150% of a core.
+          if (b.y + b.height < scrollTop - CULL || b.y > scrollTop + height + CULL) return null
           // The sung line is a touch bigger, the way it used to be scaled by a
           // transform on its view — about its own middle, so it grows into the
           // gaps rather than shoving its neighbours.
