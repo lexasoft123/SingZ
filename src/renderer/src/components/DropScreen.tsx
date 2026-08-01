@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ProjectListItem } from '../../../shared/types'
+import type { ProjectListItem, SyncStatus } from '../../../shared/types'
 import gdriveIcon from '../assets/gdrive.png'
 import { TRACK_META } from '../model'
 
@@ -44,6 +44,9 @@ interface Props {
   onBrowse: () => void
   onOpenProject: (songPath: string) => void
   onManageStorage: () => void
+  /** Opens the app's one Log dialog — the sync writes into it like everything
+   *  else, so there is no second window to keep in step. */
+  onShowLog: () => void
 }
 
 export default function DropScreen({
@@ -52,7 +55,8 @@ export default function DropScreen({
   openName,
   onBrowse,
   onOpenProject,
-  onManageStorage
+  onManageStorage,
+  onShowLog
 }: Props): React.JSX.Element {
   const [projects, setProjects] = useState<ProjectListItem[]>([])
   const [root, setRoot] = useState('')
@@ -61,10 +65,29 @@ export default function DropScreen({
     configured: boolean
     signedIn: boolean
     lastSync?: number | null
+    sync?: SyncStatus
+    dirtyDirs?: string[]
   }>({ configured: false, signedIn: false })
   const [syncingDir, setSyncingDir] = useState<string | null>(null)
   const [syncProg, setSyncProg] = useState<{ msg: string; frac: number } | null>(null)
   const [driveMsg, setDriveMsg] = useState<string | null>(null)
+
+  useEffect(
+    () =>
+      window.singz.onGdriveState((sync) => {
+        setGdrive((g) => ({ ...g, sync }))
+        // A run finishing (or a mark landing) changes which songs are waiting.
+        // The reply is merged, never assigned: it was asked for before whatever
+        // arrived in the meantime, and a whole-object set would put the older
+        // phase and dirty list back on screen.
+        if (sync.phase !== 'syncing') {
+          void window.singz.gdriveStatus().then((st) =>
+            setGdrive((g) => ({ ...st, sync: g.sync ?? st.sync }))
+          )
+        }
+      }),
+    []
+  )
 
   const refresh = useCallback(() => {
     void window.singz.listProjects().then((res) => {
@@ -114,6 +137,12 @@ export default function DropScreen({
     return h < 24 ? `${h} h ago` : fmtDate(new Date(gdrive.lastSync).toISOString())
   }, [gdrive.lastSync])
 
+  /**
+   * What Drive knows about this song. The old rule compared the last sync time
+   * against savedAt, which was wrong both ways: a lyrics-only change never
+   * moves savedAt (✓ on a song Drive has never seen), and a sync that failed
+   * still left ✓ on everything saved before it. The ledger knows instead.
+   */
   const cardBadge = (p: ProjectListItem): React.JSX.Element | null => {
     if (!gdrive.configured) return null
     if (syncingDir && p.dir.startsWith(syncingDir)) {
@@ -124,13 +153,25 @@ export default function DropScreen({
       )
     }
     if (!gdrive.signedIn) return null
-    const upToDate = gdrive.lastSync != null && gdrive.lastSync > Date.parse(p.savedAt)
-    return upToDate ? (
-      <span className="lib-badge" title="On Google Drive — up to date">
-        <img src={gdriveIcon} alt="" /> ✓
+    // A ✓ has to mean "Drive has this", and the only evidence of that is a sync
+    // that actually completed. An empty ledger on a library that has never
+    // synced is not evidence — it is the absence of any.
+    const everSynced = gdrive.lastSync != null
+    const waiting = !everSynced || gdrive.dirtyDirs?.includes(p.dir) || gdrive.sync?.dirty === -1
+    if (!waiting) {
+      return (
+        <span className="lib-badge" title="On Google Drive — up to date">
+          <img src={gdriveIcon} alt="" /> ✓
+        </span>
+      )
+    }
+    const stuck = gdrive.sync?.phase === 'blocked' || gdrive.sync?.lastErrorKind === 'fatal'
+    return stuck ? (
+      <span className="lib-badge dim" title={`Not on Google Drive yet — ${gdrive.sync?.lastError ?? 'sync failed'}`}>
+        <img src={gdriveIcon} alt="" /> !
       </span>
     ) : (
-      <span className="lib-badge dim" title="Changed since the last Drive sync">
+      <span className="lib-badge dim" title="Waiting to reach Google Drive">
         <img src={gdriveIcon} alt="" /> …
       </span>
     )
@@ -251,6 +292,11 @@ export default function DropScreen({
                     </span>
                   )}
                 </div>
+                {gdrive.signedIn && (
+                  <button type="button" className="src-link" onClick={onShowLog}>
+                    Sync log
+                  </button>
+                )}
                 <button
                   type="button"
                   className="src-link"
