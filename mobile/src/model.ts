@@ -260,6 +260,39 @@ export function singMask(lineCount: number, hear: number, sing: number): boolean
   return Array.from({ length: lineCount }, (_, i) => i % cycle >= hear)
 }
 
+/**
+ * A gap this short before the next word is the aligner's slack rather than a
+ * rest — the karaoke sweep runs through it so the fill never freezes mid-line.
+ * Longer gaps are a real breath or a held note: the word stays lit instead of
+ * crawling across the silence. (LRC word times are contiguous by
+ * construction, so this only ever engages on whisper/CTC timings.)
+ * Desktop parity: src/renderer/src/components/LyricsPanel.tsx.
+ */
+const WORD_BRIDGE_S = 0.35
+/** Whisper -ml 1 can emit e <= s; never divide by zero or sweep backwards. */
+const MIN_WORD_S = 0.05
+
+/** Per word, the moment its sweep should reach the end of the word. */
+export function sweepEnds(lines: LyricLine[]): number[][] {
+  return lines.map((l) =>
+    l.words.map((w, i) => {
+      const to = i + 1 < l.words.length ? l.words[i + 1].s : l.end
+      const gap = to - w.e
+      return Math.max(gap > 0 && gap < WORD_BRIDGE_S ? to : w.e, w.s + MIN_WORD_S)
+    })
+  )
+}
+
+/**
+ * How far the sweep has crossed a word at time `t`, 0..1. Phones quantize this
+ * to whole glyphs: at 30px there is no sub-glyph fill without a mask layer,
+ * and across the real library a word runs ~107ms per glyph anyway, so the
+ * 100ms position poll already lands about one letter at a time.
+ */
+export function sweepAt(t: number, start: number, end: number): number {
+  return Math.min(1, Math.max(0, (t - start) / (end - start)))
+}
+
 export const TRACK_META: Record<string, { label: string; color: string }> = {
   vocals: { label: 'Vocals', color: '#ff5d66' },
   drums: { label: 'Drums', color: '#f2c14e' },

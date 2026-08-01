@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AlignCheck,
   LyricLine,
@@ -50,6 +50,28 @@ interface Props {
   onCancel: () => void
 }
 
+/**
+ * A gap this short before the next word is the aligner's slack rather than a
+ * rest — the sweep runs through it so the fill never freezes mid-line. Longer
+ * gaps are a real breath or a held note: the word stays lit instead of
+ * crawling across the silence. (LRC word times are contiguous by
+ * construction, so this only ever engages on whisper/CTC timings.)
+ */
+const WORD_BRIDGE_S = 0.35
+/** Whisper -ml 1 can emit e <= s; never divide by zero or sweep backwards. */
+const MIN_WORD_S = 0.05
+
+/** Per word, the moment its sweep should reach the end of the glyphs. */
+function sweepEnds(lines: LyricLine[]): number[][] {
+  return lines.map((l) =>
+    l.words.map((w, i) => {
+      const to = i + 1 < l.words.length ? l.words[i + 1].s : l.end
+      const gap = to - w.e
+      return Math.max(gap > 0 && gap < WORD_BRIDGE_S ? to : w.e, w.s + MIN_WORD_S)
+    })
+  )
+}
+
 function findLine(lines: LyricLine[], t: number, from: number): number {
   if (from >= 0 && from < lines.length) {
     const l = lines[from]
@@ -90,6 +112,7 @@ export default function LyricsPanel({
   const countRef = useRef<{ el: HTMLElement | null; n: number }>({ el: null, n: 0 })
 
   const lines = lyrics.status === 'ready' ? lyrics.lines : null
+  const ends = useMemo(() => (lines ? sweepEnds(lines) : null), [lines])
 
   useEffect(() => {
     setView('lyrics')
@@ -111,10 +134,12 @@ export default function LyricsPanel({
       const li = findLine(lines, pos, last)
       if (li !== last) {
         last = li
+        // a same-shaped state string on a different line must not be skipped
+        wordStateRef.current = ''
         setCurrent(li)
         lineRefs.current[li]?.scrollIntoView({ block: 'center', behavior: 'smooth' })
       }
-      if (li >= 0) {
+      if (li >= 0 && ends) {
         const el = lineRefs.current[li]
         if (el) {
           const words = lines[li].words
@@ -123,10 +148,28 @@ export default function LyricsPanel({
           for (let i = 0; i < words.length && i < spans.length; i++) {
             state += pos >= words[i].e ? 's' : pos >= words[i].s ? 'n' : '.'
           }
+          // Only the word being sung carries a class now — sung/unsung is the
+          // sweep's job. The 's' state still matters: it changes the string,
+          // which is what clears the glow when a word finishes.
           if (state !== wordStateRef.current) {
             wordStateRef.current = state
             for (let i = 0; i < spans.length; i++) {
-              spans[i].className = state[i] === 's' ? 'sung' : state[i] === 'n' ? 'now' : ''
+              spans[i].className = state[i] === 'n' ? 'now' : ''
+            }
+          }
+          // Sweep every word of the line to its own progress. Only the word
+          // being sung actually moves; the rest settle at 0 or 1 and are
+          // skipped by the dataset guard. Quantized to 1/200 so a long held
+          // note stops invalidating style on frames it could not change.
+          const lineEnds = ends[li]
+          for (let i = 0; i < words.length && i < spans.length; i++) {
+            const span = lineEnds[i] - words[i].s
+            const raw = (pos - words[i].s) / span
+            const p = String(Math.round(Math.min(1, Math.max(0, raw)) * 200) / 200)
+            const sp = spans[i] as HTMLElement
+            if (sp.dataset.p !== p) {
+              sp.dataset.p = p
+              sp.style.setProperty('--p', p)
             }
           }
         }
@@ -180,7 +223,7 @@ export default function LyricsPanel({
       countRef.current.el?.classList.remove('count-1', 'count-2', 'count-3', 'count-sec')
       countRef.current = { el: null, n: 0 }
     }
-  }, [engine, lines, view])
+  }, [engine, lines, ends, view])
 
   const search = async (): Promise<void> => {
     setBusy(true)
@@ -417,8 +460,12 @@ export default function LyricsPanel({
                     onClick={() => engine.seek(l.start)}
                     title="Jump here"
                   >
+                    {/* the space rides outside the span: inside it, the sweep
+                        would only finish a word past its last glyph */}
                     {l.words.map((w, wi) => (
-                      <span key={wi}>{w.w} </span>
+                      <Fragment key={wi}>
+                        <span>{w.w}</span>{' '}
+                      </Fragment>
                     ))}
                   </p>
                 ))}
