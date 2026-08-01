@@ -78,6 +78,26 @@ export interface BeatInfo {
   detVersion?: number
 }
 
+/**
+ * The song's melody line: the pitch the singer is aiming at, one f0 per
+ * analysis hop, tracked from the vocals stem. Stored because tracking a song
+ * costs seconds of CPU on every open and the answer never changes — and
+ * because the phones have no pitch tracker of their own, exactly like the
+ * beat grid.
+ *
+ * `f0` is a space-separated token stream over consecutive frames: an integer
+ * is one voiced frame's pitch in cents above 55 Hz, `xN` (or bare `x`) is N
+ * unvoiced frames. Frame i covers `i * hopSec` seconds. Encoding lives in
+ * `renderer/audio/melody.ts` — read it before parsing this by hand.
+ */
+export interface MelodyInfo {
+  /** Detector stamp — an older stamp re-tracks the song on load. */
+  detVersion: number
+  /** Seconds per frame (the tracker's hop; ~0.025). */
+  hopSec: number
+  f0: string
+}
+
 /** Metronome preferences: click along playback, count-in bars, click loudness. */
 export interface MetronomeConfig {
   click: boolean
@@ -114,6 +134,8 @@ export interface ProjectSettings {
   tempo?: number
   /** Beat track driving the metronome and count-in. */
   beat?: BeatInfo
+  /** Tracked vocal melody line drawn in the pitch strip. */
+  melody?: MelodyInfo
   /** Metronome preferences (click on/off, count-in bars, loudness 0–1). */
   metronome?: MetronomeConfig
   /** Saved timeline zoom viewport (seconds). */

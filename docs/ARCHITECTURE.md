@@ -225,6 +225,19 @@ voiced/unvoiced states decodes the melody path, then octave errors fold to a
 running median and incredible runs drop (`pyin.ts` + `pitch.worker.ts`;
 tuned against synced-lyrics ground truth). Key: Krumhansl-Schmuckler over the
 melody's pitch-class histogram.
+The tracked line is saved as `settings.melody` (`melody.ts`): per-frame cents
+above 55 Hz as a token stream — an integer per voiced frame, `xN` for N
+unvoiced ones — which puts a four-minute song around 20 kB of readable
+project.json, next to stems measured in tens of megabytes. A song then opens
+with its pitch strip already drawn instead of paying seconds of pYIN every
+time, and the phones (no tracker of their own, exactly as with the beat grid)
+get the same line the singer practised against. Stored lines carry
+`detVersion`, and one written by an older tracker is silently re-tracked on
+load — so `PITCH_DETECT_VERSION` must be bumped with any change to pyin's
+parameters, the worker's framing, or the cleaner's gates, or every project in
+the library keeps drawing the old line forever. The corrected line saves
+itself into an existing project (never creating one), on the same deferred
+save as a re-detected grid.
 Beat track (`detectBeats`): onset flux over the drums stem, local-mean
 normalized, then windowed autocorrelation peaks voted into one tempo family
 (single-peak picks land on dotted/compound relatives on real drums), the

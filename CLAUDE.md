@@ -184,6 +184,15 @@ answer your evals while you measure the phone.
 - **zsh**: `status` is a read-only variable in scripts.
 - **npm majors**: `@vitejs/plugin-react` must match electron-vite's supported
   Vite major (currently plugin ^5 with electron-vite 5 / Vite 7).
+- **Stored analyses are versioned, and the bump is on you** — the beat grid
+  (`settings.beat`, `BEAT_DETECT_VERSION`) and the melody line
+  (`settings.melody`, `PITCH_DETECT_VERSION` in `audio/melody.ts`) are saved
+  into project.json because the phones have neither detector and re-running
+  them costs seconds per open. Both re-derive on load only when their stamp is
+  older than the current one, so touching pyin/the pitch worker's framing or
+  cleaner — or `detectBeats` — WITHOUT bumping the matching constant leaves
+  every saved project drawing the old answer forever. The corrected result
+  saves itself into an existing project (never creating one under a raw file).
 - **Project format v2 = FLAC stems** (~4x smaller, lossless; splitter cache
   stays WAV). v1 WAV projects auto-upgrade on open (`migrateProjectToV2`);
   readers must keep accepting both (`stemFile()` prefers .flac). Encoding uses
