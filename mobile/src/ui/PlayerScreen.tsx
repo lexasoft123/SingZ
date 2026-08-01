@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
-import { useFrameCallback, useSharedValue } from 'react-native-reanimated'
+import Animated, {
+  useAnimatedScrollHandler,
+  useFrameCallback,
+  useSharedValue
+} from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
@@ -23,7 +27,12 @@ import {
 import type { LoadedProject } from '../projects'
 import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper } from './bits'
 import { perf } from './perf'
-import SkiaLine from './SkiaLine'
+import SkiaLyrics, {
+  layoutColumn,
+  lyricFont,
+  type LyricsCue,
+  type SkWord
+} from './SkiaLyrics'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/player.png')
@@ -36,8 +45,11 @@ const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
  */
 const LEAD_S = 0.15
 
-/** Space between words, in place of the ' ' that used to ride inside them. */
-const WORD_GAP = 8
+/** Lyric column inset, and the runway above it the current line scrolls to. */
+const LYR_PAD = 26
+const LYR_TOP = 250
+const LYR_BOTTOM = 300
+
 export default function PlayerScreen({
   engine,
   project,
@@ -71,8 +83,9 @@ export default function PlayerScreen({
   const [countInSt, setCountInSt] = useState<{ total: number; done: number; perBar: number } | null>(
     null
   )
-  /** Width the lyrics get, measured off a line — Skia lays out its own wrap. */
-  const [lyrW, setLyrW] = useState(0)
+  /** Lyric viewport — the canvas is this size and the column scrolls under it. */
+  const [view, setView] = useState({ w: 0, h: 0 })
+  const lyrW = Math.max(0, view.w - 2 * LYR_PAD)
   /** Width of the training mic, which shares the first row of a sung line. */
   const [micW, setMicW] = useState(0)
 
@@ -85,8 +98,25 @@ export default function PlayerScreen({
    * worklets key off this array's identity, so handing them a freshly mapped
    * one every commit would tear down and rebuild every mapper twice a second.
    */
-  const wordSpecs = useMemo(
-    () => lines.map((ln, i) => ln.words.map((w, j) => ({ w: w.w, s: w.s, e: wordEnds[i][j] }))),
+  const wordSpecs = useMemo<SkWord[][]>(
+    () =>
+      lines.map((ln, i) => {
+        if (ln.words.length > 0) {
+          return ln.words.map((w, j) => ({ w: w.w, s: w.s, e: wordEnds[i][j] }))
+        }
+        // A line the aligner left without word times still has to wrap and
+        // still has to sweep: split it and give each piece a share of the line
+        // proportional to its length.
+        const parts = ln.text.split(/\s+/).filter(Boolean)
+        const chars = parts.reduce((n, p) => n + p.length, 0) || 1
+        const span = Math.max(0.05, ln.end - ln.start)
+        let t = ln.start
+        return parts.map((p) => {
+          const s0 = t
+          t += (p.length / chars) * span
+          return { w: p, s: s0, e: t }
+        })
+      }),
     [lines, wordEnds]
   )
 
@@ -345,14 +375,34 @@ export default function PlayerScreen({
     return cur
   }, [lines, lpos])
 
+  /**
+   * The whole column, laid out once per song (and per width / mic change).
+   * Static by design: the canvas draws from it, the tap targets sit on it and
+   * the auto-scroll aims at it, so a line change moves nothing.
+   */
+  const column = useMemo(
+    () =>
+      lyrW > 0
+        ? layoutColumn(wordSpecs, lyricFont(), lyrW, {
+            top: LYR_TOP,
+            indents: mask ? mask.map((m) => (m ? micW : 0)) : undefined
+          })
+        : { boxes: [], height: 0 },
+    [wordSpecs, lyrW, micW, mask]
+  )
+
   const scrollRef = useRef<ScrollView>(null)
-  const lineYs = useRef<number[]>([])
+  /** Scroll offset on the UI thread — the canvas stays put and the column moves. */
+  const scrollY = useSharedValue(0)
+  const onScroll = useAnimatedScrollHandler((e) => {
+    scrollY.value = e.contentOffset.y
+  })
   useEffect(() => {
-    const y = lineYs.current[currentLine]
-    if (currentLine >= 0 && y !== undefined) {
-      scrollRef.current?.scrollTo({ y: Math.max(0, y - 250), animated: true })
+    const b = column.boxes[currentLine]
+    if (currentLine >= 0 && b) {
+      scrollRef.current?.scrollTo({ y: Math.max(0, b.y - LYR_TOP), animated: true })
     }
-  }, [currentLine])
+  }, [currentLine, column])
 
   const toggleTrainStem = (id: string): void => {
     setTrainCfg((c) => {
@@ -452,6 +502,27 @@ export default function PlayerScreen({
   if (ktPitch !== 0) ktBadge.push(ktPitch > 0 ? `+${ktPitch}♯` : `${ktPitch}♭`)
   if (ktTempo !== 100) ktBadge.push(`${ktTempo}%`)
 
+  /**
+   * The count-in above the line the singer is waiting for: dots through the
+   * last 3s of a long gap (desktop parity: gap >= 3s, dots = ceil(seconds
+   * left)), and before that a plain countdown on a long instrumental. The FIRST
+   * line always counts in when there is any runway — play was just pressed and
+   * the singer needs orientation even on a quick start. Only one gap can be
+   * live at a time, so the column carries one of these, not one per line.
+   */
+  const cue = useMemo<LyricsCue>(() => {
+    for (let i = 0; i < lines.length; i++) {
+      const gapStart = i === 0 ? 0 : lines[i - 1].end
+      const dt = lines[i].start - pos
+      const gapOk = i === 0 ? lines[i].start >= 1.2 : lines[i].start - gapStart >= 3
+      const dots = gapOk && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
+      const longGap = (i === 0 ? lines[i].start : lines[i].start - gapStart) > 5
+      const wait = longGap && dt > 3 && (i === 0 || pos >= gapStart) ? Math.ceil(dt) : 0
+      if (dots > 0 || wait > 0) return { line: i, dots, wait }
+    }
+    return { line: -1, dots: 0, wait: 0 }
+  }, [lines, pos])
+
   /* ------- lyric line coloring ------- */
   const lineColor = (i: number, isSing: boolean): string => {
     if (i === currentLine) return C.bright
@@ -464,64 +535,34 @@ export default function PlayerScreen({
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
 
-      {/* lyrics */}
-      <ScrollView
-        ref={scrollRef}
+      {/* Lyrics. The column is ONE canvas the size of the viewport, held
+          still while a transform moves the lines under it — a canvas as tall as
+          a real song would be a 13000px surface, past what plenty of these
+          phones will allocate. What actually scrolls is a spacer carrying the
+          tap targets, so the sweep costs no views at all. */}
+      <View
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingTop: 250, paddingBottom: 300, paddingHorizontal: 26 }}
+        onLayout={(e) => {
+          const { width, height } = e.nativeEvent.layout
+          if (width !== view.w || height !== view.h)
+            setView({ w: Math.round(width), h: Math.round(height) })
+        }}
       >
-        {lines.map((ln, i) => {
-          const isCurrent = i === currentLine
-          const isSing = mask?.[i] === true
-          // count-in dots during the last 3s of a long gap before this line
-          // (desktop parity: gap >= 3s, dots = ceil(seconds left)). The FIRST
-          // line always counts in when there is any runway — the singer just
-          // pressed play and needs orientation even on a quick start.
-          const gapStart = i === 0 ? 0 : lines[i - 1].end
-          const dt = ln.start - pos
-          const gapOk = i === 0 ? ln.start >= 1.2 : ln.start - gapStart >= 3
-          const countIn = gapOk && dt > 0 && dt <= 3 ? Math.min(3, Math.ceil(dt)) : 0
-          // long instrumental pause: tick the seconds down until the dots
-          // engage at 3 s (only for the gap the playhead is actually in)
-          const longGap = (i === 0 ? ln.start : ln.start - gapStart) > 5
-          const waitSec =
-            longGap && dt > 3 && (i === 0 || pos >= gapStart) ? Math.ceil(dt) : 0
-          /* The line the sweep is on — a canvas instead of word boxes. Needs a
-             measured width to lay out, which the first render does not have. */
-          const sweeping = isCurrent && ln.words.length > 0 && lyrW > 0
-          return (
-            <Pressable
-              key={i}
-              onPress={() => engine.seek(ln.start)}
-              onLayout={(e) => {
-                lineYs.current[i] = e.nativeEvent.layout.y
-                const w = Math.round(e.nativeEvent.layout.width)
-                if (w > 0 && w !== lyrW) setLyrW(w)
-              }}
-              style={({ pressed }) => [
-                { marginBottom: 28 },
-                isCurrent && { transform: [{ scale: 1.03 }] },
-                pressed && { opacity: 0.6 }
-              ]}
-            >
-              {countIn > 0 && (
-                <Text style={s.countIn}>{Array(countIn).fill('●').join(' ')}</Text>
-              )}
-              {waitSec > 0 && (
-                <Text style={[s.countIn, { letterSpacing: 1 }]}>{waitSec} s</Text>
-              )}
-              {/* Every line is a wrapping row of word boxes rather than one
-                  Text with inline children — the line being sung is a Skia
-                  canvas laid out to land on exactly the same wrap points, so
-                  nothing shifts at the moment it lights up. */}
-              <View style={s.lineRow}>
-                {isSing && (
+        <Animated.ScrollView
+          ref={scrollRef as React.Ref<never>}
+          onScroll={onScroll}
+          scrollEventThrottle={16}
+        >
+          <View style={{ height: column.height + LYR_BOTTOM }}>
+            {column.boxes.map((b, i) => (
+              <Pressable
+                key={i}
+                onPress={() => engine.seek(lines[i].start)}
+                style={{ position: 'absolute', left: LYR_PAD, right: LYR_PAD, top: b.y, height: b.height }}
+              >
+                {mask?.[i] === true && (
                   <Text
-                    /* On the sung line the canvas spans the full width and
-                       indents its first row past this, so the mic overlays
-                       instead of pushing — otherwise a full-width canvas
-                       placed after it wraps to a row of its own. */
-                    style={[s.line, { fontSize: 19 }, sweeping && s.micLead]}
+                    style={s.micMark}
                     onLayout={(e) => {
                       const w = Math.round(e.nativeEvent.layout.width)
                       if (w > 0 && w !== micW) setMicW(w)
@@ -530,35 +571,26 @@ export default function PlayerScreen({
                     🎤
                   </Text>
                 )}
-                {sweeping ? (
-                  <SkiaLine
-                    words={wordSpecs[i]}
-                    width={lyrW}
-                    gap={WORD_GAP}
-                    indent={isSing ? micW : 0}
-                    clock={clock}
-                    lead={LEAD_S}
-                    lit={isSing ? '#ffd97a' : C.amber}
-                    dark="rgba(255,255,255,0.40)"
-                  />
-                ) : ln.words.length === 0 ? (
-                  <Text style={[s.line, { color: lineColor(i, isSing) }]}>{ln.text}</Text>
-                ) : (
-                  ln.words.map((w, j) => (
-                    <Text
-                      key={j}
-                      style={[s.line, { color: lineColor(i, isSing), marginRight: WORD_GAP }]}
-                    >
-                      {w.w}
-                    </Text>
-                  ))
-                )}
-              </View>
-            </Pressable>
-          )
-        })}
+              </Pressable>
+            ))}
+          </View>
+        </Animated.ScrollView>
+        <SkiaLyrics
+          boxes={column.boxes}
+          words={wordSpecs}
+          current={currentLine}
+          sing={mask}
+          color={(i) => lineColor(i, mask?.[i] === true)}
+          cue={cue}
+          width={view.w}
+          height={view.h}
+          left={LYR_PAD}
+          scrollY={scrollY}
+          clock={clock}
+          lead={LEAD_S}
+        />
         {lines.length === 0 && <Text style={s.noLyrics}>No lyrics in this project yet.</Text>}
-      </ScrollView>
+      </View>
 
       {/* header (scrim fades into the lyrics — no hard edge) */}
       <View
@@ -911,11 +943,9 @@ const s = StyleSheet.create({
   youChip: { backgroundColor: C.amber, borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },
   youChipText: { color: C.amberInk, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
 
-  line: { fontSize: 30, lineHeight: 37, fontWeight: '800', letterSpacing: -0.4 },
-  /* one lyric line = a row of word boxes that wraps like text used to */
-  lineRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end' },
-  /* the training mic on the line being sung: over the canvas, not before it */
-  micLead: { position: 'absolute', left: 0, top: 0, zIndex: 1 },
+  /* the training mic, sharing the first row of a sung line with the canvas —
+     the only lyric glyph left in RN, because a system face has no emoji */
+  micMark: { position: 'absolute', left: 0, top: 0, fontSize: 19, lineHeight: 37 },
   /* metronome count-in: dots fill beat by beat above the scrubber */
   countInFoot: {
     color: C.amber,
