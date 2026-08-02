@@ -138,7 +138,8 @@
    "rot": [
     0
    ],
-   "barAt": 193.596
+   "barAt": 193.596,
+   "scoreNote": "TWO official transcriptions agree (bass tab + piano/vocal, both quarter = 61, both placing every mark identically): 4/4 with a 2/4 at bar 26 (\"weitergeh'n\" -> Interlude) and bar 39 (\"Schon ist der Moment vorbei\" -> Chorus) — chorus/section exits again, like every other odd bar in the catalog. We ship 123.0 bpm, exactly DOUBLE the notation (the Puppe situation again — Rammstein ballads notated slow, shipped double; mlBimodal measured 0.12 here). THE STRUCTURAL INSIGHT THIS SONG ADDS: at our doubled level a notated 2/4 spans exactly ONE of our 4-beat bars, so the phase shift is SELF-ABSORBING — our grid crosses both 2/4s without any parity error, which is why the sweep saw no swallowed-bar signature here. The octave decision changes which meter changes are dangerous: at notated tempo (Wild World, FaS) a 2/4 breaks the grid; at double (Zeit, Puppe) it vanishes. A future bar decoder must reason about meter AT THE NOTATED LEVEL. The 8 stretched bars + 13 holes the sweep flagged live in the piano-only intro/outro (9 bars each, near-silent bass/drums — fill-tracking territory), not at the 2/4s. No anchors minted: nothing here is red at our level."
   },
   "Cat Stevens — Father and Son": {
    "bpb": 4,
