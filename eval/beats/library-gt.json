@@ -44,7 +44,8 @@
    "rot": [
     0
    ],
-   "barAt": 151.917
+   "barAt": 151.917,
+   "scoreNote": "THE ENTRY ABOVE (bpb 4) IS WRONG — and this was on the books as a clean anchor. Official Sabaton tab: the song OPENS IN 6/4 and carries ELEVEN 6/4 bars among 123 (bars 1, 6, 10 in the intro; then 38/42, 68/72, 109/113, 117/121 — a 6/4 every 4th bar, TWICE per chorus, at all four chorus/outro sites). Everything else is 4/4. quarter = 125. AUDIO-VERIFIED, and unusually cleanly: the eight chorus/outro 6/4 bars are exactly the lyrics \"As we make our way\" and \"On the shores of\", and in OUR recording those pairs are 8.70/8.72/8.66/8.70 s apart against the score's predicted 8.64 s (a 6/4 plus three 4/4 = 18 quarters at 0.48 s). The score-to-recording offset drifts smoothly 0.87 -> 1.95 s across the song (the a cappella intro is not sung in strict time, so score seconds do not transfer — anchor on the LYRIC, never on absolute score time). SECOND DEFECT: we ship 62.26 bpm against notated 125 — ratio 2.01, HALF. So at our level a notated 4/4 bar is 2 of our beats and a 6/4 is 3, and we emit no downbeats[] at all (scalar rotation), so none of the eleven changes can even be expressed. TWO anchor songs now measure exactly half their notated tempo, both Sabaton, both landing near 62.3 (this and Going To The Run at 62.3/124) — and note the singable prior FAVOURS the notated tempo here (0.92 at 125 vs 0.46 at 62.5), so the prior is not what chose the half. Worth investigating as a class rather than two coincidences. AUTOMATION TRAP: UG's own api-web meta endpoint reports tempo 120 for this tab; the printed marking, the strumming metadata and the score's bar arithmetic all say 125. Never scrape that field. Score typo: bar 33 is labelled \"Pre-horus\" — section-name matching will miss it."
   },
   "Puppe": {
    "bpb": 4,
