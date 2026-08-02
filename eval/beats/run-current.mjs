@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
-import { evaluateTrack } from './metrics.mjs'
+import { detectorBarLenAt, evaluateTrack } from './metrics.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = dirname(dirname(HERE))
@@ -233,10 +233,16 @@ async function runLibrary(detect) {
         const near = bars.reduce((m, t) => Math.min(m, Math.abs(t - spec.barAt)), Infinity)
         status = near < 0.25 * med ? 'pass' : 'FAIL'
       }
-    } else {
+    } else if (Array.isArray(spec.rot)) {
       checkable++
       expected = `rot ${JSON.stringify(spec.rot)} / ${spec.bpb}`
       status = got && got.bpb === spec.bpb && spec.rot.includes(got.rot) ? 'pass' : 'FAIL'
+    } else {
+      // An entry may carry only a note plus secondary anchors (barLenAt) —
+      // a song whose score we have but whose bar TIMES are not ear-verified
+      // yet. Report it, do not gate on it.
+      status = 'report-only'
+      expected = 'no stable GT'
     }
     if (status === 'pass') pass++
     if (status === 'FAIL') fail++
@@ -250,6 +256,21 @@ async function runLibrary(detect) {
     // the span-phase vote's regression net (TTP's bass solo). Bar times are
     // chord-anchored by the vote, so they hold across model runs even where
     // the lattice itself can shift a beat.
+    // barLenAt: the bar covering time t must be N beats long — the ONLY
+    // anchor that can catch an un-modelled meter change, which a uniform-4
+    // grid hides completely (it reports a 4-beat bar and simply stretches
+    // it). Notated in the published score and verified against the audio.
+    if (Array.isArray(spec?.barLenAt) && spec.barLenAt.length > 0) {
+      checkable++
+      const got2 = spec.barLenAt.map((a) => ({ ...a, saw: det ? detectorBarLenAt(det, a.t) : null }))
+      const ok = got2.every((a) => a.saw === a.n)
+      if (ok) pass++
+      else fail++
+      console.log(
+        `${''.padEnd(24)} ${(ok ? 'pass' : 'FAIL').padEnd(12)} barLenAt: ` +
+        got2.map((a) => `${a.t}s want ${a.n} got ${a.saw ?? 'none'}`).join(', ')
+      )
+    }
     if (Array.isArray(spec?.barAtMl) && spec.barAtMl.length > 0) {
       if (ml && det) {
         checkable++

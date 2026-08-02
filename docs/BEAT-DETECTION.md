@@ -447,7 +447,38 @@ The traps, each paid for:
 
 ## 8. Open problems and the research road
 
-- **Phase 3 (agreed, not started): bar-pointer decoder + manual-pin UI.**
+- **Phase 3, MEASURED AND KILLED in its decoder form (2026-08-02).** Five
+  published scores showed the detector forcing songs into meters they never
+  had (Father and Son 5/4 + three 3/4; Wild World a 2/4 at each verse end;
+  Nothing Else Matters six 3/8; WDOA one 2/4 — Turn The Page uniform, the
+  counter-example). The obvious answer was a Viterbi over bar boundaries with
+  lengths 3/4/5, scored by the model's downbeat head. It does not work, and
+  the reason is not fixable by tuning:
+  - Swept the change penalty 1.0 → 5.0: **the answer never moves.** Father and
+    Son never finds its verified 5/4; Turn The Page always invents the same
+    four odd bars, at exactly the spots where our own tracker wobbles. The
+    solution is insensitive to the prior, so the evidence is driving it.
+  - Feeding **raw logits instead of the rounded probabilities changed almost
+    nothing** — Father and Son identical, Wild World slightly worse. Stage 1's
+    logit win was `d' 0.54` PER BEAT, decisive only aggregated over hundreds of
+    beats. Choosing an octave aggregates. "Is THIS beat a bar line" does not.
+  - The direct measurement, and the real answer: at Father and Son's notated
+    5/4 downbeat the model's downbeat logit is **+3.14**, no stronger than its
+    neighbours (+5.35 two beats later); at the following notated bar line it is
+    **+1.03, the weakest positive in the region**. The head **alternates on a
+    half-bar period** (every 2 of our beats) from end to end. It cannot express
+    a 5-beat bar and does not mark where one is.
+  This closes a circle with §3 and §4: on this material the bass alternates
+  root-fifth, the guitar strum autocorrelates at lag 2 not lag 4, the chord
+  symbols change twice per bar, and the model marks half-bars. **The entire
+  accompaniment is 2-beat periodic.** The 4-and-5-bar structure lives in the
+  vocal phrasing and on the page, nowhere in the backing. No amount of cue
+  engineering over the accompaniment will recover it — that is a property of
+  the music, not a gap in the code.
+  What remains open became §9 — the form-and-voice architecture: manual
+  meter/bar pins, vocal-phrase-driven bars, score import, and a form layer,
+  fused with (not replacing) the accompaniment stack.
+- **Phase 3's other half (still worth doing): manual-pin UI.**
   The honest path to *shrinking* the homegrown code rather than growing it:
   a small decoder over the model's probability heads constrained by
   stem-derived anchors, plus first-class user pins ("this is a 1") that
@@ -478,6 +509,211 @@ The traps, each paid for:
   answer than the 3% tiebreak would be canonicalizing the decode itself
   (ship one resampler for analysis input) — costly, but it would collapse
   §6's deepest trap class entirely.
+
+## 9. Phase 5 — the form-and-voice architecture (researched 2026-08-02)
+
+The §8 kill result reframed the problem: on the failing songs the entire
+accompaniment is 2-beat periodic, so the bar/meter question cannot be answered
+by any single stream — but each stream answers *part* of it perfectly. The
+next architecture is a **fusion, not a replacement** ("complex, music and
+vocal" — the user's phrase, and the right one): the accompaniment keeps what
+it is provably good at, and three new layers add what it provably lacks.
+
+### What the survey found (and ruled out)
+
+Nothing off the shelf localizes meter changes per bar:
+
+- **Beat This!** (ours) is trained *with* time-signature-change data, yet its
+  downbeat head alternates on half-bars end to end on this material (§8) — it
+  cannot express a 5-beat bar. [arxiv.org/html/2407.21658v1]
+- **Foundation-model trackers** (BeatFM, HingeNet, Aug 2025; MERT/MusicFM
+  probes) reach beat F ~0.90, downbeat F ~0.80 — *below* Beat This!. No leap
+  there. [arxiv.org/html/2508.09790]
+- **Time-signature detection** literature is global classification (Meter2800
+  dataset, ResNet18 — "which meter is this track in"), not localization
+  ("which bar is the 5"). [link.springer.com/article/10.1186/s13636-024-00346-6]
+- **Symbolic/performance-MIDI transformers** (T5 over note events, 2025)
+  degrade exactly on irregular meters; downbeat F 0.77 on clean piano.
+  [arxiv.org/html/2507.00466v1]
+- **BeatNet** tracks meter online via particle filtering — the right *shape*
+  (meter as a tracked state) but weaker overall than what we ship.
+  [github.com/mjhydri/BeatNet]
+- **"Skip That Beat"** augments training for 2/4 and 3/4 — a training-side
+  answer to a different problem (whole-track underrepresented meters).
+- Two pieces of genuine prior art for the design below: **skip-chain CRF
+  structure-informed downbeat tracking** (repeated sections constrain each
+  other's downbeats) and **allin1** (WASPAA 2023; joint beats/downbeats/
+  sections on demixed audio — already in the research memory with its license
+  traps; its downbeat head must be assumed to share the half-bar failure
+  until measured). [arxiv.org/abs/2307.16425]
+- Phrase-segmentation research contributes one measured fact we can use:
+  **long notes dominate at section boundaries** (72% vs 6.4% within
+  sections) — phrase-final lengthening is detectable and structural.
+
+### The layers
+
+- **L0 — pulse and level (ships today, unchanged)**: the v17 stack. Owns
+  tempo, octave, beat times, splices. Five published scores confirmed every
+  octave it chose (74/74.9 ×2, 76/74.9, 74/76.9, 67/68.2). Not renegotiated.
+- **L1 — the half-bar lattice (rename what exists)**: the accompaniment's
+  2-beat grid — model downbeat head (alternating = half-bar marks), chord
+  changes, backbeat. Every measurement that made the *bar* vote fail (bass
+  root–fifth, two chords per bar, strum ACF at lag 2, the model's alternating
+  head) says this layer is STRONG. Stop asking it "which is the 1"; keep it
+  as a hard constraint: bar lines sit ON half-bar marks. WDOA's merge-vs-
+  split question (6 vs 4+2) is answered *entirely* at this layer — the score
+  splits where a half-bar mark falls mid-six.
+- **L1.5 — chord LABELS, not just chord changes (new; probe already green)**:
+  we have never identified a chord — `harmonicChangeVotes` is pure chroma
+  novelty, and *that a chord changed* every 2 beats is information-free about
+  which change starts the bar. Labels break the symmetry: the change to D and
+  the change to G look identical as novelty, but "the return to **Am**"
+  happens once per cycle, and the cycle start is a bar start. Probed on
+  2026-08-02 (beat-synchronous chroma from the harmonic stems + 24 maj/min
+  templates + stay-bonus Viterbi, bass chroma naming the root — ~150 lines,
+  no new deps, stems-first again since template chord-rec on a mix is
+  mediocre and on separated stems is easy):
+  - Wild World's detected sequence is the score's progression **verbatim** —
+    `Am D | G C | F Dm | E` in clean 2-beat runs, cycle chords landing on our
+    bar lines exactly as the printed two-chords-per-bar layout says.
+  - **The 2/4 bars appear as run-length anomalies**: the E that ends each
+    verse runs x4 beats in a full bar and **x1–x2 where the score puts the
+    2/4** (35.74, 140.06; the middle verse shows the same anomaly noisily,
+    right on our grid's stretched-bar-plus-hole at 86.7–89.5). Two of three
+    clean, third visible — and the form layer exists to aggregate exactly
+    this.
+  - **Father and Son's 5/4 is chord-invisible** — G runs x13 straight across
+    it ("still be here tomorrow…" is static harmony). The vocal layer stays
+    necessary; complementarity is now measured, not assumed. But FaS's
+    harmonic cycle is ~8 beats (2 bars), which anchors bar phase mod 2 bars —
+    resolving the 50/50 half-bar tie that started this whole arc, even while
+    blind to the 5/4 itself.
+  - Trap fence: the v3 "tonic-arrival bonus" dead end was per-beat argmax
+    chroma — unsmoothed, label-free, no cycle matching. This is not that;
+    do not let the old scar block the new mechanism.
+- **L2 — the vocal phrase layer (new; assets only SingZ has)**: the isolated
+  vocals stem + word-level aligned lyrics + the melody line. Extract phrase
+  segments (vocal energy on/off, breath gaps), phrase ENDS (last-word offset
+  + phrase-final lengthening), and phrase LENGTHS in beats. The NEM lesson
+  stands — phrase *starts* float on pickups and stay weak evidence — but
+  phrase ends and lengths are different animals: Father and Son's 5/4 IS a
+  five-beat vocal phrase ("still be here tomorrow, but your dreams may"), and
+  every score we read puts its meter changes under a lyric. The 5 exists
+  nowhere else in the signal.
+- **L3 — the form layer (new)**: a homegrown self-similarity matrix
+  (chroma+MFCC over the stem mix, ~beat-synchronous) → section boundaries +
+  a repetition map (verse1 ≈ verse2 ≈ verse3). Two uses, both prior-arted:
+  **evidence aggregation** — Wild World's 2/4 recurs at every verse end, so
+  three weak per-instance hints align into one decisive one (the same
+  aggregation that made Stage 1's d′ 0.54 decisive for the octave and useless
+  per beat — the unifying lesson of the whole spike); and **consistency** —
+  repeated sections carry the same internal bar structure (skip-chain CRF).
+  allin1 stays evaluated-not-shipped; revisit only if the homegrown SSM
+  underperforms.
+- **L4 — the page and the singer (new inputs, already begun)**: score-scout
+  meter maps import as soft priors anchored to lyrics ("a 5/4 near 'still be
+  here tomorrow'"), and manual pins ("this is a 1", "this bar has N beats")
+  as hard constraints — `source: 'manual'`, surviving re-detection, the final
+  authority. Both compile into the same constraint language the decoder
+  reads.
+
+### The decoder, rebuilt on top
+
+Same Viterbi-over-bar-lengths shape as the killed probe — the shape was never
+the problem — but scored by L1–L4 instead of the downbeat head alone, with one
+structural change: the meter-change penalty is **conditioned on section
+position**. Every score we read puts its odd bars at section seams (FaS bar 19
+= verse end; WW at every verse end; NEM at every chorus end; WDOA at a chorus
+exit), and TTP's four invented bars were all *mid-section* wobble. Cheap
+changes at seams + expensive changes inside sections separates exactly the two
+cases the flat penalty provably could not (§8: the sweep from 1.0 to 5.0 never
+moved either song).
+
+### Phasing, each step with a kill criterion
+
+- **5a — the two evidence extractors: MEASURED, BOTH GO (2026-08-02).**
+  Committed as `eval/beats/phase5-extractors.mjs` + `run-phase5a.mjs`.
+  *5a-harm*: FaS's half-bar label sequence folds at period 8 with agreement
+  0.88 and **94% mean residue purity** — the cycle `[Am D D D | C Am G E]`
+  names a definite phase mod 4 bars (better than the promised mod 2), and
+  the verified bar "still"@66.20 sits at residue 3 (G, exactly the Gx13
+  run). The fold also *measures* our verse-1 parity error: the true bar
+  lands on an ODD half-bar of our grid. Wild World's E-run anomaly
+  reproduces in the committed extractor (x4 in full bars, x1 at the 2/4s).
+  *5a-voice*: marks BOTH verified odd bars at **0.00 s** — "not"@70.55 (the
+  5/4) and "go"@106.99 (the 3/4) — with Turn The Page's negative control
+  clean (0 of 5 guard spots fire).
+  Traps paid for on the way, so 5c does not re-pay them: energy rises miss
+  legato ("dreams may not" never re-attacks — use the ALIGNED WORDS, the
+  CTC aligner already segmented this stem); the pitch track follows
+  accompaniment bleed straight through real rests (phrase ends must come
+  from word gaps, not f0 gaps); the hold measurement is bleed-contaminated
+  exactly at breaks (FaS's "go": 0.1 s of voice, 0.8 s rest, then the riff
+  bleed sustains the stem — a SECTION-final word testifies by position
+  alone, since bleed cannot fake an absence of words); a whole-song cycle
+  fold is scrambled BY the meter changes being hunted (fold the verified
+  clean window); and the extractor's phase must never be graded against OUR
+  downbeats — our grid being wrong is the finding, not the failure.
+- **5b — SSM repetition map: MEASURED, GO (2026-08-02).** `formMap()` in
+  `phase5-extractors.mjs` + `run-phase5b.mjs`: beat-synchronous chroma +
+  vocal activity at half-bar hops, checkerboard novelty for seams,
+  translation-invariant local-context matching for repetition classmates
+  (parity errors cancel — both instances of a repeated section shift
+  equally, which is exactly why the layer can aggregate across an
+  un-modelled meter change). Results: querying Wild World's first verse-end
+  returns the other two at **rank 1 and rank 2 of 20**; TTP takes **0 of 5**
+  false seams at its wobble spots, and its detected seams are real section
+  starts. Bonus convergence: WW's seam list (36.5/89.1/141.7) independently
+  marks the three verse-end 2/4 regions themselves.
+  Traps, paid once: **one-loop harmony makes classmate lists promiscuous**
+  (on WW everything matches everything above threshold — presence proves
+  nothing, RANK is the test, and the vocal dims are what discriminate a
+  verse end from any other bar of the same loop); **checkerboard novelty is
+  genre-sensitive** (WW's novelty magnitudes are 10× smaller than TTP's,
+  because a one-loop song has almost no harmonic novelty anywhere — seams
+  are a bonus, rank-based classmates are the robust deliverable); and FaS's
+  6–9 s guitar-only breaks vanish under the K=8 kernel (its seams find the
+  verse STARTS beautifully — "It's not time to make a change" at both 15.7
+  and 152.5 — but not the breaks; the vocal layer already owns those).
+- **5c — the fused decoder. v1 MEASURED 2026-08-02: 10/17, NO-GO, with the
+  diagnosis that designs v2.** The whole-song Viterbi (`decodeBarsFused` +
+  `run-phase5c.mjs`) turns evidence into odd bars anywhere it can pay — and
+  most phrase-final held notes sit on downbeats of perfectly UNIFORM bars,
+  so the negatives bought spurious odd bars (TTP +4 including relocating its
+  legitimate fermata 2; Dreamer +1 at the ring-out; Crowley shifted its
+  ear-anchor 0.58 s) while SoF's real 2/4s were missed in favour of two
+  wrong ones. The codebase already knew this lesson as "phrase starts float
+  on pickups — keep weights low, never decisive"; v1 made held onsets
+  decisive and re-learned it.
+  Two structural findings for v2:
+  (a) **The discrepancy IS the signal.** On the negative controls the
+  shipped uniform phase already HITS the held notes — no conflict, no
+  repair needed. On FaS/SoF/WW the swallowed odd bars make the shipped
+  phase MISS the held notes by 1–2 beats — the same wandering-accent
+  symptom the singer reports, now usable as the trigger. v2 is therefore a
+  **repair operator, not a re-decode**: walk the shipped bars; only where a
+  strong held onset disagrees with the current phase (and a seam or
+  repetition classmate corroborates) insert one odd bar and reflow; re-merge
+  with the shipped grid when phases coincide. Negatives stay untouched by
+  construction — exactly the splice family's shape, one level up.
+  (b) **The saved grids are the wrong substrate**: FaS's SAVED lattice has
+  beat holes at exactly the trouble spots (69.14 = 1.93 beats), so
+  index-based bar lengths lie — a correct 5-beat bar reads as 4 indices.
+  The harness-fresh v17 lattice carries the beat (70.00) that the app's
+  decode dropped. 5c v2 must run over the fresh lattice, i.e. inside
+  run-current where the real gate lives — and the app/harness beat-count
+  divergence on FaS (235 vs 238) is §6's decode-divergence trap surfacing
+  at the worst possible spot, logged here so v18's heal verifies it.
+  Gates unchanged: FaS barLenAt red→green, SoF 150.5→2, TTP five guards +
+  fermata intact, Crowley/Dreamer untouched, every barAt still hit,
+  Ballroom byte-stable.
+- **5d — pins UI + score import**: the constraint compiler and the popover
+  UI. The singer's tap wins over everything, including 5c.
+
+Order matters: 5a and 5b are each a day-scale measurement that can kill the
+design before any of 5c's complexity is paid for. 5d is valuable even if 5a–c
+all die — pins alone would have fixed every meter complaint this week, by
+hand, in seconds per song.
 
 ## Appendix: version history (one line each)
 
