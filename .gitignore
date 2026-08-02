@@ -17,3 +17,7 @@ eval/beats/out/
 # gitignored mobile/gdrive.config.json (EMPTY without it); never tracked
 src/main/gdrive-config.ts
 mobile/src/gdrive-config.ts
+
+# local-only tooling state: the logged-in Ultimate Guitar browser profile the
+# score-scout agent drives (contains a live session cookie — never commit it)
+.local/
