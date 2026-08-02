@@ -1,5 +1,5 @@
 {
- "comment": "Ground truth for the user's own library (established by ear + analysis). Values are DETECTOR-relative: rot = allowed values of (downbeat index % beatsPerBar) on the detector's own beat grid; bpb = expected beatsPerBar. null = no stable ground truth, report only. reject:true = the detector must return null (no steady pulse deserves a metronome).",
+ "comment": "Ground truth for the user's own library (established by ear + analysis). Values are DETECTOR-relative: rot = allowed values of (downbeat index % beatsPerBar) on the detector's own beat grid; bpb = expected beatsPerBar. null = no stable ground truth, report only. reject:true = the detector must return null (no steady pulse deserves a metronome). barLenAt = [{t, n}]: the bar covering time t must be n beats long — the only anchor that catches an un-modelled meter change (a uniform-4 grid reports 4 everywhere and silently stretches the odd bar). Sourced from the published score AND verified against the audio before being committed.",
  "songs": {
   "Dreamer": {
    "bpb": 4,
@@ -18,7 +18,7 @@
   "Mr Crowley": {
    "bpb": 4,
    "barAt": 177.621,
-   "note": "slip-class song; two harmonic phase slips (126.6s, 166.5s) re-phased since v9 \u2014 anchor minted from the harmonically-validated grid (chord changes 86% on bar starts)"
+   "note": "slip-class song; two harmonic phase slips (126.6s, 166.5s) re-phased since v9 — anchor minted from the harmonically-validated grid (chord changes 86% on bar starts)"
   },
   "Nothing Else Matters": {
    "bpb": 6,
@@ -54,7 +54,7 @@
     0
    ],
    "barAt": 93.658,
-   "note": "harmonic re-phase v9: plain grid explained 4.6% of chord changes, re-phased 59% \u2014 anchor from the harmonically-validated grid; EAR-CHECK PENDING"
+   "note": "harmonic re-phase v9: plain grid explained 4.6% of chord changes, re-phased 59% — anchor from the harmonically-validated grid; EAR-CHECK PENDING"
   },
   "Soldier Of Fortune": {
    "bpb": 4,
@@ -97,7 +97,7 @@
     70.66,
     77.16
    ],
-   "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there \u2014 ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen."
+   "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there — ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen."
   },
   "Zeit": {
    "bpb": 4,
@@ -105,6 +105,21 @@
     0
    ],
    "barAt": 193.596
+  },
+  "Cat Stevens — Father and Son": {
+   "bpb": 4,
+   "barAt": 66.2,
+   "barLenAt": [
+    {
+     "t": 68.0,
+     "n": 5
+    }
+   ],
+   "note": "Ultimate-Guitar official score: 4/4 with 5/4 at bar 19 and 3/4 at bars 30, 41, 60; quarter = 67. Bar 19 spans \"still\"@66.20 -> \"not\"@70.55 = 4.94 beats at our 0.880 s beat, so the extra beat is in the audio, not just the page. v17 emits 58 bars, all 4 beats, and lands a bar line at 68.22 INSIDE the 5/4 bar — every downbeat after it is off, and the per-segment rotation vote thrashed (3,0,3,2,2) trying to fit uniform 4/4 to a song that changes meter. The 3/4 bars are not time-anchored yet."
+  },
+  "Wild World": {
+   "bpb": 4,
+   "note": "MSB full score: quarter = 74 (our 76.9 confirms the OCTAVE — the pre-v16 156.6 was wrong), 4/4 with 2/4 bars at 12, 29 and 46, one at the end of each verse. Two chords per bar (Am D / G C / F Dm), which is why the chord-change cue is structurally half-bar periodic here and cannot name the \"1\". v17 emits 59 bars, all 4 beats. A 2/4 bar shifts the phase by exactly 2 beats — the \"which half-bar is the 1\" ambiguity is a real meter change, not a tie. No time-anchored bar yet: the score is a different lyric transcription from ours, so word-level anchoring was unreliable (measured 7.07 beats where the score implies 6). Needs an ear verdict before anchors are minted."
   }
  }
 }
