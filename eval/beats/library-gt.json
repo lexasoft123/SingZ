@@ -121,7 +121,8 @@
     70.66,
     77.16
    ],
-   "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there — ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen."
+   "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there — ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen.",
+   "scoreNote": "Official Bon Jovi bass tab (E A D G, quarter = 74 — our 74.90 is the closest tempo match in the set): 4/4 with ONE 2/4 bar at score bar 62, at the chorus exit \"dead or a-li-ve\" before Verse 3. Same shape as Wild World: a half-bar where a chorus hands over. We emit exactly one odd bar in the song too — a SIX-beat bar at 202.23 — and 4+2 = 6, so we may be MERGING the odd bar where the score SPLITS it. That distinction is audible: 4+2 accents the start of the 2, a single 6 does not. Not positionally verified (lyric anchoring has been unreliable against these transcriptions), so no anchor. A bar decoder should prefer 4+2 over 6 when the evidence supports a bar line in the middle — this is the test case for that. SECOND finding, different class: the score notates a ritardando on the sustained ending (quarter = 66 at bar 90, then 48 at bar 91). Our grid holds ~0.79 s to the last beat at 307.6 s and never slows. Either the recording holds rather than slows, or we coast a click through a rallentando — the doc already flags \"WDOA outro fade\" as a real-music defect zone. Needs an ear."
   },
   "Zeit": {
    "bpb": 4,
