@@ -2,7 +2,13 @@ import { access, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { detectProject, importProject, renameProject, saveProject } from '../../src/main/projects'
+import {
+  deleteProject,
+  detectProject,
+  importProject,
+  renameProject,
+  saveProject
+} from '../../src/main/projects'
 import { writeSettings } from '../../src/main/settings'
 
 const STEMS_6 = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other']
@@ -108,6 +114,61 @@ describe('projects outside the library root stay put', () => {
     const res = await renameProject(join(dir, 'song.mp3'), 'Renamed')
     expect(res).toMatchObject({ ok: true, dir: join(root, 'Renamed') })
     expect(await readdir(root)).toEqual(['Renamed'])
+  })
+})
+
+describe('deleteProject (the catalog ✕, with no undo behind it)', () => {
+  it('erases a library project, folder and all', async () => {
+    const root = await makeLibrary()
+    const dir = await makeProject(root, 'Doomed Song')
+    await makeProject(root, 'Innocent Song')
+
+    expect(await deleteProject(dir)).toEqual({ ok: true, name: 'Doomed Song' })
+    expect(await gone(dir)).toBe(true)
+    expect(await readdir(root)).toEqual(['Innocent Song'])
+  })
+
+  it('refuses a project outside the library — not ours to erase', async () => {
+    await makeLibrary()
+    const dir = await makeProject(await makeElsewhere(), 'Shared Song')
+
+    const res = await deleteProject(dir)
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toContain('not a project in your library')
+    expect(await gone(join(dir, 'song.mp3'))).toBe(false)
+  })
+
+  it('refuses the library root itself', async () => {
+    const root = await makeLibrary()
+    await makeProject(root, 'Keep Me')
+
+    expect((await deleteProject(root)).ok).toBe(false)
+    expect(await readdir(root)).toEqual(['Keep Me'])
+  })
+
+  it('refuses a folder that is not a project', async () => {
+    const root = await makeLibrary()
+    const dir = join(root, 'Just A Folder')
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    await writeFile(join(dir, 'stems', 'vocals.flac'), 'fLaC')
+
+    const res = await deleteProject(dir)
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toContain('not a saved project')
+    expect(await gone(dir)).toBe(false)
+  })
+
+  it('waits for a save of that project rather than deleting under it', async () => {
+    const root = await makeLibrary()
+    const dir = await makeProject(root, 'Doomed Song')
+
+    const saving = saveProject(join(dir, 'song.mp3'), 'Doomed Song', { transpose: 4, tracks: {} })
+    const deleting = deleteProject(dir)
+
+    expect(await saving).toMatchObject({ ok: true, dir })
+    expect(await deleting).toMatchObject({ ok: true })
+    // the save finished into a folder that is now gone — and stayed gone
+    expect(await readdir(root)).toEqual([])
   })
 })
 

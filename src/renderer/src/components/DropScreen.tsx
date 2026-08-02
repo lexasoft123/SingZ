@@ -29,6 +29,12 @@ function fmtDate(iso: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+function fmtSize(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`
+  if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`
+  return `${Math.max(1, Math.round(bytes / 1e3))} KB`
+}
+
 /** Which cloud the library folder itself lives in (said once, not per card). */
 function folderCloud(root: string): string {
   if (root.includes('Mobile Documents')) return 'Syncs across your devices via iCloud'
@@ -47,6 +53,8 @@ interface Props {
   /** Opens the app's one Log dialog — the sync writes into it like everything
    *  else, so there is no second window to keep in step. */
   onShowLog: () => void
+  /** A project was deleted here — the open song may have been it. */
+  onDeleted?: (dir: string) => void
 }
 
 export default function DropScreen({
@@ -56,7 +64,8 @@ export default function DropScreen({
   onBrowse,
   onOpenProject,
   onManageStorage,
-  onShowLog
+  onShowLog,
+  onDeleted
 }: Props): React.JSX.Element {
   const [projects, setProjects] = useState<ProjectListItem[]>([])
   const [root, setRoot] = useState('')
@@ -71,6 +80,9 @@ export default function DropScreen({
   const [syncingDir, setSyncingDir] = useState<string | null>(null)
   const [syncProg, setSyncProg] = useState<{ msg: string; frac: number } | null>(null)
   const [driveMsg, setDriveMsg] = useState<string | null>(null)
+  /** The project the singer has asked to delete, waiting on the confirmation. */
+  const [doomed, setDoomed] = useState<ProjectListItem | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(
     () =>
@@ -122,6 +134,44 @@ export default function DropScreen({
     setDriveMsg(rep.ok ? null : `Sync failed: ${rep.error ?? 'unknown error'}`)
     refresh()
   }, [gdrive.signedIn, refresh])
+
+  // Same deal as App's modals: the scrim's blur re-rasters the window, so the
+  // equaliser behind it stops animating while the question is on screen.
+  useEffect(() => {
+    document.body.classList.toggle('modal-open', Boolean(doomed))
+    return () => document.body.classList.remove('modal-open')
+  }, [doomed])
+
+  // Esc answers the question, not the page behind it — App's own Escape
+  // handler would otherwise close the whole catalog out from under it. Capture
+  // beats bubble whatever order the two listeners were registered in.
+  useEffect(() => {
+    if (!doomed) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      if (!deleting) setDoomed(null)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [doomed, deleting])
+
+  const confirmDelete = useCallback(async () => {
+    if (!doomed || deleting) return
+    setDeleting(true)
+    const res = await window.singz.deleteProject(doomed.dir)
+    setDeleting(false)
+    setDoomed(null)
+    if (!res.ok) {
+      setDriveMsg(`Could not delete it: ${res.error}`)
+      return
+    }
+    // the song is gone from this machine; whoever owns the open song decides
+    // what that means for what is playing
+    onDeleted?.(doomed.dir)
+    refresh()
+  }, [doomed, deleting, onDeleted, refresh])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -310,31 +360,86 @@ export default function DropScreen({
           </div>
           <div className="lib-grid">
             {filtered.map((p, i) => (
-              <button
-                type="button"
-                key={p.dir}
-                className="lib-card"
-                onClick={() => onOpenProject(p.songPath)}
-              >
-                <span className="lib-tile" aria-hidden>
-                  {TILE_HUES[i % 3].map((c) => (
-                    <i key={c} style={{ background: c }} />
-                  ))}
-                </span>
-                <span className="lib-body">
-                  <span className="lib-name">{p.name}</span>
-                  <span className="lib-meta">
-                    {p.stemCount > 0 ? `${p.stemCount} stems` : 'no stems'}
-                    {p.hasLyrics ? ' · lyrics' : ''}
-                    {p.savedAt ? ` · ${fmtDate(p.savedAt)}` : ''}
+              // the card is a button, so its delete cannot be one inside it —
+              // they sit side by side and the card fills the space
+              <div key={p.dir} className="lib-slot">
+                <button
+                  type="button"
+                  className="lib-card"
+                  onClick={() => onOpenProject(p.songPath)}
+                >
+                  <span className="lib-tile" aria-hidden>
+                    {TILE_HUES[i % 3].map((c) => (
+                      <i key={c} style={{ background: c }} />
+                    ))}
                   </span>
-                </span>
-                {cardBadge(p)}
-              </button>
+                  <span className="lib-body">
+                    <span className="lib-name">{p.name}</span>
+                    <span className="lib-meta">
+                      {p.stemCount > 0 ? `${p.stemCount} stems` : 'no stems'}
+                      {p.hasLyrics ? ' · lyrics' : ''}
+                      {p.savedAt ? ` · ${fmtDate(p.savedAt)}` : ''}
+                    </span>
+                  </span>
+                  {cardBadge(p)}
+                </button>
+                <button
+                  type="button"
+                  className="lib-del"
+                  title={`Delete “${p.name}” from your library`}
+                  aria-label={`Delete ${p.name}`}
+                  onClick={() => setDoomed(p)}
+                >
+                  ✕
+                </button>
+              </div>
             ))}
             {filtered.length === 0 && (
               <p className="fine">Nothing matches “{query}”.</p>
             )}
+          </div>
+        </div>
+      )}
+
+      {doomed && (
+        <div className="modal-scrim" onClick={() => !deleting && setDoomed(null)}>
+          <div className="modal-card confirm-card" onClick={(e) => e.stopPropagation()}>
+            <h2>Delete “{doomed.name}”?</h2>
+            <p>
+              This erases the whole project folder — {doomed.stemCount > 0
+                ? `${doomed.stemCount} stems`
+                : 'the song'}
+              {doomed.hasLyrics ? ', its lyrics' : ''}, your mix, transpose and training settings,{' '}
+              {fmtSize(doomed.bytes)} in all. It does not go to the Trash and it cannot be undone
+              here.
+            </p>
+            <p className="fine">
+              {openName === doomed.name
+                ? 'This is the song you have open — it keeps playing until you load another one, but there is nothing left to save it into. '
+                : ''}
+              {gdrive.signedIn
+                ? 'The copy in Google Drive moves to Drive’s trash on the next sync, where it is recoverable for 30 days — your phones stop listing it.'
+                : 'Splitting it again later means another run of the splitter.'}
+            </p>
+            <div className="storage-actions confirm-actions">
+              <button
+                type="button"
+                className="pill ghost small"
+                autoFocus
+                disabled={deleting}
+                onClick={() => setDoomed(null)}
+              >
+                Keep it
+              </button>
+              <button
+                type="button"
+                className="pill ghost small danger"
+                disabled={deleting}
+                onClick={() => void confirmDelete()}
+              >
+                {deleting ? 'Deleting…' : `Delete ${fmtSize(doomed.bytes)}`}
+              </button>
+            </div>
           </div>
         </div>
       )}

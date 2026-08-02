@@ -1408,6 +1408,36 @@ export default function App(): React.JSX.Element {
     setShowCatalog(opening)
   }, [engine])
 
+  /**
+   * A project was deleted from the catalog. If it was the one open behind the
+   * catalog, what is on screen now describes files that no longer exist —
+   * every lane, the pencil and Save would all be pointing into a folder that
+   * is gone. Let it go rather than leave a song nothing can be saved into.
+   */
+  const handleDeleted = useCallback(
+    (dir: string) => {
+      if (dir !== projectDir) return
+      loadSeq.current++ // anything still in flight for that song lands nowhere
+      engine.pause()
+      engine.load([])
+      setSong(null)
+      setTracks([])
+      setStemFiles(null)
+      setIsProject(false)
+      setProjectDir(null)
+      setSplit(false)
+      setKaraoke(false)
+      setLyrics({ status: 'idle' })
+      setBeatInfo(null)
+      setMelodyInfo(null)
+      setSaveState('idle')
+      setDirty(false)
+      setShowCatalog(false)
+      setPhase('empty')
+    },
+    [engine, projectDir]
+  )
+
   const toggleLoop = useCallback(() => {
     touchSettings()
     setLoopOn((on) => {
@@ -1899,6 +1929,7 @@ export default function App(): React.JSX.Element {
           onOpenProject={(p) => void loadPath(p)}
           onManageStorage={() => setShowProjects(true)}
           onShowLog={() => setShowLog(true)}
+          onDeleted={handleDeleted}
         />
       )}
 

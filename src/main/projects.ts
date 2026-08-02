@@ -461,6 +461,25 @@ async function readMeta(dir: string): Promise<ProjectFile | null> {
   }
 }
 
+/** The project's own files (song, project.json, lyrics) — stems are counted
+ *  separately from the listing stemsPresent already did. */
+async function topBytes(dir: string): Promise<number> {
+  let total = 0
+  try {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      if (!e.isFile()) continue
+      try {
+        total += (await stat(join(dir, e.name))).size
+      } catch {
+        /* vanished between the listing and the stat */
+      }
+    }
+  } catch {
+    /* unreadable — the size is a courtesy, not the point */
+  }
+  return total
+}
+
 /** Saved projects, newest first — the in-app library the Open screen shows. */
 export async function listProjects(): Promise<{ root: string; projects: ProjectListItem[] }> {
   const root = projectsRoot()
@@ -473,7 +492,8 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
       if (!meta) continue
       const songPath = join(dir, meta.songFile)
       if (!(await exists(songPath))) continue
-      const facts = describeProject(meta, await stemsPresent(dir))
+      const present = await stemsPresent(dir)
+      const facts = describeProject(meta, present)
       if (facts.damaged.length || facts.missing.length) {
         log(
           'app',
@@ -489,7 +509,10 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
         // playable = the core four exist; guitar/piano may be silent-hidden
         hasStems: facts.playable,
         stemCount: Object.keys(facts.stems).length,
-        hasLyrics: await exists(join(dir, 'lyrics.json'))
+        hasLyrics: await exists(join(dir, 'lyrics.json')),
+        // what deleting it would free — stats only, so an evicted iCloud stem
+        // is measured, never downloaded
+        bytes: Object.values(present).reduce((a, b) => a + b, 0) + (await topBytes(dir))
       })
     }
   } catch {
@@ -694,6 +717,43 @@ export async function renameProject(
         stems: coreThere ? stems : undefined,
         custom: await resolveCustom(newDir, meta.settings?.custom)
       }
+    })
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Delete a project from the library, folder and all.
+ *
+ * There is no undo — the confirmation in the catalog is the whole gate — so
+ * this is deliberately narrow about what it will erase: a folder inside the
+ * library root, that is not the root itself, that holds a project.json. A path
+ * that fails any of those is a bug or a stale card, not a project, and rm -rf
+ * is not the place to find out. The Drive copy is not touched here: the next
+ * sync sees a project folder the library no longer has and trashes it there,
+ * which is the same path a rename already takes and keeps Drive's 30-day
+ * trash as the one place a deleted song can still be recovered from.
+ */
+export async function deleteProject(
+  dir: string
+): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
+  try {
+    const target = resolve(dir)
+    if (!inLibrary(target) || target === projectsRoot()) {
+      return { ok: false, error: 'That folder is not a project in your library.' }
+    }
+    return await withProjectLock(target, async () => {
+      // read the name before the folder goes: the caller says what it deleted
+      const meta = await readMeta(target)
+      if (!meta) return { ok: false as const, error: 'That folder is not a saved project.' }
+      const name = meta.name ?? basename(target)
+      await rm(target, { recursive: true, force: true })
+      // Drive is still carrying it — the reconcile trashes remote folders the
+      // library no longer has, so the phones stop listing it too
+      markProjectDirty(target, 'deleted')
+      log('app', `project deleted: ${target}`)
+      return { ok: true as const, name }
     })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }

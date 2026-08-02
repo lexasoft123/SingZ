@@ -8,6 +8,7 @@ import { preciseCapable } from './align-mms'
 import { Transcriber } from './lyrics'
 import { ModelManager } from './models'
 import {
+  deleteProject,
   getStorage,
   importProject,
   listProjects,
@@ -344,6 +345,13 @@ function registerIpc(): void {
     if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
     return importProject(full, mode === 'move' ? 'move' : 'copy')
   })
+
+  // No isAllowed gate here, unlike its neighbours: those act on the song the
+  // renderer has open, while this acts on any card in the catalog — including
+  // projects this session never opened, which are in no allowlist. Being
+  // inside the library root and holding a project.json is the gate, and
+  // deleteProject checks both.
+  ipcMain.handle('project:delete', async (_e, raw: string) => deleteProject(resolve(String(raw))))
 
   ipcMain.handle('project:upgrade', async (_e, raw: string) => {
     const dir = resolve(String(raw))

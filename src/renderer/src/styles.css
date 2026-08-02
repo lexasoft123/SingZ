@@ -2132,6 +2132,26 @@ button.chip-status:hover {
   gap: 8px;
 }
 
+/* A question with no undo behind it: narrower than the settings modals, the
+   safe answer first and focused, the destructive one saying what it removes. */
+.confirm-card {
+  width: min(420px, calc(100vw - 60px));
+}
+
+.confirm-actions {
+  margin-top: 18px;
+}
+
+.pill.danger {
+  color: #ff8a7a;
+  border-color: rgba(255, 138, 122, 0.4);
+}
+
+.pill.danger:hover:not(:disabled) {
+  background: rgba(255, 138, 122, 0.12);
+  border-color: #ff8a7a;
+}
+
 /* ---------- drop-screen project shortcuts ---------- */
 
 .drop-projects {
@@ -2349,6 +2369,52 @@ body.modal-open .src-dot.busy {
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
+}
+
+/* The card is a button, so its delete cannot be one inside it. It sits over
+   the card's right edge instead, in a strip the card reserves by padding —
+   beside the Drive badge, never on top of it. */
+.lib-slot {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.lib-slot .lib-card {
+  flex: 1 1 auto;
+  padding-right: 38px;
+}
+
+.lib-del {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 23px;
+  height: 23px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.35;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    opacity 0.15s;
+}
+
+.lib-del:hover,
+.lib-del:focus-visible {
+  opacity: 1;
+  color: #ff8a7a;
+  background: rgba(255, 138, 122, 0.14);
 }
 
 .lib-card {

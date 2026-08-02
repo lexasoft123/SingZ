@@ -132,6 +132,8 @@ const api: SingzApi = {
 
   renameProject: (songPath, newName) => ipcRenderer.invoke('project:rename', songPath, newName),
 
+  deleteProject: (dir) => ipcRenderer.invoke('project:delete', dir),
+
   importProject: (songPath, mode) => ipcRenderer.invoke('project:import', songPath, mode),
 
   upgradeProject: (dir) => ipcRenderer.invoke('project:upgrade', dir),
