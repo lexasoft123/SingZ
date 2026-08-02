@@ -85,7 +85,30 @@
     213.7,
     220.14
    ],
-   "note": "barAtMl = the bass-solo bars (201-227s spliced span), ear-approved 2026-08-01: the v14 span-phase vote lands them on the bass chord changes (margin 0.73; blind extension missed by ~1.5 beats; the model alone only half-bar-marks here). The 225s +2-beat re-entry odd bar remains the v5 fermata case."
+   "note": "barAtMl = the bass-solo bars (201-227s spliced span), ear-approved 2026-08-01: the v14 span-phase vote lands them on the bass chord changes (margin 0.73; blind extension missed by ~1.5 beats; the model alone only half-bar-marks here). The 225s +2-beat re-entry odd bar remains the v5 fermata case.",
+   "barLenAt": [
+    {
+     "t": 130.49,
+     "n": 4
+    },
+    {
+     "t": 282.05,
+     "n": 4
+    },
+    {
+     "t": 300.47,
+     "n": 4
+    },
+    {
+     "t": 303.28,
+     "n": 4
+    },
+    {
+     "t": 345.36,
+     "n": 4
+    }
+   ],
+   "scoreNote": "Official Metallica bass tab (D# G# C# F#, \"Moderately Slow\" quarter = 76; ours reads 74.9 — right octave): 112 bars, 4/4 at bar 1 and NEVER AGAIN. This is the counter-example the bar decoder needs — a song with five stretched bars that are NOT meter changes and must stay 4 beats. The barLenAt entries above pin exactly those five spots and pass today; they exist to fail if a decoder starts inventing odd bars wherever the tracker wobbles. OPEN QUESTION: we emit one 2-beat bar at 224.99 which the score does not have. That is the \"+2 beats at the last chorus\" the v5 fermata mechanics were built around, measured from the audio — a transcription normalises what a live-feel performance breathes, so score and recording may both be right. Needs an ear before it becomes an anchor either way."
   },
   "Wanted Dead Or Alive": {
    "bpb": 4,
