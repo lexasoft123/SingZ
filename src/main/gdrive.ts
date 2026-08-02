@@ -554,32 +554,44 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         stemsId ?? (plan.upload.some((u) => u.where === 'stems') ? await ensureFolder('stems', projId) : undefined)
 
       const freshIds = new Map<string, string>()
-      // Stems first, then project.json/lyrics.json. The doc is the fingerprint
-      // for everything else, so a run interrupted between the two must leave
-      // Drive BEHIND the doc, never ahead of it: a phone that meets a doc
-      // naming md5s Drive cannot serve deletes the stem it just fetched and
-      // the song stops opening at all.
-      const ordered = [...plan.upload].sort((a, b) => (a.where === b.where ? 0 : a.where === 'stems' ? -1 : 1))
-      for (const step of ordered) {
-        onProgress?.(`Uploading ${dir}/${step.name}…`, (i + 0.5) / projectDirs.length)
-        const parent = step.where === 'top' ? projId : (stemsParent as string)
-        freshIds.set(step.name, await uploadFile(step.path, step.name, parent, step.existingId, step.mime))
-        uploaded++
-        syncLog('upload', `${dir}/${step.name} → Drive${step.existingId ? ' (replaced)' : ''}`)
-      }
-      // Files Drive still holds that the project no longer has — a lane a
-      // re-split dropped, a custom track the singer removed. Trashed, never
-      // hard-deleted: drive.file scope means these are all files this app
-      // created, and Drive's trash keeps them recoverable for 30 days.
-      for (const gone of plan.trash) {
-        onProgress?.(`Removing ${dir}/${gone.name} from Drive…`, (i + 0.75) / projectDirs.length)
-        await api(`/drive/v3/files/${gone.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ trashed: true })
-        })
-        trashed++
-        syncLog('trash', `${dir}/stems/${gone.name} is no longer in the library — moved to Drive trash`)
+      try {
+        // Stems first, then project.json/lyrics.json. The doc is the fingerprint
+        // for everything else, so a run interrupted between the two must leave
+        // Drive BEHIND the doc, never ahead of it: a phone that meets a doc
+        // naming md5s Drive cannot serve deletes the stem it just fetched and
+        // the song stops opening at all.
+        const ordered = [...plan.upload].sort((a, b) => (a.where === b.where ? 0 : a.where === 'stems' ? -1 : 1))
+        for (const step of ordered) {
+          onProgress?.(`Uploading ${dir}/${step.name}…`, (i + 0.5) / projectDirs.length)
+          const parent = step.where === 'top' ? projId : (stemsParent as string)
+          freshIds.set(step.name, await uploadFile(step.path, step.name, parent, step.existingId, step.mime))
+          uploaded++
+          syncLog('upload', `${dir}/${step.name} → Drive${step.existingId ? ' (replaced)' : ''}`)
+        }
+        // Files Drive still holds that the project no longer has — a lane a
+        // re-split dropped, a custom track the singer removed. Trashed, never
+        // hard-deleted: drive.file scope means these are all files this app
+        // created, and Drive's trash keeps them recoverable for 30 days.
+        for (const gone of plan.trash) {
+          onProgress?.(`Removing ${dir}/${gone.name} from Drive…`, (i + 0.75) / projectDirs.length)
+          await api(`/drive/v3/files/${gone.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trashed: true })
+          })
+          trashed++
+          syncLog('trash', `${dir}/stems/${gone.name} is no longer in the library — moved to Drive trash`)
+        }
+      } catch (err) {
+        // The library is a live folder: a project renamed or deleted here
+        // mid-run leaves this plan describing files that no longer exist.
+        // That costs the project, not the run — everything else still syncs,
+        // and the rename marked both names dirty, so the next run carries it.
+        // Only a vanished file is forgiven; an expired token or a 5xx must
+        // still stop the run so the scheduler can back off or ask for a login.
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
+        syncLog('error', `${dir} moved or was deleted while syncing — leaving it for the next run`)
+        continue // and out of the catalog: it must never name a file Drive lacks
       }
       if (doc) catalog.push({ dir, files: rowsOf(plan, freshIds) })
     }

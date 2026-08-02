@@ -658,7 +658,13 @@ export default function App(): React.JSX.Element {
           const tr = proj.settings.tempo ?? 1
           setTempoRate(tr)
           void engine.setTempo(tr)
-          if (proj.settings.metronome) setMetCfg(sanitizeMetronome(proj.settings.metronome))
+          if (proj.settings.metronome) {
+            const saved = sanitizeMetronome(proj.settings.metronome)
+            // The click and the count-in belong to the song; the grid lines are
+            // how the singer looks at any song — opening one saved before the
+            // view existed must not switch them off underneath them.
+            setMetCfg((cur) => ({ ...saved, grid: cur.grid }))
+          }
           const v = proj.settings.view
           if (v && Number.isFinite(v.s) && Number.isFinite(v.e) && v.e - v.s > 0.05) {
             setView({ s: Math.max(0, v.s), e: v.e })
@@ -676,6 +682,7 @@ export default function App(): React.JSX.Element {
             // Old WAV project: repack stems as FLAC in the background (the
             // buffers above are already in memory, so nothing here notices).
             void window.singz.upgradeProject(proj.dir).then((r) => {
+              if (seq !== loadSeq.current) return // these are another song's stems now
               if (r.ok && r.converted) {
                 setStemFiles((prev) => {
                   if (!prev) return prev
@@ -1220,6 +1227,13 @@ export default function App(): React.JSX.Element {
 
   const handleSaveProject = useCallback(async () => {
     if (!song || saveState === 'saving') return
+    // Which song this save is about. Saving converts six stems to FLAC, so it
+    // runs for seconds — long enough to open another song meanwhile — and its
+    // answer carries the PATH of the folder it wrote. Splicing that onto the
+    // song now on screen leaves a header naming one song and a path pointing
+    // at another, and the next save or rename acts on the wrong folder: that
+    // is how a rename typed for one song moved a different song's folder.
+    const seq = loadSeq.current
     setSaveState('saving')
     const settings = {
       transpose,
@@ -1242,6 +1256,10 @@ export default function App(): React.JSX.Element {
       )
     }
     const res = await window.singz.saveProject(song.path, cleanSongName(song.name), settings)
+    // Another song took the stage while this one was being written. The save
+    // itself stands (main finished it, and the log says so) — it is only this
+    // screen's state that must not learn about a project it is no longer on.
+    if (seq !== loadSeq.current) return
     if (res.ok) {
       setDirty(false)
       setSaveState('saved')
@@ -1284,9 +1302,11 @@ export default function App(): React.JSX.Element {
   const handleImport = useCallback(
     async (mode: 'copy' | 'move') => {
       if (!song || importing) return
+      const seq = loadSeq.current
       setImporting(true)
       const res = await window.singz.importProject(song.path, mode)
       setImporting(false)
+      if (seq !== loadSeq.current) return // a different song is open now
       if (!res.ok) {
         setShowImport(false)
         setError(res.error)
@@ -1314,7 +1334,9 @@ export default function App(): React.JSX.Element {
       const name = raw.trim()
       if (!song || !name || name === song.name) return
       if (isProject) {
+        const seq = loadSeq.current
         const res = await window.singz.renameProject(song.path, name)
+        if (seq !== loadSeq.current) return // the folder moved; this screen has since moved on
         if (!res.ok) {
           setError(res.error)
           return
@@ -1776,6 +1798,7 @@ export default function App(): React.JSX.Element {
                 tracks={tracks}
                 engine={engine}
                 view={view}
+                beat={metCfg.grid ? beatInfo : null}
                 ducked={duckedIds}
                 selection={selection}
                 onSelection={handleSelection}

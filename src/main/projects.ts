@@ -153,6 +153,32 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * One writer at a time per project folder.
+ *
+ * Saving a project runs for seconds (six stems through the FLAC encoder), and
+ * renaming it moves the folder out from under whatever else is mid-write. Let
+ * those two interleave and the library grows a project nobody asked for: the
+ * save's `mkdir` recreates the folder the rename just moved away, and the rest
+ * of the save fills the ghost with a fresh copy of the stems from the splitter
+ * cache. Queued rather than refused — every one of these operations is
+ * something the singer asked for, and they all still happen, in order.
+ */
+const projectWriters = new Map<string, Promise<unknown>>()
+
+function withProjectLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const queue = projectWriters.get(dir) ?? Promise.resolve()
+  // the tail runs whether the one before it resolved or threw — a failed save
+  // must not wedge every later write to that folder
+  const run = queue.then(fn, fn)
+  const tail = run.catch(() => undefined)
+  projectWriters.set(dir, tail)
+  void tail.then(() => {
+    if (projectWriters.get(dir) === tail) projectWriters.delete(dir)
+  })
+  return run
+}
+
 function safeName(name: string): string {
   const cleaned = name
     // strip only real audio extensions — "Mr. Crowley" must keep its second half
@@ -401,22 +427,27 @@ export async function migrateProjectToV2(
   dir: string
 ): Promise<{ ok: true; converted: boolean } | { ok: false; error: string }> {
   try {
-    const meta = await readMeta(dir)
-    if (!meta) return { ok: false, error: 'not a project folder' }
-    if (meta.version >= 2) return { ok: true, converted: false }
-    const hadWavs = await exists(join(dir, 'stems', 'vocals.wav'))
-    const allFlac = await convertStemsToFlac(dir)
-    if (!allFlac) return { ok: false, error: 'some stems could not be converted' }
-    meta.version = 2
-    // the WAVs it just deleted are still what stemHashes names — leave that in
-    // and project.json describes files that no longer exist (and a phone
-    // reading it would ask Drive for them)
-    meta.stemHashes = await refreshStemHashes(dir, undefined)
-    await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
-    // every stem is a different file now — Drive is holding the WAVs
-    markProjectDirty(dir, 'upgraded to compact stems')
-    if (hadWavs) log('app', `project upgraded to compact stems: ${dir}`)
-    return { ok: true, converted: hadWavs }
+    // repacking every stem takes seconds, and it runs unasked in the
+    // background on open — a rename must wait for it, not move the folder
+    // mid-conversion
+    return await withProjectLock(dir, async () => {
+      const meta = await readMeta(dir)
+      if (!meta) return { ok: false as const, error: 'not a project folder' }
+      if (meta.version >= 2) return { ok: true as const, converted: false }
+      const hadWavs = await exists(join(dir, 'stems', 'vocals.wav'))
+      const allFlac = await convertStemsToFlac(dir)
+      if (!allFlac) return { ok: false as const, error: 'some stems could not be converted' }
+      meta.version = 2
+      // the WAVs it just deleted are still what stemHashes names — leave that in
+      // and project.json describes files that no longer exist (and a phone
+      // reading it would ask Drive for them)
+      meta.stemHashes = await refreshStemHashes(dir, undefined)
+      await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+      // every stem is a different file now — Drive is holding the WAVs
+      markProjectDirty(dir, 'upgraded to compact stems')
+      if (hadWavs) log('app', `project upgraded to compact stems: ${dir}`)
+      return { ok: true as const, converted: hadWavs }
+    })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -514,76 +545,92 @@ export async function saveProject(
   | { ok: true; dir: string; songPath: string; inLibrary: boolean; custom?: CustomTrack[] }
   | { ok: false; error: string }
 > {
+  // Claimed before the first await, so a save asked for first is the one that
+  // runs first — and everything this save decides (does the song still exist,
+  // is it already in a project) is decided INSIDE the lock, where a rename
+  // cannot have moved the answer since.
+  const own = dirname(songPath)
   try {
-    // A song already inside a project folder saves in place, wherever that
-    // folder lives — saving a shared or cloud project must never fork a second
-    // copy into the library. Only a loose song gets a new folder made for it.
-    const own = dirname(songPath)
-    const inPlace = await exists(join(own, 'project.json'))
-    const dir = inPlace ? own : join(projectsRoot(), safeName(name))
-    return await withDirty(dir, 'save', async () => {
-      await mkdir(join(dir, 'stems'), { recursive: true })
-
-    // in place, the opened song IS the project's song — keep its filename
-    const songFile = inPlace ? basename(songPath) : `song${extname(songPath).toLowerCase()}`
-    const songDest = join(dir, songFile)
-    if (songDest !== songPath && !(await exists(songDest))) {
-      await copyFile(songPath, songDest)
-    }
-
-    // processed stems from the hash cache (if the song has been split);
-    // the six-stem split wins when both exist — it is a superset
-    const hashDir = join(stemsRoot(), await hashFile(songPath))
-    const sixDir = join(hashDir, 'htdemucs_6s')
-    const useSix = await exists(join(sixDir, 'vocals.wav'))
-    const cacheDir = useSix ? sixDir : join(hashDir, 'htdemucs')
-    for (const s of useSix ? STEMS_6 : STEMS) {
-      const src = join(cacheDir, `${s}.wav`)
-      const dst = join(dir, 'stems', `${s}.wav`)
-      // an existing FLAC already carries this stem — don't resurrect the WAV
-      if ((await exists(src)) && !(await exists(dst)) && !(await stemFile(dir, s))) {
-        await copyFile(src, dst)
+    return await withProjectLock(own, async () => {
+      // The song this save is of has to still be there. A save whose source
+      // vanished while it waited (its project renamed, the file deleted) would
+      // otherwise read as "loose song" below and fork a second copy of the
+      // project into the library, built out of the splitter cache.
+      if (!(await exists(songPath))) {
+        return {
+          ok: false as const,
+          error: 'That song is no longer where it was — reopen it and save again.'
+        }
       }
-    }
+      // A song already inside a project folder saves in place, wherever that
+      // folder lives — saving a shared or cloud project must never fork a second
+      // copy into the library. Only a loose song gets a new folder made for it.
+      const inPlace = await exists(join(own, 'project.json'))
+      const dir = inPlace ? own : join(projectsRoot(), safeName(name))
+      return await withDirty(dir, 'save', async () => {
+        await mkdir(join(dir, 'stems'), { recursive: true })
 
-    // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
-    const allFlac = await convertStemsToFlac(dir)
+        // in place, the opened song IS the project's song — keep its filename
+        const songFile = inPlace ? basename(songPath) : `song${extname(songPath).toLowerCase()}`
+        const songDest = join(dir, songFile)
+        if (songDest !== songPath && !(await exists(songDest))) {
+          await copyFile(songPath, songDest)
+        }
 
-    // The singer's own tracks land in stems/ too (Drive syncs that folder),
-    // keeping whatever format they came in.
-    const stored = await storeCustomTracks(dir, settings.custom)
+        // processed stems from the hash cache (if the song has been split);
+        // the six-stem split wins when both exist — it is a superset
+        const hashDir = join(stemsRoot(), await hashFile(songPath))
+        const sixDir = join(hashDir, 'htdemucs_6s')
+        const useSix = await exists(join(sixDir, 'vocals.wav'))
+        const cacheDir = useSix ? sixDir : join(hashDir, 'htdemucs')
+        for (const s of useSix ? STEMS_6 : STEMS) {
+          const src = join(cacheDir, `${s}.wav`)
+          const dst = join(dir, 'stems', `${s}.wav`)
+          // an existing FLAC already carries this stem — don't resurrect the WAV
+          if ((await exists(src)) && !(await exists(dst)) && !(await stemFile(dir, s))) {
+            await copyFile(src, dst)
+          }
+        }
 
-    // lyrics from the hash cache (project-local lyrics stay as they are)
-    const cachedLyrics = join(stemsRoot(), await hashFile(songPath), 'lyrics.json')
-    const projLyrics = join(dir, 'lyrics.json')
-    if ((await exists(cachedLyrics)) && !(await exists(projLyrics))) {
-      await copyFile(cachedLyrics, projLyrics)
-    }
+        // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
+        const allFlac = await convertStemsToFlac(dir)
 
-    // hashes carry over from the previous save — a settings-only save reads
-    // no stem bytes; whatever this save (re)wrote gets hashed while it is
-    // still warm and local
-    const prevMeta = await readMeta(dir)
-    const meta: ProjectFile = {
-      version: allFlac ? 2 : 1,
-      name: safeName(name),
-      songFile,
-      savedAt: new Date().toISOString(),
-      // project.json keeps custom tracks project-relative so the folder stays
-      // portable; the renderer gets absolute paths back below.
-      settings: { ...settings, custom: stored },
-      stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
-      lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
-    }
-      await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
-      log('app', `project saved: ${dir}`)
-      return {
-        ok: true as const,
-        dir,
-        songPath: songDest,
-        inLibrary: inLibrary(dir),
-        custom: await resolveCustom(dir, stored)
-      }
+        // The singer's own tracks land in stems/ too (Drive syncs that folder),
+        // keeping whatever format they came in.
+        const stored = await storeCustomTracks(dir, settings.custom)
+
+        // lyrics from the hash cache (project-local lyrics stay as they are)
+        const cachedLyrics = join(stemsRoot(), await hashFile(songPath), 'lyrics.json')
+        const projLyrics = join(dir, 'lyrics.json')
+        if ((await exists(cachedLyrics)) && !(await exists(projLyrics))) {
+          await copyFile(cachedLyrics, projLyrics)
+        }
+
+        // hashes carry over from the previous save — a settings-only save reads
+        // no stem bytes; whatever this save (re)wrote gets hashed while it is
+        // still warm and local
+        const prevMeta = await readMeta(dir)
+        const meta: ProjectFile = {
+          version: allFlac ? 2 : 1,
+          name: safeName(name),
+          songFile,
+          savedAt: new Date().toISOString(),
+          // project.json keeps custom tracks project-relative so the folder stays
+          // portable; the renderer gets absolute paths back below.
+          settings: { ...settings, custom: stored },
+          stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
+          lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
+        }
+        await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+        log('app', `project saved: ${dir}`)
+        return {
+          ok: true as const,
+          dir,
+          songPath: songDest,
+          inLibrary: inLibrary(dir),
+          custom: await resolveCustom(dir, stored)
+        }
+      })
     })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -610,40 +657,44 @@ export async function renameProject(
 > {
   try {
     const oldDir = dirname(songPath)
-    const meta = await readMeta(oldDir)
-    if (!meta) return { ok: false, error: 'This song is not a saved project yet.' }
-    const name = safeName(newName)
-    // rename where the project lives (for a library project that is the root
-    // itself) — renaming must never double as a move out of a shared folder
-    const newDir = join(dirname(oldDir), name)
-    if (newDir !== oldDir && (await exists(newDir))) {
-      return { ok: false, error: `A project called “${name}” already exists.` }
-    }
-    if (newDir !== oldDir) await rename(oldDir, newDir)
-    // the folder just moved — outside the library that lands on an unregistered
-    // path, and every stem read after this would be refused
-    allowRoot(newDir)
-    meta.name = name
-    await writeFile(join(newDir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
-    const stems: Partial<Record<StemName6, string>> = {}
-    for (const s of STEMS_6) {
-      const p = await stemFile(newDir, s)
-      if (p) stems[s] = p
-    }
-    const coreThere = STEMS.every((s) => Boolean(stems[s]))
-    // both ends: the old folder is what Drive must stop carrying, the new one
-    // is what it must start with
-    markProjectDirty(oldDir, 'rename')
-    markProjectDirty(newDir, 'rename')
-    log('app', `project renamed: ${oldDir} → ${newDir}`)
-    return {
-      ok: true,
-      name,
-      dir: newDir,
-      songPath: join(newDir, meta.songFile),
-      stems: coreThere ? stems : undefined,
-      custom: await resolveCustom(newDir, meta.settings?.custom)
-    }
+    // waits for a save of this project to finish rather than moving the folder
+    // out from under it — see withProjectLock
+    return await withProjectLock(oldDir, async () => {
+      const meta = await readMeta(oldDir)
+      if (!meta) return { ok: false as const, error: 'This song is not a saved project yet.' }
+      const name = safeName(newName)
+      // rename where the project lives (for a library project that is the root
+      // itself) — renaming must never double as a move out of a shared folder
+      const newDir = join(dirname(oldDir), name)
+      if (newDir !== oldDir && (await exists(newDir))) {
+        return { ok: false as const, error: `A project called “${name}” already exists.` }
+      }
+      if (newDir !== oldDir) await rename(oldDir, newDir)
+      // the folder just moved — outside the library that lands on an unregistered
+      // path, and every stem read after this would be refused
+      allowRoot(newDir)
+      meta.name = name
+      await writeFile(join(newDir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+      const stems: Partial<Record<StemName6, string>> = {}
+      for (const s of STEMS_6) {
+        const p = await stemFile(newDir, s)
+        if (p) stems[s] = p
+      }
+      const coreThere = STEMS.every((s) => Boolean(stems[s]))
+      // both ends: the old folder is what Drive must stop carrying, the new one
+      // is what it must start with
+      markProjectDirty(oldDir, 'rename')
+      markProjectDirty(newDir, 'rename')
+      log('app', `project renamed: ${oldDir} → ${newDir}`)
+      return {
+        ok: true as const,
+        name,
+        dir: newDir,
+        songPath: join(newDir, meta.songFile),
+        stems: coreThere ? stems : undefined,
+        custom: await resolveCustom(newDir, meta.settings?.custom)
+      }
+    })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -660,48 +711,52 @@ export async function importProject(
 ): Promise<ImportResult> {
   try {
     const src = dirname(songPath)
-    const meta = await readMeta(src)
-    if (!meta) return { ok: false, error: 'This song is not a saved project yet.' }
-    if (inLibrary(src)) return { ok: false, error: 'This project is already in your library.' }
+    // copying or moving the folder while a save is filling it would carry a
+    // half-written project into the library — take a number
+    return await withProjectLock(src, async () => {
+      const meta = await readMeta(src)
+      if (!meta) return { ok: false as const, error: 'This song is not a saved project yet.' }
+      if (inLibrary(src)) return { ok: false as const, error: 'This project is already in your library.' }
 
-    const name = safeName(meta.name ?? basename(src))
-    const dst = join(projectsRoot(), name)
-    if (await exists(dst)) {
-      return { ok: false, error: `A project called “${name}” is already in your library.` }
-    }
-    await mkdir(projectsRoot(), { recursive: true })
-
-    if (mode === 'move') {
-      try {
-        await rename(src, dst)
-      } catch (err) {
-        // iCloud, a network share or a USB stick is a different volume, where
-        // rename() can't reach — copy over, then drop the original.
-        if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
-        await cp(src, dst, { recursive: true })
-        await rm(src, { recursive: true, force: true })
+      const name = safeName(meta.name ?? basename(src))
+      const dst = join(projectsRoot(), name)
+      if (await exists(dst)) {
+        return { ok: false as const, error: `A project called “${name}” is already in your library.` }
       }
-    } else {
-      await cp(src, dst, { recursive: true })
-    }
+      await mkdir(projectsRoot(), { recursive: true })
 
-    allowRoot(dst)
-    const stems: Partial<Record<StemName6, string>> = {}
-    for (const s of STEMS_6) {
-      const p = await stemFile(dst, s)
-      if (p) stems[s] = p
-    }
-    const coreThere = STEMS.every((s) => Boolean(stems[s]))
-    markProjectDirty(dst, 'imported into the library')
-    log('app', `project ${mode === 'move' ? 'moved' : 'copied'} into the library: ${src} → ${dst}`)
-    return {
-      ok: true,
-      dir: dst,
-      songPath: join(dst, meta.songFile),
-      stems: coreThere ? stems : undefined,
-      custom: await resolveCustom(dst, meta.settings?.custom),
-      moved: mode === 'move'
-    }
+      if (mode === 'move') {
+        try {
+          await rename(src, dst)
+        } catch (err) {
+          // iCloud, a network share or a USB stick is a different volume, where
+          // rename() can't reach — copy over, then drop the original.
+          if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
+          await cp(src, dst, { recursive: true })
+          await rm(src, { recursive: true, force: true })
+        }
+      } else {
+        await cp(src, dst, { recursive: true })
+      }
+
+      allowRoot(dst)
+      const stems: Partial<Record<StemName6, string>> = {}
+      for (const s of STEMS_6) {
+        const p = await stemFile(dst, s)
+        if (p) stems[s] = p
+      }
+      const coreThere = STEMS.every((s) => Boolean(stems[s]))
+      markProjectDirty(dst, 'imported into the library')
+      log('app', `project ${mode === 'move' ? 'moved' : 'copied'} into the library: ${src} → ${dst}`)
+      return {
+        ok: true as const,
+        dir: dst,
+        songPath: join(dst, meta.songFile),
+        stems: coreThere ? stems : undefined,
+        custom: await resolveCustom(dst, meta.settings?.custom),
+        moved: mode === 'move'
+      }
+    })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }

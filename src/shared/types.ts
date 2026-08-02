@@ -106,6 +106,9 @@ export interface MetronomeConfig {
   /** Ring the "1" brighter. Off = every click identical (wrong-downbeat
    *  escape hatch, and some singers just prefer a flat click). */
   accent: boolean
+  /** Rule the waveform lanes with the beat track, so the grid can be
+   *  compared against the peaks (desktop only — the phones draw no lanes). */
+  grid: boolean
 }
 
 /**

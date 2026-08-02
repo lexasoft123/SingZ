@@ -253,6 +253,52 @@ describe('planSync', () => {
     expect(manifest.projects.map((p: { dir: string }) => p.dir)).toEqual(['Mr Crowley'])
   })
 
+  it('survives a project renamed out from under it mid-run', async () => {
+    const { readSettings, writeSettings } = await import('../../src/main/settings')
+    const { renameSync } = await import('node:fs')
+    const root = await mkdtemp(join(tmpdir(), 'singz-gdrive-'))
+    await seedProject(root, 'Aardvark')
+    await seedProject(root, 'Zebra')
+    const s = readSettings() as Record<string, unknown>
+    s.projectsRoot = root
+    s.gdrive = { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 }
+    writeSettings(s)
+
+    // The singer renames a song while the sync is walking it — this is what
+    // the rename pencil does, and it used to end the run on an unhandled
+    // ENOENT ("waiting for you"), leaving the rest of the library unsynced.
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    let moved = false
+    const rep = await gdriveSync({
+      onProgress: (msg) => {
+        if (!moved && msg.startsWith('Uploading Aardvark/')) {
+          moved = true
+          renameSync(join(root, 'Aardvark'), join(root, 'Renamed'))
+        }
+      }
+    })
+
+    expect(moved).toBe(true)
+    // the run stands, and every other project still went up
+    expect(rep.ok).toBe(true)
+    const live = [...mock.files.values()].filter((f) => !f.trashed).map((f) => f.name)
+    expect(live).toContain('Zebra')
+    // ...while the project that moved is left for the next run — and above all
+    // is not in the catalog, which must never name a file Drive does not hold
+    const cat = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)
+    const manifest = JSON.parse(cat!.bytes!.toString())
+    expect(manifest.projects.map((p: { dir: string }) => p.dir)).toEqual(['Zebra'])
+
+    // the next run carries it under its new name, with nothing left behind
+    expect(await gdriveSync()).toMatchObject({ ok: true })
+    const after = [...mock.files.values()].filter((f) => !f.trashed).map((f) => f.name)
+    expect(after).toContain('Renamed')
+    const cat2 = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)
+    expect(
+      JSON.parse(cat2!.bytes!.toString()).projects.map((p: { dir: string }) => p.dir).sort()
+    ).toEqual(['Renamed', 'Zebra'])
+  })
+
   it('diffs by md5, treating missing remotes as uploads', async () => {
     const { planSync } = await import('../../src/main/sync-plan')
     const plan = planSync(
