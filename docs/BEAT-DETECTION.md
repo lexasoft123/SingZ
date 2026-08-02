@@ -475,11 +475,9 @@ The traps, each paid for:
   vocal phrasing and on the page, nowhere in the backing. No amount of cue
   engineering over the accompaniment will recover it — that is a property of
   the music, not a gap in the code.
-  What remains open, in order of promise: **manual meter/bar pins** (the user
-  knows, and a pin is one tap); **vocal-phrase-driven bar detection** (lyric
-  line starts were the one cue pointing somewhere different, and they are
-  weak-but-not-blind); and importing meter from a published score, which is
-  what `.claude/agents/score-scout.md` exists to fetch.
+  What remains open became §9 — the form-and-voice architecture: manual
+  meter/bar pins, vocal-phrase-driven bars, score import, and a form layer,
+  fused with (not replacing) the accompaniment stack.
 - **Phase 3's other half (still worth doing): manual-pin UI.**
   The honest path to *shrinking* the homegrown code rather than growing it:
   a small decoder over the model's probability heads constrained by
@@ -511,6 +509,116 @@ The traps, each paid for:
   answer than the 3% tiebreak would be canonicalizing the decode itself
   (ship one resampler for analysis input) — costly, but it would collapse
   §6's deepest trap class entirely.
+
+## 9. Phase 5 — the form-and-voice architecture (researched 2026-08-02)
+
+The §8 kill result reframed the problem: on the failing songs the entire
+accompaniment is 2-beat periodic, so the bar/meter question cannot be answered
+by any single stream — but each stream answers *part* of it perfectly. The
+next architecture is a **fusion, not a replacement** ("complex, music and
+vocal" — the user's phrase, and the right one): the accompaniment keeps what
+it is provably good at, and three new layers add what it provably lacks.
+
+### What the survey found (and ruled out)
+
+Nothing off the shelf localizes meter changes per bar:
+
+- **Beat This!** (ours) is trained *with* time-signature-change data, yet its
+  downbeat head alternates on half-bars end to end on this material (§8) — it
+  cannot express a 5-beat bar. [arxiv.org/html/2407.21658v1]
+- **Foundation-model trackers** (BeatFM, HingeNet, Aug 2025; MERT/MusicFM
+  probes) reach beat F ~0.90, downbeat F ~0.80 — *below* Beat This!. No leap
+  there. [arxiv.org/html/2508.09790]
+- **Time-signature detection** literature is global classification (Meter2800
+  dataset, ResNet18 — "which meter is this track in"), not localization
+  ("which bar is the 5"). [link.springer.com/article/10.1186/s13636-024-00346-6]
+- **Symbolic/performance-MIDI transformers** (T5 over note events, 2025)
+  degrade exactly on irregular meters; downbeat F 0.77 on clean piano.
+  [arxiv.org/html/2507.00466v1]
+- **BeatNet** tracks meter online via particle filtering — the right *shape*
+  (meter as a tracked state) but weaker overall than what we ship.
+  [github.com/mjhydri/BeatNet]
+- **"Skip That Beat"** augments training for 2/4 and 3/4 — a training-side
+  answer to a different problem (whole-track underrepresented meters).
+- Two pieces of genuine prior art for the design below: **skip-chain CRF
+  structure-informed downbeat tracking** (repeated sections constrain each
+  other's downbeats) and **allin1** (WASPAA 2023; joint beats/downbeats/
+  sections on demixed audio — already in the research memory with its license
+  traps; its downbeat head must be assumed to share the half-bar failure
+  until measured). [arxiv.org/abs/2307.16425]
+- Phrase-segmentation research contributes one measured fact we can use:
+  **long notes dominate at section boundaries** (72% vs 6.4% within
+  sections) — phrase-final lengthening is detectable and structural.
+
+### The layers
+
+- **L0 — pulse and level (ships today, unchanged)**: the v17 stack. Owns
+  tempo, octave, beat times, splices. Five published scores confirmed every
+  octave it chose (74/74.9 ×2, 76/74.9, 74/76.9, 67/68.2). Not renegotiated.
+- **L1 — the half-bar lattice (rename what exists)**: the accompaniment's
+  2-beat grid — model downbeat head (alternating = half-bar marks), chord
+  changes, backbeat. Every measurement that made the *bar* vote fail (bass
+  root–fifth, two chords per bar, strum ACF at lag 2, the model's alternating
+  head) says this layer is STRONG. Stop asking it "which is the 1"; keep it
+  as a hard constraint: bar lines sit ON half-bar marks. WDOA's merge-vs-
+  split question (6 vs 4+2) is answered *entirely* at this layer — the score
+  splits where a half-bar mark falls mid-six.
+- **L2 — the vocal phrase layer (new; assets only SingZ has)**: the isolated
+  vocals stem + word-level aligned lyrics + the melody line. Extract phrase
+  segments (vocal energy on/off, breath gaps), phrase ENDS (last-word offset
+  + phrase-final lengthening), and phrase LENGTHS in beats. The NEM lesson
+  stands — phrase *starts* float on pickups and stay weak evidence — but
+  phrase ends and lengths are different animals: Father and Son's 5/4 IS a
+  five-beat vocal phrase ("still be here tomorrow, but your dreams may"), and
+  every score we read puts its meter changes under a lyric. The 5 exists
+  nowhere else in the signal.
+- **L3 — the form layer (new)**: a homegrown self-similarity matrix
+  (chroma+MFCC over the stem mix, ~beat-synchronous) → section boundaries +
+  a repetition map (verse1 ≈ verse2 ≈ verse3). Two uses, both prior-arted:
+  **evidence aggregation** — Wild World's 2/4 recurs at every verse end, so
+  three weak per-instance hints align into one decisive one (the same
+  aggregation that made Stage 1's d′ 0.54 decisive for the octave and useless
+  per beat — the unifying lesson of the whole spike); and **consistency** —
+  repeated sections carry the same internal bar structure (skip-chain CRF).
+  allin1 stays evaluated-not-shipped; revisit only if the homegrown SSM
+  underperforms.
+- **L4 — the page and the singer (new inputs, already begun)**: score-scout
+  meter maps import as soft priors anchored to lyrics ("a 5/4 near 'still be
+  here tomorrow'"), and manual pins ("this is a 1", "this bar has N beats")
+  as hard constraints — `source: 'manual'`, surviving re-detection, the final
+  authority. Both compile into the same constraint language the decoder
+  reads.
+
+### The decoder, rebuilt on top
+
+Same Viterbi-over-bar-lengths shape as the killed probe — the shape was never
+the problem — but scored by L1–L4 instead of the downbeat head alone, with one
+structural change: the meter-change penalty is **conditioned on section
+position**. Every score we read puts its odd bars at section seams (FaS bar 19
+= verse end; WW at every verse end; NEM at every chorus end; WDOA at a chorus
+exit), and TTP's four invented bars were all *mid-section* wobble. Cheap
+changes at seams + expensive changes inside sections separates exactly the two
+cases the flat penalty provably could not (§8: the sweep from 1.0 to 5.0 never
+moved either song).
+
+### Phasing, each step with a kill criterion
+
+- **5a — phrase extractor, offline**: measure phrase-end/bar-line correlation
+  on the five scored songs. GO only if phrase evidence marks FaS's verified
+  5/4 and at least two of WW's three 2/4s. (No app code; eval harness only.)
+- **5b — SSM repetition map**: GO only if WW's three verse ends land in one
+  repetition class and TTP gains no false seams at its wobble spots.
+- **5c — the fused decoder**, gated by the anchors that now exist: FaS
+  `barLenAt` red→green, TTP's five guards stay green, WDOA prefers 4+2 over
+  6, Ballroom byte-stable (30 s clips have no vocals/sections — the new
+  layers are inert there by construction).
+- **5d — pins UI + score import**: the constraint compiler and the popover
+  UI. The singer's tap wins over everything, including 5c.
+
+Order matters: 5a and 5b are each a day-scale measurement that can kill the
+design before any of 5c's complexity is paid for. 5d is valuable even if 5a–c
+all die — pins alone would have fixed every meter complaint this week, by
+hand, in seconds per song.
 
 ## Appendix: version history (one line each)
 
