@@ -631,14 +631,29 @@ moved either song).
 
 ### Phasing, each step with a kill criterion
 
-- **5a — the two evidence extractors, offline** (independent, either can die
-  without killing the other):
-  *5a-harm* — the chord-label layer. Probe already green on Wild World
-  (progression verbatim, 2 of 3 2/4s as clean run anomalies); GO for the
-  decoder if it also anchors FaS's phase mod 2 bars.
-  *5a-voice* — the phrase extractor. GO only if phrase evidence marks FaS's
-  verified 5/4 (the one thing 5a-harm measured blind on) and at least one
-  more scored meter change. (No app code; eval harness only.)
+- **5a — the two evidence extractors: MEASURED, BOTH GO (2026-08-02).**
+  Committed as `eval/beats/phase5-extractors.mjs` + `run-phase5a.mjs`.
+  *5a-harm*: FaS's half-bar label sequence folds at period 8 with agreement
+  0.88 and **94% mean residue purity** — the cycle `[Am D D D | C Am G E]`
+  names a definite phase mod 4 bars (better than the promised mod 2), and
+  the verified bar "still"@66.20 sits at residue 3 (G, exactly the Gx13
+  run). The fold also *measures* our verse-1 parity error: the true bar
+  lands on an ODD half-bar of our grid. Wild World's E-run anomaly
+  reproduces in the committed extractor (x4 in full bars, x1 at the 2/4s).
+  *5a-voice*: marks BOTH verified odd bars at **0.00 s** — "not"@70.55 (the
+  5/4) and "go"@106.99 (the 3/4) — with Turn The Page's negative control
+  clean (0 of 5 guard spots fire).
+  Traps paid for on the way, so 5c does not re-pay them: energy rises miss
+  legato ("dreams may not" never re-attacks — use the ALIGNED WORDS, the
+  CTC aligner already segmented this stem); the pitch track follows
+  accompaniment bleed straight through real rests (phrase ends must come
+  from word gaps, not f0 gaps); the hold measurement is bleed-contaminated
+  exactly at breaks (FaS's "go": 0.1 s of voice, 0.8 s rest, then the riff
+  bleed sustains the stem — a SECTION-final word testifies by position
+  alone, since bleed cannot fake an absence of words); a whole-song cycle
+  fold is scrambled BY the meter changes being hunted (fold the verified
+  clean window); and the extractor's phase must never be graded against OUR
+  downbeats — our grid being wrong is the finding, not the failure.
 - **5b — SSM repetition map**: GO only if WW's three verse ends land in one
   repetition class and TTP gains no false seams at its wobble spots.
 - **5c — the fused decoder**, gated by the anchors that now exist: FaS
