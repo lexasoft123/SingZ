@@ -14,6 +14,12 @@ beat_prob/downbeat_prob are the model's framewise head probabilities at fps
 one cue among the stem votes. Progress lines go to stderr. The model is
 loaded once for the whole batch.
 
+--logits ADDS beat_logit/downbeat_logit (4 decimals, pre-sigmoid). The
+shipped 3-decimal probabilities saturate: the model is trained with
+pos_weights 19/86 and no validation split, so most kept peaks round to
+exactly 1.000 and any ordering between them is destroyed at this JSON
+boundary. Anything that wants to COMPARE two peaks must read the logits.
+
 Needs a python with beat_this installed (pip install
 git+https://github.com/CPJKU/beat_this — MIT, pulls torch/torchaudio/soxr);
 point $BEAT_THIS_PY at it for run-beat-this.mjs. Checkpoints download to
@@ -33,6 +39,8 @@ def main():
     ap.add_argument("--jobs", required=True)
     ap.add_argument("--checkpoint", default="final0")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--logits", action="store_true",
+                    help="also emit beat_logit/downbeat_logit (pre-sigmoid)")
     args = ap.parse_args()
 
     with open(args.jobs) as f:
@@ -56,7 +64,7 @@ def main():
         beat_prob = torch.sigmoid(beat_logits).cpu().numpy()
         downbeat_prob = torch.sigmoid(downbeat_logits).cpu().numpy()
         dt = time.time() - t1
-        print(json.dumps({
+        out = {
             "id": job["id"],
             "beats": [round(float(b), 3) for b in beats],
             "downbeats": [round(float(d), 3) for d in downbeats],
@@ -65,7 +73,11 @@ def main():
             "fps": 50,
             "infer_s": round(dt, 2),
             "audio_s": round(len(signal) / job["sr"], 1),
-        }), flush=True)
+        }
+        if args.logits:
+            out["beat_logit"] = [round(float(x), 4) for x in beat_logits.cpu().numpy()]
+            out["downbeat_logit"] = [round(float(x), 4) for x in downbeat_logits.cpu().numpy()]
+        print(json.dumps(out), flush=True)
         print(f"done {job['id']} ({dt:.1f}s)", file=sys.stderr, flush=True)
 
 

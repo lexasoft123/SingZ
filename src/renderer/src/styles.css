@@ -673,6 +673,19 @@ button.chip-status:hover {
   border-top: 7px solid rgba(255, 244, 224, 0.9);
 }
 
+/* Beat grid over the waveforms: fixed to song time, so it repaints on zoom
+   and pan and never on the clock. Sits above the lanes and below the scrub
+   overlay, so the playhead and the selection still read on top of it. */
+.beat-lines {
+  grid-column: 2;
+  position: relative;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  animation: fade 0.25s;
+}
+
 /* ————————————————————————————————— transport ————— */
 
 .transport {
