@@ -138,9 +138,13 @@
     {
      "t": 68.0,
      "n": 5
+    },
+    {
+     "t": 105.5,
+     "n": 3
     }
    ],
-   "note": "Ultimate-Guitar official score: 4/4 with 5/4 at bar 19 and 3/4 at bars 30, 41, 60; quarter = 67. Bar 19 spans \"still\"@66.20 -> \"not\"@70.55 = 4.94 beats at our 0.880 s beat, so the extra beat is in the audio, not just the page. v17 emits 58 bars, all 4 beats, and lands a bar line at 68.22 INSIDE the 5/4 bar — every downbeat after it is off, and the per-segment rotation vote thrashed (3,0,3,2,2) trying to fit uniform 4/4 to a song that changes meter. The 3/4 bars are not time-anchored yet."
+   "note": "TWO independent official transcriptions agree (vocal score + rhythm-guitar Pro tab, both quarter=67): 4/4 with 5/4 at score bar 19 and 3/4 at bars 30, 41, 60. Both odd-bar anchors are audio-verified, not just page-read. The 5/4: bar 19 spans \"still\"@66.20 -> \"not\"@70.55 = 4.94 beats. The 3/4 at the first Break: our own grid agrees with the score up to its bar line at 104.36, the tab puts \"I know I have to\" inside that bar (sung 105.64-106.75, contained), and \"go\" — which opens the next 4/4 — lands at 106.99 = 2.99 beats after 104.36. Our grid claims 4 (next bar at 108.00). The v3 break (score bar 60) is NOT anchored: by then two upstream meter changes have shifted our uniform grid's phase (\"go\" v3 sits a beat past our 209.44 bar line), so a time anchor there would encode our own error. The guitar tab also documents the strum as a per-half-bar cell (down-up + muted X, twice per bar) — the notated confirmation of the measured lag-2 strum ACF: the accompaniment is half-bar periodic BY ARRANGEMENT, and the v17 grid emits 58 bars all 4 beats with a bar line inside the 5/4."
   },
   "Wild World": {
    "bpb": 4,
