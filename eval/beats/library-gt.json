@@ -82,7 +82,8 @@
    "barAt": 147.412
   },
   "The Music Of The Night": {
-   "reject": true
+   "reject": true,
+   "scoreNote": "NO SCORE OBTAINABLE — the rubato question stays open, in BOTH directions. Ultimate Guitar has zero official (type=900) transcriptions under any attribution (title, show-prefixed title, Andrew Lloyd Webber, Michael Crawford, Sarah Brightman, Original London Cast), and all 11 user versions return the rights-holder TAKEDOWN notice — verified as a takedown and not a paywall or a login failure: the profile was signed in as pro, no sales page rendered, 0 canvases and 0 chars of notation in the DOM. Really Useful Group appears to have swept the whole Phantom catalogue (even the one official Phantom tab that exists is blocked the same way). Our detector REFUSES this song (returns null, \"windows disagree on a tempo\"), and that refusal is therefore still unverified against notation — it stands on the audio measurement alone (steadyFrac 0.31 vs >=0.75 for real songs). To settle it needs a published VOCAL SCORE (Hal Leonard / Really Useful), not a tab site."
   },
   "Turn The Page": {
    "bpb": 4,
