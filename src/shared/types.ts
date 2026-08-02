@@ -193,6 +193,8 @@ export interface ProjectListItem {
   hasStems: boolean
   stemCount: number
   hasLyrics: boolean
+  /** Everything in the folder, in bytes — what deleting it frees. */
+  bytes: number
 }
 
 export type RenameResult =
@@ -441,6 +443,12 @@ export interface SingzApi {
   listProjects(): Promise<{ root: string; projects: ProjectListItem[] }>
   /** Rename a saved project's folder + metadata in place; returns the moved paths. */
   renameProject(songPath: string, newName: string): Promise<RenameResult>
+  /**
+   * Delete a project from the library — folder and all, with no undo. Only a
+   * project folder inside the library root can be named. The Drive copy goes
+   * to Drive's trash on the next sync, which is the one place it survives.
+   */
+  deleteProject(dir: string): Promise<{ ok: true; name: string } | { ok: false; error: string }>
   /**
    * Bring a project opened from outside the library into it — 'copy' leaves the
    * original folder alone, 'move' relocates it. Returns the project's new home.
