@@ -78,11 +78,30 @@ detector. The model's authority is confined to:
    cue dilutes confidences and silently shifts the calibrated `ANCHOR_CONF`
    world.
 
-Octave doubling of an *adopted* model lattice (it likes half notes: SoF at
-66.7 bpm, midpoint beat-prob 0.01 — fully committed to its level) is decided
-only by a singable-tempo-prior margin (+0.2; SoF +0.30 doubles, everything
-else ≤ −0.05). Drum-support probes for the midpoint were a dead end: WDOA's
-gallop articulates midpoints *more* (0.60) than SoF's actual drums do.
+An adopted lattice **is** the click: the splice family (§4) runs only when
+the drums-first tracker won, so nothing downstream levels or repairs it.
+Two rules therefore live here, both v17, both bought with Father and Son
+(136 bpm with a 250 bpm intro):
+
+- **Flatten to one level before adopting.** The model's beat level can change
+  inside a song (Father and Son rides eighths for 20 s then quarters for 190),
+  and on this path there is no v16 machinery to notice. `levelNormalize`
+  greedily thins the faster stretches, with a model bar line always winning
+  its slot so the phase re-anchors where the music puts it.
+- **Only double a lattice the model committed to.** Doubling *invents* beats
+  and is decided by the singable-tempo prior — a term with no acoustic
+  content, which cleared its own +0.2 threshold by 0.037 here. It now also
+  requires `levelMix < 0.1`: Soldier Of Fortune measures 0.00 and still
+  doubles, Father and Son 0.21 and does not.
+
+Two probes that do **not** work, both measured, both worth not repeating:
+drum onset strength at the candidate midpoints ranks Father and Son (0.48)
+*above* Soldier Of Fortune (0.302) — backwards — which is the same dead end
+an earlier probe hit from the other side (WDOA's gallop articulates midpoints
+at 0.60, more than SoF's actual drums). And the model's own beat head cannot
+adjudicate it either: having committed to a level, its logit at a midpoint is
+~16 below its own beats on *every* song in the library, including the ones
+where doubling is right.
 
 Without `aux.ml`, nothing below the fusion point alters a single vote — the
 no-pack path is the v9 pipeline verbatim, kept byte-stable deliberately.
@@ -123,6 +142,12 @@ Stages, each with its scar tissue:
   re-litigate. Wild World's race was 8.4% in the app and 1.4% in the harness:
   the same code shipped 156.6 bpm to the singer and 77.4 to the gate.
   `debug.octaveTie` records `{win, mlBimodal}` for every run.
+  **v17: the statistic is symmetric** (`levelMix` — half OR double the modal
+  interval, ±15% of each target). v16 counted the double only and so read
+  0.00 on a model that changed level the other way: Father and Son runs
+  eighths under a quarter-note median, 21% at half and 0% at double. No
+  library song crosses the 0.25 gate on the added term (highest is
+  Panzerkampf at 0.18), so the widened window reaches nothing new.
 - **DP placement**: log-period deviation penalty (α=50) holds the pulse
   against gallops while following slow drift. The DP is smooth *by
   construction* — quality gates that need to detect loose playing must snap
@@ -358,15 +383,38 @@ The traps, each paid for:
   is the model on?" must ask per span. The same statistic is also a usable
   signal — it is exactly the songs where the model wobbles that are
   genuinely octave-ambiguous (§3, v16).
-- **Cross-run model variance**: Beat This! emits *different grids on
-  near-identical mixes* in loose material — whole beats appear and drop
-  (the cached WDOA run drops two verse beats the app's own run tracks; a
-  v13 sweep flagged 820/360/220 ms "regressions" on three songs that were
-  byte-identical under the previous detector's own runs). Rules: never gate
-  a heal on cross-run model equality; diff against the **previous
-  detector's harness output**, not app-saved grids; compare medians outside
-  the reference's own dropped-beat holes; prefer chord-anchored bar anchors
-  (survive) over index anchors (don't).
+- **Cross-run model variance — CORRECTED, the model is deterministic.**
+  This entry used to say Beat This! emits different grids on near-identical
+  mixes. Measured properly (five runs over the 15 cached library mixes):
+  **15/15 songs bit-identical across MPS reruns, across CPU reruns, and
+  MPS vs CPU produce identical beat TIMES on all 15** (logits differ by
+  ≤2e-4, two ulps at 4-decimal emit resolution). The model rolls no dice.
+  What the old entry actually observed was *different inputs* — the cached
+  WDOA case crossed the harness's ffmpeg mix and the app's
+  `OfflineAudioContext` render, which is the decode-divergence trap above
+  wearing a disguise. The surviving rules are the ones about inputs: diff
+  against the **previous detector's harness output** rather than app-saved
+  grids, and keep chord-anchored bar anchors (survive) over index anchors
+  (don't). But "never gate on cross-run equality" was too strong: within
+  one decode path, equality is exact and can be gated on.
+- **We round the model's confidence away at our own JSON boundary.** All
+  three runners emit `round(sigmoid(x), 3)`, and the model is trained with
+  `pos_weights` 19/86 and **no validation split** (read from `final0.ckpt`:
+  `no_val: True`), so it is deliberately overconfident: **56.8% of kept beat
+  peaks and 53.0% of downbeat peaks round to exactly 1.000**, and any
+  ordering between them is destroyed. Measured cost: deciding which
+  alternate set is the beat (the v15/v16 question) is a **4.4σ call in logit
+  space on Puppe and a 0.6σ coin flip in sigmoid space**; across the four
+  level-ambivalent songs the separation is +1.29 logits versus +0.03 on the
+  eleven level-stable ones. `runner-beat-this.py --logits` emits the
+  pre-sigmoid heads; anything that COMPARES two peaks must use them.
+- **Ballroom is training data for `final0`** (`fold: None` in the
+  checkpoint's own datamodule hyper-parameters). It is a valid regression
+  tripwire and **not** a source of wins; GTZAN is the authors' held-out set
+  and the only honest external scoreboard for a candidate checkpoint. §6's
+  older framing of Ballroom as "the external sanity check — flatters
+  nothing" holds for the homegrown detector, which never saw it, and is
+  false for the fused path.
 - **Raw model outputs are per-checkout state**: `eval/beats/out/*.jsonl`
   is gitignored and dies with a worktree — regenerate via
   `runner-beat-this.py` (venv + checkpoints live in the session scratchpad)
@@ -384,13 +432,14 @@ The traps, each paid for:
   with whichever ran last — the "fixed" clip once rendered the *old* grid.
   Print click counts; 2× the expected count is the tell.
 
-## 7. Known-good numbers (fused, v16)
+## 7. Known-good numbers (fused, v17)
 
 - Library: no-ml 14/14, fused 16/16 (includes WDOA `beatAtMl` 0 ms ×3, TTP
-  `barAtMl` 0 ms ×3). Full-grid diff v15→v16: 15/16 songs byte-identical;
-  only Wild World changes (by design) — 208→242 beats, 19%→3% of intervals
-  off by >15%, and app vs harness within 20 ms end to end (was: a different
-  octave).
+  `barAtMl` 0 ms ×3). Full-grid diff v16→v17: 16/17 songs byte-identical;
+  only Father and Son changes (by design) — 136.36→68.18 bpm, 535→238 beats,
+  23%→1% of intervals off by >15%, `maxShift 0 ms` (the new grid is a strict
+  subset of the old: invented midpoints removed, nothing moved). The v15→v16
+  diff moved only Wild World the same way.
 - Ballroom, both modes: **identical to v15, genre for genre** — v16's octave
   window needs a model that changed level mid-track, which 30 s clips do
   not, and its splice level check never fires there.
@@ -446,3 +495,4 @@ The traps, each paid for:
 | 14 | Span-phase harmonic vote for spliced bars | TTP bass solo |
 | 15 | Acoustic octave tiebreak, per-span bar-anchored parity, `__beatDbg` | Puppe drift + app/harness divergence |
 | 16 | Per-span model level (both-set membership + insert level check), model-ambivalence-gated octave window | Wild World: wrong bpm, half-tempo last third |
+| 17 | Adopted lattices flattened to one level; doubling gated on the model having committed to one; symmetric level-mix statistic | Father and Son: 136 bpm with a 250 bpm intro |

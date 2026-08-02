@@ -99,8 +99,15 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * level join both parity sets, no insert may click at a rate that isn't
  * ours, and a model this ambivalent widens the octave tie window (the same
  * race shipped 156.6 from the app and 77.4 from the harness).
+ * v17: the same question, asked of the ADOPTED lattice — where the drums
+ * tracker refuses a song the model's grid IS the click, and nothing was
+ * levelling it. Father and Son came out at 136 bpm with a 250 bpm intro
+ * because a content-free tempo prior doubled a median that described
+ * neither of the model's two levels. A lattice must be flattened onto one
+ * level before it is adopted, and may only be doubled once the model has
+ * committed to one.
  */
-export const BEAT_DETECT_VERSION = 16
+export const BEAT_DETECT_VERSION = 17
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -273,14 +280,38 @@ export function detectBeats(
     voids?: { aSec: number; bSec: number; leading: boolean; trailing: boolean; filled: boolean }[]
   } | null = null
   let mlPhase = false
+  /** Whether `lat` IS the model's lattice. Object identity used to answer
+   *  this; v17's normalization returns a new object, and identity would have
+   *  silently handed the adopted path to the splice family (which exists to
+   *  repair the DRUMS lattice) and mislabelled it in the debug trail. */
+  let adopted = false
+  /** v17: an adopted lattice IS the click, and nothing below re-levels it —
+   *  the splice family runs only when the drums-first tracker won. Flatten a
+   *  model that changed level mid-song onto one tempo on the way in. */
+  const adopt = (c: NonNullable<typeof mlChoice>): typeof lat => {
+    const beats = levelNormalize(c.beatsSec, c.medSec, aux?.ml?.downbeats)
+    if (beats === c.beatsSec) return c
+    const iv = beats.slice(1).map((t, i) => t - beats[i]).sort((a, b) => a - b)
+    const m = iv[iv.length >> 1] ?? c.medSec
+    if (debug) {
+      debug.mlNormalized = {
+        from: c.beatsSec.length,
+        to: beats.length,
+        medSec: Math.round(m * 1000) / 1000
+      }
+    }
+    return { ...c, beatsSec: beats, medSec: m }
+  }
   if (mlChoice && !mlChoice.doubled && mlDom === 3) {
-    lat = mlChoice
+    lat = adopt(mlChoice)
     mlPhase = true
+    adopted = true
   }
   if (!lat) lat = trackFromDrums(frames, fps, drumFlux, drumPeaks, aux, debug)
   if (!lat && mlChoice) {
-    lat = mlChoice
+    lat = adopt(mlChoice)
     mlPhase = !mlChoice.doubled
+    adopted = true
   }
   if (!lat) return null
   // v11/v12: where the drums-first lattice has NOTHING (refused voids) or
@@ -311,7 +342,7 @@ export function detectBeats(
    *  re-vote below: extension across a span nothing drum-anchored ever
    *  voted is blind (TTP's bass solo accented the wrong "1"). */
   const mlSpliceRanges: { aSec: number; bSec: number }[] = []
-  if (lat && lat !== mlChoice && mlChoice && lat.beatsSec.length >= 16) {
+  if (lat && !adopted && mlChoice && lat.beatsSec.length >= 16) {
     const L = lat
     const med = L.medSec
     const ratio = med / mlChoice.medSec
@@ -567,7 +598,7 @@ export function detectBeats(
     }
   }
   if (debug) {
-    debug.lattice = lat === mlChoice ? 'ml' : 'drums'
+    debug.lattice = adopted ? 'ml' : 'drums'
     if (lat.voids?.length) {
       debug.voids = lat.voids.map((v) => ({
         aSec: Math.round(v.aSec * 10) / 10,
@@ -1560,8 +1591,11 @@ function trackFromDrums(
     const iv: number[] = []
     for (let i = 1; i < mb.length; i++) iv.push(mb[i] - mb[i - 1])
     const m = [...iv].sort((a, b) => a - b)[iv.length >> 1]
-    if (!(m > 0)) return 0
-    return iv.filter((x) => Math.abs(x - 2 * m) <= 0.3 * m).length / iv.length
+    // v17: symmetric. v16 counted only intervals at TWICE the modal one and
+    // so read 0.00 on a model that changed level the other way (Father and
+    // Son runs eighths under a quarter-note median: 21% at half, 0% at
+    // double). No library song crosses the 0.25 gate on the added term.
+    return levelMix(mb, m)
   })()
   const tieWin = mlBimodal >= 0.25 ? 0.12 : 0.03
   if (debug) debug.octaveTie = { win: tieWin, mlBimodal: Math.round(mlBimodal * 100) / 100 }
@@ -1770,6 +1804,63 @@ function dominantMlBarLen(ml: MlGrid): number {
  *   homegrown tracker decides — for true rubato it rejects, and grid-less
  *   tracks keep their wall-clock count-in.
  */
+/** How much of a model grid sits at HALF or TWICE its own modal interval —
+ *  i.e. how often the model changed its mind about the beat level inside one
+ *  song. Measured across the library: Soldier Of Fortune 0.00 and every
+ *  drums-tracked ballad ≤0.18, against Father and Son 0.21, Puppe 0.27,
+ *  Turn The Page 0.37, Wild World 0.44. Tolerances are ±15% of each target,
+ *  matching the v16 statistic this generalizes (which counted the double
+ *  only — and so read 0.00 on a song that changed level the other way). */
+function levelMix(beats: number[], med: number): number {
+  if (beats.length < 24 || !(med > 0)) return 0
+  const iv: number[] = []
+  for (let i = 1; i < beats.length; i++) iv.push(beats[i] - beats[i - 1])
+  const hit = iv.filter(
+    (x) => Math.abs(x - 2 * med) <= 0.3 * med || Math.abs(x - med / 2) <= 0.075 * med
+  ).length
+  return hit / iv.length
+}
+
+/**
+ * v17: flatten a lattice that runs at more than one level onto its modal
+ * one. An ADOPTED lattice is the click — nothing downstream re-levels it,
+ * because the splice family (v13/v15/v16) only runs when the drums-first
+ * tracker won. Father and Son's model rides eighths for the first 20 s and
+ * quarters for the rest, so the singer got a 125 bpm intro over a 68 bpm
+ * body. Thinning is greedy (self-adapting: every beat survives a stretch
+ * already at our level, every other one survives a faster stretch), and a
+ * model bar line always wins its slot, so the phase re-anchors exactly where
+ * the music puts it rather than wherever the greedy walk happened to start.
+ */
+function levelNormalize(beats: number[], med: number, bars: number[] | undefined): number[] {
+  const n = beats.length
+  if (n < 8 || !(med > 0)) return beats
+  const localIv = (i: number): number => {
+    const from = Math.max(1, i - 3)
+    const to = Math.min(n - 1, i + 3)
+    const w: number[] = []
+    for (let k = from; k <= to; k++) w.push(beats[k] - beats[k - 1])
+    w.sort((a, b) => a - b)
+    return w[w.length >> 1] ?? med
+  }
+  const barAt = (t: number): boolean => {
+    if (!bars) return false
+    for (const b of bars) if (Math.abs(b - t) <= 0.25 * med) return true
+    return false
+  }
+  const out: number[] = []
+  const push = (t: number, bar: boolean): void => {
+    const last = out.length > 0 ? out[out.length - 1] : -Infinity
+    if (t - last >= 0.7 * med) out.push(t)
+    else if (bar && out.length > 0) out[out.length - 1] = t
+  }
+  for (let i = 0; i < n; i++) {
+    if (localIv(i) >= 0.7 * med) push(beats[i], true)
+    else push(beats[i], barAt(beats[i]))
+  }
+  return out.length >= 16 ? out : beats
+}
+
 function latticeFromMl(
   ml: MlGrid | null | undefined,
   frames: number,
@@ -1794,8 +1885,30 @@ function latticeFromMl(
   const prior = (bpm: number): number =>
     Math.exp(-0.5 * Math.pow(Math.log2(bpm / 105) / 0.6, 2))
   const bpm0 = 60 / med
+  let dSum = 0
+  for (let i = 1; i < frames; i++) dSum += drumFlux[i]
+  const env = normStrength(drumFlux, dSum / frames, frames, fps)
+  // v17: a median is only a LEVEL if the model stayed on one. Where it
+  // changed its mind mid-song the median describes neither stretch, and
+  // doubling it produces a lattice that is wrong everywhere — Father and Son
+  // came out with a 250 bpm intro over a 136 bpm body. The drums cannot
+  // arbitrate this (onset strength at the invented midpoints measured 0.48
+  // for Father and Son against 0.302 for Soldier Of Fortune, i.e. backwards),
+  // and neither can the model's beat head (it has already committed to its
+  // own level, so a midpoint is ~16 logits down on every song in the
+  // library). What separates them is whether the model committed at all.
+  const multiLevel = levelMix(beats, med)
+  const gain = prior(bpm0 * 2) - prior(bpm0)
   let doubled = false
-  if (bpm0 * 2 <= 220 && prior(bpm0 * 2) > prior(bpm0) + 0.2) {
+  if (debug && bpm0 * 2 <= 220 && gain > 0.2) {
+    debug.mlDouble = {
+      bpm0: Math.round(bpm0 * 10) / 10,
+      gain: Math.round(gain * 1000) / 1000,
+      multiLevel: Math.round(multiLevel * 100) / 100,
+      doubled: multiLevel < 0.1
+    }
+  }
+  if (bpm0 * 2 <= 220 && gain > 0.2 && multiLevel < 0.1) {
     const dbl: number[] = []
     for (let i = 0; i < beats.length; i++) {
       dbl.push(beats[i])
@@ -1824,14 +1937,7 @@ function latticeFromMl(
     if (debug) debug.mlReject = `lattice unsteady (${Math.round(steadyFrac * 100)}% of windows)`
     return null
   }
-  let dSum = 0
-  for (let i = 1; i < frames; i++) dSum += drumFlux[i]
-  return {
-    beatsSec: beats,
-    medSec: med,
-    O: normStrength(drumFlux, dSum / frames, frames, fps),
-    doubled
-  }
+  return { beatsSec: beats, medSec: med, O: env, doubled }
 }
 
 /** Analysis always runs at this rate. The app decodes at the DEVICE context

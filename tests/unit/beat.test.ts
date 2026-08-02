@@ -1150,3 +1150,70 @@ describe('detectBeats octave tie window (v16)', () => {
     expect(Math.abs(det!.bpm - 120)).toBeLessThan(3)
   })
 })
+
+describe('detectBeats adopted lattice level (v17)', () => {
+  // Where the drums tracker refuses a song, the model's grid IS the click and
+  // nothing downstream levels it — the splice family runs only when the
+  // drums-first lattice won. Silent drums force that path; a lone quiet inst
+  // stem keeps us off the mix-only-verbatim branch.
+  const quiet = (): AudioBuffer => wrap(new Float32Array(SR * 100))
+  const gridOf = (beats: number[]): { beats: number[]; downbeats: number[] } => {
+    const bars: number[] = []
+    for (let t = beats[0]; t < beats[beats.length - 1]; t += 3.52) {
+      bars.push(beats.reduce((best, x) => (Math.abs(x - t) < Math.abs(best - t) ? x : best), beats[0]))
+    }
+    return { beats, downbeats: [...new Set(bars)] }
+  }
+  /** Father and Son's shape: eighths under the intro, quarters for the body,
+   *  so the MEDIAN interval describes neither stretch. */
+  const twoLevel = (): { beats: number[]; downbeats: number[] } => {
+    const beats: number[] = []
+    for (let t = 0.4; t < 20; t += 0.44) beats.push(t)
+    for (let t = 20.0; t < 95; t += 0.88) beats.push(t)
+    return gridOf(beats)
+  }
+  /** Soldier Of Fortune's shape: one level, genuinely slow. */
+  const oneLevel = (): { beats: number[]; downbeats: number[] } => {
+    const beats: number[] = []
+    for (let t = 0.4; t < 95; t += 0.9) beats.push(t)
+    return gridOf(beats)
+  }
+
+  it('a model that changed level mid-song is not doubled by the tempo prior', () => {
+    const dbg: Record<string, unknown> = {}
+    const det = detectBeats(quiet(), { inst: [quiet()], ml: twoLevel() }, dbg)
+    expect(det).not.toBeNull()
+    expect(dbg.lattice).toBe('ml')
+    // the singable prior alone WOULD double 68 bpm — it must not, because a
+    // median across two levels is not a level
+    const dd = dbg.mlDouble as { gain: number; multiLevel: number; doubled: boolean }
+    expect(dd.gain).toBeGreaterThan(0.2) // fixture self-check: the prior wants it
+    expect(dd.multiLevel).toBeGreaterThanOrEqual(0.1)
+    expect(dd.doubled).toBe(false)
+    expect(Math.abs(det!.bpm - 68.2)).toBeLessThan(3)
+  })
+
+  it('and it is flattened onto one level before it becomes the click', () => {
+    const det = detectBeats(quiet(), { inst: [quiet()], ml: twoLevel() }, {})
+    expect(det).not.toBeNull()
+    const iv = det!.beats.slice(1).map((t, i) => t - det!.beats[i])
+    const med = [...iv].sort((a, b) => a - b)[iv.length >> 1]
+    // no stretch left at half the tempo of any other
+    expect(iv.filter((x) => x < 0.7 * med).length).toBe(0)
+    expect(Math.max(...iv)).toBeLessThan(1.6 * med)
+  })
+
+  it('a model that stayed on one level is still doubled (Soldier Of Fortune)', () => {
+    // No-regression guard: this is the case the doubling branch was built
+    // for, and v17 must leave it alone. Asserts BEHAVIOUR only, so it holds
+    // on both versions — the debug field it would be tempting to read here
+    // does not exist before v17, which would make it pass for the wrong
+    // reason on old code and prove nothing.
+    const det = detectBeats(quiet(), { inst: [quiet()], ml: oneLevel() }, {})
+    expect(det).not.toBeNull()
+    expect(Math.abs(det!.bpm - 133.3)).toBeLessThan(4)
+    const iv = det!.beats.slice(1).map((t, i) => t - det!.beats[i])
+    const med = [...iv].sort((a, b) => a - b)[iv.length >> 1]
+    expect(Math.abs(med - 0.45)).toBeLessThan(0.05)
+  })
+})
