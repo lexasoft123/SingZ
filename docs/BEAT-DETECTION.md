@@ -654,8 +654,27 @@ moved either song).
   fold is scrambled BY the meter changes being hunted (fold the verified
   clean window); and the extractor's phase must never be graded against OUR
   downbeats — our grid being wrong is the finding, not the failure.
-- **5b — SSM repetition map**: GO only if WW's three verse ends land in one
-  repetition class and TTP gains no false seams at its wobble spots.
+- **5b — SSM repetition map: MEASURED, GO (2026-08-02).** `formMap()` in
+  `phase5-extractors.mjs` + `run-phase5b.mjs`: beat-synchronous chroma +
+  vocal activity at half-bar hops, checkerboard novelty for seams,
+  translation-invariant local-context matching for repetition classmates
+  (parity errors cancel — both instances of a repeated section shift
+  equally, which is exactly why the layer can aggregate across an
+  un-modelled meter change). Results: querying Wild World's first verse-end
+  returns the other two at **rank 1 and rank 2 of 20**; TTP takes **0 of 5**
+  false seams at its wobble spots, and its detected seams are real section
+  starts. Bonus convergence: WW's seam list (36.5/89.1/141.7) independently
+  marks the three verse-end 2/4 regions themselves.
+  Traps, paid once: **one-loop harmony makes classmate lists promiscuous**
+  (on WW everything matches everything above threshold — presence proves
+  nothing, RANK is the test, and the vocal dims are what discriminate a
+  verse end from any other bar of the same loop); **checkerboard novelty is
+  genre-sensitive** (WW's novelty magnitudes are 10× smaller than TTP's,
+  because a one-loop song has almost no harmonic novelty anywhere — seams
+  are a bonus, rank-based classmates are the robust deliverable); and FaS's
+  6–9 s guitar-only breaks vanish under the K=8 kernel (its seams find the
+  verse STARTS beautifully — "It's not time to make a change" at both 15.7
+  and 152.5 — but not the breaks; the vocal layer already owns those).
 - **5c — the fused decoder**, gated by the anchors that now exist: FaS
   `barLenAt` red→green, TTP's five guards stay green, WDOA prefers 4+2 over
   6, Ballroom byte-stable (30 s clips have no vocals/sections — the new

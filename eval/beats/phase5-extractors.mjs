@@ -478,3 +478,154 @@ export function halfBarCycle(labels, beats, window) {
   return { hb, hbT, period: bestL, agree, purity }
 }
 
+
+/* ---- 5b: the form layer ------------------------------------------------- */
+
+/**
+ * Beat-level features for form analysis: 12-dim harmonic chroma plus vocal
+ * activity per beat. Shares the decode/FFT path with the chord layer.
+ */
+export function beatFeatures(harmBufs, vocalsBuf, beats) {
+  let harm = harmBufs[0]
+  for (let s = 1; s < harmBufs.length; s++) {
+    const y = harmBufs[s]
+    const m = Math.min(harm.length, y.length)
+    const sum = new Float32Array(m)
+    for (let i = 0; i < m; i++) sum[i] = harm[i] + y[i]
+    harm = sum
+  }
+  const Ch = beatSync(chromaOf(frames(harm), 55, 2000), beats)
+  // vocal activity fraction per beat
+  const fps = SR / HOP
+  const n = Math.max(0, 1 + Math.floor((vocalsBuf.length - NFFT) / HOP))
+  const rms = new Float32Array(n)
+  for (let f = 0; f < n; f++) {
+    let s = 0
+    for (let i = 0; i < NFFT; i += 4) {
+      const v = vocalsBuf[f * HOP + i]
+      s += v * v
+    }
+    rms[f] = Math.sqrt(s / (NFFT / 4))
+  }
+  const sorted = [...rms].sort((a, b) => a - b)
+  const thr = 0.08 * (sorted[Math.floor(sorted.length * 0.95)] || 0)
+  const vocal = new Float32Array(Ch.length)
+  for (let i = 0; i + 1 < beats.length; i++) {
+    const a = Math.floor(beats[i] * fps)
+    const b = Math.max(a + 1, Math.floor(beats[i + 1] * fps))
+    let on = 0
+    let tot = 0
+    for (let f = a; f < Math.min(b, n); f++) {
+      tot++
+      if (rms[f] > thr) on++
+    }
+    vocal[i] = tot ? on / tot : 0
+  }
+  return { Ch, vocal }
+}
+
+/**
+ * The form map at HALF-BAR hops: novelty seams (checkerboard kernel) and
+ * repetition classmates (translation-invariant local-context match — parity
+ * errors in our grid cancel, because both instances of a repeated section
+ * shift equally; this is exactly why the form layer can aggregate evidence
+ * across an un-modelled meter change).
+ */
+export function formMap(feat, beats, opts = {}) {
+  const { Ch, vocal } = feat
+  const W = opts.vocalWeight ?? 0.35
+  const hb = []
+  const hbT = []
+  for (let h = 0; h + 1 < Ch.length; h += 2) {
+    const v = new Float32Array(26)
+    for (let k = 0; k < 12; k++) {
+      v[k] = Ch[h][k]
+      v[12 + k] = Ch[h + 1][k]
+    }
+    v[24] = W * vocal[h]
+    v[25] = W * vocal[h + 1]
+    let norm = 0
+    for (let k = 0; k < 26; k++) norm += v[k] * v[k]
+    norm = Math.sqrt(norm)
+    if (norm > 0) for (let k = 0; k < 26; k++) v[k] /= norm
+    hb.push(v)
+    hbT.push(beats[h])
+  }
+  const n = hb.length
+  const cos = (a, b) => {
+    let s = 0
+    for (let k = 0; k < 26; k++) s += hb[a][k] * hb[b][k]
+    return s
+  }
+  // novelty: checkerboard kernel, K half-bars each side
+  const K = opts.noveltyK ?? 8
+  const nov = new Float32Array(n)
+  for (let h = K; h < n - K; h++) {
+    let within = 0
+    let cross = 0
+    let nw = 0
+    let nc = 0
+    for (let i = 0; i < K; i++) {
+      for (let j = 0; j < K; j++) {
+        const a = h - 1 - i
+        const b = h + j
+        cross += cos(a, b)
+        nc++
+        if (i < j) {
+          within += cos(h - 1 - i, h - 1 - j) + cos(h + i, h + j)
+          nw += 2
+        }
+      }
+    }
+    nov[h] = (nw ? within / nw : 0) - (nc ? cross / nc : 0)
+  }
+  // seams: peaks above mean + 1 sigma, min separation K
+  const vals = [...nov].filter((x) => x !== 0)
+  const mean = vals.reduce((a, b) => a + b, 0) / (vals.length || 1)
+  const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (vals.length || 1))
+  const seams = []
+  for (let h = K; h < n - K; h++) {
+    if (nov[h] < mean + sd) continue
+    let isPeak = true
+    for (let d = 1; d <= K; d++) {
+      if ((h - d >= 0 && nov[h - d] > nov[h]) || (h + d < n && nov[h + d] > nov[h])) {
+        isPeak = false
+        break
+      }
+    }
+    if (isPeak) seams.push({ t: hbT[h], nov: Math.round(nov[h] * 1000) / 1000 })
+  }
+  /** Times whose local context matches the context at tSec — the repetition
+   *  classmates. ctx half-bars each side; matches above frac of self-sim. */
+  const classmates = (tSec, opts2 = {}) => {
+    const ctx = opts2.ctx ?? 4
+    const frac = opts2.frac ?? 0.82
+    let q = 0
+    for (let h = 0; h < n; h++) if (Math.abs(hbT[h] - tSec) < Math.abs(hbT[q] - tSec)) q = h
+    const score = (j) => {
+      let s = 0
+      let c = 0
+      for (let i = -ctx; i <= ctx; i++) {
+        const a = q + i
+        const b = j + i
+        if (a < 0 || b < 0 || a >= n || b >= n) continue
+        s += cos(a, b)
+        c++
+      }
+      return c ? s / c : 0
+    }
+    const self = score(q)
+    const out = []
+    for (let j = ctx; j < n - ctx; j++) {
+      if (Math.abs(j - q) < 4 * ctx) continue
+      const sc = score(j)
+      if (sc < frac * self) continue
+      // local maximum
+      if (j > 0 && score(j - 1) > sc) continue
+      if (j + 1 < n && score(j + 1) > sc) continue
+      out.push({ t: hbT[j], score: Math.round((sc / self) * 1000) / 1000 })
+    }
+    return out
+  }
+  return { hbT, nov, seams, classmates }
+}
