@@ -25,7 +25,8 @@
    "rot": [
     3
    ],
-   "barAt": 233.86
+   "barAt": 233.86,
+   "scoreNote": "Ultimate-Guitar official score: 6/8 with 3/8 bars at bar 7 (intro), 57/73/117 (end of each chorus, on \"Oh, but I know\") and 142/147 (outro); dotted-quarter = 72. Our grid is 154 bars, ALL 6 beats. NOT anchored: at the chorus ends the score points to, our bars measure a clean 5.92-6.17 beats — no short bar — so either we absorb the 3/8 invisibly (which would shift bar phase by half a bar afterwards) or the score bar numbers do not map where assumed. The three stretched bars we DO have (198.93, 201.25, 317.07) sit in instrumental/outro regions, and the outro is where the score puts its last two 3/8 bars. Revisit when the bar decoder lands — this is the one score-vs-audio disagreement in the set and it needs an ear, not more arithmetic."
   },
   "Panzerkampf": {
    "bpb": 4,
