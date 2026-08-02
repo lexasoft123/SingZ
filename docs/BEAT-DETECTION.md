@@ -675,10 +675,38 @@ moved either song).
   6–9 s guitar-only breaks vanish under the K=8 kernel (its seams find the
   verse STARTS beautifully — "It's not time to make a change" at both 15.7
   and 152.5 — but not the breaks; the vocal layer already owns those).
-- **5c — the fused decoder**, gated by the anchors that now exist: FaS
-  `barLenAt` red→green, TTP's five guards stay green, WDOA prefers 4+2 over
-  6, Ballroom byte-stable (30 s clips have no vocals/sections — the new
-  layers are inert there by construction).
+- **5c — the fused decoder. v1 MEASURED 2026-08-02: 10/17, NO-GO, with the
+  diagnosis that designs v2.** The whole-song Viterbi (`decodeBarsFused` +
+  `run-phase5c.mjs`) turns evidence into odd bars anywhere it can pay — and
+  most phrase-final held notes sit on downbeats of perfectly UNIFORM bars,
+  so the negatives bought spurious odd bars (TTP +4 including relocating its
+  legitimate fermata 2; Dreamer +1 at the ring-out; Crowley shifted its
+  ear-anchor 0.58 s) while SoF's real 2/4s were missed in favour of two
+  wrong ones. The codebase already knew this lesson as "phrase starts float
+  on pickups — keep weights low, never decisive"; v1 made held onsets
+  decisive and re-learned it.
+  Two structural findings for v2:
+  (a) **The discrepancy IS the signal.** On the negative controls the
+  shipped uniform phase already HITS the held notes — no conflict, no
+  repair needed. On FaS/SoF/WW the swallowed odd bars make the shipped
+  phase MISS the held notes by 1–2 beats — the same wandering-accent
+  symptom the singer reports, now usable as the trigger. v2 is therefore a
+  **repair operator, not a re-decode**: walk the shipped bars; only where a
+  strong held onset disagrees with the current phase (and a seam or
+  repetition classmate corroborates) insert one odd bar and reflow; re-merge
+  with the shipped grid when phases coincide. Negatives stay untouched by
+  construction — exactly the splice family's shape, one level up.
+  (b) **The saved grids are the wrong substrate**: FaS's SAVED lattice has
+  beat holes at exactly the trouble spots (69.14 = 1.93 beats), so
+  index-based bar lengths lie — a correct 5-beat bar reads as 4 indices.
+  The harness-fresh v17 lattice carries the beat (70.00) that the app's
+  decode dropped. 5c v2 must run over the fresh lattice, i.e. inside
+  run-current where the real gate lives — and the app/harness beat-count
+  divergence on FaS (235 vs 238) is §6's decode-divergence trap surfacing
+  at the worst possible spot, logged here so v18's heal verifies it.
+  Gates unchanged: FaS barLenAt red→green, SoF 150.5→2, TTP five guards +
+  fermata intact, Crowley/Dreamer untouched, every barAt still hit,
+  Ballroom byte-stable.
 - **5d — pins UI + score import**: the constraint compiler and the popover
   UI. The singer's tap wins over everything, including 5c.
 

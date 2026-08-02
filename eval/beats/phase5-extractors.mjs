@@ -629,3 +629,86 @@ export function formMap(feat, beats, opts = {}) {
   }
   return { hbT, nov, seams, classmates }
 }
+
+/* ---- 5c: the fused bar decoder ------------------------------------------ */
+
+/**
+ * Viterbi over bar boundaries on the beat lattice, scored by the evidence
+ * layers. The §8 probe died because its only witness was the model's
+ * downbeat head; this one is paid in the currencies that measured well:
+ *
+ *  - voice: phrase-final held-note onsets (L2) — the "not"/"go" pattern.
+ *    A bar line ON one earns W_v (+bonus when section-final).
+ *  - chord: label-run starts (L1.5) — bar lines prefer chord changes.
+ *  - seam:  form-layer novelty seams (L3) — section starts.
+ *
+ * An odd bar (length != dom) costs C and must be paid for by evidence AT its
+ * closing boundary. Chords alone can never pay (they fire every half-bar —
+ * that blindness is measured); a held vocal onset can. This is why the three
+ * uniform negative controls stay uniform by construction: no held notes at
+ * their wobble spots, no odd bars.
+ */
+export function decodeBarsFused(beats, dom, evidence, opts = {}) {
+  const { voice = [], chordStarts = [], seams = [] } = evidence
+  const W_V = opts.wVoice ?? 1.2
+  const W_VS = opts.wVoiceSection ?? 0.4
+  const W_C = opts.wChord ?? 0.25
+  const W_S = opts.wSeam ?? 0.5
+  const C = opts.changeCost ?? 1.5
+  const LENS = opts.lens ?? (dom === 6 ? [3, 6] : [2, 3, 4, 5])
+  const n = beats.length
+  const med = medianOf(beats.slice(1).map((t, i) => t - beats[i]))
+  const tolV = opts.tolVoice ?? 0.45
+  const tolC = 0.3 * med
+
+  const vAt = new Float64Array(n)
+  for (const e of voice) {
+    let bi = 0
+    for (let i = 0; i < n; i++) if (Math.abs(beats[i] - e.t) < Math.abs(beats[bi] - e.t)) bi = i
+    if (Math.abs(beats[bi] - e.t) <= tolV) {
+      vAt[bi] = Math.max(vAt[bi], W_V + (e.gapSec >= 8 * med ? W_VS : 0))
+    }
+  }
+  const cAt = new Float64Array(n)
+  for (const t of chordStarts) {
+    let bi = 0
+    for (let i = 0; i < n; i++) if (Math.abs(beats[i] - t) < Math.abs(beats[bi] - t)) bi = i
+    if (Math.abs(beats[bi] - t) <= tolC) cAt[bi] = W_C
+  }
+  const sAt = new Float64Array(n)
+  for (const s of seams) {
+    let bi = 0
+    for (let i = 0; i < n; i++) if (Math.abs(beats[i] - s.t) < Math.abs(beats[bi] - s.t)) bi = i
+    for (let d = -2; d <= 2; d++) {
+      const j = bi + d
+      if (j >= 0 && j < n) sAt[j] = Math.max(sAt[j], W_S)
+    }
+  }
+  const bonus = (j) => (j < n ? vAt[j] + cAt[j] + sAt[j] : 0)
+
+  const NEG = -1e12
+  const best = new Float64Array(n).fill(NEG)
+  const from = new Int32Array(n).fill(-1)
+  // free choice of the first bar line within the first dom beats
+  for (let i = 0; i < Math.min(dom, n); i++) best[i] = bonus(i)
+  for (let i = 0; i < n; i++) {
+    if (best[i] === NEG) continue
+    for (const L of LENS) {
+      const j = i + L
+      if (j >= n) continue
+      const v = best[i] + bonus(j) - (L === dom ? 0 : C)
+      if (v > best[j]) { best[j] = v; from[j] = i }
+    }
+  }
+  let end = -1
+  let bv = NEG
+  for (let i = Math.max(0, n - dom - 1); i < n; i++) if (best[i] > bv) { bv = best[i]; end = i }
+  if (end < 0) return null
+  const idx = []
+  for (let i = end; i >= 0; i = from[i]) {
+    idx.push(i)
+    if (from[i] < 0) break
+  }
+  idx.reverse()
+  return idx
+}
