@@ -18,7 +18,8 @@
   "Mr Crowley": {
    "bpb": 4,
    "barAt": 177.621,
-   "note": "slip-class song; two harmonic phase slips (126.6s, 166.5s) re-phased since v9 — anchor minted from the harmonically-validated grid (chord changes 86% on bar starts)"
+   "note": "slip-class song; two harmonic phase slips (126.6s, 166.5s) re-phased since v9 — anchor minted from the harmonically-validated grid (chord changes 86% on bar starts)",
+   "scoreNote": "Two official transcriptions agree (vocal + bass): Intro quarter = 90, then 105 at Verse 1 (bar 20), uniform 4/4 throughout, 126 bars, no meter changes. Both our tempos confirmed: measured 90.9 intro / 107.7 body vs notated 90/105 — the v12 organ-intro splice (\"own tempo under the body\") is exactly what the page says. Therefore the 24 stretched bars the sweep flagged (most in the library) are PERFORMANCE looseness — pushed fills, organ rubato — already the defect-splice family's job, and NOT meter. Do not let a future bar decoder mint odd bars here; this song joins TTP as a negative control, at 5x the difficulty."
   },
   "Nothing Else Matters": {
    "bpb": 6,
@@ -47,7 +48,8 @@
    "rot": [
     3
    ],
-   "barAt": 164.595
+   "barAt": 164.595,
+   "scoreNote": "Official Rammstein tab: quarter = 117 — the notation sides with the eval harness's 117.8, AGAINST the 58.73 we ship (measured exactly half, 1.99x). The v15 doc stance stands — half-vs-double is taste and the singer's pending ear verdict decides — but the notation thumb is now on the fast side, and v16's mlBimodal measured Puppe 0.26-0.27 (the model itself wavers). Meter: uniform 4/4 for 128 bars, then an outro tempo staircase 117 -> 100 (bar 128) -> 75 (bar 130) with a single 3/4 at bar 129. Our outro spacing (1.0 s +/- 0.15 noisy) shows no clear staircase — but that region is the known trailing-void knife edge, and trailing voids never splice, so low stakes today. The one interior grid hole at 37.88 has NO notated counterpart (uniform 4/4 there) — a real defect, not music."
   },
   "Sixteen Tons": {
    "bpb": 4,
@@ -62,7 +64,14 @@
    "rot": [
     1
    ],
-   "barAt": 115.601
+   "barAt": 115.601,
+   "barLenAt": [
+    {
+     "t": 150.5,
+     "n": 2
+    }
+   ],
+   "scoreNote": "Official Deep Purple tab (quarter = 66; ours 67.1 ✓): 4/4 with a 2/4 bar at every \"windmill going round\" — score bars 18, 43, 48. Audio-consistent at all three: windmill->round spans 1.8-1.9 beats at 61.7/149.7/165.8, i.e. the 2/4 carries \"windmill going\" and \"round\" opens the next 4/4. One anchor minted at the cleanest instance (verse-2 chorus, t=150.5 want 2 — RED today, we claim 4); the other two are recorded, not minted. Our grid swallows the first two 2/4s with no anomaly at all and shows one 4.47-beat stretched bar at 180.33. ALSO: notated rall. at bar 52, 66 -> 38, on the final \"soldier of fortune\" — our outro spacing stays 0.89-0.92 s flat, so the click races the band if the recording really slows (same ending class as WDOA; needs an ear). This is a GT ANCHOR song: rot/barAt still pass because the ear-minted barAt is real, but the uniform grid must be re-syncing across the swallowed 2/4s via slips — the phase between choruses is not to be trusted."
   },
   "Stirb Nicht Vor Mir": {
    "bpb": 4,
