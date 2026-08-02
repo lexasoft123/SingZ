@@ -208,9 +208,16 @@ Stages, each with its scar tissue:
   its two parities. The margin gate is a tuning knob: 0.5 would keep TTP
   (0.73) and drop WDOA's verse re-vote (0.44).
 
-Rejection is a feature. MotN-class rubato gets no grid and must keep getting
-none — grid-less play() degrades to wall-clock count-in ticks. Never "fix" a
-reject by inventing a grid.
+Rejection is a feature, and it is the one behaviour in this file **verified
+by a composer's own instruction**. The Music Of The Night's licensed vocal
+score opens "Slowly, with freedom (quarter = 64)" — rubato, in bar 1 — then
+runs accel. (b13) into "Faster (quarter = 76)" (b15), two fermatas (b20),
+"Very slowly" (b21), "a tempo" (b22), and a closing rit. + fermata (b44).
+Our detector refuses it with "windows disagree on a tempo (rubato?)": the
+windows disagree because the music does. Grid-less play() degrades to
+wall-clock count-in ticks. Never "fix" a reject by inventing a grid — for
+this song a forced grid would have been wrong three ways at once, since the
+score is not uniform 4/4 either (2/4 at bars 10, 29-30, 40-41).
 
 ## 4. The splice family (v11–v16): where the model repairs the lattice
 
