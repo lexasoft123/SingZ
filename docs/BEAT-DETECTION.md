@@ -447,7 +447,40 @@ The traps, each paid for:
 
 ## 8. Open problems and the research road
 
-- **Phase 3 (agreed, not started): bar-pointer decoder + manual-pin UI.**
+- **Phase 3, MEASURED AND KILLED in its decoder form (2026-08-02).** Five
+  published scores showed the detector forcing songs into meters they never
+  had (Father and Son 5/4 + three 3/4; Wild World a 2/4 at each verse end;
+  Nothing Else Matters six 3/8; WDOA one 2/4 — Turn The Page uniform, the
+  counter-example). The obvious answer was a Viterbi over bar boundaries with
+  lengths 3/4/5, scored by the model's downbeat head. It does not work, and
+  the reason is not fixable by tuning:
+  - Swept the change penalty 1.0 → 5.0: **the answer never moves.** Father and
+    Son never finds its verified 5/4; Turn The Page always invents the same
+    four odd bars, at exactly the spots where our own tracker wobbles. The
+    solution is insensitive to the prior, so the evidence is driving it.
+  - Feeding **raw logits instead of the rounded probabilities changed almost
+    nothing** — Father and Son identical, Wild World slightly worse. Stage 1's
+    logit win was `d' 0.54` PER BEAT, decisive only aggregated over hundreds of
+    beats. Choosing an octave aggregates. "Is THIS beat a bar line" does not.
+  - The direct measurement, and the real answer: at Father and Son's notated
+    5/4 downbeat the model's downbeat logit is **+3.14**, no stronger than its
+    neighbours (+5.35 two beats later); at the following notated bar line it is
+    **+1.03, the weakest positive in the region**. The head **alternates on a
+    half-bar period** (every 2 of our beats) from end to end. It cannot express
+    a 5-beat bar and does not mark where one is.
+  This closes a circle with §3 and §4: on this material the bass alternates
+  root-fifth, the guitar strum autocorrelates at lag 2 not lag 4, the chord
+  symbols change twice per bar, and the model marks half-bars. **The entire
+  accompaniment is 2-beat periodic.** The 4-and-5-bar structure lives in the
+  vocal phrasing and on the page, nowhere in the backing. No amount of cue
+  engineering over the accompaniment will recover it — that is a property of
+  the music, not a gap in the code.
+  What remains open, in order of promise: **manual meter/bar pins** (the user
+  knows, and a pin is one tap); **vocal-phrase-driven bar detection** (lyric
+  line starts were the one cue pointing somewhere different, and they are
+  weak-but-not-blind); and importing meter from a published score, which is
+  what `.claude/agents/score-scout.md` exists to fetch.
+- **Phase 3's other half (still worth doing): manual-pin UI.**
   The honest path to *shrinking* the homegrown code rather than growing it:
   a small decoder over the model's probability heads constrained by
   stem-derived anchors, plus first-class user pins ("this is a 1") that
