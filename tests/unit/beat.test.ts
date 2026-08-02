@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   accentIndex,
   barLengthAt,
+  barNumber,
   beatIndexAtOrAfter,
   beatTime,
   constantBeats,
@@ -111,6 +112,26 @@ describe('beat track math', () => {
     expect(barLengthAt(uniform, 6)).toBe(4)
   })
 
+  it('numbers the bars the grid strip labels', () => {
+    // Explicit map: bar 1 starts at the first entry, the pickup before it is 0.
+    expect(barNumber(vinfo, 2)).toBe(1)
+    expect(barNumber(vinfo, 5)).toBe(1)
+    expect(barNumber(vinfo, 6)).toBe(2) // the 3-beat bar
+    expect(barNumber(vinfo, 9)).toBe(3)
+    expect(barNumber(vinfo, 13)).toBe(4)
+    expect(barNumber(vinfo, 17)).toBe(5) // past the last entry, 4 beats on
+    expect(barNumber(vinfo, 1)).toBe(0) // pickup bar
+    expect(barNumber(vinfo, -2)).toBe(0) // a virtual downbeat one bar back
+    expect(barNumber(vinfo, -3)).toBe(-1)
+    // Uniform track: the same numbering off beatsPerBar/downbeat alone.
+    const { downbeats: _d, ...uniform } = vinfo
+    expect(barNumber(uniform, 2)).toBe(1)
+    expect(barNumber(uniform, 5)).toBe(1)
+    expect(barNumber(uniform, 6)).toBe(2)
+    expect(barNumber(uniform, 1)).toBe(0)
+    expect(barNumber(uniform, -2)).toBe(0)
+  })
+
   it('remaps downbeat indices through half and double time', () => {
     const twelve: BeatInfo = {
       beats: Array.from({ length: 12 }, (_, i) => i * 0.5),
@@ -158,13 +179,17 @@ describe('beat track math', () => {
       click: false,
       countInBars: 0,
       volume: 0.7,
-      accent: true // absent on older saves — accents stay on
+      accent: true, // absent on older saves — accents stay on
+      grid: false // ditto: the strip only shows when it was asked for
     })
-    expect(sanitizeMetronome({ click: true, countInBars: 9, volume: 3, accent: false })).toEqual({
+    expect(
+      sanitizeMetronome({ click: true, countInBars: 9, volume: 3, accent: false, grid: true })
+    ).toEqual({
       click: true,
       countInBars: 2,
       volume: 1,
-      accent: false
+      accent: false,
+      grid: true
     })
   })
 

@@ -6,7 +6,8 @@ export const MET_DEFAULTS: MetronomeConfig = {
   click: false,
   countInBars: 0,
   volume: 0.7,
-  accent: true
+  accent: true,
+  grid: false
 }
 
 export const BEATS_PER_BAR_CHOICES = [2, 3, 4, 6] as const
@@ -102,6 +103,23 @@ export function barLengthAt(info: BeatInfo, idx: number): number {
   if (idx >= d[d.length - 1]) return d[d.length - 1] - d[d.length - 2]
   const j = downbeatAtOrBefore(d, idx)
   return d[j + 1] - d[j]
+}
+
+/**
+ * 1-based bar number of the bar holding beat `idx` — what the grid strip
+ * labels its bar lines with. Beats before the first downbeat are the pickup
+ * bar (0) and count on backwards, the way a musician numbers them.
+ */
+export function barNumber(info: BeatInfo, idx: number): number {
+  const d = info.downbeats
+  if (d && d.length > 0) {
+    const firstLen = d.length >= 2 ? d[1] - d[0] : info.beatsPerBar
+    const lastLen = d.length >= 2 ? d[d.length - 1] - d[d.length - 2] : info.beatsPerBar
+    if (idx < d[0]) return 1 - Math.ceil((d[0] - idx) / firstLen)
+    if (idx >= d[d.length - 1]) return d.length + Math.floor((idx - d[d.length - 1]) / lastLen)
+    return downbeatAtOrBefore(d, idx) + 1
+  }
+  return Math.floor((idx - info.downbeat) / info.beatsPerBar) + 1
 }
 
 /** Constant-tempo track from a tapped/typed tempo; `anchor` becomes a downbeat. */
@@ -223,7 +241,8 @@ export function sanitizeMetronome(raw: unknown): MetronomeConfig {
     click: r.click === true,
     countInBars: Number.isFinite(bars) ? Math.max(0, Math.min(2, bars)) : 0,
     volume: Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : MET_DEFAULTS.volume,
-    accent: r.accent !== false // absent (older saves) means on
+    accent: r.accent !== false, // absent (older saves) means on
+    grid: r.grid === true
   }
 }
 
