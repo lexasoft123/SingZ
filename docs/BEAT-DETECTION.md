@@ -563,6 +563,34 @@ Nothing off the shelf localizes meter changes per bar:
   as a hard constraint: bar lines sit ON half-bar marks. WDOA's merge-vs-
   split question (6 vs 4+2) is answered *entirely* at this layer — the score
   splits where a half-bar mark falls mid-six.
+- **L1.5 — chord LABELS, not just chord changes (new; probe already green)**:
+  we have never identified a chord — `harmonicChangeVotes` is pure chroma
+  novelty, and *that a chord changed* every 2 beats is information-free about
+  which change starts the bar. Labels break the symmetry: the change to D and
+  the change to G look identical as novelty, but "the return to **Am**"
+  happens once per cycle, and the cycle start is a bar start. Probed on
+  2026-08-02 (beat-synchronous chroma from the harmonic stems + 24 maj/min
+  templates + stay-bonus Viterbi, bass chroma naming the root — ~150 lines,
+  no new deps, stems-first again since template chord-rec on a mix is
+  mediocre and on separated stems is easy):
+  - Wild World's detected sequence is the score's progression **verbatim** —
+    `Am D | G C | F Dm | E` in clean 2-beat runs, cycle chords landing on our
+    bar lines exactly as the printed two-chords-per-bar layout says.
+  - **The 2/4 bars appear as run-length anomalies**: the E that ends each
+    verse runs x4 beats in a full bar and **x1–x2 where the score puts the
+    2/4** (35.74, 140.06; the middle verse shows the same anomaly noisily,
+    right on our grid's stretched-bar-plus-hole at 86.7–89.5). Two of three
+    clean, third visible — and the form layer exists to aggregate exactly
+    this.
+  - **Father and Son's 5/4 is chord-invisible** — G runs x13 straight across
+    it ("still be here tomorrow…" is static harmony). The vocal layer stays
+    necessary; complementarity is now measured, not assumed. But FaS's
+    harmonic cycle is ~8 beats (2 bars), which anchors bar phase mod 2 bars —
+    resolving the 50/50 half-bar tie that started this whole arc, even while
+    blind to the 5/4 itself.
+  - Trap fence: the v3 "tonic-arrival bonus" dead end was per-beat argmax
+    chroma — unsmoothed, label-free, no cycle matching. This is not that;
+    do not let the old scar block the new mechanism.
 - **L2 — the vocal phrase layer (new; assets only SingZ has)**: the isolated
   vocals stem + word-level aligned lyrics + the melody line. Extract phrase
   segments (vocal energy on/off, breath gaps), phrase ENDS (last-word offset
@@ -603,9 +631,14 @@ moved either song).
 
 ### Phasing, each step with a kill criterion
 
-- **5a — phrase extractor, offline**: measure phrase-end/bar-line correlation
-  on the five scored songs. GO only if phrase evidence marks FaS's verified
-  5/4 and at least two of WW's three 2/4s. (No app code; eval harness only.)
+- **5a — the two evidence extractors, offline** (independent, either can die
+  without killing the other):
+  *5a-harm* — the chord-label layer. Probe already green on Wild World
+  (progression verbatim, 2 of 3 2/4s as clean run anomalies); GO for the
+  decoder if it also anchors FaS's phase mod 2 bars.
+  *5a-voice* — the phrase extractor. GO only if phrase evidence marks FaS's
+  verified 5/4 (the one thing 5a-harm measured blind on) and at least one
+  more scored meter change. (No app code; eval harness only.)
 - **5b — SSM repetition map**: GO only if WW's three verse ends land in one
   repetition class and TTP gains no false seams at its wobble spots.
 - **5c — the fused decoder**, gated by the anchors that now exist: FaS
