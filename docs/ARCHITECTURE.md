@@ -9,6 +9,7 @@ renderer (React)               preload            main (Node)
 MultitrackEngine (Web Audio)   window.singz  ──►  media.ts     allowlisted file access
 TrackStack/Waveform (canvas)                      separation.ts engine ladder + runs
 PitchStrip (piano roll + mic)                     lyrics.ts    LRCLIB→whisper ladder
+BeatGrid (beat lines over the lanes)
 LyricsPanel (synced lyrics)                       lrclib.ts    lrclib.net client
 SetupWizard (model manager)                       models.ts    versioned pack downloads
 LogPanel (diagnostics)                            log.ts       ring-buffer app log
@@ -45,6 +46,21 @@ the count-in still works, degraded to the clock: 3 or 6 ticks at one per
 wall-clock second (rate-independent, scheduled upfront — no walker), the
 music entering one second after the last tick. Seeks and post-split
 hot-swaps restart without a count-in.
+
+`metronome.grid` draws the same beat track over the waveforms
+(`components/BeatGrid.tsx`, one canvas spanning the ruler and every lane in
+the stack's grid, above the lanes and below the scrub overlay): a device-pixel
+hairline per beat, bar starts in accent with their number in the ruler. It is
+the only place the grid is visible against the audio it claims to describe —
+a beat off its transient, or a "1" on the wrong beat, shows here and nowhere
+else, which is what the box's nudge and `1→` controls are for. Beats disappear
+below 5 px apart (they mean nothing once they touch); bar lines instead double
+their stride until they fit — in bars, not pixels, so panning never re-picks
+which bars are drawn and the survivors stay on phrase boundaries. `grid` is the
+one metronome preference a project does not override on open: it is how the
+singer looks at any song, not part of this one. Nothing on it moves with the
+clock: it is fixed to song time, so it repaints on zoom, pan, resize and grid
+edits only — the playhead crossing it is the scrub overlay's own 1px layer.
 
 ## Timeline & zoom
 

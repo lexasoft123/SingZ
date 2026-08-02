@@ -467,6 +467,31 @@ function MetPopover({
         </div>
       </div>
       <div className="tp-row">
+        <span className="tp-label">Grid view</span>
+        <div className="mode-seg">
+          <button
+            type="button"
+            className={met.grid ? '' : 'on'}
+            onClick={met.grid ? () => onMet({ ...met, grid: false }) : undefined}
+          >
+            Off
+          </button>
+          <button
+            type="button"
+            className={met.grid ? 'on' : ''}
+            disabled={!grid}
+            title={
+              grid
+                ? 'Rule the waveforms with the beat: a line per beat, bars in orange — so you can see whether the beats sit on the song'
+                : 'Needs a tempo first'
+            }
+            onClick={met.grid || !grid ? undefined : () => onMet({ ...met, grid: true })}
+          >
+            Show
+          </button>
+        </div>
+      </div>
+      <div className="tp-row">
         <span className="tp-label">Count-in</span>
         <div className="mode-seg">
           <button
@@ -902,9 +927,9 @@ export default function Transport({
         <div className="train-wrap">
           <button
             type="button"
-            className={`round-ghost met${met.click ? ' active' : ''}`}
-            aria-pressed={met.click}
-            title="Metronome — click on the beat, count-in before play"
+            className={`round-ghost met${met.click || met.grid ? ' active' : ''}`}
+            aria-pressed={met.click || met.grid}
+            title="Metronome — click on the beat, a grid to watch, count-in before play"
             disabled={engine.duration === 0}
             onClick={() => setMetOpen((o) => !o)}
           >

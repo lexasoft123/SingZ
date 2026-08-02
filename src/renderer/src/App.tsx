@@ -658,7 +658,13 @@ export default function App(): React.JSX.Element {
           const tr = proj.settings.tempo ?? 1
           setTempoRate(tr)
           void engine.setTempo(tr)
-          if (proj.settings.metronome) setMetCfg(sanitizeMetronome(proj.settings.metronome))
+          if (proj.settings.metronome) {
+            const saved = sanitizeMetronome(proj.settings.metronome)
+            // The click and the count-in belong to the song; the grid lines are
+            // how the singer looks at any song — opening one saved before the
+            // view existed must not switch them off underneath them.
+            setMetCfg((cur) => ({ ...saved, grid: cur.grid }))
+          }
           const v = proj.settings.view
           if (v && Number.isFinite(v.s) && Number.isFinite(v.e) && v.e - v.s > 0.05) {
             setView({ s: Math.max(0, v.s), e: v.e })
@@ -1776,6 +1782,7 @@ export default function App(): React.JSX.Element {
                 tracks={tracks}
                 engine={engine}
                 view={view}
+                beat={metCfg.grid ? beatInfo : null}
                 ducked={duckedIds}
                 selection={selection}
                 onSelection={handleSelection}
