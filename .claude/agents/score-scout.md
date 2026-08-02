@@ -23,13 +23,21 @@ const { chromium } = require('/Users/maxplanck/Dev/my/SingZ/node_modules/playwri
 const ctx = await chromium.launchPersistentContext(PROFILE, { channel: 'chrome', headless: true })
 ```
 
-- `PROFILE` is a **dedicated** profile directory (see below), logged into Ultimate
-  Guitar. **Never launch against the user's real Chrome profile** — it holds every
-  other site's session, and Chrome is usually running and holds the lock anyway.
-- Ask the parent for the profile path. If the profile is not logged in, **stop and say
-  so** — do not attempt to log in, do not type credentials, do not start a trial.
-- Working scripts to copy from live beside the session scratchpad: `ug-official.cjs`
-  (search + open) and `ug-login.cjs` (one-time visible login window).
+- `PROFILE` is the persistent logged-in profile at **`.local/ug-profile`** in the
+  repo (gitignored — it holds a live session cookie — and excluded from the
+  packaged app). **Never launch against the user's real Chrome profile**: it holds
+  every other site's session, and Chrome is usually running and holds the lock.
+- **One Chrome per profile directory.** Parallel agents each need their OWN copy:
+  `cp -Rc .local/ug-profile /tmp/ug-profile-<n>` (APFS clone, ~instant) then delete
+  `SingletonLock`, `SingletonCookie`, `SingletonSocket` inside it. Launching a second
+  Chrome on a profile already in use fails with a lock error. The parent normally
+  makes these copies and passes you a path — use exactly the path you are given.
+- If the profile is not logged in, **stop and say so** — do not attempt to log in,
+  do not type credentials, do not start a trial. Re-authenticating is a human step:
+  the parent opens a headed window and the user signs in themselves.
+- Working scripts to copy from: `ug-official.cjs` (search via type=900 + open) and
+  `ug-login.cjs` (the one-time headed login window). Both live in the beat
+  scratchpad; if it is gone, the routing notes below are enough to rebuild them.
 
 ## Finding the official tab — verified route
 
