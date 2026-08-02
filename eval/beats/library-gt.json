@@ -81,7 +81,8 @@
    "rot": [
     2
    ],
-   "barAt": 147.412
+   "barAt": 147.412,
+   "scoreNote": "Official Rammstein tab: quarter = 90 (ours 87.59, 2.7% off — CORRECT OCTAVE), UNIFORM 4/4 across all 87 bars, one tempo, no repeats. Our grid agrees structurally too: 88 bars, every one of them 4 beats. FIFTH negative control (TTP, Crowley, Dreamer, Panzerkampf, this). BREAKS THE RAMMSTEIN PATTERN: Puppe and Zeit are both notated at half what we ship, so a third data point looked likely — it is not there. The tempo is self-checking rather than one read glyph: 87 bars x 4 / 90 = 232.00 s exactly, matching the player's 3:52, and all seven section markers land on that same clock (Outro predicted at bar 86 = 226.67 s vs measured ~226.8) — any inserted or dropped bar anywhere would break the identity. The octave traps this song sets and we did NOT fall into: continuous eighths run 8/bar for essentially the whole song (= 180) and the drum feel is half-time (= 45). READING TRAP for the next reader: \"1/2\" glyphs with curved arrows over bars 9, 29, 38, 42 on the Lead Guitar are HALF-STEP BENDS, not fraction time signatures — they sit at section boundaries and appear on one track only, exactly the shape that plants a phantom meter change in ground truth. Section downbeats usable as anchors (score time, app must still establish its own offset): V1 bar 9 = 21.33 s \"Die Nacht...\", V2 bar 29 = 74.67, Chorus bar 45 = 117.33 \"Ich warte hier\", Bridge bar 63 = 165.33, Chorus 2 bar 71 = 186.67, Outro bar 86 = 226.67."
   },
   "The Music Of The Night": {
    "reject": true,
