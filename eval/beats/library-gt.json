@@ -14,7 +14,8 @@
    "rot": [
     2
    ],
-   "barAt": 144.033
+   "barAt": 144.033,
+   "scoreNote": "THREE FINDINGS, one of them serious. Official Golden Earring tab: quarter = 124, uniform 4/4 across all 121 bars, no repeats. (1) WE SHIP 62.3 bpm — EXACTLY HALF the notated tempo, and this is a GT ANCHOR song (rot 2/4, barAt 144.033). Same direction and magnitude as Puppe, whose ear verdict (2026-08-02) chose the FASTER notated reading; that precedent puts the thumb on 124 here too, but it needs its own ear check before anything is changed — the anchors depend on it. Corroborating evidence that our grid is confused: our downbeats[] is a MIX of 22 two-beat bars and 50 four-beat bars, which is exactly what a half-tempo lattice looks like when some bars are counted at the notated level (2 of our beats) and others at twice that. (2) A notated tempo change we click through: quarter = 83 for the FINAL TWO BARS (bar 120, on the last sung word \"An-gel\", ~3:50 onward, with cresc. hairpins) — our tail holds 62-63 bpm flat. That is the FIFTH notated ending tempo event in this library (WDOA, SoF, Puppe, Dreamer, GTTR). (3) STRUCTURAL, matters for phase 5b/5c: the section lengths are 9/8/9/8/9/16/8/8/9/16/21 bars — every PRE-CHORUS IS NINE BARS and so is the intro, with no meter change anywhere. Anything that assumes 8-bar phrases mis-phases from 0:32.9 on. Vocal phrases also start with a pickup in the bar BEFORE each section label. Score prints no chord symbols; harmonic rhythm read off bass/rhythm voicings is one chord per bar, sometimes tied across two."
   },
   "Mr Crowley": {
    "bpb": 4,
@@ -35,7 +36,8 @@
    "rot": [
     2
    ],
-   "barAt": 188.511
+   "barAt": 188.511,
+   "scoreNote": "Official Sabaton tab: quarter = 99 (ours 97.5, 1.5% off), UNIFORM 4/4 across all 124 bars, no repeats/DS/coda, harmonic rhythm one chord per bar at fastest (whole Intro/Verse 1/every Chorus sit on a single F#5). FOURTH negative control after TTP, Crowley and Dreamer — a bar decoder must leave it alone. Independently cross-checked two ways: 124 bars at 99 = 300.6 s vs the player's 5:01, and the PARTS timeline's per-section pixel widths match the printed bar counts to within 1 px (any odd bar would have shifted a section visibly). NOTE we emit no downbeats[] here — scalar rotation only. READING TRAP: the vocal line carries QUINTUPLET brackets (a bracketed \"5\" at bars 15, 23, 48, 56, 58) and triplets at 77 — those are tuplets on the vocal rhythm, NOT 5/4 or 3/4 bars, and a pixel-reading pass will mistake them for meter marks."
   },
   "Primo Victoria": {
    "bpb": 4,
