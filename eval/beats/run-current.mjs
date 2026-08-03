@@ -41,6 +41,11 @@ const opt = (name) => {
 const dataset = opt('--dataset')
 const limit = opt('--limit') ? Number.parseInt(opt('--limit'), 10) : Infinity
 const jsonOut = opt('--json')
+// --grids-out <file.json>: dump the detector's actual grids, not just its
+// verdicts. Anchor checks look at a handful of times per song and cannot see
+// a bar of 1 beat or 20 — a whole-grid dump is the only way to catch that.
+const gridsOut = opt('--grids-out')
+const grids = {}
 // Reproduce the pre-monoOf app bug (aux read as left channel only).
 const CH0 = args.includes('--channel0')
 // --ml <raw.jsonl>: feed Beat This! grids (runner-beat-this.py output) as
@@ -252,6 +257,30 @@ async function runLibrary(detect) {
     // mixes legitimately differ by a beat in loose material, which shifts
     // the bar extension across a void, while beat times agree within ~20 ms.
     let mlStatus = null
+    // gridSane: every emitted bar must be a length music actually uses.
+    // Unlike every other check here this one needs no ground truth and looks
+    // at the WHOLE grid, not a handful of anchor times — which is the only
+    // way to see this class. Anchor checks were green on Zeit while it
+    // carried a 20-beat bar (~10 s with no downbeat) and on Mr Crowley while
+    // it carried four 1-beat bars. Notated meters run 2/4..7/4 (6/8 counted
+    // in 6), so anything outside 2..7 is a defect, not a rare time signature.
+    if (det?.downbeats && det.downbeats.length > 2) {
+      checkable++
+      const lens = det.downbeats.slice(1).map((b, k) => b - det.downbeats[k])
+      const bad = lens
+        .map((L, k) => ({ L, t: det.beats[det.downbeats[k]] }))
+        .filter((x) => x.L < 2 || x.L > 7)
+      if (bad.length === 0) pass++
+      else fail++
+      console.log(
+        `${''.padEnd(24)} ${(bad.length === 0 ? 'pass' : 'FAIL').padEnd(12)} gridSane: ` +
+        (bad.length === 0
+          ? `${lens.length} bars, all 2..7 beats`
+          : `${bad.length} impossible bars — ` +
+            bad.slice(0, 4).map((x) => `${x.L} beats @ ${x.t.toFixed(1)}s`).join(', ') +
+            (bad.length > 4 ? ', …' : ''))
+      )
+    }
     // barAtMl: ear-approved BAR times inside spliced spans (fused only) —
     // the span-phase vote's regression net (TTP's bass solo). Bar times are
     // chord-anchored by the vote, so they hold across model runs even where
@@ -316,11 +345,24 @@ async function runLibrary(detect) {
       }
     }
     rows.push({ name, status, mlStatus, expected, detected: got, reject: det ? undefined : (dbg.reject ?? 'no tempo family') })
+    if (gridsOut && det) {
+      grids[name] = {
+        bpm: det.bpm,
+        beatsPerBar: det.beatsPerBar,
+        downbeat: det.downbeat,
+        beats: det.beats.map((t) => Math.round(t * 1000) / 1000),
+        downbeats: det.downbeats
+      }
+    }
     const gotStr = got ? `rot ${got.rot} / ${got.bpb}  ${got.bpm} bpm` : `null (${dbg.reject ?? 'no tempo family'})`
     console.log(`${name.padEnd(24)} ${status.padEnd(12)} got: ${gotStr.padEnd(28)} want: ${expected}  (${secs}s)`)
   }
 
   console.log(`\nlibrary: ${pass}/${checkable} checks pass${fail ? ` — ${fail} FAILING` : ''}`)
+  if (gridsOut) {
+    writeFileSync(gridsOut, JSON.stringify(grids, null, 1))
+    console.log(`wrote ${Object.keys(grids).length} grids to ${gridsOut}`)
+  }
   writeResults({
     dataset: 'library',
     date: new Date().toISOString(),
