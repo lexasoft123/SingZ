@@ -1238,7 +1238,13 @@ function sanitizeBars(downbeats: number[], bpb: number, nBeats: number): number[
     const a = downbeats[i - 1]
     const b = downbeats[i]
     if (b - a > 7) {
-      const n = Math.max(2, Math.round((b - a) / bpb))
+      // ceil, not round: round under-counts when the remainder sits just
+      // under half a bar and leaves a residual LONGER than the limit this
+      // function exists to enforce. At bpb 6 — Nothing Else Matters — spans
+      // of 14, 20, 26, 32 and 38 beats each came out with an 8-beat bar
+      // still in them. ceil bounds the final bar at bpb, so 3, 4 and 6 are
+      // all inside 2..7 by construction.
+      const n = Math.max(2, Math.ceil((b - a) / bpb))
       for (let k = 1; k < n; k++) {
         const t = a + k * bpb
         if (t - db[db.length - 1] >= 2 && b - t >= 2) db.push(t)

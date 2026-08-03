@@ -264,6 +264,13 @@ async function runLibrary(detect) {
     // carried a 20-beat bar (~10 s with no downbeat) and on Mr Crowley while
     // it carried four 1-beat bars. Notated meters run 2/4..7/4 (6/8 counted
     // in 6), so anything outside 2..7 is a defect, not a rare time signature.
+    if (det && !(det.downbeats && det.downbeats.length > 2)) {
+      // Say so rather than passing over it: a uniform grid carries no
+      // downbeats[] and so cannot be grid-checked at all. Four of sixteen
+      // songs land here, and a bare "30/33" that quietly excluded them
+      // would read as coverage it does not have.
+      console.log(`${''.padEnd(24)} skipped      gridSane: uniform ${det.beatsPerBar}/4, no downbeats[] to check`)
+    }
     if (det?.downbeats && det.downbeats.length > 2) {
       checkable++
       const lens = det.downbeats.slice(1).map((b, k) => b - det.downbeats[k])
