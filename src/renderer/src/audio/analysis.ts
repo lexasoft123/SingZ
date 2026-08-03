@@ -106,6 +106,10 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * neither of the model's two levels. A lattice must be flattened onto one
  * level before it is adopted, and may only be doubled once the model has
  * committed to one.
+ *
+ * NOT bumped for `sanitizeBars` (below), deliberately — see the note there.
+ * The stamp forces every saved project to re-derive, and right now that
+ * would cost more than it buys.
  */
 export const BEAT_DETECT_VERSION = 17
 
@@ -1173,6 +1177,15 @@ export function detectBeats(
     downbeat = dbI.length > 0 ? dbI[0] % bpb : 0
   }
 
+  if (downbeats) {
+    const clean = sanitizeBars(downbeats, bpb, beatsSec.length)
+    if (debug && clean.length !== downbeats.length) {
+      debug.sanitized = { before: downbeats.length, after: clean.length }
+    }
+    downbeats = clean
+    downbeat = downbeats.length > 0 ? downbeats[0] % bpb : downbeat
+  }
+
   return {
     beats: beatsSec,
     bpm: 60 / medSec,
@@ -1180,6 +1193,78 @@ export function detectBeats(
     downbeat,
     ...(downbeats ? { downbeats } : {})
   }
+}
+
+/**
+ * A bar length outside 2..7 beats is not a time signature, it is a defect.
+ * Notated meters run 2/4 through 7/4 (6/8 counted in six), so nothing in
+ * that range is rejected and nothing outside it is kept. This is the only
+ * check in the detector that needs no evidence at all — it is arithmetic
+ * about what a bar can be.
+ *
+ * Found by dumping whole grids rather than anchor times: Zeit shipped a
+ * TWENTY-beat bar at 82.4 s — the metronome gave no downbeat for ten
+ * seconds — and Mr Crowley shipped four 1-beat bars in the stretch whose
+ * accents the singer complained about at v12. Every anchor check was green
+ * on both songs the entire time, because anchors look at a handful of
+ * moments and these defects live between them.
+ *
+ * Two rules, and neither ever moves a beat:
+ *   L > 7  the phase was lost across the span. Re-tile at bpb from the
+ *          span start, keeping BOTH endpoints — they are bar lines other
+ *          evidence already voted for — and let the remainder fall as the
+ *          final bar, which is where a real phase change would sit anyway.
+ *   L < 2  a downbeat was placed where no bar can begin. Drop whichever of
+ *          the two adjacent lines leaves the neighbourhood closest to bpb.
+ *
+ * Measured on the frozen v17 grids: Mr Crowley 4 impossible bars -> 0,
+ * Zeit 3 -> 0, and no ear- or score-verified barAt anchor moved by so much
+ * as a millisecond.
+ *
+ * DELIBERATELY NOT accompanied by a BEAT_DETECT_VERSION bump. The stamp
+ * forces every saved `source: 'auto'` project to re-derive, and several
+ * projects in a real library carry hand-applied odd bars (Father and Son's
+ * 5/4 and 3/4, Wild World's and Soldier Of Fortune's 2/4) that the detector
+ * still cannot find on its own — the autonomous fused decoder measures
+ * 10/17 and invents odd bars on the negative controls. Bumping today would
+ * trade four songs' correct meter for two songs' cleanup. Bump when the
+ * insert half can reproduce those bars, not before; until then fresh
+ * detections get this and saved grids keep what they have.
+ */
+function sanitizeBars(downbeats: number[], bpb: number, nBeats: number): number[] {
+  if (downbeats.length < 3 || bpb < 2) return downbeats
+  let db: number[] = [downbeats[0]]
+  for (let i = 1; i < downbeats.length; i++) {
+    const a = downbeats[i - 1]
+    const b = downbeats[i]
+    if (b - a > 7) {
+      const n = Math.max(2, Math.round((b - a) / bpb))
+      for (let k = 1; k < n; k++) {
+        const t = a + k * bpb
+        if (t - db[db.length - 1] >= 2 && b - t >= 2) db.push(t)
+      }
+    }
+    db.push(b)
+  }
+  const cost = (arr: number[]): number => {
+    let c = 0
+    for (let i = 1; i < arr.length; i++) c += Math.abs(arr[i] - arr[i - 1] - bpb)
+    return c
+  }
+  for (let guard = 0; guard < 16; guard++) {
+    let hit = -1
+    for (let i = 1; i < db.length; i++) {
+      if (db[i] - db[i - 1] < 2) {
+        hit = i
+        break
+      }
+    }
+    if (hit < 0) break
+    const dropHi = db.filter((_, k) => k !== hit)
+    const dropLo = db.filter((_, k) => k !== hit - 1)
+    db = cost(dropHi) <= cost(dropLo) ? dropHi : dropLo
+  }
+  return db.filter((k) => k >= 0 && k < nBeats)
 }
 
 function normStrength(
