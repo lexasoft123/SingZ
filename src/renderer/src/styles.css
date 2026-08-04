@@ -624,15 +624,26 @@ button.chip-status:hover {
 }
 
 .wave-base {
-  /* The audio is the subject. Raised with the beat grid pulled back: the
-     grid used to out-weigh the waveforms it exists to rule. */
-  opacity: 0.44;
+  /* The audio is the subject, and it is lit at rest — not only once the
+     playhead has passed it. `--glow` was never actually assigned anywhere,
+     so every lane was throwing a WHITE halo regardless of its own colour;
+     it comes from the stem now, which is what makes these read as saturated
+     rather than merely bright. */
+  opacity: 1;
+  /* Full colour, not 85% of it: opacity over a near-black ground reads as
+     desaturation, which is what kept these looking washed however far the
+     number was raised. Saturation now carries the vividness and the GLOW
+     carries played-vs-unplayed, so neither has to be paid for with alpha. */
+  filter: saturate(1.15) drop-shadow(0 0 4px color-mix(in srgb, var(--stem, #fff) 38%, transparent));
   transition: opacity 0.25s;
 }
 
 .wave-bright {
   clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--glow, #fff) 50%, transparent));
+  /* Played still reads as played: same hue, fuller glow. The gap has to
+     stay visible now that the resting layer is bright too. */
+  filter: saturate(1.3) brightness(1.08)
+    drop-shadow(0 0 8px color-mix(in srgb, var(--stem, #fff) 75%, transparent));
   transition: opacity 0.25s;
 }
 

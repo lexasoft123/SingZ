@@ -127,12 +127,12 @@ export function trainingWindows(
 
 export const TRACK_META: Record<string, { label: string; color: string }> = {
   original: { label: 'Full mix', color: '#bfb49d' },
-  vocals: { label: 'Vocals', color: '#ff5d66' },
-  drums: { label: 'Drums', color: '#f2c14e' },
-  bass: { label: 'Bass', color: '#7a9bff' },
-  guitar: { label: 'Guitar', color: '#e0873f' },
-  piano: { label: 'Piano', color: '#b48ead' },
-  other: { label: 'Instruments', color: '#45d6b5' }
+  vocals: { label: 'Vocals', color: '#ff5c65' },
+  drums: { label: 'Drums', color: '#ffc53d' },
+  bass: { label: 'Bass', color: '#527dff' },
+  guitar: { label: 'Guitar', color: '#f98424' },
+  piano: { label: 'Piano', color: '#da81da' },
+  other: { label: 'Instruments', color: '#27e7bb' }
 }
 
 /**
