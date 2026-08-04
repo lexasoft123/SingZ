@@ -633,6 +633,23 @@ export async function saveProject(
         // no stem bytes; whatever this save (re)wrote gets hashed while it is
         // still warm and local
         const prevMeta = await readMeta(dir)
+        // A save must never REMOVE an analysis the project already had.
+        //
+        // The renderer serialises `beat` and `melody` straight out of its own
+        // state, and that state is null while a song is still loading or still
+        // being analysed — so a save landing in that window wrote a project
+        // with no grid at all and destroyed one that had taken minutes to
+        // compute. It happened: Dreamer and Nothing Else Matters both lost
+        // their beat block that way during a library-wide pass, and nothing in
+        // the file said why.
+        //
+        // Nothing in the app removes a grid or a melody on purpose, so absent
+        // always means "not there yet", never "the singer deleted it". The rule
+        // belongs here and not in the renderer because this is the one place
+        // the file is actually overwritten, so it covers every path that ever
+        // reaches it, including ones not written yet.
+        const keep = (k: 'beat' | 'melody'): object =>
+          settings[k] == null && prevMeta?.settings?.[k] != null ? { [k]: prevMeta.settings[k] } : {}
         const meta: ProjectFile = {
           version: allFlac ? 2 : 1,
           name: safeName(name),
@@ -640,7 +657,7 @@ export async function saveProject(
           savedAt: new Date().toISOString(),
           // project.json keeps custom tracks project-relative so the folder stays
           // portable; the renderer gets absolute paths back below.
-          settings: { ...settings, custom: stored },
+          settings: { ...settings, ...keep('beat'), ...keep('melody'), custom: stored },
           stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
           lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
         }
