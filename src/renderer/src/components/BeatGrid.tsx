@@ -130,11 +130,16 @@ export default function BeatGrid({
         if (!mine && !odd && stride > 1 && (((bar - 1) % stride) + stride) % stride !== 0) continue
       }
       const x = snap(((t - viewS) / span) * w)
+      // The grid rules the waveforms; it is not the thing being looked at.
+      // At a zoom where both beats and bars are drawn it was reading as a
+      // picket fence over the audio, so both are pulled well back — and the
+      // two that MEAN something, a hand-placed line and a flagged bar, keep
+      // their weight and now carry the only strong colour on the canvas.
       ctx.fillStyle = mine
         ? 'rgba(120, 220, 150, 0.75)'
         : down
-          ? 'rgba(255, 160, 40, 0.5)'
-          : 'rgba(255, 240, 214, 0.22)'
+          ? 'rgba(255, 160, 40, 0.28)'
+          : 'rgba(255, 240, 214, 0.10)'
       ctx.fillRect(x, rulerH, down ? hair * 2 : hair, h - rulerH)
       if (down) {
         drawnRef.current.push({ i, x, t, bar })
@@ -151,7 +156,7 @@ export default function BeatGrid({
         }
         if (x - lastLabelX >= MIN_LABEL_PX) {
           lastLabelX = x
-          ctx.fillStyle = mine ? 'rgba(120, 220, 150, 0.85)' : 'rgba(255, 160, 40, 0.6)'
+          ctx.fillStyle = mine ? 'rgba(120, 220, 150, 0.85)' : 'rgba(255, 160, 40, 0.42)'
           ctx.fillText(String(bar), x + 3, rulerH - 5)
         }
       }

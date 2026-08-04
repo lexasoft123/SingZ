@@ -624,7 +624,9 @@ button.chip-status:hover {
 }
 
 .wave-base {
-  opacity: 0.28;
+  /* The audio is the subject. Raised with the beat grid pulled back: the
+     grid used to out-weigh the waveforms it exists to rule. */
+  opacity: 0.44;
   transition: opacity 0.25s;
 }
 
