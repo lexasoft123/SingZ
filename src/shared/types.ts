@@ -72,6 +72,43 @@ export interface BeatInfo {
    * a best-effort uniform view that is exact up to the first phase change.
    */
   downbeats?: number[]
+  /**
+   * Bar lines the singer placed by hand, in SECONDS.
+   *
+   * Seconds and not indices on purpose: a re-detection rebuilds `beats`, and
+   * an index into the old array would land somewhere arbitrary in the new
+   * one. A time survives it — the edit is re-snapped to whatever beat is
+   * nearest and forced back into `downbeats`.
+   *
+   * This is what lets a corrected song keep receiving detector improvements.
+   * Every other edit path (`halveTempo`, `doubleTempo`, `shiftBeats`) sets
+   * `source: 'manual'`, and the auto-heal gate only re-detects `'auto'`
+   * tracks — so one tap on ½ used to opt a song out of every future fix,
+   * permanently and invisibly. Hand-placed bar lines leave `source` alone.
+   *
+   * The RESULT is always baked into `downbeats` as well, so readers that
+   * know nothing about this field — phones in the field, older desktops —
+   * see the corrected grid and need no change at all.
+   */
+  userBars?: number[]
+  /**
+   * The detector's own bar lines, before any hand edit was folded in.
+   *
+   * Needed because `downbeats` is a DERIVED value — auto bars with the
+   * singer's corrections layered over them — and a derived value cannot be
+   * recomputed from itself. Without this, folding twice accumulates stale
+   * lines and undoing an edit leaves its bar line stranded, because there is
+   * nothing left that remembers where the machine had actually put it.
+   */
+  autoDownbeats?: number[]
+  /**
+   * Times, in seconds, the detector is NOT confident about: spans it filled
+   * by extension rather than by a vote, bars the grid sanitizer had to
+   * repair, and bars whose length disagrees with the song's own meter.
+   * Purely advisory — the UI badges these so the singer knows where to look
+   * first, and nothing downstream reads them.
+   */
+  suspectAt?: number[]
   /** auto = tracked from the drums stem; manual = tapped, typed or nudged. */
   source: 'auto' | 'manual'
   /** Detector stamp for auto tracks — older stamps re-detect on load. */

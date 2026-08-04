@@ -9,9 +9,12 @@ import type {
 } from '../../shared/types'
 import { BEAT_DETECT_VERSION, detectBeats, estimateKey, type KeyGuess, type MlGrid } from './audio/analysis'
 import {
+  applyUserBars,
+  clearUserBar,
   MET_DEFAULTS,
   sanitizeBeatInfo,
   sanitizeMetronome,
+  setUserBar,
   type BeatInfo,
   type MetronomeConfig
 } from './audio/beat'
@@ -1114,15 +1117,25 @@ export default function App(): React.JSX.Element {
             const det = detectBeats(drums, aux, dbg)
             publishBeatDbg('auto', drums, aux, det, dbg)
             if (det) {
-              setBeatInfo({
-                beats: det.beats,
-                bpm: det.bpm,
-                beatsPerBar: det.beatsPerBar,
-                downbeat: det.downbeat,
-                ...(det.downbeats ? { downbeats: det.downbeats } : {}),
-                source: 'auto',
-                detVersion: BEAT_DETECT_VERSION
-              })
+              // Hand-placed bar lines are re-folded onto the FRESH beat
+              // array — they are stored as times precisely so they survive a
+              // re-detection that renumbers every beat. This is what lets a
+              // song the singer corrected go on receiving detector work
+              // instead of being frozen at whatever version fixed it.
+              const auto = det.downbeats ?? undefined
+              setBeatInfo(
+                applyUserBars({
+                  beats: det.beats,
+                  bpm: det.bpm,
+                  beatsPerBar: det.beatsPerBar,
+                  downbeat: det.downbeat,
+                  ...(auto ? { downbeats: auto, autoDownbeats: auto } : {}),
+                  ...(det.suspectAt ? { suspectAt: det.suspectAt } : {}),
+                  ...(info?.userBars ? { userBars: info.userBars } : {}),
+                  source: 'auto',
+                  detVersion: BEAT_DETECT_VERSION
+                })
+              )
               if (stale) touchSettings()
               setSongInfo((s) => ({ ...s, bpm: det.bpm }))
             }
@@ -1466,6 +1479,29 @@ export default function App(): React.JSX.Element {
     },
     [touchSettings]
   )
+
+  // Hand-placed bar lines. Note what these do NOT do: touch `source`. Every
+  // other beat edit in this app marks the track 'manual', which quietly opts
+  // it out of the auto-heal gate forever — fix one song's downbeat and it
+  // stops receiving detector work for good. A moved bar line is stored as a
+  // time, re-folded after each re-detection, and the track stays 'auto'.
+  // These SAVE, they do not merely mark the project dirty. A corrected bar
+  // line is grid truth of exactly the kind the detected grid is, and the
+  // comment on that path applies word for word: it has to reach the project
+  // file — and through Drive the phones, which have no detector of their own
+  // — without waiting for a manual save. A correction the singer made and
+  // then lost by closing the song is worse than never offering the edit.
+  const handleMoveBar = useCallback((fromT: number, toT: number) => {
+    touchSettings()
+    setBeatInfo((g) => (g ? setUserBar(g, toT, fromT) : g))
+    setAnalysisAutoSave(true)
+  }, [touchSettings])
+
+  const handleClearBar = useCallback((t: number) => {
+    touchSettings()
+    setBeatInfo((g) => (g ? clearUserBar(g, t) : g))
+    setAnalysisAutoSave(true)
+  }, [touchSettings])
 
   /** Full-mix neural beat grid from the splitter pack (null without a pack —
    *  the detector then takes its homegrown path unchanged). The mix is
@@ -1829,6 +1865,8 @@ export default function App(): React.JSX.Element {
                 engine={engine}
                 view={view}
                 beat={metCfg.grid ? beatInfo : null}
+                onMoveBar={handleMoveBar}
+                onClearBar={handleClearBar}
                 ducked={duckedIds}
                 selection={selection}
                 onSelection={handleSelection}

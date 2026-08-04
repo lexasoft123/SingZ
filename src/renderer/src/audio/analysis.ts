@@ -124,6 +124,14 @@ export interface DetectedBeats {
   downbeat: number
   /** Bar starts as beat indices (BeatInfo contract) — phase changes live here. */
   downbeats?: number[]
+  /**
+   * Times the detector could not vote on and filled by extension instead,
+   * plus bars whose length disagrees with the song's own meter. Advisory
+   * only: the UI badges these so the singer looks there first. Where the
+   * detector is wrong it is usually here, and where it is wrong and NOT
+   * here, a badge is not what fixes it — the grid being editable is.
+   */
+  suspectAt?: number[]
 }
 
 /** Beat This! output for this song (from the splitter pack runner): beat and
@@ -1186,12 +1194,30 @@ export function detectBeats(
     downbeat = downbeats.length > 0 ? downbeats[0] % bpb : downbeat
   }
 
+  // Where the detector already knows it was guessing. Two sources, both
+  // free: spans it filled by extending the surrounding phase instead of
+  // voting (the splice ranges), and bars whose length disagrees with the
+  // song's own meter. Neither is a claim that the grid is wrong there —
+  // it is a claim that this is where to look first.
+  const suspect: number[] = []
+  for (const rg of mlSpliceRanges) {
+    const a = nearestBeatIdx(beatsSec, rg.aSec)
+    if (a >= 0 && a < beatsSec.length) suspect.push(beatsSec[a])
+  }
+  if (downbeats) {
+    for (let i = 1; i < downbeats.length; i++) {
+      if (downbeats[i] - downbeats[i - 1] !== bpb) suspect.push(beatsSec[downbeats[i - 1]])
+    }
+  }
+  const suspectAt = [...new Set(suspect)].sort((x, y) => x - y)
+
   return {
     beats: beatsSec,
     bpm: 60 / medSec,
     beatsPerBar: bpb,
     downbeat,
-    ...(downbeats ? { downbeats } : {})
+    ...(downbeats ? { downbeats } : {}),
+    ...(suspectAt.length > 0 ? { suspectAt } : {})
   }
 }
 

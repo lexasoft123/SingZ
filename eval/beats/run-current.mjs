@@ -358,7 +358,8 @@ async function runLibrary(detect) {
         beatsPerBar: det.beatsPerBar,
         downbeat: det.downbeat,
         beats: det.beats.map((t) => Math.round(t * 1000) / 1000),
-        downbeats: det.downbeats
+        downbeats: det.downbeats,
+        suspectAt: det.suspectAt
       }
     }
     const gotStr = got ? `rot ${got.rot} / ${got.bpb}  ${got.bpm} bpm` : `null (${dbg.reject ?? 'no tempo family'})`

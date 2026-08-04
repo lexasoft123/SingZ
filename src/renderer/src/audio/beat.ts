@@ -122,6 +122,89 @@ export function barNumber(info: BeatInfo, idx: number): number {
   return Math.floor((idx - info.downbeat) / info.beatsPerBar) + 1
 }
 
+/** Nearest beat index to a time — bar lines are beats, never between them. */
+export function nearestBeat(info: BeatInfo, t: number): number {
+  const b = info.beats
+  if (b.length === 0) return -1
+  let lo = 0
+  let hi = b.length - 1
+  while (lo < hi) {
+    const m = (lo + hi) >> 1
+    if (b[m] < t) lo = m + 1
+    else hi = m
+  }
+  if (lo > 0 && Math.abs(b[lo - 1] - t) <= Math.abs(b[lo] - t)) return lo - 1
+  return lo
+}
+
+/** Bar-line beat indices, explicit or extrapolated from the uniform pair. */
+export function barIndices(info: BeatInfo): number[] {
+  if (info.downbeats && info.downbeats.length > 0) return info.downbeats
+  const out: number[] = []
+  const start = ((info.downbeat % info.beatsPerBar) + info.beatsPerBar) % info.beatsPerBar
+  for (let i = start; i < info.beats.length; i += info.beatsPerBar) out.push(i)
+  return out
+}
+
+/**
+ * Fold hand-placed bar lines into the grid.
+ *
+ * Run after every re-detection, which is the whole point: the singer's
+ * corrections are re-snapped onto the new beat array and forced back in, so
+ * a song they fixed once stays fixed while still receiving detector work.
+ * `source` deliberately stays whatever it was — this must never route
+ * through the `'manual'` flag that opts a track out of the auto-heal gate.
+ *
+ * A hand-placed line always wins its neighbourhood: automatic bar lines
+ * within half a bar are dropped, so nudging a line one beat left removes the
+ * old one instead of leaving a 1-beat sliver beside it. Beyond that the
+ * singer's edit is taken literally and not second-guessed — the grid
+ * sanitizer runs inside the detector, upstream of this, precisely so it
+ * cleans up the machine's mistakes and never the musician's.
+ */
+export function applyUserBars(info: BeatInfo): BeatInfo {
+  // The auto grid is the base every fold starts from. Folding into the
+  // already-folded `downbeats` would stack stale lines and would leave a
+  // removed edit's bar line behind with nothing remembering where the
+  // detector had really put it.
+  const auto = info.autoDownbeats ?? barIndices(info)
+  const ub = info.userBars
+  const bpb = info.beatsPerBar
+  if (!ub || ub.length === 0) {
+    return { ...info, autoDownbeats: auto, downbeats: auto, downbeat: (auto[0] ?? 0) % bpb }
+  }
+  const forced = [...new Set(ub.map((t) => nearestBeat(info, t)))]
+    .filter((i) => i >= 0 && i < info.beats.length)
+    .sort((a, b) => a - b)
+  if (forced.length === 0) return { ...info, autoDownbeats: auto }
+  const near = Math.max(2, Math.ceil(bpb / 2))
+  const keep = auto.filter((i) => forced.every((f) => Math.abs(i - f) >= near))
+  const downbeats = [...new Set([...keep, ...forced])].sort((a, b) => a - b)
+  return { ...info, autoDownbeats: auto, downbeats, downbeat: downbeats[0] % bpb }
+}
+
+/** Add or move a hand-placed bar line, returning the updated track.
+ *  `fromT` (optional) is the line being dragged — it is replaced, not added
+ *  to, so dragging the same line twice leaves one edit and not two. */
+export function setUserBar(info: BeatInfo, toT: number, fromT?: number): BeatInfo {
+  const i = nearestBeat(info, toT)
+  if (i < 0) return info
+  const t = info.beats[i]
+  const tol = (60 / info.bpm) * 0.6
+  const kept = (info.userBars ?? []).filter(
+    (u) => Math.abs(u - t) > 1e-6 && (fromT == null || Math.abs(u - fromT) > tol)
+  )
+  return applyUserBars({ ...info, userBars: [...kept, t].sort((a, b) => a - b) })
+}
+
+/** Drop a hand-placed bar line near `t` (the singer undoing one edit). */
+export function clearUserBar(info: BeatInfo, t: number): BeatInfo {
+  const tol = (60 / info.bpm) * 0.6
+  const userBars = (info.userBars ?? []).filter((u) => Math.abs(u - t) > tol)
+  if (userBars.length === (info.userBars ?? []).length) return info
+  return applyUserBars({ ...info, userBars })
+}
+
 /** Constant-tempo track from a tapped/typed tempo; `anchor` becomes a downbeat. */
 export function constantBeats(
   bpm: number,
@@ -221,12 +304,38 @@ export function sanitizeBeatInfo(raw: unknown): BeatInfo | null {
     )
     if (valid) downbeats = ds
   }
+  // Same all-or-nothing rule as `downbeats`: the detector's own bar map.
+  let autoDownbeats: number[] | undefined
+  if (Array.isArray(r.autoDownbeats) && r.autoDownbeats.length > 0) {
+    const as = r.autoDownbeats.map(Number)
+    const ok = as.every(
+      (d, i) => Number.isInteger(d) && d >= 0 && d < beats.length && (i === 0 || d > as[i - 1])
+    )
+    if (ok) autoDownbeats = as
+  }
+  // Hand-placed bar lines and suspect marks are TIMES, so they only have to
+  // be finite and inside the song — an edit that no longer lands on a beat
+  // is re-snapped on the way in, never dropped. Losing one silently would
+  // undo a correction the singer made and cannot see was gone.
+  const times = (v: unknown): number[] | undefined => {
+    if (!Array.isArray(v) || v.length === 0) return undefined
+    const ts = v
+      .map(Number)
+      .filter((t) => Number.isFinite(t) && t >= 0 && t <= beats[beats.length - 1] + 1)
+      .sort((a, b) => a - b)
+    return ts.length > 0 ? ts : undefined
+  }
+  const userBars = times(r.userBars)
+  const suspectAt = times(r.suspectAt)
   return {
     beats,
     bpm,
     beatsPerBar,
     downbeat: Number.isFinite(db) ? ((db % beatsPerBar) + beatsPerBar) % beatsPerBar : 0,
     ...(downbeats ? { downbeats } : {}),
+    ...(autoDownbeats ? { autoDownbeats } : {}),
+    ...(userBars ? { userBars } : {}),
+    ...(suspectAt ? { suspectAt } : {}),
     source: r.source === 'auto' ? 'auto' : 'manual',
     ...(Number.isFinite(dv) ? { detVersion: dv } : {})
   }

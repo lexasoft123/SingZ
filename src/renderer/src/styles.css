@@ -2901,3 +2901,22 @@ body.win.maximized .app {
   box-shadow: inset 3px 0 0 var(--accent);
   background: var(--accent-soft);
 }
+
+/* Bar-line grab strip: lives in the ruler row only. The lines themselves are
+   painted on .beat-lines, which spans every lane and must stay
+   pointer-events:none — an interactive canvas over the whole stack would
+   swallow the clicks the waveforms need for seeking and selection. */
+.bar-handles {
+  grid-column: 2;
+  position: relative;
+  /* Above .scrub-overlay, which is also 5 and spans every row INCLUDING the
+     ruler — on an equal z-index the later sibling wins, and that is the
+     overlay, so at 5 this strip never received a single pointer event.
+     Scrubbing keeps the whole waveform area; the ruler row is the grid's. */
+  z-index: 6;
+  width: 100%;
+  cursor: ew-resize;
+}
+.bar-handles.dragging {
+  cursor: grabbing;
+}

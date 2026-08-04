@@ -14,6 +14,10 @@ interface Props {
   view: TimeView | null
   /** Beat track to rule the lanes with — null when the grid view is off. */
   beat: BeatInfo | null
+  /** Drag a bar line onto the beat where the bar really starts. */
+  onMoveBar?: (fromT: number, toT: number) => void
+  /** Hand a moved line back to the detector. */
+  onClearBar?: (t: number) => void
   /** Stems currently silenced by vocal training (the singer carries them). */
   ducked: string[]
   selection: { s: number; e: number } | null
@@ -85,6 +89,8 @@ export default function TrackStack({
   engine,
   view,
   beat,
+  onMoveBar,
+  onClearBar,
   ducked,
   selection,
   onSelection,
@@ -308,6 +314,8 @@ export default function TrackStack({
           viewE={viewE}
           rulerH={RULER_H}
           lanes={tracks.length}
+          onMoveBar={onMoveBar}
+          onClearBar={onClearBar}
         />
       )}
 
