@@ -106,12 +106,14 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * neither of the model's two levels. A lattice must be flattened onto one
  * level before it is adopted, and may only be doubled once the model has
  * committed to one.
- *
- * NOT bumped for `sanitizeBars` (below), deliberately — see the note there.
- * The stamp forces every saved project to re-derive, and right now that
- * would cost more than it buys.
+ * v18: no new tracking. The stamp moves so every saved project re-derives
+ * with `sanitizeBars` and the suspect marks, which shipped unbumped because
+ * a bump then destroyed the hand-applied odd bars in a real library. It is
+ * safe now for a reason outside this file: those repairs are expressed as
+ * `userBars` (times, re-folded after every detection) instead of as a
+ * `downbeats` array a re-detection overwrites.
  */
-export const BEAT_DETECT_VERSION = 17
+export const BEAT_DETECT_VERSION = 18
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -1247,15 +1249,13 @@ export function detectBeats(
  * Zeit 3 -> 0, and no ear- or score-verified barAt anchor moved by so much
  * as a millisecond.
  *
- * DELIBERATELY NOT accompanied by a BEAT_DETECT_VERSION bump. The stamp
- * forces every saved `source: 'auto'` project to re-derive, and several
- * projects in a real library carry hand-applied odd bars (Father and Son's
- * 5/4 and 3/4, Wild World's and Soldier Of Fortune's 2/4) that the detector
- * still cannot find on its own — the autonomous fused decoder measures
- * 10/17 and invents odd bars on the negative controls. Bumping today would
- * trade four songs' correct meter for two songs' cleanup. Bump when the
- * insert half can reproduce those bars, not before; until then fresh
- * detections get this and saved grids keep what they have.
+ * Shipped at v17 without a bump, because the bump would have destroyed the
+ * hand-applied odd bars in a real library (Father and Son's 5/4 and 3/4,
+ * Wild World's and Soldier Of Fortune's 2/4) which the detector still cannot
+ * find on its own — the autonomous fused decoder measures 10/17 and invents
+ * odd bars on the negative controls. v18 bumps only because those repairs
+ * were first converted to `userBars`, which survive re-detection, so the
+ * trade is no longer cleanup-for-meter.
  */
 function sanitizeBars(downbeats: number[], bpb: number, nBeats: number): number[] {
   if (downbeats.length < 3 || bpb < 2) return downbeats

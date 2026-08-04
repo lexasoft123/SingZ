@@ -177,9 +177,37 @@ export function applyUserBars(info: BeatInfo): BeatInfo {
     .filter((i) => i >= 0 && i < info.beats.length)
     .sort((a, b) => a - b)
   if (forced.length === 0) return { ...info, autoDownbeats: auto }
-  const near = Math.max(2, Math.ceil(bpb / 2))
-  const keep = auto.filter((i) => forced.every((f) => Math.abs(i - f) >= near))
-  const downbeats = [...new Set([...keep, ...forced])].sort((a, b) => a - b)
+  // A moved line RE-PHASES everything after it, until the next moved line.
+  //
+  // "The bar starts here" is a claim about the count, not about one line: if
+  // a bar of five is played where the detector counted four, every bar after
+  // it is a beat out, forever. Marking only the line itself would leave the
+  // rest of the section on the old phase and the correction would look
+  // undone two bars later.
+  //
+  // The detector's own structure is carried along rather than replaced — the
+  // downstream bars keep their spacing, odd ones included, and only slide.
+  // What the singer is overriding is the phase, not the meter.
+  const out: number[] = []
+  const push = (v: number): void => {
+    if (v >= 0 && v < info.beats.length && (out.length === 0 || v > out[out.length - 1])) out.push(v)
+  }
+  let shift = 0
+  let ai = 0
+  for (const f of forced) {
+    // which auto bar this line is correcting, judged in the current frame
+    let best = ai
+    for (let j = ai; j < auto.length; j++) {
+      if (Math.abs(auto[j] + shift - f) < Math.abs(auto[best] + shift - f)) best = j
+      if (auto[j] + shift > f + bpb) break
+    }
+    for (; ai < best; ai++) push(auto[ai] + shift)
+    push(f)
+    shift = f - auto[best]
+    ai = best + 1
+  }
+  for (; ai < auto.length; ai++) push(auto[ai] + shift)
+  const downbeats = out.length > 0 ? out : auto
   return { ...info, autoDownbeats: auto, downbeats, downbeat: downbeats[0] % bpb }
 }
 

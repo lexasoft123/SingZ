@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   accentIndex,
+  applyUserBars,
   barLengthAt,
   barNumber,
   beatIndexAtOrAfter,
@@ -1240,5 +1241,66 @@ describe('detectBeats adopted lattice level (v17)', () => {
     const iv = det!.beats.slice(1).map((t, i) => t - det!.beats[i])
     const med = [...iv].sort((a, b) => a - b)[iv.length >> 1]
     expect(Math.abs(med - 0.45)).toBeLessThan(0.05)
+  })
+})
+
+describe('applyUserBars — a moved line re-phases what follows', () => {
+  /** 60 bpm, so a beat is a second and indices read as times. */
+  const track = (userBars: number[], autoDownbeats: number[]): BeatInfo => ({
+    beats: Array.from({ length: 64 }, (_, i) => i),
+    bpm: 60,
+    beatsPerBar: 4,
+    downbeat: 0,
+    autoDownbeats,
+    userBars,
+    source: 'auto'
+  })
+  const uniform = Array.from({ length: 16 }, (_, k) => k * 4)
+
+  it('leaves a grid alone when nothing was moved', () => {
+    const g = applyUserBars(track([], uniform))
+    expect(g.downbeats).toEqual(uniform)
+  })
+
+  it('turns one mark into an odd bar and shifts the rest — the Father and Son case', () => {
+    // the bar starting at 16 is played as FIVE beats, so the next bar line is
+    // at 21 rather than 20; everything downstream is a beat later forever
+    const g = applyUserBars(track([21], uniform))
+    const lens = g.downbeats!.slice(1).map((x, k) => x - g.downbeats![k])
+    expect(g.downbeats!.slice(0, 7)).toEqual([0, 4, 8, 12, 16, 21, 25])
+    expect(lens.filter((L) => L !== 4)).toEqual([5])
+  })
+
+  it('a short bar shifts the other way', () => {
+    const g = applyUserBars(track([19], uniform))
+    const lens = g.downbeats!.slice(1).map((x, k) => x - g.downbeats![k])
+    expect(lens.filter((L) => L !== 4)).toEqual([3])
+  })
+
+  it('two marks each re-phase only up to the next one', () => {
+    const g = applyUserBars(track([21, 38], uniform))
+    const lens = g.downbeats!.slice(1).map((x, k) => x - g.downbeats![k])
+    // one bar of 5, then fours, then one of 5 again — not a cumulative drift
+    expect(lens.filter((L) => L !== 4)).toEqual([5, 5])
+  })
+
+  it('carries the detector own odd bars along instead of flattening them', () => {
+    // detector already found a 2-beat bar at 24; a correction upstream must
+    // move it, not erase it
+    const auto = [0, 4, 8, 12, 16, 20, 24, 26, 30, 34, 38]
+    const g = applyUserBars(track([21], auto))
+    const lens = g.downbeats!.slice(1).map((x, k) => x - g.downbeats![k])
+    expect(lens).toContain(2)
+  })
+
+  it('is idempotent — re-folding the same marks changes nothing', () => {
+    const once = applyUserBars(track([21], uniform))
+    const twice = applyUserBars(once)
+    expect(twice.downbeats).toEqual(once.downbeats)
+  })
+
+  it('never emits a bar line off the end of the beat array', () => {
+    const g = applyUserBars(track([62], uniform))
+    expect(g.downbeats!.every((i) => i >= 0 && i < 64)).toBe(true)
   })
 })
