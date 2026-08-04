@@ -634,16 +634,20 @@ button.chip-status:hover {
      desaturation, which is what kept these looking washed however far the
      number was raised. Saturation now carries the vividness and the GLOW
      carries played-vs-unplayed, so neither has to be paid for with alpha. */
-  filter: saturate(1.15) drop-shadow(0 0 4px color-mix(in srgb, var(--stem, #fff) 38%, transparent));
+  filter: saturate(1.15) drop-shadow(0 0 2px color-mix(in srgb, var(--stem, #fff) 20%, transparent));
   transition: opacity 0.25s;
 }
 
 .wave-bright {
   clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
-  /* Played still reads as played: same hue, fuller glow. The gap has to
-     stay visible now that the resting layer is bright too. */
-  filter: saturate(1.3) brightness(1.08)
-    drop-shadow(0 0 8px color-mix(in srgb, var(--stem, #fff) 75%, transparent));
+  /* Played reads as played by a touch of brightness, NOT by a bigger halo.
+     This layer is clipped at the playhead and that clip moves every frame,
+     so any glow it has that the resting layer lacks travels with it as a
+     bloom — which is seen as the lanes pulsing rather than as progress. The
+     halo is therefore the same radius and nearly the same strength on both
+     sides, and nothing swells as the edge goes past. */
+  filter: saturate(1.15) brightness(1.06)
+    drop-shadow(0 0 2px color-mix(in srgb, var(--stem, #fff) 26%, transparent));
   transition: opacity 0.25s;
 }
 
