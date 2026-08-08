@@ -351,6 +351,8 @@ async function runLibrary(detect) {
         console.log(`${''.padEnd(24)} skipped      beatAtMl needs --ml (fused-only anchors)`)
       }
     }
+    if (dbg.headWhy || dbg.headBackcast) console.log(`${''.padEnd(24)} head: ${JSON.stringify(dbg.headBackcast ?? dbg.headWhy)}`)
+    if (dbg.headOnsets) console.log(`${''.padEnd(24)} headOnsets: ${JSON.stringify(dbg.headOnsets)}`)
     rows.push({ name, status, mlStatus, expected, detected: got, reject: det ? undefined : (dbg.reject ?? 'no tempo family') })
     if (gridsOut && det) {
       grids[name] = {

@@ -112,8 +112,15 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * safe now for a reason outside this file: those repairs are expressed as
  * `userBars` (times, re-folded after every detection) instead of as a
  * `downbeats` array a re-detection overwrites.
+ * v19: the head backcast. A lead-in the tracker got wrong (Zeit's piano
+ * intro: model marks 783 ms median from the piano onsets, i.e. noise) or
+ * never covered (its first 6.3 s) is rebuilt by counting the stable pulse
+ * BACKWARD from the first steady stretch, re-anchoring on each audible
+ * onset so a ~1.4% intro drift cannot accumulate. Counted-back grid
+ * measures 103 ms median against the same onsets before snapping. Every
+ * line it lays down is suspect-badged and draggable.
  */
-export const BEAT_DETECT_VERSION = 18
+export const BEAT_DETECT_VERSION = 19
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -1187,8 +1194,40 @@ export function detectBeats(
     downbeat = dbI.length > 0 ? dbI[0] % bpb : 0
   }
 
+  // v19: the head. Count the stable pulse BACKWARD over a lead-in the
+  // tracker got wrong or never covered, re-anchoring on the intro's own
+  // onsets. A singer keeps counting through material like this; the count
+  // does not stop because the drums have not started.
+  //
+  // Zeit is the measured case: its piano intro left the model flapping
+  // between levels, so the shipped lead-in marks sat 783 ms median from the
+  // piano onsets — noise — and the first 6.3 s had no grid at all. The
+  // stable pulse counted back from 33.6 s lands 103 ms median, and the
+  // remaining error is a slow ~1.4% intro drift that snapping to each
+  // chord absorbs. Every rebuilt bar line is reported suspect: this is a
+  // principled guess, marked as one, and draggable.
+  let outBeats = beatsSec
+  let headBarTimes: number[] = []
+  {
+    const rebuilt = backcastHead(beatsSec, downbeats, bpb, mono, aux, debug)
+    if (rebuilt) {
+      outBeats = rebuilt.beats
+      downbeats = rebuilt.downbeats
+      // A song with no downbeats[] carries its whole bar structure in the
+      // `downbeat` rotation index. Replacing the head shifts every beat
+      // index by (added - removed), and without this correction every bar
+      // in the song silently rotates — Sixteen Tons' ear-verified anchor
+      // moved a beat the first time this ran.
+      downbeat =
+        downbeats && downbeats.length > 0
+          ? downbeats[0] % bpb
+          : ((((downbeat + rebuilt.indexShift) % bpb) + bpb) % bpb)
+      headBarTimes = rebuilt.headBarTimes
+    }
+  }
+
   if (downbeats) {
-    const clean = sanitizeBars(downbeats, bpb, beatsSec.length)
+    const clean = sanitizeBars(downbeats, bpb, outBeats.length)
     if (debug && clean.length !== downbeats.length) {
       debug.sanitized = { before: downbeats.length, after: clean.length }
     }
@@ -1196,31 +1235,325 @@ export function detectBeats(
     downbeat = downbeats.length > 0 ? downbeats[0] % bpb : downbeat
   }
 
-  // Where the detector already knows it was guessing. Two sources, both
+  // Where the detector already knows it was guessing. Three sources, all
   // free: spans it filled by extending the surrounding phase instead of
-  // voting (the splice ranges), and bars whose length disagrees with the
-  // song's own meter. Neither is a claim that the grid is wrong there —
-  // it is a claim that this is where to look first.
-  const suspect: number[] = []
+  // voting (the splice ranges), bars whose length disagrees with the
+  // song's own meter, and every bar line the head backcast laid down.
+  // Neither is a claim that the grid is wrong there — it is a claim that
+  // this is where to look first.
+  const suspect: number[] = [...headBarTimes]
   for (const rg of mlSpliceRanges) {
-    const a = nearestBeatIdx(beatsSec, rg.aSec)
-    if (a >= 0 && a < beatsSec.length) suspect.push(beatsSec[a])
+    const a = nearestBeatIdx(outBeats, rg.aSec)
+    if (a >= 0 && a < outBeats.length) suspect.push(outBeats[a])
   }
   if (downbeats) {
     for (let i = 1; i < downbeats.length; i++) {
-      if (downbeats[i] - downbeats[i - 1] !== bpb) suspect.push(beatsSec[downbeats[i - 1]])
+      if (downbeats[i] - downbeats[i - 1] !== bpb) suspect.push(outBeats[downbeats[i - 1]])
     }
   }
   const suspectAt = [...new Set(suspect)].sort((x, y) => x - y)
 
   return {
-    beats: beatsSec,
+    beats: outBeats,
     bpm: 60 / medSec,
     beatsPerBar: bpb,
     downbeat,
     ...(downbeats ? { downbeats } : {}),
     ...(suspectAt.length > 0 ? { suspectAt } : {})
   }
+}
+
+/**
+ * The head backcast. Two triggers, both judged from the grid alone before
+ * any audio is touched:
+ *
+ *   missing head   the first tracked beat is later than 2 bars in — there
+ *                  is simply no grid over the intro;
+ *   unsteady head  before the first stretch of 12 intervals that all sit
+ *                  within 8% of the song's median, more than a quarter of
+ *                  the intervals are off by >15% — the lead-in was adopted
+ *                  from marks that never settled.
+ *
+ * Either way the repair is the same and is what a musician does: take the
+ * pulse where it is unarguable, count backward, and re-lock on each thing
+ * actually audible (piano chords, a bass note) so a slightly loose intro
+ * cannot accumulate drift. The count stops half a beat before the first
+ * audible onset — clicks in dead air before the music are noise, not help.
+ *
+ * Bar lines: the body's bar phase is carried backward. If the intro's own
+ * strong onsets agree on a different beat-of-bar — a piano intro whose
+ * chords all land on the same count is voting for where "1" is — the head
+ * takes the chords' phase and the disagreement is absorbed at the seam as
+ * one odd bar, which the badge machinery then flags on its own. If the
+ * seam bar would be impossible (outside 2..7), the chord phase is refused
+ * and the carried phase stands.
+ *
+ * Everything this lays down is reported as suspect. It is a guess — a
+ * measured, principled one, but the singer gets the badge and the handle,
+ * not a silent assertion.
+ */
+function backcastHead(
+  beats: number[],
+  bars: number[] | undefined,
+  bpb: number,
+  drumsMono: Float32Array,
+  aux: BeatAux | undefined,
+  debug?: Record<string, unknown>
+): { beats: number[]; downbeats?: number[]; headBarTimes: number[]; indexShift: number } | null {
+  if (beats.length < 32) return null
+  const iv: number[] = []
+  for (let i = 1; i < beats.length; i++) iv.push(beats[i] - beats[i - 1])
+  const med = [...iv].sort((a, b) => a - b)[iv.length >> 1]
+  if (!(med > 0)) return null
+
+  // the anchor: start of the first run of 12 intervals within 8% of median
+  let anchor = -1
+  for (let i = 0; i + 12 <= iv.length; i++) {
+    let ok = true
+    for (let k = i; k < i + 12; k++) {
+      if (Math.abs(iv[k] - med) > 0.08 * med) {
+        ok = false
+        break
+      }
+    }
+    if (ok) {
+      anchor = i
+      break
+    }
+  }
+  if (anchor < 0) {
+    if (debug) debug.headWhy = 'no stable anchor'
+    return null
+  }
+
+  const off = iv.slice(0, anchor).filter((x) => Math.abs(x - med) > 0.15 * med).length
+  const unsteady = anchor > 0 && off / Math.max(1, anchor) > 0.25
+  // the gap BEFORE the grid, not the time of the anchor — testing the
+  // anchor's time made any song with a wobbly first few beats read as
+  // "missing head" however early its grid actually started
+  const missing = beats[0] > 2 * bpb * med
+  if (!unsteady && !missing) {
+    if (debug) debug.headWhy = { verdict: 'head ok', anchor, at: beats[anchor], first: beats[0] }
+    return null
+  }
+
+  // local period at the anchor — the pulse actually being carried back
+  const local = iv.slice(anchor, Math.min(iv.length, anchor + 24)).sort((a, b) => a - b)
+  const per = local[local.length >> 1]
+
+  // onsets over the head window, per part so sample rates never mix
+  const tEnd = beats[anchor] + 2 * per
+  const parts: { x: Float32Array; sr: number }[] = [{ x: drumsMono, sr: ANALYSIS_SR }]
+  for (const fb of aux?.inst ?? []) {
+    if (fb) parts.push({ x: fb.getChannelData(0), sr: fb.sampleRate })
+  }
+  if (aux?.bass) parts.push({ x: aux.bass.getChannelData(0), sr: aux.bass.sampleRate })
+  // Ranked by strength, then capped: a percentile threshold per stem once
+  // flooded this list with 86 "onsets" in a 30 s window — one every 350 ms,
+  // which no periodicity test can bless and no snap should chase. The
+  // things a musician re-locks on are the LOUDEST attacks, about one or two
+  // per bar; keep roughly that many and no more.
+  // Folded-band flux per stem, not broadband RMS. Broadband energy ranks
+  // Zeit's arpeggio notes above its chord attacks — real events on a rhythm
+  // the carried pulse cannot explain — while the fold sees the wide spectral
+  // splash of a chord landing and puts the anchors on top. This is the
+  // measured probe extractor, ported: on the same intro it yields the
+  // chords at 1.95 s spacing that a 103 ms-median backcast hangs on.
+  const cand: { t: number; v: number }[] = []
+  const NFF = 4096
+  const win = new Float64Array(NFF)
+  for (let i = 0; i < NFF; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / NFF)
+  for (const p of parts) {
+    const n = Math.min(p.x.length, Math.floor(tEnd * p.sr))
+    const hop = 1024
+    const frames = Math.floor((n - NFF) / hop)
+    if (frames < 20) continue
+    let peak = 0
+    for (let i = 0; i < n; i++) {
+      const a = Math.abs(p.x[i])
+      if (a > peak) peak = a
+    }
+    if (peak < 1e-3) continue // silent stem
+    let prev: Float64Array | null = null
+    const flux: number[] = []
+    for (let f = 0; f < frames; f++) {
+      const seg = new Float64Array(64)
+      const base = f * hop
+      for (let i = 0; i < NFF; i++) {
+        const v = p.x[base + i] * win[i]
+        seg[i & 63] += v * v
+      }
+      let d = 0
+      if (prev) for (let k = 0; k < 64; k++) d += Math.max(0, seg[k] - prev[k])
+      flux.push(d)
+      prev = seg
+    }
+    const thr = [...flux].sort((a, b) => a - b)[Math.floor(flux.length * 0.97)]
+    for (let f = 1; f < frames - 1; f++) {
+      if (flux[f] > thr && flux[f] >= flux[f - 1] && flux[f] >= flux[f + 1]) {
+        cand.push({ t: (f * hop + NFF / 2) / p.sr, v: flux[f] })
+      }
+    }
+  }
+  // non-maximum suppression at beat scale: strongest first, each claiming
+  // ±1.4 beats — about one survivor per musical event, none for its echoes
+  cand.sort((a, b) => b.v - a.v)
+  const cap = Math.max(8, Math.ceil(beats[anchor] / per / 2))
+  const taken: number[] = []
+  for (const c of cand) {
+    if (taken.length >= cap) break
+    if (taken.every((t) => Math.abs(t - c.t) > 1.4 * per)) taken.push(c.t)
+  }
+  const merged = [...taken].sort((a, b) => a - b)
+
+  // Interval scatter alone cannot tell a WRONG head from a LOOSE one.
+  // Mr Crowley's organ intro breathes — its intervals wobble past any
+  // steadiness threshold while the marks are ear-approved v12 behaviour
+  // that must not be re-laid. Zeit's head marks sit 783 ms from the piano —
+  // noise. So the marks are put to the test against the audible onsets.
+  //
+  // But the onsets must earn that authority first. Energy flux on a legato
+  // organ yields peaks on swells and vibrato, not beats — junk that then
+  // condemns a perfectly tracked head. Onsets that really carry the pulse
+  // sit near whole multiples of the period apart (Zeit's chords: 4.07
+  // periods, within 2%), so that is the entry test; onsets that fail it
+  // arbitrate nothing and are not snapped to either.
+  // The whole head window, including the gap BEFORE the first tracked beat
+  // — the uncovered intro is precisely where the evidence lives. Filtering
+  // from beats[0] here once threw away every piano chord Zeit's backcast
+  // existed to reach, the trust test then starved, and the fallback
+  // extended at the broken head's own period.
+  // Judged away from the seam: the final two bars before the anchor are the
+  // band arriving, and their dense attacks drown the intro's own evidence —
+  // Zeit's fifteen clean piano chords failed the periodicity test only
+  // because eleven band-entry onsets were graded with them.
+  const headOn = merged.filter((o) => o <= beats[anchor] - 2 * bpb * per)
+  let onsetsTrusted = false
+  if (headOn.length >= 3) {
+    // Residual against the pulse, absolute — not proportional to the gap.
+    // Real intros carry ornaments: Zeit's piano answers some chords with a
+    // pickup 0.39 s later, a 0.8-beat gap whose 0.1 s residual is fine as a
+    // fifth of a beat but hopeless as a fifth of ITSELF. Junk peaks spread
+    // residuals uniformly (~40% land under any threshold by luck), so the
+    // bar is 60%, which clean evidence clears at 90+.
+    let periodic = 0
+    for (let i = 1; i < headOn.length; i++) {
+      const gap = headOn[i] - headOn[i - 1]
+      const mult = Math.max(1, Math.round(gap / per))
+      if (mult <= 6 && Math.abs(gap - mult * per) <= 0.2 * per) periodic++
+    }
+    onsetsTrusted = periodic / (headOn.length - 1) >= 0.6
+    if (debug) debug.headOnsets = { per: Math.round(per * 1000) / 1000, periodic, of: headOn.length - 1, t: headOn.map((o) => Math.round(o * 100) / 100) }
+  }
+  // Four honest cases:
+  //   tracked head + gap        -> extend only, at the head's own period
+  //   wrong head + trusted ons  -> replace from the anchor, snapping
+  //   wrong head + junk onsets  -> no evidence to act on; leave it alone
+  //   tracked head, no gap      -> already returned above
+  let headTracked = !unsteady
+  if (unsteady && onsetsTrusted) {
+    // fraction, not median: a window that spans both the broken intro and
+    // the start of the tracked body mixes explained and unexplained onsets,
+    // and a median over that mixture hides the broken half entirely
+    let unexplained = 0
+    for (const o of headOn) {
+      let d = Infinity
+      for (let i = 0; i <= anchor; i++) d = Math.min(d, Math.abs(beats[i] - o))
+      if (d > 0.2 * per) unexplained++
+    }
+    headTracked = unexplained / headOn.length < 0.4
+  }
+  if (debug) debug.headWhy = { anchor, at: beats[anchor], unsteady, missing, onsets: headOn.length, onsetsTrusted }
+  if (unsteady && !onsetsTrusted) return null
+  const replace = unsteady && !headTracked
+  if (debug && typeof debug.headWhy === 'object') Object.assign(debug.headWhy as object, { headTracked, replace })
+  if (!replace && !missing) return null
+  const snapList = onsetsTrusted ? merged : []
+
+  // replace: re-lay everything before the anchor at the anchor's pulse.
+  // extend: the head is fine — count back only over the gap in front of
+  // it, at the period the head itself establishes.
+  const cutIdx = replace ? anchor : 0
+  const perLocal = ((): number => {
+    // the head's own intervals set the extension pace only when the head is
+    // actually tracking; a wrong head extending at its own wrong period is
+    // how Zeit once grew three bar-sized "beats" in front of a broken intro
+    if (replace || !headTracked) return per
+    const first = iv.slice(0, Math.min(iv.length, 12)).sort((a, b) => a - b)
+    return first[first.length >> 1]
+  })()
+
+  // count backward, snapping to whatever is audible
+  const firstAudible = merged.length > 0 ? merged[0] : beats[0]
+  const head: number[] = []
+  let t = beats[cutIdx]
+  let snapped = 0
+  for (let guard = 0; guard < 400; guard++) {
+    let next = t - perLocal
+    if (next < 0.25 || next < firstAudible - 0.6 * perLocal) break
+    let best = -1
+    for (const o of snapList) {
+      if (Math.abs(o - next) <= 0.28 * perLocal && (best < 0 || Math.abs(o - next) < Math.abs(best - next))) best = o
+    }
+    if (best >= 0 && t - best >= 0.7 * perLocal && t - best <= 1.45 * perLocal) {
+      next = best
+      snapped++
+    }
+    head.push(next)
+    t = next
+  }
+  if (head.length === 0) {
+    if (debug && typeof debug.headWhy === 'object') Object.assign(debug.headWhy as object, { walk: 'empty', firstAudible })
+    return null
+  }
+  head.reverse()
+
+  const outBeats = [...head, ...beats.slice(cutIdx)]
+  const K = head.length
+
+  // bars: keep the body's, re-indexed; lay the head's backward from the seam
+  let downbeats: number[] | undefined
+  const headBarTimes: number[] = []
+  if (bars && bars.length > 0) {
+    const body = bars.filter((k) => k >= cutIdx).map((k) => k - cutIdx + K)
+    if (body.length > 0) {
+      // carried phase: straight back from the first body bar
+      const carried: number[] = []
+      for (let j = body[0] - bpb; j >= 0; j -= bpb) carried.push(j)
+      carried.reverse()
+      // chord phase: do the head's strong onsets agree on a beat-of-bar?
+      const votes = new Map<number, number>()
+      for (const o of snapList) {
+        let bi = -1
+        for (let i = 0; i < K; i++) {
+          if (Math.abs(outBeats[i] - o) <= 0.3 * per && (bi < 0 || Math.abs(outBeats[i] - o) < Math.abs(outBeats[bi] - o))) bi = i
+        }
+        if (bi >= 0) votes.set(bi % bpb, (votes.get(bi % bpb) ?? 0) + 1)
+      }
+      let headBars = carried
+      const top = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]
+      if (top && top[1] >= 2 && top[1] >= 0.7 * [...votes.values()].reduce((a, b) => a + b, 0)) {
+        const chord: number[] = []
+        for (let j = K - 1 - ((((K - 1 - top[0]) % bpb) + bpb) % bpb); j >= 0; j -= bpb) chord.push(j)
+        chord.reverse()
+        const seam = chord.length > 0 ? body[0] - chord[chord.length - 1] : bpb
+        if (seam >= 2 && seam <= 7) headBars = chord
+      }
+      downbeats = [...headBars, ...body]
+      for (const j of headBars) headBarTimes.push(outBeats[j])
+      if (debug) {
+        debug.headBackcast = {
+          replaced: cutIdx,
+          added: K,
+          snapped,
+          phase: headBars === carried ? 'carried' : 'chords'
+        }
+      }
+    } else {
+      downbeats = bars.map((k) => k - cutIdx + K).filter((k) => k >= 0)
+    }
+  }
+  return { beats: outBeats, downbeats, headBarTimes, indexShift: K - cutIdx }
 }
 
 /**
