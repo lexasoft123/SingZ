@@ -11,6 +11,7 @@ import {
   type BeatInfo,
   type MetronomeConfig
 } from '../audio/beat'
+import { BEAT_DETECT_VERSION } from '../audio/analysis'
 import { fmtClock, fmtTime, modalCoversApp, TRACK_META, type TrainingConfig } from '../model'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
@@ -491,6 +492,39 @@ function MetPopover({
           </button>
         </div>
       </div>
+      {grid ? (
+        <div className="tp-row tp-gridver">
+          <span className="tp-label">Grid data</span>
+          {/* Which detector wrote this song's grid, against what this build
+              would write. A whole morning was lost to an older build
+              silently re-detecting v19 grids down to v17 — the mismatch was
+              invisible because NOTHING in the app showed either number.
+              A hand-tuned grid names itself instead: it is the singer's,
+              and no version applies. */}
+          <span
+            className={
+              grid.source !== 'auto'
+                ? 'tp-gridver-val hand'
+                : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
+                  ? 'tp-gridver-val ok'
+                  : 'tp-gridver-val stale'
+            }
+            title={
+              grid.source !== 'auto'
+                ? 'This grid was placed or corrected by hand — re-detection leaves it alone'
+                : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
+                  ? "The saved grid matches this build's detector"
+                  : `Saved with detector v${grid.detVersion ?? '?'}; this build has v${BEAT_DETECT_VERSION} and will re-derive on next open`
+            }
+          >
+            {grid.source !== 'auto'
+              ? `hand-tuned (v${grid.detVersion ?? '—'})`
+              : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
+                ? `v${grid.detVersion} — current`
+                : `v${grid.detVersion ?? '?'} → v${BEAT_DETECT_VERSION} available`}
+          </span>
+        </div>
+      ) : null}
       <div className="tp-row">
         <span className="tp-label">Count-in</span>
         <div className="mode-seg">

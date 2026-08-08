@@ -2937,3 +2937,21 @@ body.win.maximized .app {
 .bar-handles.dragging {
   cursor: grabbing;
 }
+
+/* Grid data version in the metronome window: quiet when current, amber when
+   an older detector wrote what is on screen, green-ish for the singer's own.
+   Made visible because an old build once silently rewrote newer grids and
+   nothing on screen could show it. */
+.tp-gridver-val {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+.tp-gridver-val.ok {
+  color: var(--muted, #9a917c);
+}
+.tp-gridver-val.stale {
+  color: #e2a53e;
+}
+.tp-gridver-val.hand {
+  color: #7adc96;
+}
