@@ -17,11 +17,16 @@
   --accent-deep: var(--sz-accent-deep);
   --accent-soft: var(--sz-accent-soft);
   --danger: var(--sz-danger);
-  /* The kit declares the font variables but ships no fonts — a duplicate
-     @font-face set would double the woff2 in every consumer. The app owns
-     the faces, so it assigns these outright. */
-  --font-display: 'Bricolage Grotesque Variable', system-ui, sans-serif;
-  --font-mono: 'Martian Mono Variable', ui-monospace, 'SF Mono', monospace;
+  /* The kit declares the font variables but ships no faces — a duplicate
+     @font-face set would double the woff2 in every consumer. The app owns the
+     faces, so it ASSIGNS the kit's tokens and aliases its own from them.
+     Assigning a parallel --font-display instead left kit rules (`button`)
+     resolving --sz-font-display to the kit's system-ui fallback, which
+     silently reset the typeface of every button in the app. */
+  --sz-font-display: 'Bricolage Grotesque Variable', system-ui, sans-serif;
+  --sz-font-mono: 'Martian Mono Variable', ui-monospace, 'SF Mono', monospace;
+  --font-display: var(--sz-font-display);
+  --font-mono: var(--sz-font-mono);
   /* NOT a kit token: read as a JS number in PitchStrip to map x <-> time.
      keep in sync with CONTROLS_W in model.ts */
   --controls-w: 228px;
@@ -76,20 +81,6 @@ body::after {
   background: rgba(255, 160, 40, 0.35);
 }
 
-button {
-  font-family: var(--font-display);
-  color: inherit;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-
-button:focus-visible,
-input:focus-visible {
-  outline: 2px solid rgba(255, 160, 40, 0.7);
-  outline-offset: 2px;
-}
-
 .app {
   position: relative;
   z-index: 1;
@@ -141,7 +132,11 @@ body.win .titlebar {
 
 /* Sits next to the logo: the library is a place you go, not a song action */
 .catalog-btn {
-  gap: 6px;
+  /* `gap: 6px` used to live here and never once applied: it ties with .pill's
+     `gap: 7px` on specificity, and .pill was declared later in this file so it
+     won. Now that .pill lives in the kit — one stylesheet earlier — the tie
+     would break the other way and move this button's label by a pixel. It was
+     dead when it was written; it is deleted rather than resurrected. */
   color: var(--dim);
   margin-left: -4px;
 }
@@ -213,95 +208,7 @@ button.chip-status:hover {
   color: var(--text);
 }
 
-.dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: none;
-}
-
-.dot.ok {
-  background: #58d68a;
-  box-shadow: 0 0 8px rgba(88, 214, 138, 0.7);
-}
-
-.dot.idle {
-  background: var(--faint);
-}
-
-.dot.warn {
-  background: var(--accent);
-  box-shadow: 0 0 8px rgba(255, 160, 40, 0.7);
-  animation: pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  50% {
-    opacity: 0.45;
-  }
-}
-
 /* ————————————————————————————————— buttons ————— */
-
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 9px 16px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  transition:
-    transform 0.15s,
-    border-color 0.15s,
-    background 0.15s,
-    box-shadow 0.2s;
-}
-
-.pill.small {
-  padding: 6px 12px;
-  font-size: 12px;
-}
-
-.pill.gear {
-  padding: 6px 8px;
-}
-
-.pill.gear svg {
-  display: block;
-}
-
-.pill.ghost {
-  border: 1px solid var(--line);
-  color: var(--text);
-}
-
-.pill.ghost:hover {
-  border-color: var(--line-strong);
-  transform: translateY(-1px);
-}
-
-.pill.primary {
-  background: linear-gradient(180deg, #ffbe58, var(--accent-deep));
-  color: #241705;
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.25) inset,
-    0 6px 22px rgba(255, 150, 40, 0.28);
-}
-
-.pill.primary:hover {
-  transform: translateY(-1px);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.25) inset,
-    0 8px 28px rgba(255, 150, 40, 0.4);
-}
-
-.pill.primary:disabled {
-  opacity: 0.45;
-  transform: none;
-  cursor: default;
-}
 
 .pill.karaoke {
   border: 1px solid var(--line);
@@ -555,27 +462,6 @@ button.chip-status:hover {
   gap: 6px;
 }
 
-.chip {
-  width: 26px;
-  height: 24px;
-  border-radius: 7px;
-  border: 1px solid var(--line);
-  font-size: 11px;
-  font-weight: 800;
-  color: var(--dim);
-  display: grid;
-  place-items: center;
-  transition:
-    background 0.15s,
-    color 0.15s,
-    border-color 0.15s;
-}
-
-.chip:hover {
-  border-color: var(--line-strong);
-  color: var(--text);
-}
-
 .chip.mute.active {
   background: var(--stem, var(--accent));
   border-color: transparent;
@@ -751,24 +637,6 @@ button.chip-status:hover {
   display: flex;
   align-items: center;
   gap: 14px;
-}
-
-.round-ghost {
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  border: 1px solid var(--line);
-  color: var(--dim);
-  display: grid;
-  place-items: center;
-  transition:
-    color 0.15s,
-    border-color 0.15s;
-}
-
-.round-ghost:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
 }
 
 .play {
@@ -1579,19 +1447,6 @@ button.chip-status:hover {
   white-space: nowrap;
 }
 
-.linkish {
-  flex: none;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 2px 4px;
-  border-radius: 6px;
-}
-
-.linkish:hover {
-  background: var(--accent-soft);
-}
-
 .lp-variants {
   display: flex;
   flex-direction: column;
@@ -2119,17 +1974,6 @@ button.chip-status:hover {
   gap: 6px;
 }
 
-.badge {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--dim);
-  border: 1px solid var(--line-strong);
-  border-radius: 99px;
-  padding: 2px 7px;
-}
-
 .picker-date {
   font-size: 11.5px;
   font-weight: 500;
@@ -2175,16 +2019,6 @@ button.chip-status:hover {
 
 .confirm-actions {
   margin-top: 18px;
-}
-
-.pill.danger {
-  color: #ff8a7a;
-  border-color: rgba(255, 138, 122, 0.4);
-}
-
-.pill.danger:hover:not(:disabled) {
-  background: rgba(255, 138, 122, 0.12);
-  border-color: #ff8a7a;
 }
 
 /* ---------- drop-screen project shortcuts ---------- */
@@ -2686,27 +2520,8 @@ body.win.maximized .app {
   margin-top: 6px;
 }
 
-.mode-seg {
-  display: inline-flex;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.mode-seg button {
-  padding: 5px 14px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--dim);
-}
-
 .mode-seg button + button {
   border-left: 1px solid var(--line);
-}
-
-.mode-seg button.on {
-  background: var(--accent-soft);
-  color: var(--accent);
 }
 
 /* ---- Vocal training ---------------------------------------------------- */
@@ -2889,11 +2704,6 @@ body.win.maximized .app {
   min-width: 26px;
   height: 26px;
   padding: 0 7px;
-}
-
-.mode-seg button:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 /* Count-in dots: fill beat by beat next to the clock while the pre-roll clicks. */
