@@ -10,21 +10,33 @@ import {
   type LayoutChangeEvent
 } from 'react-native'
 
+/**
+ * White at some opacity — the phone's most-used colour by far.
+ *
+ * There were twenty-two distinct alphas of pure white scattered across four
+ * files, several a hundredth apart and none of them named. This does not
+ * change any of them; it gives them one origin, so the next person can see
+ * the ladder and decide what it should be.
+ */
+export const white = (a: number): string => `rgba(255,255,255,${a})`
+
 /** Design-language constants (matches the approved HTML prototype). */
 export const C = {
   bg: '#0d0a06',
   text: '#eee6d6',
   bright: '#ffffff',
-  dim: 'rgba(255,255,255,0.5)',
-  faint: 'rgba(255,255,255,0.35)',
+  dim: white(0.5),
+  faint: white(0.35),
   amber: '#f2c14e',
   amberInk: '#1d1508',
   red: '#e2574c',
   sheet: 'rgba(32,25,15,0.98)',
-  hairline: 'rgba(255,255,255,0.09)',
-  btnBg: 'rgba(255,255,255,0.10)'
+  hairline: white(0.09),
+  btnBg: white(0.1)
 }
 
+/* Artwork hues, NOT the accent — they happen to include a colour equal to
+   C.amber today and must not start tracking it. */
 export const STEM_TILE_COLORS: string[][] = [
   ['#ff5d66', '#f2c14e', '#7a9bff', '#45d6b5'],
   ['#7a9bff', '#ff5d66', '#45d6b5', '#b48ead'],
@@ -58,7 +70,7 @@ export function StemTile({ hue, size }: { hue: number; size: number }): React.JS
 }
 
 /** Mixer glyph (three slider rails with knobs), drawn with plain views. */
-export function MixGlyph({ color = 'rgba(255,255,255,0.85)' }: { color?: string }): React.JSX.Element {
+export function MixGlyph({ color = white(0.85) }: { color?: string }): React.JSX.Element {
   const knob = (top: number): object => ({
     position: 'absolute',
     top,
@@ -100,7 +112,7 @@ export function RoundBtn({
         width: size,
         height: size,
         borderRadius: size / 2,
-        backgroundColor: pressed ? 'rgba(255,255,255,0.22)' : bg,
+        backgroundColor: pressed ? white(0.22) : bg,
         alignItems: 'center',
         justifyContent: 'center'
       })}
@@ -211,7 +223,7 @@ export function Bar({
   onCommit,
   color,
   height = 22,
-  track = 'rgba(255,255,255,0.16)'
+  track = white(0.16)
 }: {
   value: number
   onChange: (v: number) => void
@@ -264,9 +276,9 @@ export function Bar({
 export const b = StyleSheet.create({
   segTrack: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.055)',
+    backgroundColor: white(0.055),
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.09)',
+    borderColor: C.hairline,
     borderRadius: 14,
     padding: 3,
     gap: 3
@@ -281,10 +293,10 @@ export const b = StyleSheet.create({
     paddingHorizontal: 4,
     borderRadius: 11
   },
-  segText: { color: 'rgba(255,255,255,0.45)', fontSize: 13.5, fontWeight: '700' },
+  segText: { color: white(0.45), fontSize: 13.5, fontWeight: '700' },
   chip: {
     borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.16)',
+    borderColor: white(0.16),
     borderRadius: 999,
     paddingHorizontal: 14,
     height: 32,
@@ -292,7 +304,7 @@ export const b = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'transparent'
   },
-  chipText: { color: 'rgba(255,255,255,0.6)', fontSize: 13.5, fontWeight: '700' },
+  chipText: { color: white(0.6), fontSize: 13.5, fontWeight: '700' },
   stepRow: { flexDirection: 'row', alignItems: 'center', gap: 13, marginTop: 12 },
   stepLabel: { color: C.text, fontSize: 14.5, width: 78 }, // "Loudness"/"Interval" must not wrap
   stepBtn: {
@@ -300,7 +312,7 @@ export const b = StyleSheet.create({
     height: 33,
     borderRadius: 17,
     borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.2)',
+    borderColor: white(0.2),
     alignItems: 'center',
     justifyContent: 'center'
   },
@@ -327,7 +339,7 @@ export const b = StyleSheet.create({
     width: 40,
     height: 5,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.25)',
+    backgroundColor: white(0.25),
     alignSelf: 'center',
     marginTop: 10,
     marginBottom: 14
@@ -344,5 +356,5 @@ export const b = StyleSheet.create({
     marginBottom: 11
   },
   segs: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  hint: { color: 'rgba(255,255,255,0.38)', fontSize: 12.5, marginTop: 10, lineHeight: 18 }
+  hint: { color: white(0.38), fontSize: 12.5, marginTop: 10, lineHeight: 18 }
 })

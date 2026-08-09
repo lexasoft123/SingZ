@@ -43,7 +43,7 @@ import {
   type ProjectEntry,
   type RootInfo
 } from '../projects'
-import { C, Seg, StemTile } from './bits'
+import { C, Seg, StemTile, white } from './bits'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/catalog.png')
@@ -405,7 +405,7 @@ export default function CatalogScreen({
         </View>
         {isLoading ? (
           <Pressable hitSlop={10} onPress={cancelLoad} style={s.cancelBtn}>
-            <Text style={{ color: 'rgba(255,255,255,0.75)', fontSize: 13, fontWeight: '700' }}>✕</Text>
+            <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
           </Pressable>
         ) : (
           <View style={{ alignItems: 'flex-end' }}>{opts.right}</View>
@@ -612,17 +612,17 @@ const s = StyleSheet.create({
     marginBottom: 12,
     paddingHorizontal: 2
   },
-  ctxWho: { color: 'rgba(255,255,255,0.6)', fontSize: 12.5, flexShrink: 1 },
-  ctxDot: { color: 'rgba(255,255,255,0.3)', fontSize: 12.5 },
+  ctxWho: { color: white(0.6), fontSize: 12.5, flexShrink: 1 },
+  ctxDot: { color: white(0.3), fontSize: 12.5 },
   ctxLink: { color: C.amber, fontSize: 12.5, fontWeight: '800' },
   card: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 14,
     padding: 12,
-    backgroundColor: 'rgba(255,255,255,0.045)',
+    backgroundColor: white(0.045),
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.05)',
+    borderColor: white(0.05),
     borderRadius: 17,
     marginBottom: 11,
     overflow: 'hidden'
@@ -631,13 +631,13 @@ const s = StyleSheet.create({
     backgroundColor: 'transparent',
     borderWidth: 1.5,
     borderStyle: 'dashed',
-    borderColor: 'rgba(255,255,255,0.14)'
+    borderColor: white(0.14)
   },
   cardLoading: { backgroundColor: 'rgba(242,193,78,0.07)', borderColor: 'rgba(242,193,78,0.25)' },
   cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
-  cardMeta: { color: 'rgba(255,255,255,0.42)', fontSize: 12.5, marginTop: 3 },
-  status: { color: 'rgba(255,255,255,0.35)', fontSize: 12, fontWeight: '600' },
-  statusHave: { color: 'rgba(255,255,255,0.62)' },
+  cardMeta: { color: white(0.42), fontSize: 12.5, marginTop: 3 },
+  status: { color: C.faint, fontSize: 12, fontWeight: '600' },
+  statusHave: { color: white(0.62) },
   storage: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -646,12 +646,12 @@ const s = StyleSheet.create({
     marginTop: 6,
     paddingHorizontal: 2
   },
-  storageText: { color: 'rgba(255,255,255,0.35)', fontSize: 12, flexShrink: 1 },
+  storageText: { color: C.faint, fontSize: 12, flexShrink: 1 },
   cancelBtn: {
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: C.btnBg,
     alignItems: 'center',
     justifyContent: 'center'
   },
@@ -661,9 +661,9 @@ const s = StyleSheet.create({
     right: 0,
     bottom: 0,
     height: 3,
-    backgroundColor: 'rgba(255,255,255,0.08)'
+    backgroundColor: white(0.08)
   },
   progressFill: { height: 3, backgroundColor: C.amber, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
-  empty: { color: 'rgba(255,255,255,0.35)', fontSize: 14, lineHeight: 20, marginVertical: 12 },
+  empty: { color: C.faint, fontSize: 14, lineHeight: 20, marginVertical: 12 },
   err: { color: C.red, fontSize: 13, marginTop: 10 }
 })

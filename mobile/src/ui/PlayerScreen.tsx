@@ -29,7 +29,7 @@ import {
   type TrainingConfig
 } from '../model'
 import type { LoadedProject } from '../projects'
-import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper } from './bits'
+import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper, white } from './bits'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -574,8 +574,8 @@ export default function PlayerScreen({
   const lineColor = (i: number, isSing: boolean): string => {
     if (i === currentLine) return C.bright
     if (isSing) return 'rgba(245,199,88,0.42)'
-    if (i < currentLine) return 'rgba(255,255,255,0.18)'
-    return Math.abs(i - currentLine) === 1 ? 'rgba(255,255,255,0.34)' : 'rgba(255,255,255,0.25)'
+    if (i < currentLine) return white(0.18)
+    return Math.abs(i - currentLine) === 1 ? white(0.34) : white(0.25)
   }
 
   return (
@@ -985,11 +985,11 @@ const s = StyleSheet.create({
     paddingHorizontal: 18,
     paddingBottom: 14
   },
-  back: { color: 'rgba(255,255,255,0.85)', fontSize: 30, fontWeight: '600', paddingRight: 4, marginTop: -4 },
+  back: { color: white(0.85), fontSize: 30, fontWeight: '600', paddingRight: 4, marginTop: -4 },
   hTitle: { color: C.bright, fontSize: 15.5, fontWeight: '700' },
   hSub: { color: C.dim, fontSize: 12.5, marginTop: 1 },
-  ktBadge: { backgroundColor: 'rgba(255,255,255,0.10)', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
-  ktBadgeText: { color: 'rgba(255,255,255,0.8)', fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
+  ktBadge: { backgroundColor: C.btnBg, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
+  ktBadgeText: { color: white(0.8), fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
   youChip: { backgroundColor: C.amber, borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },
   youChipText: { color: C.amberInk, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
 
@@ -1028,15 +1028,15 @@ const s = StyleSheet.create({
     paddingBottom: 30
   },
   scrubRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
-  tm: { color: 'rgba(255,255,255,0.45)', fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
+  tm: { color: white(0.45), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
   btnRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  skipText: { color: 'rgba(255,255,255,0.85)', fontSize: 12.5, fontWeight: '700' },
-  toStartText: { color: 'rgba(255,255,255,0.85)', fontSize: 20, marginTop: -2 },
+  skipText: { color: white(0.85), fontSize: 12.5, fontWeight: '700' },
+  toStartText: { color: white(0.85), fontSize: 20, marginTop: -2 },
   play: {
     width: 66,
     height: 66,
     borderRadius: 33,
-    backgroundColor: '#fff',
+    backgroundColor: C.bright,
     alignItems: 'center',
     justifyContent: 'center'
   },
@@ -1050,11 +1050,11 @@ const s = StyleSheet.create({
     height: 30,
     borderRadius: 15,
     borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.18)',
+    borderColor: white(0.18),
     alignItems: 'center',
     justifyContent: 'center'
   },
-  msText: { color: 'rgba(255,255,255,0.55)', fontSize: 12, fontWeight: '800' },
+  msText: { color: white(0.55), fontSize: 12, fontWeight: '800' },
   youPill: { borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1 },
   youPillText: { color: '#191510', fontSize: 10, fontWeight: '800' }
 })

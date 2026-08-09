@@ -4,6 +4,7 @@ import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { MultitrackEngine } from './src/engine'
 import { releaseProject, type LoadedProject } from './src/projects'
+import { C } from './src/ui/bits'
 import CatalogScreen from './src/ui/CatalogScreen'
 import PlayerScreen from './src/ui/PlayerScreen'
 import { TEST } from './src/ui/testhooks'
@@ -33,7 +34,7 @@ export default function App(): React.JSX.Element {
 
   return (
     <SafeAreaProvider>
-      <View style={{ flex: 1, backgroundColor: '#0d0a06' }}>
+      <View style={{ flex: 1, backgroundColor: C.bg }}>
         <StatusBar barStyle="light-content" />
         {project === null ? (
           <CatalogScreen sampleRate={engine.sampleRate} onLoaded={setProject} />
