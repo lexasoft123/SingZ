@@ -511,46 +511,6 @@ button.chip-status:hover {
   }
 }
 
-.wave {
-  position: absolute;
-  inset: 7px 0;
-}
-
-.wave canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.wave-base {
-  /* The audio is the subject, and it is lit at rest — not only once the
-     playhead has passed it. `--glow` was never actually assigned anywhere,
-     so every lane was throwing a WHITE halo regardless of its own colour;
-     it comes from the stem now, which is what makes these read as saturated
-     rather than merely bright. */
-  opacity: 1;
-  /* Full colour, not 85% of it: opacity over a near-black ground reads as
-     desaturation, which is what kept these looking washed however far the
-     number was raised. Saturation now carries the vividness and the GLOW
-     carries played-vs-unplayed, so neither has to be paid for with alpha. */
-  filter: saturate(1.15) drop-shadow(0 0 2px color-mix(in srgb, var(--stem, #fff) 20%, transparent));
-  transition: opacity 0.25s;
-}
-
-.wave-bright {
-  clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
-  /* Played reads as played by a touch of brightness, NOT by a bigger halo.
-     This layer is clipped at the playhead and that clip moves every frame,
-     so any glow it has that the resting layer lacks travels with it as a
-     bloom — which is seen as the lanes pulsing rather than as progress. The
-     halo is therefore the same radius and nearly the same strength on both
-     sides, and nothing swells as the edge goes past. */
-  filter: saturate(1.15) brightness(1.06)
-    drop-shadow(0 0 2px color-mix(in srgb, var(--stem, #fff) 26%, transparent));
-  transition: opacity 0.25s;
-}
-
 .lane-wave.is-off .wave-base {
   opacity: 0.1;
 }
