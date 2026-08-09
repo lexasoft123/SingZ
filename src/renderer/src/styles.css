@@ -91,31 +91,7 @@ body::after {
 
 /* ————————————————————————————————— titlebar ————— */
 
-.titlebar {
-  height: 52px;
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 0 16px;
-  position: relative;
-  -webkit-app-region: drag;
-  border-bottom: 1px solid var(--line);
-}
-
-body.mac .titlebar {
-  padding-left: 92px;
-}
-
 /* Windows: native min/max/close overlay sits top-right over our titlebar */
-body.win .titlebar {
-  padding-right: 150px;
-}
-
-.no-drag,
-.titlebar button {
-  -webkit-app-region: no-drag;
-}
 
 .logo {
   font-weight: 800;
@@ -2268,10 +2244,6 @@ body.modal-open .src-dot.busy {
 
 /* Windows iGPUs pay full-window re-raster for backdrop blur (field: HD 4600
    at a 3200x1800 panel) — a solid scrim composites for free there. */
-body.win .modal-scrim {
-  backdrop-filter: none;
-  background: rgba(8, 6, 3, 0.82);
-}
 
 /* Same deal during playback: the playhead damages a frame region every
    step, and that re-runs the transport's blur(20px) over a full-width
@@ -2312,63 +2284,7 @@ body.modal-open .lyr-line::before {
 
 /* ————————————————————————————————— windows chrome (frameless) ————— */
 
-body.win {
-  background: transparent;
-}
-
-body.win .app {
-  background: var(--bg);
-  border-radius: 12px;
-  border: 1px solid rgba(255, 240, 214, 0.14);
-  overflow: hidden;
-}
-
 /* the fixed grain/tungsten overlays must clip to the same rounded rect */
-body.win::before,
-body.win::after {
-  border-radius: 12px;
-}
-
-body.win.maximized .app,
-body.win.maximized::before,
-body.win.maximized::after {
-  border-radius: 0;
-}
-
-body.win.maximized .app {
-  border-color: transparent;
-}
-
-.win-controls {
-  /* Fixed and above every modal scrim: window chrome must stay clickable
-     like native buttons would (the setup wizard was trapping the window). */
-  position: fixed;
-  top: 0;
-  right: 0;
-  height: 52px;
-  display: flex;
-  z-index: 1000;
-}
-
-.win-controls button {
-  width: 46px;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  color: var(--dim);
-  border-radius: 0;
-  transition: background 0.1s, color 0.1s;
-}
-
-.win-controls button:hover {
-  background: rgba(255, 240, 214, 0.07);
-  color: var(--text);
-}
-
-.win-controls button.close:hover {
-  background: #c42b1c;
-  color: #fff;
-}
 
 /* ————————————————————————————————— selection + loop ————— */
 

@@ -4,10 +4,12 @@ import '@fontsource-variable/martian-mono'
 // source order is the whole cascade story here, there are no layers.
 import '@singz/ui/kit.css'
 import './styles.css'
+import { applyPlatformClasses } from '@singz/ui'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 
-document.body.classList.toggle('mac', navigator.userAgent.includes('Macintosh'))
-document.body.classList.toggle('win', navigator.userAgent.includes('Windows'))
+// Before the first render, deliberately: App reads these classes DURING
+// render to decide whether to mount the window buttons.
+applyPlatformClasses()
 
 createRoot(document.getElementById('root') as HTMLElement).render(<App />)
