@@ -88,7 +88,14 @@
     "want": 97.5,
     "tolPct": 5,
     "note": "protection: level is ear-approved — no court may move it"
-   }
+   },
+   "steadyAt": [
+    {
+     "a": 237,
+     "b": 270,
+     "note": "guitar solo — model rides eighths; v21 zone-local halved view repaired a +-25% wobble the singer heard between correct downbeats"
+    }
+   ]
   },
   "Pink Floyd - Wish You Were Here": {
    "bpb": 4,

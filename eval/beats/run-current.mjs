@@ -341,6 +341,32 @@ async function runLibrary(detect) {
         got2.map((a) => `${a.t}s want ${a.n} got ${a.saw ?? 'none'}`).join(', ')
       )
     }
+    // steadyAt: every interval inside [a,b] must sit on the song's pulse.
+    // The one drift class no anchor can see: Panzerkampf's solo had every
+    // beat ON a drum onset (11 ms median) while intervals swung ±25% —
+    // fills put strong onsets on subdivisions and the tracker chased them
+    // between perfectly placed downbeats.
+    if (Array.isArray(spec?.steadyAt) && spec.steadyAt.length > 0) {
+      for (const st of spec.steadyAt) {
+        checkable++
+        let ok = false
+        let detail = 'no grid'
+        if (det) {
+          const w = det.beats.filter((t) => t >= st.a && t <= st.b)
+          const med = 60 / det.bpm
+          const iv = w.slice(1).map((t, i) => t - w[i])
+          const tol = ((st.tolPct ?? 12) / 100) * med
+          const frac = iv.length
+            ? iv.filter((x) => Math.abs(x - med) <= tol).length / iv.length
+            : 0
+          ok = frac >= (st.frac ?? 0.9)
+          detail = `${st.a}-${st.b}s: ${Math.round(frac * 100)}% of ${iv.length} intervals on the pulse (need ${Math.round((st.frac ?? 0.9) * 100)}%)`
+        }
+        if (ok) pass++
+        else fail++
+        console.log(`${''.padEnd(24)} ${(ok ? 'pass' : 'FAIL').padEnd(12)} steadyAt: ${detail}`)
+      }
+    }
     if (Array.isArray(spec?.barAtMl) && spec.barAtMl.length > 0) {
       if (ml && det) {
         checkable++
