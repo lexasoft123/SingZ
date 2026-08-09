@@ -59,6 +59,36 @@ for (const name of Object.keys(GT)) {
   const harm = ['other', 'guitar', 'piano'].map(stem).filter(Boolean)
   const bass = stem('bass')
   const vocals = stem('vocals')
+  // strong drum onsets: the doubling court's structural witness — at half
+  // tempo the true backbeat lands BETWEEN our beats, and only the drums
+  // can say so
+  const drums = stem('drums')
+  const drumPeaks = []
+  if (drums) {
+    const sr = 44100
+    const hop = 512
+    const frames = Math.floor(drums.length / hop) - 1
+    const e = new Float64Array(frames)
+    for (let f = 0; f < frames; f++) {
+      let acc = 0
+      for (let i = f * hop; i < (f + 1) * hop; i++) acc += drums[i] * drums[i]
+      e[f] = Math.sqrt(acc / hop)
+    }
+    const flux = [0]
+    for (let f = 1; f < frames; f++) flux.push(Math.max(0, e[f] - e[f - 1]))
+    const sorted = [...flux].sort((a, b) => a - b)
+    const thr = sorted[Math.floor(sorted.length * 0.985)]
+    let last = -1
+    for (let f = 1; f < frames - 1; f++) {
+      if (flux[f] > thr && flux[f] >= flux[f - 1] && flux[f] >= flux[f + 1]) {
+        const t = (f * hop) / sr
+        if (last < 0 || t - last >= 0.12) {
+          drumPeaks.push(Math.round(t * 1000) / 1000)
+          last = t
+        }
+      }
+    }
+  }
   const { runs } = chordLabels(harm, bass, lattice)
   const voice = vocals ? vocalEvidence(vocals, lattice, { melody: settings.melody, words }) : []
   const fm = formMap(beatFeatures(harm, vocals, lattice), lattice)
@@ -69,7 +99,8 @@ for (const name of Object.keys(GT)) {
     runs: runs.map((r) => ({ t: Math.round(r.t * 1000) / 1000, sec: Math.round(r.len * latPer * 1000) / 1000, c: r.name })),
     voice: voice.map((v) => ({ t: Math.round(v.t * 1000) / 1000, gapSec: Math.round((v.gapSec ?? 0) * 100) / 100 })),
     seams: (fm.seams ?? []).map((s) => ({ t: Math.round(s.t * 1000) / 1000 })),
-    words: (words ?? []).map((w) => ({ s: Math.round(w.s * 100) / 100, e: Math.round(w.e * 100) / 100 }))
+    words: (words ?? []).map((w) => ({ s: Math.round(w.s * 100) / 100, e: Math.round(w.e * 100) / 100 })),
+    drums: drumPeaks
   }
   writeFileSync(dst, JSON.stringify(doc))
   console.log(`${name}: ${doc.runs.length} runs, ${doc.voice.length} voice, ${doc.seams.length} seams (${((Date.now() - t0) / 1000).toFixed(0)}s)`)

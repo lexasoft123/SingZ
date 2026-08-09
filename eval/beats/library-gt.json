@@ -47,7 +47,12 @@
    "rot": [
     2
    ],
-   "barAt": 144.033
+   "barAt": 144.033,
+   "bpmNear": {
+    "want": 124.5,
+    "tolPct": 5,
+    "note": "score quarter=124; det says 62.3"
+   }
   },
   "Mr Crowley": {
    "bpb": 4,
@@ -101,7 +106,12 @@
    "rot": [
     0
    ],
-   "barAt": 151.917
+   "barAt": 151.917,
+   "bpmNear": {
+    "want": 124.5,
+    "tolPct": 5,
+    "note": "score quarter=125, chorus 6/4s audio-verified at the doubled level; det says 62.3"
+   }
   },
   "Puppe": {
    "bpb": 4,
@@ -109,7 +119,12 @@
     3
    ],
    "barAt": 164.595,
-   "scoreNote": "Official Rammstein tab: quarter = 117 — the notation sides with the eval harness's 117.8, AGAINST the 58.73 we ship (measured exactly half, 1.99x). The v15 doc stance stands — half-vs-double is taste and the singer's pending ear verdict decides — but the notation thumb is now on the fast side, and v16's mlBimodal measured Puppe 0.26-0.27 (the model itself wavers). Meter: uniform 4/4 for 128 bars, then an outro tempo staircase 117 -> 100 (bar 128) -> 75 (bar 130) with a single 3/4 at bar 129. Our outro spacing (1.0 s +/- 0.15 noisy) shows no clear staircase — but that region is the known trailing-void knife edge, and trailing voids never splice, so low stakes today. The one interior grid hole at 37.88 has NO notated counterpart (uniform 4/4 there) — a real defect, not music."
+   "scoreNote": "Official Rammstein tab: quarter = 117 — the notation sides with the eval harness's 117.8, AGAINST the 58.73 we ship (measured exactly half, 1.99x). The v15 doc stance stands — half-vs-double is taste and the singer's pending ear verdict decides — but the notation thumb is now on the fast side, and v16's mlBimodal measured Puppe 0.26-0.27 (the model itself wavers). Meter: uniform 4/4 for 128 bars, then an outro tempo staircase 117 -> 100 (bar 128) -> 75 (bar 130) with a single 3/4 at bar 129. Our outro spacing (1.0 s +/- 0.15 noisy) shows no clear staircase — but that region is the known trailing-void knife edge, and trailing voids never splice, so low stakes today. The one interior grid hole at 37.88 has NO notated counterpart (uniform 4/4 there) — a real defect, not music.",
+   "bpmNear": {
+    "want": 117.4,
+    "tolPct": 5,
+    "note": "ear-approved 2026-08-02; from-scratch det says 58.7 — the double court must fire"
+   }
   },
   "Sixteen Tons": {
    "bpb": 4,

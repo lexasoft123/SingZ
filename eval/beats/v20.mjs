@@ -151,6 +151,57 @@ export function octaveCourt(det, ev, dbg = {}) {
   return { action: votes >= 2 ? 'halve' : 'keep' }
 }
 
+/**
+ * The doubling court. Audio testimony failed here — measured across the
+ * whole library, the doubled-shipped songs are indistinguishable from
+ * correct ones by chord rhythm (GTTR 2.01 gap vs FaS 2.02) and by drum
+ * subdivision (Primo 21% mid-beat vs shuffling Dreamer's 59%). What
+ * separates them is the MODEL's conviction: on the true doubles its raw
+ * lattice is nearly perfectly unimodal at twice our tempo (Primo 99%,
+ * GTTR 96%, Puppe 72%), while on the songs it merely WISHES were faster
+ * it flaps (Turn The Page 62%, Wild World 55% — both ear-approved at the
+ * slower level). The court convicts only on a confident model: ratio
+ * within [1.85, 2.15], unimodality >= 0.7, the doubled tempo singable,
+ * and only for songs shipping under 80 bpm.
+ */
+export function doubleCourt(det, ev, dbg = {}) {
+  if (!ev.ml || det.beatsPerBar === 6 || det.bpm >= 80) return { action: 'keep' }
+  const ratio = ev.ml.bpm / det.bpm
+  const dbl = det.bpm * 2
+  const fire = ratio >= 1.85 && ratio <= 2.15 && ev.ml.uni >= 0.7 && dbl >= 95 && dbl <= 140
+  dbg.dbl = { mlBpm: Math.round(ev.ml.bpm * 10) / 10, uni: ev.ml.uni, ratio: Math.round(ratio * 100) / 100, action: fire ? 'double' : 'keep' }
+  return { action: fire ? 'double' : 'keep' }
+}
+
+/** Double: midpoint beats between every pair; bar phase = whichever of the
+ *  two old-beat parities the chord changes land on. */
+export function doubleGrid(det, ev) {
+  const per = 60 / det.bpm
+  const beats = []
+  for (let i = 0; i < det.beats.length; i++) {
+    beats.push(det.beats[i])
+    if (i + 1 < det.beats.length) beats.push(Math.round(((det.beats[i] + det.beats[i + 1]) / 2) * 1000) / 1000)
+  }
+  const starts = changePoints(ev.runs).filter((r) => r.sec >= per).map((r) => r.t)
+  let best = null
+  for (const off of [0, 2]) {
+    const bars = []
+    for (let i = off; i < beats.length; i += 4) bars.push(beats[i])
+    const sScore = chordsOnBars(starts, bars, 0.35 * per)
+    if (!best || sScore > best.s) best = { s: sScore, off }
+  }
+  const downbeats = []
+  for (let i = best.off; i < beats.length; i += 4) downbeats.push(i)
+  return {
+    bpm: det.bpm * 2,
+    beatsPerBar: 4,
+    downbeat: downbeats[0] % 4,
+    beats,
+    downbeats,
+    doubledFrom: det.bpm
+  }
+}
+
 /** Halve: every other beat; the surviving parity is the one the chords
  *  land on. Bars re-lay at 4 from the winning phase. */
 export function halveGrid(det, ev) {
@@ -773,16 +824,15 @@ export function meterCourt(det, ev, dbg = {}) {
               .sort((a, b) => b[1] * b[2] - a[1] * a[2])
               .slice(0, 4)
               .sort((a, b) => a[0] - b[0])
-            // Pair form only. A single-edge form (exceptional attack +
-            // lattice-supplied end) was tried and REVERTED: three controls
-            // each took an invented bar while the true FaS 3/4 still failed
-            // its gain — global gain is numerically blind in a desert
-            // (three chords cannot move a whole-song fraction), so it
-            // rejects truth there and passes luck elsewhere. A desert-safe
-            // acceptance judge is the named open problem; the note witness
-            // itself is proven (it locates FaS's 3/4 to 10ms), the JUDGE
-            // is not. Do not loosen this without a new judge and a full
-            // control battery.
+            // Two forms. The pair form pays global gain like every chord
+            // pair. The single-edge form (below) exists because an odd
+            // bar's END is often a gentle landing no cluster marks — but
+            // its first version was reverted after inventing on three
+            // controls: global gain is numerically blind in a desert, so
+            // it rejects truth and passes luck. Its judge is now the
+            // EXCLUDED-EDGE LOCAL JURY: witnesses within a bar and a half
+            // of the insert vote on soft alignment, except any witness
+            // sitting on an edge — nothing votes for itself.
             for (let i = 0; i < nn.length; i++) {
               for (let j = i + 1; j < nn.length; j++) {
                 const span = nn[j][0] - nn[i][0]
@@ -802,6 +852,17 @@ export function meterCourt(det, ev, dbg = {}) {
                 }
               }
             }
+            // A single-edge form needs a desert-safe judge, and TWO
+            // designs have now been measured and refuted: global gain is
+            // numerically blind in deserts (rejects truth, passes luck),
+            // and an excluded-edge local jury convicted twelve bars on
+            // four controls — locally every strong onset is on the pulse,
+            // so local soft-alignment measures pulse membership, not bar
+            // identity. Bar identity is a GLOBAL property; a desert lacks
+            // the global signal by definition. Until a judge exists that
+            // survives the full control battery, the one bar this affects
+            // (FaS Break 3/4 @105.5) ships as a red badge, located to
+            // 10ms by the note witness and one drag from correct.
           }
         }
       }
@@ -840,9 +901,20 @@ export function meterCourt(det, ev, dbg = {}) {
 /* ---------------- the pipeline ---------------- */
 
 export function v20(det, ev, dbg = {}) {
+  // No evidence, no opinion: a stems-less track (Ballroom, a bare mix)
+  // must pass through untouched — not even a materialized downbeats array.
+  if ((ev.runs?.length ?? 0) < 8 && !ev.ml) {
+    dbg.abstained = true
+    return det
+  }
   let grid = det
   const oc = octaveCourt(grid, ev, dbg)
-  if (oc.action === 'halve') grid = halveGrid(grid, ev)
+  if (oc.action === 'halve') {
+    grid = halveGrid(grid, ev)
+  } else {
+    const dc = doubleCourt(grid, ev, dbg)
+    if (dc.action === 'double') grid = doubleGrid(grid, ev)
+  }
   grid = meterCourt(grid, ev, dbg)
   return grid
 }

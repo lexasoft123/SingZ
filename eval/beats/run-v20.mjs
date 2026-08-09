@@ -18,6 +18,26 @@ const opt = (n) => (argv.indexOf(n) > 0 ? argv[argv.indexOf(n) + 1] : null)
 const VERBOSE = argv.includes('--verbose')
 const only = opt('--only')
 const GRIDS = JSON.parse(readFileSync(opt('--grids'), 'utf8'))
+// the neural model's raw level per song: the doubling court's key witness
+const ML = {}
+{
+  const mlPath = opt('--ml')
+  if (mlPath) {
+    for (const line of readFileSync(mlPath, 'utf8').trim().split('\n')) {
+      if (!line.startsWith('{')) continue
+      const r = JSON.parse(line)
+      const b = r.beats
+      if (!b || b.length < 32) continue
+      const iv = []
+      for (let i = 1; i < b.length; i++) iv.push(b[i] - b[i - 1])
+      iv.sort((x, y) => x - y)
+      const med = iv[iv.length >> 1]
+      const uni = iv.filter((x) => Math.abs(x - med) <= 0.1 * med).length / iv.length
+      ML[r.id] = { bpm: 60 / med, uni: Math.round(uni * 100) / 100 }
+    }
+  }
+}
+const slug = (n) => n.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
 const GT = JSON.parse(readFileSync(new URL('./library-gt.json', import.meta.url), 'utf8')).songs
 const EV = join(new URL('.', import.meta.url).pathname, 'out', 'v20-ev')
 
@@ -45,6 +65,7 @@ for (const name of Object.keys(GT).sort()) {
   const ev = JSON.parse(readFileSync(evPath, 'utf8'))
   const notesPath = evPath.replace(/\.json$/, '.notes.json')
   ev.notes = existsSync(notesPath) ? JSON.parse(readFileSync(notesPath, 'utf8')) : []
+  ev.ml = ML[slug(name)] ?? null
   const dbg = {}
   const out = v20(base, ev, dbg)
   const bars = barTimes(out)
@@ -76,6 +97,16 @@ for (const name of Object.keys(GT).sort()) {
     const lens = db.slice(1).map((x, k) => x - db[k])
     const bad = lens.filter((L) => L < 2 || L > 7).length
     check(name, 'gridSane', bad === 0, bad === 0 ? `${lens.length} bars` : `${bad} impossible`)
+  }
+  // Ballroom abstention, verified per song rather than asserted: with NO
+  // evidence — the exact shape of a stems-less full-mix track — every
+  // court must keep its hands off the grid entirely.
+  {
+    const bare = v20(base, { runs: [], voice: [], seams: [], words: [], notes: [], ml: null }, {})
+    const same = bare.bpm === base.bpm &&
+      JSON.stringify(bare.downbeats ?? null) === JSON.stringify(base.downbeats ?? null) &&
+      bare.beats.length === base.beats.length
+    check(name, 'abstains', same, same ? 'no evidence -> untouched' : `CHANGED: ${base.bpm.toFixed(1)} -> ${bare.bpm.toFixed(1)}`)
   }
   // negative control: songs with NO odd-bar GT and an approved level must
   // take no inserts at all
