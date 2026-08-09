@@ -1,21 +1,29 @@
 /* ————————————————————————————————— SingZ · night-studio theme ————— */
 
+/* The palette now lives in @singz/ui (imported by main.tsx just above this
+   file). These are aliases, not copies — the app's own names stay so 374
+   rules below need no edit, but there is exactly one place a colour is
+   defined, and the phone reads the same table. */
 :root {
-  --bg: #12100d;
-  --panel: #1b1814;
-  --panel-deep: #0f0d0a;
-  --line: rgba(255, 240, 214, 0.08);
-  --line-strong: rgba(255, 240, 214, 0.2);
-  --text: #f4efe6;
-  --dim: #9b917e;
-  --faint: #6b6355;
-  --accent: #ffa028;
-  --accent-deep: #ff8a1f;
-  --accent-soft: rgba(255, 160, 40, 0.13);
-  --danger: #ff7a5c;
+  --bg: var(--sz-bg);
+  --panel: var(--sz-panel);
+  --panel-deep: var(--sz-panel-deep);
+  --line: var(--sz-line);
+  --line-strong: var(--sz-line-strong);
+  --text: var(--sz-text);
+  --dim: var(--sz-dim);
+  --faint: var(--sz-faint);
+  --accent: var(--sz-accent);
+  --accent-deep: var(--sz-accent-deep);
+  --accent-soft: var(--sz-accent-soft);
+  --danger: var(--sz-danger);
+  /* The kit declares the font variables but ships no fonts — a duplicate
+     @font-face set would double the woff2 in every consumer. The app owns
+     the faces, so it assigns these outright. */
   --font-display: 'Bricolage Grotesque Variable', system-ui, sans-serif;
   --font-mono: 'Martian Mono Variable', ui-monospace, 'SF Mono', monospace;
-  /* keep in sync with CONTROLS_W in model.ts */
+  /* NOT a kit token: read as a JS number in PitchStrip to map x <-> time.
+     keep in sync with CONTROLS_W in model.ts */
   --controls-w: 228px;
 }
 
