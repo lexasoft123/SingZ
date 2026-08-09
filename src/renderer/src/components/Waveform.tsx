@@ -127,7 +127,9 @@ export default function Waveform({
   return (
     <div className="wave" ref={wrapRef}>
       <canvas ref={baseRef} className="wave-base" />
-      <canvas ref={brightRef} className="wave-bright" style={{ ['--glow' as string]: color }} />
+      {/* --glow was written here on every lane, every render, and read by
+          nothing — the stylesheet uses --stem for the bright layer's glow. */}
+      <canvas ref={brightRef} className="wave-bright" />
     </div>
   )
 }

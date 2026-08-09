@@ -169,6 +169,9 @@ body.win .titlebar {
   opacity: 1;
 }
 
+/* One rule, not two: this was declared here AND again ~1740 lines down, where
+   the second copy added the flex row. Both are folded in — same computed
+   result, but there is no longer a second place to edit and miss. */
 .song-title {
   position: absolute;
   left: 50%;
@@ -180,6 +183,9 @@ body.win .titlebar {
   font-weight: 500;
   font-size: 13px;
   color: var(--dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .header-right {
@@ -1908,12 +1914,6 @@ button.chip-status:hover {
   letter-spacing: 0.04em;
 }
 
-.song-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .song-title-text {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2147,7 +2147,10 @@ button.chip-status:hover {
 .picker-storage {
   margin-top: 14px;
   padding-top: 12px;
-  border-top: 1px solid var(--border);
+  /* was var(--border), which is defined nowhere and has no fallback: the
+     declaration was invalid at computed-value time, so border-top-style fell
+     back to `none` and this separator never rendered at all. */
+  border-top: 1px solid var(--line);
 }
 
 .picker-storage .picker-root {
@@ -2962,7 +2965,9 @@ body.win.maximized .app {
   letter-spacing: 0.04em;
 }
 .tp-gridver-val.ok {
-  color: var(--muted, #9a917c);
+  /* was var(--muted, …) — --muted is defined nowhere, so this always used
+     the literal, which is --dim off by 1 in R and 2 in B. */
+  color: var(--dim);
 }
 .tp-gridver-val.stale {
   color: #e2a53e;
