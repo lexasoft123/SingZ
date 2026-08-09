@@ -1,3 +1,4 @@
+import { STEM_META, CUSTOM_COLORS as KIT_CUSTOM_COLORS } from '@singz/ui/stems'
 import type { StemName } from '../../shared/types'
 
 export interface UITrack {
@@ -125,22 +126,20 @@ export function trainingWindows(
   return wins
 }
 
-export const TRACK_META: Record<string, { label: string; color: string }> = {
-  original: { label: 'Full mix', color: '#bfb49d' },
-  vocals: { label: 'Vocals', color: '#ff5c65' },
-  drums: { label: 'Drums', color: '#ffc53d' },
-  bass: { label: 'Bass', color: '#527dff' },
-  guitar: { label: 'Guitar', color: '#f98424' },
-  piano: { label: 'Piano', color: '#da81da' },
-  other: { label: 'Instruments', color: '#27e7bb' }
-}
+/**
+ * Lane labels and colours — the kit's table, because the phone draws the same
+ * project and Bass has to be the same blue in both. They had drifted by a
+ * digit before this was shared. `tests/unit/kit-tokens.test.ts` fails if the
+ * phone's vendored copy stops matching.
+ */
+export const TRACK_META: Record<string, { label: string; color: string }> = STEM_META
 
 /**
  * Lane colors for the singer's own tracks. Every hue here is far from all six
  * stem colors above — an added track next to Bass must not read as another
  * shade of Bass.
  */
-export const CUSTOM_COLORS = ['#c7e06a', '#ff9ad5', '#6fd8ff', '#e8dcc0', '#a98cff']
+export const CUSTOM_COLORS = KIT_CUSTOM_COLORS
 
 /** "harmony take 2.wav" → "Harmony take 2" (the lane's name). */
 export function trackLabel(name: string): string {

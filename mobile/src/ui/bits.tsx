@@ -1,4 +1,5 @@
 import React, { useCallback, useRef } from 'react'
+import { KIT, STEM_COLORS } from './tokens'
 import {
   Image,
   Pressable,
@@ -20,27 +21,44 @@ import {
  */
 export const white = (a: number): string => `rgba(255,255,255,${a})`
 
-/** Design-language constants (matches the approved HTML prototype). */
+/**
+ * The design language, now derived rather than transcribed.
+ *
+ * Every one of these was hand-copied from the same mock the desktop was
+ * drawn from, and every one of them missed — the accent by a whole hue
+ * (#f2c14e against #ffa028), dim and faint by being white-alpha where the
+ * desktop is opaque. The phone even carried the desktop's accent in two
+ * places already, in PlayerScreen, next to its own different one.
+ *
+ * They come from the kit now. `bright` and `amberInk` stay local: white is
+ * white, and the on-accent ink follows the accent it sits on.
+ *
+ * dim/faint change colour MODEL here, not just value — white-alpha to
+ * opaque. That is right rather than a slip: the background moves too, so
+ * the old alphas would have composited to something different anyway.
+ */
 export const C = {
-  bg: '#0d0a06',
-  text: '#eee6d6',
+  bg: KIT.bg,
+  text: KIT.text,
   bright: '#ffffff',
-  dim: white(0.5),
-  faint: white(0.35),
-  amber: '#f2c14e',
-  amberInk: '#1d1508',
-  red: '#e2574c',
-  sheet: 'rgba(32,25,15,0.98)',
-  hairline: white(0.09),
+  dim: KIT.dim,
+  faint: KIT.faint,
+  amber: KIT.accent,
+  amberInk: KIT.accentInk,
+  red: KIT.danger,
+  sheet: KIT.surfaceRaised,
+  hairline: KIT.line,
+  /* No desktop equivalent: CSS draws these as ghost borders, RN needs a
+     fill. Stays a local decision. */
   btnBg: white(0.1)
 }
 
-/* Artwork hues, NOT the accent — they happen to include a colour equal to
-   C.amber today and must not start tracking it. */
+/* Artwork hues. These are the SHARED stem colours now, so a project's tile
+   on the phone matches its lanes on the desktop. */
 export const STEM_TILE_COLORS: string[][] = [
-  ['#ff5d66', '#f2c14e', '#7a9bff', '#45d6b5'],
-  ['#7a9bff', '#ff5d66', '#45d6b5', '#b48ead'],
-  ['#e0873f', '#45d6b5', '#f2c14e', '#ff5d66']
+  [STEM_COLORS.vocals, STEM_COLORS.drums, STEM_COLORS.bass, STEM_COLORS.other],
+  [STEM_COLORS.bass, STEM_COLORS.vocals, STEM_COLORS.other, STEM_COLORS.piano],
+  [STEM_COLORS.guitar, STEM_COLORS.other, STEM_COLORS.drums, STEM_COLORS.vocals]
 ]
 const TILE_WIDTHS = ['100%', '72%', '88%', '60%'] as const
 
