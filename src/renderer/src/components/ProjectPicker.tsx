@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { CloudRoot, ProjectListItem } from '../../../shared/types'
 import gdriveIcon from '../assets/gdrive.png'
+import { Modal } from '@singz/ui'
 
 function fmtDate(iso: string): string {
   if (!iso) return ''
@@ -92,8 +93,7 @@ export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): Rea
   }
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal-card picker-card" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} cardClassName="picker-card">
         <div className="picker-head">
           <h2>Your projects</h2>
           <div className="log-actions">
@@ -202,7 +202,6 @@ export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): Rea
           {storageMsg && <p className="fine">{storageMsg}</p>}
           {gdriveMsg && <p className="fine">{gdriveMsg}</p>}
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

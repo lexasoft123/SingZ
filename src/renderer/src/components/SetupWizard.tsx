@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ModelId, ModelInfo } from '../../../shared/types'
+import { Modal } from '@singz/ui'
 
 interface Props {
   models: ModelInfo[]
@@ -67,8 +68,7 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
   }, [origin, requiredDone, busy, error, onClose])
 
   return (
-    <div className="modal-scrim">
-      <div className="modal-card wizard">
+    <Modal onClose={onClose} cardClassName="wizard" persistent>
         <h2>{origin === 'auto' ? 'Setting up SingZ' : 'AI models'}</h2>
         <p>
           SingZ runs its AI locally. Models download once into a shared folder and are reused for
@@ -170,7 +170,6 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
             {origin === 'auto' && !requiredDone ? 'Skip for now' : 'Close'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

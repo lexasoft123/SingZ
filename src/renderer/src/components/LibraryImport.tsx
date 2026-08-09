@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Modal } from '@singz/ui'
 
 interface Props {
   /** Where the project lives now — outside the library root. */
@@ -20,8 +21,7 @@ export default function LibraryImport({ dir, busy, onImport, onClose }: Props): 
   }, [])
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose}>
         <div className="picker-head">
           <h2>Add to your library</h2>
           <div className="log-actions">
@@ -61,7 +61,6 @@ export default function LibraryImport({ dir, busy, onImport, onClose }: Props): 
             ? 'Working — a project with stems is a few hundred MB, so give it a moment…'
             : 'Copying leaves the original alone, which is what you want for a folder someone else also uses. Moving takes it with you, stems and all.'}
         </p>
-      </div>
-    </div>
+    </Modal>
   )
 }

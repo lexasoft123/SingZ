@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LogEntry } from '../../../shared/types'
+import { Modal } from '@singz/ui'
 
 const MAX_ROWS = 4000
 
@@ -59,8 +60,7 @@ export default function LogPanel({ onClose }: { onClose: () => void }): React.JS
   }, [])
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal-card log-card" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} cardClassName="log-card">
         <div className="log-head">
           <h2>Log</h2>
           <span className="fine">{entries.length} lines</span>
@@ -87,7 +87,6 @@ export default function LogPanel({ onClose }: { onClose: () => void }): React.JS
           ))}
         </div>
         {savedTo && <p className="fine log-saved">Saved to {savedTo}</p>}
-      </div>
-    </div>
+    </Modal>
   )
 }

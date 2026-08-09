@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { getAudioDevices, type AudioDevices } from '../audio/devices'
 import type { MicDevice } from '../audio/mic'
 import type { AudioPrefs } from '../model'
+import { Modal } from '@singz/ui'
 
 interface Props {
   audio: AudioPrefs
@@ -58,8 +59,7 @@ export default function SettingsModal({
     Boolean(id && rows && !rows.some((d) => d.id === id))
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal-card settings-card" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} cardClassName="settings-card">
         <h2>Settings</h2>
         <div className="settings-body">
           <nav className="settings-nav">
@@ -142,7 +142,6 @@ export default function SettingsModal({
             Close
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

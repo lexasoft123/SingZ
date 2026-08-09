@@ -778,13 +778,6 @@ button.chip-status:hover {
   animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
 }
 
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(16px);
-  }
-}
-
 .eq {
   display: flex;
   align-items: center;
@@ -875,59 +868,7 @@ button.chip-status:hover {
   letter-spacing: 0.01em;
 }
 
-@keyframes fade {
-  from {
-    opacity: 0;
-  }
-}
-
 /* ————————————————————————————————— toast + modal ————— */
-
-.toast {
-  position: fixed;
-  bottom: 104px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 60;
-  max-width: 72%;
-  background: #2b1c13;
-  border: 1px solid rgba(255, 122, 92, 0.45);
-  color: #ffb9a6;
-  padding: 11px 18px;
-  border-radius: 12px;
-  font-size: 13px;
-  line-height: 1.5;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  animation: toast-in 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
-}
-
-@keyframes toast-in {
-  from {
-    opacity: 0;
-    transform: translate(-50%, 10px);
-  }
-}
-
-.modal-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  background: rgba(8, 6, 3, 0.62);
-  backdrop-filter: blur(8px);
-  display: grid;
-  place-items: center;
-  animation: fade 0.18s;
-}
-
-.modal-card {
-  width: min(480px, calc(100vw - 60px));
-  background: #1e1a15;
-  border: 1px solid var(--line-strong);
-  border-radius: 18px;
-  padding: 28px;
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
-  animation: rise 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
-}
 
 .modal-card h2 {
   font-size: 21px;
@@ -986,13 +927,6 @@ button.chip-status:hover {
 
 .fine.warn {
   color: var(--danger) !important;
-}
-
-.modal-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 20px;
-  flex-wrap: wrap;
 }
 
 /* ————————————————————————————————— karaoke: layout ————— */

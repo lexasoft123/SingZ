@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { EngineStatus } from '../../../shared/types'
+import { Modal } from '@singz/ui'
 
 const INSTALL_CMD = 'pipx install demucs && pipx inject demucs numpy'
 
@@ -28,8 +29,7 @@ export default function SetupModal({ status, onClose, onStatus }: Props): React.
   }
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose}>
         <h2>Stem splitting needs Demucs</h2>
         <p>
           SingZ uses <strong>Demucs</strong> — a free, open-source AI model that runs entirely on
@@ -61,7 +61,6 @@ export default function SetupModal({ status, onClose, onStatus }: Props): React.
             Close
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

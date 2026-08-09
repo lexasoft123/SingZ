@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Modal } from '@singz/ui'
 import type { ProjectListItem, SyncStatus } from '../../../shared/types'
 import gdriveIcon from '../assets/gdrive.png'
 import { TRACK_META } from '../model'
@@ -135,12 +136,10 @@ export default function DropScreen({
     refresh()
   }, [gdrive.signedIn, refresh])
 
-  // Same deal as App's modals: the scrim's blur re-rasters the window, so the
-  // equaliser behind it stops animating while the question is on screen.
-  useEffect(() => {
-    document.body.classList.toggle('modal-open', Boolean(doomed))
-    return () => document.body.classList.remove('modal-open')
-  }, [doomed])
+  // body.modal-open is the kit <Modal>'s job now, and it ref-counts it. This
+  // was the second independent owner of that class: a `remove` here fired
+  // whenever the confirm closed, even if one of App's dialogs was still open
+  // behind it, and the equaliser would start animating under the scrim again.
 
   // Esc answers the question, not the page behind it — App's own Escape
   // handler would otherwise close the whole catalog out from under it. Capture
@@ -402,8 +401,12 @@ export default function DropScreen({
       )}
 
       {doomed && (
-        <div className="modal-scrim" onClick={() => !deleting && setDoomed(null)}>
-          <div className="modal-card confirm-card" onClick={(e) => e.stopPropagation()}>
+        <Modal
+          onClose={() => setDoomed(null)}
+          cardClassName="confirm-card"
+          busy={deleting}
+          aria-label={`Delete ${doomed.name}?`}
+        >
             <h2>Delete “{doomed.name}”?</h2>
             <p>
               This erases the whole project folder — {doomed.stemCount > 0
@@ -440,8 +443,7 @@ export default function DropScreen({
                 {deleting ? 'Deleting…' : `Delete ${fmtSize(doomed.bytes)}`}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   )

@@ -471,12 +471,11 @@ export default function App(): React.JSX.Element {
     void window.singz.checkEngine(true).then(setEngineStatus)
   }, [])
 
-  // Background animation loops pause while a modal covers the app (the
-  // scrim's backdrop blur re-rasters the whole window on every change).
-  useEffect(() => {
-    const open = Boolean(showLog || showProjects || showSetup || showImport || showSettings || wizard)
-    document.body.classList.toggle('modal-open', open)
-  }, [showLog, showProjects, showSetup, showImport, showSettings, wizard])
+  // body.modal-open — which pauses the background animation loops, because
+  // the scrim's backdrop blur re-rasters the whole window on every change —
+  // is now owned by the kit's <Modal>, ref-counted across every dialog. This
+  // used to be one of two independent owners (DropScreen had the other), so
+  // closing either cleared the flag while the other was still up.
 
   useEffect(() => {
     if (!error) return
