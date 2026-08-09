@@ -360,28 +360,84 @@ export function meterCourt(det, ev, dbg = {}) {
       if (st && (sites.length === 0 || cand.t - sites[sites.length - 1] > 8)) sites.push(cand.t)
     }
     if (sites.length > 0 && sites.length <= 6) {
-      let plan = grid
-      for (const t of sites) {
-        // The flip's new downbeat is, by definition, an original bar of the
-        // OPPOSITE parity — one that is not currently a bar. Snapping to
-        // the nearest original bar regardless landed on existing downbeats
-        // and made every insert a silent no-op.
-        const cur = barTimes(plan)
-        const isBar = (x) => cur.some((b) => Math.abs(b - x) < 0.4)
-        let tb = null
-        for (const x of det.originalBars) {
-          if (isBar(x)) continue
-          if (tb == null || Math.abs(x - t) < Math.abs(tb - t)) tb = x
-        }
-        if (tb != null && Math.abs(tb - t) < 4) plan = withInsert(plan, tb)
-      }
+      // Each site's forced bar is an opposite-parity original bar NEAR the
+      // site — but "nearest" was still a coin flip a bar wide. There are at
+      // most two credible candidates per site (the bracketing odd bars), so
+      // the plan space is tiny: brute-force every combination and let the
+      // gain metric choose. The do-nothing gate then judges the winner.
+      // Options are PLAN-DEPENDENT: after flip k re-lays downstream, the
+      // bars of the old train stop being bars, and flip k+1's forced line
+      // is very often one of them. Scoring options against the pre-plan
+      // grid excluded exactly the correct bar at every second flip — the
+      // parity alternates by construction. So the combos are grown
+      // sequentially, each site's candidates judged against the plan so
+      // far. At most two branches per site: the search stays tiny.
       const tol2 = baseTol
       const before = chordsOnBars(starts, barTimes(grid), tol2)
-      const after = chordsOnBars(starts, barTimes(plan), tol2)
-      dbg.plan = { sites: sites.map((t) => Math.round(t * 10) / 10), before: Math.round(before * 100), after: Math.round(after * 100) }
-      if (after >= before + 0.04) {
-        for (const t of sites) applied.push({ t: Math.round(t * 10) / 10, L: 2, why: 'parity flip', gain: Math.round((after - before) * 100) })
-        grid = plan
+      let bestPlan = null
+      const allCombos = []
+      const grow = (k, plan, combo) => {
+        if (k === sites.length) {
+          const after = chordsOnBars(starts, barTimes(plan), tol2)
+          // Global gain ties whenever two placements only redistribute the
+          // same distant chords; the chords AT the seams break the tie —
+          // they are the ones the placement is actually about.
+          const bt = barTimes(plan)
+          let local = 0
+          for (const t of sites) {
+            // one bar either side, SOFT-scored: at the third seam both
+            // placements missed the chorus chord by more than the hard
+            // tolerance — 0.45s and 1.49s scoring identically is how a
+            // one-and-a-half-bar error ties a half-beat one
+            const near = starts.filter((x) => Math.abs(x - t) <= 4.2)
+            for (const x of near) {
+              let d = Infinity
+              for (const b of bt) d = Math.min(d, Math.abs(b - x))
+              local += Math.exp(-(d * d) / (2 * 0.35 * 0.35))
+            }
+          }
+          let dist = 0
+          for (let i = 0; i < combo.length; i++) if (combo[i] != null) dist += Math.abs(combo[i] - sites[i])
+          // three tiers: a real global gain wins outright; then a CLEAR
+          // local advantage (0.03 is chroma noise, not evidence); then the
+          // seam's own proximity — the site was confirmed where it was
+          // confirmed, and the nearest opposite-parity bar is its claim
+          // The clear-local bar sits between the two measured cases: seam 3
+          // separates by 0.38 (real — a half-beat miss vs a bar-and-a-half
+          // miss) and seam 4 by 0.03 (chroma noise). 0.25 is calibrated on
+          // exactly those two points and is expected to be re-tested by
+          // every native-level song that reaches this code.
+          const wins = !bestPlan ||
+            after > bestPlan.after + 0.02 ||
+            (after > bestPlan.after - 0.02 &&
+              (local > bestPlan.local + 0.25 ||
+                (Math.abs(local - bestPlan.local) <= 0.25 && dist < bestPlan.dist - 0.2)))
+          if (wins) bestPlan = { plan, after, combo, local, dist }
+          allCombos.push({ c: combo.map((x) => (x == null ? null : Math.round(x * 10) / 10)), after: Math.round(after * 1000) / 10, local: Math.round(local * 100) / 100 })
+          return
+        }
+        const t = sites[k]
+        const cur = barTimes(plan)
+        const isBar = (x) => cur.some((b) => Math.abs(b - x) < 0.4)
+        const opts = det.originalBars.filter((x) => !isBar(x) && Math.abs(x - t) < 4)
+        opts.sort((a, b) => Math.abs(a - t) - Math.abs(b - t))
+        const branch = opts.slice(0, 2)
+        if (branch.length === 0) branch.push(null)
+        for (const o of branch) grow(k + 1, o == null ? plan : withInsert(plan, o), [...combo, o])
+      }
+      grow(0, grid, [])
+      dbg.plan = {
+        sites: sites.map((t) => Math.round(t * 10) / 10),
+        chosen: bestPlan.combo.map((x) => (x == null ? null : Math.round(x * 10) / 10)),
+        before: Math.round(before * 100),
+        after: Math.round(bestPlan.after * 100)
+      }
+      dbg.combos = allCombos.sort((a, b) => b.after - a.after).slice(0, 6)
+      if (bestPlan.after >= before + 0.04) {
+        for (const tb of bestPlan.combo) {
+          if (tb != null) applied.push({ t: Math.round(tb * 10) / 10, L: 2, why: 'parity flip', gain: Math.round((bestPlan.after - before) * 100) })
+        }
+        grid = bestPlan.plan
       }
     }
     dbg.steps = steps

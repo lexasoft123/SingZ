@@ -53,6 +53,7 @@ for (const name of Object.keys(GT).sort()) {
   if (VERBOSE && dbg.oct) console.log(`  oct: ${JSON.stringify(dbg.oct)}`)
   if (VERBOSE && dbg.steps?.length) console.log(`  steps: ${JSON.stringify(dbg.steps)}`)
   if (dbg.plan) console.log(`  plan: ${JSON.stringify(dbg.plan)}`)
+  if (VERBOSE && dbg.combos) for (const c of dbg.combos) console.log(`    combo ${JSON.stringify(c.c)} after ${c.after} local ${c.local}`)
 
   if (spec.bpmNear) {
     const w = spec.bpmNear.want
