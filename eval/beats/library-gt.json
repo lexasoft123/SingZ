@@ -14,7 +14,12 @@
      "n": 3
     }
    ],
-   "note": "TWO independent official transcriptions agree (vocal score + rhythm-guitar Pro tab, both quarter=67): 4/4 with 5/4 at score bar 19 and 3/4 at bars 30, 41, 60. Both odd-bar anchors are audio-verified, not just page-read. The 5/4: bar 19 spans \"still\"@66.20 -> \"not\"@70.55 = 4.94 beats. The 3/4 at the first Break: our own grid agrees with the score up to its bar line at 104.36, the tab puts \"I know I have to\" inside that bar (sung 105.64-106.75, contained), and \"go\" — which opens the next 4/4 — lands at 106.99 = 2.99 beats after 104.36. Our grid claims 4 (next bar at 108.00). The v3 break (score bar 60) is NOT anchored: by then two upstream meter changes have shifted our uniform grid's phase (\"go\" v3 sits a beat past our 209.44 bar line), so a time anchor there would encode our own error. The guitar tab also documents the strum as a per-half-bar cell (down-up + muted X, twice per bar) — the notated confirmation of the measured lag-2 strum ACF: the accompaniment is half-bar periodic BY ARRANGEMENT, and the v17 grid emits 58 bars all 4 beats with a bar line inside the 5/4."
+   "note": "TWO independent official transcriptions agree (vocal score + rhythm-guitar Pro tab, both quarter=67): 4/4 with 5/4 at score bar 19 and 3/4 at bars 30, 41, 60. Both odd-bar anchors are audio-verified, not just page-read. The 5/4: bar 19 spans \"still\"@66.20 -> \"not\"@70.55 = 4.94 beats. The 3/4 at the first Break: our own grid agrees with the score up to its bar line at 104.36, the tab puts \"I know I have to\" inside that bar (sung 105.64-106.75, contained), and \"go\" — which opens the next 4/4 — lands at 106.99 = 2.99 beats after 104.36. Our grid claims 4 (next bar at 108.00). The v3 break (score bar 60) is NOT anchored: by then two upstream meter changes have shifted our uniform grid's phase (\"go\" v3 sits a beat past our 209.44 bar line), so a time anchor there would encode our own error. The guitar tab also documents the strum as a per-half-bar cell (down-up + muted X, twice per bar) — the notated confirmation of the measured lag-2 strum ACF: the accompaniment is half-bar periodic BY ARRANGEMENT, and the v17 grid emits 58 bars all 4 beats with a bar line inside the 5/4.",
+   "bpmNear": {
+    "want": 68.2,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Dreamer": {
    "bpb": 4,
@@ -22,7 +27,12 @@
     0
    ],
    "barAt": 172.931,
-   "scoreNote": "TWO official transcriptions agree (guitar Pro x2): quarter = 78 (ours 79.5 ✓), UNIFORM 4/4, 93 bars, no meter changes anywhere. The outro drops to quarter = 61 at bar 93 — but that is the final let-ring chord, not a played tempo. Our single stretched bar (269.56, claims 4 lasts 3.58) sits exactly at the outro transition where the band stops: a ring-out boundary, not meter. Dreamer is the THIRD negative control after TTP and Crowley — a bar decoder must leave it alone."
+   "scoreNote": "TWO official transcriptions agree (guitar Pro x2): quarter = 78 (ours 79.5 ✓), UNIFORM 4/4, 93 bars, no meter changes anywhere. The outro drops to quarter = 61 at bar 93 — but that is the final let-ring chord, not a played tempo. Our single stretched bar (269.56, claims 4 lasts 3.58) sits exactly at the outro transition where the band stops: a ring-out boundary, not meter. Dreamer is the THIRD negative control after TTP and Crowley — a bar decoder must leave it alone.",
+   "bpmNear": {
+    "want": 79.5,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Going To The Run": {
    "bpb": 4,
@@ -35,7 +45,12 @@
    "bpb": 4,
    "barAt": 177.621,
    "note": "slip-class song; two harmonic phase slips (126.6s, 166.5s) re-phased since v9 — anchor minted from the harmonically-validated grid (chord changes 86% on bar starts)",
-   "scoreNote": "Two official transcriptions agree (vocal + bass): Intro quarter = 90, then 105 at Verse 1 (bar 20), uniform 4/4 throughout, 126 bars, no meter changes. Both our tempos confirmed: measured 90.9 intro / 107.7 body vs notated 90/105 — the v12 organ-intro splice (\"own tempo under the body\") is exactly what the page says. Therefore the 24 stretched bars the sweep flagged (most in the library) are PERFORMANCE looseness — pushed fills, organ rubato — already the defect-splice family's job, and NOT meter. Do not let a future bar decoder mint odd bars here; this song joins TTP as a negative control, at 5x the difficulty."
+   "scoreNote": "Two official transcriptions agree (vocal + bass): Intro quarter = 90, then 105 at Verse 1 (bar 20), uniform 4/4 throughout, 126 bars, no meter changes. Both our tempos confirmed: measured 90.9 intro / 107.7 body vs notated 90/105 — the v12 organ-intro splice (\"own tempo under the body\") is exactly what the page says. Therefore the 24 stretched bars the sweep flagged (most in the library) are PERFORMANCE looseness — pushed fills, organ rubato — already the defect-splice family's job, and NOT meter. Do not let a future bar decoder mint odd bars here; this song joins TTP as a negative control, at 5x the difficulty.",
+   "bpmNear": {
+    "want": 110.0,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Nothing Else Matters": {
    "bpb": 6,
@@ -43,20 +58,35 @@
     3
    ],
    "barAt": 233.86,
-   "scoreNote": "Ultimate-Guitar official score: 6/8 with 3/8 bars at bar 7 (intro), 57/73/117 (end of each chorus, on \"Oh, but I know\") and 142/147 (outro); dotted-quarter = 72. Our grid is 154 bars, ALL 6 beats. NOT anchored: at the chorus ends the score points to, our bars measure a clean 5.92-6.17 beats — no short bar — so either we absorb the 3/8 invisibly (which would shift bar phase by half a bar afterwards) or the score bar numbers do not map where assumed. The three stretched bars we DO have (198.93, 201.25, 317.07) sit in instrumental/outro regions, and the outro is where the score puts its last two 3/8 bars. Revisit when the bar decoder lands — this is the one score-vs-audio disagreement in the set and it needs an ear, not more arithmetic."
+   "scoreNote": "Ultimate-Guitar official score: 6/8 with 3/8 bars at bar 7 (intro), 57/73/117 (end of each chorus, on \"Oh, but I know\") and 142/147 (outro); dotted-quarter = 72. Our grid is 154 bars, ALL 6 beats. NOT anchored: at the chorus ends the score points to, our bars measure a clean 5.92-6.17 beats — no short bar — so either we absorb the 3/8 invisibly (which would shift bar phase by half a bar afterwards) or the score bar numbers do not map where assumed. The three stretched bars we DO have (198.93, 201.25, 317.07) sit in instrumental/outro regions, and the outro is where the score puts its last two 3/8 bars. Revisit when the bar decoder lands — this is the one score-vs-audio disagreement in the set and it needs an ear, not more arithmetic.",
+   "bpmNear": {
+    "want": 143.6,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Panzerkampf": {
    "bpb": 4,
    "rot": [
     2
    ],
-   "barAt": 188.511
+   "barAt": 188.511,
+   "bpmNear": {
+    "want": 97.5,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Pink Floyd - Wish You Were Here": {
    "bpb": 4,
    "barAt": 195.988,
    "note": "Anchor minted from harmonic evidence, EAR-CHECK PENDING. Unlike Sixteen Tons (where the harmonic arbiter decided a song built to defeat it), this song is the arbiter's ideal case and the score says so explicitly: ONE chord per bar, every change on a downbeat, no exceptions. 195.988s carries a 7-beat chord change to C, sits on a bar line of the majority parity, and the \"How I wish, how I wish you were here\" line starts 0.55s later (vocal pickup after the downbeat) — score bar 46, the top of Verse 2. Three agreeing signals.",
-   "scoreNote": "OUR OCTAVE IS DOUBLED, AND FOR ONCE THAT IS NOT TASTE — it is measured against a published fact. Official Pink Floyd tab (verified artist: the type=900 search returns FIVE artists for this title and the Avril Lavigne trap is live): quarter = 60 printed once at bar 1, UNIFORM 4/4 across all 83 bars, NO meter change, NO rall./ritard./a tempo/fermata anywhere including the fade, and ONE CHORD PER BAR throughout — a change every 4.000 s, always on a downbeat. The score certifies its own uniformity three independent ways: 83 bars x 4/4 at 60 = 332.000 s exactly, matching its stated duration; its syllable clock gives 4.000 s per bar across every span including 14 bars through the solo; and multi-bar rests (which cannot span a meter change) tile the whole song across four tracks. MEASURED against our grid 2026-08-03: we ship 122.95 bpm with 172 bars of 1.952 s. The chord decode over guitar+piano+other with a bass root bonus gives a MEDIAN CHORD RUN OF 8 OF OUR BEATS = 3.90 s = 0.98 SCORE BARS — the score's one-chord-per-bar rhythm is present in the recording, and our bar is exactly half of it. The clincher is parity: of the 54 chord changes landing on one of our bar lines, 47 are on odd-numbered bars and 7 on even. A correct octave splits evenly; a doubled grid puts them all on one parity, which is what we see. So the true downbeats are our ODD bars and a halving that keeps that parity reproduces the score. Recording runs ~2.5% slower than notated (3.90 vs 4.000 s per bar) — a real performance, not a tempo change. THIS IS A NEGATIVE CONTROL for the meter repair operator: uniform 4/4 certified three ways, so the operator must insert NOTHING here. Two caveats: our copy is the album master WITH the radio-tuning intro (lyrics.json opens on four spoken lines, \"And disciplinary remains mercifully\" etc.) while the score has no such intro and starts the guitar at bar 2, so the score clock has no shared origin with our audio — anchor by lyric, never by score bar number; and the score's own syllable clock carries a 1.000 s lead-in offset against its 332.000 s duration figure, so even internally its absolute times are not the recording's."
+   "scoreNote": "OUR OCTAVE IS DOUBLED, AND FOR ONCE THAT IS NOT TASTE — it is measured against a published fact. Official Pink Floyd tab (verified artist: the type=900 search returns FIVE artists for this title and the Avril Lavigne trap is live): quarter = 60 printed once at bar 1, UNIFORM 4/4 across all 83 bars, NO meter change, NO rall./ritard./a tempo/fermata anywhere including the fade, and ONE CHORD PER BAR throughout — a change every 4.000 s, always on a downbeat. The score certifies its own uniformity three independent ways: 83 bars x 4/4 at 60 = 332.000 s exactly, matching its stated duration; its syllable clock gives 4.000 s per bar across every span including 14 bars through the solo; and multi-bar rests (which cannot span a meter change) tile the whole song across four tracks. MEASURED against our grid 2026-08-03: we ship 122.95 bpm with 172 bars of 1.952 s. The chord decode over guitar+piano+other with a bass root bonus gives a MEDIAN CHORD RUN OF 8 OF OUR BEATS = 3.90 s = 0.98 SCORE BARS — the score's one-chord-per-bar rhythm is present in the recording, and our bar is exactly half of it. The clincher is parity: of the 54 chord changes landing on one of our bar lines, 47 are on odd-numbered bars and 7 on even. A correct octave splits evenly; a doubled grid puts them all on one parity, which is what we see. So the true downbeats are our ODD bars and a halving that keeps that parity reproduces the score. Recording runs ~2.5% slower than notated (3.90 vs 4.000 s per bar) — a real performance, not a tempo change. THIS IS A NEGATIVE CONTROL for the meter repair operator: uniform 4/4 certified three ways, so the operator must insert NOTHING here. Two caveats: our copy is the album master WITH the radio-tuning intro (lyrics.json opens on four spoken lines, \"And disciplinary remains mercifully\" etc.) while the score has no such intro and starts the guitar at bar 2, so the score clock has no shared origin with our audio — anchor by lyric, never by score bar number; and the score's own syllable clock carries a 1.000 s lead-in offset against its 332.000 s duration figure, so even internally its absolute times are not the recording's.",
+   "bpmNear": {
+    "want": 61.5,
+    "tolPct": 5,
+    "note": "score quarter=60 + chord parity 47:7; det says 123"
+   }
   },
   "Primo Victoria": {
    "bpb": 4,
@@ -94,14 +124,24 @@
      "n": 2
     }
    ],
-   "scoreNote": "Official Deep Purple tab (quarter = 66; ours 67.1 ✓): 4/4 with a 2/4 bar at every \"windmill going round\" — score bars 18, 43, 48. Audio-consistent at all three: windmill->round spans 1.8-1.9 beats at 61.7/149.7/165.8, i.e. the 2/4 carries \"windmill going\" and \"round\" opens the next 4/4. One anchor minted at the cleanest instance (verse-2 chorus, t=150.5 want 2 — RED today, we claim 4); the other two are recorded, not minted. Our grid swallows the first two 2/4s with no anomaly at all and shows one 4.47-beat stretched bar at 180.33. ALSO: notated rall. at bar 52, 66 -> 38, on the final \"soldier of fortune\" — our outro spacing stays 0.89-0.92 s flat, so the click races the band if the recording really slows (same ending class as WDOA; needs an ear). This is a GT ANCHOR song: rot/barAt still pass because the ear-minted barAt is real, but the uniform grid must be re-syncing across the swallowed 2/4s via slips — the phase between choruses is not to be trusted."
+   "scoreNote": "Official Deep Purple tab (quarter = 66; ours 67.1 ✓): 4/4 with a 2/4 bar at every \"windmill going round\" — score bars 18, 43, 48. Audio-consistent at all three: windmill->round spans 1.8-1.9 beats at 61.7/149.7/165.8, i.e. the 2/4 carries \"windmill going\" and \"round\" opens the next 4/4. One anchor minted at the cleanest instance (verse-2 chorus, t=150.5 want 2 — RED today, we claim 4); the other two are recorded, not minted. Our grid swallows the first two 2/4s with no anomaly at all and shows one 4.47-beat stretched bar at 180.33. ALSO: notated rall. at bar 52, 66 -> 38, on the final \"soldier of fortune\" — our outro spacing stays 0.89-0.92 s flat, so the click races the band if the recording really slows (same ending class as WDOA; needs an ear). This is a GT ANCHOR song: rot/barAt still pass because the ear-minted barAt is real, but the uniform grid must be re-syncing across the swallowed 2/4s via slips — the phase between choruses is not to be trusted.",
+   "bpmNear": {
+    "want": 67.1,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Stirb Nicht Vor Mir": {
    "bpb": 4,
    "rot": [
     2
    ],
-   "barAt": 147.412
+   "barAt": 147.412,
+   "bpmNear": {
+    "want": 87.6,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "The Music Of The Night": {
    "reject": true
@@ -140,7 +180,12 @@
      "n": 4
     }
    ],
-   "scoreNote": "Official Metallica bass tab (D# G# C# F#, \"Moderately Slow\" quarter = 76; ours reads 74.9 — right octave): 112 bars, 4/4 at bar 1 and NEVER AGAIN. This is the counter-example the bar decoder needs — a song with five stretched bars that are NOT meter changes and must stay 4 beats. The barLenAt entries above pin exactly those five spots and pass today; they exist to fail if a decoder starts inventing odd bars wherever the tracker wobbles. OPEN QUESTION: we emit one 2-beat bar at 224.99 which the score does not have. That is the \"+2 beats at the last chorus\" the v5 fermata mechanics were built around, measured from the audio — a transcription normalises what a live-feel performance breathes, so score and recording may both be right. Needs an ear before it becomes an anchor either way."
+   "scoreNote": "Official Metallica bass tab (D# G# C# F#, \"Moderately Slow\" quarter = 76; ours reads 74.9 — right octave): 112 bars, 4/4 at bar 1 and NEVER AGAIN. This is the counter-example the bar decoder needs — a song with five stretched bars that are NOT meter changes and must stay 4 beats. The barLenAt entries above pin exactly those five spots and pass today; they exist to fail if a decoder starts inventing odd bars wherever the tracker wobbles. OPEN QUESTION: we emit one 2-beat bar at 224.99 which the score does not have. That is the \"+2 beats at the last chorus\" the v5 fermata mechanics were built around, measured from the audio — a transcription normalises what a live-feel performance breathes, so score and recording may both be right. Needs an ear before it becomes an anchor either way.",
+   "bpmNear": {
+    "want": 74.9,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Wanted Dead Or Alive": {
    "bpb": 4,
@@ -154,19 +199,63 @@
     77.16
    ],
    "note": "beatAtMl = the 48-93s drum-void the v8 gate refuses: v10 coasted through it and drifted up to half a beat (user heard it); v11 splices the model lattice there — ear-approved 2026-07-31. Anchors are BEAT times from the approved grid (coasting misses them by 330/335/104ms). v9's 204.8s breakdown re-phase rode along in that listen.",
-   "scoreNote": "Official Bon Jovi bass tab (E A D G, quarter = 74 — our 74.90 is the closest tempo match in the set): 4/4 with ONE 2/4 bar at score bar 62, at the chorus exit \"dead or a-li-ve\" before Verse 3. Same shape as Wild World: a half-bar where a chorus hands over. We emit exactly one odd bar in the song too — a SIX-beat bar at 202.23 — and 4+2 = 6, so we may be MERGING the odd bar where the score SPLITS it. That distinction is audible: 4+2 accents the start of the 2, a single 6 does not. Not positionally verified (lyric anchoring has been unreliable against these transcriptions), so no anchor. A bar decoder should prefer 4+2 over 6 when the evidence supports a bar line in the middle — this is the test case for that. SECOND finding, different class: the score notates a ritardando on the sustained ending (quarter = 66 at bar 90, then 48 at bar 91). Our grid holds ~0.79 s to the last beat at 307.6 s and never slows. Either the recording holds rather than slows, or we coast a click through a rallentando — the doc already flags \"WDOA outro fade\" as a real-music defect zone. Needs an ear."
+   "scoreNote": "Official Bon Jovi bass tab (E A D G, quarter = 74 — our 74.90 is the closest tempo match in the set): 4/4 with ONE 2/4 bar at score bar 62, at the chorus exit \"dead or a-li-ve\" before Verse 3. Same shape as Wild World: a half-bar where a chorus hands over. We emit exactly one odd bar in the song too — a SIX-beat bar at 202.23 — and 4+2 = 6, so we may be MERGING the odd bar where the score SPLITS it. That distinction is audible: 4+2 accents the start of the 2, a single 6 does not. Not positionally verified (lyric anchoring has been unreliable against these transcriptions), so no anchor. A bar decoder should prefer 4+2 over 6 when the evidence supports a bar line in the middle — this is the test case for that. SECOND finding, different class: the score notates a ritardando on the sustained ending (quarter = 66 at bar 90, then 48 at bar 91). Our grid holds ~0.79 s to the last beat at 307.6 s and never slows. Either the recording holds rather than slows, or we coast a click through a rallentando — the doc already flags \"WDOA outro fade\" as a real-music defect zone. Needs an ear.",
+   "bpmNear": {
+    "want": 74.9,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   }
   },
   "Wild World": {
    "bpb": 4,
-   "note": "MSB full score: quarter = 74 (our 76.9 confirms the OCTAVE — the pre-v16 156.6 was wrong), 4/4 with 2/4 bars at 12, 29 and 46, one at the end of each verse. Two chords per bar (Am D / G C / F Dm), which is why the chord-change cue is structurally half-bar periodic here and cannot name the \"1\". v17 emits 59 bars, all 4 beats. A 2/4 bar shifts the phase by exactly 2 beats — the \"which half-bar is the 1\" ambiguity is a real meter change, not a tie. No time-anchored bar yet: the score is a different lyric transcription from ours, so word-level anchoring was unreliable (measured 7.07 beats where the score implies 6). Needs an ear verdict before anchors are minted."
+   "note": "MSB full score: quarter = 74 (our 76.9 confirms the OCTAVE — the pre-v16 156.6 was wrong), 4/4 with 2/4 bars at 12, 29 and 46, one at the end of each verse. Two chords per bar (Am D / G C / F Dm), which is why the chord-change cue is structurally half-bar periodic here and cannot name the \"1\". v17 emits 59 bars, all 4 beats. A 2/4 bar shifts the phase by exactly 2 beats — the \"which half-bar is the 1\" ambiguity is a real meter change, not a tie. No time-anchored bar yet: the score is a different lyric transcription from ours, so word-level anchoring was unreliable (measured 7.07 beats where the score implies 6). Needs an ear verdict before anchors are minted.",
+   "bpmNear": {
+    "want": 77.1,
+    "tolPct": 5,
+    "note": "protection: level is ear-approved — no court may move it"
+   },
+   "barLenAt": [
+    {
+     "t": 34.9,
+     "n": 2
+    },
+    {
+     "t": 87.5,
+     "n": 2
+    },
+    {
+     "t": 139.3,
+     "n": 2
+    }
+   ]
   },
   "Zeit": {
    "bpb": 4,
-   "rot": [
-    0
-   ],
    "barAt": 193.596,
-   "scoreNote": "TWO official transcriptions agree (bass tab + piano/vocal, both quarter = 61, both placing every mark identically): 4/4 with a 2/4 at bar 26 (\"weitergeh'n\" -> Interlude) and bar 39 (\"Schon ist der Moment vorbei\" -> Chorus) — chorus/section exits again, like every other odd bar in the catalog. We ship 123.0 bpm, exactly DOUBLE the notation (the Puppe situation again — Rammstein ballads notated slow, shipped double; mlBimodal measured 0.12 here). THE STRUCTURAL INSIGHT THIS SONG ADDS: at our doubled level a notated 2/4 spans exactly ONE of our 4-beat bars, so the phase shift is SELF-ABSORBING — our grid crosses both 2/4s without any parity error, which is why the sweep saw no swallowed-bar signature here. The octave decision changes which meter changes are dangerous: at notated tempo (Wild World, FaS) a 2/4 breaks the grid; at double (Zeit, Puppe) it vanishes. A future bar decoder must reason about meter AT THE NOTATED LEVEL. The 8 stretched bars + 13 holes the sweep flagged live in the piano-only intro/outro (9 bars each, near-silent bass/drums — fill-tracking territory), not at the 2/4s. No anchors minted: nothing here is red at our level. RESOLVED 2026-08-09: the singer chose the notated octave after seeing the score (UG piano/vocal, Moderate quarter=61, clean 4/4). Shipped as a constructed manual grid at 61.48: beats = the v19 123 lattice halved (bar lines + midpoints), intro backcast to 2.37s, splice zone 228-284 rebuilt on the CHORD TRAIN (metronomic 3.90s bars through the very stretch the base grid spliced). FOUR 2/4 bars, each parity-CONFIRMED per seam (local chord-parity majority, +-14s): 96.1 (\"weitergehen\"->Interlude, score bar 26), 144.8 (\"Moment vorbei\"->Chorus, score bar 39), 205.3 (pre-chorus->chorus 3, bar-39 class recurring), 219.0 (chorus-3 exit, bar-26 class recurring). The printed score writes each class once; the recording repeats the form. Cycle-2 and cycle-3 \"weitergehen\" seams play STRAIGHT (parity-tested, no flip) — the classes recur, but not at every candidate. TRAP FOR THE FUTURE: a parity flip measured across the base grid's own 7-beat splice bar (235.1s) was pure artifact — 7 old beats = 3.5 halved beats poisons the ruler itself, and \"14/14 chords mid-bar\" read as proof until the chord train showed straight bars. Judge parity only across CLEAN base spans. GT anchor 193.596 is a downbeat of the shipped grid (+0.00s). detVersion pinned 19, source manual — the octave-modifier feature is what would return it to auto."
+   "scoreNote": "TWO official transcriptions agree (bass tab + piano/vocal, both quarter = 61, both placing every mark identically): 4/4 with a 2/4 at bar 26 (\"weitergeh'n\" -> Interlude) and bar 39 (\"Schon ist der Moment vorbei\" -> Chorus) — chorus/section exits again, like every other odd bar in the catalog. We ship 123.0 bpm, exactly DOUBLE the notation (the Puppe situation again — Rammstein ballads notated slow, shipped double; mlBimodal measured 0.12 here). THE STRUCTURAL INSIGHT THIS SONG ADDS: at our doubled level a notated 2/4 spans exactly ONE of our 4-beat bars, so the phase shift is SELF-ABSORBING — our grid crosses both 2/4s without any parity error, which is why the sweep saw no swallowed-bar signature here. The octave decision changes which meter changes are dangerous: at notated tempo (Wild World, FaS) a 2/4 breaks the grid; at double (Zeit, Puppe) it vanishes. A future bar decoder must reason about meter AT THE NOTATED LEVEL. The 8 stretched bars + 13 holes the sweep flagged live in the piano-only intro/outro (9 bars each, near-silent bass/drums — fill-tracking territory), not at the 2/4s. No anchors minted: nothing here is red at our level. RESOLVED 2026-08-09: the singer chose the notated octave after seeing the score (UG piano/vocal, Moderate quarter=61, clean 4/4). Shipped as a constructed manual grid at 61.48: beats = the v19 123 lattice halved (bar lines + midpoints), intro backcast to 2.37s, splice zone 228-284 rebuilt on the CHORD TRAIN (metronomic 3.90s bars through the very stretch the base grid spliced). FOUR 2/4 bars, each parity-CONFIRMED per seam (local chord-parity majority, +-14s): 96.1 (\"weitergehen\"->Interlude, score bar 26), 144.8 (\"Moment vorbei\"->Chorus, score bar 39), 205.3 (pre-chorus->chorus 3, bar-39 class recurring), 219.0 (chorus-3 exit, bar-26 class recurring). The printed score writes each class once; the recording repeats the form. Cycle-2 and cycle-3 \"weitergehen\" seams play STRAIGHT (parity-tested, no flip) — the classes recur, but not at every candidate. TRAP FOR THE FUTURE: a parity flip measured across the base grid's own 7-beat splice bar (235.1s) was pure artifact — 7 old beats = 3.5 halved beats poisons the ruler itself, and \"14/14 chords mid-bar\" read as proof until the chord train showed straight bars. Judge parity only across CLEAN base spans. GT anchor 193.596 is a downbeat of the shipped grid (+0.00s). detVersion pinned 19, source manual — the octave-modifier feature is what would return it to auto.",
+   "bpmNear": {
+    "want": 61.5,
+    "tolPct": 5,
+    "note": "score + singer 2026-08-09; from-scratch det says 123 — the halve court must fire"
+   },
+   "barLenAt": [
+    {
+     "t": 96.5,
+     "n": 2
+    },
+    {
+     "t": 145.2,
+     "n": 2
+    },
+    {
+     "t": 205.8,
+     "n": 2
+    },
+    {
+     "t": 219.4,
+     "n": 2
+    }
+   ]
   }
  }
 }
