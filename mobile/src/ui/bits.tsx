@@ -21,6 +21,18 @@ import {
  */
 export const white = (a: number): string => `rgba(255,255,255,${a})`
 
+/*
+ * Pre-built whites for anything evaluated during render.
+ *
+ * white() builds a string, and a default parameter or a style callback runs
+ * on EVERY render — Bar re-renders on every onChange while a finger is
+ * dragging it. Inside StyleSheet.create the call happens once at module load
+ * and none of this matters, but these three did not, so they are constants.
+ */
+const W_PRESSED = white(0.22)
+const W_TRACK = white(0.16)
+const W_GLYPH = white(0.85)
+
 /**
  * The design language, now derived rather than transcribed.
  *
@@ -88,7 +100,7 @@ export function StemTile({ hue, size }: { hue: number; size: number }): React.JS
 }
 
 /** Mixer glyph (three slider rails with knobs), drawn with plain views. */
-export function MixGlyph({ color = white(0.85) }: { color?: string }): React.JSX.Element {
+export function MixGlyph({ color = W_GLYPH }: { color?: string }): React.JSX.Element {
   const knob = (top: number): object => ({
     position: 'absolute',
     top,
@@ -130,7 +142,7 @@ export function RoundBtn({
         width: size,
         height: size,
         borderRadius: size / 2,
-        backgroundColor: pressed ? white(0.22) : bg,
+        backgroundColor: pressed ? W_PRESSED : bg,
         alignItems: 'center',
         justifyContent: 'center'
       })}
@@ -241,7 +253,7 @@ export function Bar({
   onCommit,
   color,
   height = 22,
-  track = white(0.16)
+  track = W_TRACK
 }: {
   value: number
   onChange: (v: number) => void
