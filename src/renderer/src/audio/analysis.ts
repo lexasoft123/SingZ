@@ -1,5 +1,7 @@
 /** Song analysis for the info card: key (Krumhansl-Schmuckler) and the beat track. */
 
+import { applyCourts, buildCourtEvidence, type CourtGrid } from './courts'
+
 const MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
 const MIN = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 
@@ -119,8 +121,21 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * onset so a ~1.4% intro drift cannot accumulate. Counted-back grid
  * measures 103 ms median against the same onsets before snapping. Every
  * line it lays down is suspect-badged and draggable.
+ * v20: the courts (courts.ts). After the grid is built, an octave HALVE
+ * court (chord-run rhythm + windowed chord parity + quiet-zone pulse fit)
+ * catches songs shipping at double their notation (Zeit, WYWH → 61.5), a
+ * DOUBLE court convicts on the neural model's raw-lattice unimodality at
+ * twice our tempo (Puppe 117.4, Primo, GTTR), and a METER court places
+ * score-verified odd bars (2/4, 3/4, 5/4) at seam candidates — lyric
+ * gaps, held notes, form seams — using a carried rigid pulse, cadence
+ * shapes with a corroboration census, and break chord-pairs, every insert
+ * gated on the grid's own chord agreement. Evidence comes from the stems
+ * already passed as aux (inst summed as the chord layer, bass naming
+ * roots, vocals for phrase ends) plus aligned words (aux.words, new).
+ * Battery: 87/88 against the library ground truth; no evidence → the
+ * courts abstain and the grid ships exactly as v19 built it.
  */
-export const BEAT_DETECT_VERSION = 19
+export const BEAT_DETECT_VERSION = 20
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -164,6 +179,10 @@ export interface BeatAux {
   vocals?: AudioBuffer | null
   /** Lyric line start times in seconds: lines sitting on a beat vote. */
   lineStarts?: number[] | null
+  /** Aligned word times (start/end seconds). The v20 meter court reads
+   *  them: a gap after a word is a seam candidate, and a long wordless
+   *  stretch marks the instrumental breaks where odd bars hide. */
+  words?: { s: number; e: number }[] | null
   /** Remaining instrument stems (other/guitar/piano): their onsets keep the
    *  tracker honest where the drums fall silent — picked intros (Nothing
    *  Else Matters spends 41 s drumless), breakdowns, instrument-only parts.
@@ -1235,6 +1254,54 @@ export function detectBeats(
     downbeat = downbeats.length > 0 ? downbeats[0] % bpb : downbeat
   }
 
+  // v20: the courts. The finished grid — exactly what the eval battery fed
+  // them — goes in; what comes back may be halved to the notation's octave,
+  // doubled to the model's conviction, or carry newly placed odd bars. Runs
+  // only when harmonic stems exist to testify: a bare mix (Ballroom's
+  // shape) skips the block entirely and ships the grid untouched, which is
+  // the abstention contract the battery verified sixteen times over.
+  let outBpm = 60 / medSec
+  let outBpb = bpb
+  {
+    const harm = (aux?.inst ?? []).map((b) => monoAt44k(b))
+    const bass = aux?.bass ? monoAt44k(aux.bass) : null
+    const vocals = aux?.vocals ? monoAt44k(aux.vocals) : null
+    if (harm.length > 0 || bass || vocals) {
+      const det0: CourtGrid = {
+        bpm: outBpm,
+        beatsPerBar: outBpb,
+        downbeat,
+        beats: outBeats,
+        ...(downbeats ? { downbeats } : {})
+      }
+      const courtDbg: Record<string, unknown> = {}
+      const ev = buildCourtEvidence(det0, {
+        harm,
+        bass,
+        vocals,
+        words: aux?.words ?? null,
+        ml: aux?.ml ?? null
+      })
+      const courted = applyCourts(det0, ev, courtDbg)
+      if (debug) debug.v20 = courtDbg
+      if (courted !== det0) {
+        // adopt only the grid fields — the courts' working notes
+        // (originalBars, halvedFrom) never leave this block
+        outBeats = courted.beats
+        outBpm = courted.bpm
+        outBpb = courted.beatsPerBar
+        downbeat = courted.downbeat
+        downbeats = courted.downbeats
+        if (downbeats) {
+          // a court insert can leave an impossible tail bar; same net as
+          // every other grid
+          downbeats = sanitizeBars(downbeats, outBpb, outBeats.length)
+          downbeat = downbeats.length > 0 ? downbeats[0] % outBpb : downbeat
+        }
+      }
+    }
+  }
+
   // Where the detector already knows it was guessing. Three sources, all
   // free: spans it filled by extending the surrounding phase instead of
   // voting (the splice ranges), bars whose length disagrees with the
@@ -1248,15 +1315,15 @@ export function detectBeats(
   }
   if (downbeats) {
     for (let i = 1; i < downbeats.length; i++) {
-      if (downbeats[i] - downbeats[i - 1] !== bpb) suspect.push(outBeats[downbeats[i - 1]])
+      if (downbeats[i] - downbeats[i - 1] !== outBpb) suspect.push(outBeats[downbeats[i - 1]])
     }
   }
   const suspectAt = [...new Set(suspect)].sort((x, y) => x - y)
 
   return {
     beats: outBeats,
-    bpm: 60 / medSec,
-    beatsPerBar: bpb,
+    bpm: outBpm,
+    beatsPerBar: outBpb,
     downbeat,
     ...(downbeats ? { downbeats } : {}),
     ...(suspectAt.length > 0 ? { suspectAt } : {})

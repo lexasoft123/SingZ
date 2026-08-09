@@ -120,7 +120,8 @@ function publishBeatDbg(
           beatsPerBar: det.beatsPerBar,
           downbeat: det.downbeat,
           beats: det.beats,
-          downbeats: det.downbeats ?? null
+          downbeats: det.downbeats ?? null,
+          suspectAt: det.suspectAt ?? null
         }
       : null,
     dbg
@@ -1121,6 +1122,7 @@ export default function App(): React.JSX.Element {
               vocals: vocalsBufRef.current,
               inst: instBufsRef.current,
               lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+              words: linesRef.current?.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) ?? null,
               ml
             }
             const dbg = {}
@@ -1580,6 +1582,7 @@ export default function App(): React.JSX.Element {
           vocals: vocalsBufRef.current,
           inst: instBufsRef.current,
           lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+          words: linesRef.current?.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) ?? null,
           ml
         }
         const dbg = {}

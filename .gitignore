@@ -10,7 +10,7 @@ vendor
 .claude/worktrees/
 
 # beat-detector eval harness: downloaded datasets and run results stay local
-eval/beats/data/
+eval/beats/data
 eval/beats/out/
 # and the same path as a SYMLINK: a worktree links the cache from the main
 # checkout rather than re-deriving gigabytes of mixes, and `foo/` with the
