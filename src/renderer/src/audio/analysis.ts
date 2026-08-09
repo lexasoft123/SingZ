@@ -134,8 +134,19 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
  * roots, vocals for phrase ends) plus aligned words (aux.words, new).
  * Battery: 87/88 against the library ground truth; no evidence → the
  * courts abstain and the grid ships exactly as v19 built it.
+ * v21: zone-local level matching for defect splices. The model's beat
+ * level changes inside a song (the v16 fact) and Panzerkampf's model
+ * rides steady eighths through the guitar solo while the song's global
+ * ratio is ~1 — so no whole-song thin view existed, the raw view was
+ * "steady" at the wrong level, and the v16 level guard (rightly) refused
+ * the splice, leaving the tracker's wobble: beats snapped onto fill
+ * accents, intervals swinging ±25% between correct downbeats — drift the
+ * singer hears between every bar line. A defect zone the raw view cannot
+ * repair now builds its own halved view (v15 bar-anchored parity
+ * partition, parity picked by continuity with the surviving lattice at
+ * the zone edges) and splices at our level.
  */
-export const BEAT_DETECT_VERSION = 20
+export const BEAT_DETECT_VERSION = 21
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
@@ -502,12 +513,108 @@ export function detectBeats(
       /** Fraction of the model's intervals within tol of their own median
        *  across [a,b] — the local "is this a real pulse" gate. */
       const view = mlB
-      const mlSteadyIn = (a: number, b: number, tol: number): number => {
-        const seg = view.filter((t) => t >= a && t <= b)
+      const steadyOf = (seg: number[], tol: number): number => {
         if (seg.length < 5) return 0
         const iv = seg.slice(1).map((t, i) => t - seg[i])
         const m = [...iv].sort((x, y) => x - y)[iv.length >> 1]
         return iv.filter((x) => Math.abs(x - m) <= tol * m).length / iv.length
+      }
+      const mlSteadyIn = (a: number, b: number, tol: number): number =>
+        steadyOf(view.filter((t) => t >= a && t <= b), tol)
+      /** Local level-matched view for ONE zone. The model's beat level
+       *  changes inside a song (v16) — Panzerkampf's model rides steady
+       *  eighths through the guitar solo while the song's global ratio is
+       *  ~1, so no whole-song thin view exists, the raw view is "steady"
+       *  at the wrong level, and the v16 level guard (correctly) refuses
+       *  the splice — leaving the tracker's wobble in place: beats snapped
+       *  onto fill accents, intervals swinging ±25% between correct
+       *  downbeats. Thin the zone's own eighths to quarters with the v15
+       *  bar-anchored parity partition; continuity with our surviving
+       *  lattice at the zone edges picks the parity. */
+      const localHalvedView = (aSec: number, bSec: number): number[] | null => {
+        const src = mlChoice.beatsSec.filter((t) => t >= aSec - 2 * med && t <= bSec + 2 * med)
+        if (src.length < 8) return null
+        const ivS = src.slice(1).map((t, i) => t - src[i]).sort((x, y) => x - y)
+        const lm = ivS[ivS.length >> 1]
+        const r = med / lm
+        // strict scope: only zones whose model is LOCALLY on eighths get a
+        // view. A relaxed (output-gated) variant was measured and reverted
+        // within the hour: it moved Wanted Dead Or Alive's ear-approved
+        // grid — the widened-splice-authority trap, again — while leaving
+        // the target seam untouched.
+        if (!(r > 1.7 && r < 2.3)) return null
+        const dts = aux?.ml?.downbeats ?? []
+        const tolD = 0.25 * lm
+        const localIv = (i: number): number => {
+          const from = Math.max(1, i - 3)
+          const to = Math.min(src.length - 1, i + 3)
+          const w: number[] = []
+          for (let k2 = from; k2 <= to; k2++) w.push(src[k2] - src[k2 - 1])
+          w.sort((x, y) => x - y)
+          return w[w.length >> 1] ?? 0
+        }
+        const evenV: number[] = []
+        const oddV: number[] = []
+        let di = 0
+        let k = -1
+        for (let i = 0; i < src.length; i++) {
+          while (di < dts.length && dts[di] < src[i] - tolD) di++
+          if (di < dts.length && Math.abs(dts[di] - src[i]) <= tolD) {
+            k = 0
+            di++
+          } else if (k >= 0) {
+            k++
+          }
+          const par = k >= 0 ? k % 2 : i % 2
+          if (localIv(i) > 0.7 * med) {
+            evenV.push(src[i])
+            oddV.push(src[i])
+          } else if (par === 0) evenV.push(src[i])
+          else oddV.push(src[i])
+        }
+        if (evenV.length < 4 || oddV.length < 4) return null
+        const pre = L.beatsSec.filter((t) => t >= aSec - 4 * med && t <= aSec)
+        const post = L.beatsSec.filter((t) => t >= bSec && t <= bSec + 4 * med)
+        const edges = [...pre, ...post]
+        if (edges.length === 0) return null
+        const fit = (v: number[]): number => {
+          const ds = edges
+            .map((e) => v.reduce((m2, t) => Math.min(m2, Math.abs(t - e)), Infinity))
+            .sort((x, y) => x - y)
+          return ds[ds.length >> 1]
+        }
+        const fa = fit(evenV)
+        const fb = fit(oddV)
+        const picked = fa <= fb ? evenV : oddV
+        // Flip seams: the ±3-window level test straddles the quarter→eighth
+        // boundary and puts two ADJACENT eighths into both sets, while the
+        // correct next beat sits in the other parity. Thin the picked view
+        // at our level, then refill each hole the thin leaves from the
+        // model's own beats, one med-step at a time — the refill is the
+        // dropped duplicate's correct neighbor.
+        const thinned: number[] = []
+        for (const t of picked) {
+          if (thinned.length === 0 || t - thinned[thinned.length - 1] >= 0.7 * med) thinned.push(t)
+        }
+        const out: number[] = []
+        for (const t of thinned) {
+          while (out.length > 0 && t - out[out.length - 1] >= 1.5 * med) {
+            const want = out[out.length - 1] + med
+            let best = -1
+            for (const s2 of src) {
+              if (
+                Math.abs(s2 - want) <= 0.25 * med &&
+                (best < 0 || Math.abs(s2 - want) < Math.abs(best - want))
+              ) {
+                best = s2
+              }
+            }
+            if (best < 0) break
+            out.push(best)
+          }
+          out.push(t)
+        }
+        return out
       }
       /** v15: which alternate set to insert for THIS span. When the
        *  surviving lattice at BOTH span edges agrees with the global view,
@@ -558,14 +665,14 @@ export function detectBeats(
       }
       let lastCarry: { ca: number; cb: number } | null = null
       const spliceDbg: { aSec: number; bSec: number; removed: number; added: number; why: string; ca?: number; cb?: number }[] = []
-      const splice = (aSec: number, bSec: number, why: string): void => {
+      const splice = (aSec: number, bSec: number, why: string, viewOverride?: number[]): boolean => {
         const lo = aSec + 0.5 * med
         const hi = bSec - 0.5 * med
-        if (hi <= lo) return
-        const ins = viewFor(aSec, bSec).filter((t) => t > lo && t < hi)
+        if (hi <= lo) return false
+        const ins = (viewOverride ?? viewFor(aSec, bSec)).filter((t) => t > lo && t < hi)
         // the model must have actually tracked the stretch — one it also
         // gave up on keeps the old path
-        if (ins.length < (0.5 * (bSec - aSec)) / med) return
+        if (ins.length < (0.5 * (bSec - aSec)) / med) return false
         // v16: and it must click at OUR rate. A view sitting at the wrong
         // level passes every steadiness gate — it is perfectly steady at
         // half the tempo — and the count gate above missed Wild World's
@@ -577,7 +684,7 @@ export function detectBeats(
             .map((t, i) => t - ins[i])
             .sort((a, b) => a - b)
           const m = iv[iv.length >> 1]
-          if (!(m > 0.6 * med && m < 1.6 * med)) return
+          if (!(m > 0.6 * med && m < 1.6 * med)) return false
         }
         const before = L.beatsSec.length
         const kept = L.beatsSec.filter((t) => t <= lo || t >= hi)
@@ -596,6 +703,7 @@ export function detectBeats(
           ...(lastCarry ?? {})
         })
         lastCarry = null
+        return true
       }
       for (const v of L.voids ?? []) {
         if (v.trailing) continue
@@ -632,7 +740,16 @@ export function detectBeats(
         else zones.push({ a, b })
       }
       for (const z of zones) {
-        if (mlSteadyIn(z.a, z.b, 0.15) >= 0.85) splice(z.a, z.b, 'defect')
+        if (mlSteadyIn(z.a, z.b, 0.15) >= 0.85 && splice(z.a, z.b, 'defect')) continue
+        // The raw view was refused — either unsteady at its own level (a
+        // window mixing eighths and quarters) or steady at the WRONG level
+        // (the v16 guard inside splice). Both are the same situation seen
+        // from different windows: the model subdivides here. A zone-local
+        // halved view repairs what the global machinery cannot see.
+        const lv = localHalvedView(z.a, z.b)
+        if (lv && steadyOf(lv.filter((t) => t >= z.a && t <= z.b), 0.15) >= 0.85) {
+          splice(z.a, z.b, 'defect-2x', lv)
+        }
       }
       if (debug && spliceDbg.length > 0) debug.mlSplice = spliceDbg
     }
