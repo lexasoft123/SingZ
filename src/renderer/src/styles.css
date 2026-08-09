@@ -1681,6 +1681,11 @@ button.chip-status:hover {
   color: var(--accent);
 }
 
+.chip.zoom:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .transpose-ctl {
   display: flex;
   align-items: center;

@@ -4,6 +4,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import { MicPitch, type MicDevice } from '../audio/mic'
 import { CONTROLS_W, fmtTime, sanitizePitchHeight, type TimeView } from '../model'
 import { modalCoversApp } from '../model'
+import { midiOfHz, segmentMelodyNotes, toNoteSegments } from '../audio/notes'
 
 export type MelodyState =
   | { status: 'none' }
@@ -16,43 +17,13 @@ const BLACK = new Set([1, 3, 6, 8, 10])
 const FULL_RANGE: [number, number] = [36, 84] // C2..C6
 const KEYB_W = 60
 
-const midiOfHz = (f: number): number => 69 + 12 * Math.log2(f / 440)
 const noteName = (midi: number): string =>
   NOTE_NAMES[((midi % 12) + 12) % 12] + String(Math.floor(midi / 12) - 1)
-
-interface NoteSeg {
-  s: number
-  e: number
-  midi: number
-}
 
 interface Trail {
   t: number
   midi: number
   hit: boolean
-}
-
-/** Merge f0 frames into quantized note segments for bars + labels. */
-function toNoteSegments(f0: Float32Array, hopSec: number): NoteSeg[] {
-  const segs: NoteSeg[] = []
-  let cur: NoteSeg | null = null
-  for (let i = 0; i < f0.length; i++) {
-    const f = f0[i]
-    const t = i * hopSec
-    if (f <= 0) {
-      cur = null
-      continue
-    }
-    const midi = Math.round(midiOfHz(f))
-    // gap tolerance is time-based so 10 ms-hop melodies don't fragment
-    if (cur && cur.midi === midi && t - cur.e <= Math.max(0.06, hopSec * 1.6)) {
-      cur.e = t + hopSec
-    } else {
-      cur = { s: t, e: t + hopSec, midi }
-      segs.push(cur)
-    }
-  }
-  return segs.filter((s) => s.e - s.s >= 0.09)
 }
 
 interface Props {
@@ -98,6 +69,10 @@ export default function PitchStrip({
   const scoreAcc = useRef({ hit: 0, total: 0 })
   const [mic, setMic] = useState<'off' | 'starting' | 'on' | 'denied'>('off')
   const [fit, setFit] = useState(true)
+  // Score-like bars (one per sung note) vs the raw frame runs. A way of
+  // looking at any song, not a song property — it rides in localStorage
+  // like the strip height, never in project.json.
+  const [noteBars, setNoteBars] = useState(() => localStorage.getItem('singz.noteBars') !== '0')
   const [stripH, setStripH] = useState(() =>
     sanitizePitchHeight(localStorage.getItem('singz.pitchH'))
   )
@@ -106,37 +81,49 @@ export default function PitchStrip({
     localStorage.setItem('singz.pitchH', String(stripH))
   }, [stripH])
 
-  const segments = useMemo(
+  useEffect(() => {
+    localStorage.setItem('singz.noteBars', noteBars ? '1' : '0')
+  }, [noteBars])
+
+  const frameSegs = useMemo(
     () => (melody.status === 'ready' ? toNoteSegments(melody.f0, melody.hopSec) : []),
     [melody]
   )
+  // The drawn segments. Fit and the range readout stay on the frame runs so
+  // nothing about the window moves when the view toggles.
+  const noteSegs = useMemo(
+    () =>
+      melody.status === 'ready' && noteBars ? segmentMelodyNotes(melody.f0, melody.hopSec) : [],
+    [melody, noteBars]
+  )
+  const segments = noteBars ? noteSegs : frameSegs
 
   // Fitted range: melody's 5th–95th percentile ± 3 semitones, min one octave.
   const fitRange = useMemo((): [number, number] => {
-    if (segments.length === 0) return FULL_RANGE
-    const midis = segments.map((s) => s.midi).sort((a, b) => a - b)
+    if (frameSegs.length === 0) return FULL_RANGE
+    const midis = frameSegs.map((s) => s.midi).sort((a, b) => a - b)
     const lo = midis[Math.floor(midis.length * 0.05)] - 3
     const hi = midis[Math.min(midis.length - 1, Math.floor(midis.length * 0.95))] + 3
     const span = Math.max(12, hi - lo)
     const mid = (lo + hi) / 2
     return [Math.max(24, Math.round(mid - span / 2)), Math.min(96, Math.round(mid + span / 2))]
-  }, [segments])
+  }, [frameSegs])
 
   // Sung range: 5th–95th percentile of the melody notes (without padding).
   const vocalRange = useMemo((): [number, number] | null => {
-    if (segments.length === 0) return null
-    const midis = segments.map((s) => s.midi).sort((a, b) => a - b)
+    if (frameSegs.length === 0) return null
+    const midis = frameSegs.map((s) => s.midi).sort((a, b) => a - b)
     return [
       midis[Math.floor(midis.length * 0.05)],
       midis[Math.min(midis.length - 1, Math.floor(midis.length * 0.95))]
     ]
-  }, [segments])
+  }, [frameSegs])
 
   // Sorted bar ends: the repaint key counts how many the clock has passed,
   // so a tick repaints the canvas only when a bar's played-state flips.
   const segEnds = useMemo(() => segments.map((s) => s.e).sort((a, b) => a - b), [segments])
-  const stateRef = useRef({ segments, segEnds, fitRange, fit, transpose, melody, view })
-  stateRef.current = { segments, segEnds, fitRange, fit, transpose, melody, view }
+  const stateRef = useRef({ segments, segEnds, fitRange, fit, noteBars, transpose, melody, view })
+  stateRef.current = { segments, segEnds, fitRange, fit, noteBars, transpose, melody, view }
   const zoomRef = useRef(onZoom)
   zoomRef.current = onZoom
   const shiftRef = useRef(onViewPan)
@@ -192,7 +179,8 @@ export default function PitchStrip({
       }
       const canvas = canvasRef.current
       if (!canvas) return
-      const { segments, segEnds, fitRange, fit, transpose, melody, view } = stateRef.current
+      const { segments, segEnds, fitRange, fit, noteBars, transpose, melody, view } =
+        stateRef.current
       const w = canvas.clientWidth
       const h = canvas.clientHeight
       const pos = engine.position
@@ -235,7 +223,7 @@ export default function PitchStrip({
         }
         played = lo
       }
-      const key = `${played}|${view?.s ?? -1}|${view?.e ?? -1}|${w}|${h}|${transpose}|${fit ? 1 : 0}|${melody.status}|${segments.length}|${trailRef.current.length}`
+      const key = `${played}|${view?.s ?? -1}|${view?.e ?? -1}|${w}|${h}|${transpose}|${fit ? 1 : 0}|${noteBars ? 1 : 0}|${melody.status}|${segments.length}|${trailRef.current.length}`
       if (key === lastKey && !micRef.current) {
         raf = requestAnimationFrame(tick)
         return
@@ -313,8 +301,43 @@ export default function PitchStrip({
           ctx.rect(x0, 0, rollW, h)
           ctx.clip()
 
+          // Under the bars, what was actually sung: the raw f0 trace, faint,
+          // so glides and vibrato stay visible where a bar only summarizes.
+          // It rides the same state-flip repaint key — never the clock.
+          if (noteBars && melody.status === 'ready') {
+            const { f0, hopSec } = melody
+            const i0 = Math.max(0, Math.floor(vs / hopSec))
+            const i1 = Math.min(f0.length, Math.ceil(ve / hopSec) + 1)
+            ctx.strokeStyle = 'rgba(255, 214, 150, 0.3)'
+            ctx.lineWidth = 1
+            ctx.beginPath()
+            let pen = false
+            let prevM = 0
+            for (let i = i0; i < i1; i++) {
+              const f = f0[i]
+              const m = f > 0 ? midiOfHz(f) + transpose : NaN
+              if (!(m >= lo - 1 && m <= hi + 1)) {
+                pen = false
+                continue
+              }
+              // fry and octave flips move semitones in one frame — lift the
+              // pen instead of streaking; no sung glide is that fast
+              if (pen && Math.abs(m - prevM) > 2.5) pen = false
+              const x = xOf(i * hopSec)
+              const y = yOf(m)
+              if (pen) ctx.lineTo(x, y)
+              else {
+                ctx.moveTo(x, y)
+                pen = true
+              }
+              prevM = m
+            }
+            ctx.stroke()
+          }
+
           const barH = Math.min(16, Math.max(3, rowH - 3))
           let lastLabelX = -100
+          let lastLabelEnd = -100
           ctx.font = `${segFont}px "Martian Mono Variable", monospace`
           for (const seg of segments) {
             if (seg.e < vs || seg.s > ve) continue
@@ -323,14 +346,48 @@ export default function PitchStrip({
             const sx = xOf(seg.s)
             const ex = xOf(seg.e)
             const y = yOf(midi)
-            ctx.fillStyle = seg.e < pos ? 'rgba(255,160,40,0.30)' : 'rgba(255,160,40,0.6)'
+            // Bars mode wears the "name plates" scheme (picked against
+            // rendered candidates): brighter bars, names in full ink on a
+            // dark plate. The frame-run view keeps the shipped colors.
+            ctx.fillStyle = noteBars
+              ? seg.e < pos
+                ? 'rgba(255,170,55,0.32)'
+                : 'rgba(255,170,55,0.85)'
+              : seg.e < pos
+                ? 'rgba(255,160,40,0.30)'
+                : 'rgba(255,160,40,0.6)'
             ctx.beginPath()
             ctx.roundRect(sx, y - barH / 2, Math.max(2, ex - sx), barH, barH / 2)
             ctx.fill()
-            if (ex - sx >= 34 && sx - lastLabelX >= 30 && rowH >= 6) {
-              ctx.fillStyle = 'rgba(255,214,150,0.85)'
-              ctx.fillText(noteName(midi), sx + 3, y - barH / 2 - 2)
-              lastLabelX = sx
+            // Wide-range songs squeeze rows under the old 6 px gate at the
+            // default strip height — in bars mode the names are the point,
+            // so they hold on longer (Zeit spans 32 lanes and lost every
+            // label to the 6 px rule).
+            if (rowH >= (noteBars ? 4.5 : 6)) {
+              if (noteBars) {
+                // The bars are the score, so every one earns its name while
+                // there is room — collisions decide, not bar width. A name
+                // pushed off its own start must still sit over its bar.
+                const name = noteName(midi)
+                const tw = ctx.measureText(name).width
+                const shifted = sx + 3 < lastLabelEnd + 5
+                const lx = shifted ? lastLabelEnd + 5 : sx + 3
+                if (!shifted || lx + tw <= ex) {
+                  // top-lane names drop onto the bar instead of clipping
+                  const ly = Math.max(y - barH / 2 - 2, segFont + 2)
+                  ctx.fillStyle = 'rgba(16,12,8,0.78)'
+                  ctx.beginPath()
+                  ctx.roundRect(lx - 2, ly - segFont - 1, tw + 4, segFont + 3, 3)
+                  ctx.fill()
+                  ctx.fillStyle = 'rgba(255,240,215,1)'
+                  ctx.fillText(name, lx, ly)
+                  lastLabelEnd = lx + tw
+                }
+              } else if (ex - sx >= 34 && sx - lastLabelX >= 30) {
+                ctx.fillStyle = 'rgba(255,214,150,0.85)'
+                ctx.fillText(noteName(midi), sx + 3, y - barH / 2 - 2)
+                lastLabelX = sx
+              }
             }
           }
 
@@ -529,6 +586,15 @@ export default function PitchStrip({
             </i>
           </span>
         )}
+        <button
+          type="button"
+          className={`chip zoom${noteBars ? ' active' : ''}`}
+          disabled={melody.status !== 'ready'}
+          title="One steady bar per sung note — the faint line underneath keeps the real pitch"
+          onClick={() => setNoteBars((v) => !v)}
+        >
+          Note bars
+        </button>
         <button
           type="button"
           className={`chip zoom${fit ? ' active' : ''}`}
