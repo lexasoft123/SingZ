@@ -56,6 +56,14 @@ type Phase = 'empty' | 'loading' | 'ready'
 
 const ACCEPT = '.mp3,.wav,.flac,.m4a,.aac,.ogg,.oga,.opus,.aif,.aiff,audio/*'
 
+/**
+ * How long the view takes to glide to the next screenful behind the playhead.
+ * The repaint a view change costs holds the glide to ~37fps whatever this is,
+ * so the length is what sets how far the song slides per frame: at 480ms the
+ * fastest frame moved 11% of the screen, which still read as a lurch.
+ */
+const FOLLOW_MS = 750
+
 
 /** Guitar/piano lanes only appear when the song actually has them. */
 function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[]; buffers: AudioBuffer[] } {
@@ -235,6 +243,9 @@ export default function App(): React.JSX.Element {
   const [transpose, setTranspose] = useState(0)
   const [tempoRate, setTempoRate] = useState(1)
   const [view, setView] = useState<TimeView | null>(null)
+  /** The rendered view, for the follow glide to start its easing from. */
+  const viewLive = useRef<TimeView | null>(null)
+  viewLive.current = view
   const [selection, setSelection] = useState<{ s: number; e: number } | null>(null)
   const [loopOn, setLoopOn] = useState(false)
   const [training, setTraining] = useState(false)
@@ -556,7 +567,6 @@ export default function App(): React.JSX.Element {
       setView(null)
       setDirty(false)
       setSaveState('idle')
-      setView(null)
       setPhase('loading')
       setSong({ path: reg.path, name: reg.name })
       setIsProject(Boolean(reg.project))
@@ -1675,9 +1685,25 @@ export default function App(): React.JSX.Element {
     [engine]
   )
 
+  const followAnim = useRef<{ from: number; span: number; to: number; t0: number; raf: number } | null>(
+    null
+  )
+
+  /** Drop any follow glide in flight — the singer's own scrolling outranks it. */
+  const stopFollow = useCallback(() => {
+    const a = followAnim.current
+    if (a) {
+      cancelAnimationFrame(a.raf)
+      followAnim.current = null
+    }
+  }, [])
+
+  useEffect(() => stopFollow, [stopFollow])
+
   const zoomBy = useCallback(
     (factor: number, center?: number) => {
       touchSettings()
+      stopFollow()
       setView((v) => {
         const dur = engine.duration
         if (dur <= 0) return v
@@ -1688,15 +1714,70 @@ export default function App(): React.JSX.Element {
         return clampView(c - span * ratio, c - span * ratio + span)
       })
     },
-    [engine, clampView, touchSettings]
+    [engine, clampView, touchSettings, stopFollow]
   )
 
-  const shiftView = useCallback(
-    (s: number, e: number) => {
+  /**
+   * Scroll the timeline along by dt seconds — by a delta, never to absolute
+   * bounds. A trackpad fires wheel events far faster than React re-renders,
+   * and panning from the last *rendered* view meant every event that arrived
+   * within a frame overwrote its predecessor instead of adding to it: ten
+   * events back to back moved the view 2.2s where they had asked for 22s.
+   */
+  const panView = useCallback(
+    (dt: number) => {
       touchSettings()
-      setView(clampView(s, e))
+      stopFollow()
+      setView((v) => (v ? clampView(v.s + dt, v.e + dt) : v))
     },
-    [clampView, touchSettings]
+    [clampView, touchSettings, stopFollow]
+  )
+
+  /**
+   * The playhead pulls the view along, as a glide rather than a cut: landing
+   * the next screenful in one frame threw two thirds of a span sideways and
+   * read as the grid lurching. Eased over FOLLOW_MS instead, so the song
+   * slides under a playhead that walks back across it.
+   *
+   * Not a continuous scroll — every view change fully repaints two canvases
+   * per lane plus the beat grid and the pitch strip, which per frame for the
+   * length of a song is exactly what the weak-iGPU rules exist to prevent.
+   * One eased turn per screenful costs about what a short two-finger scroll
+   * already does, and only while the song plays.
+   */
+  const followView = useCallback(
+    (s: number, e: number, smooth: boolean) => {
+      // A seek cuts. Only the page-turn under a playing song glides: easing
+      // across a jump to somewhere else in the song would smear the whole
+      // way there, repainting every lane at each stop.
+      if (!smooth) {
+        stopFollow()
+        setView(clampView(s, e))
+        return
+      }
+      // Already on its way there: the trailing edge stays tripped for the
+      // frame or two before the view actually moves.
+      if (followAnim.current) return
+      const from = viewLive.current
+      if (!from) return
+      const span = e - s
+      const step = (): void => {
+        const a = followAnim.current
+        if (!a) return
+        const k = Math.min(1, (performance.now() - a.t0) / FOLLOW_MS)
+        // easeInOutSine: leaves and arrives at rest like any ease-in-out, but
+        // peaks at 1.57x its average speed where a cubic peaks at 3x — and it
+        // is that peak, not the trip, that the eye reads as a lurch.
+        const eased = (1 - Math.cos(Math.PI * k)) / 2
+        const at = a.from + (a.to - a.from) * eased
+        setView(clampView(at, at + a.span))
+        if (k < 1) a.raf = requestAnimationFrame(step)
+        else followAnim.current = null
+      }
+      followAnim.current = { from: from.s, span, to: s, t0: performance.now(), raf: 0 }
+      followAnim.current.raf = requestAnimationFrame(step)
+    },
+    [clampView, stopFollow]
   )
 
   return (
@@ -1871,7 +1952,8 @@ export default function App(): React.JSX.Element {
                 selection={selection}
                 onSelection={handleSelection}
                 onZoom={zoomBy}
-                onViewShift={shiftView}
+                onViewPan={panView}
+                onFollow={followView}
                 onResetZoom={() => {
                   touchSettings()
                   setView(null)
@@ -1892,7 +1974,7 @@ export default function App(): React.JSX.Element {
                   tempo={tempoRate}
                   view={view}
                   onZoom={zoomBy}
-                  onViewShift={shiftView}
+                  onViewPan={panView}
                   info={songInfo}
                   inputId={audioPrefs.inputId}
                   onMicDevice={setMicDevice}

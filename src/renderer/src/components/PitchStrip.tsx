@@ -64,7 +64,8 @@ interface Props {
   tempo: number
   view: TimeView | null
   onZoom: (factor: number, center?: number) => void
-  onViewShift: (s: number, e: number) => void
+  /** Scroll the view along the song by `dt` seconds. */
+  onViewPan: (dt: number) => void
   info: { key: KeyGuess | null; bpm: number | null }
   /** Chosen microphone (settings) — absent = system default. */
   inputId?: string
@@ -83,7 +84,7 @@ export default function PitchStrip({
   tempo,
   view,
   onZoom,
-  onViewShift,
+  onViewPan,
   info,
   inputId,
   onMicDevice
@@ -138,8 +139,8 @@ export default function PitchStrip({
   stateRef.current = { segments, segEnds, fitRange, fit, transpose, melody, view }
   const zoomRef = useRef(onZoom)
   zoomRef.current = onZoom
-  const shiftRef = useRef(onViewShift)
-  shiftRef.current = onViewShift
+  const shiftRef = useRef(onViewPan)
+  shiftRef.current = onViewPan
   const onMicDeviceRef = useRef(onMicDevice)
   onMicDeviceRef.current = onMicDevice
 
@@ -174,7 +175,7 @@ export default function PitchStrip({
       } else if (view && span > 0 && rollW > 0) {
         const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
         const dt = (d / rollW) * span
-        shiftRef.current(vs + dt, ve + dt)
+        shiftRef.current(dt)
       }
     }
     el.addEventListener('wheel', onWheel, { passive: false })

@@ -23,7 +23,13 @@ interface Props {
   selection: { s: number; e: number } | null
   onSelection: (sel: { s: number; e: number } | null) => void
   onZoom: (factor: number, center?: number) => void
-  onViewShift: (s: number, e: number) => void
+  /** Scroll the view along the song by `dt` seconds. */
+  onViewPan: (dt: number) => void
+  /**
+   * Move the view because the playhead did — never a settings change.
+   * `smooth` eases the page-turn under a playing song; a seek cuts.
+   */
+  onFollow: (s: number, e: number, smooth: boolean) => void
   onResetZoom: () => void
   onMute: (id: string, muted: boolean) => void
   onSolo: (id: string, solo: boolean) => void
@@ -95,7 +101,8 @@ export default function TrackStack({
   selection,
   onSelection,
   onZoom,
-  onViewShift,
+  onViewPan,
+  onFollow,
   onResetZoom,
   onMute,
   onSolo,
@@ -114,8 +121,10 @@ export default function TrackStack({
   const viewE = view?.e ?? duration
   const viewRef = useRef({ s: viewS, e: viewE, zoomed: view !== null })
   viewRef.current = { s: viewS, e: viewE, zoomed: view !== null }
-  const shiftRef = useRef(onViewShift)
-  shiftRef.current = onViewShift
+  const shiftRef = useRef(onViewPan)
+  shiftRef.current = onViewPan
+  const followShiftRef = useRef(onFollow)
+  followShiftRef.current = onFollow
 
   // One rAF loop drives the playhead + the bright "played" waveform clip for
   // every lane via the inherited --p custom property, and keeps the viewport
@@ -123,19 +132,39 @@ export default function TrackStack({
   useEffect(() => {
     let raf = 0
     let lastP = ''
+    let lastOff = ''
+    let lastPos = -1
+    let lastT = 0
     const tick = (): void => {
       const el = stackRef.current
       const v = viewRef.current
       if (el && engine.duration > 0 && !modalCoversApp()) {
         const span = v.e - v.s
         const pos = engine.position
+        const now = performance.now()
+        // A seek is the playhead moving in a way the clock cannot explain:
+        // playing, it advances by exactly the time that passed times the
+        // tempo. Measuring against the wall clock rather than a fixed step
+        // means a long frame is never mistaken for a jump, and catches every
+        // way the singer can move the playhead (the transport, an arrow key,
+        // a lyric line) in one place instead of at a dozen call sites.
+        const rolled = engine.playing ? ((now - lastT) / 1000) * engine.tempo : 0
+        const seeked = lastPos >= 0 && Math.abs(pos - lastPos - rolled) > 0.35
+        lastPos = pos
+        lastT = now
         if (v.zoomed && span > 0) {
-          if (
-            (engine.playing && pos > v.e - span * 0.08) ||
-            pos < v.s ||
-            pos > v.e
-          ) {
-            shiftRef.current(pos - span * 0.25, pos + span * 0.75)
+          // Following carries the view along as the playhead nears the right
+          // edge — but only while the playhead is on screen to begin with.
+          // It is deliberately NOT "the playhead must always be visible":
+          // scrolling away from it is how the singer reads the rest of the
+          // song, and a view that snapped back every frame made scrolling
+          // past the playhead impossible. A seek is the one thing that says
+          // "show me here", so it does fetch the view back from wherever
+          // they had scrolled to.
+          const onScreen = pos >= v.s && pos <= v.e
+          const leaving = engine.playing && onScreen && pos > v.e - span * 0.08
+          if (leaving || (seeked && !onScreen)) {
+            followShiftRef.current(pos - span * 0.25, pos + span * 0.75, leaving)
           }
         }
         const pct = span > 0 ? ((pos - v.s) / span) * 100 : 0
@@ -149,6 +178,16 @@ export default function TrackStack({
         if (next !== lastP) {
           lastP = next
           el.style.setProperty('--p', next)
+        }
+        // Clamping --p keeps the played/unplayed reveal honest either side of
+        // the view, but it would also pin the playhead itself to whichever
+        // edge it went past — a bright line claiming the singer is at 1:33
+        // when they are a minute back and off screen. Hide it instead. Flips
+        // only, never per frame.
+        const off = pct < 0 || pct > 100 ? 'hidden' : 'visible'
+        if (off !== lastOff) {
+          lastOff = off
+          el.style.setProperty('--playhead-vis', off)
         }
       }
       raf = requestAnimationFrame(tick)
@@ -182,7 +221,7 @@ export default function TrackStack({
       } else if (v.zoomed && span > 0) {
         const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
         const dt = (d / rect.width) * span
-        shiftRef.current(v.s + dt, v.e + dt)
+        shiftRef.current(dt)
       }
     }
     el.addEventListener('wheel', onWheel, { passive: false })

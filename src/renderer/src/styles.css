@@ -675,6 +675,8 @@ button.chip-status:hover {
   top: 0;
   bottom: 0;
   left: var(--p, 0%);
+  /* hidden while the singer has scrolled the playhead off screen */
+  visibility: var(--playhead-vis, visible);
   width: 1px;
   background: rgba(255, 244, 224, 0.85);
   box-shadow: 0 0 9px rgba(255, 196, 110, 0.55);
