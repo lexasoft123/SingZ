@@ -9,9 +9,10 @@ the guitar and it's your backing band.
 
 Cross-platform desktop app: Electron + React + TypeScript, Web Audio for
 sample-locked multitrack playback. Everything runs locally — no cloud, no
-accounts. A fresh OS install needs nothing pre-installed: the app downloads
-its AI splitter pack once through the built-in setup and keeps it updated
-automatically.
+accounts (an optional Google Drive sync puts your library on your own Drive
+so the companion phone app can play it). A fresh OS install needs nothing
+pre-installed: the app downloads its AI splitter pack once through the
+built-in setup and keeps it updated automatically.
 
 ## What it does
 
@@ -24,6 +25,15 @@ automatically.
   the vocal melody drawn as labeled note bars on a piano roll, and mic pitch
   matching with a live score. A "Guide vocals" toggle brings the original voice
   back at any time.
+- **Beat grid & metronome** — beats and bars read from the stems, fused with
+  a neural beat model, landing at the tempo the sheet music actually says
+  (verified against published scores — including songs every tracker wants
+  to hear at double or half speed). Odd bars are found automatically: the
+  lone 2/4 before a chorus, a 5/4 nobody warned you about, a piano intro
+  with no drums to follow. Metronome clicks with count-in, the grid drawn
+  over the waveforms — and every bar line is draggable, with a red badge
+  wherever the detector knows it was guessing. Hand-placed bars survive
+  re-detection.
 - **Lyrics** — fetched from [LRCLIB](https://lrclib.net) (time-synced, matched
   by tags + duration) the moment a song loads; a variant picker with manual
   search handles other recordings. When nothing is found online, the bundled
@@ -43,6 +53,14 @@ automatically.
   **Open…** browses your saved projects inside the app, recent ones sit right
   on the drop screen, and the pencil next to the title renames a project —
   folder on disk included.
+- **Google Drive sync & phones** — one click connects your own Google Drive
+  (drive.file scope: the app can see only the folder it creates); the
+  desktop pushes the library after every save, md5-diffed so a clean sync
+  is four requests and your media never re-uploads. The companion app in
+  [mobile/](mobile) (React Native, iOS + Android) plays the synced library
+  with the same karaoke lyrics, melody line and beat grid — songs cache on
+  the phone and keep playing offline. The Android APK is attached to every
+  release.
 - **Log window** — the **Log** button shows what the app is doing under the
   hood (engines, downloads, lyrics search) and saves to a file for bug
   reports.
