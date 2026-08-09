@@ -337,6 +337,94 @@ function parityFlipAt(origBars, starts, cand, dbg) {
   return flip ? { d: 2, P: 4 } : null
 }
 
+/**
+ * Native-level step test: the carried rigid pulse, across the seam.
+ *
+ * These lattices SELF-HEAL: the tracker follows a few percent of drift, so
+ * a swallowed 2/4 is absorbed as slightly-short beats over the next bars
+ * and an offset-step judged against the lattice smears into nothing — the
+ * exact starvation 5d died of. A rigid pulse does not heal: count beats
+ * chord-to-chord across the seam at the local period and a missing pair
+ * of beats stays missing. resid = K mod bpb over >=3 downstream chords:
+ * 2 -> a 2/4, 3 -> a 3/4, 1 -> a 5/4.
+ */
+function carriedPulseAt(grid, starts, cand, dbg) {
+  const per = 60 / grid.bpm
+  const bpb = grid.beatsPerBar
+  const bars = barTimes(grid)
+  const W = 20 * per
+  const L = starts.filter((t) => t >= cand.t - W && t < cand.t - 0.2)
+  const R = starts.filter((t) => t > cand.t + 0.2 && t <= cand.t + W)
+  if (L.length < 2 || R.length < 3) {
+    if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, thin: [L.length, R.length] })
+    return null
+  }
+  // a candidate whose window touches an odd bar the grid ALREADY carries
+  // is out of jurisdiction: the tracker modelled a real tempo/meter break
+  // there (TTP's fermata), and a rigid pulse counted across a held pause
+  // manufactures exactly the residual this test convicts on. The first
+  // invented bar of the project came from skipping this check.
+  const db0 = grid.downbeats ?? []
+  for (let k = 1; k < db0.length; k++) {
+    if (db0[k] - db0[k - 1] !== bpb) {
+      const tOdd = grid.beats[db0[k - 1]]
+      if (Math.abs(tOdd - cand.t) < W + 2) {
+        if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, nearOddBar: Math.round(tOdd * 10) / 10 })
+        return null
+      }
+    }
+  }
+  // the left anchor must itself sit on a bar of the local grid — chords
+  // away from seams do, and an anchor that does not cannot carry a phase
+  let anchor = null
+  for (let i = L.length - 1; i >= 0; i--) {
+    let d = Infinity
+    for (const b of bars) d = Math.min(d, Math.abs(b - L[i]))
+    if (d <= 0.3 * per) { anchor = L[i]; break }
+  }
+  if (anchor == null) {
+    if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, noAnchor: true })
+    return null
+  }
+  const votes = new Map()
+  let counted = 0
+  for (const r of R) {
+    const k = (r - anchor) / per
+    if (Math.abs(k - Math.round(k)) > 0.28) continue // not on the pulse
+    counted++
+    const resid = mod(Math.round(k), bpb)
+    votes.set(resid, (votes.get(resid) ?? 0) + 1)
+  }
+  if (counted < 3) {
+    if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, offPulse: R.length })
+    return null
+  }
+  const top = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]
+  if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, anchor: Math.round(anchor * 10) / 10, votes: Object.fromEntries(votes), top: top[0] })
+  if (top[1] / counted < 0.7 || top[0] === 0) return null
+  const resid = top[0]
+  const lambda = resid === 1 ? bpb + 1 : resid // 2->2/4, 3->3/4, 1->5/4
+  return { lambda, resid }
+}
+
+/** Local surgery for self-healed lattices: force the bar, let the previous
+ *  bar take its emergent length, and leave downstream ALONE — the lattice
+ *  already re-synced there, and a re-lay would break what it healed. */
+function withLocalBar(det, at) {
+  const bpb = det.beatsPerBar
+  const bars = barTimes(det)
+  const beats = det.beats
+  const idxOf = (t) => {
+    let i = 0
+    for (let k = 0; k < beats.length; k++) if (Math.abs(beats[k] - t) < Math.abs(beats[i] - t)) i = k
+    return i
+  }
+  const forced = idxOf(at)
+  const all = bars.map(idxOf)
+  const db = [...all.filter((i) => i <= forced - 2), forced, ...all.filter((i) => i >= forced + 2)]
+  return { ...det, downbeats: [...new Set(db)].sort((a, b) => a - b), downbeat: db[0] % bpb }
+}
+
 export function meterCourt(det, ev, dbg = {}) {
   const per = 60 / det.bpm
   // long holds only: fragments and half-bar movement drown the phase tests
@@ -449,23 +537,27 @@ export function meterCourt(det, ev, dbg = {}) {
     let best = null
     for (const cand of cands) {
       if (applied.some((a) => Math.abs(a.t - cand.t) < 6)) continue
-      const st = det.originalBars
-        ? parityFlipAt(det.originalBars, starts, cand, round === 0 ? steps : null)
-        : phaseStepAt(grid, starts, cand, round === 0 ? steps : null)
+      const st = carriedPulseAt(grid, starts, cand, round === 0 ? steps : null)
       if (!st) continue
-      const cand2 = withInsert(grid, cand.t)
-      // the step's d validates the emergent bar length; a forced bar whose
-      // preceding length does not match the measured shift is a mislocated
-      // candidate, not a meter change
-      const db2 = cand2.downbeats
-      let L = null
-      for (let k = 1; k < db2.length; k++) {
-        if (Math.abs(grid.beats[db2[k]] - cand.t) < 0.3) { L = db2[k] - db2[k - 1]; break }
+      // the forced bar is the first downstream chord that voted — the odd
+      // bar ends where the healed phase begins
+      const R = starts.filter((t) => t > cand.t + 0.2 && t <= cand.t + 20 * per)
+      let site = null
+      for (const r of R) {
+        const cand2t = withLocalBar(grid, r)
+        const db2 = cand2t.downbeats
+        for (let k = 1; k < db2.length; k++) {
+          if (Math.abs(grid.beats[db2[k]] - r) < 0.3) {
+            if (db2[k] - db2[k - 1] === st.lambda) site = { t: r, cand2: cand2t }
+            break
+          }
+        }
+        if (site) break
       }
-      if (L == null || mod(L - grid.beatsPerBar, st.P) !== st.d) continue
-      const after = chordsOnBars(starts, barTimes(cand2), baseTol)
+      if (!site) continue
+      const after = chordsOnBars(starts, barTimes(site.cand2), baseTol)
       if (after >= before + 0.02 && (!best || after > best.after)) {
-        best = { cand2, after, t: cand.t, L, why: cand.why }
+        best = { cand2: site.cand2, after, t: site.t, L: st.lambda, why: cand.why }
       }
     }
     if (!best) break
