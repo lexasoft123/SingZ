@@ -6,7 +6,7 @@
    "barAt": 66.2,
    "barLenAt": [
     {
-     "t": 68.0,
+     "t": 68,
      "n": 5
     },
     {
@@ -14,11 +14,11 @@
      "n": 3
     },
     {
-     "t": 193.0,
+     "t": 193,
      "n": 4
     },
     {
-     "t": 60.0,
+     "t": 60,
      "n": 4
     }
    ],
@@ -60,7 +60,7 @@
    "note": "slip-class song; two harmonic phase slips (126.6s, 166.5s) re-phased since v9 — anchor minted from the harmonically-validated grid (chord changes 86% on bar starts)",
    "scoreNote": "Two official transcriptions agree (vocal + bass): Intro quarter = 90, then 105 at Verse 1 (bar 20), uniform 4/4 throughout, 126 bars, no meter changes. Both our tempos confirmed: measured 90.9 intro / 107.7 body vs notated 90/105 — the v12 organ-intro splice (\"own tempo under the body\") is exactly what the page says. Therefore the 24 stretched bars the sweep flagged (most in the library) are PERFORMANCE looseness — pushed fills, organ rubato — already the defect-splice family's job, and NOT meter. Do not let a future bar decoder mint odd bars here; this song joins TTP as a negative control, at 5x the difficulty.",
    "bpmNear": {
-    "want": 110.0,
+    "want": 110,
     "tolPct": 5,
     "note": "protection: level is ear-approved — no court may move it"
    }
@@ -262,7 +262,10 @@
   },
   "Zeit": {
    "bpb": 4,
-   "barAt": 193.596,
+   "barAt": [
+    10.18,
+    193.596
+   ],
    "scoreNote": "TWO official transcriptions agree (bass tab + piano/vocal, both quarter = 61, both placing every mark identically): 4/4 with a 2/4 at bar 26 (\"weitergeh'n\" -> Interlude) and bar 39 (\"Schon ist der Moment vorbei\" -> Chorus) — chorus/section exits again, like every other odd bar in the catalog. We ship 123.0 bpm, exactly DOUBLE the notation (the Puppe situation again — Rammstein ballads notated slow, shipped double; mlBimodal measured 0.12 here). THE STRUCTURAL INSIGHT THIS SONG ADDS: at our doubled level a notated 2/4 spans exactly ONE of our 4-beat bars, so the phase shift is SELF-ABSORBING — our grid crosses both 2/4s without any parity error, which is why the sweep saw no swallowed-bar signature here. The octave decision changes which meter changes are dangerous: at notated tempo (Wild World, FaS) a 2/4 breaks the grid; at double (Zeit, Puppe) it vanishes. A future bar decoder must reason about meter AT THE NOTATED LEVEL. The 8 stretched bars + 13 holes the sweep flagged live in the piano-only intro/outro (9 bars each, near-silent bass/drums — fill-tracking territory), not at the 2/4s. No anchors minted: nothing here is red at our level. RESOLVED 2026-08-09: the singer chose the notated octave after seeing the score (UG piano/vocal, Moderate quarter=61, clean 4/4). Shipped as a constructed manual grid at 61.48: beats = the v19 123 lattice halved (bar lines + midpoints), intro backcast to 2.37s, splice zone 228-284 rebuilt on the CHORD TRAIN (metronomic 3.90s bars through the very stretch the base grid spliced). FOUR 2/4 bars, each parity-CONFIRMED per seam (local chord-parity majority, +-14s): 96.1 (\"weitergehen\"->Interlude, score bar 26), 144.8 (\"Moment vorbei\"->Chorus, score bar 39), 205.3 (pre-chorus->chorus 3, bar-39 class recurring), 219.0 (chorus-3 exit, bar-26 class recurring). The printed score writes each class once; the recording repeats the form. Cycle-2 and cycle-3 \"weitergehen\" seams play STRAIGHT (parity-tested, no flip) — the classes recur, but not at every candidate. TRAP FOR THE FUTURE: a parity flip measured across the base grid's own 7-beat splice bar (235.1s) was pure artifact — 7 old beats = 3.5 halved beats poisons the ruler itself, and \"14/14 chords mid-bar\" read as proof until the chord train showed straight bars. Judge parity only across CLEAN base spans. GT anchor 193.596 is a downbeat of the shipped grid (+0.00s). detVersion pinned 19, source manual — the octave-modifier feature is what would return it to auto. GT CORRECTION 2026-08-09: the 145.2 anchor encoded a one-bar placement error in the hand-shipped grid, caught by the v20 court: the chord evidence holds C for a full bar 144.85-148.71 (a 2/4 there would cut a held chord in half) and Am for exactly two beats 148.71-150.67 ending on the chorus Gm — the 2/4 is the LAST bar before the chorus, as the score class says. Anchor moved to 149.7. Seam 3 rechecked the same way and kept: Gm 205.3-207.7 is the short bar, Am 207.75+ opens chorus 3 (anchor 206.5). The shipped library grid still carries the seam-2 error — pending re-ship.",
    "bpmNear": {
     "want": 61.5,

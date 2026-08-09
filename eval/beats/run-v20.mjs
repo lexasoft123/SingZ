@@ -7,6 +7,12 @@
  * The input grids MUST be a fresh harness dump (from-scratch detection),
  * never project.json — half the library carries hand repairs, and a court
  * that inherits them proves nothing.
+ *
+ * SUPERSEDED as the gate of record by run-current.mjs since the port: the
+ * courts live in src/renderer/src/audio/courts.ts and run-current bundles
+ * them along with the post-halve head backcast, which exists ONLY in
+ * analysis.ts. GT anchors that depend on it (Zeit's intro barAt 10.18) are
+ * expected red here — this runner checks the courts alone.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -85,8 +91,10 @@ for (const name of Object.keys(GT).sort()) {
     check(name, 'bpmNear', Math.abs(out.bpm - w) <= tol * w, `got ${out.bpm.toFixed(1)} want ${w}`)
   }
   if (spec.barAt != null) {
-    const near = bars.reduce((m, t) => Math.min(m, Math.abs(t - spec.barAt)), Infinity)
-    check(name, 'barAt', near < Math.max(0.25 * per, 0.3), `${spec.barAt}s -> nearest ${near.toFixed(2)}s`)
+    for (const a of Array.isArray(spec.barAt) ? spec.barAt : [spec.barAt]) {
+      const near = bars.reduce((m, t) => Math.min(m, Math.abs(t - a)), Infinity)
+      check(name, 'barAt', near < Math.max(0.25 * per, 0.3), `${a}s -> nearest ${near.toFixed(2)}s`)
+    }
   }
   for (const a of spec.barLenAt ?? []) {
     const got = detectorBarLenAt(out, a.t)

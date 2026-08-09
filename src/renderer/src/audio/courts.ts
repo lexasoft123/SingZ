@@ -597,8 +597,11 @@ const median = (a: number[]): number => {
 
 /** The chord decoder flaps on the fine lattice — a change only counts when
  *  the NEW label survives >= minHold. Consecutive same-label runs merge
- *  into ONE chord spanning their whole extent. */
-function changePoints(
+ *  into ONE chord spanning their whole extent. Exported for the post-halve
+ *  head backcast: over a chordal intro the change points ARE the events a
+ *  musician re-locks on, already Viterbi-cleaned of the ornament attacks
+ *  that poison a flux extractor (Zeit's piano answers). */
+export function changePoints(
   runs: CourtEvidence['runs'],
   minHold = 0.9
 ): { t: number; sec: number; c: string }[] {

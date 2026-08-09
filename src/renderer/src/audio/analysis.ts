@@ -1,6 +1,6 @@
 /** Song analysis for the info card: key (Krumhansl-Schmuckler) and the beat track. */
 
-import { applyCourts, buildCourtEvidence, type CourtGrid } from './courts'
+import { applyCourts, buildCourtEvidence, changePoints, type CourtGrid } from './courts'
 
 const MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
 const MIN = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
@@ -1298,6 +1298,35 @@ export function detectBeats(
           downbeats = sanitizeBars(downbeats, outBpb, outBeats.length)
           downbeat = downbeats.length > 0 ? downbeats[0] % outBpb : downbeat
         }
+        // A halved grid gets the head backcast a second chance. The v19
+        // pass judged the lead-in against the pre-halve pulse and refused —
+        // correctly: Zeit's piano chords fit the shipped 123 at 21%. At the
+        // notation's octave the same onsets fit at 71%, which is the
+        // measured finding that predicted this moment: the head fix flows
+        // through the octave verdict. Doubled grids keep their head — it
+        // was tracked at the level the music actually carries there.
+        if (courted.halvedFrom != null) {
+          const d2: Record<string, unknown> | undefined = debug ? {} : undefined
+          const again = backcastHead(
+            outBeats,
+            downbeats,
+            outBpb,
+            mono,
+            aux,
+            d2,
+            changePoints(ev.runs).map((r) => r.t)
+          )
+          if (debug) debug.headAfterHalve = d2
+          if (again) {
+            outBeats = again.beats
+            if (again.downbeats) downbeats = again.downbeats
+            headBarTimes = again.headBarTimes
+            if (downbeats) {
+              downbeats = sanitizeBars(downbeats, outBpb, outBeats.length)
+              downbeat = downbeats.length > 0 ? downbeats[0] % outBpb : downbeat
+            }
+          }
+        }
       }
     }
   }
@@ -1365,7 +1394,14 @@ function backcastHead(
   bpb: number,
   drumsMono: Float32Array,
   aux: BeatAux | undefined,
-  debug?: Record<string, unknown>
+  debug?: Record<string, unknown>,
+  // Chord-change times from the courts' decoder (post-halve call only).
+  // Over a chordal intro these are the re-lock events a musician actually
+  // uses — sparse, strong, Viterbi-cleaned. The flux extractor on the same
+  // intro interleaves the piano's syncopated answer-notes between the
+  // chords, and the consecutive-gap trust test then reads 2/8 periodic on
+  // material whose chords sit within 40 ms of the carried pulse.
+  chordOnsets?: number[] | null
 ): { beats: number[]; downbeats?: number[]; headBarTimes: number[]; indexShift: number } | null {
   if (beats.length < 32) return null
   const iv: number[] = []
@@ -1471,7 +1507,12 @@ function backcastHead(
     if (taken.length >= cap) break
     if (taken.every((t) => Math.abs(t - c.t) > 1.4 * per)) taken.push(c.t)
   }
-  const merged = [...taken].sort((a, b) => a - b)
+  const fluxMerged = [...taken].sort((a, b) => a - b)
+  // Chord-change evidence replaces the flux events when offered. The walk's
+  // stopping point stays acoustic (fluxMerged below): the fade-in chord the
+  // decoder missed is still audible, and the count should reach it.
+  const merged =
+    chordOnsets && chordOnsets.length >= 3 ? [...chordOnsets].sort((a, b) => a - b) : fluxMerged
 
   // Interval scatter alone cannot tell a WRONG head from a LOOSE one.
   // Mr Crowley's organ intro breathes — its intervals wobble past any
@@ -1551,7 +1592,8 @@ function backcastHead(
   })()
 
   // count backward, snapping to whatever is audible
-  const firstAudible = merged.length > 0 ? merged[0] : beats[0]
+  const firstAudible =
+    fluxMerged.length > 0 ? fluxMerged[0] : merged.length > 0 ? merged[0] : beats[0]
   const head: number[] = []
   let t = beats[cutIdx]
   let snapped = 0

@@ -236,20 +236,25 @@ async function runLibrary(detect) {
     } else if (spec.barAt != null) {
       // Time-anchored check: a bar start must land on the ear-verified bar
       // time (index-based rotations shift whenever newly-tracked intro beats
-      // prepend — bar TIMES are the invariant that matters).
+      // prepend — bar TIMES are the invariant that matters). A song may pin
+      // several times (Zeit: one in the rebuilt piano intro, one in the
+      // body) — every one must hit.
       checkable++
-      expected = `bar @ ${spec.barAt}s / ${spec.bpb}`
+      const anchors = Array.isArray(spec.barAt) ? spec.barAt : [spec.barAt]
+      expected = `bar @ ${anchors.join('+')}s / ${spec.bpb}`
       if (!det || !got || got.bpb !== spec.bpb) {
         status = 'FAIL'
       } else {
         const med = 60 / det.bpm
         const bars = (det.downbeats ?? det.beats.map((_, i) => i).filter((i) => (((i - det.downbeat) % det.beatsPerBar) + det.beatsPerBar) % det.beatsPerBar === 0)).map((i) => det.beats[i])
-        const near = bars.reduce((m, t) => Math.min(m, Math.abs(t - spec.barAt)), Infinity)
+        const worst = Math.max(
+          ...anchors.map((a) => bars.reduce((m, t) => Math.min(m, Math.abs(t - a)), Infinity))
+        )
         // 0.3s floor = run-v20's, deliberately: the meter court snaps bar
         // edges to chord onsets, which sit up to ~0.26s from the (slightly
         // early) ear anchor — FaS's 5/4 at 66.46 vs the anchor's 66.2. An
         // ear-verified bar time is not ±220ms sharp at 68 bpm.
-        status = near < Math.max(0.25 * med, 0.3) ? 'pass' : 'FAIL'
+        status = worst < Math.max(0.25 * med, 0.3) ? 'pass' : 'FAIL'
       }
     } else if (Array.isArray(spec.rot)) {
       checkable++
