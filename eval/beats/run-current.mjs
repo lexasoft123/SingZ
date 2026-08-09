@@ -271,6 +271,22 @@ async function runLibrary(detect) {
       // would read as coverage it does not have.
       console.log(`${''.padEnd(24)} skipped      gridSane: uniform ${det.beatsPerBar}/4, no downbeats[] to check`)
     }
+    // bpmNear: the tempo LEVEL, gated. Anchors cannot see an octave error —
+    // halving keeps every bar time, so barAt stays green while the click
+    // runs at twice the singer's pulse. Two kinds of entry share the check:
+    // targets a level court must reach (Zeit, WYWH at the notation's 61.5)
+    // and protection for the ten songs whose level is already ear-approved.
+    if (spec?.bpmNear && det) {
+      checkable++
+      const want = spec.bpmNear.want
+      const tol = (spec.bpmNear.tolPct ?? 5) / 100
+      const ok = Math.abs(det.bpm - want) <= tol * want
+      if (ok) pass++
+      else fail++
+      console.log(
+        `${''.padEnd(24)} ${(ok ? 'pass' : 'FAIL').padEnd(12)} bpmNear: got ${det.bpm.toFixed(1)}, want ${want} ±${Math.round(tol * 100)}%`
+      )
+    }
     if (det?.downbeats && det.downbeats.length > 2) {
       checkable++
       const lens = det.downbeats.slice(1).map((b, k) => b - det.downbeats[k])
