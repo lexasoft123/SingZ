@@ -193,6 +193,18 @@ answer your evals while you measure the phone.
   cleaner — or `detectBeats` — WITHOUT bumping the matching constant leaves
   every saved project drawing the old answer forever. The corrected result
   saves itself into an existing project (never creating one under a raw file).
+- **Analysis must not outlive the song it was started for** — pYIN runs for
+  seconds in a worker, so the singer can be in another song by the time it
+  answers; a line that lands late is not merely drawn in the wrong song, it is
+  AUTO-SAVED there and then adopted on every open forever after. Two field
+  projects were found carrying a neighbour's line byte for byte (notes drawn
+  all through an intro, the key read off music nobody sang). Every long job
+  captures `loadSeq.current` and drops its result if the song has changed —
+  that guard is the rule, not a nicety. Belt and braces on the stored side:
+  a line's coverage (frames × hop) IS its song's length, so `melodyFitsSong`
+  disowns one that fits a different song and re-tracks, which is how the two
+  corrupted projects healed themselves on the next open. Guarded by
+  `tests/e2e/mac/melody-song-switch-e2e.cjs`.
 - **Project format v2 = FLAC stems** (~4x smaller, lossless; splitter cache
   stays WAV). v1 WAV projects auto-upgrade on open (`migrateProjectToV2`);
   readers must keep accepting both (`stemFile()` prefers .flac). Encoding uses

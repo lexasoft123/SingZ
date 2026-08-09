@@ -19,7 +19,7 @@ import {
   type MetronomeConfig
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
-import { decodeMelody, encodeMelody, PITCH_DETECT_VERSION } from './audio/melody'
+import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
 import DropScreen from './components/DropScreen'
@@ -301,6 +301,8 @@ export default function App(): React.JSX.Element {
   /** A saved project's stored pitch line, waiting for prepMelody to adopt it
    *  (or throw it away as the work of an older tracker). */
   const storedMelodyRef = useRef<{ info: MelodyInfo; f0: Float32Array } | null>(null)
+  /** pYIN's worker while it runs — held so leaving the song can stop it. */
+  const melodyWorkerRef = useRef<Worker | null>(null)
   const selectionRef = useRef(selection)
   selectionRef.current = selection
   const showCatalogRef = useRef(showCatalog)
@@ -548,6 +550,10 @@ export default function App(): React.JSX.Element {
       setMelody({ status: 'none' })
       setMelodyInfo(null)
       storedMelodyRef.current = null
+      // pYIN takes seconds; whatever it is still chewing on belongs to the song
+      // being left, not the one arriving.
+      melodyWorkerRef.current?.terminate()
+      melodyWorkerRef.current = null
       vocalsBufRef.current = null
       drumsBufRef.current = null
       instBufsRef.current = []
@@ -1173,13 +1179,20 @@ export default function App(): React.JSX.Element {
     if (melodyRef.current.status !== 'none') return
     const stored = storedMelodyRef.current
     const buf = vocalsBufRef.current
-    // A stored line tracked by THIS detector is adopted as it is — the pitch
-    // strip draws instantly instead of after seconds of pYIN, and the phones'
-    // copy of the song stays the line the singer already practised against.
-    // An older stamp is re-tracked, unless there is no vocals stem to track
-    // from (a project whose stems went missing), when the old line still
-    // beats no line at all.
-    if (stored && (stored.info.detVersion === PITCH_DETECT_VERSION || !buf)) {
+    // A stored line tracked by THIS detector, and covering THIS song, is
+    // adopted as it is — the pitch strip draws instantly instead of after
+    // seconds of pYIN, and the phones' copy of the song stays the line the
+    // singer already practised against. An older stamp — or a line whose
+    // length says it was tracked from a different song — is re-tracked, and
+    // the fresh line saves itself, which is how the two projects that caught a
+    // neighbour's line heal on the next open. With no vocals stem to track
+    // from (a project whose stems went missing) even a stale line beats none.
+    if (
+      stored &&
+      (!buf ||
+        (stored.info.detVersion === PITCH_DETECT_VERSION &&
+          melodyFitsSong(stored.f0, stored.info.hopSec, buf.duration)))
+    ) {
       storedMelodyRef.current = null
       ;(window as { __melody?: unknown }).__melody = {
         f0: stored.f0,
@@ -1198,10 +1211,20 @@ export default function App(): React.JSX.Element {
       for (let i = 0; i < data.length; i++) mono[i] += data[i] / chans
     }
     setMelody({ status: 'computing', p: 0 })
+    // Which song this line is being tracked for. pYIN runs for seconds, so the
+    // singer can well be in another song by the time it answers — and a line
+    // that lands in the wrong song is not merely drawn there, it is saved
+    // there (analysis auto-saves), and then adopted on every open thereafter.
+    const seq = loadSeq.current
     const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
       type: 'module'
     })
+    melodyWorkerRef.current = worker
     worker.onmessage = (e: MessageEvent<{ type: string; p?: number; f0?: Float32Array; raw?: Float32Array; clarity?: Float32Array; rms?: Float32Array; hopSec?: number }>) => {
+      if (seq !== loadSeq.current) {
+        worker.terminate() // a different song is open now
+        return
+      }
       if (e.data.type === 'progress') {
         setMelody({ status: 'computing', p: e.data.p ?? 0 })
       } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
@@ -1215,6 +1238,7 @@ export default function App(): React.JSX.Element {
         }
         applyMelody(e.data.f0, e.data.hopSec, true)
         worker.terminate()
+        if (melodyWorkerRef.current === worker) melodyWorkerRef.current = null
       }
     }
     worker.postMessage({ mono, sampleRate: buf.sampleRate }, [mono.buffer])

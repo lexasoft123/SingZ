@@ -17,6 +17,14 @@ export const PITCH_DETECT_VERSION = 1
 /** Encoding reference pitch (A1), the same one the worker's cleaner counts from. */
 const REF_HZ = 55
 
+/**
+ * How far a stored line's coverage may sit from the song's own length before it
+ * is disowned. The tracker's last window ends at the last sample, so a line of
+ * this song covers `duration - WIN/sr` (~70 ms) — two seconds is slack, not
+ * policy.
+ */
+const COVERAGE_SLACK_SEC = 2
+
 /** ~83 minutes at a 25 ms hop — a garbage guard, not a policy. */
 const MAX_FRAMES = 200000
 
@@ -53,6 +61,19 @@ export function encodeMelody(f0: Float32Array, hopSec: number): MelodyInfo {
     hopSec: Math.round(hopSec * 1e7) / 1e7,
     f0: out.join(' ')
   }
+}
+
+/**
+ * Does this line describe THIS song? A line is a frame per hop from the first
+ * sample to the last, so its coverage is the song's length — anything else is
+ * some other song's line, and drawing it puts notes over silence and reads the
+ * key off music the singer never sang. Two projects in the field were found
+ * carrying a neighbour's line byte for byte (a melody worker that outlived the
+ * song it was started for), and a stored line is adopted as-is forever once its
+ * stamp is current, so the length is checked at adoption rather than trusted.
+ */
+export function melodyFitsSong(f0: Float32Array, hopSec: number, durationSec: number): boolean {
+  return Math.abs(f0.length * hopSec - durationSec) <= COVERAGE_SLACK_SEC
 }
 
 /**

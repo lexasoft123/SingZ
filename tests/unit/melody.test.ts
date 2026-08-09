@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   decodeMelody,
   encodeMelody,
+  melodyFitsSong,
   PITCH_DETECT_VERSION
 } from '../../src/renderer/src/audio/melody'
 
@@ -73,6 +74,22 @@ describe('melody codec', () => {
     expect(decodeMelody({ ...good, f0: '3600 x0 3600' })).toBeNull()
     expect(decodeMelody({ ...good, f0: 'x999999999' })).toBeNull()
     expect(decodeMelody({ ...good, f0: '' })).toBeNull()
+  })
+
+  it('disowns a line that covers a different song than the one it is stored under', () => {
+    // Two projects in the field carried a neighbour's line byte for byte: the
+    // 6:28 song had the 3:14 song's, which drew notes all through an intro
+    // nobody sings over. Coverage is the tell — a line is a frame per hop from
+    // the first sample to the last, so it is as long as its song.
+    const line = new Float32Array(7744) // 193.6 s at a 25 ms hop
+    expect(melodyFitsSong(line, 0.025, 193.6)).toBe(true)
+    expect(melodyFitsSong(line, 0.025, 388.8)).toBe(false)
+    // The tracker's last window ends at the last sample, so a real line falls
+    // ~70 ms short of the duration — and a stem may be a beat longer than the
+    // song. Neither counts as a different song.
+    expect(melodyFitsSong(line, 0.025, 193.67)).toBe(true)
+    expect(melodyFitsSong(line, 0.025, 195.4)).toBe(true)
+    expect(melodyFitsSong(line, 0.025, 196.1)).toBe(false)
   })
 
   it('accepts a hand-written line, single-frame gaps included', () => {
