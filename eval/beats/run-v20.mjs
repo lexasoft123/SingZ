@@ -43,6 +43,8 @@ for (const name of Object.keys(GT).sort()) {
     continue
   }
   const ev = JSON.parse(readFileSync(evPath, 'utf8'))
+  const notesPath = evPath.replace(/\.json$/, '.notes.json')
+  ev.notes = existsSync(notesPath) ? JSON.parse(readFileSync(notesPath, 'utf8')) : []
   const dbg = {}
   const out = v20(base, ev, dbg)
   const bars = barTimes(out)
@@ -51,6 +53,7 @@ for (const name of Object.keys(GT).sort()) {
     `${dbg.oct?.action === 'halve' ? '  [HALVED]' : ''}` +
     `${dbg.applied?.length ? `  inserts: ${dbg.applied.map((a) => `${a.L}@${a.t}s(+${a.gain})`).join(' ')}` : ''}`)
   if (VERBOSE && dbg.oct) console.log(`  oct: ${JSON.stringify(dbg.oct)}`)
+  if (VERBOSE && dbg.candList) console.log(`  cands(${dbg.halfBar ? 'halfBar' : 'full'}): ${JSON.stringify(dbg.candList)}`)
   if (VERBOSE && dbg.steps?.length) console.log(`  steps: ${JSON.stringify(dbg.steps)}`)
   if (dbg.plan) console.log(`  plan: ${JSON.stringify(dbg.plan)}`)
   if (VERBOSE && dbg.combos) for (const c of dbg.combos) console.log(`    combo ${JSON.stringify(c.c)} after ${c.after} local ${c.local}`)

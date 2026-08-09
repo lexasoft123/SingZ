@@ -401,10 +401,18 @@ function carriedPulseAt(grid, starts, cand, dbg) {
   }
   const top = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]
   if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, anchor: Math.round(anchor * 10) / 10, votes: Object.fromEntries(votes), top: top[0] })
-  if (top[1] / counted < 0.7 || top[0] === 0) return null
+  if (top[1] / counted < 0.7 || top[0] === 0) {
+    // a SPLIT vote (both parities strongly represented) is not "no
+    // evidence" — it is the half-bar blindness diagnosis, and it hands
+    // jurisdiction to the cadence test
+    const v0 = votes.get(0) ?? 0
+    const v2 = votes.get(2) ?? 0
+    if (v0 >= 2 && v2 >= 2) return { verdict: 'split' }
+    return null
+  }
   const resid = top[0]
   const lambda = resid === 1 ? bpb + 1 : resid // 2->2/4, 3->3/4, 1->5/4
-  return { lambda, resid }
+  return { verdict: 'step', lambda, resid }
 }
 
 /** Local surgery for self-healed lattices: force the bar, let the previous
@@ -424,6 +432,122 @@ function withLocalBar(det, at) {
   const db = [...all.filter((i) => i <= forced - 2), forced, ...all.filter((i) => i >= forced + 2)]
   return { ...det, downbeats: [...new Set(db)].sort((a, b) => a - b), downbeat: db[0] % bpb }
 }
+
+/**
+ * The cadence-bar test — the symmetry breaker for half-bar harmony.
+ *
+ * Mod-bpb residuals cannot see a 2/4 when chords legitimately sit on one
+ * AND three: the offset set maps to itself. What does break the symmetry,
+ * at five of the six blind sites, is the cadence SHAPE the decoder emits:
+ * a chain of two-beat runs, then a LONG-held chord whose arrival is the
+ * next section — and the short run immediately before the long hold is
+ * the odd bar itself, its own chord (Soldier Of Fortune's A# spans
+ * exactly the notated 2/4; Zeit's A# did the same at the halved level).
+ * Forcing bars at both edges of that run needs no residual vote at all.
+ */
+export function songIsHalfBar(ev, grid) {
+  const per = 60 / grid.bpm
+  const cps = changePoints(ev.runs)
+  const spans = cps.map((r) => r.sec / per).filter((x) => x >= 1)
+  if (spans.length < 12) return false
+  const m = median(spans)
+  return m >= 1.6 && m <= 2.4
+}
+
+function cadenceBarAt(grid, ev, cand, dbg) {
+  const per = 60 / grid.bpm
+  const bpb = grid.beatsPerBar
+  const cps = changePoints(ev.runs)
+  // the long hold arriving at/after the candidate
+  let H = null
+  for (const r of cps) {
+    // a real section hold runs 6-9 beats; 3.2 admitted any longer chord
+    // and convicted a spurious 2/4 in the middle of a verse
+    if (r.sec >= 4.5 * per && Math.abs(r.t - cand.t) <= 2.5 * bpb * per * 0.5) {
+      if (!H || Math.abs(r.t - cand.t) < Math.abs(H.t - cand.t)) H = r
+    }
+  }
+  if (!H) return null
+  // the run immediately before it, and the CHAIN before that: at least two
+  // more half-bar runs with distinct labels — the figure that makes this a
+  // cadence and not just any transition into a held chord
+  const idx = cps.findIndex((r) => r.t === H.t)
+  if (idx < 3) return null
+  const R = cps[idx - 1]
+  const chain = cps.slice(Math.max(0, idx - 4), idx - 1)
+  const halfish = chain.filter((r) => Math.abs(r.sec / per - 2) <= 1.0)
+  const labels = new Set(chain.map((r) => r.c))
+  if (halfish.length < 2 || labels.size < 2) {
+    if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, noChain: chain.map((r) => `${r.c}:${Math.round((r.sec / per) * 10) / 10}`) })
+    return null
+  }
+  // the odd bar's length is R's OWN span — the gap to H can be padded by a
+  // dropped one-beat blip and reads a bar too long
+  const lam = Math.round(R.sec / per)
+  if (dbg) dbg.push({ t: Math.round(cand.t * 10) / 10, cadence: { R: Math.round(R.t * 10) / 10, H: Math.round(H.t * 10) / 10, lam, span: Math.round((R.sec / per) * 10) / 10 } })
+  if (lam < 2 || lam > bpb + 1) return null
+  return { rStart: R.t, hStart: H.t, lambda: lam }
+}
+
+/** Force bars at BOTH edges of the odd-bar chord: upstream and downstream
+ *  each keep their healed structure past the enforced pair. */
+function withEdgePair(det, t0, t1) {
+  const bpb = det.beatsPerBar
+  const bars = barTimes(det)
+  const beats = det.beats
+  const idxOf = (t) => {
+    let i = 0
+    for (let k = 0; k < beats.length; k++) if (Math.abs(beats[k] - t) < Math.abs(beats[i] - t)) i = k
+    return i
+  }
+  const a = idxOf(t0)
+  const b = idxOf(t1)
+  if (b - a < 2) return null
+  const all = bars.map(idxOf)
+  const db = [...all.filter((i) => i <= a - 2), a, b, ...all.filter((i) => i >= b + 2)]
+  return { ...det, downbeats: [...new Set(db)].sort((x, y) => x - y), downbeat: db[0] % bpb }
+}
+
+/** Step placement: Λ from the residual court, the edge from a section
+ *  hold when one exists (doubly attested -> no-loss acceptance), else the
+ *  next chords (singly attested -> must gain). FaS's three-chord 5/4 is
+ *  invisible to one-run-back readings, but [hold − Λ, hold] lands on
+ *  66.44 against a truth of 66.46. */
+function tryStepPlacement(grid, ev, starts, cand, st, per, before, baseTol) {
+  const tries = []
+  {
+    const cps2 = changePoints(ev.runs)
+    let H = null
+    for (const r of cps2) {
+      if (r.sec >= 4.5 * per && r.t >= cand.t - 2 * grid.beatsPerBar * per && r.t <= cand.t + grid.beatsPerBar * per) {
+        if (!H || Math.abs(r.t - cand.t) < Math.abs(H.t - cand.t)) H = r
+      }
+    }
+    if (H) tries.push({ e0: H.t - st.lambda * per, e1: H.t, dual: true })
+  }
+  for (const r of starts.filter((t) => t > cand.t + 0.2 && t <= cand.t + 20 * per).slice(0, 3)) {
+    tries.push({ e0: r - st.lambda * per, e1: r, dual: false })
+  }
+  let site = null
+  for (const tr of tries) {
+    const cand2t = withEdgePair(grid, tr.e0, tr.e1)
+    if (!cand2t) continue
+    const db2 = cand2t.downbeats
+    let okLen = false
+    for (let k = 1; k < db2.length; k++) {
+      if (Math.abs(grid.beats[db2[k - 1]] - tr.e0) < 0.35 && db2[k] - db2[k - 1] === st.lambda) okLen = true
+    }
+    if (!okLen) continue
+    const after2 = chordsOnBars(starts, barTimes(cand2t), baseTol)
+    const floor = tr.dual ? before - 0.01 : before + 0.02
+    if (after2 >= floor && (!site || after2 > site.after)) {
+      site = { cand2: cand2t, after: after2, t: tr.e0, L: st.lambda }
+    }
+  }
+  return site
+}
+
+const VERB = process.env.V20_VERB === "1"
 
 export function meterCourt(det, ev, dbg = {}) {
   const per = 60 / det.bpm
@@ -532,37 +656,181 @@ export function meterCourt(det, ev, dbg = {}) {
     dbg.applied = applied
     return grid
   }
+  const halfBar = songIsHalfBar(ev, det)
+  if (dbg) { dbg.halfBar = halfBar; dbg.candList = cands.map((c) => Math.round(c.t * 10) / 10) }
+  // Corroboration census: a cadence shape that is REAL recurs at the
+  // song's form repeats (WW three times, SoF twice). A singleton with the
+  // same chord shape is a transition — FaS's 192.4 is indistinguishable
+  // from a real cadence in the chord stream, and only its loneliness
+  // convicts it of being ordinary.
+  const cadenceCount = new Map()
+  {
+    const perC = 60 / det.bpm
+    const startsC = changePoints(ev.runs).filter((r) => r.sec >= 1.5 * perC).map((r) => r.t)
+    const beforeC = chordsOnBars(startsC, barTimes(det), 0.35 * perC)
+    for (const cand of cands) {
+      // a site the step court can actually PLACE on must not corroborate a
+      // cadence — FaS's 5/4, read as a false 2/4, once vouched for the
+      // spurious cadence forty seconds later. A false step VERDICT that
+      // cannot place (Wild World's) excludes nothing.
+      const stC = carriedPulseAt(det, startsC, cand, null)
+      if (stC?.verdict === 'step' && tryStepPlacement(det, ev, startsC, cand, stC, perC, beforeC, 0.35 * perC)) continue
+      const c = cadenceBarAt(det, ev, cand, null)
+      if (c && c.lambda !== det.beatsPerBar) cadenceCount.set(c.lambda, (cadenceCount.get(c.lambda) ?? 0) + 1)
+    }
+  }
+  if (dbg) dbg.cadenceCensus = Object.fromEntries(cadenceCount)
+  const sibling = [] // cadence convictions, for decoder-merged classmates
   for (let round = 0; round < 6; round++) {
     const before = chordsOnBars(starts, barTimes(grid), baseTol)
     let best = null
     for (const cand of cands) {
       if (applied.some((a) => Math.abs(a.t - cand.t) < 6)) continue
       const st = carriedPulseAt(grid, starts, cand, round === 0 ? steps : null)
-      if (!st) continue
-      // the forced bar is the first downstream chord that voted — the odd
-      // bar ends where the healed phase begins
-      const R = starts.filter((t) => t > cand.t + 0.2 && t <= cand.t + 20 * per)
-      let site = null
-      for (const r of R) {
-        const cand2t = withLocalBar(grid, r)
-        const db2 = cand2t.downbeats
-        for (let k = 1; k < db2.length; k++) {
-          if (Math.abs(grid.beats[db2[k]] - r) < 0.3) {
-            if (db2[k] - db2[k - 1] === st.lambda) site = { t: r, cand2: cand2t }
-            break
+      // The step court goes first and, when it PLACES, owns the site. When
+      // it cannot — no verdict, a split, or a failed placement — the
+      // cadence court may rule, but only where residuals are blind (split
+      // or half-bar song) and only with corroboration.
+      let stepPlaced = false
+      if (st?.verdict === 'step') {
+        const placed = tryStepPlacement(grid, ev, starts, cand, st, per, before, baseTol)
+        if (placed && (!best || placed.after > best.after)) {
+          best = { ...placed, why: cand.why }
+          stepPlaced = true
+        }
+      }
+      const blind = st?.verdict === 'split' || (!st && halfBar) || (st?.verdict === 'step' && !stepPlaced && halfBar)
+      const cad = !stepPlaced && blind ? cadenceBarAt(grid, ev, cand, round === 0 ? steps : null) : null
+      let cadencePlaced = false
+      if (cad && cad.lambda !== grid.beatsPerBar && (cadenceCount.get(cad.lambda) ?? 0) >= 2) {
+        // two placements per conviction: anchored on the odd chord's own
+        // onset, or ending at the section hold's arrival — decoder onset
+        // lag cuts differently per site, and the local chords choose
+        const variants = [
+          [cad.rStart, cad.rStart + cad.lambda * per],
+          [cad.hStart - cad.lambda * per, cad.hStart]
+        ]
+        for (const [e0, e1] of variants) {
+          const cand2 = withEdgePair(grid, e0, e1)
+          if (!cand2) continue
+          const db2 = cand2.downbeats
+          let okLen = false
+          for (let k = 1; k < db2.length; k++) {
+            if (Math.abs(grid.beats[db2[k - 1]] - e0) < 0.35 && db2[k] - db2[k - 1] === cad.lambda) okLen = true
+          }
+          if (!okLen) continue
+          const after = chordsOnBars(starts, barTimes(cand2), baseTol)
+          if (after >= before - 0.01 && (!best || after > best.after)) {
+            best = { cand2, after, t: e0, L: cad.lambda, why: cand.why + ' (cadence)', sib: true }
+            cadencePlaced = true
           }
         }
-        if (site) break
       }
-      if (!site) continue
-      const after = chordsOnBars(starts, barTimes(site.cand2), baseTol)
-      if (after >= before + 0.02 && (!best || after > best.after)) {
-        best = { cand2: site.cand2, after, t: site.t, L: st.lambda, why: cand.why }
+      if (cadencePlaced) continue
+      // Break-start candidates: a long instrumental gap follows the seam,
+      // the odd bar precedes it, and the residual court has NO verdict —
+      // the desert. The one attestation strong enough alone: BOTH edges of
+      // the bar landing on chords, Λ from their own span. FaS's Break 3/4
+      // is G to D, 2.7 beats, containing the anchor exactly.
+      if (!st) {
+        const barLen2 = grid.beatsPerBar * per
+        const gapAfter = ev.words.every((w) => w.s < cand.t + 0.5 || w.s > cand.t + 2 * barLen2)
+        if (gapAfter) {
+          const cps3 = changePoints(ev.runs).filter((r) => r.t >= cand.t - 2.5 * barLen2 && r.t <= cand.t + 0.5 * barLen2)
+          for (let i = 0; i < cps3.length; i++) {
+            for (let j = i + 1; j < cps3.length; j++) {
+              const span = cps3[j].t - cps3[i].t
+              const lam = Math.round(span / per)
+              // the desert sits mid-slip, so the lattice the chords are
+              // quantized to is itself ~0.1s adrift — hence the loose cap
+              if (lam < 2 || lam > 3 || Math.abs(span - lam * per) > 0.33 * per) continue
+              const cand2 = withEdgePair(grid, cps3[i].t, cps3[j].t)
+              if (!cand2) continue
+              const db2 = cand2.downbeats
+              let okLen = false
+              for (let k = 1; k < db2.length; k++) {
+                if (Math.abs(grid.beats[db2[k - 1]] - cps3[i].t) < 0.35 && db2[k] - db2[k - 1] === lam) okLen = true
+              }
+              if (!okLen) continue
+              const after = chordsOnBars(starts, barTimes(cand2), baseTol)
+              if (after >= before + 0.02 && (!best || after > best.after)) {
+                best = { cand2, after, t: cps3[i].t, L: lam, why: cand.why + ' (break pair)' }
+              }
+            }
+          }
+          // Chroma deserts have a second witness: note-onset clusters from
+          // the polyphonic transcriber, which hears fingerpicked bars the
+          // chord decoder reads as one long hold. FaS's Break: the chroma
+          // says 7.9 seconds of G; the notes put six onsets on 104.35
+          // against a ground truth of 104.36. FALLBACK only (chord pairs
+          // found nothing), EXCEPTIONAL clusters only (the top few of the
+          // window — a six-note attack, not one of twelve hundred "strong"
+          // ones), and the same strict gain every chord pair pays.
+          if (!best || !best.why.includes('(break pair)')) {
+            const inWin = (ev.notes ?? []).filter((c) => c[0] >= cand.t - 2.5 * barLen2 && c[0] <= cand.t + 0.5 * barLen2)
+            const nn = inWin
+              .filter((c) => c[1] >= 5 || c[2] >= 2.5)
+              .sort((a, b) => b[1] * b[2] - a[1] * a[2])
+              .slice(0, 4)
+              .sort((a, b) => a[0] - b[0])
+            // Pair form only. A single-edge form (exceptional attack +
+            // lattice-supplied end) was tried and REVERTED: three controls
+            // each took an invented bar while the true FaS 3/4 still failed
+            // its gain — global gain is numerically blind in a desert
+            // (three chords cannot move a whole-song fraction), so it
+            // rejects truth there and passes luck elsewhere. A desert-safe
+            // acceptance judge is the named open problem; the note witness
+            // itself is proven (it locates FaS's 3/4 to 10ms), the JUDGE
+            // is not. Do not loosen this without a new judge and a full
+            // control battery.
+            for (let i = 0; i < nn.length; i++) {
+              for (let j = i + 1; j < nn.length; j++) {
+                const span = nn[j][0] - nn[i][0]
+                const lam = Math.round(span / per)
+                if (lam < 2 || lam > 3 || Math.abs(span - lam * per) > 0.33 * per) continue
+                const cand2 = withEdgePair(grid, nn[i][0], nn[j][0])
+                if (!cand2) continue
+                const db2 = cand2.downbeats
+                let okLen = false
+                for (let k = 1; k < db2.length; k++) {
+                  if (Math.abs(grid.beats[db2[k - 1]] - nn[i][0]) < 0.35 && db2[k] - db2[k - 1] === lam) okLen = true
+                }
+                if (!okLen) continue
+                const after = chordsOnBars(starts, barTimes(cand2), baseTol)
+                if (after >= before + 0.02 && (!best || after > best.after)) {
+                  best = { cand2, after, t: nn[i][0], L: lam, why: cand.why + ' (note pair)' }
+                }
+              }
+            }
+          }
+        }
       }
     }
     if (!best) break
     grid = best.cand2
-    applied.push({ t: Math.round(best.t * 10) / 10, L: best.L, why: best.why, gain: Math.round((best.after - chordsOnBars(starts, barTimes(grid === best.cand2 ? det : grid), baseTol)) * 100) || Math.round((best.after - before) * 100) })
+    if (best.sib) sibling.push(best.L)
+    applied.push({ t: Math.round(best.t * 10) / 10, L: best.L, why: best.why, gain: Math.round((best.after - before) * 100) })
+  }
+  // Sibling pass: verses repeat, decoders flap. A candidate whose cadence
+  // chain is intact but whose odd-bar chord got MERGED into its neighbour
+  // (lam reads bpb) inherits the length its convicted classmates measured.
+  if (sibling.length >= 2) {
+    const lamS = sibling.sort()[sibling.length >> 1]
+    for (const cand of cands) {
+      if (applied.some((a) => Math.abs(a.t - cand.t) < 6)) continue
+      const cad = cadenceBarAt(grid, ev, cand, null)
+      if (!cad || cad.lambda !== grid.beatsPerBar) continue
+      const cand2 = withEdgePair(grid, cad.rStart, cad.rStart + lamS * (60 / grid.bpm))
+      // sibling inserts get one variant only — the classmate-measured length
+      // anchored at the odd chord's onset
+      if (!cand2) continue
+      const b0 = chordsOnBars(starts, barTimes(grid), baseTol)
+      const a0 = chordsOnBars(starts, barTimes(cand2), baseTol)
+      if (a0 >= b0 - 0.01) {
+        grid = cand2
+        applied.push({ t: Math.round(cad.rStart * 10) / 10, L: lamS, why: cand.why + ' (sibling)', gain: Math.round((a0 - b0) * 100) })
+      }
+    }
   }
   dbg.steps = steps
   dbg.applied = applied
