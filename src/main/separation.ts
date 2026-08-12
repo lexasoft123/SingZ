@@ -145,6 +145,10 @@ export async function writeInputWav(outDir: string, ch0: Float32Array, ch1: Floa
 }
 
 export function friendlyError(tail: string): string {
+  // ORT's Windows logger writes its [E] lines wide (a NUL between every
+  // character), so "887A0006" never matches the raw stream — the log only
+  // looks clean because log() strips NULs for display. Match what's meant.
+  tail = tail.replace(/\u0000/g, '')
   if (/8007000E|Not enough memory resources/i.test(tail))
     return 'The graphics card ran out of memory for this model.'
   // Before the generic DML check: DmlExecutionProvider appears in these

@@ -16,6 +16,15 @@ describe('friendlyError', () => {
     expect(friendlyError(tail)).toContain('stopped responding')
   })
 
+  it('matches hex codes through ORT wide-char (NUL-interleaved) output', () => {
+    // The real stderr stream on Windows: ORT [E] lines arrive UTF-16-ish,
+    // one NUL between every character — three field builds misclassified
+    // OOM and device-hung as "device removed" because of this.
+    const wide = (s: string): string => s.split('').join('\u0000')
+    const tail = `stems: on DmlExecutionProvider\n${wide('Exception(4) tid(53f4) 8007000E')}`
+    expect(friendlyError(tail)).toContain('ran out of memory')
+  })
+
   it('keeps device-removed for 887A0005', () => {
     expect(friendlyError('Exception 887A0005 device removed')).toContain('GPU device removed')
   })
