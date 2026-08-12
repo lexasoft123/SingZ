@@ -413,21 +413,30 @@ export class Separator {
     // A GPU that crashed or stalled on this model once will do it again —
     // don't make every split pay the DirectML tax before falling back.
     // (CoreML crashes compiling this graph, so Intel Macs go straight to CPU.)
-    let providers = process.platform === 'win32' ? ['dml', 'cpu'] : ['cpu']
-    if (providers.includes('dml') && (await exists(dmlFlagPath()))) {
+    // Second DML attempt runs with graph fusion off: the fused graph's first
+    // command list can outlive Windows' 2 s GPU timeout (TDR) — every field
+    // hardware adapter died on chunk 1 with 887A0006. Op-by-op submissions
+    // are slower per chunk but each one is tiny. CPU remains the floor.
+    let attempts: Array<{ provider: string; noFusion?: boolean }> =
+      process.platform === 'win32'
+        ? [{ provider: 'dml' }, { provider: 'dml', noFusion: true }, { provider: 'cpu' }]
+        : [{ provider: 'cpu' }]
+    if (process.platform === 'win32' && (await exists(dmlFlagPath()))) {
       log(
         'splitter',
         'DirectML is switched off on this machine after an earlier failure — using the CPU engine (pick GPU in the model manager to try it again)'
       )
-      providers = ['cpu']
+      attempts = [{ provider: 'cpu' }]
     }
     let last: SeparateResult = { ok: false, error: 'not started' }
-    for (const provider of providers) {
-      log('splitter', `trying ONNX provider: ${provider}`)
-      last = await this.spawnOnnx(engine, provider, input, outDir, stems, onProgress)
+    for (const attempt of attempts) {
+      const label = `${attempt.provider}${attempt.noFusion ? ' (graph fusion off)' : ''}`
+      log('splitter', `trying ONNX provider: ${label}`)
+      last = await this.spawnOnnx(engine, attempt, input, outDir, stems, onProgress)
       if (last.ok || (!last.ok && last.cancelled)) return last
-      log('splitter', `provider ${provider} failed: ${last.error}`, 'warn')
-      if (provider === 'dml') {
+      log('splitter', `provider ${label} failed: ${last.error}`, 'warn')
+      if (attempt.provider === 'dml' && attempt.noFusion) {
+        // Both DML shapes failed — remember that and stop paying the tax.
         try {
           await writeFile(
             dmlFlagPath(),
@@ -445,7 +454,7 @@ export class Separator {
 
   private spawnOnnx(
     engine: { cmd: string[] },
-    provider: string,
+    attempt: { provider: string; noFusion?: boolean },
     input: string,
     outDir: string,
     stems: Partial<Record<StemName6, string>>,
@@ -469,7 +478,7 @@ export class Separator {
         '--cache-dir',
         join(packDir(), 'python', 'model-cache'),
         '--providers',
-        provider,
+        attempt.provider,
         '-v'
       ]
       void rm(tmpOut, { recursive: true, force: true })
@@ -515,7 +524,7 @@ export class Separator {
           const CHUNK_LIMIT_S = 300
           const heartbeat = setInterval(() => {
             const quiet = Math.round((Date.now() - lastOutput) / 1000)
-            if (provider === 'dml' && !timedOut) {
+            if (attempt.provider === 'dml' && !timedOut) {
               if (!sawOutput && quiet >= 240) {
                 timedOut = true
                 log(
@@ -598,7 +607,7 @@ export class Separator {
             void (async () => {
               try {
                 if (code !== 0) throw new Error(friendlyError(tail))
-                if (provider === 'dml' && internalCpuFallback) {
+                if (attempt.provider === 'dml' && internalCpuFallback) {
                   try {
                     await writeFile(
                       dmlFlagPath(),

@@ -111,6 +111,7 @@ def main():
         print(json.dumps({"adapters": adapters, "pick": pick_adapter(adapters)}))
         return 0
 
+    no_fusion = os.environ.get("SINGZ_DML_NO_FUSION") == "1"
     if sys.platform == "win32" and "dml" in sys.argv:
         try:
             adapters = probe_adapters()
@@ -118,22 +119,33 @@ def main():
                 kind = "software" if a["software"] else f"{a['dedicated_mb']} MB dedicated"
                 print(f"gpu adapter {a['index']}: {a['description']} ({kind})", flush=True)
             pick = pick_adapter(adapters)
+            dev = None
             if pick is None:
                 print("no hardware GPU adapter — leaving DirectML on its default", flush=True)
             elif pick["index"] != 0:
                 dev = pick["index"]
                 print(f"steering DirectML to adapter {dev}: {pick['description']}", flush=True)
+            if dev is not None or no_fusion:
+                if no_fusion:
+                    # One fused command list can outlive the 2 s GPU timeout
+                    # (TDR) — every hardware adapter in the field died on the
+                    # first chunk. Unfused, each op is its own small submission.
+                    print("DirectML graph fusion off — submitting the model in small pieces", flush=True)
                 import onnxruntime as ort
                 orig = ort.InferenceSession
 
                 def patched(*args, **kw):
                     provs = kw.get("providers")
-                    if provs:
+                    if provs and dev is not None:
                         kw["providers"] = [
                             ("DmlExecutionProvider", {"device_id": dev})
                             if p == "DmlExecutionProvider" else p
                             for p in provs
                         ]
+                    if provs and no_fusion:
+                        so = kw.get("sess_options") or ort.SessionOptions()
+                        so.add_session_config_entry("ep.dml.disable_graph_fusion", "1")
+                        kw["sess_options"] = so
                     return orig(*args, **kw)
 
                 ort.InferenceSession = patched
