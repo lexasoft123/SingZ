@@ -69,8 +69,10 @@ def probe_adapters():
         return []
     # IDXGIFactory1 vtable: IUnknown(0-2) IDXGIObject(3-6) IDXGIFactory(7-11)
     # then EnumAdapters1 = 12. IDXGIAdapter1: ...GetDesc1 = 10. Release = 2.
+    # restype must be c_long, not HRESULT: ctypes auto-raises OSError on
+    # failure HRESULTs, and end-of-list IS one (DXGI_ERROR_NOT_FOUND).
     enum_adapters1 = com_method(
-        factory.value, 12, ctypes.HRESULT, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p)
+        factory.value, 12, ctypes.c_long, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p)
     )
     adapters = []
     i = 0
@@ -79,7 +81,7 @@ def probe_adapters():
         if enum_adapters1(i, ctypes.byref(adapter)) != 0:
             break
         desc = DXGI_ADAPTER_DESC1()
-        get_desc1 = com_method(adapter.value, 10, ctypes.HRESULT, ctypes.POINTER(DXGI_ADAPTER_DESC1))
+        get_desc1 = com_method(adapter.value, 10, ctypes.c_long, ctypes.POINTER(DXGI_ADAPTER_DESC1))
         if get_desc1(ctypes.byref(desc)) == 0:
             adapters.append({
                 "index": i,
