@@ -29,6 +29,12 @@ export function packPython(): string {
  * Marker written when DirectML crashed or stalled on this machine — splits
  * then go straight to the CPU provider. Re-downloading the pack clears it.
  */
+/**
+ * Legacy-compat only: no ladder reads this since DirectML was removed
+ * (it never completed a split anywhere in the fleet). The model-manager
+ * knob still writes/clears it so older builds sharing a machine keep
+ * honoring a CPU-only choice.
+ */
 export function dmlFlagPath(): string {
   return join(packDir(), '..', 'dml-disabled.json')
 }
@@ -270,7 +276,7 @@ const REGISTRY: RegistryEntry[] = [
     label: 'Stem splitter · AI',
     description:
       process.platform === 'win32'
-        ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — using your GPU when it can (NVIDIA, AMD and Intel graphics).'
+        ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — on your GPU when it can (GeForce RTX 30xx or newer; CPU otherwise).'
         : process.arch === 'arm64'
           ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',

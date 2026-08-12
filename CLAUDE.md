@@ -130,11 +130,16 @@ answer your evals while you measure the phone.
   never stretched to the next timestamp (lag), unless AI-aligned.
 - **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
   and every split is six stems (htdemucs_6s; silent guitar/piano lanes are
-  hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere
-  (DirectML on Windows with a `dml-disabled.json` marker after failures —
-  including pathologically slow sessions caught by the chunk-pace watchdog
-  (WARP/remote-desktop adapters); CPU
-  on Intel Macs — CoreML crashes compiling the graph). Every downloaded
+  hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere.
+  Windows GPU = the TensorRT-RTX plugin EP (GeForce RTX 30xx+; pack v5
+  ships it under python/rtx with mainline ort side-loaded by the per-split
+  runner, src/main/onnx-runner.ts) with a `trtrtx-disabled.json` marker
+  after one failure and the chunk-pace watchdog for pathologically slow
+  sessions. **DirectML was removed entirely** — across the whole fleet it
+  never completed a split (fused graph = TDR device-hung 887A0006, unfused
+  = ISTFT ConvTranspose OOM; wheel frozen at ORT 1.24) — old machines'
+  `dml-disabled.json` markers linger but decide nothing. CPU on Intel
+  Macs — CoreML crashes compiling the graph. Every downloaded
   pack gets a renderer-rendered 44.1 kHz WAV (`needsPcm`) — demucs 4.1
   decodes via sphn (no m4a/aac) with an ffmpeg-CLI fallback end users lack,
   and torchaudio ≥2.9 load/save is torchcodec-only (unused by demucs 4.1,

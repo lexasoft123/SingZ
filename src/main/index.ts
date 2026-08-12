@@ -170,7 +170,9 @@ function registerIpc(): void {
 
   ipcMain.handle('splitter:mode', async () => {
     try {
-      const j = JSON.parse(await readFile(dmlFlagPath(), 'utf8')) as { reason?: string }
+      // The trtrtx marker is the ladder's actual GPU gate now (DML is gone);
+      // the dml marker lingers on old machines but decides nothing.
+      const j = JSON.parse(await readFile(trtrtxFlagPath(), 'utf8')) as { reason?: string }
       return { mode: 'cpu', reason: j.reason }
     } catch {
       return { mode: 'auto' }
