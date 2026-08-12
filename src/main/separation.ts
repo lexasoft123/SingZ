@@ -173,6 +173,29 @@ export function friendlyError(tail: string): string {
 }
 
 
+/**
+ * Env for an ONNX splitter spawn. Exported for the unit test that pins the
+ * attempt flags to the env the child actually sees — v0.14.1-test2 shipped a
+ * "fusion off" retry whose flag never left the parent process, and the field
+ * run silently repeated the fused attempt byte for byte.
+ */
+export function onnxSpawnEnv(attempt: { noFusion?: boolean }): NodeJS.ProcessEnv {
+  return {
+    ...spawnEnv(),
+    // Progress lines must arrive live, not on exit (block buffering
+    // left the UI on "Warming up" for whole splits).
+    PYTHONUNBUFFERED: '1',
+    // Piped stdout falls back to the ANSI codepage on localized
+    // Windows — GPU adapter names arrive as mojibake without this.
+    PYTHONUTF8: '1',
+    // The model ships inside the pack; a broken pack must fail fast
+    // with a clear error, never silently re-download 166 MB.
+    HF_HUB_OFFLINE: '1',
+    // The runner injects ep.dml.disable_graph_fusion when this is set.
+    ...(attempt.noFusion ? { SINGZ_DML_NO_FUSION: '1' } : {})
+  }
+}
+
 export class Separator {
   private engine: ResolvedEngine | null = null
   private extraEnv: Record<string, string> = {}
@@ -486,20 +509,7 @@ export class Separator {
         .then(() => writeFile(runner, ONNX_RUNNER_PY, 'utf8'))
         .then(() => {
           log('splitter', `run: ${engine.cmd[0]} ${args.join(' ')}`)
-          const child = spawn(engine.cmd[0], args, {
-            env: {
-              ...spawnEnv(),
-              // Progress lines must arrive live, not on exit (block buffering
-              // left the UI on "Warming up" for whole splits).
-              PYTHONUNBUFFERED: '1',
-              // Piped stdout falls back to the ANSI codepage on localized
-              // Windows — GPU adapter names arrive as mojibake without this.
-              PYTHONUTF8: '1',
-              // The model ships inside the pack; a broken pack must fail fast
-              // with a clear error, never silently re-download 166 MB.
-              HF_HUB_OFFLINE: '1'
-            }
-          })
+          const child = spawn(engine.cmd[0], args, { env: onnxSpawnEnv(attempt) })
           this.child = child
           // The bar moves as soon as the engine is up (session compile can
           // take a while on first DirectML run — 0% beats a frozen label).
