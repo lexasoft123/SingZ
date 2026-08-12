@@ -31,7 +31,7 @@ import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
-import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir } from './models'
+import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, trtrtxFlagPath } from './models'
 import { Separator } from './separation'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 
@@ -179,15 +179,19 @@ function registerIpc(): void {
   ipcMain.handle('splitter:set-mode', async (_e, mode: string) => {
     try {
       if (mode === 'cpu') {
-        await writeFile(
-          dmlFlagPath(),
-          JSON.stringify({ at: new Date().toISOString(), reason: 'chosen in the model manager' }, null, 2),
-          'utf8'
+        const chosen = JSON.stringify(
+          { at: new Date().toISOString(), reason: 'chosen in the model manager' },
+          null,
+          2
         )
+        await writeFile(dmlFlagPath(), chosen, 'utf8')
+        // CPU-only means no GPU engine at all — the trtrtx rung too.
+        await writeFile(trtrtxFlagPath(), chosen, 'utf8')
         log('splitter', 'engine set to CPU only (model manager)')
       } else {
         await rm(dmlFlagPath(), { force: true })
-        log('splitter', 'GPU (DirectML) re-enabled (model manager)')
+        await rm(trtrtxFlagPath(), { force: true })
+        log('splitter', 'GPU re-enabled (model manager)')
       }
       void separator.check(true)
       return { ok: true }

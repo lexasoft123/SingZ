@@ -15,7 +15,7 @@ import {
 import { ONNX_RUNNER_PY } from './dml-shim'
 import { stemsRoot } from './media'
 import { log, logChunk } from './log'
-import { dmlFlagPath, isOnnxPack, packDir, packOnnxModel, packPython } from './models'
+import { dmlFlagPath, isOnnxPack, packDir, packOnnxModel, packPython, packRtxEpPath, trtrtxFlagPath } from './models'
 
 const MODEL = 'htdemucs_6s'
 const PROBE_TIMEOUT_MS = 45_000
@@ -281,11 +281,12 @@ export class Separator {
   private describe(e: ResolvedEngine): string {
     if (e.kind === 'onnx') {
       if (process.platform !== 'win32') return 'splitter pack (ONNX)'
-      // The marker flips the actual provider to CPU — a label still claiming
-      // DirectML misled every field log read after a GPU failure.
-      return existsSync(dmlFlagPath())
-        ? 'splitter pack (CPU — DirectML is switched off here)'
-        : 'splitter pack (DirectML)'
+      // The markers flip the actual provider — a label still claiming a GPU
+      // engine misled every field log read after a failure.
+      if (existsSync(packRtxEpPath()) && !existsSync(trtrtxFlagPath()))
+        return 'splitter pack (TensorRT RTX)'
+      if (!existsSync(dmlFlagPath())) return 'splitter pack (DirectML)'
+      return 'splitter pack (CPU — the GPU engines are switched off here)'
     }
     return e.cmd.join(' ')
   }
@@ -440,20 +441,31 @@ export class Separator {
     // A GPU that crashed or stalled on this model once will do it again —
     // don't make every split pay the DirectML tax before falling back.
     // (CoreML crashes compiling this graph, so Intel Macs go straight to CPU.)
-    // Second DML attempt runs with graph fusion off: the fused graph's first
-    // command list can outlive Windows' 2 s GPU timeout (TDR) — every field
-    // hardware adapter died on chunk 1 with 887A0006. Op-by-op submissions
-    // are slower per chunk but each one is tiny. CPU remains the floor.
-    let attempts: Array<{ provider: string; noFusion?: boolean }> =
-      process.platform === 'win32'
-        ? [{ provider: 'dml' }, { provider: 'dml', noFusion: true }, { provider: 'cpu' }]
-        : [{ provider: 'cpu' }]
-    if (process.platform === 'win32' && (await exists(dmlFlagPath()))) {
-      log(
-        'splitter',
-        'DirectML is switched off on this machine after an earlier failure — using the CPU engine (pick GPU in the model manager to try it again)'
-      )
-      attempts = [{ provider: 'cpu' }]
+    // Windows GPU ladder: TensorRT-RTX plugin EP first (Ampere+; DML died on
+    // htdemucs both ways — fused = TDR device-hung, unfused = ISTFT OOM),
+    // then DML fused, then DML with graph fusion off (op-by-op submissions,
+    // each far under the 2 s TDR limit). CPU remains the floor. Each GPU
+    // engine that fails gets its own marker so it costs one attempt ever.
+    let attempts: Array<{ provider: string; noFusion?: boolean }> = [{ provider: 'cpu' }]
+    if (process.platform === 'win32') {
+      const rtxShipped = existsSync(packRtxEpPath())
+      const rtxOff = await exists(trtrtxFlagPath())
+      const dmlOff = await exists(dmlFlagPath())
+      if (rtxShipped && rtxOff)
+        log(
+          'splitter',
+          'TensorRT RTX is switched off on this machine after an earlier failure (pick GPU in the model manager to try it again)'
+        )
+      if (dmlOff)
+        log(
+          'splitter',
+          'DirectML is switched off on this machine after an earlier failure (pick GPU in the model manager to try it again)'
+        )
+      attempts = [
+        ...(rtxShipped && !rtxOff ? [{ provider: 'trtrtx' }] : []),
+        ...(!dmlOff ? [{ provider: 'dml' }, { provider: 'dml', noFusion: true }] : []),
+        { provider: 'cpu' }
+      ]
     }
     let last: SeparateResult = { ok: false, error: 'not started' }
     for (const attempt of attempts) {
@@ -462,6 +474,18 @@ export class Separator {
       last = await this.spawnOnnx(engine, attempt, input, outDir, stems, onProgress)
       if (last.ok || (!last.ok && last.cancelled)) return last
       log('splitter', `provider ${label} failed: ${last.error}`, 'warn')
+      if (attempt.provider === 'trtrtx') {
+        try {
+          await writeFile(
+            trtrtxFlagPath(),
+            JSON.stringify({ at: new Date().toISOString(), reason: last.error }, null, 2),
+            'utf8'
+          )
+          log('splitter', 'TensorRT RTX marked as broken here — future splits skip it', 'warn')
+        } catch {
+          // purely an optimization marker — never fail the split over it
+        }
+      }
       if (attempt.provider === 'dml' && attempt.noFusion) {
         // Both DML shapes failed — remember that and stop paying the tax.
         try {
@@ -538,12 +562,12 @@ export class Separator {
           const CHUNK_LIMIT_S = 300
           const heartbeat = setInterval(() => {
             const quiet = Math.round((Date.now() - lastOutput) / 1000)
-            if (attempt.provider === 'dml' && !timedOut) {
+            if (attempt.provider !== 'cpu' && !timedOut) {
               if (!sawOutput && quiet >= 240) {
                 timedOut = true
                 log(
                   'splitter',
-                  'DirectML produced nothing for 4 minutes — giving up on it and switching to the CPU engine',
+                  'The GPU engine produced nothing for 4 minutes — giving up on it and switching engines',
                   'warn'
                 )
                 child.kill('SIGTERM')
@@ -558,7 +582,7 @@ export class Separator {
                   timedOut = true
                   log(
                     'splitter',
-                    `DirectML is running far too slowly here (${sinceChunk}s on chunk ${chunksSeen + 1} — CPU will be much faster) — switching engines`,
+                    `The GPU engine is running far too slowly here (${sinceChunk}s on chunk ${chunksSeen + 1} — CPU will be much faster) — switching engines`,
                     'warn'
                   )
                   child.kill('SIGTERM')
@@ -615,7 +639,7 @@ export class Separator {
               return
             }
             if (timedOut) {
-              resolve({ ok: false, error: 'DirectML ran too slowly on this machine.' })
+              resolve({ ok: false, error: 'The GPU engine ran too slowly on this machine.' })
               return
             }
             void (async () => {

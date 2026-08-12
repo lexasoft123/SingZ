@@ -48,6 +48,21 @@ ONNXSCRIPT_PIN="onnxscript==0.7.1"  # …and the dynamo fallback needs onnxscrip
 BEAT_CKPT_SHA256="8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331"
 BEAT_CKPT_URL="https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt"
 
+# TensorRT-RTX plugin EP (win32 only): DML is frozen at ORT 1.24 (sustained
+# engineering) and dies on htdemucs both fused (TDR device-hung) and unfused
+# (ISTFT ConvTranspose OOM). NVIDIA's prebuilt zip is self-contained — the
+# EP dll AND the whole TRT-RTX runtime — and rides MAINLINE ort, shipped
+# side by side under python/rtx and swapped into sys.path by the runner.
+# cu12 flavor: oldest-driver compatibility across the fleet (581.x is fine).
+TRTRTX_EP_TAG="v0.4.0"
+TRTRTX_EP_ZIP="TensorRT-RTX-EP-ABI-${TRTRTX_EP_TAG}-cu12.zip"
+TRTRTX_EP_URL="https://github.com/NVIDIA/TensorRT-RTX-EP-ABI/releases/download/${TRTRTX_EP_TAG}/${TRTRTX_EP_ZIP}"
+ORT_MAINLINE_PIN="onnxruntime==1.28.0"
+# The EP dll hard-depends on cudart64_12.dll, which drivers never install
+# (nvml comes with the driver; cudart is the app's to ship) — proven on the
+# bench Dell. The wheel carries nvidia/cuda_runtime/bin/cudart64_12.dll.
+CUDART_WHL_URL="https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl"
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$ROOT/.engines-src/onnx-pack-$TARGET"
 OUT="$ROOT/vendor/packs"
@@ -88,6 +103,41 @@ if [ "$TARGET" = win32-x64 ]; then
   done
   [ -f "$WORK/python/msvcp140.dll" ] || { echo "ERROR: msvcp140.dll not bundled" >&2; exit 1; }
   [ -f "$WORK/python/vcruntime140.dll" ] || { echo "ERROR: vcruntime140.dll not bundled" >&2; exit 1; }
+
+  # ---- TensorRT-RTX plugin EP payload -----------------------------------
+  if [ ! -d "$WORK/python/rtx/ep" ]; then
+    if [ ! -f "$WORK/$TRTRTX_EP_ZIP" ]; then
+      curl -L --fail -o "$WORK/$TRTRTX_EP_ZIP" "$TRTRTX_EP_URL"
+    fi
+    rm -rf "$WORK/python/rtx"
+    mkdir -p "$WORK/python/rtx"
+    "$PY" -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+      "$WORK/$TRTRTX_EP_ZIP" "$WORK/python/rtx/ep-unpack"
+    mv "$WORK/python/rtx/ep-unpack"/TensorRT-RTX-EP-ABI-* "$WORK/python/rtx/ep"
+    rmdir "$WORK/python/rtx/ep-unpack"
+    rm -f "$WORK/python/rtx/ep"/*.pdb
+    [ -f "$WORK/python/rtx/ep/onnxruntime_providers_nv_tensorrt_rtx.dll" ] \
+      || { echo "ERROR: TRT-RTX EP dll missing after unzip" >&2; exit 1; }
+    # Mainline ort side by side with the DML wheel (same module name, so it
+    # gets its own dir the runner prepends to sys.path). --no-deps: the DML
+    # wheel already put the identical dependency set into site-packages.
+    "$PY" -m pip install --no-cache-dir --no-deps --target "$WORK/python/rtx/ort" "$ORT_MAINLINE_PIN"
+    [ -d "$WORK/python/rtx/ort/onnxruntime" ] || { echo "ERROR: mainline ort missing" >&2; exit 1; }
+    rm -rf "$WORK/python/rtx/ort/bin"
+    if [ ! -f "$WORK/cudart.whl" ]; then
+      curl -L --fail -o "$WORK/cudart.whl" "$CUDART_WHL_URL"
+    fi
+    "$PY" -c "
+import os, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+dlls = [n for n in z.namelist() if n.lower().endswith('.dll')]
+assert dlls, 'no dlls in cudart wheel'
+for n in dlls:
+    open(os.path.join(sys.argv[2], os.path.basename(n)), 'wb').write(z.read(n))
+print('cudart shipped:', [os.path.basename(n) for n in dlls])
+" "$WORK/cudart.whl" "$WORK/python/rtx/ep"
+    [ -f "$WORK/python/rtx/ep/cudart64_12.dll" ] || { echo "ERROR: cudart64_12.dll missing" >&2; exit 1; }
+  fi
 fi
 
 # embed the model + validate the stack (CPU provider: CI runners have no GPU)
@@ -320,10 +370,10 @@ find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
 
 # version stamp: the app refuses packs older than its required format
-# (v4 = the pack ships the Beat This runner + ONNX models — keep in sync
-# with PACK_FORMAT_REQUIRED in src/main/models.ts)
+# (v5 = the win32 pack ships the TensorRT-RTX plugin EP + mainline ort under
+# python/rtx — keep in sync with PACK_FORMAT_REQUIRED in src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 4, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 5, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python

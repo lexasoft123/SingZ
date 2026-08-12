@@ -33,6 +33,16 @@ export function dmlFlagPath(): string {
   return join(packDir(), '..', 'dml-disabled.json')
 }
 
+/** Same deal as the DML marker: one failed TensorRT-RTX attempt per machine. */
+export function trtrtxFlagPath(): string {
+  return join(packDir(), '..', 'trtrtx-disabled.json')
+}
+
+/** The plugin EP dll inside a v5+ win32 pack — its presence gates the trtrtx rung. */
+export function packRtxEpPath(): string {
+  return join(packDir(), 'python', 'rtx', 'ep', 'onnxruntime_providers_nv_tensorrt_rtx.dll')
+}
+
 /**
  * ONNX packs keep models in a hub-style cache; a pack whose extraction
  * failed half-way has a working interpreter but no model. Resolve the real
@@ -71,7 +81,13 @@ export async function packOnnxModel(
 // (v3 added the bundled MSVC runtime on Windows, but BOTH mac pack scripts
 // stamped 3 since then too, so the mac requirement jumps straight past 3 —
 // requiring 3 would leave installed mac packs looking current.)
-const PACK_FORMAT_REQUIRED = 4
+// v5 = the win32 pack ships the TensorRT-RTX plugin EP + mainline ORT under
+// python/rtx (DML is frozen at ORT 1.24 and dies on htdemucs both fused and
+// unfused — TDR vs OOM; the plugin EP is the NVIDIA path forward).
+// Platform-aware: the Apple-Silicon torch pack still stamps 4, and a flat
+// requirement of 5 would send every Mac chasing an upgrade that does not
+// exist (the v3 note above records this exact trap).
+const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 5 : 4
 
 /** First pack format that ships the Beat This! runner + weights. */
 const PACK_FORMAT_WITH_BEATS = 4
@@ -258,11 +274,14 @@ const REGISTRY: RegistryEntry[] = [
         : process.arch === 'arm64'
           ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
-    sizeMb: process.platform === 'win32' ? 283 : process.arch === 'arm64' ? 272 : 259,
+    sizeMb: process.platform === 'win32' ? 440 : process.arch === 'arm64' ? 272 : 259,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
-      `https://github.com/lexasoft123/SingZ/releases/latest/download/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
+      // Prerelease test builds are invisible to `latest` — they fetch the
+      // pack attached to their own tagged release, so a test build can
+      // require a new pack format without touching the fleet.
+      `https://github.com/lexasoft123/SingZ/releases/${app.getVersion().includes('-') ? `download/v${app.getVersion()}` : 'latest/download'}/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
     optional: false,
     platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
   },
@@ -393,8 +412,9 @@ export class ModelManager {
           } finally {
             await rm(archive, { force: true })
           }
-          // fresh pack → give DirectML another chance if it was disabled
+          // fresh pack → give the GPU engines another chance if disabled
           await rm(dmlFlagPath(), { force: true })
+          await rm(trtrtxFlagPath(), { force: true })
           log('models', `${entry.id} installed`)
           onProgress({ id: entry.id, percent: 100 })
         }

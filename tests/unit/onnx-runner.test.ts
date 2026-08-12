@@ -83,6 +83,21 @@ describe.skipIf(!py)('onnx runner shim', () => {
     expect(r.status).toBe(0)
   })
 
+  it('exits 3 on a trtrtx attempt when the pack has no rtx payload', () => {
+    // sys.executable's dir stands in for the pack python dir — no rtx/ there,
+    // so the runner must bail cleanly for the app ladder to move on. The
+    // check is win32-gated like the rest of the GPU path.
+    const r = spawnSync(
+      py as string,
+      [runner, 'separate', 'in.wav', 'out', '--providers', 'trtrtx', '-v'],
+      { env: { ...process.env }, encoding: 'utf8', timeout: 30_000 }
+    )
+    if (process.platform === 'win32') {
+      expect(r.stdout).toContain('TensorRT RTX payload missing')
+      expect(r.status).toBe(3)
+    }
+  })
+
   it('chains argv and exit code into demucs_onnx.cli.main', () => {
     const stub = join(dir, 'stub')
     mkdirSync(join(stub, 'demucs_onnx'), { recursive: true })

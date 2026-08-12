@@ -332,6 +332,9 @@ answer your evals while you measure the phone.
 
 ## Conventions
 
+- **Run code-review-skill over the pending diff before every commit** and fix
+  what it finds first; commit only after the review comes back clean.
+
 - **Parallel feature work happens in git worktrees** (one per feature, e.g.
   under `.claude/worktrees/<feature>`), never as concurrent edits to the same
   checkout — two sessions on one tree fight over builds, caches and
