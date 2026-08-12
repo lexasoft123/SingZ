@@ -12,6 +12,7 @@ import {
   type SeparateResult,
   type StemName6
 } from '../shared/types'
+import { ONNX_RUNNER_PY } from './dml-shim'
 import { stemsRoot } from './media'
 import { log, logChunk } from './log'
 import { dmlFlagPath, isOnnxPack, packDir, packOnnxModel, packPython } from './models'
@@ -143,9 +144,13 @@ export async function writeInputWav(outDir: string, ch0: Float32Array, ch1: Floa
   return dest
 }
 
-function friendlyError(tail: string): string {
+export function friendlyError(tail: string): string {
   if (/8007000E|Not enough memory resources/i.test(tail))
     return 'The graphics card ran out of memory for this model.'
+  // Before the generic DML check: DmlExecutionProvider appears in these
+  // stacks too (as a C++ source path), but hung-and-reset is its own story.
+  if (/887A0006|887A0007|DEVICE_HUNG|DEVICE_RESET/i.test(tail))
+    return 'The graphics driver stopped responding while running this model (Windows reset the GPU).'
   if (/887A0005|DXGI_ERROR_DEVICE_REMOVED|device.{0,10}removed|DmlExecutionProvider/i.test(tail))
     return 'The graphics driver could not run this model (GPU device removed).'
   if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
@@ -166,6 +171,7 @@ function friendlyError(tail: string): string {
     .filter(Boolean)
   return `Separation failed: ${lines.slice(-3).join(' — ').slice(0, 400) || 'unknown error'}`
 }
+
 
 export class Separator {
   private engine: ResolvedEngine | null = null
@@ -447,8 +453,12 @@ export class Separator {
   ): Promise<SeparateResult> {
     return new Promise<SeparateResult>((resolve) => {
       const tmpOut = join(outDir, 'onnx-out')
+      // The runner replaces the -c shim so DirectML can be steered to the
+      // right GPU (see dml-shim.ts); written per split so field packs need
+      // no update, next to input44k.wav where cache cleanup already reigns.
+      const runner = join(outDir, 'onnx-runner.py')
       const args = [
-        ...engine.cmd.slice(1),
+        runner,
         'separate',
         input,
         tmpOut,
@@ -464,6 +474,7 @@ export class Separator {
       ]
       void rm(tmpOut, { recursive: true, force: true })
         .then(() => mkdir(tmpOut, { recursive: true }))
+        .then(() => writeFile(runner, ONNX_RUNNER_PY, 'utf8'))
         .then(() => {
           log('splitter', `run: ${engine.cmd[0]} ${args.join(' ')}`)
           const child = spawn(engine.cmd[0], args, {
@@ -472,6 +483,9 @@ export class Separator {
               // Progress lines must arrive live, not on exit (block buffering
               // left the UI on "Warming up" for whole splits).
               PYTHONUNBUFFERED: '1',
+              // Piped stdout falls back to the ANSI codepage on localized
+              // Windows — GPU adapter names arrive as mojibake without this.
+              PYTHONUTF8: '1',
               // The model ships inside the pack; a broken pack must fail fast
               // with a clear error, never silently re-download 166 MB.
               HF_HUB_OFFLINE: '1'

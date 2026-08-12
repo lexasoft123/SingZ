@@ -115,11 +115,15 @@ jobs:
           # is the release title) makes the release public with real notes
           # from the first attach — no file falls back to the bare create
           NOTES="docs/release-notes/$TAG.md"
+          # Hyphenated tags (v0.14.1-test1) are prereleases: never "latest",
+          # so neither updater nor the in-app pack URL ever picks them up —
+          # only the person handed the link installs one.
+          PRE=(); case "$TAG" in *-*) PRE=(--prerelease);; esac
           if [ -f "$NOTES" ]; then
             tail -n +2 "$NOTES" > /tmp/relnotes-body.md
-            gh release create "$TAG" --title "$(head -n 1 "$NOTES")" --notes-file /tmp/relnotes-body.md 2>/dev/null || true
+            gh release create "$TAG" "${PRE[@]}" --title "$(head -n 1 "$NOTES")" --notes-file /tmp/relnotes-body.md 2>/dev/null || true
           else
-            gh release create "$TAG" --title "$TAG" --notes "" 2>/dev/null || true
+            gh release create "$TAG" "${PRE[@]}" --title "$TAG" --notes "" 2>/dev/null || true
           fi
           # nullglob: each matrix job only has its own platform's files
           shopt -s nullglob

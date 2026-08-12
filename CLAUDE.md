@@ -371,7 +371,10 @@ answer your evals while you measure the phone.
 Push to main freely once the user approves pushes; **releases are cut by
 tagging `v*`** — CI builds mac (arm64+x64 dmg) + win (NSIS) + all three
 splitter packs and attaches everything to the GitHub Release (gh-based
-attach step, race-safe). The Android workflow runs a cheap canary on
+attach step, race-safe). **Hyphenated tags (`v0.14.1-test1`) become
+prereleases**: never "latest", so updaters and the in-app pack URL ignore
+them — the way to hand one tester a build (the tag may sit on a feature
+branch; bump package.json to the full prerelease string). The Android workflow runs a cheap canary on
 mobile/** pushes (npm ci + tsc — postinstall is the audio-api patch-drift
 canary and synthesizes the bundled sample song via make-sample.js) and
 builds the full APK only on `v*` tags / manual dispatch, attaching
