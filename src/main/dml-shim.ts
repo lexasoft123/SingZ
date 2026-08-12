@@ -141,11 +141,18 @@ def setup_trtrtx():
         print(f"TensorRT RTX runtime dlls would not load here: {', '.join(pending)}", flush=True)
     try:
         ort.register_execution_provider_library("NvTensorRtRtx", ep_dll)
-        devs = [d for d in ort.get_ep_devices()
-                if d.ep_name == "NvTensorRtRtxExecutionProvider"]
+        all_devs = list(ort.get_ep_devices())
     except Exception as err:
         print(f"TensorRT RTX would not start here: {err}", flush=True)
         sys.exit(3)
+    # The factory's self-reported name is "TensorRTRTX" (read out of the dll;
+    # the docs say NvTensorRtRtxExecutionProvider — an exact match dropped a
+    # real RTX 3060 in the field). Match loosely and print what was seen, so
+    # the next rename diagnoses itself from the log.
+    for d in all_devs:
+        print(f"ep device: {getattr(d, 'ep_name', '?')}", flush=True)
+    devs = [d for d in all_devs
+            if "tensorrt" in str(getattr(d, "ep_name", "")).lower()]
     if not devs:
         print("TensorRT RTX found no supported GPU here (needs GeForce RTX 30xx or newer)", flush=True)
         sys.exit(3)
