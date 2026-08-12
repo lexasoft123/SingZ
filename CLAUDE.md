@@ -332,6 +332,13 @@ answer your evals while you measure the phone.
 
 ## Conventions
 
+- **Every commit is reviewed first** — launch the `code-reviewer` agent
+  (`.claude/agents/`) on the staged diff, act on what it reports (fix it, or
+  say why not), then commit. It is read-only, so it never touches the tree.
+  Stage exactly what you mean to ship *before* launching it: the review reads
+  what is STAGED, and `git commit -- <paths>` would then commit working-tree
+  contents the review never saw. A merge commit that carries no new work of
+  its own is the one thing it has nothing to say about.
 - **Parallel feature work happens in git worktrees** (one per feature, e.g.
   under `.claude/worktrees/<feature>`), never as concurrent edits to the same
   checkout — two sessions on one tree fight over builds, caches and
