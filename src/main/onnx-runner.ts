@@ -91,7 +91,9 @@ def setup_trtrtx():
             if os.path.isfile(trt_model):
                 args = (trt_model,) + args[1:]
                 print("TensorRT RTX: using the pre-simplified graph", flush=True)
-        opts = {"nv_detailed_build_log": "1"}
+        # (detailed build log stays off: one session's spew was 457 KB and
+        # evicted the whole start of the field log from the ring)
+        opts = {}
         if args and isinstance(args[0], str):
             # compiled-engine cache beside the model: the first split paid
             # ~31 s of JIT on the field 3060; cached engines skip it.
@@ -117,6 +119,34 @@ def setup_trtrtx():
         return sess
 
     ort.InferenceSession = patched
+
+    # The simplified one-engine graph still ran at 6.86 s/chunk — ~10 GFLOPS
+    # achieved on ~10 TFLOPS hardware, slower than the same machine's CPU.
+    # That smells like power management (unplugged laptop, whisper mode, dGPU
+    # parked at idle clocks), not kernels. Sample the driver's own telemetry
+    # during the split so the field log settles it.
+    def _telemetry():
+        import subprocess
+        import time
+        smi = os.path.join(os.environ.get("SystemRoot", r"C:\\Windows"), "System32", "nvidia-smi.exe")
+        if not os.path.isfile(smi):
+            smi = "nvidia-smi"
+        q = ("--query-gpu=utilization.gpu,clocks.sm,clocks.max.sm,power.draw,"
+             "power.limit,pstate,temperature.gpu")
+        while True:
+            try:
+                r = subprocess.run([smi, q, "--format=csv,noheader"],
+                                   capture_output=True, text=True, timeout=10)
+                line = (r.stdout or "").strip().replace("\\n", " | ")
+                if line:
+                    print(f"gpu telemetry: {line}", flush=True)
+            except Exception as err:
+                print(f"gpu telemetry unavailable: {err}", flush=True)
+                return
+            time.sleep(15)
+
+    import threading
+    threading.Thread(target=_telemetry, daemon=True).start()
 
 
 def main():
