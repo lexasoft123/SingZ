@@ -131,8 +131,11 @@ answer your evals while you measure the phone.
 - **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
   and every split is six stems (htdemucs_6s; silent guitar/piano lanes are
   hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere.
-  Windows GPU = the TensorRT-RTX plugin EP (GeForce RTX 30xx+; pack v5
-  ships it under python/rtx with mainline ort side-loaded by the per-split
+  Windows GPU = the TensorRT-RTX plugin EP (GeForce RTX 30xx+; pack v5+
+  ships it under python/rtx, v6 adds the pre-simplified `_trt.onnx` graph
+  (raw export = 20k shape/scatter glue nodes that shatter the TensorRT
+  partition; onnxsim with the fixed input folds it 18x, parity-gated in
+  the pack build) with mainline ort side-loaded by the per-split
   runner, src/main/onnx-runner.ts) with a `trtrtx-disabled.json` marker
   after one failure and the chunk-pace watchdog for pathologically slow
   sessions. **DirectML was removed entirely** — across the whole fleet it

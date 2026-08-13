@@ -91,9 +91,11 @@ export async function packOnnxModel(
 // python/rtx (DML is frozen at ORT 1.24 and dies on htdemucs both fused and
 // unfused — TDR vs OOM; the plugin EP is the NVIDIA path forward).
 // Platform-aware: the Apple-Silicon torch pack still stamps 4, and a flat
-// requirement of 5 would send every Mac chasing an upgrade that does not
-// exist (the v3 note above records this exact trap).
-const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 5 : 4
+// requirement would send every Mac chasing an upgrade that does not exist
+// (the v3 note above records this exact trap). v6 adds the pre-simplified
+// *_trt.onnx graph — the raw export's 20k shape/scatter nodes shattered the
+// TensorRT partition and made the GPU slower than the CPU it sits next to.
+const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 6 : 4
 
 /** First pack format that ships the Beat This! runner + weights. */
 const PACK_FORMAT_WITH_BEATS = 4
@@ -280,7 +282,7 @@ const REGISTRY: RegistryEntry[] = [
         : process.arch === 'arm64'
           ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
-    sizeMb: process.platform === 'win32' ? 440 : process.arch === 'arm64' ? 272 : 259,
+    sizeMb: process.platform === 'win32' ? 530 : process.arch === 'arm64' ? 272 : 259,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??

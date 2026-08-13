@@ -62,6 +62,14 @@ ORT_MAINLINE_PIN="onnxruntime==1.28.0"
 # (nvml comes with the driver; cudart is the app's to ship) — proven on the
 # bench Dell. The wheel carries nvidia/cuda_runtime/bin/cudart64_12.dll.
 CUDART_WHL_URL="https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl"
+# The exported graph is partition-hostile: 24.8k nodes of which ~20k are
+# shape machinery (2954 Shape, 2090 Slice, 697 Range) plus 684 ScatterND —
+# TensorRT takes compute islands, the CPU EP gets the glue, and the
+# transfers at every seam made a real RTX 3060 SLOWER than its own CPU
+# (field RTF 1.19 vs 0.47). With the fixed (1,2,343980) input, onnxsim
+# folds it to ~1.4k pure-compute nodes, ScatterND-free, parity 1.5e-07.
+# The runner feeds the _trt.onnx sibling to TensorRT-RTX sessions only.
+ONNXSIM_PIN="onnxsim==0.7.3"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$ROOT/.engines-src/onnx-pack-$TARGET"
@@ -212,7 +220,7 @@ if ! "$EXPORT_PY" -c "import torch, beat_this, onnx, onnxscript" >/dev/null 2>&1
     "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
     "$EXPORT_PY" -m pip install --no-cache-dir "$TORCH_EXPORT_PIN" "$NUMPY_PIN" \
       "$TORCHAUDIO_PIN" "$EINOPS_PIN" "$ROTARY_PIN" "$SOXR_PIN" "$BEAT_THIS_PIN" \
-      "$ONNX_PIN" "$ONNXSCRIPT_PIN"
+      "$ONNX_PIN" "$ONNXSCRIPT_PIN" "$ONNXSIM_PIN"
   else
     GPU_PY="$ROOT/.engines-src/gpu-pack/python/bin/python3"
     if ! { [ -x "$GPU_PY" ] && "$GPU_PY" -c "import torch, beat_this" >/dev/null 2>&1; }; then
@@ -224,6 +232,55 @@ if ! "$EXPORT_PY" -c "import torch, beat_this, onnx, onnxscript" >/dev/null 2>&1
     "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
     "$EXPORT_PY" -m pip install --no-cache-dir "$ONNX_PIN" "$ONNXSCRIPT_PIN"
   fi
+fi
+
+# ---- TensorRT-friendly graph (win32 only) --------------------------------
+# Simplify the prewarmed model with its fixed input shape into a sibling
+# *_trt.onnx, then PARITY-GATE it through the pack's own onnxruntime — the
+# same discipline as the beat runner below. TensorRT-RTX sessions load the
+# sibling; DirectML-wheel CPU sessions keep the original untouched.
+if [ "$TARGET" = win32-x64 ]; then
+  MODEL_FILE=$(find "$WORK/python/model-cache" -name 'htdemucs_6s_fp16weights.onnx' -type f | head -n 1)
+  [ -n "$MODEL_FILE" ] || { echo "ERROR: prewarmed model not found for simplify" >&2; exit 1; }
+  TRT_MODEL="${MODEL_FILE%.onnx}_trt.onnx"
+  if [ ! -f "$TRT_MODEL" ]; then
+    # a venv cached from a pre-onnxsim build lacks it; idempotent and quick
+    "$EXPORT_PY" -m pip install --no-cache-dir --quiet "$ONNXSIM_PIN"
+    "$EXPORT_PY" - "$MODEL_FILE" "$TRT_MODEL" << 'PYEOF'
+import sys
+
+import onnx
+import onnxsim
+
+src, dst = sys.argv[1], sys.argv[2]
+m = onnx.load(src)
+simplified, ok = onnxsim.simplify(m, overwrite_input_shapes={"mix": [1, 2, 343980]})
+assert ok, "onnxsim reported failure"
+n_src = len(m.graph.node)
+n_dst = len(simplified.graph.node)
+print(f"simplified: {n_src} -> {n_dst} nodes")
+assert n_dst < 3000, f"simplify barely helped ({n_dst} nodes) — investigate before shipping"
+banned = {n.op_type for n in simplified.graph.node} & {"ScatterND", "Shape", "Range"}
+assert not banned, f"partition-hostile ops survived: {banned}"
+onnx.save(simplified, dst)
+PYEOF
+  fi
+  "$PY" - "$MODEL_FILE" "$TRT_MODEL" << 'PYEOF'
+import sys
+
+import numpy as np
+import onnxruntime as ort
+
+rng = np.random.default_rng(7)
+x = (rng.standard_normal((1, 2, 343980)) * 0.1).astype(np.float32)
+out = []
+for path in sys.argv[1:3]:
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    out.append(sess.run(["stems"], {"mix": x})[0])
+diff = float(np.abs(out[0] - out[1]).max())
+print(f"trt-graph parity vs original: max abs diff {diff:.2e}")
+assert diff < 1e-3, f"parity broken: {diff}"
+PYEOF
 fi
 
 # Export the two graphs (recipe: CPJKU/beat_this#12): the 20M model with a
@@ -370,10 +427,11 @@ find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
 
 # version stamp: the app refuses packs older than its required format
-# (v5 = the win32 pack ships the TensorRT-RTX plugin EP + mainline ort under
-# python/rtx — keep in sync with PACK_FORMAT_REQUIRED in src/main/models.ts)
+# (v6 = the win32 pack adds the pre-simplified *_trt.onnx graph the
+# TensorRT-RTX sessions load — keep in sync with PACK_FORMAT_REQUIRED in
+# src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 5, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 6, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python

@@ -81,12 +81,32 @@ def setup_trtrtx():
     confirmed = [False]
 
     def patched(*args, **kw):
+        # The raw export is partition-hostile (20k shape/scatter glue nodes
+        # shattered the TensorRT partition; the transfers at the seams made
+        # the GPU slower than the CPU) — the pack ships a pre-simplified
+        # sibling for TensorRT-RTX sessions only. CPU sessions never come
+        # through here and keep the original.
+        if args and isinstance(args[0], str) and args[0].endswith(".onnx"):
+            trt_model = args[0][:-5] + "_trt.onnx"
+            if os.path.isfile(trt_model):
+                args = (trt_model,) + args[1:]
+                print("TensorRT RTX: using the pre-simplified graph", flush=True)
+        opts = {"nv_detailed_build_log": "1"}
+        if args and isinstance(args[0], str):
+            # compiled-engine cache beside the model: the first split paid
+            # ~31 s of JIT on the field 3060; cached engines skip it.
+            cache_dir = os.path.join(os.path.dirname(args[0]), "trtrtx-cache")
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                opts["nv_runtime_cache_path"] = cache_dir
+            except OSError:
+                pass
         # setup only runs for trtrtx attempts, so every session this process
         # creates belongs on the TensorRT-RTX devices — argv was rewritten to
         # a value demucs's argparse accepts, so providers can't signal it.
         if kw.get("providers"):
             so = kw.get("sess_options") or ort.SessionOptions()
-            so.add_provider_for_devices(devs, {})
+            so.add_provider_for_devices(devs, opts)
             kw["sess_options"] = so
             kw.pop("providers", None)
             kw.pop("provider_options", None)
