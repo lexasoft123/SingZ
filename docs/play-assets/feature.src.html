@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1024px; height: 500px; overflow: hidden;
+    background: #12100d;
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .stage {
+    position: relative; width: 1024px; height: 500px;
+    display: grid; grid-template-columns: 1fr 470px; align-items: center;
+    background:
+      radial-gradient(760px 420px at 82% 50%, rgba(255,160,40,.16), transparent 62%),
+      radial-gradient(520px 340px at 6% 8%, rgba(255,92,101,.10), transparent 60%),
+      #12100d;
+  }
+  .left { padding: 0 0 0 74px; }
+  .word {
+    font-size: 104px; font-weight: 800; letter-spacing: -.045em;
+    color: #f4efe6; line-height: .92; margin: 0;
+  }
+  .word span { color: #ffa028; }
+  .rule { width: 62px; height: 5px; border-radius: 3px; background: #ffa028; margin: 26px 0 22px; }
+  .tag {
+    font-size: 27px; line-height: 1.34; color: #f4efe6; margin: 0;
+    font-weight: 600; letter-spacing: -.012em; max-width: 430px;
+  }
+  .sub {
+    font-size: 18.5px; line-height: 1.45; color: #9b917e; margin: 16px 0 0;
+    max-width: 415px; font-weight: 500;
+  }
+  .lanes {
+    position: relative; height: 500px; display: flex; flex-direction: column;
+    justify-content: center; gap: 19px; padding-right: 76px;
+  }
+  .lane { height: 30px; border-radius: 15px; position: relative; }
+  .lane::after {
+    content: ""; position: absolute; inset: 0; border-radius: 15px;
+    background: linear-gradient(90deg, rgba(255,255,255,.20), rgba(255,255,255,0) 55%);
+  }
+  .muted { opacity: .26; }
+</style>
+<div class="stage">
+  <div class="left">
+    <p class="word">Sing<span>Z</span></p>
+    <div class="rule"></div>
+    <p class="tag">The band keeps playing.<br>The vocal is yours.</p>
+    <p class="sub">Six separate tracks, lyrics that light up word by word,
+      and a pitch guide that shows where your voice really sits.</p>
+  </div>
+  <div class="lanes">
+    <div class="lane muted" style="background:#ff5c65; width:78%"></div>
+    <div class="lane"       style="background:#ffc53d; width:96%"></div>
+    <div class="lane"       style="background:#527dff; width:64%"></div>
+    <div class="lane"       style="background:#f98424; width:87%"></div>
+    <div class="lane"       style="background:#da81da; width:52%"></div>
+    <div class="lane"       style="background:#27e7bb; width:73%"></div>
+  </div>
+</div>

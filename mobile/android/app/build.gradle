@@ -72,6 +72,57 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+/**
+ * One version for the whole product: the desktop package.json is the source of
+ * truth, so a v0.14.0 tag ships a dmg, an installer and an AAB that agree.
+ * Play needs a strictly increasing integer, so the name is folded into one:
+ * 0.14.0 -> 1400 (minor and patch each get two digits).
+ *
+ * SINGZ_VERSION_CODE overrides it for the one case the formula cannot serve —
+ * re-uploading a build under a version Play has already seen (a rejected
+ * submission, a corrected bundle). Play refuses a versionCode twice.
+ */
+def pkg = new groovy.json.JsonSlurper().parse(file("../../../package.json"))
+def semver = (pkg.version =~ /^(\d+)\.(\d+)\.(\d+)/)
+if (!semver.find()) {
+    throw new GradleException("package.json version '${pkg.version}' is not major.minor.patch")
+}
+def singzVersionName = pkg.version
+def singzVersionCode = System.getenv('SINGZ_VERSION_CODE')?.toInteger() ?:
+    (semver.group(1).toInteger() * 10000 +
+     semver.group(2).toInteger() * 100 +
+     semver.group(3).toInteger())
+
+/**
+ * Release signing. The upload key never lives in the repo: locally it comes
+ * from android/keystore.properties (gitignored), in CI from the environment.
+ * With neither, a release build falls back to the debug key so a developer can
+ * still assembleRelease for a sideload — but that build is NOT shippable, and
+ * the warning below says so, because Play rejects a debug-signed upload with a
+ * message that does not mention which key it objected to.
+ */
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file("keystore.properties")
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def uploadStore = keystoreProps['storeFile'] ?: System.getenv('SINGZ_KEYSTORE_FILE')
+def uploadStorePassword = keystoreProps['storePassword'] ?: System.getenv('SINGZ_KEYSTORE_PASSWORD')
+def uploadKeyAlias = keystoreProps['keyAlias'] ?: System.getenv('SINGZ_KEY_ALIAS')
+def uploadKeyPassword = keystoreProps['keyPassword'] ?: System.getenv('SINGZ_KEY_PASSWORD')
+def hasUploadKey = uploadStore && rootProject.file(uploadStore).exists() &&
+    uploadStorePassword && uploadKeyAlias && uploadKeyPassword
+
+if (!hasUploadKey) {
+    gradle.taskGraph.whenReady { graph ->
+        if (graph.allTasks.any { it.name.toLowerCase().contains('release') }) {
+            logger.warn(
+                "\n  SingZ: no upload key — this release build is signed with the DEBUG key.\n" +
+                "         Google Play will reject it. See docs/ANDROID-RELEASE.md.\n")
+        }
+    }
+}
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -82,8 +133,8 @@ android {
         applicationId "com.lexasoft.singz"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode singzVersionCode
+        versionName singzVersionName
     }
     signingConfigs {
         debug {
@@ -92,15 +143,21 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        if (hasUploadKey) {
+            upload {
+                storeFile rootProject.file(uploadStore)
+                storePassword uploadStorePassword
+                keyAlias uploadKeyAlias
+                keyPassword uploadKeyPassword
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            signingConfig hasUploadKey ? signingConfigs.upload : signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
