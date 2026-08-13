@@ -2,6 +2,16 @@ name: Android
 
 on:
   workflow_dispatch:
+    inputs:
+      track:
+        description: 'Play track — "validate" checks credentials and ships nothing'
+        type: choice
+        default: validate
+        options: [validate, internal, closed, production]
+      metadata:
+        description: 'Also push the store listing text and graphics'
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -210,3 +220,56 @@ jobs:
           # .apk stays the sideload for the family fleet.
           cp mobile/android/app/build/outputs/bundle/release/app-release.aab "SingZ-$TAG-android.aab"
           gh release upload "$TAG" "SingZ-$TAG-android.apk" "SingZ-$TAG-android.aab" --clobber
+
+  # Play upload. Manual only, and defaulting to "validate", because a workflow
+  # that can reach production should never be one click away by accident.
+  # Never runs on a tag: tagging cuts a release, publishing it is a decision.
+  #
+  # The very first bundle for a package cannot come through here — the Play
+  # Developer API cannot create an app entry and refuses a package it has never
+  # seen. That upload is done by hand, once. See docs/ANDROID-RELEASE.md.
+  publish:
+    if: github.event_name == 'workflow_dispatch'
+    needs: artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: mobile/android
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SingZ-android
+          path: artifact
+
+      # upload-artifact keeps the common ancestor of the paths it was given, so
+      # the bundle arrives nested. Find it rather than hardcoding that shape.
+      - name: Put the bundle where fastlane looks for it
+        run: |
+          AAB=$(find artifact -name '*.aab' | head -1)
+          [ -n "$AAB" ] || { echo "::error::no .aab in the build artifact"; exit 1; }
+          mkdir -p mobile/android/app/build/outputs/bundle/release
+          cp "$AAB" mobile/android/app/build/outputs/bundle/release/app-release.aab
+
+      - name: Publish to Play
+        working-directory: mobile/android
+        env:
+          SUPPLY_JSON_KEY_DATA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          PLAY_CLOSED_TRACK: ${{ vars.PLAY_CLOSED_TRACK || 'alpha' }}
+          # fastlane refuses to run under a non-UTF-8 locale
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+        run: |
+          if [ -z "$SUPPLY_JSON_KEY_DATA" ]; then
+            echo "::error::PLAY_SERVICE_ACCOUNT_JSON is not set — see docs/ANDROID-RELEASE.md"
+            exit 1
+          fi
+          bundle exec fastlane android "${{ inputs.track }}"
+          if [ "${{ inputs.metadata }}" = "true" ]; then
+            bundle exec fastlane android metadata
+          fi

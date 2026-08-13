@@ -1,8 +1,9 @@
 # Google Play listing — SingZ
 
-Everything the Play Console asks for, written out so it can be pasted in rather
-than improvised at the keyboard. Field limits are noted; the copy below is
-already inside them.
+Everything the Play Console asks for that fastlane cannot upload for you — the
+declarations, the questionnaire answers, and the reasoning behind them — written
+out so they can be answered rather than improvised at the keyboard. The listing
+copy itself is version-controlled and pushed by fastlane; see below.
 
 > **The one claim to keep straight.** The phone app *plays* song projects; it
 > does not split them. Splitting happens in the SingZ desktop app, and the
@@ -14,66 +15,20 @@ already inside them.
 
 ## Store listing
 
-**App name** (30 chars max)
+The copy itself lives in `mobile/android/fastlane/metadata/android/en-US/`,
+because that is what fastlane uploads. Editing it here as well would create two
+answers to one question, and the one the store shows would be whichever fastlane
+read last.
 
-```
-SingZ — Sing With The Band
-```
+| Field | File | Limit |
+| --- | --- | --- |
+| App name | `title.txt` | 30 |
+| Short description | `short_description.txt` | 80 |
+| Full description | `full_description.txt` | 4000 |
+| Release notes | `changelogs/<versionCode>.txt` | 500 |
 
-**Short description** (80 chars max)
-
-```
-Practise singing with six-track stems, synced lyrics and a live pitch guide.
-```
-
-**Full description** (4000 chars max)
-
-```
-SingZ turns a song you already own into a rehearsal room.
-
-Instead of one flat recording, a SingZ song is six separate tracks — lead vocal,
-backing vocals, drums, bass, guitar and piano. Mute the lead vocal and the band
-plays on without you. Keep it in and sing along. Drop the drums to hear whether
-you are actually holding time. It is your song, taken apart, with every part on
-its own fader.
-
-HOW SONGS GET HERE
-
-This app is the player. Songs are prepared in the SingZ desktop app for Mac and
-Windows (free, open source), which does the separation and the lyric syncing on
-your computer. The phone then reads those finished songs — over Google Drive, or
-from a folder you copy across. If you have not made any songs yet, the app ships
-with one so you can try everything straight away.
-
-WHAT YOU CAN DO WHILE SINGING
-
-• Six faders, one per instrument. Silence what you want to replace.
-• Lyrics that light up word by word as the song plays — tap any line to jump
-  there.
-• A pitch guide that draws the melody and shows where your voice actually sits
-  against it.
-• Transpose to a key that suits your voice, without the song turning to chipmunk.
-• Slow a passage down without changing its pitch, until your mouth catches up.
-• Loop the eight bars you keep fumbling, with a count-in and a click if you
-  want one.
-
-PRACTICE THAT PUSHES BACK
-
-Training mode drops the tracks you lean on, on a schedule — every few bars, or
-at the start of each lyric line. The backing vocal disappears and you find out
-whether you knew the harmony or were following it. Turn it up as you improve.
-
-OFFLINE, AND YOURS
-
-Songs you open are kept on the phone, so the train, the car park and the green
-room all work with no signal. Google Drive sign-in is optional: SingZ asks only
-for access to files it created itself, never the rest of your Drive, and there
-is no SingZ account to make. No ads, no analytics, no tracking — the code is
-public if you would like to check.
-
-Bring your own music. SingZ has no catalogue and no store; it works on the
-recordings you already have.
-```
+`fastlane android preview` prints each one with its length and flags anything
+over, without touching the network.
 
 **Category:** Music & Audio
 **Tags:** Music, Karaoke, Singing, Practice
