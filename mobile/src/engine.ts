@@ -6,7 +6,11 @@ import {
   type GainNode
 } from 'react-native-audio-api'
 import { accentIndex, barLengthAt, beatIndexAtOrAfter, beatTime } from './beat'
-import { MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
+import { describeOutput } from './latency'
+import { log } from './log'
+// fmtTime here is the song-position one (M:SS); log.ts exports a same-named
+// wall-clock formatter, which is not what a play/pause line wants.
+import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
 
 /**
  * Port of the desktop MultitrackEngine (src/renderer/src/audio/engine.ts) onto
@@ -595,6 +599,11 @@ export class MultitrackEngine {
     this._playing = false
     this.applyGains(true)
     this.emit()
+    log(
+      'engine',
+      `loaded ${this.tracks.length} lanes · ${fmtTime(this.duration)} · ` +
+        `${this.ctx.sampleRate} Hz · ctx ${this.ctx.state}`
+    )
     if (opts.play) void this.play({ countIn: false })
   }
 
@@ -692,6 +701,22 @@ export class MultitrackEngine {
     this.syncClickWatcher()
     this.clickTick() // first clicks must land inside the initial lookahead
     this.emit()
+
+    // Deliberately not awaited: the route probe can take up to 3 s and play()
+    // must not wait on a diagnostic. The line lands a moment after the music.
+    const at = fmtTime(this.startOffset)
+    void describeOutput().then(({ text, silent }) => {
+      if (gen !== this.generation) return // a newer play() already reported
+      log('engine', `play from ${at} · ${text}`)
+      if (silent) {
+        log(
+          'engine',
+          'media volume is 0 — the song is playing but nothing will be heard. ' +
+            'Press volume up while SingZ is open.',
+          'warn'
+        )
+      }
+    })
   }
 
   pause(): void {
@@ -704,6 +729,7 @@ export class MultitrackEngine {
     if (!this._playing) return
     this.startOffset = this.audioPosition
     this._playing = false
+    log('engine', `pause at ${fmtTime(this.startOffset)}`)
     this.stopSources()
     this.cancelPendingClicks()
     this.nextClickIdx = null
@@ -851,6 +877,10 @@ export class MultitrackEngine {
    * per-process-limit jetsam kill after a few songs.
    */
   unload(): void {
+    // Leaving a song unloads then releases, and the teardown path can reach
+    // here twice; the second call has nothing to free and saying so twice
+    // just spends lines of a 400-line log.
+    if (this.tracks.length > 0) log('engine', `unload · ${this.tracks.length} lanes released`)
     this.teardown()
     this.training = null
     this.duration = 0

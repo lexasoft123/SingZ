@@ -138,6 +138,17 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
         map.putString("portType", portType)
         map.putString("portName", portName)
         map.putString("portUid", key)
+        // Media volume, so the log can say why a song was inaudible. A phone
+        // sitting at zero plays silently and the volume keys move the ringtone
+        // until something is audibly playing — indistinguishable, from the
+        // outside, from an app that cannot play at all. Normalized 0..1 for
+        // parity with iOS (which reports outputVolume); the raw index and its
+        // maximum ride along because "0 of 15" reads better in a report.
+        val volIdx = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val volMax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        map.putDouble("volume", if (volMax > 0) volIdx.toDouble() / volMax else 0.0)
+        map.putInt("volumeIndex", volIdx)
+        map.putInt("volumeMax", volMax)
         promise.resolve(map)
       } catch (e: Exception) {
         promise.reject("route", e.message ?: "Cannot read the audio route")

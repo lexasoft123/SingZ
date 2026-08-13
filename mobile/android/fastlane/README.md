@@ -37,7 +37,7 @@ Upload to the internal track
 [bundle exec] fastlane android closed
 ```
 
-Upload to the closed testing track (PLAY_CLOSED_TRACK, default 'alpha')
+Upload to the closed testing track (PLAY_CLOSED_TRACK, default 'Testing')
 
 ### android production
 

@@ -22,7 +22,12 @@ class AudioRouteInfo: NSObject {
       "ioBufferDuration": session.ioBufferDuration,
       "portType": port?.portType.rawValue ?? "unknown",
       "portName": port?.portName ?? "",
-      "portUid": port?.uid ?? ""
+      "portUid": port?.uid ?? "",
+      // Output volume, so the log can say why a song was inaudible. Already
+      // 0..1 here; Android normalizes its step index to match. iOS exposes no
+      // step count, so volumeIndex/volumeMax are Android-only and the JS side
+      // treats them as optional.
+      "volume": session.outputVolume
     ])
   }
 

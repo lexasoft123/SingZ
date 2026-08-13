@@ -41,9 +41,13 @@ platform :android do
     play_publish(track: "internal")
   end
 
-  desc "Upload to the closed testing track (PLAY_CLOSED_TRACK, default 'alpha')"
+  # The closed track is a CUSTOM one called "Testing", not Play's stock
+  # "alpha" — a custom track's API name is whatever it was named in the
+  # console, and asking for the wrong one returns an empty track rather than
+  # an error, which looks exactly like a release that failed to upload.
+  desc "Upload to the closed testing track (PLAY_CLOSED_TRACK, default 'Testing')"
   lane :closed do
-    play_publish(track: ENV.fetch("PLAY_CLOSED_TRACK", "alpha"))
+    play_publish(track: ENV.fetch("PLAY_CLOSED_TRACK", "Testing"))
   end
 
   desc "Upload to production as a staged rollout (PLAY_ROLLOUT, default 10%)"
