@@ -3,8 +3,14 @@
 <!--
   The first store screenshot: a poster, not a capture. Rendered at 1206x2144
   (exactly 9:16) by scripts/make-play-assets.sh, which inlines the hero capture
-  where __SHOT_B64__ is — so the screenshot itself lives in raw/ only, never
-  base64'd into the repo.
+  into the placeholder in the img src below — so the screenshot itself lives in
+  raw/ only, never base64'd into the repo.
+
+  That placeholder token must appear exactly ONCE in this file. It used to be
+  named here in prose too, and a plain string replace swaps only the first
+  match: the capture went into this comment, the img kept the literal token,
+  and the poster rendered with an empty phone. The script now refuses to build
+  if the count is not 1.
 -->
 <style>
   html,body{margin:0;padding:0}

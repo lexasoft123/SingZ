@@ -61,10 +61,22 @@ if [ -x "$CHROME" ] && [ -f "$OUT/poster.tmpl.html" ] && [ -f "$HERO" ]; then
   node -e '
     const fs = require("fs")
     const [tmpl, shot, out] = process.argv.slice(1)
-    fs.writeFileSync(out, fs.readFileSync(tmpl, "utf8")
-      .replace("__SHOT_B64__", fs.readFileSync(shot).toString("base64")))
-  ' "$OUT/poster.tmpl.html" "$TMP/hero.png" "$TMP/poster.html"
-  "$CHROME" --headless --disable-gpu --hide-scrollbars \
+    const marker = "__SHOT_B64__"
+    const t = fs.readFileSync(tmpl, "utf8")
+    // A plain replace swaps the FIRST match only. When the token also appeared
+    // in the file comment, the capture went there and the img kept the literal
+    // token — which renders as an empty phone, and looks like a design choice
+    // rather than a failure. Refuse to build unless there is exactly one.
+    const hits = t.split(marker).length - 1
+    if (hits !== 1) {
+      console.error(`poster template: expected ${marker} exactly once, found ${hits}`)
+      process.exit(1)
+    }
+    fs.writeFileSync(out, t.replace(marker, fs.readFileSync(shot).toString("base64")))
+  ' "$OUT/poster.tmpl.html" "$TMP/hero.png" "$TMP/poster.html" || { rm -rf "$TMP"; exit 1; }
+  # --virtual-time-budget: without it the screenshot can land before a data URI
+  # this large has decoded, which also yields an empty frame.
+  "$CHROME" --headless --disable-gpu --hide-scrollbars --virtual-time-budget=8000 \
     --screenshot="$OUT/screenshot-1-poster.png" --window-size=1206,2144 \
     "file://$TMP/poster.html" 2>/dev/null
   rm -rf "$TMP"
