@@ -69,7 +69,14 @@ CUDART_WHL_URL="https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93ce
 # (field RTF 1.19 vs 0.47). With the fixed (1,2,343980) input, onnxsim
 # folds it to ~1.4k pure-compute nodes, ScatterND-free, parity 1.5e-07.
 # The runner feeds the _trt.onnx sibling to TensorRT-RTX sessions only.
-ONNXSIM_PIN="onnxsim==0.7.3"
+# The fold itself needs ~16+ GB (std::bad_alloc on the CI runner), so the
+# simplified graph is built offline and pinned here; the parity gate below
+# still proves it against the prewarmed original on every pack build.
+# Regenerate: onnxsim==0.7.3, onnxsim.simplify(model,
+#   overwrite_input_shapes={"mix": [1, 2, 343980]}) — then upload to the
+# models-1 release and update the sha256.
+TRT_MODEL_URL="https://github.com/lexasoft123/SingZ/releases/download/models-1/htdemucs_6s_fp16weights_trt.onnx"
+TRT_MODEL_SHA256="086a8f63a74dbbfccf14865da6a8d6ca92f1bfca0181d4841f04291f98842d81"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$ROOT/.engines-src/onnx-pack-$TARGET"
@@ -220,7 +227,7 @@ if ! "$EXPORT_PY" -c "import torch, beat_this, onnx, onnxscript" >/dev/null 2>&1
     "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
     "$EXPORT_PY" -m pip install --no-cache-dir "$TORCH_EXPORT_PIN" "$NUMPY_PIN" \
       "$TORCHAUDIO_PIN" "$EINOPS_PIN" "$ROTARY_PIN" "$SOXR_PIN" "$BEAT_THIS_PIN" \
-      "$ONNX_PIN" "$ONNXSCRIPT_PIN" "$ONNXSIM_PIN"
+      "$ONNX_PIN" "$ONNXSCRIPT_PIN"
   else
     GPU_PY="$ROOT/.engines-src/gpu-pack/python/bin/python3"
     if ! { [ -x "$GPU_PY" ] && "$GPU_PY" -c "import torch, beat_this" >/dev/null 2>&1; }; then
@@ -235,36 +242,19 @@ if ! "$EXPORT_PY" -c "import torch, beat_this, onnx, onnxscript" >/dev/null 2>&1
 fi
 
 # ---- TensorRT-friendly graph (win32 only) --------------------------------
-# Simplify the prewarmed model with its fixed input shape into a sibling
-# *_trt.onnx, then PARITY-GATE it through the pack's own onnxruntime — the
-# same discipline as the beat runner below. TensorRT-RTX sessions load the
-# sibling; DirectML-wheel CPU sessions keep the original untouched.
+# Fetch the offline-simplified sibling *_trt.onnx (sha256-pinned), then
+# PARITY-GATE it through the pack's own onnxruntime against the prewarmed
+# original — the same discipline as the beat runner below. TensorRT-RTX
+# sessions load the sibling; DirectML-wheel CPU sessions keep the original.
 if [ "$TARGET" = win32-x64 ]; then
   MODEL_FILE=$(find "$WORK/python/model-cache" -name 'htdemucs_6s_fp16weights.onnx' -type f | head -n 1)
-  [ -n "$MODEL_FILE" ] || { echo "ERROR: prewarmed model not found for simplify" >&2; exit 1; }
+  [ -n "$MODEL_FILE" ] || { echo "ERROR: prewarmed model not found" >&2; exit 1; }
   TRT_MODEL="${MODEL_FILE%.onnx}_trt.onnx"
-  if [ ! -f "$TRT_MODEL" ]; then
-    # a venv cached from a pre-onnxsim build lacks it; idempotent and quick
-    "$EXPORT_PY" -m pip install --no-cache-dir --quiet "$ONNXSIM_PIN"
-    "$EXPORT_PY" - "$MODEL_FILE" "$TRT_MODEL" << 'PYEOF'
-import sys
-
-import onnx
-import onnxsim
-
-src, dst = sys.argv[1], sys.argv[2]
-m = onnx.load(src)
-simplified, ok = onnxsim.simplify(m, overwrite_input_shapes={"mix": [1, 2, 343980]})
-assert ok, "onnxsim reported failure"
-n_src = len(m.graph.node)
-n_dst = len(simplified.graph.node)
-print(f"simplified: {n_src} -> {n_dst} nodes")
-assert n_dst < 3000, f"simplify barely helped ({n_dst} nodes) — investigate before shipping"
-banned = {n.op_type for n in simplified.graph.node} & {"ScatterND", "Shape", "Range"}
-assert not banned, f"partition-hostile ops survived: {banned}"
-onnx.save(simplified, dst)
-PYEOF
+  if [ ! -f "$TRT_MODEL" ] || [ "$(sha_of "$TRT_MODEL")" != "$TRT_MODEL_SHA256" ]; then
+    curl -L --fail -o "$TRT_MODEL" "$TRT_MODEL_URL"
   fi
+  [ "$(sha_of "$TRT_MODEL")" = "$TRT_MODEL_SHA256" ] \
+    || { echo "ERROR: trt model sha256 mismatch" >&2; exit 1; }
   "$PY" - "$MODEL_FILE" "$TRT_MODEL" << 'PYEOF'
 import sys
 
