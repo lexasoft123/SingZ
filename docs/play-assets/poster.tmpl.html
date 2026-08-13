@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<!--
+  The first store screenshot: a poster, not a capture. Rendered at 1206x2144
+  (exactly 9:16) by scripts/make-play-assets.sh, which inlines the hero capture
+  where __SHOT_B64__ is — so the screenshot itself lives in raw/ only, never
+  base64'd into the repo.
+-->
+<style>
+  html,body{margin:0;padding:0}
+  body{
+    width:1206px;height:2144px;overflow:hidden;background:#12100d;
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .stage{
+    position:relative;width:1206px;height:2144px;
+    background:
+      radial-gradient(880px 700px at 50% 5%, rgba(255,160,40,.20), transparent 62%),
+      radial-gradient(700px 560px at 10% 42%, rgba(255,92,101,.10), transparent 60%),
+      radial-gradient(680px 540px at 94% 58%, rgba(39,231,187,.07), transparent 60%),
+      #12100d;
+  }
+  .copy{padding:126px 88px 0;text-align:center}
+  h1{
+    margin:0;font-size:114px;line-height:1.02;letter-spacing:-.037em;
+    font-weight:800;color:#f4efe6;
+  }
+  h1 em{font-style:normal;color:#ffa028}
+  p{
+    margin:36px auto 0;max-width:900px;font-size:38px;line-height:1.4;
+    color:#c3b9a5;font-weight:500;letter-spacing:-.005em;
+  }
+  .device{
+    position:absolute;left:50%;transform:translateX(-50%);
+    top:672px;width:836px;height:1332px;box-sizing:border-box;
+    border-radius:56px;padding:13px;background:#2b2721;
+    box-shadow:0 46px 130px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.08);
+  }
+  /* Anchored to the bottom of the capture so the six faders — the thing the
+     headline is actually about — are what the frame shows. */
+  .device img{
+    display:block;width:100%;height:100%;border-radius:44px;
+    object-fit:cover;object-position:bottom;
+  }
+</style>
+<div class="stage">
+  <div class="copy">
+    <h1>Mute the singer.<br><em>Keep the band.</em></h1>
+    <p>Every song splits into six tracks you control — drop the lead vocal and sing it yourself.</p>
+  </div>
+  <div class="device"><img src="data:image/png;base64,__SHOT_B64__"></div>
+</div>
