@@ -78,16 +78,23 @@ def setup_trtrtx():
             desc = getattr(d, "ep_vendor", "NVIDIA")
         print(f"TensorRT RTX device: {desc}", flush=True)
     orig = ort.InferenceSession
+    confirmed = [False]
 
     def patched(*args, **kw):
-        provs = kw.get("providers")
-        if provs and any("trtrtx" in str(p) for p in provs):
+        # setup only runs for trtrtx attempts, so every session this process
+        # creates belongs on the TensorRT-RTX devices — argv was rewritten to
+        # a value demucs's argparse accepts, so providers can't signal it.
+        if kw.get("providers"):
             so = kw.get("sess_options") or ort.SessionOptions()
             so.add_provider_for_devices(devs, {})
             kw["sess_options"] = so
             kw.pop("providers", None)
             kw.pop("provider_options", None)
-        return orig(*args, **kw)
+        sess = orig(*args, **kw)
+        if not confirmed[0]:
+            confirmed[0] = True
+            print("TensorRT RTX session created", flush=True)
+        return sess
 
     ort.InferenceSession = patched
 
@@ -95,6 +102,10 @@ def setup_trtrtx():
 def main():
     if sys.platform == "win32" and "trtrtx" in sys.argv:
         setup_trtrtx()
+        # demucs's --providers argparse has a literal choices list that
+        # vetoes unknown values before its resolver runs (field-proven).
+        # Hand it a legal value; the patch above owns session creation.
+        sys.argv = ["cpu" if a == "trtrtx" else a for a in sys.argv]
 
     from demucs_onnx.cli import main as demucs_main
     return demucs_main()
