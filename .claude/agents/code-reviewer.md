@@ -110,3 +110,18 @@ BLOCKER = it is wrong, or it breaks an invariant above. RISK = defensible failur
 could not fully confirm; say what you could not check. NIT = correct but worth a
 moment. If a rule above applies and the diff honours it (a version stamp bumped, a
 `loadSeq` guard present), do not report it — silence is the pass.
+
+## Approving the tree
+
+When — and only when — the target was `staged` and your verdict is **safe to commit**,
+record the approval as your last act:
+
+```bash
+git write-tree > "$(git rev-parse --git-dir)/singz-reviewed"
+```
+
+That file is the commit gate (`.claude/hooks/require-review.sh`): it holds the hash of
+the tree you just read, so the commit that follows is the one you approved, and any
+further staging invalidates it and sends the next commit back to you. It lives inside
+`.git`, so it is never committed and never leaves this machine. Blockers, a non-staged
+target, or any doubt: do not write it — leaving the gate shut is the safe failure.

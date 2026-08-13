@@ -332,13 +332,33 @@ answer your evals while you measure the phone.
 
 ## Conventions
 
-- **Every commit is reviewed first** — launch the `code-reviewer` agent
-  (`.claude/agents/`) on the staged diff, act on what it reports (fix it, or
-  say why not), then commit. It is read-only, so it never touches the tree.
-  Stage exactly what you mean to ship *before* launching it: the review reads
-  what is STAGED, and `git commit -- <paths>` would then commit working-tree
-  contents the review never saw. A merge commit that carries no new work of
-  its own is the one thing it has nothing to say about.
+- **Every commit is reviewed first, and the gate enforces it** — launch the
+  `code-reviewer` agent (`.claude/agents/`) on the staged diff, act on what it
+  reports (fix it, or say why not), then commit. It edits nothing; on a clean
+  verdict it writes the staged tree hash to `.git/singz-reviewed`, and
+  `.claude/hooks/require-review.sh` (PreToolUse/Bash, `.claude/settings.json`)
+  refuses `git commit` unless that marker matches the tree being committed —
+  so what ships is what was read, and staging one more hunk sends you back for
+  another look. Stage exactly what you mean to ship *before* launching it.
+  The forms whose tree is NOT the index are refused outright rather than
+  gated, because no review of the index can vouch for them: `-a/-am/--all`
+  sweeps up every modified tracked file, `-i/--include`, `-o/--only` and
+  `-p/--patch` compose their own tree, `git commit -- <paths>` takes
+  working-tree contents for those paths, and `-C/--git-dir` aims at a
+  repository this gate cannot see. **Staging and committing in one call is
+  refused too** (`git add … && git commit …`): the hook reads the index before
+  the command runs, so the tree it approves is the one from before the
+  staging — stage in its own call, review, then commit.
+  There is no exemption for a merge or rebase
+  in progress — a clean merge never runs `git commit` at all, so reaching the
+  gate mid-merge means someone resolved conflicts by hand, which is exactly
+  the code worth reading; `merge|rebase|cherry-pick --continue` is gated for
+  the same reason, since it commits one without saying the word.
+  `.claude/hooks/require-review.test.sh` is the truth table — every case in it
+  is there because the gate got it wrong once; run it after touching the hook.
+  `SINGZ_SKIP_REVIEW=1 git commit …` (leading env assignment, not merely
+  quoted in the message) is the deliberate way past, and it shows up in the
+  transcript as one.
 - **Parallel feature work happens in git worktrees** (one per feature, e.g.
   under `.claude/worktrees/<feature>`), never as concurrent edits to the same
   checkout — two sessions on one tree fight over builds, caches and
