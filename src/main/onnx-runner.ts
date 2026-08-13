@@ -106,19 +106,21 @@ def setup_trtrtx():
                 print(f"runtime cache before: {os.listdir(cache_dir) or 'empty'}", flush=True)
             except OSError:
                 pass
-            # Per-layer GPU timing (chrome-trace JSON): the card runs at 100%
-            # util / 95 W and still takes 6.9 s per chunk — ~2% of its FLOPS.
-            # The profile names the layers eating the other 98%. Printed by
-            # the runner itself after the split (see _print_trtrtx_profile).
-            prof = os.path.join(os.path.dirname(args[0]), "trtrtx-profile.json")
-            try:
-                if os.path.isfile(prof):
-                    os.remove(prof)
-                opts["nv_enable_profiling"] = "1"
-                opts["nv_profiling_output_file"] = prof
-                PROFILE_PATH.append(prof)
-            except OSError:
-                pass
+            # Per-layer GPU timing (chrome-trace JSON), on request only: it
+            # disables CUDA-graph replay AND invalidates the cached engine
+            # (a profiling session rebuilt for 108 s in the field). It found
+            # the ISTFT ConvTranspose pair eating 98% of all GPU time —
+            # rewritten to MatMul + overlap-add in the pack's v7 model.
+            if os.environ.get("SINGZ_TRTRTX_PROFILE") == "1":
+                prof = os.path.join(os.path.dirname(args[0]), "trtrtx-profile.json")
+                try:
+                    if os.path.isfile(prof):
+                        os.remove(prof)
+                    opts["nv_enable_profiling"] = "1"
+                    opts["nv_profiling_output_file"] = prof
+                    PROFILE_PATH.append(prof)
+                except OSError:
+                    pass
         # setup only runs for trtrtx attempts, so every session this process
         # creates belongs on the TensorRT-RTX devices — argv was rewritten to
         # a value demucs's argparse accepts, so providers can't signal it.

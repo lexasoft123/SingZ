@@ -93,9 +93,10 @@ export async function packOnnxModel(
 // Platform-aware: the Apple-Silicon torch pack still stamps 4, and a flat
 // requirement would send every Mac chasing an upgrade that does not exist
 // (the v3 note above records this exact trap). v6 adds the pre-simplified
-// *_trt.onnx graph — the raw export's 20k shape/scatter nodes shattered the
-// TensorRT partition and made the GPU slower than the CPU it sits next to.
-const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 6 : 4
+// *_trt.onnx graph; v7 rewrites its ISTFT from two ConvTranspose layers
+// (98% of all GPU time in the field per-layer profile) into MatMul +
+// overlap-add — the raw export was slower on an RTX 3060 than its own CPU.
+const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 7 : 4
 
 /** First pack format that ships the Beat This! runner + weights. */
 const PACK_FORMAT_WITH_BEATS = 4

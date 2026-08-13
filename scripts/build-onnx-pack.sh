@@ -76,7 +76,7 @@ CUDART_WHL_URL="https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93ce
 #   overwrite_input_shapes={"mix": [1, 2, 343980]}) — then upload to the
 # models-1 release and update the sha256.
 TRT_MODEL_URL="https://github.com/lexasoft123/SingZ/releases/download/models-1/htdemucs_6s_fp16weights_trt.onnx"
-TRT_MODEL_SHA256="086a8f63a74dbbfccf14865da6a8d6ca92f1bfca0181d4841f04291f98842d81"
+TRT_MODEL_SHA256="c42f0a9bc2e1b9942d47ac3d40fff2c99b9bb3daa843a61af645437293dd629e"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$ROOT/.engines-src/onnx-pack-$TARGET"
@@ -417,11 +417,12 @@ find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
 
 # version stamp: the app refuses packs older than its required format
-# (v6 = the win32 pack adds the pre-simplified *_trt.onnx graph the
-# TensorRT-RTX sessions load — keep in sync with PACK_FORMAT_REQUIRED in
-# src/main/models.ts)
+# (v7 = the *_trt.onnx graph additionally has its ISTFT rewritten from two
+# pathological ConvTranspose layers (98% of all GPU time in the field
+# profile) into MatMul + overlap-add — keep in sync with
+# PACK_FORMAT_REQUIRED in src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 6, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 7, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python
