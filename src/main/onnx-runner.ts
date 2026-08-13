@@ -20,6 +20,8 @@
 export const ONNX_RUNNER_PY = `
 import os, sys
 
+PROFILE_PATH = []
+
 
 def setup_trtrtx():
     """TensorRT-RTX plugin EP (GeForce RTX 30xx+) on MAINLINE ort, shipped
@@ -101,6 +103,20 @@ def setup_trtrtx():
             try:
                 os.makedirs(cache_dir, exist_ok=True)
                 opts["nv_runtime_cache_path"] = cache_dir
+                print(f"runtime cache before: {os.listdir(cache_dir) or 'empty'}", flush=True)
+            except OSError:
+                pass
+            # Per-layer GPU timing (chrome-trace JSON): the card runs at 100%
+            # util / 95 W and still takes 6.9 s per chunk — ~2% of its FLOPS.
+            # The profile names the layers eating the other 98%. Printed by
+            # the runner itself after the split (see _print_trtrtx_profile).
+            prof = os.path.join(os.path.dirname(args[0]), "trtrtx-profile.json")
+            try:
+                if os.path.isfile(prof):
+                    os.remove(prof)
+                opts["nv_enable_profiling"] = "1"
+                opts["nv_profiling_output_file"] = prof
+                PROFILE_PATH.append(prof)
             except OSError:
                 pass
         # setup only runs for trtrtx attempts, so every session this process
@@ -149,6 +165,39 @@ def setup_trtrtx():
     threading.Thread(target=_telemetry, daemon=True).start()
 
 
+def _print_trtrtx_profile():
+    """Session teardown flushes the IProfiler's chrome-trace file — force it
+    by draining demucs's session pool, then summarize per-layer GPU time."""
+    if not PROFILE_PATH:
+        return
+    try:
+        import gc
+
+        from demucs_onnx import inference as _inf
+        _inf._DEFAULT_POOL._sessions.clear()
+        gc.collect()
+    except Exception as err:
+        print(f"gpu profile: could not flush sessions ({err})", flush=True)
+    try:
+        import json
+        with open(PROFILE_PATH[0], "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+        events = data.get("traceEvents", data) if isinstance(data, dict) else data
+        totals = {}
+        for e in events:
+            if isinstance(e, dict) and "dur" in e and e.get("name"):
+                t = totals.setdefault(e["name"], [0.0, 0])
+                t[0] += float(e["dur"])
+                t[1] += 1
+        grand = sum(v[0] for v in totals.values()) / 1e6
+        print(f"gpu profile: {len(totals)} layers, {grand:.1f}s total GPU time", flush=True)
+        ranked = sorted(totals.items(), key=lambda kv: -kv[1][0])
+        for name, (dur, cnt) in ranked[:15]:
+            print(f"gpu profile: {dur / 1e6:7.2f}s  x{cnt:5d}  {name[:90]}", flush=True)
+    except Exception as err:
+        print(f"gpu profile unavailable ({err})", flush=True)
+
+
 def main():
     if sys.platform == "win32" and "trtrtx" in sys.argv:
         setup_trtrtx()
@@ -156,6 +205,10 @@ def main():
         # vetoes unknown values before its resolver runs (field-proven).
         # Hand it a legal value; the patch above owns session creation.
         sys.argv = ["cpu" if a == "trtrtx" else a for a in sys.argv]
+        from demucs_onnx.cli import main as demucs_main
+        ret = demucs_main()
+        _print_trtrtx_profile()
+        return ret
 
     from demucs_onnx.cli import main as demucs_main
     return demucs_main()
