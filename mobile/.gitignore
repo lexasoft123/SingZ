@@ -33,6 +33,11 @@ local.properties
 .cxx/
 *.keystore
 !debug.keystore
+# The Play upload key and its passwords. Under Play App Signing a lost upload
+# key is recoverable (Google resets it on request) — a leaked one is not, so
+# these live in a password manager, never here.
+*.jks
+keystore.properties
 .kotlin/
 
 # node.js

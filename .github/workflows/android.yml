@@ -66,8 +66,10 @@ jobs:
         run: ./gradlew :app:testDebugUnitTest
         working-directory: mobile/android
 
-  # Full APK: only on v* release tags and manual dispatch.
-  apk:
+  # Shippable artifacts: only on v* release tags and manual dispatch.
+  # The AAB is what Google Play takes; the APK is what the family sideloads.
+  # One gradle invocation builds both so the NDK objects are compiled once.
+  artifacts:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -87,12 +89,24 @@ jobs:
           cache-dependency-path: mobile/package-lock.json
 
       # Real builds carry the Google OAuth client (drive.file scope) — the
-      # repo never does. Absent secret -> Drive simply hides in the app.
+      # repo never does. Absent secret -> Drive simply hides in the app, which
+      # is fine for a dispatch build and unshippable for a release: the store
+      # listing promises sync. The test is in the shell, not a step `if`, so
+      # the log says which way it went.
       - name: Inject Google Drive OAuth client
-        if: env.GDRIVE_CONFIG != ''
         env:
           GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
-        run: printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
+        run: |
+          if [ -n "$GDRIVE_CONFIG" ]; then
+            printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
+            echo "Drive OAuth client injected."
+          elif [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            echo "::error::GDRIVE_CONFIG is not set — a release tag would ship with"\
+                 "Google Drive sync silently missing."
+            exit 1
+          else
+            echo "::warning::No GDRIVE_CONFIG — Drive sync is hidden in this build."
+          fi
 
       # make-sample.js (postinstall) encodes the synthesized sample via
       # ffmpeg; ccache makes the NDK compile of the audio engine incremental
@@ -118,23 +132,61 @@ jobs:
       - name: Pinned NDK + CMake
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1" > /dev/null
 
-      - name: Build release APK
+      # The Play upload key. Without it gradle falls back to the debug key,
+      # which Play rejects on upload with a message that never names the key —
+      # so a tag build fails here instead, where the cause is legible.
+      - name: Restore Play upload key
+        id: upload-key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is not set — a release tag cannot"\
+                   "produce a Play-shippable bundle. See docs/ANDROID-RELEASE.md."
+              exit 1
+            fi
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No upload key; this dispatch build is debug-signed and not shippable."
+          else
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release bundle + APK
         env:
           # CMake picks these up from the environment (>=3.17), so every
           # native module gets ccache without touching its build files
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_DIR: /home/runner/.ccache
+          SINGZ_KEYSTORE_FILE: ${{ steps.upload-key.outputs.signed == 'true' && format('{0}/upload.jks', runner.temp) || '' }}
+          SINGZ_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SINGZ_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          SINGZ_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           ccache -z
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew bundleRelease assembleRelease --no-daemon
           ccache -s | head -8
         working-directory: mobile/android
 
+      # Proof, in the log, of the two things Play refuses a bundle for:
+      # a key it does not expect, and a versionCode it has already seen.
+      - name: Report bundle identity
+        run: |
+          BUNDLE=mobile/android/app/build/outputs/bundle/release/app-release.aab
+          unzip -p "$BUNDLE" BUNDLE-METADATA/com.android.tools.build.gradle/app-metadata.properties || true
+          "$ANDROID_HOME"/build-tools/36.0.0/aapt2 dump badging \
+            mobile/android/app/build/outputs/apk/release/app-release.apk \
+            | grep -E "^package:" || true
+          keytool -printcert -jarfile "$BUNDLE" | grep -E "Owner:|SHA1:" || true
+
       - uses: actions/upload-artifact@v4
         with:
-          name: SingZ-android-apk
-          path: mobile/android/app/build/outputs/apk/release/app-release.apk
+          name: SingZ-android
+          path: |
+            mobile/android/app/build/outputs/bundle/release/app-release.aab
+            mobile/android/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
 
       - name: Attach to GitHub Release
@@ -154,4 +206,7 @@ jobs:
             gh release create "$TAG" --title "$TAG" --notes "" 2>/dev/null || true
           fi
           cp mobile/android/app/build/outputs/apk/release/app-release.apk "SingZ-$TAG-android.apk"
-          gh release upload "$TAG" "SingZ-$TAG-android.apk" --clobber
+          # The .aab is what gets uploaded to the Play Console by hand; the
+          # .apk stays the sideload for the family fleet.
+          cp mobile/android/app/build/outputs/bundle/release/app-release.aab "SingZ-$TAG-android.aab"
+          gh release upload "$TAG" "SingZ-$TAG-android.apk" "SingZ-$TAG-android.aab" --clobber
