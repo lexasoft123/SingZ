@@ -1,20 +1,27 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.1.0'
+  s.version      = '0.1.4'
   s.summary      = 'SingZ shared C++ engine core: on-device stem split + beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
   s.author       = 'SingZ'
   s.platforms    = { :ios => '15.1' }
   s.source       = { :path => '.' }
-  # One source tree with Android (mobile/native/core); the glob is evaluated
-  # at pod install, so re-run it after files land there (podspec version bump
-  # re-globs — the FolderAccess/audio-api patch-3 lesson).
-  s.source_files = '*.{h,mm}', '../../native/core/*.{h,cpp}'
+  # One source tree with Android: core/ is a COPY of mobile/native/core
+  # materialized by mobile/scripts/sync-singzcore.js (postinstall; gitignored).
+  # CocoaPods silently drops source_files globs that reach above the podspec
+  # dir AND skips directory symlinks (both measured: libSingzCore.a shipped
+  # without ort_env.o and the app link died on singz::ortProbeJson) — copying
+  # is the only shape that works, the audio-api patch-3 lesson. After editing
+  # native/core: rerun the sync, bump this version, pod install (re-glob).
+  s.source_files = '*.{h,mm}', 'core/*.{h,cpp}'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
-    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/../../native/core"'
+    # onnxruntime-c ships its headers flat under Pods/onnxruntime-c/Headers
+    # (not inside the xcframework), and dependents don't inherit a search
+    # path for them.
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core" "$(PODS_ROOT)/onnxruntime-c/Headers"'
   }
   s.dependency 'React-Core'
   # Same 1.23.x minor the desktop packs and the Android AAR pin (trunk's

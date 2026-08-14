@@ -29,6 +29,11 @@ mobile/src/gdrive-config.ts
 # the desktop analysis sources (postinstall); never tracked
 mobile/src/gen/
 
+# SingzCore pod's copy of the shared C++ core — materialized from
+# mobile/native/core by mobile/scripts/sync-singzcore.js (postinstall);
+# CocoaPods cannot glob outside the pod dir, so the copy exists only locally
+mobile/ios/SingzCore/core/
+
 # local-only tooling state: the logged-in Ultimate Guitar browser profile the
 # score-scout agent drives (contains a live session cookie — never commit it)
 .local/

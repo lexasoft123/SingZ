@@ -233,8 +233,19 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     the WebView fallback stays designed-but-unbuilt.
   - ORT AAR = onnxruntime 1.23.2, legacy layout, all four ABIs
     (libonnxruntime.so ≈ 19 MB arm64).
+  - **iOS simulator (iPhone 16 Pro sim on the M2, 2026-08-14)** — the full
+    Phase-0 pass runs there too: SingzCore pod executes all three graphs
+    (logmel 1.2 ms/run; beat_this 30 s chunk 0.58 s; htdemucs_6s segment
+    **1.82 s**, load 3.2 s — M2 silicon ≈ desktop-class, so this brackets the
+    real-iPhone number, it does not replace it), and the Hermes spike is
+    **bit-perfect against the same baseline** (melody 57.9 s + beats 1.1 s,
+    350 beats / 7 187 f0 frames identical). Three runtimes now agree exactly:
+    node/V8, Android Hermes, iOS Hermes. The sim run also caught a REAL core
+    bug the phone had survived on allocator luck — a use-after-free chaining
+    `GetInputTypeInfo(0).GetTensorTypeAndShapeInfo()` off the temporary
+    (SIGSEGV in GetDimensions; fixed in ort_env.cpp, both platforms rebuilt).
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
-    formally), sustained multi-segment peak RSS, iPhone CPU-vs-CoreML
+    formally), sustained multi-segment peak RSS, real-iPhone CPU-vs-CoreML
     segment times, `zipalign -c -P 16` on the packaged APK.
 
 ## Top risks

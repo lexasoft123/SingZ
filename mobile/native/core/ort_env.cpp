@@ -85,7 +85,12 @@ OrtProbeResult ortProbe(const std::string& modelPath) {
     // engines.
     Ort::AllocatorWithDefaultOptions alloc;
     auto inName = session.GetInputNameAllocated(0, alloc);
-    auto inInfo = session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
+    // The TypeInfo must outlive the shape view: GetTensorTypeAndShapeInfo()
+    // returns an Unowned reference INTO the TypeInfo, and chaining it off the
+    // temporary is a use-after-free (Android survived on allocator luck; the
+    // iOS simulator SIGSEGV'd in GetDimensions — caught by the Phase-0 run).
+    Ort::TypeInfo inTypeInfo = session.GetInputTypeInfo(0);
+    auto inInfo = inTypeInfo.GetTensorTypeAndShapeInfo();
     std::vector<int64_t> shape = inInfo.GetShape();
     for (auto& d : shape) {
       if (d <= 0) d = 2;
