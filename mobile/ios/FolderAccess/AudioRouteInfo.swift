@@ -22,7 +22,27 @@ class AudioRouteInfo: NSObject {
       "ioBufferDuration": session.ioBufferDuration,
       "portType": port?.portType.rawValue ?? "unknown",
       "portName": port?.portName ?? "",
-      "portUid": port?.uid ?? ""
+      "portUid": port?.uid ?? "",
+      // Output volume, so the log can say why a song was inaudible. Already
+      // 0..1 here; Android normalizes its step index to match. iOS exposes no
+      // step count, so volumeIndex/volumeMax are Android-only and the JS side
+      // treats them as optional.
+      "volume": session.outputVolume
+    ])
+  }
+
+  /// Counterpart of the Android getAppInfo — the build/device header a bug
+  /// report needs. iOS exposes no cheap total-RAM figure worth reporting, so
+  /// the memory fields are Android-only and the JS side treats them as
+  /// optional rather than printing zeroes that mean nothing.
+  @objc func getAppInfo(
+    _ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let info = Bundle.main.infoDictionary
+    resolve([
+      "version": info?["CFBundleShortVersionString"] as? String ?? "",
+      "build": info?["CFBundleVersion"] as? String ?? "",
+      "abi": "arm64"
     ])
   }
 

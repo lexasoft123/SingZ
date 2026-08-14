@@ -154,10 +154,30 @@ export async function driveSignIn(): Promise<void> {
     refresh_token?: string
     expires_in?: number
     id_token?: string
+    scope?: string
     error_description?: string
   }
   if (!tok.access_token || !tok.refresh_token) {
     throw new Error(tok.error_description ?? 'Google did not issue tokens')
+  }
+  // Google's consent screen lets a signer approve the account and decline the
+  // Drive tick box. That yields perfectly good tokens that can do nothing but
+  // say who you are, and every later call answers 403 — so what was actually
+  // granted is written down at the one moment it is known for certain.
+  const granted = tok.scope ?? ''
+  const hasDrive = granted.includes('drive.file')
+  log(
+    'gdrive',
+    `signed in · scopes: ${granted || '(none reported)'}`,
+    hasDrive ? 'info' : 'warn'
+  )
+  if (!hasDrive) {
+    log(
+      'gdrive',
+      'Drive access was NOT granted at sign-in — listing songs will fail. ' +
+        'Sign out, sign in again, and allow Drive access.',
+      'error'
+    )
   }
   await writeTokens({
     access: tok.access_token,
@@ -253,10 +273,42 @@ async function readJson<T>(key: string, fallback: T): Promise<T> {
 const writeJson = (key: string, value: unknown): Promise<void> =>
   Prefs.setTextPref(key, JSON.stringify(value))
 
+/**
+ * Google says WHY it refused, in the body — and a bare status code throws that
+ * away. "Drive API 403" reached a tester with an empty log and could have been
+ * a missing scope, a disabled API or a quota; they are one word apart in the
+ * response and a support round-trip apart without it.
+ */
+async function driveError(res: Response, where: string): Promise<Error> {
+  let reason = ''
+  let detail = ''
+  try {
+    const body = (await res.json()) as {
+      error?: { message?: string; errors?: { reason?: string }[] }
+    }
+    reason = body.error?.errors?.[0]?.reason ?? ''
+    detail = body.error?.message ?? ''
+  } catch {
+    // a non-JSON error body tells us nothing extra; the status still does
+  }
+  // The one a singer can act on: consent completed, but the Drive tick box
+  // was not granted, so the token can sign in and nothing else.
+  const hint =
+    reason === 'insufficientPermissions' || reason === 'forbidden'
+      ? ' — SingZ was not granted access to Drive. Sign out, sign in again, and allow Drive access.'
+      : reason === 'accessNotConfigured'
+        ? ' — the Drive API is not enabled for this app build.'
+        : ''
+  const parts = [reason, detail].filter(Boolean).join(': ')
+  const line = `Drive API ${res.status} on ${where}${parts ? ` (${parts})` : ''}${hint}`
+  log('gdrive', line, 'error')
+  return new Error(line)
+}
+
 async function api<T>(path: string): Promise<T> {
   const token = await accessToken()
   const res = await fetch(`${API()}${path}`, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error(`Drive API ${res.status} on ${path.split('?')[0]}`)
+  if (!res.ok) throw await driveError(res, path.split('?')[0])
   return (await res.json()) as T
 }
 

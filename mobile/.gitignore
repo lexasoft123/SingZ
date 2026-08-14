@@ -40,6 +40,15 @@ local.properties
 keystore.properties
 .kotlin/
 
+# Play publishing. The service-account JSON grants upload rights to the whole
+# listing — it belongs in a password manager and a CI secret, nowhere else.
+android/fastlane/play-service-account.json
+# supply's image tree is staged from docs/play-assets at run time, so the same
+# PNGs are never committed twice
+android/fastlane/metadata/android/en-US/images/
+android/fastlane/report.xml
+android/fastlane/Preview.html
+
 # node.js
 #
 node_modules/

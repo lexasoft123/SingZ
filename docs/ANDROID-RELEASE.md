@@ -119,7 +119,68 @@ in [PLAY-LISTING.md](PLAY-LISTING.md).
 
 Automating this comes later: the Play Developer API cannot create an app entry,
 and refuses uploads for a package that has never had one uploaded by hand. The
-first bundle goes up through the Console no matter what.
+first bundle goes up through the Console no matter what. Every upload after that
+is fastlane's job — see below.
+
+## Publishing with fastlane
+
+`mobile/android/fastlane/` drives [supply](https://docs.fastlane.tools/actions/supply/).
+Lanes, all run from `mobile/android`:
+
+| Lane | What it does |
+| --- | --- |
+| `preview` | Stages the listing and prints every field with its length. No network. |
+| `validate` | Uploads nothing; proves the service account and the bundle are acceptable. |
+| `internal` | Bundle → internal track. |
+| `closed` | Bundle → closed track (`PLAY_CLOSED_TRACK`, default `alpha`). |
+| `production` | Bundle → production as a staged rollout (`PLAY_ROLLOUT`, default 10%). |
+| `metadata` | Listing text and graphics only, no binary. |
+
+```bash
+cd mobile/android && bundle exec fastlane android validate
+```
+
+The release lanes deliberately do **not** push the listing. Shipping a binary
+should not silently rewrite the shopfront, so changing the store page is its own
+lane, run on purpose.
+
+Graphics are not committed under `fastlane/`. They are staged at run time from
+`docs/play-assets/` into the tree supply expects, so the same PNGs are never
+stored twice and `scripts/make-play-assets.sh` stays the one place they are made.
+
+Release notes come from `docs/release-notes/v<version>.md`, folded into
+`changelogs/<versionCode>.txt` and truncated at Play's 500-character limit with a
+warning — write that file by hand when the note is longer than the store allows.
+
+### The service account
+
+supply authenticates as a service account, not as you:
+
+1. Play Console → **Setup → API access** → link a Google Cloud project.
+2. In that project, create a service account and download a **JSON key**.
+3. Back in Play Console → **Users and permissions** → invite the service
+   account's email, granting *Release manager* (or at minimum: view app
+   information, and release to the tracks you intend to use).
+4. Permissions take a few minutes to propagate. Until they do, `validate` fails
+   with a 401 that says nothing useful — wait, then retry.
+
+Locally, drop the JSON at `mobile/android/fastlane/play-service-account.json`
+(gitignored). For CI, put its **contents** in a repo secret named
+`PLAY_SERVICE_ACCOUNT_JSON` — the workflow passes it through
+`SUPPLY_JSON_KEY_DATA` so the credential never touches the runner's disk.
+
+That key can publish to your listing. It belongs in a password manager and a
+CI secret, nowhere else.
+
+### From CI
+
+The **Android** workflow's `publish` job is manual only (`workflow_dispatch`),
+with a track chooser defaulting to `validate`. It never runs on a tag: tagging
+cuts a release, publishing it is a separate decision. Tick `metadata` on the
+dispatch form to push the listing in the same run.
+
+If your closed track is not named `alpha`, set a repo **variable**
+`PLAY_CLOSED_TRACK` to its actual name.
 
 ## First release: the personal-account path
 

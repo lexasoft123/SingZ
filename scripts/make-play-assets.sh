@@ -47,18 +47,67 @@ else
   echo "skipped feature graphic — Google Chrome not installed" >&2
 fi
 
+# --- hero poster (the first screenshot) ------------------------------------
+# The first screenshot is the one people actually look at, so it is composed
+# rather than captured: headline over a framed shot of the mixer. The template
+# carries no image data — the capture is inlined here at run time so it lives
+# in raw/ only.
+HERO=$RAW/hero-mixer.png
+if [ -x "$CHROME" ] && [ -f "$OUT/poster.tmpl.html" ] && [ -f "$HERO" ]; then
+  TMP=$(mktemp -d)
+  # Strip the status and navigation bars; a store poster showing an emulator
+  # clock and debug icons looks like a screenshot of a development machine.
+  ffmpeg -y -loglevel error -i "$HERO" -vf "crop=1080:2144:0:112" -pix_fmt rgb24 "$TMP/hero.png"
+  node -e '
+    const fs = require("fs")
+    const [tmpl, shot, out] = process.argv.slice(1)
+    const marker = "__SHOT_B64__"
+    const t = fs.readFileSync(tmpl, "utf8")
+    // A plain replace swaps the FIRST match only. When the token also appeared
+    // in the file comment, the capture went there and the img kept the literal
+    // token — which renders as an empty phone, and looks like a design choice
+    // rather than a failure. Refuse to build unless there is exactly one.
+    const hits = t.split(marker).length - 1
+    if (hits !== 1) {
+      console.error(`poster template: expected ${marker} exactly once, found ${hits}`)
+      process.exit(1)
+    }
+    fs.writeFileSync(out, t.replace(marker, fs.readFileSync(shot).toString("base64")))
+  ' "$OUT/poster.tmpl.html" "$TMP/hero.png" "$TMP/poster.html" || { rm -rf "$TMP"; exit 1; }
+  # --virtual-time-budget: without it the screenshot can land before a data URI
+  # this large has decoded, which also yields an empty frame.
+  "$CHROME" --headless --disable-gpu --hide-scrollbars --virtual-time-budget=8000 \
+    --screenshot="$OUT/screenshot-1-poster.png" --window-size=1206,2144 \
+    "file://$TMP/poster.html" 2>/dev/null
+  rm -rf "$TMP"
+  echo "screenshot-1-poster.png"
+elif [ ! -x "$CHROME" ]; then
+  echo "skipped poster — Google Chrome not installed" >&2
+fi
+
 # --- screenshots -----------------------------------------------------------
-# A 1080x2400 phone is 2.22:1, which Play rejects. Cropping 112px off the top
-# and the rest off the bottom lands at 1080x2144 (1.985:1) AND takes the status
-# and navigation bars with it, which a store listing is better without.
+# Two steps, because the console asks for two different things.
+#
+# Crop: a 1080x2400 phone is 2.22:1, past the "longest side <= 2x shortest"
+# limit. Taking 112px off the top and the rest off the bottom lands at
+# 1080x2144 and removes the status and navigation bars, which a store listing
+# is better without.
+#
+# Pad: the upload form asks for 16:9 or 9:16 exactly, which 1080x2144 (1.985:1)
+# is not, even though it satisfies the documented 2:1 rule. Widening to 1206
+# (2144 * 9/16) makes it exactly 9:16 and crops nothing — the bars are the app's
+# own background colour and invisible against its dark UI.
 shopt -s nullglob
 n=0
 for src in "$RAW"/*.png; do
   name=$(basename "$src")
+  # the hero is the poster's source, not a screenshot of its own
+  [ "${name#hero-}" != "$name" ] && continue
   h=$(sips -g pixelHeight "$src" | awk '/pixelHeight/{print $2}')
   w=$(sips -g pixelWidth  "$src" | awk '/pixelWidth/{print $2}')
   if [ "$w" = "1080" ] && [ "$h" = "2400" ]; then
-    ffmpeg -y -loglevel error -i "$src" -vf "crop=1080:2144:0:112" \
+    ffmpeg -y -loglevel error -i "$src" \
+      -vf "crop=1080:2144:0:112,pad=1206:2144:63:0:0x12100d" \
       -pix_fmt rgb24 "$OUT/screenshot-$name"
   else
     # Unknown geometry: strip alpha, leave framing alone, and say so.

@@ -1,0 +1,6 @@
+source 'https://rubygems.org'
+
+# Android publishing only. The CocoaPods Gemfile one level up is a separate
+# bundle on purpose — the Play upload job has no business resolving a native
+# CocoaPods extension to send a file to Google.
+gem 'fastlane'

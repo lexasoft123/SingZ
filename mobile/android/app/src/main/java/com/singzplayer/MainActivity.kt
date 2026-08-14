@@ -1,5 +1,6 @@
 package com.singzplayer
 
+import android.media.AudioManager
 import android.os.Bundle
 import android.view.WindowManager
 import com.facebook.react.ReactActivity
@@ -14,6 +15,14 @@ class MainActivity : ReactActivity() {
     // Singers read lyrics hands-free — keep the screen on while SingZ is
     // in the foreground (the flag only applies while this window shows).
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+    // The volume keys control MEDIA the whole time SingZ is open, not only
+    // while sound is already coming out. Without this, a phone whose media
+    // volume sits at zero is a dead end: play does nothing, the volume keys
+    // move the ringtone instead because no media is audibly playing yet, and
+    // the app looks broken. That is what the first closed-test round reported
+    // as "it doesn't play songs" — the engine was running the whole time.
+    volumeControlStream = AudioManager.STREAM_MUSIC
   }
 
   /**

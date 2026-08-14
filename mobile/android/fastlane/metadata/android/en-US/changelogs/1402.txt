@@ -1,0 +1,3 @@
+Fixed: songs that played silently.
+
+The volume keys now control media volume the whole time SingZ is open, not only once sound is already coming out. If your phone's media volume happened to sit at zero, pressing play did nothing audible and turning the volume up did not help — the keys were moving the ringtone instead. Nothing was wrong with the song.
