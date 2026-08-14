@@ -130,9 +130,9 @@ Lanes, all run from `mobile/android`:
 | Lane | What it does |
 | --- | --- |
 | `preview` | Stages the listing and prints every field with its length. No network. |
-| `validate` | Uploads nothing; proves the service account and the bundle are acceptable. |
+| `validate` | Ships nothing; proves the service account, the bundle **and the track** are acceptable. |
 | `internal` | Bundle → internal track. |
-| `closed` | Bundle → closed track (`PLAY_CLOSED_TRACK`, default `alpha`). |
+| `closed` | Bundle → the closed track (see `PLAY_CLOSED_TRACK` below). |
 | `production` | Bundle → production as a staged rollout (`PLAY_ROLLOUT`, default 10%). |
 | `metadata` | Listing text and graphics only, no binary. |
 
@@ -202,6 +202,19 @@ The closed track here is a custom one named `Testing`. If that ever changes,
 set a repo **variable** `PLAY_CLOSED_TRACK` to the new name — asking Play for a
 track that does not exist returns an empty track rather than an error, which
 looks exactly like an upload that silently failed.
+
+That name has exactly one default, in the Fastfile. The workflow passes the
+variable straight through and adds nothing of its own. v0.15.0's publish failed
+because the workflow line used to end in `|| 'alpha'`: a stock track nobody has
+ever opened in the console, so Play took the whole 133 MB bundle and only then
+answered `Release in track targeting no countries` — an error that names neither
+the track nor the cure. Two defaults for one setting is one too many.
+
+A track has to be opened once **by hand** in the console — its countries, and for
+a closed track its tester list — before the API may release into it. No upload
+does that part, so a brand-new track always needs one console visit first.
+`validate` now rehearses against the real closed track, which is enough to catch
+this before a tag does: run it when the track changes.
 
 ## First release: the personal-account path
 

@@ -30,10 +30,24 @@ def singz_version
   [name, code]
 end
 
+# The closed track's name is decided HERE and nowhere else. v0.15.0 shipped
+# into "alpha" because the workflow carried a second default of its own and the
+# two disagreed — the caller passes PLAY_CLOSED_TRACK through or passes nothing.
+# ENV.fetch is not enough on its own: CI sets the variable to the empty string
+# when the repo has no value for it, and an empty track name reaches Play as a
+# track that cannot exist.
+def closed_track
+  name = ENV["PLAY_CLOSED_TRACK"].to_s.strip
+  name.empty? ? "Testing" : name
+end
+
 platform :android do
-  desc "Check the service account and the bundle without shipping anything"
+  # Against the track a tag really uses, not a spare one: the track name is
+  # itself something that can be wrong, and a rehearsal on "internal" would
+  # have waved v0.15.0's "alpha" straight through.
+  desc "Check the service account, the bundle and the track without shipping anything"
   lane :validate do
-    play_publish(track: "internal", validate_only: true)
+    play_publish(track: closed_track, validate_only: true)
   end
 
   desc "Upload to the internal track"
@@ -47,7 +61,7 @@ platform :android do
   # an error, which looks exactly like a release that failed to upload.
   desc "Upload to the closed testing track (PLAY_CLOSED_TRACK, default 'Testing')"
   lane :closed do
-    play_publish(track: ENV.fetch("PLAY_CLOSED_TRACK", "Testing"))
+    play_publish(track: closed_track)
   end
 
   desc "Upload to production as a staged rollout (PLAY_ROLLOUT, default 10%)"
@@ -88,7 +102,7 @@ platform :android do
     # changelogs are skipped. Naming the track and the code it already holds
     # satisfies it without shipping anything.
     upload_to_play_store(
-      track: ENV.fetch("PLAY_CLOSED_TRACK", "Testing"),
+      track: closed_track,
       version_code: code,
       skip_upload_aab: true,
       skip_upload_apk: true,
@@ -148,19 +162,38 @@ private_lane :play_publish do |options|
   sync_changelog
   UI.message("SingZ #{name} (#{code}) -> #{options[:track]}")
 
-  upload_to_play_store(
-    track: options[:track],
-    aab: AAB_PATH,
-    validate_only: options[:validate_only] || false,
-    rollout: options[:rollout],
-    release_status: options[:rollout] ? "inProgress" : "completed",
-    skip_upload_apk: true,
-    # A binary upload must not rewrite the shopfront — that is the `metadata`
-    # lane's job, run on purpose.
-    skip_upload_metadata: true,
-    skip_upload_images: true,
-    skip_upload_screenshots: true
-  )
+  begin
+    upload_to_play_store(
+      track: options[:track],
+      aab: AAB_PATH,
+      validate_only: options[:validate_only] || false,
+      rollout: options[:rollout],
+      release_status: options[:rollout] ? "inProgress" : "completed",
+      skip_upload_apk: true,
+      # A binary upload must not rewrite the shopfront — that is the `metadata`
+      # lane's job, run on purpose.
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true
+    )
+  rescue => e
+    # Play answers a track nobody ever opened in the console with "Release in
+    # track targeting no countries" — which names neither the track nor the
+    # cure, and arrives only after the whole bundle has gone up. Say which
+    # track, and what to do about it.
+    raise unless e.message.include?("targeting no countries")
+    UI.user_error!(<<~MSG)
+      Play refused the release: the '#{options[:track]}' track targets no countries.
+
+      That is what an untouched track says. A track has to be opened once in the
+      Play Console — countries and, for a closed track, its tester list — before
+      the API may release into it. No upload can do that part.
+
+      Either open '#{options[:track]}' in the console, or point PLAY_CLOSED_TRACK
+      at the track you actually test on. Nothing was published; the version code
+      is still free.
+    MSG
+  end
 
   if options[:validate_only]
     UI.success("Validated. Credentials and bundle are acceptable; nothing was shipped.")

@@ -21,7 +21,7 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 [bundle exec] fastlane android validate
 ```
 
-Check the service account and the bundle without shipping anything
+Check the service account, the bundle and the track without shipping anything
 
 ### android internal
 
