@@ -18,6 +18,14 @@ on:
       - 'mobile/**'
       - '.github/workflows/android.yml'
     tags: ['v*']
+  # Keeps main's ccache warm. Actions caches cannot be shared between tags —
+  # a run reads only its own ref and the DEFAULT BRANCH — so a tag build can
+  # never inherit from a sibling tag, and the artifacts job otherwise runs on
+  # tags only. That left every release compiling the NDK from cold: measured
+  # 32 minutes at a 0% ccache hit rate. This weekly build exists purely so
+  # main owns a recent cache for the next tag to inherit.
+  schedule:
+    - cron: '17 4 * * 1'
 
 permissions:
   contents: write
@@ -80,7 +88,10 @@ jobs:
   # The AAB is what Google Play takes; the APK is what the family sideloads.
   # One gradle invocation builds both so the NDK objects are compiled once.
   artifacts:
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -124,14 +135,22 @@ jobs:
       - name: ffmpeg + ccache
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg ccache
 
+      # The key carries the run id because actions/cache is WRITE-ONCE per key:
+      # with a stable key the first save is frozen forever and later runs
+      # restore it but never save an improved one. That is not a theory — the
+      # first CI build of this job reported "Hits: 0 / 712 (0.00%)". A unique
+      # key per run plus a prefix restore means every run inherits the best
+      # previous cache and then saves a superset.
       - name: ccache store
         uses: actions/cache@v4
         with:
           path: ~/.ccache
+          key: ccache-apk-${{ hashFiles('mobile/package-lock.json', 'mobile/scripts/patch-audio-api.js') }}-${{ github.run_id }}
           # audio-api version or our C++ patches changing invalidates most
-          # objects anyway; restore-keys keeps partial hits across bumps
-          key: ccache-apk-${{ hashFiles('mobile/package-lock.json', 'mobile/scripts/patch-audio-api.js') }}
-          restore-keys: ccache-apk-
+          # objects anyway; the bare prefix keeps partial hits across bumps
+          restore-keys: |
+            ccache-apk-${{ hashFiles('mobile/package-lock.json', 'mobile/scripts/patch-audio-api.js') }}-
+            ccache-apk-
 
       # postinstall applies the audio-api C++ patches and fails loud on
       # upstream drift. It also synthesizes the bundled sample project (an
@@ -175,6 +194,10 @@ jobs:
           SINGZ_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           SINGZ_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          # Bounded: a unique cache key per run means many entries, and the
+          # repo shares a 10 GB LRU budget with the desktop workflows' engine
+          # caches. 600M holds a full cold build (measured: 145 MB) with room.
+          ccache -M 600M
           ccache -z
           ./gradlew bundleRelease assembleRelease --no-daemon
           ccache -s | head -8
