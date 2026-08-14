@@ -17,6 +17,9 @@ on:
     paths:
       - 'mobile/**'
       - '.github/workflows/android.yml'
+      # editing the release notes should check the store text they generate
+      - 'docs/release-notes/**'
+      - 'scripts/store-notes.cjs'
     tags: ['v*']
   # Keeps main's ccache warm. Actions caches cannot be shared between tags —
   # a run reads only its own ref and the DEFAULT BRANCH — so a tag build can
@@ -53,6 +56,15 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: mobile/package-lock.json
+
+      # A warning, not a failure: the version is often bumped before the notes
+      # are written, and blocking every intermediate push on prose nobody has
+      # composed yet would just teach people to ignore a red canary. The
+      # publish job refuses outright, which is the gate that matters.
+      - name: Store notes match the release notes
+        run: |
+          node scripts/store-notes.cjs --check ||
+            echo "::warning::Store notes are not ready — the publish job will refuse this."
 
       # make-sample.js (postinstall) encodes the synthesized sample via ffmpeg
       - name: ffmpeg for the sample-song generator
