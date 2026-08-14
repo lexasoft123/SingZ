@@ -12,9 +12,10 @@ import {
   type SeparateResult,
   type StemName6
 } from '../shared/types'
+import { ONNX_RUNNER_PY } from './onnx-runner'
 import { stemsRoot } from './media'
 import { log, logChunk } from './log'
-import { dmlFlagPath, isOnnxPack, packDir, packOnnxModel, packPython } from './models'
+import { isOnnxPack, packDir, packOnnxModel, packPython, packRtxEpPath, trtrtxFlagPath } from './models'
 
 const MODEL = 'htdemucs_6s'
 const PROBE_TIMEOUT_MS = 45_000
@@ -143,9 +144,17 @@ export async function writeInputWav(outDir: string, ch0: Float32Array, ch1: Floa
   return dest
 }
 
-function friendlyError(tail: string): string {
+export function friendlyError(tail: string): string {
+  // ORT's Windows logger writes its [E] lines wide (a NUL between every
+  // character), so "887A0006" never matches the raw stream — the log only
+  // looks clean because log() strips NULs for display. Match what's meant.
+  tail = tail.replace(/\u0000/g, '')
   if (/8007000E|Not enough memory resources/i.test(tail))
     return 'The graphics card ran out of memory for this model.'
+  // Before the generic DML check: DmlExecutionProvider appears in these
+  // stacks too (as a C++ source path), but hung-and-reset is its own story.
+  if (/887A0006|887A0007|DEVICE_HUNG|DEVICE_RESET/i.test(tail))
+    return 'The graphics driver stopped responding while running this model (Windows reset the GPU).'
   if (/887A0005|DXGI_ERROR_DEVICE_REMOVED|device.{0,10}removed|DmlExecutionProvider/i.test(tail))
     return 'The graphics driver could not run this model (GPU device removed).'
   if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
@@ -165,6 +174,28 @@ function friendlyError(tail: string): string {
     .map((l) => l.trim())
     .filter(Boolean)
   return `Separation failed: ${lines.slice(-3).join(' — ').slice(0, 400) || 'unknown error'}`
+}
+
+
+/**
+ * Env for an ONNX splitter spawn. Exported for the unit test that pins what
+ * the child actually sees — a test build once shipped an attempt flag that
+ * never left the parent process, and the field run silently repeated the
+ * previous attempt byte for byte.
+ */
+export function onnxSpawnEnv(): NodeJS.ProcessEnv {
+  return {
+    ...spawnEnv(),
+    // Progress lines must arrive live, not on exit (block buffering
+    // left the UI on "Warming up" for whole splits).
+    PYTHONUNBUFFERED: '1',
+    // Piped stdout falls back to the ANSI codepage on localized
+    // Windows — GPU device names arrive as mojibake without this.
+    PYTHONUTF8: '1',
+    // The model ships inside the pack; a broken pack must fail fast
+    // with a clear error, never silently re-download 166 MB.
+    HF_HUB_OFFLINE: '1'
+  }
 }
 
 export class Separator {
@@ -192,7 +223,7 @@ export class Separator {
     }
     // App-managed GPU pack (works on "clean OS" too — it is our own download).
     // macOS pack = PyTorch/MPS (checkpoint via TORCH_HOME/HF_HOME inside the
-    // pack); Windows pack = demucs-onnx with DirectML.
+    // pack); Windows pack = demucs-onnx with TensorRT RTX on 30xx+ GPUs.
     if (await exists(packPython())) {
       if (isOnnxPack()) {
         // Require the embedded model too — a half-extracted pack has a
@@ -248,11 +279,14 @@ export class Separator {
   private describe(e: ResolvedEngine): string {
     if (e.kind === 'onnx') {
       if (process.platform !== 'win32') return 'splitter pack (ONNX)'
-      // The marker flips the actual provider to CPU — a label still claiming
-      // DirectML misled every field log read after a GPU failure.
-      return existsSync(dmlFlagPath())
-        ? 'splitter pack (CPU — DirectML is switched off here)'
-        : 'splitter pack (DirectML)'
+      // The marker flips the actual provider — a label still claiming a GPU
+      // engine misled every field log read after a failure. An old pack that
+      // never had the engine is its own story (a field log claimed "switched
+      // off" on a machine that had simply not updated yet).
+      if (!existsSync(packRtxEpPath()))
+        return 'splitter pack (CPU — this pack has no GPU engine, update it in the model manager)'
+      if (!existsSync(trtrtxFlagPath())) return 'splitter pack (TensorRT RTX)'
+      return 'splitter pack (CPU — the GPU engine is switched off here)'
     }
     return e.cmd.join(' ')
   }
@@ -396,7 +430,7 @@ export class Separator {
     })
   }
 
-  /** demucs-onnx pack: DirectML with CPU fallback on Windows, CPU on Intel Macs. */
+  /** demucs-onnx pack: TensorRT RTX with CPU fallback on Windows, CPU on Intel Macs. */
   private async runOnnx(
     engine: { cmd: string[] },
     input: string,
@@ -405,30 +439,37 @@ export class Separator {
     onProgress: (p: SeparationProgress) => void
   ): Promise<SeparateResult> {
     // A GPU that crashed or stalled on this model once will do it again —
-    // don't make every split pay the DirectML tax before falling back.
+    // don't make every split pay a GPU tax before falling back.
     // (CoreML crashes compiling this graph, so Intel Macs go straight to CPU.)
-    let providers = process.platform === 'win32' ? ['dml', 'cpu'] : ['cpu']
-    if (providers.includes('dml') && (await exists(dmlFlagPath()))) {
-      log(
-        'splitter',
-        'DirectML is switched off on this machine after an earlier failure — using the CPU engine (pick GPU in the model manager to try it again)'
-      )
-      providers = ['cpu']
+    // Windows GPU ladder: TensorRT-RTX plugin EP (GeForce RTX 30xx+), then
+    // CPU. DirectML is gone — across the whole fleet it never completed a
+    // split (fused = TDR device-hung, unfused = ISTFT OOM). A failed trtrtx
+    // attempt writes a marker so it costs one attempt per machine, ever.
+    let attempts: Array<{ provider: string }> = [{ provider: 'cpu' }]
+    if (process.platform === 'win32') {
+      const rtxShipped = existsSync(packRtxEpPath())
+      const rtxOff = await exists(trtrtxFlagPath())
+      if (rtxShipped && rtxOff)
+        log(
+          'splitter',
+          'TensorRT RTX is switched off on this machine after an earlier failure (pick GPU in the model manager to try it again)'
+        )
+      attempts = [...(rtxShipped && !rtxOff ? [{ provider: 'trtrtx' }] : []), { provider: 'cpu' }]
     }
     let last: SeparateResult = { ok: false, error: 'not started' }
-    for (const provider of providers) {
-      log('splitter', `trying ONNX provider: ${provider}`)
-      last = await this.spawnOnnx(engine, provider, input, outDir, stems, onProgress)
+    for (const attempt of attempts) {
+      log('splitter', `trying ONNX provider: ${attempt.provider}`)
+      last = await this.spawnOnnx(engine, attempt, input, outDir, stems, onProgress)
       if (last.ok || (!last.ok && last.cancelled)) return last
-      log('splitter', `provider ${provider} failed: ${last.error}`, 'warn')
-      if (provider === 'dml') {
+      log('splitter', `provider ${attempt.provider} failed: ${last.error}`, 'warn')
+      if (attempt.provider === 'trtrtx') {
         try {
           await writeFile(
-            dmlFlagPath(),
+            trtrtxFlagPath(),
             JSON.stringify({ at: new Date().toISOString(), reason: last.error }, null, 2),
             'utf8'
           )
-          log('splitter', 'DirectML marked as broken here — future splits go straight to CPU', 'warn')
+          log('splitter', 'TensorRT RTX marked as broken here — future splits go straight to CPU', 'warn')
         } catch {
           // purely an optimization marker — never fail the split over it
         }
@@ -439,7 +480,7 @@ export class Separator {
 
   private spawnOnnx(
     engine: { cmd: string[] },
-    provider: string,
+    attempt: { provider: string },
     input: string,
     outDir: string,
     stems: Partial<Record<StemName6, string>>,
@@ -447,8 +488,12 @@ export class Separator {
   ): Promise<SeparateResult> {
     return new Promise<SeparateResult>((resolve) => {
       const tmpOut = join(outDir, 'onnx-out')
+      // The runner replaces the -c shim so the TensorRT-RTX plugin EP can
+      // be wired up (see onnx-runner.ts); written per split so field packs
+      // need no update, next to input44k.wav where cleanup already reigns.
+      const runner = join(outDir, 'onnx-runner.py')
       const args = [
-        ...engine.cmd.slice(1),
+        runner,
         'separate',
         input,
         tmpOut,
@@ -459,39 +504,30 @@ export class Separator {
         '--cache-dir',
         join(packDir(), 'python', 'model-cache'),
         '--providers',
-        provider,
+        attempt.provider,
         '-v'
       ]
       void rm(tmpOut, { recursive: true, force: true })
         .then(() => mkdir(tmpOut, { recursive: true }))
+        .then(() => writeFile(runner, ONNX_RUNNER_PY, 'utf8'))
         .then(() => {
           log('splitter', `run: ${engine.cmd[0]} ${args.join(' ')}`)
-          const child = spawn(engine.cmd[0], args, {
-            env: {
-              ...spawnEnv(),
-              // Progress lines must arrive live, not on exit (block buffering
-              // left the UI on "Warming up" for whole splits).
-              PYTHONUNBUFFERED: '1',
-              // The model ships inside the pack; a broken pack must fail fast
-              // with a clear error, never silently re-download 166 MB.
-              HF_HUB_OFFLINE: '1'
-            }
-          })
+          const child = spawn(engine.cmd[0], args, { env: onnxSpawnEnv() })
           this.child = child
           // The bar moves as soon as the engine is up (session compile can
           // take a while on first DirectML run — 0% beats a frozen label).
           onProgress({ stage: 'separating', percent: 0 })
 
           // The engine is mute while onnxruntime compiles the model for the
-          // GPU (minutes on a first DirectML run) — say so instead of nothing,
+          // GPU (the first TensorRT RTX run JIT-compiles an engine) — say so instead of nothing,
           // and give up on a compile that goes nowhere (device-removed GPUs
           // burned 10 minutes before crashing).
           let lastOutput = Date.now()
           let sawOutput = false
           let timedOut = false
-          // Chunk-pace watchdog: a DirectML session can "work" pathologically
-          // slowly (seen in the field: ~18 min per 7.8 s chunk when DML lands
-          // on the WARP software adapter). First chunk gets 10 minutes (it
+          // Chunk-pace watchdog: a GPU session can "work" pathologically
+          // slowly (seen in the field: ~18 min per 7.8 s chunk when DirectML
+          // landed on the WARP software adapter). First chunk gets 10 minutes (it
           // includes the one-time GPU compile), later chunks 5 — anything
           // slower loses to CPU on every machine we have, so bailing is right.
           const sessionStart = Date.now()
@@ -501,12 +537,12 @@ export class Separator {
           const CHUNK_LIMIT_S = 300
           const heartbeat = setInterval(() => {
             const quiet = Math.round((Date.now() - lastOutput) / 1000)
-            if (provider === 'dml' && !timedOut) {
+            if (attempt.provider !== 'cpu' && !timedOut) {
               if (!sawOutput && quiet >= 240) {
                 timedOut = true
                 log(
                   'splitter',
-                  'DirectML produced nothing for 4 minutes — giving up on it and switching to the CPU engine',
+                  'The GPU engine produced nothing for 4 minutes — giving up on it and switching engines',
                   'warn'
                 )
                 child.kill('SIGTERM')
@@ -521,7 +557,7 @@ export class Separator {
                   timedOut = true
                   log(
                     'splitter',
-                    `DirectML is running far too slowly here (${sinceChunk}s on chunk ${chunksSeen + 1} — CPU will be much faster) — switching engines`,
+                    `The GPU engine is running far too slowly here (${sinceChunk}s on chunk ${chunksSeen + 1} — CPU will be much faster) — switching engines`,
                     'warn'
                   )
                   child.kill('SIGTERM')
@@ -540,16 +576,11 @@ export class Separator {
           }, 30_000)
 
           let tail = ''
-          // demucs-onnx retries on CPU internally when DirectML dies — the
-          // process then exits 0 and our own fallback never fires, so watch
-          // for the library's fallback line to remember the broken GPU.
-          let internalCpuFallback = false
           const consume = (chunk: Buffer): void => {
             lastOutput = Date.now()
             sawOutput = true
             const text = chunk.toString('utf8')
             tail = (tail + text).slice(-8000)
-            if (/Falling back to \['CPUExecutionProvider'\]/.test(text)) internalCpuFallback = true
             logChunk('splitter', text)
             // "    chunk 3/12: 4.1s elapsed"
             for (const m of text.matchAll(/chunk (\d+)\/(\d+)/g)) {
@@ -578,32 +609,12 @@ export class Separator {
               return
             }
             if (timedOut) {
-              resolve({ ok: false, error: 'DirectML ran too slowly on this machine.' })
+              resolve({ ok: false, error: 'The GPU engine ran too slowly on this machine.' })
               return
             }
             void (async () => {
               try {
                 if (code !== 0) throw new Error(friendlyError(tail))
-                if (provider === 'dml' && internalCpuFallback) {
-                  try {
-                    await writeFile(
-                      dmlFlagPath(),
-                      JSON.stringify(
-                        { at: new Date().toISOString(), reason: 'engine fell back to CPU internally' },
-                        null,
-                        2
-                      ),
-                      'utf8'
-                    )
-                    log(
-                      'splitter',
-                      'DirectML failed inside the engine — future splits go straight to CPU',
-                      'warn'
-                    )
-                  } catch {
-                    // marker is an optimization only
-                  }
-                }
                 await mkdir(join(outDir, MODEL), { recursive: true })
                 for (const stem of STEMS_6) {
                   const src = join(tmpOut, `${stem}.wav`)

@@ -244,11 +244,13 @@ jobs:
           # same notes-at-create logic as build.yml — whichever workflow wins
           # the race publishes the release already titled and noted
           NOTES="docs/release-notes/$TAG.md"
+          # same prerelease rule as build.yml: hyphenated tags never go "latest"
+          PRE=(); case "$TAG" in *-*) PRE=(--prerelease);; esac
           if [ -f "$NOTES" ]; then
             tail -n +2 "$NOTES" > /tmp/relnotes-body.md
-            gh release create "$TAG" --title "$(head -n 1 "$NOTES")" --notes-file /tmp/relnotes-body.md 2>/dev/null || true
+            gh release create "$TAG" "${PRE[@]}" --title "$(head -n 1 "$NOTES")" --notes-file /tmp/relnotes-body.md 2>/dev/null || true
           else
-            gh release create "$TAG" --title "$TAG" --notes "" 2>/dev/null || true
+            gh release create "$TAG" "${PRE[@]}" --title "$TAG" --notes "" 2>/dev/null || true
           fi
           cp mobile/android/app/build/outputs/apk/release/app-release.apk "SingZ-$TAG-android.apk"
           # The .aab is what gets uploaded to the Play Console by hand; the
@@ -299,7 +301,12 @@ jobs:
         working-directory: mobile/android
         env:
           SUPPLY_JSON_KEY_DATA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-          PLAY_CLOSED_TRACK: ${{ vars.PLAY_CLOSED_TRACK || 'alpha' }}
+          # Deliberately no default here — the Fastfile owns it. This line used
+          # to end in `|| 'alpha'`, which is a stock track nobody ever opened in
+          # the console, so v0.15.0 uploaded its whole bundle and was then told
+          # "Release in track targeting no countries". Two defaults for one
+          # setting is one too many; set the repo variable to override.
+          PLAY_CLOSED_TRACK: ${{ vars.PLAY_CLOSED_TRACK }}
           # fastlane refuses to run under a non-UTF-8 locale
           LANG: C.UTF-8
           LC_ALL: C.UTF-8

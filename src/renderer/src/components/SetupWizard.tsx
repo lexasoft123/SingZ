@@ -163,7 +163,11 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
             type="button"
             className="pill ghost"
             onClick={() => {
-              void window.singz.cancelModels()
+              // Skip closes the first-run wizard but lets a running download
+              // finish in the background — a 525 MB pack died twice in the
+              // field to an impatient Skip, and the splitter then "couldn't
+              // download". Deliberately opened dialogs keep Close = cancel.
+              if (!(origin === 'auto' && busy)) void window.singz.cancelModels()
               onClose()
             }}
           >

@@ -5,7 +5,7 @@
 # torch/MPS pack from build-gpu-pack.sh).
 #
 # Usage: scripts/build-onnx-pack.sh [win32-x64|darwin-x64]
-#   win32-x64  — onnxruntime-directml (GPU on any vendor, CPU fallback)
+#   win32-x64  — mainline onnxruntime + TensorRT-RTX plugin EP (RTX 30xx+)
 #   darwin-x64 — onnxruntime CPU (CoreML crashes on this graph)
 set -euo pipefail
 
@@ -16,13 +16,13 @@ case "$TARGET" in
     PBS_PY="cpython-3.12.13+${PBS_TAG}-x86_64-pc-windows-msvc-install_only.tar.gz"
     PYBIN="python/python.exe"
     SITE="python/Lib/site-packages"
-    WANT_DML=1
+    WIN_PACK=1
     ;;
   darwin-x64)
     PBS_PY="cpython-3.12.13+${PBS_TAG}-x86_64-apple-darwin-install_only.tar.gz"
     PYBIN="python/bin/python3"
     SITE="python/lib/python3.12/site-packages"
-    WANT_DML=0
+    WIN_PACK=0
     ;;
   *)
     echo "unknown target: $TARGET" >&2
@@ -48,6 +48,36 @@ ONNXSCRIPT_PIN="onnxscript==0.7.1"  # …and the dynamo fallback needs onnxscrip
 BEAT_CKPT_SHA256="8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331"
 BEAT_CKPT_URL="https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt"
 
+# TensorRT-RTX plugin EP (win32 only): DML is frozen at ORT 1.24 (sustained
+# engineering) and dies on htdemucs both fused (TDR device-hung) and unfused
+# (ISTFT ConvTranspose OOM). NVIDIA's prebuilt zip is self-contained — the
+# EP dll AND the whole TRT-RTX runtime — and rides MAINLINE ort, shipped
+# side by side under python/rtx and swapped into sys.path by the runner.
+# cu12 flavor: oldest-driver compatibility across the fleet (581.x is fine).
+TRTRTX_EP_TAG="v0.4.0"
+TRTRTX_EP_ZIP="TensorRT-RTX-EP-ABI-${TRTRTX_EP_TAG}-cu12.zip"
+TRTRTX_EP_URL="https://github.com/NVIDIA/TensorRT-RTX-EP-ABI/releases/download/${TRTRTX_EP_TAG}/${TRTRTX_EP_ZIP}"
+ORT_MAINLINE_PIN="onnxruntime==1.28.0"
+# The EP dll hard-depends on cudart64_12.dll, which drivers never install
+# (nvml comes with the driver; cudart is the app's to ship) — proven on the
+# bench Dell. The wheel carries nvidia/cuda_runtime/bin/cudart64_12.dll.
+CUDART_WHL_URL="https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl"
+# THE model (one file, both engines): the raw export is partition-hostile
+# (24.8k nodes, ~20k shape machinery + 684 ScatterND) and its ISTFT-as-
+# ConvTranspose ate 98% of all GPU time (per-layer field profile, RTX 3060
+# at 100% util / 95 W losing to its own CPU). The pinned artifact is the
+# offline-rebuilt graph: onnxsim-folded with the fixed (1,2,343980) input
+# (needs ~16+ GB — std::bad_alloc on the CI runner, hence offline), ISTFT
+# rewritten as MatMul + overlap-add (2.42 s per song on a 4060 Ti, RTF
+# 0.02), weights stored fp16 with cast-to-fp32 (the original distribution's
+# own trick; parity 2.3e-05). It REPLACES the prewarmed original in the hub
+# cache, so cpu and TensorRT-RTX load the identical file; the parity gate
+# below proves the swap against the just-prewarmed original on every build.
+# Regenerate: onnxsim 0.7.3 fold -> ISTFT OLA rewrite -> fp16 initializers
+# >1MB (2026-08-13 GPU investigation); upload to models-1, update sha256.
+SIM_MODEL_URL="https://github.com/lexasoft123/SingZ/releases/download/models-1/htdemucs_6s_sim_fp16.onnx"
+SIM_MODEL_SHA256="a339096332dc5cac7789431d9e59b2b1dd3d3b93724a3455b2a3886c7544925f"
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$ROOT/.engines-src/onnx-pack-$TARGET"
 OUT="$ROOT/vendor/packs"
@@ -69,10 +99,12 @@ if ! "$PY" -c "import demucs_onnx, onnxruntime" >/dev/null 2>&1; then
   tar -C "$WORK" -xzf "$WORK/$PBS_PY"
   "$PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
   "$PY" -m pip install --no-cache-dir demucs-onnx
-  if [ "$WANT_DML" = 1 ]; then
-    # swap the CPU-only onnxruntime for the DirectML build (same module name)
+  if [ "$WIN_PACK" = 1 ]; then
+    # ONE onnxruntime: mainline, pinned — it hosts the TensorRT-RTX plugin
+    # EP (needs >=1.23) and runs the cpu provider and the beat runner. The
+    # frozen onnxruntime-directml wheel left with DirectML itself.
     "$PY" -m pip uninstall -y onnxruntime >/dev/null
-    "$PY" -m pip install --no-cache-dir onnxruntime-directml
+    "$PY" -m pip install --no-cache-dir "$ORT_MAINLINE_PIN"
   fi
 fi
 
@@ -88,6 +120,35 @@ if [ "$TARGET" = win32-x64 ]; then
   done
   [ -f "$WORK/python/msvcp140.dll" ] || { echo "ERROR: msvcp140.dll not bundled" >&2; exit 1; }
   [ -f "$WORK/python/vcruntime140.dll" ] || { echo "ERROR: vcruntime140.dll not bundled" >&2; exit 1; }
+
+  # ---- TensorRT-RTX plugin EP payload -----------------------------------
+  if [ ! -d "$WORK/python/rtx/ep" ]; then
+    if [ ! -f "$WORK/$TRTRTX_EP_ZIP" ]; then
+      curl -L --fail -o "$WORK/$TRTRTX_EP_ZIP" "$TRTRTX_EP_URL"
+    fi
+    rm -rf "$WORK/python/rtx"
+    mkdir -p "$WORK/python/rtx"
+    "$PY" -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+      "$WORK/$TRTRTX_EP_ZIP" "$WORK/python/rtx/ep-unpack"
+    mv "$WORK/python/rtx/ep-unpack"/TensorRT-RTX-EP-ABI-* "$WORK/python/rtx/ep"
+    rmdir "$WORK/python/rtx/ep-unpack"
+    rm -f "$WORK/python/rtx/ep"/*.pdb
+    [ -f "$WORK/python/rtx/ep/onnxruntime_providers_nv_tensorrt_rtx.dll" ] \
+      || { echo "ERROR: TRT-RTX EP dll missing after unzip" >&2; exit 1; }
+    if [ ! -f "$WORK/cudart.whl" ]; then
+      curl -L --fail -o "$WORK/cudart.whl" "$CUDART_WHL_URL"
+    fi
+    "$PY" -c "
+import os, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+dlls = [n for n in z.namelist() if n.lower().endswith('.dll')]
+assert dlls, 'no dlls in cudart wheel'
+for n in dlls:
+    open(os.path.join(sys.argv[2], os.path.basename(n)), 'wb').write(z.read(n))
+print('cudart shipped:', [os.path.basename(n) for n in dlls])
+" "$WORK/cudart.whl" "$WORK/python/rtx/ep"
+    [ -f "$WORK/python/rtx/ep/cudart64_12.dll" ] || { echo "ERROR: cudart64_12.dll missing" >&2; exit 1; }
+  fi
 fi
 
 # embed the model + validate the stack (CPU provider: CI runners have no GPU)
@@ -174,6 +235,40 @@ if ! "$EXPORT_PY" -c "import torch, beat_this, onnx, onnxscript" >/dev/null 2>&1
     "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
     "$EXPORT_PY" -m pip install --no-cache-dir "$ONNX_PIN" "$ONNXSCRIPT_PIN"
   fi
+fi
+
+# ---- The ONE model: simplified graph, OLA ISTFT, fp16 weights ------------
+# Fetch the pinned artifact, PARITY-GATE it against the just-prewarmed
+# original through the pack's own onnxruntime (same discipline as the beat
+# runner below), then REPLACE the original in the hub cache — cpu and
+# TensorRT-RTX sessions load the identical file.
+if [ "$TARGET" = win32-x64 ]; then
+  MODEL_FILE=$(find "$WORK/python/model-cache" -name 'htdemucs_6s_fp16weights.onnx' -type f | head -n 1)
+  [ -n "$MODEL_FILE" ] || { echo "ERROR: prewarmed model not found" >&2; exit 1; }
+  TRT_MODEL="$WORK/htdemucs_6s_sim_fp16.onnx"
+  if [ ! -f "$TRT_MODEL" ] || [ "$(sha_of "$TRT_MODEL")" != "$SIM_MODEL_SHA256" ]; then
+    curl -L --fail -o "$TRT_MODEL" "$SIM_MODEL_URL"
+  fi
+  [ "$(sha_of "$TRT_MODEL")" = "$SIM_MODEL_SHA256" ] \
+    || { echo "ERROR: sim model sha256 mismatch" >&2; exit 1; }
+  "$PY" - "$MODEL_FILE" "$TRT_MODEL" << 'PYEOF'
+import sys
+
+import numpy as np
+import onnxruntime as ort
+
+rng = np.random.default_rng(7)
+x = (rng.standard_normal((1, 2, 343980)) * 0.1).astype(np.float32)
+out = []
+for path in sys.argv[1:3]:
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    out.append(sess.run(["stems"], {"mix": x})[0])
+diff = float(np.abs(out[0] - out[1]).max())
+print(f"slim-model parity vs original: max abs diff {diff:.2e}")
+assert diff < 1e-3, f"parity broken: {diff}"
+PYEOF
+  cp "$TRT_MODEL" "$MODEL_FILE"
+  echo "hub-cache model replaced with the slim graph"
 fi
 
 # Export the two graphs (recipe: CPJKU/beat_this#12): the 20M model with a
@@ -276,6 +371,31 @@ mode = export(mel, (torch.randn(2100, N_FFT),), outdir / "logmel.onnx",
               ["frames"], ["logmel"],
               dyn={"frames": {0: "n"}, "logmel": {0: "n"}})
 print(f"logmel.onnx exported ({mode} exporter, opset 17, dynamic frames)")
+
+# fp16 weights for the beat model (half the download); the runner casts
+# back to fp32 at load and the parity gate below re-proves beats and
+# downbeats against the torch reference. logmel stays fp32 — it is tiny
+# and its DFT/mel bases are precision-sensitive.
+import onnx
+from onnx import numpy_helper
+
+bt_path = str(outdir / "beat_this.onnx")
+bt = onnx.load(bt_path)
+big = [i for i in bt.graph.initializer
+       if i.data_type == onnx.TensorProto.FLOAT and int(np.prod(i.dims or [1])) * 4 > 1_000_000]
+casts = []
+for i in big:
+    arr = numpy_helper.to_array(i)
+    bt.graph.initializer.remove(i)
+    bt.graph.initializer.append(numpy_helper.from_array(arr.astype(np.float16), i.name + "_fp16"))
+    casts.append(onnx.helper.make_node("Cast", [i.name + "_fp16"], [i.name],
+                                       to=onnx.TensorProto.FLOAT, name=f"cast_{i.name}"))
+nodes = casts + list(bt.graph.node)
+del bt.graph.node[:]
+bt.graph.node.extend(nodes)
+onnx.checker.check_model(bt)
+onnx.save(bt, bt_path)
+print(f"beat_this.onnx weights -> fp16 ({len(big)} tensors)")
 PYEOF
 
 cp "$ROOT/scripts/beat_runner_onnx.py" "$WORK/python/beat_runner.py"
@@ -318,12 +438,23 @@ rm -rf "$PARITY"
 
 find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
+if [ "$TARGET" = win32-x64 ]; then
+  # user-download hygiene: debug symbols and tk/tcl are dead weight
+  # (python312.pdb alone is 18 MB; libcrypto's another 23)
+  find "$WORK/python" -name '*.pdb' -delete
+  rm -rf "$WORK/python/tcl" "$WORK/python/Lib/tkinter" \
+    "$WORK/python/Lib/idlelib" "$WORK/python/Lib/turtledemo"
+  rm -f "$WORK/python/DLLs/_tkinter.pyd" "$WORK/python/DLLs/tcl86t.dll" "$WORK/python/DLLs/tk86t.dll"
+fi
 
 # version stamp: the app refuses packs older than its required format
-# (v4 = the pack ships the Beat This runner + ONNX models — keep in sync
-# with PACK_FORMAT_REQUIRED in src/main/models.ts)
+# (v8 = ONE model file — simplified, OLA ISTFT, fp16 weights — replacing
+# the original+sibling pair; ONE onnxruntime — mainline in site-packages,
+# the DirectML wheel and the side-loaded rtx/ort copy are gone; pdb/tcl
+# pruned; fp16 beat model — keep in sync with PACK_FORMAT_REQUIRED in
+# src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 4, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 8, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python
