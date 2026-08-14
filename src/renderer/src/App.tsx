@@ -2,12 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   CustomTrack,
   EngineStatus,
+  KeyInfo,
   LyricLine,
   MelodyInfo,
   ProjectSettings,
   SeparationProgress
 } from '../../shared/types'
-import { BEAT_DETECT_VERSION, detectBeats, estimateKey, type KeyGuess, type MlGrid } from './audio/analysis'
+import {
+  BEAT_DETECT_VERSION,
+  KEY_DETECT_VERSION,
+  detectBeats,
+  estimateKey,
+  estimateKeyFromStems,
+  sanitizeKeyInfo,
+  type KeyGuess,
+  type MlGrid
+} from './audio/analysis'
 import {
   applyUserBars,
   clearUserBar,
@@ -267,6 +277,11 @@ export default function App(): React.JSX.Element {
   /** The stored form of the melody line, written back on every save so a
    *  tracked song never pays for its pitch line twice. */
   const [melodyInfo, setMelodyInfo] = useState<MelodyInfo | null>(null)
+  /** The stored key, same contract: estimated once, saved, re-estimated only
+   *  when KEY_DETECT_VERSION moves on. The ref mirrors it for applyMelody,
+   *  which runs before the state lands. */
+  const [keyInfo, setKeyInfo] = useState<KeyInfo | null>(null)
+  const keyInfoRef = useRef<KeyInfo | null>(null)
   /** Set when analysis just produced something a saved project should keep —
    *  a fresh pitch line, a (re)stamped auto grid — consumed by an effect that
    *  saves the project so phones (which have neither detector) get it too. */
@@ -560,6 +575,8 @@ export default function App(): React.JSX.Element {
       originalBufRef.current = null
       setSongInfo({ key: null, bpm: null })
       setBeatInfo(null)
+      setKeyInfo(null)
+      keyInfoRef.current = null
       preferRef.current = 'auto'
       setTranspose(0)
       void engine.setTranspose(0)
@@ -662,9 +679,16 @@ export default function App(): React.JSX.Element {
           // saved, track it again" on every open.
           const bg = sanitizeBeatInfo(proj.settings.beat)
           beatInfoRef.current = bg
-          if (bg) {
-            setBeatInfo(bg)
-            setSongInfo({ key: null, bpm: bg.bpm })
+          // A stored key with the current stamp fills the info card before the
+          // stems even decode; any other stamp re-estimates in applyMelody.
+          const kg = sanitizeKeyInfo(proj.settings.key)
+          keyInfoRef.current = kg
+          setKeyInfo(kg)
+          const restoredKey =
+            kg && kg.detVersion === KEY_DETECT_VERSION ? { pc: kg.pc, minor: kg.minor } : null
+          if (bg || restoredKey) {
+            if (bg) setBeatInfo(bg)
+            setSongInfo({ key: restoredKey, bpm: bg?.bpm ?? null })
           }
           const md = decodeMelody(proj.settings.melody)
           storedMelodyRef.current = md
@@ -1169,7 +1193,35 @@ export default function App(): React.JSX.Element {
       } else if (tracked) {
         setAnalysisAutoSave(true)
       }
-      setSongInfo({ key: estimateKey(f0), bpm: info?.bpm ?? null })
+      // Key: asked of the harmonic stems, not the sung line — Zeit's vocal
+      // touches its Gm tonic on 1.3% of voiced frames and the histogram of it
+      // answered A major. The melody histogram survives only as the answer of
+      // last resort for a project whose stems went missing.
+      const storedKey = keyInfoRef.current
+      const inst = instBufsRef.current
+      const bassBuf = bassBufRef.current
+      if (storedKey && storedKey.detVersion === KEY_DETECT_VERSION) {
+        setSongInfo({ key: { pc: storedKey.pc, minor: storedKey.minor }, bpm: info?.bpm ?? null })
+      } else if (inst.length > 0 || bassBuf) {
+        setSongInfo({ key: null, bpm: info?.bpm ?? null })
+        void (async () => {
+          // let the melody paint before the synchronous chroma pass blocks
+          await new Promise((r) => setTimeout(r, 30))
+          if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+          const stems = estimateKeyFromStems(inst, bassBuf)
+          // A melody-histogram fallback is displayed but never stored under
+          // the v2 stamp — it is the method the stamp says we left behind.
+          setSongInfo((s) => ({ ...s, key: stems ?? estimateKey(f0) }))
+          if (stems) {
+            const ki = { pc: stems.pc, minor: stems.minor, detVersion: KEY_DETECT_VERSION }
+            keyInfoRef.current = ki
+            setKeyInfo(ki)
+            setAnalysisAutoSave(true)
+          }
+        })()
+      } else {
+        setSongInfo({ key: estimateKey(f0), bpm: info?.bpm ?? null })
+      }
     },
     [touchSettings]
   )
@@ -1295,6 +1347,7 @@ export default function App(): React.JSX.Element {
         ? { ...beatInfo, beats: beatInfo.beats.map((b) => Math.round(b * 1000) / 1000) }
         : undefined,
       melody: melodyInfo ?? undefined,
+      key: keyInfo ?? undefined,
       metronome: metCfg,
       custom: tracks
         .filter((t) => t.custom)
@@ -1335,16 +1388,22 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, metCfg, tracks, reanchorCustom])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom])
 
   /** A silently tracked pitch line or (re)detected grid saves itself — but
    *  only into an existing project (never creating one under a raw file), and
    *  after the commit so the save closure already sees them. */
   useEffect(() => {
     if (!analysisAutoSave) return
+    // A save already writing would swallow this one (handleSaveProject
+    // early-returns mid-save) — leave the flag set so the effect re-fires
+    // when saveState settles and the later analysis still reaches disk.
+    // Two analyses can now finish inside one save's window: the key job's
+    // autosave runs for seconds on a re-split while the beat detector lands.
+    if (saveState === 'saving') return
     setAnalysisAutoSave(false)
     if (song && isProject) void handleSaveProject()
-  }, [analysisAutoSave, song, isProject, handleSaveProject])
+  }, [analysisAutoSave, saveState, song, isProject, handleSaveProject])
 
   /** Bring a project opened from outside the library in, and follow it there. */
   const handleImport = useCallback(

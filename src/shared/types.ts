@@ -168,6 +168,16 @@ export interface CustomTrack {
   file: string
 }
 
+/** Detected song key shown in the info card. Re-estimated on open when
+ *  detVersion differs from KEY_DETECT_VERSION (analysis.ts) — the same
+ *  stored-analysis contract as beat and melody. */
+export interface KeyInfo {
+  /** Pitch class of the tonic, 0 = C … 11 = B. */
+  pc: number
+  minor: boolean
+  detVersion: number
+}
+
 export interface ProjectSettings {
   transpose: number
   /** Playback speed (1 = original); optional for projects saved before it existed. */
@@ -176,6 +186,8 @@ export interface ProjectSettings {
   beat?: BeatInfo
   /** Tracked vocal melody line drawn in the pitch strip. */
   melody?: MelodyInfo
+  /** Detected song key (harmonic-stem chroma). */
+  key?: KeyInfo
   /** Metronome preferences (click on/off, count-in bars, loudness 0–1). */
   metronome?: MetronomeConfig
   /** Saved timeline zoom viewport (seconds). */
