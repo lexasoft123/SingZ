@@ -76,7 +76,9 @@ function rssMb() {
   for (let i = 0; i < 40 && !target; i++) {
     try {
       const l = await getJson(`http://localhost:${PORT}/json`);
-      target = l.find((t) => t.webSocketDebuggerUrl) ?? null;
+      // Metro lists EVERY connected app — an Android emulator sharing this
+      // port would answer the sim's evals. Pick by device name.
+      target = l.find((t) => t.webSocketDebuggerUrl && /iphone|ipad/i.test(t.deviceName || '')) ?? null;
     } catch {}
     if (!target) await sleep(1000);
   }

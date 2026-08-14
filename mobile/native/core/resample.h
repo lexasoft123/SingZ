@@ -5,10 +5,11 @@
 // Rational polyphase windowed-sinc resampler (L/M from the rate pair), used
 // by the split engine to bring the decoded mix to the graph's 44.1 kHz.
 // Streaming: feed blocks, drain output; flush() pushes the tail through.
-// Quality measured in bring-up (>90 dB SNR on in-band sines — far below
-// what a separation model can distinguish; stems are per-project artifacts,
-// not cross-device-compared bytes); the CI harness lands with the :split
-// service slice.
+// Quality is CI-measured on every mobile push (tests/native/
+// core_host_tests.cpp: 110 dB in-band sine SNR, unity passband gain,
+// streamed == one-shot bit for bit) — far below what a separation model can
+// distinguish; stems are per-project artifacts, not cross-device-compared
+// bytes.
 namespace singz {
 
 class Resampler {

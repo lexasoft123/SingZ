@@ -562,7 +562,11 @@ export default function CatalogScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const startSplitFor = useCallback(async (dir: string, resume: boolean): Promise<void> => {
+  const startSplitFor = useCallback(async (
+    dir: string,
+    resume: boolean,
+    watchdogCapMs = 0 // test seam, threaded through to the service
+  ): Promise<void> => {
     try {
       const gate = await splitGate()
       if (!gate.ok) {
@@ -572,6 +576,7 @@ export default function CatalogScreen({
       setSplitUi({ phase: 'model', project: dir, gotMB: 0, totalMB: 136 })
       await startProjectSplit(dir, {
         resume,
+        watchdogCapMs,
         onModelProgress: (got, total) =>
           setSplitUi((cur) =>
             cur?.phase === 'model'
@@ -700,7 +705,8 @@ export default function CatalogScreen({
     }
     // Split flow, headless: the same path the card drives. Poll splitUi for
     // phase (never await the whole split over CDP).
-    TEST.splitProject = (dir: string) => void startSplitFor(dir, false)
+    TEST.splitProject = (dir: string, watchdogCapMs = 0) =>
+      void startSplitFor(dir, false, watchdogCapMs)
     TEST.resumeSplit = (dir: string) => void resumeSplit(dir)
     TEST.discardSplit = discardSplit
     TEST.splitUi = splitUi

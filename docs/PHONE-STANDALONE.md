@@ -352,6 +352,34 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     claims "running": frozen past 90 s = the :split process is genuinely
     dead. The watchdog can only vouch for a process that is alive; the
     file's pulse is the cross-process truth.
+  - **Phase-2 test slice (2026-08-15, closes P2)**: the permanent suite is
+    `mobile/tests/split-android.cjs` — fifteen checks over the whole surface:
+    the product loop (add → split → adoption's four contracts → a
+    fixture-free reconstruction gate, sum-of-stems vs the source at
+    corr ≥ 0.97 — measured 0.9993 on the solo-vocal seed — so the suite
+    needs no desktop reference; the LSB-parity gate stays a manual tool),
+    audibleStems asserted for real (the solo-vocal seed leaves guitar/piano
+    silent → 4 lanes + the hidden-lane log lines), kill-both → interrupted
+    card → resume → adoption, cancel, the watchdog seam, the DONE handoff
+    (main process killed at chunk N−1 — `am force-stop` is PACKAGE-wide and
+    would take :split down too, measured; `run-as kill -9 <main pid>` is
+    the per-process kill — service finishes alone, next launch adopts), and
+    the duration-less ADTS decode. Host-side C++ tests
+    (tests/native/core_host_tests.cpp, run by the Android CI canary on every
+    mobile push, no NDK): resampler SNR MEASURED at 110 dB with unity
+    passband gain and streamed==one-shot bit-exactness (a quarter-sample
+    delay error in the harness reads as 37 dB — fit quadrature, never guess
+    group delay), and the WAV writer's byte contract including the desktop
+    renderer's asymmetric clamp (−32768 floor). JobStore's contract is
+    JVM-tested (round-trip, atomicity, touch pulses only active states) and
+    rides the canary's existing gradle step. open-close-memory.cjs re-run
+    green on the iOS sim — which doubles as the runtime proof of the
+    splitAvailable mount guard (the catalog booted the split-era JS on a
+    build with no split natives). Driver lessons: the second addSongFrom
+    argument is a FILE name — extension-less silently defaults song.<ext>
+    to .mp3; every add CONSUMES its import (the flow moves it), so each add
+    re-seeds; riding to the DONE state races live adoption (it exists for
+    under a poll interval) — leave at chunk N−1 and kill instead.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
     formally), sustained multi-segment peak RSS on real fleet hardware,
     real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16` on the

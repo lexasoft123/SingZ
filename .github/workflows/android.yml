@@ -20,6 +20,9 @@ on:
       # editing the release notes should check the store text they generate
       - 'docs/release-notes/**'
       - 'scripts/store-notes.cjs'
+      # the canary compiles these — an edit must run its own gate
+      - 'tests/native/**'
+      - 'scripts/run-core-host-tests.sh'
     tags: ['v*']
   # Keeps main's ccache warm. Actions caches cannot be shared between tags —
   # a run reads only its own ref and the DEFAULT BRANCH — so a tag build can
@@ -95,6 +98,14 @@ jobs:
       - name: Cache-currency conformance (Kotlin)
         run: ./gradlew :app:testDebugUnitTest
         working-directory: mobile/android
+
+      # The C++ core's ORT-free pieces, compiled for the host — no NDK, no
+      # device: the resampler's quality claim (>90 dB SNR, measured) and the
+      # WAV writer's byte contract (the desktop renderer's exact scale and
+      # clamp). The ORT-adjacent halves (overlap-add, resume tail) are
+      # proven on-device by mobile/tests/split-android.cjs instead.
+      - name: Native core host tests
+        run: scripts/run-core-host-tests.sh
 
   # Shippable artifacts: only on v* release tags and manual dispatch.
   # The AAB is what Google Play takes; the APK is what the family sideloads.
