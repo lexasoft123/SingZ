@@ -32,9 +32,10 @@ def setup_trtrtx():
     if not os.path.isfile(ep_dll):
         print("TensorRT RTX payload missing from this pack", flush=True)
         sys.exit(3)
-    sys.path.insert(0, os.path.join(base, "ort"))
+    # v8 packs ship ONE onnxruntime — mainline, in site-packages, plugin-EP
+    # capable (>=1.23). The v5-v7 side-load dance under rtx/ort is gone.
     import onnxruntime as ort
-    print(f"TensorRT RTX: onnxruntime {ort.__version__} (mainline, side-loaded)", flush=True)
+    print(f"TensorRT RTX: onnxruntime {ort.__version__}", flush=True)
     # ORT loads the EP dll without searching its directory for dependencies
     # (add_dll_directory is NOT consulted for them). Preload every shipped
     # dll by absolute path instead; a module already in the process
@@ -83,16 +84,9 @@ def setup_trtrtx():
     confirmed = [False]
 
     def patched(*args, **kw):
-        # The raw export is partition-hostile (20k shape/scatter glue nodes
-        # shattered the TensorRT partition; the transfers at the seams made
-        # the GPU slower than the CPU) — the pack ships a pre-simplified
-        # sibling for TensorRT-RTX sessions only. CPU sessions never come
-        # through here and keep the original.
-        if args and isinstance(args[0], str) and args[0].endswith(".onnx"):
-            trt_model = args[0][:-5] + "_trt.onnx"
-            if os.path.isfile(trt_model):
-                args = (trt_model,) + args[1:]
-                print("TensorRT RTX: using the pre-simplified graph", flush=True)
+        # v8 packs ship ONE model — the hub-cache file IS the simplified
+        # OLA-ISTFT fp16-weights graph, for cpu and TensorRT alike — so the
+        # v6/v7 _trt.onnx sibling substitution is gone.
         # (detailed build log stays off: one session's spew was 457 KB and
         # evicted the whole start of the field log from the ring)
         opts = {}

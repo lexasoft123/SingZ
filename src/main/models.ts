@@ -93,10 +93,13 @@ export async function packOnnxModel(
 // Platform-aware: the Apple-Silicon torch pack still stamps 4, and a flat
 // requirement would send every Mac chasing an upgrade that does not exist
 // (the v3 note above records this exact trap). v6 adds the pre-simplified
-// *_trt.onnx graph; v7 rewrites its ISTFT from two ConvTranspose layers
-// (98% of all GPU time in the field per-layer profile) into MatMul +
-// overlap-add — the raw export was slower on an RTX 3060 than its own CPU.
-const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 7 : 4
+// *_trt.onnx graph; v7 rewrote its ISTFT (two ConvTranspose layers = 98%
+// of all GPU time in the field profile) into MatMul + overlap-add; v8
+// slims the pack ~40%: ONE model file (simplified graph, fp16 weights,
+// replacing the original+sibling pair), ONE onnxruntime (mainline in
+// site-packages — the DirectML wheel and rtx/ort side-load are gone),
+// pdb/tcl pruned, fp16 beat model.
+const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 8 : 4
 
 /** First pack format that ships the Beat This! runner + weights. */
 const PACK_FORMAT_WITH_BEATS = 4
@@ -283,7 +286,7 @@ const REGISTRY: RegistryEntry[] = [
         : process.arch === 'arm64'
           ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
-    sizeMb: process.platform === 'win32' ? 530 : process.arch === 'arm64' ? 272 : 259,
+    sizeMb: process.platform === 'win32' ? 340 : process.arch === 'arm64' ? 272 : 259,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??

@@ -135,7 +135,7 @@ answer your evals while you measure the phone.
   ships it under python/rtx, v6 adds the pre-simplified `_trt.onnx` graph
   (raw export = 20k shape/scatter glue nodes that shatter the TensorRT
   partition; onnxsim with the fixed input folds it 18x, parity-gated in
-  the pack build) with mainline ort side-loaded by the per-split
+  the pack build; v8 = one fp16 model for both engines + one mainline ort) with mainline ort side-loaded by the per-split
   runner, src/main/onnx-runner.ts) with a `trtrtx-disabled.json` marker
   after one failure and the chunk-pace watchdog for pathologically slow
   sessions. **DirectML was removed entirely** — across the whole fleet it
