@@ -73,6 +73,9 @@ const Native = NativeModules.FolderAccess as FolderNative
 interface PrefsNative {
   getTextPref(key: string): Promise<string | null>
   setTextPref(key: string, value: string): Promise<void>
+  /** Verifier from the system CSPRNG plus its S256 challenge. Absent on
+   *  builds older than 0.14.5. */
+  pkcePair?: () => Promise<{ verifier: string; challenge: string }>
 }
 const Prefs = NativeModules.AudioRouteInfo as PrefsNative
 
@@ -118,9 +121,27 @@ export async function driveSignIn(): Promise<void> {
   if (!cfg) throw new Error('Google Drive is not configured in this build')
   const port = await Native.oauthStart()
   const redirect = `http://127.0.0.1:${port}`
-  // Hermes has no WebCrypto — plain-method PKCE (the installed-app secret is
-  // non-confidential anyway; this still binds the code to this attempt).
-  const verifier = `singz-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+  // Hermes has no WebCrypto, so the pair is made natively: SecureRandom /
+  // SecRandomCopyBytes for the verifier, SHA-256 for the challenge. The old
+  // path sent the verifier itself as the challenge (method=plain) and built
+  // it from a clock and Math.random — and PKCE rests entirely on the verifier
+  // being unguessable, so both halves mattered.
+  let verifier: string
+  let challenge: string
+  let method: 'S256' | 'plain' = 'S256'
+  if (Prefs.pkcePair) {
+    const pair = await Prefs.pkcePair()
+    verifier = pair.verifier
+    challenge = pair.challenge
+  } else {
+    // Only reachable if new JS runs against an older native, which cannot
+    // happen in a shipped build — but sign-in must not die for it, and a
+    // silent downgrade is worse than a noisy one.
+    log('gdrive', 'native PKCE unavailable — falling back to method=plain', 'warn')
+    verifier = `singz-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+    challenge = verifier
+    method = 'plain'
+  }
   const url =
     `${AUTH()}/o/oauth2/v2/auth?client_id=${encodeURIComponent(cfg.clientId)}` +
     `&redirect_uri=${encodeURIComponent(redirect)}` +
@@ -128,7 +149,7 @@ export async function driveSignIn(): Promise<void> {
     '&scope=' +
     encodeURIComponent('https://www.googleapis.com/auth/drive.file openid email') +
     '&access_type=offline&prompt=consent' +
-    `&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain`
+    `&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=${method}`
   if (Native.oauthPresent) {
     await Native.oauthPresent(url)
   } else {
