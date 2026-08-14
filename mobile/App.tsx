@@ -44,6 +44,38 @@ if (TEST) {
       })
     return true
   }
+  // Phase-2 engine proof: drive the split directly (the :split service is
+  // the production path). Progress events land in hooks.splitProgress.
+  hooks.runSplitDirect = (
+    modelPath: string,
+    mixPath: string,
+    jobDir: string,
+    srcRate: number,
+    resumeChunk = 0
+  ): Promise<string> => {
+    const { DeviceEventEmitter } = require('react-native') as {
+      DeviceEventEmitter: { addListener: (e: string, cb: (v: unknown) => void) => { remove(): void } }
+    }
+    hooks.splitProgress = []
+    const sub = DeviceEventEmitter.addListener('singzSplitProgress', (v) => {
+      ;(hooks.splitProgress as unknown[]).push(v)
+    })
+    return (
+      NativeModules.SingzSplit as {
+        runSplitDirect(
+          m: string,
+          x: string,
+          j: string,
+          r: number,
+          c: number
+        ): Promise<string>
+      }
+    )
+      .runSplitDirect(modelPath, mixPath, jobDir, srcRate, resumeChunk)
+      .finally(() => sub.remove())
+  }
+  hooks.cancelSplit = (): Promise<boolean> =>
+    (NativeModules.SingzSplit as { cancelSplit(): Promise<boolean> }).cancelSplit()
   hooks.analysisSpike = (minutes?: number): boolean => {
     hooks.spikeDone = false
     hooks.spikeResult = null

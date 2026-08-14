@@ -37,10 +37,16 @@ set_target_properties(onnxruntime PROPERTIES
 # whose *.cpp files ReactNative-application.cmake globs into appmodules.
 add_library(singzcore SHARED
     ${CORE_DIR}/android/singz_core_jni.cpp
-    ${CORE_DIR}/ort_env.cpp)
+    ${CORE_DIR}/ort_env.cpp
+    ${CORE_DIR}/resample.cpp
+    ${CORE_DIR}/split_engine.cpp
+    ${CORE_DIR}/wav.cpp)
 
 # ORT's C++ API reports errors as exceptions; the NDK toolchain does not turn
 # them on by itself.
 target_compile_options(singzcore PRIVATE -fexceptions -frtti)
+# 32-bit ABIs (armeabi-v7a, x86) have 32-bit long — a >2 GB mix would
+# overflow plain fseek/ftell; the engine uses fseeko/ftello throughout.
+target_compile_definitions(singzcore PRIVATE _FILE_OFFSET_BITS=64)
 target_include_directories(singzcore PRIVATE ${CORE_DIR} ${ORT_SDK_DIR}/headers)
 target_link_libraries(singzcore onnxruntime log)

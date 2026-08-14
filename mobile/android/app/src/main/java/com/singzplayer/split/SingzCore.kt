@@ -27,6 +27,30 @@ object SingzCore {
     }
   }
 
+  /** Progress callbacks from the engine, on the split worker thread. */
+  interface SplitListener {
+    fun onStage(stage: String, frac: Float)
+    fun onChunk(done: Long, total: Long)
+  }
+
   /** Phase-0 smoke: load a model, run one dummy-shaped inference. JSON out. */
   external fun ortProbe(modelPath: String): String
+
+  /**
+   * The whole split, ON THE CALLING THREAD (own a worker for it): raw f32
+   * stereo mix in, six <stem>.wav.part + resume tail in jobDir out.
+   * Returns "" on ok, "cancelled", or an error message.
+   */
+  external fun runSplit(
+    modelPath: String,
+    mixPath: String,
+    jobDir: String,
+    srcRate: Int,
+    resumeChunk: Long,
+    threads: Int,
+    listener: SplitListener?
+  ): String
+
+  /** Flip the engine's cancel flag; the segment in flight finishes first. */
+  external fun cancelSplit()
 }

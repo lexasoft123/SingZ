@@ -244,9 +244,25 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     bug the phone had survived on allocator luck — a use-after-free chaining
     `GetInputTypeInfo(0).GetTensorTypeAndShapeInfo()` off the temporary
     (SIGSEGV in GetDimensions; fixed in ort_env.cpp, both platforms rebuilt).
+  - **Phase-2 engine proof (2026-08-14 late)**: the C++ `split_engine` (the
+    faithful `demucs_onnx` driver port, streaming commit + resume tail) split
+    the 40.8 s sample mix ON-DEVICE (6 GB emulator) in **35 s, 7/7 chunks**,
+    and the six stems correlate against the desktop ONNX pack's own split of
+    the same mix at **1.000000 with max abs diff ≤ 2 int16 LSBs** on every
+    audible stem (the near-silent vocals lane passes the silent-stem rule —
+    Pearson floors on ±1 LSB dither below −60 dB; gate on sample closeness
+    there). Reference = the extracted darwin-x64 pack python under Rosetta.
+    Also measured en route: a **2 GB** device cannot hold the session — lmkd
+    killed the app at 1.27 GB RSS ("low on swap and thrashing"), which is the
+    `:split`-isolation rationale observed live; the AVD runs at 6 GB now.
+    **Resume proven the hard way**: force-killed mid-split after one committed
+    stride (tail.bin persisted, stems flushed to the kernel first), resumed
+    from the tail alone (job.json is a hint, never arithmetic), and the
+    resumed run's stems pass the same gate with identical numbers.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
-    formally), sustained multi-segment peak RSS, real-iPhone CPU-vs-CoreML
-    segment times, `zipalign -c -P 16` on the packaged APK.
+    formally), sustained multi-segment peak RSS on real fleet hardware,
+    real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16` on the
+    packaged APK.
 
 ## Top risks
 
