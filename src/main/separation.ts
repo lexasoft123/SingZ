@@ -280,9 +280,12 @@ export class Separator {
     if (e.kind === 'onnx') {
       if (process.platform !== 'win32') return 'splitter pack (ONNX)'
       // The marker flips the actual provider — a label still claiming a GPU
-      // engine misled every field log read after a failure.
-      if (existsSync(packRtxEpPath()) && !existsSync(trtrtxFlagPath()))
-        return 'splitter pack (TensorRT RTX)'
+      // engine misled every field log read after a failure. An old pack that
+      // never had the engine is its own story (a field log claimed "switched
+      // off" on a machine that had simply not updated yet).
+      if (!existsSync(packRtxEpPath()))
+        return 'splitter pack (CPU — this pack has no GPU engine, update it in the model manager)'
+      if (!existsSync(trtrtxFlagPath())) return 'splitter pack (TensorRT RTX)'
       return 'splitter pack (CPU — the GPU engine is switched off here)'
     }
     return e.cmd.join(' ')
