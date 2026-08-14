@@ -125,28 +125,19 @@ end
 # supply keys changelogs by versionCode. Reuse the release note that the repo
 # already requires before tagging, rather than inventing a second place to
 # write one.
+# The store text for every language comes out of the release notes, which is
+# the one place a release is described. scripts/store-notes.cjs does the
+# extracting and the length check; this only refuses to ship without it.
+#
+# It used to truncate the long notes at 500 characters when a changelog was
+# missing, which put half a sentence on the storefront. Uploading a binary
+# with no release notes, or with notes nobody wrote, is worse than stopping.
 private_lane :sync_changelog do
-  name, code = singz_version
-  target = File.join(LOCALE_DIR, "changelogs", "#{code}.txt")
-  notes  = File.join(REPO_ROOT, "docs/release-notes/v#{name}.md")
-
-  if File.exist?(target)
-    UI.message("Changelog #{code}.txt already written — leaving it alone")
-  elsif File.exist?(notes)
-    # Drop the title line; the body is what users read on the store.
-    body = File.readlines(notes).drop(1).join.strip
-    if body.length > CHANGELOG_LIMIT
-      UI.important("Release note is #{body.length} chars; Play allows #{CHANGELOG_LIMIT}. " \
-                   "Write #{code}.txt by hand to say something shorter.")
-      body = body[0, CHANGELOG_LIMIT]
-    end
-    FileUtils.mkdir_p(File.dirname(target))
-    File.write(target, body + "\n")
-    UI.success("Changelog #{code}.txt written from v#{name} release notes")
-  else
-    UI.important("No changelog for versionCode #{code} and no docs/release-notes/v#{name}.md " \
-                 "— uploading without release notes")
-  end
+  name, _code = singz_version
+  script = File.join(REPO_ROOT, "scripts/store-notes.cjs")
+  UI.user_error!("scripts/store-notes.cjs is missing") unless File.exist?(script)
+  Dir.chdir(REPO_ROOT) { sh("node", "scripts/store-notes.cjs") }
+  UI.success("Store notes for v#{name} are current")
 end
 
 private_lane :play_publish do |options|
