@@ -166,6 +166,32 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
    * of megabytes — "which phone" and "how much free" is half the diagnosis
    * when a song refuses to open.
    */
+  /**
+   * A PKCE verifier and its S256 challenge, both made here.
+   *
+   * Hermes has no WebCrypto, which is why this used to be method=plain with a
+   * verifier built from Date.now() and Math.random(). Both halves were weak:
+   * plain sends the verifier in the clear on the authorization request, and a
+   * clock-plus-Math.random verifier is guessable — and PKCE rests entirely on
+   * the verifier being unguessable. SecureRandom and MessageDigest are one
+   * line each on this side of the bridge.
+   *
+   * 32 random bytes base64url-encodes to 43 characters, the minimum RFC 7636
+   * allows, and the encoding uses exactly its unreserved alphabet.
+   */
+  @ReactMethod
+  fun pkcePair(promise: Promise) {
+    try {
+      val verifier = Pkce.newVerifier()
+      val map = Arguments.createMap()
+      map.putString("verifier", verifier)
+      map.putString("challenge", Pkce.challengeFor(verifier))
+      promise.resolve(map)
+    } catch (e: Exception) {
+      promise.reject("pkce", e.message ?: "Cannot generate a PKCE pair")
+    }
+  }
+
   @ReactMethod
   fun getAppInfo(promise: Promise) {
     try {

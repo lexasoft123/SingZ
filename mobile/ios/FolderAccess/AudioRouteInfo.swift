@@ -1,4 +1,5 @@
 import AVFAudio
+import CommonCrypto
 import Foundation
 import React
 
@@ -29,6 +30,33 @@ class AudioRouteInfo: NSObject {
       // treats them as optional.
       "volume": session.outputVolume
     ])
+  }
+
+  /// base64url, RFC 7636's alphabet: no padding, no + or /.
+  private static func b64url(_ data: Data) -> String {
+    data.base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
+  }
+
+  /// Counterpart of the Android pkcePair — a verifier from the system CSPRNG
+  /// and its SHA-256 challenge. See the Kotlin side for why this moved off
+  /// the JS thread: Hermes has no WebCrypto, so the old code sent the
+  /// verifier in the clear and built it from a clock and Math.random.
+  @objc func pkcePair(
+    _ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock
+  ) {
+    var seed = [UInt8](repeating: 0, count: 32)
+    guard SecRandomCopyBytes(kSecRandomDefault, seed.count, &seed) == errSecSuccess else {
+      reject("pkce", "Cannot read secure random bytes", nil)
+      return
+    }
+    let verifier = AudioRouteInfo.b64url(Data(seed))
+    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    let ascii = Data(verifier.utf8)
+    _ = ascii.withUnsafeBytes { CC_SHA256($0.baseAddress, CC_LONG(ascii.count), &digest) }
+    resolve(["verifier": verifier, "challenge": AudioRouteInfo.b64url(Data(digest))])
   }
 
   /// Counterpart of the Android getAppInfo — the build/device header a bug

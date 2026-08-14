@@ -6,6 +6,8 @@ RCT_EXTERN_METHOD(getOutput : (RCTPromiseResolveBlock)resolve
                   reject : (RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(getAppInfo : (RCTPromiseResolveBlock)resolve
                   reject : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(pkcePair : (RCTPromiseResolveBlock)resolve
+                  reject : (RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(getPref : (NSString *)key
                   resolve : (RCTPromiseResolveBlock)resolve
                   reject : (RCTPromiseRejectBlock)reject)
