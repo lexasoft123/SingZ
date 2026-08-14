@@ -979,6 +979,252 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     }
   }
 
+  // ---------------------------------------------- model downloads (P2) --
+  // Pinned-release assets (the split model is 136 MB): Range-resumed into
+  // Application Support/models (backup-excluded — a lost model is just a
+  // re-download), sha256-verified before the file earns its name. Same rule
+  // as the song cache: "do we have it?" is asked of the FILE. Progress
+  // events land with the P3 iOS split UI; the JS surface tolerates their
+  // absence.
+
+  private let downloadCancelled = AtomicFlag()
+
+  private func modelsDir() -> URL {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("models", isDirectory: true)
+  }
+
+  /** sha256 with the same size+mtime memo as md5 (hashing 136 MB on every
+   *  gate check would be felt). */
+  private func sha256Of(_ url: URL) -> String {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+      return ""
+    }
+    let size = (attrs[.size] as? Int64) ?? 0
+    let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    let stamp = "\(size):\(Int64(mtime * 1000))"
+    let key = "singz.sha256.\(url.path)"
+    let kept = UserDefaults.standard.string(forKey: key)?.split(separator: ":", maxSplits: 2)
+    if let kept, kept.count == 3, "\(kept[0]):\(kept[1])" == stamp { return String(kept[2]) }
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+    defer { try? handle.close() }
+    var sha = SHA256()
+    while let chunk = try? handle.read(upToCount: 1 << 16), !chunk.isEmpty {
+      sha.update(data: chunk)
+    }
+    let hex = sha.finalize().map { String(format: "%02x", $0) }.joined()
+    UserDefaults.standard.set("\(stamp):\(hex)", forKey: key)
+    return hex
+  }
+
+  @objc func cancelDownload(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    downloadCancelled.set(true)
+    resolve(true)
+  }
+
+  /**
+   * Download url into models/<name>, resuming a .part when the server
+   * honors Range, verifying sha256 before the rename. Resolves
+   * {path, downloaded}; rejects "cancelled" with the .part kept so the
+   * next call resumes it.
+   */
+  @objc func downloadFile(
+    _ name: String,
+    url: String,
+    expectedSha256: String,
+    expectedBytes: NSNumber,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.global(qos: .utility).async {
+      self.runModelDownload(
+        name: name, url: url, expectedSha256: expectedSha256,
+        expected: expectedBytes.int64Value, resolve: resolve, reject: reject)
+    }
+  }
+
+  private func runModelDownload(
+    name: String,
+    url: String,
+    expectedSha256: String,
+    expected: Int64,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    guard !name.isEmpty, !name.contains("/"), name != "..", name != "." else {
+      reject("download", "Bad model name", nil)
+      return
+    }
+    guard let remote = URL(string: url) else {
+      reject("download", "Bad download URL for \(name)", nil)
+      return
+    }
+    let fm = FileManager.default
+    var dir = modelsDir()
+    let out = dir.appendingPathComponent(name)
+    let haveSize = (try? fm.attributesOfItem(atPath: out.path))?[.size] as? Int64 ?? -1
+    if haveSize == expected, sha256Of(out) == expectedSha256 {
+      resolve(["path": out.path, "downloaded": false])
+      return
+    }
+    downloadCancelled.set(false)
+    do {
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+      var rv = URLResourceValues()
+      rv.isExcludedFromBackup = true
+      try? dir.setResourceValues(rv)
+
+      let tmp = URL(fileURLWithPath: out.path + ".part")
+      var offset = (try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int64 ?? 0
+      if offset > expected {
+        try? fm.removeItem(at: tmp)
+        offset = 0
+      }
+      // A COMPLETE .part (cancel raced the last chunk) must skip the network
+      // entirely: an exact-EOF "Range: bytes=<size>-" gets 416 from GitHub's
+      // CDN, and refusing that would wedge this model forever — the sha
+      // verify below is the only judge the bytes need.
+      if offset < expected {
+        if !fm.fileExists(atPath: tmp.path) {
+          fm.createFile(atPath: tmp.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: tmp)
+        defer { try? handle.close() }
+
+        var req = URLRequest(url: remote)
+        req.timeoutInterval = 120
+        if offset > 0 { req.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+        let delegate = RangeDownloadDelegate(handle: handle) { [weak self] in
+          self?.downloadCancelled.get() ?? true
+        }
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        session.dataTask(with: req).resume()
+        delegate.wait()
+        session.finishTasksAndInvalidate()
+        try? handle.close()
+
+        if delegate.wasCancelled || self.downloadCancelled.get() {
+          // keep the .part — a resumed 136 MB is the whole point
+          reject("cancelled", "cancelled", nil)
+          return
+        }
+        if let err = delegate.error {
+          reject("download", "\(name): \(err.localizedDescription)", err)
+          return
+        }
+        guard delegate.status == 206 || delegate.status / 100 == 2 else {
+          reject("download", "Download failed (\(delegate.status)) for \(name)", nil)
+          return
+        }
+      }
+      let gotSize = (try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int64 ?? -1
+      guard gotSize == expected else {
+        reject("download", "The download stopped short — try again", nil)
+        return
+      }
+      // Verify BEFORE the rename: only checked bytes earn the real name.
+      guard let rd = try? FileHandle(forReadingFrom: tmp) else {
+        reject("download", "Could not read the download", nil)
+        return
+      }
+      var sha = SHA256()
+      while let chunk = try? rd.read(upToCount: 1 << 16), !chunk.isEmpty {
+        sha.update(data: chunk)
+      }
+      try? rd.close()
+      let hex = sha.finalize().map { String(format: "%02x", $0) }.joined()
+      guard hex == expectedSha256 else {
+        try? fm.removeItem(at: tmp)
+        reject("download", "\(name) arrived damaged — try again", nil)
+        return
+      }
+      try install(tmp, at: out)
+      if let attrs = try? fm.attributesOfItem(atPath: out.path) {
+        let size = (attrs[.size] as? Int64) ?? 0
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        UserDefaults.standard.set(
+          "\(size):\(Int64(mtime * 1000)):\(hex)", forKey: "singz.sha256.\(out.path)")
+      }
+      resolve(["path": out.path, "downloaded": true])
+    } catch {
+      reject("download", "Could not download \(name): \(error.localizedDescription)", error)
+    }
+  }
+
+}
+
+/** Written on the RN bridge thread, read on the URLSession delegate queue —
+ *  the Kotlin side uses AtomicBoolean for the same flag. */
+private final class AtomicFlag {
+  private let lock = NSLock()
+  private var value = false
+  func set(_ newValue: Bool) {
+    lock.lock()
+    value = newValue
+    lock.unlock()
+  }
+  func get() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return value
+  }
+}
+
+/** Streams a (possibly Range-resumed) HTTP body straight into a FileHandle —
+ *  206 appends at the end, 200 truncates and starts over, anything else is
+ *  refused. Kept private to FolderAccess.swift; the class-body rule only
+ *  binds @objc bridge methods. */
+private final class RangeDownloadDelegate: NSObject, URLSessionDataDelegate {
+  private let handle: FileHandle
+  private let cancelled: () -> Bool
+  private let sem = DispatchSemaphore(value: 0)
+  var status = 0
+  var error: Error?
+  var wasCancelled = false
+
+  init(handle: FileHandle, cancelled: @escaping () -> Bool) {
+    self.handle = handle
+    self.cancelled = cancelled
+  }
+
+  func wait() { sem.wait() }
+
+  func urlSession(
+    _ session: URLSession,
+    dataTask: URLSessionDataTask,
+    didReceive response: URLResponse,
+    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+  ) {
+    status = (response as? HTTPURLResponse)?.statusCode ?? 0
+    if status == 206 {
+      _ = try? handle.seekToEnd()
+    } else if status / 100 == 2 {
+      try? handle.truncate(atOffset: 0) // the server ignored Range — start over
+    } else {
+      completionHandler(.cancel)
+      return
+    }
+    completionHandler(.allow)
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    if cancelled() {
+      wasCancelled = true
+      dataTask.cancel()
+      return
+    }
+    try? handle.write(contentsOf: data)
+  }
+
+  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    if let error, (error as NSError).code != NSURLErrorCancelled {
+      self.error = error
+    }
+    sem.signal()
+  }
 }
 
 extension FolderAccess: ASWebAuthenticationPresentationContextProviding {

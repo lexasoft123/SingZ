@@ -79,4 +79,14 @@ RCT_EXTERN_METHOD(readMediaTags : (NSString *)path
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(downloadFile : (NSString *)name
+                  url : (NSString *)url
+                  expectedSha256 : (NSString *)expectedSha256
+                  expectedBytes : (nonnull NSNumber *)expectedBytes
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(cancelDownload : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 @end

@@ -294,6 +294,29 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     every start and drop the binding in onServiceDisconnected/onBindingDied.
     (4) The app process must not call SingzCore externals it never loaded —
     an UnsatisfiedLinkError before the cancel intent once ate the cancel.
+  - **Phase-2 models slice (2026-08-15 small hours)**: model distribution is
+    live — `mobile/src/analysis/models.ts` pins tag `phone-models-1` with a
+    size+sha256 table (the PACK_FORMAT_REQUIRED role: a model revision is a
+    NEW tag stamped there, never a re-upload), FolderAccess gained
+    `downloadFile`/`cancelDownload` on BOTH platforms (Range-resume into
+    durable app storage — filesDir/models / Application Support/models
+    backup-excluded — sha256-verified before the rename, .part kept on
+    cancel, sha memoized size+mtime like the md5s), and
+    `scripts/build-phone-models.sh` verifies real files against the TS table
+    and stages the `gh release create` command — publishing is a human act.
+    Capability gate: `splitCapability` at MIN_SPLIT_MEM_MB = 5000 (the
+    1.27 GB-RSS session with honest "add the song on your computer" copy
+    below it; unknown readings pass — :split isolation makes a wrong yes a
+    failed job, never a dead player). Machine-verified on the emulator, all
+    four behaviors: fresh 136 MB download (one GET, progress events, sha
+    pass); second call answered by the FILE with zero network; cancel mid
+    body keeps the .part and the resume request carried `Range=bytes=
+    37756928-` — the exact part size (a throttled local server logging every
+    Range header is the oracle); a wrong-sha download rejected "arrived
+    damaged" with nothing installed. Trap: qemu's 10.0.2.2 NAT moves
+    ~330 KB/s — `adb reverse` for anything sized; and a download driver must
+    assert on the server's log, not on flags the JS surface deliberately
+    does not expose.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
     formally), sustained multi-segment peak RSS on real fleet hardware,
     real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16` on the

@@ -803,6 +803,159 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
     }
   }
 
+  // ---------------------------------------------- model downloads (P2) --
+  // Pinned-release assets (the split model is 136 MB): Range-resumed into
+  // filesDir/models, sha256-verified, cancellable. Same rule as the song
+  // cache: "do we have it?" is asked of the FILE — present at size with the
+  // right hash means no network at all. allowBackup=false keeps these out
+  // of device backups; a lost model is just a re-download.
+
+  private val downloadCancel = java.util.concurrent.atomic.AtomicBoolean(false)
+
+  private fun modelsDir(): File = File(reactApplicationContext.filesDir, "models")
+
+  /** sha256 with the same size+mtime memo as md5 (a 136 MB hash costs ~1 s
+   *  on-device; asking on every gate check would be felt). */
+  private fun sha256Of(f: File): String? {
+    val stamp = "${f.length()}:${f.lastModified()}"
+    val key = "sha256:${f.path}"
+    hashPrefs.getString(key, null)?.let {
+      val parts = it.split(":")
+      if (parts.size == 3 && "${parts[0]}:${parts[1]}" == stamp) return parts[2]
+    }
+    return try {
+      val digest = MessageDigest.getInstance("SHA-256")
+      f.inputStream().use { input ->
+        val buf = ByteArray(1 shl 16)
+        while (true) {
+          val n = input.read(buf)
+          if (n <= 0) break
+          digest.update(buf, 0, n)
+        }
+      }
+      val sha = digest.digest().joinToString("") { "%02x".format(it) }
+      hashPrefs.edit().putString(key, "$stamp:$sha").apply()
+      sha
+    } catch (e: Exception) {
+      null
+    }
+  }
+
+  @ReactMethod
+  fun cancelDownload(promise: Promise) {
+    downloadCancel.set(true)
+    promise.resolve(true)
+  }
+
+  /**
+   * Download url into filesDir/models/<name>, resuming a .part when the
+   * server honors Range, verifying sha256 before the file earns its name.
+   * Resolves {path, downloaded}; rejects "cancelled" with the .part kept
+   * (the next call resumes it). Progress: 'singzModelDownload' events.
+   */
+  @ReactMethod
+  fun downloadFile(
+    name: String,
+    url: String,
+    expectedSha256: String,
+    expectedBytes: Double,
+    promise: Promise
+  ) {
+    exec.execute {
+      try {
+        if (!ProjectPaths.plainChild(name)) throw Exception("Bad model name")
+        val expected = expectedBytes.toLong()
+        val out = File(modelsDir(), name)
+        if (out.isFile && out.length() == expected && sha256Of(out) == expectedSha256) {
+          promise.resolve(result(out, false))
+          return@execute
+        }
+        downloadCancel.set(false)
+        out.parentFile?.mkdirs()
+        val tmp = File(out.path + ".part")
+        var offset = if (tmp.isFile) tmp.length() else 0L
+        if (offset > expected) { tmp.delete(); offset = 0 }
+
+        // A COMPLETE .part (cancel raced the last chunk) must skip the
+        // network entirely: an exact-EOF "Range: bytes=<size>-" gets 416
+        // from GitHub's CDN, and throwing on that would wedge this model
+        // forever — the verify below is the only judge the bytes need.
+        if (offset < expected) {
+          val conn = URL(url).openConnection() as HttpURLConnection
+          conn.instanceFollowRedirects = true // release assets 302 to a CDN
+          if (offset > 0) conn.setRequestProperty("Range", "bytes=$offset-")
+          conn.connectTimeout = 20000
+          conn.readTimeout = 60000
+          val code = conn.responseCode
+          val append: Boolean = when {
+            code == 206 && offset > 0 -> true
+            code / 100 == 2 -> { offset = 0; false } // server ignored Range — start over
+            else -> throw Exception("Download failed ($code) for $name")
+          }
+
+          val emitter = reactApplicationContext.getJSModule(
+            com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
+          )
+          var got = offset
+          var lastEmit = 0L
+          conn.inputStream.use { input ->
+            java.io.FileOutputStream(tmp, append).use { o ->
+              val buf = ByteArray(1 shl 16)
+              while (true) {
+                if (downloadCancel.get()) {
+                  // keep the .part — a resumed 136 MB is the whole point
+                  promise.reject("cancelled", "cancelled")
+                  return@execute
+                }
+                val n = input.read(buf)
+                if (n <= 0) break
+                o.write(buf, 0, n)
+                got += n
+                val now = System.currentTimeMillis()
+                if (now - lastEmit > 300) {
+                  lastEmit = now
+                  val m = Arguments.createMap()
+                  m.putString("name", name)
+                  m.putDouble("got", got.toDouble())
+                  m.putDouble("total", expected.toDouble())
+                  emitter.emit("singzModelDownload", m)
+                }
+              }
+              o.fd.sync()
+            }
+          }
+        }
+
+        if (tmp.length() != expected) {
+          throw Exception("The download stopped short — try again")
+        }
+        // Verify BEFORE the rename: only checked bytes earn the real name.
+        val digest = MessageDigest.getInstance("SHA-256")
+        tmp.inputStream().use { input ->
+          val buf = ByteArray(1 shl 16)
+          while (true) {
+            val n = input.read(buf)
+            if (n <= 0) break
+            digest.update(buf, 0, n)
+          }
+        }
+        val sha = digest.digest().joinToString("") { "%02x".format(it) }
+        if (sha != expectedSha256) {
+          tmp.delete()
+          throw Exception("$name arrived damaged — try again")
+        }
+        out.delete()
+        if (!tmp.renameTo(out)) throw Exception("Could not install $name")
+        hashPrefs.edit()
+          .putString("sha256:${out.path}", "${out.length()}:${out.lastModified()}:$sha")
+          .apply()
+        promise.resolve(result(out, true))
+      } catch (e: Exception) {
+        promise.reject("download", e.message ?: "Could not download $name")
+      }
+    }
+  }
+
   companion object {
     private const val PICK_REQUEST = 42901
     private const val PICK_FILE_REQUEST = 42902

@@ -122,6 +122,34 @@ if (TEST) {
     ).attachSplitEvents()
     return true
   }
+  // Model download (P2): url override so the driver can point at a local
+  // range-serving HTTP server instead of the real release.
+  hooks.modelDownload = (url: string, file: string, sha256: string, bytes: number): boolean => {
+    hooks.dlDone = false
+    hooks.dlOut = null
+    hooks.dlProgress = []
+    void import('./src/analysis/models').then((m) =>
+      m
+        .ensureModel({ file, bytes, sha256, url }, (got, total) => {
+          ;(hooks.dlProgress as unknown[]).push([got, total])
+        })
+        .then(
+          (p) => {
+            hooks.dlOut = p
+            hooks.dlDone = true
+          },
+          (e: unknown) => {
+            hooks.dlOut = 'ERR ' + String(e)
+            hooks.dlDone = true
+          }
+        )
+    )
+    return true
+  }
+  hooks.cancelModelDownload = (): boolean => {
+    void import('./src/analysis/models').then((m) => m.cancelModelDownload())
+    return true
+  }
   hooks.clearSplitJob = (): boolean => {
     void import('./src/split/service').then((svc) => svc.clearSplitJob())
     return true
