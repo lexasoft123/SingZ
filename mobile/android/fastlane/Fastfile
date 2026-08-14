@@ -82,7 +82,14 @@ platform :android do
   desc "Push store listing text and graphics only — no binary"
   lane :metadata do
     stage_images
+    _name, code = singz_version
+    # With no binary in the edit, supply still wants a release to anchor to,
+    # and fails with "Could not find release for version code ''" even when
+    # changelogs are skipped. Naming the track and the code it already holds
+    # satisfies it without shipping anything.
     upload_to_play_store(
+      track: ENV.fetch("PLAY_CLOSED_TRACK", "Testing"),
+      version_code: code,
       skip_upload_aab: true,
       skip_upload_apk: true,
       skip_upload_changelogs: true
