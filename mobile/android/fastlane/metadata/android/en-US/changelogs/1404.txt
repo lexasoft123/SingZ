@@ -1,0 +1,3 @@
+Google Drive errors now say what actually went wrong.
+
+A refusal from Drive used to show only a number. It now carries Google's own reason, and when the cause is that Drive access was not granted while signing in, it says so and tells you to sign out and back in. Sign-in also records which permissions were granted, so the log answers it too.

@@ -5,7 +5,7 @@ import { decodeAudioData, type AudioBuffer } from 'react-native-audio-api'
 import { driveLocalFile, driveReadText } from './gdrive'
 import type { LyricsDoc, ProjectDoc } from './model'
 import { isCurrent } from './current'
-import { log } from './log'
+import { fmtBytes, fmtMs, log } from './log'
 import { customTracks, STEM_ORDER_ALL } from './model'
 
 /**
@@ -213,7 +213,25 @@ export async function loadProject(
   const added = customTracks(doc?.settings)
   const total = ids.length + added.length
   const stems: LoadedLane[] = []
+  const source = gdrive ? 'Drive' : 'the folder'
+  // Written BEFORE the work, so a song that never finishes still says which
+  // one it was. A decode that runs out of memory takes the process with it,
+  // and a log that only records successes is silent about exactly the opens
+  // worth reading about.
+  log(
+    'song',
+    `opening ${doc?.name ?? entry.dir} from ${source} · ${total} lanes` +
+      ` (${ids.map((s) => entry.stems[s]).join(', ')})`
+  )
+  const openedAt = Date.now()
+  const spent: string[] = []
   const tooBig = (bytes: number): never => {
+    log(
+      'song',
+      `refused ${entry.dir} — ${fmtBytes(bytes)} of decoded audio projected, ` +
+        `over the ${fmtBytes(MAX_DECODED_BYTES)} budget`,
+      'error'
+    )
     releaseStems(stems)
     stems.length = 0
     throw new Error(
@@ -232,7 +250,9 @@ export async function loadProject(
     // file:// matters: audio-api's Android RELEASE builds treat bare strings
     // as APK asset names ("Could not read asset bytes"); the scheme routes
     // them to the file decoder and is stripped on every other platform.
+    const t0 = Date.now()
     stems.push({ id, buffer: await decodeAudioData(`file://${path}`, sampleRate) })
+    spent.push(`${id} ${fmtMs(Date.now() - t0)}`)
     // Stems are all the same length, so one decoded stem projects the whole
     // set. Bail on the projection rather than on the total: refusing after
     // six stems are already resident is refusing too late.
@@ -261,7 +281,12 @@ export async function loadProject(
     }
     if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
   }
-  log('song', `opened ${doc.name ?? entry.dir} — ${stems.length} lanes from ${gdrive ? 'Drive' : 'the folder'}`)
+  log(
+    'song',
+    `opened ${doc.name ?? entry.dir} — ${stems.length} lanes from ${source} in ` +
+      `${fmtMs(Date.now() - openedAt)} · ${fmtBytes(decodedBytes(stems))} decoded · ` +
+      `decode ${spent.join(', ')}`
+  )
   onStep('Lyrics…', 0.98)
   await crumb?.('lyrics')
   let lyrics: LyricsDoc | null = null

@@ -1,4 +1,4 @@
-import { NativeModules } from 'react-native'
+import { NativeModules, Platform } from 'react-native'
 
 /**
  * The phone's diagnostic log — the desktop's Log dialog, ported.
@@ -13,9 +13,20 @@ import { NativeModules } from 'react-native'
  * exactly when it is needed.
  */
 
+interface AppInfo {
+  version: string
+  build: string
+  abi?: string
+  /** Android only — iOS has no cheap figure worth printing. */
+  totalMemMB?: number
+  availMemMB?: number
+}
+
 interface PrefsNative {
   getTextPref(key: string): Promise<string | null>
   setTextPref(key: string, value: string): Promise<void>
+  /** Absent on builds older than 0.14.4. */
+  getAppInfo?: () => Promise<AppInfo>
 }
 const Prefs = NativeModules.AudioRouteInfo as PrefsNative
 
@@ -87,6 +98,43 @@ export async function clearLog(): Promise<void> {
 /** One line per entry, for sharing — the same format the desktop copies. */
 export const formatLog = (entries: LogEntry[]): string =>
   entries.map((e) => `${fmtTime(e.t)} [${e.level}] ${e.source}: ${e.line}`).join('\n')
+
+/**
+ * The first line of every session: which build, on what, with how much room.
+ *
+ * A report reads "it doesn't work on my phone" and the log has to supply the
+ * rest, because the reporter will not — and by the time anyone asks, they have
+ * updated, rebooted, or forgotten. Written on every launch so the header sits
+ * above whatever went wrong afterwards, however far back it scrolled.
+ */
+export async function logStartup(): Promise<void> {
+  const c = Platform.constants as Partial<{
+    Model: string
+    Brand: string
+    Manufacturer: string
+    Release: string
+  }>
+  const device = [c.Manufacturer ?? c.Brand, c.Model].filter(Boolean).join(' ')
+  const os =
+    Platform.OS === 'android'
+      ? `Android ${c.Release ?? Platform.Version} (API ${Platform.Version})`
+      : `iOS ${Platform.Version}`
+
+  let app = 'SingZ (version unknown)'
+  let mem = ''
+  try {
+    const i = await Prefs.getAppInfo?.()
+    if (i) {
+      app = `SingZ ${i.version} (${i.build})${i.abi ? ` · ${i.abi}` : ''}`
+      if (typeof i.totalMemMB === 'number') {
+        mem = ` · RAM ${Math.round(i.totalMemMB)} MB, ${Math.round(i.availMemMB ?? 0)} MB free`
+      }
+    }
+  } catch {
+    // an unreported version is not worth failing a launch over
+  }
+  log('app', `${app} · ${device || Platform.OS} · ${os}${mem}`)
+}
 
 export function fmtTime(t: number): string {
   const d = new Date(t)

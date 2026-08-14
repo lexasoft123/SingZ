@@ -1,6 +1,8 @@
 package com.singzplayer
 
+import android.app.ActivityManager
 import android.content.Context
+import android.os.Build
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
@@ -153,6 +155,36 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
       } catch (e: Exception) {
         promise.reject("route", e.message ?: "Cannot read the audio route")
       }
+    }
+  }
+
+  /**
+   * The header every bug report needs and no reporter thinks to include:
+   * which build, on what, with how much room. Read from the installed package
+   * rather than from anything baked into JS, so it describes the copy that is
+   * actually running. Memory is here because six decoded lanes cost hundreds
+   * of megabytes — "which phone" and "how much free" is half the diagnosis
+   * when a song refuses to open.
+   */
+  @ReactMethod
+  fun getAppInfo(promise: Promise) {
+    try {
+      val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+      val code =
+        if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+        else @Suppress("DEPRECATION") pi.versionCode.toLong()
+      val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+      val mi = ActivityManager.MemoryInfo()
+      am.getMemoryInfo(mi)
+      val map = Arguments.createMap()
+      map.putString("version", pi.versionName ?: "")
+      map.putString("build", code.toString())
+      map.putString("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
+      map.putDouble("totalMemMB", mi.totalMem / 1048576.0)
+      map.putDouble("availMemMB", mi.availMem / 1048576.0)
+      promise.resolve(map)
+    } catch (e: Exception) {
+      promise.reject("appinfo", e.message ?: "Cannot read app info")
     }
   }
 

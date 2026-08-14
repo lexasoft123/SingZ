@@ -31,6 +31,21 @@ class AudioRouteInfo: NSObject {
     ])
   }
 
+  /// Counterpart of the Android getAppInfo — the build/device header a bug
+  /// report needs. iOS exposes no cheap total-RAM figure worth reporting, so
+  /// the memory fields are Android-only and the JS side treats them as
+  /// optional rather than printing zeroes that mean nothing.
+  @objc func getAppInfo(
+    _ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let info = Bundle.main.infoDictionary
+    resolve([
+      "version": info?["CFBundleShortVersionString"] as? String ?? "",
+      "build": info?["CFBundleVersion"] as? String ?? "",
+      "abi": "arm64"
+    ])
+  }
+
   @objc func getPref(
     _ key: NSString, resolve: @escaping RCTPromiseResolveBlock,
     reject: @escaping RCTPromiseRejectBlock

@@ -24,7 +24,7 @@ import {
   driveStoredProjects
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
-import { log } from '../log'
+import { fmtBytes, fmtMs, log } from '../log'
 import LogPanel from './LogPanel'
 import { customTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
@@ -33,6 +33,7 @@ import {
   clearRoot,
   getRoot,
   isDownloaded,
+  decodedBytes,
   listProjects,
   loadProject,
   pickFolder,
@@ -312,18 +313,34 @@ export default function CatalogScreen({
     try {
       const ids = STEM_ORDER_ALL.filter((s) => s in SAMPLE_STEMS)
       const stems: LoadedProject['stems'] = []
+      // The sample decodes from bundled assets, so it never touches
+      // loadProject and used to leave no trace at all — which is the worst
+      // possible gap, because a tester with no library of their own has
+      // nothing else to open.
+      log('song', `opening the bundled sample · ${ids.length} lanes`)
+      const openedAt = Date.now()
+      const spent: string[] = []
       for (let i = 0; i < ids.length; i++) {
         if (tok !== token.current) return releaseStems(stems)
         setLoading({ dir: SAMPLE_DIR, msg: `Decoding ${ids[i]} · ${i + 1}/${ids.length}`, frac: i / ids.length })
+        const t0 = Date.now()
         stems.push({ id: ids[i], buffer: await decodeAudioData(SAMPLE_STEMS[ids[i]], sampleRate) })
+        spent.push(`${ids[i]} ${fmtMs(Date.now() - t0)}`)
       }
       if (tok !== token.current) return
       setLoading(null)
+      log(
+        'song',
+        `opened the bundled sample — ${stems.length} lanes in ${fmtMs(Date.now() - openedAt)} · ` +
+          `${fmtBytes(decodedBytes(stems))} decoded · decode ${spent.join(', ')}`
+      )
       onLoaded({ name: SAMPLE_PROJECT.name, doc: SAMPLE_PROJECT, lyrics: SAMPLE_LYRICS, stems })
     } catch (e) {
       if (tok === token.current) {
         setLoading(null)
-        setError(String(e instanceof Error ? e.message : e))
+        const msg = String(e instanceof Error ? e.message : e)
+        log('song', `the bundled sample failed to open — ${msg}`, 'error')
+        setError(msg)
       }
     }
   }, [onLoaded, sampleRate])
