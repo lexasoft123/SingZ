@@ -615,25 +615,15 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   // listing already walks. Every write is .part+rename; every path is guarded
   // the way cacheDirFor guards cache names.
 
-  /** A project's folder under the documents root, or null on a bad name. */
+  /** A project's folder under the documents root, or null on a bad name.
+   *  Rules live in ProjectPaths so the JVM test can hold them to the shared
+   *  table (tests/shared/project-name-cases.json). */
   private fun docDirFor(project: String): File? =
-    if (project.isEmpty() || project.contains("/") || project == ".." || project == ".") null
-    else File(documentsDir(), project)
+    if (ProjectPaths.plainChild(project)) File(documentsDir(), project) else null
 
-  /** Relative file path inside a project — subdirs fine, escapes are not. */
-  private fun relOk(file: String): Boolean =
-    file.isNotEmpty() && !file.startsWith("/") &&
-      file.split('/').none { it.isEmpty() || it == "." || it == ".." }
+  private fun relOk(file: String): Boolean = ProjectPaths.relOk(file)
 
-  /** Desktop projects.ts safeName, mirrored: same strip, same fallback. */
-  private fun safeName(name: String): String {
-    val cleaned = name
-      .replace(Regex("\\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$", RegexOption.IGNORE_CASE), "")
-      .replace(Regex("[/\\\\:*?\"<>|]"), " ")
-      .replace(Regex("\\s{2,}"), " ")
-      .trim()
-    return cleaned.ifEmpty { "Untitled song" }
-  }
+  private fun safeName(name: String): String = ProjectPaths.safeName(name)
 
   /**
    * Create (and name) the folder a phone-added song will live in. A name that

@@ -1,0 +1,36 @@
+{
+  "_comment": "The phone writer's name/path rules, one table for every implementation: FolderAccessModule.kt + ProjectPaths (Kotlin, ProjectPathsTest), FolderAccess.swift (same logic — a Swift runner can join later), and tests/shared/fake-native-cache.ts's fakeNativeWriter (vitest project-name-rules.test.ts). safeName mirrors desktop projects.ts exactly; relOk guards project-relative file paths; plainChild guards project dir names.",
+  "safeName": [
+    { "in": "Sixteen Tons.mp3", "out": "Sixteen Tons" },
+    { "in": "Mr. Crowley", "out": "Mr. Crowley" },
+    { "in": "Mr. Brightside.mp3", "out": "Mr. Brightside" },
+    { "in": "a/b\\c:d*e?f\"g<h>i|j", "out": "a b c d e f g h i j" },
+    { "in": "  spaced   out  .flac", "out": "spaced out" },
+    { "in": "...", "out": "..." },
+    { "in": ".mp3", "out": "Untitled song" },
+    { "in": "", "out": "Untitled song" },
+    { "in": "song.opus", "out": "song" },
+    { "in": "song.txt", "out": "song.txt" },
+    { "in": "Ария — Штиль.mp3", "out": "Ария — Штиль" }
+  ],
+  "relOk": [
+    { "in": "project.json", "ok": true },
+    { "in": "stems/vocals.flac", "ok": true },
+    { "in": "stems/custom-original.mp3", "ok": true },
+    { "in": "", "ok": false },
+    { "in": "/etc/passwd", "ok": false },
+    { "in": "../outside.txt", "ok": false },
+    { "in": "stems/../../escape.txt", "ok": false },
+    { "in": "stems//double.txt", "ok": false },
+    { "in": "stems/.", "ok": false },
+    { "in": "a/b/c.txt", "ok": true }
+  ],
+  "plainChild": [
+    { "in": "Sixteen Tons", "ok": true },
+    { "in": "Sixteen Tons 2", "ok": true },
+    { "in": "", "ok": false },
+    { "in": ".", "ok": false },
+    { "in": "..", "ok": false },
+    { "in": "a/b", "ok": false }
+  ]
+}
