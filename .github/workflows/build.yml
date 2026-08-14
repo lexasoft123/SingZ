@@ -4,6 +4,19 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+  # Keeps main's engine caches warm. Actions caches cannot be shared between
+  # tags: a run reads only its own ref and the DEFAULT BRANCH, never a sibling
+  # ref. This workflow otherwise runs on tags alone, so every release wrote
+  # engines-src/engines-out into a scope no later release could read, and each
+  # one re-cloned and rebuilt whisper.cpp on both macOS and Windows. Measured
+  # on a real release: "Cache not found for input keys: engines-out-Windows-…"
+  # for a key that existed in the repo, on another tag.
+  #
+  # Nothing is published from here — "Attach to GitHub Release" is gated on a
+  # tag ref. The weekly full build doubles as a smoke test that the desktop
+  # packaging still works between releases.
+  schedule:
+    - cron: '47 5 * * 1'
 
 permissions:
   contents: write

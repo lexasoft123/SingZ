@@ -15,6 +15,11 @@ interface AudioRouteInfoApi {
     portType: string
     portName: string
     portUid: string
+    /** Media/output volume, 0..1. Absent on builds older than 0.14.3. */
+    volume?: number
+    /** Android only — the raw step index and its maximum, for the log. */
+    volumeIndex?: number
+    volumeMax?: number
   }>
   getPref(key: string): Promise<number | null>
   setPref(key: string, value: number): Promise<void>
@@ -64,6 +69,32 @@ export async function getRouteLatency(): Promise<RouteLatency> {
     label: external && o.portName ? o.portName : pretty,
     key: `singz.trim:${o.portType}:${o.portName}`
   }
+}
+
+/**
+ * Where the sound is going and how loud, as one line for the log.
+ *
+ * `silent` is the whole point. A phone whose media volume sits at zero plays
+ * a song perfectly and inaudibly, and until something is audibly playing the
+ * volume keys move the ringtone instead — so from the outside it is identical
+ * to an app that cannot play at all. That cost a closed-test round; the log
+ * now says it outright.
+ */
+export async function describeOutput(): Promise<{ text: string; silent: boolean }> {
+  const o = await Promise.race([
+    Native.getOutput(),
+    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
+  ]).catch(() => null)
+  if (o === null) return { text: 'route unknown', silent: false }
+
+  const where = (PORT_LABELS[o.portType] ?? o.portType) + (o.portName && o.portName !== o.portType ? ` (${o.portName})` : '')
+  if (typeof o.volume !== 'number') return { text: where, silent: false }
+
+  const loud =
+    typeof o.volumeIndex === 'number' && typeof o.volumeMax === 'number'
+      ? `${o.volumeIndex}/${o.volumeMax}`
+      : `${Math.round(o.volume * 100)}%`
+  return { text: `${where} · volume ${loud}`, silent: o.volume <= 0 }
 }
 
 export async function getTrimMs(key: string): Promise<number> {

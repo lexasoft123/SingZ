@@ -1,0 +1,7 @@
+package_name("com.lexasoft.singz")
+
+# Local runs read a service-account JSON sitting next to this file (gitignored).
+# CI passes the same key through SUPPLY_JSON_KEY_DATA so the credential never
+# touches the runner's disk — if that is set, it wins.
+local_key = File.expand_path("play-service-account.json", __dir__)
+json_key_file(local_key) if File.exist?(local_key) && ENV["SUPPLY_JSON_KEY_DATA"].nil?

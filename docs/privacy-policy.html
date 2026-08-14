@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SingZ — Privacy Policy</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1c1b1a; --muted: #605a54; --rule: #e3e0dc;
+    --accent: #b5484a; --card: #f7f5f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17161a; --fg: #eceaf0; --muted: #a9a4b0; --rule: #322f38;
+      --accent: #f2777a; --card: #1f1e24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 3rem 1.25rem 5rem; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 44rem; margin: 0 auto; }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .35rem; letter-spacing: -.02em; }
+  h2 { font-size: 1.15rem; margin: 2.5rem 0 .6rem; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 2.5rem; font-size: .95rem; }
+  p, li { color: var(--fg); }
+  ul { padding-left: 1.25rem; }
+  li { margin: .35rem 0; }
+  a { color: var(--accent); }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 3rem 0; }
+  .callout {
+    background: var(--card); border-left: 3px solid var(--accent);
+    padding: 1rem 1.15rem; border-radius: 0 6px 6px 0; margin: 1.25rem 0;
+  }
+  .callout p { margin: 0; }
+  code { background: var(--card); padding: .12em .4em; border-radius: 4px; font-size: .9em; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>SingZ — Privacy Policy</h1>
+<p class="sub">Last updated 13 August 2026</p>
+
+<p>SingZ is a practice tool for singers. It plays songs you already own, split into
+separate instrument and vocal tracks, with synced lyrics. This policy describes what
+the SingZ Android app does with your information.</p>
+
+<div class="callout">
+<p><strong>The short version:</strong> SingZ has no accounts, no analytics, no advertising
+and no tracking of any kind. It talks to exactly one outside service — Google Drive, and
+only when you choose to sign in, and only to reach the song files you put there yourself.
+Everything else stays on your phone.</p>
+</div>
+
+<h2>What SingZ accesses</h2>
+
+<p><strong>Songs on your device.</strong> SingZ plays song folders you copy onto the phone
+or pick with the Android folder picker. These files are read directly from storage you
+selected. They are never uploaded anywhere.</p>
+
+<p><strong>Google Drive (only if you sign in).</strong> Signing in is optional; SingZ works
+without it. If you do sign in, SingZ requests a single permission,
+<code>drive.file</code>. This is the narrowest Drive permission Google offers: it grants
+access <em>only</em> to files created or opened with SingZ — in practice, the
+<code>SingZ</code> folder your desktop copy of the app writes to. SingZ cannot see, list or
+read any other file in your Drive.</p>
+
+<p><strong>Your Google account email address.</strong> When you sign in, Google returns your
+email address alongside the access token. SingZ displays it so you can tell which account a
+library is coming from. It is stored on the phone and sent nowhere.</p>
+
+<h2>What SingZ stores, and where</h2>
+
+<ul>
+  <li><strong>Downloaded songs</strong> — in the app's private storage, so they play offline.
+      Removing a song from the app, or uninstalling it, deletes them.</li>
+  <li><strong>Google sign-in tokens</strong> — in the app's private preferences, so you do
+      not sign in every time. Signing out deletes them.</li>
+  <li><strong>A list of your song folders</strong> — the names and sizes of projects in your
+      Drive folder, so the library opens instantly and works with no signal.</li>
+  <li><strong>A diagnostic log</strong> — the same messages shown in the app's Log panel,
+      kept on the phone so a problem can be described after the fact. You choose whether to
+      share it, using Android's normal share sheet.</li>
+</ul>
+
+<p>All of this lives in app-private storage on your device. None of it is transmitted to the
+developer or to anyone else.</p>
+
+<h2>What SingZ does not do</h2>
+
+<ul>
+  <li>No analytics, telemetry, or usage measurement.</li>
+  <li>No advertising, and no advertising identifiers.</li>
+  <li>No crash-reporting or third-party SDKs that phone home.</li>
+  <li>No user accounts, and no server operated by the developer — there is nowhere for
+      your data to be sent.</li>
+  <li>No selling or sharing of personal information. Ever, and to anyone.</li>
+</ul>
+
+<h2>Google user data — limited use</h2>
+
+<p>SingZ's use of information received from Google APIs adheres to the
+<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API
+Services User Data Policy</a>, including the Limited Use requirements. Specifically, data
+obtained from Google Drive is used only to provide the song-library features you see in the
+app; it is not transferred to anyone else, not used for advertising, and not read by any
+human.</p>
+
+<h2>Removing your data</h2>
+
+<ul>
+  <li><strong>Downloaded songs:</strong> use “Free up space” in the app, or uninstall it.</li>
+  <li><strong>Google sign-in:</strong> sign out in the app to delete the stored tokens.</li>
+  <li><strong>Revoking Drive access entirely:</strong> visit
+      <a href="https://myaccount.google.com/permissions">your Google Account permissions
+      page</a> and remove SingZ.</li>
+  <li><strong>Everything:</strong> uninstalling SingZ removes all app-private storage,
+      including songs, tokens, the catalog and the log.</li>
+</ul>
+
+<h2>Children</h2>
+
+<p>SingZ is a general-audience music practice tool. It is not directed at children under 13,
+and it collects no personal information from anyone.</p>
+
+<h2>Changes</h2>
+
+<p>If this policy changes, the updated version will be posted at this address with a new date
+at the top. Material changes will also be noted in the app's release notes.</p>
+
+<h2>Contact</h2>
+
+<p>Questions about this policy, or about SingZ and your data:
+<a href="mailto:lexasoft@gmail.com">lexasoft@gmail.com</a></p>
+
+<hr>
+<footer>
+SingZ is open source. The code that does everything described above can be read at
+<a href="https://github.com/lexasoft123/SingZ">github.com/lexasoft123/SingZ</a>.
+</footer>
+
+</main>
+</body>
+</html>

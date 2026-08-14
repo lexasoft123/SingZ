@@ -1,0 +1,7 @@
+First release on Google Play.
+
+Six separate tracks per song, lyrics that light up word by word, a pitch guide
+that draws the melody, transpose, slow-down without chipmunk, and loops with a
+count-in. Songs come from the free SingZ desktop app over Google Drive, or from
+a folder you copy across. A sample song is bundled so there is something to sing
+straight away.

@@ -3,6 +3,7 @@ import { StatusBar, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { MultitrackEngine } from './src/engine'
+import { logStartup } from './src/log'
 import { releaseProject, type LoadedProject } from './src/projects'
 import { C } from './src/ui/bits'
 import CatalogScreen from './src/ui/CatalogScreen'
@@ -16,6 +17,8 @@ export default function App(): React.JSX.Element {
   const [project, setProject] = useState<LoadedProject | null>(null)
 
   useEffect(() => {
+    // First line of the session, before anything can go wrong underneath it.
+    void logStartup()
     AudioManager.setAudioSessionOptions({ iosCategory: 'playback', iosMode: 'default' })
     void AudioManager.setAudioSessionActivity(true)
   }, [])

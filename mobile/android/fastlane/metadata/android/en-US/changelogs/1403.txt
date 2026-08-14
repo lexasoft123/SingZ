@@ -1,0 +1,3 @@
+The log now records playback, not just downloading.
+
+Starting a song writes down where the sound is going and how loud — speaker, headphones or Bluetooth, and the media volume — and says so plainly when the volume is at zero and the song will be inaudible. If anything sounds wrong, the Log button in the header now has the answer in it.

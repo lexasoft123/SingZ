@@ -73,6 +73,9 @@ const Native = NativeModules.FolderAccess as FolderNative
 interface PrefsNative {
   getTextPref(key: string): Promise<string | null>
   setTextPref(key: string, value: string): Promise<void>
+  /** Verifier from the system CSPRNG plus its S256 challenge. Absent on
+   *  builds older than 0.14.5. */
+  pkcePair?: () => Promise<{ verifier: string; challenge: string }>
 }
 const Prefs = NativeModules.AudioRouteInfo as PrefsNative
 
@@ -118,9 +121,27 @@ export async function driveSignIn(): Promise<void> {
   if (!cfg) throw new Error('Google Drive is not configured in this build')
   const port = await Native.oauthStart()
   const redirect = `http://127.0.0.1:${port}`
-  // Hermes has no WebCrypto — plain-method PKCE (the installed-app secret is
-  // non-confidential anyway; this still binds the code to this attempt).
-  const verifier = `singz-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+  // Hermes has no WebCrypto, so the pair is made natively: SecureRandom /
+  // SecRandomCopyBytes for the verifier, SHA-256 for the challenge. The old
+  // path sent the verifier itself as the challenge (method=plain) and built
+  // it from a clock and Math.random — and PKCE rests entirely on the verifier
+  // being unguessable, so both halves mattered.
+  let verifier: string
+  let challenge: string
+  let method: 'S256' | 'plain' = 'S256'
+  if (Prefs.pkcePair) {
+    const pair = await Prefs.pkcePair()
+    verifier = pair.verifier
+    challenge = pair.challenge
+  } else {
+    // Only reachable if new JS runs against an older native, which cannot
+    // happen in a shipped build — but sign-in must not die for it, and a
+    // silent downgrade is worse than a noisy one.
+    log('gdrive', 'native PKCE unavailable — falling back to method=plain', 'warn')
+    verifier = `singz-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+    challenge = verifier
+    method = 'plain'
+  }
   const url =
     `${AUTH()}/o/oauth2/v2/auth?client_id=${encodeURIComponent(cfg.clientId)}` +
     `&redirect_uri=${encodeURIComponent(redirect)}` +
@@ -128,7 +149,7 @@ export async function driveSignIn(): Promise<void> {
     '&scope=' +
     encodeURIComponent('https://www.googleapis.com/auth/drive.file openid email') +
     '&access_type=offline&prompt=consent' +
-    `&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain`
+    `&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=${method}`
   if (Native.oauthPresent) {
     await Native.oauthPresent(url)
   } else {
@@ -154,10 +175,30 @@ export async function driveSignIn(): Promise<void> {
     refresh_token?: string
     expires_in?: number
     id_token?: string
+    scope?: string
     error_description?: string
   }
   if (!tok.access_token || !tok.refresh_token) {
     throw new Error(tok.error_description ?? 'Google did not issue tokens')
+  }
+  // Google's consent screen lets a signer approve the account and decline the
+  // Drive tick box. That yields perfectly good tokens that can do nothing but
+  // say who you are, and every later call answers 403 — so what was actually
+  // granted is written down at the one moment it is known for certain.
+  const granted = tok.scope ?? ''
+  const hasDrive = granted.includes('drive.file')
+  log(
+    'gdrive',
+    `signed in · scopes: ${granted || '(none reported)'}`,
+    hasDrive ? 'info' : 'warn'
+  )
+  if (!hasDrive) {
+    log(
+      'gdrive',
+      'Drive access was NOT granted at sign-in — listing songs will fail. ' +
+        'Sign out, sign in again, and allow Drive access.',
+      'error'
+    )
   }
   await writeTokens({
     access: tok.access_token,
@@ -253,10 +294,42 @@ async function readJson<T>(key: string, fallback: T): Promise<T> {
 const writeJson = (key: string, value: unknown): Promise<void> =>
   Prefs.setTextPref(key, JSON.stringify(value))
 
+/**
+ * Google says WHY it refused, in the body — and a bare status code throws that
+ * away. "Drive API 403" reached a tester with an empty log and could have been
+ * a missing scope, a disabled API or a quota; they are one word apart in the
+ * response and a support round-trip apart without it.
+ */
+async function driveError(res: Response, where: string): Promise<Error> {
+  let reason = ''
+  let detail = ''
+  try {
+    const body = (await res.json()) as {
+      error?: { message?: string; errors?: { reason?: string }[] }
+    }
+    reason = body.error?.errors?.[0]?.reason ?? ''
+    detail = body.error?.message ?? ''
+  } catch {
+    // a non-JSON error body tells us nothing extra; the status still does
+  }
+  // The one a singer can act on: consent completed, but the Drive tick box
+  // was not granted, so the token can sign in and nothing else.
+  const hint =
+    reason === 'insufficientPermissions' || reason === 'forbidden'
+      ? ' — SingZ was not granted access to Drive. Sign out, sign in again, and allow Drive access.'
+      : reason === 'accessNotConfigured'
+        ? ' — the Drive API is not enabled for this app build.'
+        : ''
+  const parts = [reason, detail].filter(Boolean).join(': ')
+  const line = `Drive API ${res.status} on ${where}${parts ? ` (${parts})` : ''}${hint}`
+  log('gdrive', line, 'error')
+  return new Error(line)
+}
+
 async function api<T>(path: string): Promise<T> {
   const token = await accessToken()
   const res = await fetch(`${API()}${path}`, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error(`Drive API ${res.status} on ${path.split('?')[0]}`)
+  if (!res.ok) throw await driveError(res, path.split('?')[0])
   return (await res.json()) as T
 }
 

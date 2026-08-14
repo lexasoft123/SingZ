@@ -1,0 +1,3 @@
+Signing in to Google Drive is a little sturdier.
+
+The one-time code the app trades for access is now protected with SHA-256 instead of being sent in the clear, and the secret behind it comes from the phone's secure random generator rather than from the clock. Nothing looks different, and you do not need to sign in again — it simply makes an already narrow door harder to lean on.
