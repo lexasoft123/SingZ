@@ -174,13 +174,34 @@ CI secret, nowhere else.
 
 ### From CI
 
-The **Android** workflow's `publish` job is manual only (`workflow_dispatch`),
-with a track chooser defaulting to `validate`. It never runs on a tag: tagging
-cuts a release, publishing it is a separate decision. Tick `metadata` on the
-dispatch form to push the listing in the same run.
+Pushing a `v*` tag builds the bundle and **ships it to the closed testing
+track**, with no further input — that is what tagging is for, and testers
+should not wait on someone remembering to press a button.
 
-If your closed track is not named `alpha`, set a repo **variable**
-`PLAY_CLOSED_TRACK` to its actual name.
+**Production is never automatic.** It reaches strangers, a staged rollout is a
+judgement call, and `git tag` is too easy to type. To reach production, dispatch
+the Android workflow by hand and choose `production` from the track menu. The
+same form offers `validate` (ships nothing, proves the credentials) and a
+`metadata` tick box to push the listing in the same run.
+
+Four secrets sign the build and one publishes it:
+
+```bash
+gh secret set ANDROID_KEYSTORE_BASE64 < <(base64 -i ~/SingZ-signing/singz-upload.jks)
+gh secret set ANDROID_KEYSTORE_PASSWORD   # paste when prompted
+gh secret set ANDROID_KEY_ALIAS           # singz-upload
+gh secret set ANDROID_KEY_PASSWORD        # same as the store password
+gh secret set PLAY_SERVICE_ACCOUNT_JSON < mobile/android/fastlane/play-service-account.json
+```
+
+The service-account JSON goes in as **file contents**, not a path: the workflow
+hands it to supply through `SUPPLY_JSON_KEY_DATA` so the credential never
+touches the runner's disk.
+
+The closed track here is a custom one named `Testing`. If that ever changes,
+set a repo **variable** `PLAY_CLOSED_TRACK` to the new name — asking Play for a
+track that does not exist returns an empty track rather than an error, which
+looks exactly like an upload that silently failed.
 
 ## First release: the personal-account path
 
