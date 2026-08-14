@@ -89,6 +89,17 @@ class SplitService : Service() {
   private val chunkDurations = ArrayDeque<Long>()
   private var lastChunkAt = 0L
   private val watchdog = Runnable { onStalled() }
+  /** The app decides "is the service alive?" by whether job.json's
+   *  updatedAtMs keeps moving. Chunks can be minutes apart on a slow phone
+   *  and the engine reports nothing inside one, so the pulse rides a CLOCK,
+   *  not callbacks — the file freezes only when this process is dead. */
+  private val pulse = object : Runnable {
+    override fun run() {
+      if (!jobActive) return
+      JobStore.touch(jobDir(this@SplitService))
+      handler.postDelayed(this, 5_000)
+    }
+  }
 
   override fun onBind(intent: Intent?): IBinder = messenger.binder
 
@@ -122,6 +133,8 @@ class SplitService : Service() {
             firstCapMs = intent.getLongExtra(EXTRA_WATCHDOG_CAP_MS, 0L)
               .let { if (it > 0) it else DEFAULT_FIRST_CAP_MS }
             startInForeground()
+            handler.removeCallbacks(pulse)
+            handler.postDelayed(pulse, 5_000)
             val projectDir = intent.getStringExtra(EXTRA_PROJECT_DIR) ?: ""
             val wantResume = intent.getBooleanExtra(EXTRA_RESUME, false)
             thread(name = "singz-split-job") { runJob(src, model, projectDir, wantResume) }
@@ -270,6 +283,7 @@ class SplitService : Service() {
     sendState(state, error)
     handler.post {
       disarmWatchdog()
+      handler.removeCallbacks(pulse)
       stopForeground(STOP_FOREGROUND_REMOVE)
       stopSelf()
       jobActive = false

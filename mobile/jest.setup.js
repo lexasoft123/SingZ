@@ -21,7 +21,15 @@ jest.mock('react-native-audio-api', () => ({
   })),
   AudioBuffer: jest.fn(),
   GainNode: jest.fn(),
-  decodeAudioData: jest.fn(() => Promise.resolve({ length: 0, numberOfChannels: 2 })),
+  // getChannelData feeds the audibleStems silence filter in loadProject —
+  // an empty lane reads as silent, so stub "audio" is loud enough to keep.
+  decodeAudioData: jest.fn(() =>
+    Promise.resolve({
+      length: 4,
+      numberOfChannels: 2,
+      getChannelData: () => new Float32Array([0.5, -0.5, 0.5, -0.5]),
+    })
+  ),
 }));
 
 /**

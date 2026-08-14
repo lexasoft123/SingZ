@@ -53,6 +53,20 @@ object JobStore {
     }
   }
 
+  /** The liveness pulse: bump updatedAtMs while the job is genuinely active.
+   *  Read and write inside one lock hold — a racing chunk update must never
+   *  be written back stale. */
+  @Synchronized
+  fun touch(dir: File) {
+    val cur = read(dir) ?: return
+    if (cur.state != STATE_DECODING && cur.state != STATE_SPLITTING) return
+    try {
+      write(dir, cur.copy(updatedAtMs = System.currentTimeMillis()))
+    } catch (_: Exception) {
+      // a missed pulse only delays the app's verdict, never corrupts it
+    }
+  }
+
   // Synchronized: the watchdog (main thread) can write a failure while the
   // worker is mid-chunk-update — two writers on one .part path would tear it.
   @Synchronized

@@ -979,6 +979,39 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     }
   }
 
+  /** Delete one file inside a phone project (the split adoption drops the
+   *  custom-original lane once six real stems land). Guarded like writeText;
+   *  missing is success — the caller retries after crashes. */
+  @objc func deleteFile(
+    _ project: String,
+    relPath: String,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.global(qos: .utility).async {
+      guard let dir = self.docDirFor(project) else {
+        reject("delete", "Bad project name", nil)
+        return
+      }
+      guard self.relOk(relPath) else {
+        reject("delete", "Bad file name", nil)
+        return
+      }
+      let f = dir.appendingPathComponent(relPath)
+      let fm = FileManager.default
+      if fm.fileExists(atPath: f.path) {
+        do {
+          try fm.removeItem(at: f)
+        } catch {
+          reject("delete", "Could not delete \(relPath)", error)
+          return
+        }
+      }
+      UserDefaults.standard.removeObject(forKey: "singz.hash.\(f.path)")
+      resolve(true)
+    }
+  }
+
   // ---------------------------------------------- model downloads (P2) --
   // Pinned-release assets (the split model is 136 MB): Range-resumed into
   // Application Support/models (backup-excluded — a lost model is just a

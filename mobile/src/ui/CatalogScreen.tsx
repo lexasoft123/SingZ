@@ -51,6 +51,22 @@ import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
 import { deleteProject, writeLyrics } from '../writer'
+import {
+  cancelSplit,
+  clearSplitJob,
+  splitAvailable,
+  splitStatus,
+  subscribeSplit,
+  type SplitJobStatus
+} from '../split/service'
+import {
+  KEEPS_FAILING_COPY,
+  finishSplit,
+  recordFailure,
+  splitGate,
+  startProjectSplit
+} from '../split/flow'
+import { cancelModelDownload } from '../analysis/models'
 
 const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
@@ -405,6 +421,199 @@ export default function CatalogScreen({
     [refresh, sampleRate]
   )
 
+  /**
+   * The split job's card state. job.json (via splitStatus) is the truth —
+   * this state is a viewer over it plus the live event stream; a relaunch
+   * mid-split reconstructs the card from the file alone.
+   */
+  type SplitUi =
+    | null
+    | { phase: 'model'; project: string; gotMB: number; totalMB: number }
+    | { phase: 'run'; project: string; text: string; frac: number }
+    | { phase: 'adopting'; project: string }
+    | { phase: 'failed'; project: string; error: string; attempts: number }
+  const [splitUi, setSplitUi] = useState<SplitUi>(null)
+  const adoptingRef = useRef(false)
+
+  const adoptDone = useCallback(
+    async (status: SplitJobStatus): Promise<void> => {
+      if (adoptingRef.current) return
+      adoptingRef.current = true
+      setSplitUi({ phase: 'adopting', project: status.projectDir })
+      try {
+        await finishSplit(status.projectDir, status.jobDir)
+        setSplitUi(null)
+        await refresh()
+      } catch (e) {
+        setSplitUi({
+          phase: 'failed',
+          project: status.projectDir,
+          error: String(e instanceof Error ? e.message : e),
+          attempts: 0
+        })
+      } finally {
+        adoptingRef.current = false
+      }
+    },
+    [refresh]
+  )
+
+  const showFailed = useCallback(async (status: SplitJobStatus, fallbackError: string) => {
+    const attempts = await recordFailure(status.srcPath, status.updatedAtMs)
+    setSplitUi({
+      phase: 'failed',
+      project: status.projectDir,
+      error: status.error ?? fallbackError,
+      attempts
+    })
+  }, [])
+
+  // One subscription for the screen's life: events only flow while the
+  // service lives, and every terminal state is re-checked against the file.
+  useEffect(() => {
+    const unsubscribe = subscribeSplit(
+      (p) => {
+        setSplitUi((cur) => {
+          if (!cur || (cur.phase !== 'run' && cur.phase !== 'model')) return cur
+          const project = cur.project
+          if (p.stage === 'decode') {
+            return { phase: 'run', project, text: 'Reading the song…', frac: p.frac * 0.05 }
+          }
+          if (p.stage === 'resample' || p.stage === 'load-model') {
+            return { phase: 'run', project, text: 'Warming up…', frac: 0.06 }
+          }
+          if (p.stage === 'chunk' && p.total > 0) {
+            return {
+              phase: 'run',
+              project,
+              text: `Splitting into stems — chunk ${p.done} of ${p.total}`,
+              frac: 0.08 + 0.92 * (p.done / p.total)
+            }
+          }
+          return cur
+        })
+      },
+      (st) => {
+        if (st.state === 'done' || st.state === 'failed') {
+          void splitStatus().then((status) => {
+            if (!status) return
+            if (status.state === 'done') void adoptDone(status)
+            else if (status.state === 'failed') void showFailed(status, 'The split failed')
+          })
+        } else if (st.state === 'cancelled') {
+          setSplitUi(null)
+        }
+      }
+    )
+    return unsubscribe
+  }, [adoptDone, showFailed])
+
+  // Liveness while the card claims "running": the service heartbeats
+  // job.json at every stage, so a file frozen past 90 s means the :split
+  // process died without a verdict — a relaunch seconds after a kill sees
+  // fresh timestamps and would otherwise show progress forever.
+  useEffect(() => {
+    if (splitUi?.phase !== 'run') return
+    const timer = setInterval(() => {
+      void splitStatus().then((status) => {
+        if (!status) {
+          setSplitUi((cur) => (cur?.phase === 'run' ? null : cur))
+          return
+        }
+        if (status.state === 'done') void adoptDone(status)
+        else if (status.state === 'failed') void showFailed(status, 'The split failed')
+        else if (Date.now() - status.updatedAtMs > 90_000) {
+          void showFailed(status, 'The split was interrupted')
+        }
+      })
+    }, 20_000)
+    return () => clearInterval(timer)
+  }, [splitUi?.phase, adoptDone, showFailed])
+
+  // The durable handoff: a job finished (or died) while the app was away.
+  useEffect(() => {
+    void splitStatus().then((status) => {
+      if (!status) return
+      if (status.state === 'done') {
+        void adoptDone(status)
+      } else if (status.state === 'failed') {
+        void showFailed(status, 'The split failed')
+      } else if (status.state === 'decoding' || status.state === 'splitting') {
+        const fresh = Date.now() - status.updatedAtMs < 90_000
+        if (fresh) {
+          setSplitUi({
+            phase: 'run',
+            project: status.projectDir,
+            text:
+              status.totalChunks > 0
+                ? `Splitting into stems — chunk ${status.chunksDone} of ${status.totalChunks}`
+                : 'Splitting into stems…',
+            frac:
+              status.totalChunks > 0 ? 0.08 + 0.92 * (status.chunksDone / status.totalChunks) : 0
+          })
+        } else {
+          // The service died without a verdict (battery pull, lmkd) — the
+          // tail makes Resume safe.
+          void showFailed(status, 'The split was interrupted')
+        }
+      }
+    })
+    // Once, at mount: later states arrive over the subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const startSplitFor = useCallback(async (dir: string, resume: boolean): Promise<void> => {
+    try {
+      const gate = await splitGate()
+      if (!gate.ok) {
+        Alert.alert('Splitting needs a bigger phone', gate.reason)
+        return
+      }
+      setSplitUi({ phase: 'model', project: dir, gotMB: 0, totalMB: 136 })
+      await startProjectSplit(dir, {
+        resume,
+        onModelProgress: (got, total) =>
+          setSplitUi((cur) =>
+            cur?.phase === 'model'
+              ? {
+                  phase: 'model',
+                  project: dir,
+                  gotMB: Math.round(got / 1e6),
+                  totalMB: Math.round(total / 1e6)
+                }
+              : cur
+          )
+      })
+      setSplitUi({ phase: 'run', project: dir, text: 'Starting…', frac: 0 })
+    } catch (e) {
+      setSplitUi(null)
+      const msg = String(e instanceof Error ? e.message : e)
+      if (!msg.includes('cancelled')) {
+        Alert.alert('Could not start the split', msg)
+      }
+    }
+  }, [])
+
+  const discardSplit = useCallback(() => {
+    void cancelSplit()
+      .then(() => clearSplitJob())
+      .then(() => setSplitUi(null))
+      .catch(() => setSplitUi(null))
+  }, [])
+
+  // Resume must first ask the file what actually failed: a job that reached
+  // DONE and then died during ADOPTION only needs the adoption re-run —
+  // handing it back to the service would wipe six finished stems and split
+  // from scratch.
+  const resumeSplit = useCallback(
+    async (project: string): Promise<void> => {
+      const status = await splitStatus()
+      if (status?.state === 'done') void adoptDone(status)
+      else void startSplitFor(project, true)
+    },
+    [adoptDone, startSplitFor]
+  )
+
   /** Phone-library long-press: this phone owns these projects. */
   const phoneCardMenu = useCallback(
     (p: ProjectEntry) => {
@@ -413,6 +622,24 @@ export default function CatalogScreen({
       ]
       if (!p.hasLyrics) {
         buttons.unshift({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
+      }
+      // Six real stems end the offer; a running job means the card owns it;
+      // a build without the split natives (iOS until P3) never offers.
+      if (splitAvailable() && Object.keys(p.stems).length === 0 && !splitUi) {
+        buttons.unshift({
+          text: 'Split into stems',
+          onPress: () => {
+            Alert.alert(
+              'Split this song?',
+              'The phone separates it into vocals, drums, bass and more — a few minutes of ' +
+                'work, and a one-time 136 MB download the first time.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Split', onPress: () => void startSplitFor(p.dir, false) }
+              ]
+            )
+          }
+        })
       }
       buttons.unshift({
         text: 'Delete from this phone',
@@ -434,7 +661,7 @@ export default function CatalogScreen({
       })
       Alert.alert(p.doc.name ?? p.dir, undefined, buttons)
     },
-    [findLyricsFor, refresh]
+    [findLyricsFor, refresh, splitUi, startSplitFor]
   )
 
   useEffect(() => {
@@ -471,6 +698,12 @@ export default function CatalogScreen({
       const p = (projects ?? []).find((x) => x.dir === dir)
       return p ? findLyricsFor(p) : Promise.reject(new Error(`no project ${dir}`))
     }
+    // Split flow, headless: the same path the card drives. Poll splitUi for
+    // phase (never await the whole split over CDP).
+    TEST.splitProject = (dir: string) => void startSplitFor(dir, false)
+    TEST.resumeSplit = (dir: string) => void resumeSplit(dir)
+    TEST.discardSplit = discardSplit
+    TEST.splitUi = splitUi
   })
 
   const card = (opts: {
@@ -632,6 +865,68 @@ export default function CatalogScreen({
             />
           }
         >
+          {splitUi && (
+            <View style={s.splitCard}>
+              <Text style={s.splitTitle} numberOfLines={1}>
+                {splitUi.project}
+              </Text>
+              {splitUi.phase === 'model' && (
+                <>
+                  <Text style={s.splitText}>
+                    Downloading the splitter — {splitUi.gotMB} of {splitUi.totalMB} MB, once
+                  </Text>
+                  <View style={s.splitBarBed}>
+                    <View
+                      style={[
+                        s.splitBar,
+                        { width: `${Math.min(100, (splitUi.gotMB / Math.max(1, splitUi.totalMB)) * 100)}%` }
+                      ]}
+                    />
+                  </View>
+                </>
+              )}
+              {splitUi.phase === 'run' && (
+                <>
+                  <Text style={s.splitText}>{splitUi.text}</Text>
+                  <View style={s.splitBarBed}>
+                    <View style={[s.splitBar, { width: `${Math.round(splitUi.frac * 100)}%` }]} />
+                  </View>
+                </>
+              )}
+              {splitUi.phase === 'adopting' && <Text style={s.splitText}>Finishing up…</Text>}
+              {splitUi.phase === 'failed' && (
+                <Text style={s.splitText}>
+                  {splitUi.attempts >= 2 ? KEEPS_FAILING_COPY : splitUi.error}
+                </Text>
+              )}
+              <View style={s.splitActions}>
+                {(splitUi.phase === 'model' || splitUi.phase === 'run') && (
+                  <Pressable
+                    hitSlop={8}
+                    onPress={() =>
+                      // No job exists yet in the model phase — the download
+                      // is the thing to stop (its reject resets the card).
+                      splitUi.phase === 'model'
+                        ? void cancelModelDownload()
+                        : void cancelSplit()
+                    }
+                  >
+                    <Text style={s.ctxLink}>Cancel</Text>
+                  </Pressable>
+                )}
+                {splitUi.phase === 'failed' && (
+                  <>
+                    <Pressable hitSlop={8} onPress={() => void resumeSplit(splitUi.project)}>
+                      <Text style={s.ctxLink}>Resume</Text>
+                    </Pressable>
+                    <Pressable hitSlop={8} onPress={discardSplit}>
+                      <Text style={[s.ctxLink, { color: C.dim }]}>Discard</Text>
+                    </Pressable>
+                  </>
+                )}
+              </View>
+            </View>
+          )}
           {(projects ?? []).map((p) => {
             const downloaded = isDownloaded(p, usage[p.dir])
             const added = customTracks(p.doc?.settings).length
@@ -720,6 +1015,25 @@ export default function CatalogScreen({
 
 const s = StyleSheet.create({
   wrap: { flex: 1, paddingHorizontal: 20 },
+  splitCard: {
+    backgroundColor: C.sheet,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.hairline
+  },
+  splitTitle: { color: C.text, fontSize: 15, fontWeight: '700', marginBottom: 4 },
+  splitText: { color: C.dim, fontSize: 13, marginBottom: 8 },
+  splitBarBed: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: white(0.12),
+    overflow: 'hidden',
+    marginBottom: 8
+  },
+  splitBar: { height: 4, borderRadius: 2, backgroundColor: C.amber },
+  splitActions: { flexDirection: 'row', gap: 18 },
   logSheet: { flex: 1, backgroundColor: C.bg, paddingHorizontal: 20, paddingTop: 60 },
   logHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   logTitle: { color: C.text, fontSize: 20, fontWeight: '700' },

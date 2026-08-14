@@ -685,8 +685,11 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
         val dir = docDirFor(project) ?: throw Exception("Bad project name")
         if (!relOk(relPath)) throw Exception("Bad file name")
         val src = File(srcPath)
+        val splitJob = File(reactApplicationContext.filesDir, "split-job")
         val owned = src.canonicalPath.startsWith(cacheRoot().canonicalPath + File.separator) ||
-          src.canonicalPath.startsWith(documentsDir().canonicalPath + File.separator)
+          src.canonicalPath.startsWith(documentsDir().canonicalPath + File.separator) ||
+          // finished split stems adopt from the service's job dir
+          src.canonicalPath.startsWith(splitJob.canonicalPath + File.separator)
         if (!owned || !src.isFile) throw Exception("Not a file this app owns")
         val out = File(dir, relPath)
         out.parentFile?.mkdirs()
@@ -774,6 +777,25 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
         promise.resolve(true)
       } catch (e: Exception) {
         promise.reject("delete", e.message ?: "Could not delete it")
+      }
+    }
+  }
+
+  /** Delete one file inside a phone project (the split adoption drops the
+   *  custom-original lane once six real stems land). Guarded like writeText;
+   *  missing is success — the caller retries after crashes. */
+  @ReactMethod
+  fun deleteFile(project: String, relPath: String, promise: Promise) {
+    exec.execute {
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        if (!relOk(relPath)) throw Exception("Bad file name")
+        val f = File(dir, relPath)
+        if (f.isFile && !f.delete()) throw Exception("Could not delete $relPath")
+        hashPrefs.edit().remove(f.path).apply()
+        promise.resolve(true)
+      } catch (e: Exception) {
+        promise.reject("delete", e.message ?: "Could not delete $relPath")
       }
     }
   }

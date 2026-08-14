@@ -317,6 +317,41 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     ~330 KB/s — `adb reverse` for anything sized; and a download driver must
     assert on the server's log, not on flags the JS surface deliberately
     does not expose.
+  - **Phase-2 adoption + UI slice (2026-08-15)**: the loop is closed — a song
+    added on the phone splits and becomes a six-lane project with no desktop
+    involved. `mobile/src/split/adopt.ts` (dependency-injected, jest-covered)
+    is the writer rule applied to a finished job: six stems move out of the
+    job dir (`moveIntoProject` now owns filesDir/split-job as a source),
+    stemHashes learns them, the custom-original lane leaves settings AND the
+    hashes, project.json is written LAST, only then does the lane file die
+    and the job dir clear — and every step tolerates a crashed earlier
+    attempt (a stem already moved counts as moved; the whole thing
+    converges). `flow.ts` wraps gate → model → service kick and the
+    two-dead-resumes rule (failure counter keyed by src + job updatedAtMs so
+    one failure counts once). The catalog card is a viewer over job.json +
+    the event stream: model download with MB progress, Reading/Warming/
+    chunk-of-N with a bar, Cancel, Finishing up, and a failed card with
+    Resume/Discard that switches to the honest add-it-on-the-desktop copy at
+    two failures. `audibleStems` is ported into loadProject (sampled RMS <
+    0.004 hides guitar/piano, dropped buffers released on the spot — the
+    GC-is-too-late rule). Machine-verified end to end on the emulator
+    (full-flow driver, all through the SAME code path the card drives): add
+    → split → adoption rewrote the doc (six rows, no custom-original
+    anywhere) → reopen shows 6 lanes (persisted-log oracle, no CDP during
+    the app decode) → THEN kill :split AND the app mid-split → relaunch →
+    the card reconstructs from the file alone, flips to "The split was
+    interrupted" → Resume → completes from the tail → adoption again,
+    identical doc. Card + notification visuals screenshot-checked.
+  - Liveness lesson: a relaunch seconds after a kill sees FRESH job
+    timestamps and would show a running card forever. The pulse must ride a
+    CLOCK, never engine callbacks — a chunk can outlast any callback
+    cadence (5 min first-chunk budget, 8× median after), and a file that
+    only moves on callbacks freezes mid-chunk on a healthy job. The service
+    runs a self-rescheduling 5 s handler calling JobStore.touch (read+write
+    in one lock hold, active states only), and the app polls while the card
+    claims "running": frozen past 90 s = the :split process is genuinely
+    dead. The watchdog can only vouch for a process that is alive; the
+    file's pulse is the cross-process truth.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
     formally), sustained multi-segment peak RSS on real fleet hardware,
     real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16` on the

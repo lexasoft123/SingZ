@@ -30,6 +30,16 @@ interface PrefsNative {
 }
 const Prefs = NativeModules.AudioRouteInfo as PrefsNative
 
+/** Build + device facts (RAM class for the split gate). Null on builds
+ *  whose native predates getAppInfo — callers treat unknown honestly. */
+export async function appInfo(): Promise<AppInfo | null> {
+  try {
+    return (await Prefs.getAppInfo?.()) ?? null
+  } catch {
+    return null
+  }
+}
+
 const KEY = 'singz.log'
 const MAX = 400
 

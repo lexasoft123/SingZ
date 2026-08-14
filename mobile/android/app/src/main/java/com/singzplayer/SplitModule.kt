@@ -152,6 +152,8 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
       m.putDouble("totalChunks", job.totalChunks.toDouble())
       job.error?.let { m.putString("error", it) }
       m.putDouble("updatedAtMs", job.updatedAtMs.toDouble())
+      // Where the finished stems live — the adoption moves them out of here.
+      m.putString("jobDir", SplitService.jobDir(reactApplicationContext).absolutePath)
       promise.resolve(m)
     } catch (t: Throwable) {
       promise.reject("status", t)

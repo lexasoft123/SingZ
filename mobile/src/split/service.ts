@@ -33,6 +33,8 @@ export interface SplitJobStatus {
   totalChunks: number
   error?: string
   updatedAtMs: number
+  /** Where the finished stems live — the adoption moves them out of here. */
+  jobDir: string
 }
 
 interface SplitNative {
@@ -51,6 +53,18 @@ interface SplitNative {
 
 const native = (): SplitNative => NativeModules.SingzSplit as SplitNative
 
+/**
+ * Whether THIS build's native carries the split-job surface. iOS ships only
+ * ortProbe until Phase 3 — every entry point below no-ops or answers null
+ * there, so the catalog can mount (and hide the offer) instead of dying on
+ * a missing method. Named probe, not key enumeration: the bridgeless
+ * interop proxy materializes methods lazily.
+ */
+export function splitAvailable(): boolean {
+  const m = NativeModules.SingzSplit as Record<string, unknown> | undefined
+  return typeof m?.startSplit === 'function'
+}
+
 export async function startSplit(opts: {
   srcPath: string
   modelPath: string
@@ -59,6 +73,7 @@ export async function startSplit(opts: {
   /** Test seam: shrink the watchdog's first-chunk cap. 0 = the real 5 min. */
   watchdogCapMs?: number
 }): Promise<void> {
+  if (!splitAvailable()) throw new Error('Splitting is not on this phone yet')
   log('split', `start ${opts.resume ? 'resume' : 'fresh'} ${opts.srcPath}`)
   await native().startSplit(
     opts.srcPath,
@@ -70,17 +85,20 @@ export async function startSplit(opts: {
 }
 
 export async function cancelSplit(): Promise<void> {
+  if (!splitAvailable()) return
   log('split', 'cancel requested')
   await native().cancelSplit()
 }
 
-/** The job record, or null when there is none. */
+/** The job record, or null when there is none (or no split surface yet). */
 export function splitStatus(): Promise<SplitJobStatus | null> {
+  if (!splitAvailable()) return Promise.resolve(null)
   return native().splitStatus()
 }
 
 /** Discard the job dir. Cancel first when the job is live. */
 export async function clearSplitJob(): Promise<void> {
+  if (!splitAvailable()) return
   log('split', 'job discarded')
   await native().clearJob()
 }
@@ -93,6 +111,7 @@ export function subscribeSplit(
   onProgress: (p: SplitProgress) => void,
   onState: (s: SplitState) => void
 ): () => void {
+  if (!splitAvailable()) return () => {}
   const prog = DeviceEventEmitter.addListener('singzSplitProgress', (v) =>
     onProgress(v as SplitProgress)
   )

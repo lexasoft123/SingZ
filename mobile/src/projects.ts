@@ -267,6 +267,27 @@ export async function loadProject(
     const projected = (decodedBytes(stems) / stems.length) * ids.length
     if (projected > MAX_DECODED_BYTES) tooBig(projected)
   }
+  // Guitar/piano lanes only appear when the song actually has them — the
+  // desktop's audibleStems rule (sampled RMS < 0.004), ported so a
+  // phone-split six-stem project shows the same lanes the desktop would.
+  // Dropped buffers are released on the spot: the GC-is-too-late rule.
+  for (let i = stems.length - 1; i >= 0; i--) {
+    const lane = stems[i]
+    if (lane.id !== 'guitar' && lane.id !== 'piano') continue
+    const data = lane.buffer.getChannelData(0)
+    let energy = 0
+    let n = 0
+    const step = Math.max(1, Math.floor(data.length / 200000))
+    for (let j = 0; j < data.length; j += step) {
+      energy += data[j] * data[j]
+      n++
+    }
+    if (Math.sqrt(energy / Math.max(1, n)) < 0.004) {
+      log('song', `${lane.id} lane is silent — hidden`)
+      releaseStems([lane])
+      stems.splice(i, 1)
+    }
+  }
   // Tracks the singer added on the desktop. They can be any length, so there
   // is nothing to project from — each one is checked against the budget as it
   // lands, and a track this phone cannot fetch or decode is skipped rather
