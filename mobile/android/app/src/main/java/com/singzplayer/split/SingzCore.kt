@@ -10,6 +10,9 @@ object SingzCore {
   @Volatile private var loadError: String? = null
   @Volatile private var loaded = false
 
+  /** True only after a successful ensureLoaded() in THIS process. */
+  fun isLoaded(): Boolean = loaded
+
   fun ensureLoaded(): String? {
     if (loaded) return null
     synchronized(this) {

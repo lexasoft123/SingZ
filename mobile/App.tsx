@@ -76,6 +76,56 @@ if (TEST) {
   }
   hooks.cancelSplit = (): Promise<boolean> =>
     (NativeModules.SingzSplit as { cancelSplit(): Promise<boolean> }).cancelSplit()
+  // Production split path (the :split service). Events are captured into
+  // hooks.splitEvents; the decode-safe completion probe stays job.json /
+  // the persisted log, never a CDP await.
+  hooks.startSplitService = (
+    srcPath: string,
+    modelPath: string,
+    projectDir: string,
+    resume = false,
+    watchdogCapMs = 0
+  ): boolean => {
+    hooks.splitEvents = []
+    void import('./src/split/service').then((svc) => {
+      // A leftover subscription from the previous kick would double every
+      // event into the fresh array.
+      ;(hooks.unsubscribeSplit as (() => void) | undefined)?.()
+      const push = (v: unknown): void => {
+        ;(hooks.splitEvents as unknown[]).push(v)
+      }
+      hooks.unsubscribeSplit = svc.subscribeSplit(push, push)
+      void svc.startSplit({ srcPath, modelPath, projectDir, resume, watchdogCapMs })
+    })
+    return true
+  }
+  hooks.splitServiceStatus = (): boolean => {
+    hooks.statusDone = false
+    hooks.statusOut = null
+    void import('./src/split/service').then((svc) =>
+      svc.splitStatus().then((s) => {
+        hooks.statusOut = s
+        hooks.statusDone = true
+      })
+    )
+    return true
+  }
+  hooks.cancelSplitService = (): boolean => {
+    void import('./src/split/service').then((svc) => svc.cancelSplit())
+    return true
+  }
+  // Pure module rebind, no new JS listener — drives the service-side
+  // register dedupe (a re-mounting UI does exactly this).
+  hooks.attachSplitEvents = (): boolean => {
+    void (
+      NativeModules.SingzSplit as { attachSplitEvents(): Promise<boolean> }
+    ).attachSplitEvents()
+    return true
+  }
+  hooks.clearSplitJob = (): boolean => {
+    void import('./src/split/service').then((svc) => svc.clearSplitJob())
+    return true
+  }
   hooks.analysisSpike = (minutes?: number): boolean => {
     hooks.spikeDone = false
     hooks.spikeResult = null

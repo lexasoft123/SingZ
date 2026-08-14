@@ -259,6 +259,41 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     stride (tail.bin persisted, stems flushed to the kernel first), resumed
     from the tail alone (job.json is a hint, never arithmetic), and the
     resumed run's stems pass the same gate with identical numbers.
+  - **Phase-2 service proof (2026-08-14 night)**: the production Android path
+    is live — `AudioDecode` (MediaExtractor/MediaCodec → raw f32 stereo),
+    `JobStore` (atomic + fsynced job.json, the cross-process truth),
+    `SplitService` (foreground service in its own `:split` process:
+    mediaProcessing type on 35+, dataSync 29–34, typeless below;
+    START_NOT_STICKY; silent progress notification with chunk count, ETA and
+    Cancel; Messenger → DeviceEventEmitter progress; chunk-pace watchdog =
+    5 min first chunk then 8× rolling median, answered by persisting
+    state=failed and killing its own process — ORT's Run() cannot be
+    interrupted, the engine's tail makes it a resume). All five behaviors
+    machine-verified on the emulator: **fresh file-to-stems split GATE PASS**
+    (corr 1.000000, ≤ 2 LSB vs the desktop pack splitting the same file — the
+    full pipeline including decode, not just the engine); **kill the :split
+    process mid-split** → the player process stays alive, job.json truthfully
+    says splitting 2/7; **resume** → completes, same gate, identical numbers;
+    **cancel** → job dir discarded, `cancelled` event lands in JS,
+    notification gone; **watchdog** (test-seam 1.5 s cap) → persisted
+    "Splitting stalled — resume to try again", `:split` dead, player alive.
+    The `MainApplication` boots no React Native in `:split`.
+  - Decode traps paid for: (1) requesting float output via KEY_PCM_ENCODING
+    makes the raw WAV decoder ECHO "float" in its output format while
+    emitting 16-bit samples — half the frames, all noise; configure with the
+    UNTOUCHED track format and a first-buffer plausibility guard turns any
+    remaining mislabel into an honest error. (2) An f32 WAV whose samples
+    exceed ±1.0 (our ffmpeg-summed test mix peaked at 1.98) clips in the
+    platform's s16 path — every big diff sat exactly at |x| > 0.999, the
+    rest was 1-LSB quantization. Real user files are mastered in-range, and
+    the desktop's own `needsPcm` render feeds pack engines int16 WAV, so the
+    phone's s16 decode is full parity with the desktop pipeline — the gate
+    mix is now PCM16 (−6 dB) so both sides read byte-identical samples.
+    (3) A ServiceConnection to a killed process leaves `bound` stale — a
+    later bindService no-ops and the next job runs silent; rebind fresh on
+    every start and drop the binding in onServiceDisconnected/onBindingDied.
+    (4) The app process must not call SingzCore externals it never loaded —
+    an UnsatisfiedLinkError before the cancel intent once ate the cancel.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
     formally), sustained multi-segment peak RSS on real fleet hardware,
     real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16` on the

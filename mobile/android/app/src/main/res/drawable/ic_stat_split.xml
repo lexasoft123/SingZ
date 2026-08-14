@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar icon for the split notification: six stem lanes. Must stay a
+     flat white silhouette — the status bar tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M2,10h2v4h-2z M5.5,8h2v8h-2z M9,5h2v14H9z M13,5h2v14h-2z M16.5,8h2v8h-2z M20,10h2v4h-2z" />
+</vector>

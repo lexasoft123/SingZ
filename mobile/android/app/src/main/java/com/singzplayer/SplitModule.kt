@@ -1,20 +1,208 @@
 package com.singzplayer
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.Message
+import android.os.Messenger
+import android.os.RemoteException
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.singzplayer.split.JobStore
 import com.singzplayer.split.SingzCore
+import com.singzplayer.split.SplitService
 import kotlin.concurrent.thread
 
 /**
- * JS bridge to the shared C++ engine core. Phase 0 exposes only the ORT
- * probe (model load + one dummy inference — the on-device smoke the spike
- * measures with); the split job API lands with Phase 2 and runs in the
- * :split service, not here.
+ * JS bridge to the split machinery. Production path: startSplit hands the
+ * job to the :split-process foreground service and mirrors its Messenger
+ * progress into DeviceEventEmitter ('singzSplitProgress'/'singzSplitState');
+ * job.json (splitStatus) is the durable truth that survives both processes.
+ * ortProbe and runSplitDirect stay as the in-process bring-up/parity
+ * harness the sim tests drive.
  */
 class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx) {
   override fun getName(): String = "SingzSplit"
+
+  // Touched from the NativeModules thread (start/attach), main (disconnect,
+  // terminal state) and invalidate — @Synchronized methods below are the
+  // lock, @Volatile covers the bare reads.
+  @Volatile private var bound = false
+  private val clientMessenger = Messenger(Handler(Looper.getMainLooper()) { msg ->
+    onServiceMessage(msg)
+    true
+  })
+  private val connection = object : ServiceConnection {
+    override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+      try {
+        Messenger(binder).send(Message.obtain(null, SplitService.MSG_REGISTER).apply {
+          replyTo = clientMessenger
+        })
+      } catch (_: RemoteException) {}
+    }
+    // The :split process can die under us (watchdog, lmkd, a test's kill);
+    // a stale `bound` then makes every later bindEvents() a no-op and the
+    // next job runs silent. Drop the binding so the next start re-registers.
+    override fun onServiceDisconnected(name: ComponentName?) = unbindEvents()
+    override fun onBindingDied(name: ComponentName?) = unbindEvents()
+  }
+
+  private fun emit(event: String, params: com.facebook.react.bridge.WritableMap) {
+    reactApplicationContext
+      .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+      .emit(event, params)
+  }
+
+  private fun onServiceMessage(msg: Message) {
+    when (msg.what) {
+      SplitService.MSG_PROGRESS -> {
+        val d = msg.data
+        val m = Arguments.createMap()
+        m.putString("stage", d.getString("stage"))
+        m.putDouble("frac", d.getFloat("frac").toDouble())
+        m.putDouble("done", d.getLong("done").toDouble())
+        m.putDouble("total", d.getLong("total").toDouble())
+        emit("singzSplitProgress", m)
+      }
+      SplitService.MSG_STATE -> {
+        val d = msg.data
+        val m = Arguments.createMap()
+        m.putString("state", d.getString("state"))
+        d.getString("error")?.let { m.putString("error", it) }
+        emit("singzSplitState", m)
+        val state = d.getString("state")
+        if (state != null && state != "busy") unbindEvents() // service is stopping
+      }
+    }
+  }
+
+  @Synchronized
+  private fun bindEvents() {
+    // Always a fresh binding: registration happens in onServiceConnected,
+    // and only a new connect reaches a service in a NEW process.
+    unbindEvents()
+    val ctx = reactApplicationContext
+    // flags=0: attach if running, never resurrect a stopped service.
+    bound = ctx.bindService(Intent(ctx, SplitService::class.java), connection, 0)
+  }
+
+  @Synchronized
+  private fun unbindEvents() {
+    if (!bound) return
+    bound = false
+    try { reactApplicationContext.unbindService(connection) } catch (_: Exception) {}
+  }
+
+  override fun invalidate() {
+    unbindEvents()
+    super.invalidate()
+  }
+
+  /** Start (or resume) the one split job in the :split service. */
+  @ReactMethod
+  fun startSplit(
+    srcPath: String,
+    modelPath: String,
+    projectDir: String,
+    resume: Boolean,
+    watchdogCapMs: Double,
+    promise: Promise
+  ) {
+    try {
+      val ctx = reactApplicationContext
+      val i = Intent(ctx, SplitService::class.java)
+        .setAction(SplitService.ACTION_START)
+        .putExtra(SplitService.EXTRA_SRC, srcPath)
+        .putExtra(SplitService.EXTRA_MODEL, modelPath)
+        .putExtra(SplitService.EXTRA_PROJECT_DIR, projectDir)
+        .putExtra(SplitService.EXTRA_RESUME, resume)
+        .putExtra(SplitService.EXTRA_WATCHDOG_CAP_MS, watchdogCapMs.toLong())
+      ctx.startForegroundService(i)
+      bindEvents()
+      promise.resolve(true)
+    } catch (t: Throwable) {
+      promise.reject("split", t)
+    }
+  }
+
+  /** The job record, or null when there is none (never started, or a cancel
+   *  cleaned up). The UI decides Resume/Discard off this at launch. */
+  @ReactMethod
+  fun splitStatus(promise: Promise) {
+    try {
+      val job = JobStore.read(SplitService.jobDir(reactApplicationContext))
+      if (job == null) {
+        promise.resolve(null)
+        return
+      }
+      val m = Arguments.createMap()
+      m.putString("state", job.state)
+      m.putString("srcPath", job.srcPath)
+      m.putString("projectDir", job.projectDir)
+      m.putInt("srcRate", job.srcRate)
+      m.putDouble("chunksDone", job.chunksDone.toDouble())
+      m.putDouble("totalChunks", job.totalChunks.toDouble())
+      job.error?.let { m.putString("error", it) }
+      m.putDouble("updatedAtMs", job.updatedAtMs.toDouble())
+      promise.resolve(m)
+    } catch (t: Throwable) {
+      promise.reject("status", t)
+    }
+  }
+
+  /** Attach progress events after an app relaunch found a live job. */
+  @ReactMethod
+  fun attachSplitEvents(promise: Promise) {
+    try {
+      bindEvents()
+      promise.resolve(bound)
+    } catch (t: Throwable) {
+      promise.reject("attach", t)
+    }
+  }
+
+  /** Discard the job dir (stems, mix, tail, doc). The UI cancels first when
+   *  the job is live — a running service would just recreate the doc. */
+  @ReactMethod
+  fun clearJob(promise: Promise) {
+    try {
+      SplitService.jobDir(reactApplicationContext).deleteRecursively()
+      promise.resolve(true)
+    } catch (t: Throwable) {
+      promise.reject("clear", t)
+    }
+  }
+
+  @ReactMethod
+  fun cancelSplit(promise: Promise) {
+    try {
+      // The service's engine lives in the :split process — the intent is
+      // the production cancel. The local flag only exists for the
+      // in-process bring-up path, and only when THIS process ever loaded
+      // the core (an external fun on an unloaded lib throws, and a throw
+      // before the intent once ate the real cancel entirely).
+      if (SingzCore.isLoaded()) SingzCore.cancelSplit()
+      val ctx = reactApplicationContext
+      try {
+        ctx.startService(Intent(ctx, SplitService::class.java).setAction(SplitService.ACTION_CANCEL))
+      } catch (_: Exception) {
+        // Backgrounded with no live service = nothing to cancel.
+      }
+      promise.resolve(true)
+    } catch (t: Throwable) {
+      promise.reject("cancel", t)
+    }
+  }
+
+  // --- Phase-0/bring-up surface (sim tests + parity harness) --------------
 
   @ReactMethod
   fun ortProbe(modelPath: String, promise: Promise) {
@@ -34,10 +222,10 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
   }
 
   /**
-   * Engine-proof entry (Phase 2 bring-up; the :split service becomes the
-   * production driver): run the whole split on a worker thread against a raw
-   * f32 stereo mix, streaming stage/chunk progress as events. Resolves ""
-   * on ok, "cancelled", or the error message.
+   * Engine-proof entry (bring-up; the :split service is the production
+   * driver): run the whole split on a worker thread against a raw f32
+   * stereo mix, streaming stage/chunk progress as events. Resolves "" on
+   * ok, "cancelled", or the error message.
    */
   @ReactMethod
   fun runSplitDirect(
@@ -56,22 +244,19 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
       }
       try {
         java.io.File(jobDir).mkdirs()
-        val emitter = reactApplicationContext.getJSModule(
-          com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
-        )
         val listener = object : SingzCore.SplitListener {
           override fun onStage(stage: String, frac: Float) {
-            val m = com.facebook.react.bridge.Arguments.createMap()
+            val m = Arguments.createMap()
             m.putString("stage", stage)
             m.putDouble("frac", frac.toDouble())
-            emitter.emit("singzSplitProgress", m)
+            emit("singzSplitProgress", m)
           }
           override fun onChunk(done: Long, total: Long) {
-            val m = com.facebook.react.bridge.Arguments.createMap()
+            val m = Arguments.createMap()
             m.putString("stage", "chunk")
             m.putDouble("done", done.toDouble())
             m.putDouble("total", total.toDouble())
-            emitter.emit("singzSplitProgress", m)
+            emit("singzSplitProgress", m)
           }
         }
         promise.resolve(
@@ -80,16 +265,6 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
       } catch (t: Throwable) {
         promise.reject("split", t)
       }
-    }
-  }
-
-  @ReactMethod
-  fun cancelSplit(promise: Promise) {
-    try {
-      SingzCore.cancelSplit()
-      promise.resolve(true)
-    } catch (t: Throwable) {
-      promise.reject("cancel", t)
     }
   }
 }

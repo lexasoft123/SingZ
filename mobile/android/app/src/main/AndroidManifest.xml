@@ -1,6 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
 
     <application
       android:name=".MainApplication"
@@ -23,5 +27,14 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+      <!-- Split jobs run in their own process: the ORT session alone is
+           ~1.3 GB RSS, and a memory kill there must never take the player.
+           Type ladder at runtime: mediaProcessing on 35+, dataSync 29..34,
+           typeless below (minSdk 26). -->
+      <service
+        android:name=".split.SplitService"
+        android:process=":split"
+        android:exported="false"
+        android:foregroundServiceType="dataSync|mediaProcessing" />
     </application>
 </manifest>
