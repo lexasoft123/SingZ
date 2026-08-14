@@ -221,15 +221,19 @@ jobs:
           cp mobile/android/app/build/outputs/bundle/release/app-release.aab "SingZ-$TAG-android.aab"
           gh release upload "$TAG" "SingZ-$TAG-android.apk" "SingZ-$TAG-android.aab" --clobber
 
-  # Play upload. Manual only, and defaulting to "validate", because a workflow
-  # that can reach production should never be one click away by accident.
-  # Never runs on a tag: tagging cuts a release, publishing it is a decision.
+  # Play upload.
+  #
+  # A v* tag ships to the CLOSED testing track automatically — that is the
+  # point of tagging, and testers should not wait on someone remembering to
+  # press a button. Production is never automatic: it reaches strangers, a
+  # staged rollout is a judgement call, and "git tag" is too easy to type.
+  # Reaching production means dispatching this workflow and choosing it.
   #
   # The very first bundle for a package cannot come through here — the Play
   # Developer API cannot create an app entry and refuses a package it has never
   # seen. That upload is done by hand, once. See docs/ANDROID-RELEASE.md.
   publish:
-    if: github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -269,7 +273,15 @@ jobs:
             echo "::error::PLAY_SERVICE_ACCOUNT_JSON is not set — see docs/ANDROID-RELEASE.md"
             exit 1
           fi
-          bundle exec fastlane android "${{ inputs.track }}"
+          # A tag always means the closed track. Only a hand-driven run gets to
+          # pick, which is the whole reason production is not on this path.
+          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            LANE=closed
+          else
+            LANE="${{ inputs.track }}"
+          fi
+          echo "publishing with lane: $LANE"
+          bundle exec fastlane android "$LANE"
           if [ "${{ inputs.metadata }}" = "true" ]; then
             bundle exec fastlane android metadata
           fi
