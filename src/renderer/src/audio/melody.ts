@@ -2,8 +2,9 @@ import type { MelodyInfo } from '../../../shared/types'
 
 /**
  * Stamp on every stored melody line. Bump it whenever the tracker's output
- * would change: pyin's parameters, priors or Viterbi (`pyin.ts`), the worker's
- * framing (decimation, window, hop) or its cleaner gates (`pitch.worker.ts`).
+ * would change: pyin's parameters, priors or Viterbi (`pyin.ts`), the tracker
+ * core's framing (decimation, window, hop) or its cleaner gates
+ * (`pitch-core.ts` — pitch.worker.ts is only the envelope).
  * Stored lines carrying an older stamp are silently re-tracked when the song
  * opens, so a fix reaches saved projects — and, through Drive, the phones —
  * instead of only songs split from then on. Forget the bump and every project

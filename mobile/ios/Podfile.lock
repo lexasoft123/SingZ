@@ -5,6 +5,7 @@ PODS:
   - hermes-engine (250829098.0.14):
     - hermes-engine/Pre-built (= 250829098.0.14)
   - hermes-engine/Pre-built (250829098.0.14)
+  - onnxruntime-c (1.23.0)
   - RCTDeprecation (0.86.0)
   - RCTRequired (0.86.0)
   - RCTSwiftUI (0.86.0)
@@ -2229,6 +2230,9 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
+  - SingzCore (0.1.0):
+    - onnxruntime-c (~> 1.23.0)
+    - React-Core
   - Yoga (0.0.0)
 
 DEPENDENCIES:
@@ -2314,7 +2318,12 @@ DEPENDENCIES:
   - RNGestureHandler (from `../node_modules/react-native-gesture-handler`)
   - RNReanimated (from `../node_modules/react-native-reanimated`)
   - RNWorklets (from `../node_modules/react-native-worklets`)
+  - SingzCore (from `./SingzCore`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
+
+SPEC REPOS:
+  trunk:
+    - onnxruntime-c
 
 EXTERNAL SOURCES:
   FBLazyVector:
@@ -2480,6 +2489,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native-reanimated"
   RNWorklets:
     :path: "../node_modules/react-native-worklets"
+  SingzCore:
+    :path: "./SingzCore"
   Yoga:
     :path: "../node_modules/react-native/ReactCommon/yoga"
 
@@ -2487,6 +2498,7 @@ SPEC CHECKSUMS:
   FBLazyVector: b3e7ad108f0d882e30445c5527d774e3fd432f3d
   FolderAccess: b49c9f97da4c344948962b747c988cbea9a4cffb
   hermes-engine: a9a1a42920ea37e283a22cf3ecdf8f18d4f5a4f9
+  onnxruntime-c: 3174c63a963d9abbc2bf9627e3d622819c0ed5f7
   RCTDeprecation: 2a74a2c57675e64419bd89078efde81f7c1de90b
   RCTRequired: 30451112e6fef4e6f31b4e7eee0845156e35e4b0
   RCTSwiftUI: 5aaf0b07e747ba749dc6acc94d8bd41eea4b570f
@@ -2565,8 +2577,9 @@ SPEC CHECKSUMS:
   RNGestureHandler: a426f18ab9021991fe2cbc8bf1677b740e20e70c
   RNReanimated: 5aa9e73d0f8d3c40d5c9bec396d6a61098db31f0
   RNWorklets: 9052122d7f98de547d247e775ea2069839236d38
+  SingzCore: 762c912dd0c262f15e85b32cbd40eed1a81e2030
   Yoga: fe50ab299e578f397fef753cf309c6703a4db29b
 
-PODFILE CHECKSUM: 684e3c96d940caf4807fde901eb4be755f2a113a
+PODFILE CHECKSUM: 59a75521c1c15e630c1248768e71b79dbcf83b46
 
 COCOAPODS: 1.17.0

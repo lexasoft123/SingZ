@@ -21,6 +21,10 @@ target 'SingZPlayer' do
   # no pbxproj surgery is needed.
   pod 'FolderAccess', :path => './FolderAccess'
 
+  # Shared C++ engine core (mobile/native/core): on-device stem split + beat
+  # inference over ONNX Runtime (docs/PHONE-STANDALONE.md).
+  pod 'SingzCore', :path => './SingzCore'
+
   use_react_native!(
     :path => config[:reactNativePath],
     # An absolute path to your application root.

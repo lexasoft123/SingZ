@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { StatusBar, View } from 'react-native'
+import { NativeModules, StatusBar, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { MultitrackEngine } from './src/engine'
@@ -12,6 +12,47 @@ import { TEST } from './src/ui/testhooks'
 
 const engine = new MultitrackEngine()
 if (TEST) TEST.engine = engine
+// Phase-0 analysis-host spike (docs/PHONE-STANDALONE.md): lazy import so the
+// analysis bundle never loads outside the spike; kicked via setTimeout so the
+// driving eval returns immediately — the run itself blocks the JS thread for
+// minutes on Hermes, and results are POLLED from __test.spikeDone (the
+// never-await-in-CDP rule).
+if (TEST) {
+  const hooks = TEST
+  // ORT probe (SingzSplit native module) — drivers reach natives through
+  // __test only; `require` does not exist inside CDP evals.
+  hooks.ortProbe = (path: string): boolean => {
+    hooks.probeDone = false
+    hooks.probeOut = null
+    ;(NativeModules.SingzSplit as { ortProbe(p: string): Promise<string> })
+      .ortProbe(path)
+      .then((r) => {
+        hooks.probeOut = r
+        hooks.probeDone = true
+      })
+      .catch((e: unknown) => {
+        hooks.probeOut = JSON.stringify({ ok: false, error: String(e) })
+        hooks.probeDone = true
+      })
+    return true
+  }
+  hooks.analysisSpike = (minutes?: number): boolean => {
+    hooks.spikeDone = false
+    hooks.spikeResult = null
+    setTimeout(() => {
+      void import('./src/analysis/spike')
+        .then((m) => {
+          hooks.spikeResult = m.runAnalysisSpike(minutes)
+          hooks.spikeDone = true
+        })
+        .catch((e: unknown) => {
+          hooks.spikeResult = { error: String(e) }
+          hooks.spikeDone = true
+        })
+    }, 50)
+    return true
+  }
+}
 
 export default function App(): React.JSX.Element {
   const [project, setProject] = useState<LoadedProject | null>(null)

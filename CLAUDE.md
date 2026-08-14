@@ -181,6 +181,20 @@ answer your evals while you measure the phone.
   install`. Adding a `test_spec` to the FolderAccess podspec is what triggered
   it here — and it generates no test target anyway, which is why the Swift
   conformance runner is plain swiftc.
+- **Android app C++ (new-arch)**: setting `externalNativeBuild` REPLACES the
+  RN gradle plugin's default CMake — `include(${REACT_ANDROID_DIR}/cmake-utils/
+  ReactNative-application.cmake)` first or `libappmodules.so` silently vanishes
+  and the app dies at boot with "PlatformConstants could not be found". That
+  include also GLOBS every `*.cpp` beside the CMakeLists into appmodules —
+  own sources live in `mobile/native/core/` (the shared C++ engine core; JNI
+  shim under `core/android/`), never next to the CMakeLists. The ORT Android
+  AAR is legacy-layout (headers/ + jni/<abi>/, no prefab) — the `extractOrtSdk`
+  gradle task unzips it and CMake imports the .so via `ORT_SDK_DIR`.
+- **Android builds need a JDK 21** (`brew install openjdk@21`; CI pins
+  temurin 21). The Android Studio JBR moved to JDK 25, and AGP's
+  GeneratePrefabPackages treats the JDK 24+ restricted-native-access warning
+  from its `prefab` subprocess as a build error — any project with a prefab
+  consumer (reanimated/worklets) fails to configure under the new JBR.
 - **zsh**: `status` is a read-only variable in scripts.
 - **npm majors**: `@vitejs/plugin-react` must match electron-vite's supported
   Vite major (currently plugin ^5 with electron-vite 5 / Vite 7).

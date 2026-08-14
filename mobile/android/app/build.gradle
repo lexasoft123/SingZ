@@ -135,6 +135,24 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode singzVersionCode
         versionName singzVersionName
+        externalNativeBuild {
+            cmake {
+                arguments "-DORT_SDK_DIR=${layout.buildDirectory.get().asFile}/ort-sdk"
+            }
+        }
+    }
+
+    // libsingzcore: the shared C++ engine core (mobile/native/core) — split
+    // engine + Beat This runner + FLAC encode, one source tree with iOS
+    // (docs/PHONE-STANDALONE.md). The ORT AAR is legacy-layout (headers/ +
+    // jni/<abi>/libonnxruntime.so, no prefab), so extractOrtSdk below unpacks
+    // it and CMake imports the .so per ABI; the APK's copy still comes from
+    // the ordinary implementation dependency.
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
     }
     signingConfigs {
         debug {
@@ -164,6 +182,21 @@ android {
     }
 }
 
+// The ORT AAR again, as its own configuration, so extractOrtSdk can unzip the
+// exact artifact the app links — headers and the imported .so can never come
+// from a different ORT version than the APK ships.
+configurations {
+    ortAar
+}
+
+tasks.register("extractOrtSdk", Copy) {
+    from({ zipTree(configurations.ortAar.singleFile) }) {
+        include "headers/**", "jni/**"
+    }
+    into layout.buildDirectory.dir("ort-sdk")
+}
+preBuild.dependsOn("extractOrtSdk")
+
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
@@ -172,6 +205,9 @@ dependencies {
     // table TypeScript and Swift run (tests/shared/currency-cases.json)
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    // ONNX Runtime for the C++ core (same version the desktop packs pin)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
+    ortAar("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
     // SAF folder trees (picked project roots, incl. Google Drive)
     implementation("androidx.documentfile:documentfile:1.0.1")
     // Custom Tabs: Google consent inside the app's own task (self-closing)
