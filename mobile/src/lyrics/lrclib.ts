@@ -1,4 +1,3 @@
-import { net } from 'electron'
 import {
   LRCLIB_API,
   LRCLIB_HEADERS,
@@ -9,14 +8,16 @@ import {
   type LookupOutcome,
   type LyricsCandidate,
   type TrackMeta
-} from '../shared/lrclib-core'
-import { log } from './log'
+} from '../gen/analysis-lib'
+import { log } from '../log'
 
 /**
- * The desktop's LRCLIB transport. All the logic — parsing, word timing, tag
- * repair, the lookup ladder, miss-vs-down semantics — lives in
- * src/shared/lrclib-core.ts, shared verbatim with the phone; this file only
- * owns electron's net.fetch and the down-TTL memory.
+ * The phone's LRCLIB transport. All the logic — parsing, word timing, tag
+ * repair, the lookup ladder, miss-vs-down semantics — comes from
+ * src/shared/lrclib-core.ts via the analysis bundle, shared verbatim with
+ * the desktop; this file only owns RN's fetch and the down-TTL memory.
+ * A 'down' verdict must never be stored as final (the 2026-07-30 outage
+ * lesson): callers leave lyrics absent and re-offerable.
  */
 
 // One non-answer usually means the service is down or blocking this network —
@@ -29,10 +30,7 @@ async function apiJson(path: string): Promise<ApiAnswer> {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), 10_000)
   try {
-    const res = await net.fetch(`${LRCLIB_API}${path}`, {
-      headers: LRCLIB_HEADERS,
-      signal: ac.signal
-    })
+    const res = await fetch(`${LRCLIB_API}${path}`, { headers: LRCLIB_HEADERS, signal: ac.signal })
     if (res.status === 404) return 'miss'
     if (!res.ok) {
       downUntil = Date.now() + DOWN_TTL_MS
@@ -61,7 +59,7 @@ export {
   type LookupOutcome,
   type LyricsCandidate,
   type TrackMeta
-} from '../shared/lrclib-core'
+} from '../gen/analysis-lib'
 
 /** Look up synced lyrics by meta (exact triple first, then search). */
 export const lookupLyrics = (meta: TrackMeta): Promise<LookupOutcome> =>

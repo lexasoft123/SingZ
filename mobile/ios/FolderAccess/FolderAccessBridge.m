@@ -41,4 +41,42 @@ RCT_EXTERN_METHOD(fetchToCache : (NSString *)project
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(pickAudioFile : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(ensureProjectDir : (NSString *)name
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(writeText : (NSString *)project
+                  file : (NSString *)file
+                  text : (NSString *)text
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(moveIntoProject : (NSString *)project
+                  relPath : (NSString *)relPath
+                  srcPath : (NSString *)srcPath
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(copyIntoProject : (NSString *)project
+                  relPath : (NSString *)relPath
+                  srcPath : (NSString *)srcPath
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(statFile : (NSString *)project
+                  relPath : (NSString *)relPath
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(deleteProject : (NSString *)project
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(readMediaTags : (NSString *)path
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 @end

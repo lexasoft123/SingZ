@@ -19,12 +19,14 @@ import UniformTypeIdentifiers
 class FolderAccess: NSObject, UIDocumentPickerDelegate {
   private static let bookmarkKey = "singz.rootBookmark"
   private var pickResolve: RCTPromiseResolveBlock?
+  var pickFileResolve: RCTPromiseResolveBlock?  // internal: audio-file pick (FolderAccessWriter.swift)
+  var pickFileReject: RCTPromiseRejectBlock?
   private var rootURL: URL?
   private var rootScoped = false
 
   @objc static func requiresMainQueueSetup() -> Bool { false }
 
-  private func documentsURL() -> URL {
+  func documentsURL() -> URL {  // internal: FolderAccessWriter.swift uses it
     FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
   }
 
@@ -37,7 +39,7 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
    * device backup. Whatever the old cache still holds is adopted once rather
    * than downloaded again.
    */
-  private func cacheRootURL() -> URL {
+  func cacheRootURL() -> URL {  // internal: FolderAccessWriter.swift uses it
     let fm = FileManager.default
     var base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("singz-projects", isDirectory: true)
@@ -199,9 +201,62 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     }
   }
 
+  /** One audio file via the system picker (asCopy — the URL is already our
+   *  own temp copy) → a private copy the decoders can open by plain path.
+   *  Resolves null on cancel. Mirrors the Android module exactly. */
+  @objc func pickAudioFile(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.main.async {
+      guard let host = self.topViewController() else {
+        reject("no_ui", "could not open the file picker (no window)", nil)
+        return
+      }
+      guard self.pickFileResolve == nil else {
+        reject("busy", "File picker is already open", nil)
+        return
+      }
+      self.pickFileResolve = resolve
+      self.pickFileReject = reject
+      let picker = UIDocumentPickerViewController(
+        forOpeningContentTypes: [UTType.audio], asCopy: true)
+      picker.allowsMultipleSelection = false
+      picker.delegate = self
+      host.present(picker, animated: true)
+    }
+  }
+
   func documentPicker(
     _ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]
   ) {
+    if let fileResolve = pickFileResolve {
+      let fileReject = pickFileReject
+      pickFileResolve = nil
+      pickFileReject = nil
+      guard let url = urls.first else {
+        fileResolve(nil)
+        return
+      }
+      DispatchQueue.global(qos: .utility).async {
+        do {
+          let fm = FileManager.default
+          let dir = self.cacheRootURL()
+            .appendingPathComponent("imports", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+          try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+          let out = dir.appendingPathComponent(url.lastPathComponent)
+          try fm.moveItem(at: url, to: out)
+          let attrs = try? fm.attributesOfItem(atPath: out.path)
+          let size = (attrs?[.size] as? Int64) ?? 0
+          fileResolve(["path": out.path, "name": url.lastPathComponent, "size": Double(size)])
+        } catch {
+          // a failed copy is an error, never a cancel — nil would read as one
+          fileReject?("pick", "Cannot copy the picked file", error)
+        }
+      }
+      return
+    }
     defer { pickResolve = nil }
     guard let url = urls.first else {
       pickResolve?(nil)
@@ -222,6 +277,12 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
   }
 
   func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    if let fileResolve = pickFileResolve {
+      pickFileResolve = nil
+      pickFileReject = nil
+      fileResolve(nil)
+      return
+    }
     pickResolve?(nil)
     pickResolve = nil
   }
@@ -413,7 +474,7 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
    *  song hashes once and not on every open. A rewrite moves the mtime, so a
    *  stale row cannot outlive the bytes it describes. The read is chunked —
    *  these are whole stems, and a song's worth will not fit in memory twice. */
-  private func hashOf(_ url: URL, _ attrs: [FileAttributeKey: Any]) -> String {
+  func hashOf(_ url: URL, _ attrs: [FileAttributeKey: Any]) -> String {  // internal: FolderAccessWriter.swift uses it
     let size = (attrs[.size] as? Int64) ?? 0
     let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
     let stamp = "\(size):\(Int64(mtime * 1000))"

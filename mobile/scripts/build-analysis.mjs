@@ -48,6 +48,10 @@ const entry = `
 export { detectBeats, estimateKey, BEAT_DETECT_VERSION } from './analysis'
 export { encodeMelody, decodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './melody'
 export { trackMelodyCore } from './pitch-core'
+export {
+  LRCLIB_API, LRCLIB_HEADERS, fixTagEncoding, realArtist, metaFromFilename,
+  parseLrc, lookupLyrics, searchCandidates, lyricsById
+} from '../../../shared/lrclib-core'
 `
 
 mkdirSync(outDir, { recursive: true })
@@ -144,6 +148,72 @@ export declare function trackMelodyCore(
   sampleRate: number,
   onProgress?: (p: number) => void
 ): MelodyTrack
+
+// ---- LRCLIB core (src/shared/lrclib-core.ts) ----
+
+export interface LyricWordLike {
+  w: string
+  s: number
+  e: number
+}
+
+export interface LyricLineLike {
+  start: number
+  end: number
+  text: string
+  words: LyricWordLike[]
+}
+
+export interface TrackMeta {
+  artist?: string
+  title: string
+  album?: string
+  durationSec: number
+  altTitle?: string
+}
+
+export type ApiAnswer = { json: unknown } | 'miss' | 'down'
+export type ApiFetch = (path: string) => Promise<ApiAnswer>
+
+export interface LyricsCandidate {
+  id: number
+  artist: string
+  track: string
+  album?: string
+  duration: number
+  synced: boolean
+}
+
+export type LookupOutcome =
+  | { hit: { lines: LyricLineLike[]; credit: string } }
+  | 'miss'
+  | 'down'
+
+export declare const LRCLIB_API: string
+export declare const LRCLIB_HEADERS: Record<string, string>
+export declare function fixTagEncoding(s: string | undefined): string | undefined
+export declare function realArtist(s: string | undefined): string | undefined
+export declare function metaFromFilename(basename: string): {
+  artist?: string
+  title: string
+  altTitle?: string
+}
+export declare function parseLrc(lrc: string, totalDuration: number): LyricLineLike[]
+export declare function lookupLyrics(
+  api: ApiFetch,
+  meta: TrackMeta,
+  onRetry?: (message: string) => void
+): Promise<LookupOutcome>
+export declare function searchCandidates(
+  api: ApiFetch,
+  query: { artist?: string; title?: string; free?: string },
+  durationSec: number
+): Promise<LyricsCandidate[]>
+export declare function lyricsById(
+  api: ApiFetch,
+  id: number,
+  durationSec: number
+): Promise<{ lines: LyricLineLike[]; credit: string } | null>
 `
 )
 

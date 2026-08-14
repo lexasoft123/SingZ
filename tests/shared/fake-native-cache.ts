@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import { isCurrent } from '../../mobile/src/current'
 
@@ -144,4 +153,118 @@ export function fakeNativeCache(root: string): FakeNativeCache {
     }
   }
   return api
+}
+
+// ---------------------------------------------------------------------------
+
+export interface FakeNativeWriter {
+  docsRoot: string
+  pickAudioFile(): Promise<{ path: string; name: string; size: number } | null>
+  ensureProjectDir(name: string): Promise<{ dir: string; path: string }>
+  writeText(project: string, file: string, text: string): Promise<boolean>
+  moveIntoProject(project: string, relPath: string, srcPath: string): Promise<string>
+  copyIntoProject(project: string, relPath: string, srcPath: string): Promise<string>
+  statFile(project: string, relPath: string): Promise<{ md5: string; size: number; mtimeMs: number }>
+  deleteProject(project: string): Promise<boolean>
+  readMediaTags(
+    path: string
+  ): Promise<{ artist?: string; title?: string; album?: string; durationMs?: number }>
+}
+
+/**
+ * The reference writer half (Phase 1): what the Kotlin and Swift writer
+ * methods do, over a temp documents root. Same guards (plain-child project
+ * names, no path escapes), same desktop-mirrored safeName, same collision
+ * suffixing, same .part+rename writes — so the phone writer's tests exercise
+ * the semantics the phones actually run.
+ */
+export function fakeNativeWriter(docsRoot: string): FakeNativeWriter {
+  const docChild = (project: string): string | null =>
+    !project || project.includes('/') || project === '..' || project === '.'
+      ? null
+      : join(docsRoot, project)
+
+  const relOk = (file: string): boolean =>
+    !!file &&
+    !file.startsWith('/') &&
+    file.split('/').every((p) => p && p !== '.' && p !== '..')
+
+  const safeName = (name: string): string => {
+    const cleaned = name
+      .replace(/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$/i, '')
+      .replace(/[/\\:*?"<>|]/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+    return cleaned || 'Untitled song'
+  }
+
+  const put = (out: string, write: (tmp: string) => void): void => {
+    mkdirSync(dirname(out), { recursive: true })
+    const tmp = `${out}.part`
+    write(tmp)
+    rmSync(out, { force: true })
+    renameSync(tmp, out)
+  }
+
+  return {
+    docsRoot,
+
+    async pickAudioFile() {
+      throw new Error('pickAudioFile needs a UI — tests hand paths in directly')
+    },
+
+    async ensureProjectDir(name) {
+      const base = safeName(name)
+      let dir = base
+      let n = 2
+      while (existsSync(join(docsRoot, dir, 'project.json'))) dir = `${base} ${n++}`
+      const path = docChild(dir)
+      if (!path) throw new Error('Bad project name')
+      mkdirSync(path, { recursive: true })
+      return { dir, path }
+    },
+
+    async writeText(project, file, text) {
+      const dir = docChild(project)
+      if (!dir || !relOk(file)) throw new Error('Bad project or file name')
+      put(join(dir, file), (tmp) => writeFileSync(tmp, text, 'utf8'))
+      return true
+    },
+
+    async moveIntoProject(project, relPath, srcPath) {
+      const dir = docChild(project)
+      if (!dir || !relOk(relPath)) throw new Error('Bad project or file name')
+      const out = join(dir, relPath)
+      put(out, (tmp) => writeFileSync(tmp, readFileSync(srcPath)))
+      rmSync(srcPath, { force: true })
+      return out
+    },
+
+    async copyIntoProject(project, relPath, srcPath) {
+      const dir = docChild(project)
+      if (!dir || !relOk(relPath)) throw new Error('Bad project or file name')
+      const out = join(dir, relPath)
+      put(out, (tmp) => writeFileSync(tmp, readFileSync(srcPath)))
+      return out
+    },
+
+    async statFile(project, relPath) {
+      const dir = docChild(project)
+      if (!dir || !relOk(relPath)) throw new Error('Bad project or file name')
+      const path = join(dir, relPath)
+      const st = statSync(path)
+      return { md5: md5Of(readFileSync(path)), size: st.size, mtimeMs: st.mtimeMs }
+    },
+
+    async deleteProject(project) {
+      const dir = docChild(project)
+      if (!dir || !existsSync(join(dir, 'project.json'))) throw new Error('Not a project folder')
+      rmSync(dir, { recursive: true, force: true })
+      return true
+    },
+
+    async readMediaTags() {
+      return {}
+    }
+  }
 }

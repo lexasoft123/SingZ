@@ -1,0 +1,423 @@
+{
+  "lrc": "[ar: Test Artist]\n[00:04.80] First line of the song\n[00:09.20] A somewhat longer second line with more words in it\n[00:15] No-fraction stamp line\n[00:21.5] Single-digit fraction\n[00:27.123] Millisecond fraction line\n[00:33.00][01:10.00] Repeated chorus line sung twice\n[00:39.00]\n[00:52.00] Line after an empty gap stamp\n[01:16.00] This line is deliberately made very long so that the twelve characters per second estimate hits the nine second ceiling instead\n[01:29.00] Short\n[01:31.00] Final line bounded by the total duration",
+  "duration": 96.5,
+  "lines": [
+    {
+      "start": 4.8,
+      "end": 6.633333333333333,
+      "text": "First line of the song",
+      "words": [
+        {
+          "w": "First",
+          "s": 4.8,
+          "e": 5.278
+        },
+        {
+          "w": "line",
+          "s": 5.278,
+          "e": 5.677
+        },
+        {
+          "w": "of",
+          "s": 5.677,
+          "e": 5.916
+        },
+        {
+          "w": "the",
+          "s": 5.916,
+          "e": 6.235
+        },
+        {
+          "w": "song",
+          "s": 6.235,
+          "e": 6.633
+        }
+      ]
+    },
+    {
+      "start": 9.2,
+      "end": 13.45,
+      "text": "A somewhat longer second line with more words in it",
+      "words": [
+        {
+          "w": "A",
+          "s": 9.2,
+          "e": 9.363
+        },
+        {
+          "w": "somewhat",
+          "s": 9.363,
+          "e": 10.099
+        },
+        {
+          "w": "longer",
+          "s": 10.099,
+          "e": 10.671
+        },
+        {
+          "w": "second",
+          "s": 10.671,
+          "e": 11.243
+        },
+        {
+          "w": "line",
+          "s": 11.243,
+          "e": 11.652
+        },
+        {
+          "w": "with",
+          "s": 11.652,
+          "e": 12.061
+        },
+        {
+          "w": "more",
+          "s": 12.061,
+          "e": 12.469
+        },
+        {
+          "w": "words",
+          "s": 12.469,
+          "e": 12.96
+        },
+        {
+          "w": "in",
+          "s": 12.96,
+          "e": 13.205
+        },
+        {
+          "w": "it",
+          "s": 13.205,
+          "e": 13.45
+        }
+      ]
+    },
+    {
+      "start": 15,
+      "end": 16.833333333333332,
+      "text": "No-fraction stamp line",
+      "words": [
+        {
+          "w": "No-fraction",
+          "s": 15,
+          "e": 15.957
+        },
+        {
+          "w": "stamp",
+          "s": 15.957,
+          "e": 16.435
+        },
+        {
+          "w": "line",
+          "s": 16.435,
+          "e": 16.833
+        }
+      ]
+    },
+    {
+      "start": 21.5,
+      "end": 23.25,
+      "text": "Single-digit fraction",
+      "words": [
+        {
+          "w": "Single-digit",
+          "s": 21.5,
+          "e": 22.534
+        },
+        {
+          "w": "fraction",
+          "s": 22.534,
+          "e": 23.25
+        }
+      ]
+    },
+    {
+      "start": 27.123,
+      "end": 29.206333333333333,
+      "text": "Millisecond fraction line",
+      "words": [
+        {
+          "w": "Millisecond",
+          "s": 27.123,
+          "e": 28.085
+        },
+        {
+          "w": "fraction",
+          "s": 28.085,
+          "e": 28.806
+        },
+        {
+          "w": "line",
+          "s": 28.806,
+          "e": 29.206
+        }
+      ]
+    },
+    {
+      "start": 33,
+      "end": 35.583333333333336,
+      "text": "Repeated chorus line sung twice",
+      "words": [
+        {
+          "w": "Repeated",
+          "s": 33,
+          "e": 33.727
+        },
+        {
+          "w": "chorus",
+          "s": 33.727,
+          "e": 34.292
+        },
+        {
+          "w": "line",
+          "s": 34.292,
+          "e": 34.695
+        },
+        {
+          "w": "sung",
+          "s": 34.695,
+          "e": 35.099
+        },
+        {
+          "w": "twice",
+          "s": 35.099,
+          "e": 35.583
+        }
+      ]
+    },
+    {
+      "start": 52,
+      "end": 54.416666666666664,
+      "text": "Line after an empty gap stamp",
+      "words": [
+        {
+          "w": "Line",
+          "s": 52,
+          "e": 52.403
+        },
+        {
+          "w": "after",
+          "s": 52.403,
+          "e": 52.886
+        },
+        {
+          "w": "an",
+          "s": 52.886,
+          "e": 53.128
+        },
+        {
+          "w": "empty",
+          "s": 53.128,
+          "e": 53.611
+        },
+        {
+          "w": "gap",
+          "s": 53.611,
+          "e": 53.933
+        },
+        {
+          "w": "stamp",
+          "s": 53.933,
+          "e": 54.417
+        }
+      ]
+    },
+    {
+      "start": 70,
+      "end": 72.58333333333333,
+      "text": "Repeated chorus line sung twice",
+      "words": [
+        {
+          "w": "Repeated",
+          "s": 70,
+          "e": 70.727
+        },
+        {
+          "w": "chorus",
+          "s": 70.727,
+          "e": 71.292
+        },
+        {
+          "w": "line",
+          "s": 71.292,
+          "e": 71.695
+        },
+        {
+          "w": "sung",
+          "s": 71.695,
+          "e": 72.099
+        },
+        {
+          "w": "twice",
+          "s": 72.099,
+          "e": 72.583
+        }
+      ]
+    },
+    {
+      "start": 76,
+      "end": 85,
+      "text": "This line is deliberately made very long so that the twelve characters per second estimate hits the nine second ceiling instead",
+      "words": [
+        {
+          "w": "This",
+          "s": 76,
+          "e": 76.352
+        },
+        {
+          "w": "line",
+          "s": 76.352,
+          "e": 76.703
+        },
+        {
+          "w": "is",
+          "s": 76.703,
+          "e": 76.914
+        },
+        {
+          "w": "deliberately",
+          "s": 76.914,
+          "e": 77.828
+        },
+        {
+          "w": "made",
+          "s": 77.828,
+          "e": 78.18
+        },
+        {
+          "w": "very",
+          "s": 78.18,
+          "e": 78.531
+        },
+        {
+          "w": "long",
+          "s": 78.531,
+          "e": 78.883
+        },
+        {
+          "w": "so",
+          "s": 78.883,
+          "e": 79.094
+        },
+        {
+          "w": "that",
+          "s": 79.094,
+          "e": 79.445
+        },
+        {
+          "w": "the",
+          "s": 79.445,
+          "e": 79.727
+        },
+        {
+          "w": "twelve",
+          "s": 79.727,
+          "e": 80.219
+        },
+        {
+          "w": "characters",
+          "s": 80.219,
+          "e": 80.992
+        },
+        {
+          "w": "per",
+          "s": 80.992,
+          "e": 81.273
+        },
+        {
+          "w": "second",
+          "s": 81.273,
+          "e": 81.766
+        },
+        {
+          "w": "estimate",
+          "s": 81.766,
+          "e": 82.398
+        },
+        {
+          "w": "hits",
+          "s": 82.398,
+          "e": 82.75
+        },
+        {
+          "w": "the",
+          "s": 82.75,
+          "e": 83.031
+        },
+        {
+          "w": "nine",
+          "s": 83.031,
+          "e": 83.383
+        },
+        {
+          "w": "second",
+          "s": 83.383,
+          "e": 83.875
+        },
+        {
+          "w": "ceiling",
+          "s": 83.875,
+          "e": 84.438
+        },
+        {
+          "w": "instead",
+          "s": 84.438,
+          "e": 85
+        }
+      ]
+    },
+    {
+      "start": 89,
+      "end": 90.2,
+      "text": "Short",
+      "words": [
+        {
+          "w": "Short",
+          "s": 89,
+          "e": 90.2
+        }
+      ]
+    },
+    {
+      "start": 91,
+      "end": 94.33333333333333,
+      "text": "Final line bounded by the total duration",
+      "words": [
+        {
+          "w": "Final",
+          "s": 91,
+          "e": 91.488
+        },
+        {
+          "w": "line",
+          "s": 91.488,
+          "e": 91.894
+        },
+        {
+          "w": "bounded",
+          "s": 91.894,
+          "e": 92.545
+        },
+        {
+          "w": "by",
+          "s": 92.545,
+          "e": 92.789
+        },
+        {
+          "w": "the",
+          "s": 92.789,
+          "e": 93.114
+        },
+        {
+          "w": "total",
+          "s": 93.114,
+          "e": 93.602
+        },
+        {
+          "w": "duration",
+          "s": 93.602,
+          "e": 94.333
+        }
+      ]
+    }
+  ]
+}

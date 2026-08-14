@@ -32,6 +32,7 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
 
   private val exec = Executors.newSingleThreadExecutor()
   private var pickPromise: Promise? = null
+  private var pickFilePromise: Promise? = null
 
   init {
     ctx.addActivityEventListener(this)
@@ -107,6 +108,42 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   }
 
   override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+    if (requestCode == PICK_FILE_REQUEST) {
+      val p = pickFilePromise ?: return
+      pickFilePromise = null
+      val uri = data?.data
+      if (resultCode != Activity.RESULT_OK || uri == null) {
+        p.resolve(null) // user cancelled
+        return
+      }
+      // Copy out of SAF right away: decodeWithFilePath needs a real path, and
+      // the grant on a plain OPEN_DOCUMENT uri does not outlive the activity.
+      exec.execute {
+        try {
+          // Providers may put '/' in a display name (Drive titles legally do),
+          // and a hostile one could hand back "../..": the name is DATA, so
+          // only its last segment is a filename.
+          val name = (DocumentFile.fromSingleUri(ctx, uri)?.name ?: "song")
+            .substringAfterLast('/').substringAfterLast('\\').ifEmpty { "song" }
+          val dir = File(File(cacheRoot(), "imports"), java.util.UUID.randomUUID().toString())
+          dir.mkdirs()
+          val out = File(dir, name)
+          val tmp = File(out.path + ".part")
+          ctx.contentResolver.openInputStream(uri)?.use { input ->
+            tmp.outputStream().use { output -> input.copyTo(output) }
+          } ?: throw Exception("Cannot read the picked file")
+          if (!tmp.renameTo(out)) throw Exception("Cannot copy the picked file")
+          val m = Arguments.createMap()
+          m.putString("path", out.absolutePath)
+          m.putString("name", name)
+          m.putDouble("size", out.length().toDouble())
+          p.resolve(m)
+        } catch (e: Exception) {
+          p.reject("pick", e.message ?: "Cannot copy the picked file")
+        }
+      }
+      return
+    }
     if (requestCode != PICK_REQUEST) return
     val p = pickPromise ?: return
     pickPromise = null
@@ -121,6 +158,28 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
       p.resolve(rootInfo())
     } catch (e: Exception) {
       p.reject("persist", e.message ?: "Cannot keep access to that folder")
+    }
+  }
+
+  /** One audio file via the system picker → a private copy the decoders can
+   *  open by plain path. Resolves null on cancel. */
+  @ReactMethod
+  fun pickAudioFile(promise: Promise) {
+    val activity = ctx.currentActivity
+      ?: return promise.reject("no_activity", "Nothing to present the file picker from")
+    if (pickFilePromise != null) return promise.reject("busy", "File picker is already open")
+    pickFilePromise = promise
+    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+      addCategory(Intent.CATEGORY_OPENABLE)
+      type = "audio/*"
+      // .ogg sometimes reports as application/ogg; audio/* alone hides it
+      putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/*", "application/ogg"))
+    }
+    try {
+      activity.startActivityForResult(intent, PICK_FILE_REQUEST)
+    } catch (e: Exception) {
+      pickFilePromise = null
+      promise.reject("picker", e.message ?: "Cannot open the file picker")
     }
   }
 
@@ -311,16 +370,16 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
             entry.putString("meta", meta.readText())
             val stems = Arguments.createMap()
             var bytes = 0L
-            var any = false
             for (id in STEMS) {
               val flac = File(dir, "stems/$id.flac")
               val wav = File(dir, "stems/$id.wav")
               val f = if (flac.isFile) flac else if (wav.isFile) wav else continue
               stems.putString(id, if (f === flac) "flac" else "wav")
-              any = true
               bytes += f.length()
             }
-            if (!any) continue
+            // No !any skip here: a phone-added project holds only its
+            // custom-original lane until the split runs, and the This-phone
+            // library must still show it (customTracks in JS carries the lane).
             entry.putMap("stems", stems)
             entry.putBoolean("cached", true) // plain local files — nothing to fetch
             entry.putDouble("bytes", bytes.toDouble())
@@ -551,8 +610,212 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
     return m
   }
 
+  // ------------------------------------------ phone-created projects (P1) --
+  // Writers operate ONLY under documentsDir() — the "This phone" library the
+  // listing already walks. Every write is .part+rename; every path is guarded
+  // the way cacheDirFor guards cache names.
+
+  /** A project's folder under the documents root, or null on a bad name. */
+  private fun docDirFor(project: String): File? =
+    if (project.isEmpty() || project.contains("/") || project == ".." || project == ".") null
+    else File(documentsDir(), project)
+
+  /** Relative file path inside a project — subdirs fine, escapes are not. */
+  private fun relOk(file: String): Boolean =
+    file.isNotEmpty() && !file.startsWith("/") &&
+      file.split('/').none { it.isEmpty() || it == "." || it == ".." }
+
+  /** Desktop projects.ts safeName, mirrored: same strip, same fallback. */
+  private fun safeName(name: String): String {
+    val cleaned = name
+      .replace(Regex("\\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$", RegexOption.IGNORE_CASE), "")
+      .replace(Regex("[/\\\\:*?\"<>|]"), " ")
+      .replace(Regex("\\s{2,}"), " ")
+      .trim()
+    return cleaned.ifEmpty { "Untitled song" }
+  }
+
+  /**
+   * Create (and name) the folder a phone-added song will live in. A name that
+   * already holds a project gets " 2", " 3"… — adding a song must never merge
+   * into or overwrite an existing project.
+   */
+  @ReactMethod
+  fun ensureProjectDir(name: String, promise: Promise) {
+    exec.execute {
+      try {
+        val base = safeName(name)
+        var dir = base
+        var n = 2
+        while (File(File(documentsDir(), dir), "project.json").isFile) {
+          dir = "$base ${n++}"
+        }
+        val f = docDirFor(dir) ?: throw Exception("Bad project name")
+        if (!f.isDirectory && !f.mkdirs()) throw Exception("Cannot create the project folder")
+        val m = Arguments.createMap()
+        m.putString("dir", dir)
+        m.putString("path", f.absolutePath)
+        promise.resolve(m)
+      } catch (e: Exception) {
+        promise.reject("mkdir", e.message ?: "Cannot create the project folder")
+      }
+    }
+  }
+
+  /** Write one small text member (project.json, lyrics.json). */
+  @ReactMethod
+  fun writeText(project: String, file: String, text: String, promise: Promise) {
+    exec.execute {
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        if (!relOk(file)) throw Exception("Bad file name")
+        val out = File(dir, file)
+        out.parentFile?.mkdirs()
+        val tmp = File(out.path + ".part")
+        tmp.writeText(text)
+        // renameTo replaces atomically (rename(2)) — no pre-delete, so a kill
+        // here can never leave the project without its doc
+        if (!tmp.renameTo(out)) throw Exception("Cannot write $file")
+        promise.resolve(true)
+      } catch (e: Exception) {
+        promise.reject("write", e.message ?: "Cannot write $file")
+      }
+    }
+  }
+
+  /**
+   * Move a file this app already owns (an import copy, a job output) into a
+   * project. Rename first; filesDir and the documents root can sit on
+   * different volumes, so fall back to copy+delete.
+   */
+  @ReactMethod
+  fun moveIntoProject(project: String, relPath: String, srcPath: String, promise: Promise) {
+    exec.execute {
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        if (!relOk(relPath)) throw Exception("Bad file name")
+        val src = File(srcPath)
+        val owned = src.canonicalPath.startsWith(cacheRoot().canonicalPath + File.separator) ||
+          src.canonicalPath.startsWith(documentsDir().canonicalPath + File.separator)
+        if (!owned || !src.isFile) throw Exception("Not a file this app owns")
+        val out = File(dir, relPath)
+        out.parentFile?.mkdirs()
+        if (!src.renameTo(out)) {
+          val tmp = File(out.path + ".part")
+          src.inputStream().use { input -> tmp.outputStream().use { o -> input.copyTo(o) } }
+          if (!tmp.renameTo(out)) throw Exception("Cannot move $relPath")
+          src.delete()
+        }
+        // a finished add must not strand its imports/<uuid>/ shell
+        val parent = src.parentFile
+        if (parent != null &&
+          parent.canonicalPath.startsWith(File(cacheRoot(), "imports").canonicalPath + File.separator) &&
+          parent.listFiles()?.isEmpty() == true
+        ) {
+          parent.delete()
+        }
+        promise.resolve(out.absolutePath)
+      } catch (e: Exception) {
+        promise.reject("move", e.message ?: "Cannot move $relPath")
+      }
+    }
+  }
+
+  /** Copy (not move) a file this app owns into a project — the add flow
+   *  needs the original present twice: song.<ext> and the pre-split lane. */
+  @ReactMethod
+  fun copyIntoProject(project: String, relPath: String, srcPath: String, promise: Promise) {
+    exec.execute {
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        if (!relOk(relPath)) throw Exception("Bad file name")
+        val src = File(srcPath)
+        val owned = src.canonicalPath.startsWith(cacheRoot().canonicalPath + File.separator) ||
+          src.canonicalPath.startsWith(documentsDir().canonicalPath + File.separator)
+        if (!owned || !src.isFile) throw Exception("Not a file this app owns")
+        val out = File(dir, relPath)
+        out.parentFile?.mkdirs()
+        val tmp = File(out.path + ".part")
+        src.inputStream().use { input -> tmp.outputStream().use { o -> input.copyTo(o) } }
+        if (!tmp.renameTo(out)) throw Exception("Cannot copy $relPath")
+        promise.resolve(out.absolutePath)
+      } catch (e: Exception) {
+        promise.reject("copy", e.message ?: "Cannot copy $relPath")
+      }
+    }
+  }
+
+  /** md5+size+mtimeMs of one project file — what stemHashes/lyricsHash state. */
+  @ReactMethod
+  fun statFile(project: String, relPath: String, promise: Promise) {
+    exec.execute {
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        if (!relOk(relPath)) throw Exception("Bad file name")
+        val f = File(dir, relPath)
+        if (!f.isFile) throw Exception("$relPath is missing")
+        val md5 = hashOf(f) ?: throw Exception("$relPath is unreadable")
+        val m = Arguments.createMap()
+        m.putString("md5", md5)
+        m.putDouble("size", f.length().toDouble())
+        m.putDouble("mtimeMs", f.lastModified().toDouble())
+        promise.resolve(m)
+      } catch (e: Exception) {
+        promise.reject("stat", e.message ?: "Cannot stat $relPath")
+      }
+    }
+  }
+
+  /** Delete one phone-created project (documents root only — a 256 MB-a-song
+   *  library needs a way out). Picked/Drive projects are not ours to delete. */
+  @ReactMethod
+  fun deleteProject(project: String, promise: Promise) {
+    exec.execute {
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        if (!File(dir, "project.json").isFile) throw Exception("Not a project folder")
+        if (dir.exists() && !dir.deleteRecursively()) throw Exception("Could not delete it")
+        val edit = hashPrefs.edit()
+        val prefix = dir.path + File.separator
+        for (path in hashPrefs.all.keys) {
+          if (path == dir.path || path.startsWith(prefix)) edit.remove(path)
+        }
+        edit.apply()
+        promise.resolve(true)
+      } catch (e: Exception) {
+        promise.reject("delete", e.message ?: "Could not delete it")
+      }
+    }
+  }
+
+  /** Tags for the add-a-song card: artist/title/album/durationMs, best effort. */
+  @ReactMethod
+  fun readMediaTags(path: String, promise: Promise) {
+    exec.execute {
+      val m = Arguments.createMap()
+      val mmr = android.media.MediaMetadataRetriever()
+      try {
+        mmr.setDataSource(path)
+        mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST)
+          ?.let { m.putString("artist", it) }
+        mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE)
+          ?.let { m.putString("title", it) }
+        mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ALBUM)
+          ?.let { m.putString("album", it) }
+        mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+          ?.toLongOrNull()?.let { m.putDouble("durationMs", it.toDouble()) }
+      } catch (_: Exception) {
+        // unreadable tags are not an error — the card falls back to the filename
+      } finally {
+        try { mmr.release() } catch (_: Exception) {}
+      }
+      promise.resolve(m)
+    }
+  }
+
   companion object {
     private const val PICK_REQUEST = 42901
+    private const val PICK_FILE_REQUEST = 42902
     private val STEMS = listOf("vocals", "drums", "bass", "guitar", "piano", "other")
   }
 }
