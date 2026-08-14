@@ -19,6 +19,14 @@ if (TEST) TEST.engine = engine
 // never-await-in-CDP rule).
 if (TEST) {
   const hooks = TEST
+  // What a native module's JS surface actually holds — the first question
+  // when a bridge method comes up undefined on a device. Keys alone lie
+  // under the bridgeless interop proxy (it materializes methods lazily), so
+  // a named probe answers typeof for one method.
+  hooks.nativeApi = (mod: string, method?: string): string[] | string => {
+    const m = (NativeModules as Record<string, Record<string, unknown>>)[mod] ?? {}
+    return method ? typeof m[method] : Object.keys(m)
+  }
   // ORT probe (SingzSplit native module) — drivers reach natives through
   // __test only; `require` does not exist inside CDP evals.
   hooks.ortProbe = (path: string): boolean => {

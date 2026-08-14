@@ -37,6 +37,8 @@ import {
   listProjects,
   loadProject,
   pickFolder,
+  localProjectFile,
+  readProjectText,
   releaseProject,
   releaseStems,
   type CacheUsage,
@@ -46,6 +48,9 @@ import {
 } from '../projects'
 import { C, Seg, StemTile, white } from './bits'
 import { TEST } from './testhooks'
+import AddSongSheet from './AddSongSheet'
+import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
+import { deleteProject, writeLyrics } from '../writer'
 
 const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
@@ -94,6 +99,8 @@ export default function CatalogScreen({
   const [offline, setOffline] = useState(false)
   /** The diagnostic log — the only evidence a release build leaves behind. */
   const [logOpen, setLogOpen] = useState(false)
+  /** The add-a-song sheet (phone library only). */
+  const [addOpen, setAddOpen] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
@@ -357,6 +364,79 @@ export default function CatalogScreen({
     }
   }, [refresh])
 
+  /** Find synced lyrics later, from the card — the down-verdict path. */
+  const findLyricsFor = useCallback(
+    async (p: ProjectEntry) => {
+      try {
+        setLoading({ dir: p.dir, msg: 'Looking for lyrics…', frac: 0.5 })
+        const docJson = await readProjectText(p.dir, 'project.json')
+        const doc = JSON.parse(docJson) as ProjectDoc
+        // real duration (LRCLIB match tolerance) + the file's own artist tag;
+        // the confirmed project name outranks whatever the tag title says
+        const songPath = await localProjectFile(p.dir, doc.songFile)
+        const facts = await readSongFacts(songPath, doc.songFile, sampleRate)
+        const outcome = await findLyrics({
+          title: doc.name,
+          artist: facts.artist,
+          durationSec: facts.durationSec
+        })
+        if (typeof outcome === 'object') {
+          // Re-read the doc NOW: the lookup took seconds, and a project
+          // deleted meanwhile must fail here (readText throws) rather than
+          // be resurrected as a folder holding only its lyrics.
+          const freshDoc = await readProjectText(p.dir, 'project.json')
+          await writeLyrics(p.dir, freshDoc, outcome.hit)
+          setLoading(null)
+          await refresh()
+        } else {
+          setLoading(null)
+          Alert.alert(
+            'No lyrics yet',
+            outcome === 'down'
+              ? "The lyrics service didn't answer — try again later."
+              : 'Nothing matched this title. Lyrics can also be added on the computer.'
+          )
+        }
+      } catch (e) {
+        setLoading(null)
+        setError(String(e instanceof Error ? e.message : e))
+      }
+    },
+    [refresh, sampleRate]
+  )
+
+  /** Phone-library long-press: this phone owns these projects. */
+  const phoneCardMenu = useCallback(
+    (p: ProjectEntry) => {
+      const buttons: Parameters<typeof Alert.alert>[2] = [
+        { text: 'Cancel', style: 'cancel' }
+      ]
+      if (!p.hasLyrics) {
+        buttons.unshift({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
+      }
+      buttons.unshift({
+        text: 'Delete from this phone',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert('Delete this song?', `"${p.doc.name ?? p.dir}" and its files go away.`, [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete',
+              style: 'destructive',
+              onPress: () => {
+                void deleteProject(p.dir)
+                  .then(() => refresh())
+                  .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+              }
+            }
+          ])
+        }
+      })
+      Alert.alert(p.doc.name ?? p.dir, undefined, buttons)
+    },
+    [findLyricsFor, refresh]
+  )
+
   useEffect(() => {
     if (!TEST) return
     TEST.screen = 'catalog'
@@ -379,6 +459,18 @@ export default function CatalogScreen({
     TEST.usage = usage
     TEST.offline = offline
     TEST.forget = forget
+    TEST.addOpen = addOpen
+    TEST.setAddOpen = setAddOpen
+    TEST.addSongFrom = (path: string, name: string) =>
+      addSongHeadless(path, name, sampleRate).then(async (r) => {
+        await refresh()
+        return r
+      })
+    TEST.deletePhoneProject = (dir: string) => deleteProject(dir).then(() => refresh())
+    TEST.findLyricsFor = (dir: string) => {
+      const p = (projects ?? []).find((x) => x.dir === dir)
+      return p ? findLyricsFor(p) : Promise.reject(new Error(`no project ${dir}`))
+    }
   })
 
   const card = (opts: {
@@ -512,11 +604,17 @@ export default function CatalogScreen({
             </>
           )}
           {mode === 'phone' && (
-            <Text style={s.ctxWho} numberOfLines={1}>
-              {Platform.OS === 'ios'
-                ? 'Files you copied onto this iPhone'
-                : 'Files you copied onto this phone'}
-            </Text>
+            <>
+              <Text style={s.ctxWho} numberOfLines={1}>
+                {Platform.OS === 'ios'
+                  ? 'Files you copied onto this iPhone'
+                  : 'Files you copied onto this phone'}
+              </Text>
+              <Text style={s.ctxDot}>·</Text>
+              <Pressable hitSlop={8} onPress={() => setAddOpen(true)}>
+                <Text style={s.ctxLink}>Add a song</Text>
+              </Pressable>
+            </>
           )}
         </View>
         <ScrollView
@@ -544,7 +642,9 @@ export default function CatalogScreen({
               title: p.doc.name ?? p.dir,
               meta: (
                 <>
-                  {Object.keys(p.stems).length} stems
+                  {Object.keys(p.stems).length > 0
+                    ? `${Object.keys(p.stems).length} stems`
+                    : 'not split yet'}
                   {added > 0 ? ` · ${added} added` : ''}
                   {p.hasLyrics ? ' · lyrics' : ''}
                   {Object.values(p.stems).some((f) => f === 'wav') ? (
@@ -558,7 +658,7 @@ export default function CatalogScreen({
                 </Text>
               ),
               onPress: () => void openEntry(p),
-              onLongPress: () => confirmForget(p)
+              onLongPress: () => (mode === 'phone' ? phoneCardMenu(p) : confirmForget(p))
             })
           })}
           {projects === null && (
@@ -605,6 +705,14 @@ export default function CatalogScreen({
           {error && <Text style={s.err}>{error}</Text>}
         </ScrollView>
         <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
+        <AddSongSheet
+          visible={addOpen}
+          sampleRate={sampleRate}
+          onClose={(added) => {
+            setAddOpen(false)
+            if (added) void refresh()
+          }}
+        />
       </View>
     </View>
   )

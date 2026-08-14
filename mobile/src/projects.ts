@@ -96,6 +96,14 @@ export const cacheUsage = (): Promise<CacheUsage[]> =>
  *  the whole of it. */
 export const clearCache = (project = ''): Promise<boolean> => Folder.clearCache(project)
 
+/** One small text member of a local/phone project (project.json, lyrics.json). */
+export const readProjectText = (project: string, file: string): Promise<string> =>
+  Folder.readText(project, file)
+
+/** Absolute path to a readable copy of a local/phone project file. */
+export const localProjectFile = (project: string, file: string): Promise<string> =>
+  Folder.localFile(project, file)
+
 export async function listProjects(): Promise<ProjectEntry[]> {
   const raw = await Folder.listProjects()
   const out: ProjectEntry[] = []
