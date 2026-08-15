@@ -50,7 +50,7 @@ import { C, Seg, StemTile, white } from './bits'
 import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
-import { deleteProject, writeLyrics } from '../writer'
+import { deleteProject, pickAudioFile, writeLyrics, type PickedFile } from '../writer'
 import {
   cancelSplit,
   clearSplitJob,
@@ -115,8 +115,17 @@ export default function CatalogScreen({
   const [offline, setOffline] = useState(false)
   /** The diagnostic log — the only evidence a release build leaves behind. */
   const [logOpen, setLogOpen] = useState(false)
-  /** The add-a-song sheet (phone library only). */
+  /** The add-a-song sheet (phone library only), and the file it was opened
+   *  for. The pick happens BEFORE the sheet exists, and that order is the
+   *  whole point: iOS presents one view controller at a time, so a sheet that
+   *  opened its own picker put two presentations in flight from one commit —
+   *  UIKit kept the picker ("waiting for a delayed presention to complete")
+   *  and silently refused the sheet, which then ran its whole flow invisibly.
+   *  One presentation at a time makes that unrepresentable. */
   const [addOpen, setAddOpen] = useState(false)
+  const [addSrc, setAddSrc] = useState<PickedFile | null>(null)
+  /** A pick is on screen: no sheet exists yet to hold that state. */
+  const picking = useRef(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
@@ -128,6 +137,40 @@ export default function CatalogScreen({
     for (const r of rows) map[r.project] = r
     setUsage(map)
   }, [])
+
+  /** Add a song: the system picker first, the sheet only once a file is in
+   *  hand (see addSrc — presenting both at once loses the sheet). Cancelling
+   *  the picker leaves nothing open, which is what cancelling should do. */
+  const beginAdd = useCallback(async () => {
+    // A pick in flight has no sheet to speak for it, so the second tap is
+    // stopped here rather than by the natives' "busy" reject (which would
+    // shout an error at the singer for what is a double tap).
+    if (addOpen || picking.current) return
+    picking.current = true
+    log('song', 'add-song: opening the picker')
+    let picked: PickedFile | null = null
+    try {
+      setError(null)
+      picked = await pickAudioFile()
+    } catch (e) {
+      // With the pick out here, this catch IS the error UI — a rejected pick
+      // used to reach the sheet and say so; silence would read as the app
+      // ignoring the tap.
+      const msg = String(e instanceof Error ? e.message : e)
+      log('song', `add-song: the picker failed — ${msg}`, 'error')
+      setError(`That file couldn't be opened (${msg})`)
+      return
+    } finally {
+      picking.current = false
+    }
+    if (!picked) {
+      log('song', 'add-song: picker cancelled')
+      return
+    }
+    log('song', `add-song: picked ${picked.name} (${fmtBytes(picked.size)})`)
+    setAddSrc(picked)
+    setAddOpen(true)
+  }, [addOpen])
 
   const refresh = useCallback(
     async (force = false) => {
@@ -850,7 +893,7 @@ export default function CatalogScreen({
                   : 'Files you copied onto this phone'}
               </Text>
               <Text style={s.ctxDot}>·</Text>
-              <Pressable hitSlop={8} onPress={() => setAddOpen(true)}>
+              <Pressable hitSlop={8} onPress={() => void beginAdd()}>
                 <Text style={s.ctxLink}>Add a song</Text>
               </Pressable>
             </>
@@ -1008,9 +1051,11 @@ export default function CatalogScreen({
         <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
         <AddSongSheet
           visible={addOpen}
+          src={addSrc}
           sampleRate={sampleRate}
           onClose={(added) => {
             setAddOpen(false)
+            setAddSrc(null)
             if (added) void refresh()
           }}
         />

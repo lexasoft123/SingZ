@@ -21,7 +21,7 @@ import type { LyricsCandidate } from '../lyrics/lrclib'
 import { log } from '../log'
 import type { LyricLine } from '../model'
 import { clearCache } from '../projects'
-import { pickAudioFile } from '../writer'
+import type { PickedFile } from '../writer'
 import { C } from './bits'
 
 /**
@@ -47,15 +47,20 @@ type Step =
 
 export default function AddSongSheet({
   visible,
+  src,
   sampleRate,
   onClose
 }: {
   visible: boolean
+  /** The already-picked file. The CALLER picks, before this sheet exists:
+   *  iOS presents one view controller at a time, and a sheet that opened its
+   *  own picker raced its own presentation and lost it — the flow then ran
+   *  invisibly to the end. */
+  src: PickedFile | null
   sampleRate: number
   /** dir of the created project, or null when the flow was abandoned. */
   onClose: (addedDir: string | null) => void
 }): React.JSX.Element {
-  const [src, setSrc] = useState<{ path: string; name: string } | null>(null)
   const [step, setStep] = useState<Step>({ k: 'reading' })
   const stepRef = useRef<Step['k']>('reading')
   stepRef.current = step.k
@@ -77,7 +82,6 @@ export default function AddSongSheet({
       // then too; this guard covers the hardware back path.
       if (stepRef.current === 'creating') return
       seq.current++
-      setSrc(null)
       setError(null)
       // the import copy is durable storage — an abandoned add must not keep it
       void clearCache('imports').catch(() => {})
@@ -87,32 +91,28 @@ export default function AddSongSheet({
     []
   )
 
-  // Opening the sheet IS picking a file: no file, no flow. Depends on
-  // [visible] alone — parent re-renders while the system picker is up must
-  // not re-run this (the second pickAudioFile would reject "busy" and the
-  // real pick would land in a stale seq).
+  // The sheet opens on a file the parent already picked. Depends on
+  // [visible] alone — parent re-renders must not re-run the read.
   useEffect(() => {
     if (!visible) return
+    // No file, no flow — a sheet opened without one would sit on the reading
+    // spinner forever, which is the very failure this rewrite removes.
+    if (!src) {
+      log('song', 'add-song sheet: opened with no file — closing', 'warn')
+      onCloseRef.current(null)
+      return
+    }
     const my = ++seq.current
-    setSrc(null)
     setStep({ k: 'reading' })
     setError(null)
     void (async () => {
       try {
         // Every step writes itself down BEFORE it runs: a Release build has
-        // no inspector, and a sheet frozen on a spinner with an empty log is
+        // no inspector, and a sheet stuck on a spinner with an empty log is
         // exactly the report this line count exists to answer (the first
         // real-phone freeze arrived with only the version line on record).
-        log('song', 'add-song sheet: opening the picker')
-        const picked = await pickAudioFile()
-        if (my !== seq.current) return
-        if (!picked) {
-          onCloseRef.current(null)
-          return
-        }
-        log('song', `add-song sheet: picked ${picked.name} (${picked.size} bytes)`)
-        setSrc(picked)
-        const facts = await readSongFacts(picked.path, picked.name, sampleRate)
+        log('song', `add-song sheet: reading ${src.name}`)
+        const facts = await readSongFacts(src.path, src.name, sampleRate)
         if (my !== seq.current) return
         log('song', `add-song sheet: read ${facts.durationSec.toFixed(0)}s — "${facts.title}"`)
         setTitle(facts.title)
@@ -141,8 +141,10 @@ export default function AddSongSheet({
         altTitle: facts.altTitle,
         durationSec: facts.durationSec
       }
+      log('song', `add-song sheet: searching lyrics for "${meta.title}"`)
       const outcome = await findLyrics(meta)
       if (my !== seq.current) return
+      log('song', `add-song sheet: lyrics ${typeof outcome === 'object' ? 'found' : outcome}`)
       if (typeof outcome === 'object') {
         setStep({ k: 'lyrics', facts, hit: outcome.hit, down: false, candidates: null })
         return
@@ -170,6 +172,7 @@ export default function AddSongSheet({
       const my = ++seq.current
       setStep({ k: 'creating' })
       try {
+        log('song', `add-song sheet: creating "${title.trim() || facts.title}"`)
         const { dir } = await addSong({
           srcPath: src.path,
           fileName: src.name,
@@ -178,7 +181,6 @@ export default function AddSongSheet({
           lyrics
         })
         if (my !== seq.current) return
-        setSrc(null)
         onCloseRef.current(dir)
       } catch (e) {
         if (my !== seq.current) return

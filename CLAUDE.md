@@ -98,6 +98,20 @@ answer your evals while you measure the phone.
   song; on device that was a per-process-limit jetsam kill on the fifth song.
   Guarded by `mobile/tests/open-close-memory.cjs` — note RSS only moves for
   song-sized blocks, sample-sized ones stay in the allocator's cache.
+- **iOS presents ONE view controller at a time, and the loser is silent** —
+  an RN `<Modal>` that opens a system picker (document picker, share sheet)
+  from its own mount effect puts two presentations in flight from one commit.
+  UIKit keeps the picker and refuses the modal ("Attempt to present
+  `RCTFabricModalHostViewController` … which is waiting for a delayed
+  presention of `UIDocumentPickerViewController` to complete", visible only in
+  the device console), so the sheet NEVER appears while its JS runs the whole
+  flow behind an empty screen — which reached a real phone as "I've added song
+  but interface just freezed", with nothing in the app log because nothing
+  failed. Present the system UI FIRST, from the screen, and open the sheet on
+  what it returned (`beginAdd` in CatalogScreen; the sheet takes `src`).
+  Guarded by `mobile/__tests__/one-presentation.test.ts` — a headless suite
+  mounts no modal and can never catch this, which is why the rule is checked
+  at the source.
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —

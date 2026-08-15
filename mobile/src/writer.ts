@@ -20,8 +20,15 @@ import { log } from './log'
  *    naming files that are not there.
  */
 
+/** What the system picker hands back: the app's own copy of the chosen file. */
+export interface PickedFile {
+  path: string
+  name: string
+  size: number
+}
+
 interface WriterNative {
-  pickAudioFile(): Promise<{ path: string; name: string; size: number } | null>
+  pickAudioFile(): Promise<PickedFile | null>
   ensureProjectDir(name: string): Promise<{ dir: string; path: string }>
   writeText(project: string, file: string, text: string): Promise<boolean>
   moveIntoProject(project: string, relPath: string, srcPath: string): Promise<string>
