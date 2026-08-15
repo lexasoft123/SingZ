@@ -404,9 +404,37 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     notification recording the block), and HyperOS may keep an
     IMPORTANCE_LOW notification out of sight entirely — verify the split
     notification's visibility on the fleet's Xiaomi devices before release.
+  - **A production song on the POCO (Mein Teil, 4:32 / 320 kbps MP3,
+    2026-08-15)**: the engine split it in **242 s — faster than the song
+    plays** (0.89× realtime). 47 chunks, median pace **4.11 s** (3.94–6.19),
+    14 s to first chunk (session load + resample included), peak PSS ≈
+    **4.8 GB** held steady across the whole run (grew 60 MB over 46 chunks —
+    an arena, not a leak). Scaled to exactly 4 minutes of audio this is
+    ~3.6 min — the 3.3-min projection held within 10 % (the median chunk
+    hides a slow tail; the mean is 4.96 s). (Run driven through `runSplitDirect` — the in-process
+    engine path — after the finding below blocked the service wrapper; the
+    engine cost is identical, and the add itself ran on-device first: the
+    272 s MP3 decoded + docced in 8 s.)
+  - **HyperOS field finding (must be retested before P2 ships to the
+    fleet)**: on the second install of the night, the `:split` service was
+    never created — ActivityManager logged the FGS start as "Allowed",
+    spawned the process, and the service-creation transaction simply never
+    arrived: an empty shell with only runtime daemon threads, no
+    onStartCommand, no crash, no ANR, reproduced twice. SmartPower marked
+    the fresh process "invisible" 75 ms after spawn. Survived every lever:
+    deviceidle whitelist, RUN_ANY_IN_BACKGROUND allow, active standby
+    bucket, POST_NOTIFICATIONS granted. The SAME build's service ran fine
+    earlier the same night (the 44.1 s sample pass) — prime suspect is
+    MIUI's install-attribution risk flag from the blocked-install episode
+    (Install-via-USB refusals) poisoning the second install. Before the
+    fleet gets P2: retest the RELEASE APK on a rebooted Xiaomi, and the
+    FGS-failure-surfacing follow-up already filed covers the UI half (the
+    card must say the start failed instead of clearing silently).
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
     formally), real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16`
-    on the packaged APK, and the split notification's visibility on HyperOS.
+    on the packaged APK, the split notification's visibility on HyperOS, and
+    the `:split` service on a rebooted Xiaomi with a release APK (the
+    HyperOS finding above).
 
 ## Top risks
 
