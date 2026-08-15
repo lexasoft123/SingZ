@@ -99,15 +99,22 @@ export default function AddSongSheet({
     setError(null)
     void (async () => {
       try {
+        // Every step writes itself down BEFORE it runs: a Release build has
+        // no inspector, and a sheet frozen on a spinner with an empty log is
+        // exactly the report this line count exists to answer (the first
+        // real-phone freeze arrived with only the version line on record).
+        log('song', 'add-song sheet: opening the picker')
         const picked = await pickAudioFile()
         if (my !== seq.current) return
         if (!picked) {
           onCloseRef.current(null)
           return
         }
+        log('song', `add-song sheet: picked ${picked.name} (${picked.size} bytes)`)
         setSrc(picked)
         const facts = await readSongFacts(picked.path, picked.name, sampleRate)
         if (my !== seq.current) return
+        log('song', `add-song sheet: read ${facts.durationSec.toFixed(0)}s — "${facts.title}"`)
         setTitle(facts.title)
         setArtist(facts.artist ?? '')
         setStep({ k: 'meta', facts })

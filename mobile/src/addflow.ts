@@ -42,7 +42,24 @@ export async function readSongFacts(
   sampleRate: number
 ): Promise<SongFacts> {
   // bare paths are APK asset names in Android release builds — always file://
-  const buffer = await decodeAudioData(`file://${srcPath}`, sampleRate)
+  // The decode is raced against a deadline: a file the decoder wedges on
+  // (first seen with an iCloud-picked song on a real phone) must become an
+  // honest error, never an eternal spinner. If the decode lands after the
+  // deadline anyway, its buffer is released on arrival — the loser of the
+  // race must not pin a song's worth of PCM.
+  const decodePromise = decodeAudioData(`file://${srcPath}`, sampleRate)
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  const buffer = await Promise.race([
+    // a decode that wins must also disarm the deadline, or the late timer
+    // would release the same buffer a second time
+    decodePromise.finally(() => clearTimeout(deadline)),
+    new Promise<never>((_, rejectLate) => {
+      deadline = setTimeout(() => {
+        decodePromise.then((b) => releaseStems([{ buffer: b }])).catch(() => {})
+        rejectLate(new Error('it did not open within 90 seconds'))
+      }, 90_000)
+    })
+  ])
   const durationSec = buffer.duration
   releaseStems([{ buffer }])
 
