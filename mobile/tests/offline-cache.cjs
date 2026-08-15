@@ -103,7 +103,12 @@ const du = (dir) => {
   for (let i = 0; i < 40 && !target; i++) {
     try {
       const l = await getJson(`http://localhost:${PORT}/json`);
-      target = l.find((t) => t.webSocketDebuggerUrl) ?? null;
+      // deviceName filter: Metro lists every attached app and an Android
+      // emulator sorts first — this driver seeded the iOS container and then
+      // interrogated the Android app, reporting Android's projects as a
+      // failure. See the note in seek-memory.cjs.
+      target =
+        l.find((t) => t.webSocketDebuggerUrl && /iphone|ipad/i.test(t.deviceName || '')) ?? null;
     } catch {}
     if (!target) await sleep(1000);
   }

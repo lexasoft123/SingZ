@@ -37,6 +37,23 @@ for cross-platform verification) — vitest unit tests in
 `tests/unit/` covering the v2 FLAC format with electron aliased to a stub).
 Load files through the hidden `<input type=file>` — same code
 path as drag-drop. Read the screenshots you take.
+**Metro serves JS live; NATIVE needs a rebuild+install, and a stale binary
+reports green** — a mobile run against an app built before the native change
+does not merely miss it, it turns every native-facing check VACUOUS: the
+CoreML branch could not appear in the log because it was not compiled in,
+and the download-progress poller was `undefined` behind its own typeof
+guard, both of which read as passes. Rebuild + reinstall whenever the diff
+touched .mm/.swift/.kt/.cpp, and if you want to check rather than trust,
+grep the app binary itself for a literal the change added —
+`strings <app>.app/SingZPlayer | grep …` (pods link STATICALLY here:
+use_frameworks! is behind USE_FRAMEWORKS, which nothing sets, so there is
+no dylib of ours to grep).
+**Every mobile driver must filter Metro's target list by `deviceName`** —
+Metro lists every attached app in connection order, so with an emulator and
+a simulator both up, an unfiltered `find(t => t.webSocketDebuggerUrl)` takes
+whichever answered first: a driver seeded the iOS container and then
+interrogated the ANDROID app, reporting its projects as a failure. Every
+driver in `mobile/tests/` filters now; a new one must too.
 **Automated runs are silent** — sound is only for a human listening
 (end-user checks/demos). Desktop drivers launch with `SINGZ_MUTE=1`
 (→ Chromium mute-audio; analysers, sinkId and timing behave exactly as

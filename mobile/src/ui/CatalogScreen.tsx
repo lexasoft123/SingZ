@@ -26,7 +26,7 @@ import {
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { fmtBytes, fmtMs, log } from '../log'
 import LogPanel from './LogPanel'
-import { addedTracks, customTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
+import { addedTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
   cacheUsage,
   clearCache,
@@ -649,6 +649,37 @@ export default function CatalogScreen({
     }
   }, [])
 
+  /** Can this song be split right now? PHONE LIBRARY ONLY — the adoption
+   *  writes through docDirFor, which is the app's own documents root on both
+   *  platforms, so splitting a picked-folder song would leave the folder song
+   *  untouched and drop a duplicate half-project into This-phone. The offer
+   *  used to be confined by living in the phone-only long-press menu; now
+   *  that a card renders it, the confinement has to be stated.
+   *  Six stems means it already is split; a job in flight owns the engine; a
+   *  build without the natives never offers. */
+  const canSplit = useCallback(
+    (p: ProjectEntry): boolean =>
+      mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0 && !splitUi,
+    [mode, splitUi]
+  )
+
+  /** The one place the offer is worded. The card button and the long-press
+   *  menu both come here, so they cannot drift apart. */
+  const offerSplit = useCallback(
+    (p: ProjectEntry) => {
+      Alert.alert(
+        'Split this song?',
+        'The phone separates it into vocals, drums, bass and more — a few minutes of ' +
+          'work, and a one-time 136 MB download the first time.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Split', onPress: () => void startSplitFor(p.dir, false) }
+        ]
+      )
+    },
+    [startSplitFor]
+  )
+
   const discardSplit = useCallback(() => {
     void cancelSplit()
       .then(() => clearSplitJob())
@@ -680,21 +711,8 @@ export default function CatalogScreen({
       }
       // Six real stems end the offer; a running job means the card owns it;
       // a build without the split natives (iOS until P3) never offers.
-      if (splitAvailable() && Object.keys(p.stems).length === 0 && !splitUi) {
-        buttons.unshift({
-          text: 'Split into stems',
-          onPress: () => {
-            Alert.alert(
-              'Split this song?',
-              'The phone separates it into vocals, drums, bass and more — a few minutes of ' +
-                'work, and a one-time 136 MB download the first time.',
-              [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Split', onPress: () => void startSplitFor(p.dir, false) }
-              ]
-            )
-          }
-        })
+      if (canSplit(p)) {
+        buttons.unshift({ text: 'Split into stems', onPress: () => offerSplit(p) })
       }
       buttons.unshift({
         text: 'Delete from this phone',
@@ -716,7 +734,7 @@ export default function CatalogScreen({
       })
       Alert.alert(p.doc.name ?? p.dir, undefined, buttons)
     },
-    [findLyricsFor, refresh, splitUi, startSplitFor]
+    [canSplit, findLyricsFor, offerSplit, refresh]
   )
 
   useEffect(() => {
@@ -778,6 +796,10 @@ export default function CatalogScreen({
     title: string
     meta: React.ReactNode
     right: React.ReactNode
+    /** A primary action for this song, shown under the status. Splitting used
+     *  to live only in the long-press menu, which is not a place a singer
+     *  finds a feature. */
+    action?: React.ReactNode
     sample?: boolean
     onPress: () => void
     onLongPress?: () => void
@@ -815,7 +837,10 @@ export default function CatalogScreen({
             <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
           </Pressable>
         ) : (
-          <View style={{ alignItems: 'flex-end' }}>{opts.right}</View>
+          <View style={{ alignItems: 'flex-end' }}>
+            {opts.right}
+            {opts.action}
+          </View>
         )}
         {isLoading && (
           <View style={s.progressRail}>
@@ -1022,6 +1047,21 @@ export default function CatalogScreen({
                   {downloaded ? '✓' : p.bytes > 0 ? `☁ ${fmtSize(p.bytes)}` : '☁'}
                 </Text>
               ),
+              // The whole point of an added song is splitting it, so the offer
+              // belongs on the card. hitSlop keeps the tap target honest at
+              // this text size, and the press must not also open the song.
+              action: canSplit(p) ? (
+                <Pressable
+                  hitSlop={10}
+                  onPress={(e) => {
+                    e.stopPropagation()
+                    offerSplit(p)
+                  }}
+                  style={s.splitChip}
+                >
+                  <Text style={s.splitChipText}>Split</Text>
+                </Pressable>
+              ) : null,
               onPress: () => void openEntry(p),
               onLongPress: () => (mode === 'phone' ? phoneCardMenu(p) : confirmForget(p))
             })
@@ -1130,6 +1170,14 @@ const s = StyleSheet.create({
     marginBottom: 8
   },
   splitBar: { height: 4, borderRadius: 2, backgroundColor: C.amber },
+  splitChip: {
+    marginTop: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: C.amber
+  },
+  splitChipText: { color: '#1d1204', fontSize: 12, fontWeight: '700' },
   splitActions: { flexDirection: 'row', gap: 18 },
   logSheet: { flex: 1, backgroundColor: C.bg, paddingHorizontal: 20, paddingTop: 60 },
   logHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },

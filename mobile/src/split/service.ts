@@ -198,7 +198,10 @@ export function subscribeSplit(
         p.stage === 'chunk' && p.total > 0
           ? `chunk ${p.done}/${p.total}`
           : isPulse
-            ? `still ${lastStage || 'working'}`
+            ? // first token only: a stage may carry a reason after a colon
+              // (the CoreML decline does), and reprinting a whole exception
+              // behind "still …" every 2 s is not a status line.
+              `still ${lastStage.split(':')[0] || 'working'}`
             : `${p.stage} ${Math.round(p.frac * 100)}%`
       const vitals =
         p.memMb !== undefined
