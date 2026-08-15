@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.1.4'
+  s.version      = '0.2.0'
   s.summary      = 'SingZ shared C++ engine core: on-device stem split + beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -23,6 +23,7 @@ Pod::Spec.new do |s|
     # path for them.
     'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core" "$(PODS_ROOT)/onnxruntime-c/Headers"'
   }
+  s.frameworks   = 'AVFoundation', 'UIKit'
   s.dependency 'React-Core'
   # Same 1.23.x minor the desktop packs and the Android AAR pin (trunk's
   # closest pod to their 1.23.2 is 1.23.0 — a patch-level skew the Phase-2

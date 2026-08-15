@@ -833,7 +833,12 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
         return
       }
       let src = URL(fileURLWithPath: srcPath as String).standardizedFileURL
-      let owned = [self.cacheRootURL(), self.documentsURL()].contains {
+      // Application Support/split-job: finished split stems adopt from the
+      // runner's job dir (the Android guard grew the same arm in P2).
+      let splitJob = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("split-job", isDirectory: true)
+      let owned = [self.cacheRootURL(), self.documentsURL(), splitJob].contains {
         src.path.hasPrefix($0.standardizedFileURL.path + "/")
       }
       guard owned, self.fm.fileExists(atPath: src.path) else {

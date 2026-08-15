@@ -430,6 +430,56 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     fleet gets P2: retest the RELEASE APK on a rebooted Xiaomi, and the
     FGS-failure-surfacing follow-up already filed covers the UI half (the
     card must say the start failed instead of clearing silently).
+  - **Phase 3a — split on iOS (2026-08-15 morning)**: the same JS lit up
+    UNTOUCHED — `splitAvailable()` started answering yes and the catalog
+    card, flow, adoption and liveness logic all ran as-is; the platform work
+    was one pod. `SingzSplitRunner` (ObjC++ in SingzCore) runs the job
+    IN-PROCESS (iOS has no :split to isolate into): AVAudioFile decode to
+    raw f32 at source rate, job.json with the Android contract byte for
+    byte — atomic + F_FULLFSYNC (plain fsync lies on APFS), chunksDone as
+    hint, a 5 s CLOCK heartbeat, DONE left as the durable handoff — a
+    dispatch watchdog that persists the stall verdict but shoots no process
+    (there is none to shoot; the wedged ORT thread rides until the user
+    restarts, stated honestly), idle-timer held while a job runs, and
+    `SingzSplit` grew the Kotlin-identical method surface as an
+    RCTEventEmitter. Sim proof (M2, iPhone 16 Pro sim): the 40.8 s sample
+    end to end in **20 s, chunk pace 1.6 s** (P0's ortProbe said 1.82);
+    adoption contracts all green; **kill the APP mid-split** (in-process:
+    the app IS the job) → truthful job.json → relaunch → interrupted card
+    from the frozen pulse → resume → identical adoption. And the LSB gate:
+    sim stems vs the desktop pack at **corr 1.000000, ≤ 2 int16 LSBs** —
+    three runtimes (desktop x64, Android arm64, iOS arm64) now agree at
+    the least significant bit.
+  - iOS traps paid for: **AVAudioFile THROWS at EOF** ("nilError") instead
+    of returning an empty buffer — loop on framePosition < length, never
+    read-until-empty (measured: 1,799,280 clean frames, then a throw). And
+    `simctl spawn defaults read` cannot see the app's NSUserDefaults-backed
+    log from outside reliably — sim drivers poll CDP globals instead (the
+    add-song.cjs precedent; the Hermes-inspector SIGSEGV was Android
+    hardware, the sim tolerates global polls).
+  - Review round (the gate earning its keep, four findings): (1)
+    **RCTEventEmitter silently drops every event when JS subscribes via
+    DeviceEventEmitter** — the module's exported addListener never runs, the
+    listener count stays zero, and sendEventWithName warns-and-drops rather
+    than throwing; `initWithDisabledObservation` restores the Android
+    semantics. The sim pass had been BLIND to it — every checked transition
+    was also reachable by polling — so the driver now asserts a live chunk
+    event reaches the card mid-run, and the permanent suite must keep that
+    assertion. (2) A stall verdict must LEAVE the runner busy: the wedged
+    ORT thread still owns the serial work queue, and freeing the flag would
+    let a mid-session Resume queue a second job behind it — worst case
+    wiping six finished stems when the "stall" was merely slow. Busy until
+    restart is the honest answer. (3) Watchdog timers expire while the app
+    is SUSPENDED and fire on resume — a >30 s app switch read as a stall.
+    The refusal signal must be a RESIGN-since-arm flag (resign always
+    precedes the freeze, order-independent), never the heartbeat's stamp:
+    the heartbeat is a clock proving PROCESS liveness and stamps straight
+    through a wedged worker — a freshness check inverts the watchdog into
+    one that fires only on false stalls (the second review round caught
+    exactly that). Refuse-once-and-re-arm keeps true stalls caught one cap
+    later. (4) Every job-dir deletion rides the
+    same serial queue as the writers, or the heartbeat can resurrect a
+    cancelled doc mid-window.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
     formally), real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16`
     on the packaged APK, the split notification's visibility on HyperOS, and
