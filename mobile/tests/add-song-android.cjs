@@ -104,6 +104,12 @@ async function main() {
   // job; the app zeroing its own master gain is the third layer.
   adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
   for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
+
+  // Keep this app's permissions where the other driver needs them: nothing
+  // here splits, so no dialog can appear, but both suites share one install
+  // and starting from a known grant state costs nothing.
+  adb('shell', 'sh', '-c',
+    `'pm grant ${APP} android.permission.POST_NOTIFICATIONS 2>/dev/null || true'`)
   adb('push', join(__dirname, '..', 'assets', 'sample', 'stems', 'vocals.flac'), '/data/local/tmp/singz-seed.flac')
   adb('shell', 'chmod', '666', '/data/local/tmp/singz-seed.flac')
   adb('shell', 'run-as', APP, 'sh', '-c',

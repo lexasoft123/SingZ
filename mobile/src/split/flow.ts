@@ -1,3 +1,4 @@
+import { PermissionsAndroid, Platform } from 'react-native'
 import { getStoredText, setStoredText } from '../latency'
 import { appInfo, log } from '../log'
 import type { ProjectDoc } from '../model'
@@ -20,6 +21,36 @@ export async function splitGate(force = false): Promise<{ ok: true } | { ok: fal
 }
 
 /**
+ * Android 13+ denies POST_NOTIFICATIONS until it is asked for, and the
+ * manifest entry alone does nothing. A foreground service whose notification
+ * is suppressed is a split that VANISHES the moment the singer leaves the
+ * app: no progress anywhere, and the Cancel action unreachable, while the
+ * work carries on invisibly. (Measured on a clean 0.16.0 install: granted=
+ * false, importance=NONE, nothing in the shade during an active split.)
+ *
+ * Asked here, at the tap, where the reason is self-evident — never at launch.
+ * The answer is NOT a gate: someone who says no still gets their stems, they
+ * just only see progress on this screen.
+ */
+async function askToShowProgress(): Promise<void> {
+  if (Platform.OS !== 'android' || Number(Platform.Version) < 33) return
+  const perm = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
+  try {
+    if (await PermissionsAndroid.check(perm)) return
+    const res = await PermissionsAndroid.request(perm)
+    log(
+      'split',
+      res === PermissionsAndroid.RESULTS.GRANTED
+        ? 'notifications allowed — progress shows while you are in other apps'
+        : 'notifications declined — splitting still runs, but only this screen shows it'
+    )
+  } catch (e) {
+    // Never let the permission plumbing cost someone their split.
+    log('split', `could not ask about notifications — ${String(e instanceof Error ? e.message : e)}`, 'warn')
+  }
+}
+
+/**
  * Gate passed: resolve the song file, make sure the model is here (136 MB,
  * once), and hand the job to the service. Resolves when the service has the
  * job — progress from here on arrives over subscribeSplit/splitStatus.
@@ -32,6 +63,9 @@ export async function startProjectSplit(
     watchdogCapMs?: number
   }
 ): Promise<void> {
+  // Ahead of the model fetch so the dialog lands on the tap that caused it,
+  // rather than interrupting a 136 MB download minutes later.
+  await askToShowProgress()
   const doc = JSON.parse(await readProjectText(project, 'project.json')) as ProjectDoc
   const srcPath = await localProjectFile(project, doc.songFile)
   const modelPath = await ensureSplitModel(opts?.onModelProgress)

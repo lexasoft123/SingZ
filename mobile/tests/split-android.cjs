@@ -240,6 +240,15 @@ async function main() {
   adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
   for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
 
+  // startProjectSplit asks for POST_NOTIFICATIONS the first time (Android 13+
+  // denies it until asked, and a suppressed notification means a split the
+  // singer can neither see nor cancel). Grant it up front: an unanswered
+  // system dialog would sit over the app and hang this driver. NOTE this also
+  // hides the case the ask exists for — a clean install with no grant — so
+  // that one is a by-hand check in the e2e-verifier android pass, not here.
+  adb('shell', 'sh', '-c',
+    `'pm grant ${APP} android.permission.POST_NOTIFICATIONS 2>/dev/null || true'`)
+
   const haveModel = shell(`run-as ${APP} ls ${MODEL.replace(`/data/data/${APP}/`, '')} 2>/dev/null || true`)
   if (!haveModel.includes('htdemucs')) {
     console.error('the split model is not on the device — seed it first (header of this file)')
