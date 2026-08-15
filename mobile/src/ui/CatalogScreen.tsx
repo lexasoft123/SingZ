@@ -168,6 +168,7 @@ export default function CatalogScreen({
       return
     }
     log('song', `add-song: picked ${picked.name} (${fmtBytes(picked.size)})`)
+    if (TEST) TEST.addSheetShown = false
     setAddSrc(picked)
     setAddOpen(true)
   }, [addOpen])
@@ -736,6 +737,15 @@ export default function CatalogScreen({
     TEST.forget = forget
     TEST.addOpen = addOpen
     TEST.setAddOpen = setAddOpen
+    /** Open the real sheet on a seeded file — everything beginAdd does once
+     *  the picker has answered (the picker itself needs a finger). Paired
+     *  with addSheetShown, this is how a driver proves the sheet is ON SCREEN
+     *  and not merely open in state. */
+    TEST.openAddSheet = (path: string, name: string, size = 0) => {
+      if (TEST) TEST.addSheetShown = false
+      setAddSrc({ path, name, size })
+      setAddOpen(true)
+    }
     TEST.addSongFrom = (path: string, name: string) =>
       addSongHeadless(path, name, sampleRate).then(async (r) => {
         await refresh()
@@ -1053,9 +1063,22 @@ export default function CatalogScreen({
           visible={addOpen}
           src={addSrc}
           sampleRate={sampleRate}
+          // Presented-for-real, and how far it walked: drivers only, written
+          // where onStep writes so release pays no render for either. Cleared
+          // on close, so no opener can hand a driver a stale true.
+          onShown={() => {
+            if (TEST) TEST.addSheetShown = true
+          }}
+          onStep={(k, seconds) => {
+            if (TEST) {
+              TEST.addSheetStep = k
+              TEST.addSheetSecs = seconds
+            }
+          }}
           onClose={(added) => {
             setAddOpen(false)
             setAddSrc(null)
+            if (TEST) TEST.addSheetShown = false
             if (added) void refresh()
           }}
         />

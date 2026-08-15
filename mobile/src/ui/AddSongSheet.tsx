@@ -49,6 +49,8 @@ export default function AddSongSheet({
   visible,
   src,
   sampleRate,
+  onShown,
+  onStep,
   onClose
 }: {
   visible: boolean
@@ -58,12 +60,27 @@ export default function AddSongSheet({
    *  invisibly to the end. */
   src: PickedFile | null
   sampleRate: number
+  /** Fired when the sheet is REALLY on screen (Modal onShow — iOS calls it
+   *  after the presentation completes, so it is the one signal that tells a
+   *  refused presentation from a working one; JS state cannot). */
+  onShown?: () => void
+  /** Which card is up, for drivers (reading → meta → searching → lyrics), and
+   *  the duration the read produced — 0 on the card that reports a file this
+   *  phone cannot open, which wears the same 'meta' name. */
+  onStep?: (step: string, seconds: number) => void
   /** dir of the created project, or null when the flow was abandoned. */
   onClose: (addedDir: string | null) => void
 }): React.JSX.Element {
   const [step, setStep] = useState<Step>({ k: 'reading' })
   const stepRef = useRef<Step['k']>('reading')
   stepRef.current = step.k
+  const onStepRef = useRef(onStep)
+  onStepRef.current = onStep
+  useEffect(() => {
+    onStepRef.current?.(step.k, 'facts' in step ? step.facts.durationSec : 0)
+    // step.k alone: the same card with new facts is not a new step
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step.k])
   const [title, setTitle] = useState('')
   const [artist, setArtist] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -348,7 +365,16 @@ export default function AddSongSheet({
   }
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={() => abandon('back')}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      onShow={() => {
+        log('song', 'add-song sheet: on screen')
+        onShown?.()
+      }}
+      onRequestClose={() => abandon('back')}
+    >
       <View style={s.scrim}>
         <View style={s.sheet}>
           <View style={s.head}>

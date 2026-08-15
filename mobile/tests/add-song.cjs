@@ -142,6 +142,46 @@ async function main() {
 
   await conn.evaluate('globalThis.__test.back?.(); true')
   await sleep(1500)
+
+  // The sheet must reach the SCREEN. The headless flow above cannot say that:
+  // when the sheet opened its own file picker, iOS refused to present the
+  // modal ("waiting for a delayed presention of UIDocumentPickerViewController
+  // to complete") and every JS-visible thing still looked perfect while the
+  // singer stared at a library with no sheet on it. Modal onShow is the one
+  // signal that separates the two, so it is asserted here per run.
+  // Scope: this opens the sheet the way beginAdd does AFTER the picker answers
+  // (no CDP can tap a system picker), so it proves the sheet presents — the
+  // pick-then-present ORDER is guarded at the source, in
+  // mobile/__tests__/one-presentation.test.ts.
+  copyFileSync(join(__dirname, '..', 'assets', 'sample', 'stems', 'vocals.flac'), seeded)
+  await conn.evaluate(
+    `globalThis.__test.openAddSheet(${JSON.stringify(seeded)}, ${JSON.stringify(SONG_NAME)}); true`
+  )
+  let shown = false
+  for (let i = 0; i < 20 && !shown; i++) {
+    await sleep(500)
+    shown =
+      (await conn.evaluate('globalThis.__test.addSheetShown === true'))?.result?.value === true
+  }
+  check('the sheet is really on screen (Modal onShow)', shown)
+  // and it walks its own steps from there: the seeded song reads and lands on
+  // the confirm card, which is where a singer takes over. The duration comes
+  // with it because the card that reports an unreadable file is ALSO 'meta',
+  // with 0 seconds on it.
+  let sheetStep = null
+  let sheetSecs = 0
+  for (let i = 0; i < 20 && sheetStep !== 'meta'; i++) {
+    await sleep(500)
+    sheetStep = (await conn.evaluate('globalThis.__test.addSheetStep ?? null'))?.result?.value
+    sheetSecs = (await conn.evaluate('globalThis.__test.addSheetSecs ?? 0'))?.result?.value ?? 0
+  }
+  check(
+    'the sheet read the song and reached the confirm card',
+    sheetStep === 'meta' && sheetSecs > 0,
+    `${String(sheetStep)} · ${sheetSecs}s`
+  )
+  await conn.evaluate('globalThis.__test.setAddOpen(false); true')
+  await sleep(800)
   await conn.evaluate(
     `globalThis.__delDone = null; globalThis.__test.deletePhoneProject(${JSON.stringify(dir)})` +
       `.then(() => { globalThis.__delDone = 'ok' }).catch(e => { globalThis.__delDone = String(e) }); true`
