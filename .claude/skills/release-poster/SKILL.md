@@ -18,11 +18,19 @@ easiest way to produce something nobody can read.
 
 ## How this gets triggered
 
-Usually by `.claude/hooks/poster-after-tag.sh` (PostToolUse/Bash), which fires
-when a `v*` tag is created and hands the session the version. It skips
-hyphenated prereleases — those go to one tester, not the channel — and stays
-quiet if `docs/release-notes/v<version>-poster.png` already exists, so
-re-tagging does not nag. Its truth table is `poster-after-tag.test.sh`.
+Usually by `.claude/hooks/poster-after-tag.sh` (PostToolUse/Bash). It asks git
+rather than reading the command: when **HEAD carries a release tag whose poster
+is missing**, it hands the session the version. That state is true however the
+tag was made, which is why the hook has no command parser and no opinion about
+quoting, chains or subshells.
+
+It stays quiet on hyphenated prereleases (those go to one tester, not the
+channel), on a detached HEAD (revisiting a tag is not making one — and a tag's
+own tree never holds its poster, since the poster is committed after the tag),
+and once `docs/release-notes/v<version>-poster.png` exists. It also says each
+version **once**, recorded in `.git/poster-reminded`, because the condition is
+a standing state rather than an event. Its truth table is
+`poster-after-tag.test.sh`.
 
 The hook only *asks*. It cannot build the poster itself, and no CI job can
 either: every fragment is a screenshot of the running app, which needs the
