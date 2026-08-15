@@ -478,10 +478,26 @@ export default function CatalogScreen({
   type SplitUi =
     | null
     | { phase: 'model'; project: string; gotMB: number; totalMB: number }
-    | { phase: 'run'; project: string; text: string; frac: number }
+    | {
+        phase: 'run'
+        project: string
+        text: string
+        frac: number
+        /** Whether the job has been heard from at all — a progress event or
+         *  job.json. A card still waiting for its first sign of life when the
+         *  liveness poll finds no file is a start that never happened, not a
+         *  job that cleaned up after itself. */
+        started: boolean
+      }
     | { phase: 'adopting'; project: string }
     | { phase: 'failed'; project: string; error: string; attempts: number }
   const [splitUi, setSplitUi] = useState<SplitUi>(null)
+  // The latest card, for the liveness poll: its timer closes over the render
+  // that armed it, and `started` flips inside a run without re-arming.
+  const splitUiRef = useRef<SplitUi>(null)
+  useEffect(() => {
+    splitUiRef.current = splitUi
+  }, [splitUi])
   const adoptingRef = useRef(false)
 
   const adoptDone = useCallback(
@@ -526,17 +542,18 @@ export default function CatalogScreen({
           if (!cur || (cur.phase !== 'run' && cur.phase !== 'model')) return cur
           const project = cur.project
           if (p.stage === 'decode') {
-            return { phase: 'run', project, text: 'Reading the song…', frac: p.frac * 0.05 }
+            return { phase: 'run', project, text: 'Reading the song…', frac: p.frac * 0.05, started: true }
           }
           if (p.stage === 'resample' || p.stage === 'load-model') {
-            return { phase: 'run', project, text: 'Warming up…', frac: 0.06 }
+            return { phase: 'run', project, text: 'Warming up…', frac: 0.06, started: true }
           }
           if (p.stage === 'chunk' && p.total > 0) {
             return {
               phase: 'run',
               project,
               text: `Splitting into stems — chunk ${p.done} of ${p.total}`,
-              frac: 0.08 + 0.92 * (p.done / p.total)
+              frac: 0.08 + 0.92 * (p.done / p.total),
+              started: true
             }
           }
           return cur
@@ -566,18 +583,49 @@ export default function CatalogScreen({
     const timer = setInterval(() => {
       void splitStatus().then((status) => {
         if (!status) {
-          setSplitUi((cur) => (cur?.phase === 'run' ? null : cur))
+          // No job.json at all. A job that was heard from and then left no
+          // file cleaned up after itself (a cancel) — the card goes. One
+          // never heard from is a start that silently never happened: an
+          // Android 15 phone refuses the mediaProcessing service while the
+          // app is not visible, and :split died right there before writing
+          // a line, leaving "Starting…" for this poll to clear in silence
+          // (the first device pass). Say so — the singer asked for a split
+          // and did not get one. A Cancel they pressed themselves wins.
+          const cur = splitUiRef.current
+          if (cur?.phase !== 'run') return
+          if (cur.started || cancelPending) {
+            setSplitUi((c) => (c?.phase === 'run' ? null : c))
+            return
+          }
+          // The one verdict no event carries — write it down, or a release
+          // build's log ends at "start fresh …" and says nothing more.
+          log('split', `never started — no job.json since the kick (${cur.project})`, 'warn')
+          setSplitUi((c) =>
+            c?.phase === 'run'
+              ? {
+                  phase: 'failed',
+                  project: c.project,
+                  error: 'The split never started — try again',
+                  attempts: 0
+                }
+              : c
+          )
           return
         }
         if (status.state === 'done') void adoptDone(status)
         else if (status.state === 'failed') void showFailed(status, 'The split failed')
         else if (Date.now() - status.updatedAtMs > 90_000) {
           void showFailed(status, 'The split was interrupted')
+        } else {
+          // A live record is the job's existence, whether or not its events
+          // reached us — a later vanished file is then a cancel, not a
+          // start that never happened.
+          setSplitUi((c) => (c?.phase === 'run' && !c.started ? { ...c, started: true } : c))
         }
       })
     }, 20_000)
     return () => clearInterval(timer)
-  }, [splitUi?.phase, adoptDone, showFailed])
+  }, [splitUi?.phase, cancelPending, adoptDone, showFailed])
 
   // The durable handoff: a job finished (or died) while the app was away.
   useEffect(() => {
@@ -598,7 +646,8 @@ export default function CatalogScreen({
                 ? `Splitting into stems — chunk ${status.chunksDone} of ${status.totalChunks}`
                 : 'Splitting into stems…',
             frac:
-              status.totalChunks > 0 ? 0.08 + 0.92 * (status.chunksDone / status.totalChunks) : 0
+              status.totalChunks > 0 ? 0.08 + 0.92 * (status.chunksDone / status.totalChunks) : 0,
+            started: true
           })
         } else {
           // The service died without a verdict (battery pull, lmkd) — the
@@ -639,7 +688,9 @@ export default function CatalogScreen({
               : cur
           )
       })
-      setSplitUi({ phase: 'run', project: dir, text: 'Starting…', frac: 0 })
+      // The service has the intent; nothing has come back yet. `started`
+      // flips on the first event or file — see the liveness poll.
+      setSplitUi({ phase: 'run', project: dir, text: 'Starting…', frac: 0, started: false })
     } catch (e) {
       setSplitUi(null)
       const msg = String(e instanceof Error ? e.message : e)
