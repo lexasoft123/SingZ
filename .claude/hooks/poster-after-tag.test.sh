@@ -45,11 +45,80 @@ echo "-- a flag inside a MESSAGE is not a flag"
 check yes 'git tag -a v0.17.0 -m "faster -d handling"'
 check yes "git tag -a v0.17.0 -m 'now with --list support'"
 
+echo "-- a MENTION is not a command (this fired on review's own test harness)"
+check no 'echo "run git tag v0.17.0 when ready"'
+check no "echo 'git tag v0.17.0'"
+check no 'grep -rn "git tag" docs/'
+check no 'echo git tag v0.17.0'
+check no 'git log --grep tag v0.17.0'
+check no 'cat notes.md | grep "git tag v0.17.0"'
+
+echo "-- but a real command in any segment still counts"
+check yes 'npm run build; git tag v0.17.0'
+check yes 'npm test && git tag -a v0.17.0 -m ok'
+check yes 'git -C /Users/x/repo tag v0.17.0'
+check yes '  git tag v0.17.0'
+
+echo "-- a neighbour's flags are not this command's (the release one-liner)"
+check yes 'git tag -a v0.17.0 -m "notes" && git push -v origin v0.17.0'
+check yes 'git tag -a v0.17.0 -m "notes" && gh release create v0.17.0 -d --notes-file n.md'
+check yes 'git tag v0.17.0 && git branch -d old-feature'
+check yes 'git tag v0.17.0 | tee -a log.txt'
+# …but the tag command's OWN flags still count
+check no 'git push -v origin main && git tag -d v0.17.0'
+
+echo "-- the version comes from the tag, not from a neighbour"
+out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git push origin v0.16.0 && git tag v0.17.0"}}' | "$HOOK" 2>/dev/null)
+case "$out" in
+  *v0.17.0*) echo 'ok   picks the tagged version, not the pushed one' ;;
+  *) echo "FAIL took the wrong version: $out"; FAILED=1 ;;
+esac
+
+echo "-- delete-then-recreate: the ordinary way to fix a bad tag"
+check yes 'git tag -d v0.17.0 && git tag -a v0.17.0 -m "corrected"'
+check yes 'git tag -d v0.16.9 && git tag v0.17.0'
+check yes 'git tag -l "v0.16*" && git tag v0.17.0'
+check yes 'git tag v0.17.0 && git tag -d v0.16.9'
+check no  'git tag -d v0.17.0 && git tag -l "v0.1*"'   # nothing created anywhere
+
+echo "-- a version named in the MESSAGE is not the tag"
+for pair in \
+  'git tag -a "v0.17.0" -m "replaces tag v0.16.9 entirely"|v0.17.0' \
+  'git tag -a "v0.17.0" -m "supersedes the tag v0.16.0"|v0.17.0' \
+  'git tag -a "v0.17.0" -m "notes" && git tag -l "v0.16.0"|v0.17.0'; do
+  c=${pair%|*}; want=${pair#*|}
+  out=$(printf '{"tool_name":"Bash","tool_input":{"command":%s}}' \
+        "$(printf '%s' "$c" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+        | "$HOOK" 2>/dev/null)
+  got=$(printf '%s' "$out" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  if [ "$got" = "$want" ]; then printf 'ok   announces %-8s %s\n' "$got" "$c"
+  else printf 'FAIL want=%s got=%s  %s\n' "$want" "${got:-<silent>}" "$c"; FAILED=1; fi
+done
+
+# A bare `git … tag` is a listing. These matter because the version lives ONLY
+# in the path and there is nothing after `tag` — the end-of-string branch of
+# after_tag, which two rounds of provenance cases never reached, since all of
+# them had a version after the word.
+echo "-- a listing whose PATH carries a version announces nothing"
+check no 'git -C /Users/x/worktrees/v1.2.3 tag'
+check no 'git --git-dir=/repos/v1.2.3/.git tag'
+
+echo "-- a version in git's own -C path is not the tag"
+out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git -C /Users/x/worktrees/v1.2.3 tag v0.17.0"}}' | "$HOOK" 2>/dev/null)
+case "$out" in
+  *v0.17.0*) echo 'ok   announces the tag, not the path' ;;
+  *) echo "FAIL took a version from the -C path: $out"; FAILED=1 ;;
+esac
+
 echo "-- not a tag command at all"
+# Every case here must name a version with NO committed poster, or the poster
+# gate silences it and the case passes without ever testing the anchoring.
+# `git log --oneline v0.16.0..HEAD` did exactly that: v0.16.0 has a poster in
+# this repo, so it stayed green even with the anchoring regex neutered.
 check no 'git commit -m "v0.17.0 notes"'
-check no 'git log --oneline v0.16.0..HEAD'
-check no 'npm run build'
-check no 'git push origin main'
+check no 'git log --oneline v0.17.0..HEAD'
+check no 'npm run build v0.17.0'
+check no 'git push origin main v0.17.0'
 
 echo "-- no version in the command"
 check no 'git tag'

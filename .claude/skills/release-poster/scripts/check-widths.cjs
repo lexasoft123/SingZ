@@ -38,12 +38,24 @@ const want = require(`${__dirname}/../assets/fragment-widths.json`);
   let bad = 0;
   const checked = new Set();
   for (const s of seen) {
-    if (!(s.name in want)) continue;
-    checked.add(s.name);
-    const ok = s.rendered === s.natural && s.rendered === want[s.name];
+    if (s.name in want) {
+      checked.add(s.name);
+      const ok = s.rendered === s.natural && s.rendered === want[s.name];
+      if (!ok) bad++;
+      console.log(`${ok ? 'ok   ' : 'DRIFT'} ${s.name.padEnd(16)} ` +
+        `json=${want[s.name]} natural=${s.natural} rendered=${s.rendered}`);
+      continue;
+    }
+    // An image the manifest does not name used to be skipped outright, which
+    // meant a fragment added to the template alone — at any resampling width —
+    // sailed through green. Nothing may leave here unexamined: judge it on the
+    // thing that actually matters, whether it is drawn at its own size.
+    const loaded = s.natural > 0;
+    const ok = loaded && s.rendered === s.natural;
     if (!ok) bad++;
-    console.log(`${ok ? 'ok   ' : 'DRIFT'} ${s.name.padEnd(16)} ` +
-      `json=${want[s.name]} natural=${s.natural} rendered=${s.rendered}`);
+    const why = !loaded ? ' — did not load' : ok ? ' (1:1, but add it to the manifest)' : ' — resampled';
+    console.log(`${ok ? 'note ' : 'DRIFT'} ${s.name.padEnd(16)} ` +
+      `not in fragment-widths.json  natural=${s.natural} rendered=${s.rendered}${why}`);
   }
 
   // A fragment named in the manifest but absent from the page means the two
