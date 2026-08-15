@@ -380,10 +380,33 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     to .mp3; every add CONSUMES its import (the flow moves it), so each add
     re-seeds; riding to the DONE state races live adoption (it exists for
     under a poll interval) — leave at chunk N−1 and kill instead.
+  - **Real-device pass (POCO X6 Pro / Dimensity 8300 / 12 GB / HyperOS
+    Android 15, 2026-08-15, spike build, phone fully restored after)**: the
+    whole product loop ran on the phone — add, split, adoption. Numbers:
+    **44.1 s kick-to-done for the 40.8 s sample** (decode + resample +
+    session load + 7 chunks), steady chunk pace **4.0–5.1 s** (squarely the
+    P0 spike's 4.71 s/segment), **adoption 339 ms**; projection ≈ **3.3 min
+    for a 4-minute song**. Peak `:split` PSS ≈ **4.4 GB** on the 12 GB
+    device — ORT sizes its arenas to what is free (the same session held
+    1.3 GB on the 6 GB emulator), so the 5 GB capability floor stands and
+    the process isolation earns its keep on big devices too.
+  - **The device lesson (cost the first run)**: Android 15 refuses a
+    `mediaProcessing` FGS start while the app is not VISIBLE — with the
+    screen off, `:split` died at startForeground before writing job.json,
+    no event reached the app, and the card showed "Starting…" until the
+    liveness poll quietly cleared it. A real user always taps Split with
+    the screen on, so the product path is safe, but the failure is
+    currently silent — the follow-up is to surface a start failure as a
+    failed card with honest copy. Device-driver rules: keep the screen on
+    (`stay_on_while_plugged_in 3`) and the app foregrounded for every
+    service start; MIUI additionally re-disables Install-via-USB
+    periodically (INSTALL_FAILED_USER_RESTRICTED with a phone-side
+    notification recording the block), and HyperOS may keep an
+    IMPORTANCE_LOW notification out of sight entirely — verify the split
+    notification's visibility on the fleet's Xiaomi devices before release.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
-    formally), sustained multi-segment peak RSS on real fleet hardware,
-    real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16` on the
-    packaged APK.
+    formally), real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16`
+    on the packaged APK, and the split notification's visibility on HyperOS.
 
 ## Top risks
 
