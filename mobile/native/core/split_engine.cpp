@@ -8,6 +8,9 @@
 #include <vector>
 
 #include <onnxruntime_cxx_api.h>
+#if defined(__APPLE__)
+#include <coreml_provider_factory.h>
+#endif
 
 #include "resample.h"
 #include "wav.h"
@@ -249,9 +252,57 @@ SplitResult runSplit(const SplitJobConfig& config, Progress& progress,
   try {
     env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "singz-split");
     Ort::SessionOptions opts;
-    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    // ORT's load-time graph rewrites kill the app outright on a real iPhone
+    // (measured: two seconds into load-model, 76 MB used with 3.3 GB free, so
+    // not memory; identical on every attempt, never once on the simulator).
+    // With them off the same model loads in two seconds and splits a 5-minute
+    // song in 5m30s at a 1265 MB peak, and the stems still reconstruct the
+    // source at corr 0.9993 — the rewrites are fusions, not semantics.
+    opts.SetGraphOptimizationLevel(config.disableGraphOpt
+                                       ? GraphOptimizationLevel::ORT_DISABLE_ALL
+                                       : GraphOptimizationLevel::ORT_ENABLE_ALL);
     if (config.intraOpThreads > 0) opts.SetIntraOpNumThreads(config.intraOpThreads);
-    session = std::make_unique<Ort::Session>(*env, config.modelPath.c_str(), opts);
+    // The arena never hands memory back and the memory pattern pre-reserves
+    // the union of every activation. Dropping both trades malloc traffic for
+    // a lower peak — measured on iOS, where the device now runs at 700-900 MB
+    // steady. NOT on by default: Android's numbers were taken with the arena.
+    if (config.leanAllocator) {
+      opts.DisableCpuMemArena();
+      opts.DisableMemPattern();
+    }
+#if defined(__APPLE__)
+    if (config.coreMlEp) {
+      // MLProgram is the format that carries fp16 and the wider op set, which
+      // is what makes the neural engine reachable at all — the older NeuralNetwork
+      // path would silently land back on CPU.
+      try {
+        Ort::SessionOptions coreml = opts.Clone();
+        Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(
+            coreml, COREML_FLAG_CREATE_MLPROGRAM));
+        session = std::make_unique<Ort::Session>(*env, config.modelPath.c_str(), coreml);
+        progress.report("coreml", 0.0f);
+      } catch (const std::exception& e) {
+        // Partition refused, compile failed, unsupported OS — none of it is
+        // fatal, the CPU path below is the same one that shipped. Reported as
+        // a stage, never through errorOut: this run is not failing. The
+        // MESSAGE rides along, because the first field run of this path threw
+        // away the one thing worth knowing — why.
+        session.reset();
+        // The reason is worth keeping, but it reaches ObjC as a dictionary
+        // value and JS as a log line: ORT statuses carry node lists and
+        // newlines, and stringWithUTF8String: returns nil on non-UTF-8 bytes,
+        // which would raise inside the event literal. One line, ASCII, capped.
+        std::string why = e.what() != nullptr ? e.what() : "";
+        for (char& ch : why) {
+          const unsigned char u = static_cast<unsigned char>(ch);
+          if (u < 0x20 || u > 0x7e) ch = ' ';
+        }
+        if (why.size() > 160) why.resize(160);
+        progress.report(("coreml-unavailable: " + why).c_str(), 0.0f);
+      }
+    }
+#endif
+    if (!session) session = std::make_unique<Ort::Session>(*env, config.modelPath.c_str(), opts);
   } catch (const std::exception& e) {
     std::fclose(mix);
     errorOut = std::string("the split model did not load: ") + e.what();

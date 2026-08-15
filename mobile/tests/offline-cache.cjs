@@ -204,7 +204,14 @@ const du = (dir) => {
   await sleep(1500);
   console.log('\n3. reported and reclaimable');
   const reported = await val("__test.usage && __test.usage['Legacy Song']");
-  check('usage reported to the catalog', typeof reported === 'number' && reported > 0, `${reported} bytes`);
+  // TEST.usage is Record<dir, CacheUsage> — the byte count is a field on it,
+  // never the value itself. Asserting a number here has been red since the
+  // shape changed under the driver in August.
+  check(
+    'usage reported to the catalog',
+    typeof reported?.bytes === 'number' && reported.bytes > 0,
+    `${reported?.bytes} bytes`
+  );
 
   await ev("void __test.forget('Legacy Song')");
   await sleep(1500);

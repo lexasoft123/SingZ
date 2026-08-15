@@ -208,6 +208,18 @@ export function sanitizeTraining(raw: unknown): TrainingConfig {
  * project. Ids that collide with a real stem, or with each other, are dropped
  * so a custom lane can never shadow the vocals.
  */
+/** The lane a phone-added song plays through before it is split: the app's
+ *  own copy of the original, not something the singer added. It is a real
+ *  lane (the player must render it) but must never be COUNTED as an added
+ *  track — an unsplit song read "0 stems · 1 added" for a track nobody
+ *  added. */
+export const ORIGINAL_LANE_ID = 'custom-original'
+
+/** What the singer actually added, for display. */
+export function addedTracks(settings: ProjectSettings | undefined): CustomTrack[] {
+  return customTracks(settings).filter((t) => t.id !== ORIGINAL_LANE_ID)
+}
+
 export function customTracks(settings: ProjectSettings | undefined): CustomTrack[] {
   const list = Array.isArray(settings?.custom) ? settings.custom : []
   const stems = new Set<string>(STEM_ORDER_ALL)

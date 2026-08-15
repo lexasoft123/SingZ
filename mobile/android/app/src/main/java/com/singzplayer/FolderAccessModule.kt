@@ -353,8 +353,15 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
               val local = cacheFile(name, "stems/${f.name}")
               if (!local.isFile || local.length() != f.length()) cached = false
             }
-            if (!any) continue
+            // Deliberately no `if (!any) continue` — the same reasoning the
+            // documentsDir branch below carries: a project whose split has not
+            // run yet holds only its custom-original lane, and dropping it
+            // means a singer adds a song to a picked-folder library and cannot
+            // see it until it is split. project.json is what makes a folder a
+            // project, not the six stem names.
             entry.putMap("stems", stems)
+            // `cached` is only ever assigned inside the stem loop, which does
+            // not run when there are no stems — so it is already true there.
             entry.putBoolean("cached", cached)
             entry.putDouble("bytes", bytes.toDouble())
             entry.putBoolean("hasLyrics", kids.containsKey("lyrics.json"))

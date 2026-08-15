@@ -11,6 +11,7 @@
 const http = require('http');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');
+const PORT = process.env.METRO_PORT || '8081';
 
 const BUNDLE = 'com.lexasoft.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
@@ -39,13 +40,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let target = null;
   for (let i = 0; i < 40 && !target; i++) {
     try {
-      const l = await getJson('http://localhost:8081/json');
-      target = l.find((t) => t.webSocketDebuggerUrl) ?? null;
+      const l = await getJson(`http://localhost:${PORT}/json`);
+      // Metro lists EVERY attached app, and an Android emulator sorts ahead of the
+      // simulator — five drivers here picked the first target with no device filter
+      // and silently drove Android while reporting on iOS (measured: a loop-region
+      // run failed as "sample never opened" because it was talking to a phone).
+      // Pick by deviceName, and let METRO_PORT reach the right worktree's Metro.
+      target =
+        l.find((t) => t.webSocketDebuggerUrl && /iphone|ipad/i.test(t.deviceName || '')) ?? null;
     } catch {}
     if (!target) await sleep(1000);
   }
   if (!target) throw new Error('no debugger target');
-  const ws = new WebSocket(target.webSocketDebuggerUrl, { origin: 'http://localhost:8081' });
+  const ws = new WebSocket(target.webSocketDebuggerUrl, { origin: `http://localhost:${PORT}` });
   await new Promise((res, rej) => {
     ws.on('open', res);
     ws.on('error', rej);

@@ -19,6 +19,22 @@ struct SplitJobConfig {
   std::string jobDir;      // mix44.raw, tail.bin, <stem>.wav.part land here
   int srcRate = 44100;
   int intraOpThreads = 0;  // 0 = ORT default (big cores)
+  /// Allocate activations per-tensor instead of out of ORT's arena, and skip
+  /// the memory pattern's pre-planned block. Lower peak, more malloc traffic.
+  /// iOS only: Android's proven configuration is the arena (the POCO splits a
+  /// 4-minute song at 0.89x realtime with it), and this was never measured
+  /// there.
+  bool leanAllocator = false;
+  /// Offer the graph to CoreML first (iOS). ORT partitions what Apple's stack
+  /// can take and runs the rest on CPU — no model conversion, no second
+  /// inference path. Falls back to plain CPU by itself if the session will not
+  /// build, so a bad partition costs a log line, not a failed split.
+  bool coreMlEp = false;
+  /// Skip ORT's graph rewrites at load. On iOS they are fatal — the app is
+  /// killed two seconds into load-model on a real device, every time, while
+  /// the simulator never reproduces it. Android leaves them on (the POCO
+  /// splits fine). Output is unaffected: fusions, not semantics.
+  bool disableGraphOpt = false;
   // Resume HINT: >0 asks the engine to attempt a resume. The actual
   // continue point comes from tail.bin alone (the engine persists the tail
   // before the caller can record its own index, so job.json can be one

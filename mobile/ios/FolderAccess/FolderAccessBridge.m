@@ -84,6 +84,8 @@ RCT_EXTERN_METHOD(deleteFile : (NSString *)project
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(downloadProgress : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(downloadFile : (NSString *)name
                   url : (NSString *)url
                   expectedSha256 : (NSString *)expectedSha256

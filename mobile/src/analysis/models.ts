@@ -55,6 +55,9 @@ export const BEAT_MODELS: PhoneModel[] = [
 ]
 
 interface DownloadNative {
+  /** iOS only: bytes so far / bytes expected for the download in flight.
+   *  Android pushes the same numbers as singzModelDownload events instead. */
+  downloadProgress?(): Promise<{ got: number; total: number }>
   downloadFile(
     name: string,
     url: string,
@@ -89,6 +92,20 @@ export async function ensureModel(
         }
       )
     : null
+  // Where the native pushes nothing (iOS has no emitter on that module), poll
+  // it — 136 MB behind a bar that never moves reads as a hung app, which is
+  // exactly how it was reported from the field.
+  const poll =
+    onProgress && typeof Folder().downloadProgress === 'function'
+      ? setInterval(() => {
+          void Folder()
+            .downloadProgress?.()
+            .then((p) => {
+              if (p && p.total > 0) onProgress(p.got, p.total)
+            })
+            .catch(() => {})
+        }, 400)
+      : null
   try {
     const r = await Folder().downloadFile(model.file, model.url, model.sha256, model.bytes)
     log(
@@ -100,6 +117,7 @@ export async function ensureModel(
     return r.path
   } finally {
     sub?.remove()
+    if (poll) clearInterval(poll)
   }
 }
 

@@ -4,6 +4,7 @@ import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { MultitrackEngine } from './src/engine'
 import { logStartup } from './src/log'
+import { replaySplitTrail } from './src/split/service'
 import { releaseProject, type LoadedProject } from './src/projects'
 import { C } from './src/ui/bits'
 import CatalogScreen from './src/ui/CatalogScreen'
@@ -178,6 +179,9 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     // First line of the session, before anything can go wrong underneath it.
     void logStartup()
+    // If the last split was killed, its native trail outlived the process —
+    // put it in the log where the singer (and a bug report) can see it.
+    void replaySplitTrail()
     AudioManager.setAudioSessionOptions({ iosCategory: 'playback', iosMode: 'default' })
     void AudioManager.setAudioSessionActivity(true)
   }, [])

@@ -17,6 +17,7 @@ import {
   fmtTime,
   MET_DEFAULTS,
   sanitizeBeatInfo,
+  ORIGINAL_LANE_ID,
   sanitizeMetronome,
   sanitizeTraining,
   singMask,
@@ -251,7 +252,16 @@ export default function PlayerScreen({
     }
     return map
   }, [project])
-  const addedCount = useMemo(() => project.stems.filter((st) => st.custom).length, [project])
+  // The pre-split original lane is the app's, not the singer's: counting it
+  // made an unsplit song read "0 stems · 1 added".
+  const addedCount = useMemo(
+    () => project.stems.filter((st) => st.custom && st.id !== ORIGINAL_LANE_ID).length,
+    [project]
+  )
+  const originalOnly = useMemo(
+    () => project.stems.every((st) => st.custom) && project.stems.length > 0,
+    [project]
+  )
 
   /* Feed the engine + apply the project's saved settings. */
   useEffect(() => {
@@ -659,7 +669,8 @@ export default function PlayerScreen({
             {project.name}
           </Text>
           <Text style={s.hSub}>
-            SingZ project · {stemIds.length - addedCount} stems
+            SingZ project
+            {originalOnly ? ' · not split yet' : ` · ${stemIds.length - addedCount} stems`}
             {addedCount > 0 ? ` · ${addedCount} added` : ''}
           </Text>
         </View>

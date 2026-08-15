@@ -1026,6 +1026,37 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
   // absence.
 
   private let downloadCancelled = AtomicFlag()
+  /// Bytes on disk / bytes expected for the download in flight. Polled by JS
+  /// rather than pushed as events: this module is a plain bridge module with
+  /// no emitter, and the singer watching a 136 MB progress bar deserves one
+  /// that moves (Android pushes the same numbers from its own downloader).
+  private static let progressLock = NSLock()
+  private static var progressGot: Int64 = 0
+  private static var progressTotal: Int64 = 0
+
+  private static func setProgress(got: Int64, total: Int64) {
+    progressLock.lock()
+    progressGot = got
+    progressTotal = total
+    progressLock.unlock()
+  }
+
+  private static func addProgress(_ n: Int64) {
+    progressLock.lock()
+    progressGot += n
+    progressLock.unlock()
+  }
+
+  @objc func downloadProgress(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    Self.progressLock.lock()
+    let got = Self.progressGot
+    let total = Self.progressTotal
+    Self.progressLock.unlock()
+    resolve(["got": NSNumber(value: got), "total": NSNumber(value: total)])
+  }
 
   private func modelsDir() -> URL {
     FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1105,6 +1136,7 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     let out = dir.appendingPathComponent(name)
     let haveSize = (try? fm.attributesOfItem(atPath: out.path))?[.size] as? Int64 ?? -1
     if haveSize == expected, sha256Of(out) == expectedSha256 {
+      Self.setProgress(got: expected, total: expected)
       resolve(["path": out.path, "downloaded": false])
       return
     }
@@ -1135,9 +1167,11 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
         var req = URLRequest(url: remote)
         req.timeoutInterval = 120
         if offset > 0 { req.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
-        let delegate = RangeDownloadDelegate(handle: handle) { [weak self] in
-          self?.downloadCancelled.get() ?? true
-        }
+        Self.setProgress(got: offset, total: expected)
+        let delegate = RangeDownloadDelegate(
+          handle: handle,
+          cancelled: { [weak self] in self?.downloadCancelled.get() ?? true },
+          onBytes: { n in Self.addProgress(n) })
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
         session.dataTask(with: req).resume()
         delegate.wait()
@@ -1219,13 +1253,16 @@ private final class RangeDownloadDelegate: NSObject, URLSessionDataDelegate {
   private let handle: FileHandle
   private let cancelled: () -> Bool
   private let sem = DispatchSemaphore(value: 0)
+  private let onBytes: (Int64) -> Void
   var status = 0
   var error: Error?
   var wasCancelled = false
 
-  init(handle: FileHandle, cancelled: @escaping () -> Bool) {
+  init(handle: FileHandle, cancelled: @escaping () -> Bool,
+       onBytes: @escaping (Int64) -> Void) {
     self.handle = handle
     self.cancelled = cancelled
+    self.onBytes = onBytes
   }
 
   func wait() { sem.wait() }
@@ -1255,6 +1292,7 @@ private final class RangeDownloadDelegate: NSObject, URLSessionDataDelegate {
       return
     }
     try? handle.write(contentsOf: data)
+    onBytes(Int64(data.count))
   }
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

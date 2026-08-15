@@ -26,7 +26,7 @@ import {
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { fmtBytes, fmtMs, log } from '../log'
 import LogPanel from './LogPanel'
-import { customTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
+import { addedTracks, customTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
   cacheUsage,
   clearCache,
@@ -126,6 +126,11 @@ export default function CatalogScreen({
   const [addSrc, setAddSrc] = useState<PickedFile | null>(null)
   /** A pick is on screen: no sheet exists yet to hold that state. */
   const picking = useRef(false)
+  /** A cancel during the model load has to wait for ORT's blocking load to
+   *  return — the engine only checks between chunks. Saying nothing makes the
+   *  button look broken (it did, in the field), so the card says what it is
+   *  doing and the tap still lands. */
+  const [cancelPending, setCancelPending] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
@@ -617,6 +622,7 @@ export default function CatalogScreen({
         Alert.alert('Splitting needs a bigger phone', gate.reason)
         return
       }
+      setCancelPending(false)
       setSplitUi({ phase: 'model', project: dir, gotMB: 0, totalMB: 136 })
       await startProjectSplit(dir, {
         resume,
@@ -967,10 +973,10 @@ export default function CatalogScreen({
                       // is the thing to stop (its reject resets the card).
                       splitUi.phase === 'model'
                         ? void cancelModelDownload()
-                        : void cancelSplit()
+                        : (setCancelPending(true), void cancelSplit())
                     }
                   >
-                    <Text style={s.ctxLink}>Cancel</Text>
+                    <Text style={s.ctxLink}>{cancelPending ? 'Stopping…' : 'Cancel'}</Text>
                   </Pressable>
                 )}
                 {splitUi.phase === 'failed' && (
@@ -988,7 +994,7 @@ export default function CatalogScreen({
           )}
           {(projects ?? []).map((p) => {
             const downloaded = isDownloaded(p, usage[p.dir])
-            const added = customTracks(p.doc?.settings).length
+            const added = addedTracks(p.doc?.settings).length
             return card({
               key: p.dir,
               dir: p.dir,
@@ -1001,7 +1007,12 @@ export default function CatalogScreen({
                     : 'not split yet'}
                   {added > 0 ? ` · ${added} added` : ''}
                   {p.hasLyrics ? ' · lyrics' : ''}
-                  {Object.values(p.stems).some((f) => f === 'wav') ? (
+                  {/* The badge means "this is an old WAV project the desktop
+                      can shrink". A song this phone split is also WAV — the
+                      phone cannot write FLAC yet — and telling the singer to
+                      redo it on a computer is the worst possible reward for a
+                      five-minute split, so phone-made projects are exempt. */}
+                  {mode !== 'phone' && Object.values(p.stems).some((f) => f === 'wav') ? (
                     <Text style={{ color: C.amber }}> · update on desktop</Text>
                   ) : null}
                 </>
@@ -1024,10 +1035,22 @@ export default function CatalogScreen({
             </View>
           )}
           {projects !== null && projects.length === 0 && (
+            // Whichever library is open has its OWN next step — and phone mode
+            // is where the app starts, so the folder advice was the first
+            // thing every new singer read, one line under the Add link that
+            // was the actual answer.
             <Text style={s.empty}>
-              {Platform.OS === 'ios'
-                ? 'No projects here yet. Save one on your computer into the shared folder (iCloud Drive/SingZ), or pick a different folder above.'
-                : 'No projects here yet. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
+              {mode === 'phone'
+                ? Platform.OS === 'ios'
+                  ? 'No songs on this iPhone yet. Add one above — it plays straight away, and can be split into stems here.'
+                  : 'No songs on this phone yet. Add one above — it plays straight away, and can be split into stems here.'
+                : mode === 'gdrive'
+                  ? driveOn
+                    ? 'Nothing in your Google Drive library yet. Save a song on your computer and it syncs over.'
+                    : 'Sign in above to see the songs your computer put in Google Drive.'
+                  : Platform.OS === 'ios'
+                    ? 'No projects in this folder. Save one on your computer into the shared folder (iCloud Drive/SingZ), or pick a different folder above.'
+                    : 'No projects in this folder. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
             </Text>
           )}
           {card({

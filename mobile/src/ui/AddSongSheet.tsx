@@ -239,6 +239,11 @@ export default function AddSongSheet({
       case 'meta':
       case 'searching': {
         const busy = step.k === 'searching'
+        // durationSec 0 IS the "this file did not open" card (the catch above
+        // lands here with the error text). Both buttons are dead then — they
+        // were dead at full opacity, and Find lyrics walked the singer to a
+        // second card whose buttons were also dead. Nothing to do but close.
+        const unreadable = step.facts.durationSec <= 0
         return (
           <View>
             <Text style={s.label}>Title</Text>
@@ -268,8 +273,8 @@ export default function AddSongSheet({
             )}
             <View style={s.row}>
               <Pressable
-                style={[s.btn, s.btnPrimary, busy && s.btnDim]}
-                disabled={busy || !title.trim()}
+                style={[s.btn, s.btnPrimary, (busy || unreadable) && s.btnDim]}
+                disabled={busy || unreadable || !title.trim()}
                 onPress={() => void search(step.facts)}
               >
                 {busy ? (
@@ -279,12 +284,20 @@ export default function AddSongSheet({
                 )}
               </Pressable>
               <Pressable
-                style={[s.btn, busy && s.btnDim]}
-                disabled={busy || step.facts.durationSec <= 0}
+                style={[s.btn, (busy || unreadable) && s.btnDim]}
+                disabled={busy || unreadable}
                 onPress={() => void create(step.facts, null)}
               >
                 <Text style={s.btnText}>Add without lyrics</Text>
               </Pressable>
+              {unreadable && (
+                <Pressable style={[s.btn, s.btnPrimary]} onPress={() => abandon('unreadable')}>
+                  {/* It closes the sheet — "Add a song" is right there to try
+                      again, and promising a picker this button does not open
+                      is the kind of small lie that erodes the rest. */}
+                  <Text style={s.btnPrimaryText}>Close</Text>
+                </Pressable>
+              )}
             </View>
           </View>
         )

@@ -11,6 +11,10 @@
 #include <string>
 #include <vector>
 
+#include <mach/mach.h>
+#include <os/proc.h>
+#include <sys/sysctl.h>
+
 #include "progress.h"
 #include "split_engine.h"
 
@@ -29,6 +33,73 @@ static NSString *const kStateFailed = @"failed";
 // reset at every job start, safe to poke from any thread.
 static singz::Progress gProgress;
 
+#pragma mark - vitals
+
+/**
+ * What the phone is spending on this split, sampled per chunk and carried on
+ * the progress event so the LOG can answer "why did it die" without a Mac.
+ *
+ * `footprint` is phys_footprint — the number jetsam actually judges, not
+ * resident size — and `headroom` is os_proc_available_memory(), how much of
+ * this process's allowance is left before iOS kills it. A split that dies
+ * silently leaves its last headroom reading in the log, which is the whole
+ * point: a real iPhone kill writes nothing else down.
+ */
+typedef struct {
+  double footprintMb;
+  double headroomMb;
+  double cpuPct;  // process CPU since the previous sample, 100% = one core
+} SingzVitals;
+
+static SingzVitals SampleVitals(void) {
+  SingzVitals v = {0, 0, 0};
+
+  task_vm_info_data_t vm;
+  mach_msg_type_number_t vmCount = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &vmCount) == KERN_SUCCESS) {
+    v.footprintMb = (double)vm.phys_footprint / (1024.0 * 1024.0);
+  }
+  v.headroomMb = (double)os_proc_available_memory() / (1024.0 * 1024.0);
+
+  // Process CPU time, summed over live threads, differenced against the last
+  // sample — absolute totals grow forever and say nothing about "now".
+  // Three samplers reach this: the worker's stage callbacks, the JobQueue
+  // heartbeat, and the JS thread via splitVitals. Atomics keep an interleave
+  // to one wrong cpuPct rather than a torn one.
+  static std::atomic<int64_t> lastCpuUs{0};
+  static std::atomic<int64_t> lastWallUs{0};
+  int64_t cpuUs = 0;
+  thread_act_array_t threads;
+  mach_msg_type_number_t threadCount = 0;
+  if (task_threads(mach_task_self(), &threads, &threadCount) == KERN_SUCCESS) {
+    for (mach_msg_type_number_t i = 0; i < threadCount; i++) {
+      thread_basic_info_data_t info;
+      mach_msg_type_number_t infoCount = THREAD_BASIC_INFO_COUNT;
+      if (thread_info(threads[i], THREAD_BASIC_INFO, (thread_info_t)&info, &infoCount) ==
+              KERN_SUCCESS &&
+          (info.flags & TH_FLAGS_IDLE) == 0) {
+        cpuUs += (int64_t)info.user_time.seconds * 1'000'000 + info.user_time.microseconds;
+        cpuUs += (int64_t)info.system_time.seconds * 1'000'000 + info.system_time.microseconds;
+      }
+      mach_port_deallocate(mach_task_self(), threads[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)threads,
+                  threadCount * sizeof(thread_act_t));
+  }
+  const int64_t wallUs = (int64_t)([NSDate date].timeIntervalSince1970 * 1'000'000);
+  const int64_t prevCpu = lastCpuUs.load(std::memory_order_relaxed);
+  const int64_t prevWall = lastWallUs.load(std::memory_order_relaxed);
+  // task_threads sees LIVE threads only, so when ORT retires a pool thread the
+  // sum drops and this guard reports 0% for one sample — an occasional 0 in
+  // the trail is that, not an idle phone.
+  if (prevWall > 0 && wallUs > prevWall && cpuUs >= prevCpu) {
+    v.cpuPct = 100.0 * (double)(cpuUs - prevCpu) / (double)(wallUs - prevWall);
+  }
+  lastCpuUs.store(cpuUs, std::memory_order_relaxed);
+  lastWallUs.store(wallUs, std::memory_order_relaxed);
+  return v;
+}
+
 // The continued-processing identifier — EXACT, never a wildcard (the
 // scheduler's wildcard matching is broken for continued tasks), and listed
 // in Info.plist's BGTaskSchedulerPermittedIdentifiers.
@@ -41,6 +112,34 @@ static NSString *JobDirPath(void) {
                        NSApplicationSupportDirectory, NSUserDomainMask, YES)
                        .firstObject;
   return [base stringByAppendingPathComponent:@"split-job"];
+}
+
+/// A crash-proof trail beside job.json: one line per vitals pulse, appended
+/// and flushed on the spot. The app log persists on a debounce, so a process
+/// the system kills loses exactly the lines that explain the kill — measured
+/// on a real iPhone, which died three seconds into loading the model with the
+/// pulses that should have covered it missing from the log entirely. This
+/// file is read back and replayed into the log at the next launch.
+static NSString *VitalsLogPath(void) {
+  return [JobDirPath() stringByAppendingPathComponent:@"vitals.log"];
+}
+
+static void AppendVitalsLine(NSString *line) {
+  NSString *dir = JobDirPath();
+  [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:nil];
+  std::FILE *f = std::fopen(VitalsLogPath().fileSystemRepresentation, "a");
+  if (!f) return;
+  NSString *withNewline = [line stringByAppendingString:@"\n"];
+  const char *utf8 = withNewline.UTF8String;
+  std::fwrite(utf8, 1, strlen(utf8), f);
+  // fflush is a write(2), which is all this needs: the threat is the SYSTEM
+  // killing this process, and the page cache outlives that. F_FULLFSYNC would
+  // buy only power-loss durability, at ~165 device cache flushes per split.
+  std::fflush(f);
+  std::fclose(f);
 }
 
 static NSString *JobJsonPath(void) {
@@ -272,7 +371,18 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
   }
 }
 
+/// Whether to hand the job to BGContinuedProcessingTask. Off, but no longer
+/// under suspicion: it was gated off to test whether iOS's own "Splitting
+/// into stems · Task failed" banners were causing the field crash, and the
+/// crash was identical without it — the real cause was ORT's graph optimizer
+/// (see disableGraphOpt). Those banners were reporting the death, not dealing
+/// it. Turning this back on restores splitting while the app is away, and
+/// needs one real-device run to confirm, which is why it has not flipped
+/// itself on: a 5-minute song is a long time to hold a phone.
+static const BOOL kUseContinuedTask = NO;
+
 - (void)submitBgTaskWithSubtitle:(NSString *)subtitle {
+  if (!kUseContinuedTask) return;
   if (@available(iOS 26.0, *)) {
     BGContinuedProcessingTaskRequest *req =
         [[BGContinuedProcessingTaskRequest alloc] initWithIdentifier:kBgTaskId
@@ -424,7 +534,8 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
             const int64_t now = (int64_t)([NSDate date].timeIntervalSince1970 * 1000);
             if (now - lastPumpMs > 250) {
               lastPumpMs = now;
-              self->_progress(@"decode", frac, 0, 0);
+              SingzVitals v = SampleVitals();
+              self->_progress(@"decode", frac, 0, 0, v.footprintMb, v.headroomMb, v.cpuPct);
             }
           });
       if (!ok) {
@@ -465,6 +576,21 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
     config.jobDir = std::string(dir.UTF8String);
     config.srcRate = srcRate;
     config.resumeChunk = resumeHint;
+    // Threads deliberately left at the ORT default: halving them was measured
+    // on a 5-minute song and moved the peak from 3059 MB to 3213 MB — noise,
+    // for half the cores. The activations, not the thread count, are the cost.
+    // iOS only, while the device crash is open — Android splits fine with
+    // the rewrites on (the POCO ran a whole album's worth).
+    config.disableGraphOpt = true;
+    config.leanAllocator = true;
+    // OFF: measured on a real iPhone 2026-08-15. ORT's CoreML EP spent 58
+    // SECONDS compiling with one core pegged, then declined the graph and fell
+    // back to CPU — a minute of the singer's time for nothing. The path stays
+    // in the engine (it costs nothing switched off, and a future ORT or a
+    // reshaped graph may take it), but reaching Apple's neural engine means
+    // converting the model with coremltools the way MonoBand does, not asking
+    // ORT to partition this one.
+    config.coreMlEp = false;
     config.onChunkUser = (__bridge void *)runner;
     config.onChunkDone = [](void *user, int64_t done, int64_t total) {
       SingzSplitRunner *r = (__bridge SingzSplitRunner *)user;
@@ -514,9 +640,43 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
   }
 }
 
++ (nullable NSString *)takeVitalsTrail {
+  __block NSString *text = nil;
+  dispatch_sync(JobQueue(), ^{
+    text = [NSString stringWithContentsOfFile:VitalsLogPath()
+                                     encoding:NSUTF8StringEncoding
+                                        error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:VitalsLogPath() error:nil];
+  });
+  return text.length > 0 ? text : nil;
+}
+
++ (NSDictionary *)vitals {
+  SingzVitals v = SampleVitals();
+  return @{@"memMb" : @(v.footprintMb), @"freeMb" : @(v.headroomMb), @"cpuPct" : @(v.cpuPct)};
+}
+
 - (void)onStage:(NSString *)stage frac:(float)frac {
   if (_cancelRequested.load()) gProgress.cancel.store(true);
-  _progress(stage, frac, 0, 0);
+  SingzVitals v = SampleVitals();
+  // The engine reports some stages per block, not per phase — resampling a
+  // 5-minute 48 kHz source alone is ~440 of them. Every one used to open,
+  // write, flush and close the trail and walk every thread for CPU, and the
+  // replay then pushed ~650 lines through a 400-line log, evicting the
+  // startup version line that identifies the build in a bug report. A stage
+  // CHANGE always lands; the repeats are paced.
+  static NSString *lastTrailStage = nil;
+  static int64_t lastTrailMs = 0;
+  const int64_t nowMs = (int64_t)([NSDate date].timeIntervalSince1970 * 1000);
+  const BOOL changed = ![stage isEqualToString:lastTrailStage];
+  if (changed || nowMs - lastTrailMs > 250) {
+    lastTrailStage = stage;
+    lastTrailMs = nowMs;
+    AppendVitalsLine([NSString stringWithFormat:@"%@ %d%% · %.0f MB used, %.0f MB before the limit · cpu %.0f%%",
+                                                stage, (int)(frac * 100), v.footprintMb,
+                                                v.headroomMb, v.cpuPct]);
+  }
+  _progress(stage, frac, 0, 0, v.footprintMb, v.headroomMb, v.cpuPct);
 }
 
 - (void)onChunk:(int64_t)done total:(int64_t)total {
@@ -536,7 +696,9 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
       job[@"totalChunks"] = @(total);
     });
   });
-  _progress(@"chunk", total > 0 ? (double)done / (double)total : 0, done, total);
+  SingzVitals v = SampleVitals();
+  _progress(@"chunk", total > 0 ? (double)done / (double)total : 0, done, total, v.footprintMb,
+            v.headroomMb, v.cpuPct);
 }
 
 - (void)finishWithState:(NSString *)state error:(NSString *_Nullable)error keepDoc:(BOOL)keepDoc {
@@ -577,14 +739,30 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
 - (void)startHeartbeat {
   if (_heartbeat) return;
   _heartbeat = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, JobQueue());
-  dispatch_source_set_timer(_heartbeat, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
-                            5 * NSEC_PER_SEC, NSEC_PER_SEC / 2);
+  // 2 s so the vitals pulse can see a fast death; job.json keeps its 5 s
+  // cadence below, since that file is disk and this one is a memory read.
+  dispatch_source_set_timer(_heartbeat, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                            2 * NSEC_PER_SEC, NSEC_PER_SEC / 2);
+  __block int64_t lastTouchMs = 0;
   dispatch_source_set_event_handler(_heartbeat, ^{
-    NSDictionary *cur = ReadJobLocked();
-    NSString *s = cur[@"state"];
-    if ([s isEqual:kStateDecoding] || [s isEqual:kStateSplitting]) {
-      UpdateJobLocked(^(NSMutableDictionary *job){ /* updatedAtMs bump */ });
+    const int64_t nowMs = (int64_t)([NSDate date].timeIntervalSince1970 * 1000);
+    if (nowMs - lastTouchMs >= 5000) {
+      lastTouchMs = nowMs;
+      NSDictionary *cur = ReadJobLocked();
+      NSString *s = cur[@"state"];
+      if ([s isEqual:kStateDecoding] || [s isEqual:kStateSplitting]) {
+        UpdateJobLocked(^(NSMutableDictionary *job){ /* updatedAtMs bump */ });
+      }
     }
+    // A pulse of vitals on the same clock. Stage callbacks are the only other
+    // sampler, and a real iPhone died THREE SECONDS into loading the model —
+    // between two of them, leaving the log to say 79 MB used and nothing
+    // after. This tick keeps a reading every couple of seconds through the
+    // silent stretches, so the last line before a kill is worth reading.
+    SingzVitals v = SampleVitals();
+    AppendVitalsLine([NSString stringWithFormat:@"still working · %.0f MB used, %.0f MB before the limit · cpu %.0f%%",
+                                                v.footprintMb, v.headroomMb, v.cpuPct]);
+    self->_progress(@"alive", 0, 0, 0, v.footprintMb, v.headroomMb, v.cpuPct);
   });
   dispatch_resume(_heartbeat);
 }

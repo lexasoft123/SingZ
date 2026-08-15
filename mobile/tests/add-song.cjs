@@ -97,16 +97,23 @@ async function main() {
   const seeded = join(container, 'Documents', SONG_NAME)
   copyFileSync(join(__dirname, '..', 'assets', 'sample', 'stems', 'vocals.flac'), seeded)
 
-  const targets = (await (await fetch(`http://localhost:${PORT}/json`)).json()).filter(
-    (t) => t.webSocketDebuggerUrl && /iPhone|Simulator/i.test(t.deviceName || '')
-  )
+  // Re-fetch the target list each pass: the app was just relaunched, and how
+  // long its inspector takes to register is a property of the Mac, not of the
+  // app — a one-shot fetch turns a slow cold start into a false red (the
+  // siblings poll for the same reason).
   let conn = null
-  for (const t of targets.reverse()) {
-    try {
-      const c = await connect(t.webSocketDebuggerUrl)
-      if ((await c.evaluate('1+1', 4000))?.result?.value === 2) { conn = c; break }
-      c.ws.close()
-    } catch { /* stale target */ }
+  for (let i = 0; i < 40 && !conn; i++) {
+    const targets = (await (await fetch(`http://localhost:${PORT}/json`)).json()).filter(
+      (t) => t.webSocketDebuggerUrl && /iPhone|Simulator/i.test(t.deviceName || '')
+    )
+    for (const t of targets.reverse()) {
+      try {
+        const c = await connect(t.webSocketDebuggerUrl)
+        if ((await c.evaluate('1+1', 4000))?.result?.value === 2) { conn = c; break }
+        c.ws.close()
+      } catch { /* stale target */ }
+    }
+    if (!conn) await sleep(1000)
   }
   if (!conn) {
     console.error('no live sim target on Metro :' + PORT)

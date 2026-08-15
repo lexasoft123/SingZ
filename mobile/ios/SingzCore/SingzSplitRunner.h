@@ -10,12 +10,27 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef void (^SingzSplitProgressBlock)(NSString *stage, double frac, int64_t done, int64_t total);
+/// stage/frac/done/total, plus what the phone is spending: memory footprint
+/// (the number jetsam judges), the headroom left before iOS kills this
+/// process, and CPU since the previous sample. The vitals ride the progress
+/// event because on a real phone a kill leaves nothing else behind.
+typedef void (^SingzSplitProgressBlock)(NSString *stage, double frac, int64_t done, int64_t total,
+                                        double footprintMb, double headroomMb, double cpuPct);
 typedef void (^SingzSplitStateBlock)(NSString *state, NSString *_Nullable error);
 
 @interface SingzSplitRunner : NSObject
 
 + (instancetype)shared;
+
+/// What this process is spending and how much iOS still allows it, sampled on
+/// demand: {memMb, freeMb, cpuPct}. `freeMb` is the allowance left before the
+/// system kills the app — the number that decides whether a split can finish.
++ (NSDictionary *)vitals;
+
+/// The crash-proof trail written during the last job, and clearing it. Read
+/// at launch: if the app was killed, this is the only account of the moments
+/// before it.
++ (nullable NSString *)takeVitalsTrail;
 
 /// Application Support/split-job — created on demand.
 + (NSString *)jobDirPath;

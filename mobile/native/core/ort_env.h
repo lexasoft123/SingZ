@@ -3,7 +3,7 @@
 
 // Thin ONNX Runtime session helpers shared by the split engine and the Beat
 // This runner (docs/PHONE-STANDALONE.md). The EP ladder lives here so the
-// engines never care: XNNPACK/CPU on Android, CoreML→CPU on iOS with a
+// engines never care: plain CPU on Android today, CoreML→CPU on iOS with a
 // per-device disable marker (the desktop dml-disabled.json pattern).
 namespace singz {
 

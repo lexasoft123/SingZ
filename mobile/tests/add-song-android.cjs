@@ -14,6 +14,12 @@
  * line lands only after the decode, on success and failure alike), and the
  * open-wait sits out the known fixture's decode before the first eval. CDP
  * polls only ever run against a decode-free app.
+ * After `./gradlew installDebug`, FORCE-STOP the app before driving it: a
+ * launch into a live Metro hot-reloads across the new bundle and React throws
+ * "Should have a queue. You are likely calling Hooks conditionally" from a
+ * screen whose hooks are all top-level. The catalog then stops re-rendering,
+ * TEST.projects goes stale, and this suite reports a perfectly good add as a
+ * missing project.
  */
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')

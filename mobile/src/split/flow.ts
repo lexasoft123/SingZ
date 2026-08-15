@@ -3,7 +3,7 @@ import { appInfo, log } from '../log'
 import type { ProjectDoc } from '../model'
 import { localProjectFile, readProjectText } from '../projects'
 import { ensureSplitModel, splitCapability } from '../analysis/models'
-import { startSplit } from './service'
+import { splitVitals, startSplit } from './service'
 import { adoptSplit } from './adopt'
 
 /**
@@ -35,6 +35,16 @@ export async function startProjectSplit(
   const doc = JSON.parse(await readProjectText(project, 'project.json')) as ProjectDoc
   const srcPath = await localProjectFile(project, doc.songFile)
   const modelPath = await ensureSplitModel(opts?.onModelProgress)
+  // The budget this phone is working inside, recorded before a single sample
+  // is decoded: a split that is killed leaves no note, so its allowance has to
+  // be in the log already.
+  const vitals = await splitVitals()
+  if (vitals) {
+    log(
+      'split',
+      `this phone allows ${Math.round(vitals.freeMb)} MB more for SingZ · using ${Math.round(vitals.memMb)} MB now`
+    )
+  }
   await startSplit({
     srcPath,
     modelPath,

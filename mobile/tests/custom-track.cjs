@@ -103,7 +103,10 @@ function seedProject() {
   for (let i = 0; i < 40 && !target; i++) {
     try {
       const l = await getJson(`http://localhost:${PORT}/json`);
-      target = l.find((t) => t.webSocketDebuggerUrl) ?? null;
+      // deviceName filter: Metro lists the Android emulator too, and it
+      // sorts first — see the note in seek-memory.cjs.
+      target =
+        l.find((t) => t.webSocketDebuggerUrl && /iphone|ipad/i.test(t.deviceName || '')) ?? null;
     } catch {}
     if (!target) await sleep(1000);
   }

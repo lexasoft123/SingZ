@@ -75,7 +75,16 @@ export interface ProjectEntry {
  * themselves; the native walked them already.
  */
 export function isDownloaded(entry: ProjectEntry, have?: CacheUsage): boolean {
-  if (entry.source !== 'gdrive') return entry.cached
+  if (entry.source !== 'gdrive') {
+    // A song with no stems is either freshly added on this phone or waiting to
+    // be split — its audio is the lane the doc names, and it is right here.
+    // The natives only ever probe the six stem names, so they disagree about
+    // this case (iOS said "not downloaded", Android said "local, nothing to
+    // fetch") and the library painted a download glyph on a song that had
+    // nothing to download.
+    if (Object.keys(entry.stems ?? {}).length === 0) return true
+    return entry.cached
+  }
   const want = Object.entries(entry.expect ?? {})
   if (want.length === 0) return false
   return want.every(([path, size]) => isCurrent({ size: have?.sizes?.[path] ?? -1 }, { size }))

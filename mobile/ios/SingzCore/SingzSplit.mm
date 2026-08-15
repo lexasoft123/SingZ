@@ -61,13 +61,17 @@ RCT_EXPORT_METHOD(startSplit:(NSString *)srcPath
         projectDir:projectDir
             resume:resume
      watchdogCapMs:(int64_t)watchdogCapMs
-          progress:^(NSString *stage, double frac, int64_t done, int64_t total) {
+          progress:^(NSString *stage, double frac, int64_t done, int64_t total,
+                     double footprintMb, double headroomMb, double cpuPct) {
             [weakSelf emitSafely:@"singzSplitProgress"
                             body:@{
                               @"stage" : stage,
                               @"frac" : @(frac),
                               @"done" : @((double)done),
-                              @"total" : @((double)total)
+                              @"total" : @((double)total),
+                              @"memMb" : @(footprintMb),
+                              @"freeMb" : @(headroomMb),
+                              @"cpuPct" : @(cpuPct)
                             }];
           }
              state:^(NSString *state, NSString *_Nullable error) {
@@ -110,6 +114,18 @@ RCT_EXPORT_METHOD(clearJob:(RCTPromiseResolveBlock)resolve
 {
   [SingzSplitRunner clearJobDir];
   resolve(@YES);
+}
+
+RCT_EXPORT_METHOD(splitVitals:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  resolve([SingzSplitRunner vitals]);
+}
+
+RCT_EXPORT_METHOD(takeSplitTrail:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  resolve([SingzSplitRunner takeVitalsTrail] ?: (id)kCFNull);
 }
 
 RCT_EXPORT_METHOD(ortProbe:(NSString *)modelPath
