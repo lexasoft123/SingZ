@@ -51,8 +51,9 @@ BEAT_CKPT_URL="https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/fina
 # TensorRT-RTX plugin EP (win32 only): DML is frozen at ORT 1.24 (sustained
 # engineering) and dies on htdemucs both fused (TDR device-hung) and unfused
 # (ISTFT ConvTranspose OOM). NVIDIA's prebuilt zip is self-contained — the
-# EP dll AND the whole TRT-RTX runtime — and rides MAINLINE ort, shipped
-# side by side under python/rtx and swapped into sys.path by the runner.
+# EP dll AND the whole TRT-RTX runtime — and rides the MAINLINE ort this
+# pack installs into site-packages; python/rtx carries the EP payload only,
+# registered at runtime, never a second onnxruntime on sys.path.
 # cu12 flavor: oldest-driver compatibility across the fleet (581.x is fine).
 TRTRTX_EP_TAG="v0.4.0"
 TRTRTX_EP_ZIP="TensorRT-RTX-EP-ABI-${TRTRTX_EP_TAG}-cu12.zip"

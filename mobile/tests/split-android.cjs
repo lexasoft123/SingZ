@@ -229,7 +229,14 @@ function reconstructionCorr(project) {
 }
 
 async function main() {
+  // Silence, belt and braces: `cmd media_session volume --set 0` is the
+  // documented way, but it hangs at "Connecting to AudioService" on some
+  // API-36 AVDs and never applies (measured: streamVolume stayed 5/15
+  // through a reboot). VOLUME_DOWN keyevents always land, so they finish the
+  // job. (add-song-android.cjs adds a third layer by zeroing the app's own
+  // master gain; this suite never reaches a decode-free point to do that.)
   adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
+  for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
 
   const haveModel = shell(`run-as ${APP} ls ${MODEL.replace(`/data/data/${APP}/`, '')} 2>/dev/null || true`)
   if (!haveModel.includes('htdemucs')) {

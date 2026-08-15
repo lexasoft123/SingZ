@@ -62,8 +62,16 @@ too); sim tests zero `__test.engine.master.gain` after the hook-wait
 (metronome clicks bypass master, so that test passes `volume: 0` —
 `clickCount` still counts); the Android emulator gets
 `adb shell cmd media_session volume --stream 3 --set 0` (the old
-`media volume` is gone on API 36; `--set 10` to hear it again for a
-human demo). Details + env hooks:
+`media volume` is gone on API 36) FOLLOWED BY twenty
+`input keyevent 25` — measured on an API-36 AVD, the documented command
+prints that it will set the volume, then hangs at "Connecting to
+AudioService" and never applies (streamVolume stayed 5/15 across a
+reboot), so ever since it was written the Android suites' self-mute was a
+no-op, and only add-song's own `master.gain = 0` kept that one quiet.
+Keyevents
+always land — twenty `input keyevent 24` (VOLUME_UP) is how you get the
+sound back for a human demo, not `--set`, which is broken in both
+directions. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,

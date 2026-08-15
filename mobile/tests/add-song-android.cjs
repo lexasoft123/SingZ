@@ -93,7 +93,13 @@ async function pollGlobal(conn, name, timeoutMs = 180000) {
 async function main() {
   // Seed + silence. Metro lists EVERY connected app (iPhone sims included) —
   // filter to the emulator's deviceName and probe before trusting a target.
+  // Silence, belt and braces: `cmd media_session volume --set 0` is the
+  // documented way, but it hangs at "Connecting to AudioService" on some
+  // API-36 AVDs and never applies (measured: streamVolume stayed 5/15
+  // through a reboot). VOLUME_DOWN keyevents always land, so they finish the
+  // job; the app zeroing its own master gain is the third layer.
   adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
+  for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
   adb('push', join(__dirname, '..', 'assets', 'sample', 'stems', 'vocals.flac'), '/data/local/tmp/singz-seed.flac')
   adb('shell', 'chmod', '666', '/data/local/tmp/singz-seed.flac')
   adb('shell', 'run-as', 'com.lexasoft.singz', 'sh', '-c',

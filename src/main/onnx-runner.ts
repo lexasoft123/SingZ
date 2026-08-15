@@ -6,16 +6,19 @@
  * Its one GPU job: the TensorRT-RTX plugin EP. DirectML is gone — across the
  * whole fleet it never completed a split (fused graph = TDR device-hung,
  * unfused = ISTFT ConvTranspose OOM; the wheel is frozen at ORT 1.24 in
- * sustained engineering). The pack's base onnxruntime import still IS the
- * DML wheel — the cpu provider runs through it unchanged — but no attempt
- * targets DmlExecutionProvider any more.
+ * sustained engineering).
  *
- * For `--providers trtrtx` the runner side-loads MAINLINE ort from
- * python/rtx/ort, preloads the shipped runtime dlls by absolute path (ORT
- * does not search the EP dll's directory for its dependencies — bench-
- * proven), registers the plugin EP, and re-points session creation at the
- * TensorRT-RTX devices via the V2 device API. Every step prints what it saw
- * — on a release build the field log is the only evidence there is.
+ * A v8 pack ships ONE onnxruntime — mainline, in site-packages, plugin-EP
+ * capable — and both the cpu and trtrtx paths import it. The DML wheel and
+ * the v5-v7 side-load of a second ort under python/rtx/ort are both gone;
+ * this header described them until the pack rewrite outran it.
+ *
+ * For `--providers trtrtx` the runner preloads the shipped runtime dlls by
+ * absolute path (ORT does not search the EP dll's directory for its
+ * dependencies — bench-proven), registers the plugin EP, and re-points
+ * session creation at the TensorRT-RTX devices via the V2 device API. Every
+ * step prints what it saw — on a release build the field log is the only
+ * evidence there is.
  */
 export const ONNX_RUNNER_PY = `
 import os, sys
@@ -24,9 +27,10 @@ PROFILE_PATH = []
 
 
 def setup_trtrtx():
-    """TensorRT-RTX plugin EP (GeForce RTX 30xx+) on MAINLINE ort, shipped
-    side by side with the pack's base wheel under python/rtx. Exits the
-    process when the GPU or payload can't serve — the app's ladder moves on."""
+    """TensorRT-RTX plugin EP (GeForce RTX 30xx+) on the pack's ONE mainline
+    ort in site-packages; python/rtx holds the EP payload only, never a
+    second runtime. Exits the process when the GPU or payload can't serve —
+    the app's ladder moves on."""
     base = os.path.join(os.path.dirname(sys.executable), "rtx")
     ep_dll = os.path.join(base, "ep", "onnxruntime_providers_nv_tensorrt_rtx.dll")
     if not os.path.isfile(ep_dll):
