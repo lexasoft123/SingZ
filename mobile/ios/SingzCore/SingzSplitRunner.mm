@@ -1,6 +1,7 @@
 #import "SingzSplitRunner.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <BackgroundTasks/BackgroundTasks.h>
 #import <UIKit/UIKit.h>
 
 #include <algorithm>
@@ -27,6 +28,11 @@ static NSString *const kStateFailed = @"failed";
 // The engine's cancel flag, namespace-scope like Android's JNI gProgress —
 // reset at every job start, safe to poke from any thread.
 static singz::Progress gProgress;
+
+// The continued-processing identifier — EXACT, never a wildcard (the
+// scheduler's wildcard matching is broken for continued tasks), and listed
+// in Info.plist's BGTaskSchedulerPermittedIdentifiers.
+static NSString *const kBgTaskId = @"com.lexasoft.singz.split";
 
 #pragma mark - job.json (the Android JobStore contract, mirrored)
 
@@ -187,6 +193,10 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
   SingzSplitStateBlock _state;
   id _becameActiveObserver;
   id _resignActiveObserver;
+  // iOS 26+ continued-processing task, granted by the system some time
+  // after submission; touched only via the main queue (plain id — an
+  // availability attribute is not legal on an ivar).
+  id _bgTask;
   // Suspension signal for the watchdog: resign ALWAYS precedes the freeze,
   // so "did a resign happen since this timer was armed" is order-independent
   // — unlike anything read on wake, where timer order is a coin toss.
@@ -226,8 +236,78 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
 - (instancetype)init {
   if ((self = [super init])) {
     _work = dispatch_queue_create("singz.split.work", DISPATCH_QUEUE_SERIAL);
+    [self registerBackgroundTask];
   }
   return self;
+}
+
+/// iOS 26+: the split keeps running with the app in the background, with
+/// the system showing its progress. Continued tasks are exempt from the
+/// register-before-launch rule, so lazy registration here is legal. On any
+/// earlier iOS (or a submission refusal) the behavior is exactly P3a:
+/// foreground with the idle timer held; suspension freezes the job and the
+/// tail resumes it.
+- (void)registerBackgroundTask {
+  if (@available(iOS 26.0, *)) {
+    __weak SingzSplitRunner *weakSelf = self;
+    [[BGTaskScheduler sharedScheduler]
+        registerForTaskWithIdentifier:kBgTaskId
+                           usingQueue:dispatch_get_main_queue()
+                        launchHandler:^(BGTask *task) {
+                          SingzSplitRunner *s = weakSelf;
+                          if (!s || !s->_active.load()) {
+                            [task setTaskCompletedWithSuccess:YES];
+                            return;
+                          }
+                          s->_bgTask = task;
+                          task.expirationHandler = ^{
+                            // The system's budget ran out: complete the BG
+                            // task and let ordinary suspension freeze the
+                            // job — the tail makes the next launch a
+                            // resume, and job.json already has every chunk.
+                            SingzSplitRunner *inner = weakSelf;
+                            if (inner) [inner completeBgTask:NO];
+                          };
+                        }];
+  }
+}
+
+- (void)submitBgTaskWithSubtitle:(NSString *)subtitle {
+  if (@available(iOS 26.0, *)) {
+    BGContinuedProcessingTaskRequest *req =
+        [[BGContinuedProcessingTaskRequest alloc] initWithIdentifier:kBgTaskId
+                                                               title:@"Splitting into stems"
+                                                            subtitle:subtitle];
+    NSError *err = nil;
+    if (![[BGTaskScheduler sharedScheduler] submitTaskRequest:req error:&err]) {
+      // Refused = the P3a foreground behavior; nothing to clean up.
+    }
+  }
+}
+
+- (void)completeBgTask:(BOOL)success {
+  if (@available(iOS 26.0, *)) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      BGTask *task = (BGTask *)self->_bgTask;
+      if (task) {
+        [task setTaskCompletedWithSuccess:success];
+        self->_bgTask = nil;
+      }
+    });
+  }
+}
+
+- (void)updateBgTaskChunk:(int64_t)done total:(int64_t)total {
+  if (@available(iOS 26.0, *)) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      BGContinuedProcessingTask *task = (BGContinuedProcessingTask *)self->_bgTask;
+      if (!task) return;
+      task.progress.totalUnitCount = total;
+      task.progress.completedUnitCount = done;
+      [task updateTitle:@"Splitting into stems"
+               subtitle:[NSString stringWithFormat:@"Chunk %lld of %lld", done, total]];
+    });
+  }
 }
 
 - (void)cancel {
@@ -277,6 +357,7 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
                       (int64_t)([NSDate date].timeIntervalSince1970 * 1000));
                 }
               }];
+  [self submitBgTaskWithSubtitle:projectDir.lastPathComponent ?: @""];
   dispatch_async(_work, ^{ [self runJobSrc:srcPath model:modelPath projectDir:projectDir resume:resume]; });
   return YES;
 }
@@ -441,6 +522,7 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
 - (void)onChunk:(int64_t)done total:(int64_t)total {
   if (_cancelRequested.load()) gProgress.cancel.store(true);
   const int64_t now = (int64_t)([NSDate date].timeIntervalSince1970 * 1000);
+  [self updateBgTaskChunk:done total:total];
   _chunkDurations.push_back(now - _lastChunkAtMs);
   _lastChunkAtMs = now;
   if (_chunkDurations.size() > 5) _chunkDurations.erase(_chunkDurations.begin());
@@ -480,6 +562,7 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
     [[NSNotificationCenter defaultCenter] removeObserver:_resignActiveObserver];
     _resignActiveObserver = nil;
   }
+  [self completeBgTask:[state isEqual:kStateDone]];
   _active = false;
   SingzSplitStateBlock cb = _state;
   if (cb) cb(state, error);
@@ -545,6 +628,9 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
         job[@"error"] = @"Splitting stalled — resume to try again";
       });
       [self stopHeartbeat];
+      // A granted continued task must not keep showing system progress for
+      // a wedged job — retire it now; "busy until restart" is ours to show.
+      [self completeBgTask:NO];
       // _active stays TRUE on purpose: the wedged ORT thread still owns the
       // serial work queue, so a mid-session Resume could only queue a second
       // job behind it — worst case wiping six finished stems if the "stall"

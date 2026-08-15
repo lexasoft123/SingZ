@@ -480,11 +480,36 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     later. (4) Every job-dir deletion rides the
     same serial queue as the writers, or the heartbeat can resurrect a
     cancelled doc mid-window.
+  - **Phase 3 wrap (2026-08-15): the permanent iOS suite + the background
+    task.** `mobile/tests/split-ios.cjs` is split-android's sibling for the
+    in-process runner: the product loop with the MANDATORY live-event
+    assertion (only events paint chunk text into a live card, and iOS
+    RCTEventEmitter drops events for DeviceEventEmitter subscribers unless
+    observation is disabled — a polling-shaped pass is blind to exactly
+    that regression), the fixture-free reconstruction gate (0.9993
+    measured), kill-the-APP resume, and both watchdog paths (true stall
+    fires; post-stall resume queues no second job and the healthy run
+    self-heals to one adoption — asserted on job.json transitions, never
+    on the card's phase). Ran green twice: on the P3a build and on the
+    BG-task build. The iOS 26 `BGContinuedProcessingTask` integration:
+    EXACT identifier (`com.lexasoft.singz.split` — the scheduler's wildcard
+    matching is broken for continued tasks), lazy registration in the
+    runner's init (continued tasks are exempt from the register-before-
+    launch rule), submitted at every job start, chunk callbacks feed
+    `task.progress` + `updateTitle`, expiration completes the task and
+    lets ordinary suspension freeze the job — the tail resumes it; a
+    submission refusal (any older iOS, the sim) degrades to exactly the
+    P3a foreground behavior. Info.plist grew the `processing` background
+    mode and the permitted identifier. Spelling note: the completion
+    selector is `setTaskCompletedWithSuccess:` (the SDK header, not the
+    Swift name). The REAL background run + the jetsam observation need the
+    physical iPhone — that is the remaining P3b half.
   - Still to measure: the 10-song real-stem parity eval (closes the host rule
-    formally), real-iPhone CPU-vs-CoreML segment times, `zipalign -c -P 16`
-    on the packaged APK, the split notification's visibility on HyperOS, and
-    the `:split` service on a rebooted Xiaomi with a release APK (the
-    HyperOS finding above).
+    formally), real-iPhone CPU-vs-CoreML segment times, the real-iPhone
+    BGContinuedProcessingTask behavior + jetsam observation (P3b's device
+    half), `zipalign -c -P 16` on the packaged APK, the split
+    notification's visibility on HyperOS, and the `:split` service on a
+    rebooted Xiaomi with a release APK (the HyperOS finding above).
 
 ## Top risks
 

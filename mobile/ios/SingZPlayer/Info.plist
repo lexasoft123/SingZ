@@ -40,6 +40,14 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>processing</string>
+	</array>
+	<!-- The split's continued-processing task (iOS 26+): an EXACT identifier,
+	     never a wildcard — the scheduler's wildcard matching is broken for
+	     continued tasks (FB in the wild; docs/PHONE-STANDALONE.md). -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.lexasoft.singz.split</string>
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>
