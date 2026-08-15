@@ -7,7 +7,7 @@ import {
 } from '../src/analysis/models'
 
 describe('phone model table', () => {
-  it('pins every asset to the immutable tag', () => {
+  it('pins every asset by name and hash — the asset is what cannot change', () => {
     for (const m of [SPLIT_MODEL, ...BEAT_MODELS]) {
       expect(m.url).toContain(`/releases/download/${PHONE_MODELS_TAG}/`)
       expect(m.url.endsWith(`/${m.file}`)).toBe(true)

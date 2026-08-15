@@ -154,9 +154,10 @@ analyses); `melodyFitsSong` re-checked against the dir's stems before writing;
 re-analysis triggers mirror the desktop (missing, or `source:'auto'` with a stale
 `detVersion`); lyrics run before beats so `lineStarts`/`words` exist for the courts.
 
-Models are **pinned-tag GitHub release assets** (the `models-1` precedent — never
-`latest/download`): tag `phone-models-1` with the three raw .onnx files
-(136.4 + 82.5 + 4.5 MB), Range-resumable, sha256-verified, stored durably
+Models are **pinned-tag GitHub release assets** (never `latest/download`):
+the three raw .onnx files (136.4 + 82.5 + 4.5 MB) live in `models-1`, the
+repo's one bucket of pinned model artifacts, alongside the desktop's aligner —
+Range-resumable, sha256-verified, stored durably
 (`filesDir/models` / iOS Application Support, backup-excluded).
 `mobile/src/analysis/models.ts` pins the tag + size/sha table (the
 `PACK_FORMAT_REQUIRED` role). The split model is required; the beat models are a
@@ -295,15 +296,17 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     (4) The app process must not call SingzCore externals it never loaded —
     an UnsatisfiedLinkError before the cancel intent once ate the cancel.
   - **Phase-2 models slice (2026-08-15 small hours)**: model distribution is
-    live — `mobile/src/analysis/models.ts` pins tag `phone-models-1` with a
+    live — `mobile/src/analysis/models.ts` pins tag `models-1` with a
     size+sha256 table (the PACK_FORMAT_REQUIRED role: a model revision is a
-    NEW tag stamped there, never a re-upload), FolderAccess gained
+    NEW FILE NAME stamped there, never a re-upload over an asset some phone
+    already judges by its sha256), FolderAccess gained
     `downloadFile`/`cancelDownload` on BOTH platforms (Range-resume into
     durable app storage — filesDir/models / Application Support/models
     backup-excluded — sha256-verified before the rename, .part kept on
     cancel, sha memoized size+mtime like the md5s), and
     `scripts/build-phone-models.sh` verifies real files against the TS table
-    and stages the `gh release create` command — publishing is a human act.
+    and stages the `gh release upload` command (upload, never create: the tag
+    already exists and is shared) — publishing is a human act.
     Capability gate: `splitCapability` at MIN_SPLIT_MEM_MB = 5000 (the
     1.27 GB-RSS session with honest "add the song on your computer" copy
     below it; unknown readings pass — :split isolation makes a wrong yes a

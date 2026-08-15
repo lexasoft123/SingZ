@@ -4,9 +4,11 @@
 # The table in mobile/src/analysis/models.ts is the single source of truth:
 # this script only checks real files against it and stages them for upload.
 # The release itself is published BY A HUMAN — nothing here talks to GitHub
-# unless you pass --upload, and the tag is immutable: a model revision ships
-# as a NEW tag stamped into models.ts, never a rewrite of an old one (the
-# desktop models-1 precedent).
+# unless you pass --upload. The ASSET is what is immutable, not the tag:
+# models-1 is the repo's one bucket of pinned model artifacts, shared with the
+# desktop's aligner, so a model revision ships as a NEW FILE NAME stamped into
+# models.ts, never a re-upload over a name some phone already judges by its
+# sha256.
 #
 # usage: scripts/build-phone-models.sh <dir holding the three .onnx> [--upload]
 #
@@ -44,7 +46,8 @@ while IFS=$'\t' read -r file bytes sha; do
   actual_bytes=$(stat -f%z "$path" 2>/dev/null || stat -c%s "$path")
   [ "$actual_bytes" = "$bytes" ] || {
     echo "SIZE MISMATCH $file: table says $bytes, file is $actual_bytes"
-    echo "(a new model revision means a NEW tag + updated table, not a re-upload)"
+    echo "(a new model revision means a NEW FILE NAME + updated table, not a re-upload:"
+    echo " a phone holding the old bytes passes its own sha check forever)"
     exit 1
   }
   actual_sha=$(shasum -a 256 "$path" | cut -d' ' -f1)
@@ -59,9 +62,11 @@ done <<<"$TABLE"
 
 echo
 echo "Staged $(printf '%s\n' "${FILES[@]}" | wc -l | tr -d ' ') assets in $OUT for tag $TAG."
-CMD=(gh release create "$TAG" --title "Phone analysis models ($TAG)" \
-  --notes "Pinned model assets for on-phone splitting and beat analysis. Downloaded by the app on demand; see docs/PHONE-STANDALONE.md." \
-  "${FILES[@]}")
+# upload, never create: $TAG is the repo's shared bucket of pinned model
+# artifacts and already exists (create would 422, and its --title would rename
+# a release the desktop's aligner lives in). No --clobber either — a duplicate
+# asset name failing here IS the enforcement of the rule above.
+CMD=(gh release upload "$TAG" "${FILES[@]}")
 if [ "$UPLOAD" = "--upload" ]; then
   echo "Running: ${CMD[*]}"
   "${CMD[@]}"

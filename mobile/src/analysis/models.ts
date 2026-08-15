@@ -5,13 +5,20 @@ import { log } from '../log'
  * The phone's analysis models: pinned-tag GitHub release assets, downloaded
  * once into durable app storage by the native `downloadFile` (Range-resumed,
  * sha256-verified — the file on disk is the truth, this module never keeps a
- * ledger). The tag is immutable, the desktop `models-1` precedent: a model
- * revision ships as a NEW tag stamped here, never as a rewrite of this one —
- * that is this table's PACK_FORMAT_REQUIRED role. scripts/build-phone-models.sh
- * assembles and checks the assets; publishing the release is a human act.
+ * ledger). They live in `models-1`, the repo's one bucket of pinned model
+ * artifacts (the desktop's aligner and ONNX variants are already there) —
+ * one place to look, one tag to keep alive, and the phone downloads by exact
+ * file name so the neighbours are invisible to it.
+ *
+ * What is immutable here is the ASSET, not the tag: a model revision ships
+ * as a NEW FILE NAME stamped into this table, never as a re-upload over an
+ * existing one, because a phone that already has the old bytes is judging
+ * them by the sha256 below. That is this table's PACK_FORMAT_REQUIRED role.
+ * scripts/build-phone-models.sh assembles and checks the assets; publishing
+ * is a human act.
  */
 
-export const PHONE_MODELS_TAG = 'phone-models-1'
+export const PHONE_MODELS_TAG = 'models-1'
 const RELEASE = `https://github.com/lexasoft123/SingZ/releases/download/${PHONE_MODELS_TAG}`
 
 export interface PhoneModel {

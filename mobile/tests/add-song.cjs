@@ -9,6 +9,10 @@
  * CDP over Metro against the iOS Simulator, like the other tests here:
  *   SIM_UDID=… METRO_PORT=8082 node mobile/tests/add-song.cjs
  * Debug build of com.lexasoft.singz must be installed and Metro running.
+ * The run relaunches the app itself, like every sibling driver here: the
+ * sheet's driver facts live on globalThis.__test, which survives a Fast
+ * Refresh that the React state behind them does not, so a long hot-reloaded
+ * app fails checks a fresh one passes.
  * Silent by design: nothing plays — the flow decodes and releases.
  * Poll-don't-await throughout (Hermes CDP rules); the seeded file is MOVED
  * into the project by the flow, so each run reseeds its own copy.
@@ -79,6 +83,15 @@ async function pollGlobal(conn, name, timeoutMs = 120000) {
 }
 
 async function main() {
+  // Fresh process, fresh __test surface (see the header).
+  try {
+    simctl('terminate', UDID, 'com.lexasoft.singz')
+  } catch {
+    /* not running */
+  }
+  simctl('launch', UDID, 'com.lexasoft.singz')
+  await sleep(9000)
+
   // Seed: the bundled sample's vocals stem doubles as "somebody's song file".
   const container = simctl('get_app_container', UDID, 'com.lexasoft.singz', 'data')
   const seeded = join(container, 'Documents', SONG_NAME)
