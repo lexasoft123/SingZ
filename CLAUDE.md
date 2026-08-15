@@ -64,9 +64,10 @@ too); sim tests zero `__test.engine.master.gain` after the hook-wait
 `adb shell cmd media_session volume --stream 3 --set 0` (the old
 `media volume` is gone on API 36) FOLLOWED BY twenty
 `input keyevent 25` — measured on an API-36 AVD, the documented command
-prints that it will set the volume, then hangs at "Connecting to
-AudioService" and never applies (streamVolume stayed 5/15 across a
-reboot), so ever since it was written the Android suites' self-mute was a
+prints that it will set the volume, prints "Connecting to AudioService",
+exits within a second and silently applies nothing (streamVolume measured
+either side of the call is unmoved; it stayed 5/15 across a reboot), so
+ever since it was written the Android suites' self-mute was a
 no-op, and only add-song's own `master.gain = 0` kept that one quiet.
 Keyevents
 always land — twenty `input keyevent 24` (VOLUME_UP) is how you get the
@@ -101,6 +102,20 @@ the `singz.crumb` pref over `adb run-as` instead, which touches no JS. Debug
 builds only — release APKs have no inspector. Metro also lists *every*
 connected app, so pick the target by `deviceName` or a stray simulator will
 answer your evals while you measure the phone.
+**Which emulator answers first and which one can be driven are different
+questions** — debug and release share the applicationId (`com.lexasoft.singz`,
+no `applicationIdSuffix`), so an AVD carrying a *release* build looks
+identical in `adb devices` and fails only once the driver is already running:
+`run-as: package not debuggable`, no inspector, no Metro target, both suites
+dead at setup for reasons that have nothing to do with the change under test.
+Ask the device before trusting it — `adb -s <serial> shell dumpsys package
+com.lexasoft.singz | grep -E 'versionName|DEBUGGABLE'` — and confirm the
+installed APK is *this* tree's (`md5sum` it against
+`mobile/android/app/build/outputs/apk/debug/app-debug.apk`). The same
+applicationId is why a debug build must never be pushed to the user's own
+phone: same id + different signing key = Android demands an uninstall first,
+which takes `files/singz-projects` (every downloaded song) and the Drive
+sign-in with it.
 
 ## Hard-won gotchas (do not re-learn these)
 

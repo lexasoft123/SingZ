@@ -146,9 +146,10 @@ Rules learned the hard way:
   `__test.engine.master.gain` on the iOS Simulator, music-stream volume 0
   on the Android emulator (`adb shell cmd media_session volume --stream 3
   --set 0` **followed by twenty `input keyevent 25`** — on an API-36 AVD
-  the first command hangs at "Connecting to AudioService" and never
-  applies, so the keyevents are what actually mute it). Muting changes
-  nothing measurable — analysers, sinkId moves,
+  the first command exits within a second and silently applies nothing, so
+  the keyevents are what actually mute it; measured in isolation, the
+  keyevents alone take streamVolume 2 -> 0 and the documented command alone
+  leaves it at 2). Muting changes nothing measurable — analysers, sinkId moves,
   fake-mic pitch and click scheduling all behave as audible. Sound on only
   when a human is checking (end-user testing/demos).
 

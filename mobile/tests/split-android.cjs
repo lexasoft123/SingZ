@@ -230,9 +230,11 @@ function reconstructionCorr(project) {
 
 async function main() {
   // Silence, belt and braces: `cmd media_session volume --set 0` is the
-  // documented way, but it hangs at "Connecting to AudioService" on some
-  // API-36 AVDs and never applies (measured: streamVolume stayed 5/15
-  // through a reboot). VOLUME_DOWN keyevents always land, so they finish the
+  // documented way, but on some API-36 AVDs it prints "Connecting to
+  // AudioService", exits within a second and silently applies nothing
+  // (measured in isolation: streamVolume 2 before, 2 after; and it stayed
+  // 5/15 through a reboot). VOLUME_DOWN keyevents always land — alone they
+  // take the same emulator 2 -> 0 — so they finish the
   // job. (add-song-android.cjs adds a third layer by zeroing the app's own
   // master gain; this suite never reaches a decode-free point to do that.)
   adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')

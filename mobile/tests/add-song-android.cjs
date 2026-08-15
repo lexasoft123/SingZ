@@ -14,7 +14,8 @@
  * line lands only after the decode, on success and failure alike), and the
  * open-wait sits out the known fixture's decode before the first eval. CDP
  * polls only ever run against a decode-free app.
- * After `./gradlew installDebug`, FORCE-STOP the app before driving it: a
+ * This driver force-stops and launches the app itself, because after
+ * `./gradlew installDebug` it MUST be force-stopped before driving: a
  * launch into a live Metro hot-reloads across the new bundle and React throws
  * "Should have a queue. You are likely calling Hooks conditionally" from a
  * screen whose hooks are all top-level. The catalog then stops re-rendering,
@@ -28,6 +29,7 @@ const WebSocket = require('ws')
 const ADB = process.env.ADB || `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`
 const SERIAL = process.env.ANDROID_SERIAL || 'emulator-5554'
 const PORT = process.env.METRO_PORT || 8081
+const APP = 'com.lexasoft.singz'
 const SONG_NAME = 'Add Song Test.flac'
 // Seeds live in the app's INTERNAL import staging — the same place a real
 // pick lands (passes moveIntoProject's owned-guard), and the one storage
@@ -94,31 +96,54 @@ async function main() {
   // Seed + silence. Metro lists EVERY connected app (iPhone sims included) —
   // filter to the emulator's deviceName and probe before trusting a target.
   // Silence, belt and braces: `cmd media_session volume --set 0` is the
-  // documented way, but it hangs at "Connecting to AudioService" on some
-  // API-36 AVDs and never applies (measured: streamVolume stayed 5/15
-  // through a reboot). VOLUME_DOWN keyevents always land, so they finish the
+  // documented way, but on some API-36 AVDs it prints "Connecting to
+  // AudioService", exits within a second and silently applies nothing
+  // (measured in isolation: streamVolume 2 before, 2 after; and it stayed
+  // 5/15 through a reboot). VOLUME_DOWN keyevents always land — alone they
+  // take the same emulator 2 -> 0 — so they finish the
   // job; the app zeroing its own master gain is the third layer.
   adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
   for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
   adb('push', join(__dirname, '..', 'assets', 'sample', 'stems', 'vocals.flac'), '/data/local/tmp/singz-seed.flac')
   adb('shell', 'chmod', '666', '/data/local/tmp/singz-seed.flac')
-  adb('shell', 'run-as', 'com.lexasoft.singz', 'sh', '-c',
+  adb('shell', 'run-as', APP, 'sh', '-c',
     `'mkdir -p "${SEED_DIR}" && cp /data/local/tmp/singz-seed.flac "${SEED_DIR}/${SONG_NAME}"'`)
   adb('shell', 'rm', '/data/local/tmp/singz-seed.flac')
 
-  const targets = (await (await fetch(`http://localhost:${PORT}/json`)).json()).filter(
-    (t) => t.webSocketDebuggerUrl && /gphone|emulator|sdk_|android/i.test(t.deviceName || '')
-  )
+  // Own the app's lifecycle rather than inheriting whatever state the caller
+  // left: force-stop (the header's rule — a launch into live Metro hot-reloads
+  // across the new bundle and breaks React's hook queue) and start it here, so
+  // the wait below is waiting for an app this driver launched. Patience without
+  // a launch would just turn an instant failure into a 120 s one, since a
+  // force-stopped app never registers an inspector target at all.
+  adb('shell', 'am', 'force-stop', APP)
+  await sleep(1200)
+  adb('shell', 'am', 'start', '-n', `${APP}/com.singzplayer.MainActivity`)
+
+  // The app needs ~30 s after launch to register its inspector, so wait for a
+  // target instead of taking one look (split-android.cjs's liveTarget, same
+  // shape, same patience).
+  const deviceRe = new RegExp(process.env.TARGET_DEVICE_RE || 'gphone|emulator|sdk_|android', 'i')
+  const t0 = Date.now()
   let conn = null
-  for (const t of targets.reverse()) {
+  while (!conn && Date.now() - t0 < 120000) {
+    let targets = []
     try {
-      const c = await connect(t.webSocketDebuggerUrl)
-      if ((await c.evaluate('1+1', 4000))?.result?.value === 2) { conn = c; break }
-      c.ws.close()
-    } catch { /* stale target */ }
+      targets = (await (await fetch(`http://localhost:${PORT}/json`)).json()).filter(
+        (t) => t.webSocketDebuggerUrl && deviceRe.test(t.deviceName || '')
+      )
+    } catch { /* metro hiccup */ }
+    for (const t of targets.reverse()) {
+      try {
+        const c = await connect(t.webSocketDebuggerUrl)
+        if ((await c.evaluate('1+1', 4000))?.result?.value === 2) { conn = c; break }
+        c.ws.close()
+      } catch { /* stale target */ }
+    }
+    if (!conn) await sleep(4000)
   }
   if (!conn) {
-    console.error('no live emulator target on Metro :' + PORT)
+    console.error(`no live emulator target on Metro :${PORT} after 120 s`)
     process.exit(2)
   }
 
