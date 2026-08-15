@@ -29,8 +29,24 @@ export function packPython(): string {
  * Marker written when DirectML crashed or stalled on this machine — splits
  * then go straight to the CPU provider. Re-downloading the pack clears it.
  */
+/**
+ * Legacy-compat only: no ladder reads this since DirectML was removed
+ * (it never completed a split anywhere in the fleet). The model-manager
+ * knob still writes/clears it so older builds sharing a machine keep
+ * honoring a CPU-only choice.
+ */
 export function dmlFlagPath(): string {
   return join(packDir(), '..', 'dml-disabled.json')
+}
+
+/** Same deal as the DML marker: one failed TensorRT-RTX attempt per machine. */
+export function trtrtxFlagPath(): string {
+  return join(packDir(), '..', 'trtrtx-disabled.json')
+}
+
+/** The plugin EP dll inside a v5+ win32 pack — its presence gates the trtrtx rung. */
+export function packRtxEpPath(): string {
+  return join(packDir(), 'python', 'rtx', 'ep', 'onnxruntime_providers_nv_tensorrt_rtx.dll')
 }
 
 /**
@@ -71,7 +87,19 @@ export async function packOnnxModel(
 // (v3 added the bundled MSVC runtime on Windows, but BOTH mac pack scripts
 // stamped 3 since then too, so the mac requirement jumps straight past 3 —
 // requiring 3 would leave installed mac packs looking current.)
-const PACK_FORMAT_REQUIRED = 4
+// v5 = the win32 pack ships the TensorRT-RTX plugin EP + mainline ORT under
+// python/rtx (DML is frozen at ORT 1.24 and dies on htdemucs both fused and
+// unfused — TDR vs OOM; the plugin EP is the NVIDIA path forward).
+// Platform-aware: the Apple-Silicon torch pack still stamps 4, and a flat
+// requirement would send every Mac chasing an upgrade that does not exist
+// (the v3 note above records this exact trap). v6 adds the pre-simplified
+// *_trt.onnx graph; v7 rewrote its ISTFT (two ConvTranspose layers = 98%
+// of all GPU time in the field profile) into MatMul + overlap-add; v8
+// slims the pack ~40%: ONE model file (simplified graph, fp16 weights,
+// replacing the original+sibling pair), ONE onnxruntime (mainline in
+// site-packages — the DirectML wheel and rtx/ort side-load are gone),
+// pdb/tcl pruned, fp16 beat model.
+const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 8 : 4
 
 /** First pack format that ships the Beat This! runner + weights. */
 const PACK_FORMAT_WITH_BEATS = 4
@@ -254,15 +282,18 @@ const REGISTRY: RegistryEntry[] = [
     label: 'Stem splitter · AI',
     description:
       process.platform === 'win32'
-        ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — using your GPU when it can (NVIDIA, AMD and Intel graphics).'
+        ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — on your GPU when it can (GeForce RTX 30xx or newer; CPU otherwise).'
         : process.arch === 'arm64'
           ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
-    sizeMb: process.platform === 'win32' ? 283 : process.arch === 'arm64' ? 272 : 259,
+    sizeMb: process.platform === 'win32' ? 296 : process.arch === 'arm64' ? 272 : 259,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
-      `https://github.com/lexasoft123/SingZ/releases/latest/download/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
+      // Prerelease test builds are invisible to `latest` — they fetch the
+      // pack attached to their own tagged release, so a test build can
+      // require a new pack format without touching the fleet.
+      `https://github.com/lexasoft123/SingZ/releases/${app.getVersion().includes('-') ? `download/v${app.getVersion()}` : 'latest/download'}/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
     optional: false,
     platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
   },
@@ -393,8 +424,9 @@ export class ModelManager {
           } finally {
             await rm(archive, { force: true })
           }
-          // fresh pack → give DirectML another chance if it was disabled
+          // fresh pack → give the GPU engines another chance if disabled
           await rm(dmlFlagPath(), { force: true })
+          await rm(trtrtxFlagPath(), { force: true })
           log('models', `${entry.id} installed`)
           onProgress({ id: entry.id, percent: 100 })
         }

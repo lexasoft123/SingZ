@@ -161,11 +161,19 @@ answer your evals while you measure the phone.
   never stretched to the next timestamp (lag), unless AI-aligned.
 - **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
   and every split is six stems (htdemucs_6s; silent guitar/piano lanes are
-  hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere
-  (DirectML on Windows with a `dml-disabled.json` marker after failures —
-  including pathologically slow sessions caught by the chunk-pace watchdog
-  (WARP/remote-desktop adapters); CPU
-  on Intel Macs — CoreML crashes compiling the graph). Every downloaded
+  hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere.
+  Windows GPU = the TensorRT-RTX plugin EP (GeForce RTX 30xx+; pack v5+
+  ships it under python/rtx, v6 adds the pre-simplified `_trt.onnx` graph
+  (raw export = 20k shape/scatter glue nodes that shatter the TensorRT
+  partition; onnxsim with the fixed input folds it 18x, parity-gated in
+  the pack build; v8 = one fp16 model for both engines + one mainline ort) with mainline ort side-loaded by the per-split
+  runner, src/main/onnx-runner.ts) with a `trtrtx-disabled.json` marker
+  after one failure and the chunk-pace watchdog for pathologically slow
+  sessions. **DirectML was removed entirely** — across the whole fleet it
+  never completed a split (fused graph = TDR device-hung 887A0006, unfused
+  = ISTFT ConvTranspose OOM; wheel frozen at ORT 1.24) — old machines'
+  `dml-disabled.json` markers linger but decide nothing. CPU on Intel
+  Macs — CoreML crashes compiling the graph. Every downloaded
   pack gets a renderer-rendered 44.1 kHz WAV (`needsPcm`) — demucs 4.1
   decodes via sphn (no m4a/aac) with an ffmpeg-CLI fallback end users lack,
   and torchaudio ≥2.9 load/save is torchcodec-only (unused by demucs 4.1,
@@ -443,7 +451,10 @@ answer your evals while you measure the phone.
 Push to main freely once the user approves pushes; **releases are cut by
 tagging `v*`** — CI builds mac (arm64+x64 dmg) + win (NSIS) + all three
 splitter packs and attaches everything to the GitHub Release (gh-based
-attach step, race-safe). The Android workflow runs a cheap canary on
+attach step, race-safe). **Hyphenated tags (`v0.14.1-test1`) become
+prereleases**: never "latest", so updaters and the in-app pack URL ignore
+them — the way to hand one tester a build (the tag may sit on a feature
+branch; bump package.json to the full prerelease string). The Android workflow runs a cheap canary on
 mobile/** pushes (npm ci + tsc — postinstall is the audio-api patch-drift
 canary and synthesizes the bundled sample song via make-sample.js) and
 builds the full APK only on `v*` tags / manual dispatch, attaching

@@ -51,7 +51,13 @@ const MMS = join(
     if (!rows.some((r) => /aligner/i.test(r.text ?? '') && !r.done)) {
       throw new Error('aligner row should be present and not installed while hidden');
     }
-    await win.keyboard.press('Escape').catch(() => {});
+    // Close by its own button: the wizard's Modal is `persistent`, which
+    // installs no Escape listener and no scrim onClick (@singz/ui Modal,
+    // since the seven-shells-become-one change). Escape was silently a
+    // no-op and the scrim then ate the next click, so every step after this
+    // failed with a 30 s timeout on an intercepted pointer event.
+    await win.click('.modal-card.wizard .modal-actions .pill.ghost');
+    await win.waitForSelector('.modal-card.wizard', { state: 'detached', timeout: 10000 });
 
     // 2) Precise → aligner consent
     await win.waitForSelector('.lib-card', { timeout: 15000 });

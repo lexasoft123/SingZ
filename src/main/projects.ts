@@ -648,7 +648,7 @@ export async function saveProject(
         // belongs here and not in the renderer because this is the one place
         // the file is actually overwritten, so it covers every path that ever
         // reaches it, including ones not written yet.
-        const keep = (k: 'beat' | 'melody'): object =>
+        const keep = (k: 'beat' | 'melody' | 'key'): object =>
           settings[k] == null && prevMeta?.settings?.[k] != null ? { [k]: prevMeta.settings[k] } : {}
         const meta: ProjectFile = {
           version: allFlac ? 2 : 1,
@@ -657,7 +657,7 @@ export async function saveProject(
           savedAt: new Date().toISOString(),
           // project.json keeps custom tracks project-relative so the folder stays
           // portable; the renderer gets absolute paths back below.
-          settings: { ...settings, ...keep('beat'), ...keep('melody'), custom: stored },
+          settings: { ...settings, ...keep('beat'), ...keep('melody'), ...keep('key'), custom: stored },
           stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
           lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
         }

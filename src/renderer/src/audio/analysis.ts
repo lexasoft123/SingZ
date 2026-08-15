@@ -1,5 +1,6 @@
 /** Song analysis for the info card: key (Krumhansl-Schmuckler) and the beat track. */
 
+import type { KeyInfo } from '../../../shared/types'
 import { applyCourts, buildCourtEvidence, changePoints, type CourtGrid } from './courts'
 
 const MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
@@ -57,6 +58,183 @@ export function estimateKey(f0: Float32Array): KeyGuess | null {
     if (min > bestScore) {
       bestScore = min
       best = { pc, minor: true }
+    }
+  }
+  return best
+}
+
+/**
+ * Bump when the stored key's method changes: a stored key with any other
+ * stamp is silently re-estimated on open, same contract as beat and melody.
+ * v2: Krumhansl over the harmonic stems' chroma. The melody histogram it
+ * replaces read A major off a song whose vocal touches its Gm tonic on 1.3%
+ * of voiced frames — a key is carried by the harmony, not the sung line.
+ */
+export const KEY_DETECT_VERSION = 2
+
+export function sanitizeKeyInfo(raw: unknown): KeyInfo | null {
+  if (!raw || typeof raw !== 'object') return null
+  const k = raw as Record<string, unknown>
+  if (typeof k.pc !== 'number' || !Number.isInteger(k.pc) || k.pc < 0 || k.pc > 11) return null
+  if (typeof k.minor !== 'boolean' || typeof k.detVersion !== 'number') return null
+  return { pc: k.pc, minor: k.minor, detVersion: k.detVersion }
+}
+
+/** Key estimate from the harmonic stems, decoded through chords rather than
+ *  read off a chroma histogram. Raw chroma + Krumhansl collapses on
+ *  power-chord material — G5/Eb5/Bb5 walls put root+fifth energy everywhere
+ *  and the thirds live in quiet pads, so the histogram goes flat (measured:
+ *  it called score-verified-Gm Zeit "D# minor", and two G-major library
+ *  songs "D# major"). Chord occupancy is where the tonic actually shows —
+ *  the same song's decoded track sits on its tonic triad 54% of the time.
+ *  Pipeline: contiguous goertzel chroma frames → 24 triad templates with a
+ *  bass-root bonus → sticky Viterbi (the phase-5a extractor's design) →
+ *  duration-weighted occupancy scored against each key's diatonic chords.
+ *  Null when the stems are effectively silent — the caller falls back to
+ *  the melody histogram. */
+export function estimateKeyFromStems(inst: AudioBuffer[], bass: AudioBuffer | null): KeyGuess | null {
+  const parts = inst.map((b) => monoAt44k(b))
+  let harm: Float32Array | null = null
+  if (parts.length > 0) {
+    // monoAt44k may hand back the buffer's own channel data — sum into a copy.
+    const len = Math.max(...parts.map((p) => p.length))
+    harm = new Float32Array(len)
+    for (const p of parts) for (let i = 0; i < p.length; i++) harm[i] += p[i]
+  }
+  const bassMono = bass ? monoAt44k(bass) : null
+  const sr = ANALYSIS_SR
+  const WIN = 16384 // 0.37 s frames, contiguous — the Viterbi wants neighbours
+  // basePc names the pitch class of baseHz: chroma bin 0 must be C no matter
+  // where the sweep starts, or every answer comes out rotated (an E base read
+  // as C shifted G-major songs to "D# major" before this was caught).
+  const collect = (
+    data: Float32Array | null,
+    baseHz: number,
+    basePc: number,
+    semis: number
+  ): number[][] => {
+    const chromas: number[][] = []
+    if (data) {
+      for (let a = 0; a + WIN <= data.length; a += WIN) {
+        const ch = new Array<number>(12).fill(0)
+        for (let s = 0; s < semis; s++)
+          ch[(basePc + s) % 12] += goertzel(data, a, a + WIN, baseHz * Math.pow(2, s / 12), sr)
+        chromas.push(ch)
+      }
+    }
+    return chromas
+  }
+  // Instruments: E2 up four octaves; bass: E1 up two — the register it names
+  // roots in (fifths above would muddy the root vote).
+  const Ch = collect(harm, 82.41, 4, 48)
+  const Cb = collect(bassMono, 41.2, 4, 24)
+  const n = Math.max(Ch.length, Cb.length)
+  if (n < 8) return null
+  // 24 L2-normalized triad templates: root 1.0, third 0.8, fifth 0.9
+  // (major 0-11, minor 12-23) — the phase-5a chord extractor's shapes.
+  const T: number[][] = []
+  for (const third of [4, 3]) {
+    for (let r = 0; r < 12; r++) {
+      const t = new Array<number>(12).fill(0)
+      t[r] = 1.0
+      t[(r + third) % 12] = 0.8
+      t[(r + 7) % 12] = 0.9
+      const norm = Math.sqrt(1 + 0.64 + 0.81)
+      for (let i = 0; i < 12; i++) t[i] /= norm
+      T.push(t)
+    }
+  }
+  const emit: Float64Array[] = []
+  const voiced: boolean[] = []
+  for (let k = 0; k < n; k++) {
+    const e = new Float64Array(24)
+    let heard = false
+    const ch = Ch[k]
+    if (ch) {
+      let norm = 0
+      for (let i = 0; i < 12; i++) norm += ch[i] * ch[i]
+      norm = Math.sqrt(norm)
+      if (norm > 0) {
+        heard = true
+        for (let j = 0; j < 24; j++) {
+          let d = 0
+          for (let i = 0; i < 12; i++) d += (ch[i] / norm) * T[j][i]
+          e[j] = d
+        }
+      }
+    }
+    const cb = Cb[k]
+    if (cb) {
+      let root = -1
+      let best = 0
+      for (let i = 0; i < 12; i++) if (cb[i] > best) { best = cb[i]; root = i }
+      if (root >= 0) {
+        heard = true
+        e[root] += 0.25
+        e[12 + root] += 0.25
+      }
+    }
+    emit.push(e)
+    voiced.push(heard)
+  }
+  let voicedCount = 0
+  for (const v of voiced) if (v) voicedCount++
+  if (voicedCount < 8) return null
+  // Sticky Viterbi, then duration-weighted chord occupancy.
+  const STAY = 0.35
+  let dp = Float64Array.from(emit[0])
+  const bp: Int8Array[] = []
+  for (let k = 1; k < n; k++) {
+    const nd = new Float64Array(24)
+    const row = new Int8Array(24)
+    let stayBest = -Infinity
+    let stayArg = 0
+    for (let j = 0; j < 24; j++)
+      if (dp[j] > stayBest) {
+        stayBest = dp[j]
+        stayArg = j
+      }
+    for (let j = 0; j < 24; j++) {
+      const hold = dp[j] + STAY
+      if (hold >= stayBest) {
+        nd[j] = emit[k][j] + hold
+        row[j] = j
+      } else {
+        nd[j] = emit[k][j] + stayBest
+        row[j] = stayArg
+      }
+    }
+    dp = nd
+    bp.push(row)
+  }
+  let cur = 0
+  for (let j = 1; j < 24; j++) if (dp[j] > dp[cur]) cur = j
+  const occ = new Array<number>(24).fill(0)
+  if (voiced[n - 1]) occ[cur]++
+  for (let k = n - 2; k >= 0; k--) {
+    cur = bp[k][cur]
+    if (voiced[k]) occ[cur]++
+  }
+  for (let j = 0; j < 24; j++) occ[j] /= voicedCount
+  // Each candidate key scores its diatonic chords by occupancy. Tonic triad
+  // dominates by design; IV-major in minor keys is the dorian borrow every
+  // other rock song makes (Zeit's C over a Gm tonic).
+  const M = (pc: number): number => occ[((pc % 12) + 12) % 12]
+  const m = (pc: number): number => occ[12 + (((pc % 12) + 12) % 12)]
+  let best: KeyGuess | null = null
+  let bestScore = -Infinity
+  for (let t = 0; t < 12; t++) {
+    const major =
+      3 * M(t) + 1.25 * M(t + 7) + m(t + 7) * 0.25 + M(t + 5) + 0.5 * (m(t + 2) + m(t + 4) + m(t + 9))
+    const minor =
+      3 * m(t) + 1.25 * M(t + 7) + 0.75 * m(t + 7) + m(t + 5) + 0.5 * (M(t + 5) + M(t + 3) + M(t + 8) + M(t + 10))
+    if (major > bestScore) {
+      bestScore = major
+      best = { pc: t, minor: false }
+    }
+    if (minor > bestScore) {
+      bestScore = minor
+      best = { pc: t, minor: true }
     }
   }
   return best

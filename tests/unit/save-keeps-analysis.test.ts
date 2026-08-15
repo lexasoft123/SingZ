@@ -31,6 +31,7 @@ const BEAT = {
   detVersion: 18
 }
 const MELODY = { hopSec: 0.01, f0: 'x40' }
+const KEY = { pc: 7, minor: true, detVersion: 2 }
 
 async function project(withAnalysis: boolean): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'singz-keep-'))
@@ -47,7 +48,7 @@ async function project(withAnalysis: boolean): Promise<string> {
       settings: {
         transpose: 0,
         tracks: {},
-        ...(withAnalysis ? { beat: BEAT, melody: MELODY } : {})
+        ...(withAnalysis ? { beat: BEAT, melody: MELODY, key: KEY } : {})
       }
     })
   )
@@ -78,6 +79,13 @@ describe('saveProject never drops an analysis it already had', () => {
     await saveProject(join(dir, 'song.mp3'), 'Song', bare)
     const s = (await read(dir)).settings as Record<string, unknown>
     expect(s.melody).toEqual(MELODY)
+  })
+
+  it('keeps the stored key — a save mid-estimation must not delete it', async () => {
+    const dir = await project(true)
+    await saveProject(join(dir, 'song.mp3'), 'Song', bare)
+    const s = (await read(dir)).settings as Record<string, unknown>
+    expect(s.key).toEqual(KEY)
   })
 
   it('still lets a real grid overwrite the stored one', async () => {

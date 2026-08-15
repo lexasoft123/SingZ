@@ -2,7 +2,7 @@ import { app, screen } from 'electron'
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import { log } from './log'
-import { dmlFlagPath } from './models'
+import { trtrtxFlagPath } from './models'
 
 const VENDORS: Record<number, string> = {
   0x10de: 'NVIDIA',
@@ -33,8 +33,8 @@ export function logHardwareInfo(): void {
     'hw',
     `app ${app.isPackaged ? app.getVersion() : 'dev'} · electron ${process.versions.electron} · chrome ${process.versions.chrome}`
   )
-  if (process.platform === 'win32' && existsSync(dmlFlagPath())) {
-    log('hw', 'DirectML: disabled marker present — splits run on CPU')
+  if (process.platform === 'win32' && existsSync(trtrtxFlagPath())) {
+    log('hw', 'GPU engine: disabled marker present — splits run on CPU')
   }
   app
     .getGPUInfo('complete')
