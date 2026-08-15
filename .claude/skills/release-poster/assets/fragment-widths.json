@@ -1,0 +1,9 @@
+{
+  "_comment": "Display width in CSS px of each fragment in poster-template.html. Kept beside the template so prep-fragments.sh and the CSS cannot drift: a fragment resized to anything other than the width it is displayed at gets resampled by the renderer, which is what makes a poster look soft. Change one, change the other.",
+  "phone-kar-crop": 264,
+  "phone-cat-crop": 252,
+  "frag-stack": 880,
+  "frag-lyrics": 246,
+  "frag-pitch": 372,
+  "zoom-split": 196
+}
