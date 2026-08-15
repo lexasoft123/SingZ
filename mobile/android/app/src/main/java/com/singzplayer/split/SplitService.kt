@@ -132,11 +132,16 @@ class SplitService : Service() {
             cancelRequested = false
             firstCapMs = intent.getLongExtra(EXTRA_WATCHDOG_CAP_MS, 0L)
               .let { if (it > 0) it else DEFAULT_FIRST_CAP_MS }
-            startInForeground()
-            handler.removeCallbacks(pulse)
-            handler.postDelayed(pulse, 5_000)
             val projectDir = intent.getStringExtra(EXTRA_PROJECT_DIR) ?: ""
             val wantResume = intent.getBooleanExtra(EXTRA_RESUME, false)
+            try {
+              startInForeground()
+            } catch (e: Exception) {
+              refuseStart(src, model, projectDir, wantResume, startId, e)
+              return START_NOT_STICKY
+            }
+            handler.removeCallbacks(pulse)
+            handler.postDelayed(pulse, 5_000)
             thread(name = "singz-split-job") { runJob(src, model, projectDir, wantResume) }
           }
         }
@@ -150,7 +155,11 @@ class SplitService : Service() {
     try {
       val loadErr = SingzCore.ensureLoaded()
       if (loadErr != null) {
-        finishJob(dir, JobStore.STATE_FAILED, "Splitting is unavailable on this phone ($loadErr)")
+        // No record exists yet on a fresh start, and finishJob only updates
+        // one — write it, or the app hears "failed" with no file to show.
+        val msg = "Splitting is unavailable on this phone ($loadErr)"
+        writeStartFailure(dir, src, model, projectDir, wantResume, msg)
+        finishJob(dir, JobStore.STATE_FAILED, msg)
         return
       }
       // A cancel that raced the library load set only the service flag
@@ -287,6 +296,60 @@ class SplitService : Service() {
       stopForeground(STOP_FOREGROUND_REMOVE)
       stopSelf()
       jobActive = false
+    }
+  }
+
+  /**
+   * startForeground was refused, so this job cannot run — but the process is
+   * still alive, which is the whole opportunity: say so where the app looks.
+   * Android 15 refuses a mediaProcessing start while the app is not visible
+   * (the first device pass: screen off, :split died right here before writing
+   * a line, no event reached the app, and the card sat on "Starting…" until
+   * the liveness poll cleared it in silence); a used-up daily FGS budget
+   * refuses the same way. The verdict is persisted as a FAILED job.json — the
+   * durable channel, and Resume answers it — then sent, then the start ends.
+   */
+  private fun refuseStart(
+    src: String, model: String, projectDir: String, wantResume: Boolean, startId: Int, cause: Exception
+  ) {
+    Log.w(TAG, "startForeground refused — the split cannot start", cause)
+    val error = "The split couldn't start — keep the screen on and try again " +
+      "(${cause.message ?: cause.javaClass.simpleName})"
+    jobActive = false
+    writeStartFailure(jobDir(this), src, model, projectDir, wantResume, error)
+    // The app registers for events over a bind that races this start — its
+    // MSG_REGISTER is a binder round trip behind us — so the event waits a
+    // moment for it. The file already says everything; the event only makes
+    // it instant. stopSelf(startId): a newer start in the meantime keeps the
+    // service, and its own job.json makes this event a no-op in the app.
+    handler.postDelayed({
+      sendState(JobStore.STATE_FAILED, error)
+      stopSelf(startId)
+    }, 1_500)
+  }
+
+  /**
+   * Persist a failure that happened before the job could write its own record
+   * (a refused foreground start, an engine that will not load). A resume
+   * keeps the previous record's tail — srcRate and the chunk count are what
+   * make the NEXT Resume a resume, not a fresh split — and only flips the
+   * verdict; anything else records this attempt from scratch.
+   */
+  private fun writeStartFailure(
+    dir: File, src: String, model: String, projectDir: String, wantResume: Boolean, error: String
+  ) {
+    try {
+      val now = System.currentTimeMillis()
+      val prev = if (wantResume) JobStore.read(dir) else null
+      val job = if (prev != null && prev.srcPath == src) {
+        prev.copy(state = JobStore.STATE_FAILED, error = error,
+          modelPath = model, projectDir = projectDir, updatedAtMs = now)
+      } else {
+        JobStore.Job(JobStore.STATE_FAILED, src, projectDir, model, 0, 0, 0, error, now)
+      }
+      JobStore.write(dir, job)
+    } catch (e: Exception) {
+      Log.w(TAG, "persisting the start failure failed", e)
     }
   }
 

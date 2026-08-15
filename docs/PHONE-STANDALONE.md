@@ -398,9 +398,32 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     screen off, `:split` died at startForeground before writing job.json,
     no event reached the app, and the card showed "Starting…" until the
     liveness poll quietly cleared it. A real user always taps Split with
-    the screen on, so the product path is safe, but the failure is
-    currently silent — the follow-up is to surface a start failure as a
-    failed card with honest copy. Device-driver rules: keep the screen on
+    the screen on, so the product path is safe; the failure itself is now
+    honest, from both ends. `SplitService` catches whatever
+    `startForeground` throws (`refuseStart`): it persists a FAILED
+    job.json — "The split couldn't start — keep the screen on and try again
+    (<the system's reason>)", keeping a resume's tail so the next Resume
+    still resumes — waits 1.5 s for the app's MSG_REGISTER (a binder round
+    trip behind the start) so the state event lands, then `stopSelf(startId)`;
+    the same record is written for an engine that will not load, which
+    used to reach the app as "failed" with no file to show. And the
+    catalog's liveness poll no longer clears a card it never heard from:
+    the run state carries `started` (false from the kick until the first
+    event or job.json), and no file + `started === false` (+ no Cancel
+    pressed) becomes "The split never started — try again", which covers a
+    service that is never even created (the HyperOS empty shell below).
+    Guarded by `mobile/tests/split-refused-android.cjs`, which reproduces
+    both on stock Android without a phone: "Restricted" battery + an idle
+    uid make the system drop the start silently (`Background start not
+    allowed`, no process — the never-started card 12 s after wake); and a
+    3 s `media_processing_fgs_timeout_duration` lets the system's own
+    onTimeout end one split, after which the next `startForeground` throws
+    the REAL `ForegroundServiceStartNotAllowedException` ("Time limit
+    already exhausted for foreground service type mediaProcessing") from
+    the same call the phone refused — the card showed the refusal 3.0 s
+    after Resume, by event. Stock Android 16 allows the screen-off start
+    itself (top-sleeping activity, visibility grace), so the device recipe
+    is kept in the suite as an observation, not a repro. Device-driver rules: keep the screen on
     (`stay_on_while_plugged_in 3`) and the app foregrounded for every
     service start; MIUI additionally re-disables Install-via-USB
     periodically (INSTALL_FAILED_USER_RESTRICTED with a phone-side
@@ -430,9 +453,10 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     earlier the same night (the 44.1 s sample pass) — prime suspect is
     MIUI's install-attribution risk flag from the blocked-install episode
     (Install-via-USB refusals) poisoning the second install. Before the
-    fleet gets P2: retest the RELEASE APK on a rebooted Xiaomi, and the
-    FGS-failure-surfacing follow-up already filed covers the UI half (the
-    card must say the start failed instead of clearing silently).
+    fleet gets P2: retest the RELEASE APK on a rebooted Xiaomi. The UI half
+    is done: a service that never comes up leaves no file and no event, and
+    the card now says "The split never started — try again" instead of
+    clearing (the `started` flag on the run state, above).
   - **Phase 3a — split on iOS (2026-08-15 morning)**: the same JS lit up
     UNTOUCHED — `splitAvailable()` started answering yes and the catalog
     card, flow, adoption and liveness logic all ran as-is; the platform work

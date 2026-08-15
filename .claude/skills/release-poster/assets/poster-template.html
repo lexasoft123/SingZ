@@ -1,0 +1,197 @@
+<meta charset="utf-8" />
+<title>SingZ __VERSION__ poster</title>
+<style>
+  @font-face {
+    font-family: 'Bricolage';
+    src: url('__REPO__/node_modules/@fontsource-variable/bricolage-grotesque/files/bricolage-grotesque-latin-wght-normal.woff2') format('woff2');
+    font-weight: 200 800;
+  }
+  @font-face {
+    font-family: 'Martian';
+    src: url('__REPO__/node_modules/@fontsource-variable/martian-mono/files/martian-mono-latin-wght-normal.woff2') format('woff2');
+    font-weight: 100 800;
+  }
+
+  :root {
+    --bg: #0b0907;
+    --panel: #12100d;
+    --accent: #ffa028;
+    --text: #f6f1e8;
+    --dim: #a99e8a;
+    --faint: #7b7263;
+    --line: rgba(255, 240, 214, 0.12);
+    --vocals: #e8746a;
+    --drums: #e8b93c;
+    --bass: #5b6ee8;
+    --guitar: #e8823c;
+    --inst: #3ec9a0;
+    --piano: #b98ce8;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1024px; height: 1280px;
+    background: var(--bg); color: var(--text);
+    font-family: 'Bricolage', system-ui, sans-serif;
+    overflow: hidden; position: relative;
+  }
+
+  /* Stage light: hot centre, dark corners — the studio at night */
+  .bloom {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(820px 660px at 50% 52%, rgba(255, 160, 40, 0.26), transparent 66%),
+      radial-gradient(560px 520px at 6% 88%, rgba(232, 116, 106, 0.14), transparent 70%),
+      radial-gradient(560px 460px at 96% 24%, rgba(91, 110, 232, 0.14), transparent 70%);
+  }
+  .vignette {
+    position: absolute; inset: 0;
+    background: radial-gradient(1100px 900px at 50% 46%, transparent 46%, rgba(0, 0, 0, 0.72) 100%);
+  }
+  .grain {
+    position: absolute; inset: 0; opacity: 0.62; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4'/></filter><rect width='160' height='160' filter='url(%23n)' opacity='0.5'/></svg>");
+  }
+
+  .sheet { position: absolute; inset: 0; padding: 48px 52px 44px; display: flex; flex-direction: column; }
+
+  /* ---- masthead ---- */
+  .top { display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 17px; }
+  .bars { display: flex; flex-direction: column; gap: 5px; }
+  .bars i { display: block; height: 7px; border-radius: 4px; }
+  .bars i:nth-child(1) { width: 46px; background: var(--vocals); }
+  .bars i:nth-child(2) { width: 34px; background: var(--drums); }
+  .bars i:nth-child(3) { width: 40px; background: var(--bass); }
+  .bars i:nth-child(4) { width: 27px; background: var(--inst); }
+  .wordmark { font-size: 44px; font-weight: 800; letter-spacing: -0.025em; }
+  .wordmark b { color: var(--accent); }
+  .ver {
+    font-family: 'Martian', monospace; font-size: 25px; font-weight: 600;
+    color: #241705; background: var(--accent);
+    padding: 10px 20px 9px; border-radius: 999px; letter-spacing: 0.01em;
+    box-shadow: 0 0 36px rgba(255, 160, 40, 0.5);
+  }
+
+  /* ---- thesis: few words, very large ---- */
+  h1 {
+    margin-top: 30px;
+    font-size: 96px; line-height: 0.9; font-weight: 800;
+    letter-spacing: -0.045em; text-wrap: balance;
+  }
+  h1 em { font-style: normal; color: var(--accent); }
+  .sub {
+    margin-top: 20px; font-size: 37px; line-height: 1.16;
+    color: var(--dim); font-weight: 500; letter-spacing: -0.015em;
+  }
+
+  /* six lanes, six colours — the product in one rule */
+  .spectrum { margin-top: 24px; display: flex; gap: 5px; height: 9px; }
+  .spectrum i { flex: 1; border-radius: 4px; }
+
+  /* ---- collage ---- */
+  .collage { position: relative; height: 566px; margin: 20px -52px 0; }
+  .frag {
+    position: absolute; border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--line); background: var(--panel);
+    box-shadow: 0 34px 70px rgba(0, 0, 0, 0.78), 0 6px 18px rgba(0, 0, 0, 0.6);
+  }
+  .frag img { display: block; }
+
+  .f-stack { left: -96px; top: 30px; width: 540px; transform: rotate(-3.5deg); }
+  .f-stack img { width: 880px; margin: -26px 0 0 -40px; }
+
+  /* whole plates, kept inside the trim — a cut word reads as a mistake */
+  .f-lyric { right: 10px; top: 10px; width: 246px; height: 300px; transform: rotate(3.2deg); }
+  .f-lyric img { width: 246px; }
+
+  .f-pitch { right: 4px; top: 446px; width: 372px; transform: rotate(2.6deg); }
+  .f-pitch img { width: 372px; }
+
+  .phone {
+    position: absolute; border-radius: 34px; overflow: hidden;
+    border: 1px solid rgba(255, 240, 214, 0.18);
+    box-shadow: 0 46px 90px rgba(0, 0, 0, 0.86), 0 0 0 6px rgba(9, 8, 6, 0.95);
+    background: #000;
+  }
+  .phone img { display: block; width: 100%; }
+  /* Widths are the BORDER box (box-sizing above) and .phone has a 1px border,
+     so these are 2px wider than the image inside them. Get this wrong and the
+     img lands 2px narrower than prep-fragments.sh built it, which resamples
+     the phone shots at 0.992x — invisible, same size on screen, and it undoes
+     the whole point of preparing them. Content box must equal the width in
+     assets/fragment-widths.json: 252 and 264. */
+  .p-cat { left: 40px; top: 168px; width: 254px; transform: rotate(-5deg); }
+  .p-kar { left: 318px; top: 4px; width: 266px; transform: rotate(1.4deg); z-index: 3; }
+
+  /* the one control this release is about, blown up so it reads anywhere */
+  .split-zoom {
+    position: absolute; right: 116px; top: 250px; z-index: 6;
+    border-radius: 14px; overflow: hidden; transform: rotate(-6deg);
+    border: 1px solid rgba(255, 160, 40, 0.5);
+    box-shadow: 0 0 54px rgba(255, 160, 40, 0.42), 0 26px 48px rgba(0, 0, 0, 0.8);
+  }
+  .split-zoom img { display: block; width: 196px; }
+
+  .note {
+    position: absolute; font-family: 'Martian', monospace; font-size: 23px;
+    font-weight: 600; letter-spacing: 0.02em; color: var(--accent); z-index: 7;
+    text-shadow: 0 3px 16px rgba(0, 0, 0, 0.95);
+  }
+  .n1 { right: 322px; top: 282px; text-align: right; }
+
+  /* ---- what changed: three short lines, sized for a phone ---- */
+  .foot { margin-top: 22px; display: flex; flex-direction: column; gap: 15px; }
+  .bullet { display: flex; align-items: center; gap: 16px; font-size: 32px; letter-spacing: -0.02em; }
+  .bullet i { width: 14px; height: 14px; border-radius: 50%; flex: none; }
+  .bullet b { font-weight: 700; }
+  .bullet span { color: var(--dim); font-weight: 500; }
+  .plat {
+    margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: 'Martian', monospace; font-size: 24px; letter-spacing: 0.03em;
+    color: var(--faint); text-transform: uppercase; font-weight: 500;
+  }
+  .plat b { color: var(--text); font-weight: 600; }
+</style>
+
+<div class="bloom"></div>
+<div class="vignette"></div>
+<div class="grain"></div>
+
+<div class="sheet">
+  <div class="top">
+    <div class="brand">
+      <div class="bars"><i></i><i></i><i></i><i></i></div>
+      <div class="wordmark">Sing<b>Z</b></div>
+    </div>
+    <div class="ver">v0.16.0</div>
+  </div>
+
+  <h1>Split a song <em>on your phone</em>.</h1>
+  <div class="sub">No computer. No cable. No waiting.</div>
+
+  <div class="spectrum">
+    <i style="background:var(--vocals)"></i><i style="background:var(--drums)"></i><i style="background:var(--bass)"></i><i style="background:var(--guitar)"></i><i style="background:var(--piano)"></i><i style="background:var(--inst)"></i>
+  </div>
+
+  <div class="collage">
+    <div class="frag f-stack"><img src="__SHOTS__/frag-stack.png" /></div>
+    <div class="frag f-lyric"><img src="__SHOTS__/frag-lyrics.png" /></div>
+    <div class="frag f-pitch"><img src="__SHOTS__/frag-pitch.png" /></div>
+
+    <div class="phone p-cat"><img src="__SHOTS__/phone-cat-crop.png" /></div>
+    <div class="phone p-kar"><img src="__SHOTS__/phone-kar-crop.png" /></div>
+
+    <div class="note n1">One tap →</div>
+    <div class="split-zoom"><img src="__SHOTS__/zoom-split.png" /></div>
+  </div>
+
+  <div class="foot">
+    <div class="bullet"><i style="background:var(--vocals)"></i><div><b>Six stems</b> <span>— in about a song-length.</span></div></div>
+    <div class="bullet"><i style="background:var(--drums)"></i><div><b>Interrupted?</b> <span>It carries on.</span></div></div>
+    <div class="bullet"><i style="background:var(--inst)"></i><div><b>Keys read the harmony</b> <span>— not the tune.</span></div></div>
+    <div class="plat"><span><b>iPhone</b> · <b>Android</b> · <b>Mac</b> · <b>Windows</b></span><span>SingZ</span></div>
+  </div>
+</div>
