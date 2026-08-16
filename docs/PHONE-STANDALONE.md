@@ -752,11 +752,42 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       peak, on a queue that may run beside a player — each stem is now
       summed and dropped as it is converted, same element order, parity
       untouched.
-    - Next: detectBeats + courts into the core (the same method,
-      compare-grids over the corpus as the gate) — which is now the whole
-      remaining cost of a phone analysis — then the desktop's
-      `analysis:run` IPC over the CLI, then retire the TS detectors behind
-      a one-release flag.
+    - **The beat detector begins (2026-08-16, front end only)**: this one
+      is ~4300 lines across analysis.ts and courts.ts, and unlike melody
+      and key it is ONE pipeline with no exported seams — a wrong grid
+      cannot be bisected from its output. So the port mirrors the TS's own
+      `debug` object stage for stage (it already carries tau, consistency,
+      fill, octaves, reject and two dozen more, so no desktop change was
+      needed), and `eval/beats-parity.mjs` compares those in pipeline order
+      and names the FIRST stage that diverges. "The tempo family disagrees
+      on Panzerkampf, everything before it matches" is a debuggable
+      sentence; "Panzerkampf disagrees" is not.
+      Landed so far: the onset front end (broadband + low-band energy,
+      flux, drum peaks), the instrument fill with its 8-second drum-free
+      span rule, local-mean normalisation, the windowed-autocorrelation
+      tempo family, and the DP tracker's octave choice with its gates.
+      **Identical on all four library projects across 12 compared stages**
+      — tau 71.656 / 98.380 / 123.495 / 75.516, every fill and octave
+      figure matching to the last digit. Host tests cover the shapes with
+      no corpus (a 120 bpm click train is tracked at 120 and not at an
+      octave of it; a sustained pad earns no metronome and says why).
+      `monoAt44k` is now shared out of analysis.h rather than re-rolled
+      here — the reviewer's point that the bounds and ordering discipline
+      should travel with it, made before there were two callers.
+      Still to port: the tracker's span gates and onset snap, the head
+      backcast, the downbeat votes (harmonic change, vocal entries, lyric
+      lines), sanitizeBars, the ML lattice, and courts.ts entire.
+    - **A test-harness trap worth the line it cost**: the core host tests'
+      `CHECK` macro declared `const bool ok = (cond)` internally, so a test
+      whose own local was named `ok` expanded to `const bool ok = (ok)` —
+      self-initialisation, garbage, and three green stages reported FAIL
+      while the CLI and a standalone probe ran the same code correctly at
+      the same moment. The macro's internal is now `check_ok_`; a macro
+      that captures the caller's names is a trap for every test after it.
+    - Next: the rest of detectBeats and courts (same method, same harness)
+      — which is now the whole remaining cost of a phone analysis — then
+      the desktop's `analysis:run` IPC over the CLI, then retire the TS
+      detectors behind a one-release flag.
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the

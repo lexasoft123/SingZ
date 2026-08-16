@@ -16,16 +16,23 @@
 #include <vector>
 
 #include "analysis.h"
+#include "beats.h"
 #include "melody.h"
 #include "resample.h"
 #include "wav.h"
 
 static int failures = 0;
+// The internal name is deliberately ugly: it used to be `ok`, and a test
+// whose own local was called `ok` expanded to `const bool ok = (ok);` —
+// self-initialisation, so the check read garbage and reported FAIL on code
+// that was working (measured: the beats front-end, which the CLI and a
+// standalone probe both ran correctly at the same moment). A macro that
+// silently captures the caller's names is a trap for every test after it.
 #define CHECK(label, cond)                                        \
   do {                                                            \
-    const bool ok = (cond);                                       \
-    std::printf("%s  %s\n", ok ? "PASS" : "FAIL", label);         \
-    if (!ok) failures++;                                          \
+    const bool check_ok_ = (cond);                                \
+    std::printf("%s  %s\n", check_ok_ ? "PASS" : "FAIL", label);  \
+    if (!check_ok_) failures++;                                   \
   } while (0)
 
 static std::vector<float> sine(double hz, int rate, int frames, int channels) {
@@ -381,11 +388,53 @@ static void keyTests() {
   }
 }
 
+// The beat tracker's front end (beats.cpp): a synthetic click train at a
+// known tempo is found at that tempo and not at an octave of it, and material
+// with no impulsive onsets is refused rather than given a metronome. The
+// bit-parity claim against the desktop TS lives in eval/beats-parity.mjs,
+// which compares stage by stage over real stems.
+static void beatsTests() {
+  const int sr = 44100;
+  const int frames = sr * 30;
+  singz::AnalysisStem drums;
+  drums.mono.assign(static_cast<size_t>(frames), 0.0f);
+  drums.sampleRate = sr;
+  // 120 bpm: a click every 0.5 s, accented every fourth.
+  const double period = 0.5 * sr;
+  for (int b = 0; b * period < frames - 400; b++) {
+    const int st = static_cast<int>(std::lrint(b * period));
+    const double amp = (b % 4 == 0) ? 0.95 : 0.6;
+    for (int i = 0; i < 300; i++)
+      drums.mono[static_cast<size_t>(st + i)] += static_cast<float>(amp * std::exp(-i / 30.0) * std::sin(i * 0.5));
+  }
+  singz::BeatDebug d;
+  const bool ok = singz::trackTempo(drums, {}, d);
+  CHECK("beats: a 120 bpm click train is tracked", ok);
+  CHECK("beats: at 120 bpm, not an octave of it",
+        ok && std::fabs(d.chosenBpm - 120) < 2.0);
+  CHECK("beats: the windows agree (not rubato)", ok && d.consistency >= 0.6);
+  CHECK("beats: stamp is the TS's BEAT_DETECT_VERSION", singz::kBeatDetectVersion == 21);
+
+  // A sustained pad has periodicity but no attacks — it must be refused.
+  singz::AnalysisStem pad;
+  pad.mono.assign(static_cast<size_t>(frames), 0.0f);
+  pad.sampleRate = sr;
+  double ph = 0;
+  for (int i = 0; i < frames; i++) {
+    ph += 2 * M_PI * 220 / sr;
+    pad.mono[static_cast<size_t>(i)] = static_cast<float>(0.3 * std::sin(ph));
+  }
+  singz::BeatDebug pd;
+  CHECK("beats: a sustained pad earns no metronome", !singz::trackTempo(pad, {}, pd));
+  CHECK("beats: and says why", !pd.reject.empty());
+}
+
 int main() {
   resamplerTests();
   wavTests();
   melodyTests();
   keyTests();
+  beatsTests();
   std::printf(failures == 0 ? "\nALL CORE HOST TESTS PASS\n" : "\n%d FAILURE(S)\n", failures);
   return failures == 0 ? 0 : 1;
 }

@@ -36,7 +36,7 @@ if (!existsSync(lib)) {
   console.error('mobile/src/gen/analysis-lib.js is missing — run `npm ci` in mobile/ (postinstall builds it)')
   process.exit(2)
 }
-const { estimateKeyFromStems } = await import(pathToFileURL(lib).href)
+const { estimateKeyFromStems, KEY_DETECT_VERSION } = await import(pathToFileURL(lib).href)
 if (dirs.length === 0) dirs.push(join(root, 'mobile', 'assets', 'sample'))
 
 /** The instrument stems in App.tsx's order (every stem that is not vocals/drums/bass). */
@@ -127,11 +127,14 @@ for (const dir of dirs) {
   const c = JSON.parse(execFileSync(bin, cliArgs, { maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
   const cMs = performance.now() - t1
 
-  const same = (ts === null && c.key === null) || (ts && c.key && ts.pc === c.key.pc && ts.minor === c.key.minor)
+  const stampOk = c.detVersion === KEY_DETECT_VERSION
+  const same =
+    ((ts === null && c.key === null) || (ts && c.key && ts.pc === c.key.pc && ts.minor === c.key.minor)) && stampOk
   if (!same) failed++
   console.log(`${same ? 'PASS' : 'FAIL'}  ${dir}`)
   console.log(`      ts ${say(ts)} (${tsMs.toFixed(0)} ms) · c++ ${say(c.key)} (${cMs.toFixed(0)} ms, incl. spawn)` +
-    ` · stems ${instPaths.length} inst${bassPath ? ' + bass' : ''}`)
+    ` · stems ${instPaths.length} inst${bassPath ? ' + bass' : ''}` +
+    (stampOk ? '' : ` · STAMP DIFF: ts v${KEY_DETECT_VERSION} vs c++ v${c.detVersion}`))
 }
 console.log(failed === 0 ? '\nKEY PARITY: IDENTICAL on every project' : `\n${failed} PROJECT(S) DIFFER`)
 process.exit(failed === 0 ? 0 : 1)

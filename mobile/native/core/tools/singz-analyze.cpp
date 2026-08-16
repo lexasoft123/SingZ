@@ -6,6 +6,7 @@
 //   singz-analyze melody --f32 <mono float32 file> --sr <rate> [--raw]
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
 //   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
+//   singz-analyze beats --drums <d.wav> [--inst <a.wav> ...]   (staged debug)
 //
 // Prints one JSON object on stdout. Floats are printed with 9 significant
 // digits, which round-trips float32 exactly — the parity harness compares
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "../analysis.h"
+#include "../beats.h"
 #include "../melody.h"
 #include "../wav.h"
 
@@ -125,6 +127,64 @@ int main(int argc, char** argv) {
     }
     std::printf("{\"detVersion\":%d,\"key\":{\"pc\":%d,\"minor\":%s}}\n", singz::kKeyDetectVersion, k.pc,
                 k.minor ? "true" : "false");
+    return 0;
+  }
+  if (cmd == "beats") {
+    // The tracker's staged debug, named exactly as analysis.ts's own `debug`
+    // object names each field — the harness compares stage by stage, so a
+    // divergence points at the stage that caused it, not just the song.
+    singz::AnalysisStem drums;
+    std::vector<singz::AnalysisStem> inst;
+    bool haveDrums = false;
+    for (int i = 2; i < argc; i++) {
+      const bool isDrums = std::strcmp(argv[i], "--drums") == 0;
+      const bool isInst = std::strcmp(argv[i], "--inst") == 0;
+      if (!(isDrums || isInst) || i + 1 >= argc) continue;
+      const std::string path = argv[++i];
+      singz::MonoWav w = singz::readWavMono(path);
+      if (!w.ok) {
+        std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
+        return 1;
+      }
+      singz::AnalysisStem st;
+      st.mono = std::move(w.samples);
+      st.sampleRate = w.sampleRate;
+      if (isDrums) {
+        drums = std::move(st);
+        haveDrums = true;
+      } else {
+        inst.push_back(std::move(st));
+      }
+    }
+    if (!haveDrums) {
+      std::fprintf(stderr, "beats needs --drums\n");
+      return 2;
+    }
+    singz::BeatDebug d;
+    const bool ok = singz::trackTempo(drums, inst, d);
+    std::printf("{\"detVersion\":%d,\"ok\":%s,\"frames\":%d,\"drumPeaks\":%d,\"peaks\":%d,",
+                singz::kBeatDetectVersion, ok ? "true" : "false", d.frames, d.drumPeaks, d.peaks);
+    std::printf("\"fluxSum\":%.17g,\"fluxMean\":%.17g,\"windows\":%d,", d.fluxSum, d.fluxMean, d.windows);
+    std::printf("\"tau\":%.17g,\"consistency\":%.17g,\"chosenBpm\":%.17g,", d.tau, d.consistency, d.chosenBpm);
+    std::printf("\"support\":%.17g,\"activeFrac\":%.17g,\"steadiness\":%.17g,\"rough\":%.17g,", d.support,
+                d.activeFrac, d.steadiness, d.rough);
+    if (d.fillApplied)
+      std::printf("\"fill\":{\"alpha\":%.17g,\"dTop\":%.17g,\"iTop\":%.17g,\"instMaxima\":%d,\"gSum\":%.17g},",
+                  d.fillAlpha, d.fillDTop, d.fillITop, d.fillInstMaxima, d.fillGSum);
+    else if (d.fillSkipped)
+      std::printf("\"fill\":{\"skipped\":true,\"instMaxima\":%d},", d.fillInstMaxima);
+    else
+      std::printf("\"fill\":null,");
+    std::printf("\"octaves\":[");
+    for (size_t i = 0; i < d.octaves.size(); i++) {
+      const singz::BeatDebug::Octave& o = d.octaves[i];
+      std::printf("%s{\"bpm\":%.17g,\"support\":%.17g,\"steadiness\":%.17g,\"alternation\":%.17g,"
+                  "\"rough\":%.17g,\"prior\":%.17g,\"score\":%.17g}",
+                  i ? "," : "", o.bpm, o.support, o.steadiness, o.alternation, o.rough, o.prior, o.score);
+    }
+    std::printf("],\"reject\":");
+    if (d.reject.empty()) std::printf("null}\n");
+    else std::printf("\"%s\"}\n", d.reject.c_str());
     return 0;
   }
   std::fprintf(stderr, "unknown command %s\n", cmd.c_str());

@@ -38,7 +38,7 @@ if (!existsSync(lib)) {
   console.error('mobile/src/gen/analysis-lib.js is missing — run `npm ci` in mobile/ (postinstall builds it)')
   process.exit(2)
 }
-const { trackMelodyCore } = await import(pathToFileURL(lib).href)
+const { trackMelodyCore, PITCH_DETECT_VERSION } = await import(pathToFileURL(lib).href)
 
 // The bundled sample by default: its stems as 44.1 kHz stereo PCM16 WAVs
 // (the split's own format), rendered once with ffmpeg.
@@ -111,11 +111,15 @@ for (const file of files) {
     return { label, diff, first, maxAbs, n: a.length, m: B.length }
   }
   const rows = [cmp('f0', ts.f0, c.f0), cmp('raw', ts.raw, c.raw), cmp('rms', ts.rms, c.rms)]
-  const ok = rows.every((r) => r.diff === 0 && r.n === r.m) && ts.hopSec === c.hopSec
+  // The stamp from both sides: a bump the stored-analysis rule demands would
+  // otherwise leave the C++ copy silently behind, and nothing else checks it.
+  const stampOk = c.detVersion === PITCH_DETECT_VERSION
+  const ok = rows.every((r) => r.diff === 0 && r.n === r.m) && ts.hopSec === c.hopSec && stampOk
   if (!ok) failed++
   const voiced = ts.f0.filter((v) => v > 0).length
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${file}`)
-  console.log(`      ${ts.f0.length} frames, ${voiced} voiced · ts ${tsMs.toFixed(0)} ms, c++ ${cMs.toFixed(0)} ms (incl. spawn) · hopSec ${ts.hopSec === c.hopSec ? 'same' : `DIFF ${ts.hopSec} vs ${c.hopSec}`}`)
+  console.log(`      ${ts.f0.length} frames, ${voiced} voiced · ts ${tsMs.toFixed(0)} ms, c++ ${cMs.toFixed(0)} ms (incl. spawn) · hopSec ${ts.hopSec === c.hopSec ? 'same' : `DIFF ${ts.hopSec} vs ${c.hopSec}`}` +
+    (stampOk ? '' : ` · STAMP DIFF: ts v${PITCH_DETECT_VERSION} vs c++ v${c.detVersion}`))
   for (const r of rows) if (r.diff) console.log(`      ${r.label}: ${r.diff} differing (first at ${r.first}, maxAbs ${r.maxAbs.toExponential(3)}, ts ${r.n} vs c++ ${r.m})`)
 }
 console.log(failed === 0 ? '\nMELODY PARITY: IDENTICAL on every file' : `\n${failed} FILE(S) DIFFER`)

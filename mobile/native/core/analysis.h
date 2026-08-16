@@ -19,6 +19,15 @@ struct AnalysisStem {
   double sampleRate = 44100;
 };
 
+/**
+ * A stem at the detectors' own rate: all channels already folded (wav.h), the
+ * sample rate converted to 44.1 kHz by linear interpolation — analysis.ts's
+ * `monoAt44k`, minus the channel half it no longer needs. Shared rather than
+ * re-rolled per detector: beats.cpp wants exactly this and the ordering and
+ * bounds discipline should travel with it, not be repeated.
+ */
+std::vector<float> monoAt44kPublic(const AnalysisStem& stem);
+
 struct KeyGuess {
   int pc = 0;        // 0 = C … 11 = B
   bool minor = false;

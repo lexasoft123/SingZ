@@ -95,6 +95,8 @@ double correlate(const double hist[12], const double profile[12], int rot) {
 
 }  // namespace
 
+std::vector<float> monoAt44kPublic(const AnalysisStem& stem) { return monoAt44k(stem); }
+
 KeyGuess estimateKey(const float* f0, size_t n) {
   KeyGuess best;
   double hist[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};

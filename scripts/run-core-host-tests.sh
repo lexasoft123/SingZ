@@ -12,6 +12,7 @@ CXX=${CXX:-c++}
   -I "$ROOT/mobile/native/core" \
   "$ROOT/tests/native/core_host_tests.cpp" \
   "$ROOT/mobile/native/core/analysis.cpp" \
+  "$ROOT/mobile/native/core/beats.cpp" \
   "$ROOT/mobile/native/core/melody.cpp" \
   "$ROOT/mobile/native/core/resample.cpp" \
   "$ROOT/mobile/native/core/wav.cpp" \
