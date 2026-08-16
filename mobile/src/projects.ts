@@ -149,6 +149,15 @@ export interface LoadedLane {
 
 export interface LoadedProject {
   name: string
+  /** The project folder this was loaded from — absent for the bundled
+   *  sample. What an analysis result names, so the player can tell its own
+   *  song's grid from a neighbour's. */
+  dir?: string
+  /** Which library the dir belongs to — a dir name is unique only WITHIN a
+   *  library (the phone's own "Foo" and the desktop's cloud-folder "Foo"
+   *  share the name), and only the phone's own library is ever analysed.
+   *  Set by the catalog, which knows the mode. */
+  library?: 'phone' | 'folder' | 'gdrive'
   doc: ProjectDoc
   lyrics: LyricsDoc | null
   /** Stems first, in display order, then the tracks the singer added. */
@@ -336,5 +345,5 @@ export async function loadProject(
       lyrics = null
     }
   }
-  return { name: doc.name ?? entry.dir, doc, lyrics, stems }
+  return { name: doc.name ?? entry.dir, dir: entry.dir, doc, lyrics, stems }
 }

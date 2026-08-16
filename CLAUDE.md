@@ -156,6 +156,19 @@ sign-in with it.
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —
   re-assert per frame (count-in dots pattern in LyricsPanel).
+- **A worklet's body runs on Hermes UNLOWERED, and Hermes has no per-iteration
+  loop bindings** — the worklets babel plugin serializes a `'worklet'`
+  function as source (plugins run before presets, so Metro's block-scoping
+  transform never touches it) and the worklet runtime evaluates that source
+  raw; measured on the iOS sim: `for (let k of ['a','b','c']) fns.push(() =>
+  k)` yields `c,c,c` there, `for (let i…)` likewise (function-scoped closures
+  such as `forEach` callbacks are fine). Silent and wrong, never a throw: the
+  first casualty was esbuild's own export helper (a getter closure per key in
+  a for-of), which resolved EVERY export of the analysis bundle to the last
+  one — `lib.detectBeats` was `trackMelodyCore`. `build-analysis.mjs` runs
+  the worklet-bound bundle through `@babel/plugin-transform-block-scoping`
+  before inlining it (`mobile/src/gen/analysis-worklet.js`); any hand-written
+  worklet with a closure inside a `let` loop needs the same care.
 - **The mobile lyrics are one Skia canvas** (`SkiaLyrics.tsx`): the whole
   column, the sung line painted with a gradient whose edge travels along x —
   desktop's `background-clip: text` a layer down. The canvas is

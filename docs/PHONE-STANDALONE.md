@@ -1,6 +1,6 @@
 # Phone standalone song-adding — research record & architecture
 
-Status: **Phase 0 (spike + rig) in progress.** Researched 2026-08-14 (three codebase
+Status: **Phases 0–3 shipped (v0.16.x); Phase 4a (beats/key/melody on-device) landing.** Researched 2026-08-14 (three codebase
 exploration agents + web verification + one design agent); scope decisions and the
 architecture below approved the same day. This document is the record — read it before
 touching the phone pipeline, and update it as phases land (the docs/BEAT-DETECTION.md
@@ -537,6 +537,128 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     half), `zipalign -c -P 16` on the packaged APK, the split
     notification's visibility on HyperOS, and the `:split` service on a
     rebooted Xiaomi with a release APK (the HyperOS finding above).
+  - **Phase 4a — beats, key and melody on the phone (2026-08-16)**: the
+    desktop's detectors run on the phone, off the app thread, and write
+    into project.json. The host rule from Phase 0 was decided for Hermes;
+    the question left was WHERE in Hermes, since 65 s of pYIN cannot sit on
+    the thread that draws the app. Answer: a **worklet runtime**
+    (`react-native-worklets`, already a dependency of reanimated) —
+    `mobile/src/analysis/host.ts` creates one runtime, once, and the
+    detectors reach it as CODE: `build-analysis.mjs` now also emits
+    `gen/analysis-worklet.js`, the whole desktop bundle inlined in ONE
+    function carrying the `'worklet'` directive, which the worklets babel
+    plugin serializes into any runtime (92 kB of source, compiled once per
+    runtime by the plugin's own hash cache, module body run once by a
+    global memo). No Bundle Mode switch, no app-wide change.
+    - **The trap that cost the first run**: the serialized worklet is
+      evaluated RAW on Hermes — plugins run before presets, so Metro's
+      block-scoping transform never sees it — and Hermes has no
+      per-iteration bindings for loop `let`s: measured on the sim,
+      `for (let k of ['a','b','c']) fns.push(() => k)` yields `c,c,c` and
+      `for (let i…)` likewise (function-scoped closures are fine). Silent
+      and wrong: esbuild's own export helper is a getter closure per key in
+      a for-of, so EVERY export of the bundle resolved to the last one —
+      `lib.detectBeats` was `trackMelodyCore`, and the first host spike
+      returned a melody where a grid was asked for. The emitter now runs
+      the bundle through `@babel/plugin-transform-block-scoping` before
+      inlining it; the detectors close over loop lets too, so without it
+      the wrong answers would not always be that loud (CLAUDE.md gotcha).
+    - **Proof (iPhone 16 Pro sim, `__test.hostSpike(3)` vs the in-thread
+      `analysisSpike(3)`)**: melody 66.0 s on the worklet runtime vs 60.2 s
+      in-thread, beats 1.3 s, two 8 MB stems crossed in 26 ms; **f0 7 187
+      frames and 350 beats / 87 downbeats IDENTICAL** — a fourth runtime
+      agreeing to the bit (node/V8, Android Hermes, iOS Hermes, and now the
+      worklet Hermes); the app thread stayed **80% free** during the run
+      (1 081 of an ideal 1 347 heartbeat ticks at 50 ms) where the
+      in-thread run blanked the driver's polls for a minute; progress
+      reached the app 29 times, thinned to 3% steps.
+    - **Memory, measured**: runtimes share nothing — a Float32Array is
+      copied twice on the way over (a byte vector, then a fresh
+      ArrayBuffer there), so stems cross ONE AT A TIME into a store the far
+      side keeps between calls (six 4-min mono stems ≈ 242 MB resident
+      there, `js_externalBytes`); the far side frees lazily even with its
+      `gc()` (Hades finalizes external memory on its own schedule — after a
+      clear+gc it held 121/161/242 MB on successive rounds), but the PEAK
+      stays bounded at one song's worth plus the lag (a second song's puts
+      displaced the first's; six re-puts under one key peaked at 484 MB
+      because six new landed before six old were collected). `clearStems`
+      calls `gc()` when the runtime exposes it and `runtimeStats()` reads
+      Hermes' own numbers for the log. Six stems at 44.1 kHz mono is the
+      whole far-side budget; the near side drops each mono copy as it
+      lands. Load path: `decodeAudioData(file, 44100)` → fold → `release()`
+      on the spot — 44.1 kHz IS the detectors' rate, so `monoAt44k` hands
+      the array straight back and the far side copies nothing more.
+    - **The pipeline (`analysis/pipeline.ts`, dependency-injected, 15 jest
+      cases)** is the desktop's rules ported: (re)detect when a grid is
+      missing or an `auto` grid carries an older stamp, never a `manual`
+      one, `userBars` re-folded with the desktop's own `applyUserBars`;
+      re-track a melody with an old stamp or a length that is another
+      song's (`melodyFitsSong`); re-read the key under a new stamp and
+      never store the melody-histogram fallback; a detector's NEGATIVE
+      answer (no grid in these drums, a silent harmonic bed) is stored under
+      its stamp too — `settings.analysisNone`, phone-only, ignored by every
+      reader — because the desktop's "ask again on every open" costs it a
+      second on decoded buffers and would cost the phone six decodes and a
+      minute behind the player, forever, for a drumless song (the review
+      caught it; a newer detector asks once more, exactly like a stale
+      grid); results land by re-read →
+      merge → write of the doc ON DISK (a save that landed mid-run is kept),
+      absent results delete nothing, and the stems the answer was computed
+      from are compared against the doc's stemHashes before every write —
+      a project re-split under the run drops its answer, a project deleted
+      under it throws. Order beats → key → melody with a write after each
+      half: the grid is what the phone plays, the melody is a minute of
+      pYIN, and a kill in that minute leaves the useful half saved; before
+      that minute the far side drops every stem but the vocals
+      (`keepStems`), since the long stage often overlaps a player holding
+      the same song decoded for playback. `analysis/run.ts` is one queue
+      app-wide (the host has one stem store), collapsing duplicate asks,
+      announcing results on `DeviceEventEmitter('singzAnalysis')` — a
+      PARTIAL event the moment the grid is written and a final one after
+      the melody — the catalog refreshes its listing on it, and the PLAYER,
+      if it is showing that dir IN THE PHONE LIBRARY (a dir name is unique
+      only within one library; the desktop's cloud-folder "Foo" must not
+      wear the phone's "Foo" grid), sets the grid live so the metronome and
+      count-in light up without a reopen. Triggers: after adoption (the split card clears, the
+      analysis card takes over: "Reading the drums…", "Finding the beat…",
+      "Tracking the melody · 46%") and on open of a phone-library project
+      whose doc says something is missing or stale — the phone's own
+      library only, never a picked folder or Drive (the desktop's to
+      write). `LoadedProject` gained `dir` for the match.
+    - **On the sim, end to end (a four-stem mix of the bundled sample,
+      split then analysed)**: 3 s of stem reads, **beat 15 s, key 3 s,
+      melody 15 s** for the 40.8 s song, all behind an open player; the
+      grid came out **67 beats at 98.5 bpm, 4/4, 17 downbeats** against
+      make-sample.js's authored 100 bpm 4/4 (68 beats) — the desktop's
+      answer, on the phone. Two fixture facts worth knowing before reading
+      a run: the solo-vocal seed has no drums, and **no drums means no
+      grid**, by rule (detectBeats returns null — the suite's first
+      Phase-4 pass read that as a failure); and the sample's "vocal" is
+      synthetic, which the splitter routes AWAY from the vocals stem in a
+      mix (vocals.wav at −83 dB RMS, `other` at −16), so its melody line
+      is all-unvoiced there — stored, stamped, covering the song's length,
+      exactly what the desktop would store; only the coverage is asserted.
+      `mobile/tests/split-ios.cjs` §1c is the permanent proof (its own
+      mix-seeded project, the stamps read off the generated bundle so a
+      bumped constant cannot pass by accident, the live pickup asserted in
+      the open player).
+    - Left for 4b: the C++ `beat_this` port + the two beat models (the
+      `ml` aux that lifts the grid to pack parity — and note that the
+      negative verdict is keyed by BEAT_DETECT_VERSION alone while the
+      phone's v21 has no ml aux, so when the neural grid ships on the phone
+      every `analysisNone.beat === 21` recorded before it must be re-asked
+      without a desktop bump: a second key or a phone-side sub-stamp), the ≥10-song real-stem
+      parity eval on Android and iOS, **player + analysis measured together
+      on a real phone with a ≥4-minute phone-split song** (the sim run was
+      the 40 s sample; on device the far side's stems ride alongside
+      ~700 MB of playback buffers for the pYIN minute — the reason for
+      `keepStems`, and a number that has to be read off a phone before the
+      fleet gets it), and the Android suite re-run (adoption and open now
+      decode in the background at moments a driver does not control, and
+      the Hermes-inspector rule about evals mid-decode applies to those
+      decodes too). The phone-side re-analysis of stale desktop grids
+      arriving via Drive is deliberately NOT done (desktop-owned; the
+      desktop heals them itself).
 
 ## Top risks
 

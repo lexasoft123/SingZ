@@ -60,7 +60,7 @@ function lcg(seed: number): () => number {
   }
 }
 
-function synthSong(minutes: number): { drums: Float32Array; vocals: Float32Array } {
+export function synthSong(minutes: number): { drums: Float32Array; vocals: Float32Array } {
   const n = Math.floor(SR * 60 * minutes)
   const drums = new Float32Array(n)
   const vocals = new Float32Array(n)
@@ -139,5 +139,75 @@ export function runAnalysisSpike(minutes = 3): SpikeResult {
       : null,
     f0Voiced: f0.filter((v) => v > 0).length,
     f0
+  }
+}
+
+/**
+ * The same song through the analysis HOST (host.ts — the worklet runtime)
+ * instead of this thread. Proves the mechanism end to end: the bundle
+ * serializes and runs over there, song-sized Float32Arrays cross, and the
+ * answer is the SAME grid and f0 as the in-thread run — three runtimes agreed
+ * to the bit in Phase 0, and a fourth has to as well. `ticks` counts a 50 ms
+ * heartbeat on THIS thread while the far side works: a blocked app thread
+ * shows as a tick count far below elapsed/50.
+ */
+export async function runHostSpike(minutes = 3): Promise<
+  SpikeResult & { hostMs: { put: number; melody: number; beats: number; total: number }; ticks: number; progressReports: number }
+> {
+  const host = await import('./host')
+  const t0 = Date.now()
+  const { drums, vocals } = synthSong(minutes)
+  const synthMs = Date.now() - t0
+
+  let ticks = 0
+  const beat = setInterval(() => {
+    ticks++
+  }, 50)
+  const tAll = Date.now()
+  try {
+    const tPut = Date.now()
+    await host.putStem('drums', { data: drums, sampleRate: SR })
+    await host.putStem('vocals', { data: vocals, sampleRate: SR })
+    const put = Date.now() - tPut
+
+    let progressReports = 0
+    const tMel = Date.now()
+    const melody = await host.trackMelody('vocals', () => {
+      progressReports++
+    })
+    const melodyMs = Date.now() - tMel
+
+    const tBeat = Date.now()
+    const det = await host.detectBeats({ drums: 'drums', vocals: 'vocals' })
+    const beatsMs = Date.now() - tBeat
+    const versions = await host.analysisVersions()
+    await host.clearStems()
+
+    const f0 = Array.from(melody.f0, (v) => Math.round(v * 1e6) / 1e6)
+    return {
+      hermes: typeof (globalThis as { HermesInternal?: unknown }).HermesInternal === 'object',
+      minutes,
+      beatDetectVersion: versions.beat,
+      pitchDetectVersion: versions.pitch,
+      synthMs,
+      melodyMs,
+      beatsMs,
+      grid: det
+        ? {
+            bpm: det.bpm,
+            beatsPerBar: det.beatsPerBar,
+            beatCount: det.beats.length,
+            downbeatCount: det.downbeats?.length ?? 0,
+            beats: det.beats.map((b) => Math.round(b * 1000) / 1000)
+          }
+        : null,
+      f0Voiced: f0.filter((v) => v > 0).length,
+      f0,
+      hostMs: { put, melody: melodyMs, beats: beatsMs, total: Date.now() - tAll },
+      ticks,
+      progressReports
+    }
+  } finally {
+    clearInterval(beat)
   }
 }

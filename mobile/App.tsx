@@ -171,6 +171,47 @@ if (TEST) {
     }, 50)
     return true
   }
+  // Phase 4 diagnostic: what loadMono44k hands the host for one stem — the
+  // first question when a project's analysis comes back empty (it was: the
+  // splitter had routed a synthetic "vocal" out of the vocals stem, −83 dB).
+  hooks.monoStats = (dir: string, rel: string): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    void import('./src/analysis/deps')
+      .then(async (m) => {
+        const t0 = Date.now()
+        const st = await m.loadMono44k(dir, rel)
+        let e = 0
+        let peak = 0
+        for (let i = 0; i < st.data.length; i++) {
+          const v = st.data[i]
+          e += v * v
+          if (Math.abs(v) > peak) peak = Math.abs(v)
+        }
+        return { len: st.data.length, sr: st.sampleRate, rms: Math.sqrt(e / Math.max(1, st.data.length)), peak, ms: Date.now() - t0 }
+      })
+      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
+      .catch((e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true })
+    return true
+  }
+  // Phase 4: the same spike through the analysis host (the worklet runtime).
+  // Same polling contract; the app thread stays free while it runs, which is
+  // the point — hostResult.ticks says whether it did.
+  hooks.hostSpike = (minutes?: number): boolean => {
+    hooks.hostDone = false
+    hooks.hostResult = null
+    void import('./src/analysis/spike')
+      .then((m) => m.runHostSpike(minutes))
+      .then((r) => {
+        hooks.hostResult = r
+        hooks.hostDone = true
+      })
+      .catch((e: unknown) => {
+        hooks.hostResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }
+        hooks.hostDone = true
+      })
+    return true
+  }
 }
 
 export default function App(): React.JSX.Element {

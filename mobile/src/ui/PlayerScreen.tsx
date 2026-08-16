@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
   runOnUI,
@@ -13,6 +13,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
+import { ANALYSIS_EVENT, subscribeAnalysis, type AnalysisDone, type AnalysisProgress } from '../analysis/run'
 import {
   fmtTime,
   MET_DEFAULTS,
@@ -314,6 +315,31 @@ export default function PlayerScreen({
     engine.setBeats(beatInfo)
   }, [engine, beatInfo])
 
+  /* A grid detected while this song is open lights the metronome up without
+   * a reopen — but only THIS song's: the event names the project dir, and a
+   * result for a neighbour (queued earlier, landing now) is not ours to
+   * apply. Only the phone's own library is ever analysed, and a dir name is
+   * unique only within one library — the desktop's cloud-folder "Foo" opened
+   * from a picked folder must not wear the phone's "Foo" grid — so the
+   * library is checked too. The progress line shows only while it is our
+   * song being read. */
+  const [analysisText, setAnalysisText] = useState<string | null>(null)
+  useEffect(() => {
+    const dir = project.dir
+    if (!dir || project.library !== 'phone') return
+    const sub = DeviceEventEmitter.addListener(ANALYSIS_EVENT, (e: AnalysisDone) => {
+      if (e.dir !== dir || !e.beat) return
+      setBeatInfo(sanitizeBeatInfo(e.beat))
+    })
+    const unsub = subscribeAnalysis((p: AnalysisProgress | null) =>
+      setAnalysisText(p && p.dir === dir ? p.text : null)
+    )
+    return () => {
+      sub.remove()
+      unsub()
+    }
+  }, [project])
+
   useEffect(() => {
     engine.setMetronome(met)
   }, [engine, met])
@@ -482,6 +508,8 @@ export default function PlayerScreen({
     if (!TEST) return
     TEST.screen = 'player'
     TEST.project = project.name
+    TEST.beatInfo = beatInfo
+    TEST.analysisText = analysisText
     TEST.armTraining = armTraining
     TEST.trainingOn = training
     TEST.setTrainMode = (mode: 'time' | 'lines') => setTrainCfg((c) => ({ ...c, mode }))
@@ -888,9 +916,16 @@ export default function PlayerScreen({
                   {beatInfo
                     ? `${Math.round(beatInfo.bpm)} bpm from the project — clicks and the ` +
                       `count-in follow the song's own beat, drift and all.`
-                    : 'No beat track — the count-in ticks once a second before playback ' +
-                      'starts. If the song has a steady beat, opening it on desktop reads ' +
-                      'one from the drums.'}
+                    : analysisText
+                      ? `${analysisText} — the click and the count-in pick the beat up ` +
+                        'the moment it is found.'
+                      : project.library === 'phone'
+                        ? 'No beat track — the count-in ticks once a second before playback ' +
+                          'starts. If the song has a steady beat, opening it here reads one ' +
+                          'from the drums once it is split.'
+                        : 'No beat track — the count-in ticks once a second before playback ' +
+                          'starts. If the song has a steady beat, opening it on desktop reads ' +
+                          'one from the drums.'}
                 </Text>
               </View>
 

@@ -44,7 +44,40 @@ export interface BeatInfo {
    * builds that predate the field still click something sensible.
    */
   downbeats?: number[]
+  /**
+   * Bar lines the singer placed by hand on the desktop, in SECONDS — kept
+   * verbatim and re-folded onto any grid the phone re-detects (the desktop's
+   * own applyUserBars, which rides in the analysis bundle), so a corrected
+   * song keeps its corrections through a phone re-detection.
+   */
+  userBars?: number[]
+  /** The detector's own bar lines before hand edits — see the desktop type. */
+  autoDownbeats?: number[]
+  /** Advisory: times the detector was not sure about. Nothing here reads them. */
+  suspectAt?: number[]
   source: 'auto' | 'manual'
+  /** Detector stamp for auto tracks — an older stamp re-detects on the phone
+   *  too, for phone-library projects (the desktop rule, same constant). */
+  detVersion?: number
+}
+
+/**
+ * The tracked vocal line (desktop `MelodyInfo`): `f0` is the desktop's token
+ * stream (cents above 55 Hz per frame, `xN` for unvoiced runs), one frame per
+ * `hopSec`. The phone draws nothing from it yet; it writes it for phone-split
+ * projects so the record is complete and the desktop adopts it as-is.
+ */
+export interface MelodyInfo {
+  detVersion: number
+  hopSec: number
+  f0: string
+}
+
+/** The song's key (desktop `KeyInfo`): pitch class 0 = C … 11 = B. */
+export interface KeyInfo {
+  pc: number
+  minor: boolean
+  detVersion: number
 }
 
 /** Metronome preferences (desktop `MetronomeConfig`). */
@@ -91,8 +124,22 @@ export interface ProjectSettings {
     sing: number
     stems: string[]
   }
-  /** Beat track driving the metronome and count-in (desktop-saved). */
+  /** Beat track driving the metronome and count-in (desktop-saved, or
+   *  detected here for a phone-split project). */
   beat?: BeatInfo
+  /** Tracked vocal melody line (desktop's pitch strip; written here too). */
+  melody?: MelodyInfo
+  /** Detected song key (harmonic-stem chroma). */
+  key?: KeyInfo
+  /**
+   * A detector's NEGATIVE verdict, by stamp — phone-only, ignored by every
+   * reader. `beat` = the BEAT_DETECT_VERSION that found no grid (a drumless
+   * or rubato song); `key` = the KEY_DETECT_VERSION that found the harmonic
+   * bed silent. Without it a song with no grid would be re-decoded and
+   * re-tracked on every open, forever; with it the question is asked again
+   * only when the detector moves on, exactly like a stale grid.
+   */
+  analysisNone?: { beat?: number; key?: number }
   /** Metronome preferences saved with the project. */
   metronome?: MetronomeConfig
   /** Audio files the singer added as extra lanes (desktop-saved). */

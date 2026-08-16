@@ -342,6 +342,24 @@ because phones render whatever `settings.beat` says: they have no detector,
 and without the auto-save a healed grid would never leave the desktop. Vocal range: p5–p95 of melody notes. All displayed
 transpose-aware in the pitch strip's info card.
 
+**The same detectors run on the phone**, for songs the phone split itself
+(docs/PHONE-STANDALONE.md, Phase 4). `mobile/scripts/build-analysis.mjs`
+bundles these very sources — `detectBeats`, `estimateKeyFromStems`,
+`trackMelodyCore`, `encodeMelody`, `melodyFitsSong`, `applyUserBars` and the
+three version stamps — twice: an ESM module for the app runtime, and ONE
+`'worklet'` function (`gen/analysis-worklet.js`, block-scoping lowered
+first — Hermes evaluates a serialized worklet raw and has no per-iteration
+loop bindings) that `mobile/src/analysis/host.ts` runs on a worklet runtime
+of its own, so a minute of pYIN never touches the thread drawing the app.
+Stems cross one at a time as mono float32 at 44.1 kHz (the detectors' own
+rate); `pipeline.ts` applies this section's rules to a phone-library
+project's doc — the same (re)detection triggers, the same keep-rule, the
+re-read → merge → write into project.json, the stems-unchanged guard — and
+`run.ts` queues one job at a time and announces results, which the open
+player applies live when the dir is its own. What the phone stores is what
+the desktop stores; the phone reads only the grid back (metronome,
+count-in), and the desktop adopts the rest as-is.
+
 ## On-disk layout
 
 ```

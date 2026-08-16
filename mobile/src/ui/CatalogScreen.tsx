@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  DeviceEventEmitter,
   Image,
   Modal,
   Platform,
@@ -67,6 +68,9 @@ import {
   startProjectSplit
 } from '../split/flow'
 import { cancelModelDownload } from '../analysis/models'
+import { planAnalysis } from '../analysis/pipeline'
+import { ANALYSIS_EVENT, startAnalysis, subscribeAnalysis, type AnalysisDone, type AnalysisProgress } from '../analysis/run'
+import { SPLIT_STEMS } from '../split/adopt'
 
 const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
@@ -367,7 +371,20 @@ export default function CatalogScreen({
         }
         await setCrumb('')
         setLoading(null)
-        onLoaded(loaded)
+        onLoaded({ ...loaded, library: mode })
+        // A phone-library song missing its grid (or carrying an older
+        // detector's) is analysed now, behind the player — the desktop's
+        // on-open rule. Only the phone's own library: a picked folder or
+        // Drive is the desktop's to write. The vocals' length is unknown here
+        // (null), so the length rule for a stored melody is not judged from
+        // this trigger — it is applied inside a run started for any other
+        // reason; a phone-split song's line was tracked from its own vocals,
+        // so nothing is lost. A song still waiting for its split has no
+        // drums/vocals stems yet, so the plan asks for nothing there.
+        if (mode === 'phone') {
+          const plan = planAnalysis(entry.doc, entry.stems, null)
+          if (plan.beat || plan.key || plan.melody) startAnalysis(entry.dir, entry.stems, loaded.lyrics)
+        }
       } catch (e) {
         await setCrumb('')
         if (tok === token.current) {
@@ -376,7 +393,7 @@ export default function CatalogScreen({
         }
       }
     },
-    [onLoaded, sampleRate]
+    [onLoaded, sampleRate, mode]
   )
 
   const openSample = useCallback(async () => {
@@ -500,6 +517,29 @@ export default function CatalogScreen({
   }, [splitUi])
   const adoptingRef = useRef(false)
 
+  /* Beat / key / melody for a phone-library project (Phase 4). One queue
+   * app-wide (analysis/run.ts); the card below is a viewer over its progress. */
+  const [analysisUi, setAnalysisUi] = useState<AnalysisProgress | null>(null)
+  useEffect(() => subscribeAnalysis(setAnalysisUi), [])
+  // A landed analysis changed a doc on disk; the listing must say so, or the
+  // next open of that song would ask for the same analysis again off a stale
+  // entry.doc.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(ANALYSIS_EVENT, (e: AnalysisDone) => {
+      if (e.changed) void refresh()
+    })
+    return () => sub.remove()
+  }, [refresh])
+  const kickAnalysis = useCallback(async (dir: string, stems: Record<string, string>) => {
+    let lyrics: LyricsDoc | null = null
+    try {
+      lyrics = JSON.parse(await readProjectText(dir, 'lyrics.json')) as LyricsDoc
+    } catch {
+      lyrics = null // no lyrics yet — the grid does without the line cues
+    }
+    startAnalysis(dir, stems, lyrics)
+  }, [])
+
   const adoptDone = useCallback(
     async (status: SplitJobStatus): Promise<void> => {
       if (adoptingRef.current) return
@@ -509,6 +549,11 @@ export default function CatalogScreen({
         await finishSplit(status.projectDir, status.jobDir)
         setSplitUi(null)
         await refresh()
+        // Six stems in place — now the beat, the key and the melody, the way
+        // the desktop would on its first open. Off the tap's critical path:
+        // the card below tracks it, and a song opened meanwhile picks the
+        // grid up when it lands.
+        void kickAnalysis(status.projectDir, Object.fromEntries(SPLIT_STEMS.map((id) => [id, 'wav'])))
       } catch (e) {
         setSplitUi({
           phase: 'failed',
@@ -520,7 +565,7 @@ export default function CatalogScreen({
         adoptingRef.current = false
       }
     },
-    [refresh]
+    [refresh, kickAnalysis]
   )
 
   const showFailed = useCallback(async (status: SplitJobStatus, fallbackError: string) => {
@@ -838,6 +883,15 @@ export default function CatalogScreen({
     TEST.resumeSplit = (dir: string) => void resumeSplit(dir)
     TEST.discardSplit = discardSplit
     TEST.splitUi = splitUi
+    TEST.analysisUi = analysisUi
+    // Phase 4: run the detectors over a phone-library project by hand (the
+    // stems as listed) — the on-open path without an open.
+    TEST.analyzeProject = (dir: string) => {
+      const p = (projects ?? []).find((x) => x.dir === dir)
+      if (!p) return false
+      void kickAnalysis(dir, p.stems)
+      return true
+    }
   })
 
   const card = (opts: {
@@ -1065,6 +1119,17 @@ export default function CatalogScreen({
                     </Pressable>
                   </>
                 )}
+              </View>
+            </View>
+          )}
+          {analysisUi && (
+            <View style={s.splitCard}>
+              <Text style={s.splitTitle} numberOfLines={1}>
+                {analysisUi.dir}
+              </Text>
+              <Text style={s.splitText}>{analysisUi.text}</Text>
+              <View style={s.splitBarBed}>
+                <View style={[s.splitBar, { width: `${Math.round(analysisUi.frac * 100)}%` }]} />
               </View>
             </View>
           )}
