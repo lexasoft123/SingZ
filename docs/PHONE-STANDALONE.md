@@ -895,6 +895,124 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       same call the reviewer made about `monoAt44k` two slices ago — the key
       detector and the chord-change cue read chroma identically, and a second
       copy is a second thing to keep bit-identical forever.
+    - **Seventh slice — the head backcast, and the gate comes off**
+      (2026-08-16). `backcastHead` is ported (~275 lines): the anchor search,
+      the unsteady/missing triggers, the folded-band flux onset extractor with
+      its beat-scale non-maximum suppression, the periodicity test that decides
+      whether those onsets may arbitrate at all, the four honest cases, the
+      backward walk with its snap, and the bar re-laying with its carried-vs-
+      chord phase vote. With it the core gained `detectBeatsNoCourts` — the
+      whole pipeline assembled (tracker → vote → backcast → sanitize →
+      suspectAt) and named for what it still lacks, so nobody wires it
+      believing the courts are in it.
+      Assembling it exposed an ordering bug from the previous slice: the TS
+      sanitizes AFTER the backcast, and `sanitizeBars` had been left inside
+      `barPhase`. Harmless while the backcast never fired — which is exactly
+      why it survived a 31/31 pass — and wrong the moment it did.
+      **The lattice gate is now off.** It had been withholding `beatsSec` and
+      the bars whenever the head machinery was not provably idle; the C++
+      rebuilds the same head now, so the gate was hiding the one stage most
+      worth comparing. What is left gating is the courts alone. All four
+      library projects pass **38/38 with it open**, tau unchanged.
+    - **The fixtures had to be invented, because the library cannot reach
+      this code.** All four eval projects report `head ok` — their grids start
+      on time and track cleanly — so a parity pass over them says nothing
+      whatever about 275 lines that never executed. Two earlier attempts to
+      build a triggering case failed identically: the instrument fill absorbed
+      the drum-free intro every time, the grid started early, and the backcast
+      was never reached. What gets past it is an intro too QUIET for the
+      fill's presence test but still audible to the backcast's own onset
+      picker, played in free time so the fill's span-quality gate rejects the
+      span outright. Measured while building it: at intro amplitude 0.02 the
+      fill still swallowed it; at 0.05 the span is rejected, the grid starts
+      14 s in, `missing` fires, six free-time chords are found, 0/5 are
+      periodic so they are not trusted to arbitrate, and the walk extends 24
+      beats back to the first chord. `eval/beats/fixtures.mjs` generates it,
+      the harness builds it on every run, and it is the first input to reach
+      the stage at all.
+      And because a fixture is a CLAIM that some path executed, each one
+      carries a precondition checked against the TS's own debug: if a tuning
+      change quietly stops it triggering, that is a hard failure, not a
+      silently vacuous pass. The first version of that check was itself
+      vacuous — it compared the grid against `debug.beats`, which the TS never
+      writes, so it read `length > 0`. It asserts `beats[0] < 3` now, which on
+      a fixture whose drums start at 14 s can only be true if the head really
+      was counted backward. Verified by making the intro loud again: the
+      fixture then reports `head ok` and the harness FAILS.
+    - **Review found the slice's one behavioural change covered by nothing**,
+      which is the finding worth keeping. Moving `sanitizeBars` after the
+      backcast was the only semantic edit here — and on the corpus the
+      backcast declines, while on the first fixture `downbeats` is undefined
+      so the sanitize never runs at all. A regression putting it back inside
+      `barPhase` would have passed 38/38.
+      `head-missing-bars` answers half of that: same refused intro, but an
+      accented kit (kick on 1 and 3, the one twice as heavy, snare on 2 and 4)
+      so the rotation vote finds a confident anchor and the song HAS bars.
+      It reaches the whole `if (bars)` re-laying block — 24 head bars laid by
+      the carried phase, `headBackcast` written, 36 bars, 6 suspect marks, and
+      the sanitize running over a list the backcast changed.
+      **Stated plainly because it is still true**: sanitizeBars finds nothing
+      to fix on that list, so the two ORDERS still produce the same answer
+      there. The reorder is right (it is what the TS does) and is now
+      exercised, but no input yet makes the two orders disagree, and a
+      regression would probably still pass. Naming that beats implying the
+      fixture closed it.
+      Two reasons the extend case can never separate them, and both are
+      provable rather than merely observed — worth writing down so nobody
+      hunts for a counter-example that cannot exist. The `nBeats` bound is
+      EXACTLY neutral: post-backcast indices are `k - cutIdx + K` against a
+      bound of `nb - cutIdx + K`, so `k - cutIdx + K < nb - cutIdx + K` iff
+      `k < nb`, in extend and replace alike. And the head bars are
+      sanitize-invariant by construction: `carried` and `chord` both step by
+      exactly `bpb`, and the seam is `bpb` (carried) or clamped to 2..7
+      (chord), so no gap the head contributes can trip either limb. Since
+      backcastHead reads only `bars.length > 0`, `bars.filter(k >= cutIdx)`
+      and `body[0]`, every way in runs through `bars` itself.
+      **The one to build, worked out and not yet built**: a sanitize that
+      moves `bars[0]`. At `hit === 1` the merge loop's `dropLo` branch deletes
+      `db[0]` outright, and since `carried` walks back from `body[0]`, a moved
+      `body[0]` moves EVERY head bar. On this fixture's numbers — raw bars
+      `[0, 1, 5, 9, …]`, bpb 4, K 24 — the old order sanitizes first
+      (`cost(dropHi) 1 > cost(dropLo) 0`, so 0 goes) and yields carried
+      `[1, 5, 9, 13, 17, 21]` with `downbeat` 1; the new order lays the head
+      from the raw 24 first and then ties on cost, keeping 24, and yields
+      `downbeat` 0. Six different head bar times and a different rotation —
+      audible, not bookkeeping. Recipe: flip the kit's accent to a new
+      rotation about two bars into the body so `phasePieces` emits a short
+      first piece, AND alternate two different triads on the bar line flipping
+      with the accent — a single triad throughout leaves `harmNov` flat, so
+      `hasHarmNov` is false and the +0.3 global gain test reverts the cut.
+      That is the next slice's first job.
+    - Two silent-skip paths in the anti-vacuity machinery, both closed: a
+      fixture added without a `FIXTURE_PRECONDITIONS` entry used to run
+      unguarded and print PASS (the harness now refuses to start, exit 2), and
+      `SINGZ_NO_FIXTURES=1` dropped them while the summary still read
+      "IDENTICAL" (it now says out loud that the backcast is uncovered).
+      The lattice gate also became a POSITIVE test asked of the TS rather than
+      resting on the absence of an `ml` key in an aux literal a few lines away
+      — and the FIRST version of that test watched three fields, none of them
+      the splice's own record. `debug.lattice` reads `'drums'` *during* a
+      splice (the splice only runs when the ML lattice was not adopted), and
+      the other two are written behind extra gates. It is one field now:
+      `debug.mlLattice`, which `latticeFromMl` writes unconditionally on every
+      non-null return, so its absence proves the function bailed at its own
+      guard — no mlChoice, no adoption, no splice, no seams. A hedge that
+      watches the wrong fields is worse than no hedge, because it reads as
+      covered.
+    - **What the fixtures still do NOT reach**, listed so it is not discovered
+      later: the `replace` limb entire (unsteady + trusted onsets, the
+      `unexplained` fraction, the refusal when onsets are junk), any run with
+      `onsetsTrusted === true` and therefore all snapping, the chord-phase bar
+      vote, `no stable anchor`, the two early returns, `walk: 'empty'`, the
+      `body.empty()` branch, and every part at a rate other than 44.1 kHz.
+    - One TS inconsistency recorded rather than silently repaired:
+      `backcastHead` reads `getChannelData(0)` for inst and bass — channel
+      ZERO, not the fold used everywhere else — while drums arrives folded.
+      The core has only the fold, which is identical for the mono buffers the
+      harness and the phone both supply and differs from the desktop
+      renderer's stereo AudioBuffers. Matching the TS is this file's contract
+      and the fold is the better input, so that gets reconciled once, at the
+      desktop swap, deliberately.
     - Next: the rest of detectBeats and courts (same method, same harness)
       — which is now the whole remaining cost of a phone analysis — then
       the desktop's `analysis:run` IPC over the CLI, then retire the TS

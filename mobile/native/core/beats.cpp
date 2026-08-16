@@ -21,6 +21,10 @@
 namespace singz {
 namespace {
 
+/** The TS's `[]` for an untrusted snap list — a named empty so the reference
+ *  binding below has something with a lifetime. */
+const std::vector<double> kNoOnsets;
+
 constexpr double ANALYSIS_SR = 44100;
 constexpr int HOP = 512;
 
@@ -1390,8 +1394,386 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
   // (The TS's third branch is the drumless ML-lattice case — unreachable with
   // no model, like the waltz branch above.)
 
-  if (haveDownbeats) {
-    const std::vector<int> clean = sanitizeBars(downbeats, bpb, nb);
+  // NOT sanitized here: the TS runs sanitizeBars AFTER the head backcast
+  // (analysis.ts:1543), and the backcast can both add bars and change the beat
+  // count they are bounded by. detectBeatsNoCourts does it in that order.
+  out.beatsPerBar = bpb;
+  out.downbeat = downbeat;
+  out.downbeats = downbeats;
+  out.ok = true;
+  return out;
+}
+
+// ---- detectBeats: the head backcast ---------------------------------------
+//
+// analysis.ts's `backcastHead`. Two triggers, both judged from the grid alone
+// before any audio is touched: an UNSTEADY lead-in (the intervals before the
+// first stable run wobble) or a MISSING one (the grid simply starts more than
+// two bars in). A singer keeps counting through material like that; the count
+// does not stop because the drums have not.
+HeadBackcast backcastHead(const std::vector<double>& beats, const std::vector<int>* bars, int bpb,
+                          const std::vector<float>& drumsMono, const BeatAux& aux, BeatDebug& dbg) {
+  HeadBackcast out;
+  if (beats.size() < 32) return out;
+  std::vector<double> iv;
+  for (size_t i = 1; i < beats.size(); i++) iv.push_back(beats[i] - beats[i - 1]);
+  std::vector<double> ivSorted = iv;
+  std::sort(ivSorted.begin(), ivSorted.end());
+  const double med = ivSorted[ivSorted.size() >> 1];
+  if (!(med > 0)) return out;
+
+  // the anchor: start of the first run of 12 intervals within 8% of median
+  int anchor = -1;
+  for (size_t i = 0; i + 12 <= iv.size(); i++) {
+    bool ok = true;
+    for (size_t k = i; k < i + 12; k++) {
+      if (std::fabs(iv[k] - med) > 0.08 * med) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) {
+      anchor = static_cast<int>(i);
+      break;
+    }
+  }
+  if (anchor < 0) {
+    dbg.headWhy = BeatDebug::HeadWhy::noAnchor;
+    return out;
+  }
+
+  int off = 0;
+  for (int i = 0; i < anchor; i++)
+    if (std::fabs(iv[static_cast<size_t>(i)] - med) > 0.15 * med) off++;
+  const bool unsteady = anchor > 0 && static_cast<double>(off) / std::max(1, anchor) > 0.25;
+  // the gap BEFORE the grid, not the time of the anchor — testing the anchor's
+  // time made any song with a wobbly first few beats read as "missing head"
+  // however early its grid actually started
+  const bool missing = beats[0] > 2 * bpb * med;
+  dbg.headAnchor = anchor;
+  dbg.headAt = beats[static_cast<size_t>(anchor)];
+  dbg.headFirst = beats[0];
+  if (!unsteady && !missing) {
+    dbg.headWhy = BeatDebug::HeadWhy::headOk;
+    return out;
+  }
+
+  // local period at the anchor — the pulse actually being carried back
+  std::vector<double> local(iv.begin() + anchor, iv.begin() + std::min(iv.size(), static_cast<size_t>(anchor) + 24));
+  std::sort(local.begin(), local.end());
+  const double per = local[local.size() >> 1];
+
+  // Onsets over the head window, per part so sample rates never mix. Folded-
+  // band flux per stem, not broadband RMS: broadband energy ranks an intro's
+  // arpeggio notes above its chord attacks, while the fold sees the wide
+  // spectral splash of a chord landing and puts the anchors on top.
+  //
+  // NOTE the TS reads `fb.getChannelData(0)` for inst and bass here — channel
+  // ZERO, not the fold it uses everywhere else — while drums arrives already
+  // folded. This side has only the fold (AnalysisStem is mono by
+  // construction), which is identical for the mono buffers the parity harness
+  // and the phone both supply, and differs from the desktop renderer's own
+  // stereo AudioBuffers. Recorded rather than silently "fixed": matching the
+  // TS is this file's whole contract, and the fold is the better input, so
+  // the desktop swap is where that gets reconciled, deliberately and once.
+  struct Part {
+    const std::vector<float>* x;
+    double sr;
+  };
+  std::vector<Part> parts{{&drumsMono, ANALYSIS_SR}};
+  if (aux.inst)
+    for (const AnalysisStem& fb : *aux.inst) parts.push_back({&fb.mono, fb.sampleRate});
+  if (aux.bass) parts.push_back({&aux.bass->mono, aux.bass->sampleRate});
+
+  const double tEnd = beats[static_cast<size_t>(anchor)] + 2 * per;
+  struct Cand {
+    double t, v;
+  };
+  std::vector<Cand> cand;
+  constexpr int NFF = 4096;
+  constexpr int HOPF = 1024;
+  std::vector<double> win(NFF);
+  for (int i = 0; i < NFF; i++) win[static_cast<size_t>(i)] = 0.5 - 0.5 * std::cos((2 * M_PI * i) / NFF);
+  for (const Part& p : parts) {
+    const double nD = std::floor(tEnd * p.sr);
+    const size_t n = std::min(p.x->size(), nD > 0 ? static_cast<size_t>(nD) : 0);
+    const long long frames = (static_cast<long long>(n) - NFF) / HOPF;
+    if (frames < 20) continue;
+    double peak = 0;
+    for (size_t i = 0; i < n; i++) {
+      const double a = std::fabs(static_cast<double>((*p.x)[i]));
+      if (a > peak) peak = a;
+    }
+    if (peak < 1e-3) continue;  // silent stem
+    std::vector<double> prev(64, 0.0);
+    bool havePrev = false;
+    std::vector<double> flux;
+    flux.reserve(static_cast<size_t>(frames));
+    for (long long f = 0; f < frames; f++) {
+      std::vector<double> seg(64, 0.0);
+      const size_t base = static_cast<size_t>(f) * HOPF;
+      for (int i = 0; i < NFF; i++) {
+        const double v = static_cast<double>((*p.x)[base + static_cast<size_t>(i)]) * win[static_cast<size_t>(i)];
+        seg[static_cast<size_t>(i & 63)] += v * v;
+      }
+      double d = 0;
+      if (havePrev)
+        for (int k = 0; k < 64; k++) d += std::max(0.0, seg[static_cast<size_t>(k)] - prev[static_cast<size_t>(k)]);
+      flux.push_back(d);
+      prev = std::move(seg);
+      havePrev = true;
+    }
+    std::vector<double> fs = flux;
+    std::sort(fs.begin(), fs.end());
+    const double thr = fs[static_cast<size_t>(std::floor(static_cast<double>(fs.size()) * 0.97))];
+    for (long long f = 1; f < frames - 1; f++) {
+      const size_t fi = static_cast<size_t>(f);
+      if (flux[fi] > thr && flux[fi] >= flux[fi - 1] && flux[fi] >= flux[fi + 1])
+        cand.push_back({(static_cast<double>(f) * HOPF + NFF / 2.0) / p.sr, flux[fi]});
+    }
+  }
+  // non-maximum suppression at beat scale: strongest first, each claiming
+  // +/-1.4 beats — about one survivor per musical event, none for its echoes
+  std::stable_sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return b.v < a.v; });
+  const int cap = std::max(8.0, std::ceil(beats[static_cast<size_t>(anchor)] / per / 2));
+  std::vector<double> taken;
+  for (const Cand& c : cand) {
+    if (static_cast<int>(taken.size()) >= cap) break;
+    bool clear = true;
+    for (const double t : taken)
+      if (!(std::fabs(t - c.t) > 1.4 * per)) clear = false;
+    if (clear) taken.push_back(c.t);
+  }
+  std::vector<double> fluxMerged = taken;
+  std::sort(fluxMerged.begin(), fluxMerged.end());
+  // The TS's `chordOnsets` argument replaces these when offered — but only the
+  // courts' post-halve call passes it, and the courts are not ported, so
+  // `merged` is the flux list here by construction, not by choice.
+  const std::vector<double>& merged = fluxMerged;
+
+  // Interval scatter alone cannot tell a WRONG head from a LOOSE one, so the
+  // marks are put to the audible onsets — and the onsets must earn that
+  // authority first, because energy flux on a legato organ yields peaks on
+  // swells and vibrato, junk that would condemn a perfectly tracked head.
+  // Judged away from the seam: the final two bars before the anchor are the
+  // band arriving, and their dense attacks drown the intro's own evidence.
+  std::vector<double> headOn;
+  for (const double o : merged)
+    if (o <= beats[static_cast<size_t>(anchor)] - 2 * bpb * per) headOn.push_back(o);
+  bool onsetsTrusted = false;
+  if (headOn.size() >= 3) {
+    // Residual against the pulse, ABSOLUTE — real intros carry ornaments whose
+    // 0.1 s residual is fine as a fifth of a beat and hopeless as a fifth of
+    // itself. Junk spreads residuals uniformly (~40% pass by luck), so the bar
+    // is 60%, which clean evidence clears at 90+.
+    int periodic = 0;
+    for (size_t i = 1; i < headOn.size(); i++) {
+      const double gap = headOn[i] - headOn[i - 1];
+      const double mult = std::max(1.0, jsRound(gap / per));
+      if (mult <= 6 && std::fabs(gap - mult * per) <= 0.2 * per) periodic++;
+    }
+    onsetsTrusted = static_cast<double>(periodic) / (headOn.size() - 1) >= 0.6;
+    dbg.hasHeadOnsets = true;
+    dbg.headOnsetsPer = jsRound(per * 1000) / 1000;
+    dbg.headOnsetsPeriodic = periodic;
+    dbg.headOnsetsOf = static_cast<int>(headOn.size()) - 1;
+    for (const double o : headOn) dbg.headOnsetsT.push_back(jsRound(o * 100) / 100);
+  }
+  // Four honest cases:
+  //   tracked head + gap        -> extend only, at the head's own period
+  //   wrong head + trusted ons  -> replace from the anchor, snapping
+  //   wrong head + junk onsets  -> no evidence to act on; leave it alone
+  //   tracked head, no gap      -> already returned above
+  bool headTracked = !unsteady;
+  if (unsteady && onsetsTrusted) {
+    // fraction, not median: a window spanning both the broken intro and the
+    // start of the tracked body mixes explained and unexplained onsets, and a
+    // median over that mixture hides the broken half entirely
+    int unexplained = 0;
+    for (const double o : headOn) {
+      double d = std::numeric_limits<double>::infinity();
+      for (int i = 0; i <= anchor; i++) d = std::min(d, std::fabs(beats[static_cast<size_t>(i)] - o));
+      if (d > 0.2 * per) unexplained++;
+    }
+    headTracked = static_cast<double>(unexplained) / headOn.size() < 0.4;
+  }
+  dbg.headWhy = BeatDebug::HeadWhy::judged;
+  dbg.headUnsteady = unsteady;
+  dbg.headMissing = missing;
+  dbg.headOnsetCount = static_cast<int>(headOn.size());
+  dbg.headOnsetsTrusted = onsetsTrusted;
+  if (unsteady && !onsetsTrusted) return out;
+  const bool replace = unsteady && !headTracked;
+  dbg.headHasVerdict = true;
+  dbg.headTracked = headTracked;
+  dbg.headReplace = replace;
+  if (!replace && !missing) return out;
+  const std::vector<double>& snapList = onsetsTrusted ? merged : kNoOnsets;
+
+  // replace: re-lay everything before the anchor at the anchor's pulse.
+  // extend: the head is fine — count back only over the gap in front of it, at
+  // the period the head itself establishes.
+  const int cutIdx = replace ? anchor : 0;
+  double perLocal = per;
+  if (!(replace || !headTracked)) {
+    // the head's own intervals set the extension pace only when the head is
+    // actually TRACKING; a wrong head extending at its own wrong period is how
+    // a broken intro once grew three bar-sized "beats" in front of itself
+    std::vector<double> first(iv.begin(), iv.begin() + std::min(iv.size(), static_cast<size_t>(12)));
+    std::sort(first.begin(), first.end());
+    perLocal = first[first.size() >> 1];
+  }
+
+  // count backward, snapping to whatever is audible
+  const double firstAudible = !fluxMerged.empty() ? fluxMerged[0] : (!merged.empty() ? merged[0] : beats[0]);
+  std::vector<double> head;
+  double t = beats[static_cast<size_t>(cutIdx)];
+  int snapped = 0;
+  for (int guard = 0; guard < 400; guard++) {
+    double next = t - perLocal;
+    if (next < 0.25 || next < firstAudible - 0.6 * perLocal) break;
+    double best = -1;
+    for (const double o : snapList) {
+      if (std::fabs(o - next) <= 0.28 * perLocal && (best < 0 || std::fabs(o - next) < std::fabs(best - next)))
+        best = o;
+    }
+    if (best >= 0 && t - best >= 0.7 * perLocal && t - best <= 1.45 * perLocal) {
+      next = best;
+      snapped++;
+    }
+    head.push_back(next);
+    t = next;
+  }
+  if (head.empty()) {
+    dbg.headWalkEmpty = true;
+    return out;
+  }
+  std::reverse(head.begin(), head.end());
+
+  std::vector<double> outBeats = head;
+  outBeats.insert(outBeats.end(), beats.begin() + cutIdx, beats.end());
+  const int K = static_cast<int>(head.size());
+
+  // bars: keep the body's, re-indexed; lay the head's backward from the seam
+  std::vector<int> downbeats;
+  bool hasDownbeats = false;
+  std::vector<double> headBarTimes;
+  if (bars && !bars->empty()) {
+    std::vector<int> body;
+    for (const int k : *bars)
+      if (k >= cutIdx) body.push_back(k - cutIdx + K);
+    if (!body.empty()) {
+      // carried phase: straight back from the first body bar
+      std::vector<int> carried;
+      for (int j = body[0] - bpb; j >= 0; j -= bpb) carried.push_back(j);
+      std::reverse(carried.begin(), carried.end());
+      // chord phase: do the head's strong onsets agree on a beat-of-bar?
+      std::vector<int> voteKey;
+      std::vector<int> voteN;
+      for (const double o : snapList) {
+        int bi = -1;
+        for (int i = 0; i < K; i++) {
+          const double d = std::fabs(outBeats[static_cast<size_t>(i)] - o);
+          if (d <= 0.3 * per && (bi < 0 || d < std::fabs(outBeats[static_cast<size_t>(bi)] - o))) bi = i;
+        }
+        if (bi >= 0) {
+          const int key = bi % bpb;
+          size_t at = voteKey.size();
+          for (size_t q = 0; q < voteKey.size(); q++)
+            if (voteKey[q] == key) at = q;
+          if (at == voteKey.size()) {
+            voteKey.push_back(key);
+            voteN.push_back(0);
+          }
+          voteN[at]++;
+        }
+      }
+      std::vector<int> headBars = carried;
+      bool usedChords = false;
+      if (!voteKey.empty()) {
+        // Map insertion order + a stable sort by count reproduce the TS's
+        // `[...votes.entries()].sort((a,b) => b[1]-a[1])[0]` exactly: a JS Map
+        // iterates in insertion order and Array.sort has been stable since
+        // ES2019, so tied counts keep first-seen order.
+        std::vector<size_t> order(voteKey.size());
+        for (size_t q = 0; q < order.size(); q++) order[q] = q;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return voteN[b] < voteN[a]; });
+        const size_t topI = order[0];
+        int totalVotes = 0;
+        for (const int v : voteN) totalVotes += v;
+        if (voteN[topI] >= 2 && voteN[topI] >= 0.7 * totalVotes) {
+          std::vector<int> chord;
+          for (int j = K - 1 - ((((K - 1 - voteKey[topI]) % bpb) + bpb) % bpb); j >= 0; j -= bpb) chord.push_back(j);
+          std::reverse(chord.begin(), chord.end());
+          const int seam = !chord.empty() ? body[0] - chord.back() : bpb;
+          if (seam >= 2 && seam <= 7) {
+            headBars = chord;
+            usedChords = true;
+          }
+        }
+      }
+      downbeats = headBars;
+      downbeats.insert(downbeats.end(), body.begin(), body.end());
+      hasDownbeats = true;
+      for (const int j : headBars) headBarTimes.push_back(outBeats[static_cast<size_t>(j)]);
+      dbg.hasHeadBackcast = true;
+      dbg.headBackcastReplaced = cutIdx;
+      dbg.headBackcastAdded = K;
+      dbg.headBackcastSnapped = snapped;
+      dbg.headBackcastChords = usedChords;
+    } else {
+      for (const int k : *bars)
+        if (k - cutIdx + K >= 0) downbeats.push_back(k - cutIdx + K);
+      hasDownbeats = true;
+    }
+  }
+  out.beats = std::move(outBeats);
+  out.downbeats = std::move(downbeats);
+  out.hasDownbeats = hasDownbeats;
+  out.headBarTimes = std::move(headBarTimes);
+  out.indexShift = K - cutIdx;
+  out.ok = true;
+  return out;
+}
+
+// ---- detectBeats, minus the courts and the ML lattice ---------------------
+
+BeatGrid detectBeatsNoCourts(const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg) {
+  static const std::vector<AnalysisStem> kNoStems;
+  BeatGrid out;
+  const DrumLattice lat = trackFromDrums(drums, aux.inst ? *aux.inst : kNoStems, dbg);
+  if (!lat.ok) return out;
+  dbg.voids = lat.voids;
+  const BarPhase ph = barPhase(lat, drums, aux, dbg);
+  const int bpb = ph.beatsPerBar;
+  int downbeat = ph.downbeat;
+  std::vector<int> downbeats = ph.downbeats;
+  // The TS's `downbeats` is undefined rather than [] when the vote produced
+  // none, and the difference is load-bearing: an empty array is truthy.
+  bool hasDownbeats = !downbeats.empty();
+
+  std::vector<double> outBeats = lat.beatsSec;
+  std::vector<double> headBarTimes;
+  {
+    const HeadBackcast rebuilt =
+        backcastHead(lat.beatsSec, hasDownbeats ? &downbeats : nullptr, bpb, monoAt44kPublic(drums), aux, dbg);
+    if (rebuilt.ok) {
+      outBeats = rebuilt.beats;
+      downbeats = rebuilt.downbeats;
+      hasDownbeats = rebuilt.hasDownbeats;
+      // A song with no downbeats[] carries its whole bar structure in the
+      // `downbeat` rotation index, and replacing the head shifts every beat
+      // index by (added - removed) — without this correction every bar in the
+      // song silently rotates.
+      downbeat = hasDownbeats && !downbeats.empty()
+                     ? downbeats[0] % bpb
+                     : ((((downbeat + rebuilt.indexShift) % bpb) + bpb) % bpb);
+      headBarTimes = rebuilt.headBarTimes;
+    }
+  }
+
+  if (hasDownbeats) {
+    const std::vector<int> clean = sanitizeBars(downbeats, bpb, static_cast<int>(outBeats.size()));
     if (clean.size() != downbeats.size()) {
       dbg.sanitizedBefore = static_cast<int>(downbeats.size());
       dbg.sanitizedAfter = static_cast<int>(clean.size());
@@ -1401,9 +1783,34 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
     if (!downbeats.empty()) downbeat = downbeats[0] % bpb;
   }
 
+  // Where to look first, not a claim that the grid is wrong: every bar line
+  // the head backcast laid down, and every bar whose length disagrees with the
+  // song's own meter. (The TS also lists the ML splice ranges, which cannot
+  // exist here.)
+  std::vector<double> suspect = headBarTimes;
+  if (hasDownbeats) {
+    for (size_t i = 1; i < downbeats.size(); i++) {
+      if (downbeats[i] - downbeats[i - 1] != bpb)
+        suspect.push_back(outBeats[static_cast<size_t>(downbeats[i - 1])]);
+    }
+  }
+  // `[...new Set(x)].sort(asc)` — dedup first (insertion order), then sort.
+  std::vector<double> suspectAt;
+  for (const double v : suspect) {
+    bool seen = false;
+    for (const double u : suspectAt)
+      if (u == v) seen = true;
+    if (!seen) suspectAt.push_back(v);
+  }
+  std::sort(suspectAt.begin(), suspectAt.end());
+
+  out.beats = std::move(outBeats);
+  out.bpm = 60 / lat.medSec;
   out.beatsPerBar = bpb;
   out.downbeat = downbeat;
-  out.downbeats = downbeats;
+  out.downbeats = std::move(downbeats);
+  out.hasDownbeats = hasDownbeats;
+  out.suspectAt = std::move(suspectAt);
   out.ok = true;
   return out;
 }

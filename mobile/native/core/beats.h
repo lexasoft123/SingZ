@@ -24,6 +24,14 @@ namespace singz {
 /** The stamp this file reproduces — analysis.ts's BEAT_DETECT_VERSION. */
 constexpr int kBeatDetectVersion = 21;
 
+/** A drum-free span the fill was applied to, in seconds — the caller's cue
+ *  that a stretch was carried by other stems (or, when `filled` is false,
+ *  that the DP coasted through it and the neural lattice may replace it). */
+struct BeatVoid {
+  double aSec = 0, bSec = 0;
+  bool leading = false, trailing = false, filled = false;
+};
+
 /** What the TS's `debug` object carries at the stages ported so far. A field
  *  named after a TS one must mean exactly what the TS's does — the harness
  *  compares by name. The four meter figures below are the only additions, and
@@ -94,16 +102,35 @@ struct BeatDebug {
   // debug.sanitized — only written when sanitizeBars actually changed the count.
   bool hasSanitized = false;
   int sanitizedBefore = 0, sanitizedAfter = 0;
+  // debug.headWhy — the backcast's verdict. `none` = never reached (the TS
+  // leaves the field unset); the other three are its three exit shapes.
+  enum class HeadWhy { none, noAnchor, headOk, judged };
+  HeadWhy headWhy = HeadWhy::none;
+  int headAnchor = 0;
+  double headAt = 0, headFirst = 0;
+  bool headUnsteady = false, headMissing = false, headOnsetsTrusted = false;
+  int headOnsetCount = 0;
+  // …and the second half of headWhy, written only once the onset test has
+  // been passed — the TS Object.assigns it onto the same object later.
+  bool headHasVerdict = false, headTracked = false, headReplace = false;
+  bool headWalkEmpty = false;
+  // debug.headOnsets — written only when there were >= 3 onsets to grade.
+  bool hasHeadOnsets = false;
+  double headOnsetsPer = 0;
+  int headOnsetsPeriodic = 0, headOnsetsOf = 0;
+  std::vector<double> headOnsetsT;
+  // debug.headBackcast — written only when the head was actually rebuilt AND
+  // the song had bars to re-lay. Testing for THIS is testing for an action:
+  // the backcast can rebuild the lattice without writing it, which is why the
+  // harness gates on headWhy instead.
+  bool hasHeadBackcast = false;
+  int headBackcastReplaced = 0, headBackcastAdded = 0, headBackcastSnapped = 0;
+  bool headBackcastChords = false;
+  // debug.voids — the tracker's own void list, carried out through the debug
+  // channel because the grid itself has no place for it.
+  std::vector<BeatVoid> voids;
   // debug.reject — empty when the tracker did not refuse.
   std::string reject;
-};
-
-/** A drum-free span the fill was applied to, in seconds — the caller's cue
- *  that a stretch was carried by other stems (or, when `filled` is false,
- *  that the DP coasted through it and the neural lattice may replace it). */
-struct BeatVoid {
-  double aSec = 0, bSec = 0;
-  bool leading = false, trailing = false, filled = false;
 };
 
 /** What `trackFromDrums` hands back: the beat lattice plus the (fill-aware)
@@ -151,11 +178,60 @@ struct BarPhase {
  * periodicity means the tracked pulse is the eighth of a compound song), the
  * activity mask, the segments, and the per-segment rotation vote — kick
  * energy alone is a coin flip between beats 1 and 3, so sharp musical events
- * decide instead — the phase cuts, and sanitizeBars. Beat TIMES are never
- * touched here: a rotation change leaves the boundary bar an odd length,
+ * decide instead — and the phase cuts. It does NOT sanitize: the TS runs
+ * sanitizeBars after the head backcast, which detectBeatsNoCourts reproduces.
+ * Beat TIMES are never touched here: a rotation change leaves the boundary bar an odd length,
  * which is honest, rather than re-spacing beats to force one global phase.
  */
 BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg);
+
+/** What `backcastHead` hands back. `ok` false = the TS returned null and the
+ *  caller keeps the lattice it had. */
+struct HeadBackcast {
+  std::vector<double> beats;
+  std::vector<int> downbeats;
+  bool hasDownbeats = false;
+  std::vector<double> headBarTimes;
+  int indexShift = 0;
+  bool ok = false;
+};
+
+/** detectBeats' return value: the grid a player draws. */
+struct BeatGrid {
+  std::vector<double> beats;
+  double bpm = 0;
+  int beatsPerBar = 4;
+  int downbeat = 0;
+  std::vector<int> downbeats;
+  bool hasDownbeats = false;  // the TS's `undefined`, which [] is NOT
+  std::vector<double> suspectAt;
+  bool ok = false;  // false = the TS returned null
+};
+
+/**
+ * analysis.ts's `detectBeats` end to end — MINUS the two stages that are not
+ * ported: the ML lattice (no model on a phone) and the courts (courts.ts).
+ *
+ * The name says so on purpose. The courts run whenever harmonic stems exist to
+ * testify and may halve the grid to the notation's octave, double it, or
+ * re-place bars, so this is the complete answer only where they abstain — a
+ * bare mix, or a library with no bass. Rename it when they land, not before.
+ */
+BeatGrid detectBeatsNoCourts(const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg);
+
+/**
+ * The head backcast (analysis.ts's `backcastHead`): count the stable pulse
+ * BACKWARD over a lead-in the tracker got wrong or never covered, re-anchoring
+ * on the intro's own onsets. A singer keeps counting through material like
+ * that; the count does not stop because the drums have not started. Every
+ * rebuilt bar line is a principled guess and the caller marks it suspect.
+ *
+ * `bars` may be null (a song whose structure lives in the rotation index
+ * alone). The TS's `chordOnsets` parameter is absent here: only the courts'
+ * post-halve call supplies it, and the courts are not ported.
+ */
+HeadBackcast backcastHead(const std::vector<double>& beats, const std::vector<int>* bars, int bpb,
+                          const std::vector<float>& drumsMono, const BeatAux& aux, BeatDebug& dbg);
 
 /**
  * The original drums-first pipeline: instrument fill, tempo family and

@@ -23,13 +23,14 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..')
 const args = process.argv.slice(2)
 let bin = null
+let FIXTURE_PRECONDITIONS = {}
 const dirs = []
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--bin') bin = args[++i]
@@ -43,6 +44,31 @@ if (!existsSync(lib)) {
 }
 const { detectBeats, BEAT_DETECT_VERSION } = await import(pathToFileURL(lib).href)
 if (dirs.length === 0) dirs.push(join(root, 'mobile', 'assets', 'sample'))
+// The synthetic fixtures run EVERY time, alongside whatever was named. They
+// are the only inputs that reach some of these stages at all: all four eval
+// projects report `head ok`, so without them the head backcast's parity would
+// be a statement about code that never executed. Cheap to build (a few seconds
+// of synthesis) and they need no library.
+if (!process.env.SINGZ_NO_FIXTURES) {
+  const mod = await import(pathToFileURL(join(root, 'eval', 'beats', 'fixtures.mjs')).href)
+  FIXTURE_PRECONDITIONS = mod.FIXTURE_PRECONDITIONS
+  const made = mod.writeFixtures(mkdtempSync(join(tmpdir(), 'singz-beats-fixtures-')))
+  // A fixture with no precondition entry would run UNGUARDED and print PASS —
+  // which is the vacuity the preconditions exist to prevent, arriving by the
+  // back door. Refuse to start instead.
+  const unguarded = made.map((d) => basename(d)).filter((n) => !FIXTURE_PRECONDITIONS[n])
+  if (unguarded.length > 0) {
+    console.error(`fixtures without a FIXTURE_PRECONDITIONS entry: ${unguarded.join(', ')}`)
+    console.error('every fixture must state the path it exists to reach — see eval/beats/fixtures.mjs')
+    process.exit(2)
+  }
+  dirs.unshift(...made)
+} else {
+  // Suppressing them is legitimate (a quick run against one library project)
+  // but it must never be invisible: without the fixtures nothing in this
+  // harness reaches the head backcast at all.
+  console.log('NOTE  synthetic fixtures suppressed (SINGZ_NO_FIXTURES) — the head backcast is NOT covered by this run')
+}
 
 const INST = ['guitar', 'piano', 'other']
 
@@ -101,12 +127,20 @@ const LATTICE_STAGES = new Set([
   // The bars come from the RETURN too, and a court can re-place them even
   // when the beat times hold. `sanitized` is here for a DIFFERENT un-ported
   // stage — see its entry: the head backcast runs before it, not after.
-  'downbeat', 'downbeats', 'sanitized'
+  'downbeat', 'downbeats', 'sanitized', 'bpm', 'suspectAt'
 ])
 
 /** The TS's `cues` object is keyed by name and the C++'s is positional, so
  *  the comparison needs the insertion order written down once. */
 const CUE_ORDER = ['kick', 'ent', 'slam', 'bass', 'voc', 'line']
+
+/** The median inter-beat interval of a grid, derived the same way on both
+ *  sides so neither can be reading a different array than the other. */
+const medianGap = (beats) => {
+  if (!beats || beats.length < 2) return 0
+  const ivs = beats.slice(1).map((b, i) => b - beats[i]).sort((a, b) => a - b)
+  return ivs[Math.floor(ivs.length / 2)]
+}
 
 const UNWRITTEN_REJECTS = new Set(['too short', 'no flux', 'no tempo family', 'no octave candidate'])
 const cReject = (c) => (c.reject && !UNWRITTEN_REJECTS.has(c.reject) ? c.reject : null)
@@ -154,8 +188,12 @@ const STAGES = [
   ['spanOk', (ts) => (ts.spanOk?.length ? ts.spanOk.map((s) => `${s.a}:${s.b}:${s.ok}`).join('|') : undefined),
     (c) => (c.spanOk?.length ? c.spanOk.map((s) => `${s.a}:${s.b}:${s.ok}`).join('|') : undefined)],
   // The three LATTICE stages, and they are conditional — see `latticeUsable`.
-  ['beats.length', (ts) => ts.__beats?.length, (c) => c.beats],
-  ['medSec', (ts) => ts.__medSec, (c) => c.medSec],
+  // Both sides off the FINISHED grid, not the tracker's lattice — the head
+  // backcast can add beats in front of it, and `debug.beats`/`debug.medSec`
+  // are recorded before that happens. (The fixture that fires the backcast
+  // caught this the moment it was added: 144 against the lattice's 120.)
+  ['beats.length', (ts) => ts.__beats?.length, (c) => c.gridBeats],
+  ['medSec', (ts) => ts.__medSec, (c) => medianGap(c.beatsSec)],
   ['beatsSec', (ts) => ts.__beats?.join(','), (c) => c.beatsSec?.join(',')],
   // debug.voids is the tracker's own void list, ROUNDED TO 0.1 s by the TS
   // before it is recorded — so the comparison rounds the C++ the same way
@@ -215,6 +253,44 @@ const STAGES = [
   ['downbeats', (ts) => ('__downbeats' in ts
     ? (ts.__downbeats?.length ? ts.__downbeats.join(',') : 'none') : undefined),
     (c) => (c.downbeats?.length ? c.downbeats.join(',') : 'none')],
+  // The head backcast. `headWhy` is the verdict — the TS writes a string on
+  // one path and an object on two others, so both sides are normalised to the
+  // shape's NAME first and its contents second.
+  ['headWhy', (ts) => (ts.headWhy === undefined ? ''
+    : typeof ts.headWhy === 'string' ? ts.headWhy
+    : ts.headWhy.verdict === 'head ok' ? 'head ok' : 'judged'), (c) => c.headWhy],
+  ['headWhy.headOk', (ts) => (ts.headWhy?.verdict === 'head ok'
+    ? `${ts.headWhy.anchor}:${ts.headWhy.at}:${ts.headWhy.first}` : 'n/a'),
+    (c) => (c.headOk ? `${c.headOk.anchor}:${c.headOk.at}:${c.headOk.first}` : 'n/a')],
+  ['headWhy.judged', (ts) => {
+    const w = ts.headWhy
+    if (!w || typeof w === 'string' || w.verdict === 'head ok') return 'n/a'
+    const tail = 'headTracked' in w ? `:${w.headTracked}:${w.replace}` : ''
+    return `${w.anchor}:${w.at}:${w.unsteady}:${w.missing}:${w.onsets}:${w.onsetsTrusted}${tail}` +
+      (w.walk ? `:walk=${w.walk}` : '')
+  }, (c) => {
+    const w = c.headJudged
+    if (!w) return 'n/a'
+    const tail = 'headTracked' in w ? `:${w.headTracked}:${w.replace}` : ''
+    return `${w.anchor}:${w.at}:${w.unsteady}:${w.missing}:${w.onsets}:${w.onsetsTrusted}${tail}` +
+      (w.walk ? `:walk=${w.walk}` : '')
+  }],
+  ['headOnsets', (ts) => (ts.headOnsets
+    ? `${ts.headOnsets.per}:${ts.headOnsets.periodic}/${ts.headOnsets.of}:${ts.headOnsets.t.join(' ')}` : 'none'),
+    (c) => (c.headOnsets
+      ? `${c.headOnsets.per}:${c.headOnsets.periodic}/${c.headOnsets.of}:${c.headOnsets.t.join(' ')}` : 'none')],
+  ['headBackcast', (ts) => (ts.headBackcast
+    ? `${ts.headBackcast.replaced}:${ts.headBackcast.added}:${ts.headBackcast.snapped}:${ts.headBackcast.phase}`
+    : 'none'),
+    (c) => (c.headBackcast
+      ? `${c.headBackcast.replaced}:${c.headBackcast.added}:${c.headBackcast.snapped}:${c.headBackcast.phase}`
+      : 'none')],
+  // The reported tempo and the suspect marks — both come off the finished
+  // grid, so both ride the same gate as the bars.
+  ['bpm', (ts) => ts.__bpm, (c) => c.bpm],
+  ['suspectAt', (ts) => ('__suspectAt' in ts
+    ? (ts.__suspectAt?.length ? ts.__suspectAt.join(',') : 'none') : undefined),
+    (c) => (c.suspectAt?.length ? c.suspectAt.join(',') : 'none')],
   ['detVersion', () => BEAT_DETECT_VERSION, (c) => c.detVersion]
 ]
 
@@ -264,6 +340,16 @@ for (const dir of dirs) {
     tsDbg
   )
 
+  // A fixture must reach the path it was built for, before its parity counts.
+  const pre = FIXTURE_PRECONDITIONS[basename(dir)]
+  if (pre && !pre.check(tsDbg, tsGrid ?? { beats: [] })) {
+    console.log(`FAIL  ${dir}`)
+    console.log(`      fixture no longer reaches its own path — it must ${pre.what}`)
+    console.log(`      headWhy=${JSON.stringify(tsDbg.headWhy)} beats=${tsGrid?.beats?.length} first=${tsGrid?.beats?.[0]}`)
+    failed++
+    continue
+  }
+
   const cliArgs = ['beats', '--drums', drumsPath, ...instPaths.flatMap((p) => ['--inst', p]),
     ...(vocalsPath ? ['--vocals', vocalsPath] : []),
     // Full precision, not the JSON's 2 decimals: `--line 0.94` and the TS's
@@ -296,25 +382,31 @@ for (const dir of dirs) {
   // none to many in one step, which is the thing to remember when the aux
   // widens for the next slice.
   const courtsIdle = tsDbg.v20 === undefined || tsDbg.v20.abstained === true
-  // DEFAULT-CLOSED, and for the same reason the spanOk bug existed: an absent
-  // field is not evidence. `debug.headBackcast` records an ACTION, so probing
-  // for its absence answers "did it announce a rebuild", not "did it decline
-  // to rebuild" — and backcastHead returns a rebuilt lattice without writing
-  // that field when its `bars` argument is undefined, which detectBeats leaves
-  // undefined on a branch that inst-only aux makes reachable. So the probe
-  // names the three ways it declines (returns null before touching anything),
-  // and any headWhy shape not on that list closes the gate.
-  // Measured on the four library projects: all four report
-  // `{verdict: 'head ok', …}`.
-  const headWhy = tsDbg.headWhy
-  const headIdle =
-    headWhy === undefined || headWhy === 'no stable anchor' || headWhy?.verdict === 'head ok'
-  const backcastAbsent = tsDbg.headBackcast === undefined  // belt and braces
-  const latticeUsable = courtsIdle && headIdle && backcastAbsent
+  // The head backcast used to be gated out here alongside the courts, with a
+  // default-closed probe over its three decline shapes. It is PORTED now, so
+  // the C++ rebuilds the same head — and the gate would be hiding the one
+  // stage that most wants comparing. What is left is the courts alone.
+  // Positive, not "the courts did not object": `debug.lattice` records which
+  // front end actually produced the grid, so this asks the TS to CONFIRM the
+  // drums-first path rather than inferring it from the absence of an ml key in
+  // an aux literal a few lines up. Same discipline as the courts probe, and
+  // the reason is the same — this file has read an absent field as evidence
+  // three times.
+  // ONE field, and it proves the rest. Every non-null return from
+  // `latticeFromMl` writes `debug.mlLattice` unconditionally, so its absence
+  // proves the function bailed at its own `if (!ml || …)` guard — hence no
+  // mlChoice, hence no adoption, no splice, no mlSpliceRanges, no mlSeams.
+  // (The first version of this enumerated three OTHER fields, none of which
+  // is the splice's own record: `debug.mlSplice` is, `lattice` reads 'drums'
+  // *during* a splice because the splice only runs when the ML lattice was
+  // NOT adopted, and both of the others are written behind extra gates. A
+  // hedge that watches the wrong fields is worse than no hedge, because it
+  // reads as covered.)
+  const noMl = tsDbg.mlLattice === undefined
+  const latticeUsable = courtsIdle && noMl
   if (tsGrid && latticeUsable) {
     tsDbg.__beats = tsGrid.beats
-    const ivs = tsGrid.beats.slice(1).map((b, i) => b - tsGrid.beats[i]).sort((a, b) => a - b)
-    tsDbg.__medSec = ivs.length ? ivs[Math.floor(ivs.length / 2)] : 0
+    tsDbg.__medSec = medianGap(tsGrid.beats)
     tsDbg.__bpb = tsGrid.beatsPerBar
     tsDbg.__downbeat = tsGrid.downbeat
     tsDbg.__downbeats = tsGrid.downbeats
@@ -322,11 +414,13 @@ for (const dir of dirs) {
     // same gate. `?? null` keeps the property present-but-empty, which is how
     // "the TS sanitized nothing" stays distinguishable from "not compared".
     tsDbg.__sanitized = tsDbg.sanitized ?? null
+    tsDbg.__bpm = tsGrid.bpm
+    tsDbg.__suspectAt = tsGrid.suspectAt ?? null
   }
   const latticeSkipReason = !courtsIdle
     ? 'the courts engaged'
-    : !headIdle || !backcastAbsent
-      ? 'the head backcast may have rebuilt the lattice'
+    : !noMl
+      ? 'an ML lattice produced or spliced the grid'
       : null
 
   let firstBad = null

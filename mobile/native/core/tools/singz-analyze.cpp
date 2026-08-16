@@ -172,16 +172,15 @@ int main(int argc, char** argv) {
       return 2;
     }
     singz::BeatDebug d;
-    singz::BarPhase phase;
-    const singz::DrumLattice lat = singz::trackFromDrums(drums, inst, d);
-    const bool ok = lat.ok;
-    if (ok) {
-      singz::BeatAux aux;
-      aux.inst = &inst;  // the fill stems double as the harmonic layer
-      if (haveVocals) aux.vocals = &vocals;
-      aux.lineStarts = lineStarts;
-      phase = singz::barPhase(lat, drums, aux, d);
-    }
+    singz::BeatAux aux;
+    aux.inst = &inst;  // the fill stems double as the harmonic layer
+    if (haveVocals) aux.vocals = &vocals;
+    aux.lineStarts = lineStarts;
+    // The whole pipeline, as detectBeats runs it — tracker, vote, head
+    // backcast, sanitize — so what is printed below is the grid itself and not
+    // an intermediate the harness would have to reassemble.
+    const singz::BeatGrid grid = singz::detectBeatsNoCourts(drums, aux, d);
+    const bool ok = grid.ok;
     std::printf("{\"detVersion\":%d,\"ok\":%s,\"frames\":%d,\"drumPeaks\":%d,\"peaks\":%d,",
                 singz::kBeatDetectVersion, ok ? "true" : "false", d.frames, d.drumPeaks, d.peaks);
     std::printf("\"fluxSum\":%.17g,\"fluxMean\":%.17g,\"windows\":%d,", d.fluxSum, d.fluxMean, d.windows);
@@ -189,10 +188,51 @@ int main(int argc, char** argv) {
     std::printf("\"support\":%.17g,\"activeFrac\":%.17g,\"steadiness\":%.17g,\"rough\":%.17g,", d.support,
                 d.activeFrac, d.steadiness, d.rough);
     std::printf("\"beats\":%d,\"medSec\":%.17g,", d.beats, d.medSec);
+    // beatsPerBar off the GRID, like medSec and beats.length — the debug copy
+    // is recorded before the return and the TS side reads the return.
     std::printf("\"beatsPerBar\":%d,\"activeBeats\":%d,\"segments\":%d,\"acAt3\":%.17g,\"acAt4\":%.17g,",
-                d.beatsPerBar, d.activeBeats, d.segments, d.acAt3, d.acAt4);
-    std::printf("\"downbeat\":%d,\"downbeats\":[", phase.downbeat);
-    for (size_t i = 0; i < phase.downbeats.size(); i++) std::printf("%s%d", i ? "," : "", phase.downbeats[i]);
+                grid.beatsPerBar, d.activeBeats, d.segments, d.acAt3, d.acAt4);
+    // `beatsSec` is the GRID's now, not the tracker's — the backcast can
+    // rebuild the head, and that is precisely what wants comparing.
+    std::printf("\"gridBeats\":%d,\"beatsSec\":[", static_cast<int>(grid.beats.size()));
+    for (size_t i = 0; i < grid.beats.size(); i++) std::printf("%s%.17g", i ? "," : "", grid.beats[i]);
+    std::printf("],");
+    {
+      const char* why = d.headWhy == singz::BeatDebug::HeadWhy::noAnchor ? "no stable anchor"
+                        : d.headWhy == singz::BeatDebug::HeadWhy::headOk  ? "head ok"
+                        : d.headWhy == singz::BeatDebug::HeadWhy::judged  ? "judged"
+                                                                         : "";
+      std::printf("\"headWhy\":\"%s\",", why);
+      if (d.headWhy == singz::BeatDebug::HeadWhy::headOk)
+        std::printf("\"headOk\":{\"anchor\":%d,\"at\":%.17g,\"first\":%.17g},", d.headAnchor, d.headAt,
+                    d.headFirst);
+      if (d.headWhy == singz::BeatDebug::HeadWhy::judged) {
+        std::printf("\"headJudged\":{\"anchor\":%d,\"at\":%.17g,\"unsteady\":%s,\"missing\":%s,\"onsets\":%d,"
+                    "\"onsetsTrusted\":%s",
+                    d.headAnchor, d.headAt, d.headUnsteady ? "true" : "false", d.headMissing ? "true" : "false",
+                    d.headOnsetCount, d.headOnsetsTrusted ? "true" : "false");
+        if (d.headHasVerdict)
+          std::printf(",\"headTracked\":%s,\"replace\":%s", d.headTracked ? "true" : "false",
+                      d.headReplace ? "true" : "false");
+        if (d.headWalkEmpty) std::printf(",\"walk\":\"empty\"");
+        std::printf("},");
+      }
+      if (d.hasHeadOnsets) {
+        std::printf("\"headOnsets\":{\"per\":%.17g,\"periodic\":%d,\"of\":%d,\"t\":[", d.headOnsetsPer,
+                    d.headOnsetsPeriodic, d.headOnsetsOf);
+        for (size_t i = 0; i < d.headOnsetsT.size(); i++) std::printf("%s%.17g", i ? "," : "", d.headOnsetsT[i]);
+        std::printf("]},");
+      }
+      if (d.hasHeadBackcast)
+        std::printf("\"headBackcast\":{\"replaced\":%d,\"added\":%d,\"snapped\":%d,\"phase\":\"%s\"},",
+                    d.headBackcastReplaced, d.headBackcastAdded, d.headBackcastSnapped,
+                    d.headBackcastChords ? "chords" : "carried");
+      std::printf("\"suspectAt\":[");
+      for (size_t i = 0; i < grid.suspectAt.size(); i++) std::printf("%s%.17g", i ? "," : "", grid.suspectAt[i]);
+      std::printf("],");
+    }
+    std::printf("\"bpm\":%.17g,\"downbeat\":%d,\"downbeats\":[", grid.bpm, grid.downbeat);
+    for (size_t i = 0; i < grid.downbeats.size(); i++) std::printf("%s%d", i ? "," : "", grid.downbeats[i]);
     std::printf("],\"phaseCuts\":[");
     for (size_t i = 0; i < d.phaseCuts.size(); i++) std::printf("%s%d", i ? "," : "", d.phaseCuts[i]);
     std::printf("],");
@@ -217,13 +257,11 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < d.spanOk.size(); i++)
       std::printf("%s{\"a\":%d,\"b\":%d,\"ok\":%s}", i ? "," : "", d.spanOk[i].a, d.spanOk[i].b,
                   d.spanOk[i].ok ? "true" : "false");
-    std::printf("],\"beatsSec\":[");
-    for (size_t i = 0; i < lat.beatsSec.size(); i++) std::printf(i ? ",%.17g" : "%.17g", lat.beatsSec[i]);
     std::printf("],\"voids\":[");
-    for (size_t i = 0; i < lat.voids.size(); i++)
+    for (size_t i = 0; i < d.voids.size(); i++)
       std::printf("%s{\"aSec\":%.17g,\"bSec\":%.17g,\"leading\":%s,\"trailing\":%s,\"filled\":%s}", i ? "," : "",
-                  lat.voids[i].aSec, lat.voids[i].bSec, lat.voids[i].leading ? "true" : "false",
-                  lat.voids[i].trailing ? "true" : "false", lat.voids[i].filled ? "true" : "false");
+                  d.voids[i].aSec, d.voids[i].bSec, d.voids[i].leading ? "true" : "false",
+                  d.voids[i].trailing ? "true" : "false", d.voids[i].filled ? "true" : "false");
     std::printf("],");
     if (d.fillApplied)
       std::printf("\"fill\":{\"alpha\":%.17g,\"dTop\":%.17g,\"iTop\":%.17g,\"instMaxima\":%d,\"gSum\":%.17g},",
