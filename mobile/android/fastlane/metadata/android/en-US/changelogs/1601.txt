@@ -1,0 +1,1 @@
+Splitting a song on Android now shows up where you would expect it: a notification with a progress bar and a Cancel button, so you can leave the app and still see how far it has got. And when the phone refuses to start a split at all — screen off, battery Restricted — it says so, with the phone's own reason, instead of quietly forgetting you asked.
