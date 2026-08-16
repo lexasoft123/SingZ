@@ -27,19 +27,33 @@ on:
   # Keeps main's ccache warm. Actions caches cannot be shared between tags —
   # a run reads only its own ref and the DEFAULT BRANCH — so a tag build can
   # never inherit from a sibling tag, and the artifacts job otherwise runs on
-  # tags only. That left every release compiling the NDK from cold: measured
-  # 32 minutes at a 0% ccache hit rate. This weekly build exists purely so
-  # main owns a recent cache for the next tag to inherit.
+  # tags only. Without this, the only cache a release could inherit was
+  # whatever a one-off dispatch happened to leave on main; v0.16.0 restored
+  # one written five hours before the shared C++ core landed.
+  #
+  # DAILY, not weekly. A weekly warmer was the first attempt and it is not
+  # enough: mobile/ moves most days, and a tag is cut whenever it is ready,
+  # so the cache has to be at most a day behind. It costs little once warm —
+  # the daily run inherits its own previous cache, so only what changed that
+  # day recompiles.
   schedule:
-    - cron: '17 4 * * 1'
+    - cron: '17 4 * * *'
 
 permissions:
   contents: write
 
 # Superseded runs of the same ref are cancelled (tags each get their own ref,
 # so release builds are never cancelled).
+#
+# The event is part of the group because the daily warmer runs on main and so
+# carries the same github.ref a mobile/** push does. Grouped on ref alone,
+# a push landing inside the warmer's half-hour would cancel it — and
+# actions/cache does not save on a cancelled job, so that day's warm would be
+# lost silently — or the warmer would cancel a canary, which reads on main as
+# a broken build. Weekly made that a rare coincidence; daily would make it a
+# daily one.
 concurrency:
-  group: android-${{ github.ref }}
+  group: android-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -181,6 +195,12 @@ jobs:
       - run: npm ci
         working-directory: mobile
 
+      # Neither version ships in the runner image — ubuntu-latest was 24.04
+      # with NDK 27.3/28.2/29.0 and CMake 3.31/4.1 when this was written — so
+      # sdkmanager downloads and EXTRACTS a fresh toolchain on every run. That
+      # is what CCACHE_COMPILERCHECK below is about; see the build step. The
+      # fix does not depend on which image is current, only on the pin being
+      # something the image does not already have.
       - name: Pinned NDK + CMake
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1" > /dev/null
 
@@ -212,6 +232,23 @@ jobs:
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_DIR: /home/runner/.ccache
+          # Why the cacheable half of this build never hit once. ccache's
+          # default compiler_check is `mtime`, which hashes the compiler's
+          # mtime and size — and the pinned NDK is re-extracted every run, so
+          # clang's mtime is new every time and every object misses no matter
+          # how good the cache is. v0.16.0 and v0.16.1 both restored 146 MB
+          # and both reported "Hits: 0 / 732 (0.00%)"; so did every android
+          # run before them. Hashing the binary's content instead is, per
+          # ccache's own manual, "very slightly slower".
+          #
+          # Two things to expect, so neither reads as a failure. The other 45%
+          # of calls are counted uncacheable and still will be — this fixes
+          # the 732 cacheable ones, not the 1324. And the value is itself part
+          # of ccache's hash, so the mtime-keyed cache sitting on main is
+          # unreachable: the first run after this lands still reports 0%, and
+          # the one after it is the first that can hit. Let a daily warmer go
+          # by before reading the result.
+          CCACHE_COMPILERCHECK: content
           SINGZ_KEYSTORE_FILE: ${{ steps.upload-key.outputs.signed == 'true' && format('{0}/upload.jks', runner.temp) || '' }}
           SINGZ_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           SINGZ_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -219,11 +256,16 @@ jobs:
         run: |
           # Bounded: a unique cache key per run means many entries, and the
           # repo shares a 10 GB LRU budget with the desktop workflows' engine
-          # caches. 600M holds a full cold build (measured: 145 MB) with room.
+          # caches. A full cold build measured 145 MB at four ABIs, so ~75 at
+          # two; 600M keeps several generations, which is what the prefix
+          # restore-keys pull forward.
           ccache -M 600M
           ccache -z
           ./gradlew bundleRelease assembleRelease --no-daemon
-          ccache -s | head -8
+          # -sv, not -s: the summary alone said 45% of calls were
+          # "uncacheable" without ever saying why, which is not something to
+          # go guessing about a second time.
+          ccache -sv
         working-directory: mobile/android
 
       # Proof, in the log, of the two things Play refuses a bundle for:
@@ -237,7 +279,13 @@ jobs:
             | grep -E "^package:" || true
           keytool -printcert -jarfile "$BUNDLE" | grep -E "Owner:|SHA1:" || true
 
+      # Not on the daily warmer: nobody downloads those, and keeping a signed
+      # bundle + APK for 30 days each would park ~8 GB of artifact storage to
+      # no purpose. The build itself still ran, which is the point — and the
+      # `Report bundle identity` step above means the daily run also proves
+      # the keystore secret still decodes.
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'schedule'
         with:
           name: SingZ-android
           path: |

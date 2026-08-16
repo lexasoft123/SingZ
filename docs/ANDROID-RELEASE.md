@@ -59,6 +59,14 @@ which is still stderr, and still fails. Use a JDK that does not warn.
 Outputs land in `app/build/outputs/bundle/release/app-release.aab` and
 `app/build/outputs/apk/release/app-release.apk`.
 
+Both carry **arm64-v8a and armeabi-v7a only** (`reactNativeArchitectures` in
+`gradle.properties`). The emulator ABIs cost 35% of the build time and reach no
+phone; what dropping x86_64 costs is Chromebooks, which Play will simply not
+offer SingZ to. Developing against an x86_64 emulator needs
+`-PreactNativeArchitectures=x86_64` — without it the install fails outright
+with `INSTALL_FAILED_NO_MATCHING_ABIS`, unless the image is a Google x86_64 one
+from API 30 up, whose ARM translation runs the arm build regardless.
+
 **Without a key, a release build still succeeds — signed with the debug key.**
 That keeps `assembleRelease` usable for a quick sideload, and gradle prints a
 warning saying the build is not shippable. Play rejects such an upload with a
