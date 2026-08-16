@@ -835,6 +835,66 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       while the CLI and a standalone probe ran the same code correctly at
       the same moment. The macro's internal is now `check_ok_`; a macro
       that captures the caller's names is a trap for every test after it.
+    - **Sixth slice — the meter and the bar lines** (2026-08-16). `barPhase`
+      is whole for the no-model path: the meter test (dominant 3-beat
+      periodicity means the tracked pulse is a compound song's eighth), the
+      activity mask, the segments, the six-cue rotation vote per segment
+      (kick / entrance / slam / bass chord changes / vocal phrase entries /
+      lyric lines, at their meter-specific weights), the anchor rule, the
+      slip windows with the physical-defect gate, the global harmonic-gain
+      arbiter that decides whether a re-phase pays for itself, and
+      `sanitizeBars`. With it the port stops producing beat times only and
+      starts producing a `BeatInfo` a player can draw — which is what wiring
+      was blocked on.
+      **31 of 31 stages identical on all four projects**, and the answers are
+      musically legible: Nothing Else Matters comes out 6/8 (ac3/ac4 = 2.61)
+      at rotation 1 with 154 uniform six-beat bars — rotation 1 being exactly
+      the verses-enter-after-the-bar-line the TS comment describes; Sixteen
+      Tons 78 bars over four segments with one 5- and one 7-beat bar at
+      section seams; WDOA 96 with one 5; Panzerkampf **none at all**, because
+      its best segment scores 0.04 against an `ANCHOR_CONF` of 0.08 — a song
+      whose bar structure lives in the rotation index alone is a legitimate
+      result, not a failure, and the port refuses in the same place.
+    - **The harness gained two inputs, and that was the point.** It had been
+      passing the fill stems only. Vocals and lyric line starts engage no
+      court (`buildCourtEvidence` fills its chord runs only inside
+      `if (bass22)`), so they can be handed over safely — and without them
+      two of the six cues would have been `uniform()` on BOTH sides, and
+      their parity would have proved nothing at all. Bass is still withheld
+      for exactly the reason it was before: it is the single input that flips
+      `applyCourts` from abstaining to active, and 1,514 un-ported lines
+      would then sit between the two sides. That is the next slice's problem,
+      by design.
+    - **What review caught, and the third repeat of one mistake.** The
+      `downbeats` stage folded "the stage was gated off" and "this song
+      legitimately has no bars" into the same `'none'`, which made its own
+      `LATTICE_STAGES` skip DEAD: the skip is keyed on `undefined`, so a
+      getter that can never yield `undefined` can never be skipped. Harmless
+      today (all five inputs report every stage compared, so the gate was
+      open throughout) and a live hazard the moment bass lands — it would
+      compare the TS's absence against the C++'s real bars. The general
+      shape, now worth stating as a rule: **only a stage that can actually
+      yield `undefined` can be gated.** That is three times in this one file
+      that an absent field was read as evidence.
+      Two more: `harmParts` held a converted copy of every harmonic stem at
+      once, reintroducing the exact pattern `estimateKeyFromStems`' comment
+      exists to forbid (~265 MB on a five-minute song, on a queue that may
+      run beside a player holding the same song), and `BeatAux::inst` was a
+      `std::vector` **by value** while its own `bass`/`vocals` were pointers,
+      so its single assignment deep-copied every stem again. Both fixed:
+      convert-add-drop in the TS's own order (bit-identical, and
+      `resampledLength` is shared for the sizing), and `inst` is a pointer
+      like its neighbours. Measured after: **187 MB peak** for a four-stem
+      beats run on a 2:56 song.
+      And the harness was comparing each segment's CONCLUSION (rotation,
+      margin) but not the six distributions it was drawn from — one cue could
+      have diverged while the argmax survived, surfacing much later as a
+      wrong bar line. `debug.segCues[].cues` is now a stage of its own, which
+      is what takes the count to 31.
+    - `goertzel` is shared out of `analysis.h` rather than re-rolled, the
+      same call the reviewer made about `monoAt44k` two slices ago — the key
+      detector and the chord-change cue read chroma identically, and a second
+      copy is a second thing to keep bit-identical forever.
     - Next: the rest of detectBeats and courts (same method, same harness)
       — which is now the whole remaining cost of a phone analysis — then
       the desktop's `analysis:run` IPC over the CLI, then retire the TS

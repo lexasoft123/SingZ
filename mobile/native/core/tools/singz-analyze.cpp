@@ -6,7 +6,8 @@
 //   singz-analyze melody --f32 <mono float32 file> --sr <rate> [--raw]
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
 //   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
-//   singz-analyze beats --drums <d.wav> [--inst <a.wav> ...]   (staged debug)
+//   singz-analyze beats --drums <d.wav> [--inst <a.wav> ...] [--vocals <v.wav>]
+//                        [--line <sec> ...]                          (staged debug)
 //
 // Prints one JSON object on stdout. Floats are printed with 9 significant
 // digits, which round-trips float32 exactly — the parity harness compares
@@ -134,12 +135,19 @@ int main(int argc, char** argv) {
     // object names each field — the harness compares stage by stage, so a
     // divergence points at the stage that caused it, not just the song.
     singz::AnalysisStem drums;
+    singz::AnalysisStem vocals;
     std::vector<singz::AnalysisStem> inst;
-    bool haveDrums = false;
+    std::vector<double> lineStarts;
+    bool haveDrums = false, haveVocals = false;
     for (int i = 2; i < argc; i++) {
+      if (std::strcmp(argv[i], "--line") == 0 && i + 1 < argc) {
+        lineStarts.push_back(std::atof(argv[++i]));
+        continue;
+      }
       const bool isDrums = std::strcmp(argv[i], "--drums") == 0;
       const bool isInst = std::strcmp(argv[i], "--inst") == 0;
-      if (!(isDrums || isInst) || i + 1 >= argc) continue;
+      const bool isVocals = std::strcmp(argv[i], "--vocals") == 0;
+      if (!(isDrums || isInst || isVocals) || i + 1 >= argc) continue;
       const std::string path = argv[++i];
       singz::MonoWav w = singz::readWavMono(path);
       if (!w.ok) {
@@ -152,6 +160,9 @@ int main(int argc, char** argv) {
       if (isDrums) {
         drums = std::move(st);
         haveDrums = true;
+      } else if (isVocals) {
+        vocals = std::move(st);
+        haveVocals = true;
       } else {
         inst.push_back(std::move(st));
       }
@@ -161,8 +172,16 @@ int main(int argc, char** argv) {
       return 2;
     }
     singz::BeatDebug d;
+    singz::BarPhase phase;
     const singz::DrumLattice lat = singz::trackFromDrums(drums, inst, d);
     const bool ok = lat.ok;
+    if (ok) {
+      singz::BeatAux aux;
+      aux.inst = &inst;  // the fill stems double as the harmonic layer
+      if (haveVocals) aux.vocals = &vocals;
+      aux.lineStarts = lineStarts;
+      phase = singz::barPhase(lat, drums, aux, d);
+    }
     std::printf("{\"detVersion\":%d,\"ok\":%s,\"frames\":%d,\"drumPeaks\":%d,\"peaks\":%d,",
                 singz::kBeatDetectVersion, ok ? "true" : "false", d.frames, d.drumPeaks, d.peaks);
     std::printf("\"fluxSum\":%.17g,\"fluxMean\":%.17g,\"windows\":%d,", d.fluxSum, d.fluxMean, d.windows);
@@ -170,7 +189,31 @@ int main(int argc, char** argv) {
     std::printf("\"support\":%.17g,\"activeFrac\":%.17g,\"steadiness\":%.17g,\"rough\":%.17g,", d.support,
                 d.activeFrac, d.steadiness, d.rough);
     std::printf("\"beats\":%d,\"medSec\":%.17g,", d.beats, d.medSec);
-    std::printf("\"spanOk\":[");
+    std::printf("\"beatsPerBar\":%d,\"activeBeats\":%d,\"segments\":%d,\"acAt3\":%.17g,\"acAt4\":%.17g,",
+                d.beatsPerBar, d.activeBeats, d.segments, d.acAt3, d.acAt4);
+    std::printf("\"downbeat\":%d,\"downbeats\":[", phase.downbeat);
+    for (size_t i = 0; i < phase.downbeats.size(); i++) std::printf("%s%d", i ? "," : "", phase.downbeats[i]);
+    std::printf("],\"phaseCuts\":[");
+    for (size_t i = 0; i < d.phaseCuts.size(); i++) std::printf("%s%d", i ? "," : "", d.phaseCuts[i]);
+    std::printf("],");
+    if (d.hasHarmGain)
+      std::printf("\"harmGain\":{\"plain\":%.17g,\"cut\":%.17g},", d.harmGainPlain, d.harmGainCut);
+    if (d.hasSanitized)
+      std::printf("\"sanitized\":{\"before\":%d,\"after\":%d},", d.sanitizedBefore, d.sanitizedAfter);
+    std::printf("\"segCues\":[");
+    for (size_t i = 0; i < d.segCues.size(); i++)
+      {
+        std::printf("%s{\"a\":%d,\"b\":%d,\"rot\":%d,\"conf\":%.17g,\"cues\":[", i ? "," : "", d.segCues[i].a,
+                    d.segCues[i].b, d.segCues[i].rot, d.segCues[i].conf);
+        for (size_t j = 0; j < d.segCues[i].cues.size(); j++) {
+          std::printf("%s[", j ? "," : "");
+          for (size_t k = 0; k < d.segCues[i].cues[j].size(); k++)
+            std::printf("%s%.17g", k ? "," : "", d.segCues[i].cues[j][k]);
+          std::printf("]");
+        }
+        std::printf("]}");
+      }
+    std::printf("],\"spanOk\":[");
     for (size_t i = 0; i < d.spanOk.size(); i++)
       std::printf("%s{\"a\":%d,\"b\":%d,\"ok\":%s}", i ? "," : "", d.spanOk[i].a, d.spanOk[i].b,
                   d.spanOk[i].ok ? "true" : "false");

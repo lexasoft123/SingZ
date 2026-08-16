@@ -2,7 +2,10 @@
 #include "beats.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdlib>
+#include <functional>
 #include <limits>
 
 // Same no-FMA rule as melody.cpp and analysis.cpp — this file's whole claim
@@ -70,6 +73,190 @@ struct Quality {
   double support = 0, activeFrac = 0, steadiness = 0, alternation = 0, rough = 0, med = 0;
 };
 
+// ---- detectBeats: the downbeat cues ---------------------------------------
+
+/** analysis.ts's `nearestBeatIdx` — binary search, ties to the earlier beat. */
+int nearestBeatIdx(const std::vector<double>& beats, double t) {
+  int lo = 0, hi = static_cast<int>(beats.size()) - 1;
+  while (lo < hi) {
+    const int mid = (lo + hi) >> 1;
+    if (beats[static_cast<size_t>(mid)] < t) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo > 0 && std::fabs(beats[static_cast<size_t>(lo - 1)] - t) < std::fabs(beats[static_cast<size_t>(lo)] - t))
+    lo--;
+  return lo;
+}
+
+/** Chord-change strength per beat: chroma novelty between consecutive beats,
+ *  kept only at gated local maxima and weighted by how pure the new chroma is.
+ *  Empty = the TS's null (too little energy, or too few changes, to judge). */
+std::vector<double> harmonicChangeVotes(const std::vector<float>& data, const std::vector<double>& beats, int bpb) {
+  const double sr = ANALYSIS_SR;
+  const size_t nCh = beats.size() > 1 ? beats.size() - 1 : 0;
+  std::vector<std::array<double, 12>> chromas(nCh);
+  std::vector<double> eng(nCh, 0.0);
+  for (size_t k = 0; k < nCh; k++) {
+    const double aD = jsRound(beats[k] * sr);
+    const double bD = jsRound(beats[k + 1] * sr);
+    const size_t a = aD < 0 ? 0 : static_cast<size_t>(aD);
+    const size_t b = bD > static_cast<double>(data.size()) ? data.size() : static_cast<size_t>(std::max(0.0, bD));
+    std::array<double, 12> ch{};
+    ch.fill(0.0);
+    double e = 0;
+    if (b > a && b - a > 1024) {
+      for (int s = 0; s < 36; s++)
+        ch[static_cast<size_t>(s % 12)] += goertzelPublic(data, a, b, 41.2 * std::pow(2.0, s / 12.0), sr);
+      for (size_t i = a; i < b; i += 4) e += static_cast<double>(data[i]) * static_cast<double>(data[i]);
+      e /= static_cast<double>(b - a) / 4.0;
+    }
+    chromas[k] = ch;
+    eng[k] = e;
+  }
+  std::vector<double> engSorted;
+  for (const double x : eng)
+    if (x > 0) engSorted.push_back(x);
+  std::sort(engSorted.begin(), engSorted.end());
+  if (engSorted.size() < static_cast<size_t>(bpb) * 4) return {};
+  const double eMed = engSorted[engSorted.size() / 2];
+  std::vector<double> nov(nCh, 0.0);
+  for (size_t k = 1; k < nCh; k++) {
+    if (eng[k] < 0.15 * eMed || eng[k - 1] < 0.15 * eMed) continue;
+    double num = 0, dx = 0, dy = 0;
+    for (size_t i = 0; i < 12; i++) {
+      num += chromas[k][i] * chromas[k - 1][i];
+      dx += chromas[k][i] * chromas[k][i];
+      dy += chromas[k - 1][i] * chromas[k - 1][i];
+    }
+    if (dx > 1e-12 && dy > 1e-12) nov[k] = 1 - num / std::sqrt(dx * dy);
+  }
+  std::vector<double> gated;
+  for (const double x : nov)
+    if (x > 0) gated.push_back(x);
+  std::sort(gated.begin(), gated.end());
+  if (gated.size() < static_cast<size_t>(bpb) * 2) return {};
+  const double nMed = gated[gated.size() / 2];
+  std::vector<double> votes(nCh, 0.0);
+  for (size_t k = 1; k + 1 < nov.size(); k++) {
+    if (nov[k] > 1.5 * nMed && nov[k] >= nov[k - 1] && nov[k] >= nov[k + 1]) {
+      const std::array<double, 12>& ch = chromas[k];
+      double tot = 0, mx = 0;
+      for (size_t i = 0; i < 12; i++) {
+        tot += ch[i];
+        if (ch[i] > mx) mx = ch[i];
+      }
+      votes[k] = nov[k] * (tot > 1e-12 ? mx / tot : 0);
+    }
+  }
+  return votes;
+}
+
+struct VocHit {
+  int k;
+  double w;
+};
+
+/** Vocal phrase entries: the loudest moment shortly after each >= 2-bar rest,
+ *  when it lands on a beat. `used` false = the TS's null. */
+std::vector<VocHit> vocalEntryVotes(const AnalysisStem& vocals, const std::vector<double>& beats, double med, int bpb,
+                                    bool& used) {
+  used = false;
+  const double sr = ANALYSIS_SR;
+  const std::vector<float> data = monoAt44kPublic(vocals);
+  const double fps = sr / HOP;
+  const int n = static_cast<int>(data.size() / HOP);
+  if (n <= 0) return {};
+  std::vector<float> env(static_cast<size_t>(n), 0.0f);
+  for (int i = 0; i < n; i++) {
+    double s = 0;
+    const size_t off = static_cast<size_t>(i) * HOP;
+    for (int j = 0; j < HOP; j += 4) s += static_cast<double>(data[off + j]) * static_cast<double>(data[off + j]);
+    env[static_cast<size_t>(i)] = static_cast<float>(s);
+  }
+  for (int i = 1; i < n; i++)
+    env[static_cast<size_t>(i)] = static_cast<float>(0.6 * static_cast<double>(env[static_cast<size_t>(i)]) +
+                                                     0.4 * static_cast<double>(env[static_cast<size_t>(i - 1)]));
+  std::vector<double> sorted;
+  sorted.reserve(static_cast<size_t>(n));
+  for (const float x : env) sorted.push_back(static_cast<double>(x));
+  std::sort(sorted.begin(), sorted.end());
+  const size_t p90i = static_cast<size_t>(std::floor(n * 0.9));
+  const double p90 = p90i < sorted.size() ? sorted[p90i] : 0.0;
+  if (!(p90 > 0)) return {};
+  used = true;
+  const double thr = 0.15 * p90;
+  const int restF = static_cast<int>(jsRound(2 * bpb * med * fps));
+  const double loudest = sorted.back();
+  const double denom = loudest != 0 ? loudest : 1.0;
+  std::vector<VocHit> hits;
+  int below = restF;
+  int i = 0;
+  while (i < n) {
+    if (static_cast<double>(env[static_cast<size_t>(i)]) < thr) {
+      below++;
+      i++;
+      continue;
+    }
+    if (below >= restF) {
+      const int end = std::min(n, i + static_cast<int>(jsRound(1.5 * bpb * med * fps)));
+      int best = i;
+      for (int j = i; j < end; j++)
+        if (env[static_cast<size_t>(j)] > env[static_cast<size_t>(best)]) best = j;
+      const double t = (static_cast<double>(best) * HOP) / sr;
+      const int bk = nearestBeatIdx(beats, t);
+      if (bk >= 0 && std::fabs(beats[static_cast<size_t>(bk)] - t) < 0.35 * med)
+        hits.push_back({bk, static_cast<double>(env[static_cast<size_t>(best)]) / denom});
+    }
+    below = 0;
+    i++;
+  }
+  return hits;
+}
+
+/** analysis.ts's `sanitizeBars` — split over-long bars (ceil, not round: at
+ *  bpb 6 rounding left 8-beat bars behind), then drop the cheaper side of any
+ *  bar under 2 beats. */
+std::vector<int> sanitizeBars(const std::vector<int>& downbeats, int bpb, int nBeats) {
+  if (downbeats.size() < 3 || bpb < 2) return downbeats;
+  std::vector<int> db{downbeats[0]};
+  for (size_t i = 1; i < downbeats.size(); i++) {
+    const int a = downbeats[i - 1], b = downbeats[i];
+    if (b - a > 7) {
+      const int n = std::max(2, static_cast<int>(std::ceil(static_cast<double>(b - a) / bpb)));
+      for (int k = 1; k < n; k++) {
+        const int t = a + k * bpb;
+        if (t - db.back() >= 2 && b - t >= 2) db.push_back(t);
+      }
+    }
+    db.push_back(b);
+  }
+  const auto cost = [&](const std::vector<int>& arr) {
+    long long c = 0;
+    for (size_t i = 1; i < arr.size(); i++) c += std::llabs(static_cast<long long>(arr[i] - arr[i - 1] - bpb));
+    return c;
+  };
+  for (int guard = 0; guard < 16; guard++) {
+    int hit = -1;
+    for (size_t i = 1; i < db.size(); i++) {
+      if (db[i] - db[i - 1] < 2) {
+        hit = static_cast<int>(i);
+        break;
+      }
+    }
+    if (hit < 0) break;
+    std::vector<int> dropHi, dropLo;
+    for (size_t k = 0; k < db.size(); k++) {
+      if (static_cast<int>(k) != hit) dropHi.push_back(db[k]);
+      if (static_cast<int>(k) != hit - 1) dropLo.push_back(db[k]);
+    }
+    db = cost(dropHi) <= cost(dropLo) ? dropHi : dropLo;
+  }
+  std::vector<int> out;
+  for (const int k : db)
+    if (k >= 0 && k < nBeats) out.push_back(k);
+  return out;
+}
+
 }  // namespace
 
 DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst, BeatDebug& dbg) {
@@ -105,10 +292,15 @@ DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<Analysis
     lowEnergy[static_cast<size_t>(i)] = static_cast<float>(low);
   }
   std::vector<float> drumFlux(static_cast<size_t>(frames), 0.0f);
-  for (int i = 1; i < frames; i++)
+  std::vector<float> lowFlux(static_cast<size_t>(frames), 0.0f);
+  for (int i = 1; i < frames; i++) {
     drumFlux[static_cast<size_t>(i)] = static_cast<float>(
         std::max(0.0, static_cast<double>(energy[static_cast<size_t>(i)]) -
                           static_cast<double>(energy[static_cast<size_t>(i) - 1])));
+    lowFlux[static_cast<size_t>(i)] = static_cast<float>(
+        std::max(0.0, static_cast<double>(lowEnergy[static_cast<size_t>(i)]) -
+                          static_cast<double>(lowEnergy[static_cast<size_t>(i) - 1])));
+  }
 
   // Drum-only onsets — they gate the instrument fill below.
   std::vector<int> drumPeaks;
@@ -691,9 +883,528 @@ DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<Analysis
   out.beatsSec = std::move(beatsSec);
   out.medSec = medSec;
   out.O = O;
+  out.lowFlux = std::move(lowFlux);
+  out.drumPeaks = drumPeaks;
+  out.frames = frames;
   out.ok = true;
   dbg.beats = static_cast<int>(out.beatsSec.size());
   dbg.medSec = medSec;
+  return out;
+}
+
+// ---- detectBeats: bar phase & meter ---------------------------------------
+//
+// Kick energy alone is a coin flip between beats 1 and 3 (both carry kick in
+// most grooves), so bar rotation is voted by sharp musical events instead.
+// Beat TIMES are never touched by phase logic. This pass so far: the activity
+// mask, the kick-energy-per-beat, the meter test and the segments — the vote
+// itself is the next slice.
+BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg) {
+  (void)drums;
+  BarPhase out;
+  if (!lat.ok || lat.beatsSec.empty()) return out;
+  const double sr = ANALYSIS_SR;
+  const double fps = sr / HOP;
+  const int frames = lat.frames;
+  const std::vector<double>& beatsSec = lat.beatsSec;
+  const double medSec = lat.medSec;
+
+  std::vector<int> beatFrames;
+  beatFrames.reserve(beatsSec.size());
+  for (const double b : beatsSec) beatFrames.push_back(static_cast<int>(jsRound((b * sr) / HOP)));
+
+  std::vector<bool> active(beatsSec.size(), false);
+  {
+    size_t pi = 0;
+    const double tol = 0.3 * medSec * fps;
+    for (size_t k = 0; k < beatsSec.size(); k++) {
+      while (pi < lat.drumPeaks.size() && lat.drumPeaks[pi] < beatFrames[k] - tol) pi++;
+      if (pi < lat.drumPeaks.size() && std::fabs(lat.drumPeaks[pi] - beatFrames[k]) < tol) active[k] = true;
+    }
+  }
+  std::vector<double> kickE(beatsSec.size(), 0.0);
+  for (size_t k = 0; k < beatsSec.size(); k++) {
+    const int w = std::max(1, static_cast<int>(jsRound(0.035 * fps)));
+    double s = 0;
+    for (int f = std::max(1, beatFrames[k] - w); f <= std::min(frames - 1, beatFrames[k] + w); f++)
+      s += static_cast<double>(lat.lowFlux[static_cast<size_t>(f)]);
+    kickE[k] = s;
+  }
+
+  // Meter: dominant 3-beat periodicity means the tracked pulse is the eighth
+  // of a compound (6/8) song — accents then group in 6, not 4. Each multiple
+  // takes the best lag in a small window: the median period is a fraction of
+  // a frame off, and by x4 that lands between sharp onset peaks.
+  const auto acAt = [&](double mult) {
+    const double center = medSec * mult * fps;
+    double best = 0;
+    for (int lag = static_cast<int>(std::floor(center)) - 3; lag <= static_cast<int>(std::ceil(center)) + 3; lag++) {
+      if (lag < 1 || lag >= frames - 1) continue;
+      double s = 0;
+      for (int i = lag; i < frames; i++)
+        s += static_cast<double>(lat.O[static_cast<size_t>(i)]) *
+             static_cast<double>(lat.O[static_cast<size_t>(i - lag)]);
+      best = std::max(best, s / (frames - lag));
+    }
+    return best;
+  };
+  // Without an ML grid the TS's waltz branch and its drumless fallback are
+  // both unreachable (`!aux?.ml` short-circuits the activity test), so this
+  // IS the whole meter decision on the no-pack path the phones take.
+  const double ac3 = acAt(3), ac4 = acAt(4);
+  const int bpb = ac3 > 1.5 * ac4 ? 6 : 4;
+  dbg.acAt3 = ac3;
+  dbg.acAt4 = ac4;
+  dbg.beatsPerBar = bpb;
+
+  // Segments: maximal active stretches split by gaps of >= 2 bars.
+  std::vector<std::pair<int, int>> segs;
+  {
+    const int gapLen = 2 * bpb;
+    const int n = static_cast<int>(beatsSec.size());
+    int i = 0;
+    while (i < n) {
+      if (!active[static_cast<size_t>(i)]) {
+        i++;
+        continue;
+      }
+      int j = i, lastAct = i;
+      while (j < n) {
+        if (active[static_cast<size_t>(j)]) lastAct = j;
+        else if (j - lastAct >= gapLen) break;
+        j++;
+      }
+      segs.push_back({i, lastAct});
+      i = lastAct + 1;
+      while (i < n && !active[static_cast<size_t>(i)]) i++;
+    }
+  }
+  int activeN = 0;
+  for (const bool a : active)
+    if (a) activeN++;
+  dbg.activeBeats = activeN;
+  dbg.segments = static_cast<int>(segs.size());
+
+  // ---- the cues -----------------------------------------------------------
+  //
+  // Chord changes are downbeat evidence wherever ANY harmonic instrument plays
+  // them (the organ that carries Mr Crowley lives in `other`, not bass), so the
+  // slip-detection windows read the SUM of every harmonic stem. The segment
+  // vote keeps the calibrated bass-only chroma — walking bass and comping churn
+  // were tuned around it.
+  //
+  // Never all at once: the TS can keep every converted stem because its
+  // monoAt44k hands back a mono buffer's own channel data, where this side
+  // must copy — four stems of a five-minute song is ~210 MB, on a queue that
+  // may run beside a player holding the same song. Each is converted, added
+  // and dropped, in the TS's own order (bass, then each inst, each ascending),
+  // so the float-per-add rounding is untouched. Same fix, same reason, as
+  // estimateKeyFromStems.
+  static const std::vector<AnalysisStem> kNoInst;
+  const std::vector<AnalysisStem>& instStems = aux.inst ? *aux.inst : kNoInst;
+  const size_t nHarm = (aux.bass ? 1 : 0) + instStems.size();
+  // The bass conversion is used twice (its own calibrated vote, and the sum),
+  // so it alone is kept — the TS reuses one array there for the same reason.
+  std::vector<float> bassMono;
+  if (aux.bass) bassMono = monoAt44kPublic(*aux.bass);
+  std::vector<double> bassNov;
+  bool hasBassNov = false;
+  if (aux.bass) {
+    bassNov = harmonicChangeVotes(bassMono, beatsSec, bpb);
+    hasBassNov = !bassNov.empty();
+  }
+  std::vector<double> harmNov;
+  bool hasHarmNov = false;
+  if (nHarm > 1) {
+    size_t hLen = aux.bass ? bassMono.size() : 0;
+    for (const AnalysisStem& fb : instStems) hLen = std::max(hLen, resampledLengthPublic(fb));
+    std::vector<float> harmData(hLen, 0.0f);
+    // Bounded by the ARRAY, not by resampledLength's prediction of it — the
+    // failure mode of a prediction that came in low is a heap overwrite.
+    const auto addInto = [&](const std::vector<float>& d) {
+      const size_t nAdd = std::min(d.size(), harmData.size());
+      for (size_t i = 0; i < nAdd; i++)
+        harmData[i] = static_cast<float>(static_cast<double>(harmData[i]) + static_cast<double>(d[i]));
+    };
+    if (aux.bass) addInto(bassMono);
+    for (const AnalysisStem& fb : instStems) {
+      const std::vector<float> p = monoAt44kPublic(fb);
+      addInto(p);
+    }
+    harmNov = harmonicChangeVotes(harmData, beatsSec, bpb);
+    hasHarmNov = !harmNov.empty();
+  } else {
+    harmNov = bassNov;
+    hasHarmNov = hasBassNov;
+  }
+  bassMono.clear();
+  bassMono.shrink_to_fit();
+  std::vector<VocHit> vocHits;
+  bool hasVoc = false;
+  if (aux.vocals) vocHits = vocalEntryVotes(*aux.vocals, beatsSec, medSec, bpb, hasVoc);
+  std::vector<int> lineHits;
+  if (aux.lineStarts.size() >= 6) {
+    for (const double t : aux.lineStarts) {
+      const int bk = nearestBeatIdx(beatsSec, t);
+      if (bk >= 0 && std::fabs(beatsSec[static_cast<size_t>(bk)] - t) < 0.2 * medSec) lineHits.push_back(bk);
+    }
+  }
+
+  double kickMax = 1e-12;
+  for (const double x : kickE) kickMax = std::max(kickMax, x);
+
+  const int nb = static_cast<int>(beatsSec.size());
+  const auto uniform = [&]() { return std::vector<double>(static_cast<size_t>(bpb), 1.0 / bpb); };
+  const auto normDist = [&](const std::vector<double>& a) {
+    double s = 0;
+    for (const double x : a) s += x;
+    if (!(s > 1e-12)) return uniform();
+    std::vector<double> out(a.size());
+    for (size_t i = 0; i < a.size(); i++) out[i] = a[i] / s;
+    return out;
+  };
+
+  struct Scored {
+    int a, b, rot;
+    double conf;
+    std::vector<std::vector<double>> cues;
+  };
+  const auto scoreSegment = [&](int a, int b) {
+    const size_t B = static_cast<size_t>(bpb);
+    const std::vector<double> kick = [&] {
+      std::vector<double> sums(B, 0.0);
+      std::vector<int> ns(B, 0);
+      for (int k = a; k <= b; k++) {
+        if (!active[static_cast<size_t>(k)]) continue;
+        sums[static_cast<size_t>(k % bpb)] += kickE[static_cast<size_t>(k)];
+        ns[static_cast<size_t>(k % bpb)]++;
+      }
+      int over = 0;
+      for (const int n : ns)
+        if (n > 2) over++;
+      if (over < bpb) return uniform();
+      std::vector<double> avg(B);
+      for (size_t i = 0; i < B; i++) avg[i] = ns[i] ? sums[i] / ns[i] : 0.0;
+      return normDist(avg);
+    }();
+    // the heaviest hit in the segment's first bar — only when it truly enters
+    // out of silence (a real intro also counts at the track edge)
+    const std::vector<double> ent = [&] {
+      int quiet = 0;
+      for (int j = a - 1; j >= 0 && !active[static_cast<size_t>(j)]; j--) quiet++;
+      const bool edge = a - quiet == 0;
+      if (quiet < bpb || (edge && quiet < 2 * bpb)) return uniform();
+      int best = a, nAct = 0;
+      for (int j = a; j < std::min(nb, a + bpb); j++) {
+        if (active[static_cast<size_t>(j)]) nAct++;
+        if (kickE[static_cast<size_t>(j)] > kickE[static_cast<size_t>(best)]) best = j;
+      }
+      if (nAct < 2 || kickE[static_cast<size_t>(best)] < 0.2 * kickMax) return uniform();
+      std::vector<double> votes(B, 0.0);
+      votes[static_cast<size_t>(best % bpb)] = 1;
+      return votes;
+    }();
+    const std::vector<double> slam = [&] {
+      std::vector<int> idx;
+      for (int k = a; k <= b; k++)
+        if (active[static_cast<size_t>(k)]) idx.push_back(k);
+      // JS sort is stable (ES2019), and equal kick energies are common in
+      // quiet stretches, so ties must keep ascending index order.
+      std::stable_sort(idx.begin(), idx.end(),
+                       [&](int x, int y) { return kickE[static_cast<size_t>(y)] < kickE[static_cast<size_t>(x)]; });
+      std::vector<double> votes(B, 0.0);
+      std::vector<int> taken;
+      for (const int k : idx) {
+        if (taken.size() >= 6) break;
+        bool near = false;
+        for (const int t : taken)
+          if (std::abs(t - k) < 2 * bpb) near = true;
+        if (near) continue;
+        taken.push_back(k);
+        votes[static_cast<size_t>(k % bpb)] += kickE[static_cast<size_t>(k)] / kickMax;
+      }
+      if (taken.size() < 3) return uniform();
+      return normDist(votes);
+    }();
+    const auto inSeg = [&](const std::vector<std::pair<int, double>>& events, int minN) {
+      std::vector<double> dist(B, 0.0);
+      int used = 0;
+      for (const auto& e : events) {
+        if (e.first >= a && e.first <= b) {
+          dist[static_cast<size_t>(e.first % bpb)] += e.second;
+          used++;
+        }
+      }
+      return used < minN ? uniform() : normDist(dist);
+    };
+    std::vector<double> bass;
+    if (hasBassNov) {
+      std::vector<std::pair<int, double>> ev;
+      for (size_t k = 0; k < bassNov.size(); k++)
+        if (bassNov[k] > 0) ev.push_back({static_cast<int>(k), bassNov[k]});
+      bass = inSeg(ev, bpb);
+    } else {
+      bass = uniform();
+    }
+    // Phrase starts are weak downbeat evidence — NEM's verses enter two to
+    // three eighths AFTER the bar line — so no pickup folding: raw positions,
+    // low weights, never decisive.
+    std::vector<double> voc;
+    if (hasVoc) {
+      std::vector<std::pair<int, double>> ev;
+      for (const VocHit& h : vocHits) ev.push_back({h.k, h.w});
+      voc = inSeg(ev, 2);
+    } else {
+      voc = uniform();
+    }
+    std::vector<std::pair<int, double>> lev;
+    for (const int k : lineHits) lev.push_back({k, 1.0});
+    const std::vector<double> line = inSeg(lev, 4);
+    // compound meter: the per-beat kick pattern stops deciding (the mid-bar tom
+    // is idiomatic) — but entrances and separated slams are structural events,
+    // not groove, and stay meaningful.
+    struct Cue {
+      const std::vector<double>* d;
+      double w;
+    };
+    // Insertion order IS the summation order (Object.entries) — and the ML cue
+    // is OMITTED rather than uniform on this path: conf divides by the summed
+    // weights, and diluting it would shift every calibrated confidence against
+    // ANCHOR_CONF.
+    const Cue cues[6] = {{&kick, bpb == 6 ? 0.05 : 0.2},  {&ent, bpb == 6 ? 0.15 : 0.18},
+                         {&slam, bpb == 6 ? 0.1 : 0.15},  {&bass, bpb == 6 ? 0.4 : 0.15},
+                         {&voc, bpb == 6 ? 0.05 : 0.05},  {&line, bpb == 6 ? 0.25 : 0.15}};
+    std::vector<double> score(B, 0.0);
+    double total = 0;
+    for (const Cue& c : cues) {
+      total += c.w;
+      for (size_t r = 0; r < B; r++) score[r] += c.w * (*c.d)[r];
+    }
+    size_t rot = 0;
+    for (size_t r = 1; r < B; r++)
+      if (score[r] > score[rot]) rot = r;
+    std::vector<double> sorted = score;
+    std::sort(sorted.begin(), sorted.end(), std::greater<double>());
+    std::vector<std::vector<double>> rounded;
+    for (const Cue& c : cues) {
+      std::vector<double> r(B);
+      for (size_t i = 0; i < B; i++) r[i] = jsRound((*c.d)[i] * 100) / 100;
+      rounded.push_back(std::move(r));
+    }
+    return Scored{a, b, static_cast<int>(rot), (sorted[0] - sorted[1]) / total, std::move(rounded)};
+  };
+
+  // Confident segments pin their own downbeat. Each anchor's rotation owns the
+  // beats from its start to the next anchor's start; agreeing neighbours chain
+  // into one uniform grid, and a phase change leaves the boundary bar an odd
+  // length — so the beat TIMES stay exactly as tracked.
+  const int MIN_BARS = 4;
+  const double ANCHOR_CONF = 0.08;
+  std::vector<Scored> scored;
+  for (const auto& sg : segs) scored.push_back(scoreSegment(sg.first, sg.second));
+  for (const Scored& s : scored)
+    dbg.segCues.push_back({s.a, s.b, s.rot, jsRound(s.conf * 1000) / 1000, s.cues});
+  std::vector<Scored> anchors;
+  for (const Scored& s : scored)
+    if (static_cast<double>(s.b - s.a) / bpb >= MIN_BARS && s.conf >= ANCHOR_CONF) anchors.push_back(s);
+
+  int downbeat = 0;
+  std::vector<int> downbeats;
+  bool haveDownbeats = false;
+
+  /** Rotation vote over one index window: kick pattern + chord changes + lyric
+   *  lines. Chord changes vote regardless of drum activity — a slip is visible
+   *  in the harmony even where the kit is thin. */
+  const auto windowRot = [&](int a, int b, int& rotOut) {
+    const size_t B = static_cast<size_t>(bpb);
+    const double wKick = bpb == 6 ? 0.1 : 0.3, wHarm = bpb == 6 ? 0.6 : 0.45, wLine = bpb == 6 ? 0.3 : 0.25;
+    std::vector<double> kick(B, 0.0);
+    std::vector<int> kn(B, 0);
+    for (int k = a; k < b; k++) {
+      if (!active[static_cast<size_t>(k)]) continue;
+      kick[static_cast<size_t>(k % bpb)] += kickE[static_cast<size_t>(k)];
+      kn[static_cast<size_t>(k % bpb)]++;
+    }
+    bool allOver = true;
+    for (const int n : kn)
+      if (!(n > 1)) allOver = false;
+    std::vector<double> kickD;
+    if (allOver) {
+      std::vector<double> avg(B);
+      for (size_t i = 0; i < B; i++) avg[i] = kn[i] ? kick[i] / kn[i] : 0.0;
+      kickD = normDist(avg);
+    } else {
+      kickD = uniform();
+    }
+    std::vector<double> harm(B, 0.0);
+    int hUsed = 0;
+    if (hasHarmNov) {
+      for (int k = a; k < b && k < static_cast<int>(harmNov.size()); k++) {
+        if (harmNov[static_cast<size_t>(k)] > 0) {
+          harm[static_cast<size_t>(k % bpb)] += harmNov[static_cast<size_t>(k)];
+          hUsed++;
+        }
+      }
+    }
+    const std::vector<double> harmD = hUsed >= bpb ? normDist(harm) : uniform();
+    std::vector<double> line(B, 0.0);
+    int lUsed = 0;
+    for (const int k : lineHits) {
+      if (k >= a && k < b) {
+        line[static_cast<size_t>(k % bpb)] += 1;
+        lUsed++;
+      }
+    }
+    const std::vector<double> lineD = lUsed >= 2 ? normDist(line) : uniform();
+    if (hUsed < bpb && lUsed < 2) return false;  // nothing but drums — undecided
+    std::vector<double> score(B, 0.0);
+    for (size_t r = 0; r < B; r++) score[r] = wKick * kickD[r] + wHarm * harmD[r] + wLine * lineD[r];
+    size_t rot = 0;
+    for (size_t r = 1; r < B; r++)
+      if (score[r] > score[rot]) rot = r;
+    std::vector<double> sorted = score;
+    std::sort(sorted.begin(), sorted.end(), std::greater<double>());
+    if (!(sorted[0] - sorted[1] >= 0.1)) return false;
+    rotOut = static_cast<int>(rot);
+    return true;
+  };
+
+  std::vector<int> phaseCutsDbg;
+  struct Piece {
+    int start, rot;
+  };
+  /** Stable rotation flips inside [from,to), beginning with the anchor's own. */
+  const auto phasePieces = [&](int from, int to, int rot0) {
+    std::vector<Piece> pieces{{from, rot0}};
+    const int winB = 12 * bpb, hopB = 4 * bpb;
+    if (to - from < winB * 2) return pieces;
+    struct Win {
+      double center;
+      int rot;
+    };
+    std::vector<Win> wins;
+    for (int a = from; a + winB <= to; a += hopB) {
+      int r = 0;
+      if (windowRot(a, a + winB, r)) wins.push_back({a + winB / 2.0, r});
+    }
+    const int RUN = 4;
+    int cur = rot0;
+    size_t i = 0;
+    while (i + RUN <= wins.size()) {
+      const int r = wins[i].rot;
+      bool allSame = true;
+      for (size_t j = i; j < i + RUN; j++)
+        if (wins[j].rot != r) allSame = false;
+      if (r != cur && allSame) {
+        // boundary at the biggest interval anomaly between the previous
+        // window's center and this run's center — slips live at tracked-
+        // interval defects — else at the run's first center.
+        const int lo = i > 0 ? static_cast<int>(jsRound(wins[i - 1].center)) : from;
+        const int hi = static_cast<int>(jsRound(wins[i].center));
+        int cut = hi;
+        double worst = 0;
+        for (int k = std::max(from + 1, lo); k < std::min(hi, nb - 1); k++) {
+          const double d = std::fabs(beatsSec[static_cast<size_t>(k + 1)] - beatsSec[static_cast<size_t>(k)] - medSec) /
+                           medSec;
+          if (d > worst) {
+            worst = d;
+            cut = k + 1;
+          }
+        }
+        // A real phase slip leaves a physical defect in the tracked intervals
+        // at the cut (Mr Crowley's measures 0.26); harmonic ambiguity over a
+        // clean grid (0.05, 0.17) must never re-phase. Without an ML lattice
+        // the gate always applies — smooth-by-construction model grids are the
+        // only case it is void for.
+        if (worst < 0.2) {
+          i += RUN;
+          continue;
+        }
+        pieces.push_back({cut, r});
+        phaseCutsDbg.push_back(cut);
+        cur = r;
+        i += RUN;
+      } else {
+        i++;
+      }
+    }
+    return pieces;
+  };
+
+  if (!anchors.empty()) {
+    const auto buildBars = [&](bool withCuts) {
+      std::vector<int> out;
+      for (size_t i = 0; i < anchors.size(); i++) {
+        const int rot = anchors[i].rot % bpb;
+        const int from = i == 0 ? 0 : anchors[i].a;
+        const int to = i + 1 < anchors.size() ? anchors[i + 1].a : nb;
+        const std::vector<Piece> pieces = withCuts ? phasePieces(from, to, rot) : std::vector<Piece>{{from, rot}};
+        for (size_t j = 0; j < pieces.size(); j++) {
+          const int end = j + 1 < pieces.size() ? pieces[j + 1].start : to;
+          const int r = pieces[j].rot % bpb;
+          for (int k = pieces[j].start + (((r - pieces[j].start) % bpb) + bpb) % bpb; k < end; k += bpb) out.push_back(k);
+        }
+      }
+      return out;
+    };
+    // Cuts must pay for themselves globally: the fraction of chord-change mass
+    // landing ON downbeats has to improve by a WIDE margin (measured keeps
+    // +0.63/+0.54/+0.33, revert +0.16). Only re-phase when the harmony
+    // overwhelmingly demands it.
+    const auto harmOnBars = [&](const std::vector<int>& bars) {
+      if (!hasHarmNov) return 0.0;
+      std::vector<bool> isBar(harmNov.size(), false);
+      for (const int k : bars)
+        if (k >= 0 && k < static_cast<int>(harmNov.size())) isBar[static_cast<size_t>(k)] = true;
+      double on = 0, tot = 0;
+      for (size_t k = 0; k < harmNov.size(); k++) {
+        if (harmNov[k] > 0) {
+          tot += harmNov[k];
+          if (isBar[k]) on += harmNov[k];
+        }
+      }
+      return tot > 0 ? on / tot : 0.0;
+    };
+    const std::vector<int> plain = buildBars(false);
+    const std::vector<int> cut = buildBars(true);
+    if (!phaseCutsDbg.empty()) {
+      dbg.harmGainPlain = harmOnBars(plain);
+      dbg.harmGainCut = harmOnBars(cut);
+      dbg.hasHarmGain = true;
+    }
+    if (!phaseCutsDbg.empty() && hasHarmNov && harmOnBars(cut) >= harmOnBars(plain) + 0.3) {
+      downbeats = cut;
+    } else {
+      phaseCutsDbg.clear();
+      downbeats = plain;
+    }
+    haveDownbeats = !downbeats.empty();
+    downbeat = haveDownbeats ? downbeats[0] % bpb : anchors[0].rot % bpb;
+    dbg.phaseCuts = phaseCutsDbg;
+  } else if (!scored.empty()) {
+    const Scored* best = &scored[0];
+    for (const Scored& s : scored)
+      if (s.conf > best->conf) best = &s;
+    downbeat = best->rot % bpb;
+  }
+  // (The TS's third branch is the drumless ML-lattice case — unreachable with
+  // no model, like the waltz branch above.)
+
+  if (haveDownbeats) {
+    const std::vector<int> clean = sanitizeBars(downbeats, bpb, nb);
+    if (clean.size() != downbeats.size()) {
+      dbg.sanitizedBefore = static_cast<int>(downbeats.size());
+      dbg.sanitizedAfter = static_cast<int>(clean.size());
+      dbg.hasSanitized = true;
+    }
+    downbeats = clean;
+    if (!downbeats.empty()) downbeat = downbeats[0] % bpb;
+  }
+
+  out.beatsPerBar = bpb;
+  out.downbeat = downbeat;
+  out.downbeats = downbeats;
+  out.ok = true;
   return out;
 }
 

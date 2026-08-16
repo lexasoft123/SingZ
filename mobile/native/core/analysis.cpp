@@ -97,6 +97,12 @@ double correlate(const double hist[12], const double profile[12], int rot) {
 
 std::vector<float> monoAt44kPublic(const AnalysisStem& stem) { return monoAt44k(stem); }
 
+double goertzelPublic(const std::vector<float>& data, size_t start, size_t end, double freq, double sr) {
+  return goertzel(data, start, end, freq, sr);
+}
+
+size_t resampledLengthPublic(const AnalysisStem& stem) { return resampledLength(stem); }
+
 KeyGuess estimateKey(const float* f0, size_t n) {
   KeyGuess best;
   double hist[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};

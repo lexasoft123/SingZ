@@ -96,7 +96,17 @@ const duck = ({ mono, rate }) => ({
  */
 /** The stages that compare the tracker's lattice against detectBeats' RETURN
  *  — only meaningful while no un-ported downstream stage has rewritten it. */
-const LATTICE_STAGES = new Set(['beats.length', 'medSec', 'beatsSec'])
+const LATTICE_STAGES = new Set([
+  'beats.length', 'medSec', 'beatsSec', 'beatsPerBar',
+  // The bars come from the RETURN too, and a court can re-place them even
+  // when the beat times hold. `sanitized` is here for a DIFFERENT un-ported
+  // stage — see its entry: the head backcast runs before it, not after.
+  'downbeat', 'downbeats', 'sanitized'
+])
+
+/** The TS's `cues` object is keyed by name and the C++'s is positional, so
+ *  the comparison needs the insertion order written down once. */
+const CUE_ORDER = ['kick', 'ent', 'slam', 'bass', 'voc', 'line']
 
 const UNWRITTEN_REJECTS = new Set(['too short', 'no flux', 'no tempo family', 'no octave candidate'])
 const cReject = (c) => (c.reject && !UNWRITTEN_REJECTS.has(c.reject) ? c.reject : null)
@@ -152,6 +162,9 @@ const STAGES = [
   // rather than pretending the debug channel carries full precision. (The
   // TS omits the field entirely when there are no voids; `none` on both
   // sides is the agreement there.)
+  // The meter, from detectBeats' RETURN — same gate as the lattice stages,
+  // since a court halve can change it too.
+  ['beatsPerBar', (ts) => ts.__bpb, (c) => c.beatsPerBar],
   ['voids', (ts) => (ts.voids ? ts.voids.map((v) =>
     `${v.aSec}:${v.bSec}:${v.leading}:${v.trailing}:${v.filled}`).join('|') : 'none'),
     (c) => (c.voids?.length ? c.voids.map((v) =>
@@ -159,6 +172,49 @@ const STAGES = [
       .join('|') : 'none')],
   // The stamp, from both sides — a bump the stored-analysis rule demands
   // would otherwise leave the C++ copy silently behind.
+  // The vote, stage by stage. segCues is the whole per-segment verdict table
+  // (span, chosen rotation, confidence to the TS's own 3 decimals) — it is
+  // written before the courts, so unlike the bars below it needs no gate.
+  ['segCues', (ts) => (ts.segCues?.length
+    ? ts.segCues.map((s) => `${s.a}:${s.b}:${s.rot}:${s.conf}`).join('|') : 'none'),
+    (c) => (c.segCues?.length ? c.segCues.map((s) => `${s.a}:${s.b}:${s.rot}:${s.conf}`).join('|') : 'none')],
+  // The six distributions INSIDE each verdict, in the TS's own order and at
+  // its own 2dp. The line above compares only what the vote concluded — one
+  // cue could diverge while the argmax and the margin both survived it, and
+  // the first sign would be a wrong bar line much further down.
+  ['segCues.cues', (ts) => (ts.segCues?.length
+    ? ts.segCues.map((s) => CUE_ORDER.map((n) => (s.cues?.[n] ?? []).join(' ')).join(';')).join('|') : 'none'),
+    (c) => (c.segCues?.length
+      ? c.segCues.map((s) => (s.cues ?? []).map((d) => d.join(' ')).join(';')).join('|') : 'none')],
+  // Cuts that were PROPOSED (harmGain is written whenever any was) and cuts
+  // that survived the +0.3 global harmonic gain. `none` on both sides is the
+  // agreement, which is the common case — a re-phase is rare and drastic.
+  ['harmGain', (ts) => (ts.harmGain ? `${ts.harmGain.plain}:${ts.harmGain.cut}` : 'none'),
+    (c) => (c.harmGain ? `${c.harmGain.plain}:${c.harmGain.cut}` : 'none')],
+  ['phaseCuts', (ts) => (ts.phaseCuts?.length ? ts.phaseCuts.join(',') : 'none'),
+    (c) => (c.phaseCuts?.length ? c.phaseCuts.join(',') : 'none')],
+  // Gated, and NOT because of the courts: `backcastHead` (analysis.ts:1526)
+  // runs BEFORE the sanitize that writes this field (:1543), and a rebuilt
+  // head changes both the bar list and the beat count it is computed from —
+  // it can even leave `downbeats` undefined, so the field is never written.
+  // A refused drum-free intro is all it takes.
+  ['sanitized', (ts) => ('__sanitized' in ts
+    ? (ts.__sanitized ? `${ts.__sanitized.before}:${ts.__sanitized.after}` : 'none') : undefined),
+    (c) => (c.sanitized ? `${c.sanitized.before}:${c.sanitized.after}` : 'none')],
+  // The bars themselves, from detectBeats' RETURN. A song may legitimately
+  // have none (no anchor was confident enough) — 'none' on both sides is
+  // agreement, and the rotation index still carries its bar structure.
+  ['downbeat', (ts) => ts.__downbeat, (c) => c.downbeat],
+  // `in`, not `?.` — a getter that folds "the stage was gated off" into the
+  // same 'none' it uses for "this song legitimately has no bars" makes the
+  // LATTICE_STAGES skip dead: the day bass lands and the courts stop
+  // abstaining, this would compare the TS's ABSENCE against the C++'s real
+  // bars. That is the same absent-field mistake this file has now made three
+  // times, so the shape is worth naming: the skip is keyed on `undefined`,
+  // therefore only a stage that can actually YIELD undefined can be skipped.
+  ['downbeats', (ts) => ('__downbeats' in ts
+    ? (ts.__downbeats?.length ? ts.__downbeats.join(',') : 'none') : undefined),
+    (c) => (c.downbeats?.length ? c.downbeats.join(',') : 'none')],
   ['detVersion', () => BEAT_DETECT_VERSION, (c) => c.detVersion]
 ]
 
@@ -181,20 +237,38 @@ for (const dir of dirs) {
   if (!drumsPath) { console.log(`SKIP  ${dir} (no drums stem — no grid, by rule)`); continue }
   const instPaths = INST.map(wavFor).filter(Boolean)
 
-  // The TS, with ONLY the fill stems as aux — the stages ported so far read
-  // nothing else, and passing bass/vocals would engage votes the C++ has not
-  // reached yet, which would compare two different pipelines.
+  // Aux: the fill stems, the vocals and the lyric line starts — every input
+  // the ported stages read. BASS is deliberately still withheld: it is the one
+  // that flips `applyCourts` from abstaining to active (buildCourtEvidence
+  // fills its chord runs only inside `if (bass22)`), which would put an
+  // un-ported 1500-line stage between the two sides. Vocals and lyrics engage
+  // no court, so they belong here — and without them two of the six segment
+  // cues would be uniform on both sides and their parity would prove nothing.
+  const vocalsPath = wavFor('vocals')
+  const lyricsFile = join(dir, 'lyrics.json')
+  const lineStarts = existsSync(lyricsFile)
+    ? (JSON.parse(readFileSync(lyricsFile, 'utf8')).lines ?? [])
+        .map((l) => l.start).filter((t) => Number.isFinite(t))
+    : []
   const tsDbg = {}
   // The RETURN value matters as well as the debug: four of the C++'s reject
   // strings name points where the TS returns null WITHOUT writing a reason,
   // so `debug.reject` alone cannot tell "both refused" from "only one did".
   const tsGrid = detectBeats(
     duck(readWavMonoJs(drumsPath)),
-    { inst: instPaths.map((p) => duck(readWavMonoJs(p))) },
+    {
+      inst: instPaths.map((p) => duck(readWavMonoJs(p))),
+      ...(vocalsPath ? { vocals: duck(readWavMonoJs(vocalsPath)) } : {}),
+      lineStarts
+    },
     tsDbg
   )
 
-  const cliArgs = ['beats', '--drums', drumsPath, ...instPaths.flatMap((p) => ['--inst', p])]
+  const cliArgs = ['beats', '--drums', drumsPath, ...instPaths.flatMap((p) => ['--inst', p]),
+    ...(vocalsPath ? ['--vocals', vocalsPath] : []),
+    // Full precision, not the JSON's 2 decimals: `--line 0.94` and the TS's
+    // 0.94 must be the same double or a beat-snap can land one beat apart.
+    ...lineStarts.flatMap((t) => ['--line', String(t)])]
   const c = JSON.parse(execFileSync(bin, cliArgs, { maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
 
   // detectBeats' returned `beats` are the tracker's `beatsSec` ONLY when
@@ -241,6 +315,13 @@ for (const dir of dirs) {
     tsDbg.__beats = tsGrid.beats
     const ivs = tsGrid.beats.slice(1).map((b, i) => b - tsGrid.beats[i]).sort((a, b) => a - b)
     tsDbg.__medSec = ivs.length ? ivs[Math.floor(ivs.length / 2)] : 0
+    tsDbg.__bpb = tsGrid.beatsPerBar
+    tsDbg.__downbeat = tsGrid.downbeat
+    tsDbg.__downbeats = tsGrid.downbeats
+    // Not from the grid, but written after backcastHead, so it belongs to the
+    // same gate. `?? null` keeps the property present-but-empty, which is how
+    // "the TS sanitized nothing" stays distinguishable from "not compared".
+    tsDbg.__sanitized = tsDbg.sanitized ?? null
   }
   const latticeSkipReason = !courtsIdle
     ? 'the courts engaged'

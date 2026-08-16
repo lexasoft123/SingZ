@@ -418,6 +418,15 @@ static void beatsTests() {
         lat.beatsSec.size() > 50);
   CHECK("beats: stamp is the TS's BEAT_DETECT_VERSION", singz::kBeatDetectVersion == 21);
 
+  // The meter test: a straight 4/4 click train must NOT read as compound.
+  // (Its 6/8 counterpart is a library fact rather than a synthesis one —
+  // Nothing Else Matters measures ac3/ac4 = 2.61 and comes out 6, which the
+  // parity harness checks against the TS on the real stem.)
+  singz::BeatAux noAux;
+  const singz::BarPhase phase = singz::barPhase(lat, drums, noAux, d);
+  CHECK("beats: a straight click train is 4/4, not compound", phase.ok && phase.beatsPerBar == 4);
+  CHECK("beats: and its beats are nearly all active", phase.ok && d.activeBeats > 50);
+
   // A sustained pad has periodicity but no attacks — it must be refused.
   singz::AnalysisStem pad;
   pad.mono.assign(static_cast<size_t>(frames), 0.0f);

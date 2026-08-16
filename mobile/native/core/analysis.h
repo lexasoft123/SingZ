@@ -28,6 +28,21 @@ struct AnalysisStem {
  */
 std::vector<float> monoAt44kPublic(const AnalysisStem& stem);
 
+/**
+ * analysis.ts's `goertzel` — one bin's energy over [start,end), decimated by
+ * 4. Shared for the same reason monoAt44k is: the key detector and the beat
+ * detector's chord-change cue read chroma the same way, and a second copy is
+ * a second thing to keep bit-identical.
+ */
+double goertzelPublic(const std::vector<float>& data, size_t start, size_t end, double freq, double sr);
+
+/**
+ * How long `monoAt44kPublic` will make a stem, without materializing it —
+ * so a caller summing several stems can size the accumulator up front and
+ * then convert-add-drop one at a time instead of holding them all.
+ */
+size_t resampledLengthPublic(const AnalysisStem& stem);
+
 struct KeyGuess {
   int pc = 0;        // 0 = C … 11 = B
   bool minor = false;
