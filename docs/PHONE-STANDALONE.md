@@ -774,9 +774,60 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       `monoAt44k` is now shared out of analysis.h rather than re-rolled
       here — the reviewer's point that the bounds and ordering discipline
       should travel with it, made before there were two callers.
-      Still to port: the tracker's span gates and onset snap, the head
-      backcast, the downbeat votes (harmonic change, vocal entries, lyric
-      lines), sanitizeBars, the ML lattice, and courts.ts entire.
+      Still to port at that point: the tracker's span gates and onset snap,
+      the head backcast, the downbeat votes, sanitizeBars, the ML lattice,
+      and courts.ts entire.
+    - **`trackFromDrums` closes (2026-08-16, same day)**: the placement
+      splice (re-track on the FILLED envelope, then keep only the beats
+      inside accepted fill spans — the global DP would otherwise bend the
+      path across lightly-drummed verses next to a span), the per-span
+      quality gate (the span's own autocorrelation must agree with the
+      song's tempo family at ≥60% of windows, AND its beats must stay
+      steady after snapping to real onsets — the DP grid is smooth by
+      construction, snapping is what exposes free-time playing), the onset
+      snap, and the void list. The whole drums-first tracker is now in the
+      core.
+      **23 of 23 stages identical on all four library projects — including
+      `beatsSec`, the beat TIMES themselves**, compared as full-precision
+      values, plus the per-span verdicts, the median interval and the void
+      list. Everything downstream is built on those times, so this is the
+      first slice where the comparison reaches the actual product of the
+      detector rather than its intermediates.
+      Two harness lessons. `debug.voids` is ROUNDED to 0.1 s by the TS
+      before recording, so the comparison rounds the C++ the same way
+      instead of pretending the debug channel carries full precision — and
+      that costs nothing, because the span FRAMES those seconds are derived
+      from are compared as exact integers one stage earlier.
+      And a claim of mine that was simply FALSE, caught at review: I wrote
+      that "nothing between the tracker and the return moves a beat TIME —
+      the downbeat machinery only chooses a phase". `applyCourts` runs
+      whenever there are harmonic stems, and its octave court needs no ML
+      model: a HALVE rewrites the lattice outright, and then fires a second
+      `backcastHead`, which is itself called unconditionally. So the
+      lattice stages are now gated on the TS's own debug — and the test is
+      POSITIVE ("the courts abstained and no backcast happened") rather
+      than a list of the downstream actions believed to move times, because
+      enumerating those means being right about every branch of 1500
+      un-ported lines and being wrong is silent. When the gate closes, the
+      harness names the reason through its NOT PORTED channel.
+      A probe then corrected the reviewer and me both, twice over. First:
+      on all four projects the courts **abstain** rather than
+      run-and-decline — and structurally, not by luck. `buildCourtEvidence`
+      fills its chord runs only when a BASS stem is present (it is what
+      names the roots), and the harness deliberately passes the fill stems
+      only, so the runs are empty for every song and applyCourts abstains.
+      More inst stems change nothing; adding bass flips it from none to
+      many in one step, which is the thing to remember when the aux widens.
+      Second, and the same lesson as the spanOk bug one round earlier: my
+      backcast probe read `debug.headBackcast !== undefined`, which detects
+      an ACTION, not a decline — and `backcastHead` can rebuild the lattice
+      WITHOUT writing that field. The probe now names the three ways it
+      declines and closes the gate on any shape it does not recognise;
+      measured, all four projects report `{verdict: 'head ok'}`.
+      An absent field is not evidence: that is now twice in one file, and
+      worth carrying into the slices after it.
+      Worth stating plainly: 23/23 proves the tracker, not the machinery
+      after it.
     - **A test-harness trap worth the line it cost**: the core host tests'
       `CHECK` macro declared `const bool ok = (cond)` internally, so a test
       whose own local was named `ok` expanded to `const bool ok = (ok)` —

@@ -54,20 +54,45 @@ struct BeatDebug {
   // (1, 2, 0.5), so a port that picked a different octave would move nothing
   // visible without these.
   double support = 0, activeFrac = 0, steadiness = 0, rough = 0;
+  // debug.spanOk — one row per fill span, in span order.
+  struct SpanOk {
+    int a, b;
+    bool ok;
+  };
+  std::vector<SpanOk> spanOk;
+  int beats = 0;      // the lattice's own length, once placed
+  double medSec = 0;  // its median interval
   // debug.reject — empty when the tracker did not refuse.
   std::string reject;
 };
 
+/** A drum-free span the fill was applied to, in seconds — the caller's cue
+ *  that a stretch was carried by other stems (or, when `filled` is false,
+ *  that the DP coasted through it and the neural lattice may replace it). */
+struct BeatVoid {
+  double aSec = 0, bSec = 0;
+  bool leading = false, trailing = false, filled = false;
+};
+
+/** What `trackFromDrums` hands back: the beat lattice plus the (fill-aware)
+ *  meter envelope the downbeat vote reads. */
+struct DrumLattice {
+  std::vector<double> beatsSec;
+  double medSec = 0;
+  std::vector<float> O;
+  std::vector<BeatVoid> voids;
+  bool ok = false;  // false = the TS returned null; dbg.reject says which gate
+};
+
 /**
- * The tracker's front half: onset flux from the drums, the instrument fill,
- * the tempo family and the octave choice. Returns false when the TS would
- * have returned null at this point (with `dbg.reject` saying which gate),
- * true with `dbg` filled otherwise.
+ * The original drums-first pipeline: instrument fill, tempo family and
+ * octave, DP placement, span quality gates, onset snap — analysis.ts's
+ * `trackFromDrums` entire. Not ok when no steady pulse deserves a metronome.
  *
  * `drums` is the drums stem; `inst` the remaining instrument stems, which
  * serve as fill material only (never as votes) — bass is deliberately not
  * among them, its sustained eighths once octave-doubled a song.
  */
-bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst, BeatDebug& dbg);
+DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst, BeatDebug& dbg);
 
 }  // namespace singz

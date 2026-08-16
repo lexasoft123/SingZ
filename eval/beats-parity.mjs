@@ -14,6 +14,11 @@
  * Stages land as they are ported; a field the C++ does not emit yet is
  * skipped rather than failed, and the summary says how far the comparison
  * reached, so partial progress is visible instead of looking like a pass.
+ *
+ * The aux passed to the TS is deliberately the fill stems ONLY. The stages
+ * ported so far read nothing else, and handing over bass/vocals/lyrics would
+ * engage the downbeat votes and the courts — un-ported machinery whose
+ * output would show up as a port divergence. That widens as the port does.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs'
@@ -89,6 +94,10 @@ const duck = ({ mono, rate }) => ({
  * null so "both refused, for the same cause" compares equal instead of
  * looking like a divergence.
  */
+/** The stages that compare the tracker's lattice against detectBeats' RETURN
+ *  — only meaningful while no un-ported downstream stage has rewritten it. */
+const LATTICE_STAGES = new Set(['beats.length', 'medSec', 'beatsSec'])
+
 const UNWRITTEN_REJECTS = new Set(['too short', 'no flux', 'no tempo family', 'no octave candidate'])
 const cReject = (c) => (c.reject && !UNWRITTEN_REJECTS.has(c.reject) ? c.reject : null)
 
@@ -125,6 +134,29 @@ const STAGES = [
   ['activeFrac', (ts) => ts.activeFrac, (c) => c.activeFrac],
   ['steadiness', (ts) => ts.steadiness, (c) => c.steadiness],
   ['rough', (ts) => ts.rough, (c) => c.rough],
+  // The per-span verdicts of the fill's quality gate, then the lattice
+  // itself — the beat TIMES are what everything downstream is built on, so
+  // they are compared exactly, as a joined string of full-precision values.
+  // `?.length`, not `?` — an EMPTY array is truthy, so the plain check
+  // compared the TS's `undefined` (it writes the field only when there is at
+  // least one span) against the C++'s '', and every project without a fill
+  // span became a false divergence. The bundled sample is exactly that case.
+  ['spanOk', (ts) => (ts.spanOk?.length ? ts.spanOk.map((s) => `${s.a}:${s.b}:${s.ok}`).join('|') : undefined),
+    (c) => (c.spanOk?.length ? c.spanOk.map((s) => `${s.a}:${s.b}:${s.ok}`).join('|') : undefined)],
+  // The three LATTICE stages, and they are conditional — see `latticeUsable`.
+  ['beats.length', (ts) => ts.__beats?.length, (c) => c.beats],
+  ['medSec', (ts) => ts.__medSec, (c) => c.medSec],
+  ['beatsSec', (ts) => ts.__beats?.join(','), (c) => c.beatsSec?.join(',')],
+  // debug.voids is the tracker's own void list, ROUNDED TO 0.1 s by the TS
+  // before it is recorded — so the comparison rounds the C++ the same way
+  // rather than pretending the debug channel carries full precision. (The
+  // TS omits the field entirely when there are no voids; `none` on both
+  // sides is the agreement there.)
+  ['voids', (ts) => (ts.voids ? ts.voids.map((v) =>
+    `${v.aSec}:${v.bSec}:${v.leading}:${v.trailing}:${v.filled}`).join('|') : 'none'),
+    (c) => (c.voids?.length ? c.voids.map((v) =>
+      `${Math.round(v.aSec * 10) / 10}:${Math.round(v.bSec * 10) / 10}:${v.leading}:${v.trailing}:${v.filled}`)
+      .join('|') : 'none')],
   // The stamp, from both sides — a bump the stored-analysis rule demands
   // would otherwise leave the C++ copy silently behind.
   ['detVersion', () => BEAT_DETECT_VERSION, (c) => c.detVersion]
@@ -165,6 +197,57 @@ for (const dir of dirs) {
   const cliArgs = ['beats', '--drums', drumsPath, ...instPaths.flatMap((p) => ['--inst', p])]
   const c = JSON.parse(execFileSync(bin, cliArgs, { maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
 
+  // detectBeats' returned `beats` are the tracker's `beatsSec` ONLY when
+  // nothing downstream rewrote them — and two things can, on exactly the
+  // inputs used here. `applyCourts` runs whenever there are harmonic stems
+  // (aux.inst IS the chord layer), and its octave court needs no ML model:
+  // a HALVE rewrites the lattice outright. `backcastHead` is called
+  // unconditionally and rebuilds the head when the lead-in is unsteady or
+  // missing. Neither is ported yet, so where either fired the TS grid is
+  // post-mutation and the C++'s is not — comparing them would report a
+  // divergence that is really an un-ported stage.
+  //
+  // So the three lattice stages are gated on the TS's OWN debug rather than
+  // on an assumption, and when they are skipped the harness says so by name
+  // through the same NOT PORTED channel as anything else unbuilt. The test
+  // is POSITIVE — "nothing downstream ran" — not a list of the downstream
+  // actions believed to move times: enumerating those means being right
+  // about every branch of 1500 un-ported lines, and being wrong is silent.
+  //
+  // On the courts the abstention is STRUCTURAL, not a property of these
+  // songs: buildCourtEvidence fills `runs` only inside `if (bass22)`
+  // (courts.ts:561 — the bass names the roots), and this harness passes no
+  // bass, so `runs` is [] for every song and applyCourts abstains at
+  // courts.ts:1500. More inst stems change nothing; adding BASS flips it from
+  // none to many in one step, which is the thing to remember when the aux
+  // widens for the next slice.
+  const courtsIdle = tsDbg.v20 === undefined || tsDbg.v20.abstained === true
+  // DEFAULT-CLOSED, and for the same reason the spanOk bug existed: an absent
+  // field is not evidence. `debug.headBackcast` records an ACTION, so probing
+  // for its absence answers "did it announce a rebuild", not "did it decline
+  // to rebuild" — and backcastHead returns a rebuilt lattice without writing
+  // that field when its `bars` argument is undefined, which detectBeats leaves
+  // undefined on a branch that inst-only aux makes reachable. So the probe
+  // names the three ways it declines (returns null before touching anything),
+  // and any headWhy shape not on that list closes the gate.
+  // Measured on the four library projects: all four report
+  // `{verdict: 'head ok', …}`.
+  const headWhy = tsDbg.headWhy
+  const headIdle =
+    headWhy === undefined || headWhy === 'no stable anchor' || headWhy?.verdict === 'head ok'
+  const backcastAbsent = tsDbg.headBackcast === undefined  // belt and braces
+  const latticeUsable = courtsIdle && headIdle && backcastAbsent
+  if (tsGrid && latticeUsable) {
+    tsDbg.__beats = tsGrid.beats
+    const ivs = tsGrid.beats.slice(1).map((b, i) => b - tsGrid.beats[i]).sort((a, b) => a - b)
+    tsDbg.__medSec = ivs.length ? ivs[Math.floor(ivs.length / 2)] : 0
+  }
+  const latticeSkipReason = !courtsIdle
+    ? 'the courts engaged'
+    : !headIdle || !backcastAbsent
+      ? 'the head backcast may have rebuilt the lattice'
+      : null
+
   let firstBad = null
   let compared = 0
   const skipped = []
@@ -186,6 +269,10 @@ for (const dir of dirs) {
       continue
     }
     if (a === undefined && b === undefined) continue      // neither side reached it
+    if (a === undefined && latticeSkipReason && LATTICE_STAGES.has(name)) {
+      skipped.push(`${name} (${latticeSkipReason} — not ported)`)
+      continue
+    }
     if (b === undefined) { skipped.push(name); continue } // not ported yet — REPORTED
     compared++
     if (!same) { firstBad = { name, ts: a, c: b }; break }

@@ -161,13 +161,27 @@ int main(int argc, char** argv) {
       return 2;
     }
     singz::BeatDebug d;
-    const bool ok = singz::trackTempo(drums, inst, d);
+    const singz::DrumLattice lat = singz::trackFromDrums(drums, inst, d);
+    const bool ok = lat.ok;
     std::printf("{\"detVersion\":%d,\"ok\":%s,\"frames\":%d,\"drumPeaks\":%d,\"peaks\":%d,",
                 singz::kBeatDetectVersion, ok ? "true" : "false", d.frames, d.drumPeaks, d.peaks);
     std::printf("\"fluxSum\":%.17g,\"fluxMean\":%.17g,\"windows\":%d,", d.fluxSum, d.fluxMean, d.windows);
     std::printf("\"tau\":%.17g,\"consistency\":%.17g,\"chosenBpm\":%.17g,", d.tau, d.consistency, d.chosenBpm);
     std::printf("\"support\":%.17g,\"activeFrac\":%.17g,\"steadiness\":%.17g,\"rough\":%.17g,", d.support,
                 d.activeFrac, d.steadiness, d.rough);
+    std::printf("\"beats\":%d,\"medSec\":%.17g,", d.beats, d.medSec);
+    std::printf("\"spanOk\":[");
+    for (size_t i = 0; i < d.spanOk.size(); i++)
+      std::printf("%s{\"a\":%d,\"b\":%d,\"ok\":%s}", i ? "," : "", d.spanOk[i].a, d.spanOk[i].b,
+                  d.spanOk[i].ok ? "true" : "false");
+    std::printf("],\"beatsSec\":[");
+    for (size_t i = 0; i < lat.beatsSec.size(); i++) std::printf(i ? ",%.17g" : "%.17g", lat.beatsSec[i]);
+    std::printf("],\"voids\":[");
+    for (size_t i = 0; i < lat.voids.size(); i++)
+      std::printf("%s{\"aSec\":%.17g,\"bSec\":%.17g,\"leading\":%s,\"trailing\":%s,\"filled\":%s}", i ? "," : "",
+                  lat.voids[i].aSec, lat.voids[i].bSec, lat.voids[i].leading ? "true" : "false",
+                  lat.voids[i].trailing ? "true" : "false", lat.voids[i].filled ? "true" : "false");
+    std::printf("],");
     if (d.fillApplied)
       std::printf("\"fill\":{\"alpha\":%.17g,\"dTop\":%.17g,\"iTop\":%.17g,\"instMaxima\":%d,\"gSum\":%.17g},",
                   d.fillAlpha, d.fillDTop, d.fillITop, d.fillInstMaxima, d.fillGSum);

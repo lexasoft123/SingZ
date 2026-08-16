@@ -72,7 +72,8 @@ struct Quality {
 
 }  // namespace
 
-bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst, BeatDebug& dbg) {
+DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst, BeatDebug& dbg) {
+  DrumLattice out;
   const double sr = ANALYSIS_SR;
   const double fps = sr / HOP;
   const std::vector<float> mono = monoAt44kPublic(drums);
@@ -80,7 +81,7 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   dbg.frames = frames;
   if (frames < 400) {
     dbg.reject = "too short";
-    return false;
+    return out;
   }
 
   // ---- detectBeats: broadband energy + low band ---------------------------
@@ -136,6 +137,9 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   // distance to the nearest drum onset — never inside playing drums — and
   // skipped outright when the fill material has no sharp attacks to offer.
   std::vector<float> flux = drumFlux;
+  // Drum-free spans (frame units) the fill was applied to — placement is
+  // spliced to these, everything outside stays the drums-only path.
+  std::vector<std::pair<int, int>> fillSpans;
   if (!inst.empty() && !drumPeaks.empty()) {
     std::vector<float> instFlux(static_cast<size_t>(frames), 0.0f);
     for (const AnalysisStem& fb : inst) {
@@ -198,7 +202,6 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
       edges.push_back(-1);
       edges.insert(edges.end(), presence.begin(), presence.end());
       edges.push_back(frames);
-      std::vector<std::pair<int, int>> fillSpans;
       for (size_t e = 1; e < edges.size(); e++)
         if (edges[e] - edges[e - 1] > 8 * fps) fillSpans.push_back({edges[e - 1], edges[e]});
       for (const auto& sp : fillSpans) {
@@ -227,7 +230,7 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   for (int i = 1; i < frames; i++) fluxSum += static_cast<double>(flux[static_cast<size_t>(i)]);
   if (fluxSum <= 1e-9) {
     dbg.reject = "no flux";
-    return false;
+    return out;
   }
   const double fluxMean = fluxSum / frames;
   dbg.fluxSum = fluxSum;
@@ -240,7 +243,7 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
       if (flux[static_cast<size_t>(i)] > 4 * fluxMean) peaky += static_cast<double>(flux[static_cast<size_t>(i)]);
     if (peaky < 0.3 * fluxSum) {
       dbg.reject = "no impulsive onsets";
-      return false;
+      return out;
     }
   }
 
@@ -261,7 +264,7 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   dbg.peaks = static_cast<int>(peaks.size());
   if (peaks.size() < 24) {
     dbg.reject = "too few onsets (" + std::to_string(peaks.size()) + ")";
-    return false;
+    return out;
   }
 
   // The tempo/octave DECISION reads the drums alone (fill must never re-vote
@@ -330,7 +333,7 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   }
   if (familyWeight <= 0) {
     dbg.reject = "no tempo family";
-    return false;
+    return out;
   }
   double num = 0, den = 0;
   for (const Peak& u : votes) {
@@ -358,7 +361,7 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   dbg.consistency = consistency;
   if (consistency < 0.6) {
     dbg.reject = "windows disagree on a tempo (rubato?)";
-    return false;
+    return out;
   }
 
   // ---- DP beat placement --------------------------------------------------
@@ -486,7 +489,7 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   std::stable_sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) { return y.score < x.score; });
   if (cands.empty()) {
     dbg.reject = "no octave candidate";
-    return false;
+    return out;
   }
   size_t chosen = 0;
   // v15/v16: near-ties resolve on acoustic evidence alone; how wide "near"
@@ -511,16 +514,187 @@ bool trackTempo(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst
   // Sparse-anchor material (rubato ballads): most tracked beats float free.
   if (cands[chosen].q.activeFrac < 0.2 || cands[chosen].q.support < 0.7) {
     dbg.reject = "beats do not sit on real onsets";
-    return false;
+    return out;
   }
   // Onset-chasing (loose timing, no pulse): locally rough inter-beat
   // intervals. Real steady/drifting songs measure <= ~0.025 here; chasing
   // jittery hits measures >= ~0.08 even after the DP smooths it.
   if (cands[chosen].q.rough > 0.05) {
     dbg.reject = "no steady pulse (intervals jump around)";
-    return false;
+    return out;
   }
-  return true;
+
+  // ---- PLACEMENT: re-track on the filled envelope, then SPLICE ------------
+  //
+  // Only beats inside fill spans come from the filled path — the global DP
+  // would otherwise bend the path across lightly-drummed verses neighbouring
+  // a span (WDOA's early bars drifted ~90 s deep). Outside the spans the
+  // drums-only path is kept bit-for-bit.
+  std::vector<bool> spanOkOut;
+  bool haveSpanOk = false;
+  if (!inst.empty() && !fillSpans.empty()) {
+    const std::vector<double> placed = track(cands[chosen].bpm, O);
+    if (placed.size() >= 24) {
+      // Per-span quality gate: a filled span is kept only when its material
+      // agrees with the SONG's tempo family — the same autocorrelation test
+      // the detector trusts globally. An in-tempo picked intro agrees;
+      // material in its own tempo or rubato does not, and the span reverts to
+      // the old path rather than force the body tempo onto music that fights
+      // it.
+      std::vector<bool> spanOk;
+      for (const auto& sp : fillSpans) {
+        const int len = sp.second - sp.first;
+        if (len < lagMax * 3) {
+          spanOk.push_back(false);
+          continue;
+        }
+        const int winLen = std::min(len, winF);
+        int agree = 0, total = 0;
+        for (int ws = sp.first; ws + winLen <= sp.second || ws == sp.first; ws += hopF) {
+          const int w0 = std::max(0, ws);  // leading spans start at frame -1
+          const int we = std::min(sp.second, w0 + winLen);
+          std::vector<double> ac(static_cast<size_t>(lagMax) + 1, 0.0);
+          double acMean = 0;
+          for (int lag = lagMin; lag <= lagMax; lag++) {
+            double sum = 0;
+            for (int i = w0 + lag; i < we; i++)
+              sum += static_cast<double>(O[static_cast<size_t>(i)]) *
+                     static_cast<double>(O[static_cast<size_t>(i - lag)]);
+            ac[static_cast<size_t>(lag)] = static_cast<float>(sum / std::max(1, we - w0 - lag));
+            acMean += ac[static_cast<size_t>(lag)];
+          }
+          acMean /= lagMax - lagMin + 1;
+          bool okWin = false;
+          for (int lag = lagMin + 1; lag < lagMax && !okWin; lag++) {
+            const double a0 = ac[static_cast<size_t>(lag) - 1], a1 = ac[static_cast<size_t>(lag)],
+                         a2 = ac[static_cast<size_t>(lag) + 1];
+            if (a1 > a0 && a1 >= a2 && a1 > acMean) {
+              const double r = fold((60 * fps) / lag) / tau;
+              if (r > 0.975 && r < 1.026) okWin = true;
+            }
+          }
+          total++;
+          if (okWin) agree++;
+        }
+        if (!(total > 0 && static_cast<double>(agree) / total >= 0.6)) {
+          spanOk.push_back(false);
+          continue;
+        }
+        // …and the beats must form a steady pulse AFTER snapping to the
+        // material's real onsets — the DP grid itself is smooth by
+        // construction; snapping is what exposes free-time playing.
+        std::vector<double> inBeats;
+        for (const double f : placed)
+          if (f > sp.first + 1 && f < sp.second - 1) inBeats.push_back(f);
+        if (inBeats.size() < 5) {
+          spanOk.push_back(false);
+          continue;
+        }
+        std::vector<double> iv0;
+        for (size_t i = 1; i < inBeats.size(); i++) iv0.push_back(inBeats[i] - inBeats[i - 1]);
+        std::vector<double> iv0s = iv0;
+        std::sort(iv0s.begin(), iv0s.end());
+        const double medRaw = iv0s[iv0.size() / 2];
+        const double tol = std::min(0.045 * fps, medRaw * 0.2);
+        size_t pi = 0;
+        std::vector<double> snapped;
+        for (const double b : inBeats) {
+          while (pi + 1 < peaks.size() && peaks[pi + 1] <= b) pi++;
+          double f = b;
+          double bestD = tol;
+          for (const size_t k : {pi, pi + 1}) {
+            if (k < peaks.size() && std::fabs(peaks[k] - b) < bestD) {
+              bestD = std::fabs(peaks[k] - b);
+              f = peaks[k];
+            }
+          }
+          snapped.push_back(f);
+        }
+        std::vector<double> iv;
+        for (size_t i = 1; i < snapped.size(); i++) iv.push_back(std::max(1.0, snapped[i] - snapped[i - 1]));
+        std::vector<double> sorted = iv;
+        std::sort(sorted.begin(), sorted.end());
+        const double med = sorted[sorted.size() / 2];
+        std::vector<double> dev;
+        for (const double x : iv) dev.push_back(std::fabs(x - med) / med);
+        std::sort(dev.begin(), dev.end());
+        spanOk.push_back(dev[static_cast<size_t>(std::floor(dev.size() * 0.9))] <= 0.15);
+      }
+      for (size_t i = 0; i < fillSpans.size(); i++)
+        dbg.spanOk.push_back({fillSpans[i].first, fillSpans[i].second, spanOk[i]});
+      spanOkOut = spanOk;
+      haveSpanOk = true;
+      const auto inKeptSpan = [&](double f) {
+        for (size_t i = 0; i < fillSpans.size(); i++)
+          if (spanOk[i] && f > fillSpans[i].first + 1 && f < fillSpans[i].second - 1) return true;
+        return false;
+      };
+      if (std::any_of(spanOk.begin(), spanOk.end(), [](bool b) { return b; })) {
+        std::vector<double> merged;
+        for (const double f : cands[chosen].beatsF)
+          if (!inKeptSpan(f)) merged.push_back(f);
+        for (const double f : placed)
+          if (inKeptSpan(f)) merged.push_back(f);
+        std::stable_sort(merged.begin(), merged.end());
+        const double minGap = ((60 * fps) / cands[chosen].bpm) * 0.5;
+        std::vector<double> spliced;
+        for (const double f : merged)
+          if (spliced.empty() || f - spliced.back() >= minGap) spliced.push_back(f);
+        cands[chosen].beatsF = spliced;
+        cands[chosen].q = evaluate(spliced);
+      }
+      // Rejected spans keep the drums-only path — for a span the old detector
+      // never covered (leading silence), those beats simply do not exist.
+    }
+  }
+
+  // ---- snap each beat to an adjacent strong onset -------------------------
+  //
+  // The frame grid is ~12 ms coarse; unsnapped beats keep their DP position.
+  const double snapTol = std::min(0.045 * fps, cands[chosen].q.med * 0.2);
+  std::vector<double> beatsSec;
+  {
+    size_t pi = 0;
+    for (const double b : cands[chosen].beatsF) {
+      while (pi + 1 < peaks.size() && peaks[pi + 1] <= b) pi++;
+      double f = b;
+      double bestD = snapTol;
+      for (const size_t k : {pi, pi + 1}) {
+        if (k < peaks.size()) {
+          const double d = std::fabs(peaks[k] - b);
+          if (d < bestD) {
+            bestD = d;
+            f = peaks[k];
+          }
+        }
+      }
+      beatsSec.push_back((f * HOP) / sr);
+    }
+  }
+  for (size_t i = 1; i < beatsSec.size(); i++)
+    if (beatsSec[i] <= beatsSec[i - 1]) beatsSec[i] = beatsSec[i - 1] + 0.001;
+
+  std::vector<double> ivSec;
+  for (size_t i = 1; i < beatsSec.size(); i++) ivSec.push_back(beatsSec[i] - beatsSec[i - 1]);
+  std::sort(ivSec.begin(), ivSec.end());
+  const double medSec = ivSec.empty() ? 0 : ivSec[ivSec.size() / 2];
+
+  for (size_t i = 0; i < fillSpans.size(); i++) {
+    BeatVoid v;
+    v.aSec = (std::max(0, fillSpans[i].first + 1) * static_cast<double>(HOP)) / sr;
+    v.bSec = (std::min(frames, fillSpans[i].second) * static_cast<double>(HOP)) / sr;
+    v.leading = fillSpans[i].first < 0;
+    v.trailing = fillSpans[i].second >= frames;
+    v.filled = haveSpanOk ? spanOkOut[i] : false;
+    out.voids.push_back(v);
+  }
+  out.beatsSec = std::move(beatsSec);
+  out.medSec = medSec;
+  out.O = O;
+  out.ok = true;
+  dbg.beats = static_cast<int>(out.beatsSec.size());
+  dbg.medSec = medSec;
+  return out;
 }
 
 }  // namespace singz

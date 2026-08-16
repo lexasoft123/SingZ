@@ -408,11 +408,14 @@ static void beatsTests() {
       drums.mono[static_cast<size_t>(st + i)] += static_cast<float>(amp * std::exp(-i / 30.0) * std::sin(i * 0.5));
   }
   singz::BeatDebug d;
-  const bool ok = singz::trackTempo(drums, {}, d);
+  const singz::DrumLattice lat = singz::trackFromDrums(drums, {}, d);
+  const bool ok = lat.ok;
   CHECK("beats: a 120 bpm click train is tracked", ok);
   CHECK("beats: at 120 bpm, not an octave of it",
         ok && std::fabs(d.chosenBpm - 120) < 2.0);
   CHECK("beats: the windows agree (not rubato)", ok && d.consistency >= 0.6);
+  CHECK("beats: the lattice has a beat every ~0.5 s", ok && std::fabs(lat.medSec - 0.5) < 0.02 &&
+        lat.beatsSec.size() > 50);
   CHECK("beats: stamp is the TS's BEAT_DETECT_VERSION", singz::kBeatDetectVersion == 21);
 
   // A sustained pad has periodicity but no attacks — it must be refused.
@@ -425,7 +428,7 @@ static void beatsTests() {
     pad.mono[static_cast<size_t>(i)] = static_cast<float>(0.3 * std::sin(ph));
   }
   singz::BeatDebug pd;
-  CHECK("beats: a sustained pad earns no metronome", !singz::trackTempo(pad, {}, pd));
+  CHECK("beats: a sustained pad earns no metronome", !singz::trackFromDrums(pad, {}, pd).ok);
   CHECK("beats: and says why", !pd.reject.empty());
 }
 
