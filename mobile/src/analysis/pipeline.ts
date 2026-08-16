@@ -91,7 +91,13 @@ export interface AnalysisHost {
     downbeats?: number[]
     suspectAt?: number[]
   } | null>
-  estimateKeyFromStems(inst: string[], bass?: string): Promise<{ pc: number; minor: boolean } | null>
+  /** The key off the harmonic stems ON DISK — the core reads them itself
+   *  (analysis.cpp), so nothing crosses a runtime for this one either. */
+  estimateKeyFromStems(
+    project: string,
+    instRel: string[],
+    bassRel?: string
+  ): Promise<{ pc: number; minor: boolean } | null>
   /** The melody line of a stem ON DISK — the core's tracker (melody.cpp)
    *  reads the file itself; nothing crosses a runtime for this one. */
   trackMelody(
@@ -254,18 +260,30 @@ export async function analyzeProject(
     return true
   }
   try {
-    // Everything the grid and the key want, one stem at a time. The vocals
-    // cross only as the grid's aux — the melody reads its own file.
-    const wantAudio = plan.beat || plan.key
+    // The grid's stems, one at a time. The vocals cross only as its aux; the
+    // melody and the key read their own files.
+    const wantAudio = plan.beat
     const have = { drums: false, bass: false, vocals: false, inst: [] as string[] }
     if (plan.beat && stems.vocals) {
       step('Reading the vocals…', 0.02)
       have.vocals = await put('vocals')
     }
+    // The key reads its own files now (the core); only the grid's aux still
+    // crosses to the worklet runtime. Its stems therefore never pass through
+    // put(), so they must be added to the stamp BY HAND — without this a
+    // key-only run (a stale key stamp over a current grid) compares an empty
+    // file list against an empty file list, which can never fail, and a key
+    // computed from stems that were replaced mid-run is written into the doc
+    // that now names different ones. The melody has the same shape at its
+    // own stage; the guard is only as good as what it is told to watch.
+    const keyInst = INST.filter((id) => stems[id])
+    if (plan.key) {
+      for (const id of keyInst) usedFiles.add(`${id}.${stems[id]}`)
+      if (stems.bass) usedFiles.add(`bass.${stems.bass}`)
+    }
     if (wantAudio) {
       let i = 0
-      // The drums serve the grid alone; the key wants the harmonic bed.
-      const load = [...(plan.beat ? ['drums'] : []), 'bass', ...INST].filter((id) => stems[id])
+      const load = plan.beat ? ['drums', 'bass', ...INST].filter((id) => stems[id]) : []
       for (const id of load) {
         step(`Reading the ${id}…`, 0.05 + (0.2 * i++) / Math.max(1, load.length))
         const ok = await put(id)
@@ -321,10 +339,21 @@ export async function analyzeProject(
       }
     }
 
-    if (plan.key && (have.inst.length > 0 || have.bass)) {
+    // The grid is done with the far side: give the memory back before the key
+    // and the melody, both of which may fall back to putting stems there
+    // themselves (a FLAC project, or JS newer than the installed binary) —
+    // and the melody stage often overlaps a player holding the same song
+    // decoded for playback. The finally clears again, harmlessly.
+    if (wantAudio) await host.clearStems()
+
+    if (plan.key && (keyInst.length > 0 || stems.bass)) {
       step('Reading the key…', 0.45)
       const t = Date.now()
-      const k = await host.estimateKeyFromStems(have.inst, have.bass ? 'bass' : undefined)
+      const k = await host.estimateKeyFromStems(
+        project,
+        keyInst.map(rel),
+        stems.bass ? rel('bass') : undefined
+      )
       ms.key = Date.now() - t
       if (k) fresh.key = { pc: k.pc, minor: k.minor, detVersion: KEY_DETECT_VERSION }
       else fresh.none = { ...fresh.none, key: KEY_DETECT_VERSION } // a silent bed, on record
@@ -339,10 +368,6 @@ export async function analyzeProject(
     if (fresh.beat || fresh.key || fresh.none) {
       if (await commit(project, deps, fresh, used, stampAtStart)) opts.onCommit?.(fresh)
     }
-    // The far side is done: give the memory back before the melody stage,
-    // which often overlaps a player holding the same song decoded for
-    // playback (finally clears again, harmlessly).
-    if (wantAudio) await host.clearStems()
 
     if (plan.melody && stems.vocals) {
       step('Tracking the melody…', 0.5)

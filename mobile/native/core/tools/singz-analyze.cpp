@@ -5,6 +5,7 @@
 //
 //   singz-analyze melody --f32 <mono float32 file> --sr <rate> [--raw]
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
+//   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
 //
 // Prints one JSON object on stdout. Floats are printed with 9 significant
 // digits, which round-trips float32 exactly — the parity harness compares
@@ -15,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "../analysis.h"
 #include "../melody.h"
 #include "../wav.h"
 
@@ -89,6 +91,40 @@ int main(int argc, char** argv) {
       printFloats(t.rms);
     }
     std::printf("}\n");
+    return 0;
+  }
+  if (cmd == "key") {
+    // The harmonic stems, in the order the caller names them — the TS sums
+    // `inst` into one chord layer and asks `bass` for roots.
+    std::vector<singz::AnalysisStem> inst;
+    singz::AnalysisStem bassStem;
+    bool haveBass = false;
+    for (int i = 2; i < argc; i++) {
+      const bool isInst = std::strcmp(argv[i], "--inst") == 0;
+      const bool isBass = std::strcmp(argv[i], "--bass") == 0;
+      if (!(isInst || isBass) || i + 1 >= argc) continue;
+      const std::string path = argv[++i];
+      singz::MonoWav w = singz::readWavMono(path);
+      if (!w.ok) {
+        std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
+        return 1;
+      }
+      singz::AnalysisStem st;
+      st.mono = std::move(w.samples);
+      st.sampleRate = w.sampleRate;
+      if (isInst) inst.push_back(std::move(st));
+      else {
+        bassStem = std::move(st);
+        haveBass = true;
+      }
+    }
+    const singz::KeyGuess k = singz::estimateKeyFromStems(inst, haveBass ? &bassStem : nullptr);
+    if (!k.ok) {
+      std::printf("{\"detVersion\":%d,\"key\":null}\n", singz::kKeyDetectVersion);
+      return 0;
+    }
+    std::printf("{\"detVersion\":%d,\"key\":{\"pc\":%d,\"minor\":%s}}\n", singz::kKeyDetectVersion, k.pc,
+                k.minor ? "true" : "false");
     return 0;
   }
   std::fprintf(stderr, "unknown command %s\n", cmd.c_str());

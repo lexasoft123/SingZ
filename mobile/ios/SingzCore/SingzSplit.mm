@@ -12,6 +12,7 @@
 #import "SingzSplitRunner.h"
 
 #include "ort_env.h"
+#include "analysis.h"
 #include "melody.h"
 #include "wav.h"
 
@@ -156,6 +157,50 @@ RCT_EXPORT_METHOD(analyzeMelody:(NSString *)wavPath
       @"sampleRate" : @(wav.sampleRate),
       @"durationSec" : @(static_cast<double>(wav.samples.size()) / wav.sampleRate)
     });
+  });
+}
+
+// Phase 4c: the key detector in the core (analysis.cpp — the desktop's
+// estimateKeyFromStems, bit-identical). Reads the harmonic stems itself;
+// `inst` is the chord layer, `bass` names roots and may be empty.
+RCT_EXPORT_METHOD(analyzeKey:(NSArray<NSString *> *)instPaths
+                  bass:(NSString *)bassPath
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSArray<NSString *> *inst = instPaths ?: @[];
+  NSString *bass = bassPath ?: @"";
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    std::vector<singz::AnalysisStem> stems;
+    stems.reserve(inst.count);
+    for (NSString *p in inst) {
+      singz::MonoWav w = singz::readWavMono(std::string(p.UTF8String));
+      if (!w.ok) {
+        reject(@"key_read", [NSString stringWithFormat:@"%@: %s", p.lastPathComponent, w.error.c_str()], nil);
+        return;
+      }
+      singz::AnalysisStem st;
+      st.mono = std::move(w.samples);
+      st.sampleRate = w.sampleRate;
+      stems.push_back(std::move(st));
+    }
+    singz::AnalysisStem bassStem;
+    bool haveBass = false;
+    if (bass.length > 0) {
+      singz::MonoWav w = singz::readWavMono(std::string(bass.UTF8String));
+      if (!w.ok) {
+        reject(@"key_read", [NSString stringWithFormat:@"%@: %s", bass.lastPathComponent, w.error.c_str()], nil);
+        return;
+      }
+      bassStem.mono = std::move(w.samples);
+      bassStem.sampleRate = w.sampleRate;
+      haveBass = true;
+    }
+    const singz::KeyGuess k = singz::estimateKeyFromStems(stems, haveBass ? &bassStem : nullptr);
+    // A silent harmonic bed has no answer — null, exactly as the TS returns,
+    // and the pipeline records that verdict rather than storing a key.
+    resolve(k.ok ? @{@"pc" : @(k.pc), @"minor" : @(k.minor), @"detVersion" : @(singz::kKeyDetectVersion)}
+                 : (id)kCFNull);
   });
 }
 

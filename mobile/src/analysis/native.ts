@@ -9,6 +9,10 @@
 import { NativeModules } from 'react-native'
 
 interface SplitNative {
+  analyzeKey(
+    instPaths: string[],
+    bassPath: string
+  ): Promise<{ pc: number; minor: boolean; detVersion: number } | null>
   analyzeMelody(wavPath: string): Promise<{
     f0: number[]
     hopSec: number
@@ -31,6 +35,10 @@ const folder = (): FolderNative => NativeModules.FolderAccess as FolderNative
 export const nativeMelodyAvailable = (): boolean =>
   typeof (NativeModules.SingzSplit as { analyzeMelody?: unknown } | undefined)?.analyzeMelody === 'function'
 
+/** Does this build carry the core's key detector? */
+export const nativeKeyAvailable = (): boolean =>
+  typeof (NativeModules.SingzSplit as { analyzeKey?: unknown } | undefined)?.analyzeKey === 'function'
+
 export async function trackMelodyNative(
   project: string,
   relPath: string
@@ -38,6 +46,23 @@ export async function trackMelodyNative(
   const path = await folder().localFile(project, relPath)
   const r = await split().analyzeMelody(path)
   return { f0: Float32Array.from(r.f0), hopSec: r.hopSec, durationSec: r.durationSec, detVersion: r.detVersion }
+}
+
+/**
+ * The key off the harmonic stems, in the core. Resolves null when the bed is
+ * silent — an ANSWER (the TS returns null there too), not a failure, and the
+ * pipeline records it as a verdict rather than storing a key.
+ */
+export async function estimateKeyNative(
+  project: string,
+  instRel: string[],
+  bassRel?: string
+): Promise<{ pc: number; minor: boolean } | null> {
+  const f = folder()
+  const instPaths = await Promise.all(instRel.map((rel) => f.localFile(project, rel)))
+  const bassPath = bassRel ? await f.localFile(project, bassRel) : ''
+  const r = await split().analyzeKey(instPaths, bassPath)
+  return r ? { pc: r.pc, minor: r.minor } : null
 }
 
 export async function audioDurationNative(project: string, relPath: string): Promise<number> {

@@ -11,6 +11,7 @@ CXX=${CXX:-c++}
 "$CXX" -std=c++17 -O2 -Wall \
   -I "$ROOT/mobile/native/core" \
   "$ROOT/mobile/native/core/tools/singz-analyze.cpp" \
+  "$ROOT/mobile/native/core/analysis.cpp" \
   "$ROOT/mobile/native/core/melody.cpp" \
   "$ROOT/mobile/native/core/wav.cpp" \
   -o "$OUT"

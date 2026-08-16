@@ -9,7 +9,13 @@ import { decodeAudioData } from 'react-native-audio-api'
 import { releaseStems } from '../projects'
 import * as host from './host'
 import type { MonoStem } from './host'
-import { audioDurationNative, nativeMelodyAvailable, trackMelodyNative } from './native'
+import {
+  audioDurationNative,
+  estimateKeyNative,
+  nativeKeyAvailable,
+  nativeMelodyAvailable,
+  trackMelodyNative
+} from './native'
 import type { AnalysisDeps, AnalysisHost } from './pipeline'
 
 /** The detectors' own rate — decode straight to it and the far side copies nothing. */
@@ -61,18 +67,35 @@ export async function loadMono44k(project: string, relPath: string): Promise<Mon
  * core cannot read is slower, never a failed run. (The core will read FLAC
  * once the desktop CLI needs it; this branch then goes away.)
  */
-const coreReads = (relPath: string): boolean => /\.wav$/i.test(relPath) && nativeMelodyAvailable()
+const coreReads = (relPath: string): boolean => /\.wav$/i.test(relPath)
 
 export function realAnalysisHost(): AnalysisHost {
   return {
     putStem: host.putStem,
     clearStems: host.clearStems,
     detectBeats: host.detectBeats,
-    estimateKeyFromStems: host.estimateKeyFromStems,
+    estimateKeyFromStems: async (project, instRel, bassRel) => {
+      if (instRel.every(coreReads) && (!bassRel || coreReads(bassRel)) && nativeKeyAvailable())
+        return estimateKeyNative(project, instRel, bassRel)
+      // FLAC (a copied desktop project) or an older native: the worklet TS,
+      // the way HEAD did it — slower, never a failed run.
+      const ids: string[] = []
+      try {
+        for (const relPath of instRel) {
+          const id = `key-${ids.length}`
+          await host.putStem(id, await loadMono44k(project, relPath))
+          ids.push(id)
+        }
+        if (bassRel) await host.putStem('key-bass', await loadMono44k(project, bassRel))
+        return await host.estimateKeyFromStems(ids, bassRel ? 'key-bass' : undefined)
+      } finally {
+        await host.clearStems()
+      }
+    },
     encodeMelody: host.encodeMelody,
     applyUserBars: host.applyUserBars,
     trackMelody: async (project, rel, onProgress) => {
-      if (coreReads(rel)) return trackMelodyNative(project, rel)
+      if (coreReads(rel) && nativeMelodyAvailable()) return trackMelodyNative(project, rel)
       const stem = await loadMono44k(project, rel)
       const durationSec = stem.data.length / stem.sampleRate
       await host.putStem('melody-src', stem)
@@ -84,7 +107,7 @@ export function realAnalysisHost(): AnalysisHost {
       }
     },
     audioDuration: async (project, rel) => {
-      if (coreReads(rel)) return audioDurationNative(project, rel)
+      if (coreReads(rel) && nativeMelodyAvailable()) return audioDurationNative(project, rel)
       // The decode is the only way to a FLAC's length from here; released
       // on the spot inside loadMono44k.
       const stem = await loadMono44k(project, rel)

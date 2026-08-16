@@ -91,13 +91,14 @@ interface World {
   writes: string[]
   puts: string[]
   tracked: string[]
+  keyStems: string[]
   cleared: number
   detectArgs: unknown[]
   deps: AnalysisDeps
 }
 
 function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): World {
-  const w: World = { disk: new Map(), writes: [], puts: [], tracked: [], cleared: 0, detectArgs: [], deps: null as unknown as AnalysisDeps }
+  const w: World = { disk: new Map(), writes: [], puts: [], tracked: [], keyStems: [], cleared: 0, detectArgs: [], deps: null as unknown as AnalysisDeps }
   w.disk.set('project.json', JSON.stringify(initial))
   const host: AnalysisHost = {
     putStem: async (id) => {
@@ -110,7 +111,10 @@ function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): 
       w.detectArgs.push(args)
       return { beats: [0.5, 1, 1.5, 2, 2.5], bpm: 120, beatsPerBar: 4, downbeat: 0, downbeats: [0, 4] }
     },
-    estimateKeyFromStems: async () => ({ pc: 9, minor: true }),
+    estimateKeyFromStems: async (_project, instRel, bassRel) => {
+      w.keyStems.push([...instRel, ...(bassRel ? [bassRel] : [])].join(','))
+      return { pc: 9, minor: true }
+    },
     trackMelody: async (_project, rel, onProgress) => {
       w.tracked.push(rel)
       onProgress?.(0.5)
@@ -177,6 +181,12 @@ describe('analyzeProject', () => {
     expect(onDisk(w).settings.melody).toBeTruthy()
   })
 
+  test('the key is asked of the harmonic stems by PATH, bass last', async () => {
+    const w = world(doc())
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(w.keyStems).toEqual(['stems/guitar.wav,stems/piano.wav,stems/other.wav,stems/bass.wav'])
+  })
+
   test('the caller hears the grid the moment it is written, before the melody', async () => {
     const w = world(doc())
     const heard: string[] = []
@@ -212,11 +222,11 @@ describe('analyzeProject', () => {
     expect(out2.settings.analysisNone).toBeUndefined()
   })
 
-  test('only the key wanted → the drums are never loaded', async () => {
+  test('only the key wanted → nothing crosses at all (the core reads the files)', async () => {
     const w = world(doc({ beat: autoGrid(), melody: melodyFor(200) }))
     await analyzeProject('T', SIX, { deps: w.deps })
-    expect(w.puts).not.toContain('drums')
-    expect(w.puts).toEqual(expect.arrayContaining(['bass', 'guitar', 'piano', 'other']))
+    expect(w.puts).toEqual([])
+    expect(w.keyStems).toEqual(['stems/guitar.wav,stems/piano.wav,stems/other.wav,stems/bass.wav'])
   })
 
   test('the beat aux carries lyric timings and the harmonic bed (App.tsx parity)', async () => {

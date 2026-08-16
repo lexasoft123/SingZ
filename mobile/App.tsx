@@ -194,6 +194,43 @@ if (TEST) {
       .catch((e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true })
     return true
   }
+  // Phase 4c: the core's KEY detector on this device, over a project's own
+  // harmonic stems — the on-device half of eval/key-parity.mjs. Reports the
+  // native answer AND the worklet TS's on the same files, so a device that
+  // disagrees with the desktop says so here rather than in a stored doc.
+  hooks.keyParity = (dir: string, stems: string[]): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    void Promise.all([import('./src/analysis/deps'), import('./src/analysis/host'), import('./src/analysis/native')])
+      .then(async ([d, h, n]) => {
+        const inst = stems.filter((s) => s !== 'bass').map((s) => `stems/${s}.wav`)
+        const bass = stems.includes('bass') ? 'stems/bass.wav' : undefined
+        const t0 = Date.now()
+        const nat = await n.estimateKeyNative(dir, inst, bass)
+        const nativeMs = Date.now() - t0
+        const ids: string[] = []
+        for (const rel of inst) {
+          const id = `kp-${ids.length}`
+          await h.putStem(id, await d.loadMono44k(dir, rel))
+          ids.push(id)
+        }
+        if (bass) await h.putStem('kp-bass', await d.loadMono44k(dir, bass))
+        const t1 = Date.now()
+        const ts = await h.estimateKeyFromStems(ids, bass ? 'kp-bass' : undefined)
+        const tsMs = Date.now() - t1
+        await h.clearStems()
+        return {
+          native: nat,
+          ts,
+          same: (nat === null && ts === null) || (!!nat && !!ts && nat.pc === ts.pc && nat.minor === ts.minor),
+          ms: { native: nativeMs, ts: tsMs },
+          stems: inst.length + (bass ? 1 : 0)
+        }
+      })
+      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
+      .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
+    return true
+  }
   // Phase 4c: the core's melody tracker against the desktop TS on the SAME
   // stem file — the on-device half of the parity gate (the host-side half is
   // singz-analyze vs node over the corpus). Native reads the WAV itself; the

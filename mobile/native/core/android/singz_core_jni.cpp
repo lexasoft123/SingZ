@@ -6,6 +6,7 @@
 #include <atomic>
 #include <string>
 
+#include "analysis.h"
 #include "melody.h"
 #include "ort_env.h"
 #include "progress.h"
@@ -153,5 +154,52 @@ Java_com_singzplayer_split_SingzCore_wavInfo(JNIEnv* env, jobject /*thiz*/, jstr
                        static_cast<double>(wav.frames), static_cast<double>(wav.frames) / wav.sampleRate};
   jdoubleArray arr = env->NewDoubleArray(4);
   env->SetDoubleArrayRegion(arr, 0, 4, v);
+  return arr;
+}
+
+// [pc, minor(0/1), detVersion]; EMPTY means "no key in this audio" (the TS
+// null — a silent harmonic bed), which the pipeline stores as a verdict and
+// never asks about again. A stem that cannot be READ is a different answer
+// and must not be mistaken for it: null, so Kotlin rejects and iOS's
+// behaviour is matched. `paths` is the instrument stems; `bassPath` may be "".
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_singzplayer_split_SingzCore_analyzeKey(JNIEnv* env, jobject /*thiz*/, jobjectArray paths,
+                                                jstring jbass) {
+  std::vector<singz::AnalysisStem> stems;
+  const jsize n = paths != nullptr ? env->GetArrayLength(paths) : 0;
+  for (jsize i = 0; i < n; i++) {
+    jstring js = static_cast<jstring>(env->GetObjectArrayElement(paths, i));
+    const char* c = env->GetStringUTFChars(js, nullptr);
+    if (c == nullptr) return nullptr;
+    singz::MonoWav w = singz::readWavMono(std::string(c));
+    env->ReleaseStringUTFChars(js, c);
+    env->DeleteLocalRef(js);  // a long inst list would otherwise fill the local frame
+    if (!w.ok) return nullptr;  // unreadable ≠ silent
+    singz::AnalysisStem st;
+    st.mono = std::move(w.samples);
+    st.sampleRate = w.sampleRate;
+    stems.push_back(std::move(st));
+  }
+  singz::AnalysisStem bassStem;
+  bool haveBass = false;
+  if (jbass != nullptr) {
+    const char* c = env->GetStringUTFChars(jbass, nullptr);
+    if (c == nullptr) return nullptr;
+    const std::string path(c);
+    env->ReleaseStringUTFChars(jbass, c);
+    if (!path.empty()) {
+      singz::MonoWav w = singz::readWavMono(path);
+      if (!w.ok) return nullptr;  // unreadable ≠ silent
+      bassStem.mono = std::move(w.samples);
+      bassStem.sampleRate = w.sampleRate;
+      haveBass = true;
+    }
+  }
+  const singz::KeyGuess k = singz::estimateKeyFromStems(stems, haveBass ? &bassStem : nullptr);
+  if (!k.ok) return env->NewDoubleArray(0);
+  const double v[3] = {static_cast<double>(k.pc), k.minor ? 1.0 : 0.0,
+                       static_cast<double>(singz::kKeyDetectVersion)};
+  jdoubleArray arr = env->NewDoubleArray(3);
+  env->SetDoubleArrayRegion(arr, 0, 3, v);
   return arr;
 }

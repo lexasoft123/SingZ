@@ -51,6 +51,14 @@ object SingzCore {
   external fun wavInfo(wavPath: String): DoubleArray?
 
   /**
+   * Phase 4c: the key detector (core analysis.cpp — the desktop's
+   * estimateKeyFromStems, bit-identical). Returns [pc, minor(0/1),
+   * detVersion], or an EMPTY array when the harmonic bed is silent — which
+   * is an answer ("no key"), not a failure. ON THE CALLING THREAD.
+   */
+  external fun analyzeKey(instPaths: Array<String>, bassPath: String): DoubleArray?
+
+  /**
    * The whole split, ON THE CALLING THREAD (own a worker for it): raw f32
    * stereo mix in, six <stem>.wav.part + resume tail in jobDir out.
    * Returns "" on ok, "cancelled", or an error message.

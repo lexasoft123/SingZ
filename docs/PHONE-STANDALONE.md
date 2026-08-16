@@ -701,8 +701,60 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       The emulator (SingZ_API36) had a RELEASE 0.16.0 on it from the FGS
       video — CLAUDE.md's "which emulator can be driven" trap, met again;
       reinstalled as debug for the parity run.
-    - Next: detectBeats + courts + key into the core (the same method,
-      compare-grids over the corpus as the gate), then the desktop's
+    - **The real-device number that decided what to port next (POCO's iOS
+      sibling — the user's iPhone, 2026-08-16, a 5:02 song)**: the whole
+      analysis pass took ~110 s — stem load 5.6 s, **beat 92.1 s**, key
+      9.5 s, **melody 2.7 s**. The melody is the ported one: on this
+      hardware the TS would have been ~100 s for the same song, so the port
+      is ~40x, and 84% of what is left is the ONE detector still in
+      TypeScript. The pass also proved the queue design on real hardware —
+      the singer opened the song, left it three seconds later, and the run
+      carried on and wrote its results two minutes on. (Open question from
+      the same run: the grid came out 297 beats at 60.1 bpm, which on a
+      rock track is usually a half-time pick. Being chased separately; the
+      port is deliberately faithful to the current logic, right or wrong.)
+    - **Key follows melody (2026-08-16)**: `analysis.cpp` is analysis.ts's
+      `estimateKeyFromStems` + `estimateKey` + `monoAt44k` + `goertzel`,
+      ported under the melody port's discipline (the same fp-contract
+      pragma, float32 stores where the TS has Float32Array, jsRound). Gate:
+      `eval/key-parity.mjs` — node's detector against `singz-analyze key`
+      over a project's real stems — **identical on all four library
+      projects and the bundled sample** (E minor, F# major, A minor, D
+      major, C major), which is a stronger check than the melody's was: a
+      key is one discrete answer, so agreement is not luck. Host tests
+      cover the shapes with no corpus (a synthetic C-major triad bed reads
+      C major; a silent bed answers nothing, which must never become a
+      stored key). Bindings `SingzSplit.analyzeKey(instPaths, bassPath)` on
+      both platforms; `AnalysisHost.estimateKeyFromStems` now takes file
+      locators like `trackMelody`, so the key crosses nothing either — and
+      with both of them off the worklet, the ONLY thing still putting stems
+      across the runtime boundary is the grid's aux. **Verified on both
+      devices** (the reviewer's call — every other claim in the slice was
+      host-side, and a Metro-only run would have passed VACUOUSLY, since an
+      app without the new binary silently takes the worklet fallback):
+      rebuilt and installed, `analyzeKey` present in the binary, and
+      `__test.keyParity` run against real stems — iOS sim **F major both
+      ways, native 778 ms vs TS 1429 ms**; Android emulator **C major both
+      ways, 2641 ms vs 5373 ms**. The iOS rebuild first hit the recorded
+      CocoaPods trap (a link failure on `facebook::react::Sealable`, the
+      RNGestureHandler family named in CLAUDE.md) — `rm -rf Pods && pod
+      install` cleared it, exactly as written down; it was not the port.
+    - Three review findings worth keeping, all mine to have avoided: the
+      pipeline refactor took the key's stems OUT of the stems-changed guard
+      (they no longer pass through `put()`, so a key-only run compared an
+      empty list against an empty list and could never fail — a key
+      computed from replaced stems would have been stored under the current
+      stamp and never re-asked); the Android JNI returned the same empty
+      array for "silent bed" and "cannot read this file", so an unreadable
+      stem would have been recorded as the permanent verdict "this song has
+      no key" while iOS rejected on the same input; and holding every
+      converted stem through the goertzel pass cost ~1.8x the TS path's
+      peak, on a queue that may run beside a player — each stem is now
+      summed and dropped as it is converted, same element order, parity
+      untouched.
+    - Next: detectBeats + courts into the core (the same method,
+      compare-grids over the corpus as the gate) — which is now the whole
+      remaining cost of a phone analysis — then the desktop's
       `analysis:run` IPC over the CLI, then retire the TS detectors behind
       a one-release flag.
     - Left for 4b: the C++ `beat_this` port + the two beat models (the

@@ -5,6 +5,7 @@
  * the bit — f0, raw and rms. This is what lets ONE implementation serve every
  * platform without moving PITCH_DETECT_VERSION: identical output on the
  * corpus, or the port is wrong. mobile/tests assert the same on device.
+ * The key detector has its own gate next door: eval/key-parity.mjs.
  *
  *   node eval/melody-parity.mjs [--bin <singz-analyze>] <file.wav|file.f32> ...
  *   node eval/melody-parity.mjs                # the bundled sample's stems

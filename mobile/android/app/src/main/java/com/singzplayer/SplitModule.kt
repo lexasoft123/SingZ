@@ -15,6 +15,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.singzplayer.split.JobStore
 import com.singzplayer.split.SingzCore
@@ -232,6 +233,36 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
         promise.resolve(m)
       } catch (t: Throwable) {
         promise.reject("melody", t)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun analyzeKey(instPaths: ReadableArray, bassPath: String, promise: Promise) {
+    thread(name = "singz-key") {
+      val loadErr = SingzCore.ensureLoaded()
+      if (loadErr != null) {
+        promise.reject("key_core", "core library: $loadErr")
+        return@thread
+      }
+      try {
+        val paths = Array(instPaths.size()) { instPaths.getString(it) ?: "" }
+        val v = SingzCore.analyzeKey(paths, bassPath)
+        if (v == null) {
+          promise.reject("key_read", "could not read a harmonic stem")
+          return@thread
+        }
+        if (v.size < 3) {
+          promise.resolve(null) // a silent bed: no key, and that is the answer
+          return@thread
+        }
+        val m = Arguments.createMap()
+        m.putInt("pc", v[0].toInt())
+        m.putBoolean("minor", v[1] != 0.0)
+        m.putInt("detVersion", v[2].toInt())
+        promise.resolve(m)
+      } catch (t: Throwable) {
+        promise.reject("key", t)
       }
     }
   }

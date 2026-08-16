@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "analysis.h"
 #include "melody.h"
 #include "resample.h"
 #include "wav.h"
@@ -317,10 +318,74 @@ static void melodyTests() {
   std::remove(path.c_str());
 }
 
+// The key detector (analysis.cpp): a synthetic C-major triad bed comes back
+// as C major, and a silent bed has no answer at all. The bit-parity claim
+// against the desktop TS lives in eval/key-parity.mjs (node-side, over real
+// projects) — this is the shape check that runs with no corpus.
+static void keyTests() {
+  const int sr = 44100;
+  const int frames = sr * 12;
+  auto tone = [&](double hz, std::vector<float>& out, double amp) {
+    double ph = 0;
+    for (int i = 0; i < frames; i++) {
+      ph += 2 * M_PI * hz / sr;
+      out[static_cast<size_t>(i)] += static_cast<float>(amp * std::sin(ph));
+    }
+  };
+  // C major: C3 (130.81), E3 (164.81), G3 (196.00), with C2 in the bass.
+  singz::AnalysisStem inst;
+  inst.mono.assign(static_cast<size_t>(frames), 0.0f);
+  inst.sampleRate = sr;
+  tone(130.81, inst.mono, 0.25);
+  tone(164.81, inst.mono, 0.20);
+  tone(196.00, inst.mono, 0.22);
+  singz::AnalysisStem bass;
+  bass.mono.assign(static_cast<size_t>(frames), 0.0f);
+  bass.sampleRate = sr;
+  tone(65.41, bass.mono, 0.30);
+  const singz::KeyGuess k = singz::estimateKeyFromStems({inst}, &bass);
+  CHECK("key: a C-major triad bed reads as C major", k.ok && k.pc == 0 && !k.minor);
+  CHECK("key: stamp is the TS's KEY_DETECT_VERSION", singz::kKeyDetectVersion == 2);
+
+  singz::AnalysisStem silent;
+  silent.mono.assign(static_cast<size_t>(frames), 0.0f);
+  silent.sampleRate = sr;
+  const singz::KeyGuess q = singz::estimateKeyFromStems({silent}, nullptr);
+  CHECK("key: a silent bed has no answer (never a stored key)", !q.ok);
+
+  // Too little audio to judge: fewer than 8 chroma frames is the TS's floor.
+  singz::AnalysisStem tiny;
+  tiny.mono.assign(16384 * 4, 0.1f);
+  tiny.sampleRate = sr;
+  CHECK("key: too short to judge answers nothing", !singz::estimateKeyFromStems({tiny}, nullptr).ok);
+
+  // estimateKey — the melody-histogram fallback. Nothing in the app reaches
+  // it yet (the phone shows no key readout), so without this it would be a
+  // ported detector with no coverage at all, which is where a parity defect
+  // waits until the day it is wired up. A C-major scale weighted toward the
+  // tonic reads C major; under 100 voiced frames there is no answer.
+  {
+    const double scale[7] = {261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88};  // C D E F G A B
+    std::vector<float> f0;
+    for (int rep = 0; rep < 40; rep++)
+      for (int i = 0; i < 7; i++) {
+        // The tonic and dominant held longer, as a real melody does — a flat
+        // histogram has no key and the correlation would pick arbitrarily.
+        const int hold = (i == 0 || i == 4) ? 4 : 2;
+        for (int h = 0; h < hold; h++) f0.push_back(static_cast<float>(scale[i]));
+      }
+    const singz::KeyGuess mk = singz::estimateKey(f0.data(), f0.size());
+    CHECK("key: a C-major melody histogram reads as C major", mk.ok && mk.pc == 0 && !mk.minor);
+    CHECK("key: under 100 voiced frames there is no answer",
+          !singz::estimateKey(f0.data(), 99).ok);
+  }
+}
+
 int main() {
   resamplerTests();
   wavTests();
   melodyTests();
+  keyTests();
   std::printf(failures == 0 ? "\nALL CORE HOST TESTS PASS\n" : "\n%d FAILURE(S)\n", failures);
   return failures == 0 ? 0 : 1;
 }
