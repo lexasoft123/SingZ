@@ -299,50 +299,55 @@ jobs:
           # one failure here that is SILENT: ccache LRU-evicts inside the run,
           # hits go partial, the build creeps back up and nothing in the log
           # says why — it just looks like the cache fix stopped holding.
-          # Measured at two ABIs with compiler_check fixed: "0.2 / 0.6" as the
-          # log prints it. Both are binary, and the same trap as the table
-          # below lives right here — ccache 4.9.1 on the runner labels that
-          # line "Cache size (GB)" while the number is GiB (4.13.6 labels it
-          # GiB; which release changed it is not in the notes), and -M's bare
-          # M suffix is DECIMAL, so 600M was 0.56 GiB and
-          # displayed as 0.6. Expect this 1200M cap to render as ~1.1.
-          # Enabling PCH caching adds 284 more objects and four .pch
-          # blobs (two modules x two ABIs; the 288 above is those 284 plus the
-          # four generator compiles), and a .pch carrying libc++, fbjni and
-          # jsi is tens of MB on its own, so the old 600M was no longer
-          # comfortable.
+          # Everything in this block is DECIMAL GB, because that is what both
+          # tools here actually speak. ccache's bare M suffix is decimal (the
+          # manual: "kB, MB, GB, TB (decimal), KiB, MiB, GiB or TiB
+          # (binary)"), and 4.9.1's "Cache size (GB)" line means what it says
+          # — verified rather than assumed, by changing the cap: 600M printed
+          # "/ 0.6" and 1200M prints "/ 1.2". `gh api …/actions/cache/usage`
+          # returns decimal bytes too.
           #
-          # Raising the cap does not make the cache grow — four ccache-apk
-          # entries measured 220.74, 220.76, 220.75 and 220.76 MiB, flat, which
-          # is what a superset-save under a unique key per run should look
-          # like (a fifth at 145.90 MiB predates both the run-id key and the
-          # ABI cut). What ships to Actions is what ccache stores, not the
-          # cap; the cap only stops a silent eviction INSIDE the run.
+          # Measured at two ABIs with compiler_check fixed: 0.2 of 0.6, and
+          # PCH caching took it to 0.4 of 1.2 — 284 more objects plus four
+          # .pch blobs (two modules x two ABIs; the 288 above is those 284
+          # plus the four generator compiles), a .pch carrying libc++, fbjni
+          # and jsi being tens of MB on its own. 0.4 against the old 600M cap
+          # is 67%, which is why it moved.
+          #
+          # Raising the cap does not make the cache grow — the four flat
+          # ccache-apk entries measured 231.49, 231.48, 231.48 and 231.46 MB,
+          # which is what a superset-save under a unique key per run should
+          # look like. What ships to Actions is what ccache stores, not the
+          # cap; the cap only stops eviction INSIDE the run. The other two of
+          # the six are the PCH one at 396.13 MB — content, not the raised cap
+          # — and a 152.99 MB fossil predating the run-id key and the ABI cut.
           #
           # But do not read that as free. The repo's Actions budget is
-          # SATURATED, and at the cap every new entry evicts older ones to fit.
-          # All GiB, one reading, because mixing units here is not academic —
-          # 10,058,697,807 bytes is 10.06 GB decimal AND 9.37 GiB binary, and
-          # reading one against the other is exactly how this block briefly
-          # claimed to have watched 700 MB get evicted when nothing had
-          # happened at all. GitHub documents the limit as "10 GB" without
-          # saying which, so at 9.37 GiB / 21 caches the repo is either just
-          # over or a few percent under; either way, at it.
+          # SATURATED — 10.45 GB across 22 caches against a documented 10 GB —
+          # so every new entry evicts older ones to fit:
           #
-          #   setup-java gradle   5.67 GiB   4 entries   <- the real pressure
-          #   ccache-apk          1.01 GiB   5 entries   <- this
-          #   engines-src-Windows 0.80 GiB   1
-          #   engines-src-macOS   0.59 GiB   1
-          #   engines-out-macOS   0.46 GiB   1
+          #   setup-java gradle   6.08 GB   4 entries   <- the real pressure
+          #   ccache-apk          1.48 GB   6 entries   <- this, and growing
+          #   engines-src-Windows 0.86 GB   1
+          #   engines-src-macOS   0.63 GB   1
+          #   engines-out-macOS   0.49 GB   1
           #
           # Only ccache-apk's newest entry is ever restored — a unique key per
-          # run never prunes the ones it supersedes, so four of those five are
-          # dead weight. What loses an LRU race is whatever is touched least,
-          # which is the engine caches, so an android cache that grows costs a
-          # DESKTOP run an engine rebuild, on another workflow, with nothing
-          # connecting the two. Go and measure rather than trusting any of
-          # this: `gh api repos/:owner/:repo/actions/cache/usage` (decimal
-          # bytes) beside `Local storage / Cache size` from the `-sv` below.
+          # run never prunes the ones it supersedes, so five of those six are
+          # dead weight, and PCH content made each new one bigger. What loses
+          # an LRU race is whatever is touched least, which is the engine
+          # caches, so an android cache that grows costs a DESKTOP run an
+          # engine rebuild, on another workflow, with nothing connecting the
+          # two. Pruning superseded ccache-apk entries, or trimming
+          # setup-java's generations, frees several times what any argument
+          # about this cap is worth.
+          #
+          # Go and measure rather than trusting a word of this — and mind the
+          # units when you do. An earlier draft of this block reported
+          # watching 700 MB get evicted; nothing had happened at all. It had
+          # divided cache/usage's decimal bytes by 2^30 and compared the
+          # result against the same figure in decimal, which is a 7.4% gap
+          # and looks exactly like an eviction.
           ccache -M 1200M
           ccache -z
           ./gradlew bundleRelease assembleRelease --no-daemon
