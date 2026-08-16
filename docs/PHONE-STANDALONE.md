@@ -1013,6 +1013,105 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       renderer's stereo AudioBuffers. Matching the TS is this file's contract
       and the fold is the better input, so that gets reconciled once, at the
       desktop swap, deliberately.
+    - **Survey before the courts slice** (2026-08-17). Measured what the
+      courts actually decide, by running the TS over the four library
+      projects twice: once with the parity harness's aux (the fill stems,
+      the vocals and the lyric line starts) and once with the same aux plus
+      BASS, which in a no-ml configuration like this one is what stops
+      `applyCourts` abstaining — `runs.length < 8 && !ev.ml` (courts.ts:1500),
+      and `runs` fills only inside `if (bass22)`. With a pack present `ml`
+      alone would wake them too.
+
+      | song | bars, no bass | with bass | courts' own edits |
+      |---|---|---|---|
+      | Nothing Else Matters | 154 | 155 | 1 held note |
+      | Panzerkampf | 0 | 130 | 1 form seam (break pair) |
+      | Sixteen Tons | 78 | 81 | 2 form seam + 1 held note, all break pair |
+      | Wanted Dead Or Alive | 96 | 97 | 1 held note (break pair) |
+
+      Five of the SIX edits take the break-pair route (courts.ts:1394) rather
+      than plain step placement — only Nothing Else Matters' held note lacks
+      the suffix that route appends — which is the porting-priority fact the
+      table exists to carry, and why step 2 below starts there. (The column
+      sums to 6, and the first version of this sentence said "four of five".
+      In the one section whose whole point is that loose numbers are not
+      evidence, a count a reader can disprove by adding up the column above
+      it is the wrong thing to get wrong.) Note also that every edit rests on vocal
+      evidence — `ev.voice`/`ev.seams` fill only inside `if (vocals22)` — so
+      a literally inst-only aux would produce none of them.
+      **`octaveCourt` is idle on the whole corpus**: all four report
+      `oct: {action: 'keep'}`, three ruled out of scope by the bpb-6 /
+      bpm-under-100 / short predicate and Sixteen Tons on its own evidence
+      (e1/e2/e3 all false, medSpan 2.93). It can rewrite the entire lattice
+      and no library song exercises it, so it will need synthetic fixtures
+      exactly as the head backcast did.
+      **`doubleCourt` is a second lattice-rewriter, and it is untested
+      rather than idle.** It runs in the else branch of the octave verdict
+      (courts.ts:1508) and a conviction calls `doubleGrid`, inserting a
+      midpoint beat between every pair — beat times move while `oct` still
+      reads keep. It reported nothing here only because it bails at
+      `!ev.ml` before its own debug line, and this harness supplies no ml.
+      It needs its own fixture too, and cannot be written off by this survey.
+    - **A claim of mine that the review refused, correctly.** I wrote that
+      Panzerkampf's 0 → 130 bars came from the VOTE — that with bass the
+      `bass` cue lifts its best segment past `ANCHOR_CONF`. It was
+      arithmetic ("130 × 4 ≈ 515 beats") plus a plausible mechanism, stated
+      as measured fact, and it was FALSE.
+      The measurement that settles it needed no new instrumentation, because
+      `debug.segCues` is written whenever a debug object is passed: with bass
+      present Panzerkampf still has exactly one segment, `[17,506]`, 122.3
+      bars long, at **conf 0.047** — the bass cue did move it up from 0.04,
+      but nowhere near the 0.08 it needs. No anchor. The vote produces no
+      bars at all, with bass or without.
+      All 130 come from `meterCourt`, which replaces an incoming grid
+      carrying ≤2 downbeats with a UNIFORM list (`barTimes`' fallback,
+      courts.ts:629-633). The bar-length histogram proves it outright:
+      126 bars of exactly 4 beats, plus one 2 and two 3s. The song is 515
+      beats at bpb 4, so a uniform list is ceil(515/4) = 129 bars; the L=3
+      edge pair at 30.7 s then drops the single uniform bar inside it and
+      adds two. 129 − 1 + 2 = 130, exactly, where my reading only ever
+      managed "≈".
+      The gap shape pins the MECHANISM rather than merely fitting it. Working
+      `withEdgePair` (courts.ts:1098) over all four residues of the pair's
+      left edge `a` on a bars-at-multiples-of-4 lattice, with `b = a+3`:
+      a ≡ 0 drops two bars (count stays 129, gaps 4,3,5), a ≡ 1 likewise
+      (129, gaps 5,3,4), while a ≡ 2 and a ≡ 3 each drop ONE (count 130,
+      gaps 2,3,3 and 3,3,2). Only the second pair can produce the measured
+      130-with-one-2-and-two-3s — but a histogram is order-blind, so the
+      evidence pins the edge to {2, 3} mod 4 and cannot choose between them.
+      That is enough: both survivors are the same edge-pair mechanism, and
+      the two it rules out would have left the count at 129, which is what
+      turns the histogram from corroboration into identification.
+      (The first version of this paragraph named ≡ 2 as the only possibility.
+      Same over-claim as the one this section exists to confess, two
+      paragraphs after confessing it — checking two residues and writing
+      "only" is exactly the shape of the Panzerkampf mistake.)
+      An edge at beat 46 or 47 by 30.7 s puts the song at 89.9 or 91.9 bpm,
+      both inside what `octaveCourt`'s own "bpm < 100" exit had independently
+      said about it.
+      The tell was visible in the table I wrote and I did not read it: the
+      other three rows have delta == applied count exactly, and Panzerkampf's
+      +130 against 1 applied is the row the whole claim rested on. An
+      approximate fit that matches two rival mechanisms is not evidence for
+      either.
+    - **What that changes for the courts slice.** The order is unchanged but
+      the reasons are sharper, and two steps were missing:
+      0. **Wire `--bass` into `singz-analyze beats` first, and make unknown
+         flags fatal.** The CLI currently parses only
+         `--drums/--inst/--vocals/--line`; an unrecognised `--bass x.wav`
+         falls through the loop in silence, so the TS would run with bass and
+         the C++ without it, and the vote stages would diverge in a shape
+         that reads exactly like a port bug. The core field already exists.
+      1. Then confirm the vote's own stages still match with bass present —
+         but note what goes DARK when it does: `courtsIdle` flips false for
+         every song, which switches off all of `LATTICE_STAGES`, and that
+         includes `downbeats`. The bars are the vote's own product, and
+         nothing records the pre-court bar list, so a one-line
+         `debug.preCourtDownbeats` in analysis.ts before the v20 block is
+         what keeps them comparable while the courts are active. Without it
+         the "confirm the vote still matches" step covers the debug cues and
+         not the thing they produce.
+      2. Only then port courts.ts, break-pair route first.
     - Next: the rest of detectBeats and courts (same method, same harness)
       — which is now the whole remaining cost of a phone analysis — then
       the desktop's `analysis:run` IPC over the CLI, then retire the TS
