@@ -90,14 +90,14 @@ interface World {
   disk: Map<string, string>
   writes: string[]
   puts: string[]
-  kept: string[]
+  tracked: string[]
   cleared: number
   detectArgs: unknown[]
   deps: AnalysisDeps
 }
 
 function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): World {
-  const w: World = { disk: new Map(), writes: [], puts: [], kept: [], cleared: 0, detectArgs: [], deps: null as unknown as AnalysisDeps }
+  const w: World = { disk: new Map(), writes: [], puts: [], tracked: [], cleared: 0, detectArgs: [], deps: null as unknown as AnalysisDeps }
   w.disk.set('project.json', JSON.stringify(initial))
   const host: AnalysisHost = {
     putStem: async (id) => {
@@ -106,18 +106,17 @@ function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): 
     clearStems: async () => {
       w.cleared++
     },
-    keepStems: async (ids) => {
-      w.kept.push(ids.join(','))
-    },
     detectBeats: async (args) => {
       w.detectArgs.push(args)
       return { beats: [0.5, 1, 1.5, 2, 2.5], bpm: 120, beatsPerBar: 4, downbeat: 0, downbeats: [0, 4] }
     },
     estimateKeyFromStems: async () => ({ pc: 9, minor: true }),
-    trackMelody: async (_v, onProgress) => {
+    trackMelody: async (_project, rel, onProgress) => {
+      w.tracked.push(rel)
       onProgress?.(0.5)
-      return { f0: new Float32Array(8000).fill(220), hopSec: 0.025 }
+      return { f0: new Float32Array(8000).fill(220), hopSec: 0.025, durationSec: 200 }
     },
+    audioDuration: async () => 200,
     encodeMelody: async (f0, hop) => encodeMelody(f0, hop),
     applyUserBars: async (info) => ({ ...info, downbeats: [1, 5] }),
     ...hostOverrides
@@ -160,12 +159,22 @@ describe('analyzeProject', () => {
     expect(d.settings.key?.pc).toBe(9)
     expect(d.settings.melody?.f0).toBeTruthy()
     expect(d.savedAt).toBe('NOW')
-    // stems crossed one at a time, vocals first, and the far side was cleared
+    // the grid's stems crossed one at a time (vocals as its aux, first);
+    // the melody read its own file and crossed nothing; the far side was
+    // cleared before the melody stage and again in finally
     expect(w.puts[0]).toBe('vocals')
     expect(new Set(w.puts)).toEqual(new Set(Object.keys(SIX)))
-    expect(w.kept).toEqual(['vocals']) // the far side dropped five before the long stage
-    expect(w.cleared).toBe(1)
+    expect(w.tracked).toEqual(['stems/vocals.wav'])
+    expect(w.cleared).toBe(2)
     expect(steps.some((s) => s.startsWith('Tracking the melody'))).toBe(true)
+  })
+
+  test('only the melody wanted → nothing crosses to the far side at all', async () => {
+    const w = world(doc({ beat: autoGrid(), key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION } }))
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(w.puts).toEqual([])
+    expect(w.tracked).toEqual(['stems/vocals.wav'])
+    expect(onDisk(w).settings.melody).toBeTruthy()
   })
 
   test('the caller hears the grid the moment it is written, before the melody', async () => {
@@ -225,13 +234,14 @@ describe('analyzeProject', () => {
     expect(args.vocals).toBe('vocals')
   })
 
-  test('nothing to do → no writes, no puts beyond the vocals length read', async () => {
+  test('nothing to do → no writes, no puts, no tracking (the length came off the header)', async () => {
     const d = doc({ beat: autoGrid(), key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION }, melody: melodyFor(200) })
     const w = world(d)
     const res = await analyzeProject('T', SIX, { deps: w.deps })
     expect(res).toBeNull()
     expect(w.writes).toEqual([])
     expect(w.puts).toEqual([])
+    expect(w.tracked).toEqual([])
   })
 
   test('hand-placed bar lines survive a re-detection, re-folded by the desktop rule', async () => {
@@ -273,7 +283,7 @@ describe('analyzeProject', () => {
     await analyzeProject('T', SIX, { deps: w.deps })
     expect(w.writes).toEqual([]) // both commits refused
     expect(onDisk(w).settings.beat).toBeUndefined()
-    expect(w.cleared).toBe(1) // and the far side was still cleared
+    expect(w.cleared).toBeGreaterThanOrEqual(1) // and the far side was still cleared
   })
 
   test('a project deleted under the run throws, and the far side is still cleared', async () => {
@@ -283,7 +293,7 @@ describe('analyzeProject', () => {
       return { beats: [1, 2, 3], bpm: 60, beatsPerBar: 4, downbeat: 0 }
     }
     await expect(analyzeProject('T', SIX, { deps: w.deps })).rejects.toThrow('gone')
-    expect(w.cleared).toBe(1)
+    expect(w.cleared).toBeGreaterThanOrEqual(1)
   })
 
   test('a silent harmonic bed stores no key (the histogram fallback is display-only), only the verdict', async () => {

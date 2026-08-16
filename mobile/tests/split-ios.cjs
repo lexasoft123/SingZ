@@ -23,7 +23,10 @@
  *      4/4) + a key + a melody line, all under the CURRENT stamps (read off
  *      the generated bundle, so a bumped constant cannot pass by accident);
  *      the open player picks the grid up through the analysis event
- *      without a reopen. The melody's VOICED count is not asserted — the
+ *      without a reopen; and the melody line comes from the CORE's tracker
+ *      (native/core/melody.cpp — the desktop's pyin, ported), asserted
+ *      bit-identical to the worklet-hosted TS on the project's own song.wav
+ *      (Phase 4c). The melody's VOICED count is not asserted — the
  *      sample's "vocal" is synthetic and the splitter routes it away from
  *      the vocals stem in a mix (measured: vocals.wav at −83 dB) — only its
  *      coverage, which is the song's length (the melodyFitsSong contract).
@@ -374,6 +377,27 @@ async function main() {
       `${live ? live.beats.length : 'no'} beats in the player`)
     const p2 = JSON.parse((await conn.evaluate('JSON.stringify(globalThis.__test.analysisText ?? null)'))?.result?.value ?? 'null')
     check('progress line cleared once done', p2 === null, String(p2))
+
+    // Phase 4c: the melody came from the CORE (melody.cpp), not the worklet
+    // TS — and the two agree to the bit on this device, on a file with real
+    // voiced content (the project's own song.wav — the mix; the split's
+    // vocals stem of a synthetic vocal is silent, see above). Native reads
+    // the WAV itself, the TS gets the phone's audio-api decode of the same
+    // file: identical f0 = the port, the reader and the decoder all agree.
+    await conn.evaluate(`globalThis.__test.melodyParity(${JSON.stringify(P.four)}, 'song.wav'); true`)
+    let par = null
+    for (let i = 0; i < 300; i++) {
+      await sleep(1000)
+      if ((await conn.evaluate('globalThis.__test.echoDone'))?.result?.value) break
+    }
+    par = JSON.parse((await conn.evaluate('JSON.stringify(globalThis.__test.echoResult ?? null)'))?.result?.value ?? 'null')
+    check('core melody tracker vs desktop TS on this device: bit-identical f0',
+      !!par && !par.error && par.differing === 0 && par.frames.native === par.frames.ts && par.frames.native > 100,
+      par ? (par.error ?? `${par.frames.native} frames, ${par.voiced.native}/${par.voiced.ts} voiced, ${par.differing} differing, native ${par.ms.native} ms vs TS ${par.ms.ts} ms`) : 'no result')
+    check('core melody tracker: the file has voiced content (else the parity is vacuous)', !!par && par.voiced.native > 100,
+      par ? `${par.voiced.native} voiced` : 'no result')
+    check('core melody tracker: hopSec and stamp match the TS', !!par && par.hopSec.native === par.hopSec.ts && par.detVersion === PITCH_V,
+      par ? `hop ${par.hopSec.native} v${par.detVersion}` : 'no result')
   }
   conn = await relaunch() // back to the catalog for the next cases
 

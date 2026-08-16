@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 // Streaming 16-bit PCM WAV writer for the split engine: header reserved up
 // front, samples appended as segments finalize, sizes patched on close. The
@@ -42,5 +43,42 @@ class WavWriter {
   int64_t frames_ = 0;
   bool finalized_ = false;
 };
+
+}  // namespace singz
+
+namespace singz {
+
+// One WAV file as mono float32 — what the detectors take. Accepts PCM 16/24/
+// 32-bit and IEEE float32, any channel count; EVERY channel is averaged in
+// (each sample scaled to [-1,1) the way the phone's audio decoder does it,
+// s / 32768 for 16-bit, and the average taken in double before the float32
+// store). For mono and stereo — the shapes the phone reads, since a split
+// stem is always one or two channels — that is the JS `loadMono44k` fold to
+// the bit, which is what the parity gate rests on. Above two channels the
+// two deliberately differ: `loadMono44k` averages the first two and ignores
+// the rest (a Web Audio convenience), and a reader that dropped channels
+// 3-6 would be wrong for the desktop CLI, which will meet real files.
+struct MonoWav {
+  std::vector<float> samples;
+  int sampleRate = 0;
+  int channels = 0;
+  bool ok = false;
+  std::string error;
+};
+
+MonoWav readWavMono(const std::string& path);
+
+// The header alone — rate, channels and the frame count the data chunk
+// states (clamped to what the file actually holds) — no samples read. What
+// the melody-fit rule needs before anything is tracked.
+struct WavInfo {
+  int sampleRate = 0;
+  int channels = 0;
+  int64_t frames = 0;
+  bool ok = false;
+  std::string error;
+};
+
+WavInfo readWavInfo(const std::string& path);
 
 }  // namespace singz

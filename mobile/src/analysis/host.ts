@@ -83,30 +83,6 @@ export function clearStems(): Promise<void> {
 }
 
 /**
- * Keep only the named stems on the far side and drop the rest — the melody
- * stage wants the vocals alone, and it is the long one (a minute of pYIN),
- * often overlapping a player that holds the same song decoded for playback.
- * Same gc() nudge as clearStems.
- */
-export function keepStems(ids: string[]): Promise<void> {
-  return runOnRuntimeAsync(
-    rt(),
-    (keep: string[]) => {
-      'worklet'
-      const g = globalThis as unknown as { __singzStems?: Record<string, MonoStem>; gc?: () => void }
-      const next: Record<string, MonoStem> = {}
-      for (const id of keep) {
-        const s = g.__singzStems?.[id]
-        if (s) next[id] = s
-      }
-      g.__singzStems = next
-      if (typeof g.gc === 'function') g.gc()
-    },
-    ids
-  )
-}
-
-/**
  * What the analysis runtime holds right now, in MB — the ArrayBuffers of the
  * stems put (external to the JS heap) and the heap itself. For the log and
  * for drivers; the numbers come from Hermes' own instrumented stats.

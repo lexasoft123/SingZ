@@ -12,6 +12,8 @@
 #import "SingzSplitRunner.h"
 
 #include "ort_env.h"
+#include "melody.h"
+#include "wav.h"
 
 @interface SingzSplit : RCTEventEmitter <RCTBridgeModule>
 @end
@@ -126,6 +128,57 @@ RCT_EXPORT_METHOD(takeSplitTrail:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
   resolve([SingzSplitRunner takeVitalsTrail] ?: (id)kCFNull);
+}
+
+// Phase 4c: the melody tracker in the core (melody.cpp — the desktop's
+// pyin.ts/pitch-core.ts, bit-identical). Reads the stem WAV itself, tracks
+// on a utility queue, answers f0 per hop; ~0.6 s for a four-minute song
+// where the worklet-hosted TS took a minute and a half.
+RCT_EXPORT_METHOD(analyzeMelody:(NSString *)wavPath
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSString *path = wavPath ?: @"";
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    singz::MonoWav wav = singz::readWavMono(std::string(path.UTF8String));
+    if (!wav.ok) {
+      reject(@"melody_read", [NSString stringWithFormat:@"%@: %s", path.lastPathComponent, wav.error.c_str()], nil);
+      return;
+    }
+    const singz::MelodyTrack t = singz::trackMelody(wav.samples.data(), wav.samples.size(), wav.sampleRate, nullptr);
+    NSMutableArray *f0 = [NSMutableArray arrayWithCapacity:t.f0.size()];
+    for (const float v : t.f0) [f0 addObject:@(v)];
+    resolve(@{
+      @"f0" : f0,
+      @"hopSec" : @(t.hopSec),
+      @"frames" : @(t.f0.size()),
+      @"detVersion" : @(singz::kPitchDetectVersion),
+      @"sampleRate" : @(wav.sampleRate),
+      @"durationSec" : @(static_cast<double>(wav.samples.size()) / wav.sampleRate)
+    });
+  });
+}
+
+// The stem's length without decoding it in JS — the melody-fit rule needs it
+// before anything is tracked.
+RCT_EXPORT_METHOD(wavInfo:(NSString *)wavPath
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSString *path = wavPath ?: @"";
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    const singz::WavInfo wav = singz::readWavInfo(std::string(path.UTF8String));  // header only
+    if (!wav.ok) {
+      reject(@"wav_read", [NSString stringWithFormat:@"%@: %s", path.lastPathComponent, wav.error.c_str()], nil);
+      return;
+    }
+    resolve(@{
+      @"sampleRate" : @(wav.sampleRate),
+      @"channels" : @(wav.channels),
+      @"frames" : @(wav.frames),
+      @"durationSec" : @(static_cast<double>(wav.frames) / wav.sampleRate)
+    });
+  });
 }
 
 RCT_EXPORT_METHOD(ortProbe:(NSString *)modelPath

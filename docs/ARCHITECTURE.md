@@ -342,7 +342,16 @@ because phones render whatever `settings.beat` says: they have no detector,
 and without the auto-save a healed grid would never leave the desktop. Vocal range: p5–p95 of melody notes. All displayed
 transpose-aware in the pitch strip's info card.
 
-**The same detectors run on the phone**, for songs the phone split itself
+**The detectors are moving into the shared C++ core, one implementation for
+every platform** (docs/PHONE-STANDALONE.md, Phase 4c): the melody tracker
+is there already — `mobile/native/core/melody.cpp` is pyin.ts + pitch.ts +
+pitch-core.ts ported line for line and held bit-identical to this section's
+TS (float where the TS keeps Float32Array, double elsewhere, sums in the
+same order; the corpus gate is `singz-analyze melody` vs node); the phones
+call it in-process (`SingzSplit.analyzeMelody`), the desktop will through
+the `singz-analyze` CLI spawned by main like whisper-cli. Until the beat and
+key detectors follow, they run on the phone as TS:
+**the same detectors run on the phone**, for songs the phone split itself
 (docs/PHONE-STANDALONE.md, Phase 4). `mobile/scripts/build-analysis.mjs`
 bundles these very sources — `detectBeats`, `estimateKeyFromStems`,
 `trackMelodyCore`, `encodeMelody`, `melodyFitsSong`, `applyUserBars` and the

@@ -1,5 +1,6 @@
 #include "wav.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -101,6 +102,168 @@ void WavWriter::close() {
     std::fclose(f_);
     f_ = nullptr;
   }
+}
+
+}  // namespace singz
+
+// ---- reader ----------------------------------------------------------------
+namespace singz {
+
+namespace {
+uint32_t le32(const unsigned char* p) {
+  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+         (static_cast<uint32_t>(p[3]) << 24);
+}
+uint16_t le16(const unsigned char* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
+}  // namespace
+
+namespace {
+// The header walk both readers share: leaves `f` positioned at the first
+// data byte and reports the format; `frames` is the data chunk's stated
+// count clamped to the bytes actually left in the file (streaming encoders
+// write 0xFFFFFFFF sizes; a truncated file states more than it holds — and
+// a multi-GB allocation off a lying header would take the app down).
+struct WavHeader {
+  int format = 0, channels = 0, bits = 0, rate = 0;
+  int64_t frames = 0;
+  bool isFloat = false;
+  std::string error;
+};
+
+bool walkHeader(std::FILE* f, WavHeader& h) {
+  unsigned char hdr[12];
+  if (std::fread(hdr, 1, 12, f) != 12 || std::memcmp(hdr, "RIFF", 4) != 0 || std::memcmp(hdr + 8, "WAVE", 4) != 0) {
+    h.error = "not a RIFF/WAVE file";
+    return false;
+  }
+  bool haveFmt = false;
+  for (;;) {
+    unsigned char ch[8];
+    if (std::fread(ch, 1, 8, f) != 8) {
+      h.error = haveFmt ? "no data chunk" : "no fmt chunk";
+      return false;
+    }
+    const uint32_t size = le32(ch + 4);
+    if (std::memcmp(ch, "fmt ", 4) == 0) {
+      if (size < 16) {
+        h.error = "fmt chunk too short";
+        return false;
+      }
+      std::vector<unsigned char> fmt(size);
+      if (std::fread(fmt.data(), 1, size, f) != size) {
+        h.error = "truncated fmt chunk";
+        return false;
+      }
+      h.format = le16(fmt.data());
+      h.channels = le16(fmt.data() + 2);
+      h.rate = static_cast<int>(le32(fmt.data() + 4));
+      h.bits = le16(fmt.data() + 14);
+      // WAVE_FORMAT_EXTENSIBLE carries the real format in the sub-format GUID.
+      if (h.format == 0xFFFE && size >= 26) h.format = le16(fmt.data() + 24);
+      haveFmt = true;
+      if (size & 1) std::fseek(f, 1, SEEK_CUR);
+    } else if (std::memcmp(ch, "data", 4) == 0) {
+      if (!haveFmt || h.channels <= 0 || h.rate <= 0) {
+        h.error = "data before fmt";
+        return false;
+      }
+      h.isFloat = h.format == 3;
+      if (!(h.isFloat && h.bits == 32) && !(h.format == 1 && (h.bits == 16 || h.bits == 24 || h.bits == 32))) {
+        h.error = "unsupported sample format";
+        return false;
+      }
+      const long here = std::ftell(f);
+      std::fseek(f, 0, SEEK_END);
+      const long end = std::ftell(f);
+      std::fseek(f, here, SEEK_SET);
+      const int64_t left = here >= 0 && end >= here ? static_cast<int64_t>(end - here) : 0;
+      const int64_t frameBytes = static_cast<int64_t>(h.bits / 8) * h.channels;
+      h.frames = std::min<int64_t>(static_cast<int64_t>(size), left) / frameBytes;
+      return true;
+    } else {
+      std::fseek(f, static_cast<long>(size + (size & 1)), SEEK_CUR);
+    }
+  }
+}
+}  // namespace
+
+WavInfo readWavInfo(const std::string& path) {
+  WavInfo out;
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == nullptr) {
+    out.error = "cannot open";
+    return out;
+  }
+  WavHeader h;
+  const bool ok = walkHeader(f, h);
+  std::fclose(f);
+  if (!ok) {
+    out.error = h.error;
+    return out;
+  }
+  out.sampleRate = h.rate;
+  out.channels = h.channels;
+  out.frames = h.frames;
+  out.ok = true;
+  return out;
+}
+
+MonoWav readWavMono(const std::string& path) {
+  MonoWav out;
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == nullptr) {
+    out.error = "cannot open";
+    return out;
+  }
+  WavHeader h;
+  if (!walkHeader(f, h)) {
+    std::fclose(f);
+    out.error = h.error;
+    return out;
+  }
+  {
+    const int channels = h.channels;
+    const int bits = h.bits;
+    const bool isFloat = h.isFloat;
+    const int rate = h.rate;
+    {
+      const size_t bytesPer = static_cast<size_t>(bits / 8);
+      const size_t frameBytes = bytesPer * static_cast<size_t>(channels);
+      const size_t frames = static_cast<size_t>(h.frames);
+      std::vector<unsigned char> raw(frames * frameBytes);
+      const size_t got = std::fread(raw.data(), 1, raw.size(), f);
+      const size_t haveFrames = got / frameBytes;
+      out.samples.resize(haveFrames);
+      for (size_t i = 0; i < haveFrames; i++) {
+        double acc = 0;
+        for (int c = 0; c < channels; c++) {
+          const unsigned char* p = raw.data() + i * frameBytes + static_cast<size_t>(c) * bytesPer;
+          double v;
+          if (isFloat) {
+            float fv;
+            std::memcpy(&fv, p, 4);
+            v = fv;
+          } else if (bits == 16) {
+            v = static_cast<int16_t>(le16(p)) / 32768.0;
+          } else if (bits == 24) {
+            int32_t s = static_cast<int32_t>((static_cast<uint32_t>(p[0]) << 8) | (static_cast<uint32_t>(p[1]) << 16) |
+                                             (static_cast<uint32_t>(p[2]) << 24)) >> 8;
+            v = s / 8388608.0;
+          } else {
+            v = static_cast<int32_t>(le32(p)) / 2147483648.0;
+          }
+          // The JS fold: mono[i] += data[i] / chans, channel by channel.
+          acc = static_cast<double>(static_cast<float>(acc + v / channels));
+        }
+        out.samples[i] = static_cast<float>(acc);
+      }
+      out.sampleRate = rate;
+      out.channels = channels;
+      out.ok = true;
+    }
+  }
+  std::fclose(f);
+  return out;
 }
 
 }  // namespace singz

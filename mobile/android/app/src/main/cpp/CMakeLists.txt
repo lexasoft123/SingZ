@@ -37,6 +37,7 @@ set_target_properties(onnxruntime PROPERTIES
 # whose *.cpp files ReactNative-application.cmake globs into appmodules.
 add_library(singzcore SHARED
     ${CORE_DIR}/android/singz_core_jni.cpp
+    ${CORE_DIR}/melody.cpp
     ${CORE_DIR}/ort_env.cpp
     ${CORE_DIR}/resample.cpp
     ${CORE_DIR}/split_engine.cpp

@@ -7,12 +7,15 @@
 //
 // Built by scripts/run-core-host-tests.sh (plain c++, no NDK), run by the
 // Android CI canary.
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "melody.h"
 #include "resample.h"
 #include "wav.h"
 
@@ -196,9 +199,128 @@ static void wavTests() {
   std::remove(path.c_str());
 }
 
+// The melody tracker (melody.cpp) — a synthetic phrase with known pitches
+// comes back at those pitches, voiced where sung and silent in the rest,
+// and the WAV reader feeds it the same samples the raw path gets. The
+// bit-parity claim against the desktop TS is NOT provable here (it needs
+// node): eval/melody-parity.mjs runs singz-analyze against trackMelodyCore
+// over real stems, and mobile/tests asserts it on device.
+static void melodyTests() {
+  const int sr = 44100;
+  const int frames = sr * 6;
+  std::vector<float> mono(static_cast<size_t>(frames), 0.0f);
+  // 2 s of A3 (220 Hz), 1 s of rest, 2 s of E4 (329.63 Hz), 1 s of rest —
+  // with a touch of second harmonic so it looks like a voice to CMND.
+  double ph = 0;
+  for (int i = 0; i < frames; i++) {
+    const double t = static_cast<double>(i) / sr;
+    double hz = 0;
+    if (t < 2) hz = 220;
+    else if (t >= 3 && t < 5) hz = 329.63;
+    if (hz > 0) {
+      ph += 2 * M_PI * hz / sr;
+      mono[static_cast<size_t>(i)] = static_cast<float>(0.3 * std::sin(ph) + 0.05 * std::sin(2 * ph));
+    }
+  }
+  const singz::MelodyTrack t = singz::trackMelody(mono.data(), mono.size(), sr, nullptr);
+  CHECK("melody: hop is 25 ms of the decimated rate", std::fabs(t.hopSec - 368.0 / 14700.0) < 1e-12);
+  CHECK("melody: one frame per hop over the song", t.f0.size() == static_cast<size_t>((frames / 3 - 1024) / 368));
+  auto median = [&](double t0, double t1) {
+    std::vector<double> v;
+    for (size_t i = 0; i < t.f0.size(); i++) {
+      const double tt = i * t.hopSec;
+      if (tt >= t0 && tt < t1 && t.f0[i] > 0) v.push_back(t.f0[i]);
+    }
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+  };
+  auto voicedFrac = [&](double t0, double t1) {
+    int n = 0, v = 0;
+    for (size_t i = 0; i < t.f0.size(); i++) {
+      const double tt = i * t.hopSec;
+      if (tt >= t0 && tt < t1) {
+        n++;
+        if (t.f0[i] > 0) v++;
+      }
+    }
+    return n ? static_cast<double>(v) / n : 0.0;
+  };
+  const double a3 = median(0.2, 1.8), e4 = median(3.2, 4.8);
+  CHECK("melody: A3 phrase tracked within 2 cents", a3 > 0 && std::fabs(1200 * std::log2(a3 / 220)) < 2);
+  CHECK("melody: E4 phrase tracked within 2 cents", e4 > 0 && std::fabs(1200 * std::log2(e4 / 329.63)) < 2);
+  CHECK("melody: sung stretches are voiced", voicedFrac(0.2, 1.8) > 0.95 && voicedFrac(3.2, 4.8) > 0.95);
+  CHECK("melody: rests are silent (RMS gate)", voicedFrac(2.2, 2.9) < 0.05 && voicedFrac(5.2, 5.9) < 0.05);
+
+  // The reader: write the phrase as PCM16 stereo (the split's own format),
+  // read it back mono, track — same pitches; and the fold matches the JS
+  // fold to the bit on a stereo pair (L != R).
+  const std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/singz-melody-test.wav";
+  {
+    singz::WavWriter w;
+    CHECK("reader: fixture written", w.open(path, sr, 2));
+    std::vector<float> st(static_cast<size_t>(frames) * 2);
+    for (int i = 0; i < frames; i++) {
+      st[static_cast<size_t>(i) * 2] = mono[static_cast<size_t>(i)];
+      st[static_cast<size_t>(i) * 2 + 1] = mono[static_cast<size_t>(i)] * 0.5f;
+    }
+    w.append(st.data(), frames);
+    w.finalize();
+  }
+  const singz::MonoWav r = singz::readWavMono(path);
+  CHECK("reader: PCM16 stereo read", r.ok && r.sampleRate == sr && r.channels == 2 && r.samples.size() == static_cast<size_t>(frames));
+  if (r.ok) {
+    // JS fold of the same PCM16 pair — ((0 + L/2) as f32 + R/2) as f32 with
+    // L, R = s / 32768 — computed from the shorts ON DISK (the writer's own
+    // 44-byte header, then interleaved int16), so this checks the reader's
+    // fold and nothing about the writer's rounding.
+    bool foldOk = true;
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f != nullptr) {
+      std::fseek(f, 44, SEEK_SET);
+      std::vector<int16_t> pcm(static_cast<size_t>(frames) * 2);
+      const size_t got = std::fread(pcm.data(), sizeof(int16_t), pcm.size(), f);
+      std::fclose(f);
+      if (got != pcm.size()) foldOk = false;
+      for (int i = 0; i < frames && foldOk; i += 997) {
+        const double L = pcm[static_cast<size_t>(i) * 2] / 32768.0;
+        const double R = pcm[static_cast<size_t>(i) * 2 + 1] / 32768.0;
+        const float js = static_cast<float>(static_cast<double>(static_cast<float>(0 + L / 2)) + R / 2);
+        if (js != r.samples[static_cast<size_t>(i)]) foldOk = false;
+      }
+    } else {
+      foldOk = false;
+    }
+    CHECK("reader: channel fold matches the JS fold to the bit", foldOk);
+    const singz::MelodyTrack t2 = singz::trackMelody(r.samples.data(), r.samples.size(), r.sampleRate, nullptr);
+    CHECK("reader→tracker: same frame count", t2.f0.size() == t.f0.size());
+  }
+  // The header alone says the same, without reading a sample.
+  const singz::WavInfo info = singz::readWavInfo(path);
+  CHECK("reader: header-only info matches", info.ok && info.sampleRate == sr && info.channels == 2 && info.frames == frames);
+  // A header that lies about its size (streaming encoders write 0xFFFFFFFF;
+  // a truncated file states more than it holds) must clamp to the bytes on
+  // disk, never allocate what it claims.
+  {
+    std::FILE* f = std::fopen(path.c_str(), "r+b");
+    if (f != nullptr) {
+      const unsigned char huge[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+      std::fseek(f, 40, SEEK_SET);  // canonical header: data size at 40
+      std::fwrite(huge, 1, 4, f);
+      std::fclose(f);
+    }
+    const singz::WavInfo lying = singz::readWavInfo(path);
+    CHECK("reader: a lying data size clamps to the file", lying.ok && lying.frames == frames);
+    const singz::MonoWav r2 = singz::readWavMono(path);
+    CHECK("reader: and reads what is there", r2.ok && r2.samples.size() == static_cast<size_t>(frames));
+  }
+  std::remove(path.c_str());
+}
+
 int main() {
   resamplerTests();
   wavTests();
+  melodyTests();
   std::printf(failures == 0 ? "\nALL CORE HOST TESTS PASS\n" : "\n%d FAILURE(S)\n", failures);
   return failures == 0 ? 0 : 1;
 }

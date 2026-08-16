@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.2.1'
+  s.version      = '0.2.2'
   s.summary      = 'SingZ shared C++ engine core: on-device stem split + beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }

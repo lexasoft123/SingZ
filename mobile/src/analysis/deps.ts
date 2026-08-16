@@ -9,7 +9,8 @@ import { decodeAudioData } from 'react-native-audio-api'
 import { releaseStems } from '../projects'
 import * as host from './host'
 import type { MonoStem } from './host'
-import type { AnalysisDeps } from './pipeline'
+import { audioDurationNative, nativeMelodyAvailable, trackMelodyNative } from './native'
+import type { AnalysisDeps, AnalysisHost } from './pipeline'
 
 /** The detectors' own rate — decode straight to it and the far side copies nothing. */
 export const ANALYSIS_SR = 44100
@@ -45,13 +46,60 @@ export async function loadMono44k(project: string, relPath: string): Promise<Mon
   }
 }
 
+/**
+ * The host the pipeline drives: the beat and key detectors on the worklet
+ * runtime (host.ts — the desktop TS, verbatim), the melody in the core
+ * (native.ts — the desktop TS, ported). As the beat and key detectors move
+ * into the core too, entries here move with them; the pipeline does not
+ * change.
+ *
+ * The core reads WAV — the split's own output. The phone library also holds
+ * FLAC: a desktop project copied in through Files ("This iPhone" is the
+ * Documents folder), whose doc may lack a melody today and WILL the day
+ * PITCH_DETECT_VERSION moves. Those go the way HEAD went — decoded by
+ * audio-api and tracked by the same TS on the worklet host — so a stem the
+ * core cannot read is slower, never a failed run. (The core will read FLAC
+ * once the desktop CLI needs it; this branch then goes away.)
+ */
+const coreReads = (relPath: string): boolean => /\.wav$/i.test(relPath) && nativeMelodyAvailable()
+
+export function realAnalysisHost(): AnalysisHost {
+  return {
+    putStem: host.putStem,
+    clearStems: host.clearStems,
+    detectBeats: host.detectBeats,
+    estimateKeyFromStems: host.estimateKeyFromStems,
+    encodeMelody: host.encodeMelody,
+    applyUserBars: host.applyUserBars,
+    trackMelody: async (project, rel, onProgress) => {
+      if (coreReads(rel)) return trackMelodyNative(project, rel)
+      const stem = await loadMono44k(project, rel)
+      const durationSec = stem.data.length / stem.sampleRate
+      await host.putStem('melody-src', stem)
+      try {
+        const t = await host.trackMelody('melody-src', onProgress)
+        return { ...t, durationSec }
+      } finally {
+        await host.clearStems()
+      }
+    },
+    audioDuration: async (project, rel) => {
+      if (coreReads(rel)) return audioDurationNative(project, rel)
+      // The decode is the only way to a FLAC's length from here; released
+      // on the spot inside loadMono44k.
+      const stem = await loadMono44k(project, rel)
+      return stem.data.length / stem.sampleRate
+    }
+  }
+}
+
 export function realAnalysisDeps(): AnalysisDeps {
   const f = NativeModules.FolderAccess as FolderNative
   return {
     readText: (p, file) => f.readText(p, file),
     writeText: (p, file, text) => f.writeText(p, file, text),
     loadMono: loadMono44k,
-    host,
+    host: realAnalysisHost(),
     now: () => new Date().toISOString()
   }
 }

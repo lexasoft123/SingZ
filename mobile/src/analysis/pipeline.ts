@@ -35,10 +35,13 @@
  *    (metronome, count-in) and it is cheap; the melody is a minute of pYIN,
  *    and a process killed in that minute still leaves the useful half saved.
  *
- * Memory: stems reach the host one at a time as mono float32 and the local
- * copy is dropped as each lands (host.ts explains the crossing). Every stem
- * is loaded through `loadMono`, which decodes at 44.1 kHz — the detectors'
- * own rate, so the far side resamples nothing and copies nothing.
+ * Memory: the grid's and the key's stems reach the worklet host one at a
+ * time as mono float32 and the local copy is dropped as each lands (host.ts
+ * explains the crossing); every stem is loaded through `loadMono`, which
+ * decodes at 44.1 kHz — the detectors' own rate, so the far side resamples
+ * nothing and copies nothing. The melody crosses NOTHING: the core's own
+ * tracker (native/core/melody.cpp — the desktop's pyin, bit-identical) reads
+ * the stem file itself, on a native thread, in about a second.
  */
 import {
   BEAT_DETECT_VERSION,
@@ -73,7 +76,6 @@ export interface AnalysisResult {
 export interface AnalysisHost {
   putStem(id: string, stem: MonoStem): Promise<void>
   clearStems(): Promise<void>
-  keepStems(ids: string[]): Promise<void>
   detectBeats(args: {
     drums: string
     bass?: string
@@ -90,7 +92,15 @@ export interface AnalysisHost {
     suspectAt?: number[]
   } | null>
   estimateKeyFromStems(inst: string[], bass?: string): Promise<{ pc: number; minor: boolean } | null>
-  trackMelody(vocals: string, onProgress?: (p: number) => void): Promise<{ f0: Float32Array; hopSec: number }>
+  /** The melody line of a stem ON DISK — the core's tracker (melody.cpp)
+   *  reads the file itself; nothing crosses a runtime for this one. */
+  trackMelody(
+    project: string,
+    relPath: string,
+    onProgress?: (p: number) => void
+  ): Promise<{ f0: Float32Array; hopSec: number; durationSec: number }>
+  /** A stem's length in seconds, off its header — no decode. */
+  audioDuration(project: string, relPath: string): Promise<number>
   encodeMelody(f0: Float32Array, hopSec: number): Promise<MelodyInfo>
   applyUserBars(info: StoredBeatInfo): Promise<StoredBeatInfo>
 }
@@ -211,15 +221,17 @@ export async function analyzeProject(
   const doc0 = JSON.parse(await deps.readText(project, 'project.json')) as ProjectDoc
   const rel = (id: string) => `stems/${id}.${stems[id]}`
 
-  // The vocals' length is the song's length for the melody-fit rule; loading
-  // them is not wasted — the melody and the beat aux both want them.
+  // The vocals' length is the song's length for the melody-fit rule — read
+  // off the file's header, no decode.
   const t0 = Date.now()
-  let vocals: MonoStem | null = null
+  const host = deps.host
   let durationSec: number | null = null
   if (stems.vocals) {
-    step('Reading the vocals…', 0.02)
-    vocals = await deps.loadMono(project, rel('vocals'))
-    durationSec = vocals.data.length / vocals.sampleRate
+    try {
+      durationSec = await host.audioDuration(project, rel('vocals'))
+    } catch {
+      durationSec = null // an unreadable stem: the plan judges by stamps alone
+    }
   }
   const plan = planAnalysis(doc0, stems, durationSec)
   if (!plan.beat && !plan.key && !plan.melody) {
@@ -234,20 +246,22 @@ export async function analyzeProject(
   )
   const usedFiles = new Set<string>()
   const ms = { load: 0, beat: 0, key: 0, melody: 0 }
-  const host = deps.host
-  const put = async (id: string, pre?: MonoStem | null): Promise<boolean> => {
+  const put = async (id: string): Promise<boolean> => {
     if (!stems[id]) return false
-    const stem = pre ?? (await deps.loadMono(project, rel(id)))
+    const stem = await deps.loadMono(project, rel(id))
     await host.putStem(id, stem)
     usedFiles.add(`${id}.${stems[id]}`)
     return true
   }
   try {
-    // Everything the grid and the key want, one stem at a time.
+    // Everything the grid and the key want, one stem at a time. The vocals
+    // cross only as the grid's aux — the melody reads its own file.
     const wantAudio = plan.beat || plan.key
     const have = { drums: false, bass: false, vocals: false, inst: [] as string[] }
-    if (vocals && (plan.melody || plan.beat)) have.vocals = await put('vocals', vocals)
-    vocals = null // the far side has it now
+    if (plan.beat && stems.vocals) {
+      step('Reading the vocals…', 0.02)
+      have.vocals = await put('vocals')
+    }
     if (wantAudio) {
       let i = 0
       // The drums serve the grid alone; the key wants the harmonic bed.
@@ -316,23 +330,32 @@ export async function analyzeProject(
       else fresh.none = { ...fresh.none, key: KEY_DETECT_VERSION } // a silent bed, on record
     }
 
+    // The stems this answer is computed from — the melody's too, though it
+    // reads the file itself rather than crossing.
+    if (plan.melody && stems.vocals) usedFiles.add(`vocals.${stems.vocals}`)
+    const usedAll = [...usedFiles]
+    const stampAll = hashesOf(doc0, usedAll)
+
     if (fresh.beat || fresh.key || fresh.none) {
       if (await commit(project, deps, fresh, used, stampAtStart)) opts.onCommit?.(fresh)
     }
+    // The far side is done: give the memory back before the melody stage,
+    // which often overlaps a player holding the same song decoded for
+    // playback (finally clears again, harmlessly).
+    if (wantAudio) await host.clearStems()
 
-    if (plan.melody && have.vocals) {
-      // The long stage wants the vocals alone: let the far side drop the
-      // other five before a minute of pYIN, which often overlaps a player
-      // holding the same song decoded for playback.
-      if (wantAudio) await host.keepStems(['vocals'])
+    if (plan.melody && stems.vocals) {
+      step('Tracking the melody…', 0.5)
       const t = Date.now()
-      const m = await host.trackMelody('vocals', (p) => step(`Tracking the melody · ${Math.round(p * 100)}%`, 0.5 + 0.5 * p))
+      const m = await host.trackMelody(project, rel('vocals'), (p) =>
+        step(`Tracking the melody · ${Math.round(p * 100)}%`, 0.5 + 0.5 * p)
+      )
       ms.melody = Date.now() - t
       // Tracked from THIS project's vocals, so it fits by construction — the
       // check guards the stored-line path (planAnalysis), not this one.
       const info = await host.encodeMelody(m.f0, m.hopSec)
       fresh.melody = info
-      if (await commit(project, deps, { melody: info }, used, stampAtStart)) opts.onCommit?.({ melody: info })
+      if (await commit(project, deps, { melody: info }, usedAll, stampAll)) opts.onCommit?.({ melody: info })
     }
 
     log(

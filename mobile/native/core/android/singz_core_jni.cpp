@@ -6,9 +6,11 @@
 #include <atomic>
 #include <string>
 
+#include "melody.h"
 #include "ort_env.h"
 #include "progress.h"
 #include "split_engine.h"
+#include "wav.h"
 
 namespace {
 
@@ -108,4 +110,48 @@ Java_com_singzplayer_split_SingzCore_runSplit(JNIEnv* env, jobject /*thiz*/,
 extern "C" JNIEXPORT void JNICALL
 Java_com_singzplayer_split_SingzCore_cancelSplit(JNIEnv* /*env*/, jobject /*thiz*/) {
   gProgress.cancel.store(true);
+}
+
+// ---- Phase 4c: the melody tracker (melody.cpp) -----------------------------
+//
+// Reads the stem WAV itself and returns [hopSec, sampleRate, durationSec,
+// detVersion, f0...] as one double array — one JNI copy (a boxed list of
+// 10k values would not be), and doubles so hopSec keeps every bit the TS
+// stores (a float32 hop would round it). An empty array = "could not
+// read".
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_singzplayer_split_SingzCore_analyzeMelody(JNIEnv* env, jobject /*thiz*/, jstring jpath) {
+  const char* c = env->GetStringUTFChars(jpath, nullptr);
+  if (c == nullptr) return nullptr;  // OOM, exception pending — let it surface
+  const std::string path(c);
+  env->ReleaseStringUTFChars(jpath, c);
+  singz::MonoWav wav = singz::readWavMono(path);
+  if (!wav.ok) return env->NewDoubleArray(0);
+  const singz::MelodyTrack t = singz::trackMelody(wav.samples.data(), wav.samples.size(), wav.sampleRate, nullptr);
+  std::vector<double> out;
+  out.reserve(4 + t.f0.size());
+  out.push_back(t.hopSec);
+  out.push_back(static_cast<double>(wav.sampleRate));
+  out.push_back(static_cast<double>(wav.samples.size()) / wav.sampleRate);
+  out.push_back(static_cast<double>(singz::kPitchDetectVersion));
+  for (const float v : t.f0) out.push_back(static_cast<double>(v));
+  jdoubleArray arr = env->NewDoubleArray(static_cast<jsize>(out.size()));
+  env->SetDoubleArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
+  return arr;
+}
+
+// [sampleRate, channels, frames, durationSec], or empty when unreadable.
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_singzplayer_split_SingzCore_wavInfo(JNIEnv* env, jobject /*thiz*/, jstring jpath) {
+  const char* c = env->GetStringUTFChars(jpath, nullptr);
+  if (c == nullptr) return nullptr;
+  const std::string path(c);
+  env->ReleaseStringUTFChars(jpath, c);
+  const singz::WavInfo wav = singz::readWavInfo(path);  // header only — no samples read
+  if (!wav.ok) return env->NewDoubleArray(0);
+  const double v[4] = {static_cast<double>(wav.sampleRate), static_cast<double>(wav.channels),
+                       static_cast<double>(wav.frames), static_cast<double>(wav.frames) / wav.sampleRate};
+  jdoubleArray arr = env->NewDoubleArray(4);
+  env->SetDoubleArrayRegion(arr, 0, 4, v);
+  return arr;
 }

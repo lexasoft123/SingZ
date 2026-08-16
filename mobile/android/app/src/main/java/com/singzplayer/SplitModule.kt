@@ -204,6 +204,64 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
     }
   }
 
+  // --- Phase 4c: the melody tracker in the core ---------------------------
+
+  @ReactMethod
+  fun analyzeMelody(wavPath: String, promise: Promise) {
+    thread(name = "singz-melody") {
+      val loadErr = SingzCore.ensureLoaded()
+      if (loadErr != null) {
+        promise.reject("melody_core", "core library: $loadErr")
+        return@thread
+      }
+      try {
+        val v = SingzCore.analyzeMelody(wavPath)
+        if (v == null || v.size < 4) {
+          promise.reject("melody_read", "could not read $wavPath")
+          return@thread
+        }
+        val m = Arguments.createMap()
+        m.putDouble("hopSec", v[0])
+        m.putDouble("sampleRate", v[1])
+        m.putDouble("durationSec", v[2])
+        m.putInt("detVersion", v[3].toInt())
+        m.putInt("frames", v.size - 4)
+        val f0 = Arguments.createArray()
+        for (i in 4 until v.size) f0.pushDouble(v[i])
+        m.putArray("f0", f0)
+        promise.resolve(m)
+      } catch (t: Throwable) {
+        promise.reject("melody", t)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun wavInfo(wavPath: String, promise: Promise) {
+    thread(name = "singz-wavinfo") {
+      val loadErr = SingzCore.ensureLoaded()
+      if (loadErr != null) {
+        promise.reject("wav_core", "core library: $loadErr")
+        return@thread
+      }
+      try {
+        val v = SingzCore.wavInfo(wavPath)
+        if (v == null || v.size < 4) {
+          promise.reject("wav_read", "could not read $wavPath")
+          return@thread
+        }
+        val m = Arguments.createMap()
+        m.putDouble("sampleRate", v[0])
+        m.putDouble("channels", v[1])
+        m.putDouble("frames", v[2])
+        m.putDouble("durationSec", v[3])
+        promise.resolve(m)
+      } catch (t: Throwable) {
+        promise.reject("wav", t)
+      }
+    }
+  }
+
   // --- Phase-0/bring-up surface (sim tests + parity harness) --------------
 
   @ReactMethod

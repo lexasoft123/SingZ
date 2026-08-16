@@ -194,6 +194,53 @@ if (TEST) {
       .catch((e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true })
     return true
   }
+  // Phase 4c: the core's melody tracker against the desktop TS on the SAME
+  // stem file — the on-device half of the parity gate (the host-side half is
+  // singz-analyze vs node over the corpus). Native reads the WAV itself; the
+  // TS gets the phone's own decode of it (loadMono44k) on the worklet host.
+  // Identical f0 means the port, the WAV reader and the decoder all agree.
+  hooks.melodyParity = (dir: string, rel: string): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    void Promise.all([import('./src/analysis/deps'), import('./src/analysis/host'), import('./src/analysis/native')])
+      .then(async ([d, h, n]) => {
+        const t0 = Date.now()
+        const nat = await n.trackMelodyNative(dir, rel)
+        const nativeMs = Date.now() - t0
+        const st = await d.loadMono44k(dir, rel)
+        await h.putStem('parity', st)
+        const t1 = Date.now()
+        const ts = await h.trackMelody('parity')
+        const tsMs = Date.now() - t1
+        await h.clearStems()
+        let differing = 0
+        let maxAbs = 0
+        let first = -1
+        const n2 = Math.max(nat.f0.length, ts.f0.length)
+        for (let i = 0; i < n2; i++) {
+          const a = nat.f0[i] ?? NaN
+          const b = ts.f0[i] ?? NaN
+          if (a !== b) {
+            differing++
+            if (first < 0) first = i
+            maxAbs = Math.max(maxAbs, Math.abs(a - b))
+          }
+        }
+        return {
+          frames: { native: nat.f0.length, ts: ts.f0.length },
+          voiced: { native: Array.from(nat.f0).filter((v) => v > 0).length, ts: Array.from(ts.f0).filter((v) => v > 0).length },
+          hopSec: { native: nat.hopSec, ts: ts.hopSec },
+          detVersion: nat.detVersion,
+          differing,
+          first,
+          maxAbs,
+          ms: { native: nativeMs, ts: tsMs }
+        }
+      })
+      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
+      .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
+    return true
+  }
   // Phase 4: the same spike through the analysis host (the worklet runtime).
   // Same polling contract; the app thread stays free while it runs, which is
   // the point — hostResult.ticks says whether it did.

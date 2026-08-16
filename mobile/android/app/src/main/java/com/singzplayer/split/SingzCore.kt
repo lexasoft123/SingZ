@@ -40,6 +40,17 @@ object SingzCore {
   external fun ortProbe(modelPath: String): String
 
   /**
+   * Phase 4c: the melody tracker (core melody.cpp — the desktop's pyin,
+   * bit-identical). Reads the WAV itself; returns [hopSec, sampleRate,
+   * durationSec, detVersion, f0 per hop...], or an empty array when the file could
+   * not be read. ON THE CALLING THREAD — a four-minute song is ~1 s.
+   */
+  external fun analyzeMelody(wavPath: String): DoubleArray?
+
+  /** [sampleRate, channels, frames, durationSec] of a WAV, or empty. */
+  external fun wavInfo(wavPath: String): DoubleArray?
+
+  /**
    * The whole split, ON THE CALLING THREAD (own a worker for it): raw f32
    * stereo mix in, six <stem>.wav.part + resume tail in jobDir out.
    * Returns "" on ok, "cancelled", or an error message.

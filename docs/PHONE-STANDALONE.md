@@ -1,6 +1,6 @@
 # Phone standalone song-adding — research record & architecture
 
-Status: **Phases 0–3 shipped (v0.16.x); Phase 4a (beats/key/melody on-device) landing.** Researched 2026-08-14 (three codebase
+Status: **Phases 0–3 shipped (v0.16.x); Phase 4a (beats/key/melody on-device) landed; 4c (the detectors in C++, one implementation for every platform) in progress — melody done.** Researched 2026-08-14 (three codebase
 exploration agents + web verification + one design agent); scope decisions and the
 architecture below approved the same day. This document is the record — read it before
 touching the phone pipeline, and update it as phases land (the docs/BEAT-DETECTION.md
@@ -642,6 +642,69 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       mix-seeded project, the stamps read off the generated bundle so a
       bumped constant cannot pass by accident, the live pickup asserted in
       the open player).
+  - **Phase 4c — the detectors move into the core, one implementation for
+    every platform (2026-08-16, decided at review of 4a)**: 4a's numbers on
+    real stems (a four-minute song: beats ~90 s, key ~18 s, melody ~90 s of
+    Hermes, ~3.3 min behind the player) made the case; the user's answer to
+    "port to C++?" was "and make the desktop run the same port" — which
+    removes the double-maintenance objection. Plan: port to
+    `mobile/native/core`, phones first (in-process, JNI/ObjC++), then the
+    desktop through a `singz-analyze` CLI spawned by main like whisper-cli
+    (not WASM: main can load native code and the stems are always on disk;
+    a CLI is crash-isolated, ABI-free, and the eval harness runs the same
+    binary the app ships). Melody first — the smallest detector, the worst
+    offender, and it stands up the whole chain.
+    - **melody.cpp** = pyin.ts + pitch.ts's cmndProfile + pitch-core.ts
+      (decimate, frame RMS, cleaner) ported line for line, float where the
+      TS kept Float32Array (d, cmnd, probs — which ACCUMULATES in float32
+      — em, binHz, the transition weights, dec, rms, cents, f0) and double
+      where it kept numbers, sums in the same order, JS Math.round
+      semantics (half toward +∞). **Bit-identical** to the TS: host-side,
+      `singz-analyze melody` (the CLI, `mobile/native/core/tools/`) against
+      node's trackMelodyCore on the sample's four stems — f0, raw AND rms
+      0 differing (vocals 777 voiced frames, bass 1413); on the iPhone sim
+      and the Android emulator, `__test.melodyParity` (native reads the WAV
+      itself; the TS gets the phone's audio-api decode of the same file, on
+      the worklet host) — 777/777, 0 differing, identical hopSec on both.
+      Cost: **89 ms** for the 40.8 s vocal on the M2 (V8 330–600 ms;
+      Hermes 15 s), 745 ms on the sim vs 13.5 s TS, 5.2 s on the emulator
+      vs 65 s TS — a four-minute song's melody in ~1 s on a phone where it
+      was ~90 s.
+    - The speed came in two steps and the second is a lesson: a faithful
+      port ran only ~2.5x faster than V8, because the difference function
+      `sum += diff²` must round in the TS's ORDER (bit-parity forbids
+      reassociation) and neither V8 nor clang can vectorize a strict-order
+      chain. Running eight LAGS side by side — each lag's sum still in
+      strict order — keeps every bit and lets the compiler vectorize across
+      lanes: 265 → 89 ms. Parity re-verified after.
+    - `wav.cpp` gained `readWavMono` (PCM 16/24/32 + float32, any channel
+      count, folded exactly as the JS fold — asserted to the bit in
+      tests/native/core_host_tests.cpp, which also tracks a synthetic
+      phrase within 2 cents and checks the RMS gate); the split's 44.1 kHz
+      PCM16 stems are what it reads on the phone. Bindings:
+      `SingzSplit.analyzeMelody(path)` / `wavInfo(path)` on iOS (ObjC++,
+      utility queue) and Android (JNI → one jdoubleArray: hopSec must stay
+      a double, a float32 hop would round the stored value; SplitModule
+      runs it on its own thread). `analysis/native.ts` wraps them; the
+      pipeline's host is now COMPOSED (`deps.ts`): grid + key on the
+      worklet TS, melody in the core — `AnalysisHost.trackMelody` takes a
+      file locator, `audioDuration` reads the header for the melody-fit
+      rule (no vocals decode in JS at all when only the melody is wanted),
+      and the far side is cleared before the melody stage rather than
+      keeping the vocals (`keepStems` went away with it). Post-split
+      analysis of the sample on the sim: 36 s → ~3 s.
+    - Not the POCO: it runs Play's 0.15.0 (installer com.android.vending,
+      Play's app-signing key), so neither a debug build nor an upload-key
+      release can install over it — Android refuses the signature, and the
+      only way past is an uninstall that takes the library and the Drive
+      sign-in with it. Its test is the next Play build + the Log panel.
+      The emulator (SingZ_API36) had a RELEASE 0.16.0 on it from the FGS
+      video — CLAUDE.md's "which emulator can be driven" trap, met again;
+      reinstalled as debug for the parity run.
+    - Next: detectBeats + courts + key into the core (the same method,
+      compare-grids over the corpus as the gate), then the desktop's
+      `analysis:run` IPC over the CLI, then retire the TS detectors behind
+      a one-release flag.
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the
