@@ -13,6 +13,7 @@ CXX=${CXX:-c++}
   "$ROOT/mobile/native/core/tools/singz-analyze.cpp" \
   "$ROOT/mobile/native/core/analysis.cpp" \
   "$ROOT/mobile/native/core/beats.cpp" \
+  "$ROOT/mobile/native/core/courts.cpp" \
   "$ROOT/mobile/native/core/melody.cpp" \
   "$ROOT/mobile/native/core/wav.cpp" \
   -o "$OUT"

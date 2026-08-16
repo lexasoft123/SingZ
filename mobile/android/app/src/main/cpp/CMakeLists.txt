@@ -39,6 +39,7 @@ add_library(singzcore SHARED
     ${CORE_DIR}/android/singz_core_jni.cpp
     ${CORE_DIR}/analysis.cpp
     ${CORE_DIR}/beats.cpp
+    ${CORE_DIR}/courts.cpp
     ${CORE_DIR}/melody.cpp
     ${CORE_DIR}/ort_env.cpp
     ${CORE_DIR}/resample.cpp

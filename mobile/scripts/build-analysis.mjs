@@ -52,6 +52,13 @@ export { detectBeats, estimateKey, estimateKeyFromStems, BEAT_DETECT_VERSION, KE
 export { encodeMelody, decodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './melody'
 export { trackMelodyCore } from './pitch-core'
 export { applyUserBars } from './beat'
+// Parity-only, and node-side ONLY (the worklet entry below does not take
+// these): the courts' extractor layer, so eval/courts-parity.mjs can compare
+// the C++ port against it directly. That layer leans on cos/sin/log2/log1p/
+// hypot for its ANSWERS rather than for a window, and libm agreement with V8
+// is an empirical property of the platform rather than anything the porting
+// rules can enforce — so it is measured, not assumed.
+export { to22k, fftComplex, chromaFrames, beatSyncChroma, rmsEnvelope } from './courts'
 export {
   LRCLIB_API, LRCLIB_HEADERS, fixTagEncoding, realArtist, metaFromFilename,
   parseLrc, lookupLyrics, searchCandidates, lyricsById

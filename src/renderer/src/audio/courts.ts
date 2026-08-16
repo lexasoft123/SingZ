@@ -76,14 +76,14 @@ const HOP = 1024
 /** 44.1k mono → 22.05k by pair-averaging. The chroma band tops out at
  *  2 kHz, where a 2-tap box is transparent; folded content above 20 kHz
  *  arrives attenuated to ~14% and log-compressed to nothing. */
-function to22k(x: Float32Array): Float32Array {
+export function to22k(x: Float32Array): Float32Array {
   const n = x.length >> 1
   const out = new Float32Array(n)
   for (let i = 0; i < n; i++) out[i] = (x[2 * i] + x[2 * i + 1]) / 2
   return out
 }
 
-function fftComplex(re: Float64Array, im: Float64Array): void {
+export function fftComplex(re: Float64Array, im: Float64Array): void {
   const n = re.length
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1
@@ -125,7 +125,7 @@ function fftComplex(re: Float64Array, im: Float64Array): void {
 /** Framewise chroma (hann/NFFT/HOP, log1p magnitudes folded to pitch
  *  classes in [loHz, hiHz)). Same math as the eval's frames()+chromaOf(),
  *  fused so the full magnitude spectrogram is never materialized. */
-function chromaFrames(x: Float32Array, loHz: number, hiHz: number): Float32Array[] {
+export function chromaFrames(x: Float32Array, loHz: number, hiHz: number): Float32Array[] {
   const win = new Float32Array(NFFT)
   for (let i = 0; i < NFFT; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / NFFT)
   const pc = new Int16Array(NFFT / 2 + 1).fill(-1)
@@ -152,7 +152,7 @@ function chromaFrames(x: Float32Array, loHz: number, hiHz: number): Float32Array
   return out
 }
 
-function beatSyncChroma(chroma: Float32Array[], beats: number[]): Float32Array[] {
+export function beatSyncChroma(chroma: Float32Array[], beats: number[]): Float32Array[] {
   const fps = SR / HOP
   const out: Float32Array[] = []
   for (let i = 0; i + 1 < beats.length; i++) {
@@ -275,7 +275,7 @@ const medianOf = (xs: number[]): number => {
 }
 
 /** RMS envelope at the analysis frame rate (the extractors' shared stride). */
-function rmsEnvelope(buf: Float32Array): { rms: Float32Array; fps: number; p95: number } {
+export function rmsEnvelope(buf: Float32Array): { rms: Float32Array; fps: number; p95: number } {
   const fps = SR / HOP
   const n = Math.max(0, 1 + Math.floor((buf.length - NFFT) / HOP))
   const rms = new Float32Array(n)

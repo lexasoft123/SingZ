@@ -8,6 +8,7 @@
  * that diverges. That is the difference between "Panzerkampf disagrees" and
  * "the tempo family disagrees on Panzerkampf, everything before it matches".
  *
+ *   node eval/beats-parity.mjs --library     # the app's own library
  *   node eval/beats-parity.mjs [--bin <singz-analyze>] <project-dir> ...
  *   node eval/beats-parity.mjs                # the bundled sample
  *
@@ -32,9 +33,44 @@ const args = process.argv.slice(2)
 let bin = null
 let FIXTURE_PRECONDITIONS = {}
 const dirs = []
+/**
+ * `--library` resolves the desktop's OWN projects root from settings.json,
+ * because guessing it was a real and expensive mistake: every measurement in
+ * one section of docs/PHONE-STANDALONE.md was taken against a stale
+ * four-project copy under ~/Documents while the app's library — seventeen
+ * projects, with ALIGNED lyrics where the stale copy had LRC estimates — sat
+ * in iCloud where settings.json says it does. Parity survived (it compares
+ * two implementations on whatever it is handed) but a documented claim about
+ * which code paths the corpus reaches did not. A corpus is an input; this is
+ * how you name it without typing a path you might get wrong.
+ */
+const libraryRoot = () => {
+  for (const id of ['SingZ', 'singz', 'Electron']) {
+    const f = join(process.env.HOME ?? '', 'Library', 'Application Support', id, 'settings.json')
+    if (!existsSync(f)) continue
+    try {
+      const root = JSON.parse(readFileSync(f, 'utf8')).projectsRoot
+      if (root && existsSync(root)) return root
+    } catch {
+      /* a settings.json we cannot read is not an error here — try the next */
+    }
+  }
+  return null
+}
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--bin') bin = args[++i]
-  else dirs.push(args[i])
+  else if (args[i] === '--library') {
+    const root = libraryRoot()
+    if (!root) {
+      console.error('--library: no settings.json names a projectsRoot that exists')
+      process.exit(2)
+    }
+    console.log(`LIBRARY  ${root}`)
+    for (const d of readdirSync(root).sort()) {
+      const p = join(root, d)
+      if (existsSync(join(p, 'stems'))) dirs.push(p)
+    }
+  } else dirs.push(args[i])
 }
 if (!bin) bin = execFileSync('bash', [join(root, 'scripts', 'build-analyze-host.sh')], { encoding: 'utf8' }).trim()
 const lib = join(root, 'mobile', 'src', 'gen', 'analysis-lib.js')

@@ -6,20 +6,23 @@
 //   singz-analyze melody --f32 <mono float32 file> --sr <rate> [--raw]
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
 //   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
+//   singz-analyze courts --wav <f.wav> [--lo <hz>] [--hi <hz>]  (extractors)
 //   singz-analyze beats --drums <d.wav> [--inst <a.wav> ...] [--vocals <v.wav>]
-//                        [--line <sec> ...]                          (staged debug)
+//                        [--bass <b.wav>] [--line <sec> ...]         (staged debug)
 //
 // Prints one JSON object on stdout. Floats are printed with 9 significant
 // digits, which round-trips float32 exactly — the parity harness compares
 // values, not text.
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include "../analysis.h"
 #include "../beats.h"
+#include "../courts.h"
 #include "../melody.h"
 #include "../wav.h"
 
@@ -105,7 +108,16 @@ int main(int argc, char** argv) {
     for (int i = 2; i < argc; i++) {
       const bool isInst = std::strcmp(argv[i], "--inst") == 0;
       const bool isBass = std::strcmp(argv[i], "--bass") == 0;
-      if (!(isInst || isBass) || i + 1 >= argc) continue;
+      // Strict, like `beats` and `courts`: a lenient loop here would be the
+      // same trap in the subcommand that ALREADY takes --bass.
+      if (!(isInst || isBass)) {
+        std::fprintf(stderr, "key: unknown argument %s\n", argv[i]);
+        return 2;
+      }
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "key: %s needs a path\n", argv[i]);
+        return 2;
+      }
       const std::string path = argv[++i];
       singz::MonoWav w = singz::readWavMono(path);
       if (!w.ok) {
@@ -136,18 +148,46 @@ int main(int argc, char** argv) {
     // divergence points at the stage that caused it, not just the song.
     singz::AnalysisStem drums;
     singz::AnalysisStem vocals;
+    singz::AnalysisStem bass;
     std::vector<singz::AnalysisStem> inst;
     std::vector<double> lineStarts;
-    bool haveDrums = false, haveVocals = false;
+    bool haveDrums = false, haveVocals = false, haveBass = false;
     for (int i = 2; i < argc; i++) {
-      if (std::strcmp(argv[i], "--line") == 0 && i + 1 < argc) {
-        lineStarts.push_back(std::atof(argv[++i]));
+      if (std::strcmp(argv[i], "--line") == 0) {
+        if (i + 1 >= argc) {
+          std::fprintf(stderr, "beats: --line needs a value\n");
+          return 2;
+        }
+        // strtod, not atof: atof returns 0.0 for anything unparseable, so a
+        // typo'd or shell-mangled time silently became a line start at t=0 —
+        // the same silent-argument hazard the unknown-flag check above exists
+        // to remove, one line below it.
+        const char* raw = argv[++i];
+        char* end = nullptr;
+        const double v = std::strtod(raw, &end);
+        if (end == raw || *end != '\0' || !std::isfinite(v)) {
+          std::fprintf(stderr, "beats: --line wants a number, got %s\n", raw);
+          return 2;
+        }
+        lineStarts.push_back(v);
         continue;
       }
       const bool isDrums = std::strcmp(argv[i], "--drums") == 0;
       const bool isInst = std::strcmp(argv[i], "--inst") == 0;
       const bool isVocals = std::strcmp(argv[i], "--vocals") == 0;
-      if (!(isDrums || isInst || isVocals) || i + 1 >= argc) continue;
+      const bool isBass = std::strcmp(argv[i], "--bass") == 0;
+      // FATAL, not skipped. A flag this loop does not recognise used to fall
+      // through in silence, so `--bass x.wav` ran the TypeScript with a bass
+      // stem and this side without one — and the vote stages would then
+      // diverge in a shape that reads exactly like a bug in the port.
+      if (!(isDrums || isInst || isVocals || isBass)) {
+        std::fprintf(stderr, "beats: unknown argument %s\n", argv[i]);
+        return 2;
+      }
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "beats: %s needs a path\n", argv[i]);
+        return 2;
+      }
       const std::string path = argv[++i];
       singz::MonoWav w = singz::readWavMono(path);
       if (!w.ok) {
@@ -163,6 +203,9 @@ int main(int argc, char** argv) {
       } else if (isVocals) {
         vocals = std::move(st);
         haveVocals = true;
+      } else if (isBass) {
+        bass = std::move(st);
+        haveBass = true;
       } else {
         inst.push_back(std::move(st));
       }
@@ -175,6 +218,7 @@ int main(int argc, char** argv) {
     singz::BeatAux aux;
     aux.inst = &inst;  // the fill stems double as the harmonic layer
     if (haveVocals) aux.vocals = &vocals;
+    if (haveBass) aux.bass = &bass;
     aux.lineStarts = lineStarts;
     // The whole pipeline, as detectBeats runs it — tracker, vote, head
     // backcast, sanitize — so what is printed below is the grid itself and not
@@ -282,6 +326,99 @@ int main(int argc, char** argv) {
     else std::printf("\"%s\"}\n", d.reject.c_str());
     return 0;
   }
+  if (std::strcmp(argv[1], "courts") == 0) {
+    // The courts' extractor layer on ONE stem, dumped in full. Values, not a
+    // digest: the whole reason this subcommand exists is that the layer runs
+    // on libm rather than on arithmetic the porting rules can pin, so a
+    // checksum that happened to collide would hide exactly the failure it is
+    // here to find.
+    std::string path;
+    double lo = 55, hi = 2000;
+    for (int i = 2; i < argc; i++) {
+      const bool isWav = std::strcmp(argv[i], "--wav") == 0;
+      const bool isLo = std::strcmp(argv[i], "--lo") == 0;
+      const bool isHi = std::strcmp(argv[i], "--hi") == 0;
+      if (!(isWav || isLo || isHi)) {
+        std::fprintf(stderr, "courts: unknown argument %s\n", argv[i]);
+        return 2;
+      }
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "courts: %s needs a value\n", argv[i]);
+        return 2;
+      }
+      if (isWav) {
+        path = argv[++i];
+      } else {
+        // strtod with full consumption, same as --line: std::atof turns a
+        // mistyped band into 0.0 and analyses [0,2000) while reporting
+        // success, which during a band-by-band comparison reads as a
+        // divergence in the port. Verified: `--lo abc` used to exit 0.
+        const char* raw = argv[++i];
+        char* end = nullptr;
+        const double v = std::strtod(raw, &end);
+        if (end == raw || *end != '\0' || !std::isfinite(v)) {
+          std::fprintf(stderr, "courts: %s wants a number, got %s\n", isLo ? "--lo" : "--hi", raw);
+          return 2;
+        }
+        if (isLo) lo = v;
+        else hi = v;
+      }
+    }
+    if (path.empty()) {
+      std::fprintf(stderr, "courts needs --wav\n");
+      return 2;
+    }
+    singz::MonoWav w = singz::readWavMono(path);
+    if (!w.ok) {
+      std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
+      return 1;
+    }
+    singz::AnalysisStem st;
+    st.mono = std::move(w.samples);
+    st.sampleRate = w.sampleRate;
+    const std::vector<float> at44 = singz::monoAt44kPublic(st);
+    const std::vector<float> x = singz::to22k(at44);
+    const std::vector<std::vector<float>> ch = singz::chromaFrames(x, lo, hi);
+    const singz::RmsEnvelope env = singz::rmsEnvelope(x);
+    std::printf("{\"to22kLen\":%zu,\"chromaFrames\":%zu,\"rmsFrames\":%zu,\"rmsP95\":%.17g,\"fps\":%.17g,",
+                x.size(), ch.size(), env.rms.size(), env.p95, env.fps);
+    std::printf("\"chroma\":[");
+    for (size_t f = 0; f < ch.size(); f++) {
+      std::printf("%s[", f ? "," : "");
+      // %.17g, not %.9g. 9 significant digits round-trips a float32 as a
+      // VALUE, but the two sides render the halfway case differently — JS
+      // toPrecision rounds half away from zero, C's %g rounds half to even —
+      // so 22.64453125 printed as 22.6445313 against 22.6445312 read as a
+      // divergence in three of six stems when nothing had diverged at all.
+      // 17 digits is the exact double, and JSON.parse returns it exactly.
+      for (size_t k = 0; k < 12; k++) std::printf("%s%.17g", k ? "," : "", static_cast<double>(ch[f][k]));
+      std::printf("]");
+    }
+    std::printf("],\"beatSync\":[");
+    {
+      // A synthetic beat grid, so the harness can compare beatSyncChroma —
+      // the one extractor with a deliberate deviation from the TS (a negative
+      // frame index, which C++ skips where JS would throw) and, until now,
+      // the one with no gate over it at all. Half-second beats over the whole
+      // file: the point is to exercise the averaging and the L2 normalise,
+      // not to be musical.
+      std::vector<double> beats;
+      const double dur = static_cast<double>(x.size()) / 22050.0;
+      for (double t = 0; t < dur; t += 0.5) beats.push_back(t);
+      const std::vector<std::vector<float>> bs = singz::beatSyncChroma(ch, beats);
+      for (size_t f = 0; f < bs.size(); f++) {
+        std::printf("%s[", f ? "," : "");
+        for (size_t k = 0; k < 12; k++) std::printf("%s%.17g", k ? "," : "", static_cast<double>(bs[f][k]));
+        std::printf("]");
+      }
+    }
+    std::printf("],\"rms\":[");
+    for (size_t f = 0; f < env.rms.size(); f++)
+      std::printf("%s%.17g", f ? "," : "", static_cast<double>(env.rms[f]));
+    std::printf("]}\n");
+    return 0;
+  }
+
   std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
   return 2;
 }
