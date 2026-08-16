@@ -241,25 +241,109 @@ jobs:
           # run before them. Hashing the binary's content instead is, per
           # ccache's own manual, "very slightly slower".
           #
-          # Two things to expect, so neither reads as a failure. The other 45%
-          # of calls are counted uncacheable and still will be — this fixes
-          # the 732 cacheable ones, not the 1324. And the value is itself part
-          # of ccache's hash, so the mtime-keyed cache sitting on main is
-          # unreachable: the first run after this lands still reports 0%, and
-          # the one after it is the first that can hit. Let a daily warmer go
-          # by before reading the result.
+          # The value is itself part of ccache's hash, so changing it orphans
+          # every entry keyed under the old one: the first run after such a
+          # change reports 0% however healthy the cache is, and the one after
+          # it is the first that can hit. Measured on two back-to-back
+          # dispatches on main: 0/366, then 366/366 direct hits and a 13m24s
+          # build became 5m54s.
           CCACHE_COMPILERCHECK: content
+          # The rest of the build. `ccache -sv` reported 296 uncacheable calls
+          # of which 288 (97.3%) were "Could not use precompiled header" and
+          # only 8 were actual link steps — so PCH, not linking, was the whole
+          # 45% that compiler_check could not reach. reanimated and worklets
+          # are the only two modules in the tree, ours included, that call
+          # target_precompile_headers, and they account for the number
+          # exactly: 106 compile_commands entries + 38, times two ABIs, is
+          # 288. Both the generator and the consumers are counted uncacheable
+          # without this, which is why the arithmetic lands on the nose.
+          #
+          # ccache needs three things to cache a clang PCH compile. Two are
+          # already present: -include-pch from CMake's PCH support, and
+          # -fno-pch-timestamp — which comes NOT from CMake but from those two
+          # packages' own CMakeLists (target_compile_options ... -Xclang;
+          # -fno-pch-timestamp, upstream comment says it is for ccache). That
+          # makes it a dependency opt-in, not something structural: if a
+          # reanimated or worklets bump ever drops it, these 288 go back to
+          # missing every run, because clang bakes the header's mtime into the
+          # .pch and npm ci gives every header a fresh mtime. This is the
+          # third requirement and the only one we were missing.
+          #
+          # `time_macros` is inert here rather than merely tolerable: nothing
+          # we compile — reanimated, worklets, audio-api, skia, our own core —
+          # mentions __DATE__, __TIME__ or __TIMESTAMP__ at all, so there is
+          # nothing for it to be sloppy about. `pch_defines` is the real
+          # trade, and it is narrow: CMake force-includes the PCH ahead of the
+          # translation unit, so a source-level #define cannot change it, and
+          # command-line -D still gets hashed normally.
+          #
+          # The manual also suggests include_file_mtime,include_file_ctime.
+          # Deliberately NOT set: we measured 366/366 without them, so there
+          # is no evidence they are needed here, and they would give up real
+          # header-change detection to buy nothing.
+          #
+          # Unlike compiler_check, this does NOT orphan the existing cache —
+          # entries stored with sloppiness unset still direct-hit with it set.
+          # So expect ~366 hits plus ~288 fresh misses on the first run after
+          # this, and on the second a Hits line of ~654/654 (100%) against a
+          # Cacheable-calls line of ~654/662 — two different ratios that -sv
+          # prints one above the other. Only files using the time macros would
+          # re-populate, and there are none.
+          CCACHE_SLOPPINESS: pch_defines,time_macros
           SINGZ_KEYSTORE_FILE: ${{ steps.upload-key.outputs.signed == 'true' && format('{0}/upload.jks', runner.temp) || '' }}
           SINGZ_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           SINGZ_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           SINGZ_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          # Bounded: a unique cache key per run means many entries, and the
-          # repo shares a 10 GB LRU budget with the desktop workflows' engine
-          # caches. A full cold build measured 145 MB at four ABIs, so ~75 at
-          # two; 600M keeps several generations, which is what the prefix
-          # restore-keys pull forward.
-          ccache -M 600M
+          # Bounded, but with real headroom, because overflowing this is the
+          # one failure here that is SILENT: ccache LRU-evicts inside the run,
+          # hits go partial, the build creeps back up and nothing in the log
+          # says why — it just looks like the cache fix stopped holding.
+          # Measured at two ABIs with compiler_check fixed: "0.2 / 0.6" as the
+          # log prints it. Both are binary, and the same trap as the table
+          # below lives right here — ccache 4.9.1 on the runner labels that
+          # line "Cache size (GB)" while the number is GiB (4.13.6 labels it
+          # GiB; which release changed it is not in the notes), and -M's bare
+          # M suffix is DECIMAL, so 600M was 0.56 GiB and
+          # displayed as 0.6. Expect this 1200M cap to render as ~1.1.
+          # Enabling PCH caching adds 284 more objects and four .pch
+          # blobs (two modules x two ABIs; the 288 above is those 284 plus the
+          # four generator compiles), and a .pch carrying libc++, fbjni and
+          # jsi is tens of MB on its own, so the old 600M was no longer
+          # comfortable.
+          #
+          # Raising the cap does not make the cache grow — four ccache-apk
+          # entries measured 220.74, 220.76, 220.75 and 220.76 MiB, flat, which
+          # is what a superset-save under a unique key per run should look
+          # like (a fifth at 145.90 MiB predates both the run-id key and the
+          # ABI cut). What ships to Actions is what ccache stores, not the
+          # cap; the cap only stops a silent eviction INSIDE the run.
+          #
+          # But do not read that as free. The repo's Actions budget is
+          # SATURATED, and at the cap every new entry evicts older ones to fit.
+          # All GiB, one reading, because mixing units here is not academic —
+          # 10,058,697,807 bytes is 10.06 GB decimal AND 9.37 GiB binary, and
+          # reading one against the other is exactly how this block briefly
+          # claimed to have watched 700 MB get evicted when nothing had
+          # happened at all. GitHub documents the limit as "10 GB" without
+          # saying which, so at 9.37 GiB / 21 caches the repo is either just
+          # over or a few percent under; either way, at it.
+          #
+          #   setup-java gradle   5.67 GiB   4 entries   <- the real pressure
+          #   ccache-apk          1.01 GiB   5 entries   <- this
+          #   engines-src-Windows 0.80 GiB   1
+          #   engines-src-macOS   0.59 GiB   1
+          #   engines-out-macOS   0.46 GiB   1
+          #
+          # Only ccache-apk's newest entry is ever restored — a unique key per
+          # run never prunes the ones it supersedes, so four of those five are
+          # dead weight. What loses an LRU race is whatever is touched least,
+          # which is the engine caches, so an android cache that grows costs a
+          # DESKTOP run an engine rebuild, on another workflow, with nothing
+          # connecting the two. Go and measure rather than trusting any of
+          # this: `gh api repos/:owner/:repo/actions/cache/usage` (decimal
+          # bytes) beside `Local storage / Cache size` from the `-sv` below.
+          ccache -M 1200M
           ccache -z
           ./gradlew bundleRelease assembleRelease --no-daemon
           # -sv, not -s: the summary alone said 45% of calls were
