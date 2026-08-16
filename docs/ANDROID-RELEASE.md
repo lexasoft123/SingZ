@@ -61,8 +61,12 @@ Outputs land in `app/build/outputs/bundle/release/app-release.aab` and
 
 Both carry **arm64-v8a and armeabi-v7a only** (`reactNativeArchitectures` in
 `gradle.properties`). The emulator ABIs cost 35% of the build time and reach no
-phone; what dropping x86_64 costs is Chromebooks, which Play will simply not
-offer SingZ to. Developing against an x86_64 emulator needs
+phone. Chromebooks keep the app — Google's ABI guidance rates arm32+arm64 "OK
+(with translation)" and tells you to ship both when you cannot ship x86, which
+is exactly this — but an Intel Chromebook now runs SingZ translated, so
+splitting is slower there. Dropping `armeabi-v7a` too would be the actual
+mistake: arm64 alone rates "Poor", since not every Chromebook can translate
+arm64. Developing against an x86_64 emulator needs
 `-PreactNativeArchitectures=x86_64` — without it the install fails outright
 with `INSTALL_FAILED_NO_MATCHING_ABIS`, unless the image is a Google x86_64 one
 from API 30 up, whose ARM translation runs the arm build regardless.
