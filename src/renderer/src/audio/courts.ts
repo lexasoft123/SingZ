@@ -181,7 +181,7 @@ const CHORD_NAMES = ((): string[] => {
 /** Beat-synchronous chord labels: 24 maj/min templates on the summed
  *  harmonic chroma, bass chroma naming the root, Viterbi with a stay
  *  bonus. Returns run-length encoding {name, t, len(beats)}. */
-function chordRuns(
+export function chordRuns(
   Ch: Float32Array[],
   Cb: Float32Array[],
   beats: number[]

@@ -15,6 +15,19 @@
  * collide would hide exactly the failure this exists to catch. Both sides
  * exchange exact doubles (%.17g), so "identical" means identical.
  *
+ * Two different strengths live here, and conflating them would flatter the
+ * weaker one. The chroma/rms/beat-sync comparisons are VALUE gates: exact
+ * doubles, so a single-ulp difference fails them, which is what makes them
+ * meaningful against libm drift. The chord-run comparison is a DECISION gate:
+ * it sees names, times and lengths, so it only fails when the Viterbi picks
+ * differently. Measured floor, not guessed — scaling the major emission
+ * scores by 1.001 passes every stem, by 1.01 fails only the one with short
+ * ambiguous runs, and by 1.05 three of six still pass. That is ~1e-2
+ * relative, five to fourteen orders coarser than the float-store (~6e-8) and
+ * reordered-dot-product (~1e-16) differences the porting rules exist to
+ * police. It gates the decoder's structure and its decisions; the values it
+ * decides from are gated one layer up, at full precision.
+ *
  *   node eval/courts-parity.mjs [file.wav ...]
  *
  * With no arguments it runs the bundled sample's stems.
@@ -40,7 +53,7 @@ if (!existsSync(lib)) {
   console.error('mobile/src/gen/analysis-lib.js is missing — run `npm ci` in mobile/')
   process.exit(2)
 }
-const { to22k, chromaFrames, beatSyncChroma, rmsEnvelope } = await import(pathToFileURL(lib).href)
+const { to22k, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns } = await import(pathToFileURL(lib).href)
 if (typeof chromaFrames !== 'function') {
   console.error('the analysis bundle does not export the courts extractors — rebuild it')
   process.exit(2)
@@ -151,6 +164,15 @@ for (const path of files) {
   wavs.push(out)
 }
 
+// The chord layer needs two chroma layers at once, so it runs on whichever
+// input IS the bass stem paired with each other input. `runs` is the single
+// thing that decides whether the courts speak at all, so it gets a gate.
+const bassWav = wavs.find((p) => /bass/i.test(names.get(p) ?? p)) ?? null
+if (!bassWav) {
+  console.log('NOTE  no /bass/ input — chord runs were NOT compared by this run')
+}
+let chordComparisons = 0
+
 for (const path of wavs) {
  for (const band of BANDS) {
   const w = readWavMono(path)
@@ -169,10 +191,25 @@ for (const path of wavs) {
   for (let t = 0; t < x22.length / 22050; t += 0.5) tsBeats.push(t)
   const tsSync = beatSyncChroma(tsChroma, tsBeats)
 
+  // Only on the wide band — the chord layer fixes its own two bands (55-2000
+  // for the harmonic chroma, 41-400 for the bass), so running it under the
+  // narrow band too would compare the same thing twice and report it as
+  // coverage.
+  const wantChords = bassWav && band === BANDS[0]
   const c = JSON.parse(
-    execFileSync(bin, ['courts', '--wav', path, '--lo', String(lo), '--hi', String(hi)],
+    execFileSync(bin, ['courts', '--wav', path, '--lo', String(lo), '--hi', String(hi),
+      ...(wantChords ? ['--bass-wav', bassWav] : [])],
       { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString()
   )
+  let tsRuns = null
+  if (wantChords) {
+    const bw = readWavMono(bassWav)
+    const b22 = to22k(monoAt44k(bw))
+    const Ch = beatSyncChroma(chromaFrames(x22, 55, 2000), tsBeats)
+    const Cb = beatSyncChroma(chromaFrames(b22, 41, 400), tsBeats)
+    tsRuns = chordRuns(Ch, Cb, tsBeats)
+    chordComparisons++
+  }
 
   const problems = []
   if (c.to22kLen !== x22.length) problems.push(`to22k length ts=${x22.length} c++=${c.to22kLen}`)
@@ -190,6 +227,17 @@ for (const path of wavs) {
           firstBad = f
           problems.push(`chroma[${f}][${k}] ts=${show(tsChroma[f][k])} c++=${show(c.chroma[f][k])}`)
         }
+      }
+    }
+  }
+  if (tsRuns) {
+    const cr = c.chordRuns ?? []
+    if (cr.length !== tsRuns.length) problems.push(`chordRuns count ts=${tsRuns.length} c++=${cr.length}`)
+    for (let i = 0; i < Math.min(tsRuns.length, cr.length); i++) {
+      if (tsRuns[i].name !== cr[i].name || differs(tsRuns[i].t, cr[i].t) || tsRuns[i].len !== cr[i].len) {
+        problems.push(`chordRuns[${i}] ts=${tsRuns[i].name}@${show(tsRuns[i].t)}x${tsRuns[i].len}` +
+          ` c++=${cr[i].name}@${show(cr[i].t)}x${cr[i].len}`)
+        break
       }
     }
   }
@@ -222,7 +270,8 @@ for (const path of wavs) {
   } else {
     console.log(`PASS  ${label}`)
     console.log(`      [${band[0]}-${band[1]} Hz] ${c.chromaFrames} chroma + ${c.beatSync?.length ?? 0} beat-sync` +
-      ` + ${c.rmsFrames} rms + p95 — all identical`)
+      ` + ${c.rmsFrames} rms + p95` +
+      (tsRuns ? ` + ${tsRuns.length} chord runs` : '') + ' — all identical')
     compared++
   }
  }
@@ -243,6 +292,15 @@ if (compared + failed !== expected) {
 if (new Set(seen).size !== wavs.length) {
   console.log(`\nHARNESS BUG: ${wavs.length} inputs produced ${new Set(seen).size} distinct labels` +
     ` — inputs are colliding and some were never compared.`)
+  process.exit(2)
+}
+
+// Same discipline as the two checks above: if a bass input WAS present, every
+// other input must have had its chord runs compared. Silence about skipped
+// coverage is this file's recurring failure mode.
+if (bassWav && chordComparisons !== wavs.length) {
+  console.log(`\nHARNESS BUG: ${chordComparisons} chord comparisons for ${wavs.length} inputs` +
+    ' — the chord gate was skipped for some of them.')
   process.exit(2)
 }
 

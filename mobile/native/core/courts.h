@@ -20,10 +20,17 @@
 // bit-parity here is an empirical property of the platform's libm and not a
 // guarantee the porting rules can enforce. It holds on macOS/arm64 today
 // (analysis.cpp's goertzel and Hann window already depend on it and are
-// gated), and the parity harness is what would notice it stopping — which is
-// the reason the harness compares chord runs and not merely verdicts.
+// gated), and the parity harness is what would notice it stopping — at the
+// VALUE level, where chroma, beat-sync chroma and rms are compared as exact
+// doubles, so a single ulp fails them. The chord runs beside them are a
+// weaker instrument ON PURPOSE: they compare decisions, so their floor is
+// ~1e-2 relative (measured: emissions scaled by 1.001 pass every stem, 1.01
+// fails only the stem with short ambiguous runs). They gate the decoder's
+// structure and its tie rule; the numbers it decides from are gated above it,
+// which is where a mis-ported width or a reassociated sum would show.
 //
-// Landing in pieces, evidence first. Present so far: the extractor layer.
+// Landing in pieces, evidence first. Present so far: the extractor layer
+// and the chord decoder.
 namespace singz {
 
 /** A chord run on the base lattice: when it starts, how long it holds, and
@@ -68,6 +75,25 @@ std::vector<std::vector<float>> chromaFrames(const std::vector<float>& x, double
 /** Chroma averaged over each beat interval and L2-normalised. */
 std::vector<std::vector<float>> beatSyncChroma(const std::vector<std::vector<float>>& chroma,
                                                const std::vector<double>& beats);
+
+/** One Viterbi-decoded chord segment on the beat lattice. */
+struct ChordSeg {
+  std::string name;
+  double t = 0;   // the beat time it starts at
+  int len = 0;    // its length in beats
+};
+
+/**
+ * Beat-synchronous chord labels: 24 maj/min templates on the summed harmonic
+ * chroma, the bass chroma naming the root, Viterbi with a stay bonus.
+ *
+ * This is the function `buildCourtEvidence` turns into `runs` — and `runs` is
+ * the single thing that decides whether the courts speak at all
+ * (`applyCourts` abstains on `runs.length < 8 && !ev.ml`). Nothing downstream
+ * of it matters if this is wrong.
+ */
+std::vector<ChordSeg> chordRuns(const std::vector<std::vector<float>>& Ch,
+                                const std::vector<std::vector<float>>& Cb, const std::vector<double>& beats);
 
 /** Frame RMS and its 95th percentile — the loudness the voice extractor and
  *  the quiet-zone pulse fit are both judged against. */

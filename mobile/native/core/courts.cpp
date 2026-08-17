@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // Same no-FMA rule as the rest of the core — this file's whole claim is
 // "rounds where the TS rounds".
@@ -151,6 +152,113 @@ std::vector<std::vector<float>> beatSyncChroma(const std::vector<std::vector<flo
     out.push_back(std::move(v));
   }
   return out;
+}
+
+// ---- courts.ts: chordRuns --------------------------------------------------
+
+std::vector<ChordSeg> chordRuns(const std::vector<std::vector<float>>& Ch,
+                                const std::vector<std::vector<float>>& Cb, const std::vector<double>& beats) {
+  // Only 8 of these 24 labels are ever produced by the sample corpus — a
+  // reviewer permuted the other 16 and the gate stayed green, correctly, since
+  // downstream only equality-compares a label. Unwitnessed rather than broken,
+  // and worth knowing before anyone reads a passing gate as covering them.
+  static const char* kNames[24] = {"C",  "C#", "D",  "D#", "E",  "F",  "F#", "G",  "G#", "A",  "A#", "B",
+                                   "Cm", "C#m", "Dm", "D#m", "Em", "Fm", "F#m", "Gm", "G#m", "Am", "A#m", "Bm"};
+  // 12 major then 12 minor templates, L2-normalised — float storage, as the TS
+  // holds them in Float32Arrays.
+  std::vector<std::vector<float>> T;
+  for (int r = 0; r < 12; r++) {
+    std::vector<float> t(12, 0.0f);
+    t[static_cast<size_t>(r)] = 1.0f;
+    t[static_cast<size_t>((r + 4) % 12)] = 0.8f;
+    t[static_cast<size_t>((r + 7) % 12)] = 0.9f;
+    T.push_back(std::move(t));
+  }
+  for (int r = 0; r < 12; r++) {
+    std::vector<float> t(12, 0.0f);
+    t[static_cast<size_t>(r)] = 1.0f;
+    t[static_cast<size_t>((r + 3) % 12)] = 0.8f;
+    t[static_cast<size_t>((r + 7) % 12)] = 0.9f;
+    T.push_back(std::move(t));
+  }
+  for (std::vector<float>& t : T) {
+    double n = 0;
+    for (size_t k = 0; k < 12; k++) n += static_cast<double>(t[k]) * static_cast<double>(t[k]);
+    n = std::sqrt(n);
+    for (size_t k = 0; k < 12; k++) t[k] = static_cast<float>(static_cast<double>(t[k]) / n);
+  }
+  const size_t n = Ch.size();
+  if (n == 0) return {};
+  std::vector<std::vector<double>> emit;
+  emit.reserve(n);
+  for (size_t i = 0; i < n; i++) {
+    std::vector<double> e(24, 0.0);
+    for (size_t j = 0; j < 24; j++) {
+      double d = 0;
+      for (size_t k = 0; k < 12; k++) d += static_cast<double>(Ch[i][k]) * static_cast<double>(T[j][k]);
+      e[j] = d;
+    }
+    int root = -1;
+    double best = 0;
+    // Bounded by Cb, not by Ch. Every caller passes two beatSyncChroma results
+    // over the SAME lattice so the lengths match — but where the TS would
+    // throw on a short Cb, this side would read off the end, and a silent bad
+    // read is worse than a throw. (The `s < beats.size()` guard further down
+    // is unreachable for the same structural reason; this is the index that
+    // could ever matter.)
+    const bool haveBass = i < Cb.size() && Cb[i].size() >= 12;
+    for (size_t k = 0; haveBass && k < 12; k++) {
+      if (static_cast<double>(Cb[i][k]) > best) {
+        best = static_cast<double>(Cb[i][k]);
+        root = static_cast<int>(k);
+      }
+    }
+    if (root >= 0 && best > 0) {
+      e[static_cast<size_t>(root)] += 0.25;
+      e[static_cast<size_t>(12 + root)] += 0.25;
+    }
+    emit.push_back(std::move(e));
+  }
+  const double STAY = 0.35;
+  std::vector<double> dp = emit[0];
+  std::vector<std::vector<signed char>> bp;
+  for (size_t i = 1; i < n; i++) {
+    std::vector<double> nd(24, 0.0);
+    std::vector<signed char> row(24, 0);
+    for (size_t j = 0; j < 24; j++) {
+      int bj = -1;
+      double bv = -std::numeric_limits<double>::infinity();
+      // Strict `>`, so the FIRST maximum wins and k ascends — the TS's tie
+      // rule, and a tie is common on a held chord where the stay bonus is the
+      // only thing separating two states.
+      for (size_t k = 0; k < 24; k++) {
+        const double v = dp[k] + (k == j ? STAY : 0);
+        if (v > bv) {
+          bv = v;
+          bj = static_cast<int>(k);
+        }
+      }
+      nd[j] = emit[i][j] + bv;
+      row[j] = static_cast<signed char>(bj);
+    }
+    dp = std::move(nd);
+    bp.push_back(std::move(row));
+  }
+  std::vector<int> path(n, 0);
+  size_t cur = 0;
+  for (size_t j = 1; j < 24; j++)
+    if (dp[j] > dp[cur]) cur = j;
+  path[n - 1] = static_cast<int>(cur);
+  for (size_t i = n - 1; i-- > 0;) path[i] = bp[i][static_cast<size_t>(path[i + 1])];
+  std::vector<ChordSeg> runs;
+  size_t s = 0;
+  for (size_t i = 1; i <= n; i++) {
+    if (i == n || path[i] != path[s]) {
+      runs.push_back({kNames[path[s]], s < beats.size() ? beats[s] : 0.0, static_cast<int>(i - s)});
+      s = i;
+    }
+  }
+  return runs;
 }
 
 // ---- courts.ts: rmsEnvelope ------------------------------------------------

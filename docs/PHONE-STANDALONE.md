@@ -1137,6 +1137,34 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       and the pre-court vote lays 129 uniform bars, which is the same
       ceil(515/4) `meterCourt` would materialise. Two mechanisms, one number,
       again.
+    - **Eighth slice — the chord layer** (2026-08-18). `chordRuns` is ported:
+      24 maj/min templates on the summed harmonic chroma, the bass chroma
+      naming the root, Viterbi with a 0.35 stay bonus. It is the function
+      `buildCourtEvidence` turns into `runs`, and `runs` is the single thing
+      that decides whether the courts speak at all — `applyCourts` abstains on
+      `runs.length < 8 && !ev.ml` — so nothing downstream of it matters if it
+      is wrong.
+      Identical to the TS on every sample stem (17-18 runs each, and the count
+      varies per stem so the comparison is not degenerate).
+      **The gate is mutation-tested, and the first attempt was inconclusive in
+      a useful way.** Perturbing `STAY` by 1e-7 relative changed nothing at
+      all — the Viterbi margins are simply wider than that, which is worth
+      knowing — so it proved neither that the gate works nor that it does not.
+      Removing the stay bonus entirely (`STAY = 0`) makes it fail loudly and
+      precisely: 17 runs against 20, first divergence named as `A@28.5x5`
+      versus `A@28.5x2`. A mutation too small to change the answer is not
+      evidence that a gate is live.
+      **And my reading of that was still too flattering.** Review measured the
+      floor properly: scaling the major emission scores by 1.001 passes every
+      stem, 1.01 fails only the one with short ambiguous runs, 1.05 leaves
+      three of six passing. That is ~1e-2 relative — five to fourteen orders
+      coarser than the float-store (~6e-8) and reordered-dot-product (~1e-16)
+      differences the porting rules exist to police. So this is a DECISION
+      gate, not a value gate: it proves the decoder's structure and its tie
+      rule (verified — flipping `>` to `>=` fails), while the numbers it
+      decides from are gated one layer up at exact-double precision. Both
+      courts.h and the harness header say so now; they had sold it as
+      ulp-drift detection, which it is not.
     - Next: the rest of detectBeats and courts (same method, same harness)
       — which is now the whole remaining cost of a phone analysis — then
       the desktop's `analysis:run` IPC over the CLI, then retire the TS

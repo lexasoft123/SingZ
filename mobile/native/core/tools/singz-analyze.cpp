@@ -6,7 +6,8 @@
 //   singz-analyze melody --f32 <mono float32 file> --sr <rate> [--raw]
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
 //   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
-//   singz-analyze courts --wav <f.wav> [--lo <hz>] [--hi <hz>]  (extractors)
+//   singz-analyze courts --wav <f.wav> [--lo <hz>] [--hi <hz>]
+//                        [--bass-wav <b.wav>]                    (extractors)
 //   singz-analyze beats --drums <d.wav> [--inst <a.wav> ...] [--vocals <v.wav>]
 //                        [--bass <b.wav>] [--line <sec> ...]         (staged debug)
 //
@@ -332,13 +333,14 @@ int main(int argc, char** argv) {
     // on libm rather than on arithmetic the porting rules can pin, so a
     // checksum that happened to collide would hide exactly the failure it is
     // here to find.
-    std::string path;
+    std::string path, bassPath;
     double lo = 55, hi = 2000;
     for (int i = 2; i < argc; i++) {
       const bool isWav = std::strcmp(argv[i], "--wav") == 0;
+      const bool isBassWav = std::strcmp(argv[i], "--bass-wav") == 0;
       const bool isLo = std::strcmp(argv[i], "--lo") == 0;
       const bool isHi = std::strcmp(argv[i], "--hi") == 0;
-      if (!(isWav || isLo || isHi)) {
+      if (!(isWav || isBassWav || isLo || isHi)) {
         std::fprintf(stderr, "courts: unknown argument %s\n", argv[i]);
         return 2;
       }
@@ -348,6 +350,8 @@ int main(int argc, char** argv) {
       }
       if (isWav) {
         path = argv[++i];
+      } else if (isBassWav) {
+        bassPath = argv[++i];
       } else {
         // strtod with full consumption, same as --line: std::atof turns a
         // mistyped band into 0.0 and analyses [0,2000) while reporting
@@ -411,6 +415,32 @@ int main(int argc, char** argv) {
         for (size_t k = 0; k < 12; k++) std::printf("%s%.17g", k ? "," : "", static_cast<double>(bs[f][k]));
         std::printf("]");
       }
+    }
+    std::printf("],\"chordRuns\":[");
+    if (!bassPath.empty()) {
+      // The chord layer as buildCourtEvidence assembles it: the harmonic
+      // chroma over 55-2000 and the BASS chroma over 41-400 naming the root,
+      // both on the same lattice. The lattice here is the synthetic half-
+      // second grid above — the point is to exercise the Viterbi, not to be
+      // musical, and both sides use the same one.
+      singz::MonoWav bw = singz::readWavMono(bassPath);
+      if (!bw.ok) {
+        std::fprintf(stderr, "could not read %s: %s\n", bassPath.c_str(), bw.error.c_str());
+        return 1;
+      }
+      singz::AnalysisStem bst;
+      bst.mono = std::move(bw.samples);
+      bst.sampleRate = bw.sampleRate;
+      const std::vector<float> b22 = singz::to22k(singz::monoAt44kPublic(bst));
+      std::vector<double> beats;
+      const double dur = static_cast<double>(x.size()) / 22050.0;
+      for (double t = 0; t < dur; t += 0.5) beats.push_back(t);
+      const std::vector<std::vector<float>> Ch = singz::beatSyncChroma(singz::chromaFrames(x, 55, 2000), beats);
+      const std::vector<std::vector<float>> Cb = singz::beatSyncChroma(singz::chromaFrames(b22, 41, 400), beats);
+      const std::vector<singz::ChordSeg> runs = singz::chordRuns(Ch, Cb, beats);
+      for (size_t i = 0; i < runs.size(); i++)
+        std::printf("%s{\"name\":\"%s\",\"t\":%.17g,\"len\":%d}", i ? "," : "", runs[i].name.c_str(), runs[i].t,
+                    runs[i].len);
     }
     std::printf("],\"rms\":[");
     for (size_t f = 0; f < env.rms.size(); f++)
