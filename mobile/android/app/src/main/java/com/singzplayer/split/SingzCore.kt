@@ -51,6 +51,21 @@ object SingzCore {
   external fun wavInfo(wavPath: String): DoubleArray?
 
   /**
+   * Phase 4b: the Beat This! grid (core beat_this.cpp — the desktop packs'
+   * beat_runner_onnx.py, ported). `wavPath` must be 22 050 Hz MONO and is
+   * checked, not resampled: at 44.1 kHz this would return a grid at half the
+   * real tempo with nothing reporting a problem. `modelsDir` holds
+   * logmel.onnx and beat_this.onnx.
+   *
+   * Returns the desktop's one JSON line — beats, downbeats, beat_prob,
+   * downbeat_prob, fps — or `{"error":"…"}`. An error object rather than an
+   * empty string because "this song has no grid" and "the models are not
+   * downloaded" are different answers and the caller must be able to tell
+   * them apart. ON THE CALLING THREAD; ~6 s of work for a 40 s song.
+   */
+  external fun mlGrid(wavPath: String, modelsDir: String, dumpDir: String): String
+
+  /**
    * Phase 4c: the key detector (core analysis.cpp — the desktop's
    * estimateKeyFromStems, bit-identical). Returns [pc, minor(0/1),
    * detVersion], or an EMPTY array when the harmonic bed is silent — which

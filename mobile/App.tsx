@@ -231,6 +231,29 @@ if (TEST) {
       .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
     return true
   }
+  // Phase 4b: the Beat This! grid straight off the core, for comparison
+  // against the desktop packs' python runner. Same echoDone/echoResult shape
+  // as the other parity hooks — the driver polls rather than awaiting an eval,
+  // because a long native call blocking the inspector is how the Hermes
+  // segfault in the loading tests was first hit.
+  hooks.mlGridParity = (wavPath: string, modelsDir: string, dumpDir = ''): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    void import('react-native')
+      .then(async (rn) => {
+        const t0 = Date.now()
+        try {
+          const g = await (rn.NativeModules as Record<string, { mlGrid: (a: string, b: string, c: string) => Promise<Record<string, unknown>> }>)
+            .SingzSplit.mlGrid(wavPath, modelsDir, dumpDir)
+          hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }
+        } catch (e) {
+          hooks.echoResult = { ok: false, error: String((e as Error)?.message ?? e) }
+        }
+        hooks.echoDone = true
+      })
+    return true
+  }
+
   // Phase 4c: the core's melody tracker against the desktop TS on the SAME
   // stem file — the on-device half of the parity gate (the host-side half is
   // singz-analyze vs node over the corpus). Native reads the WAV itself; the

@@ -207,6 +207,50 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
 
   // --- Phase 4c: the melody tracker in the core ---------------------------
 
+  /**
+   * Phase 4b: the Beat This! grid. `wavPath` must be 22 050 Hz mono (the core
+   * checks and refuses otherwise rather than resampling — a 44.1 kHz file
+   * would otherwise come back as a confident grid at half the real tempo).
+   * `modelsDir` holds logmel.onnx and beat_this.onnx.
+   *
+   * Resolves the core's JSON line PARSED, so JS gets the same object shape the
+   * desktop's fetchMlGrid produces. An `error` key from the core becomes a
+   * rejection here: a caller that saw `{error: …}` as a normal result would
+   * store a grid-less analysis and stamp it as done.
+   */
+  @ReactMethod
+  fun mlGrid(wavPath: String, modelsDir: String, dumpDir: String, promise: Promise) {
+    thread(name = "singz-mlgrid") {
+      val loadErr = SingzCore.ensureLoaded()
+      if (loadErr != null) {
+        promise.reject("mlgrid_core", "core library: $loadErr")
+        return@thread
+      }
+      try {
+        val started = System.currentTimeMillis()
+        val json = SingzCore.mlGrid(wavPath, modelsDir, dumpDir)
+        val elapsed = System.currentTimeMillis() - started
+        val obj = org.json.JSONObject(json)
+        if (obj.has("error")) {
+          promise.reject("mlgrid", obj.getString("error"))
+          return@thread
+        }
+        val m = Arguments.createMap()
+        for (key in listOf("beats", "downbeats", "beat_prob", "downbeat_prob")) {
+          val src = obj.getJSONArray(key)
+          val arr = Arguments.createArray()
+          for (i in 0 until src.length()) arr.pushDouble(src.getDouble(i))
+          m.putArray(key, arr)
+        }
+        m.putInt("fps", obj.getInt("fps"))
+        m.putInt("elapsedMs", elapsed.toInt())
+        promise.resolve(m)
+      } catch (t: Throwable) {
+        promise.reject("mlgrid", t)
+      }
+    }
+  }
+
   @ReactMethod
   fun analyzeMelody(wavPath: String, promise: Promise) {
     thread(name = "singz-melody") {

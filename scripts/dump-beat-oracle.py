@@ -15,16 +15,50 @@ catch, arriving through the oracle instead of the port.
   # a full replay recording for the framing + chunk stages
   dump-beat-oracle.py --replay <in.f32> <models-dir> <out-dir>
 
-Needs numpy and onnxruntime. The splitter packs carry both:
-  .engines-src/onnx-pack-<platform>/python/bin/python3.12
+Needs numpy; --replay also needs onnxruntime. It must run NATIVE — see below.
+
+  # numpy only, so the Apple Silicon torch pack is enough for --postproc:
+  .engines-src/gpu-pack/python/bin/python3.12
 """
 import importlib.util
 import json
+import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
+
+
+def refuse_if_translated() -> None:
+    """Refuse to run under Rosetta, because a recording made there is an
+    x86_64 answer wearing an arm64 machine's clothes.
+
+    This is not hygiene. The only local interpreter with onnxruntime used to
+    be the INTEL splitter pack (built here for other people's machines), so
+    reaching for it was the path of least resistance — and it silently made
+    the phone-vs-desktop comparison a cross-ARCHITECTURE one. The ported logic
+    was bit-identical; the ONNX inference was not, and 71 beats became 73. The
+    conclusion "the phone disagrees with the desktop" was really "x86_64 ORT
+    disagrees with arm64 ORT", which is a different fact with different
+    consequences. A comment saying so would not have stopped it, so the check
+    is here instead.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        out = subprocess.run(["sysctl", "-n", "sysctl.proc_translated"],
+                             capture_output=True, text=True, check=False)
+    except OSError:
+        return
+    if out.stdout.strip() == "1":
+        sys.stderr.write(
+            f"refusing to run: this interpreter is {platform.machine()} under Rosetta on an\n"
+            "arm64 machine, so any recording it makes is an x86_64 answer. Use a native\n"
+            "interpreter — .engines-src/gpu-pack/python/bin/python3.12 covers --postproc;\n"
+            "--replay needs a native onnxruntime, which no local pack currently ships.\n")
+        raise SystemExit(2)
 
 RUNNER = Path(__file__).resolve().parent / "beat_runner_onnx.py"
 spec = importlib.util.spec_from_file_location("btr", RUNNER)
@@ -43,6 +77,7 @@ def rounded(beats, downbeats, beat_logits, down_logits):
 
 
 def main() -> int:
+    refuse_if_translated()
     if len(sys.argv) >= 2 and sys.argv[1] == "--postproc":
         b = np.fromfile(sys.argv[2], dtype=np.float32)
         d = np.fromfile(sys.argv[3], dtype=np.float32)
