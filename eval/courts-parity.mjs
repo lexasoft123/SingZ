@@ -35,7 +35,10 @@
  * The voice and seam comparisons are COARSER STILL — ~1e-1 relative, measured
  * the same way. Survivors on the sample: `++quiet` to `quiet++`, the 8-second
  * cap to 9, the 2.5-beat gap anywhere in [1.9, 3.1], `minHold` anywhere in
- * [1.1, 1.75] (1.0 and below FAIL, 1.8 fails), `sectionFinal` up to 11 beats,
+ * [1.1, 1.75] (1.0 and below FAIL — measured before the holdSec drop, and the
+ * only figure on this line that drop could weaken; 1.1 and 1.8 have since been
+ * re-measured against the current comparison, 1.1 identical and 1.8 failing on
+ * voice count 4 to 3), `sectionFinal` up to 11 beats,
  * the RMS threshold by a thousandth, and removing the dedup entirely; for
  * seams, W by a hundredth,
  * the peak threshold by 10%, `nov` from float to double, and `>` to `>=`.
@@ -50,20 +53,37 @@
  * each was a correct measurement of a tree that the very same commit then
  * edited out from under it (first the reshaped word list, then the per-input
  * envelope; each tightened the gate). So: measure these LAST, once the
- * harness has stopped changing, and re-measure any interval whose comment the
- * same commit touches. A number describing a test is invalidated by changing
- * the test — obvious in retrospect, and not obvious three times.
+ * harness has stopped changing, and RE-MEASURE WHENEVER A COMMIT CHANGES
+ * ANYTHING THESE NUMBERS DESCRIBE — this harness, the code they mutate
+ * (courts.ts and its C++ twin), or the audio they run on — whether or not it
+ * touches this paragraph. A number describing a test is invalidated by
+ * changing the test, and "the test" is all three of those.
+ *
+ * That trigger is deliberately the principle itself, because the narrower one
+ * it replaces ("re-measure any interval whose comment the same commit
+ * touches") failed on the very next commit: that one dropped `holdSec` from
+ * the voice comparison and left this text alone, so nothing fired. A rule
+ * whose trigger is narrower than its principle reads as a safeguard while
+ * staying silent on the case in front of it, which is worse than no rule.
  *
  * FOURTH TIME, in the commit that gated buildCourtEvidence. The voice
  * comparison now reads the MAPPED voice — `{t, gapSec}` — so `holdSec` is no
  * longer compared directly, which can only widen the voice gate. Every voice
- * interval above was measured while it WAS compared, so those figures are
- * upper bounds on that gate's strength rather than measurements of it: `end`
- * in the words path and `b` in the no-words path feed `holdSec` alone, so a
- * mis-ported quiet-walk terminus or segment end is now invisible unless it
- * crosses `minHold`. Re-measuring is the fix; recording that they are stale is
- * the minimum, and is what this note is. The rule above is correct and sat
- * here while I broke it once more.
+ * interval above EXCEPT the re-measured 1.1/1.8 endpoints was measured while
+ * it WAS compared, so those figures are upper bounds on that gate's strength
+ * rather than measurements of it: `end` in the words path and `b` in the
+ * no-words path feed `holdSec` alone, so a mis-ported quiet-walk terminus or
+ * segment end is now invisible unless it crosses `minHold`.
+ *
+ * Which figures the drop can actually invalidate is the opposite of the
+ * obvious answer, and worth stating because I got it backwards first.
+ * Removing a compared field can only make the comparison MORE permissive, so
+ * every SURVIVOR figure here is still a survivor — it is merely no longer
+ * known to be tight. The ones at risk are the FAIL figures: something once
+ * caught might now slip through. So re-measure the fails first.
+ * Re-measuring is the fix; recording it is the minimum, and is what this note
+ * is. The rule above did not fire here — which is why it now reads as the
+ * principle rather than a proxy for it.
  *
  * And one thing NONE of them police: compiling courts.cpp with
  * `-ffp-contract=fast` puts 64 fused multiply-adds into it where the default
