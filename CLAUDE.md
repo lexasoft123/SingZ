@@ -152,6 +152,29 @@ sign-in with it.
   Guarded by `mobile/__tests__/one-presentation.test.ts` — a headless suite
   mounts no modal and can never catch this, which is why the rule is checked
   at the source.
+- **A native method whose arity does not match JS never runs, and never
+  says so** — pass three arguments to a two-argument `RCT_EXPORT_METHOD` and
+  the bridge declines to dispatch: the promise is neither resolved nor
+  rejected, so there is no work, no error and no red box, just an app sitting
+  on its main screen looking healthy. `mlGrid` shipped that way on iOS while
+  Android's JNI already took `dumpDir`, and it read from outside as "nothing
+  happens" for ten minutes at 1.3% CPU with flat RSS. The rule that the module
+  name, **method arity** and event payloads are identical on both platforms is
+  written at the top of `SingzSplit.mm` for this reason; when a method changes
+  on one side, sweep the whole surface against `SplitModule.kt`, not just the
+  method in hand. Suites that drive a native call need a settle DEADLINE, not
+  a poll count — an unsettled promise is what this looks like from the driver.
+- **Foundation's JSON parser is not correctly rounded, so no core number may
+  reach iOS as text** — `NSJSONSerialization` reads `"0.053999999999999999"`
+  as `0.054000000000000006` where `strtod`, Kotlin and JS all read `0.054`.
+  The core writes `%.17g`, which is exactly the shape it gets wrong; SHORT
+  forms parse correctly, so checking `"0.013"` says the parser is healthy and
+  sends you looking elsewhere. Parsing `mlGridJson` back cost 49 of 2041
+  probabilities their last bit while beats and downbeats stayed identical —
+  invisible to any grid comparison, which is why the suites compare every
+  VALUE and never a count. iOS bindings build their result from the core's
+  doubles (`mlGridRounded`); Android's text hop is fine because Kotlin's
+  parser is correct.
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —

@@ -284,32 +284,32 @@ MlGrid beatThis(const std::vector<float>& signal22k, const BeatThisModels& model
   return grid;
 }
 
+MlGrid mlGridRounded(const MlGrid& grid) {
+  MlGrid out = grid;
+  for (double& v : out.beats) v = round3(v);
+  for (double& v : out.downbeats) v = round3(v);
+  for (double& v : out.beatProb) v = round3(v);
+  for (double& v : out.downbeatProb) v = round3(v);
+  return out;
+}
+
 std::string mlGridJson(const MlGrid& grid) {
   // Rounded exactly where the python runner rounds. Interchangeable by VALUE
   // with a pack-produced line, not by byte: see mlGridJson's declaration.
-  std::vector<double> beats;
-  std::vector<double> downbeats;
-  std::vector<double> bp;
-  std::vector<double> dp;
-  beats.reserve(grid.beats.size());
-  downbeats.reserve(grid.downbeats.size());
-  bp.reserve(grid.beatProb.size());
-  dp.reserve(grid.downbeatProb.size());
-  for (const double v : grid.beats) beats.push_back(round3(v));
-  for (const double v : grid.downbeats) downbeats.push_back(round3(v));
-  for (const double v : grid.beatProb) bp.push_back(round3(v));
-  for (const double v : grid.downbeatProb) dp.push_back(round3(v));
+  // One rounding implementation, two consumers — the iOS binding reads the
+  // same numbers straight off mlGridRounded rather than parsing this back.
+  const MlGrid r = mlGridRounded(grid);
 
   std::ostringstream out;
   out << "{\"beats\":";
-  appendNums(out, beats);
+  appendNums(out, r.beats);
   out << ",\"downbeats\":";
-  appendNums(out, downbeats);
+  appendNums(out, r.downbeats);
   out << ",\"beat_prob\":";
-  appendNums(out, bp);
+  appendNums(out, r.beatProb);
   out << ",\"downbeat_prob\":";
-  appendNums(out, dp);
-  out << ",\"fps\":" << grid.fps << "}";
+  appendNums(out, r.downbeatProb);
+  out << ",\"fps\":" << r.fps << "}";
   return out.str();
 }
 

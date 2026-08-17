@@ -88,6 +88,20 @@ bool runChunks(const std::vector<float>& spect, int nFrames, const BeatThisModel
 MlGrid beatThis(const std::vector<float>& signal22k, const BeatThisModels& models,
                 const BeatThisProgress& progress);
 
+/** The grid with every value rounded exactly where the python runner rounds —
+ *  the JSON contract's NUMBERS, without the text. mlGridJson serializes this,
+ *  and a binding that can hand its platform doubles directly should use this
+ *  instead of parsing the string back.
+ *
+ *  iOS must: mlGridJson writes `%.17g`, and Foundation's JSON number parser is
+ *  not correctly rounded on 17-significant-digit input — it reads
+ *  "0.053999999999999999" as 0.054000000000000006 where strtod (and Kotlin,
+ *  and JS) read 0.054. Measured, not assumed: 49 of 2041 probabilities came
+ *  back one ULP off that way, which is invisible in a grid comparison and
+ *  loud in a value comparison. Short forms parse fine, which is why a casual
+ *  check of "0.013" says the parser is healthy. */
+MlGrid mlGridRounded(const MlGrid& grid);
+
 /** The grid as the desktop's one JSON line: the same fields, rounded where the
  *  python runner rounds, so a phone-produced `ml` aux and a pack-produced one
  *  carry the same NUMBERS. Not the same bytes — this writes `%.17g` and no

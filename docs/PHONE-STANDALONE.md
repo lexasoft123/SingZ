@@ -1228,6 +1228,79 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       — which is now the whole remaining cost of a phone analysis — then
       the desktop's `analysis:run` IPC over the CLI, then retire the TS
       detectors behind a one-release flag.
+    - **4b's iOS half** (2026-08-18). `mlGrid` crosses the ObjC++ binding
+      the way it crosses JNI — 22 050 Hz mono wav + models dir in, the
+      desktop's own grid out, rate CHECKED rather than resampled. On the
+      iPhone 16 Pro simulator: 73 beats, 18 downbeats and all 4 082
+      probabilities identical to the desktop runner in 1.4 s of INFERENCE for
+      a 40.8 s song (Android, rebuilt against the same core, agrees). That
+      1.4 s is the BINDING's `elapsedMs` — each binding mints its own clock,
+      which is exactly why the two platforms' fields are not comparable — and
+      on iOS it starts after the model load; the cost table below says 2.2 s
+      for the same song because it measures the caller's JS→JS wall. Same
+      run, two spans — the note at `t0` in SingzSplit.mm is the standing
+      warning not to mix them. Treat any single EMULATOR timing as
+      indicative only: the same 40.8 s song measured 14.2, 17.6 and 26.1 s
+      across runs here, so an older figure in a commit message need not
+      contradict this table.
+      Permanent suite: `mobile/tests/mlgrid-ios.cjs`.
+      Two findings worth keeping, both of which a grid comparison is blind to:
+      **(1) arity.** The method shipped taking two arguments while the hook
+      and the JNI pass three; the bridge then never dispatches and the
+      promise never settles — no work, no rejection, no red box. Hence the
+      suite's settle DEADLINE and its native-method probe, and the CLAUDE.md
+      gotcha. **(2) `%.17g` must not reach Foundation.** `NSJSONSerialization`
+      is not correctly rounded on seventeen significant digits, so parsing
+      `mlGridJson` back cost 49 of 2041 beat probabilities and 7 downbeat
+      ones their last bit while every beat and downbeat stayed identical.
+      The binding now builds its result from the core's doubles;
+      `mlGridRounded` is the rounding, once, for both consumers.
+      The tee ships on iOS too (same wrapper, RCTLogWarn where Android uses
+      logcat) and is what settled this: the iOS logits differ from the
+      recording's — real cross-platform ORT drift — and none of it reaches a
+      rounded probability.
+    - **What the grid COSTS** (2026-08-18). Measured per run, fresh process,
+      the same audio on both. Wall is the hook's JS→JS time (model load +
+      inference + marshalling); CPU is the process's own utime+stime delta;
+      peak is `VmHWM` on Android — the kernel's high-water mark, which no
+      sampling can miss — and 100 ms `ps` sampling on the sim, **so the iOS
+      peaks are a LOWER bound and the Android ones are exact**. Read the two
+      columns as the same order of magnitude, not as a difference measured
+      to the megabyte.
+
+      | | 40.8 s song | 4 min song (6× the audio) |
+      |---|---|---|
+      | iOS sim wall | 2.2 s (19× realtime) | 6.0 s (41×) |
+      | iOS sim CPU | 8.8 s (≈4 cores) | 29.8 s |
+      | iOS sim peak RSS | 376 → 1035 MB (**+660**) | 311 → 1067 MB (**+756**) |
+      | Android emu wall | 14.3 s (2.8× realtime) | 61.3 s (4.0×) |
+      | Android emu CPU | 26.2 s (≈1.8 cores) | 114.5 s |
+      | Android emu peak RSS | 442 → 1117 MB (**+675**) | 442 → 1247 MB (**+805**) |
+
+      **The headline is that peak RSS barely tracks song length.** Six times
+      the audio costs +96 MB on iOS and +130 MB on Android — the linear part
+      (frames, spect, probabilities) — on top of a FIXED ~660-675 MB that is
+      the ORT session and its per-chunk activations. Chunks are 1500 frames
+      whatever the song is. So the memory question for the fleet is "can this
+      device spare ~700-800 MB transiently", not "how long is the song", and
+      it is the same order of magnitude on both platforms. Both RELEASE it,
+      measured after the fact rather than assumed: the sim's process sits at
+      204 MB idle having peaked at 1067, and the emulator's `VmRSS` is 473 MB
+      against a `VmHWM` of 1247 — the high-water mark never falls, so it is
+      `VmRSS` that says the memory came back.
+      Longer songs are also CHEAPER per second — 19× → 41× realtime on the
+      sim — because a 40.8 s song still pays for two padded 30 s chunks.
+      Parallelism differs sharply and is NOT one number: CPU/wall is ≈4-5
+      cores on the sim and ≈1.8 on the emulator, which is a property of those
+      two hosts' core counts and ORT's thread pool, and among the first things
+      a real device will contradict.
+      **These are a simulator and an emulator on an M2, NOT phone numbers**;
+      what they establish is the shape (fixed-cost-dominated, released after),
+      not the absolute — and on two song lengths only, so the per-minute cost
+      (28 MB on the sim, 38 on the emulator, over 3.4 added minutes) is a
+      slope through two points, not a curve. A real-device pass is still
+      owed, and the ~700-800 MB transient has to be read against the split
+      gate's own budget before beats and a split can ever run near each other.
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the

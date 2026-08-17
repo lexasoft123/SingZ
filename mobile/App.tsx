@@ -239,18 +239,21 @@ if (TEST) {
   hooks.mlGridParity = (wavPath: string, modelsDir: string, dumpDir = ''): boolean => {
     hooks.echoDone = false
     hooks.echoResult = null
-    void import('react-native')
-      .then(async (rn) => {
-        const t0 = Date.now()
-        try {
-          const g = await (rn.NativeModules as Record<string, { mlGrid: (a: string, b: string, c: string) => Promise<Record<string, unknown>> }>)
-            .SingzSplit.mlGrid(wavPath, modelsDir, dumpDir)
-          hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }
-        } catch (e) {
-          hooks.echoResult = { ok: false, error: String((e as Error)?.message ?? e) }
-        }
-        hooks.echoDone = true
-      })
+    // The STATIC NativeModules from the top of this file, never
+    // `import('react-native')`. Building that namespace object enumerates
+    // every export, which fires react-native/index.js's lazy getters — and
+    // PushNotificationIOS's throws on iOS when its native module is absent,
+    // red-boxing the app before this hook does anything. Android never showed
+    // it: the throw sits behind a Platform.OS === 'ios' check.
+    const t0 = Date.now()
+    void (NativeModules.SingzSplit as {
+      mlGrid(a: string, b: string, c: string): Promise<Record<string, unknown>>
+    })
+      .mlGrid(wavPath, modelsDir, dumpDir)
+      .then(
+        (g) => { hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }; hooks.echoDone = true },
+        (e: unknown) => { hooks.echoResult = { ok: false, error: String((e as Error)?.message ?? e) }; hooks.echoDone = true }
+      )
     return true
   }
 
