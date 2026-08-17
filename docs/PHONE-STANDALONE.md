@@ -951,16 +951,14 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       It reaches the whole `if (bars)` re-laying block — 24 head bars laid by
       the carried phase, `headBackcast` written, 36 bars, 6 suspect marks, and
       the sanitize running over a list the backcast changed.
-      **Stated plainly because it is still true**: sanitizeBars finds nothing
-      to fix on that list, so the two ORDERS still produce the same answer
-      there. The reorder is right (it is what the TS does) and is now
-      exercised, but no input yet makes the two orders disagree, and a
-      regression would probably still pass. Naming that beats implying the
-      fixture closed it.
-      Two reasons the extend case can never separate them, and both are
-      provable rather than merely observed — worth writing down so nobody
-      hunts for a counter-example that cannot exist. The `nBeats` bound is
-      EXACTLY neutral: post-backcast indices are `k - cutIdx + K` against a
+      **True for a slice, and no longer**: sanitizeBars finds nothing to fix on
+      that list, so the two ORDERS produce the same answer there —
+      `head-missing-bars` passes 38/38 against a build with the sanitize moved
+      back inside `barPhase`. A third fixture, `sanitize-order`, closes it.
+      Two reasons the extend case can never separate them ON THAT FIXTURE, and
+      both are provable rather than merely observed — worth writing down so
+      nobody hunts for a counter-example that cannot exist. The `nBeats` bound
+      is EXACTLY neutral: post-backcast indices are `k - cutIdx + K` against a
       bound of `nb - cutIdx + K`, so `k - cutIdx + K < nb - cutIdx + K` iff
       `k < nb`, in extend and replace alike. And the head bars are
       sanitize-invariant by construction: `carried` and `chord` both step by
@@ -968,21 +966,60 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       (chord), so no gap the head contributes can trip either limb. Since
       backcastHead reads only `bars.length > 0`, `bars.filter(k >= cutIdx)`
       and `body[0]`, every way in runs through `bars` itself.
-      **The one to build, worked out and not yet built**: a sanitize that
-      moves `bars[0]`. At `hit === 1` the merge loop's `dropLo` branch deletes
-      `db[0]` outright, and since `carried` walks back from `body[0]`, a moved
-      `body[0]` moves EVERY head bar. On this fixture's numbers — raw bars
-      `[0, 1, 5, 9, …]`, bpb 4, K 24 — the old order sanitizes first
-      (`cost(dropHi) 1 > cost(dropLo) 0`, so 0 goes) and yields carried
-      `[1, 5, 9, 13, 17, 21]` with `downbeat` 1; the new order lays the head
-      from the raw 24 first and then ties on cost, keeping 24, and yields
-      `downbeat` 0. Six different head bar times and a different rotation —
-      audible, not bookkeeping. Recipe: flip the kit's accent to a new
-      rotation about two bars into the body so `phasePieces` emits a short
-      first piece, AND alternate two different triads on the bar line flipping
-      with the accent — a single triad throughout leaves `harmNov` flat, so
-      `hasHarmNov` is false and the +0.3 global gain test reverts the cut.
-      That is the next slice's first job.
+      **`sanitize-order`, built and measured.** The lever is the FIRST bar
+      pair, and it is the merge loop's cost comparison rather than the bound:
+      at `hit === 1`, dropping `db[0]` DELETES a gap outright while dropping
+      `db[1]` merely merges two, so the cheap delete wins — but only while the
+      pair is at the front. Let the backcast prepend head bars and the same
+      pair sits in the interior, both options merge, the tie goes the other way,
+      and the song's whole bar rotation lands a beat off.
+      Manufacturing a defective FIRST pair takes a phase cut. Bars are laid per
+      piece at `k ≡ rot (mod bpb)` (analysis.ts:1379), so a cut at beat 4 with
+      rotation 3 before it and 0 after gives `[3, 4, 8, 12, …]`: one bar from
+      the leading piece, then the next piece's first bar one beat later. Three
+      things gate that cut, and each cost an attempt. The interval defect must
+      sit at `k = 3` — `cut = k + 1` and `phasePieces` never looks at `k = 0`,
+      so a defect on the first interval proposes nothing. The segment vote and
+      the window vote must DISAGREE: with no bass the segment reads kick and
+      slam (accent on rotation 3) while the window is 0.45 harmonic
+      (chords changing on rotation 0), and agreeing cues propose nothing. And
+      the cut must clear the +0.3 global harmonic test (analysis.ts:1409).
+      The trap that cost the most was none of those: `harmNov` falls back to
+      the BASS-only novelty unless `harmParts.length > 1` (analysis.ts:1101).
+      With a single `other` and no bass, `windowRot` bails at its
+      `hUsed < bpb && lUsed < 2` guard for every window, no cut is proposed at
+      all, and both orders agree — the fixture was built and measured that way
+      once, reading green and proving nothing. It writes `guitar.wav` as well.
+      The head must also stay TRACKED, which is why the defect sits at index 3
+      and not 1: `unsteady` is `off / anchor > 0.25`, so index 1 gives anchor 2
+      and ratio 1/2 — unsteady, and a deliberately free-time intro can never
+      have trusted onsets, so `backcastHead` returns null at analysis.ts:1870
+      and nothing happens. At index 3 the anchor is 4 and the ratio is exactly
+      0.25, not greater, so the extend path runs.
+      Measured, correct order: `headBackcast` {added 22, carried}, `phaseCuts`
+      [4], `harmGain` {plain 0, cut 0.9997}, `sanitized` {74 → 73}, downbeats
+      `[1, 5, 9, 13, 17, 21]`, `downbeat` 1, 7 suspect marks. Sanitize moved
+      back into `barPhase`: `[2, 6, 10, 14, 18, 22]`, `downbeat` 2, 6 suspects,
+      no `sanitized` at all — the harness stops at
+      `FIRST DIVERGENCE at sanitized: ts=74:73 c++=none`, exit 1, while both
+      older fixtures still PASS. Six different head bar times and a different
+      rotation: audible, not bookkeeping.
+      The precondition pins the cut INDEX, not merely that some cut happened.
+      Review found the hole, and simulating every cut index against verbatim
+      `buildBars`/`sanitizeBars` sized it. Beat 4 is the only cut where the two
+      orders differ at all. Every LATER BAR LINE leaves the leading piece two
+      bars or more, so the short pair lands in the interior, both orders drop
+      the same one, and `sanitized` still reads 74:73 with `downbeats[0]` still
+      1 — silent, every time. Cuts BETWEEN bar lines fail loudly on their own:
+      the leading bar sits a clear 5 beats from the next piece, so there is no
+      short pair and sanitize never runs. A whole class of silent cuts is the
+      exact vacuity the preconditions exist to prevent, and pinning the index
+      closes it.
+      No count is given on purpose. Three drafts of this paragraph carried
+      three different totals — 3, then 66, then a range that assumed cuts could
+      reach 268 when `phasePieces` cannot place one past its last window centre
+      — because each was a sweep's bounds quoted as a population. The mechanism
+      is frame-independent and the numbers were not, so the numbers went.
     - Two silent-skip paths in the anti-vacuity machinery, both closed: a
       fixture added without a `FIXTURE_PRECONDITIONS` entry used to run
       unguarded and print PASS (the harness now refuses to start, exit 2), and
