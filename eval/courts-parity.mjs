@@ -1,6 +1,10 @@
 /**
- * Parity gate for the courts' extractor layer — `to22k`, `chromaFrames` (and
- * the FFT under it) and `rmsEnvelope`, C++ against the TypeScript.
+ * Parity gate for the courts' evidence side, C++ against the TypeScript:
+ * `buildCourtEvidence` itself, and beneath it `to22k`, `chromaFrames` (with the
+ * FFT), `beatSyncChroma`, `rmsEnvelope`, `chordRuns`, `vocalEvidence` and
+ * `formSeams`. The CLI calls the real assembly rather than a hand-built twin,
+ * so the rounding, the `sec = len * latPer` conversion and the abstention
+ * contract are gated too.
  *
  * This layer gets its own harness rather than riding on beats-parity because
  * of what it runs on. Everything ported before it was arithmetic the porting
@@ -50,6 +54,17 @@
  * same commit touches. A number describing a test is invalidated by changing
  * the test — obvious in retrospect, and not obvious three times.
  *
+ * FOURTH TIME, in the commit that gated buildCourtEvidence. The voice
+ * comparison now reads the MAPPED voice — `{t, gapSec}` — so `holdSec` is no
+ * longer compared directly, which can only widen the voice gate. Every voice
+ * interval above was measured while it WAS compared, so those figures are
+ * upper bounds on that gate's strength rather than measurements of it: `end`
+ * in the words path and `b` in the no-words path feed `holdSec` alone, so a
+ * mis-ported quiet-walk terminus or segment end is now invisible unless it
+ * crosses `minHold`. Re-measuring is the fix; recording that they are stale is
+ * the minimum, and is what this note is. The rule above is correct and sat
+ * here while I broke it once more.
+ *
  * And one thing NONE of them police: compiling courts.cpp with
  * `-ffp-contract=fast` puts 64 fused multiply-adds into it where the default
  * build has none, and every comparison here still reports identical. The
@@ -81,7 +96,7 @@ if (!existsSync(lib)) {
   console.error('mobile/src/gen/analysis-lib.js is missing — run `npm ci` in mobile/')
   process.exit(2)
 }
-const { to22k, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns, vocalEvidence, formSeams } = await import(pathToFileURL(lib).href)
+const { to22k, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns, vocalEvidence, formSeams, buildCourtEvidence } = await import(pathToFileURL(lib).href)
 if (typeof chromaFrames !== 'function') {
   console.error('the analysis bundle does not export the courts extractors — rebuild it')
   process.exit(2)
@@ -315,6 +330,7 @@ for (const path of wavs) {
     const vw = readWavMono(vocalsWav)
     const venv = rmsEnvelope(to22k(monoAt44k(vw)))
     tsVoice = vocalEvidence(venv, tsBeats, WORDS.map(([s2, e]) => ({ s: s2, e })))
+      .map((v) => ({ t: Math.round(v.t * 1000) / 1000, gapSec: Math.round((v.gapSec ?? 0) * 100) / 100 }))
     // The NO-WORDS fallback too — phraseSegments and the last-rise loop, which
     // the words path never reaches. It ran ZERO times until this line existed.
     // Partially closed, and the measurement says which part. CAUGHT now: the
@@ -334,6 +350,7 @@ for (const path of wavs) {
     // while the branch it exists for ran on someone else's audio.
     // `tsRms` above is this same envelope — one value, one name.
     tsVoiceNW = vocalEvidence(tsRms, tsBeats, null)
+      .map((v) => ({ t: Math.round(v.t * 1000) / 1000, gapSec: Math.round((v.gapSec ?? 0) * 100) / 100 }))
     cNW = JSON.parse(execFileSync(bin,
       ['courts', '--wav', path, '--lo', String(lo), '--hi', String(hi), '--vocals-wav', path],
       { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
@@ -341,15 +358,28 @@ for (const path of wavs) {
     tsSeams = formSeams(beatSyncChroma(chromaFrames(x22, lo, hi), tsBeats), venv, tsBeats)
     voiceComparisons++
   }
-  let tsRuns = null
-  if (wantChords) {
-    const bw = readWavMono(bassWav)
-    const b22 = to22k(monoAt44k(bw))
-    const Ch = beatSyncChroma(chromaFrames(x22, 55, 2000), tsBeats)
-    const Cb = beatSyncChroma(chromaFrames(b22, 41, 400), tsBeats)
-    tsRuns = chordRuns(Ch, Cb, tsBeats)
-    chordComparisons++
+  let tsEv = null
+  if (wantChords || wantVoice) {
+    // The CLI's `courts` run assembles harm = this input, bass, vocals and the
+    // words — so the TS side builds the same CourtSources and calls the same
+    // function. 0.5 s beats => 120 bpm, matching the tool.
+    tsEv = buildCourtEvidence(
+      { bpm: 120, beatsPerBar: 4, downbeat: 0, beats: tsBeats },
+      // 44.1k mono — buildCourtEvidence calls to22k itself.
+      // Mirrors the CLI's own conditionality: a missing bass or missing vocals
+      // is the abstention contract, not a reason to skip the comparison. It
+      // was `wantChords && wantVoice`, which meant a bass-but-no-vocals input
+      // list compared ZERO chord runs while printing "IDENTICAL on every file".
+      { harm: [monoAt44k(w)],
+        bass: wantChords ? monoAt44k(readWavMono(bassWav)) : null,
+        vocals: wantVoice ? monoAt44k(readWavMono(vocalsWav)) : null,
+        words: wantVoice ? WORDS.map(([a, b2]) => ({ s: a, e: b2 })) : null }
+    )
   }
+  // The TS-side hand-built Ch/Cb/chordRuns twin lived here. It was the other
+  // half of the duplicate assembly: the CLI's copy went when it started calling
+  // buildCourtEvidence, and this one had no reason to outlive it. `tsEv.runs` is
+  // the same chord runs from the same function, which is the point.
 
   const problems = []
   if (c.to22kLen !== x22.length) problems.push(`to22k length ts=${x22.length} c++=${c.to22kLen}`)
@@ -370,13 +400,39 @@ for (const path of wavs) {
       }
     }
   }
-  if (tsRuns) {
+  if (tsEv) {
+    // buildCourtEvidence's OWN output now, not a hand-rebuilt copy of its
+    // parts — the CLI calls the function, so this gates the rounding, the
+    // `sec = len * latPer` conversion and the assembly order too.
     const cr = c.chordRuns ?? []
-    if (cr.length !== tsRuns.length) problems.push(`chordRuns count ts=${tsRuns.length} c++=${cr.length}`)
-    for (let i = 0; i < Math.min(tsRuns.length, cr.length); i++) {
-      if (tsRuns[i].name !== cr[i].name || differs(tsRuns[i].t, cr[i].t) || tsRuns[i].len !== cr[i].len) {
-        problems.push(`chordRuns[${i}] ts=${tsRuns[i].name}@${show(tsRuns[i].t)}x${tsRuns[i].len}` +
-          ` c++=${cr[i].name}@${show(cr[i].t)}x${cr[i].len}`)
+    // Counted where the COMPARISON happens. It used to increment beside the
+    // TS-side computation, so when the comparison was skipped the guard that
+    // exists to notice that stayed silent.
+    if (wantChords) chordComparisons++
+    if (cr.length !== tsEv.runs.length) problems.push(`ev.runs count ts=${tsEv.runs.length} c++=${cr.length}`)
+    for (let i = 0; i < Math.min(tsEv.runs.length, cr.length); i++) {
+      if (tsEv.runs[i].c !== cr[i].name || differs(tsEv.runs[i].t, cr[i].t) ||
+          differs(tsEv.runs[i].sec, cr[i].sec)) {
+        problems.push(`ev.runs[${i}] ts=${tsEv.runs[i].c}@${show(tsEv.runs[i].t)}/${show(tsEv.runs[i].sec)}` +
+          ` c++=${cr[i].name}@${show(cr[i].t)}/${show(cr[i].sec)}`)
+        break
+      }
+    }
+    const cvv = c.voice ?? []
+    if (cvv.length !== tsEv.voice.length) problems.push(`ev.voice count ts=${tsEv.voice.length} c++=${cvv.length}`)
+    for (let i = 0; i < Math.min(tsEv.voice.length, cvv.length); i++) {
+      if (differs(tsEv.voice[i].t, cvv[i].t) || differs(tsEv.voice[i].gapSec, cvv[i].gapSec)) {
+        problems.push(`ev.voice[${i}] ts=${show(tsEv.voice[i].t)}/${show(tsEv.voice[i].gapSec)}` +
+          ` c++=${show(cvv[i].t)}/${show(cvv[i].gapSec)}`)
+        break
+      }
+    }
+    const csm = c.seams ?? []
+    const tsm = tsEv.seams.map((s2) => s2.t)
+    if (csm.length !== tsm.length) problems.push(`ev.seams count ts=${tsm.length} c++=${csm.length}`)
+    for (let i = 0; i < Math.min(tsm.length, csm.length); i++) {
+      if (differs(tsm[i], csm[i])) {
+        problems.push(`ev.seams[${i}] ts=${show(tsm[i])} c++=${show(csm[i])}`)
         break
       }
     }
@@ -385,10 +441,13 @@ for (const path of wavs) {
     const cv = c.voice ?? []
     if (cv.length !== tsVoice.length) problems.push(`voice count ts=${tsVoice.length} c++=${cv.length}`)
     for (let i = 0; i < Math.min(tsVoice.length, cv.length); i++) {
-      if (differs(tsVoice[i].t, cv[i].t) || differs(tsVoice[i].holdSec, cv[i].holdSec) ||
-          differs(tsVoice[i].gapSec, cv[i].gapSec)) {
-        problems.push(`voice[${i}] ts=${show(tsVoice[i].t)}/${show(tsVoice[i].holdSec)}/${show(tsVoice[i].gapSec)}` +
-          ` c++=${show(cv[i].t)}/${show(cv[i].holdSec)}/${show(cv[i].gapSec)}`)
+      // t and gapSec only: the CLI emits buildCourtEvidence's MAPPED voice,
+      // which drops holdSec by design (courts.ts maps to {t, gapSec}). holdSec
+      // is still gated in effect — it decides WHICH entries survive and at
+      // what t, which is what caught the merge-gap mutation.
+      if (differs(tsVoice[i].t, cv[i].t) || differs(tsVoice[i].gapSec, cv[i].gapSec)) {
+        problems.push(`voice[${i}] ts=${show(tsVoice[i].t)}/${show(tsVoice[i].gapSec)}` +
+          ` c++=${show(cv[i].t)}/${show(cv[i].gapSec)}`)
         break
       }
     }
@@ -396,11 +455,10 @@ for (const path of wavs) {
     if (nw.length !== tsVoiceNW.length)
       problems.push(`voice(no-words) count ts=${tsVoiceNW.length} c++=${nw.length}`)
     for (let i = 0; i < Math.min(tsVoiceNW.length, nw.length); i++) {
-      if (differs(tsVoiceNW[i].t, nw[i].t) || differs(tsVoiceNW[i].holdSec, nw[i].holdSec) ||
-          differs(tsVoiceNW[i].gapSec, nw[i].gapSec)) {
+      if (differs(tsVoiceNW[i].t, nw[i].t) || differs(tsVoiceNW[i].gapSec, nw[i].gapSec)) {
         problems.push(`voice(no-words)[${i}] ` +
-          `ts=${show(tsVoiceNW[i].t)}/${show(tsVoiceNW[i].holdSec)}/${show(tsVoiceNW[i].gapSec)} ` +
-          `c++=${show(nw[i].t)}/${show(nw[i].holdSec)}/${show(nw[i].gapSec)}`)
+          `ts=${show(tsVoiceNW[i].t)}/${show(tsVoiceNW[i].gapSec)} ` +
+          `c++=${show(nw[i].t)}/${show(nw[i].gapSec)}`)
         break
       }
     }
@@ -444,7 +502,7 @@ for (const path of wavs) {
     console.log(`PASS  ${label}`)
     console.log(`      [${band[0]}-${band[1]} Hz] ${c.chromaFrames} chroma + ${c.beatSync?.length ?? 0} beat-sync` +
       ` + ${c.rmsFrames} rms + p95` +
-      (tsRuns ? ` + ${tsRuns.length} chord runs` : '') +
+      (tsEv && wantChords ? ` + ${tsEv.runs.length} chord runs` : '') +
       (tsVoice ? ` + ${tsVoice.length}/${tsVoiceNW.length} voice (words/none) + ${tsSeams.length} seams` : '') +
       ' — all identical')
     compared++

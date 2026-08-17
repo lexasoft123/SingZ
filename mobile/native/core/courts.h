@@ -72,6 +72,41 @@ struct CourtEvidence {
   // `ml` is absent because the ML lattice is not ported; the TS's null.
 };
 
+/** The stems the courts are assembled from — mono at 44.1 kHz, as the rest of
+ *  the core carries them. `harm` is the harmonic layer (the TS's aux.inst),
+ *  summed; `bass` names chord roots; `vocals` gives holds and seams. */
+struct CourtSources {
+  // A POINTER, like bass and vocals below. By value this deep-copied every
+  // harmonic stem's PCM at the assignment — ~53 MB each on a five-minute song,
+  // ~159 MB for other/guitar/piano — on top of the ~105 MB the conversion loop
+  // inside already peaks at. beats.h's BeatAux carries this same note after
+  // making the same mistake; repeating it two files later is what comments
+  // like that exist to prevent.
+  const std::vector<AnalysisStem>* harm = nullptr;
+  const AnalysisStem* bass = nullptr;
+  const AnalysisStem* vocals = nullptr;
+  std::vector<std::pair<double, double>> words;
+};
+
+/** The grid the courts are asked to judge. */
+struct CourtGrid {
+  double bpm = 0;
+  int beatsPerBar = 4;
+  int downbeat = 0;
+  std::vector<double> beats;
+};
+
+/**
+ * Everything the courts are allowed to weigh, assembled from the stems the
+ * detector already has — `buildCourtEvidence`.
+ *
+ * The abstention contract lives here rather than in the courts: a track with
+ * no harmonic stem yields no chord runs, one with no bass yields none either
+ * (the bass names the roots), and `applyCourts` then declines to speak at all
+ * on `runs.length < 8`. Missing evidence is silence, never a guess.
+ */
+CourtEvidence buildCourtEvidence(const CourtGrid& det, const CourtSources& src);
+
 /** 44.1k mono to 22.05k by pair-averaging — the chroma band tops out at
  *  2 kHz, where a 2-tap box is transparent. */
 std::vector<float> to22k(const std::vector<float>& x);

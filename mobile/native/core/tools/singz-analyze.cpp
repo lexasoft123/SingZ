@@ -443,67 +443,64 @@ int main(int argc, char** argv) {
         std::printf("]");
       }
     }
-    std::printf("],\"chordRuns\":[");
-    if (!bassPath.empty()) {
-      // The chord layer as buildCourtEvidence assembles it: the harmonic
-      // chroma over 55-2000 and the BASS chroma over 41-400 naming the root,
-      // both on the same lattice. The lattice here is the synthetic half-
-      // second grid above — the point is to exercise the Viterbi, not to be
-      // musical, and both sides use the same one.
-      singz::MonoWav bw = singz::readWavMono(bassPath);
-      if (!bw.ok) {
-        std::fprintf(stderr, "could not read %s: %s\n", bassPath.c_str(), bw.error.c_str());
-        return 1;
-      }
-      singz::AnalysisStem bst;
-      bst.mono = std::move(bw.samples);
-      bst.sampleRate = bw.sampleRate;
-      const std::vector<float> b22 = singz::to22k(singz::monoAt44kPublic(bst));
-      std::vector<double> beats;
-      const double dur = static_cast<double>(x.size()) / 22050.0;
-      for (double t = 0; t < dur; t += 0.5) beats.push_back(t);
-      const std::vector<std::vector<float>> Ch = singz::beatSyncChroma(singz::chromaFrames(x, 55, 2000), beats);
-      const std::vector<std::vector<float>> Cb = singz::beatSyncChroma(singz::chromaFrames(b22, 41, 400), beats);
-      const std::vector<singz::ChordSeg> runs = singz::chordRuns(Ch, Cb, beats);
-      for (size_t i = 0; i < runs.size(); i++)
-        std::printf("%s{\"name\":\"%s\",\"t\":%.17g,\"len\":%d}", i ? "," : "", runs[i].name.c_str(), runs[i].t,
-                    runs[i].len);
-    }
-    std::printf("],\"voice\":[");
+    // ONE assembly, not two. This block used to hand-build the same
+    // Ch/Cb/chordRuns and rmsEnvelope->vocalEvidence->formSeams pipeline that
+    // buildCourtEvidence now owns — so the parity gate watched a copy of the
+    // real function rather than the function. Calling it here gates it and
+    // retires the duplicate in one move.
+    std::printf("],");
     {
       std::vector<double> beats;
       const double dur = static_cast<double>(x.size()) / 22050.0;
       for (double t = 0; t < dur; t += 0.5) beats.push_back(t);
+
+      std::vector<singz::AnalysisStem> harm;
+      harm.push_back(st);
+      singz::AnalysisStem bassStem, vocalStem;
+      singz::CourtSources src;
+      src.harm = &harm;
+      if (!bassPath.empty()) {
+        singz::MonoWav bw = singz::readWavMono(bassPath);
+        if (!bw.ok) {
+          std::fprintf(stderr, "could not read %s: %s\n", bassPath.c_str(), bw.error.c_str());
+          return 1;
+        }
+        bassStem.mono = std::move(bw.samples);
+        bassStem.sampleRate = bw.sampleRate;
+        src.bass = &bassStem;
+      }
       if (!vocalsPath.empty()) {
         singz::MonoWav vw = singz::readWavMono(vocalsPath);
         if (!vw.ok) {
           std::fprintf(stderr, "could not read %s: %s\n", vocalsPath.c_str(), vw.error.c_str());
           return 1;
         }
-        singz::AnalysisStem vst;
-        vst.mono = std::move(vw.samples);
-        vst.sampleRate = vw.sampleRate;
-        const std::vector<float> v22 = singz::to22k(singz::monoAt44kPublic(vst));
-        const singz::RmsEnvelope venv = singz::rmsEnvelope(v22);
-        const std::vector<singz::VoiceHit> vh =
-            singz::vocalEvidence(venv, beats, words.empty() ? nullptr : &words);
-        // gapSec is genuinely Infinity for a final word with no successor —
-        // the TS keeps it that way and the comparison must see it. C's %g
-        // prints `inf`, which is not JSON, so emit the overflowing literal
-        // `1e999`, which JSON.parse turns back into Infinity exactly.
-        const auto num = [](double v) { return std::isinf(v) ? (v > 0 ? "1e999" : "-1e999") : nullptr; };
-        for (size_t i = 0; i < vh.size(); i++) {
-          std::printf("%s{\"t\":%.17g,\"holdSec\":%.17g,\"gapSec\":", i ? "," : "", vh[i].t, vh[i].holdSec);
-          if (const char* lit = num(vh[i].gapSec)) std::printf("%s}", lit);
-          else std::printf("%.17g}", vh[i].gapSec);
-        }
-        std::printf("],\"seams\":[");
-        const std::vector<std::vector<float>> ChS = singz::beatSyncChroma(ch, beats);
-        const std::vector<double> sm = singz::formSeams(ChS, venv, beats);
-        for (size_t i = 0; i < sm.size(); i++) std::printf("%s%.17g", i ? "," : "", sm[i]);
-      } else {
-        std::printf("],\"seams\":[");
+        vocalStem.mono = std::move(vw.samples);
+        vocalStem.sampleRate = vw.sampleRate;
+        src.vocals = &vocalStem;
       }
+      src.words = words;
+
+      singz::CourtGrid det;
+      // 0.5 s beats -> 120 bpm, so `sec` below is len * 0.5 exactly.
+      det.bpm = 120;
+      det.beats = beats;
+      const singz::CourtEvidence ev = singz::buildCourtEvidence(det, src);
+
+      std::printf("\"chordRuns\":[");
+      for (size_t i2 = 0; i2 < ev.runs.size(); i2++)
+        std::printf("%s{\"name\":\"%s\",\"t\":%.17g,\"sec\":%.17g}", i2 ? "," : "", ev.runs[i2].c.c_str(),
+                    ev.runs[i2].t, ev.runs[i2].sec);
+      std::printf("],\"voice\":[");
+      for (size_t i2 = 0; i2 < ev.voice.size(); i2++) {
+        std::printf("%s{\"t\":%.17g,\"gapSec\":", i2 ? "," : "", ev.voice[i2].t);
+        const double g = ev.voice[i2].gapSec;
+        if (std::isinf(g)) std::printf("%s}", g > 0 ? "1e999" : "-1e999");
+        else std::printf("%.17g}", g);
+      }
+      std::printf("],\"seams\":[");
+      for (size_t i2 = 0; i2 < ev.seams.size(); i2++) std::printf("%s%.17g", i2 ? "," : "", ev.seams[i2]);
+      // seams is closed by the `],"rms":[` that follows — do NOT close it here.
     }
     std::printf("],\"rms\":[");
     for (size_t f = 0; f < env.rms.size(); f++)

@@ -519,4 +519,62 @@ std::vector<double> formSeams(const std::vector<std::vector<float>>& Ch, const R
   return seams;
 }
 
+// ---- courts.ts: buildCourtEvidence ----------------------------------------
+
+CourtEvidence buildCourtEvidence(const CourtGrid& det, const CourtSources& src) {
+  CourtEvidence ev;
+  const double latPer = 60 / det.bpm;
+  const std::vector<double>& lattice = det.beats;
+  const auto r3 = [](double x) { return jsRound(x * 1000) / 1000; };
+  const auto r2 = [](double x) { return jsRound(x * 100) / 100; };
+
+  // The chord layer needs at least one harmonic stem AND the bass root-namer.
+  // Converted one at a time rather than all at once: the TS can hold every
+  // to22k result because its monoAt44k hands back the buffer's own data, and
+  // this side must copy — the same ~30 MB-per-song-minute lesson analysis.cpp
+  // and beats.cpp both had to learn.
+  std::vector<std::vector<float>> Ch;
+  bool haveCh = false;
+  if (src.harm && !src.harm->empty()) {
+    std::vector<float> harmSum = to22k(monoAt44kPublic((*src.harm)[0]));
+    for (size_t s = 1; s < src.harm->size(); s++) {
+      const std::vector<float> y = to22k(monoAt44kPublic((*src.harm)[s]));
+      const size_t m = std::min(harmSum.size(), y.size());
+      std::vector<float> sum(m);
+      for (size_t i = 0; i < m; i++)
+        sum[i] = static_cast<float>(static_cast<double>(harmSum[i]) + static_cast<double>(y[i]));
+      harmSum = std::move(sum);
+    }
+    Ch = beatSyncChroma(chromaFrames(harmSum, 55, 2000), lattice);
+    haveCh = true;
+    harmSum.clear();
+    harmSum.shrink_to_fit();
+    if (src.bass) {
+      // Scoped so the 22k copy dies before chordRuns runs — ~26 MB that has no
+      // reader past the chroma.
+      const std::vector<std::vector<float>> Cb = [&] {
+        const std::vector<float> bass22 = to22k(monoAt44kPublic(*src.bass));
+        return beatSyncChroma(chromaFrames(bass22, 41, 400), lattice);
+      }();
+      for (const ChordSeg& r : chordRuns(Ch, Cb, lattice))
+        ev.runs.push_back({r3(r.t), r3(r.len * latPer), r.name});
+    }
+  }
+  if (src.vocals) {
+    const RmsEnvelope env = [&] {
+      const std::vector<float> vocals22 = to22k(monoAt44kPublic(*src.vocals));
+      return rmsEnvelope(vocals22);
+    }();
+    for (const VoiceHit& v : vocalEvidence(env, lattice, src.words.empty() ? nullptr : &src.words))
+      ev.voice.push_back({r3(v.t), r2(v.gapSec)});
+    if (haveCh)
+      for (const double t : formSeams(Ch, env, lattice)) ev.seams.push_back(r3(t));
+  }
+  for (const auto& w : src.words) ev.words.push_back({r2(w.first), r2(w.second)});
+  // `notes` stays empty — the app has no polyphonic transcriber and the TS
+  // passes [] unconditionally. `ml` is absent for the same reason it is absent
+  // from BeatAux: not ported.
+  return ev;
+}
+
 }  // namespace singz

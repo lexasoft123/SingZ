@@ -58,7 +58,7 @@ export { applyUserBars } from './beat'
 // hypot for its ANSWERS rather than for a window, and libm agreement with V8
 // is an empirical property of the platform rather than anything the porting
 // rules can enforce — so it is measured, not assumed.
-export { to22k, fftComplex, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns, vocalEvidence, formSeams } from './courts'
+export { to22k, fftComplex, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns, vocalEvidence, formSeams, buildCourtEvidence } from './courts'
 export {
   LRCLIB_API, LRCLIB_HEADERS, fixTagEncoding, realArtist, metaFromFilename,
   parseLrc, lookupLyrics, searchCandidates, lyricsById
