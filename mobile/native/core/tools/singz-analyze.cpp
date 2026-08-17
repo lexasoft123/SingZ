@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "../analysis.h"
+#include "../beat_this.h"
 #include "../beats.h"
 #include "../courts.h"
 #include "../melody.h"
@@ -506,6 +507,169 @@ int main(int argc, char** argv) {
     for (size_t f = 0; f < env.rms.size(); f++)
       std::printf("%s%.17g", f ? "," : "", static_cast<double>(env.rms[f]));
     std::printf("]}\n");
+    return 0;
+  }
+
+  if (std::strcmp(argv[1], "mlgrid") == 0) {
+    // The Beat This! runner with its two graph calls REPLAYED from recordings
+    // rather than run. The host has no ONNX Runtime, and it does not need one
+    // to gate this: every way the port can be wrong — the reflect padding, the
+    // hop arithmetic, the chunk starts, the keep_first ordering, the border
+    // trim, the peak picking, the dedupe, the downbeat snap, the rounding —
+    // lives on this side of the model. eval/mlgrid-parity.mjs feeds this the
+    // tensors scripts/beat_runner_onnx.py actually fed ORT, and compares what
+    // comes back. The graphs themselves are proved on-device, where they run.
+    std::string f32Path, spectPath, chunkBeatPath, chunkDownPath, framesOut, logitsOut;
+    std::string logitsBeatPath, logitsDownPath;
+    for (int i = 2; i < argc; i++) {
+      const bool isF32 = std::strcmp(argv[i], "--f32") == 0;
+      const bool isSpect = std::strcmp(argv[i], "--spect") == 0;
+      const bool isCb = std::strcmp(argv[i], "--chunk-beat") == 0;
+      const bool isCd = std::strcmp(argv[i], "--chunk-down") == 0;
+      const bool isFramesOut = std::strcmp(argv[i], "--frames-out") == 0;
+      const bool isLogitsOut = std::strcmp(argv[i], "--logits-out") == 0;
+      const bool isLb = std::strcmp(argv[i], "--logits-beat") == 0;
+      const bool isLd = std::strcmp(argv[i], "--logits-down") == 0;
+      if (!(isF32 || isSpect || isCb || isCd || isFramesOut || isLogitsOut || isLb || isLd)) {
+        std::fprintf(stderr, "mlgrid: unknown argument %s\n", argv[i]);
+        return 2;
+      }
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "mlgrid: %s needs a value\n", argv[i]);
+        return 2;
+      }
+      if (isF32) f32Path = argv[++i];
+      else if (isSpect) spectPath = argv[++i];
+      else if (isCb) chunkBeatPath = argv[++i];
+      else if (isCd) chunkDownPath = argv[++i];
+      else if (isFramesOut) framesOut = argv[++i];
+      else if (isLb) logitsBeatPath = argv[++i];
+      else if (isLd) logitsDownPath = argv[++i];
+      else logitsOut = argv[++i];
+    }
+
+    // Postprocess-only mode: logits straight in, no framing and no chunks. The
+    // real song reaches none of the postprocessor's edges — measured on the
+    // sample, 89 peaks with not one adjacent pair, so the dedupe never merges;
+    // no logit within 65 of the sigmoid clip; no exact zero; no snap tie. Every
+    // one of those is a live branch that a real input simply does not visit, so
+    // the fixture feeds them directly. Same reasoning as eval/beats/fixtures.mjs.
+    if (!logitsBeatPath.empty() || !logitsDownPath.empty()) {
+      if (logitsBeatPath.empty() || logitsDownPath.empty()) {
+        std::fprintf(stderr, "mlgrid: --logits-beat and --logits-down go together\n");
+        return 2;
+      }
+      const std::vector<float> lb = readF32(logitsBeatPath);
+      const std::vector<float> ld = readF32(logitsDownPath);
+      if (lb.empty() || lb.size() != ld.size()) {
+        std::fprintf(stderr, "mlgrid: logit rows are %zu and %zu floats\n", lb.size(), ld.size());
+        return 1;
+      }
+      singz::MlGrid g;
+      singz::postprocess(lb, ld, g.beats, g.downbeats);
+      g.beatProb.reserve(lb.size());
+      g.downbeatProb.reserve(ld.size());
+      for (const float v : lb) g.beatProb.push_back(singz::sigmoidProb(v));
+      for (const float v : ld) g.downbeatProb.push_back(singz::sigmoidProb(v));
+      g.ok = true;
+      std::fprintf(stderr, "mlgrid: postprocess-only, %zu frames, %zu beats, %zu downbeats\n",
+                   lb.size(), g.beats.size(), g.downbeats.size());
+      std::printf("%s\n", singz::mlGridJson(g).c_str());
+      return 0;
+    }
+
+    if (f32Path.empty() || spectPath.empty() || chunkBeatPath.empty() || chunkDownPath.empty()) {
+      std::fprintf(stderr,
+                   "usage: singz-analyze mlgrid --f32 <in> --spect <spect.f32> "
+                   "--chunk-beat <b.f32> --chunk-down <d.f32> [--frames-out <p>] "
+                   "[--logits-out <prefix>]\n");
+      return 2;
+    }
+
+    const std::vector<float> signal = readF32(f32Path);
+    if (signal.empty()) {
+      std::fprintf(stderr, "mlgrid: could not read %s\n", f32Path.c_str());
+      return 1;
+    }
+    int nFrames = 0;
+    const std::vector<float> frames = singz::frameSignal(signal, nFrames);
+    if (!framesOut.empty()) {
+      FILE* fo = std::fopen(framesOut.c_str(), "wb");
+      if (!fo) {
+        std::fprintf(stderr, "mlgrid: could not write %s\n", framesOut.c_str());
+        return 1;
+      }
+      std::fwrite(frames.data(), sizeof(float), frames.size(), fo);
+      std::fclose(fo);
+    }
+
+    const std::vector<float> spect = readF32(spectPath);
+    if (spect.size() != static_cast<size_t>(nFrames) * 128) {
+      std::fprintf(stderr, "mlgrid: spect has %zu floats, this port framed %d rows (%zu)\n",
+                   spect.size(), nFrames, static_cast<size_t>(nFrames) * 128);
+      return 1;
+    }
+    const std::vector<float> cb = readF32(chunkBeatPath);
+    const std::vector<float> cd = readF32(chunkDownPath);
+    const size_t chunkLen = static_cast<size_t>(singz::kBeatThisChunk);
+    if (cb.size() % chunkLen != 0 || cb.size() != cd.size()) {
+      std::fprintf(stderr, "mlgrid: chunk logits are %zu/%zu floats, not whole %zu-frame rows\n",
+                   cb.size(), cd.size(), chunkLen);
+      return 1;
+    }
+    const size_t recorded = cb.size() / chunkLen;
+
+    // Replay in call order. A port that asked for a different NUMBER of chunks,
+    // or in the other order, would silently line up against the wrong logits —
+    // so the count is checked against the recording afterwards, and the
+    // callback refuses to run off the end.
+    size_t call = 0;
+    singz::BeatThisModels models;
+    models.logmel = [](const std::vector<float>&, int) { return std::vector<float>(); };
+    models.model = [&](const std::vector<float>&, std::vector<float>& b, std::vector<float>& d) {
+      if (call >= recorded) return false;
+      b.assign(cb.begin() + static_cast<long>(call * chunkLen),
+               cb.begin() + static_cast<long>((call + 1) * chunkLen));
+      d.assign(cd.begin() + static_cast<long>(call * chunkLen),
+               cd.begin() + static_cast<long>((call + 1) * chunkLen));
+      call++;
+      return true;
+    };
+
+    std::vector<float> beatLogits, downLogits;
+    if (!singz::runChunks(spect, nFrames, models, beatLogits, downLogits, nullptr)) {
+      std::fprintf(stderr, "mlgrid: runChunks failed after %zu of %zu recorded chunks\n", call,
+                   recorded);
+      return 1;
+    }
+    if (call != recorded) {
+      std::fprintf(stderr, "mlgrid: replayed %zu chunks, the recording has %zu\n", call, recorded);
+      return 1;
+    }
+    if (!logitsOut.empty()) {
+      for (int which = 0; which < 2; which++) {
+        const std::vector<float>& v = which == 0 ? beatLogits : downLogits;
+        const std::string p = logitsOut + (which == 0 ? "-beat.f32" : "-down.f32");
+        FILE* fo = std::fopen(p.c_str(), "wb");
+        if (!fo) {
+          std::fprintf(stderr, "mlgrid: could not write %s\n", p.c_str());
+          return 1;
+        }
+        std::fwrite(v.data(), sizeof(float), v.size(), fo);
+        std::fclose(fo);
+      }
+    }
+
+    singz::MlGrid grid;
+    singz::postprocess(beatLogits, downLogits, grid.beats, grid.downbeats);
+    grid.beatProb.reserve(beatLogits.size());
+    grid.downbeatProb.reserve(downLogits.size());
+    for (const float v : beatLogits) grid.beatProb.push_back(singz::sigmoidProb(v));
+    for (const float v : downLogits) grid.downbeatProb.push_back(singz::sigmoidProb(v));
+    grid.ok = true;
+    std::fprintf(stderr, "mlgrid: %d frames, %zu chunks, %zu beats, %zu downbeats\n", nFrames,
+                 recorded, grid.beats.size(), grid.downbeats.size());
+    std::printf("%s\n", singz::mlGridJson(grid).c_str());
     return 0;
   }
 

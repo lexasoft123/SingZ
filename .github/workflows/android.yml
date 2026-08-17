@@ -23,6 +23,15 @@ on:
       # the canary compiles these — an edit must run its own gate
       - 'tests/native/**'
       - 'scripts/run-core-host-tests.sh'
+      # …and it now runs the Beat This! parity gate, which reads these. The
+      # expectation is a RECORDING of the python runner's answer, so a bad
+      # regeneration is exactly the edit that must not reach main unrun —
+      # and without these it would sit green until someone else's unrelated
+      # mobile/** push happened to surface it.
+      - 'eval/mlgrid-parity.mjs'
+      - 'eval/beats/ml-fixtures.mjs'
+      - 'eval/beats/ml-postproc-expected.json'
+      - 'scripts/build-analyze-host.sh'
     tags: ['v*']
   # Keeps main's ccache warm. Actions caches cannot be shared between tags —
   # a run reads only its own ref and the DEFAULT BRANCH — so a tag build can
