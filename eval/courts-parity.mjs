@@ -24,9 +24,12 @@
  * doubles, so a single-ulp difference fails them, which is what makes them
  * meaningful against libm drift. The chord-run comparison is a DECISION gate:
  * it sees names, times and lengths, so it only fails when the Viterbi picks
- * differently. Measured floor, not guessed — scaling the major emission
- * scores by 1.001 passes every stem, by 1.01 fails only the one with short
- * ambiguous runs, and by 1.05 three of six still pass. That is ~1e-2
+ * differently. Measured floor, not guessed, and re-measured against the
+ * CURRENT comparison: of the SEVEN inputs that carry chord runs at all (the
+ * 55-2000 Hz band; the 41-400 Hz half of every run compares none, so it can
+ * never fail this mutation and does not belong in the denominator), scaling
+ * the major emission scores by 1.001 leaves all seven identical, 1.01 fails
+ * two, and 1.05 fails four with three still passing. That is ~1e-2
  * relative, five to fourteen orders coarser than the float-store (~6e-8) and
  * reordered-dot-product (~1e-16) differences the porting rules exist to
  * police. It gates the decoder's structure and its decisions; the values it
@@ -82,6 +85,16 @@
  * known to be tight. The ones at risk are the FAIL figures: something once
  * caught might now slip through. So re-measure the fails first.
  *
+ * Note the scope, because it is narrower than it reads: that argument covers
+ * a REMOVAL, and 310c911 did two things. It dropped `holdSec` from the voice
+ * comparison — a removal, so the reasoning holds there — and it replaced the
+ * chord runs' `len` equality with a `sec` comparison, which is a substitution
+ * and can move a gate in either direction. Nothing about a survivor is safe
+ * under a substitution, so the chord figures had to be re-run rather than
+ * reasoned about. They were, and the substitution turned out to change no
+ * verdict at all — which does not soften the point. The scope argument rests
+ * on the SHAPE of a substitution, not on that outcome.
+ *
  * DONE for the VOICE and SEAM figures, and nothing moved. Every fail among
  * them was re-measured against the current comparison and every one still
  * fails: `minHold` 1.0
@@ -89,7 +102,10 @@
  * catches W to 0 (5), K 8 to 6 (7), the kernel's `nw += 2` to `+= 1` (6),
  * keeping the zeros (3) and the hbT off-by-one (6). The `minHold` survivors
  * 1.1 and 1.75 were re-run too, both identical — so every value on that figure
- * is current.
+ * is current. The voice fails recorded INLINE rather than here — three at the
+ * `phraseFixture` comment, five at the no-words comparison — were swept in the
+ * same pass and all eight still fail; what changed there is the evidence, not
+ * the verdict, and that comment says so.
  * The other survivors were NOT re-run and do not need to be, by the direction
  * argument above: a wider gate cannot start failing a mutation it used to
  * pass. They remain true as survival claims. What is no longer known is
@@ -98,15 +114,28 @@
  * `minHold` figure is measured end to end, and the remaining survivor edges
  * are upper bounds.
  *
- * STILL OWED: the CHORD gate's figures two paragraphs up (1.001 passes, 1.01
- * fails, 1.05 leaves three passing) date from f9a9db3, and 310c911 changed the
- * comparison they describe — `tsRuns[i].len !== cr[i].len` became a `sec`
- * comparison against `r3(r.len * latPer)`. The rule fired on them and they
- * have not been re-run. It is very likely a formality, since latPer is exactly
- * 0.5 at 120 bpm so `sec` is bijective with `len` and r3 is the identity on
- * multiples of 0.5 — but "reasoned from the source rather than re-run" is the
- * standard this paragraph refused for its own numbers, so it is owed and not
- * assertable. Task #47.
+ * DONE for the CHORD gate too. Those figures dated from f9a9db3, and 310c911
+ * changed the comparison they describe — `tsRuns[i].len !== cr[i].len` became
+ * a `sec` comparison against `r3(r.len * latPer)`. Re-run against the current
+ * harness: 1.001 leaves all seven identical; 1.01 fails the sample's vocals
+ * AND the phrase fixture; 1.05 fails drums, other, vocals and the fixture,
+ * leaving three of seven. So the ~1e-2 floor stands.
+ *
+ * Every one of those deltas is the CORPUS, and none is the comparison.
+ * Restricted to the six stems that existed at f9a9db3 the re-run reproduces
+ * the old figures exactly — 1.01 fails only vocals, 1.05 leaves bass, guitar
+ * and piano passing, "three of six" — so the substitution changed no verdict.
+ * Nor could it have: `latPer` is 60/120 = 0.5 exactly at the bpm this harness
+ * fixes, so `r3(len * latPer)` on an integer `len` is a multiple of 0.5 that
+ * r3 is the identity on, making `sec` equality equivalent to `len` equality.
+ * What moved the numbers was 934e75a adding the phrase fixture, which carries
+ * chord runs. Recorded at this length so the next reader does not re-litigate
+ * whether the substitution was the culprit: it was measured, and it was not.
+ *
+ * A figure is a claim about a harness AND its corpus. Changing either can move
+ * it, and only re-running says which one did. The `latPer` argument was sound
+ * and it was not enough: it settles the comparison completely and says nothing
+ * whatever about the corpus, which is the half that actually moved.
  *
  * The rule above did not fire here — which is why it now reads as the
  * principle rather than a proxy for it.
@@ -294,10 +323,34 @@ let noWordComparisons = 0
  * that is present in a harness is not thereby reaching the code it was written
  * for.
  *
- * Measured with the per-input envelope in place: merge 0.3 -> 0.9 CAUGHT
- * (t 4.78/hold 2.51 becomes t 0.19/hold 7.11), minGap 1.5 -> 0.5 CAUGHT
- * (4 files), rise gate 0.25 -> 0.02 CAUGHT. Still free: `holdSec >= minHold`
- * -> `>`, which needs a hold landing exactly on the threshold. See task #47.
+ * Measured with the per-input envelope in place, and RE-MEASURED against the
+ * mapped `{t, gapSec}` comparison: merge 0.3 -> 0.9 CAUGHT (t 4.78 becomes
+ * 0.19), minGap 1.5 -> 0.5 CAUGHT (4 files), rise gate 0.25 -> 0.02 CAUGHT
+ * (t 4.78 becomes 4.88). Still free: `holdSec >= minHold` -> `>`, which needs
+ * a hold landing exactly on the threshold.
+ *
+ * What the re-measurement changed is the EVIDENCE, not the verdict, and that
+ * is the part worth keeping. This figure used to read "t 4.78/hold 2.51
+ * becomes t 0.19/hold 7.11" — the hold moving by 4.6 seconds was most of what
+ * made the catch look solid, and `holdSec` is not compared any more. All three
+ * still fail, but on different channels and that distinction is the point:
+ * merge and the rise gate fail on `t` alone, gapSec unchanged at 1.63, while
+ * `minGap` is caught mostly on the entry COUNT — on bass, guitar and piano the
+ * TS side emits nothing at all against the mutant's 1, 1 and 16.
+ *
+ * So the blind spot is narrower than "these mutations". What a comparison
+ * without `holdSec` cannot see is a mutation that moves the hold and moves
+ * NOTHING else — no entry count, no `t`, no gapSec. Nothing in this suite has
+ * that shape, and the free mutation is emphatically not an example: `holdSec
+ * >= minHold` -> `>` never touches the hold (courts.cpp:417 computes it
+ * identically; :418 is the inclusion test it changes), and it is free only
+ * because no hold on this corpus lands exactly on the threshold. Had one, that
+ * entry would vanish, the lengths would differ, and the COUNT would catch it —
+ * the same channel that catches `minGap`.
+ *
+ * The blind spot is therefore real and UN-INSTANTIATED, which is the useful
+ * thing to record. No mutation here demonstrates it, and restoring `holdSec`
+ * to the comparison would change no result measured above.
  */
 const phraseFixture = (dir) => {
   const SR = 44100
@@ -379,9 +432,17 @@ for (const path of wavs) {
       .map((v) => ({ t: Math.round(v.t * 1000) / 1000, gapSec: Math.round((v.gapSec ?? 0) * 100) / 100 }))
     // The NO-WORDS fallback too — phraseSegments and the last-rise loop, which
     // the words path never reaches. It ran ZERO times until this line existed.
-    // Partially closed, and the measurement says which part. CAUGHT now: the
-    // rise ratio (1.6 -> 3.0 and -> 1.1), phraseSegments' own threshold
-    // (0.08*p95 -> 0.20 and -> 0.02), and the rise lag (2 -> 3).
+    // Partially closed, and the measurement says which part. CAUGHT, and all
+    // five re-measured against the mapped `{t, gapSec}` comparison: the rise
+    // ratio (1.6 -> 3.0, 1 file; -> 1.1, 2 files), phraseSegments' own
+    // threshold (0.08*p95 -> 0.20, 4 files; -> 0.02, 3 files), and the rise
+    // lag (2 -> 3, 1 file). The three RISE mutations move the phrase start and
+    // are caught on `t`. The two THRESHOLD ones do not depend on it: on vocals
+    // `t` is identical either way (7.15 and 11.98) and only gapSec differs, and
+    // on bass/guitar/drums the TS side emits no entry at all, so the count
+    // catches them. (They do move `t` on the fixture — the point is that they
+    // are caught without it.) Different channels, which is why the header's
+    // blind spot is about a hold that moves ALONE rather than about these.
     // On the REAL stems the merge branch never executes at all — 7 voiced
     // runs, 6 gaps all 1.90-1.95 s, against thresholds of 0.15 s and 0.45 s —
     // so the merge gap and `minGap` were uncovered rather than weakly
