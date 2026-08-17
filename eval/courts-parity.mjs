@@ -35,10 +35,9 @@
  * The voice and seam comparisons are COARSER STILL — ~1e-1 relative, measured
  * the same way. Survivors on the sample: `++quiet` to `quiet++`, the 8-second
  * cap to 9, the 2.5-beat gap anywhere in [1.9, 3.1], `minHold` anywhere in
- * [1.1, 1.75] (1.0 and below FAIL — measured before the holdSec drop, and the
- * only figure on this line that drop could weaken; 1.1 and 1.8 have since been
- * re-measured against the current comparison, 1.1 identical and 1.8 failing on
- * voice count 4 to 3), `sectionFinal` up to 11 beats,
+ * [1.1, 1.75] — re-measured against the CURRENT comparison, every boundary
+ * value: 1.1 and 1.75 identical, 1.0 fails (1 file), 0.0 fails (7), 1.8 fails
+ * on voice count 4 to 3 — `sectionFinal` up to 11 beats,
  * the RMS threshold by a thousandth, and removing the dedup entirely; for
  * seams, W by a hundredth,
  * the peak threshold by 10%, `nov` from float to double, and `>` to `>=`.
@@ -69,11 +68,12 @@
  * FOURTH TIME, in the commit that gated buildCourtEvidence. The voice
  * comparison now reads the MAPPED voice — `{t, gapSec}` — so `holdSec` is no
  * longer compared directly, which can only widen the voice gate. Every voice
- * interval above EXCEPT the re-measured 1.1/1.8 endpoints was measured while
- * it WAS compared, so those figures are upper bounds on that gate's strength
- * rather than measurements of it: `end` in the words path and `b` in the
- * no-words path feed `holdSec` alone, so a mis-ported quiet-walk terminus or
- * segment end is now invisible unless it crosses `minHold`.
+ * figure above EXCEPT the whole `minHold` interval — every value of which has
+ * since been re-measured, see DONE below — was measured while `holdSec` WAS
+ * compared, so those figures are upper bounds on that gate's strength rather
+ * than measurements of it: `end` in the words path and `b` in the no-words
+ * path feed `holdSec` alone, so a mis-ported quiet-walk terminus or segment
+ * end is now invisible unless it crosses `minHold`.
  *
  * Which figures the drop can actually invalidate is the opposite of the
  * obvious answer, and worth stating because I got it backwards first.
@@ -81,8 +81,34 @@
  * every SURVIVOR figure here is still a survivor — it is merely no longer
  * known to be tight. The ones at risk are the FAIL figures: something once
  * caught might now slip through. So re-measure the fails first.
- * Re-measuring is the fix; recording it is the minimum, and is what this note
- * is. The rule above did not fire here — which is why it now reads as the
+ *
+ * DONE for the VOICE and SEAM figures, and nothing moved. Every fail among
+ * them was re-measured against the current comparison and every one still
+ * fails: `minHold` 1.0
+ * (1 file), 0.0 (7) and 1.8 (voice count 4 to 3); and the seam structural
+ * catches W to 0 (5), K 8 to 6 (7), the kernel's `nw += 2` to `+= 1` (6),
+ * keeping the zeros (3) and the hbT off-by-one (6). The `minHold` survivors
+ * 1.1 and 1.75 were re-run too, both identical — so every value on that figure
+ * is current.
+ * The other survivors were NOT re-run and do not need to be, by the direction
+ * argument above: a wider gate cannot start failing a mutation it used to
+ * pass. They remain true as survival claims. What is no longer known is
+ * whether their edges are still where they were recorded — a survivor
+ * interval may now be wider than it reads. So: the fails are measured, the
+ * `minHold` figure is measured end to end, and the remaining survivor edges
+ * are upper bounds.
+ *
+ * STILL OWED: the CHORD gate's figures two paragraphs up (1.001 passes, 1.01
+ * fails, 1.05 leaves three passing) date from f9a9db3, and 310c911 changed the
+ * comparison they describe — `tsRuns[i].len !== cr[i].len` became a `sec`
+ * comparison against `r3(r.len * latPer)`. The rule fired on them and they
+ * have not been re-run. It is very likely a formality, since latPer is exactly
+ * 0.5 at 120 bpm so `sec` is bijective with `len` and r3 is the identity on
+ * multiples of 0.5 — but "reasoned from the source rather than re-run" is the
+ * standard this paragraph refused for its own numbers, so it is owed and not
+ * assertable. Task #47.
+ *
+ * The rule above did not fire here — which is why it now reads as the
  * principle rather than a proxy for it.
  *
  * And one thing NONE of them police: compiling courts.cpp with
