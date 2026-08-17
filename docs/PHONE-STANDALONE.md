@@ -1165,6 +1165,28 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       decides from are gated one layer up at exact-double precision. Both
       courts.h and the harness header say so now; they had sold it as
       ulp-drift detection, which it is not.
+    - **Ninth slice — the voice and form evidence** (2026-08-18).
+      `vocalEvidence`, `formSeams` and `phraseSegments` are ported. With that
+      the courts' whole INPUT side is native: chord runs, held notes and
+      section seams are everything `buildCourtEvidence` assembles.
+      `vocalEvidence` has two paths and the gate runs the one that matters:
+      with aligned WORDS it grades the silence after each word against the
+      beat, without them it falls back to energy segments and last-rise
+      detection. The app always has words, so gating only the fallback would
+      have gated the path nothing takes — the harness passes synthetic words
+      and exercises the real one. Identical on every stem: 4 voice hits, and
+      0-2 seams which vary per stem so the seam comparison is not degenerate.
+      **The voice comparison is redundant across stems and the record should
+      say so**: with words supplied, `vocalEvidence` reads only the vocals
+      stem and the word list, so all six runs compute the same answer. It is
+      compared, not skipped — but it is one comparison performed six times,
+      not six independent ones. Seams differ per stem because they read the
+      harmonic chroma too.
+      One JSON trap worth the line: a final word with no successor has a
+      genuinely infinite `gapSec`, and C's `%g` prints `inf`, which is not
+      JSON — the harness died on it. The CLI emits `1e999`, which `JSON.parse`
+      turns back into `Infinity` exactly, so the comparison sees the value the
+      TS actually holds rather than a finite stand-in.
     - Next: the rest of detectBeats and courts (same method, same harness)
       — which is now the whole remaining cost of a phone analysis — then
       the desktop's `analysis:run` IPC over the CLI, then retire the TS

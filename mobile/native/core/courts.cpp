@@ -291,4 +291,224 @@ RmsEnvelope rmsEnvelope(const std::vector<float>& buf) {
   return out;
 }
 
+// ---- courts.ts: medianOf / phraseSegments ---------------------------------
+
+namespace {
+
+double medianOf(const std::vector<double>& xs) {
+  std::vector<double> s = xs;
+  std::sort(s.begin(), s.end());
+  return s.empty() ? std::numeric_limits<double>::quiet_NaN() : s[s.size() >> 1];
+}
+
+struct PhraseSeg {
+  double a, b, gapSec;
+};
+
+/** Voiced stretches, merged across sub-0.3-beat gaps, kept when the silence
+ *  AFTER them is at least `minGap`. */
+std::vector<PhraseSeg> phraseSegments(const RmsEnvelope& env, double med, double minGap) {
+  const std::vector<float>& rms = env.rms;
+  const double fps = env.fps;
+  const long long n = static_cast<long long>(rms.size());
+  const double thr = 0.08 * env.p95;
+  std::vector<std::pair<long long, long long>> voiced;
+  long long s0 = -1;
+  for (long long f = 0; f <= n; f++) {
+    const bool on = f < n && static_cast<double>(rms[static_cast<size_t>(f)]) > thr;
+    if (on && s0 < 0) s0 = f;
+    if (!on && s0 >= 0) {
+      voiced.push_back({s0, f});
+      s0 = -1;
+    }
+  }
+  std::vector<std::pair<long long, long long>> merged;
+  for (const auto& seg : voiced) {
+    if (!merged.empty() && (static_cast<double>(seg.first - merged.back().second)) / fps < 0.3 * med)
+      merged.back().second = seg.second;
+    else
+      merged.push_back(seg);
+  }
+  std::vector<PhraseSeg> segs;
+  for (size_t k = 0; k < merged.size(); k++) {
+    const long long a = merged[k].first, b = merged[k].second;
+    const long long nextA = k + 1 < merged.size() ? merged[k + 1].first : n;
+    const double gapSec = static_cast<double>(nextA - b) / fps;
+    if (gapSec >= minGap) segs.push_back({static_cast<double>(a) / fps, static_cast<double>(b) / fps, gapSec});
+  }
+  return segs;
+}
+
+}  // namespace
+
+// ---- courts.ts: vocalEvidence ---------------------------------------------
+
+std::vector<VoiceHit> vocalEvidence(const RmsEnvelope& env, const std::vector<double>& beats,
+                                    const std::vector<std::pair<double, double>>* words) {
+  std::vector<double> iv;
+  for (size_t i = 1; i < beats.size(); i++) iv.push_back(beats[i] - beats[i - 1]);
+  const double med = medianOf(iv);
+  const double minHold = 1.2 * med;
+  const double minGap = 1.5 * med;
+  const std::vector<float>& rms = env.rms;
+  const double fps = env.fps;
+  std::vector<VoiceHit> out;
+
+  if (words && !words->empty()) {
+    // Stable, like JS sort since ES2019 — words sharing a start keep their
+    // original order, which the dedup key below is sensitive to.
+    std::vector<std::pair<double, double>> ws = *words;
+    std::stable_sort(ws.begin(), ws.end(),
+                     [](const std::pair<double, double>& a, const std::pair<double, double>& b) {
+                       return a.first < b.first;
+                     });
+    const double thr = 0.08 * env.p95;
+    std::vector<long long> seen;  // the TS's Set, in insertion order
+    for (size_t i = 0; i < ws.size(); i++) {
+      const double nextS =
+          i + 1 < ws.size() ? ws[i + 1].first : std::numeric_limits<double>::infinity();
+      const double gapToNext = nextS - ws[i].first;
+      if (gapToNext < 2.5 * med) continue;
+      const long long a = static_cast<long long>(jsRound(ws[i].first * fps));
+      const double capT = std::min(ws[i].first + 8, i + 1 < ws.size() ? ws[i + 1].first : ws[i].first + 8);
+      const long long cap = static_cast<long long>(jsRound(capT * fps));
+      long long end = a;
+      long long quiet = 0;
+      for (long long f = a; f < std::min(cap, static_cast<long long>(rms.size())); f++) {
+        if (f < 0) continue;
+        if (static_cast<double>(rms[static_cast<size_t>(f)]) > thr) {
+          end = f;
+          quiet = 0;
+        } else if (static_cast<double>(++quiet) * (1 / fps) > 0.3 * med) {
+          break;
+        }
+      }
+      const double hold = static_cast<double>(end - a) / fps;
+      const bool sectionFinal = gapToNext >= 8 * med;
+      if (hold < minHold && !sectionFinal) continue;
+      const long long key = static_cast<long long>(jsRound(ws[i].first * 10));
+      if (std::find(seen.begin(), seen.end(), key) == seen.end()) {
+        seen.push_back(key);
+        out.push_back({jsRound(ws[i].first * 100) / 100, jsRound(hold * 100) / 100,
+                       // Infinity/100 is Infinity in JS too, so a final word
+                       // with no successor keeps an infinite gap rather than
+                       // rounding to something finite.
+                       std::isinf(gapToNext) ? gapToNext : jsRound(gapToNext * 100) / 100});
+      }
+    }
+    return out;
+  }
+
+  // no lyrics: energy segments, last-rise hold detection
+  const std::vector<PhraseSeg> segs = phraseSegments(env, med, minGap);
+  for (const PhraseSeg& seg : segs) {
+    const long long a = static_cast<long long>(jsRound(seg.a * fps));
+    const long long b = static_cast<long long>(jsRound(seg.b * fps));
+    long long lastRise = a;
+    for (long long f = a + 2; f < b; f++) {
+      if (f < 2 || f >= static_cast<long long>(rms.size())) continue;
+      const double v = static_cast<double>(rms[static_cast<size_t>(f)]);
+      if (v > 1.6 * static_cast<double>(rms[static_cast<size_t>(f - 2)]) && v > 0.25 * env.p95) lastRise = f;
+    }
+    const double holdSec = static_cast<double>(b - lastRise) / fps;
+    if (holdSec >= minHold)
+      out.push_back({jsRound((static_cast<double>(lastRise) / fps) * 100) / 100, jsRound(holdSec * 100) / 100,
+                     jsRound(seg.gapSec * 100) / 100});
+  }
+  return out;
+}
+
+// ---- courts.ts: formSeams -------------------------------------------------
+
+std::vector<double> formSeams(const std::vector<std::vector<float>>& Ch, const RmsEnvelope& vocalEnv,
+                              const std::vector<double>& beats) {
+  const std::vector<float>& rms = vocalEnv.rms;
+  const double fps = vocalEnv.fps;
+  const long long n0 = static_cast<long long>(rms.size());
+  const double thr = 0.08 * vocalEnv.p95;
+  std::vector<float> vocal(Ch.size(), 0.0f);
+  for (size_t i = 0; i + 1 < beats.size(); i++) {
+    if (i >= vocal.size()) break;
+    const long long a = static_cast<long long>(std::floor(beats[i] * fps));
+    const long long b = std::max(a + 1, static_cast<long long>(std::floor(beats[i + 1] * fps)));
+    long long on = 0, tot = 0;
+    for (long long f = a; f < std::min(b, n0); f++) {
+      if (f < 0) continue;
+      tot++;
+      if (static_cast<double>(rms[static_cast<size_t>(f)]) > thr) on++;
+    }
+    vocal[i] = tot ? static_cast<float>(static_cast<double>(on) / static_cast<double>(tot)) : 0.0f;
+  }
+  const double W = 0.35;
+  // Half-bar chroma: two beats stacked, with the vocal activity of each
+  // appended as dimensions 24 and 25 — so a section that changes only in
+  // whether anyone is singing still registers as novelty.
+  std::vector<std::vector<float>> hb;
+  std::vector<double> hbT;
+  for (size_t h = 0; h + 1 < Ch.size(); h += 2) {
+    std::vector<float> v(26, 0.0f);
+    for (size_t k = 0; k < 12; k++) {
+      v[k] = Ch[h][k];
+      v[12 + k] = Ch[h + 1][k];
+    }
+    v[24] = static_cast<float>(W * static_cast<double>(vocal[h]));
+    v[25] = static_cast<float>(W * static_cast<double>(vocal[h + 1]));
+    double norm = 0;
+    for (size_t k = 0; k < 26; k++) norm += static_cast<double>(v[k]) * static_cast<double>(v[k]);
+    norm = std::sqrt(norm);
+    if (norm > 0)
+      for (size_t k = 0; k < 26; k++) v[k] = static_cast<float>(static_cast<double>(v[k]) / norm);
+    hb.push_back(std::move(v));
+    hbT.push_back(h < beats.size() ? beats[h] : 0.0);
+  }
+  const long long n = static_cast<long long>(hb.size());
+  const auto cosim = [&](long long a, long long b) {
+    double s = 0;
+    for (size_t k = 0; k < 26; k++)
+      s += static_cast<double>(hb[static_cast<size_t>(a)][k]) * static_cast<double>(hb[static_cast<size_t>(b)][k]);
+    return s;
+  };
+  const long long K = 8;
+  std::vector<float> nov(static_cast<size_t>(std::max(0LL, n)), 0.0f);
+  for (long long h = K; h < n - K; h++) {
+    double within = 0, cross = 0;
+    long long nw = 0, nc = 0;
+    for (long long i = 0; i < K; i++) {
+      for (long long j = 0; j < K; j++) {
+        cross += cosim(h - 1 - i, h + j);
+        nc++;
+        if (i < j) {
+          within += cosim(h - 1 - i, h - 1 - j) + cosim(h + i, h + j);
+          nw += 2;
+        }
+      }
+    }
+    nov[static_cast<size_t>(h)] =
+        static_cast<float>((nw ? within / static_cast<double>(nw) : 0) - (nc ? cross / static_cast<double>(nc) : 0));
+  }
+  std::vector<double> vals;
+  for (const float x : nov)
+    if (static_cast<double>(x) != 0) vals.push_back(static_cast<double>(x));
+  double sum = 0;
+  for (const double v : vals) sum += v;
+  const double mean = sum / (vals.empty() ? 1.0 : static_cast<double>(vals.size()));
+  double sq = 0;
+  for (const double v : vals) sq += (v - mean) * (v - mean);
+  const double sd = std::sqrt(sq / (vals.empty() ? 1.0 : static_cast<double>(vals.size())));
+  std::vector<double> seams;
+  for (long long h = K; h < n - K; h++) {
+    if (static_cast<double>(nov[static_cast<size_t>(h)]) < mean + sd) continue;
+    bool isPeak = true;
+    for (long long d = 1; d <= K; d++) {
+      if ((h - d >= 0 && nov[static_cast<size_t>(h - d)] > nov[static_cast<size_t>(h)]) ||
+          (h + d < n && nov[static_cast<size_t>(h + d)] > nov[static_cast<size_t>(h)])) {
+        isPeak = false;
+        break;
+      }
+    }
+    if (isPeak) seams.push_back(hbT[static_cast<size_t>(h)]);
+  }
+  return seams;
+}
+
 }  // namespace singz

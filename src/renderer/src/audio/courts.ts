@@ -342,7 +342,7 @@ function phraseSegments(
  * line refinement — never ran on the battery: every project with lyrics
  * takes the words path, so it is not ported.)
  */
-function vocalEvidence(
+export function vocalEvidence(
   env: { rms: Float32Array; fps: number; p95: number },
   beats: number[],
   words: { s: number; e: number }[] | null
@@ -415,7 +415,7 @@ function vocalEvidence(
  * beatFeatures()+formMap(), seams only — the classmates query is unused
  * by the courts.
  */
-function formSeams(
+export function formSeams(
   Ch: Float32Array[],
   vocalEnv: { rms: Float32Array; fps: number; p95: number },
   beats: number[]

@@ -42,6 +42,15 @@ struct ChordRun {
   std::string c;
 };
 
+/** Frame RMS and its 95th percentile — the loudness the voice extractor and
+ *  the quiet-zone pulse fit are both judged against. */
+struct RmsEnvelope {
+  std::vector<float> rms;
+  double fps = 0;
+  double p95 = 0;
+};
+RmsEnvelope rmsEnvelope(const std::vector<float>& buf);
+
 /** A phrase-final held note or section-final word, from the vocals stem. */
 struct VoiceHold {
   double t = 0;
@@ -95,13 +104,34 @@ struct ChordSeg {
 std::vector<ChordSeg> chordRuns(const std::vector<std::vector<float>>& Ch,
                                 const std::vector<std::vector<float>>& Cb, const std::vector<double>& beats);
 
-/** Frame RMS and its 95th percentile — the loudness the voice extractor and
- *  the quiet-zone pulse fit are both judged against. */
-struct RmsEnvelope {
-  std::vector<float> rms;
-  double fps = 0;
-  double p95 = 0;
+/** A phrase-final held note or section-final word — `vocalEvidence`'s output
+ *  and, through `buildCourtEvidence`, the `voice` the meter court reads. */
+struct VoiceHit {
+  double t = 0;
+  double holdSec = 0;
+  double gapSec = 0;
 };
-RmsEnvelope rmsEnvelope(const std::vector<float>& buf);
+
+/**
+ * Phrase-final held notes and section-final words from the vocals stem.
+ *
+ * Two paths, and which one runs is decided by the caller's data rather than
+ * by a flag: with aligned WORDS it grades the silence after each word against
+ * the beat; without them it falls back to energy segments and last-rise
+ * detection. The word path is the one the app takes, and the one the eval
+ * battery calibrated.
+ */
+std::vector<VoiceHit> vocalEvidence(const RmsEnvelope& env, const std::vector<double>& beats,
+                                    const std::vector<std::pair<double, double>>* words);
+
+/**
+ * Form-novelty seams — section starts, from a checkerboard novelty kernel over
+ * half-bar chroma with the vocal activity fraction appended as two extra
+ * dimensions. Peaks above mean+sd that dominate their +/-K neighbourhood.
+ */
+std::vector<double> formSeams(const std::vector<std::vector<float>>& Ch, const RmsEnvelope& vocalEnv,
+                              const std::vector<double>& beats);
+
+
 
 }  // namespace singz

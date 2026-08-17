@@ -53,7 +53,7 @@ if (!existsSync(lib)) {
   console.error('mobile/src/gen/analysis-lib.js is missing — run `npm ci` in mobile/')
   process.exit(2)
 }
-const { to22k, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns } = await import(pathToFileURL(lib).href)
+const { to22k, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns, vocalEvidence, formSeams } = await import(pathToFileURL(lib).href)
 if (typeof chromaFrames !== 'function') {
   console.error('the analysis bundle does not export the courts extractors — rebuild it')
   process.exit(2)
@@ -168,6 +168,15 @@ for (const path of files) {
 // input IS the bass stem paired with each other input. `runs` is the single
 // thing that decides whether the courts speak at all, so it gets a gate.
 const bassWav = wavs.find((p) => /bass/i.test(names.get(p) ?? p)) ?? null
+const vocalsWav = wavs.find((p) => /vocal/i.test(names.get(p) ?? p)) ?? null
+if (!vocalsWav) {
+  console.log('NOTE  no /vocal/ input — voice evidence and form seams were NOT compared by this run')
+}
+// A handful of synthetic words, so the WORDS path of vocalEvidence is
+// exercised and not only its no-lyrics fallback. The app always has words;
+// gating only the fallback would gate the path nothing takes.
+const WORDS = [[1, 1.4], [2.5, 2.9], [3.1, 3.4], [9, 9.5], [20, 20.4], [21, 21.6], [33, 33.5]]
+let voiceComparisons = 0
 if (!bassWav) {
   console.log('NOTE  no /bass/ input — chord runs were NOT compared by this run')
 }
@@ -196,11 +205,22 @@ for (const path of wavs) {
   // narrow band too would compare the same thing twice and report it as
   // coverage.
   const wantChords = bassWav && band === BANDS[0]
+  const wantVoice = vocalsWav && band === BANDS[0]
   const c = JSON.parse(
     execFileSync(bin, ['courts', '--wav', path, '--lo', String(lo), '--hi', String(hi),
-      ...(wantChords ? ['--bass-wav', bassWav] : [])],
+      ...(wantChords ? ['--bass-wav', bassWav] : []),
+      ...(wantVoice ? ['--vocals-wav', vocalsWav, ...WORDS.flatMap(([a, b]) => ['--word', `${a}:${b}`])] : [])],
       { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString()
   )
+  let tsVoice = null
+  let tsSeams = null
+  if (wantVoice) {
+    const vw = readWavMono(vocalsWav)
+    const venv = rmsEnvelope(to22k(monoAt44k(vw)))
+    tsVoice = vocalEvidence(venv, tsBeats, WORDS.map(([s2, e]) => ({ s: s2, e })))
+    tsSeams = formSeams(beatSyncChroma(chromaFrames(x22, lo, hi), tsBeats), venv, tsBeats)
+    voiceComparisons++
+  }
   let tsRuns = null
   if (wantChords) {
     const bw = readWavMono(bassWav)
@@ -241,6 +261,27 @@ for (const path of wavs) {
       }
     }
   }
+  if (tsVoice) {
+    const cv = c.voice ?? []
+    if (cv.length !== tsVoice.length) problems.push(`voice count ts=${tsVoice.length} c++=${cv.length}`)
+    for (let i = 0; i < Math.min(tsVoice.length, cv.length); i++) {
+      if (differs(tsVoice[i].t, cv[i].t) || differs(tsVoice[i].holdSec, cv[i].holdSec) ||
+          differs(tsVoice[i].gapSec, cv[i].gapSec)) {
+        problems.push(`voice[${i}] ts=${show(tsVoice[i].t)}/${show(tsVoice[i].holdSec)}/${show(tsVoice[i].gapSec)}` +
+          ` c++=${show(cv[i].t)}/${show(cv[i].holdSec)}/${show(cv[i].gapSec)}`)
+        break
+      }
+    }
+    const cs = c.seams ?? []
+    const ts2 = tsSeams.map((s2) => s2.t)
+    if (cs.length !== ts2.length) problems.push(`seams count ts=${ts2.length} c++=${cs.length}`)
+    for (let i = 0; i < Math.min(ts2.length, cs.length); i++) {
+      if (differs(ts2[i], cs[i])) {
+        problems.push(`seams[${i}] ts=${show(ts2[i])} c++=${show(cs[i])}`)
+        break
+      }
+    }
+  }
   if ((c.beatSync?.length ?? 0) !== tsSync.length)
     problems.push(`beatSync frames ts=${tsSync.length} c++=${c.beatSync?.length}`)
   for (let f = 0; f < Math.min(tsSync.length, c.beatSync?.length ?? 0); f++) {
@@ -271,7 +312,8 @@ for (const path of wavs) {
     console.log(`PASS  ${label}`)
     console.log(`      [${band[0]}-${band[1]} Hz] ${c.chromaFrames} chroma + ${c.beatSync?.length ?? 0} beat-sync` +
       ` + ${c.rmsFrames} rms + p95` +
-      (tsRuns ? ` + ${tsRuns.length} chord runs` : '') + ' — all identical')
+      (tsRuns ? ` + ${tsRuns.length} chord runs` : '') +
+      (tsVoice ? ` + ${tsVoice.length} voice + ${tsSeams.length} seams` : '') + ' — all identical')
     compared++
   }
  }
@@ -298,6 +340,11 @@ if (new Set(seen).size !== wavs.length) {
 // Same discipline as the two checks above: if a bass input WAS present, every
 // other input must have had its chord runs compared. Silence about skipped
 // coverage is this file's recurring failure mode.
+if (vocalsWav && voiceComparisons !== wavs.length) {
+  console.log(`\nHARNESS BUG: ${voiceComparisons} voice comparisons for ${wavs.length} inputs` +
+    ' — the voice/seam gate was skipped for some of them.')
+  process.exit(2)
+}
 if (bassWav && chordComparisons !== wavs.length) {
   console.log(`\nHARNESS BUG: ${chordComparisons} chord comparisons for ${wavs.length} inputs` +
     ' — the chord gate was skipped for some of them.')

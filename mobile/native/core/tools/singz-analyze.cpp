@@ -7,7 +7,8 @@
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
 //   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
 //   singz-analyze courts --wav <f.wav> [--lo <hz>] [--hi <hz>]
-//                        [--bass-wav <b.wav>]                    (extractors)
+//                        [--bass-wav <b.wav>] [--vocals-wav <v.wav>]
+//                        [--word <s>:<e> ...]                    (extractors)
 //   singz-analyze beats --drums <d.wav> [--inst <a.wav> ...] [--vocals <v.wav>]
 //                        [--bass <b.wav>] [--line <sec> ...]         (staged debug)
 //
@@ -333,14 +334,38 @@ int main(int argc, char** argv) {
     // on libm rather than on arithmetic the porting rules can pin, so a
     // checksum that happened to collide would hide exactly the failure it is
     // here to find.
-    std::string path, bassPath;
+    std::string path, bassPath, vocalsPath;
+    std::vector<std::pair<double, double>> words;
     double lo = 55, hi = 2000;
     for (int i = 2; i < argc; i++) {
       const bool isWav = std::strcmp(argv[i], "--wav") == 0;
       const bool isBassWav = std::strcmp(argv[i], "--bass-wav") == 0;
+      const bool isVocalsWav = std::strcmp(argv[i], "--vocals-wav") == 0;
+      if (std::strcmp(argv[i], "--word") == 0) {
+        if (i + 1 >= argc) {
+          std::fprintf(stderr, "courts: --word needs <start>:<end>\n");
+          return 2;
+        }
+        const char* raw = argv[++i];
+        char* end = nullptr;
+        const double a = std::strtod(raw, &end);
+        if (end == raw || *end != ':') {
+          std::fprintf(stderr, "courts: --word wants <start>:<end>, got %s\n", raw);
+          return 2;
+        }
+        const char* raw2 = end + 1;
+        char* end2 = nullptr;
+        const double b2 = std::strtod(raw2, &end2);
+        if (end2 == raw2 || *end2 != '\0' || !std::isfinite(a) || !std::isfinite(b2)) {
+          std::fprintf(stderr, "courts: --word wants <start>:<end>, got %s\n", raw);
+          return 2;
+        }
+        words.push_back({a, b2});
+        continue;
+      }
       const bool isLo = std::strcmp(argv[i], "--lo") == 0;
       const bool isHi = std::strcmp(argv[i], "--hi") == 0;
-      if (!(isWav || isBassWav || isLo || isHi)) {
+      if (!(isWav || isBassWav || isVocalsWav || isLo || isHi)) {
         std::fprintf(stderr, "courts: unknown argument %s\n", argv[i]);
         return 2;
       }
@@ -352,6 +377,8 @@ int main(int argc, char** argv) {
         path = argv[++i];
       } else if (isBassWav) {
         bassPath = argv[++i];
+      } else if (isVocalsWav) {
+        vocalsPath = argv[++i];
       } else {
         // strtod with full consumption, same as --line: std::atof turns a
         // mistyped band into 0.0 and analyses [0,2000) while reporting
@@ -441,6 +468,42 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < runs.size(); i++)
         std::printf("%s{\"name\":\"%s\",\"t\":%.17g,\"len\":%d}", i ? "," : "", runs[i].name.c_str(), runs[i].t,
                     runs[i].len);
+    }
+    std::printf("],\"voice\":[");
+    {
+      std::vector<double> beats;
+      const double dur = static_cast<double>(x.size()) / 22050.0;
+      for (double t = 0; t < dur; t += 0.5) beats.push_back(t);
+      if (!vocalsPath.empty()) {
+        singz::MonoWav vw = singz::readWavMono(vocalsPath);
+        if (!vw.ok) {
+          std::fprintf(stderr, "could not read %s: %s\n", vocalsPath.c_str(), vw.error.c_str());
+          return 1;
+        }
+        singz::AnalysisStem vst;
+        vst.mono = std::move(vw.samples);
+        vst.sampleRate = vw.sampleRate;
+        const std::vector<float> v22 = singz::to22k(singz::monoAt44kPublic(vst));
+        const singz::RmsEnvelope venv = singz::rmsEnvelope(v22);
+        const std::vector<singz::VoiceHit> vh =
+            singz::vocalEvidence(venv, beats, words.empty() ? nullptr : &words);
+        // gapSec is genuinely Infinity for a final word with no successor —
+        // the TS keeps it that way and the comparison must see it. C's %g
+        // prints `inf`, which is not JSON, so emit the overflowing literal
+        // `1e999`, which JSON.parse turns back into Infinity exactly.
+        const auto num = [](double v) { return std::isinf(v) ? (v > 0 ? "1e999" : "-1e999") : nullptr; };
+        for (size_t i = 0; i < vh.size(); i++) {
+          std::printf("%s{\"t\":%.17g,\"holdSec\":%.17g,\"gapSec\":", i ? "," : "", vh[i].t, vh[i].holdSec);
+          if (const char* lit = num(vh[i].gapSec)) std::printf("%s}", lit);
+          else std::printf("%.17g}", vh[i].gapSec);
+        }
+        std::printf("],\"seams\":[");
+        const std::vector<std::vector<float>> ChS = singz::beatSyncChroma(ch, beats);
+        const std::vector<double> sm = singz::formSeams(ChS, venv, beats);
+        for (size_t i = 0; i < sm.size(); i++) std::printf("%s%.17g", i ? "," : "", sm[i]);
+      } else {
+        std::printf("],\"seams\":[");
+      }
     }
     std::printf("],\"rms\":[");
     for (size_t f = 0; f < env.rms.size(); f++)
