@@ -28,12 +28,40 @@
  * police. It gates the decoder's structure and its decisions; the values it
  * decides from are gated one layer up, at full precision.
  *
+ * The voice and seam comparisons are COARSER STILL — ~1e-1 relative, measured
+ * the same way. Survivors on the sample: `++quiet` to `quiet++`, the 8-second
+ * cap to 9, the 2.5-beat gap anywhere in [1.9, 3.1], `minHold` anywhere in
+ * [1.1, 1.75] (1.0 and below FAIL, 1.8 fails), `sectionFinal` up to 11 beats,
+ * the RMS threshold by a thousandth, and removing the dedup entirely; for
+ * seams, W by a hundredth,
+ * the peak threshold by 10%, `nov` from float to double, and `>` to `>=`.
+ * What they DO catch is structural — the kernel size, its counting, keeping
+ * the zeros, an hbT off-by-one, W to zero. So they prove shape, not
+ * arithmetic. Three gates, three strengths; saying so is cheaper than
+ * rediscovering it.
+ *
+ * A RULE ABOUT THIS PARAGRAPH, learned by breaking it three times running.
+ * Every survivor interval above measures a PARTICULAR harness. The `minHold`
+ * figure was recorded as [0.5, 3.0], then [0.1, 1.75], then [1.1, 1.75] — and
+ * each was a correct measurement of a tree that the very same commit then
+ * edited out from under it (first the reshaped word list, then the per-input
+ * envelope; each tightened the gate). So: measure these LAST, once the
+ * harness has stopped changing, and re-measure any interval whose comment the
+ * same commit touches. A number describing a test is invalidated by changing
+ * the test — obvious in retrospect, and not obvious three times.
+ *
+ * And one thing NONE of them police: compiling courts.cpp with
+ * `-ffp-contract=fast` puts 64 fused multiply-adds into it where the default
+ * build has none, and every comparison here still reports identical. The
+ * no-FMA pragma is right and is still there — but nothing would notice if it
+ * stopped working.
+ *
  *   node eval/courts-parity.mjs [file.wav ...]
  *
  * With no arguments it runs the bundled sample's stems.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, mkdtempSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -175,12 +203,79 @@ if (!vocalsWav) {
 // A handful of synthetic words, so the WORDS path of vocalEvidence is
 // exercised and not only its no-lyrics fallback. The app always has words;
 // gating only the fallback would gate the path nothing takes.
-const WORDS = [[1, 1.4], [2.5, 2.9], [3.1, 3.4], [9, 9.5], [20, 20.4], [21, 21.6], [33, 33.5]]
+// Holds that STRADDLE minHold, deliberately. The first version of this list
+// left every word except one rescued by `sectionFinal` regardless, which is
+// why a 6x perturbation of minHold survived it. These sit either side.
+const WORDS = [[1, 1.4], [2.5, 2.9], [3.1, 3.4], [5.2, 5.6], [6.4, 6.8],
+  [9, 9.5], [11.2, 11.6], [14.5, 14.9], [20, 20.4], [21, 21.6], [33, 33.5]]
 let voiceComparisons = 0
+let noWordComparisons = 0
+
+/**
+ * A synthetic phrase envelope, because the real stems cannot constrain the
+ * lyric-less path. Their silences are all one length (six gaps, 1.90-1.95 s),
+ * so `phraseSegments`' merge branch never executes at any plausible threshold
+ * and `minGap` is equally unconstrained. This one straddles both.
+ *
+ * The soft edges are meant to be load-bearing: they should keep the last-rise
+ * test from re-anchoring inside a phrase, so `lastRise` stays at the segment
+ * start and `holdSec` follows whether the merge happened.
+ *
+ * It measures as designed: gaps of 0.372 s and 1.625 s, straddling the merge
+ * thresholds (0.150 / 0.450) and minGap (0.750 / 0.250).
+ *
+ * It did NOTHING at first, and the reason is worth more than the fixture. The
+ * no-words comparison read the shared `vocalsWav` rather than the input under
+ * test, so this file sat in `wavs` being compared for chroma and rms while the
+ * branch it exists for ran on someone else's audio. I diagnosed that wrongly
+ * first — blamed the envelope shape, on a hypothesis I had not tested — and
+ * measuring the gaps is what showed the envelope was right all along. An input
+ * that is present in a harness is not thereby reaching the code it was written
+ * for.
+ *
+ * Measured with the per-input envelope in place: merge 0.3 -> 0.9 CAUGHT
+ * (t 4.78/hold 2.51 becomes t 0.19/hold 7.11), minGap 1.5 -> 0.5 CAUGHT
+ * (4 files), rise gate 0.25 -> 0.02 CAUGHT. Still free: `holdSec >= minHold`
+ * -> `>`, which needs a hold landing exactly on the threshold. See task #47.
+ */
+const phraseFixture = (dir) => {
+  const SR = 44100
+  const seg = []
+  const push = (secs, fn) => {
+    const n = Math.round(secs * SR)
+    for (let i = 0; i < n; i++) seg.push(fn(i / n))
+  }
+  for (let rep = 0; rep < 3; rep++) {
+    push(3.0, (u) => u)          // ramp up
+    push(1.0, () => 1)           // hold
+    push(0.5, (u) => 1 - u)      // fade down
+    push(0.25, () => 0)          // the short silence the merge must span
+    push(1.5, (u) => u)          // fade up
+    push(1.0, () => 1)           // hold
+    push(1.5, () => 0)           // the long silence that ends a phrase
+  }
+  const n = seg.length
+  const buf = Buffer.alloc(44 + n * 2)
+  buf.write('RIFF', 0); buf.writeUInt32LE(36 + n * 2, 4); buf.write('WAVEfmt ', 8)
+  buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22)
+  buf.writeUInt32LE(SR, 24); buf.writeUInt32LE(SR * 2, 28); buf.writeUInt16LE(2, 32)
+  buf.writeUInt16LE(16, 34); buf.write('data', 36); buf.writeUInt32LE(n * 2, 40)
+  for (let i = 0; i < n; i++) {
+    const v = seg[i] * 0.8 * Math.sin((2 * Math.PI * 220 * i) / SR)
+    buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v * 32767))), 44 + i * 2)
+  }
+  const p = join(dir, 'phrase-fixture.wav')
+  writeFileSync(p, buf)
+  return p
+}
+const phraseWav = phraseFixture(tmp)
 if (!bassWav) {
   console.log('NOTE  no /bass/ input — chord runs were NOT compared by this run')
 }
 let chordComparisons = 0
+
+wavs.push(phraseWav)
+names.set(phraseWav, 'eval/beats phrase fixture (synthetic)')
 
 for (const path of wavs) {
  for (const band of BANDS) {
@@ -213,11 +308,36 @@ for (const path of wavs) {
       { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString()
   )
   let tsVoice = null
+  let tsVoiceNW = null
+  let cNW = null
   let tsSeams = null
   if (wantVoice) {
     const vw = readWavMono(vocalsWav)
     const venv = rmsEnvelope(to22k(monoAt44k(vw)))
     tsVoice = vocalEvidence(venv, tsBeats, WORDS.map(([s2, e]) => ({ s: s2, e })))
+    // The NO-WORDS fallback too — phraseSegments and the last-rise loop, which
+    // the words path never reaches. It ran ZERO times until this line existed.
+    // Partially closed, and the measurement says which part. CAUGHT now: the
+    // rise ratio (1.6 -> 3.0 and -> 1.1), phraseSegments' own threshold
+    // (0.08*p95 -> 0.20 and -> 0.02), and the rise lag (2 -> 3).
+    // On the REAL stems the merge branch never executes at all — 7 voiced
+    // runs, 6 gaps all 1.90-1.95 s, against thresholds of 0.15 s and 0.45 s —
+    // so the merge gap and `minGap` were uncovered rather than weakly
+    // constrained. `phraseFixture` is what covers them, and only once the
+    // envelope became per-input; see its comment.
+    // The no-words run uses THIS input as its own envelope, not the shared
+    // vocals stem. Two reasons, and the second is why the phrase fixture did
+    // nothing at first: per-input envelopes make these six comparisons six
+    // comparisons instead of one repeated six times, AND until this line the
+    // fixture was in `wavs` but never reached vocalEvidence, because the voice
+    // path always read `vocalsWav`. It was being compared for chroma and rms
+    // while the branch it exists for ran on someone else's audio.
+    // `tsRms` above is this same envelope — one value, one name.
+    tsVoiceNW = vocalEvidence(tsRms, tsBeats, null)
+    cNW = JSON.parse(execFileSync(bin,
+      ['courts', '--wav', path, '--lo', String(lo), '--hi', String(hi), '--vocals-wav', path],
+      { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
+    noWordComparisons++
     tsSeams = formSeams(beatSyncChroma(chromaFrames(x22, lo, hi), tsBeats), venv, tsBeats)
     voiceComparisons++
   }
@@ -272,6 +392,18 @@ for (const path of wavs) {
         break
       }
     }
+    const nw = cNW?.voice ?? []
+    if (nw.length !== tsVoiceNW.length)
+      problems.push(`voice(no-words) count ts=${tsVoiceNW.length} c++=${nw.length}`)
+    for (let i = 0; i < Math.min(tsVoiceNW.length, nw.length); i++) {
+      if (differs(tsVoiceNW[i].t, nw[i].t) || differs(tsVoiceNW[i].holdSec, nw[i].holdSec) ||
+          differs(tsVoiceNW[i].gapSec, nw[i].gapSec)) {
+        problems.push(`voice(no-words)[${i}] ` +
+          `ts=${show(tsVoiceNW[i].t)}/${show(tsVoiceNW[i].holdSec)}/${show(tsVoiceNW[i].gapSec)} ` +
+          `c++=${show(nw[i].t)}/${show(nw[i].holdSec)}/${show(nw[i].gapSec)}`)
+        break
+      }
+    }
     const cs = c.seams ?? []
     const ts2 = tsSeams.map((s2) => s2.t)
     if (cs.length !== ts2.length) problems.push(`seams count ts=${ts2.length} c++=${cs.length}`)
@@ -313,7 +445,8 @@ for (const path of wavs) {
     console.log(`      [${band[0]}-${band[1]} Hz] ${c.chromaFrames} chroma + ${c.beatSync?.length ?? 0} beat-sync` +
       ` + ${c.rmsFrames} rms + p95` +
       (tsRuns ? ` + ${tsRuns.length} chord runs` : '') +
-      (tsVoice ? ` + ${tsVoice.length} voice + ${tsSeams.length} seams` : '') + ' — all identical')
+      (tsVoice ? ` + ${tsVoice.length}/${tsVoiceNW.length} voice (words/none) + ${tsSeams.length} seams` : '') +
+      ' — all identical')
     compared++
   }
  }
@@ -340,6 +473,11 @@ if (new Set(seen).size !== wavs.length) {
 // Same discipline as the two checks above: if a bass input WAS present, every
 // other input must have had its chord runs compared. Silence about skipped
 // coverage is this file's recurring failure mode.
+if (vocalsWav && noWordComparisons !== wavs.length) {
+  console.log(`\nHARNESS BUG: ${noWordComparisons} no-words comparisons for ${wavs.length} inputs` +
+    ' — the lyric-less fallback was skipped for some of them.')
+  process.exit(2)
+}
 if (vocalsWav && voiceComparisons !== wavs.length) {
   console.log(`\nHARNESS BUG: ${voiceComparisons} voice comparisons for ${wavs.length} inputs` +
     ' — the voice/seam gate was skipped for some of them.')

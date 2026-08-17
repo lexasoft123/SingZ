@@ -29,8 +29,9 @@
 // structure and its tie rule; the numbers it decides from are gated above it,
 // which is where a mis-ported width or a reassociated sum would show.
 //
-// Landing in pieces, evidence first. Present so far: the extractor layer
-// and the chord decoder.
+// Landing in pieces, evidence first. Present so far: the extractor layer, the
+// chord decoder, and the voice/form extractors — i.e. everything
+// buildCourtEvidence reads. The courts themselves are next.
 namespace singz {
 
 /** A chord run on the base lattice: when it starts, how long it holds, and
@@ -104,8 +105,8 @@ struct ChordSeg {
 std::vector<ChordSeg> chordRuns(const std::vector<std::vector<float>>& Ch,
                                 const std::vector<std::vector<float>>& Cb, const std::vector<double>& beats);
 
-/** A phrase-final held note or section-final word — `vocalEvidence`'s output
- *  and, through `buildCourtEvidence`, the `voice` the meter court reads. */
+/** `vocalEvidence`'s own output, BEFORE buildCourtEvidence maps it — the court
+ *  reads the mapped `VoiceHold` (t + gapSec, rounded), not this. */
 struct VoiceHit {
   double t = 0;
   double holdSec = 0;

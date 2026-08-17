@@ -375,6 +375,10 @@ std::vector<VoiceHit> vocalEvidence(const RmsEnvelope& env, const std::vector<do
       long long end = a;
       long long quiet = 0;
       for (long long f = a; f < std::min(cap, static_cast<long long>(rms.size())); f++) {
+        // NOT behaviour-preserving if it ever fired: the TS would read
+        // undefined here and still increment `quiet`, where this skips. It
+        // cannot fire — `a` comes from a lyrics word start, which is never
+        // negative — so this is a bounds belt, not a port decision.
         if (f < 0) continue;
         if (static_cast<double>(rms[static_cast<size_t>(f)]) > thr) {
           end = f;
@@ -433,6 +437,10 @@ std::vector<double> formSeams(const std::vector<std::vector<float>>& Ch, const R
     const long long b = std::max(a + 1, static_cast<long long>(std::floor(beats[i + 1] * fps)));
     long long on = 0, tot = 0;
     for (long long f = a; f < std::min(b, n0); f++) {
+      // Same shape, same reasoning as the guard in vocalEvidence: the TS would
+      // count `tot++` on an out-of-range frame and this skips it. Unreachable
+      // because the backcast walk breaks at `next < 0.25`, so no beat is
+      // negative.
       if (f < 0) continue;
       tot++;
       if (static_cast<double>(rms[static_cast<size_t>(f)]) > thr) on++;
