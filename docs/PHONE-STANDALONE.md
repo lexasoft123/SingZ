@@ -1270,6 +1270,9 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
 
       | | 40.8 s song | 4 min song (6× the audio) |
       |---|---|---|
+      | **POCO X6 Pro wall** | **3.7 s (11× realtime)** | **14.9 s (16×)** |
+      | **POCO X6 Pro CPU** | **13.0 s (≈3.5 cores)** | **55.8 s (≈3.7)** |
+      | **POCO X6 Pro peak RSS** | **461 → 1147 MB (+686)** | **458 → 1269 MB (+811)** |
       | iOS sim wall | 2.2 s (19× realtime) | 6.0 s (41×) |
       | iOS sim CPU | 8.8 s (≈4 cores) | 29.8 s |
       | iOS sim peak RSS | 376 → 1035 MB (**+660**) | 311 → 1067 MB (**+756**) |
@@ -1279,7 +1282,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
 
       **The headline is that peak RSS barely tracks song length.** Six times
       the audio costs +96 MB on iOS and +130 MB on Android — the linear part
-      (frames, spect, probabilities) — on top of a FIXED ~660-675 MB that is
+      (frames, spect, probabilities) — on top of a FIXED ~660-690 MB that is
       the ORT session and its per-chunk activations. Chunks are 1500 frames
       whatever the song is. So the memory question for the fleet is "can this
       device spare ~700-800 MB transiently", not "how long is the song", and
@@ -1294,13 +1297,27 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       cores on the sim and ≈1.8 on the emulator, which is a property of those
       two hosts' core counts and ORT's thread pool, and among the first things
       a real device will contradict.
-      **These are a simulator and an emulator on an M2, NOT phone numbers**;
-      what they establish is the shape (fixed-cost-dominated, released after),
-      not the absolute — and on two song lengths only, so the per-minute cost
-      (28 MB on the sim, 38 on the emulator, over 3.4 added minutes) is a
-      slope through two points, not a curve. A real-device pass is still
-      owed, and the ~700-800 MB transient has to be read against the split
-      gate's own budget before beats and a split can ever run near each other.
+      **THE REAL PHONE AGREES, and that is the point of the row at the top.**
+      A POCO X6 Pro (Snapdragon 7+ Gen 2, 8 cores, 11.4 GB, HyperOS/API 35)
+      peaks at +686 MB for the short song and +811 MB for the 4-minute one —
+      within 2% of the emulator, the other exact `VmHWM` measurement, and
+      4-7% of the sim's sampled lower bound — so the fixed-cost shape is a
+      property of the model and not of the host. It is the fastest REAL
+      DEVICE of the three and about 4× the emulator, which is the
+      like-for-like comparison; the sim's higher multiples (19×/41×) come
+      from desktop-class cores, not from being a phone. With
+      5.4 GB free on that device the ~800 MB transient is comfortable, and it
+      returns: RSS falls back to 483 MB after the run.
+      The remaining numbers are a simulator and an emulator on an M2, NOT
+      phone numbers; what they establish is the shape (fixed-cost-dominated,
+      released after), not the absolute — and on two song lengths only, so the
+      per-minute cost (28 MB on the sim, 38 on the emulator, 37 on the phone,
+      over 3.4 added minutes) is a slope through two points, not a curve.
+      The Android device pass is DONE (the POCO row above); iOS is still
+      simulator-only. And the ~700-800 MB transient has to be read against
+      the split gate's own budget before beats and a split can ever run near
+      each other — 11.4 GB of phone makes it comfortable here, which says
+      nothing about the 6-8 GB devices the capability gate exists for.
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the

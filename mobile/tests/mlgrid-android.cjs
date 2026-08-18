@@ -30,7 +30,11 @@
  * Preconditions: debug build installed, Metro reachable, and BOTH beat models
  * plus the wav already on the device (this suite never downloads):
  *   adb push logmel.onnx beat_this.onnx in.wav \
- *     /sdcard/Android/data/com.lexasoft.singz/files/mlt/
+ *     /sdcard/Android/data/<pkg>/files/mlt/
+ *
+ * Driving a REAL PHONE rather than the emulator (see ANDROID_PKG below):
+ *   ANDROID_SERIAL=<serial> ANDROID_PKG=com.lexasoft.singz.debug \
+ *     DEVICE_NAME=<model> METRO_PORT=8082 node mobile/tests/mlgrid-android.cjs <rec>
  */
 const { execFileSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
@@ -40,7 +44,14 @@ const path = require('node:path')
 const SERIAL = process.env.ANDROID_SERIAL || 'emulator-5554'
 const PORT = Number(process.env.METRO_PORT || 8082)
 const ADB = process.env.ADB || `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`
-const DIR = '/sdcard/Android/data/com.lexasoft.singz/files/mlt'
+// ANDROID_PKG exists so this suite can drive a REAL PHONE. A debug build
+// installed over somebody's release build forces an uninstall that takes
+// files/singz-projects and the Drive sign-in with it, so a phone that is
+// actually used gets a side-by-side debug app instead
+// (`-PdebugAppIdSuffix=.debug`), which has a different package — so the
+// external-files path below is derived from it rather than hardcoded.
+const PKG = process.env.ANDROID_PKG || 'com.lexasoft.singz'
+const DIR = `/sdcard/Android/data/${PKG}/files/mlt`
 const rec = process.argv[2]
 
 const die = (m) => { console.error(m); process.exit(1) }
@@ -88,10 +99,13 @@ try {
 
   // 2. Drive the grid through the app's own bridge.
   const list = await (await fetch(`http://localhost:${PORT}/json/list`)).json()
-  // Filter by deviceName: Metro lists every attached app, and an iOS
-  // simulator on the same Metro will happily answer first.
-  const target = list.filter((x) => (x.deviceName || '').includes('sdk_gphone64') && x.webSocketDebuggerUrl).pop()
-  if (!target) die(`no Android target on Metro ${PORT} — is the app running?`)
+  // Filter by deviceName: Metro lists every attached app in connection order,
+  // so an iOS simulator on this same Metro will happily answer first. The
+  // default matches the emulator; a real phone reports its model (the POCO
+  // X6 Pro is '23049PCD8G'), so pass DEVICE_NAME when driving hardware.
+  const wantDevice = process.env.DEVICE_NAME || 'sdk_gphone64'
+  const target = list.filter((x) => (x.deviceName || '').includes(wantDevice) && x.webSocketDebuggerUrl).pop()
+  if (!target) die(`no Android target named '${wantDevice}' on Metro ${PORT} — is the app running?`)
   const WebSocket = require(path.join(__dirname, '..', 'node_modules', 'ws'))
   const ws = new WebSocket(target.webSocketDebuggerUrl, { headers: { Origin: 'http://localhost' } })
   let id = 0

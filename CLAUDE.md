@@ -112,10 +112,12 @@ Ask the device before trusting it — `adb -s <serial> shell dumpsys package
 com.lexasoft.singz | grep -E 'versionName|DEBUGGABLE'` — and confirm the
 installed APK is *this* tree's (`md5sum` it against
 `mobile/android/app/build/outputs/apk/debug/app-debug.apk`). The same
-applicationId is why a debug build must never be pushed to the user's own
-phone: same id + different signing key = Android demands an uninstall first,
-which takes `files/singz-projects` (every downloaded song) and the Drive
-sign-in with it.
+applicationId is why a PLAIN debug build must never be pushed to the user's
+own phone: same id + different signing key = Android demands an uninstall
+first, which takes `files/singz-projects` (every downloaded song) and the
+Drive sign-in with it. Build it with `-PdebugAppIdSuffix=.debug` instead and
+it installs beside the release app, touching neither — that is how the POCO
+was driven; the gotchas that follow from it are below.
 
 ## Hard-won gotchas (do not re-learn these)
 
@@ -288,6 +290,39 @@ sign-in with it.
   shim under `core/android/`), never next to the CMakeLists. The ORT Android
   AAR is legacy-layout (headers/ + jni/<abi>/, no prefab) — the `extractOrtSdk`
   gradle task unzips it and CMake imports the .so via `ORT_SDK_DIR`.
+- **A piped gradle build reports its failure as success** — `./gradlew … |
+  tail` exits with TAIL's status, so a build that died still reads as exit 0.
+  It happened twice in one session: both "rebuilds" actually aborted on
+  `Gradle requires JVM 17 or later … currently configured to use JVM 8`, the
+  APK on disk stayed the previous one, and the suite then passed against a
+  binary that did not contain the change under test — the stale-binary trap
+  arriving through the build rather than through the install. Redirect to a
+  file and echo `$?` instead of piping, and confirm the APK's mtime moved.
+  The JVM 8 came from **`/usr/libexec/java_home -v 21` EXITING 0 AND
+  RETURNING A JDK 8 PATH** — measured: only 1.8.491.10 is registered on this
+  Mac, and asking for 21 yields
+  `/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home` with
+  status 0, so the usual `$(java_home -v 21 || echo <fallback>)` idiom never
+  reaches its fallback and hands gradle the wrong JDK. Set JAVA_HOME to the
+  brew path directly — `/opt/homebrew/opt/openjdk@21` and its
+  `…/libexec/openjdk.jdk/Contents/Home` both work — and never derive it from
+  `java_home` here.
+- **Driving a dev build on somebody's REAL phone**: build with
+  `-PdebugAppIdSuffix=.debug` so it installs beside the release app instead
+  of demanding the uninstall that would take `files/singz-projects` and the
+  Drive sign-in. Three things then bite, in order: HyperOS/MIUI refuses
+  `adb install` until "Install via USB" is on in Developer options
+  (`INSTALL_FAILED_USER_RESTRICTED`, and pushing + `pm install` does not get
+  round it); a fresh applicationId has NO `debug_http_host` pref, so on an
+  emulator RN falls back to `10.0.2.2:8081` and quietly attaches to a
+  neighbouring worktree's Metro (write
+  `<pkg>_preferences.xml` with `debug_http_host` — a real phone is fine on
+  `localhost` + `adb reverse`); and on the emulator an `adb`-created
+  `files/mlt` is owned by shell and the app cannot open it (`adb root` +
+  `chown` to the app uid fixes it; the phone's FUSE grants by path and needs
+  nothing). **`run-as` is useless for diagnosing any of this** — it does not
+  inherit the app's storage sandbox, so it reports "Permission denied" even
+  for directories the app itself created.
 - **Android builds need a JDK 21** (`brew install openjdk@21`; CI pins
   temurin 21). The Android Studio JBR moved to JDK 25, and AGP's
   GeneratePrefabPackages treats the JDK 24+ restricted-native-access warning
