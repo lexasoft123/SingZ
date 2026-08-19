@@ -50,7 +50,7 @@ const ADB = process.env.ADB || `${process.env.HOME}/Library/Android/sdk/platform
 // actually used gets a side-by-side debug app instead
 // (`-PdebugAppIdSuffix=.debug`), which has a different package — so the
 // external-files path below is derived from it rather than hardcoded.
-const PKG = process.env.ANDROID_PKG || 'com.lexasoft.singz'
+const { PKG, silenceDevice } = require('./android-lib.cjs')
 const DIR = `/sdcard/Android/data/${PKG}/files/mlt`
 const rec = process.argv[2]
 
@@ -59,16 +59,18 @@ if (!rec) die('usage: node mobile/tests/mlgrid-android.cjs <recording-dir>')
 const metaPath = path.join(rec, 'meta.json')
 if (!fs.existsSync(metaPath)) die(`no meta.json in ${rec} — make one with scripts/dump-beat-oracle.py --replay`)
 const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+// The last route to a green run that compared nothing: a recording whose
+// arrays are empty makes every field below print "0 values identical".
+for (const k of ['beats', 'downbeats', 'beat_prob', 'downbeat_prob']) {
+  if (!Array.isArray(meta.json?.[k]) || meta.json[k].length === 0) {
+    die(`${rec}/meta.json has no ${k} — that recording would pass this suite without comparing anything`)
+  }
+}
 
 const adb = (...a) => execFileSync(ADB, ['-s', SERIAL, ...a], { encoding: 'utf8', maxBuffer: 1 << 28 })
 
-// Automated runs are silent. This suite plays nothing, so it is the rule
-// rather than the noise — and `--set 0` is a no-op on API 36 (it prints,
-// connects, exits, changes nothing), so the keyevents are what actually work.
-try {
-  adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
-  for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
-} catch { /* a device that refuses the mute is not a reason to skip the test */ }
+// Automated runs are silent — the emulator's volume only; see android-lib.
+console.log(silenceDevice(adb))
 
 ;(async () => {
   // 1. The device's wav must decode to the very samples the recording used.
@@ -132,14 +134,36 @@ try {
   if (await val('typeof globalThis.__test.mlGridParity') !== 'function') {
     die('__test.mlGridParity is missing — is this a dev build served by THIS Metro?')
   }
+  // The hook is JS, which Metro serves live; the NATIVE side is the half that
+  // needs a rebuild and reinstall, and a stale binary is the standing trap
+  // here. Ask the module directly — an absent mlGrid would otherwise burn the
+  // whole settle deadline before failing with a much vaguer message.
+  if (await val("globalThis.__test.nativeApi('SingzSplit','mlGrid')") !== 'function') {
+    die('SingzSplit.mlGrid is not in the installed binary — rebuild and reinstall the app ' +
+        '(Metro serves JS live, native needs a real install)')
+  }
 
   // Kicked, then POLLED. The native call runs for tens of seconds and an
   // awaited eval across the Hermes inspector is the shape that segfaults.
-  await val(`globalThis.__test.mlGridParity('${DIR}/in.wav','${DIR}','')`)
+  // The hook returns true; a throw inside it evaluates to undefined instead,
+  // and swallowing that would spend the whole deadline saying nothing useful.
+  const kicked = await val(`globalThis.__test.mlGridParity('${DIR}/in.wav','${DIR}','')`)
+  if (kicked !== true) die(`mlGridParity did not start (returned ${JSON.stringify(kicked)}) — it threw`)
   const t0 = Date.now()
-  for (let i = 0; i < 600; i++) {
+  // A DEADLINE, not a poll count: an unsettled promise is the arity-skew
+  // signature (a native method whose argument count does not match JS is
+  // never dispatched and never rejects), and it must fail here rather than
+  // look like a slow machine.
+  const DEADLINE_MS = 600000
+  let done = false
+  while (Date.now() - t0 < DEADLINE_MS) {
     await new Promise((r) => setTimeout(r, 1000))
-    if (await val('globalThis.__test.echoDone === true')) break
+    if (await val('globalThis.__test.echoDone === true')) { done = true; break }
+  }
+  if (!done) {
+    die(`mlGrid never settled in ${DEADLINE_MS / 1000}s — neither resolved nor rejected.\n` +
+        'That is the signature of a native/JS arity mismatch: the bridge refuses to dispatch and ' +
+        'the promise is simply dropped. Check mlGrid takes (wav, models, dump) on BOTH platforms.')
   }
   const res = JSON.parse((await val('JSON.stringify(globalThis.__test.echoResult)')) || 'null')
   if (!res) die(`no result after ${((Date.now() - t0) / 1000).toFixed(0)}s`)

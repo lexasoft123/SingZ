@@ -1152,7 +1152,13 @@ export default function CatalogScreen({
               {splitUi.phase === 'model' && (
                 <>
                   <Text style={s.splitText}>
-                    Downloading the splitter — {splitUi.gotMB} of {splitUi.totalMB} MB, once
+                    {/* Downloads are single-flight (models.ts): the splitter
+                        waits if the beat models are already coming down, and
+                        a bar at 0 that never moves is how a wait reads as a
+                        hang. Say which it is. */}
+                    {splitUi.gotMB === 0 && beatModelsUi?.phase === 'downloading'
+                      ? `Waiting for the beat models to finish — then the splitter (${splitUi.totalMB} MB, once)`
+                      : `Downloading the splitter — ${splitUi.gotMB} of ${splitUi.totalMB} MB, once`}
                   </Text>
                   <View style={s.splitBarBed}>
                     <View

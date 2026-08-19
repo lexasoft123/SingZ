@@ -54,7 +54,7 @@ const path = require('node:path')
 const SERIAL = process.env.ANDROID_SERIAL || 'emulator-5554'
 const PORT = Number(process.env.METRO_PORT || 8082)
 const ADB = process.env.ADB || `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`
-const PKG = process.env.ANDROID_PKG || 'com.lexasoft.singz'
+const { PKG, silenceDevice, grantExternal } = require('./android-lib.cjs')
 const DEV = process.env.DEVICE_NAME || 'sdk_gphone64'
 const DIR = `/sdcard/Android/data/${PKG}/files/mlt`
 const rec = process.argv[2]
@@ -71,25 +71,17 @@ if (stems.length === 0) die(`no .wav stems in ${stemsDir}`)
 
 const adb = (...a) => execFileSync(ADB, ['-s', SERIAL, ...a], { encoding: 'utf8', maxBuffer: 1 << 28 })
 
-// Automated runs are silent (see mlgrid-android.cjs for why both calls).
-try {
-  adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
-  for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
-} catch { /* not a reason to skip */ }
+// Automated runs are silent — the emulator's volume only; see android-lib.
+console.log(silenceDevice(adb))
 
 ;(async () => {
   // 1. Push the stems. The device reads what the host mixed — same files.
   adb('shell', 'mkdir', '-p', `${DIR}/stems`)
   for (const f of stems) adb('push', path.join(stemsDir, f), `${DIR}/stems/${f}`)
-  // On an EMULATOR an adb-created directory under the app's external files
-  // is owned by `shell` and the app cannot open it (CLAUDE.md: the real
-  // phone's FUSE grants by path and needs nothing). Rooted AVDs let us hand
-  // it over; where root is refused the run will say "cannot open" and the
-  // fix is by hand. Best-effort, because the phone path must not need it.
-  try {
-    const uid = adb('shell', 'stat', '-c', '%U', `/data/data/${PKG}`).trim()
-    if (uid && !uid.includes('Permission')) adb('shell', 'chown', '-R', uid, `/data/media/0/Android/data/${PKG}/files/mlt/stems`)
-  } catch { /* not root — a phone, or an AVD that said no */ }
+  // An adb-created dir under the app's external files is shell-owned on an
+  // emulator and the app cannot open it; android-lib carries the rule and
+  // the reasons.
+  grantExternal(adb, `${DIR}/stems`, PKG)
   console.log(`pushed ${stems.length} stems: ${stems.join(', ')}`)
 
   // 2. Drive mlGridFromStems through the app's own hook.

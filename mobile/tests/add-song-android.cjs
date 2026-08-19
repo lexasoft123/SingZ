@@ -29,14 +29,14 @@ const WebSocket = require('ws')
 const ADB = process.env.ADB || `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`
 const SERIAL = process.env.ANDROID_SERIAL || 'emulator-5554'
 const PORT = process.env.METRO_PORT || 8081
-const APP = 'com.lexasoft.singz'
+const { PKG: APP, silenceDevice, dataDir } = require('./android-lib.cjs')
 const SONG_NAME = 'Add Song Test.flac'
 // Seeds live in the app's INTERNAL import staging — the same place a real
 // pick lands (passes moveIntoProject's owned-guard), and the one storage
 // run-as can write: the run-as uid has no external-storage groups, and a
 // plain adb push into the EXTERNAL files dir lands shell-owned, unreadable
 // to the app itself (both measured on API 36).
-const SEED_DIR = '/data/data/com.lexasoft.singz/files/singz-projects/imports/e2e-seed'
+const SEED_DIR = `${dataDir(APP)}/files/singz-projects/imports/e2e-seed`
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failures = 0
 const check = (label, cond, detail) => {
@@ -95,15 +95,12 @@ async function pollGlobal(conn, name, timeoutMs = 180000) {
 async function main() {
   // Seed + silence. Metro lists EVERY connected app (iPhone sims included) —
   // filter to the emulator's deviceName and probe before trusting a target.
-  // Silence, belt and braces: `cmd media_session volume --set 0` is the
-  // documented way, but on some API-36 AVDs it prints "Connecting to
-  // AudioService", exits within a second and silently applies nothing
-  // (measured in isolation: streamVolume 2 before, 2 after; and it stayed
-  // 5/15 through a reboot). VOLUME_DOWN keyevents always land — alone they
-  // take the same emulator 2 -> 0 — so they finish the
-  // job; the app zeroing its own master gain is the third layer.
-  adb('shell', 'cmd', 'media_session', 'volume', '--stream', '3', '--set', '0')
-  for (let i = 0; i < 20; i++) adb('shell', 'input', 'keyevent', '25')
+  // Silence: the emulator's own volume (android-lib explains why only an
+  // emulator's — on a phone the volume keys move the RINGER, since these
+  // suites play nothing for them to follow). On any real device nothing is
+  // sent here at all and the master-gain zero below is the only layer,
+  // which is what the iOS suites have always relied on.
+  console.log(`  ${silenceDevice(adb)}`)
 
   // Keep this app's permissions where the other driver needs them: nothing
   // here splits, so no dialog can appear, but both suites share one install
@@ -166,8 +163,8 @@ async function main() {
   // inspector-unsafe window is over.
   const addLogCount = () => {
     try {
-      const xml = adb('shell', 'run-as', 'com.lexasoft.singz', 'sh', '-c',
-        "'cat /data/data/com.lexasoft.singz/shared_prefs/singz.xml 2>/dev/null || true'")
+      const xml = adb('shell', 'run-as', APP, 'sh', '-c',
+        `'cat ${dataDir(APP)}/shared_prefs/singz.xml 2>/dev/null || true'`)
       return (xml.match(/add-song /g) ?? []).length
     } catch {
       return -1
