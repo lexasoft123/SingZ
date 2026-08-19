@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "analysis.h"
+#include "beat_this.h"
 #include "beats.h"
 #include "melody.h"
 #include "resample.h"
@@ -103,6 +104,41 @@ static void resamplerTests() {
     const double gain = std::sqrt(A * A + B * B) / 0.5;
     std::snprintf(label, sizeof label, "passband gain within 0.1 dB (%.4f)", gain);
     CHECK(label, gain > 0.9886 && gain < 1.0116);
+  }
+  {
+    // 44.1k -> 22.05k, the Beat This! input path: a DECIMATION, where the
+    // filter actually has to work. The 1 kHz/48k->44.1k check above is
+    // nearly unity ratio and cannot see a short filter — it read 110 dB while
+    // the 2:1 case was a 24-tap lowpass aliasing 14 kHz back at -25 dB
+    // (measured; cymbals onto the band the beat model listens to, a
+    // different grid from the same stems). Gate the alias floor and the
+    // passband edge, not a tone that sits comfortably in the middle.
+    const int srcRate = 44100, dstRate = 22050, seconds = 2;
+    auto gainAt = [&](double hz) {
+      singz::Resampler r(srcRate, dstRate, 1);
+      const auto in = sine(hz, srcRate, srcRate * seconds, 1);
+      std::vector<float> out;
+      r.process(in.data(), srcRate * seconds, out);
+      r.flush(out);
+      const int n = static_cast<int>(out.size()), head = dstRate / 10, tail = dstRate / 10;
+      // above the new Nyquist a tone lands at its alias
+      const double f = hz < dstRate / 2.0 ? hz : std::fabs(hz - dstRate);
+      double ss = 0, sc = 0, cc = 0, ys = 0, yc = 0;
+      for (int i = head; i < n - tail; i++) {
+        const double ph = 2.0 * M_PI * f * i / dstRate, sn = std::sin(ph), cs = std::cos(ph), y = out[i];
+        ss += sn * sn; sc += sn * cs; cc += cs * cs; ys += y * sn; yc += y * cs;
+      }
+      const double det = ss * cc - sc * sc, A = (ys * cc - yc * sc) / det, B = (yc * ss - ys * sc) / det;
+      return 20.0 * std::log10(std::sqrt(A * A + B * B) / 0.5);
+    };
+    char label[128];
+    const double g10k = gainAt(10000.0), a14k = gainAt(14000.0), a12k = gainAt(12000.0);
+    std::snprintf(label, sizeof label, "2:1 passband flat to 10 kHz (%.2f dB)", g10k);
+    CHECK(label, g10k > -0.5);
+    std::snprintf(label, sizeof label, "2:1 alias of 14 kHz below -60 dB (%.1f dB)", a14k);
+    CHECK(label, a14k < -60.0);
+    std::snprintf(label, sizeof label, "2:1 alias of 12 kHz below -30 dB (%.1f dB)", a12k);
+    CHECK(label, a12k < -30.0);
   }
   {
     // Streaming in blocks must equal one-shot processing byte for byte —
@@ -441,12 +477,85 @@ static void beatsTests() {
   CHECK("beats: and says why", !pd.reject.empty());
 }
 
+// sumStemsTo22k (beat_this.cpp) — the from-stems ML input. The resampler's
+// QUALITY is gated above; these gate the wiring around it: the pad-to-max
+// sum, the 44.1 kHz refusal, and that the whole path equals Resampler(sum) —
+// so a future "optimisation" that resamples per stem, drops the tail flush
+// or truncates to the shortest stem turns a light red here instead of a
+// slightly different grid on a phone.
+static void sumStemsTests() {
+  const std::string a = "/tmp/singz-core-host-sum-a.wav";
+  const std::string b = "/tmp/singz-core-host-sum-b.wav";
+  // Quarters survive the writer/reader pair exactly (0.25 -> 8192 -> 0.25:
+  // the writer scales by 32767 with lrintf, the reader divides by 32768), so
+  // the sum below is checked with == and not a tolerance.
+  const int an = 1200;
+  const int bn = 700;  // shorter: the tail of `a` must arrive unsummed
+  std::vector<float> av(an), bv(bn);
+  for (int i = 0; i < an; i++) av[static_cast<size_t>(i)] = (i % 2 == 0) ? 0.25f : -0.5f;
+  for (int i = 0; i < bn; i++) bv[static_cast<size_t>(i)] = (i % 3 == 0) ? 0.5f : -0.25f;
+  {
+    singz::WavWriter w;
+    w.open(a, 44100, 1);
+    w.append(av.data(), an);
+    w.finalize();
+  }
+  {
+    singz::WavWriter w;
+    w.open(b, 44100, 1);
+    w.append(bv.data(), bn);
+    w.finalize();
+  }
+
+  std::string err;
+  const std::vector<float> got = singz::sumStemsTo22k({a, b}, err);
+  CHECK("two stems sum without error", err.empty());
+
+  // The reference: hand-sum (padding b with silence), then the very
+  // Resampler the function is contracted to use.
+  std::vector<float> mix(static_cast<size_t>(an), 0.0f);
+  for (int i = 0; i < an; i++) mix[static_cast<size_t>(i)] += av[static_cast<size_t>(i)];
+  for (int i = 0; i < bn; i++) mix[static_cast<size_t>(i)] += bv[static_cast<size_t>(i)];
+  singz::Resampler rs(44100, singz::kBeatThisSr, 1);
+  std::vector<float> want;
+  rs.process(mix.data(), an, want);
+  rs.flush(want);
+  bool same = got.size() == want.size();
+  for (size_t i = 0; same && i < got.size(); i++) same = got[i] == want[i];
+  CHECK("sum+decimate == Resampler(hand-sum), tail included", same);
+  // Half the frames plus the filter tail that flush() drains — at most one
+  // output sample per tap, never less than half. A missing flush() would
+  // land at exactly an/2 and fail the identity check above too.
+  CHECK("output is decimated (half the frames plus the filter tail)",
+        got.size() >= static_cast<size_t>(an / 2) && got.size() <= static_cast<size_t>(an / 2 + 128));
+
+  // Refusals say why, with the path in the message.
+  const std::vector<float> none = singz::sumStemsTo22k({}, err);
+  CHECK("no stems is an error", !err.empty() && none.empty());
+  const std::vector<float> gone = singz::sumStemsTo22k({"/tmp/singz-no-such-stem.wav"}, err);
+  CHECK("a missing stem names itself", !err.empty() && gone.empty() &&
+        err.find("singz-no-such-stem") != std::string::npos);
+  {
+    singz::WavWriter w;
+    w.open(b, 48000, 1);
+    w.append(bv.data(), bn);
+    w.finalize();
+  }
+  const std::vector<float> wrong = singz::sumStemsTo22k({a, b}, err);
+  CHECK("a 48 kHz stem is refused, not resampled", !err.empty() && wrong.empty() &&
+        err.find("48000") != std::string::npos);
+
+  std::remove(a.c_str());
+  std::remove(b.c_str());
+}
+
 int main() {
   resamplerTests();
   wavTests();
   melodyTests();
   keyTests();
   beatsTests();
+  sumStemsTests();
   std::printf(failures == 0 ? "\nALL CORE HOST TESTS PASS\n" : "\n%d FAILURE(S)\n", failures);
   return failures == 0 ? 0 : 1;
 }

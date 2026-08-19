@@ -1318,6 +1318,64 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       the split gate's own budget before beats and a split can ever run near
       each other — 11.4 GB of phone makes it comfortable here, which says
       nothing about the 6-8 GB devices the capability gate exists for.
+    - **4b wired** (2026-08-19). The lattice reaches the pipeline. The
+      binding's new entry is `mlGridFromStems` (both platforms, same arity):
+      44.1 kHz stem paths in, the core sums and decimates them itself
+      (`sumStemsTo22k` — the desktop's fetchMlGrid mix, natively; ~250 MB
+      of audio never crosses a JS runtime), the grid out. `pipeline.ts`
+      runs it FIRST, before any stem crosses to the worklet host, so the
+      ORT session's ~700 MB and the six decoded stems never coexist, and
+      hands the result to `detectBeats` as the `ml` aux. The beat models
+      are an opt-in "better beats" card in the phone library (87 MB, once;
+      dismissable; never downloaded on anyone's behalf) — `BEAT_MODELS`
+      was already pinned to `models-1`, and the sha256s match the files the
+      device suites were verified with. Both natives grew `modelStatus`
+      (a stat, never a download) so the planner can ask without touching
+      the network.
+      **The stamp trap is closed**: `analysisNone.beatMl` is the beat
+      verdict's sub-stamp — true when the lattice was heard on the way to
+      "no grid". BEAT_DETECT_VERSION alone cannot carry it (the desktop
+      stores ml and no-ml grids under one detVersion), so a verdict that
+      predates the models is re-asked exactly once when they land, and a
+      verdict heard WITH them binds. Jest gates it (29 pipeline tests, the
+      sub-stamp rule mutation-tested: ignoring it turns exactly the two
+      re-ask tests red). Proven end to end on the sim
+      (`mobile/tests/ml-aux-ios.cjs`): models absent → homegrown grid,
+      `ml 0 ms`, the offer showing; models seeded → re-analysis logs
+      `ml grid: 120 beats, 37 downbeats in 3.8s` and `ml 3955 ms`, fresh
+      grid under the current stamp, key and melody kept.
+      **And a real finding on the way**: the shared `Resampler` was sized
+      for 48k→44.1k (24 taps per output at up=147 is a ~3.5k-tap prototype)
+      and the same 24 at 44.1k→22.05k is a 24-TAP lowpass — measured −3 dB
+      at 10 kHz, content at 12-14 kHz aliasing back at −10..−25 dB. On
+      real stems that was 16.8 dB SNR against soxr and a different grid.
+      The tap count now scales with the net decimation (96-tap prototype
+      at 2:1; 14 kHz aliases at −134 dB; 48k→44.1k byte-identical to
+      before, its 110 dB gate unmoved), and the host harness gates the 2:1
+      response directly — the old filter turns three checks red. The
+      "110 dB" in resample.h's header had been measured with a 1 kHz tone
+      at a near-unity ratio, where a short filter cannot show.
+      **What "matches the desktop" can mean here, measured before the
+      device suites' gate was set**: three good renders of the same three
+      stems (Chromium's OfflineAudioContext — the desktop's actual path,
+      via `scripts/render-ml-mix.cjs` —, the core's Kaiser, ffmpeg's soxr)
+      agree to 0.01 dB from 20 Hz to 10 kHz, differ in group delay and the
+      last 500 Hz under Nyquist, and Beat This! gives them THREE grids:
+      119/43, 120/37, 117/39 beats/downbeats. Chromium's is the
+      least-filtered of the three (it sums at 44.1k and its per-source
+      interpolation folds 11 kHz+ back in; its peak is the raw sum's), yet
+      it is what the desktop ships. There is no resampler-independent grid
+      to match bit for bit. What is stable is the LATTICE: phone vs
+      Chromium beats F1 0.996 (119 of 119 within 70 ms), same tempo,
+      downbeats F1 0.88 — the downbeat head is the marginal one, and `ml`
+      is evidence to the courts, not the grid. So `mlgrid-stems-{android,
+      ios}.cjs` gate beat-F1 ≥ 0.98 / tempo / downbeat-F1 ≥ 0.80 against
+      the Chromium oracle, and dropping a stem turns them red (F1 0.975,
+      tempo 120 vs 125). iOS and Android agree with each other bit for bit
+      on the from-stems path (120/37 on both).
+      Not done: a real-phone run of the from-stems path (the binding was;
+      the wired pipeline was not), levelling `mlgrid-android.cjs` up to
+      the iOS suite, and the ≥10-song corpus eval of phone-ml grids.
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the

@@ -138,8 +138,15 @@ export interface ProjectSettings {
    * bed silent. Without it a song with no grid would be re-decoded and
    * re-tracked on every open, forever; with it the question is asked again
    * only when the detector moves on, exactly like a stale grid.
+   *
+   * `beatMl` is the beat verdict's SUB-STAMP: true when the neural lattice
+   * (the Beat This! models) was heard on the way to "no grid".
+   * BEAT_DETECT_VERSION alone cannot carry this — the desktop stores ml and
+   * no-ml grids under the same detVersion — so when the models arrive on a
+   * phone after a verdict, the version matches, the verdict predates the
+   * evidence, and this flag is what lets the pipeline ask exactly once more.
    */
-  analysisNone?: { beat?: number; key?: number }
+  analysisNone?: { beat?: number; beatMl?: boolean; key?: number }
   /** Metronome preferences saved with the project. */
   metronome?: MetronomeConfig
   /** Audio files the singer added as extra lanes (desktop-saved). */

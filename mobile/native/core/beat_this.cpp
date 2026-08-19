@@ -9,6 +9,9 @@
 #include <limits>
 #include <sstream>
 
+#include "resample.h"
+#include "wav.h"
+
 // Same no-FMA rule as the rest of the core.
 #if defined(__clang__)
 #pragma clang fp contract(off)
@@ -282,6 +285,51 @@ MlGrid beatThis(const std::vector<float>& signal22k, const BeatThisModels& model
   for (const float v : downLogits) grid.downbeatProb.push_back(sigmoidProb(v));
   grid.ok = true;
   return grid;
+}
+
+std::vector<float> sumStemsTo22k(const std::vector<std::string>& stemPaths, std::string& error) {
+  error.clear();
+  if (stemPaths.empty()) {
+    error = "no stems to sum";
+    return {};
+  }
+  // Sum at 44.1 kHz first, resample once: with a linear filter the two orders
+  // are the same mix, and one pass costs half the filter work of six.
+  std::vector<float> mix;
+  for (const std::string& p : stemPaths) {
+    MonoWav w = readWavMono(p);
+    if (!w.ok) {
+      error = p + ": " + w.error;
+      return {};
+    }
+    if (w.sampleRate != 44100) {
+      error = p + ": stems are 44100 Hz, got " + std::to_string(w.sampleRate);
+      return {};
+    }
+    if (w.samples.size() > mix.size()) mix.resize(w.samples.size(), 0.0f);
+    for (size_t i = 0; i < w.samples.size(); i++) mix[i] += w.samples[i];
+    // w's ~40 MB per stem-minute goes back here, before the next read — the
+    // peak is mix + one stem, never mix + six.
+  }
+  Resampler rs(44100, kBeatThisSr, 1);
+  std::vector<float> out;
+  out.reserve(mix.size() / 2 + 16);
+  rs.process(mix.data(), static_cast<int64_t>(mix.size()), out);
+  rs.flush(out);
+  return out;
+}
+
+MlGrid beatThisFromStems(const std::vector<std::string>& stemPaths, const BeatThisModels& models,
+                         const BeatThisProgress& progress) {
+  std::string error;
+  std::vector<float> signal22k = sumStemsTo22k(stemPaths, error);
+  if (!error.empty()) {
+    MlGrid g;
+    g.ok = false;
+    g.error = error;
+    return g;
+  }
+  return beatThis(signal22k, models, progress);
 }
 
 MlGrid mlGridRounded(const MlGrid& grid) {

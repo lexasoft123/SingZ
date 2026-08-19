@@ -65,6 +65,9 @@ interface DownloadNative {
     expectedBytes: number
   ): Promise<{ path: string; downloaded: boolean }>
   cancelDownload(): Promise<boolean>
+  /** Present-at-size per name (-1 = absent) plus the models dir — a stat,
+   *  never a download. Absent on natives older than this JS. */
+  modelStatus?(names: string[]): Promise<{ dir: string; sizes: number[] }>
 }
 
 const Folder = (): DownloadNative => NativeModules.FolderAccess as DownloadNative
@@ -80,7 +83,48 @@ export async function ensureSplitModel(
   return ensureModel(SPLIT_MODEL, onProgress)
 }
 
+/**
+ * SINGLE-FLIGHT over the native downloader — which is one instance with ONE
+ * cancel flag and (on iOS) one progress pair. Two callers at once — the
+ * split card fetching the 136 MB splitter while the "better beats" card
+ * fetches its 87 MB — would on iOS paint each other's bytes into both bars
+ * and on both platforms make either Cancel abort whichever download was in
+ * flight, then reset the flag for the next (found in review: "my split
+ * download stopped by itself"). So downloads queue here, one at a time, and
+ * cancel is addressed to the NAME in flight: a cancel for a model that is
+ * merely queued removes it from the queue and never touches the native.
+ */
+let chain: Promise<unknown> = Promise.resolve()
+let inFlight: string | null = null
+const queued = new Set<string>()
+
 export async function ensureModel(
+  model: PhoneModel,
+  onProgress?: (gotBytes: number, totalBytes: number) => void
+): Promise<string> {
+  queued.add(model.file)
+  const turn = chain.then(async () => {
+    if (!queued.has(model.file)) {
+      // Cancelled while waiting its turn — before the native ever heard of it.
+      const e = new Error('cancelled') as Error & { code?: string }
+      e.code = 'cancelled'
+      throw e
+    }
+    queued.delete(model.file)
+    inFlight = model.file
+    try {
+      return await downloadNow(model, onProgress)
+    } finally {
+      inFlight = null
+    }
+  })
+  // The chain must survive a rejection or every later download is stuck
+  // behind the first failure.
+  chain = turn.catch(() => {})
+  return turn
+}
+
+async function downloadNow(
   model: PhoneModel,
   onProgress?: (gotBytes: number, totalBytes: number) => void
 ): Promise<string> {
@@ -121,9 +165,70 @@ export async function ensureModel(
   }
 }
 
-export function cancelModelDownload(): Promise<boolean> {
-  log('split', 'model download cancelled')
+/**
+ * Cancel ONE model's download, by name. The one in flight is stopped at the
+ * native (its reject resets the caller's card, the .part is kept for
+ * resume); a queued one is simply dropped from the queue; a name that is
+ * neither is a no-op — never a blind flip of the native's single flag, which
+ * would stop whatever OTHER download happened to be running.
+ */
+export async function cancelModelDownload(file: string): Promise<boolean> {
+  if (queued.delete(file)) {
+    log('split', `${file} download cancelled before it started`)
+    return true
+  }
+  if (inFlight !== file) return false
+  log('split', `${file} download cancelled`)
   return Folder().cancelDownload()
+}
+
+/** Cancel every model in BEAT_MODELS, in flight or queued. */
+export async function cancelBeatModels(): Promise<void> {
+  for (const m of BEAT_MODELS) await cancelModelDownload(m.file)
+}
+
+/** BEAT_MODELS' combined size, for copy that states the cost up front. */
+export const BEAT_MODELS_MB = Math.round(BEAT_MODELS.reduce((n, m) => n + m.bytes, 0) / 1e6)
+
+/**
+ * Are the beat models on this phone, and where? Judged from the FILES —
+ * present at the pinned size (the sha was verified when they earned their
+ * names, and these live in app-private storage) — never from a record of
+ * past downloads: the ledger this app once kept for song stems answered
+ * "have we downloaded it?" when the question was "is it here?", and the two
+ * drift the moment anything else touches the disk. `have: false` with an
+ * older native that cannot be asked — absence of the answer is absence of
+ * the feature, not an error.
+ */
+export async function beatModelsStatus(): Promise<{ have: boolean; dir: string }> {
+  const f = Folder()
+  if (typeof f.modelStatus !== 'function') return { have: false, dir: '' }
+  try {
+    const r = await f.modelStatus(BEAT_MODELS.map((m) => m.file))
+    const have = BEAT_MODELS.every((m, i) => r.sizes[i] === m.bytes)
+    return { have, dir: r.dir }
+  } catch (e) {
+    log('analysis', `beat model status failed — ${String(e instanceof Error ? e.message : e)}`, 'warn')
+    return { have: false, dir: '' }
+  }
+}
+
+/**
+ * Download the Beat This! pair (the "better beats" extra — skippable, and
+ * absence stays a legitimate no-ml grid). Progress is COMBINED bytes across
+ * both files, so the bar never restarts at zero in the middle; a cancel
+ * rejects with code "cancelled" and keeps the .part for resume.
+ */
+export async function ensureBeatModels(
+  onProgress?: (gotBytes: number, totalBytes: number) => void
+): Promise<void> {
+  const total = BEAT_MODELS.reduce((n, m) => n + m.bytes, 0)
+  let done = 0
+  for (const m of BEAT_MODELS) {
+    await ensureModel(m, onProgress ? (got) => onProgress(done + got, total) : undefined)
+    done += m.bytes
+    onProgress?.(done, total)
+  }
 }
 
 /**

@@ -12,10 +12,37 @@ import type { MonoStem } from './host'
 import {
   audioDurationNative,
   estimateKeyNative,
+  mlGridFromStemsNative,
   nativeKeyAvailable,
   nativeMelodyAvailable,
+  nativeMlGridAvailable,
   trackMelodyNative
 } from './native'
+import { beatModelsStatus } from './models'
+import { splitVitals } from '../split/service'
+import { log } from '../log'
+
+/**
+ * The lattice's measured transient: +660..+810 MB over idle on every host
+ * (docs/PHONE-STANDALONE.md — sim, emulator, POCO; it is the ORT session,
+ * not the song). This runs BEHIND THE PLAYER on an open — on top of the
+ * song's decoded stems, in the same process — and a jetsam/LMK kill mid-run
+ * writes no stamp, so the same song re-attempts on its next open, forever.
+ * Ask the process how much it may still grow and skip the lattice when the
+ * answer is under the transient: the homegrown grid is the packless-desktop
+ * answer and the singer loses nothing they had. A native that cannot say
+ * lets it through — the split's own floor gates those phones — and "cannot
+ * say" has two shapes: null (no splitVitals on this platform/build —
+ * Android today) and NEGATIVE (the iOS simulator, which SingzSplitRunner
+ * reports as -1). ZERO is not unknown: Apple's os_proc_available_memory
+ * returns 0 both for "not an app" (the sim) and for "already over the
+ * limit" (a device about to be killed), so the native disambiguates at
+ * compile time and a 0 that reaches here is the device saying it has
+ * nothing left — the one reading this guard most exists for. (First cut
+ * treated 0 as unknown; the sim measured "0 MB more", and review read the
+ * doc.)
+ */
+export const ML_HEADROOM_MB = 900
 import type { AnalysisDeps, AnalysisHost } from './pipeline'
 
 /** The detectors' own rate — decode straight to it and the far side copies nothing. */
@@ -74,6 +101,21 @@ export function realAnalysisHost(): AnalysisHost {
     putStem: host.putStem,
     clearStems: host.clearStems,
     detectBeats: host.detectBeats,
+    // The lattice has no worklet fallback, on purpose: no models or FLAC
+    // stems is the packless-desktop condition, and the answer there is a
+    // legitimate no-ml grid — not a slower path to the same one.
+    mlAvailable: async () => nativeMlGridAvailable() && (await beatModelsStatus()).have,
+    mlGrid: async (project, stemRels) => {
+      if (!stemRels.every(coreReads)) return null
+      const st = await beatModelsStatus()
+      if (!st.have) return null
+      const v = await splitVitals()
+      if (v && v.freeMb >= 0 && v.freeMb < ML_HEADROOM_MB) {
+        log('analysis', `ml grid skipped — this phone allows ${Math.round(v.freeMb)} MB more for SingZ, the lattice needs ~${ML_HEADROOM_MB}; grid from the drums alone`, 'warn')
+        return null
+      }
+      return mlGridFromStemsNative(project, stemRels, st.dir)
+    },
     estimateKeyFromStems: async (project, instRel, bassRel) => {
       if (instRel.every(coreReads) && (!bassRel || coreReads(bassRel)) && nativeKeyAvailable())
         return estimateKeyNative(project, instRel, bassRel)

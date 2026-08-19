@@ -16,6 +16,7 @@ CXX=${CXX:-c++}
   "$ROOT/mobile/native/core/beat_this.cpp" \
   "$ROOT/mobile/native/core/courts.cpp" \
   "$ROOT/mobile/native/core/melody.cpp" \
+  "$ROOT/mobile/native/core/resample.cpp" \
   "$ROOT/mobile/native/core/wav.cpp" \
   -o "$OUT"
 echo "$OUT"

@@ -88,6 +88,31 @@ bool runChunks(const std::vector<float>& spect, int nFrames, const BeatThisModel
 MlGrid beatThis(const std::vector<float>& signal22k, const BeatThisModels& models,
                 const BeatThisProgress& progress);
 
+/** The model's input built from stem FILES — the desktop's fetchMlGrid
+ *  contract, natively: every stem read as mono float32 (readWavMono), summed
+ *  sample-wise with shorter stems running out into silence (the desktop's
+ *  OfflineAudioContext renders to the longest buffer), then brought to
+ *  22 050 Hz by the split engine's own Resampler (1/2 polyphase windowed
+ *  sinc, CI-gated at 110 dB in-band SNR). The sum is raw — WebAudio floats
+ *  never clip and neither does the runner's input.
+ *
+ *  Each stem's rate is CHECKED to be 44 100 Hz, never resampled from
+ *  arbitrary rates: the phone's stems are the split engine's own output, so
+ *  any other rate is a wiring bug upstream, and quietly "fixing" it here
+ *  would hand the model time-stretched audio and a confident wrong grid.
+ *
+ *  NOT bit-parity with the desktop, and not claimed: Chromium resamples each
+ *  source with its own sinc kernel before the sum, so the two mixes agree to
+ *  filter quality, not to the bit. Grid-level agreement is what the corpus
+ *  eval measures; what IS exact is this function against itself across
+ *  platforms, which the device suites compare value by value. */
+std::vector<float> sumStemsTo22k(const std::vector<std::string>& stemPaths, std::string& error);
+
+/** sumStemsTo22k -> beatThis: the from-stems runner both phone bindings call.
+ *  On a sum failure the grid comes back !ok with the reason. */
+MlGrid beatThisFromStems(const std::vector<std::string>& stemPaths, const BeatThisModels& models,
+                         const BeatThisProgress& progress);
+
 /** The grid with every value rounded exactly where the python runner rounds —
  *  the JSON contract's NUMBERS, without the text. mlGridJson serializes this,
  *  and a binding that can hand its platform doubles directly should use this

@@ -222,6 +222,79 @@ Java_com_singzplayer_split_SingzCore_analyzeKey(JNIEnv* env, jobject /*thiz*/, j
  * the decimation the desktop does on its way to 22.05 kHz has its own parity
  * question that this binding is not the place to answer.
  */
+// The `{"error":"…"}` line both mlGrid entry points return on failure.
+// Escaped, because the only interpolated text is ORT's e.what(): a quote or
+// newline in a model-load message would otherwise make the Kotlin side throw
+// a JSONException and report a parse error instead of the reason.
+static jstring mlGridFailJson(JNIEnv* env, const std::string& why) {
+  std::string esc;
+  esc.reserve(why.size() + 16);
+  for (const char c : why) {
+    if (c == '"' || c == '\\') { esc += '\\'; esc += c; }
+    else if (c == '\n') esc += "\\n";
+    else if (c == '\r') esc += "\\r";
+    else if (c == '\t') esc += "\\t";
+    else if (static_cast<unsigned char>(c) < 0x20) esc += ' ';
+    else esc += c;
+  }
+  return env->NewStringUTF(("{\"error\":\"" + esc + "\"}").c_str());
+}
+
+// With a dump dir, TEE what the two graphs return on their way past. The
+// host parity gate replays recorded logits, so it proves the pure logic and
+// says nothing about this file's marshalling — which is the one half that
+// only ever runs here. Wrapping the callables rather than changing the core
+// means the dumped tensors are the production path's, not a parallel one.
+// An empty dumpDir returns the models untouched — every real caller.
+static singz::BeatThisModels tapBeatThisModels(const singz::BeatThisModels& models,
+                                               const std::string& dumpDir) {
+  singz::BeatThisModels tapped = models;
+  if (dumpDir.empty()) return tapped;
+  const auto write = [dumpDir](const char* name, const std::vector<float>& v, const char* mode) {
+    FILE* f = std::fopen((dumpDir + "/" + name).c_str(), mode);
+    if (f == nullptr) {
+      // Silence here would be the tee's own version of a false pass: a
+      // reader slicing to the recording's length would read whatever was
+      // there before and call it this run's tensors. logcat, NOT stderr —
+      // an app process's fd 2 goes to /dev/null unless log.redirect-stdio
+      // is set, which it is not on the AVD this suite drives, so a printf
+      // here would have been a silent fix for silence.
+      __android_log_print(ANDROID_LOG_WARN, "singz", "mlGrid tee could not open %s/%s",
+                          dumpDir.c_str(), name);
+      return;
+    }
+    std::fwrite(v.data(), sizeof(float), v.size(), f);
+    std::fclose(f);
+  };
+  // The chunk tees append (one write per chunk, in call order), so a second
+  // run into the same dir would leave BOTH runs concatenated with the stale
+  // bytes at the head — exactly where a reader looks. Truncate once here.
+  for (const char* n : {"dev-chunk-in.f32", "dev-chunk-beat.f32", "dev-chunk-down.f32"}) {
+    FILE* f = std::fopen((dumpDir + "/" + n).c_str(), "wb");
+    if (f != nullptr) std::fclose(f);
+  }
+  const singz::BeatThisModels inner = models;
+  tapped.logmel = [inner, write](const std::vector<float>& frames, int n) {
+    const std::vector<float> spect = inner.logmel(frames, n);
+    write("dev-frames.f32", frames, "wb");
+    write("dev-spect.f32", spect, "wb");
+    return spect;
+  };
+  tapped.model = [inner, write](const std::vector<float>& spect, std::vector<float>& b,
+                                std::vector<float>& d) {
+    const bool ok = inner.model(spect, b, d);
+    if (ok) {
+      // Appended in CALL order, which is reversed starts — the same order
+      // the recording stores them in.
+      write("dev-chunk-in.f32", spect, "ab");
+      write("dev-chunk-beat.f32", b, "ab");
+      write("dev-chunk-down.f32", d, "ab");
+    }
+    return ok;
+  };
+  return tapped;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_singzplayer_split_SingzCore_mlGrid(JNIEnv* env, jobject /*thiz*/, jstring jwav,
                                             jstring jmodels, jstring jdump) {
@@ -229,86 +302,52 @@ Java_com_singzplayer_split_SingzCore_mlGrid(JNIEnv* env, jobject /*thiz*/, jstri
   const std::string modelsDir = toStd(env, jmodels);
   const std::string dumpDir = toStd(env, jdump);  // "" = no tee
 
-  const auto fail = [env](const std::string& why) {
-    // Escaped, because the only interpolated text is ORT's e.what(): a quote
-    // or newline in a model-load message would otherwise make the Kotlin side
-    // throw a JSONException and report a parse error instead of the reason.
-    std::string esc;
-    esc.reserve(why.size() + 16);
-    for (const char c : why) {
-      if (c == '"' || c == '\\') { esc += '\\'; esc += c; }
-      else if (c == '\n') esc += "\\n";
-      else if (c == '\r') esc += "\\r";
-      else if (c == '\t') esc += "\\t";
-      else if (static_cast<unsigned char>(c) < 0x20) esc += ' ';
-      else esc += c;
-    }
-    return env->NewStringUTF(("{\"error\":\"" + esc + "\"}").c_str());
-  };
-
   singz::MonoWav wav = singz::readWavMono(wavPath);
-  if (!wav.ok) return fail("could not read the wav: " + wav.error);
+  if (!wav.ok) return mlGridFailJson(env, "could not read the wav: " + wav.error);
   if (wav.sampleRate != singz::kBeatThisSr) {
-    return fail("beat models want " + std::to_string(singz::kBeatThisSr) + " Hz, got " +
-                std::to_string(wav.sampleRate));
+    return mlGridFailJson(env, "beat models want " + std::to_string(singz::kBeatThisSr) +
+                                   " Hz, got " + std::to_string(wav.sampleRate));
   }
 
   std::string error;
   const singz::BeatThisModels models = singz::loadBeatThisModels(modelsDir, error);
-  if (!error.empty()) return fail(error);
+  if (!error.empty()) return mlGridFailJson(env, error);
 
-  // With a dump dir, TEE what the two graphs return on their way past. The
-  // host parity gate replays recorded logits, so it proves the pure logic and
-  // says nothing about this file's marshalling — which is the one half that
-  // only ever runs here. Wrapping the callables rather than changing the core
-  // means the dumped tensors are the production path's, not a parallel one.
-  singz::BeatThisModels tapped = models;
-  if (!dumpDir.empty()) {
-    const auto write = [dumpDir](const char* name, const std::vector<float>& v, const char* mode) {
-      FILE* f = std::fopen((dumpDir + "/" + name).c_str(), mode);
-      if (f == nullptr) {
-        // Silence here would be the tee's own version of a false pass: a
-        // reader slicing to the recording's length would read whatever was
-        // there before and call it this run's tensors. logcat, NOT stderr —
-        // an app process's fd 2 goes to /dev/null unless log.redirect-stdio
-        // is set, which it is not on the AVD this suite drives, so a printf
-        // here would have been a silent fix for silence.
-        __android_log_print(ANDROID_LOG_WARN, "singz", "mlGrid tee could not open %s/%s",
-                            dumpDir.c_str(), name);
-        return;
-      }
-      std::fwrite(v.data(), sizeof(float), v.size(), f);
-      std::fclose(f);
-    };
-    // The chunk tees append (one write per chunk, in call order), so a second
-    // run into the same dir would leave BOTH runs concatenated with the stale
-    // bytes at the head — exactly where a reader looks. Truncate once here.
-    for (const char* n : {"dev-chunk-in.f32", "dev-chunk-beat.f32", "dev-chunk-down.f32"}) {
-      FILE* f = std::fopen((dumpDir + "/" + n).c_str(), "wb");
-      if (f != nullptr) std::fclose(f);
-    }
-    const singz::BeatThisModels inner = models;
-    tapped.logmel = [inner, write](const std::vector<float>& frames, int n) {
-      const std::vector<float> spect = inner.logmel(frames, n);
-      write("dev-frames.f32", frames, "wb");
-      write("dev-spect.f32", spect, "wb");
-      return spect;
-    };
-    tapped.model = [inner, write](const std::vector<float>& spect, std::vector<float>& b,
-                                  std::vector<float>& d) {
-      const bool ok = inner.model(spect, b, d);
-      if (ok) {
-        // Appended in CALL order, which is reversed starts — the same order
-        // the recording stores them in.
-        write("dev-chunk-in.f32", spect, "ab");
-        write("dev-chunk-beat.f32", b, "ab");
-        write("dev-chunk-down.f32", d, "ab");
-      }
-      return ok;
-    };
-  }
-
+  const singz::BeatThisModels tapped = tapBeatThisModels(models, dumpDir);
   const singz::MlGrid grid = singz::beatThis(wav.samples, tapped, nullptr);
-  if (!grid.ok) return fail(grid.error);
+  if (!grid.ok) return mlGridFailJson(env, grid.error);
+  return env->NewStringUTF(singz::mlGridJson(grid).c_str());
+}
+
+/**
+ * The same grid from the project's STEMS: the pipeline's entry point. Paths
+ * to 44.1 kHz mono-foldable wavs in, the core sums and decimates them to the
+ * model's 22.05 kHz itself (sumStemsTo22k — the desktop's fetchMlGrid mix,
+ * natively), so no audio ever crosses a JS runtime for this. Same JSON line
+ * out, same tee, same escaping, same arity as iOS — the rule at the top of
+ * SingzSplit.mm.
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_mlGridFromStems(JNIEnv* env, jobject /*thiz*/,
+                                                     jobjectArray jpaths, jstring jmodels,
+                                                     jstring jdump) {
+  std::vector<std::string> paths;
+  const jsize n = env->GetArrayLength(jpaths);
+  paths.reserve(static_cast<size_t>(n));
+  for (jsize i = 0; i < n; i++) {
+    auto* js = static_cast<jstring>(env->GetObjectArrayElement(jpaths, i));
+    paths.push_back(toStd(env, js));
+    env->DeleteLocalRef(js);
+  }
+  const std::string modelsDir = toStd(env, jmodels);
+  const std::string dumpDir = toStd(env, jdump);  // "" = no tee
+
+  std::string error;
+  const singz::BeatThisModels models = singz::loadBeatThisModels(modelsDir, error);
+  if (!error.empty()) return mlGridFailJson(env, error);
+
+  const singz::BeatThisModels tapped = tapBeatThisModels(models, dumpDir);
+  const singz::MlGrid grid = singz::beatThisFromStems(paths, tapped, nullptr);
+  if (!grid.ok) return mlGridFailJson(env, grid.error);
   return env->NewStringUTF(singz::mlGridJson(grid).c_str());
 }

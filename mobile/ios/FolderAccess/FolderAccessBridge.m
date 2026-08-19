@@ -96,4 +96,8 @@ RCT_EXTERN_METHOD(downloadFile : (NSString *)name
 RCT_EXTERN_METHOD(cancelDownload : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(modelStatus : (NSArray<NSString *> *)names
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 @end

@@ -66,6 +66,15 @@ object SingzCore {
   external fun mlGrid(wavPath: String, modelsDir: String, dumpDir: String): String
 
   /**
+   * The same grid from the project's STEMS: 44.1 kHz wav paths in, the core
+   * sums and decimates them to the model's 22.05 kHz itself (sumStemsTo22k —
+   * the desktop's fetchMlGrid mix, natively), so no audio crosses a JS
+   * runtime for this. Same JSON line or `{"error":"…"}` out. ON THE CALLING
+   * THREAD; reading + summing adds a second or two to mlGrid's cost.
+   */
+  external fun mlGridFromStems(stemPaths: Array<String>, modelsDir: String, dumpDir: String): String
+
+  /**
    * Phase 4c: the key detector (core analysis.cpp — the desktop's
    * estimateKeyFromStems, bit-identical). Returns [pc, minor(0/1),
    * detVersion], or an EMPTY array when the harmonic bed is silent — which

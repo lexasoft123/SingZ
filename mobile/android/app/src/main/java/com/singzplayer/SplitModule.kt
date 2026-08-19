@@ -220,6 +220,26 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
    */
   @ReactMethod
   fun mlGrid(wavPath: String, modelsDir: String, dumpDir: String, promise: Promise) {
+    mlGridCall(promise) { SingzCore.mlGrid(wavPath, modelsDir, dumpDir) }
+  }
+
+  /**
+   * The same grid from the project's STEMS (44.1 kHz wavs; the core sums and
+   * decimates to the model's rate itself) — the analysis pipeline's entry
+   * point. Same arity and payload as iOS, per the rule at the top of
+   * SingzSplit.mm.
+   */
+  @ReactMethod
+  fun mlGridFromStems(stemPaths: ReadableArray, modelsDir: String, dumpDir: String, promise: Promise) {
+    val paths = Array(stemPaths.size()) { i -> stemPaths.getString(i) ?: "" }
+    mlGridCall(promise) { SingzCore.mlGridFromStems(paths, modelsDir, dumpDir) }
+  }
+
+  /** Both mlGrid entry points end here: run off-thread, parse the core's
+   *  JSON line, reject an `error` object rather than resolving it — a caller
+   *  that saw `{error: …}` as a normal result would store a grid-less
+   *  analysis and stamp it as done. */
+  private fun mlGridCall(promise: Promise, run: () -> String) {
     thread(name = "singz-mlgrid") {
       val loadErr = SingzCore.ensureLoaded()
       if (loadErr != null) {
@@ -228,7 +248,7 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
       }
       try {
         val started = System.currentTimeMillis()
-        val json = SingzCore.mlGrid(wavPath, modelsDir, dumpDir)
+        val json = run()
         val elapsed = System.currentTimeMillis() - started
         val obj = org.json.JSONObject(json)
         if (obj.has("error")) {

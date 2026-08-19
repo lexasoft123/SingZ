@@ -147,8 +147,8 @@ if (TEST) {
     )
     return true
   }
-  hooks.cancelModelDownload = (): boolean => {
-    void import('./src/analysis/models').then((m) => m.cancelModelDownload())
+  hooks.cancelModelDownload = (file: string): boolean => {
+    void import('./src/analysis/models').then((m) => m.cancelModelDownload(file))
     return true
   }
   hooks.clearSplitJob = (): boolean => {
@@ -229,6 +229,51 @@ if (TEST) {
       })
       .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
       .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
+    return true
+  }
+  // Phase 4b, the pipeline's own entry: the grid FROM STEMS, summed and
+  // decimated in the core (mlGridFromStems) — what analyzeProject actually
+  // calls. Drivers compare it against mlGridParity fed the same mix rendered
+  // on the host, which is how the native sum is proven against the desktop's.
+  hooks.mlGridFromStems = (stemPaths: string[], modelsDir: string, dumpDir = ''): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    const t0 = Date.now()
+    void (NativeModules.SingzSplit as {
+      mlGridFromStems(a: string[], b: string, c: string): Promise<Record<string, unknown>>
+    })
+      .mlGridFromStems(stemPaths, modelsDir, dumpDir)
+      .then(
+        (g) => { hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }; hooks.echoDone = true },
+        (e: unknown) => { hooks.echoResult = { ok: false, error: String((e as Error)?.message ?? e) }; hooks.echoDone = true }
+      )
+    return true
+  }
+  // The app's own log, for drivers: the pipeline writes `ml N ms` and
+  // native.ts writes `ml grid: N beats` — the evidence that the lattice was
+  // actually heard on the way to a stored grid, which no doc field says.
+  hooks.logEntries = (): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    void import('./src/log').then((m) =>
+      m.logEntries().then(
+        (r) => { hooks.echoResult = r; hooks.echoDone = true },
+        (e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true }
+      )
+    )
+    return true
+  }
+  // The beat models' presence and location, as the pipeline judges them — a
+  // stat, never a download.
+  hooks.beatModelsStatus = (): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    void import('./src/analysis/models').then((m) =>
+      m.beatModelsStatus().then(
+        (r) => { hooks.echoResult = r; hooks.echoDone = true },
+        (e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true }
+      )
+    )
     return true
   }
   // Phase 4b: the Beat This! grid straight off the core, for comparison

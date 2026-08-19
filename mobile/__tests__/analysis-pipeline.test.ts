@@ -92,13 +92,14 @@ interface World {
   puts: string[]
   tracked: string[]
   keyStems: string[]
+  mlAsks: string[][]
   cleared: number
   detectArgs: unknown[]
   deps: AnalysisDeps
 }
 
 function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): World {
-  const w: World = { disk: new Map(), writes: [], puts: [], tracked: [], keyStems: [], cleared: 0, detectArgs: [], deps: null as unknown as AnalysisDeps }
+  const w: World = { disk: new Map(), writes: [], puts: [], tracked: [], keyStems: [], mlAsks: [], cleared: 0, detectArgs: [], deps: null as unknown as AnalysisDeps }
   w.disk.set('project.json', JSON.stringify(initial))
   const host: AnalysisHost = {
     putStem: async (id) => {
@@ -106,6 +107,13 @@ function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): 
     },
     clearStems: async () => {
       w.cleared++
+    },
+    // No models by default — the packless-desktop condition every existing
+    // test was written under.
+    mlAvailable: async () => false,
+    mlGrid: async (_project, rels) => {
+      w.mlAsks.push(rels)
+      return null
     },
     detectBeats: async (args) => {
       w.detectArgs.push(args)
@@ -314,5 +322,94 @@ describe('analyzeProject', () => {
     expect(onDisk(w).settings.analysisNone).toEqual({ key: KEY_DETECT_VERSION })
     expect(onDisk(w).settings.beat?.beats).toHaveLength(5)
     expect(planAnalysis(onDisk(w), SIX, 200).key).toBe(false)
+  })
+})
+
+/**
+ * The neural lattice (Phase 4b): when the beat models are on the phone the
+ * pipeline runs mlGrid off the project's stems BEFORE anything crosses to
+ * the worklet host, hands the grid to detectBeats as its `ml` aux, and the
+ * "no grid" verdict carries the beatMl sub-stamp — because
+ * BEAT_DETECT_VERSION alone cannot say whether the lattice was heard (the
+ * desktop stores ml and no-ml grids under the same stamp), and a verdict
+ * that predates the models must be asked exactly once more when they land.
+ */
+describe('analyzeProject — the ml aux', () => {
+  const ML = { beats: [0.5, 1.5], downbeats: [0.5], beatProb: [0.1], downbeatProb: [0.1], fps: 50 }
+
+  test('with models: mlGrid runs first (before any stem crosses), over every mix stem, and detectBeats hears it', async () => {
+    const putsWhenAsked: number[] = []
+    const w = world(doc(), {
+      mlAvailable: async () => true
+    })
+    w.deps.host.mlGrid = async (_p, rels) => {
+      putsWhenAsked.push(w.puts.length)
+      w.mlAsks.push(rels)
+      return ML
+    }
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(w.mlAsks).toEqual([
+      ['stems/drums.wav', 'stems/bass.wav', 'stems/vocals.wav', 'stems/guitar.wav', 'stems/piano.wav', 'stems/other.wav']
+    ])
+    // The two memory peaks must never stack: the lattice ran with the far
+    // side still empty.
+    expect(putsWhenAsked).toEqual([0])
+    expect((w.detectArgs[0] as { ml?: unknown }).ml).toEqual(ML)
+  })
+
+  test('without models nothing is asked and detectBeats hears null — the packless desktop', async () => {
+    const w = world(doc())
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(w.mlAsks).toEqual([])
+    expect((w.detectArgs[0] as { ml?: unknown }).ml).toBeNull()
+  })
+
+  test('a "no grid" verdict heard WITH the lattice is stamped beatMl and binds forever', async () => {
+    const w = world(doc(), { mlAvailable: async () => true, mlGrid: async () => ML, detectBeats: async () => null })
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(onDisk(w).settings.analysisNone?.beat).toBe(BEAT_DETECT_VERSION)
+    expect(onDisk(w).settings.analysisNone?.beatMl).toBe(true)
+    // Models present next open: the verdict already heard them — no re-ask.
+    expect(planAnalysis(onDisk(w), SIX, 200, true).beat).toBe(false)
+    expect(planAnalysis(onDisk(w), SIX, 200, false).beat).toBe(false)
+  })
+
+  test('a verdict reached WITHOUT the lattice is re-asked once models arrive — and only then', async () => {
+    const w = world(doc(), { detectBeats: async () => null })
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(onDisk(w).settings.analysisNone?.beat).toBe(BEAT_DETECT_VERSION)
+    expect(onDisk(w).settings.analysisNone?.beatMl).toBeUndefined()
+    // No models: the verdict binds, no re-decode on every open.
+    expect(planAnalysis(onDisk(w), SIX, 200, false).beat).toBe(false)
+    // Models landed: ask once more, with the better ears.
+    expect(planAnalysis(onDisk(w), SIX, 200, true).beat).toBe(true)
+  })
+
+  test('an attempted-but-failed run stays un-stamped, like a missing model — no evidence was heard', async () => {
+    const w = world(doc(), { mlAvailable: async () => true, mlGrid: async () => null, detectBeats: async () => null })
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(onDisk(w).settings.analysisNone?.beatMl).toBeUndefined()
+    expect(planAnalysis(onDisk(w), SIX, 200, true).beat).toBe(true)
+  })
+
+  test('a positive grid retires the verdict AND its sub-stamp', () => {
+    const d = doc({ analysisNone: { beat: BEAT_DETECT_VERSION, beatMl: true } })
+    const out = mergeAnalysis(d, { beat: autoGrid() as never }, 'NOW')
+    expect(out.settings.analysisNone).toBeUndefined()
+  })
+
+  test('a fresh no-ml verdict cannot keep wearing an older run\'s beatMl', () => {
+    const d = doc({ analysisNone: { beat: BEAT_DETECT_VERSION, beatMl: true } })
+    const out = mergeAnalysis(d, { none: { beat: BEAT_DETECT_VERSION } }, 'NOW')
+    expect(out.settings.analysisNone).toEqual({ beat: BEAT_DETECT_VERSION })
+  })
+
+  test('FLAC stems never reach the lattice: mlNow is judged per project', async () => {
+    const flac = { drums: 'flac', bass: 'flac', other: 'flac', vocals: 'flac', guitar: 'flac', piano: 'flac' }
+    const hashes = Object.fromEntries(Object.keys(flac).map((s) => [`${s}.flac`, { md5: 'h-' + s, size: 100, mtimeMs: 1 }]))
+    const w = world(doc({}, hashes), { mlAvailable: async () => true })
+    await analyzeProject('T', flac, { deps: w.deps })
+    expect(w.mlAsks).toEqual([])
+    expect((w.detectArgs[0] as { ml?: unknown }).ml).toBeNull()
   })
 })

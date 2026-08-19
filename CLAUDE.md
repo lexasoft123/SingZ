@@ -177,6 +177,28 @@ was driven; the gotchas that follow from it are below.
   VALUE and never a count. iOS bindings build their result from the core's
   doubles (`mlGridRounded`); Android's text hop is fine because Kotlin's
   parser is correct.
+- **A resampler's quality gate must exercise the ratio that is actually
+  used** — `Resampler` was sized for 48k→44.1k (24 taps per output sample
+  at up=147 is a ~3.5k-tap prototype) and the same 24 at 44.1k→22.05k is a
+  24-TAP lowpass: −3 dB at 10 kHz, 12-14 kHz aliasing back at −10..−25 dB,
+  16.8 dB SNR against soxr on real stems, a different beat grid. Its "110
+  dB" gate was a 1 kHz tone at a near-unity ratio, which no short filter
+  can fail. Taps now scale with net decimation and the host harness sweeps
+  the 2:1 response itself. When a new consumer uses a shared DSP block at
+  a new ratio, measure the response at THAT ratio before trusting the
+  header's number.
+- **There is no resampler-independent Beat This! grid** — three good
+  renders of the same stems (Chromium's OfflineAudioContext, the core's
+  Kaiser, soxr) agree to 0.01 dB to 10 kHz and still give three grids
+  (119/43, 120/37, 117/39); the model is that sensitive to sub-frame delay
+  and the top 500 Hz. Chromium's — the desktop's actual input — is the
+  least filtered of the three and yet the one that ships. The phone suites
+  therefore gate the LATTICE (beat F1 ≥ 0.98 at 70 ms, tempo, downbeat F1
+  ≥ 0.80) against an oracle rendered by Chromium itself
+  (`scripts/render-ml-mix.cjs`), never bit-equality of probabilities across
+  renders; bit-equality is asserted only where the input is the same bytes
+  (the wav suites). A suite demanding bit parity across resamplers would
+  have to be tuned until it passed.
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —

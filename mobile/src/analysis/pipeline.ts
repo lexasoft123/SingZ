@@ -50,7 +50,7 @@ import {
   decodeMelody,
   melodyFitsSong
 } from '../gen/analysis-lib'
-import type { StoredBeatInfo } from '../gen/analysis-lib'
+import type { MlGrid, StoredBeatInfo } from '../gen/analysis-lib'
 import type { BeatInfo, KeyInfo, LyricLine, MelodyInfo, ProjectDoc } from '../model'
 import { log } from '../log'
 import type { MonoStem } from './host'
@@ -67,9 +67,9 @@ export interface AnalysisResult {
   key?: KeyInfo
   melody?: MelodyInfo
   /** Detectors that answered "nothing here" this run, by stamp — a write too. */
-  none?: { beat?: number; key?: number }
+  none?: { beat?: number; beatMl?: boolean; key?: number }
   /** Where the time went, ms — for the log. */
-  ms: { load: number; beat: number; key: number; melody: number }
+  ms: { load: number; ml: number; beat: number; key: number; melody: number }
 }
 
 /** The host surface the pipeline drives — host.ts in the app, a fake in jest. */
@@ -83,6 +83,7 @@ export interface AnalysisHost {
     inst?: string[]
     lineStarts?: number[] | null
     words?: { s: number; e: number }[] | null
+    ml?: MlGrid | null
   }): Promise<{
     beats: number[]
     bpm: number
@@ -91,6 +92,17 @@ export interface AnalysisHost {
     downbeats?: number[]
     suspectAt?: number[]
   } | null>
+  /** Can the neural beat lattice run at all — the from-stems binding in the
+   *  installed native AND both models on this phone? A stat, never a
+   *  download; the planner asks it to decide whether an old "no grid here"
+   *  verdict should be re-asked now that better ears are available. */
+  mlAvailable(): Promise<boolean>
+  /** The lattice off the project's stems ON DISK (the core sums and
+   *  decimates them itself — the desktop's fetchMlGrid mix, natively).
+   *  Null is a legitimate answer, never a failure: models absent, stems the
+   *  core cannot read (FLAC), or a failed run — the grid then comes from
+   *  the homegrown path alone, exactly like a packless desktop. */
+  mlGrid(project: string, stemRels: string[]): Promise<MlGrid | null>
   /** The key off the harmonic stems ON DISK — the core reads them itself
    *  (analysis.cpp), so nothing crosses a runtime for this one either. */
   estimateKeyFromStems(
@@ -133,7 +145,11 @@ const INST = ['guitar', 'piano', 'other'] as const
 export function planAnalysis(
   doc: ProjectDoc,
   stems: Record<string, string>,
-  durationSec: number | null
+  durationSec: number | null,
+  /** Could the neural lattice run on THIS project right now (models here,
+   *  binding here, stems the core reads)? Decides only whether an old
+   *  negative verdict still binds — see below. */
+  mlNow = false
 ): AnalysisPlan {
   const s = doc.settings ?? ({} as ProjectDoc['settings'])
   const none = s.analysisNone ?? {}
@@ -141,7 +157,15 @@ export function planAnalysis(
   const beatStale = !!beatStored && beatStored.source === 'auto' && beatStored.detVersion !== BEAT_DETECT_VERSION
   // A negative verdict from THIS detector counts as an answer — a drumless
   // song is not asked again on every open; a newer detector asks once more.
-  const beat = !!stems.drums && (!beatStored || beatStale) && none.beat !== BEAT_DETECT_VERSION
+  // The verdict carries a SUB-STAMP, beatMl: whether the neural lattice was
+  // heard when "no grid" was decided. BEAT_DETECT_VERSION alone cannot say —
+  // the desktop ships ml and no-ml grids under the same detVersion (a
+  // packless desktop's grid is legitimate) — so when the beat models arrive
+  // on a phone AFTER a song was declared gridless, the version matches, the
+  // verdict predates the evidence, and without this line it would bind
+  // forever. Re-ask exactly once, with the better ears.
+  const noneBeatBinds = none.beat === BEAT_DETECT_VERSION && (none.beatMl === true || !mlNow)
+  const beat = !!stems.drums && (!beatStored || beatStale) && !noneBeatBinds
 
   const keyStored = s.key
   const key =
@@ -173,8 +197,10 @@ export interface FreshAnalysis {
   beat?: BeatInfo
   key?: KeyInfo
   melody?: MelodyInfo
-  /** Detectors that answered "nothing here" this run, by stamp. */
-  none?: { beat?: number; key?: number }
+  /** Detectors that answered "nothing here" this run, by stamp. `beatMl`
+   *  is the beat verdict's sub-stamp: true when the neural lattice was
+   *  heard on the way to "no grid". */
+  none?: { beat?: number; beatMl?: boolean; key?: number }
 }
 
 export function mergeAnalysis(onDisk: ProjectDoc, fresh: FreshAnalysis, now: string): ProjectDoc {
@@ -182,8 +208,15 @@ export function mergeAnalysis(onDisk: ProjectDoc, fresh: FreshAnalysis, now: str
   // negative one is recorded under its stamp. Untouched detectors keep
   // whatever the disk says.
   const prevNone = onDisk.settings?.analysisNone ?? {}
-  const none: { beat?: number; key?: number } = { ...prevNone, ...(fresh.none ?? {}) }
-  if (fresh.beat) delete none.beat
+  const none: { beat?: number; beatMl?: boolean; key?: number } = { ...prevNone, ...(fresh.none ?? {}) }
+  // The beat verdict moves as a UNIT: a fresh "no grid" replaces the old
+  // sub-stamp too, so a verdict reached without the models cannot keep
+  // wearing an older run's beatMl.
+  if (fresh.none?.beat !== undefined && fresh.none.beatMl === undefined) delete none.beatMl
+  if (fresh.beat) {
+    delete none.beat
+    delete none.beatMl
+  }
   if (fresh.key) delete none.key
   const hasNone = none.beat !== undefined || none.key !== undefined
   return {
@@ -239,7 +272,14 @@ export async function analyzeProject(
       durationSec = null // an unreadable stem: the plan judges by stamps alone
     }
   }
-  const plan = planAnalysis(doc0, stems, durationSec)
+  // Could the lattice run HERE? Models + binding + every mix stem readable
+  // by the core (WAV — the split's own output; a copied desktop project's
+  // FLAC simply has no phone-ml, like a packless desktop). Decided before
+  // planning, because an old "no grid" verdict binds or not by this.
+  const mixIds = ['drums', 'bass', 'vocals', ...INST].filter((id) => stems[id])
+  const mlNow =
+    mixIds.length > 0 && mixIds.every((id) => /\.wav$/i.test(rel(id))) && (await host.mlAvailable())
+  const plan = planAnalysis(doc0, stems, durationSec, mlNow)
   if (!plan.beat && !plan.key && !plan.melody) {
     log('analysis', `${project}: nothing to detect — grid, key and melody are current`)
     return null
@@ -251,7 +291,7 @@ export async function analyzeProject(
       .join(', ')} · stems ${Object.keys(stems).join(',')}`
   )
   const usedFiles = new Set<string>()
-  const ms = { load: 0, beat: 0, key: 0, melody: 0 }
+  const ms = { load: 0, ml: 0, beat: 0, key: 0, melody: 0 }
   const put = async (id: string): Promise<boolean> => {
     if (!stems[id]) return false
     const stem = await deps.loadMono(project, rel(id))
@@ -260,6 +300,22 @@ export async function analyzeProject(
     return true
   }
   try {
+    // The neural lattice FIRST, and off the worklet host entirely: the core
+    // reads, sums and decimates the stems itself, so running it before put()
+    // keeps the two memory peaks apart — the ORT session's ~700 MB (measured,
+    // docs/PHONE-STANDALONE.md) and the worklet's six decoded stems never
+    // coexist. Null is the packless-desktop answer, not a failure; the mix's
+    // files join the stamp because the grid that comes out depends on them.
+    let ml: MlGrid | null = null
+    if (plan.beat && mlNow) {
+      step('Listening for the beat…', 0.01)
+      const t = Date.now()
+      ml = await host.mlGrid(project, mixIds.map(rel))
+      ms.ml = Date.now() - t
+      if (ml) for (const id of mixIds) usedFiles.add(`${id}.${stems[id]}`)
+    }
+    const tLoad = Date.now() // `load` is the stems crossing, not the lattice — reported apart
+
     // The grid's stems, one at a time. The vocals cross only as its aux; the
     // melody and the key read their own files.
     const wantAudio = plan.beat
@@ -293,7 +349,7 @@ export async function analyzeProject(
         else have.inst.push(id)
       }
     }
-    ms.load = Date.now() - t0
+    ms.load = Date.now() - tLoad
     // The stems this answer is computed from — compared against the doc on
     // disk before every write.
     const used = [...usedFiles]
@@ -311,7 +367,8 @@ export async function analyzeProject(
         vocals: have.vocals ? 'vocals' : undefined,
         inst: have.inst,
         lineStarts: lines ? lines.map((l) => l.words[0]?.s ?? l.start) : null,
-        words: lines ? lines.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) : null
+        words: lines ? lines.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) : null,
+        ml
       })
       ms.beat = Date.now() - t
       if (det) {
@@ -334,8 +391,12 @@ export async function analyzeProject(
       } else {
         // No grid in these drums (the desktop's own verdict for a drumless or
         // rubato song) — written down under the stamp, or every open would
-        // decode six stems to hear the same silence.
-        fresh.none = { ...fresh.none, beat: BEAT_DETECT_VERSION }
+        // decode six stems to hear the same silence. beatMl records whether
+        // the lattice was HEARD on the way to this verdict: models arriving
+        // later make a no-ml verdict worth asking once more (planAnalysis),
+        // and an attempted-but-failed run stays un-stamped for the same
+        // reason a missing model does — no evidence was heard.
+        fresh.none = { ...fresh.none, beat: BEAT_DETECT_VERSION, ...(ml ? { beatMl: true } : {}) }
       }
     }
 
@@ -389,7 +450,7 @@ export async function analyzeProject(
         `${fresh.beat ? `${fresh.beat.beats.length} beats at ${fresh.beat.bpm.toFixed(1)} bpm` : fresh.none?.beat ? 'no grid in these drums' : 'grid kept'}, ` +
         `${fresh.key ? `key ${fresh.key.pc}${fresh.key.minor ? 'm' : ''}` : fresh.none?.key ? 'harmonic bed silent, no key' : 'key kept'}, ` +
         `${fresh.melody ? 'melody tracked' : 'melody kept'} · ` +
-        `load ${ms.load} ms, beat ${ms.beat} ms, key ${ms.key} ms, melody ${ms.melody} ms`
+        `load ${ms.load} ms, ml ${ms.ml} ms, beat ${ms.beat} ms, key ${ms.key} ms, melody ${ms.melody} ms`
     )
     return { ...fresh, ms } // fresh carries beat/key/melody and none
   } finally {

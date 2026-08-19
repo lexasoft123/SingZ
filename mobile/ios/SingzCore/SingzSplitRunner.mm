@@ -44,6 +44,15 @@ static singz::Progress gProgress;
  * this process's allowance is left before iOS kills it. A split that dies
  * silently leaves its last headroom reading in the log, which is the whole
  * point: a real iPhone kill writes nothing else down.
+ *
+ * headroom is -1 on the SIMULATOR, never 0. Apple's doc for
+ * os_proc_available_memory: 0 when the caller is not an app — the sim —
+ * "or if the process has already exceeded its memory limit". Two opposite
+ * conditions, one value: on a device 0 is the WORST reading there is, on
+ * the sim it is no reading at all. A consumer that treated 0 as "cannot
+ * say" would wave the ~700 MB beat-model transient through at the exact
+ * moment it should refuse (found in review). So the sim says -1 and JS
+ * reads negative as unknown, 0 as empty.
  */
 typedef struct {
   double footprintMb;
@@ -59,7 +68,11 @@ static SingzVitals SampleVitals(void) {
   if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &vmCount) == KERN_SUCCESS) {
     v.footprintMb = (double)vm.phys_footprint / (1024.0 * 1024.0);
   }
+#if TARGET_OS_SIMULATOR
+  v.headroomMb = -1.0;  // no jetsam budget to report; see the note above
+#else
   v.headroomMb = (double)os_proc_available_memory() / (1024.0 * 1024.0);
+#endif
 
   // Process CPU time, summed over live threads, differenced against the last
   // sample — absolute totals grow forever and say nothing about "now".

@@ -67,7 +67,8 @@ import {
   splitGate,
   startProjectSplit
 } from '../split/flow'
-import { cancelModelDownload } from '../analysis/models'
+import { BEAT_MODELS_MB, SPLIT_MODEL, beatModelsStatus, cancelBeatModels, cancelModelDownload, ensureBeatModels } from '../analysis/models'
+import { nativeMlGridAvailable } from '../analysis/native'
 import { planAnalysis } from '../analysis/pipeline'
 import { ANALYSIS_EVENT, startAnalysis, subscribeAnalysis, type AnalysisDone, type AnalysisProgress } from '../analysis/run'
 import { SPLIT_STEMS } from '../split/adopt'
@@ -382,7 +383,14 @@ export default function CatalogScreen({
         // so nothing is lost. A song still waiting for its split has no
         // drums/vocals stems yet, so the plan asks for nothing there.
         if (mode === 'phone') {
-          const plan = planAnalysis(entry.doc, entry.stems, null)
+          // mlNow=true here is the OPTIMISTIC question — "would the models,
+          // if present, change the answer?" — so a song declared gridless
+          // before the beat models arrived is handed to the runner, which
+          // asks the real question (models on disk, stems the core reads)
+          // and plans again; when they are not, it finds nothing to do and
+          // costs one stat. Asking pessimistically would leave that song
+          // gridless forever after the download.
+          const plan = planAnalysis(entry.doc, entry.stems, null, true)
           if (plan.beat || plan.key || plan.melody) startAnalysis(entry.dir, entry.stems, loaded.lyrics)
         }
       } catch (e) {
@@ -539,6 +547,76 @@ export default function CatalogScreen({
     }
     startAnalysis(dir, stems, lyrics)
   }, [])
+
+  /* The "better beats" offer (Phase 4b): the Beat This! models are an
+   * optional 87 MB extra — the neural lattice the desktop's packs carry,
+   * which holds a grid through drumless intros and rubato the drums-first
+   * tracker loses. Offered in the phone library only when the installed
+   * native can use them AND the library holds at least one song with stems
+   * to hear them on — an empty library, or one of unsplit songs, has
+   * nothing the models would change yet, so it is not asked. Dismissing
+   * keeps it away (one pref). Never started on anyone's behalf — 87 MB is a
+   * tap, not a side effect. What the download changes is stated on the
+   * card: songs the detector has not heard yet, and any it found no grid
+   * in; a song already holding a current grid keeps it (desktop semantics —
+   * there is no re-analyse here either). */
+  type BeatModelsUi = null | { phase: 'offer' } | { phase: 'downloading'; gotMB: number; totalMB: number }
+  const [beatModelsUi, setBeatModelsUi] = useState<BeatModelsUi>(null)
+  const BEAT_MODELS_DISMISSED = 'singz.beatModels.dismissed'
+  // Keyed on `projects` (a new array every refresh), not on a derived
+  // boolean: the models are a fact about the DISK, and whether they are
+  // there is re-asked whenever the library is re-read — the way the ✓ on a
+  // song is re-asked of its files. A boolean that happened not to flip
+  // would have frozen the first answer for the session (measured: the
+  // offer stayed hidden after the files were gone, because the effect had
+  // no reason to look again).
+  useEffect(() => {
+    const anyStemmed = (projects ?? []).some((p) => Object.keys(p.stems).length > 0)
+    if (mode !== 'phone' || !nativeMlGridAvailable() || !anyStemmed) {
+      setBeatModelsUi((cur) => (cur?.phase === 'downloading' ? cur : null))
+      return
+    }
+    let alive = true
+    void (async () => {
+      if ((await getStoredText(BEAT_MODELS_DISMISSED)) === '1') return
+      const st = await beatModelsStatus()
+      if (!alive) return
+      // The disk is the truth both ways: present → no offer (and not while
+      // a download is in flight, which is its own card state).
+      setBeatModelsUi((cur) => (cur?.phase === 'downloading' ? cur : st.have ? null : { phase: 'offer' }))
+    })()
+    return () => {
+      alive = false
+    }
+  }, [mode, projects])
+  const fetchBeatModels = useCallback(async () => {
+    setBeatModelsUi({ phase: 'downloading', gotMB: 0, totalMB: BEAT_MODELS_MB })
+    try {
+      await ensureBeatModels((got, total) =>
+        setBeatModelsUi({ phase: 'downloading', gotMB: Math.round(got / 1e6), totalMB: Math.round(total / 1e6) })
+      )
+      setBeatModelsUi(null)
+      // Songs already declared gridless before the models were here are
+      // asked once more — the runner re-plans with the real answer. The
+      // catalog's next open does this per song anyway; this just does not
+      // make the singer reopen every one.
+      for (const p of projects ?? []) {
+        if (p.doc && Object.keys(p.stems).length > 0) {
+          const plan = planAnalysis(p.doc, p.stems, null, true)
+          if (plan.beat) void kickAnalysis(p.dir, p.stems)
+        }
+      }
+    } catch (e) {
+      setBeatModelsUi({ phase: 'offer' })
+      const msg = String(e instanceof Error ? e.message : e)
+      if (!msg.includes('cancelled')) Alert.alert('Could not download the beat models', msg)
+    }
+  }, [projects, kickAnalysis])
+  const dismissBeatModels = useCallback(() => {
+    setBeatModelsUi(null)
+    void setStoredText(BEAT_MODELS_DISMISSED, '1')
+  }, [])
+
 
   const adoptDone = useCallback(
     async (status: SplitJobStatus): Promise<void> => {
@@ -892,6 +970,12 @@ export default function CatalogScreen({
       void kickAnalysis(dir, p.stems)
       return true
     }
+    // Phase 4b: the "better beats" card and its two actions, for the driver
+    // that proves the offer appears only when it should and that the
+    // download actually wires the models in.
+    TEST.beatModelsUi = beatModelsUi
+    TEST.fetchBeatModels = () => void fetchBeatModels()
+    TEST.dismissBeatModels = dismissBeatModels
   })
 
   const card = (opts: {
@@ -1102,7 +1186,7 @@ export default function CatalogScreen({
                       // No job exists yet in the model phase — the download
                       // is the thing to stop (its reject resets the card).
                       splitUi.phase === 'model'
-                        ? void cancelModelDownload()
+                        ? void cancelModelDownload(SPLIT_MODEL.file)
                         : (setCancelPending(true), void cancelSplit())
                     }
                   >
@@ -1131,6 +1215,49 @@ export default function CatalogScreen({
               <View style={s.splitBarBed}>
                 <View style={[s.splitBar, { width: `${Math.round(analysisUi.frac * 100)}%` }]} />
               </View>
+            </View>
+          )}
+          {beatModelsUi && (
+            <View style={s.splitCard}>
+              <Text style={s.splitTitle} numberOfLines={1}>
+                Better beats
+              </Text>
+              {beatModelsUi.phase === 'offer' ? (
+                <>
+                  <Text style={s.splitText}>
+                    Download the beat models ({BEAT_MODELS_MB} MB, once) and songs analysed from now on — and any
+                    the detector found no beat in — get a grid that holds through quiet intros and rubato the
+                    drums alone lose. Songs that already have a grid keep it.
+                  </Text>
+                  <View style={s.splitActions}>
+                    <Pressable hitSlop={8} onPress={() => void fetchBeatModels()}>
+                      <Text style={s.ctxLink}>Download</Text>
+                    </Pressable>
+                    <Pressable hitSlop={8} onPress={dismissBeatModels}>
+                      <Text style={[s.ctxLink, { color: C.dim }]}>Not now</Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Text style={s.splitText}>
+                    Downloading the beat models — {beatModelsUi.gotMB} of {beatModelsUi.totalMB} MB
+                  </Text>
+                  <View style={s.splitBarBed}>
+                    <View
+                      style={[
+                        s.splitBar,
+                        { width: `${Math.min(100, (beatModelsUi.gotMB / Math.max(1, beatModelsUi.totalMB)) * 100)}%` }
+                      ]}
+                    />
+                  </View>
+                  <View style={s.splitActions}>
+                    <Pressable hitSlop={8} onPress={() => void cancelBeatModels()}>
+                      <Text style={s.ctxLink}>Cancel</Text>
+                    </Pressable>
+                  </View>
+                </>
+              )}
             </View>
           )}
           {(projects ?? []).map((p) => {

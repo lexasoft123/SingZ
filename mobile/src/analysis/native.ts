@@ -7,8 +7,22 @@
  * crosses a JS runtime for these; the file path is the whole request.
  */
 import { NativeModules } from 'react-native'
+import type { MlGrid } from '../gen/analysis-lib'
+import { log } from '../log'
 
 interface SplitNative {
+  mlGridFromStems(
+    stemPaths: string[],
+    modelsDir: string,
+    dumpDir: string
+  ): Promise<{
+    beats: number[]
+    downbeats: number[]
+    beat_prob: number[]
+    downbeat_prob: number[]
+    fps: number
+    elapsedMs: number
+  }>
   analyzeKey(
     instPaths: string[],
     bassPath: string
@@ -68,4 +82,44 @@ export async function estimateKeyNative(
 export async function audioDurationNative(project: string, relPath: string): Promise<number> {
   const path = await folder().localFile(project, relPath)
   return (await split().wavInfo(path)).durationSec
+}
+
+/** Does this build carry the from-stems Beat This! runner? */
+export const nativeMlGridAvailable = (): boolean =>
+  typeof (NativeModules.SingzSplit as { mlGridFromStems?: unknown } | undefined)?.mlGridFromStems ===
+  'function'
+
+/**
+ * The neural beat lattice off the project's stems, in the core: the native
+ * reads, sums and decimates the wavs itself (sumStemsTo22k — the desktop's
+ * fetchMlGrid mix) and runs the two graphs, so ~250 MB of audio never
+ * crosses a JS runtime. Resolves null on ANY failure, logged: the desktop
+ * treats a failed model run exactly this way (fetchMlGrid's catch) — the
+ * grid falls back to the homegrown path, which must never cost the singer
+ * their analysis, but a silent quality downgrade must be diagnosable.
+ */
+export async function mlGridFromStemsNative(
+  project: string,
+  stemRels: string[],
+  modelsDir: string
+): Promise<MlGrid | null> {
+  try {
+    const f = folder()
+    const paths = await Promise.all(stemRels.map((rel) => f.localFile(project, rel)))
+    const g = await split().mlGridFromStems(paths, modelsDir, '')
+    log(
+      'analysis',
+      `ml grid: ${g.beats.length} beats, ${g.downbeats.length} downbeats in ${(g.elapsedMs / 1000).toFixed(1)}s`
+    )
+    return {
+      beats: g.beats,
+      downbeats: g.downbeats,
+      beatProb: g.beat_prob,
+      downbeatProb: g.downbeat_prob,
+      fps: g.fps
+    }
+  } catch (e) {
+    log('analysis', `ml grid failed — ${String(e instanceof Error ? e.message : e)}`, 'warn')
+    return null
+  }
 }
