@@ -22,7 +22,7 @@
  * output would show up as a port divergence. That widens as the port does.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -57,8 +57,46 @@ const libraryRoot = () => {
   }
   return null
 }
+/**
+ * `--ml <raw.jsonl>` — Beat This! grids keyed by project directory name, as
+ * eval/beats/make-ml-grids.mjs writes them. Without it every ML stage below
+ * is UNREACHED and the harness says so by name; with it the two sides get the
+ * same lattice and the adoption, the splice family and the bar-phase votes
+ * are all under comparison.
+ */
+let mlById = new Map()
+/** Was a --ml FILE given? Not `mlById.size` — the ML fixtures put their own
+ *  lattices in that map, so it is never empty and the hint below never fired. */
+let mlFileGiven = false
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--bin') bin = args[++i]
+  else if (args[i] === '--ml') {
+    const f = args[++i]
+    for (const line of readFileSync(f, 'utf8').split('\n')) {
+      if (!line.startsWith('{')) continue
+      const r = JSON.parse(line)
+      // A prob array PRESENT BUT EMPTY is the one shape the C++ MlGrid cannot
+      // express (empty vector = the TS's `undefined`), and the difference is
+      // not cosmetic: `[]` is truthy, so the TS would add the `mld` cue at
+      // zero mass and divide every segment confidence by a larger weight sum.
+      // Refuse the fixture rather than let that hide inside a passing run.
+      for (const k of ['beat_prob', 'downbeat_prob']) {
+        if (Array.isArray(r[k]) && r[k].length === 0) {
+          console.error(`${f}: ${r.id} has an empty ${k} — present-but-empty is not representable, drop the key instead`)
+          process.exit(2)
+        }
+      }
+      mlById.set(r.id, {
+        beats: r.beats,
+        downbeats: r.downbeats,
+        beatProb: r.beat_prob,
+        downbeatProb: r.downbeat_prob,
+        fps: r.fps
+      })
+    }
+    mlFileGiven = true
+    console.log(`ML       ${mlById.size} grid(s) from ${f}`)
+  }
   else if (args[i] === '--library') {
     const root = libraryRoot()
     if (!root) {
@@ -88,6 +126,15 @@ if (dirs.length === 0) dirs.push(join(root, 'mobile', 'assets', 'sample'))
 if (!process.env.SINGZ_NO_FIXTURES) {
   const mod = await import(pathToFileURL(join(root, 'eval', 'beats', 'fixtures.mjs')).href)
   FIXTURE_PRECONDITIONS = mod.FIXTURE_PRECONDITIONS
+  // The ML fixtures declare their own lattice, so the ML fork is covered even
+  // on a run with no --ml grids at all. Merged AFTER the file so a fixture
+  // name can never be shadowed by a library project of the same name.
+  for (const [id, g] of Object.entries(mod.FIXTURE_ML)) {
+    mlById.set(id, {
+      beats: g.beats, downbeats: g.downbeats,
+      beatProb: g.beat_prob, downbeatProb: g.downbeat_prob, fps: g.fps
+    })
+  }
   const made = mod.writeFixtures(mkdtempSync(join(tmpdir(), 'singz-beats-fixtures-')))
   // A fixture with no precondition entry would run UNGUARDED and print PASS —
   // which is the vacuity the preconditions exist to prevent, arriving by the
@@ -156,19 +203,15 @@ const duck = ({ mono, rate }) => ({
  * null so "both refused, for the same cause" compares equal instead of
  * looking like a divergence.
  */
-/** The stages that compare the tracker's lattice against detectBeats' RETURN
- *  — only meaningful while no un-ported downstream stage has rewritten it. */
-const LATTICE_STAGES = new Set([
-  'beats.length', 'medSec', 'beatsSec', 'beatsPerBar',
-  // The bars come from the RETURN too, and a court can re-place them even
-  // when the beat times hold. `sanitized` is here for a DIFFERENT un-ported
-  // stage — see its entry: the head backcast runs before it, not after.
-  'downbeat', 'downbeats', 'sanitized', 'bpm', 'suspectAt'
-])
-
-/** The TS's `cues` object is keyed by name and the C++'s is positional, so
- *  the comparison needs the insertion order written down once. */
-const CUE_ORDER = ['kick', 'ent', 'slam', 'bass', 'voc', 'line']
+/** The TS's `cues` object is keyed by name and the C++'s is positional, so the
+ *  comparison needs the insertion order written down once. `mld` — the neural
+ *  downbeat head — is CONDITIONAL: without a model it is omitted rather than
+ *  made uniform (conf divides by the summed weights), so a segment carries six
+ *  entries or seven and the getter below filters this list to what is actually
+ *  there. A name missing from this list would be silently dropped from the
+ *  comparison, which is how `mld` went uncompared the first time, so an
+ *  unrecognised key is reported instead of skipped. */
+const CUE_ORDER = ['kick', 'ent', 'slam', 'bass', 'voc', 'line', 'mld']
 
 /** The median inter-beat interval of a grid, derived the same way on both
  *  sides so neither can be reading a different array than the other. */
@@ -196,6 +239,21 @@ const STAGES = [
   // inside it cannot see that.
   ['fill.branch', (ts) => (ts.fill ? (ts.fill.skipped ? 'skipped' : 'applied') : 'none'),
     (c) => (c.fill ? (c.fill.skipped ? 'skipped' : 'applied') : 'none')],
+  // ---- the neural lattice's fork, which runs BEFORE the tracker ----------
+  // Each of these keys is written CONDITIONALLY by the TS, so each getter
+  // yields a sentinel string rather than undefined when the key is absent:
+  // `undefined` on both sides means "neither side reached it" and is silently
+  // skipped, which would hide a real disagreement about whether the stage ran
+  // at all. 'none' is a value; absence is not.
+  ['mlDouble', (ts) => (ts.mlDouble
+    ? `${ts.mlDouble.bpm0}:${ts.mlDouble.gain}:${ts.mlDouble.multiLevel}:${ts.mlDouble.doubled}` : 'none'),
+    (c) => (c.mlDouble
+      ? `${c.mlDouble.bpm0}:${c.mlDouble.gain}:${c.mlDouble.multiLevel}:${c.mlDouble.doubled}` : 'none')],
+  ['mlLattice', (ts) => (ts.mlLattice
+    ? `${ts.mlLattice.bpm0}:${ts.mlLattice.doubled}:${ts.mlLattice.steadyFrac}:${ts.mlLattice.wins}` : 'none'),
+    (c) => (c.mlLattice
+      ? `${c.mlLattice.bpm0}:${c.mlLattice.doubled}:${c.mlLattice.steadyFrac}:${c.mlLattice.wins}` : 'none')],
+  ['mlReject', (ts) => ts.mlReject ?? 'none', (c) => c.mlReject ?? 'none'],
   ['tau', (ts) => ts.tau, (c) => c.tau],
   ['consistency', (ts) => ts.consistency, (c) => c.consistency],
   ['fill.alpha', (ts) => ts.fill?.alpha, (c) => c.fill?.alpha],
@@ -210,6 +268,14 @@ const STAGES = [
   // The CHOSEN candidate. `octaves` stays in the TS's mult order (1, 2, 0.5),
   // so without these a port that picked a DIFFERENT octave would move nothing
   // the harness looks at.
+  // The octave near-tie window, and the model's own ambivalence that widens
+  // it. This is the ONE aux.ml read inside trackFromDrums — it decides a
+  // whole-song halve or double and leaves no other trace — and it went
+  // uncompared through a 23-input run because nothing here asked for it.
+  // 'none' on both sides is a real value, not a skip: the TS writes this key
+  // on every drums-path song, so an absent one is itself a divergence.
+  ['octaveTie', (ts) => (ts.octaveTie ? `${ts.octaveTie.win}:${ts.octaveTie.mlBimodal}` : 'none'),
+    (c) => (c.octaveTie ? `${c.octaveTie.win}:${c.octaveTie.mlBimodal}` : 'none')],
   ['support', (ts) => ts.support, (c) => c.support],
   ['activeFrac', (ts) => ts.activeFrac, (c) => c.activeFrac],
   ['steadiness', (ts) => ts.steadiness, (c) => c.steadiness],
@@ -223,11 +289,30 @@ const STAGES = [
   // span became a false divergence. The bundled sample is exactly that case.
   ['spanOk', (ts) => (ts.spanOk?.length ? ts.spanOk.map((s) => `${s.a}:${s.b}:${s.ok}`).join('|') : undefined),
     (c) => (c.spanOk?.length ? c.spanOk.map((s) => `${s.a}:${s.b}:${s.ok}`).join('|') : undefined)],
-  // The three LATTICE stages, and they are conditional — see `latticeUsable`.
   // Both sides off the FINISHED grid, not the tracker's lattice — the head
   // backcast can add beats in front of it, and `debug.beats`/`debug.medSec`
   // are recorded before that happens. (The fixture that fires the backcast
   // caught this the moment it was added: 144 against the lattice's 120.)
+  // ---- adoption and the splice family, between the tracker and the grid ---
+  ['mlNormalized', (ts) => (ts.mlNormalized
+    ? `${ts.mlNormalized.from}:${ts.mlNormalized.to}:${ts.mlNormalized.medSec}` : 'none'),
+    (c) => (c.mlNormalized ? `${c.mlNormalized.from}:${c.mlNormalized.to}:${c.mlNormalized.medSec}` : 'none')],
+  ['mlView', (ts) => (ts.mlView
+    ? `${ts.mlView.ratio}:${ts.mlView.scoreA}:${ts.mlView.scoreB}:${ts.mlView.picked}` : 'none'),
+    (c) => (c.mlView ? `${c.mlView.ratio}:${c.mlView.scoreA}:${c.mlView.scoreB}:${c.mlView.picked}` : 'none')],
+  // Every field of every row, `ca`/`cb` included: those two are the per-span
+  // parity vote, and the TS carries them forward across a REFUSED splice (it
+  // clears `lastCarry` only on a successful one), so a port that tidied that
+  // up would move them one row and change nothing else.
+  ['mlSplice', (ts) => (ts.mlSplice?.length
+    ? ts.mlSplice.map((r) => `${r.aSec}:${r.bSec}:${r.removed}:${r.added}:${r.why}:${r.ca ?? '-'}:${r.cb ?? '-'}`).join('|')
+    : 'none'),
+    (c) => (c.mlSplice?.length
+      ? c.mlSplice.map((r) => `${r.aSec}:${r.bSec}:${r.removed}:${r.added}:${r.why}:${r.ca ?? '-'}:${r.cb ?? '-'}`).join('|')
+      : 'none')],
+  // Which front end actually produced the grid: 'drums', 'ml', or the
+  // bare-mix 'ml-verbatim' early return.
+  ['lattice', (ts) => ts.lattice ?? 'none', (c) => c.lattice ?? 'none'],
   ['beats.length', (ts) => ts.__beats?.length, (c) => c.gridBeats],
   ['medSec', (ts) => ts.__medSec, (c) => medianGap(c.beatsSec)],
   ['beatsSec', (ts) => ts.__beats?.join(','), (c) => c.beatsSec?.join(',')],
@@ -249,6 +334,8 @@ const STAGES = [
   // The vote, stage by stage. segCues is the whole per-segment verdict table
   // (span, chosen rotation, confidence to the TS's own 3 decimals) — it is
   // written before the courts, so unlike the bars below it needs no gate.
+  ['mlSeams', (ts) => (ts.mlSeams?.length ? ts.mlSeams.join(',') : 'none'),
+    (c) => (c.mlSeams?.length ? c.mlSeams.join(',') : 'none')],
   ['segCues', (ts) => (ts.segCues?.length
     ? ts.segCues.map((s) => `${s.a}:${s.b}:${s.rot}:${s.conf}`).join('|') : 'none'),
     (c) => (c.segCues?.length ? c.segCues.map((s) => `${s.a}:${s.b}:${s.rot}:${s.conf}`).join('|') : 'none')],
@@ -257,7 +344,11 @@ const STAGES = [
   // cue could diverge while the argmax and the margin both survived it, and
   // the first sign would be a wrong bar line much further down.
   ['segCues.cues', (ts) => (ts.segCues?.length
-    ? ts.segCues.map((s) => CUE_ORDER.map((n) => (s.cues?.[n] ?? []).join(' ')).join(';')).join('|') : 'none'),
+    ? ts.segCues.map((s) => {
+      const unknown = Object.keys(s.cues ?? {}).filter((n) => !CUE_ORDER.includes(n))
+      if (unknown.length > 0) return `UNKNOWN CUE ${unknown.join(',')} — add it to CUE_ORDER`
+      return CUE_ORDER.filter((n) => n in (s.cues ?? {})).map((n) => s.cues[n].join(' ')).join(';')
+    }).join('|') : 'none'),
     (c) => (c.segCues?.length
       ? c.segCues.map((s) => (s.cues ?? []).map((d) => d.join(' ')).join(';')).join('|') : 'none')],
   // Cuts that were PROPOSED (harmGain is written whenever any was) and cuts
@@ -279,19 +370,20 @@ const STAGES = [
   // have none (no anchor was confident enough) — 'none' on both sides is
   // agreement, and the rotation index still carries its bar structure.
   ['downbeat', (ts) => ts.__downbeat, (c) => c.downbeat],
-  // `in`, not `?.` — a getter that folds "the stage was gated off" into the
-  // same 'none' it uses for "this song legitimately has no bars" makes the
-  // LATTICE_STAGES skip dead: the day bass lands and the courts stop
-  // abstaining, this would compare the TS's ABSENCE against the C++'s real
-  // bars. That is the same absent-field mistake this file has now made three
-  // times, so the shape is worth naming: the skip is keyed on `undefined`,
-  // therefore only a stage that can actually YIELD undefined can be skipped.
+  // `in`, not `?.` — a getter that folds "this stage was never reached" into
+  // the same 'none' it uses for "this song legitimately has no bars" cannot be
+  // skipped, because the skip is keyed on `undefined`. The gate those skips
+  // served is gone (every stage is ported), but the shape is worth keeping:
+  // this file has read an absent field as evidence three times.
   ['downbeats', (ts) => ('__downbeats' in ts
     ? (ts.__downbeats?.length ? ts.__downbeats.join(',') : 'none') : undefined),
     (c) => (c.downbeats?.length ? c.downbeats.join(',') : 'none')],
   // The head backcast. `headWhy` is the verdict — the TS writes a string on
   // one path and an object on two others, so both sides are normalised to the
   // shape's NAME first and its contents second.
+  ['spanPhase', (ts) => (ts.spanPhase?.length
+    ? ts.spanPhase.map((r) => `${r.aSec}:${r.bSec}:${r.rot}:${r.margin}`).join('|') : 'none'),
+    (c) => (c.spanPhase?.length ? c.spanPhase.map((r) => `${r.aSec}:${r.bSec}:${r.rot}:${r.margin}`).join('|') : 'none')],
   ['headWhy', (ts) => (ts.headWhy === undefined ? ''
     : typeof ts.headWhy === 'string' ? ts.headWhy
     : ts.headWhy.verdict === 'head ok' ? 'head ok' : 'judged'), (c) => c.headWhy],
@@ -323,6 +415,32 @@ const STAGES = [
       : 'none')],
   // The reported tempo and the suspect marks — both come off the finished
   // grid, so both ride the same gate as the bars.
+  // The courts, COARSELY: whether they were asked, whether they abstained, and
+  // how much they did. Their internals have two gates of their own
+  // (eval/courts-parity.mjs for the extractors, eval/courts-decide-parity.mjs
+  // for the verdicts) and duplicating those here would report one divergence
+  // twice. What this stage adds is that detectBeats hands them the same grid
+  // and adopts the same answer — which neither of those gates can see.
+  ['v20', (ts) => (ts.v20
+    ? `${ts.v20.abstained === true}:${ts.v20.cands ?? 0}:${ts.v20.halfBar === true}:${ts.v20.applied?.length ?? 0}`
+    : 'none'),
+    (c) => (c.v20 ? `${c.v20.abstained}:${c.v20.cands}:${c.v20.halfBar}:${c.v20.applied}` : 'none')],
+  // The head backcast's SECOND chance, run only on a grid the octave court
+  // halved. Its presence is the evidence that the halve happened and the head
+  // was re-judged at the notation's octave.
+  ['headAfterHalve', (ts) => {
+    const h = ts.headAfterHalve
+    if (!h) return 'none'
+    const why = h.headWhy === undefined ? '' : typeof h.headWhy === 'string' ? h.headWhy
+      : h.headWhy.verdict === 'head ok' ? 'head ok' : 'judged'
+    return `${why}:${h.headBackcast
+      ? `${h.headBackcast.replaced}:${h.headBackcast.added}:${h.headBackcast.snapped}:${h.headBackcast.phase}`
+      : 'none'}`
+  }, (c) => (c.headAfterHalve
+    ? `${c.headAfterHalve.headWhy}:${c.headAfterHalve.backcast
+      ? `${c.headAfterHalve.backcast.replaced}:${c.headAfterHalve.backcast.added}:${c.headAfterHalve.backcast.snapped}:${c.headAfterHalve.backcast.phase}`
+      : 'none'}`
+    : 'none')],
   ['bpm', (ts) => ts.__bpm, (c) => c.bpm],
   ['suspectAt', (ts) => ('__suspectAt' in ts
     ? (ts.__suspectAt?.length ? ts.__suspectAt.join(',') : 'none') : undefined),
@@ -331,6 +449,44 @@ const STAGES = [
 ]
 
 let failed = 0
+/**
+ * Which branches of the ML fork this run actually EXECUTED, counted off the
+ * TS's own debug. A parity report that says IDENTICAL without saying what it
+ * ran is the failure this file's fixtures exist to prevent, one level up: the
+ * gate can be green because both sides agree, or green because neither side
+ * did anything. The courts learned this the expensive way — a summary line
+ * counted an octave court's SCOPE REFUSALS as appearances, and the gate was
+ * judging an empty room for as long as it existed. So the branches are named
+ * and the ones nothing reached are printed as a NOTE, not omitted.
+ */
+const REACHED = {
+  'ml offered': (d) => d.mlLattice !== undefined,
+  'ml refused (unsteady)': (d) => d.mlReject !== undefined,
+  // The tracker's own aux.ml read — a widened window is the model saying the
+  // octave race is real. Listed apart from the branches of the ML FORK
+  // because it is not one: it lives inside trackFromDrums.
+  'octave tie widened': (d) => d.octaveTie?.win === 0.12,
+  'octave test reached': (d) => d.mlDouble !== undefined,
+  'octave test fired': (d) => d.mlDouble?.doubled === true,
+  'lattice adopted': (d) => d.lattice === 'ml',
+  'bare-mix verbatim': (d) => d.lattice === 'ml-verbatim',
+  'level normalized': (d) => d.mlNormalized !== undefined,
+  'halved view picked': (d) => d.mlView !== undefined,
+  'splice: leading': (d) => d.mlSplice?.some((r) => r.why === 'leading'),
+  'splice: void': (d) => d.mlSplice?.some((r) => r.why === 'void'),
+  'splice: void-filled': (d) => d.mlSplice?.some((r) => r.why === 'void-filled'),
+  'splice: defect': (d) => d.mlSplice?.some((r) => r.why === 'defect'),
+  'splice: defect-2x': (d) => d.mlSplice?.some((r) => r.why === 'defect-2x'),
+  'per-span parity vote': (d) => d.mlSplice?.some((r) => r.ca !== undefined),
+  'bar seams cut segments': (d) => d.mlSeams?.length > 0,
+  'span rotation re-voted': (d) => d.spanPhase?.length > 0,
+  'waltz meter (3)': (d, g) => d.lattice === 'ml' && g?.beatsPerBar === 3,
+  'drumless meter histogram': (d, g) => d.lattice === 'ml' && d.segCues?.length === 0 && g?.beatsPerBar !== undefined,
+  'courts engaged': (d) => d.v20 !== undefined && d.v20.abstained !== true,
+  'courts abstained': (d) => d.v20?.abstained === true,
+  'head re-judged after halve': (d) => d.headAfterHalve !== undefined
+}
+const reachedBy = new Map(Object.keys(REACHED).map((k) => [k, []]))
 for (const dir of dirs) {
   const stemDir = join(dir, 'stems')
   if (!existsSync(stemDir)) { console.log(`SKIP  ${dir} (no stems/)`); continue }
@@ -349,19 +505,34 @@ for (const dir of dirs) {
   if (!drumsPath) { console.log(`SKIP  ${dir} (no drums stem — no grid, by rule)`); continue }
   const instPaths = INST.map(wavFor).filter(Boolean)
 
-  // Aux: the fill stems, the vocals and the lyric line starts — every input
-  // the ported stages read. BASS is deliberately still withheld: it is the one
-  // that flips `applyCourts` from abstaining to active (buildCourtEvidence
-  // fills its chord runs only inside `if (bass22)`), which would put an
-  // un-ported 1500-line stage between the two sides. Vocals and lyrics engage
-  // no court, so they belong here — and without them two of the six segment
-  // cues would be uniform on both sides and their parity would prove nothing.
+  // Aux: the WIDEST the app ever builds — the fill stems, the bass, the
+  // vocals, the lyric line starts, the aligned words and (with --ml) the
+  // neural lattice. Every stage is ported now, so nothing is withheld; the
+  // paragraph below the CLI call records what each of these switches on.
   const vocalsPath = wavFor('vocals')
+  const bassPath = wavFor('bass')
   const lyricsFile = join(dir, 'lyrics.json')
-  const lineStarts = existsSync(lyricsFile)
-    ? (JSON.parse(readFileSync(lyricsFile, 'utf8')).lines ?? [])
-        .map((l) => l.start).filter((t) => Number.isFinite(t))
-    : []
+  const lyricLines = existsSync(lyricsFile) ? (JSON.parse(readFileSync(lyricsFile, 'utf8')).lines ?? []) : []
+  const lineStarts = lyricLines.map((l) => l.start).filter((t) => Number.isFinite(t))
+  // Aligned words, exactly as App.tsx flattens them. detectBeats never reads
+  // them itself — they are the v20 meter court's witness — but the courts run
+  // here now, so withholding them would leave that court testifying blind on
+  // both sides and prove nothing about it.
+  const words = lyricLines
+    .flatMap((l) => (l.words ?? []).map((w) => ({ s: w.s, e: w.e })))
+    .filter((w) => Number.isFinite(w.s) && Number.isFinite(w.e))
+  const ml = mlById.get(basename(dir)) ?? null
+  // The C++ takes the lattice as whitespace tokens rather than JSON: `String(x)`
+  // is JS's shortest round-trip repr and strtod is correctly rounded, so every
+  // value is the SAME double on both sides. A %.17g hop would not be — see the
+  // Foundation note in beat_this.h.
+  let mlFile = null
+  if (ml) {
+    const section = (name, arr) => (Array.isArray(arr) ? `${name} ${arr.length} ${arr.map(String).join(' ')}\n` : '')
+    mlFile = join(tmp, 'ml.txt')
+    writeFileSync(mlFile, `fps ${ml.fps}\n${section('beats', ml.beats)}${section('downbeats', ml.downbeats)}` +
+      `${section('beatProb', ml.beatProb)}${section('downbeatProb', ml.downbeatProb)}`)
+  }
   const tsDbg = {}
   // The RETURN value matters as well as the debug: four of the C++'s reject
   // strings name points where the TS returns null WITHOUT writing a reason,
@@ -371,6 +542,9 @@ for (const dir of dirs) {
     {
       inst: instPaths.map((p) => duck(readWavMonoJs(p))),
       ...(vocalsPath ? { vocals: duck(readWavMonoJs(vocalsPath)) } : {}),
+      ...(bassPath ? { bass: duck(readWavMonoJs(bassPath)) } : {}),
+      ...(words.length > 0 ? { words } : {}),
+      ...(ml ? { ml } : {}),
       lineStarts
     },
     tsDbg
@@ -388,76 +562,44 @@ for (const dir of dirs) {
 
   const cliArgs = ['beats', '--drums', drumsPath, ...instPaths.flatMap((p) => ['--inst', p]),
     ...(vocalsPath ? ['--vocals', vocalsPath] : []),
+    ...(bassPath ? ['--bass', bassPath] : []),
+    ...(mlFile ? ['--ml', mlFile] : []),
+    ...words.flatMap((w) => ['--word', `${w.s}:${w.e}`]),
     // Full precision, not the JSON's 2 decimals: `--line 0.94` and the TS's
     // 0.94 must be the same double or a beat-snap can land one beat apart.
     ...lineStarts.flatMap((t) => ['--line', String(t)])]
   const c = JSON.parse(execFileSync(bin, cliArgs, { maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
 
-  // detectBeats' returned `beats` are the tracker's `beatsSec` ONLY when
-  // nothing downstream rewrote them — and two things can, on exactly the
-  // inputs used here. `applyCourts` runs whenever there are harmonic stems
-  // (aux.inst IS the chord layer), and its octave court needs no ML model:
-  // a HALVE rewrites the lattice outright. `backcastHead` is called
-  // unconditionally and rebuilds the head when the lead-in is unsteady or
-  // missing. Neither is ported yet, so where either fired the TS grid is
-  // post-mutation and the C++'s is not — comparing them would report a
-  // divergence that is really an un-ported stage.
+  // Every stage of detectBeats is ported now — the ML fork, the splice family,
+  // the head backcast and the v20 courts — so the grid the TS returns and the
+  // grid the C++ returns are answers to the same question, and there is
+  // nothing left to gate out. The three lattice stages used to be withheld
+  // whenever the courts engaged or an ML lattice produced the grid, because
+  // comparing a post-mutation TS grid against a pre-mutation C++ one reports a
+  // divergence that is really an un-ported stage. Both conditions are now the
+  // POINT of the run rather than a reason to look away: with `--ml` and a bass
+  // stem this harness drives the widest aux the app ever builds.
   //
-  // So the three lattice stages are gated on the TS's OWN debug rather than
-  // on an assumption, and when they are skipped the harness says so by name
-  // through the same NOT PORTED channel as anything else unbuilt. The test
-  // is POSITIVE — "nothing downstream ran" — not a list of the downstream
-  // actions believed to move times: enumerating those means being right
-  // about every branch of 1500 un-ported lines, and being wrong is silent.
-  //
-  // On the courts the abstention is STRUCTURAL, not a property of these
-  // songs: buildCourtEvidence fills `runs` only inside `if (bass22)`
-  // (courts.ts:561 — the bass names the roots), and this harness passes no
-  // bass, so `runs` is [] for every song and applyCourts abstains at
-  // courts.ts:1500. More inst stems change nothing; adding BASS flips it from
-  // none to many in one step, which is the thing to remember when the aux
-  // widens for the next slice.
-  const courtsIdle = tsDbg.v20 === undefined || tsDbg.v20.abstained === true
-  // The head backcast used to be gated out here alongside the courts, with a
-  // default-closed probe over its three decline shapes. It is PORTED now, so
-  // the C++ rebuilds the same head — and the gate would be hiding the one
-  // stage that most wants comparing. What is left is the courts alone.
-  // Positive, not "the courts did not object": `debug.lattice` records which
-  // front end actually produced the grid, so this asks the TS to CONFIRM the
-  // drums-first path rather than inferring it from the absence of an ml key in
-  // an aux literal a few lines up. Same discipline as the courts probe, and
-  // the reason is the same — this file has read an absent field as evidence
-  // three times.
-  // ONE field, and it proves the rest. Every non-null return from
-  // `latticeFromMl` writes `debug.mlLattice` unconditionally, so its absence
-  // proves the function bailed at its own `if (!ml || …)` guard — hence no
-  // mlChoice, hence no adoption, no splice, no mlSpliceRanges, no mlSeams.
-  // (The first version of this enumerated three OTHER fields, none of which
-  // is the splice's own record: `debug.mlSplice` is, `lattice` reads 'drums'
-  // *during* a splice because the splice only runs when the ML lattice was
-  // NOT adopted, and both of the others are written behind extra gates. A
-  // hedge that watches the wrong fields is worse than no hedge, because it
-  // reads as covered.)
-  const noMl = tsDbg.mlLattice === undefined
-  const latticeUsable = courtsIdle && noMl
-  if (tsGrid && latticeUsable) {
+  // What remains worth remembering from that era: the courts' abstention is
+  // STRUCTURAL, not a property of these songs. buildCourtEvidence fills `runs`
+  // only inside `if (bass22)` (courts.ts:561 — the bass names the roots), so
+  // dropping `--bass` puts every court back to sleep, and `--ml` alone also
+  // wakes them (doubleCourt's only witness IS the model, and applyCourts
+  // abstains on `runs.length < 8 && !ev.ml`). A run that passes neither flag
+  // is a narrower test than it looks; the summary line says which it was.
+  if (tsGrid) {
     tsDbg.__beats = tsGrid.beats
     tsDbg.__medSec = medianGap(tsGrid.beats)
     tsDbg.__bpb = tsGrid.beatsPerBar
     tsDbg.__downbeat = tsGrid.downbeat
     tsDbg.__downbeats = tsGrid.downbeats
-    // Not from the grid, but written after backcastHead, so it belongs to the
-    // same gate. `?? null` keeps the property present-but-empty, which is how
-    // "the TS sanitized nothing" stays distinguishable from "not compared".
+    // Not from the grid, but written after backcastHead, so it belongs with
+    // it. `?? null` keeps the property present-but-empty, which is how "the TS
+    // sanitized nothing" stays distinguishable from "not compared".
     tsDbg.__sanitized = tsDbg.sanitized ?? null
     tsDbg.__bpm = tsGrid.bpm
     tsDbg.__suspectAt = tsGrid.suspectAt ?? null
   }
-  const latticeSkipReason = !courtsIdle
-    ? 'the courts engaged'
-    : !noMl
-      ? 'an ML lattice produced or spliced the grid'
-      : null
 
   let firstBad = null
   let compared = 0
@@ -472,21 +614,34 @@ for (const dir of dirs) {
       if (!same) { firstBad = { name, ts: a, c: b }; break }
       // Both refused: everything downstream is unreached on BOTH sides, and
       // comparing it would report the TS's `undefined` against the C++'s
-      // printed zeros. Agreeing to refuse IS the pass — refusals are what
-      // the reject strings exist for. The second half covers the four points
-      // where the TS returns null silently: it must still be a FAILURE when
-      // the C++ refuses and the TS handed back a grid.
-      if (a !== null || (c.ok === false && tsGrid === null)) { bothRefused = true; break }
+      // printed zeros. Agreeing to refuse IS the pass — refusals are what the
+      // reject strings exist for.
+      //
+      // The test is the RETURN VALUE on both sides, never the reject string.
+      // It used to break out as soon as the TS had written one, which was
+      // sound while `debug.reject` could only be written on a path that
+      // returned null — and stopped being sound the moment the ML lattice
+      // could rescue a song the tracker had already refused. Father and Son is
+      // exactly that song: the tracker writes "windows disagree on a tempo",
+      // the model's lattice is adopted, a grid comes back, and the old test
+      // read the leftover string as a refusal and compared ONE stage of
+      // forty-nine. It reported PASS for as long as it did that. Found by
+      // mutating the octave gate and watching a mutant that should have
+      // rewritten the whole grid survive.
+      if (tsGrid === null && c.ok === false) { bothRefused = true; break }
       continue
     }
     if (a === undefined && b === undefined) continue      // neither side reached it
-    if (a === undefined && latticeSkipReason && LATTICE_STAGES.has(name)) {
-      skipped.push(`${name} (${latticeSkipReason} — not ported)`)
-      continue
-    }
     if (b === undefined) { skipped.push(name); continue } // not ported yet — REPORTED
     compared++
     if (!same) { firstBad = { name, ts: a, c: b }; break }
+  }
+  for (const [name, hit] of Object.entries(REACHED)) {
+    try {
+      if (hit(tsDbg, tsGrid)) reachedBy.get(name).push(basename(dir))
+    } catch {
+      /* a debug shape this probe does not understand is not a reach */
+    }
   }
   const ok = firstBad === null && compared > 0
   if (!ok) failed++
@@ -501,6 +656,36 @@ for (const dir of dirs) {
     (!firstBad && !bothRefused ? ' · all identical' : '') +
     (skipped.length ? ` · NOT PORTED: ${skipped.join(', ')}` : '') +
     ` · tau=${tsDbg.tau?.toFixed?.(3) ?? '-'}`)
+}
+console.log('\nML FORK COVERAGE — what this run actually executed:')
+const unreached = []
+for (const [name, songs] of reachedBy) {
+  if (songs.length === 0) unreached.push(name)
+  else console.log(`  ${String(songs.length).padStart(3)}x  ${name.padEnd(28)} ${songs.slice(0, 3).join(', ')}${songs.length > 3 ? ', …' : ''}`)
+}
+/**
+ * Gates this corpus is known NOT to exercise, with the evidence. Every entry
+ * was found by mutating the constant and watching the run stay green — the
+ * only way to tell "covered" from "reached but inert", and the difference the
+ * courts' own gate spent its whole life on the wrong side of. Printed rather
+ * than filed away, because a green run that does not say what it left out
+ * reads as a green run that left out nothing.
+ */
+const UNEXERCISED = [
+  ["splice's v16 level gate (0.6 < m/med < 1.6)",
+    'removing it entirely changes no grid here — no span the model repaired sits at the wrong level in these lattices'],
+  ["levelNormalize's barAt tolerance (0.25 * med)",
+    'tightening it to 0.15 changes nothing: Beat This! snaps every downbeat ONTO a beat, so the distance is always 0'],
+  ['the splice debug\'s carry-over across a REFUSED splice',
+    'clearing it early changes no row here; it is a debug field only — no grid depends on it']
+]
+console.log('KNOWN UNEXERCISED — reached but inert, proved by mutation:')
+for (const [what, why] of UNEXERCISED) console.log(`  - ${what}\n      ${why}`)
+if (unreached.length > 0) {
+  console.log(`NOTE  ${unreached.length} branch(es) UNREACHED by this run — their parity is a statement`)
+  console.log('      about code that did not execute:')
+  for (const n of unreached) console.log(`        - ${n}`)
+  if (!mlFileGiven) console.log('      (pass --ml <grids.jsonl> — see eval/beats/make-ml-grids.mjs)')
 }
 console.log(failed === 0 ? '\nBEATS PARITY (staged): IDENTICAL so far' : `\n${failed} PROJECT(S) DIVERGE`)
 process.exit(failed === 0 ? 0 : 1)

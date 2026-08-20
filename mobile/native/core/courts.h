@@ -264,6 +264,20 @@ struct AppliedStep {
  *  per-candidate `steps` trace is diagnostic only and is left to the TS. */
 struct CourtsDbg {
   bool abstained = false;
+  /** Did applyCourts hand back something OTHER than its input? The TS's
+   *  caller asks this with `courted !== det0` — object identity — which a
+   *  by-value C++ return cannot express, and comparing contents is not the
+   *  same question: a court that fires and reproduces the grid exactly still
+   *  sends the caller through the adoption block (a second sanitizeBars, a
+   *  halvedFrom test).
+   *
+   *  Set wherever the TS CONSTRUCTS A NEW GRID OBJECT — which is not the same
+   *  as "wherever a court decided something". meterCourt materializes a
+   *  uniform bar array for a grid that arrived without one, purely so its own
+   *  tests have bars to measure; no verdict follows, and the caller still
+   *  adopts the result, because the object it got back is not the one it
+   *  passed in. Two library songs ship their bar lines that way. */
+  bool changed = false;
   std::string oct;   // dbg.oct, verbatim JSON (empty when the court did not run)
   std::string dbl;   // dbg.dbl
   int cands = 0;

@@ -151,6 +151,75 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (cmd == "beats") {
+    /**
+     * `--ml <file>`: the neural lattice, in a whitespace-token format rather
+     * than the runner's JSON — the core has no JSON parser and does not want
+     * one here, and this side of the gate must hold the SAME doubles as the
+     * TypeScript side, not a re-rounded copy of them.
+     *
+     *   fps <v>
+     *   beats <n> <v> ...          downbeats <n> <v> ...
+     *   beatProb <n> <v> ...       downbeatProb <n> <v> ...
+     *
+     * A section may be omitted; absent is the TS's `undefined`, which is what
+     * the detector branches on. The harness writes each value with JS's
+     * `String(x)` (shortest round-trip) and this reads it with strtod
+     * (correctly rounded), so every value is bit-identical on both sides —
+     * the one property a %.17g hop through Foundation would NOT give us.
+     */
+    const auto readMlFile = [](const std::string& path, singz::MlGrid& g) -> std::string {
+      std::FILE* f = std::fopen(path.c_str(), "rb");
+      if (!f) return "cannot open " + path;
+      std::string text;
+      char chunk[65536];
+      size_t n;
+      while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0) text.append(chunk, n);
+      std::fclose(f);
+      size_t pos = 0;
+      const auto token = [&](std::string& t) {
+        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
+        const size_t start = pos;
+        while (pos < text.size() && !std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
+        t.assign(text, start, pos - start);
+        return !t.empty();
+      };
+      const auto number = [&](double& v) {
+        std::string t;
+        if (!token(t)) return false;
+        char* end = nullptr;
+        v = std::strtod(t.c_str(), &end);
+        return end == t.c_str() + t.size() && std::isfinite(v);
+      };
+      const auto array = [&](std::vector<double>& into) -> std::string {
+        double count = 0;
+        if (!number(count) || count < 0) return "bad count";
+        into.resize(static_cast<size_t>(count));
+        for (size_t i = 0; i < into.size(); i++)
+          if (!number(into[i])) return "short array";
+        return "";
+      };
+      std::string key;
+      bool sawFps = false;
+      while (token(key)) {
+        std::string err;
+        if (key == "fps") {
+          double v = 0;
+          if (!number(v)) return "bad fps";
+          g.fps = static_cast<int>(v);
+          sawFps = true;
+        } else if (key == "beats") err = array(g.beats);
+        else if (key == "downbeats") err = array(g.downbeats);
+        else if (key == "beatProb") err = array(g.beatProb);
+        else if (key == "downbeatProb") err = array(g.downbeatProb);
+        else return "unknown section " + key;
+        if (!err.empty()) return err + " in " + key;
+      }
+      // The producer states fps explicitly or the grid is not usable: MlGrid
+      // defaults to 50, and silently accepting that default would make a
+      // truncated file look like a healthy 50 fps one.
+      if (!sawFps) return "no fps line";
+      return "";
+    };
     // The tracker's staged debug, named exactly as analysis.ts's own `debug`
     // object names each field — the harness compares stage by stage, so a
     // divergence points at the stage that caused it, not just the song.
@@ -159,8 +228,42 @@ int main(int argc, char** argv) {
     singz::AnalysisStem bass;
     std::vector<singz::AnalysisStem> inst;
     std::vector<double> lineStarts;
-    bool haveDrums = false, haveVocals = false, haveBass = false;
+    std::vector<std::pair<double, double>> words;
+    singz::MlGrid ml;
+    bool haveDrums = false, haveVocals = false, haveBass = false, haveMl = false;
     for (int i = 2; i < argc; i++) {
+      if (std::strcmp(argv[i], "--ml") == 0) {
+        if (i + 1 >= argc) {
+          std::fprintf(stderr, "beats: --ml needs a path\n");
+          return 2;
+        }
+        const std::string err = readMlFile(argv[++i], ml);
+        if (!err.empty()) {
+          std::fprintf(stderr, "beats: --ml %s\n", err.c_str());
+          return 2;
+        }
+        haveMl = true;
+        continue;
+      }
+      if (std::strcmp(argv[i], "--word") == 0) {
+        if (i + 1 >= argc) {
+          std::fprintf(stderr, "beats: --word needs <start>:<end>\n");
+          return 2;
+        }
+        const std::string w = argv[++i];
+        const size_t colon = w.find(':');
+        char* e1 = nullptr;
+        char* e2 = nullptr;
+        const double a = colon == std::string::npos ? 0 : std::strtod(w.c_str(), &e1);
+        const double b = colon == std::string::npos ? 0 : std::strtod(w.c_str() + colon + 1, &e2);
+        if (colon == std::string::npos || e1 != w.c_str() + colon || *e2 != '\0' ||
+            !std::isfinite(a) || !std::isfinite(b)) {
+          std::fprintf(stderr, "beats: --word wants <start>:<end>, got %s\n", w.c_str());
+          return 2;
+        }
+        words.push_back({a, b});
+        continue;
+      }
       if (std::strcmp(argv[i], "--line") == 0) {
         if (i + 1 >= argc) {
           std::fprintf(stderr, "beats: --line needs a value\n");
@@ -228,18 +331,40 @@ int main(int argc, char** argv) {
     if (haveVocals) aux.vocals = &vocals;
     if (haveBass) aux.bass = &bass;
     aux.lineStarts = lineStarts;
+    aux.words = words;
+    if (haveMl) {
+      ml.ok = true;
+      aux.ml = &ml;
+    }
     // The whole pipeline, as detectBeats runs it — tracker, vote, head
     // backcast, sanitize — so what is printed below is the grid itself and not
     // an intermediate the harness would have to reassemble.
-    const singz::BeatGrid grid = singz::detectBeatsNoCourts(drums, aux, d);
+    const singz::BeatGrid grid = singz::detectBeats(drums, aux, d);
     const bool ok = grid.ok;
     std::printf("{\"detVersion\":%d,\"ok\":%s,\"frames\":%d,\"drumPeaks\":%d,\"peaks\":%d,",
                 singz::kBeatDetectVersion, ok ? "true" : "false", d.frames, d.drumPeaks, d.peaks);
-    std::printf("\"fluxSum\":%.17g,\"fluxMean\":%.17g,\"windows\":%d,", d.fluxSum, d.fluxMean, d.windows);
-    std::printf("\"tau\":%.17g,\"consistency\":%.17g,\"chosenBpm\":%.17g,", d.tau, d.consistency, d.chosenBpm);
-    std::printf("\"support\":%.17g,\"activeFrac\":%.17g,\"steadiness\":%.17g,\"rough\":%.17g,", d.support,
-                d.activeFrac, d.steadiness, d.rough);
-    std::printf("\"beats\":%d,\"medSec\":%.17g,", d.beats, d.medSec);
+    std::printf("\"fluxSum\":%.17g,\"fluxMean\":%.17g,", d.fluxSum, d.fluxMean);
+    // The tracker's own stages, each OMITTED when it did not reach that group.
+    // Two ways to miss one: the ML fork can return before the tracker entirely
+    // (the bare-mix path, the waltz adoption), or the tracker can refuse part
+    // way — a song that dies at the flux gate has no tau. The TS just leaves
+    // its keys unwritten in both cases, and printing the zero defaults instead
+    // would put a measured-looking 0 against that absence, which the harness
+    // must read as a divergence and which would be one only in the report.
+    if (d.hasTau)
+      std::printf("\"windows\":%d,\"tau\":%.17g,\"consistency\":%.17g,", d.windows, d.tau, d.consistency);
+    // The octave near-tie window and the model's own ambivalence that widened
+    // it. Its own flag because the TS writes the key even for a song with no
+    // octave candidate at all.
+    if (d.hasOctaveTie)
+      std::printf("\"octaveTie\":{\"win\":%.17g,\"mlBimodal\":%.17g},", d.octaveTieWin,
+                  d.octaveTieMlBimodal);
+    if (d.hasChosen) {
+      std::printf("\"chosenBpm\":%.17g,", d.chosenBpm);
+      std::printf("\"support\":%.17g,\"activeFrac\":%.17g,\"steadiness\":%.17g,\"rough\":%.17g,", d.support,
+                  d.activeFrac, d.steadiness, d.rough);
+    }
+    if (d.hasLattice) std::printf("\"beats\":%d,\"medSec\":%.17g,", d.beats, d.medSec);
     // beatsPerBar off the GRID, like medSec and beats.length — the debug copy
     // is recorded before the return and the TS side reads the return.
     std::printf("\"beatsPerBar\":%d,\"activeBeats\":%d,\"segments\":%d,\"acAt3\":%.17g,\"acAt4\":%.17g,",
@@ -322,14 +447,86 @@ int main(int argc, char** argv) {
       std::printf("\"fill\":{\"skipped\":true,\"instMaxima\":%d},", d.fillInstMaxima);
     else
       std::printf("\"fill\":null,");
-    std::printf("\"octaves\":[");
-    for (size_t i = 0; i < d.octaves.size(); i++) {
-      const singz::BeatDebug::Octave& o = d.octaves[i];
-      std::printf("%s{\"bpm\":%.17g,\"support\":%.17g,\"steadiness\":%.17g,\"alternation\":%.17g,"
-                  "\"rough\":%.17g,\"prior\":%.17g,\"score\":%.17g}",
-                  i ? "," : "", o.bpm, o.support, o.steadiness, o.alternation, o.rough, o.prior, o.score);
+    // `null`, not `[]`: `c.octaves?.length` must come out undefined so it
+    // compares equal to the TS's unwritten key, and an empty array would
+    // report 0 against nothing.
+    if (!d.hasOctaves) {
+      std::printf("\"octaves\":null,");
+    } else {
+      std::printf("\"octaves\":[");
+      for (size_t i = 0; i < d.octaves.size(); i++) {
+        const singz::BeatDebug::Octave& o = d.octaves[i];
+        std::printf("%s{\"bpm\":%.17g,\"support\":%.17g,\"steadiness\":%.17g,\"alternation\":%.17g,"
+                    "\"rough\":%.17g,\"prior\":%.17g,\"score\":%.17g}",
+                    i ? "," : "", o.bpm, o.support, o.steadiness, o.alternation, o.rough, o.prior, o.score);
+      }
+      std::printf("],");
     }
-    std::printf("],\"reject\":");
+    // ---- the neural lattice's stages, each written only when the TS writes
+    // its key: an absent field and a zeroed one are different evidence, and
+    // the harness compares "was it written" before it compares a number.
+    std::printf("\"lattice\":");
+    if (d.lattice.empty()) std::printf("null,");
+    else std::printf("\"%s\",", d.lattice.c_str());
+    if (d.hasMlDouble)
+      std::printf("\"mlDouble\":{\"bpm0\":%.17g,\"gain\":%.17g,\"multiLevel\":%.17g,\"doubled\":%s},",
+                  d.mlDoubleBpm0, d.mlDoubleGain, d.mlDoubleMultiLevel, d.mlDoubleDoubled ? "true" : "false");
+    if (d.hasMlLattice)
+      std::printf("\"mlLattice\":{\"bpm0\":%.17g,\"doubled\":%s,\"steadyFrac\":%.17g,\"wins\":%d},",
+                  d.mlLatticeBpm0, d.mlLatticeDoubled ? "true" : "false", d.mlLatticeSteadyFrac, d.mlLatticeWins);
+    if (!d.mlReject.empty()) std::printf("\"mlReject\":\"%s\",", d.mlReject.c_str());
+    if (d.hasMlNormalized)
+      std::printf("\"mlNormalized\":{\"from\":%d,\"to\":%d,\"medSec\":%.17g},", d.mlNormalizedFrom,
+                  d.mlNormalizedTo, d.mlNormalizedMedSec);
+    if (d.hasMlView)
+      std::printf("\"mlView\":{\"ratio\":%.17g,\"scoreA\":%d,\"scoreB\":%d,\"picked\":%d},", d.mlViewRatio,
+                  d.mlViewScoreA, d.mlViewScoreB, d.mlViewPicked);
+    if (!d.mlSplice.empty()) {
+      std::printf("\"mlSplice\":[");
+      for (size_t i = 0; i < d.mlSplice.size(); i++) {
+        const singz::BeatDebug::MlSplice& r = d.mlSplice[i];
+        std::printf("%s{\"aSec\":%.17g,\"bSec\":%.17g,\"removed\":%d,\"added\":%d,\"why\":\"%s\"", i ? "," : "",
+                    r.aSec, r.bSec, r.removed, r.added, r.why.c_str());
+        if (r.hasCarry) std::printf(",\"ca\":%d,\"cb\":%d", r.ca, r.cb);
+        std::printf("}");
+      }
+      std::printf("],");
+    }
+    if (!d.mlSeams.empty()) {
+      std::printf("\"mlSeams\":[");
+      for (size_t i = 0; i < d.mlSeams.size(); i++) std::printf("%s%d", i ? "," : "", d.mlSeams[i]);
+      std::printf("],");
+    }
+    if (!d.spanPhase.empty()) {
+      std::printf("\"spanPhase\":[");
+      for (size_t i = 0; i < d.spanPhase.size(); i++) {
+        const singz::BeatDebug::SpanPhase& r = d.spanPhase[i];
+        std::printf("%s{\"aSec\":%.17g,\"bSec\":%.17g,\"rot\":%d,\"margin\":%.17g}", i ? "," : "", r.aSec,
+                    r.bSec, r.rot, r.margin);
+      }
+      std::printf("],");
+    }
+    // The courts' own record. `abstained` is their answer when nothing could
+    // testify; `changed` is the TS's `courted !== det0`, which decides whether
+    // the whole adoption block downstream ran at all.
+    if (d.hasV20)
+      std::printf("\"v20\":{\"abstained\":%s,\"changed\":%s,\"cands\":%d,\"halfBar\":%s,\"applied\":%d},",
+                  d.v20.abstained ? "true" : "false", d.v20.changed ? "true" : "false", d.v20.cands,
+                  d.v20.halfBar ? "true" : "false", static_cast<int>(d.v20.applied.size()));
+    if (d.headAfterHalve) {
+      const singz::BeatDebug& h = *d.headAfterHalve;
+      const char* hw = h.headWhy == singz::BeatDebug::HeadWhy::noAnchor ? "no stable anchor"
+                       : h.headWhy == singz::BeatDebug::HeadWhy::headOk  ? "head ok"
+                       : h.headWhy == singz::BeatDebug::HeadWhy::judged  ? "judged"
+                                                                        : "";
+      std::printf("\"headAfterHalve\":{\"headWhy\":\"%s\",\"backcast\":", hw);
+      if (h.hasHeadBackcast)
+        std::printf("{\"replaced\":%d,\"added\":%d,\"snapped\":%d,\"phase\":\"%s\"}}, ",
+                    h.headBackcastReplaced, h.headBackcastAdded, h.headBackcastSnapped,
+                    h.headBackcastChords ? "chords" : "carried");
+      else std::printf("null},");
+    }
+    std::printf("\"reject\":");
     if (d.reject.empty()) std::printf("null}\n");
     else std::printf("\"%s\"}\n", d.reject.c_str());
     return 0;

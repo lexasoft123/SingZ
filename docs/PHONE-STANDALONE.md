@@ -1393,6 +1393,120 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       decodes too). The phone-side re-analysis of stale desktop grids
       arriving via Drive is deliberately NOT done (desktop-owned; the
       desktop heals them itself).
+    - **Tenth slice — the ML fork, and `detectBeats` is whole**
+      (2026-08-20). The last un-ported stage of the detector: `latticeFromMl`
+      with its octave and steadiness guards, `dominantMlBarLen`, `levelMix`,
+      v17's `levelNormalize`, the whole v11-v16 splice family (~430 lines: the
+      thinned and bar-anchored parity views, the per-span carry vote, the
+      zone-local halved view, the five splice reasons), and the bar-phase
+      touchpoints — the waltz meter, the drumless bar histogram, the segment
+      seams, the `mld` cue, the void physical-defect gate, the spliced-intro
+      bars and the per-span rotation re-vote. Composed with courts.cpp and the
+      head backcast's post-halve second chance, the core's entry point is now
+      `detectBeats` and the name has dropped its qualifier, as the header it
+      carried told the next person to do.
+      The front-end (flux, low band, drum onsets) moved out of
+      `trackFromDrums` into `drumFrontEnd` on the way, because `latticeFromMl`
+      needs `drumFlux` too and the fork between them happens before either has
+      run — the TS's own shape, which the port had flattened for convenience.
+      **The gate widened to the app's real aux.** `singz-analyze beats` takes
+      `--ml`, `--bass` and `--word`; `eval/beats/make-ml-grids.mjs` runs the
+      installed pack's Beat This! over the library and writes the grids as
+      JSONL, which the harness hands to BOTH sides as whitespace tokens (JS's
+      shortest round-trip repr in, strtod out — the same double on both sides,
+      which a %.17g hop through Foundation would not give). 50 stages, 25
+      inputs (17 library songs and 8 fixtures), identical — and identical
+      again with `--ml` withheld, which is the packless path the phones take
+      without the models.
+      **Adding bass found a real bug in the courts, three days old.**
+      `meterCourt` materializes a uniform bar array for a grid that reached it
+      without one — purely so its own tests have bars to measure, no verdict
+      follows — and the TS does it by building a NEW OBJECT, which its caller
+      tests by identity (`courted !== det0`). So a song whose phase pass finds
+      no confident anchor leaves the courts WITH bars even though every court
+      declined. Panzerkampf's 129 bar lines and Primo Victoria's 64 are exactly
+      that, and this side was shipping neither while every court debug field
+      still compared equal. `CourtsDbg.changed` now marks the construction, not
+      the verdict.
+      **And a hole in the gate itself, found by mutation.** `debug.reject`
+      used to imply the TS returned null, so the harness broke out of the
+      comparison as soon as it saw one. The ML fallback ends that: the tracker
+      writes "windows disagree on a tempo (rubato?)", the model's lattice is
+      adopted, and a grid comes back with the string still sitting in the
+      debug. Father and Son compared ONE stage of forty-nine and printed PASS —
+      and had been doing so in every run of this slice. The test is the return
+      value on both sides now. What surfaced it: an octave-gate mutant that
+      should have rewritten that song's entire grid survived, twice, which is
+      not something a live gate does.
+      **Coverage is measured, not assumed.** The harness ends with a
+      branch-by-branch report of what the run executed — twenty-two named
+      branches, each with the songs that reached it — because a green parity
+      run that does not say what it ran is the failure the fixtures exist to
+      prevent, one level up. Four branches the library structurally cannot
+      reach got fixtures with preconditions: `ml-verbatim` (the bare-mix early
+      return needs a project with no bass and no instrument stem), `ml-waltz`
+      (a 3-beat meter the drums-first path cannot emit at all), `ml-drumless`
+      (the meter read off the model's own bar histogram and the phase off its
+      own marks — and its bars are SIX beats long on purpose, because both the
+      histogram and the autocorrelation it replaces answer 4 on a 4/4 song and
+      a 4/4 fixture would have proved nothing), and `ml-multilevel` (v17's
+      thinning, with a seam whose local interval sits between 0.7 and 0.9 of
+      the song's own).
+      Two of those fixtures took a second shape to work. `ml-drumless` began
+      as quiet white noise, on the reasoning that a real drums lane carries
+      bleed: the onset picker found 339 peaks in it and marked 78% of beats
+      active against a 30% ceiling, reaching neither branch. And
+      `ml-multilevel`'s seam began as alternating 0.30/0.50 gaps — but the
+      median of an odd window over two values is always one of them, so the
+      local interval read 0.30 or 0.50 and never the 0.40 the seam existed to
+      produce. Both are the same lesson: a fixture that plausibly resembles a
+      case while missing its branch is worse than none, because it reads as
+      covered.
+      **Mutation results**, since that is the only way to tell "covered" from
+      "reached but inert": nine mutants of the ML port, six killed by the
+      corpus (the octave gate both ways, the steadiness gate, the seam's
+      half-bar allowance, the span-phase margin, the `mld` cue weight), two
+      more killed by `ml-multilevel` once its seam was reshaped, and three
+      that survive and are printed by the harness as KNOWN UNEXERCISED — the
+      splice's v16 level gate (no span in these lattices sits at the wrong
+      level, so removing it entirely changes no grid), `levelNormalize`'s
+      `barAt` tolerance (Beat This! snaps every downbeat onto a beat, so the
+      distance is always 0 and any tolerance accepts), and the splice debug's
+      carry-over across a refused splice (a debug field only; no grid depends
+      on it).
+      One smaller shape worth keeping: the CLI now OMITS the tracker's debug
+      groups it did not reach rather than printing their zero defaults. The ML
+      fork can return before the tracker entirely, and a printed 0 against the
+      TS's unwritten key is a divergence that exists only in the report.
+      **Review caught the one touchpoint that was not in `detectBeats` at
+      all.** `trackFromDrums` reads `aux.ml` too — v16/v17 widen the octave
+      near-tie window from 3% to 12% when the model tracked both levels in one
+      song, because then it is saying in its own voice that the race is real.
+      It decides a whole-song halve or double and leaves no trace but
+      `debug.octaveTie`, and this port had left it at the narrow 3% with a
+      comment ("without a pack is absent") that the same diff had made false.
+      Nothing caught it: the harness had no `octaveTie` stage, so the field was
+      never compared, and no library song has BOTH halves of the trigger —
+      Puppe, Turn The Page and Wild World widen the window but race by more
+      than 12%; Primo Victoria, Sixteen Tons and Wanted Dead Or Alive race
+      inside the band with unambiguous models. A 23-input run at 49 identical
+      stages was hiding a whole-song octave.
+      Now: `trackFromDrums` takes the whole `BeatAux` rather than the fill
+      stems (which is the TS's own shape, and removes the way for the two to
+      disagree about what the tracker may read), `mlBimodal` is ported, the
+      stage exists, and `ml-octave-tie` is a fixture built to have both halves
+      — an SSSW accent at 0.45 s puts the 133 and 66.5 bpm candidates 6.7%
+      apart with the half-time reading winning on support x alternation, and a
+      lattice whose ratio falls outside every view window and whose level
+      mixing gets it refused, so the tie is the only thing the model touches.
+      Reverting the fix now turns the gate red at that fixture.
+      The same review found the host test suite no longer compiling —
+      `barPhase` had gained a required parameter and `tests/native/
+      core_host_tests.cpp` still called the four-argument form, which the
+      Android CI canary runs before anything else. Fixed; the suite passes.
+      Not done in this slice: the bindings (`analyzeBeats` on both platforms,
+      arity-matched) and `deps.ts` switching off the worklet host, which is
+      where the 22.6 s of a phone analysis actually goes.
 
 ## Top risks
 

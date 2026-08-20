@@ -1266,6 +1266,16 @@ CourtGrid meterCourt(const CourtGrid& det, const CourtEvidence& ev, CourtsDbg& d
     }
     grid.downbeats = db;
     grid.hasDownbeats = true;
+    // This changes no verdict — it only gives the tests below a bar array to
+    // measure against — but the TS builds a NEW OBJECT to do it, and its
+    // caller tests `courted !== det0` by identity. So a grid that arrives here
+    // with no bars leaves the courts WITH them even when every court declines,
+    // and the caller adopts them. Measured on Panzerkampf and Primo Victoria:
+    // neither has a confident enough segment to anchor a rotation, so the
+    // phase pass produces no bars at all, and these uniform ones are the
+    // 129/64 the app draws. Missing this flag cost both songs their bar lines
+    // on this side while every court field still compared equal.
+    dbg.changed = true;
   }
   std::vector<AppliedStep> applied;
   const double baseTol = 0.35 * per;
@@ -1379,6 +1389,7 @@ CourtGrid meterCourt(const CourtGrid& det, const CourtEvidence& ev, CourtsDbg& d
           }
         }
         grid = best.plan;
+        dbg.changed = true;
       }
     }
     dbg.applied = applied;
@@ -1569,6 +1580,7 @@ CourtGrid meterCourt(const CourtGrid& det, const CourtEvidence& ev, CourtsDbg& d
     }
     if (!haveBest) break;
     grid = best.cand2;
+    dbg.changed = true;
     if (best.sib) sibling.push_back(best.L);
     applied.push_back({roundTo(best.t, 10.0), best.L, best.why, std::round((best.after - before) * 100)});
   }
@@ -1599,6 +1611,7 @@ CourtGrid meterCourt(const CourtGrid& det, const CourtEvidence& ev, CourtsDbg& d
       const double a0 = chordsOnBars(starts, barTimes(cand2), baseTol);
       if (a0 >= b0 - 0.01) {
         grid = cand2;
+        dbg.changed = true;
         applied.push_back({roundTo(cad.rStart, 10.0), lamS, cand.why + " (sibling)",
                            std::round((a0 - b0) * 100)});
       }
@@ -1622,10 +1635,14 @@ CourtGrid applyCourts(const CourtGrid& det, const CourtEvidence& ev, CourtsDbg& 
   dbg.oct = oc.dbg;
   if (oc.fire) {
     grid = halveGrid(grid, ev);
+    dbg.changed = true;
   } else {
     const CourtVerdict dc = doubleCourt(grid, ev);
     dbg.dbl = dc.dbg;
-    if (dc.fire) grid = doubleGrid(grid, ev);
+    if (dc.fire) {
+      grid = doubleGrid(grid, ev);
+      dbg.changed = true;
+    }
   }
   grid = meterCourt(grid, ev, dbg);
   return grid;

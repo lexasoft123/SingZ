@@ -459,7 +459,9 @@ static void beatsTests() {
   // Nothing Else Matters measures ac3/ac4 = 2.61 and comes out 6, which the
   // parity harness checks against the TS on the real stem.)
   singz::BeatAux noAux;
-  const singz::BarPhase phase = singz::barPhase(lat, drums, noAux, d);
+  // MlPhaseCtx{} is "no model on this device" — every field then reads as the
+  // TS reads an absent aux.ml, which is the path this fixture is about.
+  const singz::BarPhase phase = singz::barPhase(lat, drums, noAux, singz::MlPhaseCtx{}, d);
   CHECK("beats: a straight click train is 4/4, not compound", phase.ok && phase.beatsPerBar == 4);
   CHECK("beats: and its beats are nearly all active", phase.ok && d.activeBeats > 50);
 

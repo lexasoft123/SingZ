@@ -261,19 +261,37 @@ std::vector<int> sanitizeBars(const std::vector<int>& downbeats, int bpb, int nB
   return out;
 }
 
-}  // namespace
+/**
+ * detectBeats' own front-end: the broadband and low-band flux and the
+ * drum-only onsets. In the TS this is inlined at the top of detectBeats and
+ * its outputs are handed to trackFromDrums; here it is a function because
+ * latticeFromMl needs `drumFlux` as well (it normalizes it into the ML
+ * lattice's envelope) and the fork between the two happens before either
+ * has run. Computing it once is not an optimization — running this pass
+ * twice over a five-minute stem is seconds on a phone.
+ */
+struct DrumFrontEnd {
+  std::vector<float> mono;
+  int frames = 0;
+  double fps = 0;
+  std::vector<float> drumFlux;
+  std::vector<float> lowFlux;
+  std::vector<int> drumPeaks;
+  bool ok = false;  // false = the TS's `frames < 400` -> return null
+};
 
-DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<AnalysisStem>& inst, BeatDebug& dbg) {
-  DrumLattice out;
+DrumFrontEnd drumFrontEnd(const AnalysisStem& drums, BeatDebug& dbg) {
+  DrumFrontEnd out;
   const double sr = ANALYSIS_SR;
   const double fps = sr / HOP;
-  const std::vector<float> mono = monoAt44kPublic(drums);
+  std::vector<float> mono = monoAt44kPublic(drums);
   const int frames = static_cast<int>(mono.size() / HOP) - 1;
   dbg.frames = frames;
   if (frames < 400) {
     dbg.reject = "too short";
     return out;
   }
+
 
   // ---- detectBeats: broadband energy + low band ---------------------------
   //
@@ -326,6 +344,665 @@ DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<Analysis
   }
   dbg.drumPeaks = static_cast<int>(drumPeaks.size());
 
+  out.mono = std::move(mono);
+  out.frames = frames;
+  out.fps = fps;
+  out.drumFlux = std::move(drumFlux);
+  out.lowFlux = std::move(lowFlux);
+  out.drumPeaks = std::move(drumPeaks);
+  out.ok = true;
+  return out;
+}
+
+// ---- detectBeats: the neural lattice --------------------------------------
+//
+// analysis.ts's dominantMlBarLen / levelMix / levelNormalize / latticeFromMl.
+// These four decide whether the model's grid is usable at all and at which
+// level, before anything downstream is allowed to read it.
+
+/** analysis.ts's `dominantMlBarLen`: the model's own modal bar length in
+ *  beats, or 0 when no length holds 60% of its bars.
+ *
+ *  The histogram is a VECTOR in insertion order, not a std::map: the TS reads
+ *  a JS Map, whose iteration order is insertion order, and picks its maximum
+ *  with a strict `>` — so ties go to the length seen FIRST. Keyed order would
+ *  hand them to the smallest length instead, which is a different answer on
+ *  any song whose bars split evenly between two readings. */
+int dominantMlBarLen(const MlGrid& ml) {
+  if (ml.downbeats.size() < 8) return 0;
+  std::vector<std::pair<int, int>> hist;  // (barLenInBeats, count), insertion order
+  size_t bi = 0;
+  int prev = -1;
+  for (const double t : ml.downbeats) {
+    while (bi < ml.beats.size() && ml.beats[bi] < t - 1e-3) bi++;
+    const int b = static_cast<int>(bi);
+    if (prev >= 0 && b > prev) {
+      const int len = b - prev;
+      bool found = false;
+      for (auto& e : hist)
+        if (e.first == len) {
+          e.second++;
+          found = true;
+          break;
+        }
+      if (!found) hist.push_back({len, 1});
+    }
+    if (b > prev) prev = b;
+  }
+  int dom = 0, domN = 0, total = 0;
+  for (const auto& e : hist) {
+    total += e.second;
+    if (e.second > domN) {
+      dom = e.first;
+      domN = e.second;
+    }
+  }
+  return total > 0 && static_cast<double>(domN) / total >= 0.6 ? dom : 0;
+}
+
+/** The upper median the TS takes everywhere in this stage: `s[s.length >> 1]`
+ *  of the SORTED copy, which for an even count is the higher of the two
+ *  middles — not their mean. */
+double upperMedian(std::vector<double> xs) {
+  if (xs.empty()) return 0;
+  std::sort(xs.begin(), xs.end());
+  return xs[xs.size() >> 1];
+}
+
+std::vector<double> intervalsOf(const std::vector<double>& beats) {
+  std::vector<double> iv;
+  for (size_t i = 1; i < beats.size(); i++) iv.push_back(beats[i] - beats[i - 1]);
+  return iv;
+}
+
+/** analysis.ts's `levelMix`: how much of a lattice sits at HALF or TWICE its
+ *  own modal interval — how often the model changed its mind about the beat
+ *  level inside one song. */
+double levelMix(const std::vector<double>& beats, double med) {
+  if (beats.size() < 24 || !(med > 0)) return 0;
+  const std::vector<double> iv = intervalsOf(beats);
+  int hit = 0;
+  for (const double x : iv)
+    if (std::fabs(x - 2 * med) <= 0.3 * med || std::fabs(x - med / 2) <= 0.075 * med) hit++;
+  return static_cast<double>(hit) / iv.size();
+}
+
+/**
+ * analysis.ts's `levelNormalize` (v17): flatten a lattice that runs at more
+ * than one level onto its modal one.
+ *
+ * `sameArray` reports what the TS's caller tests: `adopt` compares the result
+ * against the input by OBJECT IDENTITY, so the two early returns (too short,
+ * or a thin that left fewer than 16 beats) mean "unchanged" while a thin that
+ * happens to reproduce the same times exactly does NOT — it is a new array
+ * there, and the caller re-medians and writes debug.mlNormalized. Comparing
+ * contents here would silently drop that record on any song where the
+ * normalization is a no-op in value but not in identity.
+ */
+std::vector<double> levelNormalize(const std::vector<double>& beats, double med,
+                                   const std::vector<double>* bars, bool& sameArray) {
+  sameArray = true;
+  const int n = static_cast<int>(beats.size());
+  if (n < 8 || !(med > 0)) return beats;
+  const auto localIv = [&](int i) {
+    const int from = std::max(1, i - 3);
+    const int to = std::min(n - 1, i + 3);
+    std::vector<double> w;
+    for (int k = from; k <= to; k++) w.push_back(beats[static_cast<size_t>(k)] - beats[static_cast<size_t>(k) - 1]);
+    // `w[w.length >> 1] ?? med` — the window is empty only when from > to,
+    // i.e. n < 2, which the n < 8 guard above has already refused.
+    return w.empty() ? med : upperMedian(w);
+  };
+  const auto barAt = [&](double t) {
+    if (!bars) return false;
+    for (const double b : *bars)
+      if (std::fabs(b - t) <= 0.25 * med) return true;
+    return false;
+  };
+  std::vector<double> out;
+  const auto push = [&](double t, bool bar) {
+    const double last = out.empty() ? -std::numeric_limits<double>::infinity() : out.back();
+    if (t - last >= 0.7 * med) out.push_back(t);
+    else if (bar && !out.empty()) out.back() = t;
+  };
+  for (int i = 0; i < n; i++) {
+    if (localIv(i) >= 0.7 * med) push(beats[static_cast<size_t>(i)], true);
+    else push(beats[static_cast<size_t>(i)], barAt(beats[static_cast<size_t>(i)]));
+  }
+  if (out.size() < 16) return beats;
+  sameArray = false;
+  return out;
+}
+
+/** latticeFromMl's return — the TS's `{beatsSec, medSec, O, doubled}` or null. */
+struct MlLattice {
+  std::vector<double> beatsSec;
+  double medSec = 0;
+  std::vector<float> O;
+  bool doubled = false;
+  bool ok = false;
+};
+
+/**
+ * analysis.ts's `latticeFromMl`: adopt the neural beat lattice when it is
+ * usable. Two guards, both from measurement on the library — an octave test
+ * against the singable-tempo prior, and a windowed steadiness test that
+ * refuses true rubato and hands the decision back to the homegrown tracker.
+ */
+MlLattice latticeFromMl(const MlGrid* ml, int frames, double fps, const std::vector<float>& drumFlux,
+                        BeatDebug& dbg) {
+  MlLattice out;
+  if (!ml || ml->beats.size() < 16) return out;
+  std::vector<double> beats;
+  for (const double t : ml->beats) {
+    if (!std::isfinite(t) || t < 0) continue;
+    if (beats.empty() || t > beats.back() + 1e-3) beats.push_back(t);
+  }
+  if (beats.size() < 16) return out;
+  double med = upperMedian(intervalsOf(beats));
+  if (!(med > 0)) return out;
+  const auto prior = [](double bpm) {
+    const double z = (std::log2(bpm / 105) / 0.6);
+    return std::exp(-0.5 * z * z);
+  };
+  const double bpm0 = 60 / med;
+  double dSum = 0;
+  for (int i = 1; i < frames; i++) dSum += static_cast<double>(drumFlux[static_cast<size_t>(i)]);
+  const std::vector<float> env = normStrength(drumFlux, dSum / frames, frames, fps);
+  // v17: a median is only a LEVEL if the model stayed on one. Where it changed
+  // its mind mid-song the median describes neither stretch, and doubling it
+  // produces a lattice that is wrong everywhere.
+  const double multiLevel = levelMix(beats, med);
+  const double gain = prior(bpm0 * 2) - prior(bpm0);
+  bool doubled = false;
+  if (bpm0 * 2 <= 220 && gain > 0.2) {
+    dbg.hasMlDouble = true;
+    dbg.mlDoubleBpm0 = jsRound(bpm0 * 10) / 10;
+    dbg.mlDoubleGain = jsRound(gain * 1000) / 1000;
+    dbg.mlDoubleMultiLevel = jsRound(multiLevel * 100) / 100;
+    dbg.mlDoubleDoubled = multiLevel < 0.1;
+  }
+  if (bpm0 * 2 <= 220 && gain > 0.2 && multiLevel < 0.1) {
+    std::vector<double> dbl;
+    for (size_t i = 0; i < beats.size(); i++) {
+      dbl.push_back(beats[i]);
+      // subdivide steady gaps only — never bridge a silence with midpoints
+      if (i + 1 < beats.size() && beats[i + 1] - beats[i] < 1.8 * med)
+        dbl.push_back((beats[i] + beats[i + 1]) / 2);
+    }
+    beats = std::move(dbl);
+    med = med / 2;
+    doubled = true;
+  }
+  const std::vector<double> iv2 = intervalsOf(beats);
+  int wins = 0, steady = 0;
+  for (size_t s = 0; s + 16 <= iv2.size(); s += 8) {
+    const std::vector<double> w(iv2.begin() + static_cast<long>(s), iv2.begin() + static_cast<long>(s) + 16);
+    const double wMed = upperMedian(w);
+    int okN = 0;
+    for (const double x : w)
+      if (std::fabs(x - wMed) <= 0.12 * wMed) okN++;
+    wins++;
+    if (static_cast<double>(okN) / w.size() >= 0.75) steady++;
+  }
+  const double steadyFrac = wins > 0 ? static_cast<double>(steady) / wins : 0;
+  dbg.hasMlLattice = true;
+  dbg.mlLatticeBpm0 = jsRound(bpm0 * 10) / 10;
+  dbg.mlLatticeDoubled = doubled;
+  dbg.mlLatticeSteadyFrac = jsRound(steadyFrac * 100) / 100;
+  dbg.mlLatticeWins = wins;
+  if (wins < 3 || steadyFrac < 0.55) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "lattice unsteady (%d%% of windows)",
+                  static_cast<int>(jsRound(steadyFrac * 100)));
+    dbg.mlReject = buf;
+    return out;
+  }
+  out.beatsSec = std::move(beats);
+  out.medSec = med;
+  out.O = env;
+  out.doubled = doubled;
+  out.ok = true;
+  return out;
+}
+
+/** What the splice pass hands the bar-phase stage: the TS's `mlLeadEnd` and
+ *  `mlSpliceRanges`, which no later stage can reconstruct. */
+struct MlSpliceOut {
+  double leadEnd = -1;
+  std::vector<std::pair<double, double>> ranges;
+};
+
+/**
+ * analysis.ts's v11/v12/v13/v15/v16 splice family: where the drums-first
+ * lattice has NOTHING (refused voids) or is physically SUSPECT (interval
+ * defects), the model's beats replace the stretch.
+ *
+ * `L` is mutated in place, and WHEN each helper reads it matters — the TS
+ * reassigns `L.beatsSec` to a fresh array on every successful splice, so
+ * anything holding the old one keeps the old one. Both places that depend on
+ * that are marked below.
+ *
+ * Every gate here was set by measurement on the library; the comments naming
+ * songs are the TS's own and are kept because they are the only record of
+ * what each threshold is protecting.
+ */
+void spliceFromMl(DrumLattice& L, const MlLattice& mlChoice, const MlGrid& ml, MlSpliceOut& res,
+                  BeatDebug& dbg) {
+  const double med = L.medSec;
+  const double ratio = med / mlChoice.medSec;
+  // Level-matched view of the model lattice. The model sometimes rides our
+  // eighths for a WHOLE song (Turn The Page subdivides its bridge and the
+  // model stays on eighths throughout, ratio 1.88) — a raw ratio gate would
+  // disable every repair for such songs. A halved view — every other model
+  // beat, greedily thinned so silence gaps self-heal, parity picked by which
+  // one lands on our drum-anchored body — restores level compatibility.
+  // Doubling views (model on half notes) are not built: no song has needed
+  // one; the adopted-lattice path handles SoF's case.
+  std::vector<double> mlB;
+  bool haveMlB = false;
+  std::vector<double> thinA, thinB;
+  bool haveThinViews = false;
+  const std::vector<double>* mlBarTimes = nullptr;
+  const std::vector<double>& src = mlChoice.beatsSec;
+  if (ratio > 0.9 && ratio < 1.1) {
+    mlB = mlChoice.beatsSec;
+    haveMlB = true;
+  } else if (ratio > 1.7 && ratio < 2.3) {
+    const auto thin = [&](size_t start) {
+      std::vector<double> o;
+      for (size_t i = start; i < src.size(); i++)
+        if (o.empty() || src[i] - o.back() >= 0.7 * med) o.push_back(src[i]);
+      return o;
+    };
+    const auto score = [&](const std::vector<double>& v) {
+      std::vector<double> ds;
+      for (size_t i = 0; i < v.size(); i += 4) {
+        double best = std::numeric_limits<double>::infinity();
+        for (const double t : L.beatsSec) {
+          const double d = std::fabs(t - v[i]);
+          if (d < best) best = d;
+        }
+        ds.push_back(best);
+      }
+      // `ds[ds.length >> 1] ?? Infinity` — an empty view scores worst.
+      if (ds.empty()) return std::numeric_limits<double>::infinity();
+      std::sort(ds.begin(), ds.end());
+      return ds[ds.size() >> 1];
+    };
+    const std::vector<double> a = thin(0);
+    const std::vector<double> b = thin(1);
+    const double sa = score(a);
+    const double sb = score(b);
+    mlB = sa <= sb ? a : b;
+    haveMlB = true;
+    // v15: parity views for the PER-SPAN choice below. Greedy thin(0)/thin(1)
+    // converge onto one subsequence at the first interval anomaly (an
+    // ornament, an odd bar) — measured IDENTICAL through Puppe's verse, so
+    // they cannot express "the other parity" there. Partition instead by
+    // offset from the PRECEDING model bar line: even offsets are the
+    // half-rate beat that carries the "1", odd offsets are the off-beat.
+    // Re-anchoring at every bar line survives ornaments and odd bars (the
+    // phase shift lands exactly at a bar line, where music puts it). The
+    // GLOBAL view keeps the greedy thin — its silence-healing matters for
+    // whole-song repairs and v13 behavior stays byte-stable.
+    const std::vector<double>& dts0 = ml.downbeats;
+    if (dts0.size() >= 2) {
+      mlBarTimes = &dts0;
+      std::vector<double> evenV, oddV;
+      const double tolD = 0.25 * mlChoice.medSec;
+      int j0 = -1;
+      {
+        double best = std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < src.size(); i++) {
+          const double d = std::fabs(src[i] - dts0[0]);
+          if (d < best) {
+            best = d;
+            j0 = static_cast<int>(i);
+          }
+        }
+        if (best > tolD) j0 = -1;
+      }
+      /** v16: the model's beat level can change INSIDE one song. Wild World's
+       *  model rides 0.39 s eighths through the choruses and 0.78 s quarters
+       *  through the verses, all under bars 1.57 s apart — one global "halve
+       *  it" then clicks the verses at half tempo (55 s of 1.56 s gaps, which
+       *  is what the singer heard). A beat whose own neighbourhood is ALREADY
+       *  our interval is not a subdivision of anything: it belongs to both
+       *  alternate sets, so whichever one a span picks still clicks at our
+       *  rate. */
+      const auto localIv = [&](int i) {
+        const int from = std::max(1, i - 3);
+        const int to = std::min(static_cast<int>(src.size()) - 1, i + 3);
+        std::vector<double> w;
+        for (int k2 = from; k2 <= to; k2++)
+          w.push_back(src[static_cast<size_t>(k2)] - src[static_cast<size_t>(k2) - 1]);
+        return w.empty() ? 0.0 : upperMedian(w);  // the TS's `?? 0`, not `?? med`
+      };
+      size_t di = 0;
+      int k = -1;
+      for (int i = 0; i < static_cast<int>(src.size()); i++) {
+        const double t = src[static_cast<size_t>(i)];
+        while (di < dts0.size() && dts0[di] < t - tolD) di++;
+        if (di < dts0.size() && std::fabs(dts0[di] - t) <= tolD) {
+          k = 0;
+          di++;
+        } else if (k >= 0) {
+          k++;
+        }
+        // `(j0 - i) % 2` is NEGATIVE in JS for i > j0 and stays negative here
+        // — which is the point: only an exact 0 selects the even set.
+        const int par = k >= 0 ? k % 2 : (j0 >= 0 ? (j0 - i) % 2 : 0);
+        if (localIv(i) > 0.7 * med) {
+          evenV.push_back(t);
+          oddV.push_back(t);
+        } else if (par == 0) {
+          evenV.push_back(t);
+        } else {
+          oddV.push_back(t);
+        }
+      }
+      if (evenV.size() >= 8 && oddV.size() >= 8) {
+        thinA = std::move(evenV);
+        thinB = std::move(oddV);
+        haveThinViews = true;
+      }
+    }
+    dbg.hasMlView = true;
+    dbg.mlViewRatio = jsRound(ratio * 100) / 100;
+    dbg.mlViewScoreA = static_cast<int>(jsRound(sa * 1000));
+    dbg.mlViewScoreB = static_cast<int>(jsRound(sb * 1000));
+    dbg.mlViewPicked = sa <= sb ? 0 : 1;
+  }
+  if (!haveMlB || mlB.size() < 16) return;
+
+  const std::vector<double>& view = mlB;
+  /** Fraction of the model's intervals within tol of their own median across
+   *  [a,b] — the local "is this a real pulse" gate. */
+  const auto steadyOf = [](const std::vector<double>& seg, double tol) {
+    if (seg.size() < 5) return 0.0;
+    const std::vector<double> iv = intervalsOf(seg);
+    const double m = upperMedian(iv);
+    int n = 0;
+    for (const double x : iv)
+      if (std::fabs(x - m) <= tol * m) n++;
+    return static_cast<double>(n) / iv.size();
+  };
+  const auto between = [](const std::vector<double>& xs, double a, double b) {
+    std::vector<double> o;
+    for (const double t : xs)
+      if (t >= a && t <= b) o.push_back(t);
+    return o;
+  };
+  const auto mlSteadyIn = [&](double a, double b, double tol) {
+    return steadyOf(between(view, a, b), tol);
+  };
+  /** Median distance from each of `edges` to its nearest beat in `v`. */
+  const auto fitTo = [](const std::vector<double>& v, const std::vector<double>& edges) {
+    std::vector<double> ds;
+    for (const double e : edges) {
+      double m = std::numeric_limits<double>::infinity();
+      for (const double t : v) m = std::min(m, std::fabs(t - e));
+      ds.push_back(m);
+    }
+    std::sort(ds.begin(), ds.end());
+    return ds.empty() ? std::numeric_limits<double>::quiet_NaN() : ds[ds.size() >> 1];
+  };
+  /** Local level-matched view for ONE zone. The model's beat level changes
+   *  inside a song (v16) — Panzerkampf's model rides steady eighths through
+   *  the guitar solo while the song's global ratio is ~1, so no whole-song
+   *  thin view exists, the raw view is "steady" at the wrong level, and the
+   *  v16 level guard (correctly) refuses the splice — leaving the tracker's
+   *  wobble in place: beats snapped onto fill accents, intervals swinging
+   *  +-25% between correct downbeats. Thin the zone's own eighths to quarters
+   *  with the v15 bar-anchored parity partition; continuity with our surviving
+   *  lattice at the zone edges picks the parity. */
+  const auto localHalvedView = [&](double aSec, double bSec, std::vector<double>& outView) {
+    const std::vector<double> zsrc = between(mlChoice.beatsSec, aSec - 2 * med, bSec + 2 * med);
+    if (zsrc.size() < 8) return false;
+    const double lm = upperMedian(intervalsOf(zsrc));
+    const double r = med / lm;
+    // strict scope: only zones whose model is LOCALLY on eighths get a view.
+    // A relaxed (output-gated) variant was measured and reverted within the
+    // hour: it moved Wanted Dead Or Alive's ear-approved grid — the
+    // widened-splice-authority trap, again — while leaving the target seam
+    // untouched.
+    if (!(r > 1.7 && r < 2.3)) return false;
+    const std::vector<double>& dts = ml.downbeats;
+    const double tolD = 0.25 * lm;
+    const auto localIv = [&](int i) {
+      const int from = std::max(1, i - 3);
+      const int to = std::min(static_cast<int>(zsrc.size()) - 1, i + 3);
+      std::vector<double> w;
+      for (int k2 = from; k2 <= to; k2++)
+        w.push_back(zsrc[static_cast<size_t>(k2)] - zsrc[static_cast<size_t>(k2) - 1]);
+      return w.empty() ? 0.0 : upperMedian(w);
+    };
+    std::vector<double> evenV, oddV;
+    size_t di = 0;
+    int k = -1;
+    for (int i = 0; i < static_cast<int>(zsrc.size()); i++) {
+      const double t = zsrc[static_cast<size_t>(i)];
+      while (di < dts.size() && dts[di] < t - tolD) di++;
+      if (di < dts.size() && std::fabs(dts[di] - t) <= tolD) {
+        k = 0;
+        di++;
+      } else if (k >= 0) {
+        k++;
+      }
+      const int par = k >= 0 ? k % 2 : i % 2;
+      if (localIv(i) > 0.7 * med) {
+        evenV.push_back(t);
+        oddV.push_back(t);
+      } else if (par == 0) {
+        evenV.push_back(t);
+      } else {
+        oddV.push_back(t);
+      }
+    }
+    if (evenV.size() < 4 || oddV.size() < 4) return false;
+    // L.beatsSec is read LIVE here: earlier splices in this same pass have
+    // already rewritten it, and the edges that pick the parity are whatever
+    // survived them.
+    std::vector<double> edges = between(L.beatsSec, aSec - 4 * med, aSec);
+    for (const double t : L.beatsSec)
+      if (t >= bSec && t <= bSec + 4 * med) edges.push_back(t);
+    if (edges.empty()) return false;
+    const double fa = fitTo(evenV, edges);
+    const double fb = fitTo(oddV, edges);
+    const std::vector<double>& picked = fa <= fb ? evenV : oddV;
+    // Flip seams: the +-3-window level test straddles the quarter->eighth
+    // boundary and puts two ADJACENT eighths into both sets, while the correct
+    // next beat sits in the other parity. Thin the picked view at our level,
+    // then refill each hole the thin leaves from the model's own beats, one
+    // med-step at a time — the refill is the dropped duplicate's correct
+    // neighbor.
+    std::vector<double> thinned;
+    for (const double t : picked)
+      if (thinned.empty() || t - thinned.back() >= 0.7 * med) thinned.push_back(t);
+    std::vector<double> o;
+    for (const double t : thinned) {
+      while (!o.empty() && t - o.back() >= 1.5 * med) {
+        const double want = o.back() + med;
+        double best = -1;
+        for (const double s2 : zsrc) {
+          if (std::fabs(s2 - want) <= 0.25 * med &&
+              (best < 0 || std::fabs(s2 - want) < std::fabs(best - want))) {
+            best = s2;
+          }
+        }
+        if (best < 0) break;
+        o.push_back(best);
+      }
+      o.push_back(t);
+    }
+    outView = std::move(o);
+    return true;
+  };
+  /** v15: which alternate set to insert for THIS span. When the surviving
+   *  lattice at BOTH span edges agrees with the global view, the body's phase
+   *  is continuous across the span and the v13 pick stands — TTP's
+   *  ear-approved bridge and solo repairs live here. When the edges DISAGREE
+   *  (Puppe free-runs a 43 s verse and re-locks half a beat off at 67 s —
+   *  pre-edge and post-edge on opposite parities), continuity cannot decide,
+   *  and the model's bar lines do: the alternate set that carries them is the
+   *  beat, the other is the off-beat (Puppe's verse clicked 2-and-4 of every
+   *  model bar for 34 s — the drift the singer heard). Bar-less spans keep the
+   *  global pick. */
+  bool haveCarry = false;
+  int carryA = 0, carryB = 0;
+  const auto viewFor = [&](double aSec, double bSec) -> const std::vector<double>& {
+    if (!haveThinViews) return view;
+    const double lo = aSec + 0.5 * med;
+    const double hi = bSec - 0.5 * med;
+    std::vector<double> pre, post;
+    for (const double t : L.beatsSec) {
+      if (t <= lo && t > lo - 4 * med) pre.push_back(t);
+      if (t >= hi && t < hi + 4 * med) post.push_back(t);
+    }
+    const auto sideOk = [&](const std::vector<double>& v, const std::vector<double>& side) {
+      if (side.empty()) return true;  // no evidence = no veto
+      return fitTo(v, side) < 0.3 * med;
+    };
+    if (sideOk(view, pre) && sideOk(view, post)) return view;
+    if (!mlBarTimes || mlBarTimes->empty()) return view;
+    const double tol = 0.25 * mlChoice.medSec;
+    const auto carry = [&](const std::vector<double>& v) {
+      int c = 0;
+      for (const double d : *mlBarTimes) {
+        if (d < aSec || d > bSec) continue;
+        double best = std::numeric_limits<double>::infinity();
+        for (const double t : v) best = std::min(best, std::fabs(t - d));
+        if (best < tol) c++;
+      }
+      return c;
+    };
+    carryA = carry(thinA);
+    carryB = carry(thinB);
+    haveCarry = true;
+    if (carryA == carryB) return view;
+    return carryA > carryB ? thinA : thinB;
+  };
+  const auto splice = [&](double aSec, double bSec, const char* why,
+                          const std::vector<double>* viewOverride) {
+    const double lo = aSec + 0.5 * med;
+    const double hi = bSec - 0.5 * med;
+    if (hi <= lo) return false;
+    const std::vector<double>& chosen = viewOverride ? *viewOverride : viewFor(aSec, bSec);
+    std::vector<double> ins;
+    for (const double t : chosen)
+      if (t > lo && t < hi) ins.push_back(t);
+    // the model must have actually tracked the stretch — one it also gave up
+    // on keeps the old path
+    if (static_cast<double>(ins.size()) < (0.5 * (bSec - aSec)) / med) return false;
+    // v16: and it must click at OUR rate. A view sitting at the wrong level
+    // passes every steadiness gate — it is perfectly steady at half the tempo
+    // — and the count gate above missed Wild World's halved last third by a
+    // single beat. Genuine tempo seams stay in (Mr Crowley's 88 bpm intro
+    // under a 107 bpm body is 1.22x).
+    if (ins.size() >= 3) {
+      const double m = upperMedian(intervalsOf(ins));
+      if (!(m > 0.6 * med && m < 1.6 * med)) return false;
+    }
+    const size_t before = L.beatsSec.size();
+    std::vector<double> kept;
+    for (const double t : L.beatsSec)
+      if (t <= lo || t >= hi) kept.push_back(t);
+    std::vector<double> merged = kept;
+    merged.insert(merged.end(), ins.begin(), ins.end());
+    // STABLE: the TS concatenates kept-then-ins and sorts, and JS's sort is
+    // stable, so an inserted beat landing on exactly a kept one loses the
+    // dedup below to the kept one.
+    std::stable_sort(merged.begin(), merged.end());
+    std::vector<double> o;
+    for (const double t : merged)
+      if (o.empty() || t - o.back() >= 0.5 * med) o.push_back(t);
+    L.beatsSec = std::move(o);
+    BeatDebug::MlSplice row;
+    row.aSec = jsRound(aSec * 10) / 10;
+    row.bSec = jsRound(bSec * 10) / 10;
+    row.removed = static_cast<int>(before - kept.size());
+    row.added = static_cast<int>(ins.size());
+    row.why = why;
+    // The TS spreads `lastCarry ?? {}` here and clears it only on a SUCCESSFUL
+    // splice — a refused one leaves the carry counts standing, so the next
+    // successful row can inherit the previous span's vote. Faithful on
+    // purpose: it is the record the harness compares.
+    row.hasCarry = haveCarry;
+    row.ca = carryA;
+    row.cb = carryB;
+    dbg.mlSplice.push_back(std::move(row));
+    haveCarry = false;
+    return true;
+  };
+
+  for (const BeatVoid& v : L.voids) {
+    if (v.trailing) continue;
+    if (v.leading) {
+      // filled leading spans are the proven fill-tracked intros (NEM) —
+      // untouched; refused ones splice when the model is strictly steady
+      if (!v.filled && mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) {
+        splice(v.aSec, v.bSec, "leading", nullptr);
+        res.leadEnd = std::max(res.leadEnd, v.bSec);
+      }
+      continue;
+    }
+    if (v.filled) {
+      // fill-tracked interior spans are usually fine — but TTP's bridge is
+      // fill-ACCEPTED yet sits 130-190 ms off the model's pulse. When the
+      // model is clearly steady across the span, its beats win.
+      if (mlSteadyIn(v.aSec, v.bSec, 0.15) >= 0.85) {
+        splice(v.aSec, v.bSec, "void-filled", nullptr);
+        res.ranges.push_back({v.aSec, v.bSec});
+      }
+      continue;
+    }
+    splice(v.aSec, v.bSec, "void", nullptr);
+    res.ranges.push_back({v.aSec, v.bSec});
+  }
+  std::vector<std::pair<double, double>> zones;
+  // A COPY, not a reference: the TS binds `bs` to the array object the voids
+  // pass left behind, and `splice` REPLACES L.beatsSec rather than editing it
+  // — so the zone list is computed once, off the post-voids lattice, and does
+  // not shift under the loop that consumes it.
+  const std::vector<double> bs = L.beatsSec;
+  for (size_t i = 1; i < bs.size(); i++) {
+    const double d = std::fabs(bs[i] - bs[i - 1] - med) / med;
+    if (d < 0.2) continue;
+    const double a = bs[i] - 8 * med;
+    const double b = bs[i] + 8 * med;
+    if (!zones.empty() && a <= zones.back().second) zones.back().second = b;
+    else zones.push_back({a, b});
+  }
+  for (const auto& z : zones) {
+    if (mlSteadyIn(z.first, z.second, 0.15) >= 0.85 && splice(z.first, z.second, "defect", nullptr))
+      continue;
+    // The raw view was refused — either unsteady at its own level (a window
+    // mixing eighths and quarters) or steady at the WRONG level (the v16 guard
+    // inside splice). Both are the same situation seen from different windows:
+    // the model subdivides here. A zone-local halved view repairs what the
+    // global machinery cannot see.
+    std::vector<double> lv;
+    if (localHalvedView(z.first, z.second, lv) &&
+        steadyOf(between(lv, z.first, z.second), 0.15) >= 0.85) {
+      splice(z.first, z.second, "defect-2x", &lv);
+    }
+  }
+}
+
+}  // namespace
+
+namespace {
+DrumLattice trackFromDrumsCore(const DrumFrontEnd& fe, const BeatAux& aux, BeatDebug& dbg) {
+  static const std::vector<AnalysisStem> kNoInst;
+  const std::vector<AnalysisStem>& inst = aux.inst != nullptr ? *aux.inst : kNoInst;
+  DrumLattice out;
+  const double sr = ANALYSIS_SR;
+  const double fps = fe.fps;
+  const int frames = fe.frames;
+  const std::vector<float>& drumFlux = fe.drumFlux;
+  std::vector<float> lowFlux = fe.lowFlux;
+  const std::vector<int>& drumPeaks = fe.drumPeaks;
   // ---- trackFromDrums: the instrument fill --------------------------------
   //
   // Where the drums are silent for seconds at a stretch, the other stems'
@@ -555,6 +1232,7 @@ DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<Analysis
   const double consistency = static_cast<double>(agreeing) / std::max<size_t>(1, windows.size());
   dbg.tau = tau;
   dbg.consistency = consistency;
+  dbg.hasTau = true;
   if (consistency < 0.6) {
     dbg.reject = "windows disagree on a tempo (rubato?)";
     return out;
@@ -682,21 +1360,52 @@ DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<Analysis
                            r3(q.rough), r3(prior), jsRound(s * 10000) / 10000});
     cands.push_back({bpm, std::move(beatsF), q, s});
   }
+  // The TS assigns `debug.octaves` HERE, after the candidate loop and before
+  // any of the gates below can refuse — so an empty list is still a WRITTEN
+  // one, and only a return above this line leaves the key absent.
+  dbg.hasOctaves = true;
   std::stable_sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) { return y.score < x.score; });
+  // v15: near-ties resolve on acoustic evidence alone. WebAudio and ffmpeg
+  // decode the same FLACs a hair apart, and Puppe's octave race measured
+  // 0.48% — the SAME code shipped a 117.8 bpm grid from the eval harness and
+  // a 58.9 bpm grid from the app. Within a 3% tie the prior is opinion at
+  // noise level; support x alternation measured a 2x gap and survives any
+  // decoder. The margin must stay well under Sixteen Tons' 11%.
+  //
+  // v16/v17: how wide "near" is depends on whether the MODEL could decide
+  // either way. When a large minority of its intervals sit at half or twice
+  // its own modal one, it tracked both levels in one song and is saying, in
+  // its own voice, that the race is real — Wild World measures 44% against a
+  // library median of 4%. There a 3% window is far too narrow for a race
+  // decode noise swings by 8%: the same code shipped 156.6 bpm from the app
+  // and 77.4 from the harness. This is the ONLY ML touchpoint inside the
+  // tracker and it decides a whole-song octave, so it is worth saying twice:
+  // it is not reachable from detectBeats' own ML fork, and nothing but
+  // `debug.octaveTie` records that it happened.
+  const double mlBimodal = [&]() -> double {
+    if (aux.ml == nullptr || aux.ml->beats.size() < 24) return 0.0;
+    const std::vector<double>& mb = aux.ml->beats;
+    // The RAW lattice, not latticeFromMl's deduped or doubled one: this asks
+    // what the model itself did, before anything here reinterpreted it.
+    return levelMix(mb, upperMedian(intervalsOf(mb)));
+  }();
+  const double tieWin = mlBimodal >= 0.25 ? 0.12 : 0.03;
+  // Written BEFORE the empty check, where the TS writes it — a song with no
+  // candidate at all still records the window it would have used.
+  dbg.hasOctaveTie = true;
+  dbg.octaveTieWin = tieWin;
+  dbg.octaveTieMlBimodal = jsRound(mlBimodal * 100) / 100;
   if (cands.empty()) {
     dbg.reject = "no octave candidate";
     return out;
   }
   size_t chosen = 0;
-  // v15/v16: near-ties resolve on acoustic evidence alone; how wide "near"
-  // is depends on the ML model's own ambivalence, which without a pack is
-  // absent — the tie window is then the narrow 3%.
-  const double tieWin = 0.03;
   if (cands.size() >= 2 && cands[0].score - cands[1].score < tieWin * cands[0].score) {
     const auto acoustic = [](const Cand& c) { return c.q.support * c.q.alternation; };
     chosen = acoustic(cands[1]) > acoustic(cands[0]) ? 1 : 0;
   }
   dbg.chosenBpm = cands[chosen].bpm;
+  dbg.hasChosen = true;
   // The chosen candidate's own numbers, as the TS writes them for the WINNER
   // (debug.support/activeFrac/steadiness/rough) — distinct from the
   // per-candidate `octaves` rows, which stay in mult order (1, 2, 0.5) and so
@@ -893,7 +1602,16 @@ DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<Analysis
   out.ok = true;
   dbg.beats = static_cast<int>(out.beatsSec.size());
   dbg.medSec = medSec;
+  dbg.hasLattice = true;
   return out;
+}
+
+}  // namespace
+
+DrumLattice trackFromDrums(const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg) {
+  const DrumFrontEnd fe = drumFrontEnd(drums, dbg);
+  if (!fe.ok) return DrumLattice();
+  return trackFromDrumsCore(fe, aux, dbg);
 }
 
 // ---- detectBeats: bar phase & meter ---------------------------------------
@@ -903,7 +1621,8 @@ DrumLattice trackFromDrums(const AnalysisStem& drums, const std::vector<Analysis
 // Beat TIMES are never touched by phase logic. This pass so far: the activity
 // mask, the kick-energy-per-beat, the meter test and the segments — the vote
 // itself is the next slice.
-BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg) {
+BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatAux& aux, const MlPhaseCtx& mlc,
+                  BeatDebug& dbg) {
   (void)drums;
   BarPhase out;
   if (!lat.ok || lat.beatsSec.empty()) return out;
@@ -952,13 +1671,52 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
     }
     return best;
   };
-  // Without an ML grid the TS's waltz branch and its drumless fallback are
-  // both unreachable (`!aux?.ml` short-circuits the activity test), so this
-  // IS the whole meter decision on the no-pack path the phones take.
   const double ac3 = acAt(3), ac4 = acAt(4);
-  const int bpb = ac3 > 1.5 * ac4 ? 6 : 4;
   dbg.acAt3 = ac3;
   dbg.acAt4 = ac4;
+  int activeN = 0;
+  for (const bool a : active)
+    if (a) activeN++;
+  dbg.activeBeats = activeN;
+  const int bpb = [&] {
+    // Waltz: the model's own bars are 3 beats with real dominance — a meter
+    // the drums-first autocorrelation test cannot even emit (it knows 4 and
+    // 6). Ballroom 3/4 signature: 0.000 without this, 0.99 with.
+    if (mlc.phase && mlc.dom == 3) return 3;
+    if (static_cast<double>(activeN) / std::max<size_t>(1, active.size()) >= 0.3 || !mlc.phase || !aux.ml)
+      return ac3 > 1.5 * ac4 ? 6 : 4;
+    // Too little drumming for the autocorrelation meter test (the envelope is
+    // bleed) — count the model's own bars instead: dominant bar length,
+    // clamped to meters the app renders. This is the drumless-waltz path;
+    // every drummed song keeps the proven test above.
+    std::vector<std::pair<int, int>> hist;  // (barLen, count) in INSERTION order
+    int prev = -1;
+    for (const double t : aux.ml->downbeats) {
+      const int i = nearestBeatIdx(beatsSec, t);
+      if (i > prev) {
+        if (prev >= 0) {
+          const int len = i - prev;
+          bool found = false;
+          for (auto& e : hist)
+            if (e.first == len) {
+              e.second++;
+              found = true;
+              break;
+            }
+          if (!found) hist.push_back({len, 1});
+        }
+        prev = i;
+      }
+    }
+    // The TS sorts the Map's entries by count descending and takes the first.
+    // JS's sort is stable and a Map yields insertion order, so a tie goes to
+    // the bar length seen FIRST — stable_sort over the insertion-ordered
+    // vector is the only arrangement that reproduces that.
+    std::stable_sort(hist.begin(), hist.end(),
+                     [](const std::pair<int, int>& x, const std::pair<int, int>& y) { return x.second > y.second; });
+    const int dom = hist.empty() ? 0 : hist[0].first;
+    return dom == 3 || dom == 4 || dom == 6 ? dom : 4;
+  }();
   dbg.beatsPerBar = bpb;
 
   // Segments: maximal active stretches split by gaps of >= 2 bars.
@@ -983,10 +1741,45 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
       while (i < n && !active[static_cast<size_t>(i)]) i++;
     }
   }
-  int activeN = 0;
-  for (const bool a : active)
-    if (a) activeN++;
-  dbg.activeBeats = activeN;
+  // ML lattices occasionally insert or drop a beat MUSICALLY — a push, a fill
+  // (NEM hides one mid-song; Zeit has a dozen) — leaving no interval defect,
+  // but flipping every index class downstream, and one rotation per segment
+  // cannot hold across the flip. The model's own bar marks expose these seams:
+  // a bar whose length is neither the meter nor its half (half-bar marks are
+  // its normal habit) is a lattice hiccup — cut the segment there so each side
+  // votes its own rotation; the seam bar simply comes out an odd length,
+  // exactly like a fermata bar.
+  if (mlc.phase && aux.ml) {
+    std::vector<int> seams;
+    int prev = -1;
+    for (const double t : aux.ml->downbeats) {
+      const int i = nearestBeatIdx(beatsSec, t);
+      if (i <= prev) continue;
+      if (prev >= 0) {
+        const int len = i - prev;
+        const bool normal = len == bpb || (bpb % 2 == 0 && len == bpb / 2);
+        if (!normal) seams.push_back(i);
+      }
+      prev = i;
+    }
+    if (!seams.empty()) {
+      std::vector<std::pair<int, int>> cutSegs;
+      for (const auto& sg : segs) {
+        int a = sg.first;
+        for (const int c : seams) {
+          if (c > a && c <= sg.second) {
+            cutSegs.push_back({a, c - 1});
+            a = c;
+          }
+        }
+        cutSegs.push_back({a, sg.second});
+      }
+      segs.clear();
+      for (const auto& sg : cutSegs)
+        if (sg.second > sg.first) segs.push_back(sg);
+      dbg.mlSeams = std::move(seams);
+    }
+  }
   dbg.segments = static_cast<int>(segs.size());
 
   // ---- the cues -----------------------------------------------------------
@@ -1046,6 +1839,22 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
   std::vector<VocHit> vocHits;
   bool hasVoc = false;
   if (aux.vocals) vocHits = vocalEntryVotes(*aux.vocals, beatsSec, medSec, bpb, hasVoc);
+  // Neural downbeat head sampled on the lattice — only when the lattice is the
+  // model's OWN and untransposed: after an octave doubling its bar opinions
+  // describe a different level and are dropped.
+  std::vector<double> mlDownE;
+  const bool hasMlDownE = mlc.phase && aux.ml && !aux.ml->downbeatProb.empty() && aux.ml->fps > 0;
+  if (hasMlDownE) {
+    const std::vector<double>& p = aux.ml->downbeatProb;
+    for (const double t : beatsSec) {
+      const int f = static_cast<int>(jsRound(t * aux.ml->fps));
+      double best = 0;
+      for (const int g : {f - 1, f, f + 1})
+        if (g >= 0 && g < static_cast<int>(p.size()) && p[static_cast<size_t>(g)] > best)
+          best = p[static_cast<size_t>(g)];
+      mlDownE.push_back(best);
+    }
+  }
   std::vector<int> lineHits;
   if (aux.lineStarts.size() >= 6) {
     for (const double t : aux.lineStarts) {
@@ -1164,6 +1973,22 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
     std::vector<std::pair<int, double>> lev;
     for (const int k : lineHits) lev.push_back({k, 1.0});
     const std::vector<double> line = inSeg(lev, 4);
+    // Neural downbeat head: one voter among the stems. Reliable on straight
+    // meters (dead-on Sixteen Tons' re-phased bar), but its 6/8 bar sits a
+    // beat off the drummer's notation (NEM +1 eighth), so compound weight is
+    // token — never decisive against the band-entrance/chord evidence.
+    std::vector<double> mld;
+    if (hasMlDownE) {
+      std::vector<double> sums(B, 0.0);
+      double mass = 0;
+      for (int k = a; k <= b && k < static_cast<int>(mlDownE.size()); k++) {
+        sums[static_cast<size_t>(k % bpb)] += mlDownE[static_cast<size_t>(k)];
+        mass += mlDownE[static_cast<size_t>(k)];
+      }
+      mld = mass >= 1 ? normDist(sums) : uniform();
+    } else {
+      mld = uniform();
+    }
     // compound meter: the per-beat kick pattern stops deciding (the mid-bar tom
     // is idiomatic) — but entrances and separated slams are structural events,
     // not groove, and stay meaningful.
@@ -1171,13 +1996,14 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
       const std::vector<double>* d;
       double w;
     };
-    // Insertion order IS the summation order (Object.entries) — and the ML cue
-    // is OMITTED rather than uniform on this path: conf divides by the summed
-    // weights, and diluting it would shift every calibrated confidence against
-    // ANCHOR_CONF.
-    const Cue cues[6] = {{&kick, bpb == 6 ? 0.05 : 0.2},  {&ent, bpb == 6 ? 0.15 : 0.18},
-                         {&slam, bpb == 6 ? 0.1 : 0.15},  {&bass, bpb == 6 ? 0.4 : 0.15},
-                         {&voc, bpb == 6 ? 0.05 : 0.05},  {&line, bpb == 6 ? 0.25 : 0.15}};
+    // Insertion order IS the summation order (the TS iterates Object.entries),
+    // and without ML data the cue is OMITTED rather than made uniform: `conf`
+    // divides by the summed weights, so a uniform seventh voter would shift
+    // every calibrated no-pack confidence against ANCHOR_CONF.
+    std::vector<Cue> cues = {{&kick, bpb == 6 ? 0.05 : 0.2},  {&ent, bpb == 6 ? 0.15 : 0.18},
+                             {&slam, bpb == 6 ? 0.1 : 0.15},  {&bass, bpb == 6 ? 0.4 : 0.15},
+                             {&voc, bpb == 6 ? 0.05 : 0.05},  {&line, bpb == 6 ? 0.25 : 0.15}};
+    if (hasMlDownE) cues.push_back({&mld, bpb == 6 ? 0.05 : 0.2});
     std::vector<double> score(B, 0.0);
     double total = 0;
     for (const Cue& c : cues) {
@@ -1320,7 +2146,13 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
         // clean grid (0.05, 0.17) must never re-phase. Without an ML lattice
         // the gate always applies — smooth-by-construction model grids are the
         // only case it is void for.
-        if (worst < 0.2) {
+        // ML lattices are smooth by construction even at REAL musical seams —
+        // NEM loses an eighth mid-song (414 true eighths crossed in 413 model
+        // beats) with no interval defect anywhere — so for them this gate is
+        // void and the global harmonic arbiter below is the only judge.
+        // Homegrown grids keep it: their slips leave measurable defects
+        // (Mr Crowley's measure 0.26).
+        if (worst < 0.2 && !mlc.phase) {
           i += RUN;
           continue;
         }
@@ -1382,6 +2214,102 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
       phaseCutsDbg.clear();
       downbeats = plain;
     }
+    // Spliced leading span: the model's own bar marks rule the intro — the
+    // only downbeat evidence over a drum-free intro at its own tempo. The
+    // boundary bar into the first anchored region comes out odd, which is
+    // honest: the intro-to-body seam is a real tempo change.
+    if (mlc.leadEnd > 0 && aux.ml && !downbeats.empty()) {
+      const int firstOwn = anchors[0].a;
+      // `beatsSec[firstOwn] ?? mlLeadEnd` — an out-of-range index is undefined
+      // in JS and the min then falls back to the span end.
+      const double boundarySec =
+          firstOwn >= 0 && firstOwn < nb ? std::min(mlc.leadEnd, beatsSec[static_cast<size_t>(firstOwn)])
+                                         : mlc.leadEnd;
+      std::vector<int> intro;
+      int prevI = -1;
+      for (const double t : aux.ml->downbeats) {
+        if (t >= boundarySec - 0.2) break;
+        const int i = nearestBeatIdx(beatsSec, t);
+        if (i > prevI && std::fabs(beatsSec[static_cast<size_t>(i)] - t) < 0.15) {
+          intro.push_back(i);
+          prevI = i;
+        }
+      }
+      if (intro.size() >= 2) {
+        std::vector<int> merged = intro;
+        for (const int k : downbeats)
+          if (k >= firstOwn && k > intro.back()) merged.push_back(k);
+        downbeats = std::move(merged);
+      }
+    }
+    // Interior spliced spans: the model repaired their TIMING, but the "1" was
+    // blind extension from the surrounding anchors — nothing musical ever
+    // voted it (TTP's bass solo walks chord changes on bars the extension
+    // missed). Chord-change mass plus the model's downbeat head re-vote the
+    // rotation per span; only a confident margin overrides, and the boundary
+    // bars come out odd — the fermata mechanics.
+    if (!mlc.spliceRanges.empty() && !downbeats.empty()) {
+      const bool hasDbp = aux.ml && !aux.ml->downbeatProb.empty() && aux.ml->fps > 0;
+      for (const auto& rg : mlc.spliceRanges) {
+        const int a = std::max(0, nearestBeatIdx(beatsSec, rg.first));
+        const int b = std::min(nb - 1, nearestBeatIdx(beatsSec, rg.second));
+        if (b - a < 2 * bpb) continue;
+        std::vector<double> harm(static_cast<size_t>(bpb), 0.0);
+        std::vector<double> mld2(static_cast<size_t>(bpb), 0.0);
+        double hMass = 0;
+        for (int k = a; k <= b; k++) {
+          const double hv = hasHarmNov && k < static_cast<int>(harmNov.size())
+                                ? harmNov[static_cast<size_t>(k)]
+                                : 0.0;
+          if (hv > 0) {
+            harm[static_cast<size_t>(k % bpb)] += hv;
+            hMass += hv;
+          }
+          if (hasDbp) {
+            const std::vector<double>& dbp = aux.ml->downbeatProb;
+            const int f = static_cast<int>(jsRound(beatsSec[static_cast<size_t>(k)] * aux.ml->fps));
+            double best = 0;
+            for (const int g : {f - 1, f, f + 1})
+              if (g >= 0 && g < static_cast<int>(dbp.size()) && dbp[static_cast<size_t>(g)] > best)
+                best = dbp[static_cast<size_t>(g)];
+            mld2[static_cast<size_t>(k % bpb)] += best;
+          }
+        }
+        if (hMass <= 0) continue;
+        const auto norm = [&](const std::vector<double>& xs) {
+          double t = 0;
+          for (const double x : xs) t += x;
+          std::vector<double> o(xs.size());
+          for (size_t i = 0; i < xs.size(); i++) o[i] = t > 1e-9 ? xs[i] / t : 1.0 / bpb;
+          return o;
+        };
+        const std::vector<double> hd = norm(harm);
+        const std::vector<double> md = norm(mld2);
+        std::vector<double> score(static_cast<size_t>(bpb));
+        for (int r = 0; r < bpb; r++)
+          score[static_cast<size_t>(r)] = 0.7 * hd[static_cast<size_t>(r)] + 0.3 * md[static_cast<size_t>(r)];
+        int rot = 0;
+        for (int r = 1; r < bpb; r++)
+          if (score[static_cast<size_t>(r)] > score[static_cast<size_t>(rot)]) rot = r;
+        std::vector<double> sorted = score;
+        std::sort(sorted.begin(), sorted.end(), std::greater<double>());
+        const double margin = sorted[0] - sorted[1];
+        if (margin < 0.15) continue;
+        std::vector<int> merged;
+        for (const int k : downbeats)
+          if (k < a || k > b) merged.push_back(k);
+        for (int k = a + ((((rot - a) % bpb) + bpb) % bpb); k <= b; k += bpb) merged.push_back(k);
+        // Stable, then drop duplicates keeping the first — a re-voted bar
+        // landing on a kept one must not appear twice.
+        std::stable_sort(merged.begin(), merged.end());
+        downbeats.clear();
+        for (size_t i = 0; i < merged.size(); i++)
+          if (i == 0 || merged[i] > merged[i - 1]) downbeats.push_back(merged[i]);
+        dbg.spanPhase.push_back({rg.first, rg.second, jsRound(margin * 100) / 100, rot});
+      }
+      // (The TS re-derives `downbeat` here; the line below overwrites it
+      // unconditionally, so it is not reproduced.)
+    }
     haveDownbeats = !downbeats.empty();
     downbeat = haveDownbeats ? downbeats[0] % bpb : anchors[0].rot % bpb;
     dbg.phaseCuts = phaseCutsDbg;
@@ -1390,13 +2318,25 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
     for (const Scored& s : scored)
       if (s.conf > best->conf) best = &s;
     downbeat = best->rot % bpb;
+  } else if (mlc.phase && aux.ml) {
+    // No segments at all (drumless song on the ML lattice): the stems offer
+    // zero phase evidence, so the model's own bar marks stand rather than a
+    // downbeat of 0 by luck.
+    std::vector<int> dbI;
+    for (const double t : aux.ml->downbeats) {
+      const int i = nearestBeatIdx(beatsSec, t);
+      if (i >= 0 && (dbI.empty() || i > dbI.back())) dbI.push_back(i);
+    }
+    if (dbI.size() >= 2) {
+      downbeats = dbI;
+      haveDownbeats = true;
+    }
+    downbeat = !dbI.empty() ? dbI[0] % bpb : 0;
   }
-  // (The TS's third branch is the drumless ML-lattice case — unreachable with
-  // no model, like the waltz branch above.)
 
   // NOT sanitized here: the TS runs sanitizeBars AFTER the head backcast
   // (analysis.ts:1543), and the backcast can both add bars and change the beat
-  // count they are bounded by. detectBeatsNoCourts does it in that order.
+  // count they are bounded by. detectBeats does it in that order.
   out.beatsPerBar = bpb;
   out.downbeat = downbeat;
   out.downbeats = downbeats;
@@ -1412,7 +2352,8 @@ BarPhase barPhase(const DrumLattice& lat, const AnalysisStem& drums, const BeatA
 // two bars in). A singer keeps counting through material like that; the count
 // does not stop because the drums have not.
 HeadBackcast backcastHead(const std::vector<double>& beats, const std::vector<int>* bars, int bpb,
-                          const std::vector<float>& drumsMono, const BeatAux& aux, BeatDebug& dbg) {
+                          const std::vector<float>& drumsMono, const BeatAux& aux, BeatDebug& dbg,
+                          const std::vector<double>& chordOnsets) {
   HeadBackcast out;
   if (beats.size() < 32) return out;
   std::vector<double> iv;
@@ -1546,10 +2487,15 @@ HeadBackcast backcastHead(const std::vector<double>& beats, const std::vector<in
   }
   std::vector<double> fluxMerged = taken;
   std::sort(fluxMerged.begin(), fluxMerged.end());
-  // The TS's `chordOnsets` argument replaces these when offered — but only the
-  // courts' post-halve call passes it, and the courts are not ported, so
-  // `merged` is the flux list here by construction, not by choice.
-  const std::vector<double>& merged = fluxMerged;
+  // Chord-change evidence replaces the flux events when offered. The walk's
+  // stopping point stays acoustic (fluxMerged below): the fade-in chord the
+  // decoder missed is still audible, and the count should reach it.
+  std::vector<double> chordSorted;
+  if (chordOnsets.size() >= 3) {
+    chordSorted = chordOnsets;
+    std::sort(chordSorted.begin(), chordSorted.end());
+  }
+  const std::vector<double>& merged = chordSorted.empty() ? fluxMerged : chordSorted;
 
   // Interval scatter alone cannot tell a WRONG head from a LOOSE one, so the
   // marks are put to the audible onsets — and the onsets must earn that
@@ -1738,13 +2684,125 @@ HeadBackcast backcastHead(const std::vector<double>& beats, const std::vector<in
 
 // ---- detectBeats, minus the courts and the ML lattice ---------------------
 
-BeatGrid detectBeatsNoCourts(const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg) {
-  static const std::vector<AnalysisStem> kNoStems;
+BeatGrid detectBeats(const AnalysisStem& drums, const BeatAux& aux, BeatDebug& dbg) {
   BeatGrid out;
-  const DrumLattice lat = trackFromDrums(drums, aux.inst ? *aux.inst : kNoStems, dbg);
+  const DrumFrontEnd fe = drumFrontEnd(drums, dbg);
+  if (!fe.ok) return out;
+
+  // Neural lattice (Beat This!) + the homegrown tracker, fused by measurement,
+  // not ideology:
+  // - On drum-strong songs the HOMEGROWN lattice wins outright: its beat count
+  //   follows real drum onsets through musical seams (NEM eats an eighth
+  //   mid-song — 414 true eighths crossed in 413 model beats, no interval
+  //   defect anywhere) that the model smooths away, shifting every downstream
+  //   bar by one. 12/14 ML-first vs 14/14 this way.
+  // - ML takes over where homegrown FAILS (rejects) — drumless songs, soft
+  //   material — and where homegrown cannot even express the answer: a steady
+  //   lattice whose dominant bar is 3 beats is a waltz, a meter the drums-first
+  //   path structurally mislabels as 4/4 (Ballroom 3/4 signature: 0.000
+  //   homegrown, 0.992 model).
+  // - An unsteady lattice (true rubato — The Music Of The Night) is refused,
+  //   and homegrown rejection then stands: no grid, wall-clock count-in.
+  // No model, no change: trackFromDrums is the v9 pipeline verbatim, and
+  // without aux.ml nothing below alters a single vote.
+  const MlLattice mlChoice = latticeFromMl(aux.ml, fe.frames, fe.fps, fe.drumFlux, dbg);
+  const int mlDom = mlChoice.ok && aux.ml ? dominantMlBarLen(*aux.ml) : 0;
+  // No harmonic stems = nothing to verify WITH: the stem-vote machinery's
+  // authority comes entirely from bass/instrument evidence, and on bare mixes
+  // it degrades badly (Ballroom 4/4 downbeat F 0.60 re-voted vs 0.985 taking
+  // the model's word). Mix-only inputs get the model verbatim. Every real
+  // project has all six stems and takes the verified path below.
+  if (mlChoice.ok && !mlChoice.doubled && aux.ml && !aux.bass && !(aux.inst && !aux.inst->empty())) {
+    const std::vector<double>& beats = mlChoice.beatsSec;
+    std::vector<int> dbI;
+    for (const double t : aux.ml->downbeats) {
+      const int i = nearestBeatIdx(beats, t);
+      if (i >= 0 && (dbI.empty() || i > dbI.back())) dbI.push_back(i);
+    }
+    const int bpbMl = mlDom == 3 || mlDom == 4 || mlDom == 6 ? mlDom : 4;
+    dbg.lattice = "ml-verbatim";
+    out.beats = beats;
+    out.bpm = 60 / mlChoice.medSec;
+    out.beatsPerBar = bpbMl;
+    out.downbeat = !dbI.empty() ? dbI[0] % bpbMl : 0;
+    if (dbI.size() >= 2) {
+      out.downbeats = std::move(dbI);
+      out.hasDownbeats = true;
+    }
+    out.ok = true;
+    return out;
+  }
+
+  DrumLattice lat;
+  bool mlPhase = false;
+  /** Whether `lat` IS the model's lattice. The TS used object identity until
+   *  v17's normalization started returning a new object — which would have
+   *  silently handed the adopted path to the splice family (which exists to
+   *  repair the DRUMS lattice) and mislabelled it in the debug trail. */
+  bool adopted = false;
+  /** v17: an adopted lattice IS the click, and nothing below re-levels it —
+   *  the splice family runs only when the drums-first tracker won. Flatten a
+   *  model that changed level mid-song onto one tempo on the way in. */
+  const auto adopt = [&](const MlLattice& c) {
+    DrumLattice o;
+    o.medSec = c.medSec;
+    o.O = c.O;
+    bool same = false;
+    std::vector<double> beats =
+        levelNormalize(c.beatsSec, c.medSec, aux.ml ? &aux.ml->downbeats : nullptr, same);
+    if (same) {
+      o.beatsSec = c.beatsSec;
+    } else {
+      const double m = beats.size() >= 2 ? upperMedian(intervalsOf(beats)) : c.medSec;
+      dbg.hasMlNormalized = true;
+      dbg.mlNormalizedFrom = static_cast<int>(c.beatsSec.size());
+      dbg.mlNormalizedTo = static_cast<int>(beats.size());
+      dbg.mlNormalizedMedSec = jsRound(m * 1000) / 1000;
+      o.beatsSec = std::move(beats);
+      o.medSec = m;
+    }
+    // The bar-phase pass reads these off the lattice, and for an adopted one
+    // they are the front-end's — the TS keeps them as detectBeats locals, so
+    // the model's grid is measured against the same drum activity.
+    o.lowFlux = fe.lowFlux;
+    o.drumPeaks = fe.drumPeaks;
+    o.frames = fe.frames;
+    o.ok = true;
+    return o;
+  };
+  if (mlChoice.ok && !mlChoice.doubled && mlDom == 3) {
+    lat = adopt(mlChoice);
+    mlPhase = true;
+    adopted = true;
+  }
+  if (!lat.ok) {
+    lat = trackFromDrumsCore(fe, aux, dbg);
+    // A refusal writes dbg.reject; the ML fallback below may still produce a
+    // grid, and the TS leaves that reason standing in the debug either way.
+  }
+  if (!lat.ok && mlChoice.ok) {
+    lat = adopt(mlChoice);
+    mlPhase = !mlChoice.doubled;
+    adopted = true;
+  }
   if (!lat.ok) return out;
+
+  MlPhaseCtx mlc;
+  mlc.phase = mlPhase;
+  mlc.dom = mlDom;
+  // v11/v12: where the drums-first lattice has NOTHING (refused voids) or is
+  // physically SUSPECT (interval defects), the model's beats replace the
+  // stretch — see spliceFromMl for the three sources and their gates.
+  if (!adopted && mlChoice.ok && aux.ml && lat.beatsSec.size() >= 16) {
+    MlSpliceOut sp;
+    spliceFromMl(lat, mlChoice, *aux.ml, sp, dbg);
+    mlc.leadEnd = sp.leadEnd;
+    mlc.spliceRanges = std::move(sp.ranges);
+  }
+  dbg.lattice = adopted ? "ml" : "drums";
   dbg.voids = lat.voids;
-  const BarPhase ph = barPhase(lat, drums, aux, dbg);
+
+  const BarPhase ph = barPhase(lat, drums, aux, mlc, dbg);
   const int bpb = ph.beatsPerBar;
   int downbeat = ph.downbeat;
   std::vector<int> downbeats = ph.downbeats;
@@ -1756,7 +2814,7 @@ BeatGrid detectBeatsNoCourts(const AnalysisStem& drums, const BeatAux& aux, Beat
   std::vector<double> headBarTimes;
   {
     const HeadBackcast rebuilt =
-        backcastHead(lat.beatsSec, hasDownbeats ? &downbeats : nullptr, bpb, monoAt44kPublic(drums), aux, dbg);
+        backcastHead(lat.beatsSec, hasDownbeats ? &downbeats : nullptr, bpb, fe.mono, aux, dbg);
     if (rebuilt.ok) {
       outBeats = rebuilt.beats;
       downbeats = rebuilt.downbeats;
@@ -1783,14 +2841,101 @@ BeatGrid detectBeatsNoCourts(const AnalysisStem& drums, const BeatAux& aux, Beat
     if (!downbeats.empty()) downbeat = downbeats[0] % bpb;
   }
 
-  // Where to look first, not a claim that the grid is wrong: every bar line
-  // the head backcast laid down, and every bar whose length disagrees with the
-  // song's own meter. (The TS also lists the ML splice ranges, which cannot
-  // exist here.)
+  // v20: the courts. The finished grid — exactly what the eval battery fed
+  // them — goes in; what comes back may be halved to the notation's octave,
+  // doubled to the model's conviction, or carry newly placed odd bars. Runs
+  // only when harmonic stems exist to testify: a bare mix (Ballroom's shape)
+  // skips the block entirely and ships the grid untouched, which is the
+  // abstention contract the battery verified sixteen times over.
+  double outBpm = 60 / lat.medSec;
+  int outBpb = bpb;
+  {
+    const bool haveHarm = (aux.inst && !aux.inst->empty()) || aux.bass || aux.vocals;
+    if (haveHarm) {
+      CourtGrid det0;
+      det0.bpm = outBpm;
+      det0.beatsPerBar = outBpb;
+      det0.downbeat = downbeat;
+      det0.beats = outBeats;
+      det0.downbeats = downbeats;
+      det0.hasDownbeats = hasDownbeats;
+      CourtSources srcs;
+      srcs.harm = aux.inst;
+      srcs.bass = aux.bass;
+      srcs.vocals = aux.vocals;
+      srcs.words = aux.words;
+      CourtEvidence ev = buildCourtEvidence(det0, srcs);
+      // CourtSources deliberately has no `ml` — the lattice arrives from
+      // beat_this, not from audio — so the caller fills ev.ml itself. Forget
+      // this and doubleCourt, whose only witness IS the model, silently never
+      // fires and no parity run can see it (both sides agree on nothing
+      // happening). courts.h says so at the struct; this is the call site it
+      // is talking about.
+      if (aux.ml) ev.ml = mlLevelStats(aux.ml->beats, ev.hasMl);
+      CourtsDbg courtDbg;
+      const CourtGrid courted = applyCourts(det0, ev, courtDbg);
+      const bool courtsMoved = courtDbg.changed;
+      dbg.v20 = std::move(courtDbg);
+      dbg.hasV20 = true;
+      if (courtsMoved) {
+        // adopt only the grid fields — the courts' working notes
+        // (originalBars, halvedFrom) never leave this block
+        outBeats = courted.beats;
+        outBpm = courted.bpm;
+        outBpb = courted.beatsPerBar;
+        downbeat = courted.downbeat;
+        downbeats = courted.downbeats;
+        hasDownbeats = courted.hasDownbeats;
+        if (hasDownbeats) {
+          // a court insert can leave an impossible tail bar; same net as every
+          // other grid
+          downbeats = sanitizeBars(downbeats, outBpb, static_cast<int>(outBeats.size()));
+          if (!downbeats.empty()) downbeat = downbeats[0] % outBpb;
+        }
+        // A halved grid gets the head backcast a second chance. The v19 pass
+        // judged the lead-in against the pre-halve pulse and refused —
+        // correctly: Zeit's piano chords fit the shipped 123 at 21%. At the
+        // notation's octave the same onsets fit at 71%, which is the measured
+        // finding that predicted this moment: the head fix flows through the
+        // octave verdict. Doubled grids keep their head — it was tracked at
+        // the level the music actually carries there.
+        if (courted.hasHalvedFrom) {
+          BeatDebug d2;
+          std::vector<double> chordOnsets;
+          for (const ChordRun& r : changePoints(ev.runs)) chordOnsets.push_back(r.t);
+          const HeadBackcast again =
+              backcastHead(outBeats, hasDownbeats ? &downbeats : nullptr, outBpb, fe.mono, aux, d2, chordOnsets);
+          dbg.headAfterHalve = std::make_shared<BeatDebug>(std::move(d2));
+          if (again.ok) {
+            outBeats = again.beats;
+            if (again.hasDownbeats) {
+              downbeats = again.downbeats;
+              hasDownbeats = true;
+            }
+            headBarTimes = again.headBarTimes;
+            if (hasDownbeats) {
+              downbeats = sanitizeBars(downbeats, outBpb, static_cast<int>(outBeats.size()));
+              if (!downbeats.empty()) downbeat = downbeats[0] % outBpb;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Where the detector already knows it was guessing. Three sources, all free:
+  // spans it filled by extending the surrounding phase instead of voting (the
+  // splice ranges), bars whose length disagrees with the song's own meter, and
+  // every bar line the head backcast laid down. None is a claim that the grid
+  // is wrong there — it is a claim that this is where to look first.
   std::vector<double> suspect = headBarTimes;
+  for (const auto& rg : mlc.spliceRanges) {
+    const int a = nearestBeatIdx(outBeats, rg.first);
+    if (a >= 0 && a < static_cast<int>(outBeats.size())) suspect.push_back(outBeats[static_cast<size_t>(a)]);
+  }
   if (hasDownbeats) {
     for (size_t i = 1; i < downbeats.size(); i++) {
-      if (downbeats[i] - downbeats[i - 1] != bpb)
+      if (downbeats[i] - downbeats[i - 1] != outBpb)
         suspect.push_back(outBeats[static_cast<size_t>(downbeats[i - 1])]);
     }
   }
@@ -1805,8 +2950,8 @@ BeatGrid detectBeatsNoCourts(const AnalysisStem& drums, const BeatAux& aux, Beat
   std::sort(suspectAt.begin(), suspectAt.end());
 
   out.beats = std::move(outBeats);
-  out.bpm = 60 / lat.medSec;
-  out.beatsPerBar = bpb;
+  out.bpm = outBpm;
+  out.beatsPerBar = outBpb;
   out.downbeat = downbeat;
   out.downbeats = std::move(downbeats);
   out.hasDownbeats = hasDownbeats;
@@ -1814,5 +2959,4 @@ BeatGrid detectBeatsNoCourts(const AnalysisStem& drums, const BeatAux& aux, Beat
   out.ok = true;
   return out;
 }
-
 }  // namespace singz
