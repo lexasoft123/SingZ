@@ -1374,8 +1374,9 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       tempo 120 vs 125). iOS and Android agree with each other bit for bit
       on the from-stems path (120/37 on both).
       Not done: a real-phone run of the from-stems path (the binding was;
-      the wired pipeline was not), levelling `mlgrid-android.cjs` up to
-      the iOS suite, and the ≥10-song corpus eval of phone-ml grids.
+      the wired pipeline was not), and the ≥10-song corpus eval of
+      phone-ml grids. (`mlgrid-android.cjs` needed no levelling — checked
+      in Phase 4 and found already point for point with its iOS sibling.)
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the

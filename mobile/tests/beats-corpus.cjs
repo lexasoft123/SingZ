@@ -142,6 +142,12 @@ const digestOf = (g) =>
       }
       fs.copyFileSync(path.join(local, 'project.json'), path.join(dst, 'project.json'))
     } else {
+      // Same hazard as the iOS branch above, and `push` does not close it:
+      // it overwrites the files it carries and removes nothing, so a
+      // lyrics.json left by an earlier run — or by a real folder-library song
+      // of this name — is still there for beatsParity to read, while the host
+      // CLI below is given no --line/--word.
+      adb('shell', 'rm', '-rf', `"${deviceRoot}/${s}"`)
       adb('shell', 'mkdir', '-p', `"${deviceRoot}/${s}/stems"`)
       adb('push', `${local}/stems/.`, `${deviceRoot}/${s}/stems/`)
       adb('push', `${local}/project.json`, `${deviceRoot}/${s}/project.json`)
