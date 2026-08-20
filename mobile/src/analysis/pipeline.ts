@@ -35,13 +35,15 @@
  *    (metronome, count-in) and it is cheap; the melody is a minute of pYIN,
  *    and a process killed in that minute still leaves the useful half saved.
  *
- * Memory: the grid's and the key's stems reach the worklet host one at a
- * time as mono float32 and the local copy is dropped as each lands (host.ts
- * explains the crossing); every stem is loaded through `loadMono`, which
- * decodes at 44.1 kHz — the detectors' own rate, so the far side resamples
- * nothing and copies nothing. The melody crosses NOTHING: the core's own
- * tracker (native/core/melody.cpp — the desktop's pyin, bit-identical) reads
- * the stem file itself, on a native thread, in about a second.
+ * Memory: NOTHING crosses a JS runtime here any more. The grid, the key and
+ * the melody all read their own stem files in the core (native/core —
+ * detectBeats, estimateKeyFromStems and the pyin tracker, each bit-identical
+ * to the desktop's), on a native thread. Where the core cannot read a stem —
+ * a copied desktop project's FLAC, or an older native beside newer JS —
+ * deps.ts falls back to the worklet host and does its own loading there,
+ * dropping each stem as it lands and clearing on the way out; the pipeline
+ * never holds one. What the pipeline still owes, because put() used to do it
+ * as a side effect, is naming those stems in the STAMP.
  */
 import {
   BEAT_DETECT_VERSION,
@@ -74,17 +76,35 @@ export interface AnalysisResult {
 
 /** The host surface the pipeline drives — host.ts in the app, a fake in jest. */
 export interface AnalysisHost {
+  /** Hand one stem to the worklet runtime under a name the TS detectors ask
+   *  for later. The pipeline no longer calls either of these — the fallbacks
+   *  inside deps.ts do, for themselves — but they stay on the interface
+   *  because that is what a fallback IS, and because `clearStems` in the
+   *  pipeline's `finally` is the last guarantee that nothing is left pinned. */
   putStem(id: string, stem: MonoStem): Promise<void>
   clearStems(): Promise<void>
-  detectBeats(args: {
-    drums: string
-    bass?: string
-    vocals?: string
-    inst?: string[]
-    lineStarts?: number[] | null
-    words?: { s: number; e: number }[] | null
-    ml?: MlGrid | null
-  }): Promise<{
+  /** Would `detectBeats` take the core, or the worklet fallback, for this
+   *  build? The pipeline asks only to word the wait honestly — the fallback
+   *  decodes six stems inside the call and takes minutes where the core takes
+   *  seconds. Absent on the jest fake, where the question does not arise. */
+  beatsAreNative?(): boolean
+  /** The grid off the project's stems. Paths are project-RELATIVE, like the
+   *  key and the melody: the core reads them itself, and the worklet fallback
+   *  (FLAC, or an older native) does its own loading inside deps.ts. The
+   *  pipeline no longer crosses these stems to any runtime — which is also
+   *  why it must add them to the stamp by hand. */
+  detectBeats(
+    project: string,
+    args: {
+      drums: string
+      bass?: string
+      vocals?: string
+      inst?: string[]
+      lineStarts?: number[] | null
+      words?: { s: number; e: number }[] | null
+      ml?: MlGrid | null
+    }
+  ): Promise<{
     beats: number[]
     bpm: number
     beatsPerBar: number
@@ -126,8 +146,15 @@ export interface AnalysisHost {
 export interface AnalysisDeps {
   readText(project: string, file: string): Promise<string>
   writeText(project: string, file: string, text: string): Promise<boolean>
-  /** One stem as mono float32 at 44.1 kHz; the implementation decodes,
-   *  folds channels and frees the decoded buffer before returning. */
+  /** One stem as mono float32 at 44.1 kHz; the implementation decodes, folds
+   *  channels and frees the decoded buffer before returning.
+   *
+   *  Nothing in this file calls it any more — the detectors read their own
+   *  files in the core, and the worklet fallbacks behind `host` import
+   *  `loadMono44k` directly rather than coming back through here. It stays on
+   *  the interface because the jest world supplies it and a fake host built
+   *  against this shape is how the pipeline's own tests load a stem; a reader
+   *  looking for its call site inside this file will not find one. */
   loadMono(project: string, relPath: string): Promise<MonoStem>
   host: AnalysisHost
   now(): string
@@ -149,7 +176,23 @@ export function planAnalysis(
   /** Could the neural lattice run on THIS project right now (models here,
    *  binding here, stems the core reads)? Decides only whether an old
    *  negative verdict still binds — see below. */
-  mlNow = false
+  mlNow = false,
+  /** The singer asked for it. Every stamp and every stored verdict is set
+   *  aside and each detector runs on whatever stems exist — which is the
+   *  whole point of a "detect again" button: the stamps say nothing needs
+   *  doing, and the singer disagrees. Hand-placed bar lines are NOT lost;
+   *  analyzeProject folds them back onto the fresh grid the way the desktop
+   *  does.
+   *
+   *  A hand-made ('manual') GRID is the one thing force does not override.
+   *  The rule at the top of this file has no exception for it, and the phone
+   *  has no beat editor: a desktop project whose grid was halved, shifted or
+   *  re-metered by hand and then dropped into "On My iPhone" through Files
+   *  looks exactly like any other phone-library song to the sheet, and one
+   *  tap would replace work the singer cannot redo here. The desktop's own
+   *  Re-detect does overwrite it — beside a "hand-tuned" label and an editor
+   *  to put it back. */
+  force = false
 ): AnalysisPlan {
   const s = doc.settings ?? ({} as ProjectDoc['settings'])
   const none = s.analysisNone ?? {}
@@ -165,18 +208,21 @@ export function planAnalysis(
   // verdict predates the evidence, and without this line it would bind
   // forever. Re-ask exactly once, with the better ears.
   const noneBeatBinds = none.beat === BEAT_DETECT_VERSION && (none.beatMl === true || !mlNow)
-  const beat = !!stems.drums && (!beatStored || beatStale) && !noneBeatBinds
+  const beatManual = beatStored?.source === 'manual'
+  const beat =
+    !!stems.drums && !beatManual && (force || ((!beatStored || beatStale) && !noneBeatBinds))
 
   const keyStored = s.key
   const key =
     (INST.some((id) => stems[id]) || !!stems.bass) &&
-    (!keyStored || keyStored.detVersion !== KEY_DETECT_VERSION) &&
-    none.key !== KEY_DETECT_VERSION
+    (force ||
+      ((!keyStored || keyStored.detVersion !== KEY_DETECT_VERSION) && none.key !== KEY_DETECT_VERSION))
 
   let melody = false
   if (stems.vocals) {
     const m = s.melody
-    if (!m || m.detVersion !== PITCH_DETECT_VERSION) melody = true
+    if (force) melody = true
+    else if (!m || m.detVersion !== PITCH_DETECT_VERSION) melody = true
     else if (durationSec != null) {
       // A stored line whose coverage is another song's length is disowned
       // and re-tracked — the rule that healed the two field projects that
@@ -252,6 +298,9 @@ export async function analyzeProject(
     /** Called after each write lands — the grid is on disk a minute before
      *  the melody is, and a player showing the song should not wait. */
     onCommit?: (fresh: FreshAnalysis) => void
+    /** The singer asked for it — see planAnalysis. Sets every stamp and
+     *  every stored verdict aside and runs each detector the stems allow. */
+    force?: boolean
     deps: AnalysisDeps
   }
 ): Promise<AnalysisResult | null> {
@@ -279,7 +328,7 @@ export async function analyzeProject(
   const mixIds = ['drums', 'bass', 'vocals', ...INST].filter((id) => stems[id])
   const mlNow =
     mixIds.length > 0 && mixIds.every((id) => /\.wav$/i.test(rel(id))) && (await host.mlAvailable())
-  const plan = planAnalysis(doc0, stems, durationSec, mlNow)
+  const plan = planAnalysis(doc0, stems, durationSec, mlNow, opts.force === true)
   if (!plan.beat && !plan.key && !plan.melody) {
     log('analysis', `${project}: nothing to detect — grid, key and melody are current`)
     return null
@@ -292,13 +341,6 @@ export async function analyzeProject(
   )
   const usedFiles = new Set<string>()
   const ms = { load: 0, ml: 0, beat: 0, key: 0, melody: 0 }
-  const put = async (id: string): Promise<boolean> => {
-    if (!stems[id]) return false
-    const stem = await deps.loadMono(project, rel(id))
-    await host.putStem(id, stem)
-    usedFiles.add(`${id}.${stems[id]}`)
-    return true
-  }
   try {
     // The neural lattice FIRST, and off the worklet host entirely: the core
     // reads, sums and decimates the stems itself, so running it before put()
@@ -316,39 +358,33 @@ export async function analyzeProject(
     }
     const tLoad = Date.now() // `load` is the stems crossing, not the lattice — reported apart
 
-    // The grid's stems, one at a time. The vocals cross only as its aux; the
-    // melody and the key read their own files.
-    const wantAudio = plan.beat
-    const have = { drums: false, bass: false, vocals: false, inst: [] as string[] }
-    if (plan.beat && stems.vocals) {
-      step('Reading the vocals…', 0.02)
-      have.vocals = await put('vocals')
-    }
-    // The key reads its own files now (the core); only the grid's aux still
-    // crosses to the worklet runtime. Its stems therefore never pass through
-    // put(), so they must be added to the stamp BY HAND — without this a
-    // key-only run (a stale key stamp over a current grid) compares an empty
-    // file list against an empty file list, which can never fail, and a key
-    // computed from stems that were replaced mid-run is written into the doc
-    // that now names different ones. The melody has the same shape at its
-    // own stage; the guard is only as good as what it is told to watch.
+    // NOTHING crosses a JS runtime here any more. The grid, the key and the
+    // melody all read their own files in the core; the worklet fallbacks
+    // (FLAC stems, or an older native beside newer JS) do their own loading
+    // inside deps.ts, where the stem can be dropped the moment it is used.
+    //
+    // Which means every one of these stems must be added to the stamp BY HAND
+    // — put() used to do it as a side effect. Without it a run compares an
+    // empty file list against an empty file list, which can never fail, and an
+    // answer computed from stems that were replaced mid-run is written into a
+    // doc that now names different ones. The guard is only as good as what it
+    // is told to watch.
+    const beatStems = plan.beat ? ['drums', 'bass', 'vocals', ...INST].filter((id) => stems[id]) : []
+    for (const id of beatStems) usedFiles.add(`${id}.${stems[id]}`)
     const keyInst = INST.filter((id) => stems[id])
     if (plan.key) {
       for (const id of keyInst) usedFiles.add(`${id}.${stems[id]}`)
       if (stems.bass) usedFiles.add(`bass.${stems.bass}`)
     }
-    if (wantAudio) {
-      let i = 0
-      const load = plan.beat ? ['drums', 'bass', ...INST].filter((id) => stems[id]) : []
-      for (const id of load) {
-        step(`Reading the ${id}…`, 0.05 + (0.2 * i++) / Math.max(1, load.length))
-        const ok = await put(id)
-        if (!ok) continue
-        if (id === 'drums') have.drums = true
-        else if (id === 'bass') have.bass = true
-        else have.inst.push(id)
-      }
+    const have = {
+      drums: beatStems.includes('drums'),
+      bass: beatStems.includes('bass'),
+      vocals: beatStems.includes('vocals'),
+      inst: INST.filter((id) => beatStems.includes(id))
     }
+    // Kept at 0 rather than deleted: the log line is read across releases and
+    // a load time that has become zero says the stems stopped crossing, where
+    // a missing field says only that someone edited the log.
     ms.load = Date.now() - tLoad
     // The stems this answer is computed from — compared against the doc on
     // disk before every write.
@@ -358,14 +394,27 @@ export async function analyzeProject(
     const fresh: FreshAnalysis = {}
 
     if (plan.beat && have.drums) {
-      step('Finding the beat…', 0.3)
+      // The core reads the stems itself and answers in seconds, so one message
+      // covers it. The FALLBACK does not: a copied desktop project's six FLAC
+      // stems decode inside this call, measured at 51 s on a simulator against
+      // the native's 8.5, and the "Reading the …" steps that used to move
+      // during that decode went with put(). Naming the wait is the honest
+      // minimum until the fallback reports its own progress.
+      // Decided from the PATHS, not just the build: `beatsAreNative` answers
+      // "does the installed binary have the method", which is true on every
+      // current build — including for the copied desktop project whose six
+      // FLAC stems decode inside this call, which is the case the honest
+      // wording exists for.
+      const beatsFast =
+        beatStems.every((id) => /\.wav$/i.test(rel(id))) && deps.host.beatsAreNative?.() !== false
+      step(beatsFast ? 'Finding the beat…' : 'Reading the stems…', 0.3)
       const t = Date.now()
       const lines = opts.lyrics?.lines ?? null
-      const det = await host.detectBeats({
-        drums: 'drums',
-        bass: have.bass ? 'bass' : undefined,
-        vocals: have.vocals ? 'vocals' : undefined,
-        inst: have.inst,
+      const det = await host.detectBeats(project, {
+        drums: rel('drums'),
+        bass: have.bass ? rel('bass') : undefined,
+        vocals: have.vocals ? rel('vocals') : undefined,
+        inst: have.inst.map(rel),
         lineStarts: lines ? lines.map((l) => l.words[0]?.s ?? l.start) : null,
         words: lines ? lines.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) : null,
         ml
@@ -400,12 +449,10 @@ export async function analyzeProject(
       }
     }
 
-    // The grid is done with the far side: give the memory back before the key
-    // and the melody, both of which may fall back to putting stems there
-    // themselves (a FLAC project, or JS newer than the installed binary) —
-    // and the melody stage often overlaps a player holding the same song
-    // decoded for playback. The finally clears again, harmlessly.
-    if (wantAudio) await host.clearStems()
+    // Nothing this stage put anything on the far side any more — every
+    // fallback that does (a FLAC project, or JS newer than the installed
+    // binary) clears up after itself inside deps.ts, on the spot. The clear
+    // in the finally below is what still guarantees it.
 
     if (plan.key && (keyInst.length > 0 || stems.bass)) {
       step('Reading the key…', 0.45)

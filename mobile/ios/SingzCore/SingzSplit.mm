@@ -18,6 +18,7 @@
 #include "ort_env.h"
 #include "analysis.h"
 #include "beat_this.h"
+#include "beats.h"
 #include "melody.h"
 #include "wav.h"
 
@@ -350,6 +351,144 @@ RCT_EXPORT_METHOD(mlGridFromStems:(NSArray<NSString *> *)stemPaths
       return;
     }
     resolve(MlGridDict(grid, CACurrentMediaTime() * 1000.0 - t0));
+  });
+}
+
+// Phase 4d: the beat detector in the core — `singz::detectBeats`, the
+// desktop's whole pipeline (neural fork, drums-first tracker, splices, bar
+// phase, head backcast, v20 courts) bit-identical, reading its stems from
+// disk so no audio crosses a JS runtime.
+//
+// Same module, method NAME and ARITY as Android's analyzeBeats — seven
+// arguments plus the promise pair. What deliberately differs is the
+// marshalling: Android crosses a JSON line from C++ and parses it in Kotlin,
+// while this builds its dictionary from the core's doubles directly. That is
+// not a style choice. Foundation's JSON number parser is not correctly
+// rounded on 17-significant-digit input (measured, see beat_this.h), so beat
+// times through a text hop would arrive one ULP off here and exactly right
+// there — invisible in any grid comparison and loud in a value one.
+//
+// `ml` is the neural lattice or nil, and carries only what the detector
+// reads: beats, downbeats, downbeatProb, fps. `beatProb` is not among them —
+// nothing in detectBeats or the courts touches it, and it is ~12 000 numbers
+// per four-minute song that would cross for nothing.
+RCT_EXPORT_METHOD(analyzeBeats:(NSString *)drumsPath
+                  bass:(NSString *)bassPath
+                  vocals:(NSString *)vocalsPath
+                  inst:(NSArray<NSString *> *)instPaths
+                  lineStarts:(NSArray<NSNumber *> *)lineStarts
+                  words:(NSArray<NSNumber *> *)words
+                  ml:(NSDictionary *)ml
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSString *drums = drumsPath ?: @"";
+  NSString *bass = bassPath ?: @"";
+  NSString *vocals = vocalsPath ?: @"";
+  NSArray<NSString *> *inst = instPaths ?: @[];
+  NSArray<NSNumber *> *lines = lineStarts ?: @[];
+  NSArray<NSNumber *> *flatWords = words ?: @[];
+  NSDictionary *mlIn = ml;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    const auto readStem = [&](NSString *path, singz::AnalysisStem &into) {
+      singz::MonoWav w = singz::readWavMono(std::string(path.UTF8String));
+      if (!w.ok) {
+        reject(@"beats_read", [NSString stringWithFormat:@"%@: %s", path.lastPathComponent, w.error.c_str()], nil);
+        return false;
+      }
+      into.mono = std::move(w.samples);
+      into.sampleRate = w.sampleRate;
+      return true;
+    };
+    singz::AnalysisStem drumsStem;
+    if (!readStem(drums, drumsStem)) return;
+
+    singz::AnalysisStem bassStem, vocalsStem;
+    bool haveBass = false, haveVocals = false;
+    if (bass.length > 0) {
+      if (!readStem(bass, bassStem)) return;
+      haveBass = true;
+    }
+    if (vocals.length > 0) {
+      if (!readStem(vocals, vocalsStem)) return;
+      haveVocals = true;
+    }
+    std::vector<singz::AnalysisStem> instStems;
+    instStems.reserve(inst.count);
+    for (NSString *p in inst) {
+      singz::AnalysisStem st;
+      if (!readStem(p, st)) return;
+      instStems.push_back(std::move(st));
+    }
+
+    singz::BeatAux aux;
+    aux.inst = &instStems;
+    if (haveBass) aux.bass = &bassStem;
+    if (haveVocals) aux.vocals = &vocalsStem;
+    for (NSNumber *t in lines) aux.lineStarts.push_back(t.doubleValue);
+    // A FLAT [s0,e0,s1,e1,…] array, like Android's. An odd length is a caller
+    // bug and is refused rather than silently dropping half a word.
+    if (flatWords.count % 2 != 0) {
+      reject(@"beats_words", @"words must be a flat [start, end, …] array", nil);
+      return;
+    }
+    for (NSUInteger i = 0; i + 1 < flatWords.count; i += 2)
+      aux.words.push_back({flatWords[i].doubleValue, flatWords[i + 1].doubleValue});
+
+    singz::MlGrid mlGrid;
+    // RN marshals a JS `null` as NSNull on some paths and nil on others, so
+    // ask the class rather than trusting nil.
+    if ([mlIn isKindOfClass:[NSDictionary class]]) {
+      const auto take = [&](NSString *key, std::vector<double> &into) {
+        NSArray<NSNumber *> *a = mlIn[key];
+        if (![a isKindOfClass:[NSArray class]]) return;
+        into.reserve(a.count);
+        for (NSNumber *v in a) into.push_back(v.doubleValue);
+      };
+      take(@"beats", mlGrid.beats);
+      take(@"downbeats", mlGrid.downbeats);
+      take(@"downbeatProb", mlGrid.downbeatProb);
+      NSNumber *fps = mlIn[@"fps"];
+      mlGrid.fps = [fps isKindOfClass:[NSNumber class]] ? fps.intValue : 0;
+      mlGrid.ok = !mlGrid.beats.empty();
+      if (mlGrid.ok) aux.ml = &mlGrid;
+    }
+
+    const double t0 = CACurrentMediaTime() * 1000.0;
+    singz::BeatDebug dbg;
+    const singz::BeatGrid grid = singz::detectBeats(drumsStem, aux, dbg);
+    const double elapsed = CACurrentMediaTime() * 1000.0 - t0;
+    // The detector's OWN refusal — no steady pulse deserves a metronome — is
+    // null, exactly as the TS returns, and the pipeline stores that verdict.
+    // A stem it could not READ rejected above; the two must stay distinct.
+    if (!grid.ok) {
+      resolve((id)kCFNull);
+      return;
+    }
+    NSMutableArray<NSNumber *> *beats = [NSMutableArray arrayWithCapacity:grid.beats.size()];
+    for (const double t : grid.beats) [beats addObject:@(t)];
+    NSMutableDictionary *out = [@{
+      @"beats" : beats,
+      @"bpm" : @(grid.bpm),
+      @"beatsPerBar" : @(grid.beatsPerBar),
+      @"downbeat" : @(grid.downbeat),
+      @"detVersion" : @(singz::kBeatDetectVersion),
+      @"elapsedMs" : @(elapsed)
+    } mutableCopy];
+    // Present only when the vote found bars: the TS's `downbeats` is
+    // undefined there, and an empty array is truthy — the app stores the
+    // difference.
+    if (grid.hasDownbeats) {
+      NSMutableArray<NSNumber *> *db = [NSMutableArray arrayWithCapacity:grid.downbeats.size()];
+      for (const int k : grid.downbeats) [db addObject:@(k)];
+      out[@"downbeats"] = db;
+    }
+    if (!grid.suspectAt.empty()) {
+      NSMutableArray<NSNumber *> *sa = [NSMutableArray arrayWithCapacity:grid.suspectAt.size()];
+      for (const double t : grid.suspectAt) [sa addObject:@(t)];
+      out[@"suspectAt"] = sa;
+    }
+    resolve(out);
   });
 }
 

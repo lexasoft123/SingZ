@@ -1507,6 +1507,133 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       Not done in this slice: the bindings (`analyzeBeats` on both platforms,
       arity-matched) and `deps.ts` switching off the worklet host, which is
       where the 22.6 s of a phone analysis actually goes.
+    - **Eleventh slice — the detector reaches the phone** (2026-08-20).
+      `analyzeBeats` binds on both platforms with the same name and the same
+      seven arguments: the drums, the bass, the vocals, the instrument bed,
+      the lyric line starts, the aligned words as a FLAT [s0,e0,s1,e1,…]
+      array, and the neural lattice or null. What the two platforms
+      deliberately do NOT share is the marshalling — Android crosses a JSON
+      line from C++ and parses it in Kotlin, iOS builds its dictionary from
+      the core's doubles without any text at all — because Foundation's JSON
+      number parser is not correctly rounded on 17-significant-digit input
+      and Kotlin's is. A beat time is a double that has to survive; the text
+      hop is safe on exactly one of the two platforms.
+      The lattice crosses as three arrays plus fps, not four: nothing in
+      `detectBeats` or the courts reads `beatProb`, and it is ~12 000 numbers
+      per four-minute song.
+      `deps.ts` chooses the native when every stem is WAV and the installed
+      binary carries the method, and falls back to the worklet TS otherwise —
+      a copied desktop project's FLAC, or JS newer than the app. The fallback
+      loads its stems ONE AT A TIME and awaits each: ~53 MB of float32 apiece,
+      and decoding four at once is four times the peak for no wall-clock gain.
+      `pipeline.ts` no longer crosses anything to any runtime — `put()` is
+      gone entirely — which means the beat stems must be named in the STAMP by
+      hand, because put() used to do that as a side effect. A stem left off
+      that list could be replaced mid-run without the commit noticing;
+      `analysis-pipeline.test.ts` watches the VOCALS specifically, since every
+      other aux stem is also named by the key stage and would pass even if the
+      beat list dropped it.
+      **Measured on the iOS Simulator, four-minute song**: 8.5 s native
+      against 31.4 s on the worklet host for the same stems, and 51 s through
+      the FLAC fallback (which decodes as well as tracks). The whole pipeline
+      run reports `load 0 ms` now, which is the change stated in one number.
+      **Verified value for value on device**, not by counts: the new
+      `mobile/tests/beats-native-ios.cjs` runs the native, the worklet TS and
+      the deps branch over one project and requires every beat time, the
+      tempo, the meter, the rotation, every bar index and every suspect mark
+      to agree — then runs the whole thing again over a lossless FLAC copy,
+      where the fallback must reproduce the native's grid EXACTLY rather than
+      approximately. It does. The suite asks the INSTALLED binary for
+      `analyzeBeats` before anything else, because Metro serves JS live and a
+      build made before this landed would silently take the fallback and
+      compare the TypeScript against itself.
+      Mutation found the sharpness of that check to be input-dependent, which
+      is now in its header: with the seeded project's guitar and piano silent,
+      a fallback mutated to drop its LAST instrument stem passed. Moving the
+      mutation to the first (the one with music) gave 919 beats on a different
+      rotation and turned it red.
+      **Android is driven too, on the user's own POCO X6 Pro.**
+      `beats-native-android.cjs` is the iOS suite's sibling — the same
+      comparison, a different target selector — and it exists as its own file
+      rather than a flag because the two bindings MARSHAL DIFFERENTLY: iOS
+      builds its dictionary from the core's doubles, Android crosses a JSON
+      line and parses it in Kotlin. A beat time that lost a bit in that text
+      hop would be invisible to every count and to the iOS suite. It does not:
+      513 beats, 97.5 bpm, 129 bars, identical to the worklet's, in **25.7 s
+      native against 126.1 s** on a 5.3-minute song. The phone got the build
+      with `-PdebugAppIdSuffix=.debug`, which is what keeps the release app's
+      downloaded songs and Drive sign-in intact.
+      **Both suites cross the FULL aux**, which review caught them not doing:
+      the lattice and the aligned words are the two arguments the real
+      pipeline always fills and a bare comparison never sends, and a
+      mis-marshalled word pair or ml dictionary yields a grid that is wrong
+      and is stored under an unchanged detVersion — never re-derived. The
+      suites now report what actually crossed (iOS 176 words / 894 ml beats,
+      Android 296 words / 545 ml beats) and say so out loud when either
+      crossed empty. Holding that aux constant is also why the FLAC leg takes
+      its lattice from the WAV twin: the core cannot read FLAC, and an unequal
+      aux would make the fallback comparison answer a different question.
+    - **Player + analysis on one real phone, measured** (2026-08-20). The
+      number `keepStems` exists for, and which had never been read off a
+      device. POCO X6 Pro, a 5.3-minute six-stem song, total PSS from
+      `dumpsys meminfo` (never a JS eval — opening a song decodes six stems
+      and evaluating during a decodeAudioData segfaults the Hermes
+      inspector):
+      catalog with nothing open **369 MB**; the song open in the player
+      **1243 MB** (+874 for six decoded stems); and with a full forced
+      analysis running ON TOP of it, including the neural lattice, a peak of
+      **2118 MB** — +875 MB over the open song.
+      The same song analysed the OLD way, with the worklet leg crossing six
+      more decoded stems to the analysis runtime, peaks at **2236 MB**:
+      +1060 MB over its open song, and that figure carries NO ORT session at
+      all. So the core's path costs less at its peak than the worklet's did
+      while doing strictly more — the ~700 MB ONNX session included. At 12 GB
+      the phone is nowhere near trouble; the figure to carry forward for the
+      6 GB tier is that a song open PLUS an analysis is a ~2.1 GB event, not
+      the ~2.9 GB the two stem sets would have made of it.
+    - **The corpus gate: device C++ == host C++, twelve songs, both
+      platforms** (2026-08-20). `mobile/tests/beats-corpus.cjs` closes the
+      last link in the chain. `eval/beats-parity.mjs` proves TypeScript ≡ C++
+      on the HOST across the library; `beats-native-{ios,android}.cjs` prove
+      the core ≡ the worklet TS on ONE song, on the device. Neither says
+      whether an ARM build, a different libm or a different ORT gives the
+      same answer as the machine the gate runs on. This does: it seeds a
+      corpus, asks the device for each grid, runs the host CLI over the SAME
+      bytes, and compares value for value.
+      **11 songs with a grid, identical on both, plus one both sides refused**
+      — on the iPhone 17 Pro simulator (5.7-7.3 s per 90-second excerpt) and
+      on the user's POCO X6 Pro (7.2-7.3 s). The two devices also agree with
+      each other, which is not something either suite alone can say.
+      It is honest about its scope in its own header: the neural lattice is
+      OFF on both sides, because feeding the host CLI the identical lattice
+      means shipping ~13 000 numbers back per song for a comparison the
+      single-song suites already make with the real thing. So the corpus is
+      the homegrown pipeline and the v20 courts; the ML fork is covered
+      per-platform on one song each and across 17 songs on the host.
+      Mutation-checked, because device and host run the SAME C++ source and a
+      bug in it would move both: pointing the host at a neighbouring song
+      turns that row red with `host 94 beats vs device 118; first difference
+      at index 0`.
+    - **A song sheet, because the analysis was invisible** (2026-08-20, at the
+      user's request: "there is no possibility to understand what is current
+      beat detection state on the phone"). The player's header gained a
+      top-right control opening a per-song sheet: the beat (tempo, meter, bar
+      count — or the live progress line, or the verdict), the "better beats"
+      models with their download, the key, the melody and the lyrics.
+      The state worth the whole feature is the middle one. A song nothing has
+      read, a song being read right now, and a song the detector listened to
+      and honestly found no beat in all looked identical from the player — and
+      the third is a stored VERDICT the app deliberately never revisits, so
+      from the outside it is indistinguishable from a bug. It now says so, and
+      offers the one action that changes the answer.
+      "Detect again" needed a real addition rather than a button: every stamp
+      says nothing needs doing, which is exactly why the singer is pressing
+      it. `planAnalysis` gained a `force` that sets every stamp and every
+      stored verdict aside and runs each detector the stems allow; hand-placed
+      bar lines still survive, because analyzeProject folds them back. Driven
+      on the simulator: the sheet went through "Listening for the beat…" and
+      "Finding the beat…" to a fresh grid, which is a real run — a no-op would
+      have gone straight from "Getting ready…" to done.
 
 ## Top risks
 

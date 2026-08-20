@@ -76,9 +76,18 @@ directions. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
-`offline-cache.cjs`, `custom-track.cjs`): CDP over Metro against the iOS
+`offline-cache.cjs`, `custom-track.cjs`, `beats-native-ios.cjs`): CDP over
+Metro against the iOS
 Simulator — run them
-after engine or loading changes. Pure-JS mobile logic that no device can show
+after engine or loading changes. `beats-native-{ios,android}.cjs` are a PAIR
+and both are owed: the two bindings marshal differently (iOS builds its dict
+from the core's doubles, Android crosses a JSON line and parses it in Kotlin),
+so a value lost in that text hop is invisible to the iOS half. Both want a
+project whose stems ALL carry audio — a silent stem discriminates nothing, and
+a fallback mutated to drop one passed until the mutation was moved to a stem
+with music in it — and both report whether the LATTICE and the aligned WORDS
+actually crossed, because a bare comparison sends neither and those are the
+two arguments the real pipeline always fills. Pure-JS mobile logic that no device can show
 (the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
 — needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
 our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
@@ -576,7 +585,13 @@ canary and synthesizes the bundled sample song via make-sample.js) and
 builds the full APK only on `v*` tags / manual dispatch, attaching
 `SingZ-<tag>-android.apk` to the release — the family fleet sideloads
 that. Superseded same-ref runs auto-cancel. Bump `package.json` version to match
-the tag (artifact names use it). Engine steps are cached keyed on the vendor
+the tag (artifact names use it) — **and the iOS project with it**:
+`MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in
+`mobile/ios/SingZPlayer.xcodeproj/project.pbxproj` are the one place a version
+is written down by hand (android/app/build.gradle reads package.json, the
+desktop reads it too), and iOS treats an install of an unchanged version as
+nothing to do — so a forgotten bump ships an `.ipa` that silently will not
+replace the copy already on the phone. Engine steps are cached keyed on the vendor
 scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
 `releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.
 

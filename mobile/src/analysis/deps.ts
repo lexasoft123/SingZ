@@ -11,8 +11,10 @@ import * as host from './host'
 import type { MonoStem } from './host'
 import {
   audioDurationNative,
+  detectBeatsNative,
   estimateKeyNative,
   mlGridFromStemsNative,
+  nativeBeatsAvailable,
   nativeKeyAvailable,
   nativeMelodyAvailable,
   nativeMlGridAvailable,
@@ -100,7 +102,61 @@ export function realAnalysisHost(): AnalysisHost {
   return {
     putStem: host.putStem,
     clearStems: host.clearStems,
-    detectBeats: host.detectBeats,
+    /** Which implementation `detectBeats` would use for a WAV project on this
+     *  build — the pipeline asks so it can word the wait, since the fallback
+     *  decodes six stems inside the call. */
+    beatsAreNative: () => nativeBeatsAvailable(),
+    /**
+     * The grid, in the core — the desktop's whole detectBeats, reading the
+     * stems itself. This is where a phone analysis actually spends its time
+     * (22.6 s of a 26 s run on the worklet host, measured), and the core does
+     * it in a fraction of that with no stem crossing a JS runtime.
+     *
+     * The fallback is the worklet TS, unchanged: a copied desktop project's
+     * FLAC stems, or an older native beside newer JS. It loads and clears
+     * here rather than in the pipeline, so the stems live for exactly the one
+     * call — the same shape estimateKeyFromStems already had.
+     */
+    detectBeats: async (project, args) => {
+      const rels = [args.drums, args.bass, args.vocals, ...(args.inst ?? [])].filter(
+        (r): r is string => typeof r === 'string'
+      )
+      if (rels.every(coreReads) && nativeBeatsAvailable())
+        return detectBeatsNative(project, args)
+      // ONE AT A TIME, awaited in sequence — never Promise.all. Each stem is
+      // ~53 MB of float32 for a five-minute song, and the local copy is only
+      // dropped once putStem has handed it over; decoding four of them
+      // concurrently is four times the peak for no wall-clock gain on a phone.
+      const cross = async (rel: string | undefined, id: string) => {
+        if (!rel) return undefined
+        await host.putStem(id, await loadMono44k(project, rel))
+        return id
+      }
+      try {
+        const drums = await cross(args.drums, 'drums')
+        const bass = await cross(args.bass, 'bass')
+        const vocals = await cross(args.vocals, 'vocals')
+        const inst: string[] = []
+        // Indexed names, and the ORDER is the caller's: the fill material and
+        // the harmonic sum both read this list in sequence.
+        for (const [i, rel] of (args.inst ?? []).entries()) {
+          const id = await cross(rel, `beat-inst-${i}`)
+          if (id) inst.push(id)
+        }
+        if (!drums) return null // no drums, no grid — the desktop's own rule
+        return await host.detectBeats({
+          drums,
+          bass,
+          vocals,
+          inst,
+          lineStarts: args.lineStarts,
+          words: args.words,
+          ml: args.ml
+        })
+      } finally {
+        await host.clearStems()
+      }
+    },
     // The lattice has no worklet fallback, on purpose: no models or FLAC
     // stems is the packless-desktop condition, and the answer there is a
     // legitimate no-ml grid — not a slower path to the same one.

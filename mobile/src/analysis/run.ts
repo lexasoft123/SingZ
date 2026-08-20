@@ -65,6 +65,8 @@ interface Job {
   dir: string
   stems: Record<string, string>
   lyrics: { lines: LyricLine[] } | null
+  /** Asked for by hand rather than by a stale stamp. */
+  force?: boolean
 }
 
 const queue: Job[] = []
@@ -78,9 +80,18 @@ export const analysisPending = (dir: string): boolean =>
  * Ask for a project's analyses. Returns at once; the answer arrives as an
  * ANALYSIS_EVENT and, meanwhile, as progress. Duplicate asks collapse.
  */
-export function startAnalysis(dir: string, stems: Record<string, string>, lyrics: { lines: LyricLine[] } | null): void {
+export function startAnalysis(
+  dir: string,
+  stems: Record<string, string>,
+  lyrics: { lines: LyricLine[] } | null,
+  /** The singer pressed "detect again": ignore every stamp and verdict and
+   *  run whatever the stems allow. Still single-flight — a forced run while
+   *  one is already going for this project is the same answer arriving, not
+   *  a reason to do it twice. */
+  force = false
+): void {
   if (analysisPending(dir)) return
-  queue.push({ dir, stems, lyrics })
+  queue.push({ dir, stems, lyrics, force })
   void pump()
 }
 
@@ -102,6 +113,7 @@ async function pump(): Promise<void> {
     const announced = { beat: false, key: false, melody: false }
     const res = await analyzeProject(dir, job.stems, {
       lyrics: job.lyrics,
+      force: job.force === true,
       onStep: (text, frac) => setProgress({ dir, text, frac }),
       // The grid is on disk a minute before the melody: tell the player now,
       // so the metronome lights up when the beat is found, not when pYIN is

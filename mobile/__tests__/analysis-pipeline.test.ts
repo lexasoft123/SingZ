@@ -58,6 +58,38 @@ describe('planAnalysis — the desktop triggers', () => {
     expect(planAnalysis(doc({ beat: autoGrid(BEAT_DETECT_VERSION - 1) }), SIX, 200).beat).toBe(true)
     expect(planAnalysis(doc({ beat: { ...autoGrid(1), source: 'manual' } }), SIX, 200).beat).toBe(false)
   })
+  // `force` is the "detect again" button: the stamps say nothing needs doing,
+  // which is exactly why it was pressed. Each case below is one of the three
+  // decisions it is allowed to invert — and the fourth is the one it is NOT.
+  test('force overrides a current stamp, a fitting melody and a stored verdict', () => {
+    const current = doc({
+      beat: autoGrid(),
+      key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION },
+      melody: melodyFor(200)
+    })
+    expect(planAnalysis(current, SIX, 200)).toEqual({ beat: false, key: false, melody: false })
+    expect(planAnalysis(current, SIX, 200, false, true)).toEqual({ beat: true, key: true, melody: true })
+
+    // A negative verdict binds without force and is re-asked with it.
+    const verdict = doc({})
+    verdict.settings = { ...verdict.settings, analysisNone: { beat: BEAT_DETECT_VERSION, beatMl: true } }
+    expect(planAnalysis(verdict, SIX, 200).beat).toBe(false)
+    expect(planAnalysis(verdict, SIX, 200, false, true).beat).toBe(true)
+  })
+  test('force does NOT re-detect a hand-made grid — the phone has no editor to rebuild one', () => {
+    const manual = doc({ beat: { ...autoGrid(1), source: 'manual' } })
+    expect(planAnalysis(manual, SIX, 200, false, true).beat).toBe(false)
+    // …and it still forces the detectors that have nothing hand-made to lose.
+    expect(planAnalysis(manual, SIX, 200, false, true).key).toBe(true)
+  })
+  test('force cannot conjure a detector the stems do not support', () => {
+    const { drums: _d, vocals: _v, ...noDrumsNoVox } = SIX
+    expect(planAnalysis(doc({}), noDrumsNoVox, 200, false, true)).toEqual({
+      beat: false,
+      key: true,
+      melody: false
+    })
+  })
   test('no drums, no grid — even with nothing stored', () => {
     const { drums: _d, ...noDrums } = SIX
     expect(planAnalysis(doc(), noDrums, 200).beat).toBe(false)
@@ -115,7 +147,7 @@ function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): 
       w.mlAsks.push(rels)
       return null
     },
-    detectBeats: async (args) => {
+    detectBeats: async (_project, args) => {
       w.detectArgs.push(args)
       return { beats: [0.5, 1, 1.5, 2, 2.5], bpm: 120, beatsPerBar: 4, downbeat: 0, downbeats: [0, 4] }
     },
@@ -171,13 +203,14 @@ describe('analyzeProject', () => {
     expect(d.settings.key?.pc).toBe(9)
     expect(d.settings.melody?.f0).toBeTruthy()
     expect(d.savedAt).toBe('NOW')
-    // the grid's stems crossed one at a time (vocals as its aux, first);
-    // the melody read its own file and crossed nothing; the far side was
-    // cleared before the melody stage and again in finally
-    expect(w.puts[0]).toBe('vocals')
-    expect(new Set(w.puts)).toEqual(new Set(Object.keys(SIX)))
+    // NOTHING crossed to the far side: the grid, the key and the melody all
+    // read their own files in the core, and the worklet fallbacks live behind
+    // `host` where they load and clear for themselves. This assertion is the
+    // whole point of the change that moved the grid's stems off the runtime —
+    // it used to read `w.puts[0] === 'vocals'` and list all six.
+    expect(w.puts).toEqual([])
     expect(w.tracked).toEqual(['stems/vocals.wav'])
-    expect(w.cleared).toBe(2)
+    expect(w.cleared).toBeGreaterThanOrEqual(1)
     expect(steps.some((s) => s.startsWith('Tracking the melody'))).toBe(true)
   })
 
@@ -247,9 +280,12 @@ describe('analyzeProject', () => {
     const args = w.detectArgs[0] as { lineStarts: number[]; words: { s: number; e: number }[]; inst: string[]; bass?: string; vocals?: string }
     expect(args.lineStarts).toEqual([1.1, 3]) // first word's start, else the line's
     expect(args.words).toEqual([{ s: 1.1, e: 1.4 }, { s: 1.5, e: 1.9 }])
-    expect(new Set(args.inst)).toEqual(new Set(['guitar', 'piano', 'other']))
-    expect(args.bass).toBe('bass')
-    expect(args.vocals).toBe('vocals')
+    // Project-RELATIVE paths now, not stem ids: the core reads them itself.
+    expect(new Set(args.inst)).toEqual(
+      new Set(['stems/guitar.wav', 'stems/piano.wav', 'stems/other.wav'])
+    )
+    expect(args.bass).toBe('stems/bass.wav')
+    expect(args.vocals).toBe('stems/vocals.wav')
   })
 
   test('nothing to do → no writes, no puts, no tracking (the length came off the header)', async () => {
@@ -276,10 +312,10 @@ describe('analyzeProject', () => {
     const w = world(doc())
     // the player saves a transpose while the detectors run
     const orig = w.deps.host.detectBeats
-    w.deps.host.detectBeats = async (a) => {
+    w.deps.host.detectBeats = async (p, a) => {
       const cur = onDisk(w)
       w.disk.set('project.json', JSON.stringify({ ...cur, settings: { ...cur.settings, transpose: 3 } }))
-      return orig(a)
+      return orig(p, a)
     }
     await analyzeProject('T', SIX, { deps: w.deps })
     const d = onDisk(w)
@@ -290,18 +326,46 @@ describe('analyzeProject', () => {
   test('stems replaced under the run → the answer is dropped, never written', async () => {
     const w = world(doc())
     const orig = w.deps.host.detectBeats
-    w.deps.host.detectBeats = async (a) => {
+    w.deps.host.detectBeats = async (p, a) => {
       const cur = onDisk(w)
       w.disk.set(
         'project.json',
         JSON.stringify({ ...cur, stemHashes: { ...cur.stemHashes, 'drums.wav': { md5: 'other', size: 1, mtimeMs: 2 } } })
       )
-      return orig(a)
+      return orig(p, a)
     }
     await analyzeProject('T', SIX, { deps: w.deps })
     expect(w.writes).toEqual([]) // both commits refused
     expect(onDisk(w).settings.beat).toBeUndefined()
     expect(w.cleared).toBeGreaterThanOrEqual(1) // and the far side was still cleared
+  })
+
+  // put() used to add each stem to the stamp as a side effect of crossing it.
+  // Nothing crosses now, so the pipeline names them by hand — and a stem it
+  // forgot to name could be replaced mid-run without the commit noticing.
+  //
+  // VOCALS, specifically: drums is covered by the test above, and every other
+  // aux stem (bass, guitar, piano, other) is ALSO named by the key stage, so
+  // watching one of those would pass even if the beat list dropped it
+  // entirely. The vocals are the only stem the grid alone claims — the aux
+  // that votes phrase entries — and therefore the only one that tests this.
+  test('the vocals — the grid\'s own aux — are in the stamp: replaced mid-run, the answer drops', async () => {
+    const w = world(doc())
+    const orig = w.deps.host.detectBeats
+    w.deps.host.detectBeats = async (p, a) => {
+      const cur = onDisk(w)
+      w.disk.set(
+        'project.json',
+        JSON.stringify({
+          ...cur,
+          stemHashes: { ...cur.stemHashes, 'vocals.wav': { md5: 'other', size: 1, mtimeMs: 2 } }
+        })
+      )
+      return orig(p, a)
+    }
+    await analyzeProject('T', SIX, { deps: w.deps })
+    expect(w.writes).toEqual([])
+    expect(onDisk(w).settings.beat).toBeUndefined()
   })
 
   test('a project deleted under the run throws, and the far side is still cleared', async () => {

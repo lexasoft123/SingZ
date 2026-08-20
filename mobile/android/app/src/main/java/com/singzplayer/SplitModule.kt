@@ -16,6 +16,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
+import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.singzplayer.split.JobStore
 import com.singzplayer.split.SingzCore
@@ -297,6 +298,91 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
         promise.resolve(m)
       } catch (t: Throwable) {
         promise.reject("melody", t)
+      }
+    }
+  }
+
+  /**
+   * The beat detector in the core. Same arity and payload as iOS, per the rule
+   * at the top of SingzSplit.mm — and note what the two sides do NOT share:
+   * this one crosses a JSON line from C++ and parses it here, where iOS builds
+   * its dictionary from the doubles directly. Kotlin's number parser is
+   * correctly rounded and Foundation's is not (see beat_this.h), so the text
+   * hop is safe on exactly one of the two platforms.
+   *
+   * `ml` is the neural lattice or null; only the three arrays the detector
+   * actually reads cross (beats, downbeats, downbeatProb) plus fps.
+   */
+  @ReactMethod
+  fun analyzeBeats(
+    drumsPath: String,
+    bassPath: String,
+    vocalsPath: String,
+    instPaths: ReadableArray,
+    lineStarts: ReadableArray,
+    words: ReadableArray,
+    ml: ReadableMap?,
+    promise: Promise
+  ) {
+    thread(name = "singz-beats") {
+      val loadErr = SingzCore.ensureLoaded()
+      if (loadErr != null) {
+        promise.reject("beats_core", "core library: $loadErr")
+        return@thread
+      }
+      try {
+        val inst = Array(instPaths.size()) { instPaths.getString(it) ?: "" }
+        val lines = DoubleArray(lineStarts.size()) { lineStarts.getDouble(it) }
+        val flatWords = DoubleArray(words.size()) { words.getDouble(it) }
+        val mlArr = { key: String ->
+          val a = ml?.getArray(key)
+          if (a == null) DoubleArray(0) else DoubleArray(a.size()) { a.getDouble(it) }
+        }
+        val started = System.currentTimeMillis()
+        val json = SingzCore.analyzeBeats(
+          drumsPath, bassPath, vocalsPath, inst, lines, flatWords,
+          mlArr("beats"), mlArr("downbeats"), mlArr("downbeatProb"),
+          if (ml != null && ml.hasKey("fps")) ml.getInt("fps") else 0
+        )
+        val elapsed = System.currentTimeMillis() - started
+        if (json == null) {
+          promise.reject("beats_read", "could not read a stem for the beat detector")
+          return@thread
+        }
+        val obj = org.json.JSONObject(json)
+        if (!obj.getBoolean("ok")) {
+          // The detector's OWN refusal — no steady pulse deserves a metronome.
+          // A legitimate verdict the app stores, never an error.
+          promise.resolve(null)
+          return@thread
+        }
+        val m = Arguments.createMap()
+        m.putDouble("bpm", obj.getDouble("bpm"))
+        m.putInt("beatsPerBar", obj.getInt("beatsPerBar"))
+        m.putInt("downbeat", obj.getInt("downbeat"))
+        m.putInt("detVersion", obj.getInt("detVersion"))
+        m.putInt("elapsedMs", elapsed.toInt())
+        val beats = obj.getJSONArray("beats")
+        val ba = Arguments.createArray()
+        for (i in 0 until beats.length()) ba.pushDouble(beats.getDouble(i))
+        m.putArray("beats", ba)
+        // Only when the core wrote them: an ABSENT downbeats and an empty one
+        // are different answers upstream (the TS's undefined is not []).
+        if (obj.has("downbeats")) {
+          val db = obj.getJSONArray("downbeats")
+          val da = Arguments.createArray()
+          for (i in 0 until db.length()) da.pushInt(db.getInt(i))
+          m.putArray("downbeats", da)
+        }
+        if (obj.has("suspectAt")) {
+          val sa = obj.getJSONArray("suspectAt")
+          val aa = Arguments.createArray()
+          for (i in 0 until sa.length()) aa.pushDouble(sa.getDouble(i))
+          m.putArray("suspectAt", aa)
+        }
+        promise.resolve(m)
+      } catch (t: Throwable) {
+        promise.reject("beats", t)
       }
     }
   }

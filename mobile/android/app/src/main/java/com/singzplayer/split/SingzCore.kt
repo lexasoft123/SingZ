@@ -75,6 +75,38 @@ object SingzCore {
   external fun mlGridFromStems(stemPaths: Array<String>, modelsDir: String, dumpDir: String): String
 
   /**
+   * Phase 4d: the beat detector (core beats.cpp + courts.cpp — the desktop's
+   * whole `detectBeats`, bit-identical: the neural fork, the drums-first
+   * tracker, the splices, the bar phase, the head backcast and the v20
+   * courts). Reads its stems from disk, so no audio crosses a JS runtime.
+   *
+   * `bassPath`/`vocalsPath` may be "" (absent). `words` is a FLAT
+   * [s0,e0,s1,e1,…] array — the v20 meter court's witness — and an odd length
+   * is a caller bug, not half a word. The neural lattice arrives as its three
+   * arrays plus fps; `beatProb` is deliberately not among them, because
+   * nothing in detectBeats or the courts reads it and it is ~12 000 doubles
+   * per four-minute song.
+   *
+   * Returns the grid as one JSON line — `{"ok":false}` is the detector's own
+   * refusal (a drumless or rubato song), which the app stores as a verdict —
+   * or `null` when a stem could not be READ, which is a different answer and
+   * must not be mistaken for it. ON THE CALLING THREAD; seconds for a
+   * four-minute song.
+   */
+  external fun analyzeBeats(
+    drumsPath: String,
+    bassPath: String,
+    vocalsPath: String,
+    instPaths: Array<String>,
+    lineStarts: DoubleArray,
+    words: DoubleArray,
+    mlBeats: DoubleArray,
+    mlDownbeats: DoubleArray,
+    mlDownbeatProb: DoubleArray,
+    mlFps: Int
+  ): String?
+
+  /**
    * Phase 4c: the key detector (core analysis.cpp — the desktop's
    * estimateKeyFromStems, bit-identical). Returns [pc, minor(0/1),
    * detVersion], or an EMPTY array when the harmonic bed is silent — which

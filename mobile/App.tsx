@@ -231,6 +231,170 @@ if (TEST) {
       .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
     return true
   }
+  // Phase 4d: the core's BEAT detector on this device, over a project's own
+  // stems — the on-device half of eval/beats-parity.mjs, and the same shape as
+  // keyParity above. It runs the native AND the worklet TS on the same files
+  // and reports whether they agree, so a device that disagrees with the
+  // desktop says so HERE rather than in a stored grid nobody re-derives.
+  //
+  // Both halves matter. The native is what the app now uses; the TS is the
+  // reference the parity gate holds it to on the host, and running it here as
+  // well is what makes this a comparison rather than a smoke test.
+  hooks.beatsParity = (dir: string, stems: string[], ext = 'wav', mlFrom = '', useMl = true): boolean => {
+    hooks.echoDone = false
+    hooks.echoResult = null
+    void import('./src/latency').then((l) => l.setStoredText('singz.beatsParity.done', ''))
+    void Promise.all([import('./src/analysis/deps'), import('./src/analysis/host'), import('./src/analysis/native')])
+      .then(async ([d, h, n]) => {
+        const deps = d.realAnalysisDeps()
+        const rel = (id: string) => `stems/${id}.${ext}`
+        const inst = stems.filter((x) => x !== 'drums' && x !== 'bass' && x !== 'vocals')
+        const args: Parameters<ReturnType<typeof d.realAnalysisHost>['detectBeats']>[1] & {
+          lineStarts: number[]
+          words: { s: number; e: number }[]
+        } = {
+          drums: rel('drums'),
+          bass: stems.includes('bass') ? rel('bass') : undefined,
+          vocals: stems.includes('vocals') ? rel('vocals') : undefined,
+          inst: inst.map(rel),
+          lineStarts: [],
+          words: []
+        }
+        // The native reads the files itself and only understands WAV; a FLAC
+        // project has no native path by design (a copied desktop library).
+        // The AUX the real pipeline always fills, and which a bare comparison
+        // never crosses: the lyric line starts, the aligned WORDS (a flat
+        // number array on the bridge) and the neural LATTICE (a dictionary of
+        // three arrays). A grid built from a mis-marshalled word pair or a
+        // mis-marshalled lattice is wrong and is stored under an unchanged
+        // detVersion, so it is never re-derived — which makes this the one
+        // part of the crossing worth going out of the way to exercise.
+        let lines: { start: number; words: { s: number; e: number }[] }[] = []
+        try {
+          const raw = JSON.parse(await deps.readText(dir, 'lyrics.json')) as {
+            lines?: { start: number; words?: { s: number; e: number }[] }[]
+          }
+          lines = (raw.lines ?? []).map((l) => ({ start: l.start, words: l.words ?? [] }))
+        } catch {
+          lines = [] // no lyrics for this project — reported, not fatal
+        }
+        const aux = {
+          lineStarts: lines.map((l) => l.words[0]?.s ?? l.start).filter((t) => Number.isFinite(t)),
+          words: lines.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e })))
+        }
+        // `mlFrom` names the project to compute the lattice FROM, which for a
+        // FLAC project is its WAV twin: the core cannot read FLAC, so a flac
+        // leg would otherwise get no lattice while the wav leg got one, and
+        // the two would be answering different questions. The comparison needs
+        // the aux held constant; the app's own behaviour (no phone-ml for a
+        // copied desktop project) is not what this hook is measuring.
+        const mlDir = mlFrom || dir
+        const mixRels = ['drums', 'bass', 'vocals', 'guitar', 'piano', 'other']
+          .filter((id) => stems.includes(id))
+          .map((id) => `stems/${id}.wav`)
+        const host = d.realAnalysisHost()
+        // `useMl` false is for a CORPUS run: the host CLI it is compared against
+        // would need the identical lattice to answer the same question, and
+        // shipping one back per song is a lot of numbers for a comparison the
+        // single-song suites already make. Off, both sides run the homegrown
+        // path over the same bytes.
+        const ml = useMl && (await host.mlAvailable()) ? await host.mlGrid(mlDir, mixRels) : null
+        Object.assign(args, aux, { ml })
+
+        const t0 = Date.now()
+        const nat = ext === 'wav' ? await n.detectBeatsNative(dir, args) : null
+        const nativeMs = Date.now() - t0
+        // And the branch itself: what deps.ts actually hands the pipeline for
+        // THESE paths. On wav that is the native; on flac it is the worklet
+        // fallback, which is the only place that fallback's stem naming and
+        // ORDER are ever executed.
+        const t2 = Date.now()
+        const via = await host.detectBeats(dir, args)
+        const viaMs = Date.now() - t2
+        // The worklet path wants the stems on the far side, one at a time.
+        const ids: string[] = []
+        const cross = async (r: string | undefined, id: string) => {
+          if (!r) return undefined
+          await h.putStem(id, await d.loadMono44k(dir, r))
+          ids.push(id)
+          return id
+        }
+        const drumsId = await cross(args.drums, 'bp-drums')
+        const bassId = await cross(args.bass, 'bp-bass')
+        const vocId = await cross(args.vocals, 'bp-vocals')
+        const instIds: string[] = []
+        for (const [i, r] of (args.inst ?? []).entries()) {
+          const id = await cross(r, `bp-inst-${i}`)
+          if (id) instIds.push(id)
+        }
+        const t1 = Date.now()
+        let ts: Awaited<ReturnType<typeof n.detectBeatsNative>> = null
+        try {
+          ts = drumsId
+            ? await h.detectBeats({
+                drums: drumsId,
+                bass: bassId,
+                vocals: vocId,
+                inst: instIds,
+                lineStarts: args.lineStarts,
+                words: args.words,
+                ml: args.ml
+              })
+            : null
+        } finally {
+          // finally, like every other path here: a throw above would otherwise
+          // leave six decoded stems (~53 MB each) pinned on the analysis
+          // runtime for the session, and the driver would report a closed
+          // inspector instead of the real failure.
+          await h.clearStems()
+        }
+        const tsMs = Date.now() - t1
+        const arr = (x?: number[] | null) => (x ?? []).join(',')
+        type G = typeof ts
+        const alike = (a: G, b: G) =>
+          (a === null && b === null) ||
+          (!!a &&
+            !!b &&
+            arr(a.beats) === arr(b.beats) &&
+            a.bpm === b.bpm &&
+            a.beatsPerBar === b.beatsPerBar &&
+            a.downbeat === b.downbeat &&
+            arr(a.downbeats) === arr(b.downbeats) &&
+            arr(a.suspectAt) === arr(b.suspectAt))
+        return {
+          same: ext === 'wav' ? alike(nat, ts) : true,
+          viaSame: alike(via, ts),
+          ext,
+          grid: via && { beats: via.beats.length, bpm: via.bpm, bpb: via.beatsPerBar, downbeat: via.downbeat, bars: via.downbeats?.length ?? null },
+          // The whole grid, so a driver can compare two RUNS of this hook (a
+          // wav project against its own lossless FLAC copy) value for value
+          // rather than by these counts.
+          digest: via ? `${arr(via.beats)}|${via.bpm}|${via.beatsPerBar}|${via.downbeat}|${arr(via.downbeats)}|${arr(via.suspectAt)}` : null,
+          // Counts and the first few values: the driver compares `same`, which
+          // was computed over EVERY value above — these are for the human
+          // reading a failure, not the gate.
+          native: nat && { beats: nat.beats.length, bpm: nat.bpm, bpb: nat.beatsPerBar, downbeat: nat.downbeat, bars: nat.downbeats?.length ?? null, first3: nat.beats.slice(0, 3) },
+          ts: ts && { beats: ts.beats.length, bpm: ts.bpm, bpb: ts.beatsPerBar, downbeat: ts.downbeat, bars: ts.downbeats?.length ?? null, first3: ts.beats.slice(0, 3) },
+          ms: { native: nativeMs, ts: tsMs, via: viaMs },
+          stems: stems.length,
+          // What the aux ACTUALLY carried, so a driver can refuse to call a
+          // run a pass when the two hardest arguments crossed empty.
+          crossed: { words: args.words.length, lineStarts: args.lineStarts.length, mlBeats: ml ? ml.beats.length : 0 }
+        }
+      })
+      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
+      .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
+      // A CRUMB in the prefs, not just the in-memory flag. The Android driver
+      // cannot poll this over CDP: the worklet leg decodes six stems, and
+      // evaluating JS while a decodeAudioData is in flight segfaults the
+      // Hermes inspector (CLAUDE.md — 3/3 reproducible, and it reads as an
+      // OOM). It watches this pref with `adb run-as` instead and evaluates
+      // exactly once, after the decodes are over.
+      .finally(() => {
+        void import('./src/latency').then((l) => l.setStoredText('singz.beatsParity.done', String(Date.now())))
+      })
+    return true
+  }
   // Phase 4b, the pipeline's own entry: the grid FROM STEMS, summed and
   // decimated in the core (mlGridFromStems) — what analyzeProject actually
   // calls. Drivers compare it against mlGridParity fed the same mix rendered

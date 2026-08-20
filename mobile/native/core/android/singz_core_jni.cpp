@@ -7,9 +7,11 @@
 #include <atomic>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "analysis.h"
 #include "beat_this.h"
+#include "beats.h"
 #include "melody.h"
 #include "ort_env.h"
 #include "progress.h"
@@ -205,6 +207,143 @@ Java_com_singzplayer_split_SingzCore_analyzeKey(JNIEnv* env, jobject /*thiz*/, j
   jdoubleArray arr = env->NewDoubleArray(3);
   env->SetDoubleArrayRegion(arr, 0, 3, v);
   return arr;
+}
+
+/**
+ * The beat detector in the core — `singz::detectBeats`, the desktop's whole
+ * pipeline (ML fork, tracker, splices, bar phase, head backcast, v20 courts)
+ * bit-identical, reading its stems from disk on a native thread.
+ *
+ * The aux is the app's: `bassPath`/`vocalsPath` may be "" (absent), `instPaths`
+ * is the harmonic bed, `lineStarts` are lyric line times, `words` are aligned
+ * word times as a FLAT [s0,e0,s1,e1,…] array (a nested one marshals awkwardly
+ * on both bridges and an odd length is a caller bug worth failing on), and
+ * `ml` is the neural lattice as three arrays plus its fps — `beatProb` is
+ * deliberately NOT taken: nothing in detectBeats or the courts reads it, and
+ * it is ~12 000 doubles per four-minute song that would cross the bridge for
+ * nothing.
+ *
+ * Out: the desktop's one JSON line, like mlGrid and for the same reason —
+ * it is a shape iOS can be held to as well, so the two platforms cannot
+ * drift in what they report. `null` means the stems could not be READ;
+ * `{"ok":false}` means the detector refused (the TS's null return), which is
+ * a legitimate verdict the pipeline stores. Kotlin's JSON number parser is
+ * correctly rounded, so the beat times survive the text hop exactly — the
+ * iOS binding builds its dictionary from the same doubles WITHOUT text,
+ * because Foundation's parser is not (see beat_this.h).
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_analyzeBeats(JNIEnv* env, jobject /*thiz*/, jstring jdrums,
+                                                  jstring jbass, jstring jvocals,
+                                                  jobjectArray jinst, jdoubleArray jlines,
+                                                  jdoubleArray jwords, jdoubleArray jmlBeats,
+                                                  jdoubleArray jmlDownbeats,
+                                                  jdoubleArray jmlDownbeatProb, jint jmlFps) {
+  const auto readStem = [&](const std::string& path, singz::AnalysisStem& into) {
+    singz::MonoWav w = singz::readWavMono(path);
+    if (!w.ok) return false;
+    into.mono = std::move(w.samples);
+    into.sampleRate = w.sampleRate;
+    return true;
+  };
+  const auto readDoubles = [&](jdoubleArray a) {
+    std::vector<double> out;
+    if (a == nullptr) return out;
+    const jsize n = env->GetArrayLength(a);
+    out.resize(static_cast<size_t>(n));
+    if (n > 0) env->GetDoubleArrayRegion(a, 0, n, out.data());
+    return out;
+  };
+
+  singz::AnalysisStem drums;
+  if (!readStem(toStd(env, jdrums), drums)) return nullptr;
+
+  singz::AnalysisStem bass, vocals;
+  bool haveBass = false, haveVocals = false;
+  const std::string bassPath = toStd(env, jbass);
+  if (!bassPath.empty()) {
+    if (!readStem(bassPath, bass)) return nullptr;
+    haveBass = true;
+  }
+  const std::string vocalsPath = toStd(env, jvocals);
+  if (!vocalsPath.empty()) {
+    if (!readStem(vocalsPath, vocals)) return nullptr;
+    haveVocals = true;
+  }
+  std::vector<singz::AnalysisStem> inst;
+  const jsize nInst = jinst != nullptr ? env->GetArrayLength(jinst) : 0;
+  for (jsize i = 0; i < nInst; i++) {
+    jstring js = static_cast<jstring>(env->GetObjectArrayElement(jinst, i));
+    const std::string path = toStd(env, js);
+    env->DeleteLocalRef(js);  // a long inst list would otherwise fill the local frame
+    singz::AnalysisStem st;
+    if (!readStem(path, st)) return nullptr;
+    inst.push_back(std::move(st));
+  }
+
+  singz::BeatAux aux;
+  aux.inst = &inst;
+  if (haveBass) aux.bass = &bass;
+  if (haveVocals) aux.vocals = &vocals;
+  aux.lineStarts = readDoubles(jlines);
+  const std::vector<double> flatWords = readDoubles(jwords);
+  if (flatWords.size() % 2 != 0) return nullptr;  // a caller bug, not a silent half-word
+  for (size_t i = 0; i + 1 < flatWords.size(); i += 2)
+    aux.words.push_back({flatWords[i], flatWords[i + 1]});
+
+  singz::MlGrid ml;
+  ml.beats = readDoubles(jmlBeats);
+  ml.downbeats = readDoubles(jmlDownbeats);
+  ml.downbeatProb = readDoubles(jmlDownbeatProb);
+  ml.fps = static_cast<int>(jmlFps);
+  ml.ok = !ml.beats.empty();
+  if (ml.ok) aux.ml = &ml;
+
+  singz::BeatDebug dbg;
+  const singz::BeatGrid grid = singz::detectBeats(drums, aux, dbg);
+
+  std::string out = "{\"ok\":";
+  if (!grid.ok) {
+    out += "false}";
+    return env->NewStringUTF(out.c_str());
+  }
+  char buf[64];
+  const auto num = [&](double v) {
+    std::snprintf(buf, sizeof buf, "%.17g", v);
+    out += buf;
+  };
+  out += "true,\"bpm\":";
+  num(grid.bpm);
+  std::snprintf(buf, sizeof buf, ",\"beatsPerBar\":%d,\"downbeat\":%d,\"beats\":[", grid.beatsPerBar,
+                grid.downbeat);
+  out += buf;
+  for (size_t i = 0; i < grid.beats.size(); i++) {
+    if (i) out += ',';
+    num(grid.beats[i]);
+  }
+  out += ']';
+  // ABSENT, not empty: the TS's `downbeats` is undefined when the vote found
+  // no bars, and the app stores the difference (an empty array is truthy).
+  if (grid.hasDownbeats) {
+    out += ",\"downbeats\":[";
+    for (size_t i = 0; i < grid.downbeats.size(); i++) {
+      if (i) out += ',';
+      std::snprintf(buf, sizeof buf, "%d", grid.downbeats[i]);
+      out += buf;
+    }
+    out += ']';
+  }
+  if (!grid.suspectAt.empty()) {
+    out += ",\"suspectAt\":[";
+    for (size_t i = 0; i < grid.suspectAt.size(); i++) {
+      if (i) out += ',';
+      num(grid.suspectAt[i]);
+    }
+    out += ']';
+  }
+  std::snprintf(buf, sizeof buf, ",\"detVersion\":%d}", singz::kBeatDetectVersion);
+  out += buf;
+  return env->NewStringUTF(out.c_str());
 }
 
 /**
