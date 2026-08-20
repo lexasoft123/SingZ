@@ -308,6 +308,33 @@ async function main() {
   const doc1 = JSON.parse(shell(`cat "${DOCS}/${P.one}/project.json"`))
   const rows1 = Object.keys(doc1.stemHashes ?? {}).sort()
   check('adoption: six stem rows', STEMS.every((s) => rows1.includes(`${s}.wav`)))
+
+  // Phase 4c: the melody in project.json came from the CORE's tracker
+  // (native/core/melody.cpp via JNI), and on this device it agrees with the
+  // desktop TS to the bit — asserted on song.wav (the seed as added; the
+  // split's vocals stem of a synthetic vocal is silent, so it would be a
+  // vacuous pass). The TS side decodes song.wav through audio-api INSIDE
+  // the hook: sit that decode out before polling — the Hermes-inspector
+  // rule about evals mid-decode applies to it too. Skipped on a FLAC seed
+  // for the same reason the reconstruction gate below is: without ffmpeg
+  // the kept original is song.flac, and the core reads WAV.
+  if (wavSeed) {
+    await conn.evaluate(`globalThis.__test.melodyParity(${JSON.stringify(P.one)}, 'song.wav'); true`)
+    await sleep(20000)
+    let par = null
+    for (let i = 0; i < 150; i++) {
+      await sleep(2000)
+      if ((await conn.evaluate('globalThis.__test.echoDone'))?.result?.value) break
+    }
+    par = JSON.parse((await conn.evaluate('JSON.stringify(globalThis.__test.echoResult ?? null)'))?.result?.value ?? 'null')
+    check('core melody tracker vs desktop TS on this device: bit-identical f0',
+      !!par && !par.error && par.differing === 0 && par.frames.native === par.frames.ts && par.frames.native > 100,
+      par ? (par.error ?? `${par.frames.native} frames, ${par.voiced.native}/${par.voiced.ts} voiced, ${par.differing} differing, native ${par.ms.native} ms vs TS ${par.ms.ts} ms`) : 'no result')
+    check('core melody tracker: the file has voiced content (else the parity is vacuous)', !!par && par.voiced.native > 100,
+      par ? `${par.voiced.native} voiced` : 'no result')
+  } else {
+    console.log('SKIP  melody parity (flac seed — song.wav absent without ffmpeg)')
+  }
   check('adoption: original lane gone from doc', !rows1.some((r) => r.startsWith('custom-original')) && !doc1.settings.custom)
   const stemsLs = shell(`ls "${DOCS}/${P.one}/stems/"`)
   check('adoption: original lane gone from disk', !stemsLs.includes('custom-original'))

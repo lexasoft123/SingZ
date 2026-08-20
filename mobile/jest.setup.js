@@ -71,6 +71,20 @@ jest.mock('react-native-reanimated', () => {
 });
 
 /**
+ * react-native-worklets installs its native runtime proxy at import time —
+ * absent under jest, like reanimated's. The analysis host (src/analysis/
+ * host.ts) is what imports it; the host is proven on the simulator
+ * (mobile/tests/split-ios.cjs, the hostSpike hook), and the pipeline's rules
+ * are jest-tested against a fake host, so here it only has to load.
+ */
+jest.mock('react-native-worklets', () => ({
+  __esModule: true,
+  createWorkletRuntime: () => ({ name: 'jest' }),
+  runOnRuntimeAsync: () => Promise.reject(new Error('no worklet runtime under jest')),
+  scheduleOnRN: () => {},
+}));
+
+/**
  * Skia loads its native bindings at import time (the Canvas the karaoke sweep
  * draws into). Same deal as audio: what it paints is a device question, so the
  * stub only has to let the module graph resolve. Fonts answer a fixed advance

@@ -1,14 +1,22 @@
 // JNI shim over mobile/native/core — kept to marshalling only; everything
 // with behavior (including the JSON the probe reports) lives in the shared
 // core so iOS binds the same code.
+#include <android/log.h>
 #include <jni.h>
 
 #include <atomic>
+#include <cstdio>
 #include <string>
+#include <vector>
 
+#include "analysis.h"
+#include "beat_this.h"
+#include "beats.h"
+#include "melody.h"
 #include "ort_env.h"
 #include "progress.h"
 #include "split_engine.h"
+#include "wav.h"
 
 namespace {
 
@@ -108,4 +116,377 @@ Java_com_singzplayer_split_SingzCore_runSplit(JNIEnv* env, jobject /*thiz*/,
 extern "C" JNIEXPORT void JNICALL
 Java_com_singzplayer_split_SingzCore_cancelSplit(JNIEnv* /*env*/, jobject /*thiz*/) {
   gProgress.cancel.store(true);
+}
+
+// ---- Phase 4c: the melody tracker (melody.cpp) -----------------------------
+//
+// Reads the stem WAV itself and returns [hopSec, sampleRate, durationSec,
+// detVersion, f0...] as one double array — one JNI copy (a boxed list of
+// 10k values would not be), and doubles so hopSec keeps every bit the TS
+// stores (a float32 hop would round it). An empty array = "could not
+// read".
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_singzplayer_split_SingzCore_analyzeMelody(JNIEnv* env, jobject /*thiz*/, jstring jpath) {
+  const char* c = env->GetStringUTFChars(jpath, nullptr);
+  if (c == nullptr) return nullptr;  // OOM, exception pending — let it surface
+  const std::string path(c);
+  env->ReleaseStringUTFChars(jpath, c);
+  singz::MonoWav wav = singz::readWavMono(path);
+  if (!wav.ok) return env->NewDoubleArray(0);
+  const singz::MelodyTrack t = singz::trackMelody(wav.samples.data(), wav.samples.size(), wav.sampleRate, nullptr);
+  std::vector<double> out;
+  out.reserve(4 + t.f0.size());
+  out.push_back(t.hopSec);
+  out.push_back(static_cast<double>(wav.sampleRate));
+  out.push_back(static_cast<double>(wav.samples.size()) / wav.sampleRate);
+  out.push_back(static_cast<double>(singz::kPitchDetectVersion));
+  for (const float v : t.f0) out.push_back(static_cast<double>(v));
+  jdoubleArray arr = env->NewDoubleArray(static_cast<jsize>(out.size()));
+  env->SetDoubleArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
+  return arr;
+}
+
+// [sampleRate, channels, frames, durationSec], or empty when unreadable.
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_singzplayer_split_SingzCore_wavInfo(JNIEnv* env, jobject /*thiz*/, jstring jpath) {
+  const char* c = env->GetStringUTFChars(jpath, nullptr);
+  if (c == nullptr) return nullptr;
+  const std::string path(c);
+  env->ReleaseStringUTFChars(jpath, c);
+  const singz::WavInfo wav = singz::readWavInfo(path);  // header only — no samples read
+  if (!wav.ok) return env->NewDoubleArray(0);
+  const double v[4] = {static_cast<double>(wav.sampleRate), static_cast<double>(wav.channels),
+                       static_cast<double>(wav.frames), static_cast<double>(wav.frames) / wav.sampleRate};
+  jdoubleArray arr = env->NewDoubleArray(4);
+  env->SetDoubleArrayRegion(arr, 0, 4, v);
+  return arr;
+}
+
+// [pc, minor(0/1), detVersion]; EMPTY means "no key in this audio" (the TS
+// null — a silent harmonic bed), which the pipeline stores as a verdict and
+// never asks about again. A stem that cannot be READ is a different answer
+// and must not be mistaken for it: null, so Kotlin rejects and iOS's
+// behaviour is matched. `paths` is the instrument stems; `bassPath` may be "".
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_singzplayer_split_SingzCore_analyzeKey(JNIEnv* env, jobject /*thiz*/, jobjectArray paths,
+                                                jstring jbass) {
+  std::vector<singz::AnalysisStem> stems;
+  const jsize n = paths != nullptr ? env->GetArrayLength(paths) : 0;
+  for (jsize i = 0; i < n; i++) {
+    jstring js = static_cast<jstring>(env->GetObjectArrayElement(paths, i));
+    const char* c = env->GetStringUTFChars(js, nullptr);
+    if (c == nullptr) return nullptr;
+    singz::MonoWav w = singz::readWavMono(std::string(c));
+    env->ReleaseStringUTFChars(js, c);
+    env->DeleteLocalRef(js);  // a long inst list would otherwise fill the local frame
+    if (!w.ok) return nullptr;  // unreadable ≠ silent
+    singz::AnalysisStem st;
+    st.mono = std::move(w.samples);
+    st.sampleRate = w.sampleRate;
+    stems.push_back(std::move(st));
+  }
+  singz::AnalysisStem bassStem;
+  bool haveBass = false;
+  if (jbass != nullptr) {
+    const char* c = env->GetStringUTFChars(jbass, nullptr);
+    if (c == nullptr) return nullptr;
+    const std::string path(c);
+    env->ReleaseStringUTFChars(jbass, c);
+    if (!path.empty()) {
+      singz::MonoWav w = singz::readWavMono(path);
+      if (!w.ok) return nullptr;  // unreadable ≠ silent
+      bassStem.mono = std::move(w.samples);
+      bassStem.sampleRate = w.sampleRate;
+      haveBass = true;
+    }
+  }
+  const singz::KeyGuess k = singz::estimateKeyFromStems(stems, haveBass ? &bassStem : nullptr);
+  if (!k.ok) return env->NewDoubleArray(0);
+  const double v[3] = {static_cast<double>(k.pc), k.minor ? 1.0 : 0.0,
+                       static_cast<double>(singz::kKeyDetectVersion)};
+  jdoubleArray arr = env->NewDoubleArray(3);
+  env->SetDoubleArrayRegion(arr, 0, 3, v);
+  return arr;
+}
+
+/**
+ * The beat detector in the core — `singz::detectBeats`, the desktop's whole
+ * pipeline (ML fork, tracker, splices, bar phase, head backcast, v20 courts)
+ * bit-identical, reading its stems from disk on a native thread.
+ *
+ * The aux is the app's: `bassPath`/`vocalsPath` may be "" (absent), `instPaths`
+ * is the harmonic bed, `lineStarts` are lyric line times, `words` are aligned
+ * word times as a FLAT [s0,e0,s1,e1,…] array (a nested one marshals awkwardly
+ * on both bridges and an odd length is a caller bug worth failing on), and
+ * `ml` is the neural lattice as three arrays plus its fps — `beatProb` is
+ * deliberately NOT taken: nothing in detectBeats or the courts reads it, and
+ * it is ~12 000 doubles per four-minute song that would cross the bridge for
+ * nothing.
+ *
+ * Out: the desktop's one JSON line, like mlGrid and for the same reason —
+ * it is a shape iOS can be held to as well, so the two platforms cannot
+ * drift in what they report. `null` means the stems could not be READ;
+ * `{"ok":false}` means the detector refused (the TS's null return), which is
+ * a legitimate verdict the pipeline stores. Kotlin's JSON number parser is
+ * correctly rounded, so the beat times survive the text hop exactly — the
+ * iOS binding builds its dictionary from the same doubles WITHOUT text,
+ * because Foundation's parser is not (see beat_this.h).
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_analyzeBeats(JNIEnv* env, jobject /*thiz*/, jstring jdrums,
+                                                  jstring jbass, jstring jvocals,
+                                                  jobjectArray jinst, jdoubleArray jlines,
+                                                  jdoubleArray jwords, jdoubleArray jmlBeats,
+                                                  jdoubleArray jmlDownbeats,
+                                                  jdoubleArray jmlDownbeatProb, jint jmlFps) {
+  const auto readStem = [&](const std::string& path, singz::AnalysisStem& into) {
+    singz::MonoWav w = singz::readWavMono(path);
+    if (!w.ok) return false;
+    into.mono = std::move(w.samples);
+    into.sampleRate = w.sampleRate;
+    return true;
+  };
+  const auto readDoubles = [&](jdoubleArray a) {
+    std::vector<double> out;
+    if (a == nullptr) return out;
+    const jsize n = env->GetArrayLength(a);
+    out.resize(static_cast<size_t>(n));
+    if (n > 0) env->GetDoubleArrayRegion(a, 0, n, out.data());
+    return out;
+  };
+
+  singz::AnalysisStem drums;
+  if (!readStem(toStd(env, jdrums), drums)) return nullptr;
+
+  singz::AnalysisStem bass, vocals;
+  bool haveBass = false, haveVocals = false;
+  const std::string bassPath = toStd(env, jbass);
+  if (!bassPath.empty()) {
+    if (!readStem(bassPath, bass)) return nullptr;
+    haveBass = true;
+  }
+  const std::string vocalsPath = toStd(env, jvocals);
+  if (!vocalsPath.empty()) {
+    if (!readStem(vocalsPath, vocals)) return nullptr;
+    haveVocals = true;
+  }
+  std::vector<singz::AnalysisStem> inst;
+  const jsize nInst = jinst != nullptr ? env->GetArrayLength(jinst) : 0;
+  for (jsize i = 0; i < nInst; i++) {
+    jstring js = static_cast<jstring>(env->GetObjectArrayElement(jinst, i));
+    const std::string path = toStd(env, js);
+    env->DeleteLocalRef(js);  // a long inst list would otherwise fill the local frame
+    singz::AnalysisStem st;
+    if (!readStem(path, st)) return nullptr;
+    inst.push_back(std::move(st));
+  }
+
+  singz::BeatAux aux;
+  aux.inst = &inst;
+  if (haveBass) aux.bass = &bass;
+  if (haveVocals) aux.vocals = &vocals;
+  aux.lineStarts = readDoubles(jlines);
+  const std::vector<double> flatWords = readDoubles(jwords);
+  if (flatWords.size() % 2 != 0) return nullptr;  // a caller bug, not a silent half-word
+  for (size_t i = 0; i + 1 < flatWords.size(); i += 2)
+    aux.words.push_back({flatWords[i], flatWords[i + 1]});
+
+  singz::MlGrid ml;
+  ml.beats = readDoubles(jmlBeats);
+  ml.downbeats = readDoubles(jmlDownbeats);
+  ml.downbeatProb = readDoubles(jmlDownbeatProb);
+  ml.fps = static_cast<int>(jmlFps);
+  ml.ok = !ml.beats.empty();
+  if (ml.ok) aux.ml = &ml;
+
+  singz::BeatDebug dbg;
+  const singz::BeatGrid grid = singz::detectBeats(drums, aux, dbg);
+
+  std::string out = "{\"ok\":";
+  if (!grid.ok) {
+    out += "false}";
+    return env->NewStringUTF(out.c_str());
+  }
+  char buf[64];
+  const auto num = [&](double v) {
+    std::snprintf(buf, sizeof buf, "%.17g", v);
+    out += buf;
+  };
+  out += "true,\"bpm\":";
+  num(grid.bpm);
+  std::snprintf(buf, sizeof buf, ",\"beatsPerBar\":%d,\"downbeat\":%d,\"beats\":[", grid.beatsPerBar,
+                grid.downbeat);
+  out += buf;
+  for (size_t i = 0; i < grid.beats.size(); i++) {
+    if (i) out += ',';
+    num(grid.beats[i]);
+  }
+  out += ']';
+  // ABSENT, not empty: the TS's `downbeats` is undefined when the vote found
+  // no bars, and the app stores the difference (an empty array is truthy).
+  if (grid.hasDownbeats) {
+    out += ",\"downbeats\":[";
+    for (size_t i = 0; i < grid.downbeats.size(); i++) {
+      if (i) out += ',';
+      std::snprintf(buf, sizeof buf, "%d", grid.downbeats[i]);
+      out += buf;
+    }
+    out += ']';
+  }
+  if (!grid.suspectAt.empty()) {
+    out += ",\"suspectAt\":[";
+    for (size_t i = 0; i < grid.suspectAt.size(); i++) {
+      if (i) out += ',';
+      num(grid.suspectAt[i]);
+    }
+    out += ']';
+  }
+  std::snprintf(buf, sizeof buf, ",\"detVersion\":%d}", singz::kBeatDetectVersion);
+  out += buf;
+  return env->NewStringUTF(out.c_str());
+}
+
+/**
+ * Beat This! on the phone: a 22.05 kHz MONO wav plus a directory holding
+ * logmel.onnx and beat_this.onnx, in; the desktop's one JSON line, out.
+ *
+ * One string and nothing else, for the same reason ortProbe returns one — it
+ * is the shape iOS marshals too, so the two platforms cannot drift in what
+ * they report. Errors come back as `{"error":"…"}` rather than an empty
+ * string, because "no grid" and "the models are missing" are different
+ * answers and the caller has to be able to tell them apart.
+ *
+ * The rate is CHECKED, not resampled. Feeding this 44.1 kHz would produce a
+ * grid at half the real tempo with nothing anywhere reporting a problem, and
+ * the decimation the desktop does on its way to 22.05 kHz has its own parity
+ * question that this binding is not the place to answer.
+ */
+// The `{"error":"…"}` line both mlGrid entry points return on failure.
+// Escaped, because the only interpolated text is ORT's e.what(): a quote or
+// newline in a model-load message would otherwise make the Kotlin side throw
+// a JSONException and report a parse error instead of the reason.
+static jstring mlGridFailJson(JNIEnv* env, const std::string& why) {
+  std::string esc;
+  esc.reserve(why.size() + 16);
+  for (const char c : why) {
+    if (c == '"' || c == '\\') { esc += '\\'; esc += c; }
+    else if (c == '\n') esc += "\\n";
+    else if (c == '\r') esc += "\\r";
+    else if (c == '\t') esc += "\\t";
+    else if (static_cast<unsigned char>(c) < 0x20) esc += ' ';
+    else esc += c;
+  }
+  return env->NewStringUTF(("{\"error\":\"" + esc + "\"}").c_str());
+}
+
+// With a dump dir, TEE what the two graphs return on their way past. The
+// host parity gate replays recorded logits, so it proves the pure logic and
+// says nothing about this file's marshalling — which is the one half that
+// only ever runs here. Wrapping the callables rather than changing the core
+// means the dumped tensors are the production path's, not a parallel one.
+// An empty dumpDir returns the models untouched — every real caller.
+static singz::BeatThisModels tapBeatThisModels(const singz::BeatThisModels& models,
+                                               const std::string& dumpDir) {
+  singz::BeatThisModels tapped = models;
+  if (dumpDir.empty()) return tapped;
+  const auto write = [dumpDir](const char* name, const std::vector<float>& v, const char* mode) {
+    FILE* f = std::fopen((dumpDir + "/" + name).c_str(), mode);
+    if (f == nullptr) {
+      // Silence here would be the tee's own version of a false pass: a
+      // reader slicing to the recording's length would read whatever was
+      // there before and call it this run's tensors. logcat, NOT stderr —
+      // an app process's fd 2 goes to /dev/null unless log.redirect-stdio
+      // is set, which it is not on the AVD this suite drives, so a printf
+      // here would have been a silent fix for silence.
+      __android_log_print(ANDROID_LOG_WARN, "singz", "mlGrid tee could not open %s/%s",
+                          dumpDir.c_str(), name);
+      return;
+    }
+    std::fwrite(v.data(), sizeof(float), v.size(), f);
+    std::fclose(f);
+  };
+  // The chunk tees append (one write per chunk, in call order), so a second
+  // run into the same dir would leave BOTH runs concatenated with the stale
+  // bytes at the head — exactly where a reader looks. Truncate once here.
+  for (const char* n : {"dev-chunk-in.f32", "dev-chunk-beat.f32", "dev-chunk-down.f32"}) {
+    FILE* f = std::fopen((dumpDir + "/" + n).c_str(), "wb");
+    if (f != nullptr) std::fclose(f);
+  }
+  const singz::BeatThisModels inner = models;
+  tapped.logmel = [inner, write](const std::vector<float>& frames, int n) {
+    const std::vector<float> spect = inner.logmel(frames, n);
+    write("dev-frames.f32", frames, "wb");
+    write("dev-spect.f32", spect, "wb");
+    return spect;
+  };
+  tapped.model = [inner, write](const std::vector<float>& spect, std::vector<float>& b,
+                                std::vector<float>& d) {
+    const bool ok = inner.model(spect, b, d);
+    if (ok) {
+      // Appended in CALL order, which is reversed starts — the same order
+      // the recording stores them in.
+      write("dev-chunk-in.f32", spect, "ab");
+      write("dev-chunk-beat.f32", b, "ab");
+      write("dev-chunk-down.f32", d, "ab");
+    }
+    return ok;
+  };
+  return tapped;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_mlGrid(JNIEnv* env, jobject /*thiz*/, jstring jwav,
+                                            jstring jmodels, jstring jdump) {
+  const std::string wavPath = toStd(env, jwav);
+  const std::string modelsDir = toStd(env, jmodels);
+  const std::string dumpDir = toStd(env, jdump);  // "" = no tee
+
+  singz::MonoWav wav = singz::readWavMono(wavPath);
+  if (!wav.ok) return mlGridFailJson(env, "could not read the wav: " + wav.error);
+  if (wav.sampleRate != singz::kBeatThisSr) {
+    return mlGridFailJson(env, "beat models want " + std::to_string(singz::kBeatThisSr) +
+                                   " Hz, got " + std::to_string(wav.sampleRate));
+  }
+
+  std::string error;
+  const singz::BeatThisModels models = singz::loadBeatThisModels(modelsDir, error);
+  if (!error.empty()) return mlGridFailJson(env, error);
+
+  const singz::BeatThisModels tapped = tapBeatThisModels(models, dumpDir);
+  const singz::MlGrid grid = singz::beatThis(wav.samples, tapped, nullptr);
+  if (!grid.ok) return mlGridFailJson(env, grid.error);
+  return env->NewStringUTF(singz::mlGridJson(grid).c_str());
+}
+
+/**
+ * The same grid from the project's STEMS: the pipeline's entry point. Paths
+ * to 44.1 kHz mono-foldable wavs in, the core sums and decimates them to the
+ * model's 22.05 kHz itself (sumStemsTo22k — the desktop's fetchMlGrid mix,
+ * natively), so no audio ever crosses a JS runtime for this. Same JSON line
+ * out, same tee, same escaping, same arity as iOS — the rule at the top of
+ * SingzSplit.mm.
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_mlGridFromStems(JNIEnv* env, jobject /*thiz*/,
+                                                     jobjectArray jpaths, jstring jmodels,
+                                                     jstring jdump) {
+  std::vector<std::string> paths;
+  const jsize n = env->GetArrayLength(jpaths);
+  paths.reserve(static_cast<size_t>(n));
+  for (jsize i = 0; i < n; i++) {
+    auto* js = static_cast<jstring>(env->GetObjectArrayElement(jpaths, i));
+    paths.push_back(toStd(env, js));
+    env->DeleteLocalRef(js);
+  }
+  const std::string modelsDir = toStd(env, jmodels);
+  const std::string dumpDir = toStd(env, jdump);  // "" = no tee
+
+  std::string error;
+  const singz::BeatThisModels models = singz::loadBeatThisModels(modelsDir, error);
+  if (!error.empty()) return mlGridFailJson(env, error);
+
+  const singz::BeatThisModels tapped = tapBeatThisModels(models, dumpDir);
+  const singz::MlGrid grid = singz::beatThisFromStems(paths, tapped, nullptr);
+  if (!grid.ok) return mlGridFailJson(env, grid.error);
+  return env->NewStringUTF(singz::mlGridJson(grid).c_str());
 }

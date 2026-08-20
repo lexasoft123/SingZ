@@ -173,6 +173,19 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+            // OPT-IN side-by-side install: -PdebugAppIdSuffix=.debug gives the
+            // debug build its own applicationId so it can sit next to a
+            // RELEASE build on the same phone. Without it, debug and release
+            // share com.lexasoft.singz with different signing keys, so
+            // installing one over the other forces an uninstall — which takes
+            // files/singz-projects (every downloaded song) and the Drive
+            // sign-in with it. That is why this exists: it is the only safe
+            // way to drive a dev build on a phone that is somebody's daily
+            // player. Default is empty, so CI, the emulator and every driver
+            // that hardcodes the package are unaffected.
+            if (project.hasProperty('debugAppIdSuffix')) {
+                applicationIdSuffix project.property('debugAppIdSuffix')
+            }
         }
         release {
             signingConfig hasUploadKey ? signingConfigs.upload : signingConfigs.debug

@@ -76,9 +76,18 @@ directions. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
-`offline-cache.cjs`, `custom-track.cjs`): CDP over Metro against the iOS
+`offline-cache.cjs`, `custom-track.cjs`, `beats-native-ios.cjs`): CDP over
+Metro against the iOS
 Simulator — run them
-after engine or loading changes. Pure-JS mobile logic that no device can show
+after engine or loading changes. `beats-native-{ios,android}.cjs` are a PAIR
+and both are owed: the two bindings marshal differently (iOS builds its dict
+from the core's doubles, Android crosses a JSON line and parses it in Kotlin),
+so a value lost in that text hop is invisible to the iOS half. Both want a
+project whose stems ALL carry audio — a silent stem discriminates nothing, and
+a fallback mutated to drop one passed until the mutation was moved to a stem
+with music in it — and both report whether the LATTICE and the aligned WORDS
+actually crossed, because a bare comparison sends neither and those are the
+two arguments the real pipeline always fills. Pure-JS mobile logic that no device can show
 (the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
 — needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
 our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
@@ -112,10 +121,12 @@ Ask the device before trusting it — `adb -s <serial> shell dumpsys package
 com.lexasoft.singz | grep -E 'versionName|DEBUGGABLE'` — and confirm the
 installed APK is *this* tree's (`md5sum` it against
 `mobile/android/app/build/outputs/apk/debug/app-debug.apk`). The same
-applicationId is why a debug build must never be pushed to the user's own
-phone: same id + different signing key = Android demands an uninstall first,
-which takes `files/singz-projects` (every downloaded song) and the Drive
-sign-in with it.
+applicationId is why a PLAIN debug build must never be pushed to the user's
+own phone: same id + different signing key = Android demands an uninstall
+first, which takes `files/singz-projects` (every downloaded song) and the
+Drive sign-in with it. Build it with `-PdebugAppIdSuffix=.debug` instead and
+it installs beside the release app, touching neither — that is how the POCO
+was driven; the gotchas that follow from it are below.
 
 ## Hard-won gotchas (do not re-learn these)
 
@@ -152,10 +163,68 @@ sign-in with it.
   Guarded by `mobile/__tests__/one-presentation.test.ts` — a headless suite
   mounts no modal and can never catch this, which is why the rule is checked
   at the source.
+- **A native method whose arity does not match JS never runs, and never
+  says so** — pass three arguments to a two-argument `RCT_EXPORT_METHOD` and
+  the bridge declines to dispatch: the promise is neither resolved nor
+  rejected, so there is no work, no error and no red box, just an app sitting
+  on its main screen looking healthy. `mlGrid` shipped that way on iOS while
+  Android's JNI already took `dumpDir`, and it read from outside as "nothing
+  happens" for ten minutes at 1.3% CPU with flat RSS. The rule that the module
+  name, **method arity** and event payloads are identical on both platforms is
+  written at the top of `SingzSplit.mm` for this reason; when a method changes
+  on one side, sweep the whole surface against `SplitModule.kt`, not just the
+  method in hand. Suites that drive a native call need a settle DEADLINE, not
+  a poll count — an unsettled promise is what this looks like from the driver.
+- **Foundation's JSON parser is not correctly rounded, so no core number may
+  reach iOS as text** — `NSJSONSerialization` reads `"0.053999999999999999"`
+  as `0.054000000000000006` where `strtod`, Kotlin and JS all read `0.054`.
+  The core writes `%.17g`, which is exactly the shape it gets wrong; SHORT
+  forms parse correctly, so checking `"0.013"` says the parser is healthy and
+  sends you looking elsewhere. Parsing `mlGridJson` back cost 49 of 2041
+  probabilities their last bit while beats and downbeats stayed identical —
+  invisible to any grid comparison, which is why the suites compare every
+  VALUE and never a count. iOS bindings build their result from the core's
+  doubles (`mlGridRounded`); Android's text hop is fine because Kotlin's
+  parser is correct.
+- **A resampler's quality gate must exercise the ratio that is actually
+  used** — `Resampler` was sized for 48k→44.1k (24 taps per output sample
+  at up=147 is a ~3.5k-tap prototype) and the same 24 at 44.1k→22.05k is a
+  24-TAP lowpass: −3 dB at 10 kHz, 12-14 kHz aliasing back at −10..−25 dB,
+  16.8 dB SNR against soxr on real stems, a different beat grid. Its "110
+  dB" gate was a 1 kHz tone at a near-unity ratio, which no short filter
+  can fail. Taps now scale with net decimation and the host harness sweeps
+  the 2:1 response itself. When a new consumer uses a shared DSP block at
+  a new ratio, measure the response at THAT ratio before trusting the
+  header's number.
+- **There is no resampler-independent Beat This! grid** — three good
+  renders of the same stems (Chromium's OfflineAudioContext, the core's
+  Kaiser, soxr) agree to 0.01 dB to 10 kHz and still give three grids
+  (119/43, 120/37, 117/39); the model is that sensitive to sub-frame delay
+  and the top 500 Hz. Chromium's — the desktop's actual input — is the
+  least filtered of the three and yet the one that ships. The phone suites
+  therefore gate the LATTICE (beat F1 ≥ 0.98 at 70 ms, tempo, downbeat F1
+  ≥ 0.80) against an oracle rendered by Chromium itself
+  (`scripts/render-ml-mix.cjs`), never bit-equality of probabilities across
+  renders; bit-equality is asserted only where the input is the same bytes
+  (the wav suites). A suite demanding bit parity across resamplers would
+  have to be tuned until it passed.
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —
   re-assert per frame (count-in dots pattern in LyricsPanel).
+- **A worklet's body runs on Hermes UNLOWERED, and Hermes has no per-iteration
+  loop bindings** — the worklets babel plugin serializes a `'worklet'`
+  function as source (plugins run before presets, so Metro's block-scoping
+  transform never touches it) and the worklet runtime evaluates that source
+  raw; measured on the iOS sim: `for (let k of ['a','b','c']) fns.push(() =>
+  k)` yields `c,c,c` there, `for (let i…)` likewise (function-scoped closures
+  such as `forEach` callbacks are fine). Silent and wrong, never a throw: the
+  first casualty was esbuild's own export helper (a getter closure per key in
+  a for-of), which resolved EVERY export of the analysis bundle to the last
+  one — `lib.detectBeats` was `trackMelodyCore`. `build-analysis.mjs` runs
+  the worklet-bound bundle through `@babel/plugin-transform-block-scoping`
+  before inlining it (`mobile/src/gen/analysis-worklet.js`); any hand-written
+  worklet with a closure inside a `let` loop needs the same care.
 - **The mobile lyrics are one Skia canvas** (`SkiaLyrics.tsx`): the whole
   column, the sung line painted with a gradient whose edge travels along x —
   desktop's `background-clip: text` a layer down. The canvas is
@@ -252,6 +321,39 @@ sign-in with it.
   shim under `core/android/`), never next to the CMakeLists. The ORT Android
   AAR is legacy-layout (headers/ + jni/<abi>/, no prefab) — the `extractOrtSdk`
   gradle task unzips it and CMake imports the .so via `ORT_SDK_DIR`.
+- **A piped gradle build reports its failure as success** — `./gradlew … |
+  tail` exits with TAIL's status, so a build that died still reads as exit 0.
+  It happened twice in one session: both "rebuilds" actually aborted on
+  `Gradle requires JVM 17 or later … currently configured to use JVM 8`, the
+  APK on disk stayed the previous one, and the suite then passed against a
+  binary that did not contain the change under test — the stale-binary trap
+  arriving through the build rather than through the install. Redirect to a
+  file and echo `$?` instead of piping, and confirm the APK's mtime moved.
+  The JVM 8 came from **`/usr/libexec/java_home -v 21` EXITING 0 AND
+  RETURNING A JDK 8 PATH** — measured: only 1.8.491.10 is registered on this
+  Mac, and asking for 21 yields
+  `/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home` with
+  status 0, so the usual `$(java_home -v 21 || echo <fallback>)` idiom never
+  reaches its fallback and hands gradle the wrong JDK. Set JAVA_HOME to the
+  brew path directly — `/opt/homebrew/opt/openjdk@21` and its
+  `…/libexec/openjdk.jdk/Contents/Home` both work — and never derive it from
+  `java_home` here.
+- **Driving a dev build on somebody's REAL phone**: build with
+  `-PdebugAppIdSuffix=.debug` so it installs beside the release app instead
+  of demanding the uninstall that would take `files/singz-projects` and the
+  Drive sign-in. Three things then bite, in order: HyperOS/MIUI refuses
+  `adb install` until "Install via USB" is on in Developer options
+  (`INSTALL_FAILED_USER_RESTRICTED`, and pushing + `pm install` does not get
+  round it); a fresh applicationId has NO `debug_http_host` pref, so on an
+  emulator RN falls back to `10.0.2.2:8081` and quietly attaches to a
+  neighbouring worktree's Metro (write
+  `<pkg>_preferences.xml` with `debug_http_host` — a real phone is fine on
+  `localhost` + `adb reverse`); and on the emulator an `adb`-created
+  `files/mlt` is owned by shell and the app cannot open it (`adb root` +
+  `chown` to the app uid fixes it; the phone's FUSE grants by path and needs
+  nothing). **`run-as` is useless for diagnosing any of this** — it does not
+  inherit the app's storage sandbox, so it reports "Permission denied" even
+  for directories the app itself created.
 - **Android builds need a JDK 21** (`brew install openjdk@21`; CI pins
   temurin 21). The Android Studio JBR moved to JDK 25, and AGP's
   GeneratePrefabPackages treats the JDK 24+ restricted-native-access warning
@@ -483,7 +585,13 @@ canary and synthesizes the bundled sample song via make-sample.js) and
 builds the full APK only on `v*` tags / manual dispatch, attaching
 `SingZ-<tag>-android.apk` to the release — the family fleet sideloads
 that. Superseded same-ref runs auto-cancel. Bump `package.json` version to match
-the tag (artifact names use it). Engine steps are cached keyed on the vendor
+the tag (artifact names use it) — **and the iOS project with it**:
+`MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in
+`mobile/ios/SingZPlayer.xcodeproj/project.pbxproj` are the one place a version
+is written down by hand (android/app/build.gradle reads package.json, the
+desktop reads it too), and iOS treats an install of an unchanged version as
+nothing to do — so a forgotten bump ships an `.ipa` that silently will not
+replace the copy already on the phone. Engine steps are cached keyed on the vendor
 scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
 `releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.
 

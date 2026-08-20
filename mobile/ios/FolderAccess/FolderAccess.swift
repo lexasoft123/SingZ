@@ -1115,6 +1115,32 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     }
   }
 
+  /**
+   * Are these models on this phone? `{dir, sizes}` — the size on disk per
+   * name, -1 when absent; JS compares against its pinned table. A stat and
+   * nothing else: downloadFile would START an 87-232 MB download when the
+   * answer is no, which makes it unusable as a question — and presence must
+   * be askable from a planner that has no business touching the network.
+   * Same surface on Android (FolderAccessModule.kt).
+   */
+  @objc func modelStatus(
+    _ names: [String],
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let dir = modelsDir()
+    let fm = FileManager.default
+    var sizes: [NSNumber] = []
+    for name in names {
+      let plain = !name.isEmpty && !name.contains("/") && name != ".." && name != "."
+      let size = plain
+        ? ((try? fm.attributesOfItem(atPath: dir.appendingPathComponent(name).path))?[.size] as? Int64 ?? -1)
+        : -1
+      sizes.append(NSNumber(value: size))
+    }
+    resolve(["dir": dir.path, "sizes": sizes])
+  }
+
   private func runModelDownload(
     name: String,
     url: String,

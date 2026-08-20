@@ -11,6 +11,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.WritableMap
 import java.io.File
 import java.net.HttpURLConnection
@@ -874,6 +875,33 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   fun cancelDownload(promise: Promise) {
     downloadCancel.set(true)
     promise.resolve(true)
+  }
+
+  /**
+   * Are these models on this phone? `{dir, sizes}` — the size on disk per
+   * name, -1 when absent; JS compares against its pinned table. A stat and
+   * nothing else: downloadFile would START an 87-232 MB download when the
+   * answer is no, which makes it unusable as a question — and presence must
+   * be askable from a planner that has no business touching the network.
+   * Same surface on iOS (FolderAccess.swift).
+   */
+  @ReactMethod
+  fun modelStatus(names: ReadableArray, promise: Promise) {
+    try {
+      val dir = modelsDir()
+      val sizes = Arguments.createArray()
+      for (i in 0 until names.size()) {
+        val name = names.getString(i) ?: ""
+        val f = File(dir, name)
+        sizes.pushDouble(if (ProjectPaths.plainChild(name) && f.isFile) f.length().toDouble() else -1.0)
+      }
+      val m = Arguments.createMap()
+      m.putString("dir", dir.absolutePath)
+      m.putArray("sizes", sizes)
+      promise.resolve(m)
+    } catch (e: Exception) {
+      promise.reject("model_status", e)
+    }
   }
 
   /**

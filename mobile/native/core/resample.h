@@ -2,14 +2,19 @@
 #include <cstdint>
 #include <vector>
 
-// Rational polyphase windowed-sinc resampler (L/M from the rate pair), used
-// by the split engine to bring the decoded mix to the graph's 44.1 kHz.
-// Streaming: feed blocks, drain output; flush() pushes the tail through.
+// Rational polyphase windowed-sinc resampler (L/M from the rate pair). Two
+// consumers: the split engine, bringing a decoded mix to the graph's 44.1 kHz
+// (48k->44.1k and other near-unity ratios), and beat_this's sumStemsTo22k,
+// decimating 44.1k stems 2:1 to the beat model's 22.05 kHz. Streaming: feed
+// blocks, drain output; flush() pushes the tail through. The tap count
+// scales with net decimation (resample.cpp says why — a 24-tap prototype
+// that is fine near 1:1 is a bad lowpass at 2:1).
 // Quality is CI-measured on every mobile push (tests/native/
-// core_host_tests.cpp: 110 dB in-band sine SNR, unity passband gain,
-// streamed == one-shot bit for bit) — far below what a separation model can
-// distinguish; stems are per-project artifacts, not cross-device-compared
-// bytes.
+// core_host_tests.cpp): 48k->44.1k 1 kHz sine SNR > 90 dB (reads 110) and
+// unity passband gain; the 2:1 response directly — flat to 10 kHz, 12 kHz
+// alias < -30 dB, 14 kHz alias < -60 dB; streamed == one-shot bit for bit.
+// A single-tone SNR at a near-unity ratio says nothing about a decimating
+// ratio, which is how the 2:1 case shipped aliasing for a while.
 namespace singz {
 
 class Resampler {

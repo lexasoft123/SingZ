@@ -29,9 +29,27 @@ Resampler::Resampler(int srcRate, int dstRate, int channels) : channels_(channel
   if (passthrough()) return;
 
   // Kaiser-windowed sinc lowpass at the tighter Nyquist, beta 10.056
-  // (~100 dB stopband). 24 taps per output sample keeps 48k->44.1k
-  // (up=147) at a ~3.5k-tap prototype — built once per job.
-  tapsPerPhase_ = 24;
+  // (~100 dB stopband), built once per job.
+  //
+  // The tap count per OUTPUT sample has to scale with the decimation. Each
+  // output sample reads exactly tapsPerPhase_ INPUT frames at every ratio
+  // (the base-j loop in process), so the prototype spans T input samples
+  // and its transition band is ~27% of the INPUT rate for T=24 whatever the
+  // ratio. At 48k->44.1k that transition sits above the new Nyquist and
+  // costs only the top of the band (-1.5 dB at 20 kHz, 23 kHz folding back
+  // at -10 dB — tolerable for stems, and frozen by the split parity gate).
+  // At 44.1k->22.05k that same width exceeds the whole output band: measured
+  // before this line existed, -3 dB at 10 kHz and content at 12-14 kHz
+  // aliasing back at only -10..-25 dB — cymbals and sibilance folding onto
+  // the band the beat model listens to, 16.8 dB SNR against soxr on a real
+  // mix, and a different grid. The 110 dB figure the header quotes was
+  // measured with a 1 kHz tone at that near-unity ratio, where none of this
+  // can show. 48 taps per unit of NET decimation (down_/up_, integer) makes
+  // the 2:1 case a 96-tap prototype (flat to 10 kHz, 14 kHz aliasing at
+  // -134 dB) and leaves every ratio with down_ < 2*up_ — the split engine's
+  // 48k->44.1k among them — at the 24 it was gated with, byte for byte.
+  const int64_t netDown = down_ / up_;  // 48k->44.1k: 1; 44.1k->22.05k: 2
+  tapsPerPhase_ = netDown >= 2 ? static_cast<int>(48 * netDown) : 24;
   const int64_t n = static_cast<int64_t>(tapsPerPhase_) * up_;
   const double cutoff = 0.5 / std::max(up_, down_);  // cycles per zero-stuffed sample
   const double beta = 10.056;

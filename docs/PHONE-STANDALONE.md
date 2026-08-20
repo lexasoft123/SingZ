@@ -1,6 +1,6 @@
 # Phone standalone song-adding — research record & architecture
 
-Status: **Phase 0 (spike + rig) in progress.** Researched 2026-08-14 (three codebase
+Status: **Phases 0–3 shipped (v0.16.x); Phase 4a (beats/key/melody on-device) landed; 4c (the detectors in C++, one implementation for every platform) in progress — melody done.** Researched 2026-08-14 (three codebase
 exploration agents + web verification + one design agent); scope decisions and the
 architecture below approved the same day. This document is the record — read it before
 touching the phone pipeline, and update it as phases land (the docs/BEAT-DETECTION.md
@@ -537,6 +537,1104 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     half), `zipalign -c -P 16` on the packaged APK, the split
     notification's visibility on HyperOS, and the `:split` service on a
     rebooted Xiaomi with a release APK (the HyperOS finding above).
+  - **Phase 4a — beats, key and melody on the phone (2026-08-16)**: the
+    desktop's detectors run on the phone, off the app thread, and write
+    into project.json. The host rule from Phase 0 was decided for Hermes;
+    the question left was WHERE in Hermes, since 65 s of pYIN cannot sit on
+    the thread that draws the app. Answer: a **worklet runtime**
+    (`react-native-worklets`, already a dependency of reanimated) —
+    `mobile/src/analysis/host.ts` creates one runtime, once, and the
+    detectors reach it as CODE: `build-analysis.mjs` now also emits
+    `gen/analysis-worklet.js`, the whole desktop bundle inlined in ONE
+    function carrying the `'worklet'` directive, which the worklets babel
+    plugin serializes into any runtime (92 kB of source, compiled once per
+    runtime by the plugin's own hash cache, module body run once by a
+    global memo). No Bundle Mode switch, no app-wide change.
+    - **The trap that cost the first run**: the serialized worklet is
+      evaluated RAW on Hermes — plugins run before presets, so Metro's
+      block-scoping transform never sees it — and Hermes has no
+      per-iteration bindings for loop `let`s: measured on the sim,
+      `for (let k of ['a','b','c']) fns.push(() => k)` yields `c,c,c` and
+      `for (let i…)` likewise (function-scoped closures are fine). Silent
+      and wrong: esbuild's own export helper is a getter closure per key in
+      a for-of, so EVERY export of the bundle resolved to the last one —
+      `lib.detectBeats` was `trackMelodyCore`, and the first host spike
+      returned a melody where a grid was asked for. The emitter now runs
+      the bundle through `@babel/plugin-transform-block-scoping` before
+      inlining it; the detectors close over loop lets too, so without it
+      the wrong answers would not always be that loud (CLAUDE.md gotcha).
+    - **Proof (iPhone 16 Pro sim, `__test.hostSpike(3)` vs the in-thread
+      `analysisSpike(3)`)**: melody 66.0 s on the worklet runtime vs 60.2 s
+      in-thread, beats 1.3 s, two 8 MB stems crossed in 26 ms; **f0 7 187
+      frames and 350 beats / 87 downbeats IDENTICAL** — a fourth runtime
+      agreeing to the bit (node/V8, Android Hermes, iOS Hermes, and now the
+      worklet Hermes); the app thread stayed **80% free** during the run
+      (1 081 of an ideal 1 347 heartbeat ticks at 50 ms) where the
+      in-thread run blanked the driver's polls for a minute; progress
+      reached the app 29 times, thinned to 3% steps.
+    - **Memory, measured**: runtimes share nothing — a Float32Array is
+      copied twice on the way over (a byte vector, then a fresh
+      ArrayBuffer there), so stems cross ONE AT A TIME into a store the far
+      side keeps between calls (six 4-min mono stems ≈ 242 MB resident
+      there, `js_externalBytes`); the far side frees lazily even with its
+      `gc()` (Hades finalizes external memory on its own schedule — after a
+      clear+gc it held 121/161/242 MB on successive rounds), but the PEAK
+      stays bounded at one song's worth plus the lag (a second song's puts
+      displaced the first's; six re-puts under one key peaked at 484 MB
+      because six new landed before six old were collected). `clearStems`
+      calls `gc()` when the runtime exposes it and `runtimeStats()` reads
+      Hermes' own numbers for the log. Six stems at 44.1 kHz mono is the
+      whole far-side budget; the near side drops each mono copy as it
+      lands. Load path: `decodeAudioData(file, 44100)` → fold → `release()`
+      on the spot — 44.1 kHz IS the detectors' rate, so `monoAt44k` hands
+      the array straight back and the far side copies nothing more.
+    - **The pipeline (`analysis/pipeline.ts`, dependency-injected, 15 jest
+      cases)** is the desktop's rules ported: (re)detect when a grid is
+      missing or an `auto` grid carries an older stamp, never a `manual`
+      one, `userBars` re-folded with the desktop's own `applyUserBars`;
+      re-track a melody with an old stamp or a length that is another
+      song's (`melodyFitsSong`); re-read the key under a new stamp and
+      never store the melody-histogram fallback; a detector's NEGATIVE
+      answer (no grid in these drums, a silent harmonic bed) is stored under
+      its stamp too — `settings.analysisNone`, phone-only, ignored by every
+      reader — because the desktop's "ask again on every open" costs it a
+      second on decoded buffers and would cost the phone six decodes and a
+      minute behind the player, forever, for a drumless song (the review
+      caught it; a newer detector asks once more, exactly like a stale
+      grid); results land by re-read →
+      merge → write of the doc ON DISK (a save that landed mid-run is kept),
+      absent results delete nothing, and the stems the answer was computed
+      from are compared against the doc's stemHashes before every write —
+      a project re-split under the run drops its answer, a project deleted
+      under it throws. Order beats → key → melody with a write after each
+      half: the grid is what the phone plays, the melody is a minute of
+      pYIN, and a kill in that minute leaves the useful half saved; before
+      that minute the far side drops every stem but the vocals
+      (`keepStems`), since the long stage often overlaps a player holding
+      the same song decoded for playback. `analysis/run.ts` is one queue
+      app-wide (the host has one stem store), collapsing duplicate asks,
+      announcing results on `DeviceEventEmitter('singzAnalysis')` — a
+      PARTIAL event the moment the grid is written and a final one after
+      the melody — the catalog refreshes its listing on it, and the PLAYER,
+      if it is showing that dir IN THE PHONE LIBRARY (a dir name is unique
+      only within one library; the desktop's cloud-folder "Foo" must not
+      wear the phone's "Foo" grid), sets the grid live so the metronome and
+      count-in light up without a reopen. Triggers: after adoption (the split card clears, the
+      analysis card takes over: "Reading the drums…", "Finding the beat…",
+      "Tracking the melody · 46%") and on open of a phone-library project
+      whose doc says something is missing or stale — the phone's own
+      library only, never a picked folder or Drive (the desktop's to
+      write). `LoadedProject` gained `dir` for the match.
+    - **On the sim, end to end (a four-stem mix of the bundled sample,
+      split then analysed)**: 3 s of stem reads, **beat 15 s, key 3 s,
+      melody 15 s** for the 40.8 s song, all behind an open player; the
+      grid came out **67 beats at 98.5 bpm, 4/4, 17 downbeats** against
+      make-sample.js's authored 100 bpm 4/4 (68 beats) — the desktop's
+      answer, on the phone. Two fixture facts worth knowing before reading
+      a run: the solo-vocal seed has no drums, and **no drums means no
+      grid**, by rule (detectBeats returns null — the suite's first
+      Phase-4 pass read that as a failure); and the sample's "vocal" is
+      synthetic, which the splitter routes AWAY from the vocals stem in a
+      mix (vocals.wav at −83 dB RMS, `other` at −16), so its melody line
+      is all-unvoiced there — stored, stamped, covering the song's length,
+      exactly what the desktop would store; only the coverage is asserted.
+      `mobile/tests/split-ios.cjs` §1c is the permanent proof (its own
+      mix-seeded project, the stamps read off the generated bundle so a
+      bumped constant cannot pass by accident, the live pickup asserted in
+      the open player).
+  - **Phase 4c — the detectors move into the core, one implementation for
+    every platform (2026-08-16, decided at review of 4a)**: 4a's numbers on
+    real stems (a four-minute song: beats ~90 s, key ~18 s, melody ~90 s of
+    Hermes, ~3.3 min behind the player) made the case; the user's answer to
+    "port to C++?" was "and make the desktop run the same port" — which
+    removes the double-maintenance objection. Plan: port to
+    `mobile/native/core`, phones first (in-process, JNI/ObjC++), then the
+    desktop through a `singz-analyze` CLI spawned by main like whisper-cli
+    (not WASM: main can load native code and the stems are always on disk;
+    a CLI is crash-isolated, ABI-free, and the eval harness runs the same
+    binary the app ships). Melody first — the smallest detector, the worst
+    offender, and it stands up the whole chain.
+    - **melody.cpp** = pyin.ts + pitch.ts's cmndProfile + pitch-core.ts
+      (decimate, frame RMS, cleaner) ported line for line, float where the
+      TS kept Float32Array (d, cmnd, probs — which ACCUMULATES in float32
+      — em, binHz, the transition weights, dec, rms, cents, f0) and double
+      where it kept numbers, sums in the same order, JS Math.round
+      semantics (half toward +∞). **Bit-identical** to the TS: host-side,
+      `singz-analyze melody` (the CLI, `mobile/native/core/tools/`) against
+      node's trackMelodyCore on the sample's four stems — f0, raw AND rms
+      0 differing (vocals 777 voiced frames, bass 1413); on the iPhone sim
+      and the Android emulator, `__test.melodyParity` (native reads the WAV
+      itself; the TS gets the phone's audio-api decode of the same file, on
+      the worklet host) — 777/777, 0 differing, identical hopSec on both.
+      Cost: **89 ms** for the 40.8 s vocal on the M2 (V8 330–600 ms;
+      Hermes 15 s), 745 ms on the sim vs 13.5 s TS, 5.2 s on the emulator
+      vs 65 s TS — a four-minute song's melody in ~1 s on a phone where it
+      was ~90 s.
+    - The speed came in two steps and the second is a lesson: a faithful
+      port ran only ~2.5x faster than V8, because the difference function
+      `sum += diff²` must round in the TS's ORDER (bit-parity forbids
+      reassociation) and neither V8 nor clang can vectorize a strict-order
+      chain. Running eight LAGS side by side — each lag's sum still in
+      strict order — keeps every bit and lets the compiler vectorize across
+      lanes: 265 → 89 ms. Parity re-verified after.
+    - `wav.cpp` gained `readWavMono` (PCM 16/24/32 + float32, any channel
+      count, folded exactly as the JS fold — asserted to the bit in
+      tests/native/core_host_tests.cpp, which also tracks a synthetic
+      phrase within 2 cents and checks the RMS gate); the split's 44.1 kHz
+      PCM16 stems are what it reads on the phone. Bindings:
+      `SingzSplit.analyzeMelody(path)` / `wavInfo(path)` on iOS (ObjC++,
+      utility queue) and Android (JNI → one jdoubleArray: hopSec must stay
+      a double, a float32 hop would round the stored value; SplitModule
+      runs it on its own thread). `analysis/native.ts` wraps them; the
+      pipeline's host is now COMPOSED (`deps.ts`): grid + key on the
+      worklet TS, melody in the core — `AnalysisHost.trackMelody` takes a
+      file locator, `audioDuration` reads the header for the melody-fit
+      rule (no vocals decode in JS at all when only the melody is wanted),
+      and the far side is cleared before the melody stage rather than
+      keeping the vocals (`keepStems` went away with it). Post-split
+      analysis of the sample on the sim: 36 s → ~3 s.
+    - Not the POCO: it runs Play's 0.15.0 (installer com.android.vending,
+      Play's app-signing key), so neither a debug build nor an upload-key
+      release can install over it — Android refuses the signature, and the
+      only way past is an uninstall that takes the library and the Drive
+      sign-in with it. Its test is the next Play build + the Log panel.
+      The emulator (SingZ_API36) had a RELEASE 0.16.0 on it from the FGS
+      video — CLAUDE.md's "which emulator can be driven" trap, met again;
+      reinstalled as debug for the parity run.
+    - **The real-device number that decided what to port next (POCO's iOS
+      sibling — the user's iPhone, 2026-08-16, a 5:02 song)**: the whole
+      analysis pass took ~110 s — stem load 5.6 s, **beat 92.1 s**, key
+      9.5 s, **melody 2.7 s**. The melody is the ported one: on this
+      hardware the TS would have been ~100 s for the same song, so the port
+      is ~40x, and 84% of what is left is the ONE detector still in
+      TypeScript. The pass also proved the queue design on real hardware —
+      the singer opened the song, left it three seconds later, and the run
+      carried on and wrote its results two minutes on. (Open question from
+      the same run: the grid came out 297 beats at 60.1 bpm, which on a
+      rock track is usually a half-time pick. Being chased separately; the
+      port is deliberately faithful to the current logic, right or wrong.)
+    - **Key follows melody (2026-08-16)**: `analysis.cpp` is analysis.ts's
+      `estimateKeyFromStems` + `estimateKey` + `monoAt44k` + `goertzel`,
+      ported under the melody port's discipline (the same fp-contract
+      pragma, float32 stores where the TS has Float32Array, jsRound). Gate:
+      `eval/key-parity.mjs` — node's detector against `singz-analyze key`
+      over a project's real stems — **identical on all four library
+      projects and the bundled sample** (E minor, F# major, A minor, D
+      major, C major), which is a stronger check than the melody's was: a
+      key is one discrete answer, so agreement is not luck. Host tests
+      cover the shapes with no corpus (a synthetic C-major triad bed reads
+      C major; a silent bed answers nothing, which must never become a
+      stored key). Bindings `SingzSplit.analyzeKey(instPaths, bassPath)` on
+      both platforms; `AnalysisHost.estimateKeyFromStems` now takes file
+      locators like `trackMelody`, so the key crosses nothing either — and
+      with both of them off the worklet, the ONLY thing still putting stems
+      across the runtime boundary is the grid's aux. **Verified on both
+      devices** (the reviewer's call — every other claim in the slice was
+      host-side, and a Metro-only run would have passed VACUOUSLY, since an
+      app without the new binary silently takes the worklet fallback):
+      rebuilt and installed, `analyzeKey` present in the binary, and
+      `__test.keyParity` run against real stems — iOS sim **F major both
+      ways, native 778 ms vs TS 1429 ms**; Android emulator **C major both
+      ways, 2641 ms vs 5373 ms**. The iOS rebuild first hit the recorded
+      CocoaPods trap (a link failure on `facebook::react::Sealable`, the
+      RNGestureHandler family named in CLAUDE.md) — `rm -rf Pods && pod
+      install` cleared it, exactly as written down; it was not the port.
+    - Three review findings worth keeping, all mine to have avoided: the
+      pipeline refactor took the key's stems OUT of the stems-changed guard
+      (they no longer pass through `put()`, so a key-only run compared an
+      empty list against an empty list and could never fail — a key
+      computed from replaced stems would have been stored under the current
+      stamp and never re-asked); the Android JNI returned the same empty
+      array for "silent bed" and "cannot read this file", so an unreadable
+      stem would have been recorded as the permanent verdict "this song has
+      no key" while iOS rejected on the same input; and holding every
+      converted stem through the goertzel pass cost ~1.8x the TS path's
+      peak, on a queue that may run beside a player — each stem is now
+      summed and dropped as it is converted, same element order, parity
+      untouched.
+    - **The beat detector begins (2026-08-16, front end only)**: this one
+      is ~4300 lines across analysis.ts and courts.ts, and unlike melody
+      and key it is ONE pipeline with no exported seams — a wrong grid
+      cannot be bisected from its output. So the port mirrors the TS's own
+      `debug` object stage for stage (it already carries tau, consistency,
+      fill, octaves, reject and two dozen more, so no desktop change was
+      needed), and `eval/beats-parity.mjs` compares those in pipeline order
+      and names the FIRST stage that diverges. "The tempo family disagrees
+      on Panzerkampf, everything before it matches" is a debuggable
+      sentence; "Panzerkampf disagrees" is not.
+      Landed so far: the onset front end (broadband + low-band energy,
+      flux, drum peaks), the instrument fill with its 8-second drum-free
+      span rule, local-mean normalisation, the windowed-autocorrelation
+      tempo family, and the DP tracker's octave choice with its gates.
+      **Identical on all four library projects across 12 compared stages**
+      — tau 71.656 / 98.380 / 123.495 / 75.516, every fill and octave
+      figure matching to the last digit. Host tests cover the shapes with
+      no corpus (a 120 bpm click train is tracked at 120 and not at an
+      octave of it; a sustained pad earns no metronome and says why).
+      `monoAt44k` is now shared out of analysis.h rather than re-rolled
+      here — the reviewer's point that the bounds and ordering discipline
+      should travel with it, made before there were two callers.
+      Still to port at that point: the tracker's span gates and onset snap,
+      the head backcast, the downbeat votes, sanitizeBars, the ML lattice,
+      and courts.ts entire.
+    - **`trackFromDrums` closes (2026-08-16, same day)**: the placement
+      splice (re-track on the FILLED envelope, then keep only the beats
+      inside accepted fill spans — the global DP would otherwise bend the
+      path across lightly-drummed verses next to a span), the per-span
+      quality gate (the span's own autocorrelation must agree with the
+      song's tempo family at ≥60% of windows, AND its beats must stay
+      steady after snapping to real onsets — the DP grid is smooth by
+      construction, snapping is what exposes free-time playing), the onset
+      snap, and the void list. The whole drums-first tracker is now in the
+      core.
+      **23 of 23 stages identical on all four library projects — including
+      `beatsSec`, the beat TIMES themselves**, compared as full-precision
+      values, plus the per-span verdicts, the median interval and the void
+      list. Everything downstream is built on those times, so this is the
+      first slice where the comparison reaches the actual product of the
+      detector rather than its intermediates.
+      Two harness lessons. `debug.voids` is ROUNDED to 0.1 s by the TS
+      before recording, so the comparison rounds the C++ the same way
+      instead of pretending the debug channel carries full precision — and
+      that costs nothing, because the span FRAMES those seconds are derived
+      from are compared as exact integers one stage earlier.
+      And a claim of mine that was simply FALSE, caught at review: I wrote
+      that "nothing between the tracker and the return moves a beat TIME —
+      the downbeat machinery only chooses a phase". `applyCourts` runs
+      whenever there are harmonic stems, and its octave court needs no ML
+      model: a HALVE rewrites the lattice outright, and then fires a second
+      `backcastHead`, which is itself called unconditionally. So the
+      lattice stages are now gated on the TS's own debug — and the test is
+      POSITIVE ("the courts abstained and no backcast happened") rather
+      than a list of the downstream actions believed to move times, because
+      enumerating those means being right about every branch of 1500
+      un-ported lines and being wrong is silent. When the gate closes, the
+      harness names the reason through its NOT PORTED channel.
+      A probe then corrected the reviewer and me both, twice over. First:
+      on all four projects the courts **abstain** rather than
+      run-and-decline — and structurally, not by luck. `buildCourtEvidence`
+      fills its chord runs only when a BASS stem is present (it is what
+      names the roots), and the harness deliberately passes the fill stems
+      only, so the runs are empty for every song and applyCourts abstains.
+      More inst stems change nothing; adding bass flips it from none to
+      many in one step, which is the thing to remember when the aux widens.
+      Second, and the same lesson as the spanOk bug one round earlier: my
+      backcast probe read `debug.headBackcast !== undefined`, which detects
+      an ACTION, not a decline — and `backcastHead` can rebuild the lattice
+      WITHOUT writing that field. The probe now names the three ways it
+      declines and closes the gate on any shape it does not recognise;
+      measured, all four projects report `{verdict: 'head ok'}`.
+      An absent field is not evidence: that is now twice in one file, and
+      worth carrying into the slices after it.
+      Worth stating plainly: 23/23 proves the tracker, not the machinery
+      after it.
+    - **A test-harness trap worth the line it cost**: the core host tests'
+      `CHECK` macro declared `const bool ok = (cond)` internally, so a test
+      whose own local was named `ok` expanded to `const bool ok = (ok)` —
+      self-initialisation, garbage, and three green stages reported FAIL
+      while the CLI and a standalone probe ran the same code correctly at
+      the same moment. The macro's internal is now `check_ok_`; a macro
+      that captures the caller's names is a trap for every test after it.
+    - **Sixth slice — the meter and the bar lines** (2026-08-16). `barPhase`
+      is whole for the no-model path: the meter test (dominant 3-beat
+      periodicity means the tracked pulse is a compound song's eighth), the
+      activity mask, the segments, the six-cue rotation vote per segment
+      (kick / entrance / slam / bass chord changes / vocal phrase entries /
+      lyric lines, at their meter-specific weights), the anchor rule, the
+      slip windows with the physical-defect gate, the global harmonic-gain
+      arbiter that decides whether a re-phase pays for itself, and
+      `sanitizeBars`. With it the port stops producing beat times only and
+      starts producing a `BeatInfo` a player can draw — which is what wiring
+      was blocked on.
+      **31 of 31 stages identical on all four projects**, and the answers are
+      musically legible: Nothing Else Matters comes out 6/8 (ac3/ac4 = 2.61)
+      at rotation 1 with 154 uniform six-beat bars — rotation 1 being exactly
+      the verses-enter-after-the-bar-line the TS comment describes; Sixteen
+      Tons 78 bars over four segments with one 5- and one 7-beat bar at
+      section seams; WDOA 96 with one 5; Panzerkampf **none at all**, because
+      its best segment scores 0.04 against an `ANCHOR_CONF` of 0.08 — a song
+      whose bar structure lives in the rotation index alone is a legitimate
+      result, not a failure, and the port refuses in the same place.
+    - **The harness gained two inputs, and that was the point.** It had been
+      passing the fill stems only. Vocals and lyric line starts engage no
+      court (`buildCourtEvidence` fills its chord runs only inside
+      `if (bass22)`), so they can be handed over safely — and without them
+      two of the six cues would have been `uniform()` on BOTH sides, and
+      their parity would have proved nothing at all. Bass is still withheld
+      for exactly the reason it was before: it is the single input that flips
+      `applyCourts` from abstaining to active, and 1,514 un-ported lines
+      would then sit between the two sides. That is the next slice's problem,
+      by design.
+    - **What review caught, and the third repeat of one mistake.** The
+      `downbeats` stage folded "the stage was gated off" and "this song
+      legitimately has no bars" into the same `'none'`, which made its own
+      `LATTICE_STAGES` skip DEAD: the skip is keyed on `undefined`, so a
+      getter that can never yield `undefined` can never be skipped. Harmless
+      today (all five inputs report every stage compared, so the gate was
+      open throughout) and a live hazard the moment bass lands — it would
+      compare the TS's absence against the C++'s real bars. The general
+      shape, now worth stating as a rule: **only a stage that can actually
+      yield `undefined` can be gated.** That is three times in this one file
+      that an absent field was read as evidence.
+      Two more: `harmParts` held a converted copy of every harmonic stem at
+      once, reintroducing the exact pattern `estimateKeyFromStems`' comment
+      exists to forbid (~265 MB on a five-minute song, on a queue that may
+      run beside a player holding the same song), and `BeatAux::inst` was a
+      `std::vector` **by value** while its own `bass`/`vocals` were pointers,
+      so its single assignment deep-copied every stem again. Both fixed:
+      convert-add-drop in the TS's own order (bit-identical, and
+      `resampledLength` is shared for the sizing), and `inst` is a pointer
+      like its neighbours. Measured after: **187 MB peak** for a four-stem
+      beats run on a 2:56 song.
+      And the harness was comparing each segment's CONCLUSION (rotation,
+      margin) but not the six distributions it was drawn from — one cue could
+      have diverged while the argmax survived, surfacing much later as a
+      wrong bar line. `debug.segCues[].cues` is now a stage of its own, which
+      is what takes the count to 31.
+    - `goertzel` is shared out of `analysis.h` rather than re-rolled, the
+      same call the reviewer made about `monoAt44k` two slices ago — the key
+      detector and the chord-change cue read chroma identically, and a second
+      copy is a second thing to keep bit-identical forever.
+    - **Seventh slice — the head backcast, and the gate comes off**
+      (2026-08-16). `backcastHead` is ported (~275 lines): the anchor search,
+      the unsteady/missing triggers, the folded-band flux onset extractor with
+      its beat-scale non-maximum suppression, the periodicity test that decides
+      whether those onsets may arbitrate at all, the four honest cases, the
+      backward walk with its snap, and the bar re-laying with its carried-vs-
+      chord phase vote. With it the core gained `detectBeatsNoCourts` — the
+      whole pipeline assembled (tracker → vote → backcast → sanitize →
+      suspectAt) and named for what it still lacks, so nobody wires it
+      believing the courts are in it.
+      Assembling it exposed an ordering bug from the previous slice: the TS
+      sanitizes AFTER the backcast, and `sanitizeBars` had been left inside
+      `barPhase`. Harmless while the backcast never fired — which is exactly
+      why it survived a 31/31 pass — and wrong the moment it did.
+      **The lattice gate is now off.** It had been withholding `beatsSec` and
+      the bars whenever the head machinery was not provably idle; the C++
+      rebuilds the same head now, so the gate was hiding the one stage most
+      worth comparing. What is left gating is the courts alone. All four
+      library projects pass **38/38 with it open**, tau unchanged.
+    - **The fixtures had to be invented, because the library cannot reach
+      this code.** All four eval projects report `head ok` — their grids start
+      on time and track cleanly — so a parity pass over them says nothing
+      whatever about 275 lines that never executed. Two earlier attempts to
+      build a triggering case failed identically: the instrument fill absorbed
+      the drum-free intro every time, the grid started early, and the backcast
+      was never reached. What gets past it is an intro too QUIET for the
+      fill's presence test but still audible to the backcast's own onset
+      picker, played in free time so the fill's span-quality gate rejects the
+      span outright. Measured while building it: at intro amplitude 0.02 the
+      fill still swallowed it; at 0.05 the span is rejected, the grid starts
+      14 s in, `missing` fires, six free-time chords are found, 0/5 are
+      periodic so they are not trusted to arbitrate, and the walk extends 24
+      beats back to the first chord. `eval/beats/fixtures.mjs` generates it,
+      the harness builds it on every run, and it is the first input to reach
+      the stage at all.
+      And because a fixture is a CLAIM that some path executed, each one
+      carries a precondition checked against the TS's own debug: if a tuning
+      change quietly stops it triggering, that is a hard failure, not a
+      silently vacuous pass. The first version of that check was itself
+      vacuous — it compared the grid against `debug.beats`, which the TS never
+      writes, so it read `length > 0`. It asserts `beats[0] < 3` now, which on
+      a fixture whose drums start at 14 s can only be true if the head really
+      was counted backward. Verified by making the intro loud again: the
+      fixture then reports `head ok` and the harness FAILS.
+    - **Review found the slice's one behavioural change covered by nothing**,
+      which is the finding worth keeping. Moving `sanitizeBars` after the
+      backcast was the only semantic edit here — and on the corpus the
+      backcast declines, while on the first fixture `downbeats` is undefined
+      so the sanitize never runs at all. A regression putting it back inside
+      `barPhase` would have passed 38/38.
+      `head-missing-bars` answers half of that: same refused intro, but an
+      accented kit (kick on 1 and 3, the one twice as heavy, snare on 2 and 4)
+      so the rotation vote finds a confident anchor and the song HAS bars.
+      It reaches the whole `if (bars)` re-laying block — 24 head bars laid by
+      the carried phase, `headBackcast` written, 36 bars, 6 suspect marks, and
+      the sanitize running over a list the backcast changed.
+      **True for a slice, and no longer**: sanitizeBars finds nothing to fix on
+      that list, so the two ORDERS produce the same answer there —
+      `head-missing-bars` passes 38/38 against a build with the sanitize moved
+      back inside `barPhase`. A third fixture, `sanitize-order`, closes it.
+      Two reasons the extend case can never separate them ON THAT FIXTURE, and
+      both are provable rather than merely observed — worth writing down so
+      nobody hunts for a counter-example that cannot exist. The `nBeats` bound
+      is EXACTLY neutral: post-backcast indices are `k - cutIdx + K` against a
+      bound of `nb - cutIdx + K`, so `k - cutIdx + K < nb - cutIdx + K` iff
+      `k < nb`, in extend and replace alike. And the head bars are
+      sanitize-invariant by construction: `carried` and `chord` both step by
+      exactly `bpb`, and the seam is `bpb` (carried) or clamped to 2..7
+      (chord), so no gap the head contributes can trip either limb. Since
+      backcastHead reads only `bars.length > 0`, `bars.filter(k >= cutIdx)`
+      and `body[0]`, every way in runs through `bars` itself.
+      **`sanitize-order`, built and measured.** The lever is the FIRST bar
+      pair, and it is the merge loop's cost comparison rather than the bound:
+      at `hit === 1`, dropping `db[0]` DELETES a gap outright while dropping
+      `db[1]` merely merges two, so the cheap delete wins — but only while the
+      pair is at the front. Let the backcast prepend head bars and the same
+      pair sits in the interior, both options merge, the tie goes the other way,
+      and the song's whole bar rotation lands a beat off.
+      Manufacturing a defective FIRST pair takes a phase cut. Bars are laid per
+      piece at `k ≡ rot (mod bpb)` (analysis.ts:1379), so a cut at beat 4 with
+      rotation 3 before it and 0 after gives `[3, 4, 8, 12, …]`: one bar from
+      the leading piece, then the next piece's first bar one beat later. Three
+      things gate that cut, and each cost an attempt. The interval defect must
+      sit at `k = 3` — `cut = k + 1` and `phasePieces` never looks at `k = 0`,
+      so a defect on the first interval proposes nothing. The segment vote and
+      the window vote must DISAGREE: with no bass the segment reads kick and
+      slam (accent on rotation 3) while the window is 0.45 harmonic
+      (chords changing on rotation 0), and agreeing cues propose nothing. And
+      the cut must clear the +0.3 global harmonic test (analysis.ts:1409).
+      The trap that cost the most was none of those: `harmNov` falls back to
+      the BASS-only novelty unless `harmParts.length > 1` (analysis.ts:1101).
+      With a single `other` and no bass, `windowRot` bails at its
+      `hUsed < bpb && lUsed < 2` guard for every window, no cut is proposed at
+      all, and both orders agree — the fixture was built and measured that way
+      once, reading green and proving nothing. It writes `guitar.wav` as well.
+      The head must also stay TRACKED, which is why the defect sits at index 3
+      and not 1: `unsteady` is `off / anchor > 0.25`, so index 1 gives anchor 2
+      and ratio 1/2 — unsteady, and a deliberately free-time intro can never
+      have trusted onsets, so `backcastHead` returns null at analysis.ts:1870
+      and nothing happens. At index 3 the anchor is 4 and the ratio is exactly
+      0.25, not greater, so the extend path runs.
+      Measured, correct order: `headBackcast` {added 22, carried}, `phaseCuts`
+      [4], `harmGain` {plain 0, cut 0.9997}, `sanitized` {74 → 73}, downbeats
+      `[1, 5, 9, 13, 17, 21]`, `downbeat` 1, 7 suspect marks. Sanitize moved
+      back into `barPhase`: `[2, 6, 10, 14, 18, 22]`, `downbeat` 2, 6 suspects,
+      no `sanitized` at all — the harness stops at
+      `FIRST DIVERGENCE at sanitized: ts=74:73 c++=none`, exit 1, while both
+      older fixtures still PASS. Six different head bar times and a different
+      rotation: audible, not bookkeeping.
+      The precondition pins the cut INDEX, not merely that some cut happened.
+      Review found the hole, and simulating every cut index against verbatim
+      `buildBars`/`sanitizeBars` sized it. Beat 4 is the only cut where the two
+      orders differ at all. Every LATER BAR LINE leaves the leading piece two
+      bars or more, so the short pair lands in the interior, both orders drop
+      the same one, and `sanitized` still reads 74:73 with `downbeats[0]` still
+      1 — silent, every time. Cuts BETWEEN bar lines fail loudly on their own:
+      the leading bar sits a clear 5 beats from the next piece, so there is no
+      short pair and sanitize never runs. A whole class of silent cuts is the
+      exact vacuity the preconditions exist to prevent, and pinning the index
+      closes it.
+      No count is given on purpose. Three drafts of this paragraph carried
+      three different totals — 3, then 66, then a range that assumed cuts could
+      reach 268 when `phasePieces` cannot place one past its last window centre
+      — because each was a sweep's bounds quoted as a population. The mechanism
+      is frame-independent and the numbers were not, so the numbers went.
+    - Two silent-skip paths in the anti-vacuity machinery, both closed: a
+      fixture added without a `FIXTURE_PRECONDITIONS` entry used to run
+      unguarded and print PASS (the harness now refuses to start, exit 2), and
+      `SINGZ_NO_FIXTURES=1` dropped them while the summary still read
+      "IDENTICAL" (it now says out loud that the backcast is uncovered).
+      The lattice gate also became a POSITIVE test asked of the TS rather than
+      resting on the absence of an `ml` key in an aux literal a few lines away
+      — and the FIRST version of that test watched three fields, none of them
+      the splice's own record. `debug.lattice` reads `'drums'` *during* a
+      splice (the splice only runs when the ML lattice was not adopted), and
+      the other two are written behind extra gates. It is one field now:
+      `debug.mlLattice`, which `latticeFromMl` writes unconditionally on every
+      non-null return, so its absence proves the function bailed at its own
+      guard — no mlChoice, no adoption, no splice, no seams. A hedge that
+      watches the wrong fields is worse than no hedge, because it reads as
+      covered.
+    - **What the fixtures still do NOT reach**, listed so it is not discovered
+      later: the `replace` limb entire (unsteady + trusted onsets, the
+      `unexplained` fraction, the refusal when onsets are junk), any run with
+      `onsetsTrusted === true` and therefore all snapping, the chord-phase bar
+      vote, `no stable anchor`, the two early returns, `walk: 'empty'`, the
+      `body.empty()` branch, and every part at a rate other than 44.1 kHz.
+    - One TS inconsistency recorded rather than silently repaired:
+      `backcastHead` reads `getChannelData(0)` for inst and bass — channel
+      ZERO, not the fold used everywhere else — while drums arrives folded.
+      The core has only the fold, which is identical for the mono buffers the
+      harness and the phone both supply and differs from the desktop
+      renderer's stereo AudioBuffers. Matching the TS is this file's contract
+      and the fold is the better input, so that gets reconciled once, at the
+      desktop swap, deliberately.
+    - **Survey before the courts slice** (2026-08-17, re-measured 2026-08-18
+      after the corpus turned out to be wrong — see below). What the courts
+      actually decide, measured by running the TS over the library twice: once
+      with the parity harness's aux (fill stems, vocals, lyric line starts) and
+      once with the same aux plus BASS, which in a no-ml configuration is what
+      stops `applyCourts` abstaining (`runs.length < 8 && !ev.ml`,
+      courts.ts:1500, and `runs` fills only inside `if (bass22)`). With a pack
+      present `ml` alone would wake them too.
+      **The library is the 17 projects under whatever `settings.json` names as
+      `projectsRoot`** — currently the iCloud SingZ folder. `--library` on the
+      parity harness resolves it, and every number below came from there.
+      Of the 17: **15 produce a grid, 2 are refused** (Father and Son and The
+      Music Of The Night, both "windows disagree on a tempo (rubato?)").
+
+      | song | bars, no bass | with bass | edits | by route |
+      |---|---|---|---|---|
+      | Zeit | 163 | **82** | — | octaveCourt HALVE |
+      | Wish You Were Here | 0 | **86** | — | octaveCourt HALVE |
+      | Wild World | 62 | 65 | 6 | 3 break-pair, 3 cadence |
+      | Sixteen Tons | 78 | 81 | 3 | 3 break-pair |
+      | Turn The Page | 114 | 117 | 3 | 2 break-pair, 1 plain |
+      | Soldier Of Fortune | 54 | 56 | 2 | 1 break-pair, 1 plain |
+      | Mr Crowley | 109 | 109 | 1 | 1 break-pair |
+      | Panzerkampf | 0 | 130 | 1 | 1 break-pair |
+      | Wanted Dead Or Alive | 96 | 96 | 1 | 1 break-pair |
+      | the other 6 | — | — | 0 | — |
+
+      The route column adds to **12 break-pair + 3 cadence + 2 plain = 17**,
+      which is the sentence below it. The first version of this table did not:
+      it mixed route names with EVIDENCE names ("held note", "form seam") in
+      one column, so it summed to 11 break-pair against a prose 12 and no
+      reader could tell which was right. Route and evidence are orthogonal —
+      every edit has one of each — and conflating them is how a table stops
+      being checkable.
+
+      **17 edits over the corpus: 12 by the break-pair route, 5 not** (3 by a
+      cadence route, 2 plain step placement). So break-pair is still where a
+      port starts, but it is 70% of the work rather than the 83% four songs
+      suggested, and there is a third route the small corpus never showed at
+      all.
+      **`octaveCourt` is NOT idle.** It halves two songs, which is exactly
+      what courts.ts's own header says it exists for ("Zeit and WYWH ship at
+      exactly double their notation"). It has real regression material, so
+      only `doubleCourt` needs an invented fixture.
+      **`doubleCourt` is untested rather than idle** — it runs in the else
+      branch of the octave verdict (courts.ts:1508) and `doubleGrid` inserts a
+      midpoint between every pair, so beat times move while `oct` reads keep.
+      It reports nothing here because it bails at `!ev.ml` before its debug
+      line and this harness supplies no ml. That is a property of the harness
+      config, not of the corpus: a Beat This! pack is installed on this
+      machine, so the app's own configuration is the one still unmeasured.
+    - **The corpus was wrong, and it took a claim with it.** Everything in the
+      first version of this survey was measured against `~/Documents/SingZ` —
+      a stale four-project copy (3 of the 4 still v1 WAV against the library's
+      v2 FLAC; the decoded PCM is identical, the containers are not). The
+      library copies carry whisper-ALIGNED lyrics where the stale ones have
+      LRC estimates — in ALL FOUR overlapping projects, not just one:
+      Nothing Else Matters 39 of 39 line starts differ, Wanted Dead Or Alive
+      53 of 53, Panzerkampf 64 of 65, Sixteen Tons 32 of 32 plus a line-count
+      difference. Line starts feed the vote, which is why three table rows
+      moved — naming a single song made the changes look stranger than they
+      are.
+      The headline was the casualty: "octaveCourt is idle on the whole corpus,
+      no library song exercises it, so it will need synthetic fixtures" was
+      false, and it was the sentence the porting plan for that court rested
+      on. Two more rows were wrong too — Nothing Else Matters is 0 → 154 bars
+      with NO edits (the stale copy said 154 → 155 with one), and Wanted Dead
+      Or Alive is 96 → 96 (the stale copy said 96 → 97) — and the break-pair
+      statistic moved from "5 of 6" to "12 of 17" with a third route
+      appearing. The table above is the re-measured one; nothing from the
+      stale run survives in it.
+      **The port itself was never at risk and is now far better evidenced.**
+      Parity compares two implementations on whatever input it is handed, so
+      the corpus could not threaten it: re-run over all 17, beats parity is
+      identical on every song that produces a grid — **38/38 on 14 of the 15
+      and 37/38 on Primo Victoria**, which compares one stage fewer for a
+      reason not yet run down — and the two refusals are refused identically
+      on both sides for the same recorded reason. Nothing diverges anywhere;
+      the coverage count is what varies, and "38/38 on every song" was a
+      rounding of my own results in my own favour. What the wrong corpus threatened was every DESCRIPTIVE claim
+      made from it, and it took several.
+    - **Where Panzerkampf's 130 bars come from** — kept, because it is still
+      the sharpest thing this survey found, and because the rewrite above
+      very nearly lost it. An earlier version of this section claimed the
+      bars came from the VOTE, on the strength of "130 x 4 is about 515
+      beats". They do not. `debug.segCues` settles it with no new
+      instrumentation: with bass the song's one segment scores under
+      `ANCHOR_CONF`, so no anchor is placed and the vote lays no bars at all.
+      All 130 come from `meterCourt` replacing a bar-less grid with a UNIFORM
+      list (`barTimes`' fallback, courts.ts:629-633).
+      The supporting histogram — 126 bars of exactly 4 beats plus one 2 and
+      two 3s, i.e. ceil(515/4) = 129 uniform bars minus the one inside the
+      L=3 edge pair plus the two it adds — was measured on the STALE grid and
+      has not been re-run. The bar count reproduces on the library (130), so
+      the identification stands as an argument about a mechanism; the exact
+      gap shape is not a library measurement and is not claimed as one.
+      The methodological lesson from that round is what the table above now
+      obeys: an approximate fit that matches two rival mechanisms is evidence
+      for neither, and a count a reader can disprove by adding up the column
+      above it is the wrong thing to get wrong.
+      The lesson is cheap to state and was expensive here: **a corpus is an
+      input like any other, and this document had no line saying which one.**
+      It does now, and `--library` means nobody has to type a path they might
+      get wrong.
+    - **Step 0 is done** (2026-08-17). `singz-analyze beats` takes `--bass`,
+      and an argument it does not recognise — or one given without a path —
+      is now FATAL (exit 2) instead of falling through the loop in silence.
+      That silence was the whole hazard: it would have run the TypeScript
+      with a bass stem and the C++ without one.
+      It also produced a cross-check of the corrected Panzerkampf finding
+      from the C++ side — and the first numbers written here were themselves
+      off the stale copy. On the LIBRARY Panzerkampf, with the harness's aux
+      (drums + guitar/piano/other + vocals + its 65 aligned line starts), the
+      C++ scores **0.015 without bass and 0.073 with**, and the rotation moves
+      0 to 2. TS agrees. 0.073 is 91% of `ANCHOR_CONF` — not the comfortable
+      margin the stale copy's 0.047 suggested, and on exactly the quantity
+      step 1 exists to watch.
+      The attribution rests on the THRESHOLD, not on a bar count: with bass
+      the vote scores 0.073, under 0.08, so it places no anchor and therefore
+      no bars, and the bars the TS ships must come from downstream. The count
+      cannot carry it — drop the line starts and the same song scores 0.142
+      and the pre-court vote lays 129 uniform bars, which is the same
+      ceil(515/4) `meterCourt` would materialise. Two mechanisms, one number,
+      again.
+    - **Eighth slice — the chord layer** (2026-08-18). `chordRuns` is ported:
+      24 maj/min templates on the summed harmonic chroma, the bass chroma
+      naming the root, Viterbi with a 0.35 stay bonus. It is the function
+      `buildCourtEvidence` turns into `runs`, and `runs` is the single thing
+      that decides whether the courts speak at all — `applyCourts` abstains on
+      `runs.length < 8 && !ev.ml` — so nothing downstream of it matters if it
+      is wrong.
+      Identical to the TS on every sample stem (17-18 runs each, and the count
+      varies per stem so the comparison is not degenerate).
+      **The gate is mutation-tested, and the first attempt was inconclusive in
+      a useful way.** Perturbing `STAY` by 1e-7 relative changed nothing at
+      all — the Viterbi margins are simply wider than that, which is worth
+      knowing — so it proved neither that the gate works nor that it does not.
+      Removing the stay bonus entirely (`STAY = 0`) makes it fail loudly and
+      precisely: 17 runs against 20, first divergence named as `A@28.5x5`
+      versus `A@28.5x2`. A mutation too small to change the answer is not
+      evidence that a gate is live.
+      **And my reading of that was still too flattering.** Review measured the
+      floor properly: scaling the major emission scores by 1.001 passes every
+      stem, 1.01 fails only the one with short ambiguous runs, 1.05 leaves
+      three of six passing. That is ~1e-2 relative — five to fourteen orders
+      coarser than the float-store (~6e-8) and reordered-dot-product (~1e-16)
+      differences the porting rules exist to police. So this is a DECISION
+      gate, not a value gate: it proves the decoder's structure and its tie
+      rule (verified — flipping `>` to `>=` fails), while the numbers it
+      decides from are gated one layer up at exact-double precision. Both
+      courts.h and the harness header say so now; they had sold it as
+      ulp-drift detection, which it is not.
+    - **Ninth slice — the voice and form evidence** (2026-08-18).
+      `vocalEvidence`, `formSeams` and `phraseSegments` are ported. With that
+      the courts' whole INPUT side is native: chord runs, held notes and
+      section seams are everything `buildCourtEvidence` assembles.
+      `vocalEvidence` has two paths and the gate runs the one that matters:
+      with aligned WORDS it grades the silence after each word against the
+      beat, without them it falls back to energy segments and last-rise
+      detection. The app always has words, so gating only the fallback would
+      have gated the path nothing takes — the harness passes synthetic words
+      and exercises the real one. Identical on every stem: 4 voice hits, and
+      0-2 seams which vary per stem so the seam comparison is not degenerate.
+      **The voice comparison is redundant across stems and the record should
+      say so**: with words supplied, `vocalEvidence` reads only the vocals
+      stem and the word list, so all six runs compute the same answer. It is
+      compared, not skipped — but it is one comparison performed six times,
+      not six independent ones. Seams differ per stem because they read the
+      harmonic chroma too.
+      One JSON trap worth the line: a final word with no successor has a
+      genuinely infinite `gapSec`, and C's `%g` prints `inf`, which is not
+      JSON — the harness died on it. The CLI emits `1e999`, which `JSON.parse`
+      turns back into `Infinity` exactly, so the comparison sees the value the
+      TS actually holds rather than a finite stand-in.
+    - Next: the rest of detectBeats and courts (same method, same harness)
+      — which is now the whole remaining cost of a phone analysis — then
+      the desktop's `analysis:run` IPC over the CLI, then retire the TS
+      detectors behind a one-release flag.
+    - **4b's iOS half** (2026-08-18). `mlGrid` crosses the ObjC++ binding
+      the way it crosses JNI — 22 050 Hz mono wav + models dir in, the
+      desktop's own grid out, rate CHECKED rather than resampled. On the
+      iPhone 16 Pro simulator: 73 beats, 18 downbeats and all 4 082
+      probabilities identical to the desktop runner in 1.4 s of INFERENCE for
+      a 40.8 s song (Android, rebuilt against the same core, agrees). That
+      1.4 s is the BINDING's `elapsedMs` — each binding mints its own clock,
+      which is exactly why the two platforms' fields are not comparable — and
+      on iOS it starts after the model load; the cost table below says 2.2 s
+      for the same song because it measures the caller's JS→JS wall. Same
+      run, two spans — the note at `t0` in SingzSplit.mm is the standing
+      warning not to mix them. Treat any single EMULATOR timing as
+      indicative only: the same 40.8 s song measured 14.2, 17.6 and 26.1 s
+      across runs here, so an older figure in a commit message need not
+      contradict this table.
+      Permanent suite: `mobile/tests/mlgrid-ios.cjs`.
+      Two findings worth keeping, both of which a grid comparison is blind to:
+      **(1) arity.** The method shipped taking two arguments while the hook
+      and the JNI pass three; the bridge then never dispatches and the
+      promise never settles — no work, no rejection, no red box. Hence the
+      suite's settle DEADLINE and its native-method probe, and the CLAUDE.md
+      gotcha. **(2) `%.17g` must not reach Foundation.** `NSJSONSerialization`
+      is not correctly rounded on seventeen significant digits, so parsing
+      `mlGridJson` back cost 49 of 2041 beat probabilities and 7 downbeat
+      ones their last bit while every beat and downbeat stayed identical.
+      The binding now builds its result from the core's doubles;
+      `mlGridRounded` is the rounding, once, for both consumers.
+      The tee ships on iOS too (same wrapper, RCTLogWarn where Android uses
+      logcat) and is what settled this: the iOS logits differ from the
+      recording's — real cross-platform ORT drift — and none of it reaches a
+      rounded probability.
+    - **What the grid COSTS** (2026-08-18). Measured per run, fresh process,
+      the same audio on both. Wall is the hook's JS→JS time (model load +
+      inference + marshalling); CPU is the process's own utime+stime delta;
+      peak is `VmHWM` on Android — the kernel's high-water mark, which no
+      sampling can miss — and 100 ms `ps` sampling on the sim, **so the iOS
+      peaks are a LOWER bound and the Android ones are exact**. Read the two
+      columns as the same order of magnitude, not as a difference measured
+      to the megabyte.
+
+      | | 40.8 s song | 4 min song (6× the audio) |
+      |---|---|---|
+      | **POCO X6 Pro wall** | **3.7 s (11× realtime)** | **14.9 s (16×)** |
+      | **POCO X6 Pro CPU** | **13.0 s (≈3.5 cores)** | **55.8 s (≈3.7)** |
+      | **POCO X6 Pro peak RSS** | **461 → 1147 MB (+686)** | **458 → 1269 MB (+811)** |
+      | iOS sim wall | 2.2 s (19× realtime) | 6.0 s (41×) |
+      | iOS sim CPU | 8.8 s (≈4 cores) | 29.8 s |
+      | iOS sim peak RSS | 376 → 1035 MB (**+660**) | 311 → 1067 MB (**+756**) |
+      | Android emu wall | 14.3 s (2.8× realtime) | 61.3 s (4.0×) |
+      | Android emu CPU | 26.2 s (≈1.8 cores) | 114.5 s |
+      | Android emu peak RSS | 442 → 1117 MB (**+675**) | 442 → 1247 MB (**+805**) |
+
+      **The headline is that peak RSS barely tracks song length.** Six times
+      the audio costs +96 MB on iOS and +130 MB on Android — the linear part
+      (frames, spect, probabilities) — on top of a FIXED ~660-690 MB that is
+      the ORT session and its per-chunk activations. Chunks are 1500 frames
+      whatever the song is. So the memory question for the fleet is "can this
+      device spare ~700-800 MB transiently", not "how long is the song", and
+      it is the same order of magnitude on both platforms. Both RELEASE it,
+      measured after the fact rather than assumed: the sim's process sits at
+      204 MB idle having peaked at 1067, and the emulator's `VmRSS` is 473 MB
+      against a `VmHWM` of 1247 — the high-water mark never falls, so it is
+      `VmRSS` that says the memory came back.
+      Longer songs are also CHEAPER per second — 19× → 41× realtime on the
+      sim — because a 40.8 s song still pays for two padded 30 s chunks.
+      Parallelism differs sharply and is NOT one number: CPU/wall is ≈4-5
+      cores on the sim and ≈1.8 on the emulator, which is a property of those
+      two hosts' core counts and ORT's thread pool, and among the first things
+      a real device will contradict.
+      **THE REAL PHONE AGREES, and that is the point of the row at the top.**
+      A POCO X6 Pro (Snapdragon 7+ Gen 2, 8 cores, 11.4 GB, HyperOS/API 35)
+      peaks at +686 MB for the short song and +811 MB for the 4-minute one —
+      within 2% of the emulator, the other exact `VmHWM` measurement, and
+      4-7% of the sim's sampled lower bound — so the fixed-cost shape is a
+      property of the model and not of the host. It is the fastest REAL
+      DEVICE of the three and about 4× the emulator, which is the
+      like-for-like comparison; the sim's higher multiples (19×/41×) come
+      from desktop-class cores, not from being a phone. With
+      5.4 GB free on that device the ~800 MB transient is comfortable, and it
+      returns: RSS falls back to 483 MB after the run.
+      The remaining numbers are a simulator and an emulator on an M2, NOT
+      phone numbers; what they establish is the shape (fixed-cost-dominated,
+      released after), not the absolute — and on two song lengths only, so the
+      per-minute cost (28 MB on the sim, 38 on the emulator, 37 on the phone,
+      over 3.4 added minutes) is a slope through two points, not a curve.
+      The Android device pass is DONE (the POCO row above); iOS is still
+      simulator-only. And the ~700-800 MB transient has to be read against
+      the split gate's own budget before beats and a split can ever run near
+      each other — 11.4 GB of phone makes it comfortable here, which says
+      nothing about the 6-8 GB devices the capability gate exists for.
+    - **4b wired** (2026-08-19). The lattice reaches the pipeline. The
+      binding's new entry is `mlGridFromStems` (both platforms, same arity):
+      44.1 kHz stem paths in, the core sums and decimates them itself
+      (`sumStemsTo22k` — the desktop's fetchMlGrid mix, natively; ~250 MB
+      of audio never crosses a JS runtime), the grid out. `pipeline.ts`
+      runs it FIRST, before any stem crosses to the worklet host, so the
+      ORT session's ~700 MB and the six decoded stems never coexist, and
+      hands the result to `detectBeats` as the `ml` aux. The beat models
+      are an opt-in "better beats" card in the phone library (87 MB, once;
+      dismissable; never downloaded on anyone's behalf) — `BEAT_MODELS`
+      was already pinned to `models-1`, and the sha256s match the files the
+      device suites were verified with. Both natives grew `modelStatus`
+      (a stat, never a download) so the planner can ask without touching
+      the network.
+      **The stamp trap is closed**: `analysisNone.beatMl` is the beat
+      verdict's sub-stamp — true when the lattice was heard on the way to
+      "no grid". BEAT_DETECT_VERSION alone cannot carry it (the desktop
+      stores ml and no-ml grids under one detVersion), so a verdict that
+      predates the models is re-asked exactly once when they land, and a
+      verdict heard WITH them binds. Jest gates it (29 pipeline tests, the
+      sub-stamp rule mutation-tested: ignoring it turns exactly the two
+      re-ask tests red). Proven end to end on the sim
+      (`mobile/tests/ml-aux-ios.cjs`): models absent → homegrown grid,
+      `ml 0 ms`, the offer showing; models seeded → re-analysis logs
+      `ml grid: 120 beats, 37 downbeats in 3.8s` and `ml 3955 ms`, fresh
+      grid under the current stamp, key and melody kept.
+      **And a real finding on the way**: the shared `Resampler` was sized
+      for 48k→44.1k (24 taps per output at up=147 is a ~3.5k-tap prototype)
+      and the same 24 at 44.1k→22.05k is a 24-TAP lowpass — measured −3 dB
+      at 10 kHz, content at 12-14 kHz aliasing back at −10..−25 dB. On
+      real stems that was 16.8 dB SNR against soxr and a different grid.
+      The tap count now scales with the net decimation (96-tap prototype
+      at 2:1; 14 kHz aliases at −134 dB; 48k→44.1k byte-identical to
+      before, its 110 dB gate unmoved), and the host harness gates the 2:1
+      response directly — the old filter turns three checks red. The
+      "110 dB" in resample.h's header had been measured with a 1 kHz tone
+      at a near-unity ratio, where a short filter cannot show.
+      **What "matches the desktop" can mean here, measured before the
+      device suites' gate was set**: three good renders of the same three
+      stems (Chromium's OfflineAudioContext — the desktop's actual path,
+      via `scripts/render-ml-mix.cjs` —, the core's Kaiser, ffmpeg's soxr)
+      agree to 0.01 dB from 20 Hz to 10 kHz, differ in group delay and the
+      last 500 Hz under Nyquist, and Beat This! gives them THREE grids:
+      119/43, 120/37, 117/39 beats/downbeats. Chromium's is the
+      least-filtered of the three (it sums at 44.1k and its per-source
+      interpolation folds 11 kHz+ back in; its peak is the raw sum's), yet
+      it is what the desktop ships. There is no resampler-independent grid
+      to match bit for bit. What is stable is the LATTICE: phone vs
+      Chromium beats F1 0.996 (119 of 119 within 70 ms), same tempo,
+      downbeats F1 0.88 — the downbeat head is the marginal one, and `ml`
+      is evidence to the courts, not the grid. So `mlgrid-stems-{android,
+      ios}.cjs` gate beat-F1 ≥ 0.98 / tempo / downbeat-F1 ≥ 0.80 against
+      the Chromium oracle, and dropping a stem turns them red (F1 0.975,
+      tempo 120 vs 125). iOS and Android agree with each other bit for bit
+      on the from-stems path (120/37 on both).
+      Not done: a real-phone run of the from-stems path (the binding was;
+      the wired pipeline was not), and the ≥10-song corpus eval of
+      phone-ml grids. (`mlgrid-android.cjs` needed no levelling — checked
+      in Phase 4 and found already point for point with its iOS sibling.)
+    - Left for 4b: the C++ `beat_this` port + the two beat models (the
+      `ml` aux that lifts the grid to pack parity — and note that the
+      negative verdict is keyed by BEAT_DETECT_VERSION alone while the
+      phone's v21 has no ml aux, so when the neural grid ships on the phone
+      every `analysisNone.beat === 21` recorded before it must be re-asked
+      without a desktop bump: a second key or a phone-side sub-stamp), the ≥10-song real-stem
+      parity eval on Android and iOS, **player + analysis measured together
+      on a real phone with a ≥4-minute phone-split song** (the sim run was
+      the 40 s sample; on device the far side's stems ride alongside
+      ~700 MB of playback buffers for the pYIN minute — the reason for
+      `keepStems`, and a number that has to be read off a phone before the
+      fleet gets it), and the Android suite re-run (adoption and open now
+      decode in the background at moments a driver does not control, and
+      the Hermes-inspector rule about evals mid-decode applies to those
+      decodes too). The phone-side re-analysis of stale desktop grids
+      arriving via Drive is deliberately NOT done (desktop-owned; the
+      desktop heals them itself).
+    - **Tenth slice — the ML fork, and `detectBeats` is whole**
+      (2026-08-20). The last un-ported stage of the detector: `latticeFromMl`
+      with its octave and steadiness guards, `dominantMlBarLen`, `levelMix`,
+      v17's `levelNormalize`, the whole v11-v16 splice family (~430 lines: the
+      thinned and bar-anchored parity views, the per-span carry vote, the
+      zone-local halved view, the five splice reasons), and the bar-phase
+      touchpoints — the waltz meter, the drumless bar histogram, the segment
+      seams, the `mld` cue, the void physical-defect gate, the spliced-intro
+      bars and the per-span rotation re-vote. Composed with courts.cpp and the
+      head backcast's post-halve second chance, the core's entry point is now
+      `detectBeats` and the name has dropped its qualifier, as the header it
+      carried told the next person to do.
+      The front-end (flux, low band, drum onsets) moved out of
+      `trackFromDrums` into `drumFrontEnd` on the way, because `latticeFromMl`
+      needs `drumFlux` too and the fork between them happens before either has
+      run — the TS's own shape, which the port had flattened for convenience.
+      **The gate widened to the app's real aux.** `singz-analyze beats` takes
+      `--ml`, `--bass` and `--word`; `eval/beats/make-ml-grids.mjs` runs the
+      installed pack's Beat This! over the library and writes the grids as
+      JSONL, which the harness hands to BOTH sides as whitespace tokens (JS's
+      shortest round-trip repr in, strtod out — the same double on both sides,
+      which a %.17g hop through Foundation would not give). 50 stages, 25
+      inputs (17 library songs and 8 fixtures), identical — and identical
+      again with `--ml` withheld, which is the packless path the phones take
+      without the models.
+      **Adding bass found a real bug in the courts, three days old.**
+      `meterCourt` materializes a uniform bar array for a grid that reached it
+      without one — purely so its own tests have bars to measure, no verdict
+      follows — and the TS does it by building a NEW OBJECT, which its caller
+      tests by identity (`courted !== det0`). So a song whose phase pass finds
+      no confident anchor leaves the courts WITH bars even though every court
+      declined. Panzerkampf's 129 bar lines and Primo Victoria's 64 are exactly
+      that, and this side was shipping neither while every court debug field
+      still compared equal. `CourtsDbg.changed` now marks the construction, not
+      the verdict.
+      **And a hole in the gate itself, found by mutation.** `debug.reject`
+      used to imply the TS returned null, so the harness broke out of the
+      comparison as soon as it saw one. The ML fallback ends that: the tracker
+      writes "windows disagree on a tempo (rubato?)", the model's lattice is
+      adopted, and a grid comes back with the string still sitting in the
+      debug. Father and Son compared ONE stage of forty-nine and printed PASS —
+      and had been doing so in every run of this slice. The test is the return
+      value on both sides now. What surfaced it: an octave-gate mutant that
+      should have rewritten that song's entire grid survived, twice, which is
+      not something a live gate does.
+      **Coverage is measured, not assumed.** The harness ends with a
+      branch-by-branch report of what the run executed — twenty-two named
+      branches, each with the songs that reached it — because a green parity
+      run that does not say what it ran is the failure the fixtures exist to
+      prevent, one level up. Four branches the library structurally cannot
+      reach got fixtures with preconditions: `ml-verbatim` (the bare-mix early
+      return needs a project with no bass and no instrument stem), `ml-waltz`
+      (a 3-beat meter the drums-first path cannot emit at all), `ml-drumless`
+      (the meter read off the model's own bar histogram and the phase off its
+      own marks — and its bars are SIX beats long on purpose, because both the
+      histogram and the autocorrelation it replaces answer 4 on a 4/4 song and
+      a 4/4 fixture would have proved nothing), and `ml-multilevel` (v17's
+      thinning, with a seam whose local interval sits between 0.7 and 0.9 of
+      the song's own).
+      Two of those fixtures took a second shape to work. `ml-drumless` began
+      as quiet white noise, on the reasoning that a real drums lane carries
+      bleed: the onset picker found 339 peaks in it and marked 78% of beats
+      active against a 30% ceiling, reaching neither branch. And
+      `ml-multilevel`'s seam began as alternating 0.30/0.50 gaps — but the
+      median of an odd window over two values is always one of them, so the
+      local interval read 0.30 or 0.50 and never the 0.40 the seam existed to
+      produce. Both are the same lesson: a fixture that plausibly resembles a
+      case while missing its branch is worse than none, because it reads as
+      covered.
+      **Mutation results**, since that is the only way to tell "covered" from
+      "reached but inert": nine mutants of the ML port, six killed by the
+      corpus (the octave gate both ways, the steadiness gate, the seam's
+      half-bar allowance, the span-phase margin, the `mld` cue weight), two
+      more killed by `ml-multilevel` once its seam was reshaped, and three
+      that survive and are printed by the harness as KNOWN UNEXERCISED — the
+      splice's v16 level gate (no span in these lattices sits at the wrong
+      level, so removing it entirely changes no grid), `levelNormalize`'s
+      `barAt` tolerance (Beat This! snaps every downbeat onto a beat, so the
+      distance is always 0 and any tolerance accepts), and the splice debug's
+      carry-over across a refused splice (a debug field only; no grid depends
+      on it).
+      One smaller shape worth keeping: the CLI now OMITS the tracker's debug
+      groups it did not reach rather than printing their zero defaults. The ML
+      fork can return before the tracker entirely, and a printed 0 against the
+      TS's unwritten key is a divergence that exists only in the report.
+      **Review caught the one touchpoint that was not in `detectBeats` at
+      all.** `trackFromDrums` reads `aux.ml` too — v16/v17 widen the octave
+      near-tie window from 3% to 12% when the model tracked both levels in one
+      song, because then it is saying in its own voice that the race is real.
+      It decides a whole-song halve or double and leaves no trace but
+      `debug.octaveTie`, and this port had left it at the narrow 3% with a
+      comment ("without a pack is absent") that the same diff had made false.
+      Nothing caught it: the harness had no `octaveTie` stage, so the field was
+      never compared, and no library song has BOTH halves of the trigger —
+      Puppe, Turn The Page and Wild World widen the window but race by more
+      than 12%; Primo Victoria, Sixteen Tons and Wanted Dead Or Alive race
+      inside the band with unambiguous models. A 23-input run at 49 identical
+      stages was hiding a whole-song octave.
+      Now: `trackFromDrums` takes the whole `BeatAux` rather than the fill
+      stems (which is the TS's own shape, and removes the way for the two to
+      disagree about what the tracker may read), `mlBimodal` is ported, the
+      stage exists, and `ml-octave-tie` is a fixture built to have both halves
+      — an SSSW accent at 0.45 s puts the 133 and 66.5 bpm candidates 6.7%
+      apart with the half-time reading winning on support x alternation, and a
+      lattice whose ratio falls outside every view window and whose level
+      mixing gets it refused, so the tie is the only thing the model touches.
+      Reverting the fix now turns the gate red at that fixture.
+      The same review found the host test suite no longer compiling —
+      `barPhase` had gained a required parameter and `tests/native/
+      core_host_tests.cpp` still called the four-argument form, which the
+      Android CI canary runs before anything else. Fixed; the suite passes.
+      Not done in this slice: the bindings (`analyzeBeats` on both platforms,
+      arity-matched) and `deps.ts` switching off the worklet host, which is
+      where the 22.6 s of a phone analysis actually goes.
+    - **Eleventh slice — the detector reaches the phone** (2026-08-20).
+      `analyzeBeats` binds on both platforms with the same name and the same
+      seven arguments: the drums, the bass, the vocals, the instrument bed,
+      the lyric line starts, the aligned words as a FLAT [s0,e0,s1,e1,…]
+      array, and the neural lattice or null. What the two platforms
+      deliberately do NOT share is the marshalling — Android crosses a JSON
+      line from C++ and parses it in Kotlin, iOS builds its dictionary from
+      the core's doubles without any text at all — because Foundation's JSON
+      number parser is not correctly rounded on 17-significant-digit input
+      and Kotlin's is. A beat time is a double that has to survive; the text
+      hop is safe on exactly one of the two platforms.
+      The lattice crosses as three arrays plus fps, not four: nothing in
+      `detectBeats` or the courts reads `beatProb`, and it is ~12 000 numbers
+      per four-minute song.
+      `deps.ts` chooses the native when every stem is WAV and the installed
+      binary carries the method, and falls back to the worklet TS otherwise —
+      a copied desktop project's FLAC, or JS newer than the app. The fallback
+      loads its stems ONE AT A TIME and awaits each: ~53 MB of float32 apiece,
+      and decoding four at once is four times the peak for no wall-clock gain.
+      `pipeline.ts` no longer crosses anything to any runtime — `put()` is
+      gone entirely — which means the beat stems must be named in the STAMP by
+      hand, because put() used to do that as a side effect. A stem left off
+      that list could be replaced mid-run without the commit noticing;
+      `analysis-pipeline.test.ts` watches the VOCALS specifically, since every
+      other aux stem is also named by the key stage and would pass even if the
+      beat list dropped it.
+      **Measured on the iOS Simulator, four-minute song**: 8.5 s native
+      against 31.4 s on the worklet host for the same stems, and 51 s through
+      the FLAC fallback (which decodes as well as tracks). The whole pipeline
+      run reports `load 0 ms` now, which is the change stated in one number.
+      **Verified value for value on device**, not by counts: the new
+      `mobile/tests/beats-native-ios.cjs` runs the native, the worklet TS and
+      the deps branch over one project and requires every beat time, the
+      tempo, the meter, the rotation, every bar index and every suspect mark
+      to agree — then runs the whole thing again over a lossless FLAC copy,
+      where the fallback must reproduce the native's grid EXACTLY rather than
+      approximately. It does. The suite asks the INSTALLED binary for
+      `analyzeBeats` before anything else, because Metro serves JS live and a
+      build made before this landed would silently take the fallback and
+      compare the TypeScript against itself.
+      Mutation found the sharpness of that check to be input-dependent, which
+      is now in its header: with the seeded project's guitar and piano silent,
+      a fallback mutated to drop its LAST instrument stem passed. Moving the
+      mutation to the first (the one with music) gave 919 beats on a different
+      rotation and turned it red.
+      **Android is driven too, on the user's own POCO X6 Pro.**
+      `beats-native-android.cjs` is the iOS suite's sibling — the same
+      comparison, a different target selector — and it exists as its own file
+      rather than a flag because the two bindings MARSHAL DIFFERENTLY: iOS
+      builds its dictionary from the core's doubles, Android crosses a JSON
+      line and parses it in Kotlin. A beat time that lost a bit in that text
+      hop would be invisible to every count and to the iOS suite. It does not:
+      513 beats, 97.5 bpm, 129 bars, identical to the worklet's, in **25.7 s
+      native against 126.1 s** on a 5.3-minute song. The phone got the build
+      with `-PdebugAppIdSuffix=.debug`, which is what keeps the release app's
+      downloaded songs and Drive sign-in intact.
+      **Both suites cross the FULL aux**, which review caught them not doing:
+      the lattice and the aligned words are the two arguments the real
+      pipeline always fills and a bare comparison never sends, and a
+      mis-marshalled word pair or ml dictionary yields a grid that is wrong
+      and is stored under an unchanged detVersion — never re-derived. The
+      suites now report what actually crossed (iOS 176 words / 894 ml beats,
+      Android 296 words / 545 ml beats) and say so out loud when either
+      crossed empty. Holding that aux constant is also why the FLAC leg takes
+      its lattice from the WAV twin: the core cannot read FLAC, and an unequal
+      aux would make the fallback comparison answer a different question.
+    - **Player + analysis on one real phone, measured** (2026-08-20). The
+      number `keepStems` exists for, and which had never been read off a
+      device. POCO X6 Pro, a 5.3-minute six-stem song, total PSS from
+      `dumpsys meminfo` (never a JS eval — opening a song decodes six stems
+      and evaluating during a decodeAudioData segfaults the Hermes
+      inspector):
+      catalog with nothing open **369 MB**; the song open in the player
+      **1243 MB** (+874 for six decoded stems); and with a full forced
+      analysis running ON TOP of it, including the neural lattice, a peak of
+      **2118 MB** — +875 MB over the open song.
+      The same song analysed the OLD way, with the worklet leg crossing six
+      more decoded stems to the analysis runtime, peaks at **2236 MB**:
+      +1060 MB over its open song, and that figure carries NO ORT session at
+      all. So the core's path costs less at its peak than the worklet's did
+      while doing strictly more — the ~700 MB ONNX session included. At 12 GB
+      the phone is nowhere near trouble; the figure to carry forward for the
+      6 GB tier is that a song open PLUS an analysis is a ~2.1 GB event, not
+      the ~2.9 GB the two stem sets would have made of it.
+    - **The corpus gate: device C++ == host C++, twelve songs, both
+      platforms** (2026-08-20). `mobile/tests/beats-corpus.cjs` closes the
+      last link in the chain. `eval/beats-parity.mjs` proves TypeScript ≡ C++
+      on the HOST across the library; `beats-native-{ios,android}.cjs` prove
+      the core ≡ the worklet TS on ONE song, on the device. Neither says
+      whether an ARM build, a different libm or a different ORT gives the
+      same answer as the machine the gate runs on. This does: it seeds a
+      corpus, asks the device for each grid, runs the host CLI over the SAME
+      bytes, and compares value for value.
+      **11 songs with a grid, identical on both, plus one both sides refused**
+      — on the iPhone 17 Pro simulator (5.7-7.3 s per 90-second excerpt) and
+      on the user's POCO X6 Pro (7.2-7.3 s). The two devices also agree with
+      each other, which is not something either suite alone can say.
+      It is honest about its scope in its own header: the neural lattice is
+      OFF on both sides, because feeding the host CLI the identical lattice
+      means shipping ~13 000 numbers back per song for a comparison the
+      single-song suites already make with the real thing. So the corpus is
+      the homegrown pipeline and the v20 courts; the ML fork is covered
+      per-platform on one song each and across 17 songs on the host.
+      Mutation-checked, because device and host run the SAME C++ source and a
+      bug in it would move both: pointing the host at a neighbouring song
+      turns that row red with `host 94 beats vs device 118; first difference
+      at index 0`.
+    - **A song sheet, because the analysis was invisible** (2026-08-20, at the
+      user's request: "there is no possibility to understand what is current
+      beat detection state on the phone"). The player's header gained a
+      top-right control opening a per-song sheet: the beat (tempo, meter, bar
+      count — or the live progress line, or the verdict), the "better beats"
+      models with their download, the key, the melody and the lyrics.
+      The state worth the whole feature is the middle one. A song nothing has
+      read, a song being read right now, and a song the detector listened to
+      and honestly found no beat in all looked identical from the player — and
+      the third is a stored VERDICT the app deliberately never revisits, so
+      from the outside it is indistinguishable from a bug. It now says so, and
+      offers the one action that changes the answer.
+      "Detect again" needed a real addition rather than a button: every stamp
+      says nothing needs doing, which is exactly why the singer is pressing
+      it. `planAnalysis` gained a `force` that sets every stamp and every
+      stored verdict aside and runs each detector the stems allow; hand-placed
+      bar lines still survive, because analyzeProject folds them back. Driven
+      on the simulator: the sheet went through "Listening for the beat…" and
+      "Finding the beat…" to a fresh grid, which is a real run — a no-op would
+      have gone straight from "Getting ready…" to done.
 
 ## Top risks
 

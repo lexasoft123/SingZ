@@ -40,6 +40,81 @@ object SingzCore {
   external fun ortProbe(modelPath: String): String
 
   /**
+   * Phase 4c: the melody tracker (core melody.cpp — the desktop's pyin,
+   * bit-identical). Reads the WAV itself; returns [hopSec, sampleRate,
+   * durationSec, detVersion, f0 per hop...], or an empty array when the file could
+   * not be read. ON THE CALLING THREAD — a four-minute song is ~1 s.
+   */
+  external fun analyzeMelody(wavPath: String): DoubleArray?
+
+  /** [sampleRate, channels, frames, durationSec] of a WAV, or empty. */
+  external fun wavInfo(wavPath: String): DoubleArray?
+
+  /**
+   * Phase 4b: the Beat This! grid (core beat_this.cpp — the desktop packs'
+   * beat_runner_onnx.py, ported). `wavPath` must be 22 050 Hz MONO and is
+   * checked, not resampled: at 44.1 kHz this would return a grid at half the
+   * real tempo with nothing reporting a problem. `modelsDir` holds
+   * logmel.onnx and beat_this.onnx.
+   *
+   * Returns the desktop's one JSON line — beats, downbeats, beat_prob,
+   * downbeat_prob, fps — or `{"error":"…"}`. An error object rather than an
+   * empty string because "this song has no grid" and "the models are not
+   * downloaded" are different answers and the caller must be able to tell
+   * them apart. ON THE CALLING THREAD; ~6 s of work for a 40 s song.
+   */
+  external fun mlGrid(wavPath: String, modelsDir: String, dumpDir: String): String
+
+  /**
+   * The same grid from the project's STEMS: 44.1 kHz wav paths in, the core
+   * sums and decimates them to the model's 22.05 kHz itself (sumStemsTo22k —
+   * the desktop's fetchMlGrid mix, natively), so no audio crosses a JS
+   * runtime for this. Same JSON line or `{"error":"…"}` out. ON THE CALLING
+   * THREAD; reading + summing adds a second or two to mlGrid's cost.
+   */
+  external fun mlGridFromStems(stemPaths: Array<String>, modelsDir: String, dumpDir: String): String
+
+  /**
+   * Phase 4d: the beat detector (core beats.cpp + courts.cpp — the desktop's
+   * whole `detectBeats`, bit-identical: the neural fork, the drums-first
+   * tracker, the splices, the bar phase, the head backcast and the v20
+   * courts). Reads its stems from disk, so no audio crosses a JS runtime.
+   *
+   * `bassPath`/`vocalsPath` may be "" (absent). `words` is a FLAT
+   * [s0,e0,s1,e1,…] array — the v20 meter court's witness — and an odd length
+   * is a caller bug, not half a word. The neural lattice arrives as its three
+   * arrays plus fps; `beatProb` is deliberately not among them, because
+   * nothing in detectBeats or the courts reads it and it is ~12 000 doubles
+   * per four-minute song.
+   *
+   * Returns the grid as one JSON line — `{"ok":false}` is the detector's own
+   * refusal (a drumless or rubato song), which the app stores as a verdict —
+   * or `null` when a stem could not be READ, which is a different answer and
+   * must not be mistaken for it. ON THE CALLING THREAD; seconds for a
+   * four-minute song.
+   */
+  external fun analyzeBeats(
+    drumsPath: String,
+    bassPath: String,
+    vocalsPath: String,
+    instPaths: Array<String>,
+    lineStarts: DoubleArray,
+    words: DoubleArray,
+    mlBeats: DoubleArray,
+    mlDownbeats: DoubleArray,
+    mlDownbeatProb: DoubleArray,
+    mlFps: Int
+  ): String?
+
+  /**
+   * Phase 4c: the key detector (core analysis.cpp — the desktop's
+   * estimateKeyFromStems, bit-identical). Returns [pc, minor(0/1),
+   * detVersion], or an EMPTY array when the harmonic bed is silent — which
+   * is an answer ("no key"), not a failure. ON THE CALLING THREAD.
+   */
+  external fun analyzeKey(instPaths: Array<String>, bassPath: String): DoubleArray?
+
+  /**
    * The whole split, ON THE CALLING THREAD (own a worker for it): raw f32
    * stereo mix in, six <stem>.wav.part + resume tail in jobDir out.
    * Returns "" on ok, "cancelled", or an error message.

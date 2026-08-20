@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
   runOnUI,
@@ -13,6 +13,16 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
+import {
+  ANALYSIS_EVENT,
+  analysisPending,
+  startAnalysis,
+  subscribeAnalysis,
+  type AnalysisDone,
+  type AnalysisProgress
+} from '../analysis/run'
+import { BEAT_MODELS_MB, beatModelsStatus, cancelBeatModels, ensureBeatModels } from '../analysis/models'
+import { nativeMlGridAvailable } from '../analysis/native'
 import {
   fmtTime,
   MET_DEFAULTS,
@@ -29,7 +39,8 @@ import {
   type MetronomeConfig,
   type TrainingConfig
 } from '../model'
-import type { LoadedProject } from '../projects'
+import { readProjectText, type LoadedProject } from '../projects'
+import type { ProjectDoc } from '../model'
 import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper, white } from './bits'
 import { perf } from './perf'
 import SkiaLyrics, {
@@ -72,7 +83,46 @@ export default function PlayerScreen({
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
   const [route, setRoute] = useState<RouteLatency | null>(null)
   const [trimMs, setTrim] = useState(0)
-  const [sheet, setSheet] = useState<'none' | 'mixer' | 'practice'>('none')
+  const [sheet, setSheet] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
+  /* ---- the Song sheet: what has been detected, and what can be asked for --
+   *
+   * The gap this closes: analysis runs invisibly. A song with no grid, a song
+   * whose grid is being computed right now, and a song the detector listened
+   * to and honestly found no beat in all look identical from the player — and
+   * the third is a VERDICT the app stores and never revisits, which is the
+   * one most worth being able to see. */
+  /* The analysis fields as the DISK has them now, not as they were when this
+   * song was opened. `null` until the first re-read; the sheet falls back to
+   * the load-time doc, which is right for a song nothing has touched since. */
+  const [freshSettings, setFreshSettings] = useState<ProjectDoc['settings'] | null>(null)
+  const refreshDoc = useCallback(async () => {
+    if (!project.dir) return
+    try {
+      const doc = JSON.parse(await readProjectText(project.dir, 'project.json')) as ProjectDoc
+      setFreshSettings(doc.settings ?? {})
+    } catch {
+      // The project moved or was deleted under us — the rows keep what they
+      // have rather than blanking, and the next open reads the truth.
+    }
+  }, [project.dir])
+  const settings = freshSettings ?? project.doc.settings
+  const [modelsHave, setModelsHave] = useState<boolean | null>(null)
+  const [modelsGot, setModelsGot] = useState<{ mb: number; totalMb: number } | null>(null)
+  /* The stems as the analysis runner wants them (id -> extension). The player
+   * is handed decoded lanes, not the file list, so it reads the doc — which
+   * names every file the project is made of. Custom lanes are the singer's
+   * own audio and are not stems. */
+  const stemFiles = useMemo(() => {
+    const out: Record<string, string> = {}
+    for (const f of Object.keys(project.doc.stemHashes ?? {})) {
+      const dot = f.lastIndexOf('.')
+      if (dot <= 0) continue
+      const id = f.slice(0, dot)
+      if (id.startsWith('custom-')) continue
+      out[id] = f.slice(dot + 1).toLowerCase()
+    }
+    return out
+  }, [project.doc.stemHashes])
   const insets = useSafeAreaInsets()
   /* Android 15 draws edge-to-edge: keep controls clear of the system bar.
    * iOS keeps its hand-tuned paddings. */
@@ -314,6 +364,108 @@ export default function PlayerScreen({
     engine.setBeats(beatInfo)
   }, [engine, beatInfo])
 
+  /* A grid detected while this song is open lights the metronome up without
+   * a reopen — but only THIS song's: the event names the project dir, and a
+   * result for a neighbour (queued earlier, landing now) is not ours to
+   * apply. Only the phone's own library is ever analysed, and a dir name is
+   * unique only within one library — the desktop's cloud-folder "Foo" opened
+   * from a picked folder must not wear the phone's "Foo" grid — so the
+   * library is checked too. The progress line shows only while it is our
+   * song being read. */
+  const [analysisText, setAnalysisText] = useState<string | null>(null)
+
+  /* Are the beat models on this phone? Asked of the FILES every time the
+   * sheet opens, never cached across opens: the models are a fact about the
+   * disk, and a boolean that happened not to flip would freeze the first
+   * answer for the session — the mistake the catalog's own offer made once. */
+  useEffect(() => {
+    if (sheet !== 'song' || !nativeMlGridAvailable()) return
+    let alive = true
+    void beatModelsStatus().then((st) => {
+      if (alive) setModelsHave(st.have)
+    })
+    return () => {
+      alive = false
+    }
+  }, [sheet])
+
+  /* A hand-made grid is never re-detected (planAnalysis), and the phone has
+   * no editor to rebuild one — so the sheet names it and does not offer the
+   * button, rather than offering a button that quietly does nothing. */
+  const beatManual = settings?.beat?.source === 'manual'
+  /* Can the LATTICE run on this song at all? The models being installed is a
+   * fact about the phone; this is a fact about the project. The core cannot
+   * read FLAC, so a copied desktop project can never have a phone-ml grid —
+   * and offering the 87 MB download beside "detect again to use it on this
+   * one" would be a promise the pipeline refuses to keep (planAnalysis's
+   * `mlNow` makes the same all-WAV test and would answer false forever). */
+  const mlPossible =
+    Object.keys(stemFiles).length > 0 && Object.values(stemFiles).every((ext) => ext === 'wav')
+  const canAnalyse =
+    project.library === 'phone' && !!project.dir && Object.keys(stemFiles).length > 0 && !beatManual
+  /* The detector's own "no beat here" answer, stored under its stamp. Without
+   * this the sheet cannot tell a song nothing has read from one that WAS read
+   * and honestly came back empty — and the second is the state a singer is
+   * most likely to be staring at, wondering why there is no click. */
+  const noBeatVerdict = settings?.analysisNone?.beat !== undefined
+  const busyHere = !!analysisText || (!!project.dir && analysisPending(project.dir))
+  const keyText = ((): string | null => {
+    const k = settings?.key
+    if (!k) return null
+    const NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
+    return `${NAMES[k.pc % 12]} ${k.minor ? 'minor' : 'major'}`
+  })()
+  const detectAgain = useCallback(() => {
+    if (!project.dir) return
+    // FORCED: every stamp says nothing needs doing — that is exactly why the
+    // singer is pressing this. Hand-placed bar lines survive; analyzeProject
+    // folds them back onto the fresh grid.
+    startAnalysis(project.dir, stemFiles, project.lyrics, true)
+    setAnalysisText('Getting ready…')
+  }, [project.dir, project.lyrics, stemFiles])
+
+  const fetchModels = useCallback(async () => {
+    setModelsGot({ mb: 0, totalMb: BEAT_MODELS_MB })
+    try {
+      await ensureBeatModels((got, total) =>
+        setModelsGot({ mb: Math.round(got / 1e6), totalMb: Math.round(total / 1e6) })
+      )
+      setModelsHave(true)
+    } catch {
+      // A cancel rejects with code "cancelled" and keeps the part-file; any
+      // other failure is the same story from here — the card goes back to
+      // offering, and the log carries the reason.
+      setModelsHave(false)
+    } finally {
+      setModelsGot(null)
+    }
+  }, [])
+  useEffect(() => {
+    const dir = project.dir
+    if (!dir || project.library !== 'phone') return
+    const sub = DeviceEventEmitter.addListener(ANALYSIS_EVENT, (e: AnalysisDone) => {
+      if (e.dir !== dir) return
+      if (e.beat) setBeatInfo(sanitizeBeatInfo(e.beat))
+      // The Song sheet reads the key, the melody and the "no beat here"
+      // verdict off the project doc — which CatalogScreen set once, before
+      // this player mounted, and which nothing refreshes while a song is
+      // open. So an analysis that lands NOW is invisible to those rows: key
+      // and melody sit at "not detected yet" while project.json names both,
+      // and a run that came back empty leaves the verdict row saying
+      // "not detected yet" instead of the answer the sheet exists to show.
+      // The event cannot carry the verdict (AnalysisDone has no `none`), so
+      // any write is a reason to re-read the doc.
+      if (e.changed) void refreshDoc()
+    })
+    const unsub = subscribeAnalysis((p: AnalysisProgress | null) =>
+      setAnalysisText(p && p.dir === dir ? p.text : null)
+    )
+    return () => {
+      sub.remove()
+      unsub()
+    }
+  }, [project])
+
   useEffect(() => {
     engine.setMetronome(met)
   }, [engine, met])
@@ -482,6 +634,31 @@ export default function PlayerScreen({
     if (!TEST) return
     TEST.screen = 'player'
     TEST.project = project.name
+    TEST.beatInfo = beatInfo
+    TEST.analysisText = analysisText
+    // The Song sheet, for a driver that wants to see what the singer sees:
+    // open it, read the rows it would show, and press its one action.
+    TEST.openSongSheet = () => setSheet('song')
+    TEST.songSheet = () => ({
+      open: sheet === 'song',
+      beat: beatInfo
+        ? { bpm: beatInfo.bpm, beatsPerBar: beatInfo.beatsPerBar, bars: beatInfo.downbeats?.length ?? 0 }
+        : null,
+      noBeatVerdict,
+      busy: busyHere,
+      analysisText,
+      canAnalyse,
+      beatManual,
+      modelsHave,
+      key: keyText,
+      melody: !!settings?.melody,
+      lyricLines: project.lyrics?.lines?.length ?? 0
+    })
+    TEST.detectAgain = () => {
+      if (!canAnalyse || busyHere) return false
+      detectAgain()
+      return true
+    }
     TEST.armTraining = armTraining
     TEST.trainingOn = training
     TEST.setTrainMode = (mode: 'time' | 'lines') => setTrainCfg((c) => ({ ...c, mode }))
@@ -684,6 +861,12 @@ export default function PlayerScreen({
             <Text style={s.youChipText}>YOU SING 🎤</Text>
           </View>
         )}
+        {/* Song sheet. Three dots rather than a gear: a gear glyph has no
+            guaranteed text presentation on Android and renders as a colour
+            emoji next to a monochrome header. */}
+        <Pressable onPress={() => setSheet('song')} hitSlop={12} style={s.songBtn}>
+          <Text style={s.songBtnText}>•••</Text>
+        </Pressable>
       </View>
 
       {/* footer controls (scrim rises out of the lyrics) */}
@@ -799,6 +982,131 @@ export default function PlayerScreen({
         </Pressable>
       </Modal>
 
+      {/* ---------- Song sheet: what is known about this song ---------- */}
+      <Modal
+        visible={sheet === 'song'}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSheet('none')}
+      >
+        <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
+          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
+            <View style={b.grab} />
+            <Text style={b.sheetTitle}>{project.name}</Text>
+            <ScrollView>
+              <View style={[b.sec, b.secFirst]}>
+                <Text style={b.secLab}>Beat</Text>
+                <Text style={s.songVal}>
+                  {analysisText
+                    ? analysisText
+                    : beatInfo
+                      ? `${Math.round(beatInfo.bpm)} bpm · ${meterName(beatInfo.beatsPerBar)} · ` +
+                        `${beatInfo.downbeats?.length ?? 0} bars`
+                      : noBeatVerdict
+                        ? 'No beat in these drums'
+                        : 'Not detected yet'}
+                </Text>
+                <Text style={b.hint}>
+                  {analysisText
+                    ? 'Listening now — the click and the count-in pick the beat up the moment it is found.'
+                    : beatInfo
+                      ? (beatManual
+                          ? 'Hand-tuned on the computer — nothing here will re-detect over it. '
+                          : settings?.beat?.userBars?.length
+                            ? 'Your own bar lines are on this grid and stay on it. '
+                            : '') +
+                        'The click, the count-in and the bar lines all follow this.'
+                      : noBeatVerdict
+                        ? 'The detector listened and found no steady beat it would put a click on — ' +
+                          'a free-time or drumless song. That answer is remembered, so opening the song ' +
+                          'again does not read the stems for nothing. Detect again to ask once more.'
+                        : canAnalyse
+                          ? 'Nothing has read the stems yet.'
+                          : Object.keys(stemFiles).length === 0
+                            ? 'Not split yet — the beat is read from the drums, so it waits for the split.'
+                            : 'Songs from the computer arrive with their beat already in them.'}
+                </Text>
+                {canAnalyse && !busyHere && (
+                  <Text style={b.hint}>
+                    {mlPossible
+                      ? 'Reading the stems takes a few seconds; the melody takes about a minute.'
+                      : 'This song\'s stems are FLAC, so the reading happens in JavaScript — about a ' +
+                        'minute for the beat and another for the melody.'}
+                  </Text>
+                )}
+                {canAnalyse && (
+                  <View style={[b.segs, { marginTop: 12 }]}>
+                    <Chip
+                      label={busyHere ? 'Detecting…' : 'Detect again'}
+                      active={busyHere}
+                      onPress={() => {
+                        if (!busyHere) detectAgain()
+                      }}
+                    />
+                  </View>
+                )}
+              </View>
+
+              {canAnalyse && mlPossible && nativeMlGridAvailable() && (
+                <View style={b.sec}>
+                  <Text style={b.secLab}>Better beats</Text>
+                  <Text style={s.songVal}>
+                    {modelsGot
+                      ? `Downloading — ${modelsGot.mb} of ${modelsGot.totalMb} MB`
+                      : modelsHave === true
+                        ? 'On this phone'
+                        : modelsHave === false
+                          ? `Not downloaded — ${BEAT_MODELS_MB} MB`
+                          : 'Checking…'}
+                  </Text>
+                  <Text style={b.hint}>
+                    A neural model that hears the beat through drumless intros and rubato the
+                    drums-first reader loses. Downloaded once, used by every song afterwards.
+                    {modelsHave === true ? ' Detect again to use it on this one.' : ''}
+                  </Text>
+                  <View style={[b.segs, { marginTop: 12 }]}>
+                    {modelsGot ? (
+                      <Chip label="Cancel" active={false} onPress={() => void cancelBeatModels()} />
+                    ) : modelsHave === false ? (
+                      <Chip
+                        label={`Download ${BEAT_MODELS_MB} MB`}
+                        active={false}
+                        onPress={() => void fetchModels()}
+                      />
+                    ) : null}
+                  </View>
+                </View>
+              )}
+
+              <View style={b.sec}>
+                <Text style={b.secLab}>Key</Text>
+                <Text style={s.songVal}>{keyText ?? 'Not detected yet'}</Text>
+              </View>
+              <View style={b.sec}>
+                <Text style={b.secLab}>Melody</Text>
+                <Text style={s.songVal}>
+                  {settings?.melody ? 'Tracked from the vocals' : 'Not tracked yet'}
+                </Text>
+                <Text style={b.hint}>
+                  The sung line under the lyrics, and what the pitch strip draws.
+                </Text>
+              </View>
+              <View style={b.sec}>
+                <Text style={b.secLab}>Lyrics</Text>
+                <Text style={s.songVal}>
+                  {project.lyrics?.lines?.length
+                    ? `${project.lyrics.lines.length} lines` +
+                      (project.lyrics.lines.some((l) => (l.words?.length ?? 0) > 0)
+                        ? ' · word timings'
+                        : ' · line timings only')
+                    : 'None'}
+                </Text>
+              </View>
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* ---------- Practice sheet ---------- */}
       <Modal
         visible={sheet === 'practice'}
@@ -888,9 +1196,16 @@ export default function PlayerScreen({
                   {beatInfo
                     ? `${Math.round(beatInfo.bpm)} bpm from the project — clicks and the ` +
                       `count-in follow the song's own beat, drift and all.`
-                    : 'No beat track — the count-in ticks once a second before playback ' +
-                      'starts. If the song has a steady beat, opening it on desktop reads ' +
-                      'one from the drums.'}
+                    : analysisText
+                      ? `${analysisText} — the click and the count-in pick the beat up ` +
+                        'the moment it is found.'
+                      : project.library === 'phone'
+                        ? 'No beat track — the count-in ticks once a second before playback ' +
+                          'starts. If the song has a steady beat, opening it here reads one ' +
+                          'from the drums once it is split.'
+                        : 'No beat track — the count-in ticks once a second before playback ' +
+                          'starts. If the song has a steady beat, opening it on desktop reads ' +
+                          'one from the drums.'}
                 </Text>
               </View>
 
@@ -983,7 +1298,25 @@ export default function PlayerScreen({
   )
 }
 
+/** How the detector's `beatsPerBar` is written on a page. Six is the compound
+ *  meter counted in six — 6/8, not 6/4 (analysis.ts:334); everything else is
+ *  over a quarter note, which covers the 2/4-through-7/4 range the detector
+ *  can emit. */
+const meterName = (bpb: number): string => (bpb === 6 ? '6/8' : `${bpb}/4`)
+
 const s = StyleSheet.create({
+  songBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1.5,
+    borderColor: white(0.2),
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  // The dots sit optically low in the box; lift them rather than centre them.
+  songBtnText: { color: white(0.72), fontSize: 15, fontWeight: '800', marginTop: -3 },
+  songVal: { color: C.bright, fontSize: 16, fontWeight: '700' },
   hdr: {
     position: 'absolute',
     top: 0,
