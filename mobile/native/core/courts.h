@@ -34,6 +34,13 @@
 // buildCourtEvidence reads. The courts themselves are next.
 namespace singz {
 
+/** The neural model's own level, as the doubling court reads it. The TS's
+ *  `ev.ml`, null when the model said nothing or said too little. */
+struct MlLevel {
+  double bpm = 0;
+  double uni = 0;
+};
+
 /** A chord run on the base lattice: when it starts, how long it holds, and
  *  the label — `buildCourtEvidence`'s `runs`, which is the single input that
  *  decides whether the courts speak at all. */
@@ -69,7 +76,11 @@ struct CourtEvidence {
   std::vector<std::pair<double, double>> words;  // aligned words: start, end
   // `notes` (polyphonic transcription) is absent by construction — the app
   // has none either, and the TS always passes [].
-  // `ml` is absent because the ML lattice is not ported; the TS's null.
+  /** The TS's `ml`. Present only when the neural lattice ran AND had at
+   *  least 32 beats to speak from — `mlLevelStats` decides, and the doubling
+   *  court is the only reader. */
+  MlLevel ml;
+  bool hasMl = false;
 };
 
 /** The stems the courts are assembled from — mono at 44.1 kHz, as the rest of
@@ -86,14 +97,37 @@ struct CourtSources {
   const AnalysisStem* bass = nullptr;
   const AnalysisStem* vocals = nullptr;
   std::vector<std::pair<double, double>> words;
+  // NO `ml` HERE, deliberately, and the caller has to know it: the TS's
+  // buildCourtEvidence takes the neural lattice among its sources and fills
+  // `ev.ml` itself, while this one cannot — the lattice arrives from
+  // beat_this, not from audio, so whoever assembles the evidence must call
+  // mlLevelStats and set `ev.ml`/`ev.hasMl` by hand (the parity harness does
+  // exactly that on both sides). Forget it and doubleCourt — whose only
+  // witness IS the model — silently never fires, on a phone, with no parity
+  // run able to see it, because both sides would agree on nothing happening.
 };
 
-/** The grid the courts are asked to judge. */
+/** The grid the courts are asked to judge, and hand back.
+ *
+ *  The four trailing members are the TS's OPTIONALS. C++ has no `undefined`,
+ *  so each carries its own `has` flag rather than a sentinel value: `downbeat`
+ *  0 and `halvedFrom` 0 are both legitimate numbers, and a sentinel would make
+ *  "absent" indistinguishable from a grid that genuinely starts on beat 0.
+ *  `originalBars` is never persisted — halveGrid keeps it as the ruler the
+ *  parity test measures 2/4s against, and the caller strips it. */
 struct CourtGrid {
   double bpm = 0;
   int beatsPerBar = 4;
   int downbeat = 0;
   std::vector<double> beats;
+  std::vector<int> downbeats;
+  bool hasDownbeats = false;
+  std::vector<double> originalBars;
+  bool hasOriginalBars = false;
+  double halvedFrom = 0;
+  bool hasHalvedFrom = false;
+  double doubledFrom = 0;
+  bool hasDoubledFrom = false;
 };
 
 /**
@@ -168,6 +202,85 @@ std::vector<VoiceHit> vocalEvidence(const RmsEnvelope& env, const std::vector<do
 std::vector<double> formSeams(const std::vector<std::vector<float>>& Ch, const RmsEnvelope& vocalEnv,
                               const std::vector<double>& beats);
 
+/* ---- the courts themselves (courts.ts, ported verbatim) ---------------- */
 
+/** The neural model's own level: bpm from the median raw-lattice interval,
+ *  unimodality = the fraction of intervals within 10% of that median.
+ *  `ok` false is the TS's null — fewer than 32 beats, or no lattice. */
+MlLevel mlLevelStats(const std::vector<double>& mlBeats, bool& ok);
+
+/** The chord decoder flaps on the fine lattice — a change only counts when
+ *  the NEW label survives >= minHold. Consecutive same-label runs merge into
+ *  ONE chord spanning their whole extent. Exported because the post-halve
+ *  head backcast reads it too. */
+std::vector<ChordRun> changePoints(const std::vector<ChordRun>& runs, double minHold = 0.9);
+
+/** Bar times from a grid (downbeat indices, or the uniform fallback). */
+std::vector<double> barTimes(const CourtGrid& det);
+
+/** Fraction of chord-run starts sitting on bar lines (tol in seconds). */
+double chordsOnBars(const std::vector<double>& starts, const std::vector<double>& bars, double tol);
+
+/** What a court decided, and the `dbg` line the TS writes beside it.
+ *
+ *  The string is the TS's KEYS and ORDER — not its bytes: these carry
+ *  `%.17g` doubles where the TS writes a shortest repr (2.8700000000000001
+ *  against 2.87), and the harness compares PARSED VALUES, which is why that
+ *  passes. Anything that hands this text to a platform JSON parser inherits
+ *  the mlGridJson finding: Foundation's is not correctly rounded on 17
+ *  significant digits. A binding that surfaces these records should build
+ *  them from the core's doubles, the way SingzSplit.mm builds the grid. */
+struct CourtVerdict {
+  bool fire = false;   // 'halve' for the octave court, 'double' for the other
+  std::string dbg;     // JSON object, the TS's dbg.oct / dbg.dbl
+};
+
+/** The octave court: three witnesses (harmonic rhythm, windowed parity
+ *  concentration, quiet-zone pulse fit); two convict and the grid halves. */
+CourtVerdict octaveCourt(const CourtGrid& det, const CourtEvidence& ev);
+
+/** The doubling court. Audio testimony failed here — what separates a true
+ *  double is the MODEL's conviction, so this reads `ev.ml` alone. */
+CourtVerdict doubleCourt(const CourtGrid& det, const CourtEvidence& ev);
+
+/** Double: midpoints between every pair; bar phase = whichever old-beat
+ *  parity the chord changes land on. */
+CourtGrid doubleGrid(const CourtGrid& det, const CourtEvidence& ev);
+
+/** Halve: every other beat, the surviving parity being the one the chords
+ *  land on; bars re-lay at 4 from the winning phase. */
+CourtGrid halveGrid(const CourtGrid& det, const CourtEvidence& ev);
+
+/** One odd bar the meter court placed. */
+struct AppliedStep {
+  double t = 0;
+  int L = 0;
+  std::string why;
+  double gain = 0;
+};
+
+/** What the courts wrote down on their way to a verdict — the TS's `dbg`
+ *  object, which the parity harness reads. Not every TS field is here: the
+ *  per-candidate `steps` trace is diagnostic only and is left to the TS. */
+struct CourtsDbg {
+  bool abstained = false;
+  std::string oct;   // dbg.oct, verbatim JSON (empty when the court did not run)
+  std::string dbl;   // dbg.dbl
+  int cands = 0;
+  bool halfBar = false;
+  std::string cadenceCensus;  // dbg.cadenceCensus, insertion order
+  std::string plan;           // dbg.plan on a halved grid, else empty
+  std::vector<AppliedStep> applied;
+};
+
+/**
+ * Run the courts over a detected grid — the TS's `applyCourts`, the entry
+ * point the app calls and the one the parity harness gates.
+ *
+ * Returns the input UNCHANGED when abstaining: fewer than 8 chord runs and
+ * no ml level is "no evidence, no opinion", and a stems-less track must pass
+ * through without even a materialized downbeats array.
+ */
+CourtGrid applyCourts(const CourtGrid& det, const CourtEvidence& ev, CourtsDbg& dbg);
 
 }  // namespace singz

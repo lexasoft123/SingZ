@@ -11,6 +11,11 @@
 //                        [--word <s>:<e> ...]                    (extractors)
 //   singz-analyze beats --drums <d.wav> [--inst <a.wav> ...] [--vocals <v.wav>]
 //                        [--bass <b.wav>] [--line <sec> ...]         (staged debug)
+//   singz-analyze courtsjudge --wav <harm.wav> --bpm <x> [--bpb <n>] [--t0 <s>]
+//                        [--dur <s>] [--bass-wav <b>] [--vocals-wav <v>]
+//                        [--word <s>:<e> ...] [--ml-beats <csv>]        (courts)
+//                        [--runs <t:sec:label,...>] [--voice <t:gap,...>]
+//                        [--seam <t,...>]        (synthetic evidence; skips audio)
 //
 // Prints one JSON object on stdout. Floats are printed with 9 significant
 // digits, which round-trips float32 exactly — the parity harness compares
@@ -670,6 +675,222 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "mlgrid: %d frames, %zu chunks, %zu beats, %zu downbeats\n", nFrames,
                  recorded, grid.beats.size(), grid.downbeats.size());
     std::printf("%s\n", singz::mlGridJson(grid).c_str());
+    return 0;
+  }
+
+  // ---- the courts, judged on a stated grid ---------------------------------
+  //
+  // The evidence side already has a gate (`courts`); this is the deciding
+  // side. The grid is UNIFORM and built from --bpm/--bpb/--t0/--dur rather
+  // than passed as hundreds of times on a command line: both sides construct
+  // it by the same arithmetic, so what is being compared is the courts, not a
+  // serialisation. Real stems still supply the evidence, so the chord runs
+  // the courts weigh are the real ones.
+  if (cmd == "courtsjudge") {
+    std::string harmPath, bassPath, vocalsPath, mlBeatsCsv;
+    std::string runsCsv, voiceCsv, seamCsv;
+    double bpm = 0, t0 = 0, dur = 0;
+    int bpb = 4;
+    std::vector<std::pair<double, double>> words;
+    for (int i = 2; i < argc; i++) {
+      const std::string a = argv[i];
+      auto need = [&](const char* what) -> const char* {
+        if (i + 1 >= argc) {
+          std::fprintf(stderr, "courtsjudge: %s needs a value\n", what);
+          std::exit(2);
+        }
+        return argv[++i];
+      };
+      if (a == "--wav") harmPath = need("--wav");
+      else if (a == "--bass-wav") bassPath = need("--bass-wav");
+      else if (a == "--vocals-wav") vocalsPath = need("--vocals-wav");
+      else if (a == "--bpm") bpm = std::atof(need("--bpm"));
+      else if (a == "--bpb") bpb = std::atoi(need("--bpb"));
+      else if (a == "--t0") t0 = std::atof(need("--t0"));
+      else if (a == "--dur") dur = std::atof(need("--dur"));
+      else if (a == "--ml-beats") mlBeatsCsv = need("--ml-beats");
+      // Synthetic evidence, for the branches no real stem in the corpus
+      // reaches (the cadence and sibling courts). When --runs is given the
+      // audio is not read at all: what is under test is the deciding side,
+      // and the extractors have their own gate.
+      else if (a == "--runs") runsCsv = need("--runs");
+      else if (a == "--voice") voiceCsv = need("--voice");
+      else if (a == "--seam") seamCsv = need("--seam");
+      else if (a == "--word") {
+        const std::string w = need("--word");
+        const size_t colon = w.find(':');
+        if (colon == std::string::npos) {
+          std::fprintf(stderr, "courtsjudge: --word wants <start>:<end>, got %s\n", w.c_str());
+          return 2;
+        }
+        words.push_back({std::atof(w.substr(0, colon).c_str()), std::atof(w.substr(colon + 1).c_str())});
+      } else {
+        std::fprintf(stderr, "courtsjudge: unknown argument %s\n", a.c_str());
+        return 2;
+      }
+    }
+    const bool synthetic = !runsCsv.empty();
+    if (bpm <= 0 || (harmPath.empty() && !synthetic)) {
+      std::fprintf(stderr, "courtsjudge needs --bpm, and --wav unless --runs is given\n");
+      return 2;
+    }
+    singz::AnalysisStem harmStem;
+    if (!synthetic) {
+      singz::MonoWav hw = singz::readWavMono(harmPath);
+      if (!hw.ok) {
+        std::fprintf(stderr, "could not read %s: %s\n", harmPath.c_str(), hw.error.c_str());
+        return 1;
+      }
+      harmStem.mono = std::move(hw.samples);
+      harmStem.sampleRate = hw.sampleRate;
+      if (dur <= 0) {
+        dur = static_cast<double>(harmStem.mono.size()) / static_cast<double>(harmStem.sampleRate);
+      }
+    }
+    if (dur <= 0) {
+      std::fprintf(stderr, "courtsjudge needs --dur when --runs replaces the audio\n");
+      return 2;
+    }
+
+    // The uniform grid. `t + i * per`, not a running sum: an accumulator
+    // would drift differently once the two languages' roundings diverged,
+    // and the point here is that both sides hold the SAME lattice.
+    singz::CourtGrid det;
+    det.bpm = bpm;
+    det.beatsPerBar = bpb;
+    det.downbeat = 0;
+    {
+      const double per = 60.0 / bpm;
+      for (int i = 0;; i++) {
+        const double t = t0 + i * per;
+        if (t > dur) break;
+        det.beats.push_back(t);
+      }
+    }
+
+    singz::CourtEvidence ev;
+    if (synthetic) {
+      // "t:sec:label,..." / "t:gap,..." / "t,..." — the same three strings the
+      // harness parses on its side, so both hold the identical pack.
+      const auto fields = [](const std::string& row, char sep) {
+        std::vector<std::string> out;
+        size_t at = 0;
+        for (;;) {
+          const size_t k = row.find(sep, at);
+          out.push_back(row.substr(at, k == std::string::npos ? std::string::npos : k - at));
+          if (k == std::string::npos) break;
+          at = k + 1;
+        }
+        return out;
+      };
+      for (const std::string& row : fields(runsCsv, ',')) {
+        if (row.empty()) continue;
+        const std::vector<std::string> f = fields(row, ':');
+        if (f.size() < 3) {
+          std::fprintf(stderr, "courtsjudge: --runs wants t:sec:label, got %s\n", row.c_str());
+          return 2;
+        }
+        ev.runs.push_back({std::atof(f[0].c_str()), std::atof(f[1].c_str()), f[2]});
+      }
+      for (const std::string& row : fields(voiceCsv, ',')) {
+        if (row.empty()) continue;
+        const std::vector<std::string> f = fields(row, ':');
+        if (f.size() < 2) continue;
+        ev.voice.push_back({std::atof(f[0].c_str()), std::atof(f[1].c_str())});
+      }
+      for (const std::string& row : fields(seamCsv, ',')) {
+        if (row.empty()) continue;
+        ev.seams.push_back(std::atof(row.c_str()));
+      }
+      ev.words = words;
+    }
+
+    std::vector<singz::AnalysisStem> harm;
+    // MOVED, not copied: harmStem holds the whole decoded stem, and the copy
+    // is the very one CourtSources' header warns about a few lines below its
+    // own pointer members. harmStem is dead after this.
+    harm.push_back(std::move(harmStem));
+    singz::AnalysisStem bassStem, vocalStem;
+    singz::CourtSources src;
+    src.harm = &harm;
+    if (!bassPath.empty() && !synthetic) {
+      singz::MonoWav bw = singz::readWavMono(bassPath);
+      if (!bw.ok) {
+        std::fprintf(stderr, "could not read %s: %s\n", bassPath.c_str(), bw.error.c_str());
+        return 1;
+      }
+      bassStem.mono = std::move(bw.samples);
+      bassStem.sampleRate = bw.sampleRate;
+      src.bass = &bassStem;
+    }
+    if (!vocalsPath.empty() && !synthetic) {
+      singz::MonoWav vw = singz::readWavMono(vocalsPath);
+      if (!vw.ok) {
+        std::fprintf(stderr, "could not read %s: %s\n", vocalsPath.c_str(), vw.error.c_str());
+        return 1;
+      }
+      vocalStem.mono = std::move(vw.samples);
+      vocalStem.sampleRate = vw.sampleRate;
+      src.vocals = &vocalStem;
+    }
+    src.words = words;
+
+    if (!synthetic) ev = singz::buildCourtEvidence(det, src);
+    if (!mlBeatsCsv.empty()) {
+      std::vector<double> mlBeats;
+      size_t at = 0;
+      while (at < mlBeatsCsv.size()) {
+        const size_t comma = mlBeatsCsv.find(',', at);
+        const std::string tok = mlBeatsCsv.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        if (!tok.empty()) mlBeats.push_back(std::atof(tok.c_str()));
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+      }
+      bool ok = false;
+      const singz::MlLevel lvl = singz::mlLevelStats(mlBeats, ok);
+      ev.ml = lvl;
+      ev.hasMl = ok;
+    }
+
+    singz::CourtsDbg cdbg;
+    const singz::CourtGrid ruled = singz::applyCourts(det, ev, cdbg);
+    const std::vector<singz::ChordRun> cps = singz::changePoints(ev.runs, 0.9);
+    const std::vector<double> bars = singz::barTimes(det);
+
+    auto printGrid = [](const char* name, const singz::CourtGrid& g) {
+      std::printf("\"%s\":{\"bpm\":%.17g,\"beatsPerBar\":%d,\"downbeat\":%d,\"beats\":[", name, g.bpm,
+                  g.beatsPerBar, g.downbeat);
+      for (size_t i = 0; i < g.beats.size(); i++) std::printf("%s%.17g", i ? "," : "", g.beats[i]);
+      std::printf("],\"downbeats\":[");
+      for (size_t i = 0; i < g.downbeats.size(); i++) std::printf("%s%d", i ? "," : "", g.downbeats[i]);
+      std::printf("]}");
+    };
+    std::printf("{\"lattice\":%zu,\"runs\":%zu,", det.beats.size(), ev.runs.size());
+    std::printf("\"hasMl\":%s,", ev.hasMl ? "true" : "false");
+    if (ev.hasMl) std::printf("\"ml\":{\"bpm\":%.17g,\"uni\":%.17g},", ev.ml.bpm, ev.ml.uni);
+    std::printf("\"abstained\":%s,", cdbg.abstained ? "true" : "false");
+    std::printf("\"oct\":%s,", cdbg.oct.empty() ? "null" : cdbg.oct.c_str());
+    std::printf("\"dbl\":%s,", cdbg.dbl.empty() ? "null" : cdbg.dbl.c_str());
+    std::printf("\"cands\":%d,\"halfBar\":%s,", cdbg.cands, cdbg.halfBar ? "true" : "false");
+    std::printf("\"cadenceCensus\":%s,",
+                cdbg.cadenceCensus.empty() ? "{}" : cdbg.cadenceCensus.c_str());
+    std::printf("\"plan\":%s,", cdbg.plan.empty() ? "null" : cdbg.plan.c_str());
+    std::printf("\"applied\":[");
+    for (size_t i = 0; i < cdbg.applied.size(); i++) {
+      std::printf("%s{\"t\":%.17g,\"L\":%d,\"why\":\"%s\",\"gain\":%.17g}", i ? "," : "",
+                  cdbg.applied[i].t, cdbg.applied[i].L, cdbg.applied[i].why.c_str(),
+                  cdbg.applied[i].gain);
+    }
+    std::printf("],\"changePoints\":[");
+    for (size_t i = 0; i < cps.size(); i++) {
+      std::printf("%s{\"t\":%.17g,\"sec\":%.17g,\"c\":\"%s\"}", i ? "," : "", cps[i].t, cps[i].sec,
+                  cps[i].c.c_str());
+    }
+    std::printf("],\"barTimes\":[");
+    for (size_t i = 0; i < bars.size(); i++) std::printf("%s%.17g", i ? "," : "", bars[i]);
+    std::printf("],");
+    printGrid("ruled", ruled);
+    std::printf("}\n");
     return 0;
   }
 

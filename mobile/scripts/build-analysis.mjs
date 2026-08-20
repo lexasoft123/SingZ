@@ -59,6 +59,12 @@ export { applyUserBars } from './beat'
 // is an empirical property of the platform rather than anything the porting
 // rules can enforce — so it is measured, not assumed.
 export { to22k, fftComplex, chromaFrames, beatSyncChroma, rmsEnvelope, chordRuns, vocalEvidence, formSeams, buildCourtEvidence } from './courts'
+// The DECIDING side, likewise parity-only: applyCourts is the entry point the
+// app calls, so it is the one worth gating — the individual courts are
+// internal to courts.ts and stay that way. changePoints and mlLevelStats come
+// too because the C++ exposes them and a harness that could only see the
+// composed answer would not say WHICH court moved.
+export { applyCourts, changePoints, mlLevelStats } from './courts'
 export {
   LRCLIB_API, LRCLIB_HEADERS, fixTagEncoding, realArtist, metaFromFilename,
   parseLrc, lookupLyrics, searchCandidates, lyricsById
