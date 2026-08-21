@@ -69,6 +69,11 @@ exits within a second and silently applies nothing (streamVolume measured
 either side of the call is unmoved; it stayed 5/15 across a reboot), so
 ever since it was written the Android suites' self-mute was a
 no-op, and only add-song's own `master.gain = 0` kept that one quiet.
+On this Mac, boot Android emulators via `~/Dev/emu/run-patched-emulator.sh`,
+never the SDK's `emulator` — the stock CoreAudio backend garbles all guest
+audio while the default output has >2 channels (the Zen; Google issue
+506475581, fix CLs pending; details in ~/.claude/rules/android-emulator.md) —
+and automated runs pass `-no-audio`, which sidesteps the question entirely.
 Keyevents
 always land — twenty `input keyevent 24` (VOLUME_UP) is how you get the
 sound back for a human demo, not `--set`, which is broken in both
