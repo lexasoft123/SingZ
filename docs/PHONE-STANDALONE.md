@@ -1,6 +1,6 @@
 # Phone standalone song-adding — research record & architecture
 
-Status: **Phases 0–4 shipped (v0.16.x). Phase 4 is complete: every detector — melody, key, beats with the courts and the neural fork — runs in the C++ core on both phones, bound, wired and gated device-against-host over a corpus — the HOMEGROWN pipeline and the v20 courts, that is; the neural fork is gated per-platform on one song each and across 17 songs on the host, never over the corpus, which runs with the lattice off on both sides by design. Phase 5 (FLAC storage) is next and is BLOCKED on vendoring libFLAC (see the Phase 5 note below).** Researched 2026-08-14 (three codebase
+Status: **Phases 0–4 shipped (v0.16.x). Phase 4 is complete: every detector — melody, key, beats with the courts and the neural fork — runs in the C++ core on both phones, bound, wired and gated device-against-host over a corpus — the HOMEGROWN pipeline and the v20 courts, that is; the neural fork is gated per-platform on one song each and across 17 songs on the host, never over the corpus, which runs with the lattice off on both sides by design. Phase 5 (FLAC storage) is under way: libFLAC is vendored and gated, and the phase is RE-SCOPED — the core has to READ FLAC before anything writes it, because Phase 4 made WAV the fast path without anyone noticing (see the Phase 5 section).** Researched 2026-08-14 (three codebase
 exploration agents + web verification + one design agent); scope decisions and the
 architecture below approved the same day. This document is the record — read it before
 touching the phone pipeline, and update it as phases land (the docs/BEAT-DETECTION.md
@@ -1693,40 +1693,127 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       still came back with a grid (126 bpm, 0 downbeats), testing the grid path
       instead of the verdict path.
 
-## Phase 5 — FLAC storage: blocked on vendoring libFLAC (2026-08-21)
+## Phase 5 — FLAC storage, re-scoped: the DECODER comes first (2026-08-21)
 
-The architecture calls for **one encoder on both platforms** — vendored
-libFLAC (BSD) in the core — rather than Android MediaCodec plus iOS
-ExtAudioFile, so that what the phone writes is one behaviour rather than two.
-That decision stands; what stops it starting is prosaic.
+The plan had this phase as "encode the stems, migrate the projects". That order
+is wrong, and the reason did not exist when the plan was written.
 
-**libFLAC's C sources are not on this machine and cannot be reached offline.**
-Homebrew has `flac 1.5.0` as a compiled macOS dylib plus headers
-(`/opt/homebrew/opt/flac`) — enough for a HOST round-trip test, useless for an
-arm64-v8a or arm64-ios build, which needs the sources compiled per ABI. The
-`libflacjs` npm dependency the desktop encodes with ships only the emscripten
-output (`dist/`, `lib/`, `src/` — no `.c` anywhere), so the tree does not
-already carry what is needed.
+**On this phone, WAV is the FAST format.** `deps.ts` sends a project to the C++
+core only when every stem is WAV (`coreReads = /\.wav$/i`) and to the worklet
+TS otherwise, because the core reads WAV and nothing else.
 
-So Phase 5's first slice is a **download and a vendoring decision the user has
-to make**: `flac-1.5.0.tar.xz` from xiph.org (~1 MB), of which the encoder path
-is roughly twenty `.c` files, added under a third-party directory and wired
-into `mobile/android/app/src/main/cpp/CMakeLists.txt` and the SingzCore podspec.
-Everything downstream — `flac_enc.cpp`, the `encodeFlac` bindings (arity-matched
-on both platforms, per the rule at the top of `SingzSplit.mm`), the writer
-emitting v2 when all six stems verify, the per-stem WAV fallback that keeps v1,
-and the "Upgrade to save space" migration mirroring `migrateProjectToV2` — is
-ordinary work behind that one gate.
+Exactly one platform has been measured end to end on this question. **iOS
+Simulator, four-minute song: 8.5 s in the core against 51 s through the FLAC
+fallback**, which decodes as well as tracks — a **6x** cost for the format,
+and the only honest ratio here. The POCO's pair (25.7 s native against 126.1 s)
+is NOT this comparison: `beats-native-android.cjs` prints `ms.ts`, the worklet
+on the same WAV stems, which is the analogue of the simulator's 31.4 s. The
+Android FLAC figure is `f.ms.via` on a separate line and has never been written
+down. It can only be worse than 126.1 s, since it is that plus the decode —
+but "worse than" is what is known, not a number.
 
-Worth stating so it is not rediscovered: the round-trip requirement (encode →
-decode → sample-exact) is satisfied by ANY conformant encoder, FLAC being
-lossless. The argument for vendoring is maintenance and single-behaviour, not
-correctness — which is what makes it a decision rather than a necessity. The
-one place it edges toward correctness is the fleet: a platform FLAC encoder's
-presence and behaviour vary across Android vendors and API levels, so "the
-phone can encode" would stop being one fact and become a per-device question,
-which is the shape of thing this project keeps paying for elsewhere.
+That was got wrong once already: an earlier draft of this section paired 25.7
+against 126.1 as if it were WAV-vs-FLAC and told the user their phone would go
+"from 25.7 s to over two minutes". Both halves came from the record, the
+sentence read cleanly, and it attributed a WAV timing to FLAC. **Record
+`f.ms.via` on the next Android run** and this stops being an inference.
 
+Converting phone stems to FLAC without teaching the core to read them therefore
+buys disk and pays roughly sixfold on every re-analysis.
+
+That does not bite on every open: analysis re-runs only when a detector stamp
+moves (`BEAT_DETECT_VERSION`, `PITCH_DETECT_VERSION`) or the singer presses
+"Detect again". Those are precisely the moments somebody is waiting for it.
+
+The plan missed it because it was written in Phase 0, when every detector ran
+on the worklet host and the stem format made no difference to analysis at all.
+Phase 4 moved the detectors into the core and quietly made the format
+load-bearing. `deps.ts` even says so in a comment — *"The core will read FLAC
+once the desktop CLI needs it; this branch then goes away"* — which is the
+right instinct filed under the wrong phase.
+
+**So the rule for this phase is: never create a file the core cannot read.**
+The decoder lands, and is proven, before anything encodes.
+
+### Slices, in this order
+
+1. **Vendor libFLAC + the gate** *(done, 2026-08-21)*. Encoder AND decoder
+   sources are both in the tree already — the decoder came along for the
+   encoder's self-verify mode, which turns out to be exactly what slice 2
+   needs.
+2. **The core reads FLAC.** `readWavMono` (`wav.h`) is the choke point every
+   detector goes through for SAMPLES — beats, key, melody, the ML mix, the
+   analyze CLI, both bindings. But it is not the only reader: `coreReads`
+   gates six sites in `deps.ts` (99, 124, 165, 176, 196, 208) and widening it
+   switches all six on at once, including `:208`, which routes `audioDuration`
+   to `readWavInfo` — a header-only read, a different function. Today FLAC
+   never reaches it because `coreReads` excludes it; the day it does not, a
+   duration read on a FLAC stem breaks. **Both functions**, then, and the
+   widening of `coreReads` is the last step rather than the first.
+   Each gains a FLAC path dispatched on the file's MAGIC BYTES rather than its
+   extension. That is not belt-and-braces: the writer does NOT control both
+   ends — `deps.ts` describes FLAC projects as "a desktop project copied in
+   through Files", and projects open from anywhere. Both readers already
+   `fopen` the file, so the first four bytes cost nothing; the case worth
+   guarding is not a WAV named `.flac` (which fails loudly) but the reverse and
+   the raw-PCM one, which give a plausible wrong answer instead of an error. The vendored sources are wired into
+   `mobile/android/app/src/main/cpp/CMakeLists.txt` and the SingzCore podspec
+   — **with `-DHAVE_CONFIG_H`**, without which `config.h` is not read at all
+   and the build dies inside a platform system header. Then `coreReads`
+   widens and the worklet fallback stops mattering for FLAC.
+   Gate: the host round-trip already writes a FLAC; decode it back through
+   `readWavMono` and require it sample-exact against the WAV it came from.
+   Device: a copied desktop FLAC project analyses on the native path at WAV
+   speed — the same before/after comparison that produced the numbers above.
+3. **The core writes FLAC.** `flac_enc.cpp`, and `encodeFlac` bound on both
+   platforms with the same name and the same arity (the rule at the top of
+   `SingzSplit.mm`). Level 5, verify on, total samples declared, `.part`
+   rename — the same four choices `src/main/flac.ts` makes, so a stem is the
+   same kind of file whichever machine wrote it.
+4. **The writer emits v2, and old projects upgrade themselves.**
+
+### Auto re-encode, the way the desktop does it
+
+The desktop does not ask. `App.tsx:727` calls `upgradeProject(dir)` on open,
+unasked, in the background; `migrateProjectToV2` takes the project lock,
+converts every stem, bumps `version` to 2, refreshes `stemHashes`, writes
+project.json LAST and marks the library dirty so Drive gets the new files. Per
+stem, a failed encode keeps the WAV and the project stays v1 rather than
+claiming a conversion that did not happen.
+
+The phone mirrors that, with two differences that come from being a phone:
+
+- **Crash safety has to be real, not incidental.** A desktop that dies
+  mid-conversion is rare; a phone is killed as a matter of course. So per stem:
+  encode to `.flac.part`, rename, decode it back and check it against the WAV,
+  and only then delete the WAV — and rewrite project.json at the end. A kill at
+  any point leaves either the old WAV or a verified FLAC, never a doc naming a
+  file that is not there.
+- **It must not fight the analysis runner.** Conversion and a detector run both
+  touch the same stems, and `run.ts` already owns a single-flight queue for
+  exactly that reason. The upgrade goes through the same queue rather than
+  beside it; a project being analysed is not a project to repack underneath.
+
+Mixed WAV/FLAC folders are legal on both sides and always were — the desktop's
+`stemFile()` prefers `.flac` and the phone carries a per-stem
+`Record<string, 'flac' | 'wav'>` — so an interrupted upgrade is a state the
+readers already handle rather than a corruption to guard against.
+
+### Numbers that are quoted but not yet measured
+
+The ~65 MB/song figure is the DESKTOP's, on desktop stems; nobody has measured
+what six phone-split stems compress to. Its partner ~256 MB/song is DERIVED,
+not measured, and does not obviously survive arithmetic — six 44.1 kHz 16-bit
+stereo stems of a 5.3-minute song come to about 336 MB — so it either assumes
+something unstated or belongs to a different song. The cost of decoding FLAC
+inside the core versus reading a WAV is unmeasured too; it will not be free,
+only far cheaper than the JS path. And the Android FLAC analysis time above is
+absent rather than approximate.
+
+All four want measuring before any migration copy quotes a number at the
+singer, because "Upgrade to save space" is a promise, and because the one
+number in this section that was stated confidently without being measured is
+the one that turned out to be wrong.
 ## Top risks
 
 - **RAM peak** (~2–2.5 GB) on 6–8 GB devices → `:split` isolation + streaming +
