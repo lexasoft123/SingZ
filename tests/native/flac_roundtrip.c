@@ -19,6 +19,15 @@
 #include <FLAC/stream_decoder.h>
 #include <math.h>
 #include <stdio.h>
+
+/* glibc hides M_PI behind POSIX feature macros under strict -std=c99; macOS
+ * exposes it regardless, which is how this compiled everywhere except the
+ * CI canary's gcc — the first Linux build of this file found it. The
+ * constant is spelled out rather than the build switched to gnu99: the
+ * strictness is doing its job. */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <stdlib.h>
 #include <string.h>
 
