@@ -25,10 +25,13 @@ import { log } from './log'
  * unproven here rather than as history.
  *
  * What it is NOT allowed to do is wait forever: the splitter pack loads
- * torch and can leave a descendant holding the inherited pipe, and none of
- * these call sites has a timeout — so a plain `'close'` swap would trade a
- * rare wrong log line for a "splitting…" spinner that never ends, which is a
- * far worse failure. Hence the grace timer: `'close'` if it comes, otherwise
+ * torch and can leave a descendant holding the inherited pipe, and six of the
+ * seven call sites would then wait on it for good — only `probeDetailed`'s
+ * timeout resolves its own promise; `beats-ml`'s and the ONNX heartbeat's
+ * merely kill the child, which a pipe-holding grandchild survives, and four
+ * have no timer at all. So a plain `'close'` swap would trade a rare wrong log
+ * line for a "splitting…" spinner that never ends, which is a far worse
+ * failure. Hence the grace timer: `'close'` if it comes, otherwise
  * whatever had arrived by then, and a line in the log saying so, so a
  * truncated read diagnoses itself instead of looking like a corrupt engine.
  */
