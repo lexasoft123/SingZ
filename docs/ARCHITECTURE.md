@@ -347,9 +347,16 @@ every platform** (docs/PHONE-STANDALONE.md, Phase 4c): the melody tracker
 is there already — `mobile/native/core/melody.cpp` is pyin.ts + pitch.ts +
 pitch-core.ts ported line for line and held bit-identical to this section's
 TS (float where the TS keeps Float32Array, double elsewhere, sums in the
-same order; the corpus gate is `singz-analyze melody` vs node); the phones
-call it in-process (`SingzSplit.analyzeMelody`), the desktop will through
-the `singz-analyze` CLI spawned by main like whisper-cli. Until the beat and
+same order; the corpus gate is `singz-analyze melody` vs node, at the file's
+rate and at the other of the 44.1/48 pair); the phones call it in-process
+(`SingzSplit.analyzeMelody`), the desktop will through the `singz-analyze`
+CLI spawned by main like whisper-cli. Bit-identity is of the CODE, and it
+bought nothing for a year while the two were fed different sample rates —
+the core reads the stem file, the desktop tracked the buffer its
+AudioContext had resampled to the output device's rate, and the framing is
+derived from whichever rate arrives. The desktop reads the file's own rate
+now (`audio/stem-rate.ts`); until every detector is behind one CLI, each new
+one has to answer the same question about its input. Until the beat and
 key detectors follow, they run on the phone as TS:
 **the same detectors run on the phone**, for songs the phone split itself
 (docs/PHONE-STANDALONE.md, Phase 4). `mobile/scripts/build-analysis.mjs`

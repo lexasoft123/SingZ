@@ -32,6 +32,7 @@ import { MultitrackEngine } from './audio/engine'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
+import { stemSampleRate } from './audio/stem-rate'
 import DropScreen from './components/DropScreen'
 import LogPanel from './components/LogPanel'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
@@ -74,6 +75,57 @@ const ACCEPT = '.mp3,.wav,.flac,.m4a,.aac,.ogg,.oga,.opus,.aif,.aiff,audio/*'
  */
 const FOLLOW_MS = 750
 
+
+/**
+ * The mono signal the melody tracker runs on, and the rate it must be told.
+ *
+ * Read from the stem FILE at the rate the file states, not from the playing
+ * buffer: the engine's AudioContext resamples everything to the output
+ * device's rate, and the tracker derives its hop from whatever rate it is
+ * handed, so tracking the playback buffer makes a project's stored line — hop
+ * and frame count both — a property of the machine that happened to open it
+ * rather than of the song (audio/stem-rate.ts spells the numbers out). The C++
+ * core reads the file, so reading the file is what agrees with it.
+ *
+ * Falls back to the playback buffer when there is no readable stem to go to:
+ * an unsaved split whose path never landed, a header in neither format, a
+ * stem that has gone missing. A line tracked that way is still this song's
+ * line and still saves — it is just framed by whatever rate the device runs
+ * at, which is the state every project was in before this.
+ */
+async function melodyInput(
+  path: string | null,
+  buf: AudioBuffer
+): Promise<{ mono: Float32Array; sampleRate: number }> {
+  const fold = (b: AudioBuffer): Float32Array => {
+    const chans = Math.min(2, b.numberOfChannels)
+    const mono = new Float32Array(b.length)
+    for (let c = 0; c < chans; c++) {
+      const data = b.getChannelData(c)
+      for (let i = 0; i < data.length; i++) mono[i] += data[i] / chans
+    }
+    return mono
+  }
+  if (path) {
+    try {
+      const bytes = await window.singz.readAudio(path)
+      const sr = stemSampleRate(bytes)
+      if (sr !== null) {
+        // decodeAudioData resamples to the context's rate, so the context is
+        // built at the file's — the decode is then a pass-through and the
+        // tracker sees the samples the core would have read.
+        const off = new OfflineAudioContext(1, 1, sr)
+        const decoded = await off.decodeAudioData(bytes)
+        return { mono: fold(decoded), sampleRate: decoded.sampleRate }
+      }
+      // E2E drivers read these, the same way they read the beat-model warnings
+      console.warn(`melody: ${path} states no readable sample rate — tracking the playback buffer at ${buf.sampleRate} Hz`)
+    } catch (e) {
+      console.warn(`melody: ${path} could not be read (${String(e)}) — tracking the playback buffer at ${buf.sampleRate} Hz`)
+    }
+  }
+  return { mono: fold(buf), sampleRate: buf.sampleRate }
+}
 
 /** Guitar/piano lanes only appear when the song actually has them. */
 function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[]; buffers: AudioBuffer[] } {
@@ -303,6 +355,16 @@ export default function App(): React.JSX.Element {
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
+  /** Where the vocals stem in `vocalsBufRef` came from. The melody is tracked
+   *  from the FILE, not from that buffer: `decodeAudioData` resamples to the
+   *  playback device's rate, and the tracker's hop is derived from whatever
+   *  rate it is handed, so tracking the buffer makes a project's stored line
+   *  depend on the machine that opened it (see audio/stem-rate.ts). Assigned by
+   *  hand next to the buffer, not read from `stemFiles` state — the load path
+   *  calls prepMelody in the same breath as `setStemFiles`, a render too early
+   *  for state to have caught up, and a stale path here is silently the old
+   *  bug again. */
+  const vocalsPathRef = useRef<string | null>(null)
   const bassBufRef = useRef<AudioBuffer | null>(null)
   /** Non-drum, non-bass, non-vocal stems (other/guitar/piano) — the beat
    *  tracker's fill where drums are silent. */
@@ -569,6 +631,7 @@ export default function App(): React.JSX.Element {
       melodyWorkerRef.current?.terminate()
       melodyWorkerRef.current = null
       vocalsBufRef.current = null
+      vocalsPathRef.current = null
       drumsBufRef.current = null
       instBufsRef.current = []
       bassBufRef.current = null
@@ -655,6 +718,7 @@ export default function App(): React.JSX.Element {
           setStemFiles(stems)
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
+          vocalsPathRef.current = stems.vocals ?? null
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
           bassBufRef.current = buffers[order.indexOf('bass')] ?? null
           instBufsRef.current = order
@@ -727,6 +791,13 @@ export default function App(): React.JSX.Element {
             void window.singz.upgradeProject(proj.dir).then((r) => {
               if (seq !== loadSeq.current) return // these are another song's stems now
               if (r.ok && r.converted) {
+                // The wav this named has been unlinked. Nothing reachable reads
+                // it after this point — a melody run that wanted it started
+                // back at prepMelody, before the upgrade was even invoked — but
+                // a stale path here fails SILENTLY, falling back to the
+                // device-rate buffer under a v2 stamp, which is the old bug
+                // wearing the new stamp.
+                vocalsPathRef.current = vocalsPathRef.current?.replace(/\.wav$/, '.flac') ?? null
                 setStemFiles((prev) => {
                   if (!prev) return prev
                   const next: Record<string, string> = {}
@@ -909,6 +980,7 @@ export default function App(): React.JSX.Element {
       setDirty(true)
       setSaveState((st) => (st === 'saved' ? 'idle' : st))
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
+      vocalsPathRef.current = stems.vocals ?? null
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
       bassBufRef.current = buffers[order.indexOf('bass')] ?? null
       instBufsRef.current = order
@@ -1265,44 +1337,56 @@ export default function App(): React.JSX.Element {
     }
     storedMelodyRef.current = null
     if (!buf) return
-    const chans = Math.min(2, buf.numberOfChannels)
-    const mono = new Float32Array(buf.length)
-    for (let c = 0; c < chans; c++) {
-      const data = buf.getChannelData(c)
-      for (let i = 0; i < data.length; i++) mono[i] += data[i] / chans
-    }
     setMelody({ status: 'computing', p: 0 })
+    // The ref too: reading the stem back off disk below is asynchronous, so
+    // without this a second prepMelody — karaoke opening in the same breath as
+    // the load that called it — would walk straight past the guard at the top
+    // and start a second pYIN on the same song.
+    melodyRef.current = { status: 'computing', p: 0 }
     // Which song this line is being tracked for. pYIN runs for seconds, so the
     // singer can well be in another song by the time it answers — and a line
     // that lands in the wrong song is not merely drawn there, it is saved
     // there (analysis auto-saves), and then adopted on every open thereafter.
     const seq = loadSeq.current
-    const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
-      type: 'module'
-    })
-    melodyWorkerRef.current = worker
-    worker.onmessage = (e: MessageEvent<{ type: string; p?: number; f0?: Float32Array; raw?: Float32Array; clarity?: Float32Array; rms?: Float32Array; hopSec?: number }>) => {
-      if (seq !== loadSeq.current) {
-        worker.terminate() // a different song is open now
-        return
-      }
-      if (e.data.type === 'progress') {
-        setMelody({ status: 'computing', p: e.data.p ?? 0 })
-      } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
-        // diagnostics hook: E2E drivers dump this to tune the melody cleaner
-        ;(window as { __melody?: unknown }).__melody = {
-          f0: e.data.f0,
-          raw: e.data.raw,
-          clarity: e.data.clarity,
-          rms: e.data.rms,
-          hopSec: e.data.hopSec
+    const path = vocalsPathRef.current
+    void (async () => {
+      const src = await melodyInput(path, buf)
+      if (seq !== loadSeq.current) return // a different song is open now
+      const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
+        type: 'module'
+      })
+      melodyWorkerRef.current = worker
+      worker.onmessage = (e: MessageEvent<{ type: string; p?: number; f0?: Float32Array; raw?: Float32Array; clarity?: Float32Array; rms?: Float32Array; hopSec?: number }>) => {
+        if (seq !== loadSeq.current) {
+          worker.terminate() // a different song is open now
+          return
         }
-        applyMelody(e.data.f0, e.data.hopSec, true)
-        worker.terminate()
-        if (melodyWorkerRef.current === worker) melodyWorkerRef.current = null
+        if (e.data.type === 'progress') {
+          setMelody({ status: 'computing', p: e.data.p ?? 0 })
+        } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
+          // diagnostics hook: E2E drivers dump this to tune the melody cleaner
+          ;(window as { __melody?: unknown }).__melody = {
+            f0: e.data.f0,
+            raw: e.data.raw,
+            clarity: e.data.clarity,
+            rms: e.data.rms,
+            hopSec: e.data.hopSec
+          }
+          applyMelody(e.data.f0, e.data.hopSec, true)
+          worker.terminate()
+          if (melodyWorkerRef.current === worker) melodyWorkerRef.current = null
+        }
       }
-    }
-    worker.postMessage({ mono, sampleRate: buf.sampleRate }, [mono.buffer])
+      worker.postMessage({ mono: src.mono, sampleRate: src.sampleRate }, [src.mono.buffer])
+    })().catch((e) => {
+      // Nothing above is expected to throw — melodyInput swallows its own — but
+      // a pitch strip stuck on "computing" forever is a worse way to find out
+      // than a line in the console and a state that can be asked again.
+      console.error('melody: tracking could not start:', e)
+      if (seq !== loadSeq.current) return
+      melodyRef.current = { status: 'none' }
+      setMelody({ status: 'none' })
+    })
   }, [applyMelody])
   const prepMelodyRef = useRef<(() => void) | null>(null)
   prepMelodyRef.current = prepMelody
@@ -1431,7 +1515,10 @@ export default function App(): React.JSX.Element {
       }
       // the copy in the library is the one we keep working on from here
       setSong((s) => (s ? { ...s, path: res.songPath } : s))
-      if (res.stems) setStemFiles(res.stems)
+      if (res.stems) {
+        setStemFiles(res.stems)
+        vocalsPathRef.current = res.stems.vocals ?? null // the folder moved
+      }
       reanchorCustom(res.custom)
       setInLibrary(true)
       setProjectDir(res.dir)
@@ -1459,7 +1546,10 @@ export default function App(): React.JSX.Element {
           return
         }
         setSong({ path: res.songPath, name: res.name })
-        if (res.stems) setStemFiles(res.stems)
+        if (res.stems) {
+          setStemFiles(res.stems)
+          vocalsPathRef.current = res.stems.vocals ?? null // the folder moved
+        }
         reanchorCustom(res.custom)
         setProjectDir(res.dir)
         setNotice(`Renamed — the project folder is now ${res.dir}`)

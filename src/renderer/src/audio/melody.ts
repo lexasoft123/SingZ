@@ -12,8 +12,17 @@ import type { MelodyInfo } from '../../../shared/types'
  *
  * v1: first stored line — pYIN (Beta(2,18) threshold prior, banded Viterbi)
  * plus the RMS-gated cleaner (isolated-octave refold, quiet outlier-run drop).
+ * v2: same tracker, tracked from the stem FILE at the rate the file states.
+ * v1 lines were tracked from the playing buffer, which `decodeAudioData` had
+ * resampled to the output device's rate — and the hop is derived from the rate
+ * it is handed, so a v1 line's framing says which machine opened the project,
+ * not which song it is. A 48 kHz desktop wrote hop 0.025 where the phones and
+ * a 44.1 kHz desktop wrote 0.0250340136, both stamped v1, neither ever
+ * re-derived: `melodyFitsSong` compares coverage against the song's LENGTH,
+ * and the two coverages of one song differ by about three milliseconds. The
+ * bump is what retires them (audio/stem-rate.ts).
  */
-export const PITCH_DETECT_VERSION = 1
+export const PITCH_DETECT_VERSION = 2
 
 /** Encoding reference pitch (A1), the same one the worker's cleaner counts from. */
 const REF_HZ = 55

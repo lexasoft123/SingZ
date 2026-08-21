@@ -56,8 +56,10 @@ first (the family fleet, $0 distribution); iOS is in scope with the same engine 
   6-frame borders, keep_first overlap → 7-wide max-filter peak pick → downbeat→beat
   snap → one JSON line). Desktop's model input is a 22.05 k mono OfflineAudioContext
   sum of all loaded stems (`fetchMlGrid`, App.tsx:1545).
-- **Melody**: pure-TS pYIN in a Web Worker (`pyin.ts` + `pitch.worker.ts`);
-  `PITCH_DETECT_VERSION = 1`; ~20 kB encoded per song. The **mobile player reads no
+- **Melody**: pure-TS pYIN in a Web Worker (`pyin.ts` + `pitch.worker.ts`),
+  fed the vocals stem read back at the rate the FILE states rather than the
+  playback buffer at the output device's (the framing is derived from the rate;
+  audio/stem-rate.ts); `PITCH_DETECT_VERSION = 2`; ~20 kB encoded per song. The **mobile player reads no
   melody at all** and `settings.beat` is optional — a phone project is playable with
   zero analyses, which is what makes staged shipping work.
 - **Project contract**: only `settings.beat` + `settings.melody` are stored analyses;

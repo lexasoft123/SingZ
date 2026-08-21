@@ -421,6 +421,30 @@ was driven; the gotchas that follow from it are below.
   cleaner — or `detectBeats` — WITHOUT bumping the matching constant leaves
   every saved project drawing the old answer forever. The corrected result
   saves itself into an existing project (never creating one under a raw file).
+- **An analysis is framed by the rate it is HANDED, so that rate comes from the
+  file, never from the device** — the melody's hop is derived on both sides of
+  the port (`hop = round(sr / DECIM * HOP_SEC)`, `hopSec = hop / (sr / DECIM)`
+  in pitch-core.ts and melody.cpp alike), so the same song analysed at two
+  rates gets two grids: 44.1 kHz decimates to 14700 and rounds 367.5 up to a
+  368-sample hop (0.0250340136 s), 48 kHz decimates to 16000 and lands on
+  exactly 400 (0.025 s). The C++ core reads the stem file, so it always saw the
+  file's rate; the desktop used to track the PLAYING AudioBuffer, which
+  `decodeAudioData` had resampled to the output device's rate — 48 kHz on this
+  Mac, 44.1 kHz on plenty of Windows machines. Measured on Wild World: 8009
+  frames at hop 0.025 from the desktop against 7998 at 0.0250340136 from the
+  core, 5% of the shared voiced frames more than a quarter-tone apart, and the
+  key readout rides on the same line. Both were stamped v1 and BOTH GUARDS LET
+  IT THROUGH — `melodyFitsSong` compares coverage against the song's LENGTH,
+  and one song's two coverages differ by three milliseconds — so each side
+  adopted the other's line and neither ever re-derived it. The desktop now
+  reads the stem file at the rate the file states (`audio/stem-rate.ts`,
+  `melodyInput` in App.tsx) and `PITCH_DETECT_VERSION` is 2 to retire what the
+  old path wrote. **A parity gate that runs one rate cannot see any of this**:
+  eval/melody-parity.mjs was green throughout, because it read the rate off the
+  WAV and handed the SAME rate to both implementations — it now runs every file
+  at its own rate and at the other of the 44.1/48 pair. Any future detector
+  that takes a sample rate owes the same question: which rate, whose, and does
+  the other implementation get the same one?
 - **Analysis must not outlive the song it was started for** — pYIN runs for
   seconds in a worker, so the singer can be in another song by the time it
   answers; a line that lands late is not merely drawn in the wrong song, it is

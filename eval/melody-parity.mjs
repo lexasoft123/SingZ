@@ -10,13 +10,25 @@
  *   node eval/melody-parity.mjs [--bin <singz-analyze>] <file.wav|file.f32> ...
  *   node eval/melody-parity.mjs                # the bundled sample's stems
  *
+ * Every file is run at TWO rates: its own, and the other of the 44.1/48 kHz
+ * pair. Not because anything plays at the wrong rate, but because the framing
+ * is DERIVED from the rate on both sides — the hop (`round(sr / DECIM *
+ * HOP_SEC)`, 368 samples at 44.1 kHz against 400 at 48) and the Viterbi
+ * transition band with it — and a gate that only ever runs one rate proves
+ * nothing about the arithmetic that turns a rate into a grid. Declaring a
+ * different rate over the same samples isolates exactly that: identical audio
+ * in, so any disagreement is in the rate-derived path alone. This axis was
+ * missing while the desktop tracked at its output device's rate and the core
+ * at the stem file's, which put two differently-framed lines in the field
+ * under one stamp (PITCH_DETECT_VERSION v1 -> v2).
+ *
  * f32 files are raw mono float32 at 44.1 kHz (--sr to override); WAVs go
  * through the core's own reader on the C++ side and a small PCM reader here.
  * Needs mobile/src/gen/analysis-lib.js (mobile's postinstall) and a built
  * CLI (scripts/build-analyze-host.sh, built here when --bin is absent).
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -90,37 +102,70 @@ function readWavMonoJs(path) {
   throw new Error(`${path}: no data chunk`)
 }
 
+const cmp = (label, a, arr) => {
+  const B = Float32Array.from(arr)
+  let diff = 0, first = -1, maxAbs = 0
+  for (let i = 0; i < Math.max(a.length, B.length); i++) {
+    const x = a[i] ?? NaN, y = B[i] ?? NaN
+    if (x !== y) { diff++; if (first < 0) first = i; maxAbs = Math.max(maxAbs, Math.abs(x - y)) }
+  }
+  return { label, diff, first, maxAbs, n: a.length, m: B.length }
+}
+
+// The declared-rate pass hands both sides the SAME samples with a rate of our
+// choosing, so the C++ side needs them as a headerless f32 dump; written once
+// per file and reused.
+const f32Cache = new Map()
+let f32Dir = null
+function f32For(file, isWav, mono) {
+  if (!isWav) return file
+  let path = f32Cache.get(file)
+  if (path === undefined) {
+    f32Dir ??= mkdtempSync(join(tmpdir(), 'singz-melody-rate-'))
+    path = join(f32Dir, `${f32Cache.size}.f32`)
+    writeFileSync(path, Buffer.from(mono.buffer, mono.byteOffset, mono.byteLength))
+    f32Cache.set(file, path)
+  }
+  return path
+}
+
 let failed = 0
 for (const file of files) {
   const isWav = /\.wav$/i.test(file)
   const input = isWav ? readWavMonoJs(file) : (() => { const b = readFileSync(file); return { mono: new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4), sr } })()
-  const t0 = performance.now()
-  const ts = trackMelodyCore(input.mono, input.sr)
-  const tsMs = performance.now() - t0
-  const t1 = performance.now()
-  const cliArgs = isWav ? ['melody', '--wav', file, '--raw'] : ['melody', '--f32', file, '--sr', String(input.sr), '--raw']
-  const c = JSON.parse(execFileSync(bin, cliArgs, { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
-  const cMs = performance.now() - t1
-  const cmp = (label, a, arr) => {
-    const B = Float32Array.from(arr)
-    let diff = 0, first = -1, maxAbs = 0
-    for (let i = 0; i < Math.max(a.length, B.length); i++) {
-      const x = a[i] ?? NaN, y = B[i] ?? NaN
-      if (x !== y) { diff++; if (first < 0) first = i; maxAbs = Math.max(maxAbs, Math.abs(x - y)) }
-    }
-    return { label, diff, first, maxAbs, n: a.length, m: B.length }
+  // The file's own rate first — the rate both products actually analyse at —
+  // then the other of the pair, over the same samples, for the framing.
+  const other = input.sr === 48000 ? 44100 : 48000
+  let fileOk = true
+  const lines = []
+  for (const rate of [input.sr, other]) {
+    const own = rate === input.sr
+    const t0 = performance.now()
+    const ts = trackMelodyCore(input.mono, rate)
+    const tsMs = performance.now() - t0
+    const t1 = performance.now()
+    // The core reads a WAV's rate out of its own header, so the declared-rate
+    // pass has to go in as f32 for both sides to be told the same thing.
+    const cliArgs = isWav && own
+      ? ['melody', '--wav', file, '--raw']
+      : ['melody', '--f32', f32For(file, isWav, input.mono), '--sr', String(rate), '--raw']
+    const c = JSON.parse(execFileSync(bin, cliArgs, { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString())
+    const cMs = performance.now() - t1
+    const rows = [cmp('f0', ts.f0, c.f0), cmp('raw', ts.raw, c.raw), cmp('rms', ts.rms, c.rms)]
+    // The stamp from both sides: a bump the stored-analysis rule demands would
+    // otherwise leave the C++ copy silently behind, and nothing else checks it.
+    const stampOk = c.detVersion === PITCH_DETECT_VERSION
+    const ok = rows.every((r) => r.diff === 0 && r.n === r.m) && ts.hopSec === c.hopSec && stampOk
+    if (!ok) fileOk = false
+    const voiced = ts.f0.filter((v) => v > 0).length
+    lines.push(`      ${own ? 'own' : 'alt'} ${String(rate).padStart(5)} Hz: hop ${ts.hopSec}, ${ts.f0.length} frames, ${voiced} voiced · ts ${tsMs.toFixed(0)} ms, c++ ${cMs.toFixed(0)} ms (incl. spawn)` +
+      (ts.hopSec === c.hopSec ? '' : ` · hopSec DIFF ${ts.hopSec} vs ${c.hopSec}`) +
+      (stampOk ? '' : ` · STAMP DIFF: ts v${PITCH_DETECT_VERSION} vs c++ v${c.detVersion}`))
+    for (const r of rows) if (r.diff) lines.push(`        ${r.label}: ${r.diff} differing (first at ${r.first}, maxAbs ${r.maxAbs.toExponential(3)}, ts ${r.n} vs c++ ${r.m})`)
   }
-  const rows = [cmp('f0', ts.f0, c.f0), cmp('raw', ts.raw, c.raw), cmp('rms', ts.rms, c.rms)]
-  // The stamp from both sides: a bump the stored-analysis rule demands would
-  // otherwise leave the C++ copy silently behind, and nothing else checks it.
-  const stampOk = c.detVersion === PITCH_DETECT_VERSION
-  const ok = rows.every((r) => r.diff === 0 && r.n === r.m) && ts.hopSec === c.hopSec && stampOk
-  if (!ok) failed++
-  const voiced = ts.f0.filter((v) => v > 0).length
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${file}`)
-  console.log(`      ${ts.f0.length} frames, ${voiced} voiced · ts ${tsMs.toFixed(0)} ms, c++ ${cMs.toFixed(0)} ms (incl. spawn) · hopSec ${ts.hopSec === c.hopSec ? 'same' : `DIFF ${ts.hopSec} vs ${c.hopSec}`}` +
-    (stampOk ? '' : ` · STAMP DIFF: ts v${PITCH_DETECT_VERSION} vs c++ v${c.detVersion}`))
-  for (const r of rows) if (r.diff) console.log(`      ${r.label}: ${r.diff} differing (first at ${r.first}, maxAbs ${r.maxAbs.toExponential(3)}, ts ${r.n} vs c++ ${r.m})`)
+  if (!fileOk) failed++
+  console.log(`${fileOk ? 'PASS' : 'FAIL'}  ${file}`)
+  for (const l of lines) console.log(l)
 }
 console.log(failed === 0 ? '\nMELODY PARITY: IDENTICAL on every file' : `\n${failed} FILE(S) DIFFER`)
 process.exit(failed === 0 ? 0 : 1)

@@ -32,7 +32,17 @@ struct MelodyTrack {
 // The stamp of the tracker this file reproduces — pitch-core.ts's own
 // PITCH_DETECT_VERSION. A port that changes any output must move it, and the
 // TS constant with it; the parity harness (tests/native + eval) holds both.
-constexpr int kPitchDetectVersion = 1;
+//
+// v2 moved for something neither implementation did wrong: the DESKTOP used to
+// track the playing AudioBuffer, which its AudioContext had resampled to the
+// output device's rate, while this core reads the stem file at the file's own
+// rate. Same code, same song, two rates in — and the framing is derived from
+// the rate (`hop = round(sr / DECIM * HOP_SEC)`), so 48 kHz gave hop 0.025 with
+// 8009 frames where 44.1 kHz gave 0.0250340136 with 7998. Both stamped v1, and
+// a three-millisecond coverage difference is far inside what melodyFitsSong
+// disowns, so each side adopted the other's line and never re-derived it. The
+// desktop now reads the file too; this stamp retires what the old path wrote.
+constexpr int kPitchDetectVersion = 2;
 
 // Track `mono` (float32 samples at `sampleRate`) — trackMelodyCore's whole
 // body: 3x average-pooling decimation, pYIN over 1024-sample frames at a
