@@ -93,6 +93,13 @@ interface Loading {
   frac: number
 }
 
+/**
+ * Sizes as a SINGER reads them, which is why this is not `fmtBytes` from the
+ * log. That one goes down to kB because a log line wants the real number;
+ * this one floors at 1 MB, so a small song is never offered for deletion as
+ * "0 MB". Two formatters on purpose — the log and the screen are different
+ * audiences.
+ */
 const fmtSize = (bytes: number): string =>
   bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`
 
@@ -1556,8 +1563,8 @@ const s = StyleSheet.create({
   },
   cardLoading: { backgroundColor: 'rgba(242,193,78,0.07)', borderColor: 'rgba(242,193,78,0.25)' },
   cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
-  cardMeta: { color: white(0.42), fontSize: 12.5, marginTop: 3 },
-  status: { color: C.faint, fontSize: 12, fontWeight: '600' },
+  cardMeta: { color: white(0.5), fontSize: 12.5, marginTop: 3 },
+  status: { color: C.dim, fontSize: 12, fontWeight: '600' },
   statusHave: { color: white(0.62) },
   storage: {
     flexDirection: 'row',
@@ -1567,7 +1574,7 @@ const s = StyleSheet.create({
     marginTop: 6,
     paddingHorizontal: 2
   },
-  storageText: { color: C.faint, fontSize: 12, flexShrink: 1 },
+  storageText: { color: C.dim, fontSize: 12, flexShrink: 1 },
   cancelBtn: {
     width: 30,
     height: 30,
@@ -1585,7 +1592,7 @@ const s = StyleSheet.create({
     backgroundColor: white(0.08)
   },
   progressFill: { height: 3, backgroundColor: C.amber, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
-  empty: { color: C.faint, fontSize: 14, lineHeight: 20, marginVertical: 12 },
+  empty: { color: C.dim, fontSize: 14, lineHeight: 20, marginVertical: 12 },
   errBox: {
     flexDirection: 'row',
     alignItems: 'flex-start',

@@ -820,11 +820,29 @@ export default function PlayerScreen({
   }, [lines, pos])
 
   /* ------- lyric line coloring ------- */
+  /**
+   * How bright each line sits against the sung one.
+   *
+   * Reading AHEAD is the whole act of singing from a screen, and the upcoming
+   * lines were dimmer than the ones already behind you deserved to be: 0.34
+   * for the next and 0.25 for everything past it, over a brown ground and
+   * under a 360px scrim, which put the third line down at the edge of
+   * legibility and lost the fourth entirely.
+   *
+   * C.bright here is only what a line with no word timings gets. A line the
+   * sweep is running through is drawn by SkiaLyrics instead, which lights the
+   * swept part and holds the rest at its own `dark` — so that constant, not
+   * this one, is what the next line has to stay under. Raising these without
+   * it put the words about to be sung BELOW the whole line after them.
+   *
+   * Lines already sung stay the quietest thing on screen; they are the only
+   * ones the singer has no further use for.
+   */
   const lineColor = (i: number, isSing: boolean): string => {
     if (i === currentLine) return C.bright
-    if (isSing) return 'rgba(245,199,88,0.42)'
-    if (i < currentLine) return white(0.18)
-    return Math.abs(i - currentLine) === 1 ? white(0.34) : white(0.25)
+    if (isSing) return 'rgba(245,199,88,0.55)'
+    if (i < currentLine) return white(0.22)
+    return Math.abs(i - currentLine) === 1 ? white(0.52) : white(0.4)
   }
 
   return (
@@ -919,10 +937,13 @@ export default function PlayerScreen({
           <Text style={s.hTitle} numberOfLines={1}>
             {project.name}
           </Text>
+          {/* "SingZ project" used to lead here, spending the most prominent
+              line under the title telling the singer that this app's song is
+              this app's song. What is left is what varies between songs. */}
           <Text style={s.hSub}>
-            SingZ project
-            {originalOnly ? ' · not split yet' : ` · ${stemIds.length - addedCount} stems`}
+            {originalOnly ? 'Not split yet' : `${stemIds.length - addedCount} stems`}
             {addedCount > 0 ? ` · ${addedCount} added` : ''}
+            {beatInfo ? ` · ${Math.round(beatInfo.bpm)} bpm` : ''}
           </Text>
         </View>
         {ktBadge.length > 0 && (
@@ -1571,7 +1592,7 @@ const s = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10
   },
-  noLyrics: { color: C.faint, fontSize: 15, marginTop: 40 },
+  noLyrics: { color: C.dim, fontSize: 15, marginTop: 40 },
 
   foot: {
     position: 'absolute',
@@ -1583,7 +1604,7 @@ const s = StyleSheet.create({
     paddingBottom: 30
   },
   scrubRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
-  tm: { color: white(0.45), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
+  tm: { color: white(0.5), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
   btnRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   skipText: { color: white(0.85), fontSize: 12.5, fontWeight: '700' },
   toStartText: { color: white(0.85), fontSize: 20, marginTop: -2 },

@@ -400,7 +400,23 @@ export default function SkiaLyrics({
                     clock={clock}
                     lead={lead}
                     lit={sing?.[i] ? '#ffd97a' : CUE}
-                    dark="rgba(255,255,255,0.40)"
+                    /* The words on the CURRENT line that the sweep has not
+                       reached yet. This has to stay brighter than the next
+                       line, or the singer's own runway is dimmer than the one
+                       after it — which is what happened when the read-ahead
+                       lines were raised and this constant was not (next 0.52
+                       against a tail of 0.40). Ladder, brightest first:
+                       swept > this tail > next line 0.52 > further 0.40 >
+                       already sung 0.22.
+
+                       0.60 rather than more: the tail also sets how much
+                       LUMINANCE the sweep edge has to travel across, and the
+                       edge telling the singer which word they are on is worth
+                       more than headroom over the next line. Gold against
+                       0.40 was 3.12:1 and against 0.68 only 1.32:1 — leaving
+                       the edge to hue and the bloom alone. This keeps a real
+                       step in both directions. */
+                    dark="rgba(255,255,255,0.60)"
                   />
                 ))
               ) : (

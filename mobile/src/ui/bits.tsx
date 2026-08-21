@@ -2,6 +2,7 @@ import React, { useCallback, useRef } from 'react'
 import { KIT, STEM_COLORS } from './tokens'
 import {
   Image,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -54,6 +55,11 @@ export const C = {
   text: KIT.text,
   bright: '#ffffff',
   dim: KIT.dim,
+  /* NOT for anything meant to be read: #6b6355 on the app's ground is
+     3.2:1, under the 4.5:1 AA floor for normal text, and the catalog's
+     background image is lighter than the token in its upper half, which
+     makes it worse rather than better. Body text that was reaching for
+     this now uses `dim` (6.1:1). */
   faint: KIT.faint,
   amber: KIT.accent,
   amberInk: KIT.accentInk,
@@ -424,7 +430,28 @@ export function Bar({
         now: Math.round(pct * 100),
         text: valueText ? valueText(pct) : `${Math.round(pct * 100)} percent`
       }}
-      accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+      /* 'activate' is declared so it is HANDLED, not because it does anything:
+         `accessible` makes the bar a double-tap target, and with nothing
+         claiming the activation both screen readers fall back to a simulated
+         tap at the element's centre — which the responder path below would
+         read as a genuine tap and slam the fader to 50% (or seek the scrubber
+         to the middle of the song). Declaring it puts ACTION_CLICK in
+         Android's map; onAccessibilityTap does the same job on iOS. Both then
+         land in the handler above, which ignores everything but the two real
+         actions. The labels are for VoiceOver's rotor, which otherwise reads
+         the raw action names aloud. */
+      onAccessibilityTap={() => {}}
+      accessibilityActions={[
+        { name: 'increment', label: 'Increase' },
+        { name: 'decrement', label: 'Decrease' },
+        // Android only: it exists to put ACTION_CLICK in the map so the click
+        // is SWALLOWED rather than falling through as a centre tap. iOS has
+        // onAccessibilityTap for that, and turns every entry here into a
+        // VoiceOver rotor action — so listing it there would advertise an
+        // "Adjust" that does nothing. No label, so TalkBack says the generic
+        // "activate" instead of promising an action it will not perform.
+        ...(Platform.OS === 'android' ? [{ name: 'activate' }] : [])
+      ]}
       onAccessibilityAction={(e) => {
         // Only the two we declare; 'activate'/'escape'/'magicTap' also arrive
         // here and must not be read as "move it down".
@@ -493,7 +520,7 @@ export const b = StyleSheet.create({
     paddingHorizontal: 4,
     borderRadius: 11
   },
-  segText: { color: white(0.45), fontSize: 13.5, fontWeight: '700' },
+  segText: { color: white(0.5), fontSize: 13.5, fontWeight: '700' },
   chip: {
     borderWidth: 1.5,
     borderColor: white(0.16),
@@ -525,7 +552,7 @@ export const b = StyleSheet.create({
     textAlign: 'center',
     fontVariant: ['tabular-nums']
   },
-  stepSuffix: { color: C.faint, fontSize: 12.5 },
+  stepSuffix: { color: C.dim, fontSize: 12.5 },
   sheetWrap: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
   sheet: {
     backgroundColor: C.sheet,
@@ -556,5 +583,5 @@ export const b = StyleSheet.create({
     marginBottom: 11
   },
   segs: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  hint: { color: white(0.38), fontSize: 12.5, marginTop: 10, lineHeight: 18 }
+  hint: { color: white(0.5), fontSize: 12.5, marginTop: 10, lineHeight: 18 }
 })
