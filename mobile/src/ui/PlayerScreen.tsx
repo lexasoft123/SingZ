@@ -131,6 +131,73 @@ export default function PlayerScreen({
   const navPad = Platform.OS === 'android' ? { paddingBottom: Math.max(30, insets.bottom + 14) } : null
   const sheetPad = Platform.OS === 'android' ? { paddingBottom: Math.max(34, insets.bottom + 18) } : null
   const [dragPos, setDragPos] = useState<number | null>(null)
+  /**
+   * A-B repeat, the thing a singer actually does with a hard bar: mark where
+   * it starts, mark where it ends, and go round until it is right. The engine
+   * has had the whole mechanism since the desktop needed it — setRegion wraps
+   * every stem natively at the region edges, on the same sample — and nothing
+   * on the phone reached it.
+   *
+   * SESSION-ONLY, and that is load-bearing rather than laziness: a saved
+   * desktop selection playing on the phone was a field bug (Jul 2026), and an
+   * armed region surviving engine.load() let one song's loop bound the next.
+   * So nothing is read from doc.settings.selection and nothing is written
+   * back; load() clears the engine's region and the effect below clears these
+   * marks with it. tests/loop-region.cjs is the guard.
+   */
+  const [loopA, setLoopA] = useState<number | null>(null)
+  const [loopB, setLoopB] = useState<number | null>(null)
+  /* The marks again as refs, because cycleLoop is a THREE-STATE machine whose
+     next move depends on both: reading them from the closure makes two calls
+     inside one tick both take the first branch, which is exactly what a driver
+     tapping through the cycle does. */
+  const loopARef = useRef<number | null>(null)
+  const loopBRef = useRef<number | null>(null)
+  const markLoop = useCallback((a: number | null, b: number | null) => {
+    loopARef.current = a
+    loopBRef.current = b
+    setLoopA(a)
+    setLoopB(b)
+  }, [])
+  useEffect(() => {
+    markLoop(null, null)
+  }, [project, markLoop])
+
+  /** Off -> A marked -> looping -> off. One button, the order a singer works in. */
+  const cycleLoop = useCallback(() => {
+    const at = engine.audioPosition
+    const a0 = loopARef.current
+    if (a0 === null) {
+      markLoop(at, null)
+      return
+    }
+    if (loopBRef.current === null) {
+      const a = Math.min(a0, at)
+      const b = Math.max(a0, at)
+      // The engine will not loop a region shorter than 0.05s, and a region
+      // that short is a mis-tap anyway — treat it as re-marking A instead of
+      // arming something that silently does nothing.
+      if (b - a < 0.4) {
+        markLoop(at, null)
+        return
+      }
+      // No seek here: setRegion re-anchors the clock and puts the playhead
+      // inside the region itself, which it has to do anyway for the internal
+      // restart path the UI cannot reach.
+      engine.setRegion({ start: a, end: b }, true)
+      /* Read the region BACK rather than assuming the marks were taken.
+         setRegion may cap `end` to the song's length, and may reject the
+         span outright once capped — leaving the button lit and a band drawn
+         over a loop that was never armed. The engine owns the region; the UI
+         draws what the engine owns, which keeps this honest for any clamp
+         added inside setRegion later. */
+      const armed = engine.regionState
+      markLoop(armed?.start ?? null, armed?.end ?? null)
+      return
+    }
+    markLoop(null, null)
+    engine.setRegion(null, false)
+  }, [engine, markLoop])
   /** Key & speed — UI + persistence-ready; audio lands with the pitch engine. */
   const [ktPitch, setKtPitch] = useState(0)
   const [ktTempo, setKtTempo] = useState(100)
@@ -317,7 +384,7 @@ export default function PlayerScreen({
 
   /* Feed the engine + apply the project's saved settings. */
   useEffect(() => {
-    engine.load(project.stems.map(({ id, buffer }) => ({ id, buffer })))
+    engine.load(project.stems.map(({ id, buffer, custom }) => ({ id, buffer, custom })))
     const st = project.doc.settings
     if (st) {
       for (const [id, t] of Object.entries(st.tracks ?? {})) {
@@ -728,6 +795,11 @@ export default function PlayerScreen({
     TEST.openMixer = () => setSheet('mixer')
     TEST.openPractice = () => setSheet('practice')
     TEST.closeSheets = () => setSheet('none')
+    /* A-B repeat through the button's own path, not engine.setRegion — the
+       engine has always been drivable; what needed a hook is the three-state
+       cycle and the marks the UI holds. loopMarks is what the band draws. */
+    TEST.cycleLoop = cycleLoop
+    TEST.loopMarks = { a: loopA, b: loopB }
     TEST.sheet = sheet
     TEST.tapLine = (i: number) => lines[i] && engine.seek(lines[i].start)
     TEST.back = onBack
@@ -1009,8 +1081,46 @@ export default function PlayerScreen({
               label="Position"
               valueText={(v) => fmtTime(v * engine.duration)}
             />
+            {/* Where the loop is, drawn on the bar it belongs to. pointerEvents
+                none so it never takes the drag away from the scrubber. */}
+            {loopA !== null && engine.duration > 0 && (
+              <View pointerEvents="none" style={s.loopLayer}>
+                <View
+                  style={[
+                    s.loopBand,
+                    loopB === null
+                      ? { left: `${(loopA / engine.duration) * 100}%`, width: 2 }
+                      : {
+                          left: `${(loopA / engine.duration) * 100}%`,
+                          right: `${100 - (loopB / engine.duration) * 100}%`
+                        }
+                  ]}
+                />
+              </View>
+            )}
           </View>
           <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
+          {/* On the scrub row rather than the transport: a loop is a fact about
+              the TIMELINE, and the six transport buttons already fill 358pt —
+              a seventh would leave under 2pt between them, or force them under
+              the 44pt target. hitSlop keeps this one honest at 32pt. */}
+          <Pressable
+            onPress={cycleLoop}
+            hitSlop={8}
+            style={[s.loopBtn, loopA !== null && s.loopBtnOn]}
+            accessibilityRole="button"
+            accessibilityLabel={
+              loopA === null
+                ? 'Loop a section. Marks the start here.'
+                : loopB === null
+                  ? `Loop start marked at ${fmtTime(loopA)}. Marks the end here.`
+                  : `Looping ${fmtTime(loopA)} to ${fmtTime(loopB)}. Clears the loop.`
+            }
+          >
+            <Text style={[s.loopBtnText, loopA !== null && s.loopBtnTextOn]}>
+              {loopA !== null && loopB === null ? 'A' : 'A–B'}
+            </Text>
+          </Pressable>
         </View>
         <View style={s.btnRow}>
           <RoundBtn onPress={() => setSheet('mixer')} label="Mixer">
@@ -1605,6 +1715,29 @@ const s = StyleSheet.create({
   },
   scrubRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
   tm: { color: white(0.5), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
+  loopBtn: {
+    width: 40,
+    height: 32,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    borderColor: white(0.2),
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  loopBtnOn: { backgroundColor: C.amber, borderColor: C.amber },
+  loopBtnText: { color: white(0.6), fontSize: 11.5, fontWeight: '800' },
+  loopBtnTextOn: { color: C.amberInk },
+  /* Sits exactly over the 5px rail Bar draws, which is vertically centred in
+     its 44pt touch strip. */
+  loopLayer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center'
+  },
+  loopBand: { position: 'absolute', height: 5, borderRadius: 3, backgroundColor: 'rgba(255,160,40,0.55)' },
   btnRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   skipText: { color: white(0.85), fontSize: 12.5, fontWeight: '700' },
   toStartText: { color: white(0.85), fontSize: 20, marginTop: -2 },
