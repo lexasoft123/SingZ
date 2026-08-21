@@ -103,6 +103,97 @@ export function realArtist(s: string | undefined): string | undefined {
   return s
 }
 
+/**
+ * ",", "&" and "/" always separate credits; the word markers need whitespace
+ * around them so "Maxx" and "Aerosmith" keep their letters. `\b` is no help
+ * here — JS word boundaries are ASCII-only and never fire around Cyrillic, so
+ * a `\bи\b` rung would silently match nothing.
+ */
+const COLLAB_MARKER = /\s*[,&/]\s*|\s+(?:feat|ft|featuring|with|vs|x|и)\.?(?=\s|$)\s*/i
+
+/**
+ * The lead credit alone: everything from the first collaboration marker on is
+ * dropped. LRCLIB matches artist_name loosely — searching "Женя Трофимов"
+ * finds a record credited "Женя Трофимов, NANSI & SIDOROV" — so the lead name
+ * is the query that widens correctly, while the tag's own spelling of the
+ * guests is exactly what makes it miss: a file tagged "Женя Трофимов feat.
+ * Nansi & Sidorov — Вторая весна" found nothing and spent three minutes
+ * transcribing a song LRCLIB has synced under half a dozen credits.
+ *
+ * Over-narrowing a real name ("Simon & Garfunkel" → "Simon", "AC/DC" → "AC")
+ * costs nothing: this only ever runs as a retry after the full name missed,
+ * and the lead is still a prefix of the record LRCLIB holds.
+ */
+export function primaryArtist(s: string | undefined): string | undefined {
+  if (!s) return undefined
+  const lead = s.split(COLLAB_MARKER)[0].trim()
+  // A one-letter lead ("M x Y") is too weak a filter to be worth a query, and
+  // an unchanged one is the query that already missed.
+  return lead.length >= 2 && lead !== s.trim() ? lead : undefined
+}
+
+/**
+ * Download sites glue their own name to the front of the artist — the tag, the
+ * filename, or both. Matched by SHAPE, never by a list of sites: a domain-ish
+ * leading token, or a leading run carrying a "download"/"mp3" segment. A rip
+ * credited "AudioCleaner_Download_Notre Dame de Paris" found nothing and spent
+ * five minutes in whisper-cli, while LRCLIB holds that song synced at exactly
+ * the right length under "Notre Dame de Paris".
+ *
+ * Titles already survive this — metaFromFilename strips "(Sefon.Pro)" with the
+ * rest of the brackets — but nothing ever cleaned the artist.
+ */
+const SITE_TLD =
+  '(?:ru|su|ua|by|kz|net|com|org|pro|info|biz|cc|top|club|online|site|xyz|mobi|fm|tv|ws)'
+
+const SITE_LEADERS = [
+  // "[muzmo.ru] Ария", "(sefon.pro) Ария" — a bracketed leader naming a site.
+  // Tag artists never went through the bracket stripper that filenames do.
+  new RegExp(`^[[(][^\\])]*\\.${SITE_TLD}[^\\])]*[\\])][\\s|_-]*`, 'i'),
+  // "Muzoi.net - Артист", "Sefon.Pro_Ария", "zaycev.net Ария". The separator
+  // is required: an artist that is ONLY a domain has nothing to salvage, and
+  // demanding it keeps "will.i.am" (a real name, and ".am" a real TLD) whole.
+  new RegExp(`^(?:www\\.)?[\\w-]+\\.${SITE_TLD}[\\s|_-]+`, 'i'),
+  // "AudioCleaner_Download_Notre Dame de Paris", "get-mp3-Ария" — the marker
+  // segment must sit inside one unbroken run, so a real name with spaces
+  // ("Fifty Foot Mp3"…) is never the thing being cut.
+  /^\S*?[_-](?:download|mp3)[_-]+/i
+]
+
+/** Something is left that could plausibly be a name — not "-", not "123". */
+const HAS_NAME = /[^\s\d_.,|/\\()[\]-]/
+
+/**
+ * The artist with a download-site tag removed, or undefined when there is no
+ * site tag to remove. Idempotent: its own output has no leader left, so the
+ * retry rung cannot cycle.
+ */
+export function stripSitePrefix(s: string | undefined): string | undefined {
+  if (!s) return undefined
+  for (const re of SITE_LEADERS) {
+    const rest = s.replace(re, '').trim()
+    if (rest !== s.trim() && rest.length >= 2 && HAS_NAME.test(rest)) return rest
+  }
+  return undefined
+}
+
+/**
+ * The artist spellings worth a second query, in order of least mangling. Each
+ * is a reduction of the tag, so this list is what bounds the ladder: the
+ * artist dimension is a loop, never a recursion.
+ */
+function artistFallbacks(artist: string | undefined): { artist: string; why: string }[] {
+  const out: { artist: string; why: string }[] = []
+  const push = (a: string | undefined, why: string): void => {
+    if (a && a !== artist && !out.some((o) => o.artist === a)) out.push({ artist: a, why })
+  }
+  const noSite = stripSitePrefix(artist)
+  push(primaryArtist(artist), 'the lead artist')
+  push(noSite, 'the artist without the site tag')
+  push(primaryArtist(noSite), 'the lead artist without the site tag')
+  return out
+}
+
 /** "08. Sixteen Tons [Am +2st]" / "Sixteen Tons (Am, +2)" → artist?/title. */
 export function metaFromFilename(
   basename: string
@@ -249,31 +340,45 @@ export async function lookupLyrics(
   meta: TrackMeta,
   onRetry?: (message: string) => void
 ): Promise<LookupOutcome> {
-  let best: LrclibRecord | null = null
   let sawDown = false
 
-  if (meta.artist) {
-    const q = new URLSearchParams({
-      artist_name: meta.artist,
-      track_name: meta.title,
-      duration: String(Math.round(meta.durationSec))
-    })
-    if (meta.album) q.set('album_name', meta.album)
-    const answer = await api(`/get?${q}`)
-    if (answer === 'down') sawDown = true
-    else if (answer !== 'miss') {
-      const exact = answer.json as LrclibRecord | null
-      if (exact && !exact.instrumental && exact.syncedLyrics) best = exact
+  /** The exact triple, then the search — the two questions for one spelling. */
+  const probe = async (artist: string | undefined): Promise<LrclibRecord | null> => {
+    if (artist) {
+      const q = new URLSearchParams({
+        artist_name: artist,
+        track_name: meta.title,
+        duration: String(Math.round(meta.durationSec))
+      })
+      if (meta.album) q.set('album_name', meta.album)
+      const answer = await api(`/get?${q}`)
+      if (answer === 'down') sawDown = true
+      else if (answer !== 'miss') {
+        const exact = answer.json as LrclibRecord | null
+        if (exact && !exact.instrumental && exact.syncedLyrics) return exact
+      }
     }
-  }
-
-  if (!best) {
     const q = new URLSearchParams({ track_name: meta.title })
-    if (meta.artist) q.set('artist_name', meta.artist)
+    if (artist) q.set('artist_name', artist)
     const answer = await api(`/search?${q}`)
     if (answer === 'down') sawDown = true
     else if (answer !== 'miss' && Array.isArray(answer.json)) {
-      best = pickBest(answer.json as LrclibRecord[], meta.durationSec)
+      return pickBest(answer.json as LrclibRecord[], meta.durationSec)
+    }
+    return null
+  }
+
+  let best = await probe(meta.artist)
+
+  // The tag as written is always asked first; these only ever run after it
+  // missed, so a lookup that works today cannot be broken by them. LRCLIB
+  // matches artist_name loosely, so every reduction widens rather than
+  // narrows — the tag's own extra words are what made it miss.
+  if (!best) {
+    for (const alt of artistFallbacks(meta.artist)) {
+      onRetry?.(`retrying LRCLIB with ${alt.why}: ${alt.artist}`)
+      best = await probe(alt.artist)
+      if (best) break
     }
   }
 

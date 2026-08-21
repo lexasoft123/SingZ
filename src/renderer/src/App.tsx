@@ -1100,9 +1100,18 @@ export default function App(): React.JSX.Element {
       const cur = lyricsRef.current.status
       if (!allowDownload && !prefer && (cur === 'loading' || cur === 'ready' || cur === 'consent'))
         return
+      // Which song these lyrics are being looked up for. The LRCLIB ladder is
+      // several network round-trips and whisper is minutes, so the singer can
+      // well be in another song by the time it answers — and lyrics that land
+      // in the wrong song are not merely drawn there: linesRef feeds
+      // detectBeats' lineStarts/words, and that grid is auto-saved into the
+      // project. Same rule as prepMelody, for the same reason.
+      const seq = loadSeq.current
       // Ladder: cache → LRCLIB synced lyrics → whisper (with model consent).
       setLyrics({ status: 'loading', progress: null })
-      const unsub = window.singz.onLyricsProgress((p) => setLyrics({ status: 'loading', progress: p }))
+      const unsub = window.singz.onLyricsProgress((p) => {
+        if (seq === loadSeq.current) setLyrics({ status: 'loading', progress: p })
+      })
       const res = await window.singz.getLyrics(
         song.path,
         engine.duration,
@@ -1110,6 +1119,7 @@ export default function App(): React.JSX.Element {
         preferRef.current
       )
       unsub()
+      if (seq !== loadSeq.current) return // a different song is open now
       applyLyricsResult(res)
     },
     [song, engine, applyLyricsResult]

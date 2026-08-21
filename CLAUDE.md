@@ -383,6 +383,20 @@ was driven; the gotchas that follow from it are below.
   disowns one that fits a different song and re-tracks, which is how the two
   corrupted projects healed themselves on the next open. Guarded by
   `tests/e2e/mac/melody-song-switch-e2e.cjs`.
+  **The rule is not just pYIN's** — `prepLyrics` shipped without the guard and
+  was measured landing song A's lyrics in song B (Wild World displaying
+  "Metallica — Nothing Else Matters"). Lyrics have no `melodyFitsSong` twin to
+  heal them, and the damage is not only what is drawn: `linesRef` feeds
+  `detectBeats`' `lineStarts`/`words` aux, so a foreign phrasing is baked into
+  THIS song's beat grid and auto-saved under a current stamp that stops it
+  being re-derived. `cancelLyrics()` does not cover the window either —
+  `Transcriber.cancel()` aborts the model download and kills the whisper/
+  aligner child, but the LRCLIB ladder runs under neither and `busy` is false
+  throughout it, so the lookup runs to completion with nothing to stop it.
+  Guarded by `tests/e2e/mac/lyrics-song-switch-e2e.cjs`, which makes the race
+  deterministic by wrapping main's `net.fetch` with a delay via
+  `app.evaluate` — the ladder runs in MAIN, so no renderer-side route
+  interception can see it.
 - **Project format v2 = FLAC stems** (~4x smaller, lossless; splitter cache
   stays WAV). v1 WAV projects auto-upgrade on open (`migrateProjectToV2`);
   readers must keep accepting both (`stemFile()` prefers .flac). Encoding uses
