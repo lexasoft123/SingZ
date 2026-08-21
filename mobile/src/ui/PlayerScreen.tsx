@@ -23,6 +23,7 @@ import {
 } from '../analysis/run'
 import { BEAT_MODELS_MB, beatModelsStatus, cancelBeatModels, ensureBeatModels } from '../analysis/models'
 import { nativeMlGridAvailable } from '../analysis/native'
+import type { AnalysisStage } from '../analysis/pipeline'
 import {
   fmtTime,
   MET_DEFAULTS,
@@ -49,6 +50,7 @@ import SkiaLyrics, {
   type LyricsCue,
   type SkWord
 } from './SkiaLyrics'
+import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/player.png')
@@ -372,7 +374,16 @@ export default function PlayerScreen({
    * from a picked folder must not wear the phone's "Foo" grid — so the
    * library is checked too. The progress line shows only while it is our
    * song being read. */
-  const [analysisText, setAnalysisText] = useState<string | null>(null)
+  const [analysisAt, setAnalysisAt] = useState<{ text: string; stage: AnalysisStage } | null>(
+    null
+  )
+  const analysisText = analysisAt?.text ?? null
+  /** The progress line, but only against the detector it is about. A
+   *  project-wide line under `Beat` said "Listening now…" while the KEY
+   *  ran — over a hand-tuned grid, wiping both the grid and its promise
+   *  that nothing here re-detects over it. */
+  const stepAt = (stage: AnalysisStage): string | null =>
+    analysisAt?.stage === stage ? analysisAt.text : null
 
   /* Are the beat models on this phone? Asked of the FILES every time the
    * sheet opens, never cached across opens: the models are a fact about the
@@ -409,19 +420,54 @@ export default function PlayerScreen({
    * most likely to be staring at, wondering why there is no click. */
   const noBeatVerdict = settings?.analysisNone?.beat !== undefined
   const busyHere = !!analysisText || (!!project.dir && analysisPending(project.dir))
+  /* Which state the Beat row is in — one decision, so its value and its hint
+   * cannot fall through to different leaves. See song-sheet-copy.ts for why
+   * the busy case exists at all. */
+  const beatRow = sheetRowState({
+    step: stepAt('beat'),
+    hasGrid: !!beatInfo,
+    verdict: noBeatVerdict,
+    busy: busyHere
+  })
   const keyText = ((): string | null => {
     const k = settings?.key
     if (!k) return null
     const NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
     return `${NAMES[k.pc % 12]} ${k.minor ? 'minor' : 'major'}`
   })()
+  /* The Key row had the Beat row's bug exactly: the detector stores a "the
+   * harmonic bed is silent, there is no key here" verdict, and the row read
+   * "Not detected yet" over it — a stored answer displayed as a gap. Same
+   * rule, same function. */
+  const noKeyVerdict = settings?.analysisNone?.key !== undefined
+  const keyRow = sheetRowState({
+    step: stepAt('key'),
+    hasGrid: !!keyText,
+    verdict: noKeyVerdict,
+    busy: busyHere
+  })
+  /* All three rows on one rule. `verdict` is hardcoded false because there is
+   * no melody verdict to have: analysisNone is typed {beat, beatMl, key}
+   * (model.ts) — the melody is tracked or it is not. So sheetRowState can
+   * never return 'verdict' here, which is why the row renders no branch for
+   * it; if a melody verdict is ever stored, THIS line is what changes and the
+   * branch comes with it. Melody has no blind window either — it commits
+   * straight after its own step — so only 'busy' is doing new work, and it is
+   * the same 'busy' Key has: during the beat stage both are queued, and until
+   * now they said different things about the identical situation. */
+  const melodyRow = sheetRowState({
+    step: stepAt('melody'),
+    hasGrid: !!settings?.melody,
+    verdict: false,
+    busy: busyHere
+  })
   const detectAgain = useCallback(() => {
     if (!project.dir) return
     // FORCED: every stamp says nothing needs doing — that is exactly why the
     // singer is pressing this. Hand-placed bar lines survive; analyzeProject
     // folds them back onto the fresh grid.
     startAnalysis(project.dir, stemFiles, project.lyrics, true)
-    setAnalysisText('Getting ready…')
+    setAnalysisAt({ text: 'Getting ready…', stage: 'start' })
   }, [project.dir, project.lyrics, stemFiles])
 
   const fetchModels = useCallback(async () => {
@@ -458,7 +504,7 @@ export default function PlayerScreen({
       if (e.changed) void refreshDoc()
     })
     const unsub = subscribeAnalysis((p: AnalysisProgress | null) =>
-      setAnalysisText(p && p.dir === dir ? p.text : null)
+      setAnalysisAt(p && p.dir === dir ? { text: p.text, stage: p.stage } : null)
     )
     return () => {
       sub.remove()
@@ -635,6 +681,10 @@ export default function PlayerScreen({
     TEST.screen = 'player'
     TEST.project = project.name
     TEST.beatInfo = beatInfo
+    /** PROJECT-WIDE: the line for whatever detector is running, whichever it
+     *  is. Never show it, or assert it, against ONE row — doing exactly that
+     *  is what put "Listening for the beat" under a hand-tuned grid while the
+     *  key was being read. Per-row lines are `songSheet().beatRow` and friends. */
     TEST.analysisText = analysisText
     // The Song sheet, for a driver that wants to see what the singer sees:
     // open it, read the rows it would show, and press its one action.
@@ -646,7 +696,18 @@ export default function PlayerScreen({
         : null,
       noBeatVerdict,
       busy: busyHere,
+      /** Project-wide — see the warning on TEST.analysisText. A driver that
+       *  wants "what does the Beat row say" wants `beatRow`. */
       analysisText,
+      /** The detector that line is about, and the line as each row actually
+       *  shows it: null on a row whose detector is not the one running. */
+      analysisStage: analysisAt?.stage ?? null,
+      beatRowState: beatRow,
+      keyRowState: keyRow,
+      melodyRowState: melodyRow,
+      beatRow: stepAt('beat'),
+      keyRow: stepAt('key'),
+      melodyRow: stepAt('melody'),
       canAnalyse,
       beatManual,
       modelsHave,
@@ -997,34 +1058,49 @@ export default function PlayerScreen({
               <View style={[b.sec, b.secFirst]}>
                 <Text style={b.secLab}>Beat</Text>
                 <Text style={s.songVal}>
-                  {analysisText
-                    ? analysisText
-                    : beatInfo
+                  {beatRow === 'progress'
+                    ? stepAt('beat')
+                    : beatRow === 'grid' && beatInfo
                       ? `${Math.round(beatInfo.bpm)} bpm · ${meterName(beatInfo.beatsPerBar)} · ` +
                         `${beatInfo.downbeats?.length ?? 0} bars`
-                      : noBeatVerdict
+                      : beatRow === 'verdict'
                         ? 'No beat in these drums'
-                        : 'Not detected yet'}
+                        : beatRow === 'busy'
+                          ? 'Reading the song…'
+                          : 'Not detected yet'}
                 </Text>
                 <Text style={b.hint}>
-                  {analysisText
+                  {beatRow === 'progress'
                     ? 'Listening now — the click and the count-in pick the beat up the moment it is found.'
-                    : beatInfo
+                    : beatRow === 'grid'
                       ? (beatManual
                           ? 'Hand-tuned on the computer — nothing here will re-detect over it. '
                           : settings?.beat?.userBars?.length
                             ? 'Your own bar lines are on this grid and stay on it. '
                             : '') +
                         'The click, the count-in and the bar lines all follow this.'
-                      : noBeatVerdict
+                      : beatRow === 'verdict'
                         ? 'The detector listened and found no steady beat it would put a click on — ' +
                           'a free-time or drumless song. That answer is remembered, so opening the song ' +
-                          'again does not read the stems for nothing. Detect again to ask once more.'
-                        : canAnalyse
-                          ? 'Nothing has read the stems yet.'
-                          : Object.keys(stemFiles).length === 0
-                            ? 'Not split yet — the beat is read from the drums, so it waits for the split.'
-                            : 'Songs from the computer arrive with their beat already in them.'}
+                          'again does not read the stems for nothing.' +
+                          // Nothing positive can be said here. This state needs
+                          // stepAt('beat') to be null, so the stage is 'start', 'key' or
+                          // 'melody' — and on the two paths that actually reach it the
+                          // beat is NOT being asked: a drumless song whose verdict was
+                          // just stored mid-run (the melody still has a minute to go),
+                          // and any later unforced run, where a bound verdict makes
+                          // plan.beat false outright. Only drop the invitation, which is
+                          // all that was wrong: the chip beside this already says
+                          // "Detecting…".
+                          (busyHere ? '' : ' Detect again to ask once more.')
+                        : beatRow === 'busy'
+                          ? 'Being read right now — the grid is written after the key is ' +
+                            'read, so this row fills in a moment after the beat itself is found.'
+                          : canAnalyse
+                            ? 'Nothing has read the stems yet.'
+                            : Object.keys(stemFiles).length === 0
+                              ? 'Not split yet — the beat is read from the drums, so it waits for the split.'
+                              : 'Songs from the computer arrive with their beat already in them.'}
                 </Text>
                 {canAnalyse && !busyHere && (
                   <Text style={b.hint}>
@@ -1080,12 +1156,35 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>Key</Text>
-                <Text style={s.songVal}>{keyText ?? 'Not detected yet'}</Text>
+                <Text style={s.songVal}>
+                  {keyRow === 'progress'
+                    ? stepAt('key')
+                    : keyRow === 'grid'
+                      ? keyText
+                      : keyRow === 'verdict'
+                        ? 'No key in these stems'
+                        : keyRow === 'busy'
+                          ? 'Reading the song…'
+                          : 'Not detected yet'}
+                </Text>
+                {keyRow === 'verdict' && (
+                  <Text style={b.hint}>
+                    The harmony the key is read from — the guitar, piano and bass lanes —
+                    is silent here, so there is nothing to read it off. That answer is
+                    remembered rather than re-read on every open.
+                  </Text>
+                )}
               </View>
               <View style={b.sec}>
                 <Text style={b.secLab}>Melody</Text>
                 <Text style={s.songVal}>
-                  {settings?.melody ? 'Tracked from the vocals' : 'Not tracked yet'}
+                  {melodyRow === 'progress'
+                    ? stepAt('melody')
+                    : melodyRow === 'grid'
+                      ? 'Tracked from the vocals'
+                      : melodyRow === 'busy'
+                        ? 'Reading the song…'
+                        : 'Not tracked yet'}
                 </Text>
                 <Text style={b.hint}>
                   The sung line under the lyrics, and what the pitch strip draws.
@@ -1196,16 +1295,19 @@ export default function PlayerScreen({
                   {beatInfo
                     ? `${Math.round(beatInfo.bpm)} bpm from the project — clicks and the ` +
                       `count-in follow the song's own beat, drift and all.`
-                    : analysisText
-                      ? `${analysisText} — the click and the count-in pick the beat up ` +
+                    : stepAt('beat')
+                      ? `${stepAt('beat')} — the click and the count-in pick the beat up ` +
                         'the moment it is found.'
-                      : project.library === 'phone'
-                        ? 'No beat track — the count-in ticks once a second before playback ' +
-                          'starts. If the song has a steady beat, opening it here reads one ' +
-                          'from the drums once it is split.'
-                        : 'No beat track — the count-in ticks once a second before playback ' +
-                          'starts. If the song has a steady beat, opening it on desktop reads ' +
-                          'one from the drums.'}
+                      : busyHere
+                        ? 'The song is being read now — the click and the count-in pick the ' +
+                          'beat up the moment it lands.'
+                        : project.library === 'phone'
+                          ? 'No beat track — the count-in ticks once a second before playback ' +
+                            'starts. If the song has a steady beat, opening it here reads one ' +
+                            'from the drums once it is split.'
+                          : 'No beat track — the count-in ticks once a second before playback ' +
+                            'starts. If the song has a steady beat, opening it on desktop reads ' +
+                            'one from the drums.'}
                 </Text>
               </View>
 
