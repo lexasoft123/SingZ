@@ -92,6 +92,12 @@ two you chose into `phone-cat-crop.png` and `phone-kar-crop.png`, which are the
 names the template and `fragment-widths.json` use. Do this rather than cropping
 by hand — hand-cropping gives a different answer every run.
 
+It does **not** crop by default, and its optional fractions are for trimming a
+home indicator, never for fitting a phone into a box. It refuses outright
+anything that moves the aspect more than 5%, because that failure is purely
+visual and clears every other gate — `check-widths.cjs` measures width alone
+and will happily print `ALL FRAGMENTS 1:1` over a phone squashed to 0.80.
+
 Screenshots are headless; no live panel is needed. If the change being
 announced is native, the installed build must postdate it — a stale binary
 photographs the old app perfectly.
@@ -168,7 +174,19 @@ Composition rules that came from getting them wrong:
 
 - **Never cut a fragment mid-word.** A plate sliced through text reads as a
   broken export, not a crop. Show the whole panel scaled down, or crop on a
-  clean edge.
+  clean edge. This applies to the zoom plates too: crop each to ITS OWN content
+  width. Two plates forced to a shared width cost the longer one its last word
+  ("123 bpm · 4/4 · 81" — the "bars" was off the edge).
+- **A phone fragment is the WHOLE screenshot, never cropped shorter.** The
+  device's aspect is the thing that makes it read as a phone: an iPhone shot is
+  1206x2622, ratio **0.46**. Cropping to ~60% height to keep more app text
+  legible puts it at 0.74 — 61% too wide — and it stops looking like a device
+  at all. That shipped once and the verdict was "posters are ugly, why phones
+  are shot not in their original size". Choose a display WIDTH that preserves
+  the ratio (230px wide is 500px tall, which fits the 566px collage) and let
+  the zoom plate carry the readable detail, which is its whole job. If the
+  phones then foul the bullets, move them or pull in the `box-shadow` drop —
+  a `0 46px 90px` shadow dims the first bullet even when the phone clears it.
 - **Keep the collage in its own fixed-height box.** Phones that overflow it
   land on the bullets and hide them.
 - **Do not repeat content between fragments.** A zoomed lyric line next to a
@@ -184,7 +202,7 @@ small text turns to mush.
 So do the reduction **once**, with a good filter, before rendering:
 
 ```bash
-.claude/skills/release-poster/scripts/prep-fragments.sh shots/ shots-1x/
+.claude/skills/release-poster/scripts/prep-fragments.sh shots/ shots-1x/ <widths.json>
 node .claude/skills/release-poster/scripts/render.cjs poster.html <out-dir> v0.16.0-poster
 ```
 
@@ -199,8 +217,21 @@ prepped to a width it is no longer displayed at is silently resampled again.
 After touching either, check them:
 
 ```bash
-node .claude/skills/release-poster/scripts/check-widths.cjs poster.html
+node .claude/skills/release-poster/scripts/check-widths.cjs poster.html <widths.json>
 ```
+
+Pass `check-widths.cjs` and `prep-fragments.sh` **the same manifest**. A poster
+that re-composes the template has its own widths, and checking those against the
+skill's default reports DRIFT on every fragment — which buries the one line that
+matters (`natural === rendered`) under noise. A clean run says
+`ALL FRAGMENTS 1:1`.
+
+The template's collage CSS is split into a **STRUCTURE** block and a
+**POSITION** block. Re-compose POSITION freely; keep STRUCTURE verbatim. They
+are separated because they were not: `.phone` carries `position: absolute` and
+used to sit between `.f-stack` and `.p-cat`, so replacing "the collage CSS"
+took it with them, every phone dropped into normal flow, and they stacked down
+the page.
 
 Watch the box model when you do. `.frag`/`.phone` are `border-box` with a 1px
 border, so a wrapper at `width: 264px` gives its child a **262px** content box;

@@ -90,7 +90,14 @@
   .spectrum { margin-top: 24px; display: flex; gap: 5px; height: 9px; }
   .spectrum i { flex: 1; border-radius: 4px; }
 
-  /* ---- collage ---- */
+  /* ---- collage: STRUCTURE ----
+     Chrome only — what makes a rectangle read as a plate or a device. Every
+     poster keeps this block verbatim. The POSITION block below is the part you
+     re-compose per release, and the two are separated because they were not:
+     `.phone` (which carries `position: absolute`) used to sit between
+     `.f-stack` and `.p-cat`, so replacing "the collage CSS" silently took it,
+     every phone fell into normal flow, and they stacked down the page looking
+     like a layout that had never been written. */
   .collage { position: relative; height: 566px; margin: 20px -52px 0; }
   .frag {
     position: absolute; border-radius: 12px; overflow: hidden;
@@ -99,40 +106,56 @@
   }
   .frag img { display: block; }
 
+  /* A phone fragment is the WHOLE uncropped screenshot. Cropping it shorter to
+     fit a box changes the device's aspect — a 1206x2622 iPhone is 0.46, and
+     cropping to ~60% height makes it 0.74, which stops reading as a phone
+     entirely. Pick a display WIDTH that leaves the ratio alone (230px wide is
+     500px tall, which fits this box) and let the zoom plates carry the
+     legible detail, as they are meant to. */
+  .phone {
+    position: absolute; border-radius: 34px; overflow: hidden;
+    border: 1px solid rgba(255, 240, 214, 0.18);
+    box-shadow: 0 22px 54px rgba(0, 0, 0, 0.8), 0 0 0 6px rgba(9, 8, 6, 0.95);
+    background: #000;
+  }
+  .phone img { display: block; width: 100%; }
+
+  /* The zoomed detail — one control or verdict, blown up, accent-glowed. */
+  .plate {
+    position: absolute; z-index: 6; border-radius: 14px; overflow: hidden;
+    border: 1px solid rgba(255, 160, 40, 0.55);
+    box-shadow: 0 0 52px rgba(255, 160, 40, 0.4), 0 22px 44px rgba(0, 0, 0, 0.8);
+  }
+  .plate img { display: block; }
+
+  /* ---- collage: POSITION ----
+     Per-release. Replace freely; the STRUCTURE block above must survive.
+     Widths on .phone/.frag/.plate are the BORDER box and each has a 1px
+     border, so they are 2px MORE than the image inside them. The content box
+     must equal the width in the manifest, or `img { width: 100% }` resamples
+     at 0.99x — same size on screen, every pixel softer, nothing reporting it.
+     `check-widths.cjs <poster.html> <widths.json>` is what catches it. */
   .f-stack { left: -96px; top: 30px; width: 540px; transform: rotate(-3.5deg); }
   .f-stack img { width: 880px; margin: -26px 0 0 -40px; }
 
-  /* whole plates, kept inside the trim — a cut word reads as a mistake */
+  /* whole plates, kept inside the trim — a cut word reads as a mistake, and it
+     applies to a zoom too: crop each plate to ITS OWN content width rather
+     than to a width shared with a shorter row, or the longer one loses a word
+     off the end. */
   .f-lyric { right: 10px; top: 10px; width: 246px; height: 300px; transform: rotate(3.2deg); }
   .f-lyric img { width: 246px; }
 
   .f-pitch { right: 4px; top: 446px; width: 372px; transform: rotate(2.6deg); }
   .f-pitch img { width: 372px; }
 
-  .phone {
-    position: absolute; border-radius: 34px; overflow: hidden;
-    border: 1px solid rgba(255, 240, 214, 0.18);
-    box-shadow: 0 46px 90px rgba(0, 0, 0, 0.86), 0 0 0 6px rgba(9, 8, 6, 0.95);
-    background: #000;
-  }
-  .phone img { display: block; width: 100%; }
-  /* Widths are the BORDER box (box-sizing above) and .phone has a 1px border,
-     so these are 2px wider than the image inside them. Get this wrong and the
-     img lands 2px narrower than prep-fragments.sh built it, which resamples
-     the phone shots at 0.992x — invisible, same size on screen, and it undoes
-     the whole point of preparing them. Content box must equal the width in
-     assets/fragment-widths.json: 252 and 264. */
-  .p-cat { left: 40px; top: 168px; width: 254px; transform: rotate(-5deg); }
-  .p-kar { left: 318px; top: 4px; width: 266px; transform: rotate(1.4deg); z-index: 3; }
+  /* 232/240 border box = 230/238 content = 500/517 tall at the device ratio,
+     which clears the 566px collage. Widen these and the phones sit on the
+     bullets; the fix for that is never a shorter crop. */
+  .p-cat { left: 58px; top: 14px; width: 232px; transform: rotate(-5.4deg); z-index: 2; }
+  .p-kar { left: 300px; top: 0px; width: 240px; transform: rotate(2.4deg); z-index: 3; }
 
-  /* the one control this release is about, blown up so it reads anywhere */
-  .split-zoom {
-    position: absolute; right: 116px; top: 250px; z-index: 6;
-    border-radius: 14px; overflow: hidden; transform: rotate(-6deg);
-    border: 1px solid rgba(255, 160, 40, 0.5);
-    box-shadow: 0 0 54px rgba(255, 160, 40, 0.42), 0 26px 48px rgba(0, 0, 0, 0.8);
-  }
-  .split-zoom img { display: block; width: 196px; }
+  .pl-split { right: 116px; top: 250px; transform: rotate(-6deg); }
+  .pl-split img { width: 196px; }
 
   .note {
     position: absolute; font-family: 'Martian', monospace; font-size: 23px;
@@ -166,7 +189,7 @@
       <div class="bars"><i></i><i></i><i></i><i></i></div>
       <div class="wordmark">Sing<b>Z</b></div>
     </div>
-    <div class="ver">v0.16.0</div>
+    <div class="ver">__VERSION__</div>
   </div>
 
   <h1>Split a song <em>on your phone</em>.</h1>
@@ -185,7 +208,7 @@
     <div class="phone p-kar"><img src="__SHOTS__/phone-kar-crop.png" /></div>
 
     <div class="note n1">One tap →</div>
-    <div class="split-zoom"><img src="__SHOTS__/zoom-split.png" /></div>
+    <div class="plate pl-split"><img src="__SHOTS__/zoom-split.png" /></div>
   </div>
 
   <div class="foot">

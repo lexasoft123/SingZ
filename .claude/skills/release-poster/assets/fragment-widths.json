@@ -1,7 +1,7 @@
 {
-  "_comment": "Display width in CSS px of each fragment in poster-template.html. Kept beside the template so prep-fragments.sh and the CSS cannot drift: a fragment resized to anything other than the width it is displayed at gets resampled by the renderer, which is what makes a poster look soft. Change one, change the other.",
-  "phone-kar-crop": 264,
-  "phone-cat-crop": 252,
+  "_comment": "Display width in CSS px of each fragment in poster-template.html. Kept beside the template so prep-fragments.sh and the CSS cannot drift: a fragment resized to anything other than the width it is displayed at gets resampled by the renderer, which is what makes a poster look soft. Change one, change the other. The phone entries are widths ONLY \u2014 a phone fragment is the whole uncropped screenshot and keeps the device's 0.46 aspect, so 230 wide is 500 tall. Never crop one shorter to fit.",
+  "phone-kar-crop": 238,
+  "phone-cat-crop": 230,
   "frag-stack": 880,
   "frag-lyrics": 246,
   "frag-pitch": 372,

@@ -12,7 +12,14 @@
  * fragments are rotated, and a bounding box reports the rotated extent, which
  * made a first version of this check call all six a failure.
  *
- * Usage: node check-widths.cjs <poster.html>     (exit 1 on any drift)
+ * The manifest defaults to the skill's own assets/fragment-widths.json, but a
+ * poster that re-composes the template uses its OWN widths — and comparing
+ * those against the default reports DRIFT on every fragment, burying the line
+ * that matters (natural === rendered) under noise a reader learns to ignore.
+ * So it takes a manifest too — prep-fragments.sh's third positional, this
+ * tool's second. Pass them both the same file.
+ *
+ * Usage: node check-widths.cjs <poster.html> [widths.json]   (exit 1 on drift)
  */
 const REPO = process.env.SINGZ_REPO
   ?? require('node:path').resolve(__dirname, '..', '..', '..', '..');
@@ -20,7 +27,10 @@ const { chromium } = require(`${REPO}/node_modules/playwright-core`);
 const { resolve } = require('node:path');
 
 const HTML = resolve(process.argv[2] ?? 'poster.html');
-const want = require(`${__dirname}/../assets/fragment-widths.json`);
+const WIDTHS = process.argv[3]
+  ? resolve(process.argv[3])
+  : `${__dirname}/../assets/fragment-widths.json`;
+const want = require(WIDTHS);
 
 (async () => {
   const browser = await chromium.launch({ channel: 'chromium' });
@@ -55,14 +65,14 @@ const want = require(`${__dirname}/../assets/fragment-widths.json`);
     if (!ok) bad++;
     const why = !loaded ? ' — did not load' : ok ? ' (1:1, but add it to the manifest)' : ' — resampled';
     console.log(`${ok ? 'note ' : 'DRIFT'} ${s.name.padEnd(16)} ` +
-      `not in fragment-widths.json  natural=${s.natural} rendered=${s.rendered}${why}`);
+      `not in the manifest  natural=${s.natural} rendered=${s.rendered}${why}`);
   }
 
   // A fragment named in the manifest but absent from the page means the two
   // have drifted apart in the other direction.
   for (const name of Object.keys(want)) {
     if (name.startsWith('_') || checked.has(name)) continue;
-    console.log(`MISS  ${name.padEnd(16)} in fragment-widths.json but not in the poster`);
+    console.log(`MISS  ${name.padEnd(16)} in the manifest but not in the poster`);
     bad++;
   }
 
