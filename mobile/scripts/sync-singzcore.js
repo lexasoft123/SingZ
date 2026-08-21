@@ -30,4 +30,25 @@ for (const f of readdirSync(src)) {
   chmodSync(join(dst, f), 0o444)
   n++
 }
-console.log(`sync-singzcore: ${n} files → ios/SingzCore/core/`)
+
+// The vendored libFLAC rides along the same way (Phase 5): the pod compiles
+// flac/src/*.c and wav.cpp dispatches to it. Directory structure is
+// preserved — deduplication/ holds #included fragments the podspec must NOT
+// compile, and the include/ tree is what <FLAC/…> resolves against.
+const flacSrc = join(root, 'native', 'third_party', 'flac')
+const flacDst = join(root, 'ios', 'SingzCore', 'flac')
+rmSync(flacDst, { recursive: true, force: true })
+const copyTree = (from, to) => {
+  mkdirSync(to, { recursive: true })
+  for (const e of readdirSync(from, { withFileTypes: true })) {
+    if (e.isDirectory()) {
+      copyTree(join(from, e.name), join(to, e.name))
+    } else if (/\.(c|h)$/.test(e.name)) {
+      copyFileSync(join(from, e.name), join(to, e.name))
+      chmodSync(join(to, e.name), 0o444)
+      n++
+    }
+  }
+}
+copyTree(flacSrc, flacDst)
+console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,flac}/`)

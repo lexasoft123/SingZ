@@ -1,6 +1,6 @@
 # Phone standalone song-adding — research record & architecture
 
-Status: **Phases 0–3 shipped (v0.16.x); Phase 4a (beats/key/melody on-device) landed; 4c (the detectors in C++, one implementation for every platform) in progress — melody done.** Researched 2026-08-14 (three codebase
+Status: **Phases 0–4 shipped (v0.16.x). Phase 4 is complete: every detector — melody, key, beats with the courts and the neural fork — runs in the C++ core on both phones, bound, wired and gated device-against-host over a corpus — the HOMEGROWN pipeline and the v20 courts, that is; the neural fork is gated per-platform on one song each and across 17 songs on the host, never over the corpus, which runs with the lattice off on both sides by design. Phase 5 (FLAC storage) is COMPLETE and device-verified 2026-08-21: the core reads FLAC on both platforms (POCO 178.1 s → 28.7 s, sim 51 s → 21.7 s, grids identical to WAV value for value), writes it (compactStem, 41.4 s for six stems on the phone), and a phone-split song compacts itself after its first analysis — with convergence proven against the killed-tail state live on the POCO and the killed-middle state under test. Phase 6 (publish to Drive) is all that remains.** Researched 2026-08-14 (three codebase
 exploration agents + web verification + one design agent); scope decisions and the
 architecture below approved the same day. This document is the record — read it before
 touching the phone pipeline, and update it as phases land (the docs/BEAT-DETECTION.md
@@ -1373,10 +1373,14 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       the Chromium oracle, and dropping a stem turns them red (F1 0.975,
       tempo 120 vs 125). iOS and Android agree with each other bit for bit
       on the from-stems path (120/37 on both).
-      Not done: a real-phone run of the from-stems path (the binding was;
-      the wired pipeline was not), and the ≥10-song corpus eval of
-      phone-ml grids. (`mlgrid-android.cjs` needed no levelling — checked
-      in Phase 4 and found already point for point with its iOS sibling.)
+      Not done: the ≥10-song corpus eval of phone-ml grids — `beats-corpus`
+      withholds the lattice from both sides deliberately (feeding the host
+      CLI the identical grid means shipping ~13 000 numbers a song), so the
+      corpus gate does NOT cover this and no other suite does it at scale.
+      (Two items that stood here are done: the real-phone run of the
+      from-stems path landed with the twelfth slice's forced analysis on the
+      POCO, and `mlgrid-android.cjs` needed no levelling — checked in
+      Phase 4 and found already point for point with its iOS sibling.)
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the
@@ -1635,7 +1639,380 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       on the simulator: the sheet went through "Listening for the beat…" and
       "Finding the beat…" to a fresh grid, which is a real run — a no-op would
       have gone straight from "Getting ready…" to done.
+    - **Twelfth slice — the corpus gate, and the sheet learns to attribute**
+      (2026-08-21, merged as #1 and #2). Three links had to hold for the port
+      to mean anything, and only two of them had a suite. `eval/beats-parity`
+      proves TypeScript ≡ C++ on THIS machine; `beats-native-{ios,android}`
+      prove core ≡ worklet on a device. Nothing proved **device C++ ≡ host
+      C++**, which an ARM build or a different libm could break in silence.
+      `mobile/tests/beats-corpus.cjs` closes it: eleven songs with a grid plus
+      one both sides refuse, value for value, on the iPhone simulator AND the
+      POCO — and the two devices agree with each other. Its stem order is one
+      constant on both sides, because review measured the sorted-vs-literal
+      split moving `fluxSum`, `acAt4` and the fill's alpha, which would one day
+      have read as the device disagreeing with the host. Its Android seed now
+      clears the destination before pushing: `push` overwrites what it carries
+      and removes nothing, so a `lyrics.json` from an earlier run was read into
+      the device's aux while the host CLI got no `--line/--word`. Proved on the
+      POCO by planting a deliberately off-grid one and watching corpus-01 still
+      land on 118 beats / 30 bars with the sentinel gone.
+      **Measured on the user's phone**, 5.3-minute song: catalog 369 MB, the
+      song open in the player 1243 MB, a full forced analysis on top peaking at
+      2118 MB — against 2236 MB for the old worklet path, which carries no ORT
+      session at all. The core's peak is LOWER while it does strictly more.
+      **Then the song sheet had to stop lying, twice.** The progress line is
+      project-wide but was tested first in the Beat row, so the key and melody
+      stages captured it: a hand-tuned grid read `BEAT / "Reading the key…"`
+      and lost both its `120 bpm · 4/4 · 20 bars` and its promise that nothing
+      here re-detects over it — the promise being the entire point of the
+      manual branch. The stage now travels with the line (`AnalysisStage`
+      through `onStep` → `AnalysisProgress`), and each row shows only its own.
+      That fix alone was WORSE than the bug, and the gate caught it: the grid
+      is computed in the beat stage but not committed until after the key stage
+      (`pipeline.ts:466` vs `:485`), so de-attributing the line un-shadowed
+      three leaves that only make sense before a run starts — "Not detected
+      yet" and "Nothing has read the stems yet." for the seconds the key is
+      read, on every fresh phone-split song. The value and the hint were each
+      walking that four-level chain independently, which is HOW they drifted,
+      so the precedence is one pure function now (`song-sheet-copy.ts`,
+      `sheetRowState`) and `'idle'` is unreachable while anything runs.
+      All three rows are on it: the Key row had the identical lie one row down
+      (the detector stores "the harmonic bed is silent, no key" and the row
+      printed "Not detected yet" over it), and the Melody row joined because
+      during the beat stage it and Key are equally queued and were saying
+      different things about it. The metronome hint deliberately does NOT use
+      it — its precedence is grid-before-progress, the reverse, because it
+      answers what the click is FOLLOWING rather than what is being worked out.
+      Verified on both platforms afterwards: the busy window is real (iOS
+      10.5-12.0 s, Android 17.6-20.1 s, between `progress/beat` and
+      `grid/melody`) and `idle`-while-busy samples were **zero** in every run.
+      Two notes for whoever writes the next device suite: "Tracking the melody
+      · N%" is unreachable on the native path (`trackMelodyNative` resolves
+      without progress; the percentage is the worklet/FLAC fallback only), and
+      a "drumless" fixture must be digital SILENCE — a structureless drone
+      still came back with a grid (126 bpm, 0 downbeats), testing the grid path
+      instead of the verdict path.
 
+## Phase 5 — FLAC storage, re-scoped: the DECODER comes first (2026-08-21)
+
+The plan had this phase as "encode the stems, migrate the projects". That order
+is wrong, and the reason did not exist when the plan was written.
+
+**On this phone, WAV is the FAST format.** `deps.ts` sends a project to the C++
+core only when every stem is WAV (`coreReads = /\.wav$/i`) and to the worklet
+TS otherwise, because the core reads WAV and nothing else.
+
+Both platforms are measured end to end now (the POCO's FLAC leg was recorded
+2026-08-21, on a FLAC copy of the same Panzerkampf project the WAV figures came
+from — grid identical either way, 513 beats / 129 bars):
+
+| | POCO X6 Pro | iOS Simulator |
+|---|---|---|
+| core, WAV stems | **25.8 s** | 8.5 s |
+| deps branch on FLAC (worklet fallback) | **178.1 s** | 51 s |
+| the format's penalty | **6.9x** | 6.0x |
+
+These are same-rig debug comparisons — both legs of each pair ran on the same
+build in the same run, so the ORDERING is the robust part and the decision
+rests on it; the release app's absolute times, and likely its ratio, are
+smaller (the ~54 s decode slice below runs through the app bundle's JS buffer
+handling, which is the inflated path). The Android figure decomposes, because
+the driver times tracking apart from the branch: `ms.ts` 124.2 s is the worklet TRACKING with stems already decoded —
+near-identical to the WAV leg's 125.0 s, as it must be, since tracking does not
+care what the file was — and `ms.via` 178.1 s is the real deps branch, decode
+included. So the **decode itself costs ~54 s** on this phone through the
+audio-api path, and the other ~99 s of the penalty is JS tracking instead of
+C++. Note what that 54 s is NOT: it is miniaudio decoding via audio-api plus
+JS-side buffer handling, not the vendored libFLAC, which nothing calls yet —
+an upper bound on what slice 2 replaces, not a prediction of what it costs.
+(The vendored decoder does these same six stems in **1.28 s on the M2**; even
+at 10x on the phone, slice 2 turns 178 s into roughly 35-40 s.)
+
+This section carried a wrong number once already — an earlier draft paired
+25.7 against 126.1 as if that were WAV-vs-FLAC, when both were WAV. Both
+halves came from the record, the sentence read cleanly, and it was still
+wrong; two measurements from different harnesses look like a pair.
+
+A note for whoever runs that suite with a FLAC leg: the driver's own deadline
+is 15 minutes PER LEG (`DEADLINE_MS = 900000`), and the run that produced the
+number above was killed at 10 minutes by the LAUNCHER (the shell tool's cap),
+not by the driver — the app finished on its own and the result was read out
+afterwards. Launch it in the background or with a >15-minute cap; and know
+that the driver's "arity skew between JS and native?" die-message now has a
+second innocent cause, a slow leg under a short launcher.
+
+Converting phone stems to FLAC without teaching the core to read them
+therefore buys disk and pays roughly sevenfold on every re-analysis.
+
+That does not bite on every open: analysis re-runs only when a detector stamp
+moves (`BEAT_DETECT_VERSION`, `PITCH_DETECT_VERSION`) or the singer presses
+"Detect again". Those are precisely the moments somebody is waiting for it.
+
+The plan missed it because it was written in Phase 0, when every detector ran
+on the worklet host and the stem format made no difference to analysis at all.
+Phase 4 moved the detectors into the core and quietly made the format
+load-bearing. `deps.ts` even says so in a comment — *"The core will read FLAC
+once the desktop CLI needs it; this branch then goes away"* — which is the
+right instinct filed under the wrong phase.
+
+**So the rule for this phase is: never create a file the core cannot read.**
+The decoder lands, and is proven, before anything encodes.
+
+### Why FLAC at all, since the question was asked
+
+Measured on the same six stems: WAV 321 MB, FLAC -5 **115 MB (36%)**, ALAC
+121 MB. So the codec race is a wash — ALAC buys nothing and Android has no
+encoder for it; WavPack would land within a few percent. Lossy (Opus, ~25 MB)
+is excluded by something harder than quality: the detectors are bit-identical
+ports, and analysis over lossy stems would give a DIFFERENT GRID than the
+desktop for the same song — the divergence Phase 4 existed to eliminate.
+
+What actually decides it is that FLAC is not a choice being made here at all:
+**v2 = FLAC stems is the project format**. The desktop writes it, Drive syncs
+it, the currency rule on three platforms compares it, both phone readers
+already accept it, and every song downloaded from Drive is already FLAC on the
+phone today. A different phone format would not be a better codec, it would be
+a fork of the project format — and Phase 6 (publish, desktop adopts) would put
+a transcode at the boundary anyway.
+
+One nuance recorded because it was nearly gotten wrong: the single-encoder
+argument (one behaviour on both platforms) justifies vendoring the ENCODER,
+where levels and framing genuinely vary, and does NOT apply to the decoder —
+FLAC decode is exactly specified, every conformant decoder yields identical
+samples. The core still decodes with the vendored libFLAC, but the reason is
+architectural (the core reads file paths itself; MediaCodec and ExtAudioFile
+cannot be called from inside it without re-crossing stems over a runtime,
+which is the exact thing Phase 4 removed), not behavioural.
+
+### Slices, in this order — ALL FOUR LANDED AND DEVICE-VERIFIED 2026-08-21
+
+The numbers, measured on the real targets the same day:
+
+| | POCO X6 Pro | iOS Simulator |
+|---|---|---|
+| FLAC analysis, worklet fallback (before) | 178.1 s | 51 s |
+| FLAC analysis, the core (after) | **28.7 s** | **21.7 s** |
+| grid vs the WAV native grid | identical, value for value | identical, value for value |
+
+Same song, same aux (296 words / 545 ml beats crossed), 513 beats and 129
+bars agreeing to the 17th digit. The grid-identity row is the one that
+carries slice 2: FLAC through the core answers exactly what WAV answers.
+
+And slice 4 ran END TO END on the phone, twice, the second time by accident
+of the first: a v1 WAV project with no analyses opened in phone mode →
+detectors (native, ml 33.1 s + beat 26.3 s) → compact — which FAILED its
+first run, every stem "kept as wav — stems/x.flac is missing", because
+`encodeFlacNative` resolved the OUTPUT path through `localFile`, which
+verifies existence: right for an input, absurd for an output, and invisible
+to every jest fake because the fake's statFile answers for anything. The
+failure ordering held exactly as designed — detectors committed, wavs kept,
+doc stayed truthfully v1 — and the phone was left in the PRECISE state the
+stranded-tail blocker described: v1, all wav, every stamp current. The fixed
+bundle then reopened the project and the convergence ran live:
+`plan.compact` alone queued it, NO detector ran ("grid kept, key kept,
+melody kept · ml 0 ms, beat 0 ms"), **six stems encoded in 41.4 s** (321 MB
+→ 115 MB, level 5, verify on, ~7 s/stem with per-stem progress), doc
+version 2, stored analyses untouched. The design's hardest requirement was
+proven by its own first bug.
+
+Review then found the LAST member of the stranding family — one state
+deeper than the tail. A kill inside the compact LOOP (after some per-stem
+unlinks, before the single doc write — anywhere in ~34 of the 41.4 s
+measured) leaves mixed stems under an all-wav doc; the all-wav probe is
+then false forever, the doc names deleted files (the two-level-hashing
+contract Phase 6's publish reads), and the unconverted stems never
+compact. What tells that state from a FAILED stem — which must NOT retry
+every open — is the DOC: a failed run wrote its flacs into stemHashes, a
+killed one never got to. So `plan.compact` also fires for a probed .flac
+stem with no `${id}.flac` doc entry, and the healing run branches per
+stem: wav → encode as normal; flac → sweep a leftover wav if the kill
+landed in the rename→unlink micro-window (compactStem's skip-heal, whose
+wav-resolution rejecting IS the ordinary healed state) and state the flac
+in the doc, which is the half the kill lost. Pinned by THE KILLED MIDDLE
+jest test and mutation-proven: the probe-only gate fails it.
+
+One measured note for the suites: the FLAC leg's `viaSame` check silently
+became STRONGER with slice 2 — `via` is the core there now, so it holds
+core-on-flac == worklet-on-flac on the device — and its label still claimed
+the old routing. Both suites are relabelled, with the meaning-per-binary
+stated at the check.
+
+1. **Vendor libFLAC + the gate** *(done, 2026-08-21)*. Encoder AND decoder
+   sources are both in the tree already — the decoder came along for the
+   encoder's self-verify mode, which turns out to be exactly what slice 2
+   needs.
+2. **The core reads FLAC** *(done)*. Exactly as planned: BOTH readers —
+   `readWavMono` and `readWavInfo` — dispatch on the file's magic bytes
+   inside `wav.cpp` (fLaC → `flac_io.cpp`, RIFF → the walk that was already
+   there), so all six `coreReads` sites in `deps.ts`, `audioDuration`
+   included, went together and the JS-side widening of `coreReads` was the
+   LAST step, gated on `nativeFlacAvailable()` (the `encodeFlac` method's
+   presence on the INSTALLED binary — reader and encoder shipped in one
+   native change, so one probe answers for both, and an older native under
+   newer JS keeps the worklet fallback).
+   The delicate part was never losslessness — it is the FOLD. `readWavMono`
+   squeezes its running channel sum through float32 after every channel
+   (`acc = float(acc + v/channels)`, the JS `loadMono44k` fold), and a FLAC
+   path folding in double would differ in the last bit while every byte on
+   disk was right. The host gate therefore asserts the FLAC decode of a stem
+   equals the WAV it was encoded from **sample for sample, no tolerance** —
+   plus the magic dispatch (the same FLAC bytes under a `.wav` name decode
+   identically) and `readWavInfo` parity across the formats.
+   Consumers wired: the host test runner and `build-analyze-host.sh` compile
+   the vendored C once (as C — a C++ compile of C99 is the wrong language)
+   into shared objects; the Android CMakeLists gets a `singzflac` STATIC
+   library linked into `singzcore`; the SingzCore pod compiles `flac/src/*.c`
+   (synced by `sync-singzcore.js`, structure preserved — the `deduplication/`
+   fragments must NOT be in `source_files` or they compile standalone and
+   fail). Every one of them passes `-DHAVE_CONFIG_H`, the flag the vendor
+   README warns fails silently at the flag and loudly inside an SDK header. The vendored sources are wired into
+   `mobile/android/app/src/main/cpp/CMakeLists.txt` and the SingzCore podspec
+   — **with `-DHAVE_CONFIG_H`**, without which `config.h` is not read at all
+   and the build dies inside a platform system header. Then `coreReads`
+   widens and the worklet fallback stops mattering for FLAC.
+   Gate: the host round-trip already writes a FLAC; decode it back through
+   `readWavMono` and require it sample-exact against the WAV it came from.
+   Device: a copied desktop FLAC project analyses on the native path at WAV
+   speed — the same before/after comparison that produced the numbers above.
+3. **The core writes FLAC** *(done)*. Not a bare encoder: `compactStem`
+   (`flac_io.cpp`) is the upgrade's whole per-stem op, in the core so the two
+   platforms cannot drift — encode to `.part` (level 5, **verify on**: the
+   encoder decodes its own output as it writes and fails the finish on any
+   mismatch, which is the decode-back check placed where a crash cannot skip
+   it; total samples declared — `src/main/flac.ts`'s four choices), rename,
+   delete the WAV. **Idempotent**: a flac already at the destination means a
+   kill landed between rename and unlink — the re-run deletes the wav and
+   reports skipped, because `.part` is never renamed unless the encoder
+   FINISHED. Only canonical 16-bit PCM is accepted, the desktop's own rule.
+   Bound as `encodeFlac` on both platforms, same name, same two string
+   arguments (the arity rule at the top of `SingzSplit.mm`); Android crosses
+   the result as one JSON line — sizes and booleans survive text, and no
+   core double is in it.
+4. **The writer emits v2, and old projects upgrade themselves** *(done)*.
+   The compact phase rides the tail of `analyzeProject`, AFTER the
+   detectors, through the same single-flight queue — and is PLANNED, not
+   only ridden: `planAnalysis` returns `compact` for a v1 all-WAV project
+   regardless of stamp currency, `CatalogScreen`'s phone-mode open gate
+   includes it, and the runner re-checks the native probe (a build that
+   cannot encode plans a no-op, same cost as any other). The stranded-tail
+   kill therefore converges on the next open. Per stem, a failed encode
+   keeps the WAV and the doc keeps naming it; `version` flips to 2 only when
+   EVERY stem converted (the desktop's `allFlac` rule), and the doc rewrite
+   is re-read → merge → write with fresh `statFile` hashes (the native's
+   memoized md5). `compacted` rides `AnalysisResult` so listeners re-list —
+   entry.stems changed. Guarded by six jest tests including THE STRANDED
+   TAIL (mutation-proven: restoring the tail-only design fails it) and a
+   FLAC-born-project-never-plans check.
+
+### Auto re-encode — the desktop's mechanics, but AFTER analysis, not on open
+
+The desktop does not ask. `App.tsx:727` calls `upgradeProject(dir)` on open,
+unasked, in the background; `migrateProjectToV2` takes the project lock,
+converts every stem, bumps `version` to 2, refreshes `stemHashes`, writes
+project.json LAST and marks the library dirty so Drive gets the new files. Per
+stem, a failed encode keeps the WAV and the project stays v1 rather than
+claiming a conversion that did not happen. (It also guards its result with
+`loadSeq` — the analysis-must-not-outlive-the-song rule — and the phone's
+version needs the same.)
+
+The phone copies the mechanics but NOT the trigger, and the difference came
+out of asking whether FLAC fits mobile at all. Encode-on-open is the
+desktop's shape because on the desktop the stems' format never mattered to
+anything downstream. On the phone it does: a phone-split song is born WAV,
+which is the format the core analyses fastest, and its first full analysis is
+guaranteed to be ahead of it. Encoding on open would put the decode penalty in
+front of the one analysis that is certain to happen. So the rule is:
+
+**A phone-split project stays WAV until its first full analysis has finished,
+and the encode runs after the detectors, through the same queue, as the tail
+of the same job.** The hot path never touches FLAC while it is hot.
+Re-analysis after that (a stamp bump, "Detect again") pays the in-core decode
+slice 2 buys — the ~1.3 s-on-M2 path, not today's 54 s — which is the cost
+that made encode-on-open wrong. Projects that ARRIVE as FLAC (copied desktop
+folders, Drive downloads) are already in their final format and none of this
+applies.
+
+**The encode is PLANNED, not only ridden (slice 4's hardest requirement)** —
+review caught the convergence
+hole in the tail-only version. Walk the kill: detectors finish and COMMIT
+(stamps now current), the phone dies during the encode. Next open,
+`CatalogScreen` runs `planAnalysis` and queues a job only when a detector is
+owed — all stamps are current, nothing is planned, and a tail that only rides
+analysis jobs never runs again: the project is stranded v1/WAV forever,
+silently, because WAV plays and analyses fine. The desktop never has this
+state because its trigger is idempotent-on-open — the mechanism the phone
+dropped when it moved the trigger. So the planner also queues an encode-only
+job for a v1 phone-split project whose detectors are current; the first
+analysis still carries the encode as its tail, and the plan step is what
+makes a killed tail converge instead of strand. The OTHER kill — analysis
+itself dying — needs nothing: no stored grid means `plan.beat` is true on the
+next open, and WAV is the correct resting state to be stranded in, being the
+fast one.
+
+The other two differences from being a phone stand as before:
+
+- **Crash safety has to be real, not incidental.** A desktop that dies
+  mid-conversion is rare; a phone is killed as a matter of course. So per stem:
+  encode to `.flac.part`, rename, decode it back and check it against the WAV,
+  and only then delete the WAV — and rewrite project.json at the end. A kill at
+  any point leaves either the old WAV or a verified FLAC, never a doc naming a
+  file that is not there.
+- **It must not fight the analysis runner.** Conversion and a detector run both
+  touch the same stems, and `run.ts` already owns a single-flight queue for
+  exactly that reason. The upgrade goes through the same queue rather than
+  beside it; a project being analysed is not a project to repack underneath.
+
+Mixed WAV/FLAC folders are legal on both sides and always were — the desktop's
+`stemFile()` prefers `.flac` and the phone carries a per-stem
+`Record<string, 'flac' | 'wav'>` — so an interrupted upgrade is a state the
+readers already handle rather than a corruption to guard against.
+
+### Numbers: three measured on 2026-08-21, two still owed
+
+Measured, on the POCO's own Panzerkampf stems (5.3-minute song):
+
+- **321 MB as WAV, 115 MB as FLAC -5 (36%)** — so the plan's old ~256 MB was
+  wrong (the reviewer's arithmetic said ~336 MB and the disk says 321) and
+  ~65 MB was optimistic. One stem skews the ratio: bass.flac is 61 KB, that
+  lane is near-silent in this song.
+- **Android FLAC analysis: 178.1 s** against 25.8 s native (above).
+- **The vendored decoder at 1.28 s for all six stems on the M2** — the number
+  that bounds slice 2's benefit from below on the phone only after scaling,
+  so treat it as evidence the decode is cheap, not as a phone figure.
+
+Still owed, before any copy quotes a number at the singer:
+
+- **The in-core decode time ON THE PHONE** (slice 2's actual deliverable
+  number; the M2 figure x some unknown factor).
+- ~~What FLAC adds to a plain song OPEN for playback~~ — asked and answered,
+  though not the way it was planned, and the episode is worth its space
+  because it burned half a day and produced two new driving traps.
+  Measured on the POCO's DEBUG app: WAV open 27 s, FLAC open 58 s — which
+  reads as "FLAC doubles every open" right up until the user points out that
+  real desktop-uploaded FLAC projects open in **3-4 s on the release app**.
+  The debug rig was then re-measured with no inspector attached at any point
+  (tap by `input tap` at uiautomator bounds, completion by the catalog
+  marker leaving the UI dump): WAV still took **30.2 s**. So the inspector
+  was never the poison — **the debug rig itself is**: the dev Metro bundle's
+  `__DEV__` JS inflates the load path by roughly an order of magnitude (the
+  30 s and the 3-4 s are DIFFERENT songs on different rigs, so the factor is
+  directional, not a ratio of one measurement), and NO number measured on it
+  describes the product. The release app cannot be driven (no inspector, no
+  run-as), so the authoritative figure is the user's lived one: FLAC opens
+  in 3-4 s where it matters, the playback tax is small, and the
+  encode-after-first-analysis trigger stands. Debug-rig open times must
+  never be quoted as product numbers — this section nearly did.
+  Two traps found on the way, both now in CLAUDE.md's territory:
+  **disconnecting the Hermes inspector while a decode is in flight kills
+  the app** exactly like evaluating does (SIGSEGV at 0x0 on `mqt_v_js`,
+  reproduced 2026-08-21 12:36) — the socket may sit attached idle through a
+  load, but may neither speak nor hang up during one; and uiautomator
+  bounds parsing must not `tr -d "[]"` — deleting the `][` between the two
+  pairs glues y1 to x2 and every tap lands on garbage coordinates, which
+  looks exactly like "taps do nothing".
+
+The discipline stands: the one number in this section that was stated
+confidently without being measured is the one that turned out to be wrong.
 ## Top risks
 
 - **RAM peak** (~2–2.5 GB) on 6–8 GB devices → `:split` isolation + streaming +

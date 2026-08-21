@@ -112,7 +112,17 @@ Driving **Android** over CDP: never evaluate JS while a decode is in flight —
 the Hermes inspector segfaults the app mid-`decodeAudioData` (looks exactly
 like an OOM: SIGSEGV at 0x0 on `mqt_v_js` in libhermesvm, ~9 s into loading a
 long song, 3/3 reproducible; the same load never fails unpolled, 4/4). Poll
-the `singz.crumb` pref over `adb run-as` instead, which touches no JS. Debug
+the `singz.crumb` pref over `adb run-as` instead, which touches no JS.
+**DISCONNECTING the inspector mid-decode kills the app the same way**
+(measured 2026-08-21: close the socket during a six-stem load → the identical
+SIGSEGV) — the socket may sit attached idle across a whole load, but may
+neither speak nor hang up while one is running; connect before, disconnect
+after. And **no open/load time measured on the debug app describes the
+product**: the dev Metro bundle inflates the load path by roughly an order of
+magnitude (the 5.3-min test song opens in 30 s on the debug rig, inspector
+detached; the user's real songs open in 3-4 s on the release app — different
+songs, so the factor is directional, not a ratio of one measurement) — quote
+release-app numbers or none. Debug
 builds only — release APKs have no inspector. Metro also lists *every*
 connected app, so pick the target by `deviceName` or a stray simulator will
 answer your evals while you measure the phone. And its bundles are PER

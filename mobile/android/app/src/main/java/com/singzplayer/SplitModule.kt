@@ -22,6 +22,7 @@ import com.singzplayer.split.JobStore
 import com.singzplayer.split.SingzCore
 import com.singzplayer.split.SplitService
 import kotlin.concurrent.thread
+import org.json.JSONObject
 
 /**
  * JS bridge to the split machinery. Production path: startSplit hands the
@@ -413,6 +414,40 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
         promise.resolve(m)
       } catch (t: Throwable) {
         promise.reject("key", t)
+      }
+    }
+  }
+
+  /** One stem of the v1->v2 upgrade (Phase 5): the core's compactStem —
+   *  level 5, verify on, .part rename, wav deleted on success, idempotent
+   *  when the flac already exists. Crosses as one JSON line (the Android
+   *  marshalling rule): sizes and booleans survive text; no core double is
+   *  in it. Same name, same two string arguments as iOS. */
+  @ReactMethod
+  fun encodeFlac(wavPath: String, flacPath: String, promise: Promise) {
+    thread(name = "singz-flac") {
+      val loadErr = SingzCore.ensureLoaded()
+      if (loadErr != null) {
+        promise.reject("flac_core", "core library: $loadErr")
+        return@thread
+      }
+      try {
+        val line = SingzCore.encodeFlac(wavPath, flacPath)
+        if (line == null) {
+          promise.reject("flac_encode", "encode returned nothing")
+          return@thread
+        }
+        val o = JSONObject(line)
+        if (!o.optBoolean("ok", false)) {
+          promise.reject("flac_encode", o.optString("error", "encode failed"))
+          return@thread
+        }
+        val m = Arguments.createMap()
+        m.putDouble("bytes", o.optLong("bytes", 0).toDouble())
+        m.putBoolean("skipped", o.optBoolean("skipped", false))
+        promise.resolve(m)
+      } catch (t: Throwable) {
+        promise.reject("flac", t)
       }
     }
   }

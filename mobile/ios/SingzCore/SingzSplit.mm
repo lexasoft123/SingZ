@@ -17,6 +17,7 @@
 
 #include "ort_env.h"
 #include "analysis.h"
+#include "flac_io.h"
 #include "beat_this.h"
 #include "beats.h"
 #include "melody.h"
@@ -555,6 +556,28 @@ RCT_EXPORT_METHOD(wavInfo:(NSString *)wavPath
       @"frames" : @(wav.frames),
       @"durationSec" : @(static_cast<double>(wav.frames) / wav.sampleRate)
     });
+  });
+}
+
+// One stem of the v1->v2 upgrade (Phase 5): encode wavPath to flacPath with
+// the core's compactStem — level 5, verify on, .part rename, wav deleted on
+// success, idempotent when the flac already exists. Same name, same TWO
+// string arguments as Android's — the arity rule at the top of this file.
+RCT_EXPORT_METHOD(encodeFlac:(NSString *)wavPath
+                  flacPath:(NSString *)flacPath
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSString *wav = wavPath ?: @"";
+  NSString *flac = flacPath ?: @"";
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    const singz::CompactResult r =
+        singz::compactStem(std::string(wav.UTF8String), std::string(flac.UTF8String));
+    if (!r.ok) {
+      reject(@"flac_encode", [NSString stringWithFormat:@"%@: %s", wav.lastPathComponent, r.error.c_str()], nil);
+      return;
+    }
+    resolve(@{ @"bytes" : @(r.bytes), @"skipped" : @(r.skipped) });
   });
 }
 

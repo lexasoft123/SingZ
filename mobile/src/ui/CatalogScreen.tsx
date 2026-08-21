@@ -391,7 +391,12 @@ export default function CatalogScreen({
           // costs one stat. Asking pessimistically would leave that song
           // gridless forever after the download.
           const plan = planAnalysis(entry.doc, entry.stems, null, true)
-          if (plan.beat || plan.key || plan.melody) startAnalysis(entry.dir, entry.stems, loaded.lyrics)
+          // plan.compact alone re-queues a v1 WAV project whose detectors
+          // are all current — the phone-died-during-the-encode case. The
+          // runner re-checks the native probe and does nothing on a build
+          // that cannot encode, same cost as any other no-op plan.
+          if (plan.beat || plan.key || plan.melody || plan.compact)
+            startAnalysis(entry.dir, entry.stems, loaded.lyrics)
         }
       } catch (e) {
         await setCrumb('')
