@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "analysis.h"
+#include "flac_io.h"
 #include "beat_this.h"
 #include "beats.h"
 #include "melody.h"
@@ -551,9 +552,127 @@ static void sumStemsTests() {
   std::remove(b.c_str());
 }
 
+// The core's FLAC path (Phase 5, docs/PHONE-STANDALONE.md): what these hold
+// is that a FLAC stem answers IDENTICALLY to the WAV it was encoded from —
+// same samples, same fold, through the same readWavMono the detectors call —
+// so a compacted project's grid cannot drift from its own pre-compact grid.
+// Losslessness alone does not give that: the mono fold squeezes the running
+// sum through float32 per channel, and a FLAC path that folded in double
+// would differ in the last bit while every byte on disk was correct.
+static void flacTests() {
+  const std::string dir = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp");
+  const std::string wav = dir + "/singz-flac-io-test.wav";
+  const std::string wavKeep = dir + "/singz-flac-io-keep.wav";
+  const std::string flac = dir + "/singz-flac-io-test.flac";
+  std::remove(wav.c_str());
+  std::remove(wavKeep.c_str());
+  std::remove(flac.c_str());
+
+  // Two seconds of full-range stereo: tones plus deterministic noise, values
+  // that exercise both channels differently so the fold has work to do.
+  const int rate = 44100, frames = 2 * rate;
+  std::vector<float> pcm(static_cast<size_t>(frames) * 2);
+  unsigned seed = 424242u;
+  for (int i = 0; i < frames; i++) {
+    seed = seed * 1103515245u + 12345u;
+    const double t = static_cast<double>(i) / rate;
+    pcm[static_cast<size_t>(i) * 2] =
+        static_cast<float>(0.5 * std::sin(2 * M_PI * 220.0 * t) +
+                           0.05 * (static_cast<int16_t>(seed >> 16) / 32768.0));
+    pcm[static_cast<size_t>(i) * 2 + 1] =
+        static_cast<float>(0.4 * std::sin(2 * M_PI * 333.0 * t + 0.7));
+  }
+  {
+    singz::WavWriter w;
+    w.open(wav, rate, 2);
+    w.append(pcm.data(), frames);
+    w.finalize();
+  }
+  {
+    singz::WavWriter w;  // a copy compactStem will not eat, for the comparison
+    w.open(wavKeep, rate, 2);
+    w.append(pcm.data(), frames);
+    w.finalize();
+  }
+
+  // The upgrade's own op writes the FLAC (level 5, verify on, .part rename).
+  const singz::CompactResult enc = singz::compactStem(wav, flac);
+  CHECK("compactStem encodes a canonical stem", enc.ok && !enc.skipped && enc.bytes > 0);
+  CHECK("…and the wav is gone afterwards", std::fopen(wav.c_str(), "rb") == nullptr);
+  {
+    std::FILE* pf = std::fopen((flac + ".part").c_str(), "rb");
+    CHECK("…and no .part is left behind", pf == nullptr);
+    if (pf != nullptr) std::fclose(pf);
+  }
+
+  // Idempotence: the kill-between-rename-and-unlink state heals itself.
+  {
+    singz::WavWriter w;
+    w.open(wav, rate, 2);
+    w.append(pcm.data(), frames);
+    w.finalize();
+  }
+  const singz::CompactResult again = singz::compactStem(wav, flac);
+  CHECK("a re-run with the flac already there skips and removes the wav",
+        again.ok && again.skipped && std::fopen(wav.c_str(), "rb") == nullptr);
+
+  // THE parity check: the FLAC through readWavMono — magic dispatch, not the
+  // suffix — equals the WAV, sample for sample, no tolerance.
+  const singz::MonoWav a = singz::readWavMono(wavKeep);
+  const singz::MonoWav b = singz::readWavMono(flac);
+  CHECK("both readers report ok", a.ok && b.ok);
+  CHECK("same length", a.samples.size() == b.samples.size());
+  size_t bad = 0, firstBad = 0;
+  for (size_t i = 0; i < std::min(a.samples.size(), b.samples.size()); i++)
+    if (a.samples[i] != b.samples[i]) {
+      if (bad == 0) firstBad = i;
+      bad++;
+    }
+  if (bad > 0)
+    std::printf("      %zu samples differ; first at %zu: % .9f vs % .9f\n", bad, firstBad,
+                static_cast<double>(a.samples[firstBad]), static_cast<double>(b.samples[firstBad]));
+  CHECK("FLAC folds to the SAME mono as its source WAV, bit for bit", bad == 0 && a.ok && b.ok);
+
+  // readWavInfo answers off STREAMINFO, no samples read.
+  const singz::WavInfo wi = singz::readWavInfo(wavKeep);
+  const singz::WavInfo fi = singz::readWavInfo(flac);
+  CHECK("info: rate/channels/frames agree across the formats",
+        wi.ok && fi.ok && wi.sampleRate == fi.sampleRate && wi.channels == fi.channels &&
+            wi.frames == fi.frames);
+
+  // The dispatch trusts magic, not names: the same FLAC bytes under a .wav
+  // name still decode (a copied file wearing the wrong suffix answers
+  // plausibly-and-wrong if the suffix decides).
+  const std::string lie = dir + "/singz-flac-io-lie.wav";
+  std::remove(lie.c_str());
+  {
+    std::FILE* in = std::fopen(flac.c_str(), "rb");
+    std::FILE* outF = std::fopen(lie.c_str(), "wb");
+    char buf[65536];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, in)) > 0) std::fwrite(buf, 1, n, outF);
+    std::fclose(in);
+    std::fclose(outF);
+  }
+  const singz::MonoWav c = singz::readWavMono(lie);
+  CHECK("a FLAC named .wav decodes by magic, identically",
+        c.ok && c.samples.size() == b.samples.size() &&
+            std::memcmp(c.samples.data(), b.samples.data(),
+                        b.samples.size() * sizeof(float)) == 0);
+
+  // And a stem that is neither is an error, not a guess.
+  const singz::CompactResult junk = singz::compactStem(lie, dir + "/singz-flac-io-junk.flac");
+  CHECK("compactStem refuses a non-PCM16 source", !junk.ok);
+
+  std::remove(wavKeep.c_str());
+  std::remove(flac.c_str());
+  std::remove(lie.c_str());
+}
+
 int main() {
   resamplerTests();
   wavTests();
+  flacTests();
   melodyTests();
   keyTests();
   beatsTests();

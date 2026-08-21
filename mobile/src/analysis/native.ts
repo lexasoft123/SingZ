@@ -54,6 +54,7 @@ interface SplitNative {
     durationSec: number
   }>
   wavInfo(wavPath: string): Promise<{ sampleRate: number; channels: number; frames: number; durationSec: number }>
+  encodeFlac(wavPath: string, flacPath: string): Promise<{ bytes: number; skipped: boolean }>
 }
 
 interface FolderNative {
@@ -174,6 +175,41 @@ export async function detectBeatsNative(
     ...(r.downbeats ? { downbeats: r.downbeats } : {}),
     ...(r.suspectAt ? { suspectAt: r.suspectAt } : {})
   }
+}
+
+/**
+ * Does this build's core read AND write FLAC? One probe for both: the FLAC
+ * reader and `encodeFlac` shipped in the same native change, so the method's
+ * presence is the marker — the same older-native-beside-newer-JS rule every
+ * other probe here follows. deps.ts widens `coreReads` on it, which is why
+ * it must be the INSTALLED binary that answers, never the JS bundle's idea
+ * of itself.
+ */
+export const nativeFlacAvailable = (): boolean =>
+  typeof (NativeModules.SingzSplit as { encodeFlac?: unknown } | undefined)?.encodeFlac ===
+  'function'
+
+/**
+ * One stem of the v1->v2 upgrade: wav -> flac in the core (level 5, verify
+ * on, .part rename, wav deleted on success; idempotent when the flac is
+ * already there — the kill-between-rename-and-unlink state heals). Both
+ * paths are project-relative like every other entry here.
+ */
+export async function encodeFlacNative(
+  project: string,
+  wavRel: string,
+  flacRel: string
+): Promise<{ bytes: number; skipped: boolean }> {
+  const f = folder()
+  // ONLY the wav goes through localFile: it verifies the file exists, which
+  // is right for an input and wrong for an OUTPUT — the flac does not exist
+  // yet, that being the point, and asking localFile about it failed every
+  // stem with "stems/x.flac is missing" on the first real device run. The
+  // output path is the input's sibling, so it is derived from the resolved
+  // wav path plus the flac name.
+  const wav = await f.localFile(project, wavRel)
+  const flac = wav.replace(/[^/]+$/, flacRel.replace(/^.*\//, ''))
+  return split().encodeFlac(wav, flac)
 }
 
 export async function audioDurationNative(project: string, relPath: string): Promise<number> {

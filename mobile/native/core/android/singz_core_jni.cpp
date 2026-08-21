@@ -17,6 +17,7 @@
 #include "progress.h"
 #include "split_engine.h"
 #include "wav.h"
+#include "flac_io.h"
 
 namespace {
 
@@ -160,6 +161,37 @@ Java_com_singzplayer_split_SingzCore_wavInfo(JNIEnv* env, jobject /*thiz*/, jstr
   jdoubleArray arr = env->NewDoubleArray(4);
   env->SetDoubleArrayRegion(arr, 0, 4, v);
   return arr;
+}
+
+// One stem of the v1->v2 upgrade (Phase 5): compactStem in the core —
+// level 5, verify on, .part rename, wav deleted on success, idempotent when
+// the flac already exists. One JSON line out, the Android marshalling rule:
+// {"ok":true,"bytes":N,"skipped":bool} or {"ok":false,"error":"…"} — sizes
+// and booleans survive a text hop fine; it is only the core's DOUBLES that
+// must never cross as text, and none does here.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_encodeFlac(JNIEnv* env, jobject /*thiz*/, jstring jwav,
+                                                jstring jflac) {
+  const char* cw = env->GetStringUTFChars(jwav, nullptr);
+  const char* cf = env->GetStringUTFChars(jflac, nullptr);
+  if (cw == nullptr || cf == nullptr) return nullptr;
+  const std::string wav(cw), flac(cf);
+  env->ReleaseStringUTFChars(jwav, cw);
+  env->ReleaseStringUTFChars(jflac, cf);
+  const singz::CompactResult r = singz::compactStem(wav, flac);
+  std::string json;
+  if (r.ok) {
+    json = "{\"ok\":true,\"bytes\":" + std::to_string(r.bytes) +
+           ",\"skipped\":" + (r.skipped ? "true" : "false") + "}";
+  } else {
+    std::string esc;
+    for (char ch : r.error) {
+      if (ch == '"' || ch == '\\') esc += '\\';
+      esc += ch;
+    }
+    json = "{\"ok\":false,\"error\":\"" + esc + "\"}";
+  }
+  return env->NewStringUTF(json.c_str());
 }
 
 // [pc, minor(0/1), detVersion]; EMPTY means "no key in this audio" (the TS

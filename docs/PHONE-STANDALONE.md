@@ -1784,28 +1784,88 @@ architectural (the core reads file paths itself; MediaCodec and ExtAudioFile
 cannot be called from inside it without re-crossing stems over a runtime,
 which is the exact thing Phase 4 removed), not behavioural.
 
-### Slices, in this order
+### Slices, in this order — ALL FOUR LANDED AND DEVICE-VERIFIED 2026-08-21
+
+The numbers, measured on the real targets the same day:
+
+| | POCO X6 Pro | iOS Simulator |
+|---|---|---|
+| FLAC analysis, worklet fallback (before) | 178.1 s | 51 s |
+| FLAC analysis, the core (after) | **28.7 s** | **21.7 s** |
+| grid vs the WAV native grid | identical, value for value | identical, value for value |
+
+Same song, same aux (296 words / 545 ml beats crossed), 513 beats and 129
+bars agreeing to the 17th digit. The grid-identity row is the one that
+carries slice 2: FLAC through the core answers exactly what WAV answers.
+
+And slice 4 ran END TO END on the phone, twice, the second time by accident
+of the first: a v1 WAV project with no analyses opened in phone mode →
+detectors (native, ml 33.1 s + beat 26.3 s) → compact — which FAILED its
+first run, every stem "kept as wav — stems/x.flac is missing", because
+`encodeFlacNative` resolved the OUTPUT path through `localFile`, which
+verifies existence: right for an input, absurd for an output, and invisible
+to every jest fake because the fake's statFile answers for anything. The
+failure ordering held exactly as designed — detectors committed, wavs kept,
+doc stayed truthfully v1 — and the phone was left in the PRECISE state the
+stranded-tail blocker described: v1, all wav, every stamp current. The fixed
+bundle then reopened the project and the convergence ran live:
+`plan.compact` alone queued it, NO detector ran ("grid kept, key kept,
+melody kept · ml 0 ms, beat 0 ms"), **six stems encoded in 41.4 s** (321 MB
+→ 115 MB, level 5, verify on, ~7 s/stem with per-stem progress), doc
+version 2, stored analyses untouched. The design's hardest requirement was
+proven by its own first bug.
+
+Review then found the LAST member of the stranding family — one state
+deeper than the tail. A kill inside the compact LOOP (after some per-stem
+unlinks, before the single doc write — anywhere in ~34 of the 41.4 s
+measured) leaves mixed stems under an all-wav doc; the all-wav probe is
+then false forever, the doc names deleted files (the two-level-hashing
+contract Phase 6's publish reads), and the unconverted stems never
+compact. What tells that state from a FAILED stem — which must NOT retry
+every open — is the DOC: a failed run wrote its flacs into stemHashes, a
+killed one never got to. So `plan.compact` also fires for a probed .flac
+stem with no `${id}.flac` doc entry, and the healing run branches per
+stem: wav → encode as normal; flac → sweep a leftover wav if the kill
+landed in the rename→unlink micro-window (compactStem's skip-heal, whose
+wav-resolution rejecting IS the ordinary healed state) and state the flac
+in the doc, which is the half the kill lost. Pinned by THE KILLED MIDDLE
+jest test and mutation-proven: the probe-only gate fails it.
+
+One measured note for the suites: the FLAC leg's `viaSame` check silently
+became STRONGER with slice 2 — `via` is the core there now, so it holds
+core-on-flac == worklet-on-flac on the device — and its label still claimed
+the old routing. Both suites are relabelled, with the meaning-per-binary
+stated at the check.
 
 1. **Vendor libFLAC + the gate** *(done, 2026-08-21)*. Encoder AND decoder
    sources are both in the tree already — the decoder came along for the
    encoder's self-verify mode, which turns out to be exactly what slice 2
    needs.
-2. **The core reads FLAC.** `readWavMono` (`wav.h`) is the choke point every
-   detector goes through for SAMPLES — beats, key, melody, the ML mix, the
-   analyze CLI, both bindings. But it is not the only reader: `coreReads`
-   gates six sites in `deps.ts` (99, 124, 165, 176, 196, 208) and widening it
-   switches all six on at once, including `:208`, which routes `audioDuration`
-   to `readWavInfo` — a header-only read, a different function. Today FLAC
-   never reaches it because `coreReads` excludes it; the day it does not, a
-   duration read on a FLAC stem breaks. **Both functions**, then, and the
-   widening of `coreReads` is the last step rather than the first.
-   Each gains a FLAC path dispatched on the file's MAGIC BYTES rather than its
-   extension. That is not belt-and-braces: the writer does NOT control both
-   ends — `deps.ts` describes FLAC projects as "a desktop project copied in
-   through Files", and projects open from anywhere. Both readers already
-   `fopen` the file, so the first four bytes cost nothing; the case worth
-   guarding is not a WAV named `.flac` (which fails loudly) but the reverse and
-   the raw-PCM one, which give a plausible wrong answer instead of an error. The vendored sources are wired into
+2. **The core reads FLAC** *(done)*. Exactly as planned: BOTH readers —
+   `readWavMono` and `readWavInfo` — dispatch on the file's magic bytes
+   inside `wav.cpp` (fLaC → `flac_io.cpp`, RIFF → the walk that was already
+   there), so all six `coreReads` sites in `deps.ts`, `audioDuration`
+   included, went together and the JS-side widening of `coreReads` was the
+   LAST step, gated on `nativeFlacAvailable()` (the `encodeFlac` method's
+   presence on the INSTALLED binary — reader and encoder shipped in one
+   native change, so one probe answers for both, and an older native under
+   newer JS keeps the worklet fallback).
+   The delicate part was never losslessness — it is the FOLD. `readWavMono`
+   squeezes its running channel sum through float32 after every channel
+   (`acc = float(acc + v/channels)`, the JS `loadMono44k` fold), and a FLAC
+   path folding in double would differ in the last bit while every byte on
+   disk was right. The host gate therefore asserts the FLAC decode of a stem
+   equals the WAV it was encoded from **sample for sample, no tolerance** —
+   plus the magic dispatch (the same FLAC bytes under a `.wav` name decode
+   identically) and `readWavInfo` parity across the formats.
+   Consumers wired: the host test runner and `build-analyze-host.sh` compile
+   the vendored C once (as C — a C++ compile of C99 is the wrong language)
+   into shared objects; the Android CMakeLists gets a `singzflac` STATIC
+   library linked into `singzcore`; the SingzCore pod compiles `flac/src/*.c`
+   (synced by `sync-singzcore.js`, structure preserved — the `deduplication/`
+   fragments must NOT be in `source_files` or they compile standalone and
+   fail). Every one of them passes `-DHAVE_CONFIG_H`, the flag the vendor
+   README warns fails silently at the flag and loudly inside an SDK header. The vendored sources are wired into
    `mobile/android/app/src/main/cpp/CMakeLists.txt` and the SingzCore podspec
    — **with `-DHAVE_CONFIG_H`**, without which `config.h` is not read at all
    and the build dies inside a platform system header. Then `coreReads`
@@ -1814,12 +1874,35 @@ which is the exact thing Phase 4 removed), not behavioural.
    `readWavMono` and require it sample-exact against the WAV it came from.
    Device: a copied desktop FLAC project analyses on the native path at WAV
    speed — the same before/after comparison that produced the numbers above.
-3. **The core writes FLAC.** `flac_enc.cpp`, and `encodeFlac` bound on both
-   platforms with the same name and the same arity (the rule at the top of
-   `SingzSplit.mm`). Level 5, verify on, total samples declared, `.part`
-   rename — the same four choices `src/main/flac.ts` makes, so a stem is the
-   same kind of file whichever machine wrote it.
-4. **The writer emits v2, and old projects upgrade themselves.**
+3. **The core writes FLAC** *(done)*. Not a bare encoder: `compactStem`
+   (`flac_io.cpp`) is the upgrade's whole per-stem op, in the core so the two
+   platforms cannot drift — encode to `.part` (level 5, **verify on**: the
+   encoder decodes its own output as it writes and fails the finish on any
+   mismatch, which is the decode-back check placed where a crash cannot skip
+   it; total samples declared — `src/main/flac.ts`'s four choices), rename,
+   delete the WAV. **Idempotent**: a flac already at the destination means a
+   kill landed between rename and unlink — the re-run deletes the wav and
+   reports skipped, because `.part` is never renamed unless the encoder
+   FINISHED. Only canonical 16-bit PCM is accepted, the desktop's own rule.
+   Bound as `encodeFlac` on both platforms, same name, same two string
+   arguments (the arity rule at the top of `SingzSplit.mm`); Android crosses
+   the result as one JSON line — sizes and booleans survive text, and no
+   core double is in it.
+4. **The writer emits v2, and old projects upgrade themselves** *(done)*.
+   The compact phase rides the tail of `analyzeProject`, AFTER the
+   detectors, through the same single-flight queue — and is PLANNED, not
+   only ridden: `planAnalysis` returns `compact` for a v1 all-WAV project
+   regardless of stamp currency, `CatalogScreen`'s phone-mode open gate
+   includes it, and the runner re-checks the native probe (a build that
+   cannot encode plans a no-op, same cost as any other). The stranded-tail
+   kill therefore converges on the next open. Per stem, a failed encode
+   keeps the WAV and the doc keeps naming it; `version` flips to 2 only when
+   EVERY stem converted (the desktop's `allFlac` rule), and the doc rewrite
+   is re-read → merge → write with fresh `statFile` hashes (the native's
+   memoized md5). `compacted` rides `AnalysisResult` so listeners re-list —
+   entry.stems changed. Guarded by six jest tests including THE STRANDED
+   TAIL (mutation-proven: restoring the tail-only design fails it) and a
+   FLAC-born-project-never-plans check.
 
 ### Auto re-encode — the desktop's mechanics, but AFTER analysis, not on open
 

@@ -63,13 +63,21 @@ import type { MonoStem } from './host'
  *  claimed the beat was still being looked for while the key ran, wiping a
  *  hand-tuned grid off the screen along with its promise never to re-detect
  *  over it. The stage travels with the line so each row can show its own. */
-export type AnalysisStage = 'start' | 'beat' | 'key' | 'melody'
+export type AnalysisStage = 'start' | 'beat' | 'key' | 'melody' | 'compact'
 
 /** What one project needs, judged from its doc alone. */
 export interface AnalysisPlan {
   beat: boolean
   key: boolean
   melody: boolean
+  /** The project is v1 with WAV stems — a phone-split song not yet
+   *  compacted. WHETHER this build can act on it is the runner's question
+   *  (the native probe answers at run time, like mlNow); this only says the
+   *  project is in the state the upgrade exists for. Planned, not only
+   *  ridden: a phone killed during the encode leaves every detector stamp
+   *  current, and a tail that only rode analysis jobs would never run
+   *  again — the stranding hole review caught. */
+  compact: boolean
 }
 
 export interface AnalysisResult {
@@ -78,6 +86,9 @@ export interface AnalysisResult {
   melody?: MelodyInfo
   /** Detectors that answered "nothing here" this run, by stamp — a write too. */
   none?: { beat?: number; beatMl?: boolean; key?: number }
+  /** Stems converted wav->flac this run (the v1->v2 upgrade riding the same
+   *  job). A write: listeners re-list on it — entry.stems changed. */
+  compacted?: number
   /** Where the time went, ms — for the log. */
   ms: { load: number; ml: number; beat: number; key: number; melody: number }
 }
@@ -149,11 +160,23 @@ export interface AnalysisHost {
   audioDuration(project: string, relPath: string): Promise<number>
   encodeMelody(f0: Float32Array, hopSec: number): Promise<MelodyInfo>
   applyUserBars(info: StoredBeatInfo): Promise<StoredBeatInfo>
+  /** Does the INSTALLED binary read (and write) FLAC? Absent on the jest
+   *  fake and on an older native beside newer JS — both mean "treat FLAC as
+   *  the worklet's problem and never plan a compact". */
+  flacIsNative?(): boolean
+  /** One stem of the v1->v2 upgrade, in the core: encode wav->flac (verify
+   *  on, .part rename, wav deleted on success; idempotent when the flac is
+   *  already there). Rejects on failure — the wav is then untouched. */
+  compactStem?(project: string, wavRel: string, flacRel: string): Promise<{ bytes: number; skipped: boolean }>
 }
 
 export interface AnalysisDeps {
   readText(project: string, file: string): Promise<string>
   writeText(project: string, file: string, text: string): Promise<boolean>
+  /** md5+size+mtime of a project file (the native's memoized hash) — what
+   *  stemHashes is made of. Optional: absent means compacting cannot update
+   *  the doc and is therefore not attempted. */
+  statFile?(project: string, relPath: string): Promise<{ md5: string; size: number; mtimeMs: number }>
   /** One stem as mono float32 at 44.1 kHz; the implementation decodes, folds
    *  channels and frees the decoded buffer before returning.
    *
@@ -239,7 +262,27 @@ export function planAnalysis(
       melody = !dec || !melodyFitsSong(dec.f0, dec.info.hopSec, durationSec)
     }
   }
-  return { beat, key, melody }
+  // v1 + WAV stems = the state the upgrade exists for. Not gated on force:
+  // a forced re-detect of an already-compacted project has nothing to
+  // compact, and an uncompacted one wants it regardless of why it ran.
+  //
+  // The second clause is the KILLED-MIDDLE rescue (review caught it as the
+  // last member of the stranding family): a phone that dies inside the
+  // compact loop — after some per-stem unlinks, before the single doc
+  // write — leaves mixed stems under an all-wav doc. All-wav is then false
+  // forever, and the probe alone cannot tell that state from a FAILED stem,
+  // whose doc write landed. The DOC tells them apart: a failed run named
+  // its flacs, a killed one did not — so a probed .flac stem with no
+  // `${id}.flac` entry in stemHashes is a conversion the doc never heard
+  // about, and the project plans until the doc catches up.
+  const ids = Object.keys(stems)
+  const compact =
+    (doc.version ?? 1) < 2 &&
+    ids.length > 0 &&
+    (ids.every((id) => /^wav$/i.test(stems[id])) ||
+      ids.some((id) => /^flac$/i.test(stems[id]) && !doc.stemHashes?.[`${id}.flac`]))
+
+  return { beat, key, melody, compact }
 }
 
 /**
@@ -334,18 +377,31 @@ export async function analyzeProject(
   // FLAC simply has no phone-ml, like a packless desktop). Decided before
   // planning, because an old "no grid" verdict binds or not by this.
   const mixIds = ['drums', 'bass', 'vocals', ...INST].filter((id) => stems[id])
-  const mlNow =
-    mixIds.length > 0 && mixIds.every((id) => /\.wav$/i.test(rel(id))) && (await host.mlAvailable())
+  // "Readable by the core" is wav — or flac on a build whose native carries
+  // the FLAC reader (Phase 5). The probe asks the INSTALLED binary; absent
+  // (jest, an older native under newer JS) keeps the wav-only answer.
+  const coreExt = (r: string): boolean =>
+    /\.wav$/i.test(r) || (/\.flac$/i.test(r) && host.flacIsNative?.() === true)
+  const mlNow = mixIds.length > 0 && mixIds.every((id) => coreExt(rel(id))) && (await host.mlAvailable())
   const plan = planAnalysis(doc0, stems, durationSec, mlNow, opts.force === true)
-  if (!plan.beat && !plan.key && !plan.melody) {
+  // Compacting needs all three of: the state (plan), the binary (probe) and
+  // the doc machinery (statFile). Decided once, here, so the early exit and
+  // the phase below cannot disagree.
+  const canCompact =
+    plan.compact && host.flacIsNative?.() === true && host.compactStem != null && deps.statFile != null
+  if (!plan.beat && !plan.key && !plan.melody && !canCompact) {
     log('analysis', `${project}: nothing to detect — grid, key and melody are current`)
     return null
   }
   log(
     'analysis',
-    `${project}: detecting ${[plan.beat && 'beat', plan.key && 'key', plan.melody && 'melody']
-      .filter(Boolean)
-      .join(', ')} · stems ${Object.keys(stems).join(',')}`
+    `${project}: ${(() => {
+      const det = [plan.beat && 'beat', plan.key && 'key', plan.melody && 'melody'].filter(Boolean)
+      // An encode-only run (the stranded-tail rescue) detects nothing — the
+      // first live one logged "detecting  ·" with an empty list.
+      if (det.length === 0) return 'compacting stems'
+      return `detecting ${det.join(', ')}${canCompact ? ', then compacting' : ''}`
+    })()} · stems ${Object.keys(stems).join(',')}`
   )
   const usedFiles = new Set<string>()
   const ms = { load: 0, ml: 0, beat: 0, key: 0, melody: 0 }
@@ -414,7 +470,7 @@ export async function analyzeProject(
       // FLAC stems decode inside this call, which is the case the honest
       // wording exists for.
       const beatsFast =
-        beatStems.every((id) => /\.wav$/i.test(rel(id))) && deps.host.beatsAreNative?.() !== false
+        beatStems.every((id) => coreExt(rel(id))) && deps.host.beatsAreNative?.() !== false
       step(beatsFast ? 'Finding the beat…' : 'Reading the stems…', 0.3, 'beat')
       const t = Date.now()
       const lines = opts.lyrics?.lines ?? null
@@ -499,6 +555,88 @@ export async function analyzeProject(
       if (await commit(project, deps, { melody: info }, usedAll, stampAll)) opts.onCommit?.({ melody: info })
     }
 
+    // ---- the v1->v2 upgrade, riding the tail of the job that owns the
+    // stems (docs/PHONE-STANDALONE.md, Phase 5). AFTER the detectors: a
+    // phone-split song is born WAV, the fast format, and its first full
+    // analysis is guaranteed ahead of it — encoding first would put the
+    // decode penalty in front of the one analysis certain to happen. And
+    // PLANNED, not only ridden: plan.compact re-queues a v1 project whose
+    // detectors are current, so a phone killed mid-encode converges on the
+    // next open instead of stranding v1 forever.
+    let compacted = 0
+    if (canCompact && host.compactStem && deps.statFile) {
+      const ids = Object.keys(stems)
+      const hashes: Record<string, { md5: string; size: number; mtimeMs: number }> = {}
+      let allFlac = true
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]
+        step(`Compacting stems · ${i + 1} of ${ids.length}`, 0.97, 'compact')
+        if (/^flac$/i.test(stems[id])) {
+          // Already converted on disk — the killed-middle rescue, or simply
+          // a stem an interrupted run finished. Two jobs, neither an encode:
+          // clean a leftover wav if the kill landed in the rename→unlink
+          // micro-window (compactStem's skip-heal does exactly that — and
+          // its wav resolution REJECTING because there is no wav to clean is
+          // the ordinary healed state, not an error), then state the flac in
+          // the doc, which is the half the kill lost.
+          try {
+            await host.compactStem(project, `stems/${id}.wav`, `stems/${id}.flac`)
+          } catch {
+            /* no leftover wav — the usual case */
+          }
+          try {
+            hashes[`${id}.flac`] = await deps.statFile(project, `stems/${id}.flac`)
+            compacted++
+          } catch (e) {
+            log('analysis', `${project}: stem ${id} unreadable while healing — ${String(e instanceof Error ? e.message : e)}`, 'warn')
+            allFlac = false
+          }
+          continue
+        }
+        try {
+          // Idempotent and crash-safe in the core: encode to .part (verify
+          // on), rename, delete the wav — a kill at any instant leaves the
+          // wav, or a verified flac, or briefly both, and a re-run heals.
+          await host.compactStem(project, `stems/${id}.wav`, `stems/${id}.flac`)
+          hashes[`${id}.flac`] = await deps.statFile(project, `stems/${id}.flac`)
+          compacted++
+        } catch (e) {
+          // The failed stem keeps its wav and the doc keeps naming it — the
+          // desktop's own rule (a project is v2 only when EVERY stem
+          // converted; src/main/projects.ts convertStemsToFlac).
+          log('analysis', `${project}: stem ${id} kept as wav — ${String(e instanceof Error ? e.message : e)}`, 'warn')
+          allFlac = false
+        }
+      }
+      if (compacted > 0) {
+        // Re-read → merge → write, like every other landing: another writer
+        // may have moved the doc while the encoder ran. stemHashes entries
+        // move wav->flac per converted stem; version flips only on a full
+        // set, and savedAt moves because the project's files changed.
+        const onDisk = JSON.parse(await deps.readText(project, 'project.json')) as ProjectDoc
+        const nextHashes: Record<string, { md5: string; size: number; mtimeMs: number }> = {
+          ...(onDisk.stemHashes ?? {})
+        }
+        for (const id of ids) {
+          if (hashes[`${id}.flac`]) {
+            delete nextHashes[`${id}.wav`]
+            nextHashes[`${id}.flac`] = hashes[`${id}.flac`]
+          }
+        }
+        const next: ProjectDoc = {
+          ...onDisk,
+          version: allFlac ? Math.max(2, onDisk.version ?? 1) : onDisk.version,
+          stemHashes: nextHashes,
+          savedAt: deps.now()
+        }
+        await deps.writeText(project, 'project.json', JSON.stringify(next, null, 2))
+        log(
+          'analysis',
+          `${project}: compacted ${compacted} stem(s) to flac${allFlac ? ' — project is v2' : ' — some kept wav, still v1'}`
+        )
+      }
+    }
+
     log(
       'analysis',
       `${project}: done — ` +
@@ -507,7 +645,7 @@ export async function analyzeProject(
         `${fresh.melody ? 'melody tracked' : 'melody kept'} · ` +
         `load ${ms.load} ms, ml ${ms.ml} ms, beat ${ms.beat} ms, key ${ms.key} ms, melody ${ms.melody} ms`
     )
-    return { ...fresh, ms } // fresh carries beat/key/melody and none
+    return { ...fresh, ms, ...(compacted > 0 ? { compacted } : {}) }
   } finally {
     await host.clearStems()
   }

@@ -142,7 +142,7 @@ async function pump(): Promise<void> {
       beat: announced.beat ? undefined : res?.beat,
       key: announced.key ? undefined : res?.key,
       melody: announced.melody ? undefined : res?.melody,
-      changed: !!(res?.beat || res?.key || res?.melody || res?.none)
+      changed: !!(res?.beat || res?.key || res?.melody || res?.none || res?.compacted)
     } satisfies AnalysisDone)
   } catch (e) {
     log('analysis', `${dir}: analysis failed — ${String(e instanceof Error ? e.message : e)}`, 'warn')

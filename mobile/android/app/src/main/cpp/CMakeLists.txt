@@ -33,6 +33,21 @@ add_library(onnxruntime SHARED IMPORTED)
 set_target_properties(onnxruntime PROPERTIES
     IMPORTED_LOCATION ${ORT_SDK_DIR}/jni/${ANDROID_ABI}/libonnxruntime.so)
 
+# The vendored libFLAC (native/third_party/flac — Phase 5): compiled as its
+# own static C library so the C99 sources never meet the C++ flags, and
+# linked into singzcore, whose wav.cpp dispatches FLAC files to it by magic
+# bytes. The deduplication/ fragments are #included by lpc.c/bitreader.c and
+# must NOT be compiled standalone. -DHAVE_CONFIG_H is load-bearing: without
+# it config.h is silently not read, HAVE_FSEEKO goes undefined, and the
+# build fails inside a bionic header complaining about fseek — the trap the
+# vendor README documents.
+set(FLAC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../native/third_party/flac)
+file(GLOB FLAC_SOURCES ${FLAC_DIR}/src/*.c)
+add_library(singzflac STATIC ${FLAC_SOURCES})
+target_compile_definitions(singzflac PRIVATE HAVE_CONFIG_H)
+target_include_directories(singzflac PRIVATE
+    ${FLAC_DIR} ${FLAC_DIR}/include ${FLAC_DIR}/src/include ${FLAC_DIR}/src)
+
 # The JNI shim lives under native/core/android — NOT in this directory,
 # whose *.cpp files ReactNative-application.cmake globs into appmodules.
 add_library(singzcore SHARED
@@ -42,6 +57,7 @@ add_library(singzcore SHARED
     ${CORE_DIR}/beat_this.cpp
     ${CORE_DIR}/beat_this_ort.cpp
     ${CORE_DIR}/courts.cpp
+    ${CORE_DIR}/flac_io.cpp
     ${CORE_DIR}/melody.cpp
     ${CORE_DIR}/ort_env.cpp
     ${CORE_DIR}/resample.cpp
@@ -54,5 +70,5 @@ target_compile_options(singzcore PRIVATE -fexceptions -frtti)
 # 32-bit ABIs (armeabi-v7a, x86) have 32-bit long — a >2 GB mix would
 # overflow plain fseek/ftell; the engine uses fseeko/ftello throughout.
 target_compile_definitions(singzcore PRIVATE _FILE_OFFSET_BITS=64)
-target_include_directories(singzcore PRIVATE ${CORE_DIR} ${ORT_SDK_DIR}/headers)
-target_link_libraries(singzcore onnxruntime log)
+target_include_directories(singzcore PRIVATE ${CORE_DIR} ${ORT_SDK_DIR}/headers ${FLAC_DIR}/include)
+target_link_libraries(singzcore singzflac onnxruntime log)

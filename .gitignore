@@ -33,6 +33,8 @@ mobile/src/gen/
 # mobile/native/core by mobile/scripts/sync-singzcore.js (postinstall);
 # CocoaPods cannot glob outside the pod dir, so the copy exists only locally
 mobile/ios/SingzCore/core/
+# …and the vendored libFLAC, synced beside it by the same script
+mobile/ios/SingzCore/flac/
 
 # local-only tooling state: the logged-in Ultimate Guitar browser profile the
 # score-scout agent drives (contains a live session cookie — never commit it)

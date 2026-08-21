@@ -48,7 +48,13 @@ class WavWriter {
 
 namespace singz {
 
-// One WAV file as mono float32 — what the detectors take. Accepts PCM 16/24/
+// One stem as mono float32 — what the detectors take. Despite the name this
+// is the core's ONE audio-read choke point and it dispatches on the file's
+// magic bytes: RIFF goes down the WAV path below, fLaC goes to the vendored
+// libFLAC (flac_io.h) with the identical channel fold, so every caller —
+// beats, key, melody, the ML mix, the CLI, both bindings — gained FLAC the
+// moment the dispatch landed, and none of them needed to know.
+// The WAV path accepts PCM 16/24/
 // 32-bit and IEEE float32, any channel count; EVERY channel is averaged in
 // (each sample scaled to [-1,1) the way the phone's audio decoder does it,
 // s / 32768 for 16-bit, and the average taken in double before the float32
@@ -70,7 +76,8 @@ MonoWav readWavMono(const std::string& path);
 
 // The header alone — rate, channels and the frame count the data chunk
 // states (clamped to what the file actually holds) — no samples read. What
-// the melody-fit rule needs before anything is tracked.
+// the melody-fit rule needs before anything is tracked. Dispatches on magic
+// bytes exactly like readWavMono (FLAC answers from STREAMINFO).
 struct WavInfo {
   int sampleRate = 0;
   int channels = 0;

@@ -107,7 +107,25 @@ void WavWriter::close() {
 }  // namespace singz
 
 // ---- reader ----------------------------------------------------------------
+#include "flac_io.h"
+
 namespace singz {
+
+namespace {
+// Dispatch on the file's first four bytes, not its suffix: a stem is named
+// by its id, projects open from anywhere, and a FLAC named .wav would
+// otherwise fail as "not a RIFF/WAVE file" while a WAV named .flac already
+// fails loudly — the asymmetric case is the one the suffix cannot catch.
+bool looksFlac(const std::string& path) {
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == nullptr) return false;
+  unsigned char magic[4] = {0, 0, 0, 0};
+  const size_t got = std::fread(magic, 1, 4, f);
+  std::fclose(f);
+  return got == 4 && std::memcmp(magic, "fLaC", 4) == 0;
+}
+}  // namespace
+
 
 namespace {
 uint32_t le32(const unsigned char* p) {
@@ -188,6 +206,7 @@ bool walkHeader(std::FILE* f, WavHeader& h) {
 }  // namespace
 
 WavInfo readWavInfo(const std::string& path) {
+  if (looksFlac(path)) return readFlacInfo(path);
   WavInfo out;
   std::FILE* f = std::fopen(path.c_str(), "rb");
   if (f == nullptr) {
@@ -209,6 +228,7 @@ WavInfo readWavInfo(const std::string& path) {
 }
 
 MonoWav readWavMono(const std::string& path) {
+  if (looksFlac(path)) return readFlacMono(path);
   MonoWav out;
   std::FILE* f = std::fopen(path.c_str(), "rb");
   if (f == nullptr) {

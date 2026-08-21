@@ -22,7 +22,7 @@ import {
   type AnalysisProgress
 } from '../analysis/run'
 import { BEAT_MODELS_MB, beatModelsStatus, cancelBeatModels, ensureBeatModels } from '../analysis/models'
-import { nativeMlGridAvailable } from '../analysis/native'
+import { nativeFlacAvailable, nativeMlGridAvailable } from '../analysis/native'
 import type { AnalysisStage } from '../analysis/pipeline'
 import {
   fmtTime,
@@ -411,7 +411,8 @@ export default function PlayerScreen({
    * one" would be a promise the pipeline refuses to keep (planAnalysis's
    * `mlNow` makes the same all-WAV test and would answer false forever). */
   const mlPossible =
-    Object.keys(stemFiles).length > 0 && Object.values(stemFiles).every((ext) => ext === 'wav')
+    Object.keys(stemFiles).length > 0 &&
+    Object.values(stemFiles).every((ext) => ext === 'wav' || (ext === 'flac' && nativeFlacAvailable()))
   const canAnalyse =
     project.library === 'phone' && !!project.dir && Object.keys(stemFiles).length > 0 && !beatManual
   /* The detector's own "no beat here" answer, stored under its stamp. Without
@@ -1106,8 +1107,8 @@ export default function PlayerScreen({
                   <Text style={b.hint}>
                     {mlPossible
                       ? 'Reading the stems takes a few seconds; the melody takes about a minute.'
-                      : 'This song\'s stems are FLAC, so the reading happens in JavaScript — about a ' +
-                        'minute for the beat and another for the melody.'}
+                      : 'This song\'s stems are FLAC and this build reads them in JavaScript — ' +
+                        'about a minute for the beat and another for the melody.'}
                   </Text>
                 )}
                 {canAnalyse && (

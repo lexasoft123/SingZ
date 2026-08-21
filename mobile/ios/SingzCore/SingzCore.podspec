@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.2.7'
+  s.version      = '0.3.0'
   s.summary      = 'SingZ shared C++ engine core: on-device stem split + beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -14,14 +14,27 @@ Pod::Spec.new do |s|
   # without ort_env.o and the app link died on singz::ortProbeJson) — copying
   # is the only shape that works, the audio-api patch-3 lesson. After editing
   # native/core: rerun the sync, bump this version, pod install (re-glob).
-  s.source_files = '*.{h,mm}', 'core/*.{h,cpp}'
+  # flac/ is the vendored libFLAC (native/third_party/flac), synced by the
+  # same script. Only flac/src/*.c COMPILES — the deduplication/ fragments
+  # are #included by lpc.c/bitreader.c and must stay out of source_files or
+  # they compile standalone and fail; they ride in preserve_paths with the
+  # headers instead.
+  s.source_files = '*.{h,mm}', 'core/*.{h,cpp}', 'flac/src/*.c'
+  s.preserve_paths = 'flac/**/*'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
+    # HAVE_CONFIG_H is load-bearing for the flac sources: without it their
+    # config.h is silently not read, HAVE_FSEEKO goes undefined, and the
+    # build fails inside an SDK header complaining about fseek (the vendor
+    # README documents the trap). Harmless for the .mm/.cpp sources, which
+    # never test it.
+    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) HAVE_CONFIG_H=1',
     # onnxruntime-c ships its headers flat under Pods/onnxruntime-c/Headers
     # (not inside the xcframework), and dependents don't inherit a search
-    # path for them.
-    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core" "$(PODS_ROOT)/onnxruntime-c/Headers"'
+    # path for them. The flac paths serve <FLAC/…>, <config.h> and the
+    # private/ tree, in that order.
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core" "$(PODS_ROOT)/onnxruntime-c/Headers" "$(PODS_TARGET_SRCROOT)/flac/include" "$(PODS_TARGET_SRCROOT)/flac" "$(PODS_TARGET_SRCROOT)/flac/src/include" "$(PODS_TARGET_SRCROOT)/flac/src"'
   }
   s.frameworks   = 'AVFoundation', 'BackgroundTasks', 'UIKit'
   s.dependency 'React-Core'

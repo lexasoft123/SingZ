@@ -12,9 +12,11 @@ import type { MonoStem } from './host'
 import {
   audioDurationNative,
   detectBeatsNative,
+  encodeFlacNative,
   estimateKeyNative,
   mlGridFromStemsNative,
   nativeBeatsAvailable,
+  nativeFlacAvailable,
   nativeKeyAvailable,
   nativeMelodyAvailable,
   nativeMlGridAvailable,
@@ -54,6 +56,7 @@ interface FolderNative {
   readText(project: string, file: string): Promise<string>
   writeText(project: string, file: string, text: string): Promise<boolean>
   localFile(project: string, file: string): Promise<string>
+  statFile(project: string, file: string): Promise<{ md5: string; size: number; mtimeMs: number }>
 }
 
 /**
@@ -88,15 +91,15 @@ export async function loadMono44k(project: string, relPath: string): Promise<Mon
  * into the core too, entries here move with them; the pipeline does not
  * change.
  *
- * The core reads WAV — the split's own output. The phone library also holds
- * FLAC: a desktop project copied in through Files ("This iPhone" is the
- * Documents folder), whose doc may lack a melody today and WILL the day
- * PITCH_DETECT_VERSION moves. Those go the way HEAD went — decoded by
- * audio-api and tracked by the same TS on the worklet host — so a stem the
- * core cannot read is slower, never a failed run. (The core will read FLAC
- * once the desktop CLI needs it; this branch then goes away.)
+ * The core reads WAV — and, since Phase 5, FLAC, on any build whose native
+ * carries it: `nativeFlacAvailable` probes the INSTALLED binary, because
+ * Metro serves this JS to old binaries and a widened gate over an old native
+ * would hand it files it cannot open. The worklet fallback below survives
+ * for exactly that pairing — an older native beside newer JS — and for it
+ * alone; on a current build every project takes the core.
  */
-const coreReads = (relPath: string): boolean => /\.wav$/i.test(relPath)
+const coreReads = (relPath: string): boolean =>
+  /\.wav$/i.test(relPath) || (/\.flac$/i.test(relPath) && nativeFlacAvailable())
 
 export function realAnalysisHost(): AnalysisHost {
   return {
@@ -106,6 +109,10 @@ export function realAnalysisHost(): AnalysisHost {
      *  build — the pipeline asks so it can word the wait, since the fallback
      *  decodes six stems inside the call. */
     beatsAreNative: () => nativeBeatsAvailable(),
+    /** The INSTALLED binary's FLAC capability — reader and encoder shipped
+     *  together, so one probe answers for both. */
+    flacIsNative: () => nativeFlacAvailable(),
+    compactStem: (p, wavRel, flacRel) => encodeFlacNative(p, wavRel, flacRel),
     /**
      * The grid, in the core — the desktop's whole detectBeats, reading the
      * stems itself. This is where a phone analysis actually spends its time
@@ -219,6 +226,9 @@ export function realAnalysisDeps(): AnalysisDeps {
   return {
     readText: (p, file) => f.readText(p, file),
     writeText: (p, file, text) => f.writeText(p, file, text),
+    // The native's memoized md5 (size+mtime keyed) — what stemHashes is made
+    // of, and the reason compacting can afford to re-state six files.
+    statFile: (p, file) => f.statFile(p, file),
     loadMono: loadMono44k,
     host: realAnalysisHost(),
     now: () => new Date().toISOString()

@@ -260,8 +260,10 @@ if (TEST) {
           lineStarts: [],
           words: []
         }
-        // The native reads the files itself and only understands WAV; a FLAC
-        // project has no native path by design (a copied desktop library).
+        // The native leg is gated on WAV here even though a Phase-5 build
+        // reads FLAC: on a flac project `via` below IS the native (deps.ts
+        // widened), so core-on-flac is covered by the via/ts comparison,
+        // while this null keeps the harness meaningful on an older binary.
         // The AUX the real pipeline always fills, and which a bare comparison
         // never crosses: the lyric line starts, the aligned WORDS (a flat
         // number array on the bridge) and the neural LATTICE (a dictionary of

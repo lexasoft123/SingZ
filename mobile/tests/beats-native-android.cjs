@@ -242,16 +242,22 @@ const check = (label, ok, detail = '') => {
   //    which, or the order of the harmonic bed, shows up here and nowhere
   //    else.
   if (!flacProject) {
-    console.log('NOTE  no FLAC project given — the worklet FALLBACK (every copied')
-    console.log('      desktop project) is NOT covered by this run.')
+    console.log('NOTE  no FLAC project given — the FLAC leg (a copied desktop')
+    console.log('      project: the core reader on a Phase-5 build, the worklet')
+    console.log('      fallback on an older one) is NOT covered by this run.')
   } else {
     const f = await run(flacProject, 'flac', project)
-    console.log(`      flac   ${JSON.stringify(f.grid)}  (${f.ms.via} ms through the fallback)`)
-    check('the fallback produced a grid', f.grid !== null && f.grid.beats > 0)
+    console.log(`      flac   ${JSON.stringify(f.grid)}  (${f.ms.via} ms through the deps branch)`)
+    check('the deps branch produced a grid from FLAC', f.grid !== null && f.grid.beats > 0)
     // `f.native` is null by construction on this leg, so asserting it proves
-    // nothing. What does: the deps branch and the worklet leg agree, which is
-    // deps.ts having CHOSEN the fallback for these paths.
-    check('deps.ts chose the worklet fallback for the FLAC stems', f.viaSame === true)
+    // nothing. What viaSame holds DEPENDS ON THE BINARY, and both meanings
+    // are wanted: on a Phase-5 build `via` is the core's FLAC reader, so this
+    // is core-on-flac == worklet-on-flac, value for value — the decode-fold
+    // parity claim, on the device; on an older native `via` IS the worklet
+    // and it degrades to the routing check it began life as. The timing line
+    // above says which ran: worklet-decode-and-track is minutes, the core is
+    // seconds.
+    check('the deps branch agrees with the worklet on the FLAC stems', f.viaSame === true)
     check('fallback grid == native grid, value for value', !!f.digest && f.digest === res.digest)
   }
 

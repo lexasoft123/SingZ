@@ -50,6 +50,12 @@ object SingzCore {
   /** [sampleRate, channels, frames, durationSec] of a WAV, or empty. */
   external fun wavInfo(wavPath: String): DoubleArray?
 
+  /** One stem of the v1->v2 upgrade: encode wav -> flac (verify on, .part
+   *  rename, wav deleted on success; idempotent when the flac exists). One
+   *  JSON line back — {"ok":true,"bytes":N,"skipped":b} or {"ok":false,
+   *  "error":"…"}. */
+  external fun encodeFlac(wavPath: String, flacPath: String): String?
+
   /**
    * Phase 4b: the Beat This! grid (core beat_this.cpp — the desktop packs'
    * beat_runner_onnx.py, ported). `wavPath` must be 22 050 Hz MONO and is

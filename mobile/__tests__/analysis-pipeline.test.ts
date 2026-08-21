@@ -48,11 +48,11 @@ const autoGrid = (detVersion = BEAT_DETECT_VERSION) => ({
 
 describe('planAnalysis — the desktop triggers', () => {
   test('a fresh six-stem project wants everything', () => {
-    expect(planAnalysis(doc(), SIX, 200)).toEqual({ beat: true, key: true, melody: true })
+    expect(planAnalysis(doc(), SIX, 200)).toEqual({ beat: true, key: true, melody: true, compact: true })
   })
   test('current stamps want nothing', () => {
     const d = doc({ beat: autoGrid(), key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION }, melody: melodyFor(200) })
-    expect(planAnalysis(d, SIX, 200)).toEqual({ beat: false, key: false, melody: false })
+    expect(planAnalysis(d, SIX, 200)).toEqual({ beat: false, key: false, melody: false, compact: true })
   })
   test('an older auto grid re-detects; a manual grid never does', () => {
     expect(planAnalysis(doc({ beat: autoGrid(BEAT_DETECT_VERSION - 1) }), SIX, 200).beat).toBe(true)
@@ -67,8 +67,8 @@ describe('planAnalysis — the desktop triggers', () => {
       key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION },
       melody: melodyFor(200)
     })
-    expect(planAnalysis(current, SIX, 200)).toEqual({ beat: false, key: false, melody: false })
-    expect(planAnalysis(current, SIX, 200, false, true)).toEqual({ beat: true, key: true, melody: true })
+    expect(planAnalysis(current, SIX, 200)).toEqual({ beat: false, key: false, melody: false, compact: true })
+    expect(planAnalysis(current, SIX, 200, false, true)).toEqual({ beat: true, key: true, melody: true, compact: true })
 
     // A negative verdict binds without force and is re-asked with it.
     const verdict = doc({})
@@ -87,7 +87,8 @@ describe('planAnalysis — the desktop triggers', () => {
     expect(planAnalysis(doc({}), noDrumsNoVox, 200, false, true)).toEqual({
       beat: false,
       key: true,
-      melody: false
+      melody: false,
+      compact: true
     })
   })
   test('no drums, no grid — even with nothing stored', () => {
@@ -128,10 +129,11 @@ interface World {
   cleared: number
   detectArgs: unknown[]
   deps: AnalysisDeps
+  compacts: string[]
 }
 
 function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): World {
-  const w: World = { disk: new Map(), writes: [], puts: [], tracked: [], keyStems: [], mlAsks: [], cleared: 0, detectArgs: [], deps: null as unknown as AnalysisDeps }
+  const w: World = { disk: new Map(), writes: [], puts: [], tracked: [], keyStems: [], mlAsks: [], cleared: 0, detectArgs: [], compacts: [], deps: null as unknown as AnalysisDeps }
   w.disk.set('project.json', JSON.stringify(initial))
   const host: AnalysisHost = {
     putStem: async (id) => {
@@ -177,9 +179,29 @@ function world(initial: ProjectDoc, hostOverrides: Partial<AnalysisHost> = {}): 
       return true
     },
     loadMono: async () => ({ data: new Float32Array(44100 * 200), sampleRate: 44100 }),
+    // statFile answers for whatever name it is asked about — the pipeline
+    // only calls it for freshly written flacs.
+    statFile: async (_p, rel) => ({ md5: `md5-of-${rel}`, size: 1000, mtimeMs: 1 }),
     host,
     now: () => 'NOW'
   }
+  return w
+}
+
+/** world() plus a flac-capable native: the probe answers true and
+ *  compactStem records each call. failStems lists ids whose encode rejects
+ *  (the wav then stays, like the core's own behaviour). */
+function flacWorld(initial: ProjectDoc, failStems: string[] = [], hostOverrides: Partial<AnalysisHost> = {}): World {
+  const w = world(initial, {
+    flacIsNative: () => true,
+    compactStem: async (_p, wavRel, flacRel) => {
+      const id = wavRel.replace(/^stems\//, '').replace(/\.wav$/, '')
+      if (failStems.includes(id)) throw new Error(`encode failed for ${id}`)
+      w.compacts.push(`${wavRel}->${flacRel}`)
+      return { bytes: 12345, skipped: false }
+    },
+    ...hostOverrides
+  })
   return w
 }
 
@@ -276,7 +298,7 @@ describe('analyzeProject', () => {
     expect(d.settings.key?.pc).toBe(9)
     expect(d.settings.melody).toBeTruthy()
     // the next open asks for nothing
-    expect(planAnalysis(d, SIX, 200)).toEqual({ beat: false, key: false, melody: false })
+    expect(planAnalysis(d, SIX, 200)).toEqual({ beat: false, key: false, melody: false, compact: true })
     // a bumped detector asks once more
     const older = { ...d, settings: { ...d.settings, analysisNone: { beat: BEAT_DETECT_VERSION - 1 } } }
     expect(planAnalysis(older, SIX, 200).beat).toBe(true)
@@ -502,5 +524,137 @@ describe('analyzeProject — the ml aux', () => {
     await analyzeProject('T', flac, { deps: w.deps })
     expect(w.mlAsks).toEqual([])
     expect((w.detectArgs[0] as { ml?: unknown }).ml).toBeNull()
+  })
+})
+
+describe('the v1->v2 upgrade (Phase 5) — compacting rides and re-queues', () => {
+  test('a fresh phone-split project analyses, then compacts, and the doc flips to v2', async () => {
+    const w = flacWorld(doc())
+    const res = await analyzeProject('T', SIX, { deps: w.deps })
+    expect(res?.compacted).toBe(6)
+    expect(w.compacts).toHaveLength(6)
+    expect(w.compacts[0]).toBe('stems/drums.wav->stems/drums.flac')
+    const d = onDisk(w)
+    expect(d.version).toBe(2)
+    // every hash entry moved wav->flac; none of the old names survive
+    expect(Object.keys(d.stemHashes ?? {}).sort()).toEqual(
+      ['bass.flac', 'drums.flac', 'guitar.flac', 'other.flac', 'piano.flac', 'vocals.flac']
+    )
+    expect(d.settings.beat?.beats).toHaveLength(5) // the detectors still ran first
+  })
+
+  test('THE STRANDED TAIL: current stamps + v1 wav still plans, and an encode-only run converges', async () => {
+    // The kill case review caught: detectors committed, phone died during
+    // the encode. Every stamp is current, so a tail that only rode analysis
+    // jobs would never run again. plan.compact is what re-queues it.
+    const current = doc({
+      beat: autoGrid(),
+      key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION },
+      melody: melodyFor(200)
+    })
+    expect(planAnalysis(current, SIX, 200).compact).toBe(true)
+    const w = flacWorld(current)
+    const res = await analyzeProject('T', SIX, { deps: w.deps })
+    expect(res?.compacted).toBe(6)
+    expect(w.tracked).toHaveLength(0) // no detector ran — encode only
+    expect(w.detectArgs).toHaveLength(0)
+    expect(onDisk(w).version).toBe(2)
+    expect(onDisk(w).settings.beat?.beats).toEqual(autoGrid().beats) // the stored grid survives untouched
+  })
+
+  test('a build whose native cannot encode does nothing — and does not claim to', async () => {
+    const current = doc({
+      beat: autoGrid(),
+      key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION },
+      melody: melodyFor(200)
+    })
+    const w = world(current) // no flacIsNative, no compactStem — an older native
+    const res = await analyzeProject('T', SIX, { deps: w.deps })
+    expect(res).toBeNull() // "nothing to detect" — the doc is untouched
+    expect(onDisk(w).version).toBe(1)
+  })
+
+  test('a failed stem keeps its wav in the doc and the project stays v1', async () => {
+    const w = flacWorld(doc(), ['bass'])
+    const res = await analyzeProject('T', SIX, { deps: w.deps })
+    expect(res?.compacted).toBe(5)
+    const d = onDisk(w)
+    expect(d.version).toBe(1) // the desktop's allFlac rule
+    expect(d.stemHashes?.['bass.wav']).toBeTruthy() // the survivor is still named
+    expect(d.stemHashes?.['bass.flac']).toBeUndefined()
+    expect(d.stemHashes?.['drums.flac']).toBeTruthy()
+    // …and the NEXT run heals: compact is still planned, the core skips the
+    // five done stems (idempotent) and retries the sixth.
+    expect(planAnalysis(d, { ...SIX, bass: 'wav', drums: 'flac' } as never, 200).compact).toBe(false)
+    // mixed extensions no longer plan a compact — the doc-level rule is
+    // every-stem-wav; the healing rerun happens because entry.stems still
+    // reports bass as wav and the OTHERS as flac only after ALL converted.
+    expect(planAnalysis(d, SIX, 200).compact).toBe(true)
+  })
+
+  test('a FLAC-born project (copied desktop folder) never plans a compact', () => {
+    const FLAC6 = Object.fromEntries(Object.keys(SIX).map((k) => [k, 'flac'])) as typeof SIX
+    // A real desktop FLAC project is v2 with flac stemHashes — build that,
+    // not v1-with-wav-hashes, which is indistinguishable from (and IS) the
+    // killed-middle state the next test pins.
+    const born = doc()
+    born.version = 2
+    born.stemHashes = Object.fromEntries(
+      Object.keys(SIX).map((k) => [`${k}.flac`, { md5: 'x', size: 1, mtimeMs: 1 }])
+    )
+    expect(planAnalysis(born, FLAC6, 200).compact).toBe(false)
+  })
+
+  test('THE KILLED MIDDLE: mixed stems under an all-wav doc plan, and the healing run converges', async () => {
+    // The stranding one state deeper than the tail (review): the phone dies
+    // INSIDE the compact loop — three stems converted and their wavs
+    // unlinked, doc never rewritten. Probed stems arrive mixed, so all-wav
+    // is false forever; what tells this apart from a FAILED stem (which must
+    // NOT retry) is the DOC: a failed run wrote its flacs into stemHashes,
+    // a killed one did not.
+    const killed = doc({
+      beat: autoGrid(),
+      key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION },
+      melody: melodyFor(200)
+    }) // stemHashes still name six .wav files — the doc write never happened
+    const MIXED = { ...SIX, drums: 'flac', bass: 'flac', vocals: 'flac' } as typeof SIX
+    expect(planAnalysis(killed, MIXED, 200).compact).toBe(true)
+
+    const cleaned: string[] = []
+    const w = flacWorld(killed, [], {
+      compactStem: async (_p, wavRel, flacRel) => {
+        const id = wavRel.replace(/^stems\//, '').replace(/\.wav$/, '')
+        if (['drums', 'bass'].includes(id)) {
+          // converted stems whose wav is gone: the wav resolution rejects,
+          // which the healing branch treats as the ordinary healed state
+          throw new Error(`${wavRel} is missing`)
+        }
+        if (id === 'vocals') cleaned.push(id) // the rename->unlink micro-window orphan
+        w.compacts.push(`${wavRel}->${flacRel}`)
+        return { bytes: 1, skipped: id === 'vocals' }
+      }
+    })
+    const res = await analyzeProject('T', MIXED, { deps: w.deps })
+    expect(res?.compacted).toBe(6)
+    expect(w.tracked).toHaveLength(0) // stamps current — no detector ran
+    expect(cleaned).toEqual(['vocals']) // the orphan wav was swept
+    const d = onDisk(w)
+    expect(d.version).toBe(2)
+    expect(Object.keys(d.stemHashes ?? {}).every((f) => f.endsWith('.flac'))).toBe(true)
+    // …and the healed doc no longer plans: convergence, not a loop.
+    expect(planAnalysis(d, Object.fromEntries(Object.keys(SIX).map((k) => [k, 'flac'])) as typeof SIX, 200).compact).toBe(false)
+  })
+
+  test('compacting is a change the listeners hear', async () => {
+    const current = doc({
+      beat: autoGrid(),
+      key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION },
+      melody: melodyFor(200)
+    })
+    const w = flacWorld(current)
+    const res = await analyzeProject('T', SIX, { deps: w.deps })
+    // run.ts computes `changed` from exactly this — a compacted project
+    // re-lists (its entry.stems moved), or the next tap runs off stale state.
+    expect(!!(res?.beat || res?.key || res?.melody || res?.none || res?.compacted)).toBe(true)
   })
 })
