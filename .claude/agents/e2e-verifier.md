@@ -20,12 +20,14 @@ The `E2E Windows` workflow (e2e-win.yml) runs on pushes to the `e2e-win` branch:
 
 ## Platform: mac (local desktop)
 
-Prereq state on this machine: models under "~/Library/Application Support/SingZ/models/" (whisper turbo + MMS at torch-home/hub/checkpoints/model.pt), GPU pack at "~/Library/Application Support/SingZ/gpu-splitter/", projects in iCloud Drive/SingZ. Build first if out/ is stale: `npm run build`. You own the desktop app exclusively — `pkill -f "out/main/index.js"; sleep 1` before each driver, and the two drivers must run SEQUENTIALLY (same userData identity "Electron").
+Prereq state on this machine: models under "~/Library/Application Support/SingZ/models/" (whisper turbo + MMS at torch-home/hub/checkpoints/model.pt), GPU pack at "~/Library/Application Support/SingZ/gpu-splitter/", projects in iCloud Drive/SingZ. Build first if out/ is stale: `npm run build`. You own the desktop app exclusively — `pkill -f "out/main/index.js"; sleep 1` before each driver, and the drivers must run SEQUENTIALLY (same userData identity "Electron").
 
 1. `node tests/e2e/mac/align-app-e2e.cjs` — Check & align then Precise through the real UI on a real project. PASS requires both verdict rows and a persisted ctc result.
 2. `node tests/e2e/mac/wizard-consent-e2e.cjs` — wizard lists 3 artifacts; Precise with the MMS checkpoint hidden shows the aligner consent panel. The driver restores the checkpoint in a finally — verify it exists afterwards.
-3. Read every screenshot the drivers report (Read tool) and confirm it shows what the text claims. A blank window is a failure.
-4. Flake note: the first wizard click can race the engine probe (driver retries internally); a selector timeout on `.lib-card` usually means a stale app instance survived — pkill and rerun.
+3. `node tests/e2e/mac/melody-song-switch-e2e.cjs` — leave a song while pYIN is still tracking it; PASS means the next song never draws or saves the line.
+4. `node tests/e2e/mac/lyrics-song-switch-e2e.cjs` — the same race on the lyrics leg, made deterministic by delaying main's `net.fetch`; PASS means the next song keeps its own credit. Both of these open a REAL library project and restore its files in a `finally` — if either is interrupted, check `git status` is not the place to look: verify the project.json of the song named in the output (the lyrics one also restores lyrics.json). The lyrics one refuses to run against a v1 project rather than restore a doc describing WAVs the migration deleted.
+5. Read every screenshot the drivers report (Read tool) and confirm it shows what the text claims. A blank window is a failure.
+6. Flake note: the first wizard click can race the engine probe (driver retries internally); a selector timeout on `.lib-card` usually means a stale app instance survived — pkill and rerun.
 
 ## Platform: simulators (ios + android)
 

@@ -8,6 +8,7 @@ import { flacToWav } from './flac'
 import { log } from './log'
 import { isOnnxPack, mmsModelPath, packPython, torchHome } from './models'
 import { spawnEnv } from './separation'
+import { onChildSettled } from './child-exit'
 
 /**
  * Precise word alignment: MMS forced alignment (CTC) through the GPU
@@ -422,8 +423,27 @@ export async function runMmsAlign(
       void rm(dir, { recursive: true, force: true })
       reject(new Error(`Could not start the aligner: ${err.message}`))
     })
-    child.on('exit', (code) => {
+    onChildSettled(child, 'lyrics', (code, signal) => {
       void rm(dir, { recursive: true, force: true })
+      // SIGTERM is cancel() doing its job, not a failure: node reports a
+      // killed child as code null + a signal (TerminateProcess on Windows
+      // too), and cancel() is the only thing that signals this child. It used
+      // to reach the field log as `[error] mms align failed (exit null):
+      // Unexpected end of JSON input` — the loudest line in a report whose
+      // real complaint was elsewhere, and the only evidence a release build
+      // leaves behind. Any OTHER signal is the pack python dying for real
+      // (SIGSEGV, SIGKILL from the OOM killer): those keep the error level
+      // and the traceback, which are the whole point of the log.
+      if (signal === 'SIGTERM') {
+        log('lyrics', 'mms align stopped (cancelled)')
+        reject(new Error('The aligner was stopped.'))
+        return
+      }
+      if (signal !== null) {
+        log('lyrics', `mms align died on ${signal} — ${errTail.slice(-300)}`, 'error')
+        reject(new Error(`The aligner stopped unexpectedly (${signal}).`))
+        return
+      }
       try {
         const parsed = JSON.parse(out.trim().split('\n').pop() ?? '') as {
           words?: { i: number; s: number; e: number; score: number; v?: number }[]

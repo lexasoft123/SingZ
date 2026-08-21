@@ -16,6 +16,7 @@ import { ONNX_RUNNER_PY } from './onnx-runner'
 import { stemsRoot } from './media'
 import { log, logChunk } from './log'
 import { isOnnxPack, packDir, packOnnxModel, packPython, packRtxEpPath, trtrtxFlagPath } from './models'
+import { onChildSettled } from './child-exit'
 
 const MODEL = 'htdemucs_6s'
 const PROBE_TIMEOUT_MS = 45_000
@@ -83,7 +84,7 @@ export function probeDetailed(
         clearTimeout(timer)
         finish(false, `could not start: ${err.message}`)
       })
-      child.on('exit', (code) => {
+      onChildSettled(child, 'splitter', (code) => {
         clearTimeout(timer)
         const lines = tail.replace(/\u0000/g, '').split('\n').map((l) => l.trim()).filter(Boolean)
         finish(code === 0, `exit ${code}: ${lines.slice(-3).join(' — ').slice(0, 300)}`)
@@ -407,7 +408,7 @@ export class Separator {
         resolve({ ok: false, error: `Could not start demucs: ${err.message}` })
       })
 
-      child.on('exit', (code) => {
+      onChildSettled(child, 'splitter', (code) => {
         this.child = null
         log('splitter', `demucs exited with code ${code}`)
         if (this.cancelled) {
@@ -599,7 +600,7 @@ export class Separator {
             resolve({ ok: false, error: `Could not start the GPU pack: ${err.message}` })
           })
 
-          child.on('exit', (code) => {
+          onChildSettled(child, 'splitter', (code) => {
             clearInterval(heartbeat)
             this.child = null
             log('splitter', `ONNX splitter exited with code ${code}`)

@@ -6,6 +6,7 @@ import type { BeatsMlResult } from '../shared/types'
 import { log, logChunk } from './log'
 import { packBeatsAvailable, packDir, packPython } from './models'
 import { spawnEnv } from './separation'
+import { onChildSettled } from './child-exit'
 
 /** A whole song at 22.05 kHz is a few chunks of a 20M model — minutes never. */
 const TIMEOUT_MS = 180_000
@@ -122,7 +123,7 @@ class BeatsMl {
         resolve({ ok: false, error: `Could not start the beat runner: ${err.message}` })
       })
 
-      child.on('exit', (code, signal) => {
+      onChildSettled(child, 'beats', (code, signal) => {
         clearTimeout(timer)
         this.child = null
         if (signal === 'SIGKILL') {

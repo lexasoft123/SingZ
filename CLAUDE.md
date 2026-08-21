@@ -281,6 +281,24 @@ was driven; the gotchas that follow from it are below.
   symlinks without admin rights (the v0.2.2 pack shipped broken this way).
 - **Spawned python buffers stdout when not a TTY** — set `PYTHONUNBUFFERED=1`
   or progress lines arrive only at process exit (UI stuck on "Warming up").
+- **Every spawn reads its output through `onChildSettled`** (`src/main/child-exit.ts`),
+  never a bare `child.on('exit')` — `'close'` is the documented promise that
+  stdio has drained, `'exit'` explicitly is not. Two children actually depend
+  on it (the MMS aligner and the beat runner each print one JSON object; the
+  aligner's is ~50 bytes a word). **The truncation was NOT reproducible here
+  and nobody should re-derive that**: 400 trials, 1 KB to 8 MB, idle and busy
+  parent loop, macOS + node 26, 0 short reads — `exit` and `close` land in the
+  same millisecond. It is kept for the mostly-Windows fleet, whose libuv pipes
+  are IOCP and cannot be measured from a Mac, so treat it as correctness by
+  contract rather than as a bug that once bit. The grace timer is not optional
+  garnish: a plain `'close'` swap can hang forever, because the splitter pack
+  loads torch and can leave a descendant holding the inherited pipe, and six of
+  the seven call sites would then wait on it for good. Only `probeDetailed`
+  escapes, because its timeout resolves the promise itself; the two other
+  timers (`beats-ml`, the ONNX heartbeat) merely KILL the child, which a
+  grandchild holding the pipe survives, and the remaining four have no timer at
+  all. The unit suite's teeth are that case alone — the big-payload tests pass
+  against the old code too, and say so.
 - **Engine subprocesses run with `HF_HUB_OFFLINE=1`** — models must come from
   the pack; without it a broken pack silently re-downloads 166 MB mid-split.
 - **electron-builder**: `files` must exclude `vendor/`, `.engines-src/` etc. or
@@ -383,6 +401,20 @@ was driven; the gotchas that follow from it are below.
   disowns one that fits a different song and re-tracks, which is how the two
   corrupted projects healed themselves on the next open. Guarded by
   `tests/e2e/mac/melody-song-switch-e2e.cjs`.
+  **The rule is not just pYIN's** — `prepLyrics` shipped without the guard and
+  was measured landing song A's lyrics in song B (Wild World displaying
+  "Metallica — Nothing Else Matters"). Lyrics have no `melodyFitsSong` twin to
+  heal them, and the damage is not only what is drawn: `linesRef` feeds
+  `detectBeats`' `lineStarts`/`words` aux, so a foreign phrasing is baked into
+  THIS song's beat grid and auto-saved under a current stamp that stops it
+  being re-derived. `cancelLyrics()` does not cover the window either —
+  `Transcriber.cancel()` aborts the model download and kills the whisper/
+  aligner child, but the LRCLIB ladder runs under neither and `busy` is false
+  throughout it, so the lookup runs to completion with nothing to stop it.
+  Guarded by `tests/e2e/mac/lyrics-song-switch-e2e.cjs`, which makes the race
+  deterministic by wrapping main's `net.fetch` with a delay via
+  `app.evaluate` — the ladder runs in MAIN, so no renderer-side route
+  interception can see it.
 - **Project format v2 = FLAC stems** (~4x smaller, lossless; splitter cache
   stays WAV). v1 WAV projects auto-upgrade on open (`migrateProjectToV2`);
   readers must keep accepting both (`stemFile()` prefers .flac). Encoding uses

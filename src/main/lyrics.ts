@@ -20,6 +20,7 @@ import { markFileDirty } from './sync-dirty'
 import { downloadFile, mmsModelMb, mmsModelPath, mmsModelUrl, modelsDir } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
+import { onChildSettled } from './child-exit'
 
 // Fallback transcription only runs when no online lyrics exist, so a bigger
 // one-time download is worth it — turbo is far stronger than `small` on singing.
@@ -127,15 +128,36 @@ interface LyricsCache {
    * day of songs with whisper lyrics) — treat as pending, never as settled.
    */
   lrclibPending?: boolean
+  /**
+   * Which lookup ladder settled this as "LRCLIB has nothing". Absent means a
+   * ladder older than the stamp — see LRCLIB_LADDER_VERSION.
+   */
+  lookup?: number
   lines: LyricLine[]
 }
 
-/** Whisper lyrics stay provisional until LRCLIB has actually answered once. */
+/**
+ * Bump whenever the ladder in src/shared/lrclib-core.ts learns to find
+ * something it used to miss — the same rule as BEAT_DETECT_VERSION and
+ * PITCH_DETECT_VERSION, for the same reason: a "no match" is only as final
+ * as the search that produced it, and a transcription written under a
+ * blinder ladder would otherwise stand forever.
+ *
+ * 2 — the lead-artist rung. Files tagged "X feat. Y" missed songs LRCLIB
+ * holds under "X", and every one of them settled on whisper lyrics.
+ * 3 — the site-prefix rung. Rips credited "AudioCleaner_Download_X" or
+ * "muzoi.net - X" missed the same way, for the same five minutes.
+ */
+export const LRCLIB_LADDER_VERSION = 3
+
+/** Whisper lyrics stay provisional until the CURRENT ladder has answered. */
 export function shouldReaskLrclib(c: {
   source: LyricsSource
   lrclibPending?: boolean
+  lookup?: number
 }): boolean {
-  return c.source === 'whisper' && c.lrclibPending !== false
+  if (c.source !== 'whisper') return false
+  return c.lrclibPending !== false || (c.lookup ?? 0) < LRCLIB_LADDER_VERSION
 }
 
 /**
@@ -195,6 +217,7 @@ export class Transcriber {
         aligned: raw.aligned,
         check: raw.check,
         lrclibPending: raw.lrclibPending,
+        lookup: raw.lookup,
         lines: raw.lines
       }
     } catch {
@@ -288,11 +311,16 @@ export class Transcriber {
       !alignBase &&
       (prefer === 'auto' || (prefer === 'whisper' && cached.source === 'whisper'))
     ) {
-      // Whisper lyrics born during an LRCLIB outage (or before outages were
-      // tracked) are provisional — ask again now, and either upgrade to
-      // synced lyrics or settle the matter.
+      // Whisper lyrics are provisional while the verdict behind them is: an
+      // LRCLIB outage, or a lookup ladder since taught to find more. Ask
+      // again now, and either upgrade to synced lyrics or settle the matter.
       if (prefer === 'auto' && shouldReaskLrclib(cached)) {
-        log('lyrics', 'cached lyrics were transcribed while LRCLIB was unanswering — asking again')
+        log(
+          'lyrics',
+          cached.lrclibPending === false
+            ? 'cached lyrics were transcribed under an older lyrics search — asking again'
+            : 'cached lyrics were transcribed while LRCLIB was unanswering — asking again'
+        )
         onProgress({ stage: 'searching', percent: 10 })
         const found = await this.searchOnline(songPath, durationSec)
         if (found.hit) {
@@ -316,7 +344,11 @@ export class Transcriber {
         if (!found.down) {
           // a real miss this time — keep the transcription and stop asking
           // (false survives JSON; deleting the field would read as legacy)
-          await this.writeCache(lyricsPath, { ...cached, lrclibPending: false })
+          await this.writeCache(lyricsPath, {
+            ...cached,
+            lrclibPending: false,
+            lookup: LRCLIB_LADDER_VERSION
+          })
         }
       }
       log('lyrics', `using cached lyrics for ${basename(songPath)} (${cached.source}${cached.aligned ? ', aligned' : ''}) from ${lyricsPath}`)
@@ -509,7 +541,7 @@ export class Transcriber {
         resolve({ ok: false, error: `Could not start whisper-cli: ${err.message}` })
       })
 
-      child.on('exit', (code) => {
+      onChildSettled(child, 'lyrics', (code) => {
         this.child = null
         log('lyrics', `whisper-cli exited with code ${code}`)
         if (this.cancelled) {
@@ -566,7 +598,9 @@ export class Transcriber {
               lines,
               // an outage is not a verdict — true makes a later open ask
               // LRCLIB again; false records that it really answered "miss"
-              lrclibPending: lrclibDown
+              lrclibPending: lrclibDown,
+              // ...and which ladder it answered, so a better one asks again
+              lookup: LRCLIB_LADDER_VERSION
             })
             await rm(outDir, { recursive: true, force: true })
             resolve({ ok: true, cached: false, source: 'whisper', lines })
