@@ -16,7 +16,11 @@ import { onChildSettled } from '../../src/main/child-exit'
  * is the case where 'close' never arrives, and it is the reason this waits on
  * a grace timer instead of on 'close' alone. That one fails against both the
  * old 'exit' code and a naive 'close' swap — the first reads early, the
- * second hangs forever.
+ * second hangs forever. Its teeth are POSIX-only: on Windows 'close' arrived
+ * at 110 ms with the grandchild still running (measured in CI), so the grace
+ * timer is never reached there and this case cannot exercise it. Whether that
+ * is the exit closing the pipe or the grandchild never holding it is not
+ * something the timing shows. It still asserts the outcome on both.
  */
 
 /** One JSON object shaped like the MMS aligner's, `words` entries and all. */
@@ -114,7 +118,19 @@ describe('onChildSettled', () => {
     expect(code).toBe(0)
     expect(out).toBe('PARTIAL')
     const waited = Date.now() - started
-    expect(waited).toBeGreaterThanOrEqual(300) // it really did wait for the grace
-    expect(waited).toBeLessThan(3000) // and really did not wait for the grandchild
+    // The requirement everywhere: it settled, and it did NOT wait for the
+    // grandchild's four seconds.
+    expect(waited).toBeLessThan(3000)
+    // That it settled ON THE GRACE TIMER can only be asserted where the
+    // premise holds. Inheriting fd 1 keeps the write end open on POSIX, so
+    // 'close' never arrives and the timer is the only way out. On Windows it
+    // is not: this exact case was measured in CI (windows-latest, node 24) at
+    // 110 ms with the payload whole and the code correct, so 'close' arrived
+    // and the timer was never reached. WHY is unmeasured — the exit may close
+    // the pipe despite the live grandchild, or the grandchild may never get
+    // the handle; 110 ms cannot tell those apart and this test checks
+    // neither. So it asserts the outcome there rather than asserting the
+    // opposite timing.
+    if (process.platform !== 'win32') expect(waited).toBeGreaterThanOrEqual(300)
   }, 10000)
 })
