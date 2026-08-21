@@ -1,6 +1,6 @@
 {
   "name": "singz",
-  "version": "0.16.2",
+  "version": "0.17.0",
   "description": "Practice app for singers — drop a song, split it into stems, toggle tracks while you sing.",
   "author": "lexasoft <lexasoft@gmail.com>",
   "type": "module",
