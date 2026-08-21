@@ -25,7 +25,7 @@ import { log } from '../log'
 import type { LyricLine } from '../model'
 import { clearCache } from '../projects'
 import type { PickedFile } from '../writer'
-import { C } from './bits'
+import { C, white } from './bits'
 
 /**
  * The add-a-song flow (Phase 1): pick → read the file → confirm title/artist
@@ -341,7 +341,7 @@ export default function AddSongSheet({
                 onPress={() => void search(step.facts)}
               >
                 {busy ? (
-                  <ActivityIndicator color="#1d1204" />
+                  <ActivityIndicator color={C.amberInk} />
                 ) : (
                   <Text style={s.btnPrimaryText}>Find lyrics</Text>
                 )}
@@ -489,27 +489,46 @@ export default function AddSongSheet({
 }
 
 const s = StyleSheet.create({
-  scrim: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#000000aa' },
+  /* Deliberately NOT tappable-to-close, unlike the other three sheets: this
+     one owns a flow with side effects — abandoning sweeps the import copy out
+     of durable storage — so a stray tap beside the keyboard must not throw the
+     song away. Cancel is the way out, and it is always on screen. */
+  scrim: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
   sheet: {
     // Lets the sheet shrink inside the keyboard avoider, which is what gives
     // the ScrollView above a bounded height — an unbounded one measures its
     // own content, decides everything fits, and silently never scrolls.
     flexShrink: 1,
-    backgroundColor: C.bg,
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
-    padding: 20,
+    // Same surface, radius and scrim as the other three sheets (b.sheet in
+     // bits.tsx). This one is hand-rolled rather than reusing them because it
+     // is a FLOW with side effects, not a panel. The surface, radius, scrim
+     // and title match; the DISMISSAL does not, and deliberately: no grab
+     // handle and no tap-to-close, because both advertise throwing the sheet
+     // away by gesture and abandoning sweeps the import copy out of durable
+     // storage. Cancel is the one way out and it is always on screen. A grab
+     // handle here would re-promise exactly the gesture the scrim refuses.
+    backgroundColor: C.sheet,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingHorizontal: 22,
+    paddingTop: 20,
     paddingBottom: 34
   },
+
   head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
-  title: { color: C.text, fontSize: 20, fontWeight: '700' },
+  title: { color: C.bright, fontSize: 19, fontWeight: '800', letterSpacing: -0.2 },
   close: { color: C.amber, fontSize: 15 },
   center: { alignItems: 'center', paddingVertical: 28, gap: 10 },
   label: { color: C.dim, fontSize: 12, marginBottom: 4, marginTop: 8 },
   input: {
     color: C.text,
     fontSize: 16,
-    backgroundColor: '#ffffff10',
+    /* white(0.063), not white(0.1): RN reads 8-digit hex as #rrggbbaa, so the
+       #ffffff10 this replaced was 16/255, and rounding it up to a tenth
+       brightened the well by ~59%. On the sheet's new surface that put the
+       "Song title" / "Helps find the right lyrics" placeholders at 4.16:1,
+       under the AA floor — instructional copy, not decoration. 4.70:1 here. */
+    backgroundColor: white(0.063),
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10
@@ -522,17 +541,20 @@ const s = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 11,
-    backgroundColor: '#ffffff14'
+    // C.btnBg is the token for exactly this (a ghost-button fill RN has to
+    // paint). Adopting it is the point of the pass; it is a shade up from the
+    // #ffffff14 it replaces, deliberately.
+    backgroundColor: C.btnBg
   },
   btnPrimary: { backgroundColor: C.amber },
-  btnPrimaryText: { color: '#1d1204', fontWeight: '700', fontSize: 15 },
+  btnPrimaryText: { color: C.amberInk, fontWeight: '700', fontSize: 15 },
   btnText: { color: C.text, fontSize: 15 },
   btnDim: { opacity: 0.5 },
-  err: { color: '#ff8a80', fontSize: 13, marginBottom: 8 },
+  err: { color: C.red, fontSize: 13, marginBottom: 8, lineHeight: 18 },
   credit: { color: C.text, fontSize: 15, fontWeight: '600' },
   preview: { maxHeight: 180, marginTop: 10 },
   previewLine: { color: C.dim, fontSize: 13, lineHeight: 19 },
-  cand: { paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#ffffff14' },
+  cand: { paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.hairline },
   candText: { color: C.text, fontSize: 14 },
   candMeta: { color: C.dim, fontSize: 12 }
 })

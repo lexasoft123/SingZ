@@ -1616,6 +1616,14 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
+  /* Three near-black inks that stay literals. The muted M and the "your turn"
+     pill are tinted toward the fill they sit on — danger red, a lane colour —
+     and there is no token for ink on an arbitrary lane hue because the hue
+     belongs to the project, not the palette. playText is the odd one: on a
+     white button it is simply the palette's warm near-black, the same value
+     the StemTile well uses for a different reason. C.amberInk already covers
+     ink on the accent, which is why the solo glyph beside these does not
+     appear here. */
   playText: { color: '#17110a', fontSize: 24, fontWeight: '800' },
 
   mixRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 9 },

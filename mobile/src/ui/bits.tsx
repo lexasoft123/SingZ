@@ -71,6 +71,11 @@ export const C = {
   btnBg: white(0.1)
 }
 
+/** The well a StemTile's lanes sit in — darker than any surface, so the lane
+ *  colours read as lit. Local by nature: the desktop draws this artwork with
+ *  its own geometry and has no equivalent. */
+const TILE_WELL = '#17110a'
+
 /* Artwork hues. These are the SHARED stem colours now, so a project's tile
    on the phone matches its lanes on the desktop. */
 export const STEM_TILE_COLORS: string[][] = [
@@ -89,7 +94,7 @@ export function StemTile({ hue, size }: { hue: number; size: number }): React.JS
         width: size,
         height: size,
         borderRadius: size * 0.23,
-        backgroundColor: '#17110a',
+        backgroundColor: TILE_WELL,
         justifyContent: 'center',
         gap: size * 0.062,
         paddingHorizontal: size * 0.18
