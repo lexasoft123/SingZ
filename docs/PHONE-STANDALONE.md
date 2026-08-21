@@ -1,6 +1,6 @@
 # Phone standalone song-adding — research record & architecture
 
-Status: **Phases 0–3 shipped (v0.16.x); Phase 4a (beats/key/melody on-device) landed; 4c (the detectors in C++, one implementation for every platform) in progress — melody done.** Researched 2026-08-14 (three codebase
+Status: **Phases 0–4 shipped (v0.16.x). Phase 4 is complete: every detector — melody, key, beats with the courts and the neural fork — runs in the C++ core on both phones, bound, wired and gated device-against-host over a corpus — the HOMEGROWN pipeline and the v20 courts, that is; the neural fork is gated per-platform on one song each and across 17 songs on the host, never over the corpus, which runs with the lattice off on both sides by design. Phase 5 (FLAC storage) is next and is BLOCKED on vendoring libFLAC (see the Phase 5 note below).** Researched 2026-08-14 (three codebase
 exploration agents + web verification + one design agent); scope decisions and the
 architecture below approved the same day. This document is the record — read it before
 touching the phone pipeline, and update it as phases land (the docs/BEAT-DETECTION.md
@@ -1373,10 +1373,14 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       the Chromium oracle, and dropping a stem turns them red (F1 0.975,
       tempo 120 vs 125). iOS and Android agree with each other bit for bit
       on the from-stems path (120/37 on both).
-      Not done: a real-phone run of the from-stems path (the binding was;
-      the wired pipeline was not), and the ≥10-song corpus eval of
-      phone-ml grids. (`mlgrid-android.cjs` needed no levelling — checked
-      in Phase 4 and found already point for point with its iOS sibling.)
+      Not done: the ≥10-song corpus eval of phone-ml grids — `beats-corpus`
+      withholds the lattice from both sides deliberately (feeding the host
+      CLI the identical grid means shipping ~13 000 numbers a song), so the
+      corpus gate does NOT cover this and no other suite does it at scale.
+      (Two items that stood here are done: the real-phone run of the
+      from-stems path landed with the twelfth slice's forced analysis on the
+      POCO, and `mlgrid-android.cjs` needed no levelling — checked in
+      Phase 4 and found already point for point with its iOS sibling.)
     - Left for 4b: the C++ `beat_this` port + the two beat models (the
       `ml` aux that lifts the grid to pack parity — and note that the
       negative verdict is keyed by BEAT_DETECT_VERSION alone while the
@@ -1635,6 +1639,93 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       on the simulator: the sheet went through "Listening for the beat…" and
       "Finding the beat…" to a fresh grid, which is a real run — a no-op would
       have gone straight from "Getting ready…" to done.
+    - **Twelfth slice — the corpus gate, and the sheet learns to attribute**
+      (2026-08-21, merged as #1 and #2). Three links had to hold for the port
+      to mean anything, and only two of them had a suite. `eval/beats-parity`
+      proves TypeScript ≡ C++ on THIS machine; `beats-native-{ios,android}`
+      prove core ≡ worklet on a device. Nothing proved **device C++ ≡ host
+      C++**, which an ARM build or a different libm could break in silence.
+      `mobile/tests/beats-corpus.cjs` closes it: eleven songs with a grid plus
+      one both sides refuse, value for value, on the iPhone simulator AND the
+      POCO — and the two devices agree with each other. Its stem order is one
+      constant on both sides, because review measured the sorted-vs-literal
+      split moving `fluxSum`, `acAt4` and the fill's alpha, which would one day
+      have read as the device disagreeing with the host. Its Android seed now
+      clears the destination before pushing: `push` overwrites what it carries
+      and removes nothing, so a `lyrics.json` from an earlier run was read into
+      the device's aux while the host CLI got no `--line/--word`. Proved on the
+      POCO by planting a deliberately off-grid one and watching corpus-01 still
+      land on 118 beats / 30 bars with the sentinel gone.
+      **Measured on the user's phone**, 5.3-minute song: catalog 369 MB, the
+      song open in the player 1243 MB, a full forced analysis on top peaking at
+      2118 MB — against 2236 MB for the old worklet path, which carries no ORT
+      session at all. The core's peak is LOWER while it does strictly more.
+      **Then the song sheet had to stop lying, twice.** The progress line is
+      project-wide but was tested first in the Beat row, so the key and melody
+      stages captured it: a hand-tuned grid read `BEAT / "Reading the key…"`
+      and lost both its `120 bpm · 4/4 · 20 bars` and its promise that nothing
+      here re-detects over it — the promise being the entire point of the
+      manual branch. The stage now travels with the line (`AnalysisStage`
+      through `onStep` → `AnalysisProgress`), and each row shows only its own.
+      That fix alone was WORSE than the bug, and the gate caught it: the grid
+      is computed in the beat stage but not committed until after the key stage
+      (`pipeline.ts:466` vs `:485`), so de-attributing the line un-shadowed
+      three leaves that only make sense before a run starts — "Not detected
+      yet" and "Nothing has read the stems yet." for the seconds the key is
+      read, on every fresh phone-split song. The value and the hint were each
+      walking that four-level chain independently, which is HOW they drifted,
+      so the precedence is one pure function now (`song-sheet-copy.ts`,
+      `sheetRowState`) and `'idle'` is unreachable while anything runs.
+      All three rows are on it: the Key row had the identical lie one row down
+      (the detector stores "the harmonic bed is silent, no key" and the row
+      printed "Not detected yet" over it), and the Melody row joined because
+      during the beat stage it and Key are equally queued and were saying
+      different things about it. The metronome hint deliberately does NOT use
+      it — its precedence is grid-before-progress, the reverse, because it
+      answers what the click is FOLLOWING rather than what is being worked out.
+      Verified on both platforms afterwards: the busy window is real (iOS
+      10.5-12.0 s, Android 17.6-20.1 s, between `progress/beat` and
+      `grid/melody`) and `idle`-while-busy samples were **zero** in every run.
+      Two notes for whoever writes the next device suite: "Tracking the melody
+      · N%" is unreachable on the native path (`trackMelodyNative` resolves
+      without progress; the percentage is the worklet/FLAC fallback only), and
+      a "drumless" fixture must be digital SILENCE — a structureless drone
+      still came back with a grid (126 bpm, 0 downbeats), testing the grid path
+      instead of the verdict path.
+
+## Phase 5 — FLAC storage: blocked on vendoring libFLAC (2026-08-21)
+
+The architecture calls for **one encoder on both platforms** — vendored
+libFLAC (BSD) in the core — rather than Android MediaCodec plus iOS
+ExtAudioFile, so that what the phone writes is one behaviour rather than two.
+That decision stands; what stops it starting is prosaic.
+
+**libFLAC's C sources are not on this machine and cannot be reached offline.**
+Homebrew has `flac 1.5.0` as a compiled macOS dylib plus headers
+(`/opt/homebrew/opt/flac`) — enough for a HOST round-trip test, useless for an
+arm64-v8a or arm64-ios build, which needs the sources compiled per ABI. The
+`libflacjs` npm dependency the desktop encodes with ships only the emscripten
+output (`dist/`, `lib/`, `src/` — no `.c` anywhere), so the tree does not
+already carry what is needed.
+
+So Phase 5's first slice is a **download and a vendoring decision the user has
+to make**: `flac-1.5.0.tar.xz` from xiph.org (~1 MB), of which the encoder path
+is roughly twenty `.c` files, added under a third-party directory and wired
+into `mobile/android/app/src/main/cpp/CMakeLists.txt` and the SingzCore podspec.
+Everything downstream — `flac_enc.cpp`, the `encodeFlac` bindings (arity-matched
+on both platforms, per the rule at the top of `SingzSplit.mm`), the writer
+emitting v2 when all six stems verify, the per-stem WAV fallback that keeps v1,
+and the "Upgrade to save space" migration mirroring `migrateProjectToV2` — is
+ordinary work behind that one gate.
+
+Worth stating so it is not rediscovered: the round-trip requirement (encode →
+decode → sample-exact) is satisfied by ANY conformant encoder, FLAC being
+lossless. The argument for vendoring is maintenance and single-behaviour, not
+correctness — which is what makes it a decision rather than a necessity. The
+one place it edges toward correctness is the fleet: a platform FLAC encoder's
+presence and behaviour vary across Android vendors and API levels, so "the
+phone can encode" would stop being one fact and become a per-device question,
+which is the shape of thing this project keeps paying for elsewhere.
 
 ## Top risks
 
