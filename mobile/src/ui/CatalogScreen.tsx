@@ -292,7 +292,12 @@ export default function CatalogScreen({
       setDriveOn(true)
       await refresh()
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e))
+      const msg = String(e instanceof Error ? e.message : e)
+      // Backing out of the consent screen is a completed choice, not a fault.
+      // It was being reported back as red error text ("Google sign-in was
+      // cancelled"), telling the singer their own tap had gone wrong. Same
+      // idiom as the split and the model download.
+      if (!msg.toLowerCase().includes('cancel')) setError(msg)
     }
   }, [refresh])
 
@@ -617,6 +622,20 @@ export default function CatalogScreen({
       if (!msg.includes('cancelled')) Alert.alert('Could not download the beat models', msg)
     }
   }, [projects, kickAnalysis])
+  /** 87 MB started from a bare text link, while deleting one song took a
+   *  long-press, a menu, a destructive item and a second dialog — the ceremony
+   *  ran opposite to the consequence. This is the cheaper half to put right. */
+  const confirmBeatModels = useCallback(() => {
+    Alert.alert(
+      'Download the beat models?',
+      `${BEAT_MODELS_MB} MB, once. Every song analysed afterwards uses them.`,
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Download', onPress: () => void fetchBeatModels() }
+      ]
+    )
+  }, [fetchBeatModels])
+
   const dismissBeatModels = useCallback(() => {
     setBeatModelsUi(null)
     void setStoredText(BEAT_MODELS_DISMISSED, '1')
@@ -1004,6 +1023,12 @@ export default function CatalogScreen({
         key={opts.key}
         onPress={opts.onPress}
         onLongPress={opts.onLongPress}
+        accessibilityRole="button"
+        /* Deliberately NO accessibilityLabel: a Pressable is already the
+           accessibility element for the whole card, and an explicit label
+           REPLACES the string RN composes from the children — title, meta and
+           the ✓/☁ status would all vanish behind the title alone. */
+        accessibilityHint={opts.onLongPress ? 'Opens the song. Long press for more actions.' : 'Opens the song.'}
         style={({ pressed }) => [
           s.card,
           opts.sample && s.cardSample,
@@ -1027,7 +1052,13 @@ export default function CatalogScreen({
           )}
         </View>
         {isLoading ? (
-          <Pressable hitSlop={10} onPress={cancelLoad} style={s.cancelBtn}>
+          <Pressable
+            hitSlop={10}
+            onPress={cancelLoad}
+            style={s.cancelBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Stop opening this song"
+          >
             <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
           </Pressable>
         ) : (
@@ -1055,7 +1086,13 @@ export default function CatalogScreen({
           <Text style={s.brand}>SingZ</Text>
           {/* where the desktop keeps it: in the header, always reachable —
               a log you can only open when things are going well is no use */}
-          <Pressable hitSlop={10} style={{ marginLeft: 'auto' }} onPress={() => setLogOpen(true)}>
+          <Pressable
+            hitSlop={10}
+            style={{ marginLeft: 'auto' }}
+            onPress={() => setLogOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Open the log"
+          >
             <Text style={s.ctxLink}>Log</Text>
           </Pressable>
         </View>
@@ -1070,10 +1107,13 @@ export default function CatalogScreen({
             }
           ]}
           active={mode}
-          onSelect={(k) => {
-            if (k === 'gdrive') void openDrive()
-            else selectMode(k as 'folder' | 'phone')
-          }}
+          // Every segment just switches segment. Drive used to sign in from
+          // here, so tapping a TAB — next to two other tabs, to see what was
+          // there — put a Google consent dialog on screen unasked, and the
+          // choice was already persisted by the time it was refused. The
+          // signed-out Drive view says "Sign in above" and carries its own
+          // Sign in link; that is where signing in belongs.
+          onSelect={(k) => selectMode(k as 'gdrive' | 'folder' | 'phone')}
         />
         <View style={s.ctx}>
           {mode === 'gdrive' &&
@@ -1086,6 +1126,7 @@ export default function CatalogScreen({
                 </Text>
                 <Text style={s.ctxDot}>·</Text>
                 <Pressable
+                  accessibilityRole="button"
                   hitSlop={8}
                   onPress={() => {
                     void driveSignOut().then(() => {
@@ -1104,7 +1145,7 @@ export default function CatalogScreen({
                   Your projects, synced from the desktop
                 </Text>
                 <Text style={s.ctxDot}>·</Text>
-                <Pressable hitSlop={8} onPress={() => void driveSignInFlow()}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void driveSignInFlow()}>
                   <Text style={s.ctxLink}>Sign in</Text>
                 </Pressable>
               </>
@@ -1115,7 +1156,7 @@ export default function CatalogScreen({
                 {root?.kind === 'picked' ? root.name : 'No folder picked yet'}
               </Text>
               <Text style={s.ctxDot}>·</Text>
-              <Pressable hitSlop={8} onPress={() => void changeFolder()}>
+              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void changeFolder()}>
                 <Text style={s.ctxLink}>Change…</Text>
               </Pressable>
             </>
@@ -1128,12 +1169,32 @@ export default function CatalogScreen({
                   : 'Files you copied onto this phone'}
               </Text>
               <Text style={s.ctxDot}>·</Text>
-              <Pressable hitSlop={8} onPress={() => void beginAdd()}>
+              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
                 <Text style={s.ctxLink}>Add a song</Text>
               </Pressable>
             </>
           )}
         </View>
+        {/* Errors sit ABOVE the list, next to the controls that cause them.
+            They used to render as the last child of the ScrollView — below
+            every song and below the sample card — so with a real library they
+            were off-screen entirely. The crash notice lands in this same slot
+            ("The last open crashed while …"), which made the most important
+            sentence the app ever writes the one least likely to be read.
+            Tap to dismiss: the slot is shared by six unrelated messages and
+            nothing else clears it until the next action happens to. */}
+        {error && (
+          <Pressable
+            style={s.errBox}
+            onPress={() => setError(null)}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={`${error}. Tap to dismiss.`}
+          >
+            <Text style={s.err}>{error}</Text>
+            <Text style={s.errX}>✕</Text>
+          </Pressable>
+        )}
         <ScrollView
           style={{ flex: 1 }}
           contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
@@ -1192,6 +1253,7 @@ export default function CatalogScreen({
               <View style={s.splitActions}>
                 {(splitUi.phase === 'model' || splitUi.phase === 'run') && (
                   <Pressable
+                    accessibilityRole="button"
                     hitSlop={8}
                     onPress={() =>
                       // No job exists yet in the model phase — the download
@@ -1206,10 +1268,10 @@ export default function CatalogScreen({
                 )}
                 {splitUi.phase === 'failed' && (
                   <>
-                    <Pressable hitSlop={8} onPress={() => void resumeSplit(splitUi.project)}>
+                    <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void resumeSplit(splitUi.project)}>
                       <Text style={s.ctxLink}>Resume</Text>
                     </Pressable>
-                    <Pressable hitSlop={8} onPress={discardSplit}>
+                    <Pressable accessibilityRole="button" hitSlop={8} onPress={discardSplit}>
                       <Text style={[s.ctxLink, { color: C.dim }]}>Discard</Text>
                     </Pressable>
                   </>
@@ -1228,47 +1290,30 @@ export default function CatalogScreen({
               </View>
             </View>
           )}
-          {beatModelsUi && (
+          {/* In-flight work stays at the top, next to the split and
+              analysis cards — that is where progress belongs. The OFFER does
+              not: see below the library. */}
+          {beatModelsUi?.phase === 'downloading' && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
                 Better beats
               </Text>
-              {beatModelsUi.phase === 'offer' ? (
-                <>
-                  <Text style={s.splitText}>
-                    Download the beat models ({BEAT_MODELS_MB} MB, once) and songs analysed from now on — and any
-                    the detector found no beat in — get a grid that holds through quiet intros and rubato the
-                    drums alone lose. Songs that already have a grid keep it.
-                  </Text>
-                  <View style={s.splitActions}>
-                    <Pressable hitSlop={8} onPress={() => void fetchBeatModels()}>
-                      <Text style={s.ctxLink}>Download</Text>
-                    </Pressable>
-                    <Pressable hitSlop={8} onPress={dismissBeatModels}>
-                      <Text style={[s.ctxLink, { color: C.dim }]}>Not now</Text>
-                    </Pressable>
-                  </View>
-                </>
-              ) : (
-                <>
-                  <Text style={s.splitText}>
-                    Downloading the beat models — {beatModelsUi.gotMB} of {beatModelsUi.totalMB} MB
-                  </Text>
-                  <View style={s.splitBarBed}>
-                    <View
-                      style={[
-                        s.splitBar,
-                        { width: `${Math.min(100, (beatModelsUi.gotMB / Math.max(1, beatModelsUi.totalMB)) * 100)}%` }
-                      ]}
-                    />
-                  </View>
-                  <View style={s.splitActions}>
-                    <Pressable hitSlop={8} onPress={() => void cancelBeatModels()}>
-                      <Text style={s.ctxLink}>Cancel</Text>
-                    </Pressable>
-                  </View>
-                </>
-              )}
+              <Text style={s.splitText}>
+                Downloading the beat models — {beatModelsUi.gotMB} of {beatModelsUi.totalMB} MB
+              </Text>
+              <View style={s.splitBarBed}>
+                <View
+                  style={[
+                    s.splitBar,
+                    { width: `${Math.min(100, (beatModelsUi.gotMB / Math.max(1, beatModelsUi.totalMB)) * 100)}%` }
+                  ]}
+                />
+              </View>
+              <View style={s.splitActions}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void cancelBeatModels()}>
+                  <Text style={s.ctxLink}>Cancel</Text>
+                </Pressable>
+              </View>
             </View>
           )}
           {(projects ?? []).map((p) => {
@@ -1297,7 +1342,18 @@ export default function CatalogScreen({
                 </>
               ),
               right: (
-                <Text style={[s.status, downloaded && s.statusHave]}>
+                <Text
+                  style={[s.status, downloaded && s.statusHave]}
+                  /* A bare glyph carrying the one fact the singer most needs
+                     offline: is this song actually on the phone. */
+                  accessibilityLabel={
+                    downloaded
+                      ? 'On this phone'
+                      : p.bytes > 0
+                        ? `Not downloaded, ${fmtSize(p.bytes)}`
+                        : 'Not downloaded'
+                  }
+                >
                   {downloaded ? '✓' : p.bytes > 0 ? `☁ ${fmtSize(p.bytes)}` : '☁'}
                 </Text>
               ),
@@ -1312,6 +1368,8 @@ export default function CatalogScreen({
                     offerSplit(p)
                   }}
                   style={s.splitChip}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Split ${p.doc.name ?? p.dir} into stems`}
                 >
                   <Text style={s.splitChipText}>Split</Text>
                 </Pressable>
@@ -1367,13 +1425,38 @@ export default function CatalogScreen({
                   {dirs.length} song{dirs.length > 1 ? 's' : ''} on this phone · {fmtSize(total)} —
                   playable without internet
                 </Text>
-                <Pressable hitSlop={8} onPress={() => confirmForgetAll(total)}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => confirmForgetAll(total)}>
                   <Text style={s.ctxLink}>Free up space</Text>
                 </Pressable>
               </View>
             )
           })()}
-          {error && <Text style={s.err}>{error}</Text>}
+          {/* The offer sits BELOW the library. It used to open the screen:
+              a heading, six lines of prose and two actions taking the top
+              third, above every song the singer owns — on a library of one or
+              two songs it WAS the screen. It is a suggestion about a future
+              song, so it ranks under the songs that already exist. Copy cut to
+              the two facts that decide it; the long version lives in the Song
+              sheet, where someone is already asking about the beat. */}
+          {beatModelsUi?.phase === 'offer' && (
+            <View style={[s.splitCard, { marginTop: 14 }]}>
+              <Text style={s.splitTitle} numberOfLines={1}>
+                Better beats
+              </Text>
+              <Text style={s.splitText}>
+                An {BEAT_MODELS_MB} MB download, once, that hears the beat through quiet intros and
+                rubato the drums alone lose. Songs that already have a grid keep it.
+              </Text>
+              <View style={s.splitActions}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={confirmBeatModels}>
+                  <Text style={s.ctxLink}>Download</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={dismissBeatModels}>
+                  <Text style={[s.ctxLink, { color: C.dim }]}>Not now</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
         </ScrollView>
         <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
         <AddSongSheet
@@ -1503,5 +1586,18 @@ const s = StyleSheet.create({
   },
   progressFill: { height: 3, backgroundColor: C.amber, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
   empty: { color: C.faint, fontSize: 14, lineHeight: 20, marginVertical: 12 },
-  err: { color: C.red, fontSize: 13, marginTop: 10 }
+  errBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginBottom: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,122,92,0.35)',
+    backgroundColor: 'rgba(255,122,92,0.10)'
+  },
+  err: { color: C.red, fontSize: 13, flex: 1, lineHeight: 18 },
+  errX: { color: C.red, fontSize: 13, fontWeight: '700' }
 })

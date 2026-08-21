@@ -42,7 +42,7 @@ import {
 } from '../model'
 import { readProjectText, type LoadedProject } from '../projects'
 import type { ProjectDoc } from '../model'
-import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper, white } from './bits'
+import { b, Bar, C, Chip, MixGlyph, RoundBtn, Seg, StemTile, Stepper, white } from './bits'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -854,6 +854,18 @@ export default function PlayerScreen({
               <Pressable
                 key={i}
                 onPress={() => engine.seek(lines[i].start)}
+                /* The lyrics are painted on a Skia canvas, so there is no text
+                   in the tree for a screen reader to find — the whole song's
+                   words were silent. These invisible tap targets sit exactly
+                   over each line, so they are the natural place to put them. */
+                accessibilityRole="button"
+                accessibilityLabel={
+                  // The explicit label replaces the composed one, so the 🎤
+                  // marker rendered inside this same Pressable has to be said
+                  // here or it is lost.
+                  mask?.[i] === true ? `${lines[i].text}. Your turn.` : lines[i].text
+                }
+                accessibilityHint="Jump to this line"
                 style={{ position: 'absolute', left: LYR_PAD, right: LYR_PAD, top: b.y, height: b.height }}
               >
                 {mask?.[i] === true && (
@@ -899,7 +911,7 @@ export default function PlayerScreen({
         <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
       <View style={s.hdr} pointerEvents="box-none">
-        <Pressable onPress={onBack} hitSlop={12}>
+        <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel="Back to library">
           <Text style={s.back}>‹</Text>
         </Pressable>
         <StemTile hue={0} size={46} />
@@ -926,7 +938,13 @@ export default function PlayerScreen({
         {/* Song sheet. Three dots rather than a gear: a gear glyph has no
             guaranteed text presentation on Android and renders as a colour
             emoji next to a monochrome header. */}
-        <Pressable onPress={() => setSheet('song')} hitSlop={12} style={s.songBtn}>
+        <Pressable
+          onPress={() => setSheet('song')}
+          hitSlop={12}
+          style={s.songBtn}
+          accessibilityRole="button"
+          accessibilityLabel="About this song"
+        >
           <Text style={s.songBtnText}>•••</Text>
         </Pressable>
       </View>
@@ -940,7 +958,12 @@ export default function PlayerScreen({
       </View>
       <View style={[s.foot, navPad]}>
         {countInSt && (
-          <Text style={s.countInFoot}>
+          <Text
+            style={s.countInFoot}
+            /* Rendered as a run of ● and ○ characters, which a screen reader
+               reads out one bullet at a time. */
+            accessibilityLabel={`Count-in, beat ${countInSt.done} of ${countInSt.total}`}
+          >
             {Array.from({ length: countInSt.total }, (_, i) =>
               i < countInSt.done ? '●' : '○'
             ).reduce<string[]>((acc, d, i) => {
@@ -962,28 +985,35 @@ export default function PlayerScreen({
               }}
               color="rgba(255,255,255,0.85)"
               height={26}
+              label="Position"
+              valueText={(v) => fmtTime(v * engine.duration)}
             />
           </View>
           <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
         </View>
         <View style={s.btnRow}>
-          <RoundBtn onPress={() => setSheet('mixer')}>
+          <RoundBtn onPress={() => setSheet('mixer')} label="Mixer">
             <MixGlyph />
           </RoundBtn>
-          <RoundBtn onPress={() => engine.seek(0)}>
+          <RoundBtn onPress={() => engine.seek(0)} label="Back to start">
             {/* ︎ keeps the glyph monochrome (no emoji rendering) */}
             <Text style={s.toStartText}>{'⏮︎'}</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => engine.seekBy(-5)}>
+          <RoundBtn onPress={() => engine.seekBy(-5)} label="Back 5 seconds">
             <Text style={s.skipText}>−5s</Text>
           </RoundBtn>
-          <Pressable onPress={() => engine.toggle()} style={s.play}>
+          <Pressable
+            onPress={() => engine.toggle()}
+            style={s.play}
+            accessibilityRole="button"
+            accessibilityLabel={playing ? 'Pause' : 'Play'}
+          >
             <Text style={s.playText}>{playing ? '❚❚' : '▶'}</Text>
           </Pressable>
-          <RoundBtn onPress={() => engine.seekBy(5)}>
+          <RoundBtn onPress={() => engine.seekBy(5)} label="Forward 5 seconds">
             <Text style={s.skipText}>+5s</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => setSheet('practice')}>
+          <RoundBtn onPress={() => setSheet('practice')} label="Practice">
             <Text style={{ fontSize: 19 }}>🎤</Text>
           </RoundBtn>
         </View>
@@ -996,10 +1026,27 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
+        <Pressable
+          style={b.sheetWrap}
+          onPress={() => setSheet('none')}
+          /* Touch handler only. Left accessible it becomes ONE element over the
+             whole modal reading "Close, button", and everything inside — the
+             faders, the chips, the steppers — is unreachable behind it. The
+             two-finger escape gesture below is the screen-reader way out. */
+          accessible={false}
+        >
+          <Pressable
+            style={[b.sheet, sheetPad]}
+            onPress={() => {}}
+            accessible={false}
+            onAccessibilityEscape={() => setSheet('none')}
+          >
             <View style={b.grab} />
             <Text style={b.sheetTitle}>Mixer</Text>
+            {/* The lane rows had no scroll container at all, so past roughly a
+                dozen lanes they clipped with no way to reach them — and the
+                44 pt fader targets below bring that cliff closer. */}
+            <ScrollView>
             {tracks.map((t) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
@@ -1021,11 +1068,15 @@ export default function PlayerScreen({
                       color={meta.color}
                       height={22}
                       track="rgba(255,255,255,0.14)"
+                      label={`${meta.label} volume`}
                     />
                   </View>
                   <Pressable
                     hitSlop={4}
                     onPress={() => engine.setMuted(t.id, !t.muted)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Mute ${meta.label}`}
+                    accessibilityState={{ selected: t.muted }}
                     style={[s.msBtn, t.muted && { backgroundColor: C.red, borderColor: C.red }]}
                   >
                     <Text style={[s.msText, t.muted && { color: '#1d0f0d' }]}>M</Text>
@@ -1033,6 +1084,9 @@ export default function PlayerScreen({
                   <Pressable
                     hitSlop={4}
                     onPress={() => engine.setSolo(t.id, !t.solo)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Solo ${meta.label}`}
+                    accessibilityState={{ selected: t.solo }}
                     style={[s.msBtn, t.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
                   >
                     <Text style={[s.msText, t.solo && { color: C.amberInk }]}>S</Text>
@@ -1040,6 +1094,7 @@ export default function PlayerScreen({
                 </View>
               )
             })}
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
@@ -1051,8 +1106,21 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
+        <Pressable
+          style={b.sheetWrap}
+          onPress={() => setSheet('none')}
+          /* Touch handler only. Left accessible it becomes ONE element over the
+             whole modal reading "Close, button", and everything inside — the
+             faders, the chips, the steppers — is unreachable behind it. The
+             two-finger escape gesture below is the screen-reader way out. */
+          accessible={false}
+        >
+          <Pressable
+            style={[b.sheet, sheetPad]}
+            onPress={() => {}}
+            accessible={false}
+            onAccessibilityEscape={() => setSheet('none')}
+          >
             <View style={b.grab} />
             <Text style={b.sheetTitle}>{project.name}</Text>
             <ScrollView>
@@ -1099,7 +1167,16 @@ export default function PlayerScreen({
                             'read, so this row fills in a moment after the beat itself is found.'
                           : canAnalyse
                             ? 'Nothing has read the stems yet.'
-                            : Object.keys(stemFiles).length === 0
+                            : // Whether the song is SPLIT is a fact about its
+                              // lanes, which is what the header says two lines
+                              // up ("6 stems"). This asked stemFiles instead —
+                              // derived from doc.stemHashes — and the bundled
+                              // sample's project.json has no stemHashes at all,
+                              // so the one song every new singer opens first
+                              // announced "Not split yet" beside its own six
+                              // lanes and its six-lane mixer. originalOnly is
+                              // the signal the header already trusts.
+                              originalOnly
                               ? 'Not split yet — the beat is read from the drums, so it waits for the split.'
                               : 'Songs from the computer arrive with their beat already in them.'}
                 </Text>
@@ -1214,8 +1291,21 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
+        <Pressable
+          style={b.sheetWrap}
+          onPress={() => setSheet('none')}
+          /* Touch handler only. Left accessible it becomes ONE element over the
+             whole modal reading "Close, button", and everything inside — the
+             faders, the chips, the steppers — is unreachable behind it. The
+             two-finger escape gesture below is the screen-reader way out. */
+          accessible={false}
+        >
+          <Pressable
+            style={[b.sheet, sheetPad]}
+            onPress={() => {}}
+            accessible={false}
+            onAccessibilityEscape={() => setSheet('none')}
+          >
             <ScrollView bounces={false}>
               <View style={b.grab} />
               <Text style={b.sheetTitle}>Practice</Text>
@@ -1252,31 +1342,37 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>Metronome</Text>
-                <View style={b.segs}>
+                {/* Three different control semantics used to share one wrapping
+                    row of identical amber pills: a Click toggle, a three-way
+                    count-in choice, and an Accent toggle. Nothing told the
+                    singer that tapping "1 bar" clears "No count-in" while
+                    tapping "Accent on" clears nothing.
+
+                    The exclusive choice is a Seg now — it already looks like a
+                    picker with one winner. The toggles keep the pill shape and
+                    sit on their own row, and they are named for the THING
+                    rather than its state: a chip reading "Click off" while
+                    unlit made the label and the highlight two answers to the
+                    same question. Lit means on, everywhere on this sheet. */}
+                <Seg
+                  segments={[
+                    { key: '0', label: 'No count-in' },
+                    { key: '1', label: beatInfo ? '1 bar' : '3 s' },
+                    { key: '2', label: beatInfo ? '2 bars' : '6 s' }
+                  ]}
+                  active={String(met.countInBars)}
+                  onSelect={(k) => setMet((m) => ({ ...m, countInBars: Number(k) }))}
+                />
+                <View style={[b.segs, { marginTop: 10 }]}>
                   {beatInfo != null && (
                     <Chip
-                      label={met.click ? 'Click on' : 'Click off'}
+                      label="Click"
                       active={met.click}
                       onPress={() => setMet((m) => ({ ...m, click: !m.click }))}
                     />
                   )}
                   <Chip
-                    label="No count-in"
-                    active={met.countInBars === 0}
-                    onPress={() => setMet((m) => ({ ...m, countInBars: 0 }))}
-                  />
-                  <Chip
-                    label={beatInfo ? '1 bar' : '3 s'}
-                    active={met.countInBars === 1}
-                    onPress={() => setMet((m) => ({ ...m, countInBars: 1 }))}
-                  />
-                  <Chip
-                    label={beatInfo ? '2 bars' : '6 s'}
-                    active={met.countInBars === 2}
-                    onPress={() => setMet((m) => ({ ...m, countInBars: 2 }))}
-                  />
-                  <Chip
-                    label={met.accent ? 'Accent on' : 'Accent off'}
+                    label="Accent"
                     active={met.accent}
                     onPress={() => setMet((m) => ({ ...m, accent: !m.accent }))}
                   />
@@ -1314,17 +1410,22 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>Vocal training</Text>
+                {/* Same split as the metronome. "Off · By time · By lyric
+                    lines" read as one three-way choice, so with training OFF
+                    and the mode set to lines the sheet lit "By lyric lines" —
+                    which says the opposite of the truth. The switch is a
+                    toggle and stands alone; the mode is a picker. */}
                 <View style={b.segs}>
-                  <Chip label={training ? 'On' : 'Off'} active={training} onPress={armTraining} />
-                  <Chip
-                    label="By time"
-                    active={trainCfg.mode === 'time'}
-                    onPress={() => setTrainCfg((c) => ({ ...c, mode: 'time' }))}
-                  />
-                  <Chip
-                    label="By lyric lines"
-                    active={trainCfg.mode === 'lines'}
-                    onPress={() => setTrainCfg((c) => ({ ...c, mode: 'lines' }))}
+                  <Chip label="Training" active={training} onPress={armTraining} />
+                </View>
+                <View style={{ marginTop: 10 }}>
+                  <Seg
+                    segments={[
+                      { key: 'time', label: 'By time' },
+                      { key: 'lines', label: 'By lyric lines' }
+                    ]}
+                    active={trainCfg.mode}
+                    onSelect={(k) => setTrainCfg((c) => ({ ...c, mode: k as 'time' | 'lines' }))}
                   />
                 </View>
                 {trainCfg.mode === 'time' ? (
@@ -1361,7 +1462,14 @@ export default function PlayerScreen({
                     ? `Guide plays ${trainCfg.periodSec} s, then you take the next ${trainCfg.periodSec} s.`
                     : `Hear ${trainCfg.hear} line${trainCfg.hear > 1 ? 's' : ''}, then sing ${trainCfg.sing} on your own — marked 🎤 in the lyrics.`}
                 </Text>
-                <View style={[b.segs, { marginTop: 12 }]}>
+                {/* These decide WHICH lanes drop out when it is your turn, and
+                    they arrived with no label at all — a row of lane names
+                    under a hint about line counts, which reads as decoration.
+                    Multi-select toggles, so they stay pills. */}
+                <Text style={[b.hint, { marginTop: 14, marginBottom: 2 }]}>
+                  Lanes that drop out when you sing:
+                </Text>
+                <View style={[b.segs, { marginTop: 6 }]}>
                   {stemIds.map((id) => (
                     <Chip
                       key={id}

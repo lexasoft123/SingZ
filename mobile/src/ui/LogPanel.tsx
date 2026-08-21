@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native'
+import { Alert, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { clearLog, fmtTime, formatLog, logEntries, onLogLine, type LogEntry } from '../log'
 import { C } from './bits'
@@ -39,6 +39,19 @@ export default function LogPanel({
     void Share.share({ message: formatLog(entries) })
   }, [entries])
 
+  /* On a release build there is no inspector and no run-as: this log is the
+     whole record of what happened. One unconfirmed tap used to wipe it. */
+  const confirmClear = useCallback(() => {
+    Alert.alert('Clear the log?', 'This is the only record of what the app has done.', [
+      { text: 'Keep it', style: 'cancel' },
+      {
+        text: 'Clear',
+        style: 'destructive',
+        onPress: () => void clearLog().then(() => setEntries([]))
+      }
+    ])
+  }, [])
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={[s.sheet, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 10 }]}>
@@ -46,13 +59,18 @@ export default function LogPanel({
           <Text style={s.title}>Log</Text>
           <Text style={s.count}>{entries.length} lines</Text>
           <View style={s.actions}>
-            <Pressable hitSlop={8} onPress={share}>
+            <Pressable hitSlop={8} onPress={share} accessibilityRole="button" accessibilityLabel="Share the log">
               <Text style={s.link}>Share</Text>
             </Pressable>
-            <Pressable hitSlop={8} onPress={() => void clearLog().then(() => setEntries([]))}>
+            <Pressable
+              hitSlop={8}
+              onPress={confirmClear}
+              accessibilityRole="button"
+              accessibilityLabel="Clear the log"
+            >
               <Text style={s.link}>Clear</Text>
             </Pressable>
-            <Pressable hitSlop={8} onPress={onClose}>
+            <Pressable hitSlop={8} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close the log">
               <Text style={s.link}>Close</Text>
             </Pressable>
           </View>

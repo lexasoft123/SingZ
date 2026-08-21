@@ -123,21 +123,30 @@ export function MixGlyph({ color = W_GLYPH }: { color?: string }): React.JSX.Ele
   )
 }
 
+/**
+ * A round icon button. `label` is not optional in spirit — every one of these
+ * holds a glyph and nothing else, so without it a screen reader announces
+ * "button" and leaves the singer to guess which of the six it landed on.
+ */
 export function RoundBtn({
   size = 47,
   onPress,
   children,
-  bg = C.btnBg
+  bg = C.btnBg,
+  label
 }: {
   size?: number
   onPress: () => void
   children: React.ReactNode
   bg?: string
+  label?: string
 }): React.JSX.Element {
   return (
     <Pressable
       onPress={onPress}
       hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={label}
       style={({ pressed }) => ({
         width: size,
         height: size,
@@ -172,6 +181,11 @@ export function Chip({
       onPress={onPress}
       disabled={disabled}
       hitSlop={6}
+      // Chips are toggles and multi-selects: the lit state IS the value, so it
+      // has to travel to the screen reader as state rather than as colour.
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: active, disabled: !!disabled }}
       style={[
         b.chip,
         icon != null && { flexDirection: 'row', alignItems: 'center', gap: 6 },
@@ -199,11 +213,26 @@ export function Stepper({
   return (
     <View style={b.stepRow}>
       <Text style={b.stepLabel}>{label}</Text>
-      <Pressable style={b.stepBtn} hitSlop={6} onPress={() => onStep(-1)}>
+      {/* "−" and "+" alone say nothing out loud; name the thing they move. */}
+      <Pressable
+        style={b.stepBtn}
+        hitSlop={6}
+        onPress={() => onStep(-1)}
+        accessibilityRole="button"
+        accessibilityLabel={`Decrease ${label}`}
+      >
         <Text style={b.stepBtnText}>−</Text>
       </Pressable>
-      <Text style={b.stepValue}>{valueText}</Text>
-      <Pressable style={b.stepBtn} hitSlop={6} onPress={() => onStep(1)}>
+      <Text style={b.stepValue} accessibilityLabel={`${label}, ${valueText}`}>
+        {valueText}
+      </Text>
+      <Pressable
+        style={b.stepBtn}
+        hitSlop={6}
+        onPress={() => onStep(1)}
+        accessibilityRole="button"
+        accessibilityLabel={`Increase ${label}`}
+      >
         <Text style={b.stepBtnText}>+</Text>
       </Pressable>
       {suffix ? <Text style={b.stepSuffix}>{suffix}</Text> : null}
@@ -233,6 +262,10 @@ export function Seg({
           <Pressable
             key={s.key}
             onPress={() => onSelect(s.key)}
+            // One of these wins; `selected` is what says so out loud.
+            accessibilityRole="button"
+            accessibilityLabel={s.label}
+            accessibilityState={{ selected: on }}
             style={[b.segBtn, on && { backgroundColor: C.amber }]}
           >
             {s.icon != null && <Image source={s.icon} style={{ width: 13, height: 13 }} />}
@@ -253,7 +286,9 @@ export function Bar({
   onCommit,
   color,
   height = 22,
-  track = W_TRACK
+  track = W_TRACK,
+  label,
+  valueText
 }: {
   value: number
   onChange: (v: number) => void
@@ -261,44 +296,179 @@ export function Bar({
   color: string
   height?: number
   track?: string
+  /** What this bar controls, for the screen reader. */
+  label?: string
+  /** How to say the current value out loud (defaults to a percentage). */
+  valueText?: (v: number) => string
 }): React.JSX.Element {
   const width = useRef(1)
   const last = useRef(0)
-  const handle = useCallback(
+  /* Where the finger landed, and whether it has since moved sideways enough to
+     mean it. The bar claims the responder on touch-DOWN (that is what makes
+     tap-to-set work), and it now sits inside the mixer's ScrollView — so
+     writing the value on grant would set a lane's volume to wherever a finger
+     happened to touch on its way to scrolling past it. Nothing is written
+     until the gesture declares itself: sideways beyond the slop is a drag, a
+     release with no movement is a tap, and a vertical drag is the scroller's,
+     which takes the responder away and leaves the value alone. */
+  const pending = useRef<number | null>(null)
+  const engaged = useRef(false)
+  /** Moved far enough, in any direction, that this is no longer a tap. */
+  const strayed = useRef(false)
+  const origin = useRef({ x: 0, y: 0 })
+  const posOf = (e: GestureResponderEvent): number =>
+    Math.max(0, Math.min(1, e.nativeEvent.locationX / width.current))
+  /* page coordinates are what survive the finger leaving this view; location*
+     is the fallback. Anything non-finite becomes 0 so the comparisons below
+     stay decidable — a NaN makes every `<=` false, which would let a gesture
+     engage by default, which is the opposite of what is wanted here. */
+  const ptOf = (e: GestureResponderEvent): { x: number; y: number } => {
+    const n = e.nativeEvent
+    const x = Number.isFinite(n.pageX) ? n.pageX : n.locationX
+    const y = Number.isFinite(n.pageY) ? n.pageY : n.locationY
+    return { x: Number.isFinite(x) ? x : 0, y: Number.isFinite(y) ? y : 0 }
+  }
+  const SLOP = 6
+
+  const grant = useCallback((e: GestureResponderEvent) => {
+    pending.current = posOf(e)
+    origin.current = ptOf(e)
+    engaged.current = false
+    strayed.current = false
+  }, [])
+
+  const move = useCallback(
     (e: GestureResponderEvent) => {
-      const v = Math.max(0, Math.min(1, e.nativeEvent.locationX / width.current))
+      const p = ptOf(e)
+      const dx = p.x - origin.current.x
+      const dy = p.y - origin.current.y
+      if (Math.abs(dx) > SLOP || Math.abs(dy) > SLOP) strayed.current = true
+      if (!engaged.current) {
+        // Stated positively so it fails CLOSED: only a clearly sideways drag
+        // moves a fader. Anything else is the scroller's gesture passing
+        // through, and must leave the value alone.
+        const sideways = Math.abs(dx) > SLOP && Math.abs(dx) > Math.abs(dy)
+        if (!sideways) return
+        engaged.current = true
+      }
+      const v = posOf(e)
       last.current = v
       onChange(v)
     },
     [onChange]
   )
-  const commit = useCallback(() => {
-    onCommit?.(last.current)
+  const commit = useCallback(
+    (e: GestureResponderEvent) => {
+      // A release that never moved at all is a tap: apply where it landed. One
+      // that strayed without engaging was a scroll that happened to start here.
+      // The release position is checked as well as the moves, because a fast
+      // flick can arrive as down-then-up with no move event in between — and
+      // that must not be mistaken for a tap where it started.
+      const p = ptOf(e)
+      const wandered =
+        strayed.current ||
+        Math.abs(p.x - origin.current.x) > SLOP ||
+        Math.abs(p.y - origin.current.y) > SLOP
+      const tapped = !engaged.current && !wandered && pending.current !== null
+      if (tapped) {
+        last.current = pending.current as number
+        onChange(pending.current as number)
+      }
+      const acted = engaged.current || tapped
+      pending.current = null
+      engaged.current = false
+      strayed.current = false
+      if (acted) onCommit?.(last.current)
+    },
+    [onChange, onCommit]
+  )
+
+  /* The scroller took over. Anything already dragged stands (and still has to
+     commit, or the scrubber's dragPos would stay pinned); an un-engaged
+     gesture writes nothing at all. */
+  const terminate = useCallback(() => {
+    const wasEngaged = engaged.current
+    pending.current = null
+    engaged.current = false
+    strayed.current = false
+    if (wasEngaged) onCommit?.(last.current)
   }, [onCommit])
+  /* Screen-reader stepping. "adjustable" is what makes VoiceOver and TalkBack
+     offer swipe-up/down at all, and without these actions that gesture has
+     nothing to call. */
+  const nudge = useCallback(
+    (dir: 1 | -1) => {
+      const v = Math.max(0, Math.min(1, value + dir * 0.05))
+      last.current = v
+      onChange(v)
+      onCommit?.(v)
+    },
+    [value, onChange, onCommit]
+  )
+  const pct = Math.max(0, Math.min(1, value))
   return (
     <View
-      style={{ height: Math.max(height, 22), justifyContent: 'center' }}
+      /* 44 pt is the documented minimum touch target; this was 22 — half of
+         it — for every mixer fader and 26 for the scrubber. The RAIL stays
+         5 px: what grows is the invisible area a finger may land in. */
+      style={{ height: Math.max(height, 44), justifyContent: 'center' }}
+      /* ViewProps.accessible defaults to false, and iOS maps it straight to
+         isAccessibilityElement — without it VoiceOver cannot focus the bar,
+         never offers swipe-up/down, and onAccessibilityAction is dead. */
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel={label}
+      accessibilityValue={{
+        min: 0,
+        max: 100,
+        now: Math.round(pct * 100),
+        text: valueText ? valueText(pct) : `${Math.round(pct * 100)} percent`
+      }}
+      accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+      onAccessibilityAction={(e) => {
+        // Only the two we declare; 'activate'/'escape'/'magicTap' also arrive
+        // here and must not be read as "move it down".
+        if (e.nativeEvent.actionName === 'increment') nudge(1)
+        else if (e.nativeEvent.actionName === 'decrement') nudge(-1)
+      }}
       onLayout={(e: LayoutChangeEvent) => {
         width.current = Math.max(1, e.nativeEvent.layout.width)
       }}
       onStartShouldSetResponder={() => true}
       onMoveShouldSetResponder={() => true}
-      onResponderGrant={handle}
-      onResponderMove={handle}
+      onResponderGrant={grant}
+      onResponderMove={move}
       onResponderRelease={commit}
-      onResponderTerminate={commit}
+      onResponderTerminate={terminate}
     >
       <View style={{ height: 5, borderRadius: 3, backgroundColor: track, overflow: 'hidden' }}>
         <View
           pointerEvents="none"
           style={{
-            width: `${Math.max(0, Math.min(1, value)) * 100}%`,
+            width: `${pct * 100}%`,
             height: '100%',
             borderRadius: 3,
             backgroundColor: color
           }}
         />
       </View>
+      {/* The knob. Without it a fader at 100% — which every stem is by default
+          — was a solid coloured line with no handle and a track too dim to
+          read: it looked like a divider, not something you could drag. */}
+      <View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          left: `${pct * 100}%`,
+          marginLeft: -7,
+          width: 14,
+          height: 14,
+          borderRadius: 7,
+          backgroundColor: color,
+          borderWidth: 2,
+          borderColor: KIT.bg
+        }}
+      />
     </View>
   )
 }
