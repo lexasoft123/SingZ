@@ -47,7 +47,7 @@ iOS:
 2. `cd ios && LANG=en_US.UTF-8 pod install > /tmp/pod.log 2>&1; echo EXIT=$?`
 3. Boot sim, then `xcodebuild -workspace ios/SingZPlayer.xcworkspace -scheme SingZPlayer -configuration Debug -destination "id=<UDID>" -derivedDataPath ios/build-sim build > /tmp/ios.log 2>&1; echo EXIT=$?`
 4. `xcrun simctl install <UDID> ios/build-sim/Build/Products/Debug-iphonesimulator/SingZPlayer.app`
-5. From the repo root, run the permanent tests sequentially: `node mobile/tests/loop-region.cjs`, `node mobile/tests/seek-memory.cjs`, `node mobile/tests/open-close-memory.cjs` — each prints PASS.
+5. From the repo root, run the permanent tests sequentially: `node mobile/tests/loop-region.cjs`, `node mobile/tests/seek-memory.cjs`, `node mobile/tests/open-close-memory.cjs`, `node mobile/tests/song-sheet-beat.cjs` — each prints PASS. The last one seeds its own two projects in Documents and takes ~90 s; it is the only one that reads a SCREEN rather than the engine (the Song sheet's Beat row, watched through an analysis).
 
 Android:
 1. Boot the AVD if `adb devices` is empty (nohup the emulator binary; wait for sys.boot_completed).

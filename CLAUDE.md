@@ -76,10 +76,15 @@ directions. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
-`offline-cache.cjs`, `custom-track.cjs`, `beats-native-ios.cjs`): CDP over
+`offline-cache.cjs`, `custom-track.cjs`, `beats-native-ios.cjs`,
+`song-sheet-beat.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
-after engine or loading changes. `beats-native-{ios,android}.cjs` are a PAIR
+after engine or loading changes. `song-sheet-beat.cjs` is the one that watches
+a SCREEN rather than the engine: it seeds two phone-library projects (a
+hand-made grid, and a song with nothing detected), opens the Song sheet and
+reads the Beat row through somebody else's analysis — the rule in
+`song-sheet-copy.ts`, which no headless suite can see applied to a real row. `beats-native-{ios,android}.cjs` are a PAIR
 and both are owed: the two bindings marshal differently (iOS builds its dict
 from the core's doubles, Android crosses a JSON line and parses it in Kotlin),
 so a value lost in that text hop is invisible to the iOS half. Both want a
@@ -110,7 +115,12 @@ long song, 3/3 reproducible; the same load never fails unpolled, 4/4). Poll
 the `singz.crumb` pref over `adb run-as` instead, which touches no JS. Debug
 builds only — release APKs have no inspector. Metro also lists *every*
 connected app, so pick the target by `deviceName` or a stray simulator will
-answer your evals while you measure the phone.
+answer your evals while you measure the phone. And its bundles are PER
+PLATFORM: a Metro already warm for iOS still builds Android from cold, which
+outlasts the app's own patience and surfaces as "no debugger target" from a
+dev server answering `packager-status:running` perfectly — pre-build it with
+`curl -s -o /dev/null "http://localhost:<port>/index.bundle?platform=android&dev=true&minify=false"`
+before launching the app.
 **Which emulator answers first and which one can be driven are different
 questions** — debug and release share the applicationId (`com.lexasoft.singz`,
 no `applicationIdSuffix`), so an AVD carrying a *release* build looks
@@ -369,7 +379,14 @@ was driven; the gotchas that follow from it are below.
   `localhost` + `adb reverse`); and on the emulator an `adb`-created
   `files/mlt` is owned by shell and the app cannot open it (`adb root` +
   `chown` to the app uid fixes it; the phone's FUSE grants by path and needs
-  nothing). **`run-as` is useless for diagnosing any of this** — it does not
+  nothing). The same ownership decides whether a SEEDED PROJECT exists at all:
+  a folder pushed into `getExternalFilesDir(null)/SingZ projects` belongs to
+  shell, external-storage FUSE will not hand it to the app, and `listProjects`
+  skips it in a `continue` — no throw, no `listError`, the catalog just lists
+  the projects the app made itself and a driver reports "never listed" against
+  a healthy `libMode=phone`. Read the owner off the library folder rather than
+  parsing `dumpsys` for it: API 36 stopped printing `userId=`, and a regex
+  that misses arrives as a null dereference three steps later. **`run-as` is useless for diagnosing any of this** — it does not
   inherit the app's storage sandbox, so it reports "Permission denied" even
   for directories the app itself created.
 - **Android builds need a JDK 21** (`brew install openjdk@21`; CI pins
