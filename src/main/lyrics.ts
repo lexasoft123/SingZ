@@ -20,6 +20,7 @@ import { markFileDirty } from './sync-dirty'
 import { downloadFile, mmsModelMb, mmsModelPath, mmsModelUrl, modelsDir } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile, spawnEnv } from './separation'
+import { onChildSettled } from './child-exit'
 
 // Fallback transcription only runs when no online lyrics exist, so a bigger
 // one-time download is worth it — turbo is far stronger than `small` on singing.
@@ -540,7 +541,7 @@ export class Transcriber {
         resolve({ ok: false, error: `Could not start whisper-cli: ${err.message}` })
       })
 
-      child.on('exit', (code) => {
+      onChildSettled(child, 'lyrics', (code) => {
         this.child = null
         log('lyrics', `whisper-cli exited with code ${code}`)
         if (this.cancelled) {

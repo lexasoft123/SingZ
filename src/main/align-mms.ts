@@ -8,6 +8,7 @@ import { flacToWav } from './flac'
 import { log } from './log'
 import { isOnnxPack, mmsModelPath, packPython, torchHome } from './models'
 import { spawnEnv } from './separation'
+import { onChildSettled } from './child-exit'
 
 /**
  * Precise word alignment: MMS forced alignment (CTC) through the GPU
@@ -422,7 +423,7 @@ export async function runMmsAlign(
       void rm(dir, { recursive: true, force: true })
       reject(new Error(`Could not start the aligner: ${err.message}`))
     })
-    child.on('exit', (code, signal) => {
+    onChildSettled(child, 'lyrics', (code, signal) => {
       void rm(dir, { recursive: true, force: true })
       // SIGTERM is cancel() doing its job, not a failure: node reports a
       // killed child as code null + a signal (TerminateProcess on Windows

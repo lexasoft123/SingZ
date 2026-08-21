@@ -5,6 +5,7 @@ import { access, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/prom
 import { join } from 'node:path'
 import type { ModelId, ModelInfo, ModelsProgress } from '../shared/types'
 import { log } from './log'
+import { onChildSettled } from './child-exit'
 
 /**
  * Shared local model cache, identical for every way the app runs (dev,
@@ -229,7 +230,7 @@ function untar(archive: string, destDir: string): Promise<void> {
       tail = (tail + c.toString('utf8')).slice(-2000)
     })
     child.on('error', reject)
-    child.on('exit', (code) => {
+    onChildSettled(child, 'models', (code) => {
       if (code === 0) {
         resolve()
       } else {
