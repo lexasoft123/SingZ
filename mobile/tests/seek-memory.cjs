@@ -24,19 +24,31 @@ const BURSTS = parseInt(process.env.BURSTS || '6', 10);
  */
 const MAX_GROWTH_MB = 60 + 12 * BURSTS;
 
+/**
+ * Metro's target list. The timeout is the point: `http.get` has none of its
+ * own, so a Metro that accepts the connection and then stalls — which is what
+ * one busy building a cold bundle does — never settles the promise, and the
+ * driver hangs on this line with nothing printed. The rejection lands in the
+ * caller's `catch` and the retry loop simply asks again.
+ */
 const getJson = (u) =>
   new Promise((res, rej) => {
-    http.get(u, (r) => {
-      let d = '';
-      r.on('data', (c) => (d += c));
-      r.on('end', () => {
-        try {
-          res(JSON.parse(d));
-        } catch (e) {
-          rej(e);
-        }
+    http
+      .get(u, (r) => {
+        let d = '';
+        r.on('data', (c) => (d += c));
+        r.on('end', () => {
+          try {
+            res(JSON.parse(d));
+          } catch (e) {
+            rej(e);
+          }
+        });
+      })
+      .on('error', rej)
+      .setTimeout(5000, function () {
+        this.destroy(new Error('metro /json timed out'));
       });
-    }).on('error', rej);
   });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

@@ -32,6 +32,14 @@ const PORT = process.env.METRO_PORT || '8081';
 const SONG = 'Cached Song';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Metro's target list. The timeout is the point: `http.get` has none of its
+ * own, so a Metro that accepts the connection and then stalls — which is what
+ * one busy building a cold bundle does — never settles the promise, and the
+ * driver hangs on this line with nothing printed. The rejection lands in the
+ * caller's `catch` and the retry loop simply asks again.
+ */
 const getJson = (u) =>
   new Promise((res, rej) => {
     http
@@ -46,7 +54,10 @@ const getJson = (u) =>
           }
         });
       })
-      .on('error', rej);
+      .on('error', rej)
+      .setTimeout(5000, function () {
+        this.destroy(new Error('metro /json timed out'));
+      });
   });
 
 const check = (label, cond, detail) => {
