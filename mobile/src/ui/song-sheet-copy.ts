@@ -1,5 +1,5 @@
 /**
- * Which of its states the song sheet's Beat row is in.
+ * Which of its states a song sheet row is in.
  *
  * The row's value and its hint used to walk the same four-level precedence
  * chain independently, and that is how they drifted: when the progress line
@@ -10,8 +10,11 @@
  * the truth: the stems had just been read, and the grid existed; it is simply
  * not committed until after the key step, so the player has not been told yet.
  *
- * One function, so the two can no longer disagree, and so the rule they share
- * can be tested without a device.
+ * One function, so a row's value and its hint can no longer disagree, and so
+ * the rule they share can be tested without a device. The Key row runs on it
+ * too — it had the identical lie, found on the same device pass: the key
+ * detector stores a "harmonic bed is silent, no key" verdict and the row read
+ * "Not detected yet" over it.
  *
  * The metronome sheet's hint deliberately does NOT use this. Its precedence is
  * grid-before-progress, the reverse of the sheet's: the Beat row answers "what
@@ -20,30 +23,33 @@
  * OLD grid until the new one lands. Both are right; they are different
  * questions. It is therefore not covered by this module's tests.
  */
-export type BeatRowState =
+export type SheetRowState =
   /** This detector is running right now, and the line is about IT. */
   | 'progress'
-  /** A grid is known — stored, hand-made, or just committed. */
+  /** An answer is known — stored, hand-made, or just committed. */
   | 'grid'
-  /** The detector listened and found no beat. A stored answer, not a gap. */
+  /** The detector listened and found nothing. A stored answer, not a gap. */
   | 'verdict'
   /** A run is going, but this row has nothing of its own to show yet. */
   | 'busy'
   /** Nothing is running and nothing is known. */
   | 'idle'
 
-export function beatRowState(a: {
-  /** The progress line, ONLY if it belongs to the beat detector. */
+export function sheetRowState(a: {
+  /** The progress line, ONLY if it belongs to THIS row's detector — the whole
+   *  point of the stage travelling with it. Never the project-wide line. */
   step: string | null
-  /** Is a grid known to the screen? */
+  /** Is an answer known to the screen? */
   hasGrid: boolean
-  /** Is a "no beat here" verdict stored? */
+  /** Is a "nothing here" verdict stored for this detector? */
   verdict: boolean
-  /** Is any detector running for this project? Project-wide on purpose: the
-   *  grid is computed well before it is written, so the beat row is blind for
-   *  the whole key stage and must not claim nothing has happened. */
+  /** Is any detector running for this project? Project-wide on purpose — a row
+   *  whose own detector is not the one running still belongs to the run, and
+   *  must not claim nothing is happening. The Beat row is the case that forced
+   *  it (its grid is computed a whole stage before it is written, so that row
+   *  is blind AND wrong throughout the key stage), but the rule is general. */
   busy: boolean
-}): BeatRowState {
+}): SheetRowState {
   if (a.step) return 'progress'
   if (a.hasGrid) return 'grid'
   if (a.verdict) return 'verdict'

@@ -50,7 +50,7 @@ import SkiaLyrics, {
   type LyricsCue,
   type SkWord
 } from './SkiaLyrics'
-import { beatRowState } from './song-sheet-copy'
+import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
 
 const BG = require('../../assets/bg/player.png')
@@ -423,7 +423,7 @@ export default function PlayerScreen({
   /* Which state the Beat row is in — one decision, so its value and its hint
    * cannot fall through to different leaves. See song-sheet-copy.ts for why
    * the busy case exists at all. */
-  const beatRow = beatRowState({
+  const beatRow = sheetRowState({
     step: stepAt('beat'),
     hasGrid: !!beatInfo,
     verdict: noBeatVerdict,
@@ -435,6 +435,32 @@ export default function PlayerScreen({
     const NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
     return `${NAMES[k.pc % 12]} ${k.minor ? 'minor' : 'major'}`
   })()
+  /* The Key row had the Beat row's bug exactly: the detector stores a "the
+   * harmonic bed is silent, there is no key here" verdict, and the row read
+   * "Not detected yet" over it — a stored answer displayed as a gap. Same
+   * rule, same function. */
+  const noKeyVerdict = settings?.analysisNone?.key !== undefined
+  const keyRow = sheetRowState({
+    step: stepAt('key'),
+    hasGrid: !!keyText,
+    verdict: noKeyVerdict,
+    busy: busyHere
+  })
+  /* All three rows on one rule. `verdict` is hardcoded false because there is
+   * no melody verdict to have: analysisNone is typed {beat, beatMl, key}
+   * (model.ts) — the melody is tracked or it is not. So sheetRowState can
+   * never return 'verdict' here, which is why the row renders no branch for
+   * it; if a melody verdict is ever stored, THIS line is what changes and the
+   * branch comes with it. Melody has no blind window either — it commits
+   * straight after its own step — so only 'busy' is doing new work, and it is
+   * the same 'busy' Key has: during the beat stage both are queued, and until
+   * now they said different things about the identical situation. */
+  const melodyRow = sheetRowState({
+    step: stepAt('melody'),
+    hasGrid: !!settings?.melody,
+    verdict: false,
+    busy: busyHere
+  })
   const detectAgain = useCallback(() => {
     if (!project.dir) return
     // FORCED: every stamp says nothing needs doing — that is exactly why the
@@ -677,6 +703,8 @@ export default function PlayerScreen({
        *  shows it: null on a row whose detector is not the one running. */
       analysisStage: analysisAt?.stage ?? null,
       beatRowState: beatRow,
+      keyRowState: keyRow,
+      melodyRowState: melodyRow,
       beatRow: stepAt('beat'),
       keyRow: stepAt('key'),
       melodyRow: stepAt('melody'),
@@ -1128,13 +1156,35 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>Key</Text>
-                <Text style={s.songVal}>{stepAt('key') ?? keyText ?? 'Not detected yet'}</Text>
+                <Text style={s.songVal}>
+                  {keyRow === 'progress'
+                    ? stepAt('key')
+                    : keyRow === 'grid'
+                      ? keyText
+                      : keyRow === 'verdict'
+                        ? 'No key in these stems'
+                        : keyRow === 'busy'
+                          ? 'Reading the song…'
+                          : 'Not detected yet'}
+                </Text>
+                {keyRow === 'verdict' && (
+                  <Text style={b.hint}>
+                    The harmony the key is read from — the guitar, piano and bass lanes —
+                    is silent here, so there is nothing to read it off. That answer is
+                    remembered rather than re-read on every open.
+                  </Text>
+                )}
               </View>
               <View style={b.sec}>
                 <Text style={b.secLab}>Melody</Text>
                 <Text style={s.songVal}>
-                  {stepAt('melody') ??
-                    (settings?.melody ? 'Tracked from the vocals' : 'Not tracked yet')}
+                  {melodyRow === 'progress'
+                    ? stepAt('melody')
+                    : melodyRow === 'grid'
+                      ? 'Tracked from the vocals'
+                      : melodyRow === 'busy'
+                        ? 'Reading the song…'
+                        : 'Not tracked yet'}
                 </Text>
                 <Text style={b.hint}>
                   The sung line under the lyrics, and what the pitch strip draws.
