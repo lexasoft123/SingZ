@@ -214,6 +214,33 @@ describe('analyzeProject', () => {
     expect(steps.some((s) => s.startsWith('Tracking the melody'))).toBe(true)
   })
 
+  test('every progress line says which detector it is about', async () => {
+    // The song sheet shows a line against the detector it belongs to. When the
+    // stage did not travel with the line, the project-wide text sat under
+    // `Beat` — so a hand-tuned grid vanished behind "Reading the key…" along
+    // with its promise that nothing here re-detects over it. Asserting only
+    // that some line mentions the melody (the test above) cannot see that:
+    // the text was always right, it was the ATTRIBUTION that was missing.
+    const w = world(doc())
+    const seen: { msg: string; stage: string }[] = []
+    await analyzeProject('T', SIX, {
+      deps: w.deps,
+      onStep: (msg, _frac, stage) => seen.push({ msg, stage })
+    })
+    // All three detectors reported, and no line arrived unattributed.
+    expect(new Set(seen.map((x) => x.stage))).toEqual(new Set(['beat', 'key', 'melody']))
+    expect(seen.every((x) => typeof x.stage === 'string' && x.stage.length > 0)).toBe(true)
+    // …and each line is filed under the detector that emitted it, which is the
+    // property the sheet reads. A line about the key must never be a 'beat'.
+    const stageOf = (needle: string): string[] =>
+      seen.filter((x) => x.msg.includes(needle)).map((x) => x.stage)
+    expect(stageOf('beat')).toEqual(expect.arrayContaining(['beat']))
+    expect(stageOf('beat').every((st) => st === 'beat')).toBe(true)
+    expect(stageOf('key')).toEqual(['key'])
+    expect(stageOf('melody').every((st) => st === 'melody')).toBe(true)
+    expect(stageOf('melody').length).toBeGreaterThan(0)
+  })
+
   test('only the melody wanted → nothing crosses to the far side at all', async () => {
     const w = world(doc({ beat: autoGrid(), key: { pc: 0, minor: false, detVersion: KEY_DETECT_VERSION } }))
     await analyzeProject('T', SIX, { deps: w.deps })

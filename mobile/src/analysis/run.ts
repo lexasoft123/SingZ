@@ -19,6 +19,7 @@ import { log } from '../log'
 import type { BeatInfo, KeyInfo, LyricLine, MelodyInfo } from '../model'
 import { realAnalysisDeps } from './deps'
 import { analyzeProject } from './pipeline'
+import type { AnalysisStage } from './pipeline'
 
 export const ANALYSIS_EVENT = 'singzAnalysis'
 
@@ -39,6 +40,9 @@ export interface AnalysisProgress {
   dir: string
   text: string
   frac: number
+  /** Which detector this line is about, so a listener can show it against
+   *  that detector rather than against the first row on the screen. */
+  stage: AnalysisStage
 }
 
 type Listener = (p: AnalysisProgress | null) => void
@@ -102,7 +106,7 @@ async function pump(): Promise<void> {
   running = job
   const { dir } = job
   try {
-    setProgress({ dir, text: 'Getting ready…', frac: 0 })
+    setProgress({ dir, text: 'Getting ready…', frac: 0, stage: 'start' })
     // What the partial events already delivered — the final event must not
     // carry it again: the player would set the same grid twice, and
     // engine.setBeats restarts a count-in that is running (a re-armed click
@@ -114,7 +118,7 @@ async function pump(): Promise<void> {
     const res = await analyzeProject(dir, job.stems, {
       lyrics: job.lyrics,
       force: job.force === true,
-      onStep: (text, frac) => setProgress({ dir, text, frac }),
+      onStep: (text, frac, stage) => setProgress({ dir, text, frac, stage }),
       // The grid is on disk a minute before the melody: tell the player now,
       // so the metronome lights up when the beat is found, not when pYIN is
       // done with the vocals.

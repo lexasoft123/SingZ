@@ -57,6 +57,14 @@ import type { BeatInfo, KeyInfo, LyricLine, MelodyInfo, ProjectDoc } from '../mo
 import { log } from '../log'
 import type { MonoStem } from './host'
 
+/** Which detector a progress line is about. The line itself is written for
+ *  the singer ("Reading the key…"), so it says nothing about WHICH row of the
+ *  song sheet it belongs under — and a project-wide line shown under `Beat`
+ *  claimed the beat was still being looked for while the key ran, wiping a
+ *  hand-tuned grid off the screen along with its promise never to re-detect
+ *  over it. The stage travels with the line so each row can show its own. */
+export type AnalysisStage = 'start' | 'beat' | 'key' | 'melody'
+
 /** What one project needs, judged from its doc alone. */
 export interface AnalysisPlan {
   beat: boolean
@@ -294,7 +302,7 @@ export async function analyzeProject(
   stems: Record<string, string>,
   opts: {
     lyrics?: { lines: LyricLine[] } | null
-    onStep?: (msg: string, frac: number) => void
+    onStep?: (msg: string, frac: number, stage: AnalysisStage) => void
     /** Called after each write lands — the grid is on disk a minute before
      *  the melody is, and a player showing the song should not wait. */
     onCommit?: (fresh: FreshAnalysis) => void
@@ -350,7 +358,7 @@ export async function analyzeProject(
     // files join the stamp because the grid that comes out depends on them.
     let ml: MlGrid | null = null
     if (plan.beat && mlNow) {
-      step('Listening for the beat…', 0.01)
+      step('Listening for the beat…', 0.01, 'beat')
       const t = Date.now()
       ml = await host.mlGrid(project, mixIds.map(rel))
       ms.ml = Date.now() - t
@@ -407,7 +415,7 @@ export async function analyzeProject(
       // wording exists for.
       const beatsFast =
         beatStems.every((id) => /\.wav$/i.test(rel(id))) && deps.host.beatsAreNative?.() !== false
-      step(beatsFast ? 'Finding the beat…' : 'Reading the stems…', 0.3)
+      step(beatsFast ? 'Finding the beat…' : 'Reading the stems…', 0.3, 'beat')
       const t = Date.now()
       const lines = opts.lyrics?.lines ?? null
       const det = await host.detectBeats(project, {
@@ -455,7 +463,7 @@ export async function analyzeProject(
     // in the finally below is what still guarantees it.
 
     if (plan.key && (keyInst.length > 0 || stems.bass)) {
-      step('Reading the key…', 0.45)
+      step('Reading the key…', 0.45, 'key')
       const t = Date.now()
       const k = await host.estimateKeyFromStems(
         project,
@@ -478,10 +486,10 @@ export async function analyzeProject(
     }
 
     if (plan.melody && stems.vocals) {
-      step('Tracking the melody…', 0.5)
+      step('Tracking the melody…', 0.5, 'melody')
       const t = Date.now()
       const m = await host.trackMelody(project, rel('vocals'), (p) =>
-        step(`Tracking the melody · ${Math.round(p * 100)}%`, 0.5 + 0.5 * p)
+        step(`Tracking the melody · ${Math.round(p * 100)}%`, 0.5 + 0.5 * p, 'melody')
       )
       ms.melody = Date.now() - t
       // Tracked from THIS project's vocals, so it fits by construction — the
