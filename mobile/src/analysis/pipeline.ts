@@ -32,8 +32,10 @@
  *    computed from. Which song is on SCREEN is the caller's jobSeq business.
  *  - Order is beats → key → melody, and the doc is written after beats+key
  *    and again after melody: the grid is what the phone itself plays
- *    (metronome, count-in) and it is cheap; the melody is a minute of pYIN,
- *    and a process killed in that minute still leaves the useful half saved.
+ *    (metronome, count-in) and it is cheap; the melody goes last, and a
+ *    process killed while it runs still leaves the useful half saved. (It is
+ *    seconds in the core now, minutes on the worklet fallback — the split
+ *    write earns its keep on the fallback and costs nothing on the core.)
  *
  * Memory: NOTHING crosses a JS runtime here any more. The grid, the key and
  * the melody all read their own stem files in the core (native/core —
@@ -373,9 +375,10 @@ export async function analyzeProject(
     }
   }
   // Could the lattice run HERE? Models + binding + every mix stem readable
-  // by the core (WAV — the split's own output; a copied desktop project's
-  // FLAC simply has no phone-ml, like a packless desktop). Decided before
-  // planning, because an old "no grid" verdict binds or not by this.
+  // by the core — WAV always, FLAC where the installed native carries the
+  // reader (coreExt, just below); a stem it cannot read simply has no
+  // phone-ml, like a packless desktop. Decided before planning, because an
+  // old "no grid" verdict binds or not by this.
   const mixIds = ['drums', 'bass', 'vocals', ...INST].filter((id) => stems[id])
   // "Readable by the core" is wav — or flac on a build whose native carries
   // the FLAC reader (Phase 5). The probe asks the INSTALLED binary; absent
