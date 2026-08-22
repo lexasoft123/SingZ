@@ -42,7 +42,7 @@ import {
 } from '../model'
 import { readProjectText, type LoadedProject } from '../projects'
 import type { ProjectDoc } from '../model'
-import { b, Bar, C, Chip, MixGlyph, RoundBtn, Seg, StemTile, Stepper, white } from './bits'
+import { b, Bar, C, Chip, MixGlyph, RoundBtn, Seg, Sheet, StemTile, Stepper, white } from './bits'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -1157,21 +1157,7 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable
-          style={b.sheetWrap}
-          onPress={() => setSheet('none')}
-          /* Touch handler only. Left accessible it becomes ONE element over the
-             whole modal reading "Close, button", and everything inside — the
-             faders, the chips, the steppers — is unreachable behind it. The
-             two-finger escape gesture below is the screen-reader way out. */
-          accessible={false}
-        >
-          <Pressable
-            style={[b.sheet, sheetPad]}
-            onPress={() => {}}
-            accessible={false}
-            onAccessibilityEscape={() => setSheet('none')}
-          >
+        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <View style={b.grab} />
             <Text style={b.sheetTitle}>Mixer</Text>
             {/* The lane rows had no scroll container at all, so past roughly a
@@ -1226,8 +1212,7 @@ export default function PlayerScreen({
               )
             })}
             </ScrollView>
-          </Pressable>
-        </Pressable>
+        </Sheet>
       </Modal>
 
       {/* ---------- Song sheet: what is known about this song ---------- */}
@@ -1237,21 +1222,7 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable
-          style={b.sheetWrap}
-          onPress={() => setSheet('none')}
-          /* Touch handler only. Left accessible it becomes ONE element over the
-             whole modal reading "Close, button", and everything inside — the
-             faders, the chips, the steppers — is unreachable behind it. The
-             two-finger escape gesture below is the screen-reader way out. */
-          accessible={false}
-        >
-          <Pressable
-            style={[b.sheet, sheetPad]}
-            onPress={() => {}}
-            accessible={false}
-            onAccessibilityEscape={() => setSheet('none')}
-          >
+        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <View style={b.grab} />
             <Text style={b.sheetTitle}>{project.name}</Text>
             <ScrollView>
@@ -1411,8 +1382,7 @@ export default function PlayerScreen({
                 </Text>
               </View>
             </ScrollView>
-          </Pressable>
-        </Pressable>
+        </Sheet>
       </Modal>
 
       {/* ---------- Practice sheet ---------- */}
@@ -1422,21 +1392,7 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable
-          style={b.sheetWrap}
-          onPress={() => setSheet('none')}
-          /* Touch handler only. Left accessible it becomes ONE element over the
-             whole modal reading "Close, button", and everything inside — the
-             faders, the chips, the steppers — is unreachable behind it. The
-             two-finger escape gesture below is the screen-reader way out. */
-          accessible={false}
-        >
-          <Pressable
-            style={[b.sheet, sheetPad]}
-            onPress={() => {}}
-            accessible={false}
-            onAccessibilityEscape={() => setSheet('none')}
-          >
+        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <ScrollView bounces={false}>
               <View style={b.grab} />
               <Text style={b.sheetTitle}>Practice</Text>
@@ -1633,8 +1589,7 @@ export default function PlayerScreen({
                 )}
               </View>
             </ScrollView>
-          </Pressable>
-        </Pressable>
+        </Sheet>
       </Modal>
     </View>
   )
