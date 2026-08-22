@@ -42,7 +42,7 @@ import {
 } from '../model'
 import { readProjectText, type LoadedProject } from '../projects'
 import type { ProjectDoc } from '../model'
-import { b, Bar, C, Chip, MixGlyph, RoundBtn, Seg, Sheet, StemTile, Stepper, white } from './bits'
+import { b, Bar, C, Chip, MicGlyph, MixGlyph, RoundBtn, Seg, Sheet, StemTile, Stepper, white } from './bits'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -1025,6 +1025,11 @@ export default function PlayerScreen({
         )}
         {training && ducked.length > 0 && (
           <View style={s.youChip}>
+            {/* The one colour emoji left in the header, and deliberately. It is
+                not an icon in a row of icons — it is a QUOTE of the 🎤 that
+                marks the lines you sing, and this badge exists to announce
+                exactly those. Matching the drawn transport glyph here would
+                break the only thing it is for. */}
             <Text style={s.youChipText}>YOU SING 🎤</Text>
           </View>
         )}
@@ -1145,7 +1150,7 @@ export default function PlayerScreen({
             <Text style={s.skipText}>+5s</Text>
           </RoundBtn>
           <RoundBtn onPress={() => setSheet('practice')} label="Practice">
-            <Text style={{ fontSize: 19 }}>🎤</Text>
+            <MicGlyph />
           </RoundBtn>
         </View>
       </View>
