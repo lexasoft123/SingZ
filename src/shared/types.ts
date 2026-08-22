@@ -420,6 +420,23 @@ export interface SingzApi {
   cancelSeparation(): Promise<void>
   /** Does the installed splitter pack include the Beat This! beat model? */
   beatsMlAvailable(): Promise<{ ok: true; available: boolean }>
+  /** Is singz-analyze in this build? The core's own melody tracker. */
+  melodyNativeAvailable(): Promise<{ ok: true; available: boolean }>
+  /** Track the melody of a REGISTERED stem file through the C++ core.
+   *  The caller must check `detVersion` against PITCH_DETECT_VERSION and
+   *  fall back loudly on a mismatch — a stale vendored binary must be a
+   *  visible downgrade, never a silent one. */
+  trackMelodyNative(path: string): Promise<{
+    ok: boolean
+    error?: string
+    f0?: Float32Array
+    raw?: Float32Array
+    rms?: Float32Array
+    hopSec?: number
+    detVersion?: number
+  }>
+  cancelMelodyNative(): Promise<{ ok: true }>
+  onMelodyNativeProgress(cb: (p: number) => void): () => void
   /** Run ML beat/downbeat detection on raw mono float32 PCM at `sr` (22050). */
   beatsMlDetect(pcm: ArrayBuffer, sr: number): Promise<BeatsMlResult>
   /** Beat-model progress (0..1) while beatsMlDetect runs. Returns unsubscribe. */

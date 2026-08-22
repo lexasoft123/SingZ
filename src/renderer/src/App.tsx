@@ -698,6 +698,7 @@ export default function App(): React.JSX.Element {
       // being left, not the one arriving.
       melodyWorkerRef.current?.terminate()
       melodyWorkerRef.current = null
+      void window.singz.cancelMelodyNative() // the core's child dies with the song too
       vocalsBufRef.current = null
       stemPathsRef.current = null
       audibleIdsRef.current = []
@@ -1433,6 +1434,7 @@ export default function App(): React.JSX.Element {
     ) {
       storedMelodyRef.current = null
       ;(window as { __melody?: unknown }).__melody = {
+        src: 'stored',
         f0: stored.f0,
         hopSec: stored.info.hopSec,
         stored: true
@@ -1455,6 +1457,42 @@ export default function App(): React.JSX.Element {
     const seq = loadSeq.current
     const path = stemPathsRef.current?.vocals ?? null
     void (async () => {
+      // The C++ core first (singz-analyze, spawned by main like whisper-cli).
+      // It reads the stem FILE at the file's own rate — the same input
+      // discipline melodyInput enforces below — and the parity gates hold it
+      // bit-identical to the worker's TS, so which one ran is invisible in
+      // the line and visible only in __melody.src. The worker survives as
+      // the fallback for a build with no binary, and every fallback says so
+      // out loud: silent substitution is how input bugs shipped before.
+      if (path) {
+        const avail = await window.singz.melodyNativeAvailable().catch(() => ({ ok: false, available: false }))
+        if (seq !== loadSeq.current) return
+        if (avail.available) {
+          const unsub = window.singz.onMelodyNativeProgress((p) => {
+            if (seq === loadSeq.current) setMelody({ status: 'computing', p })
+          })
+          const res = await window.singz.trackMelodyNative(path)
+          unsub()
+          if (seq !== loadSeq.current) return
+          if (res.ok && res.f0 && res.hopSec && res.detVersion === PITCH_DETECT_VERSION) {
+            ;(window as { __melody?: unknown }).__melody = {
+              src: 'core',
+              f0: res.f0,
+              raw: res.raw,
+              rms: res.rms,
+              hopSec: res.hopSec
+            }
+            applyMelody(res.f0, res.hopSec, true)
+            return
+          }
+          // E2E drivers read this, the same way they read the beat-model warnings
+          console.warn(
+            res.ok
+              ? `melody: singz-analyze is stamped v${res.detVersion} but the app is v${PITCH_DETECT_VERSION} — a stale binary; falling back to the in-app tracker`
+              : `melody: singz-analyze failed (${res.error}) — falling back to the in-app tracker`
+          )
+        }
+      }
       const src = await melodyInput(path, buf)
       if (seq !== loadSeq.current) return // a different song is open now
       const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
@@ -1471,6 +1509,7 @@ export default function App(): React.JSX.Element {
         } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
           // diagnostics hook: E2E drivers dump this to tune the melody cleaner
           ;(window as { __melody?: unknown }).__melody = {
+            src: 'worker',
             f0: e.data.f0,
             raw: e.data.raw,
             clarity: e.data.clarity,

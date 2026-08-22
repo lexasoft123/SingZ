@@ -349,8 +349,13 @@ pitch-core.ts ported line for line and held bit-identical to this section's
 TS (float where the TS keeps Float32Array, double elsewhere, sums in the
 same order; the corpus gate is `singz-analyze melody` vs node, at the file's
 rate and at the other of the 44.1/48 pair); the phones call it in-process
-(`SingzSplit.analyzeMelody`), the desktop will through the `singz-analyze`
-CLI spawned by main like whisper-cli. Bit-identity is of the CODE, and it
+(`SingzSplit.analyzeMelody`), and the desktop NOW DOES too — main spawns the
+vendored `singz-analyze` like whisper-cli (`src/main/analyze.ts`), prepMelody
+takes the core first and falls back to the pitch worker LOUDLY when the
+binary is missing or its stamp disagrees with `PITCH_DETECT_VERSION` (a stale
+vendored binary must be a visible downgrade, never a silent one —
+`window.__melody.src` says which ran, and the framing driver fails on
+'worker'). Key and beats still run as renderer TS until their phases land. Bit-identity is of the CODE, and it
 bought nothing for a year while the two were fed different sample rates —
 the core reads the stem file, the desktop tracked the buffer its
 AudioContext had resampled to the output device's rate, and the framing is

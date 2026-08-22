@@ -49,6 +49,16 @@ const api: SingzApi = {
   cancelSeparation: () => ipcRenderer.invoke('separation:cancel'),
 
   beatsMlAvailable: () => ipcRenderer.invoke('beats:mlAvailable'),
+  melodyNativeAvailable: () => ipcRenderer.invoke('melody:available'),
+  trackMelodyNative: (path) => ipcRenderer.invoke('melody:track', path),
+  cancelMelodyNative: () => ipcRenderer.invoke('melody:cancel'),
+  onMelodyNativeProgress: (cb) => {
+    const listener = (_e: IpcRendererEvent, p: number): void => cb(p)
+    ipcRenderer.on('melody:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('melody:progress', listener)
+    }
+  },
 
   beatsMlDetect: (pcm, sr) => ipcRenderer.invoke('beats:mlDetect', pcm, sr),
 
