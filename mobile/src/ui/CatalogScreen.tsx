@@ -1431,13 +1431,15 @@ export default function CatalogScreen({
              sitting ABOVE this list still arms it, and AddSongSheet.tsx:507
              already carries the same guard for the same reason.
              NOT reproduced here, and the A/B was a real one — API 36
-             emulator, soft IME genuinely up (`mVisibleBound=true`), a visible
-             marker in the same edit proving the bundle had landed: the first
-             tap opened the song with the prop and without it. Kept anyway,
-             because it is the correct default for a list under a field, it
-             costs nothing, and the iOS half is unmeasurable from here — the
-             simulator answers a hardware keyboard and never raises a soft one,
-             so `_keyboardMetrics` stays null and the branch cannot arm. */
+             emulator, soft IME genuinely up, a visible marker in the same edit
+             proving the bundle had landed: the first tap opened the song with
+             the prop and without it. Kept anyway, because it is the correct
+             default for a list under a field and costs nothing: `'handled'`
+             only changes what happens to a tap a child DOES handle, so a tap
+             on empty list area still dismisses the keyboard. The iOS half is
+             simply unmeasured — the simulator boots with the Mac's hardware
+             keyboard connected and shows no soft keyboard, and there is no
+             `simctl` way to raise one (see CLAUDE.md for the ⌘K that is). */
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
           refreshControl={

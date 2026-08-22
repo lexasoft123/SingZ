@@ -81,6 +81,37 @@ a simulator both up, an unfiltered `find(t => t.webSocketDebuggerUrl)` takes
 whichever answered first: a driver seeded the iOS container and then
 interrogated the ANDROID app, reporting its projects as a failure. Every
 driver in `mobile/tests/` filters now; a new one must too.
+**By default the iOS simulator shows NO soft keyboard, which quietly makes
+every keyboard-dependent check there vacuous** — it boots with the Mac's
+hardware keyboard connected. On this rig the devices are booted headlessly
+with no Simulator.app at all, which is how the drivers here run — so there is
+no window to send ⌘K to, and nothing has established what a headless device
+does when a field takes focus. It is a default, not a law: Simulator's
+I/O ▸ Keyboard ▸ **Toggle Software Keyboard (⌘K)**, or turning off **Connect
+Hardware Keyboard (⇧⌘K)**, raises a real one, and the choice persists per
+device as `ConnectHardwareKeyboard` under `DevicePreferences` in
+`~/Library/Preferences/com.apple.iphonesimulator.plist`. What is missing is a
+`simctl` subcommand, so a driver cannot flip it the way it flips everything
+else. A driver that types into a field and taps a result on the sim proves
+nothing about a phone unless somebody has raised the keyboard first: RN's
+guard for that case (`ScrollView`'s `_keyboardIsDismissible`, fed by
+keyboardWillShow/DidShow into `_keyboardMetrics`) is only as real as the
+keyboard that raised it. Measure that class on Android, whose IME is real —
+confirm it with
+`adb shell dumpsys input_method | grep -E "mInputShown|mVisibleBound"` rather
+than assuming, since `adb shell input text` types without opening one
+(`mInputShown` is the one that literally answers "is the IME up"; the other is
+a binding flag that happens to move with it) — and say which platform a
+keyboard result came from. (Measured 2026-08-22: with the IME up on an API 36
+emulator, the first tap on a search result landed both with and without
+`keyboardShouldPersistTaps`, so the first-tap-dismisses branch does not bite
+there. The iOS half is still unmeasured — ⌘K makes it possible, and nothing
+here has done it.)
+**A Fast Refresh A/B needs a VISIBLE marker in the same edit** — twice in one
+session a "the change makes no difference" result had to be re-run because
+nothing proved the bundle had landed. Rename a placeholder, move a label,
+anything the screenshot can show; without it a negative result and a stale
+bundle are the same picture.
 **Automated runs are silent** — sound is only for a human listening
 (end-user checks/demos). Desktop drivers launch with `SINGZ_MUTE=1`
 (→ Chromium mute-audio; analysers, sinkId and timing behave exactly as
