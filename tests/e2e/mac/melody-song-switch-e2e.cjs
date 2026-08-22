@@ -23,6 +23,7 @@
  *      E2E_OUT (scratch dir for the copy, default os.tmpdir()).
  */
 const { _electron } = require('playwright-core')
+const { quietLaunch } = require('./quiet-launch.cjs')
 const { readFileSync, writeFileSync, cpSync, rmSync, existsSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
@@ -74,6 +75,7 @@ const duration = (dir) =>
     args: [APP],
     env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
   })
+  await quietLaunch(app) // measurement runs must not steal the singer's focus
   app.process().stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`))
   // B is a REAL project in the singer's library and a regression rewrites it,
   // so putting it back is the outermost thing this driver does — an assertion

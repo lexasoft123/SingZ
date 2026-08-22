@@ -15,6 +15,7 @@
  * Env: E2E_OUT (screenshot + profile dir, default os.tmpdir()).
  */
 const { _electron } = require('playwright-core')
+const { quietLaunch } = require('./quiet-launch.cjs')
 const { writeFileSync, mkdirSync, copyFileSync, createReadStream, rmSync } = require('node:fs')
 const { createHash } = require('node:crypto')
 const { join } = require('node:path')
@@ -58,14 +59,17 @@ const hashFile = (path) =>
       .on('error', reject)
   })
 
-const launch = () =>
-  _electron.launch({
+const launch = async () => {
+  const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
     // SINGZ_MUTE silences the device only — enumeration, sinkId moves and the
     // fake-mic pitch path stay real, so every assertion here is mute-proof.
-    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1' }
+    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' }
   })
+  await quietLaunch(app) // measurement runs must not steal the singer's focus
+  return app
+}
 
 ;(async () => {
   const wav = join(OUT, 'e2e-tone.wav')

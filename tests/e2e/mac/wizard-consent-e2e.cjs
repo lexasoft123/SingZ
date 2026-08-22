@@ -8,6 +8,7 @@
  * Env: E2E_PROJECT (default "Wanted Dead Or Alive"), E2E_OUT (screenshots).
  */
 const { _electron } = require('playwright-core');
+const { quietLaunch } = require('./quiet-launch.cjs');
 const { renameSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir, homedir } = require('node:os');
@@ -27,8 +28,9 @@ const MMS = join(
     const app = await _electron.launch({
       executablePath: require('electron'),
       args: [APP],
-      env: { ...process.env, SINGZ_MUTE: '1' } // automated runs are silent
+      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
     });
+    await quietLaunch(app); // measurement runs must not steal the singer's focus
     const win = await app.firstWindow();
     await win.waitForLoadState('domcontentloaded');
     await win.waitForSelector('.chip-status', { timeout: 20000 });
