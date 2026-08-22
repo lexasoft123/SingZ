@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseCliMelody } from '../../src/main/analyze'
+import { mlFileText, parseCliBeats, parseCliKey, parseCliMelody } from '../../src/main/analyze'
 
 // The runner's whole job is to turn singz-analyze's one JSON object into a
 // result the renderer can trust — or into a refusal. The spawn/settle side is
@@ -62,5 +62,81 @@ describe('parseCliMelody', () => {
   it('refuses truncated JSON (a killed child) rather than throwing', () => {
     const r = parseCliMelody(good.slice(0, 40))
     expect(r.ok).toBe(false)
+  })
+})
+
+describe('parseCliKey', () => {
+  it('adopts a well-formed answer', () => {
+    const r = parseCliKey('{"detVersion":2,"key":{"pc":7,"minor":true}}\n')
+    expect(r).toEqual({ ok: true, pc: 7, minor: true, detVersion: 2 })
+  })
+
+  it('a null key is a refusal with a reason, not a crash', () => {
+    const r = parseCliKey('{"detVersion":2,"key":null}')
+    expect(r.ok).toBe(false)
+    expect(r.error).toContain('no key answer')
+  })
+
+  it('refuses a pc outside the chromatic circle', () => {
+    expect(parseCliKey('{"detVersion":2,"key":{"pc":12,"minor":false}}').ok).toBe(false)
+    expect(parseCliKey('{"detVersion":2,"key":{"pc":-1,"minor":false}}').ok).toBe(false)
+  })
+
+  it('refuses a missing stamp', () => {
+    const r = parseCliKey('{"key":{"pc":0,"minor":false}}')
+    expect(r.ok).toBe(false)
+    expect(r.error).toContain('detVersion')
+  })
+})
+
+describe('parseCliBeats', () => {
+  const grid = (extra: object = {}): string =>
+    JSON.stringify({
+      detVersion: 22,
+      ok: true,
+      bpm: 77.13,
+      beatsPerBar: 4,
+      downbeat: 2,
+      beatsSec: [0.5, 1.28, 2.06],
+      downbeats: [2],
+      hasDownbeats: true,
+      suspectAt: [1.28],
+      ...extra
+    })
+
+  it('adopts the production fields out of the staged blob', () => {
+    const r = parseCliBeats(`noise\n${grid()}`)
+    expect(r.ok).toBe(true)
+    expect(r.bpm).toBeCloseTo(77.13)
+    expect(r.beats).toEqual([0.5, 1.28, 2.06])
+    expect(r.downbeats).toEqual([2])
+    expect(r.hasDownbeats).toBe(true)
+    expect(r.suspectAt).toEqual([1.28])
+  })
+
+  it("ok:false from the DETECTOR is the TS's null — beats:[], not an error", () => {
+    const r = parseCliBeats(JSON.stringify({ detVersion: 22, ok: false }))
+    expect(r.ok).toBe(true)
+    expect(r.beats).toEqual([])
+    expect(r.detVersion).toBe(22)
+  })
+
+  it('refuses an ok grid with no beats, a missing marker, a missing stamp', () => {
+    expect(parseCliBeats(grid({ beatsSec: [] })).ok).toBe(false)
+    expect(parseCliBeats(grid({ hasDownbeats: undefined })).ok).toBe(false)
+    expect(parseCliBeats(grid({ detVersion: undefined })).ok).toBe(false)
+  })
+})
+
+describe('mlFileText', () => {
+  it('writes the token format readMlFile parses, values via String()', () => {
+    const t = mlFileText({ beats: [0.5, 1.25], downbeats: [0.5], beatProb: [0.25], fps: 50 })
+    expect(t).toBe('fps 50\nbeats 2 0.5 1.25\ndownbeats 1 0.5\nbeatProb 1 0.25\n')
+  })
+
+  it('omits absent sections entirely — absent is the detector\'s undefined', () => {
+    const t = mlFileText({ beats: [1], downbeats: [] })
+    expect(t).toBe('fps 50\nbeats 1 1\n')
+    expect(t).not.toContain('downbeats')
   })
 })

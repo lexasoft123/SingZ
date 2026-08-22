@@ -1,6 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { access, mkdir, rm, writeFile } from 'node:fs/promises'
+import { app } from 'electron'
 import { join } from 'node:path'
 import { onChildSettled } from './child-exit'
 import { log, logChunk } from './log'
@@ -69,17 +70,136 @@ interface CliMelody {
   rms: number[]
 }
 
-/** One melody job at a time, cancellable — the renderer's loadSeq decides
- *  whose result counts; this only makes sure a dead song's child dies too. */
+/** One job per KIND at a time (melody and key fire in parallel from the same
+ *  analysis pass), cancellable — the renderer's loadSeq decides whose result
+ *  counts; this only makes sure a dead song's children die too. */
 class Analyze {
-  private child: ChildProcess | null = null
+  private children = new Map<string, ChildProcess>()
 
   cancel(): void {
-    this.child?.kill('SIGKILL')
+    for (const c of this.children.values()) c.kill('SIGKILL')
+  }
+
+  async key(instPaths: string[], bassPath: string | null): Promise<KeyNativeResult> {
+    if (this.children.has('key')) return { ok: false, error: 'A key analysis is already running.' }
+    const bin = await resolveAnalyze()
+    if (bin === null) return { ok: false, error: 'singz-analyze is not in this build.' }
+    return new Promise<KeyNativeResult>((resolve) => {
+      const args = ['key']
+      for (const p of instPaths) args.push('--inst', p)
+      if (bassPath) args.push('--bass', bassPath)
+      log('key', `core: ${bin} ${args.map((a) => (a.startsWith('--') ? a : a.split('/').pop())).join(' ')}`)
+      const child = spawn(bin, args)
+      this.children.set('key', child)
+      const out: Buffer[] = []
+      let errTail = ''
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        log('key', `core key exceeded ${TIMEOUT_MS / 1000}s — killing it`, 'error')
+        child.kill('SIGKILL')
+      }, TIMEOUT_MS)
+      child.stdout?.on('data', (c: Buffer) => {
+        out.push(c)
+      })
+      child.stderr?.on('data', (c: Buffer) => {
+        errTail = (errTail + c.toString('utf8')).slice(-4000)
+        logChunk('key', c.toString('utf8'))
+      })
+      child.on('error', (err) => {
+        clearTimeout(timer)
+        this.children.delete('key')
+        resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
+      })
+      onChildSettled(child, 'key', (code, signal) => {
+        clearTimeout(timer)
+        this.children.delete('key')
+        if (signal === 'SIGKILL') {
+          resolve({ ok: false, error: timedOut ? `Timed out after ${TIMEOUT_MS / 1000}s.` : 'Cancelled.' })
+          return
+        }
+        if (code !== 0) {
+          log('key', `singz-analyze exited with code ${code}`, 'error')
+          resolve({ ok: false, error: errTail.trim().split('\n').pop() || `exit ${code}` })
+          return
+        }
+        resolve(parseCliKey(Buffer.concat(out).toString('utf8')))
+      })
+    })
+  }
+
+  async beats(input: BeatsNativeInput): Promise<BeatsNativeResult> {
+    if (this.children.has('beats')) return { ok: false, error: 'A beat analysis is already running.' }
+    const bin = await resolveAnalyze()
+    if (bin === null) return { ok: false, error: 'singz-analyze is not in this build.' }
+    // NOT `singz-analyze`: build-analyze-host.sh drops the BINARY at
+    // $TMPDIR/singz-analyze on dev machines, and mkdir over a file is EEXIST
+    // even with recursive — found live as an unhandled 'beats:detect'
+    // rejection the first time the ML path ran.
+    const tmpDir = join(app.getPath('temp'), 'singz-analyze-ml')
+    const mlPath = input.ml ? join(tmpDir, `ml-${process.pid}-${Date.now()}.txt`) : null
+    try {
+      if (mlPath && input.ml) {
+        await mkdir(tmpDir, { recursive: true })
+        await writeFile(mlPath, mlFileText(input.ml))
+      }
+      return await new Promise<BeatsNativeResult>((resolve) => {
+        const args = ['beats', '--drums', input.drums]
+        if (input.bass) args.push('--bass', input.bass)
+        if (input.vocals) args.push('--vocals', input.vocals)
+        for (const p of input.inst) args.push('--inst', p)
+        for (const t of input.lineStarts ?? []) args.push('--line', String(t))
+        for (const w of input.words ?? []) args.push('--word', `${w.s}:${w.e}`)
+        if (mlPath) args.push('--ml', mlPath)
+        log('beats', `core: ${bin} beats (${input.inst.length + 1 + (input.bass ? 1 : 0) + (input.vocals ? 1 : 0)} stems, ${input.words?.length ?? 0} words, ml=${mlPath ? 'yes' : 'no'})`)
+        const child = spawn(bin, args)
+        this.children.set('beats', child)
+        const out: Buffer[] = []
+        let errTail = ''
+        let timedOut = false
+        const timer = setTimeout(() => {
+          timedOut = true
+          log('beats', `core beats exceeded ${TIMEOUT_MS / 1000}s — killing it`, 'error')
+          child.kill('SIGKILL')
+        }, TIMEOUT_MS)
+        child.stdout?.on('data', (c: Buffer) => {
+          out.push(c)
+        })
+        child.stderr?.on('data', (c: Buffer) => {
+          errTail = (errTail + c.toString('utf8')).slice(-4000)
+          logChunk('beats', c.toString('utf8'), /^progress /)
+        })
+        child.on('error', (err) => {
+          clearTimeout(timer)
+          this.children.delete('beats')
+          resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
+        })
+        onChildSettled(child, 'beats', (code, signal) => {
+          clearTimeout(timer)
+          this.children.delete('beats')
+          if (signal === 'SIGKILL') {
+            resolve({ ok: false, error: timedOut ? `Timed out after ${TIMEOUT_MS / 1000}s.` : 'Cancelled.' })
+            return
+          }
+          if (code !== 0) {
+            log('beats', `singz-analyze exited with code ${code}`, 'error')
+            resolve({ ok: false, error: errTail.trim().split('\n').pop() || `exit ${code}` })
+            return
+          }
+          resolve(parseCliBeats(Buffer.concat(out).toString('utf8')))
+        })
+      })
+    } catch (err) {
+      // IPC handlers return result objects, never throw (the repo rule) — a
+      // temp-file failure is a loud fallback, not a renderer exception.
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    } finally {
+      if (mlPath) await rm(mlPath, { force: true }).catch(() => undefined)
+    }
   }
 
   async melody(stemPath: string): Promise<MelodyNativeResult> {
-    if (this.child) return { ok: false, error: 'A melody analysis is already running.' }
+    if (this.children.has('melody')) return { ok: false, error: 'A melody analysis is already running.' }
     const bin = await resolveAnalyze()
     if (bin === null) return { ok: false, error: 'singz-analyze is not in this build.' }
     return new Promise<MelodyNativeResult>((resolve) => {
@@ -88,7 +208,7 @@ class Analyze {
       const args = ['melody', '--wav', stemPath, '--raw']
       log('melody', `core: ${bin} ${args.join(' ')}`)
       const child = spawn(bin, args)
-      this.child = child
+      this.children.set('melody', child)
 
       const out: Buffer[] = []
       let errTail = ''
@@ -127,13 +247,13 @@ class Analyze {
 
       child.on('error', (err) => {
         clearTimeout(timer)
-        this.child = null
+        this.children.delete('melody')
         resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
       })
 
       onChildSettled(child, 'melody', (code, signal) => {
         clearTimeout(timer)
-        this.child = null
+        this.children.delete('melody')
         if (signal === 'SIGKILL') {
           // A cancel's result is dropped by the renderer's seq guard before
           // any warn, so the only SIGKILL a human ever READS is the
@@ -184,6 +304,120 @@ export function parseCliMelody(stdout: string): MelodyNativeResult {
   }
 }
 
+/** The key detector through the same binary. No progress protocol — the
+ *  chroma pass is ~1 s on the sample and single-digit seconds on a song. */
+export interface KeyNativeResult {
+  ok: boolean
+  error?: string
+  pc?: number
+  minor?: boolean
+  detVersion?: number
+}
+
+export function parseCliKey(stdout: string): KeyNativeResult {
+  try {
+    const line = stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('{'))
+      .pop()
+    if (!line) throw new Error('no result object on stdout')
+    const j = JSON.parse(line) as { detVersion: number; key: { pc: number; minor: boolean } | null }
+    if (!Number.isInteger(j.detVersion)) throw new Error('no detVersion stamp')
+    if (j.key === null) return { ok: false, error: 'no key answer (silent harmonics?)' }
+    if (!Number.isInteger(j.key.pc) || j.key.pc < 0 || j.key.pc > 11 || typeof j.key.minor !== 'boolean')
+      throw new Error('key is not a pitch class')
+    return { ok: true, pc: j.key.pc, minor: j.key.minor, detVersion: j.detVersion }
+  } catch (err) {
+    return { ok: false, error: `singz-analyze output unusable: ${err instanceof Error ? err.message : String(err)}` }
+  }
+}
+
+export interface BeatsNativeInput {
+  drums: string
+  bass: string | null
+  vocals: string | null
+  inst: string[]
+  lineStarts: number[] | null
+  words: { s: number; e: number }[] | null
+  ml: { beats: number[]; downbeats: number[]; beatProb?: number[]; downbeatProb?: number[]; fps?: number } | null
+}
+
+export interface BeatsNativeResult {
+  ok: boolean
+  error?: string
+  detVersion?: number
+  bpm?: number
+  beatsPerBar?: number
+  downbeat?: number
+  beats?: number[]
+  downbeats?: number[]
+  hasDownbeats?: boolean
+  suspectAt?: number[]
+}
+
+/** The production grid out of the CLI's staged-debug object — the fields the
+ *  app stores are all present in it; everything else is the parity harness's
+ *  business. `ok:false` from the DETECTOR (no steady beat) is not an error:
+ *  it crosses as ok:true with gridOk:false semantics folded into beats=[] —
+ *  the renderer treats an empty grid exactly as the TS's null. */
+export function parseCliBeats(stdout: string): BeatsNativeResult {
+  try {
+    const line = stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('{'))
+      .pop()
+    if (!line) throw new Error('no result object on stdout')
+    const j = JSON.parse(line) as {
+      detVersion: number
+      ok: boolean
+      bpm: number
+      beatsPerBar: number
+      downbeat: number
+      beatsSec: number[]
+      downbeats: number[]
+      hasDownbeats: boolean
+      suspectAt?: number[]
+    }
+    if (!Number.isInteger(j.detVersion)) throw new Error('no detVersion stamp')
+    if (j.ok !== true) return { ok: true, detVersion: j.detVersion, beats: [] } // the TS's null
+    if (!Array.isArray(j.beatsSec) || j.beatsSec.length === 0) throw new Error('ok grid with no beats')
+    if (!(j.bpm > 0) || !Number.isInteger(j.beatsPerBar)) throw new Error('grid without a tempo')
+    if (typeof j.hasDownbeats !== 'boolean') throw new Error('no hasDownbeats marker')
+    if (!Array.isArray(j.downbeats)) throw new Error('no downbeats array')
+    return {
+      ok: true,
+      detVersion: j.detVersion,
+      bpm: j.bpm,
+      beatsPerBar: j.beatsPerBar,
+      downbeat: j.downbeat,
+      beats: j.beatsSec,
+      downbeats: j.downbeats,
+      hasDownbeats: j.hasDownbeats,
+      suspectAt: Array.isArray(j.suspectAt) ? j.suspectAt : []
+    }
+  } catch (err) {
+    return { ok: false, error: `singz-analyze output unusable: ${err instanceof Error ? err.message : String(err)}` }
+  }
+}
+
+/** The neural grid, in the token format readMlFile parses. Values go through
+ *  String() — the shortest round-trip — and the CLI reads them with strtod,
+ *  so every value is bit-identical on both sides (the property the harness's
+ *  own writer documents; a %.17g hop would not give it on every platform). */
+export function mlFileText(ml: NonNullable<BeatsNativeInput['ml']>): string {
+  const arr = (name: string, v: number[] | undefined): string =>
+    v && v.length > 0 ? `${name} ${v.length} ${v.map((x) => String(x)).join(' ')}\n` : ''
+  return (
+    `fps ${ml.fps ?? 50}\n` +
+    arr('beats', ml.beats) +
+    arr('downbeats', ml.downbeats) +
+    arr('beatProb', ml.beatProb) +
+    arr('downbeatProb', ml.downbeatProb)
+  )
+}
+
 const analyze = new Analyze()
 
 export function registerAnalyze(): void {
@@ -198,5 +432,29 @@ export function registerAnalyze(): void {
   ipcMain.handle('melody:cancel', () => {
     analyze.cancel()
     return { ok: true }
+  })
+  ipcMain.handle('beats:detect', (_e, raw: unknown): Promise<BeatsNativeResult> => {
+    const i = raw as BeatsNativeInput
+    if (!i || typeof i.drums !== 'string') return Promise.resolve({ ok: false, error: 'bad input' })
+    const paths = [i.drums, ...(i.bass ? [i.bass] : []), ...(i.vocals ? [i.vocals] : []), ...(Array.isArray(i.inst) ? i.inst : [])]
+    if (paths.some((p) => typeof p !== 'string' || !isAllowed(p)))
+      return Promise.resolve({ ok: false, error: 'File is not registered.' })
+    return analyze.beats({
+      drums: i.drums,
+      bass: i.bass ?? null,
+      vocals: i.vocals ?? null,
+      inst: Array.isArray(i.inst) ? i.inst : [],
+      lineStarts: Array.isArray(i.lineStarts) ? i.lineStarts.filter((t) => Number.isFinite(t)) : null,
+      words: Array.isArray(i.words) ? i.words.filter((w) => w && Number.isFinite(w.s) && Number.isFinite(w.e)) : null,
+      ml: i.ml && Array.isArray(i.ml.beats) && Array.isArray(i.ml.downbeats) ? i.ml : null
+    })
+  })
+  ipcMain.handle('key:detect', (_e, inst: unknown, bass: unknown): Promise<KeyNativeResult> => {
+    if (!Array.isArray(inst) || inst.some((p) => typeof p !== 'string') || (bass !== null && typeof bass !== 'string'))
+      return Promise.resolve({ ok: false, error: 'bad paths' })
+    const paths = [...(inst as string[]), ...(bass ? [bass as string] : [])]
+    if (paths.length === 0) return Promise.resolve({ ok: false, error: 'no harmonic stems' })
+    for (const p of paths) if (!isAllowed(p)) return Promise.resolve({ ok: false, error: 'File is not registered.' })
+    return analyze.key(inst as string[], bass as string | null)
   })
 }

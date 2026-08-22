@@ -155,6 +155,16 @@ function resampleStem(file, rate) {
       // indistinguishable in the line, which is exactly why the tag exists).
       if (pass === 1 && got.src !== 'core')
         fail.push(`open #1 tracked via '${got.src}' — expected the core binary (missing or stale singz-analyze?)`)
+      // The key rides the same binary and the same loud-fallback rule; its
+      // detector runs in this very pass, so certify it here too.
+      if (pass === 1) {
+        const keySrc = await win
+          .waitForFunction(() => window.__keySrc, null, { timeout: 120000 })
+          .then(() => win.evaluate(() => window.__keySrc))
+          .catch(() => '(never set)')
+        console.log(`key detected via: ${keySrc}`)
+        if (keySrc !== 'core') fail.push(`key detected via '${keySrc}' — expected the core binary`)
+      }
 
       if (pass === 1) {
         if (got.stored) fail.push('open #1 adopted a line instead of tracking — settings.melody was not stripped')

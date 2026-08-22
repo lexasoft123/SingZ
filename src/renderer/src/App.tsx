@@ -15,6 +15,7 @@ import {
   estimateKey,
   estimateKeyFromStems,
   sanitizeKeyInfo,
+  type DetectedBeats,
   type KeyGuess,
   type MlGrid
 } from './audio/analysis'
@@ -188,6 +189,71 @@ async function melodyInput(
   return { mono: fold(buf), sampleRate: buf.sampleRate }
 }
 
+/**
+ * The beat grid through the core, when the binary is here — Phase 4 of the
+ * cutover. The renderer still decodes the stems (the neural mix is rendered
+ * HERE, from Chromium's decode — the model's canonical input, docs/BEAT-
+ * DETECTION.md) and still produces the ML grid; what moves out is the
+ * 1.7-second synchronous detectBeats call. The parity gate held every branch
+ * of the ML fork IDENTICAL over the whole library with real grids before this
+ * swap (eval/beats-parity.mjs --library --ml), which is what licensed it.
+ * Returns null when the core cannot answer — wrong stamp, missing binary,
+ * failed run — after saying WHY out loud; the caller then runs the TS.
+ */
+async function detectBeatsViaCore(
+  paths: Record<string, string> | null,
+  ids: string[],
+  aux: {
+    lineStarts: number[] | null
+    words: { s: number; e: number }[] | null
+    ml: MlGrid | null
+  }
+): Promise<DetectedBeats | null | 'ts'> {
+  if (!paths?.drums) return 'ts'
+  const avail = await window.singz.melodyNativeAvailable().catch(() => ({ ok: false, available: false }))
+  if (!avail.available) return 'ts'
+  // .catch: the invoke itself must not take the whole pass down — a rejected
+  // IPC (it happened: an EEXIST escaping main) is a loud 'ts' fallback.
+  const res = await window.singz.detectBeatsNative({
+    drums: paths.drums,
+    bass: ids.includes('bass') ? (paths.bass ?? null) : null,
+    vocals: ids.includes('vocals') ? (paths.vocals ?? null) : null,
+    inst: ids
+      .filter((id) => id !== 'vocals' && id !== 'drums' && id !== 'bass')
+      .map((id) => paths[id])
+      .filter((p): p is string => typeof p === 'string'),
+    lineStarts: aux.lineStarts,
+    words: aux.words,
+    ml: aux.ml
+      ? {
+          beats: Array.from(aux.ml.beats),
+          downbeats: Array.from(aux.ml.downbeats),
+          ...(aux.ml.beatProb ? { beatProb: Array.from(aux.ml.beatProb) } : {}),
+          ...(aux.ml.downbeatProb ? { downbeatProb: Array.from(aux.ml.downbeatProb) } : {}),
+          ...(aux.ml.fps ? { fps: aux.ml.fps } : {})
+        }
+      : null
+  }).catch((e) => ({ ok: false as const, error: String(e) }))
+  if (!res.ok || res.detVersion !== BEAT_DETECT_VERSION) {
+    // E2E drivers read this, like the beat-model warnings
+    console.warn(
+      res.ok
+        ? `beats: singz-analyze is stamped v${res.detVersion} but the app is v${BEAT_DETECT_VERSION} — a stale binary; falling back to the in-app detector`
+        : `beats: singz-analyze failed (${res.error}) — falling back to the in-app detector`
+    )
+    return 'ts'
+  }
+  if (!res.beats || res.beats.length === 0) return null // the detector's own "no steady beat"
+  return {
+    beats: res.beats,
+    bpm: res.bpm ?? 0,
+    beatsPerBar: res.beatsPerBar ?? 4,
+    downbeat: res.downbeat ?? 0,
+    ...(res.hasDownbeats && res.downbeats ? { downbeats: res.downbeats } : {}),
+    ...(res.suspectAt && res.suspectAt.length > 0 ? { suspectAt: res.suspectAt } : {})
+  }
+}
+
 /** Guitar/piano lanes only appear when the song actually has them. */
 function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[]; buffers: AudioBuffer[] } {
   const keptOrder: string[] = []
@@ -216,6 +282,7 @@ function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[
  *  invisible without this. */
 function publishBeatDbg(
   why: string,
+  src: 'core' | 'ts',
   drums: AudioBuffer,
   aux: {
     bass: AudioBuffer | null
@@ -231,6 +298,7 @@ function publishBeatDbg(
     b ? { sr: b.sampleRate, n: b.length, ch: b.numberOfChannels } : null
   ;(window as { __beatDbg?: unknown }).__beatDbg = {
     why,
+    src,
     drums: stat(drums),
     bass: stat(aux.bass),
     vocals: stat(aux.vocals),
@@ -698,7 +766,7 @@ export default function App(): React.JSX.Element {
       // being left, not the one arriving.
       melodyWorkerRef.current?.terminate()
       melodyWorkerRef.current = null
-      void window.singz.cancelMelodyNative() // the core's child dies with the song too
+      void window.singz.cancelAnalyzeNative() // the core's children die with the song too
       vocalsBufRef.current = null
       stemPathsRef.current = null
       audibleIdsRef.current = []
@@ -1324,8 +1392,14 @@ export default function App(): React.JSX.Element {
               ml
             }
             const dbg = {}
-            const det = detectBeats(stems.drums, aux, dbg)
-            publishBeatDbg('auto', stems.drums, aux, det, dbg)
+            const viaCore = await detectBeatsViaCore(stemPathsRef.current, audibleIdsRef.current, {
+              lineStarts: aux.lineStarts,
+              words: aux.words,
+              ml: ml ?? null
+            })
+            if (drumsBufRef.current !== drums) return // song changed mid-flight
+            const det = viaCore === 'ts' ? detectBeats(stems.drums, aux, dbg) : viaCore
+            publishBeatDbg('auto', viaCore === 'ts' ? 'ts' : 'core', stems.drums, aux, det, dbg)
             if (det) {
               // Hand-placed bar lines are re-folded onto the FRESH beat
               // array — they are stored as times precisely so they survive a
@@ -1374,20 +1448,56 @@ export default function App(): React.JSX.Element {
       } else if (inst.length > 0 || bassBuf) {
         setSongInfo({ key: null, bpm: info?.bpm ?? null })
         void (async () => {
-          // The harmonic stems off disk too, same rule as the beat pass. The
-          // key answer measured identical across the whole library either way
-          // (17/17), which is why KEY_DETECT_VERSION does not move — but a
-          // borderline song someday should land on the file's samples, not the
-          // device's.
-          // Only the harmonic paths: handing the full map over would decode
-          // drums and vocals this pass never reads — concurrently with the
-          // beat pass's own six, which is a fleet-machine's worth of memory
-          // for nothing.
+          const adopt = (pc: number, minor: boolean): void => {
+            setSongInfo((s) => ({ ...s, key: { pc, minor } }))
+            const ki = { pc, minor, detVersion: KEY_DETECT_VERSION }
+            keyInfoRef.current = ki
+            setKeyInfo(ki)
+            setAnalysisAutoSave(true)
+          }
+          // The core first, straight off the FILES — no renderer decode at
+          // all on this path, which on a fresh song runs beside the beat
+          // pass's own six decodes. Phase 3 of the cutover: the parity gate
+          // holds this detector bit-identical to the TS below, so which ran
+          // is visible only in __keySrc — and the fallback says so out loud.
           const allPaths = stemPathsRef.current
+          const audible = audibleIdsRef.current
+          const instPaths = audible
+            .filter((id) => id !== 'vocals' && id !== 'drums' && id !== 'bass')
+            .map((id) => allPaths?.[id])
+            .filter((p): p is string => typeof p === 'string')
+          const bassPath = audible.includes('bass') ? (allPaths?.bass ?? null) : null
+          if (instPaths.length > 0 || bassPath) {
+            const avail = await window.singz.melodyNativeAvailable().catch(() => ({ ok: false, available: false }))
+            if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+            if (avail.available) {
+              // same .catch discipline as the beats invoke — a rejected IPC
+              // is a loud fallback, never a dead key pass
+              const res = await window.singz
+                .detectKeyNative(instPaths, bassPath)
+                .catch((e) => ({ ok: false as const, error: String(e) }))
+              if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return
+              if (res.ok && res.pc !== undefined && res.minor !== undefined && res.detVersion === KEY_DETECT_VERSION) {
+                ;(window as { __keySrc?: string }).__keySrc = 'core'
+                adopt(res.pc, res.minor)
+                return
+              }
+              // E2E drivers read this, like the beat-model warnings
+              console.warn(
+                res.ok
+                  ? `key: singz-analyze is stamped v${res.detVersion} but the app is v${KEY_DETECT_VERSION} — a stale binary; falling back to the in-app detector`
+                  : `key: singz-analyze failed (${res.error}) — falling back to the in-app detector`
+              )
+            }
+          }
+          // Fallback: the TS detector on stems decoded off disk — same input
+          // rule, renderer-side. The key answer measured identical across the
+          // whole library at both input rates (17/17), which is why
+          // KEY_DETECT_VERSION does not move for any of this.
           const harmonicPaths = allPaths
             ? Object.fromEntries(Object.entries(allPaths).filter(([id]) => id !== 'drums' && id !== 'vocals'))
             : null
-          const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, {
+          const fromDisk = await analysisStems(harmonicPaths, audible, {
             drums: null,
             bass: bassBuf,
             vocals: null,
@@ -1397,15 +1507,11 @@ export default function App(): React.JSX.Element {
           await new Promise((r) => setTimeout(r, 30))
           if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
           const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
+          ;(window as { __keySrc?: string }).__keySrc = stems ? 'ts' : 'melody-histogram'
           // A melody-histogram fallback is displayed but never stored under
           // the v2 stamp — it is the method the stamp says we left behind.
-          setSongInfo((s) => ({ ...s, key: stems ?? estimateKey(f0) }))
-          if (stems) {
-            const ki = { pc: stems.pc, minor: stems.minor, detVersion: KEY_DETECT_VERSION }
-            keyInfoRef.current = ki
-            setKeyInfo(ki)
-            setAnalysisAutoSave(true)
-          }
+          if (stems) adopt(stems.pc, stems.minor)
+          else setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
         })()
       } else {
         setSongInfo({ key: estimateKey(f0), bpm: info?.bpm ?? null })
@@ -1926,8 +2032,14 @@ export default function App(): React.JSX.Element {
           ml
         }
         const dbg = {}
-        const det = detectBeats(stems.drums, aux, dbg)
-        publishBeatDbg('redetect', stems.drums, aux, det, dbg)
+        const viaCore = await detectBeatsViaCore(stemPathsRef.current, audibleIdsRef.current, {
+          lineStarts: aux.lineStarts,
+          words: aux.words,
+          ml: ml ?? null
+        })
+        if (drumsBufRef.current !== buf) return // song changed mid-flight
+        const det = viaCore === 'ts' ? detectBeats(stems.drums, aux, dbg) : viaCore
+        publishBeatDbg('redetect', viaCore === 'ts' ? 'ts' : 'core', stems.drums, aux, det, dbg)
         if (det) {
           touchSettings()
           setBeatInfo({

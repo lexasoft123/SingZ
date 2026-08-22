@@ -408,6 +408,10 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < grid.suspectAt.size(); i++) std::printf("%s%.17g", i ? "," : "", grid.suspectAt[i]);
       std::printf("],");
     }
+    // hasDownbeats carries the TS's `undefined`-vs-`[]` distinction (see the
+    // struct) — the desktop runner adopts this object as the production grid,
+    // so the marker has to cross with it.
+    std::printf("\"hasDownbeats\":%s,", grid.hasDownbeats ? "true" : "false");
     std::printf("\"bpm\":%.17g,\"downbeat\":%d,\"downbeats\":[", grid.bpm, grid.downbeat);
     for (size_t i = 0; i < grid.downbeats.size(); i++) std::printf("%s%d", i ? "," : "", grid.downbeats[i]);
     std::printf("],\"phaseCuts\":[");

@@ -435,7 +435,39 @@ export interface SingzApi {
     hopSec?: number
     detVersion?: number
   }>
-  cancelMelodyNative(): Promise<{ ok: true }>
+  /** Kills every in-flight singz-analyze child (melody, key, beats). */
+  cancelAnalyzeNative(): Promise<{ ok: true }>
+  /** The key through the core, from REGISTERED harmonic stem files. Caller
+   *  checks detVersion against KEY_DETECT_VERSION and falls back loudly. */
+  detectKeyNative(
+    inst: string[],
+    bass: string | null
+  ): Promise<{ ok: boolean; error?: string; pc?: number; minor?: boolean; detVersion?: number }>
+  /** The whole beat pipeline through the core, from REGISTERED stem files.
+   *  The renderer supplies the neural grid (its own Chromium-rendered mix —
+   *  the model's canonical input) and the lyric aux; the caller checks
+   *  detVersion against BEAT_DETECT_VERSION and falls back loudly. beats=[]
+   *  with ok:true is the detector's own "no steady beat" (the TS's null). */
+  detectBeatsNative(input: {
+    drums: string
+    bass: string | null
+    vocals: string | null
+    inst: string[]
+    lineStarts: number[] | null
+    words: { s: number; e: number }[] | null
+    ml: { beats: number[]; downbeats: number[]; beatProb?: number[]; downbeatProb?: number[]; fps?: number } | null
+  }): Promise<{
+    ok: boolean
+    error?: string
+    detVersion?: number
+    bpm?: number
+    beatsPerBar?: number
+    downbeat?: number
+    beats?: number[]
+    downbeats?: number[]
+    hasDownbeats?: boolean
+    suspectAt?: number[]
+  }>
   onMelodyNativeProgress(cb: (p: number) => void): () => void
   /** Run ML beat/downbeat detection on raw mono float32 PCM at `sr` (22050). */
   beatsMlDetect(pcm: ArrayBuffer, sr: number): Promise<BeatsMlResult>
