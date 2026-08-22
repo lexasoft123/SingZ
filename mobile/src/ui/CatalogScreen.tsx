@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
@@ -11,6 +11,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View
 } from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
@@ -87,6 +88,11 @@ const SAMPLE_STEMS: Record<string, number> = {
 }
 const SAMPLE_DIR = '~sample'
 
+/** Songs from which the library gets a search box. Below this the list is
+ *  shorter than the screen and the box is clutter over something already
+ *  readable; above it, finding a song by scrolling stops working. */
+const SEARCH_FROM = 8
+
 interface Loading {
   dir: string
   msg: string
@@ -156,6 +162,46 @@ export default function CatalogScreen({
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
   const listSeq = useRef(0)
+
+  /** What the singer typed into the library search box (see `shown`). */
+  const [query, setQuery] = useState('')
+
+  /** The song's own name, which is what the singer searches and sorts by. */
+  const titleOf = (p: ProjectEntry): string => p.doc.name ?? p.dir
+
+  /** The library in a fixed, findable order.
+   *
+   *  `listProjects` returns whatever the filesystem or Drive handed back, so
+   *  the same library came out in a different order on each source and the
+   *  same card moved between refreshes. Sorted by name, numeric so "Take 2"
+   *  sorts before "Take 10", and case- and accent-insensitive so a lowercase
+   *  title does not sink to the bottom. */
+  const sorted = useMemo(
+    () =>
+      (projects ?? [])
+        .slice()
+        .sort(
+          (a, b) =>
+            titleOf(a).localeCompare(titleOf(b), undefined, { numeric: true, sensitivity: 'base' }) ||
+            // 'base' calls "Ballad" and "ballad" EQUAL, and a stable sort then
+            // falls back to whatever order the listing arrived in — which is
+            // the one thing this memo exists to stop. The folder name is
+            // unique, so it makes the order total.
+            a.dir.localeCompare(b.dir)
+        ),
+    [projects]
+  )
+
+  /** What the list actually renders: the sorted library, narrowed to what the
+   *  singer is looking for. */
+  const q = query.trim().toLowerCase()
+  const shown = useMemo(() => (q ? sorted.filter((p) => titleOf(p).toLowerCase().includes(q)) : sorted), [sorted, q])
+
+  /** The bundled sample is a song in this list like any other, so it answers
+   *  to the search too — left unfiltered it sat under two matches looking
+   *  like a third. */
+  const sampleTitle = `Sample — ${SAMPLE_PROJECT.name}`
+  const sampleShown = !q || sampleTitle.toLowerCase().includes(q)
 
   /** A project's name for the cards that only know its directory. The split
    *  and analysis cards were titling themselves with the folder slug while
@@ -301,6 +347,8 @@ export default function CatalogScreen({
             }
           }
           setMode(next)
+          // a query typed against the phone library means nothing against Drive
+          setQuery('')
           void setStoredText('singz.libMode', next)
         } catch (e) {
           setError(String(e instanceof Error ? e.message : e))
@@ -1031,7 +1079,7 @@ export default function CatalogScreen({
     TEST.libMode = mode
     TEST.setPref = setStoredText
     TEST.getPref = getStoredText
-    TEST.projects = (projects ?? []).map((p) => p.dir)
+    TEST.projects = sorted.map((p) => p.dir)
     TEST.listError = error
     TEST.busy = loading?.msg ?? null
     TEST.loadingFrac = loading?.frac ?? null
@@ -1096,20 +1144,26 @@ export default function CatalogScreen({
     action?: React.ReactNode
     sample?: boolean
     onPress: () => void
-    onLongPress?: () => void
+    /** The card's other actions. Long-press reaches them, and so does the •••
+     *  button this puts on the card — a long-press has no affordance, and the
+     *  code already conceded the point for Split ("the long-press menu, which
+     *  is not a place a singer finds a feature"). Omitted entirely when the
+     *  song has nothing to offer: a Drive song with nothing downloaded used to
+     *  take the long-press and silently do nothing. */
+    menu?: (() => void) | null
   }): React.JSX.Element => {
     const isLoading = loading?.dir === opts.dir
     return (
       <Pressable
         key={opts.key}
         onPress={opts.onPress}
-        onLongPress={opts.onLongPress}
+        onLongPress={opts.menu ?? undefined}
         accessibilityRole="button"
         /* Deliberately NO accessibilityLabel: a Pressable is already the
            accessibility element for the whole card, and an explicit label
            REPLACES the string RN composes from the children — title, meta and
            the ✓/☁ status would all vanish behind the title alone. */
-        accessibilityHint={opts.onLongPress ? 'Opens the song. Long press for more actions.' : 'Opens the song.'}
+        accessibilityHint={opts.menu ? 'Opens the song. Long press for more actions.' : 'Opens the song.'}
         style={({ pressed }) => [
           s.card,
           opts.sample && s.cardSample,
@@ -1143,10 +1197,35 @@ export default function CatalogScreen({
             <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
           </Pressable>
         ) : (
-          <View style={{ alignItems: 'flex-end' }}>
-            {opts.right}
-            {opts.action}
-          </View>
+          <>
+            <View style={{ alignItems: 'flex-end' }}>
+              {opts.right}
+              {opts.action}
+            </View>
+            {opts.menu && (
+              <Pressable
+                /* Asymmetric on purpose. The Split chip beside it claims 10 of
+                   the card's 14 pt gap; ••• is the later sibling, so a near-miss
+                   to the right of Split would open the menu instead of
+                   splitting. 4 makes the two targets abut rather than overlap —
+                   the same arithmetic the crash notice's Report link needed. */
+                hitSlop={{ top: 10, bottom: 10, left: 4, right: 10 }}
+                onPress={(e) => {
+                  // the card underneath would otherwise open the song
+                  e.stopPropagation()
+                  opts.menu?.()
+                }}
+                style={s.moreBtn}
+                accessibilityRole="button"
+                accessibilityLabel={`More actions for ${opts.title}`}
+              >
+                {/* ••• rather than a gear, for the reason the player's header
+                    gives: a gear glyph has no guaranteed text presentation on
+                    Android. */}
+                <Text style={s.moreGlyph}>•••</Text>
+              </Pressable>
+            )}
+          </>
         )}
         {isLoading && (
           <View style={s.progressRail}>
@@ -1306,8 +1385,62 @@ export default function CatalogScreen({
             <Text style={s.errX}>✕</Text>
           </Pressable>
         )}
+        {/* Above the ScrollView, not inside it: a search box you have to
+            scroll back up to reach is not a search box. Only past
+            SEARCH_FROM songs — see the constant — but ALWAYS while a query is
+            live, or deleting a song down past the threshold takes the box away
+            and leaves the filter applied, with nothing on screen to clear it
+            and no explanation of why most of the library is missing. */}
+        {(sorted.length >= SEARCH_FROM || q !== '') && (
+          <View style={s.searchRow}>
+            <TextInput
+              style={s.search}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Find a song"
+              placeholderTextColor={C.dim}
+              autoCorrect={false}
+              autoCapitalize="none"
+              returnKeyType="search"
+              clearButtonMode="while-editing"
+              accessibilityLabel="Find a song by name"
+            />
+            {/* iOS draws its own clear button inside the field; Android has
+                none, and a query with no way out strands the library. */}
+            {Platform.OS === 'android' && query.length > 0 && (
+              <Pressable
+                hitSlop={10}
+                onPress={() => setQuery('')}
+                accessibilityRole="button"
+                accessibilityLabel="Clear the search"
+              >
+                <Text style={s.searchX}>✕</Text>
+              </Pressable>
+            )}
+          </View>
+        )}
         <ScrollView
           style={{ flex: 1 }}
+          /* Belt and braces against RN's documented default. With a text
+             field focused, `keyboardShouldPersistTaps` unset means 'never',
+             and ScrollView.js:1487 says in as many words that the first tap
+             "should be sent to the scroll view and dismiss the keyboard, then
+             the second tap goes to the actual interior view" — i.e. the tap
+             that opens the song you just searched for does nothing. It checks
+             `TextInputState.currentlyFocusedInput()` GLOBALLY, so the field
+             sitting ABOVE this list still arms it, and AddSongSheet.tsx:507
+             already carries the same guard for the same reason.
+             NOT reproduced here, and the A/B was a real one — API 36
+             emulator, soft IME genuinely up, a visible marker in the same edit
+             proving the bundle had landed: the first tap opened the song with
+             the prop and without it. Kept anyway, because it is the correct
+             default for a list under a field and costs nothing: `'handled'`
+             only changes what happens to a tap a child DOES handle, so a tap
+             on empty list area still dismisses the keyboard. The iOS half is
+             simply unmeasured — the simulator boots with the Mac's hardware
+             keyboard connected and shows no soft keyboard, and there is no
+             `simctl` way to raise one (see CLAUDE.md for the ⌘K that is). */
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
           refreshControl={
             <RefreshControl
@@ -1427,7 +1560,7 @@ export default function CatalogScreen({
               </View>
             </View>
           )}
-          {(projects ?? []).map((p) => {
+          {shown.map((p) => {
             const downloaded = isDownloaded(p, usage[p.dir])
             const added = addedTracks(p.doc?.settings).length
             return card({
@@ -1504,7 +1637,16 @@ export default function CatalogScreen({
                 </Pressable>
               ) : null,
               onPress: () => void openEntry(p),
-              onLongPress: () => (mode === 'phone' ? phoneCardMenu(p) : confirmForget(p))
+              /* Nothing to offer, nothing offered. A Drive or folder song with
+                 nothing downloaded used to take a long-press and return at
+                 `if (have <= 0) return` — a gesture with no feedback and no
+                 result. Now there is no ••• and no long-press on that card. */
+              menu:
+                mode === 'phone'
+                  ? () => phoneCardMenu(p)
+                  : (usage[p.dir]?.bytes ?? 0) > 0
+                    ? () => confirmForget(p)
+                    : null
             })
           })}
           {projects === null && (
@@ -1515,7 +1657,10 @@ export default function CatalogScreen({
               </Text>
             </View>
           )}
-          {projects !== null && projects.length === 0 && (
+          {projects !== null && shown.length === 0 && !sampleShown && (
+            <Text style={s.empty}>No song here is called “{query.trim()}”.</Text>
+          )}
+          {projects !== null && projects.length === 0 && q === '' && (
             // Whichever library is open has its OWN next step — and phone mode
             // is where the app starts, so the folder advice was the first
             // thing every new singer read, one line under the Add link that
@@ -1534,16 +1679,17 @@ export default function CatalogScreen({
                     : 'No projects in this folder. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
             </Text>
           )}
-          {card({
-            key: SAMPLE_DIR,
-            dir: SAMPLE_DIR,
-            hue: 0,
-            title: `Sample — ${SAMPLE_PROJECT.name}`,
-            meta: 'bundled · always available',
-            right: <Text style={s.status}>✓</Text>,
-            sample: true,
-            onPress: () => void openSample()
-          })}
+          {sampleShown &&
+            card({
+              key: SAMPLE_DIR,
+              dir: SAMPLE_DIR,
+              hue: 0,
+              title: sampleTitle,
+              meta: 'bundled · always available',
+              right: <Text style={s.status}>✓</Text>,
+              sample: true,
+              onPress: () => void openSample()
+            })}
           {(() => {
             const dirs = Object.keys(usage).filter((d) => usage[d].bytes > 0)
             const total = dirs.reduce((n, d) => n + usage[d].bytes, 0)
@@ -1687,6 +1833,21 @@ const s = StyleSheet.create({
   cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
   cardMeta: { color: white(0.5), fontSize: 12.5, marginTop: 3 },
   status: { color: C.dim, fontSize: 12, fontWeight: '600' },
+  moreBtn: { width: 30, height: 34, alignItems: 'center', justifyContent: 'center' },
+  moreGlyph: { color: white(0.55), fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
+  search: {
+    flex: 1,
+    height: 40,
+    borderRadius: 12,
+    paddingHorizontal: 13,
+    backgroundColor: white(0.063),
+    borderWidth: 1,
+    borderColor: white(0.07),
+    color: C.text,
+    fontSize: 15
+  },
+  searchX: { color: C.dim, fontSize: 15, fontWeight: '700' },
   statusHave: { color: white(0.62) },
   storage: {
     flexDirection: 'row',
