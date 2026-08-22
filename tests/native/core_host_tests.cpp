@@ -24,6 +24,16 @@
 #include "wav.h"
 
 static int failures = 0;
+
+// Scratch directory for the wav/flac fixtures the suites write. TMPDIR is the
+// POSIX answer; Windows sets TEMP (never TMPDIR) and has no /tmp, which made
+// every hardcoded literal here a harness failure on the first MSVC run — the
+// core was healthy, the paths were not.
+static std::string scratchDir() {
+  if (const char* t = std::getenv("TMPDIR")) return t;
+  if (const char* t = std::getenv("TEMP")) return t;
+  return "/tmp";
+}
 // The internal name is deliberately ugly: it used to be `ok`, and a test
 // whose own local was called `ok` expanded to `const bool ok = (ok);` —
 // self-initialisation, so the check read garbage and reported FAIL on code
@@ -177,7 +187,7 @@ static std::vector<unsigned char> slurp(const std::string& path) {
 }
 
 static void wavTests() {
-  const std::string path = "/tmp/singz-core-host-test.wav";
+  const std::string path = scratchDir() + "/singz-core-host-test.wav";
   std::remove(path.c_str());
   {
     // Golden bytes: header fields + lrintf scaling, including the clamp.
@@ -300,7 +310,7 @@ static void melodyTests() {
   // The reader: write the phrase as PCM16 stereo (the split's own format),
   // read it back mono, track — same pitches; and the fold matches the JS
   // fold to the bit on a stereo pair (L != R).
-  const std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/singz-melody-test.wav";
+  const std::string path = scratchDir() + "/singz-melody-test.wav";
   {
     singz::WavWriter w;
     CHECK("reader: fixture written", w.open(path, sr, 2));
@@ -487,8 +497,8 @@ static void beatsTests() {
 // or truncates to the shortest stem turns a light red here instead of a
 // slightly different grid on a phone.
 static void sumStemsTests() {
-  const std::string a = "/tmp/singz-core-host-sum-a.wav";
-  const std::string b = "/tmp/singz-core-host-sum-b.wav";
+  const std::string a = scratchDir() + "/singz-core-host-sum-a.wav";
+  const std::string b = scratchDir() + "/singz-core-host-sum-b.wav";
   // Quarters survive the writer/reader pair exactly (0.25 -> 8192 -> 0.25:
   // the writer scales by 32767 with lrintf, the reader divides by 32768), so
   // the sum below is checked with == and not a tolerance.
@@ -535,7 +545,7 @@ static void sumStemsTests() {
   // Refusals say why, with the path in the message.
   const std::vector<float> none = singz::sumStemsTo22k({}, err);
   CHECK("no stems is an error", !err.empty() && none.empty());
-  const std::vector<float> gone = singz::sumStemsTo22k({"/tmp/singz-no-such-stem.wav"}, err);
+  const std::vector<float> gone = singz::sumStemsTo22k({scratchDir() + "/singz-no-such-stem.wav"}, err);
   CHECK("a missing stem names itself", !err.empty() && gone.empty() &&
         err.find("singz-no-such-stem") != std::string::npos);
   {
@@ -560,7 +570,7 @@ static void sumStemsTests() {
 // sum through float32 per channel, and a FLAC path that folded in double
 // would differ in the last bit while every byte on disk was correct.
 static void flacTests() {
-  const std::string dir = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp");
+  const std::string dir = scratchDir();
   const std::string wav = dir + "/singz-flac-io-test.wav";
   const std::string wavKeep = dir + "/singz-flac-io-keep.wav";
   const std::string flac = dir + "/singz-flac-io-test.flac";
