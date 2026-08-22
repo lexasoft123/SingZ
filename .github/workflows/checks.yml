@@ -1,0 +1,86 @@
+name: Checks
+
+# Nothing ran on an ordinary push or a pull request until this file. The desktop
+# was not untested — build.yml runs typecheck and `npm test` on `v*` tags, on a
+# manual dispatch and on the Monday cron, and e2e-win.yml runs the tests again
+# on the `e2e-win` branch — but every one of those is armed deliberately, after the
+# fact or by hand. Between them, a change could be written, reviewed and merged
+# without a machine ever seeing it. The melody fix in 0da3a04 changed a
+# detector, moved a version stamp every stored project depends on, and rewrote a
+# parity gate; nothing checked it until a release was cut.
+#
+# The parity gates are the other half. Five of the six ran only when a human
+# typed the command, and they are what holds the desktop's TypeScript detectors
+# and the core's C++ to the same answer — which, now that the core is the source
+# of truth, is the contract rather than a diagnostic.
+#
+# paths-ignore rather than paths, deliberately: an allow-list silently stops
+# covering a source directory the day someone adds one, which is the failure
+# mode this workflow exists to remove. Ignore only what cannot affect a test.
+on:
+  workflow_dispatch:
+  # Listed twice rather than shared through a YAML anchor: the Actions workflow
+  # parser does not resolve anchors, and a workflow that silently fails to parse
+  # is worse than a duplicated list.
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.claude/**'
+      - '.agents/**'
+      - '.codex/**'
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.claude/**'
+      - '.agents/**'
+      - '.codex/**'
+
+concurrency:
+  group: checks-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    # PINNED, not `ubuntu-latest`. courts-parity and courts-decide-parity compare
+    # transcendentals (cos/sin/log2/log1p/hypot) and their own header says
+    # bit-parity is a property of the platform's libm agreeing with V8 — which no
+    # rule of ours enforces and no runner label promises. Measured green here on
+    # Ubuntu 24.04 (glibc 2.39, g++ 13.3) before this landed, which is what earns
+    # the blocking `run:` below. A moving label would turn an image bump into a
+    # red push nobody changed anything to cause; this way it takes an edit.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # melody-parity renders the sample's stems to WAV, and make-sample.js
+      # synthesizes the sample itself, if this checkout has not got one.
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      # The root postinstall generates the gdrive-config modules. Without the
+      # secret they come out EMPTY, which is what the unit tests want — nothing
+      # here talks to Drive (mock-drive.ts stands in for it).
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      # Six gates, ~45 s with the core built once. Measured green before this
+      # landed on Ubuntu 24.04 (glibc 2.39, g++ 13.3) — the pinned runner — and
+      # on Debian 12 (glibc 2.36, g++ 12.2) on both x86_64 and aarch64. If a
+      # courts gate ever goes red here, read eval/courts-parity.mjs first: it may
+      # be the platform talking rather than the port.
+      - name: Parity gates (TypeScript against the C++ core)
+        run: scripts/run-parity-gates.sh

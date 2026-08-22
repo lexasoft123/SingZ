@@ -18,7 +18,10 @@
 // the magnitudes a chord label is read off. C++ `std::cos` and V8's
 // `Math.cos` are not required by any standard to agree in the last ulp, so
 // bit-parity here is an empirical property of the platform's libm and not a
-// guarantee the porting rules can enforce. It holds on macOS/arm64 today
+// guarantee the porting rules can enforce. It holds on macOS/arm64, and as of
+// 2026-08-22 on the Linux toolchains measured — Ubuntu 24.04 x86_64 (glibc
+// 2.39, g++ 13.3, the runner CI pins) and Debian 12 (glibc 2.36, g++ 12.2) on
+// x86_64 and aarch64, which CI does not run
 // (analysis.cpp's goertzel and Hann window already depend on it and are
 // gated), and the parity harness is what would notice it stopping — at the
 // VALUE level, where chroma, beat-sync chroma and rms are compared as exact

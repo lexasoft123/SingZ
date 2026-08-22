@@ -12,8 +12,15 @@
  * `cos`/`sin` generate the FFT twiddles, `log2` assigns each bin its pitch
  * class, and `log1p`/`hypot` compress the magnitude a chord label is read off
  * — so bit-parity is a property of the platform's libm agreeing with V8, which
- * no rule of ours can enforce. It holds on macOS/arm64 today. This file is how
- * we would find out it had stopped, on a phone toolchain or anywhere else.
+ * no rule of ours can enforce. Measured green 2026-08-22, when this gate joined
+ * CI, on macOS/arm64, on Ubuntu 24.04 x86_64 (glibc 2.39, g++ 13.3 — the
+ * runner .github/workflows/checks.yml pins) and on Debian 12 glibc 2.36 with
+ * g++ 12.2 on both x86_64 and aarch64 — which is what earns it a
+ * BLOCKING step rather than an advisory one, and why that runner is pinned
+ * rather than `ubuntu-latest`. A red on the pinned runner is therefore worth
+ * taking at face value; a red anywhere unmeasured — a runner bump, a phone
+ * toolchain — may be the platform talking, and this file is how we would find
+ * that out.
  *
  * Values are compared in full, never a checksum: a digest that happened to
  * collide would hide exactly the failure this exists to catch. Both sides

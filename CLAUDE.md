@@ -12,6 +12,7 @@ Deeper docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 npm run dev          # electron-vite dev (HMR; restarts main on src/main changes)
 npm run typecheck    # tsc over node (main/preload) + web (renderer) + tests configs
 npm test             # vitest: unit suites + tests/roundtrip (real sync -> fake Drive -> real phone code)
+npm run gates        # the six TS-against-C++ parity gates (scripts/run-parity-gates.sh)
 npm run build        # bundle into out/  — ALWAYS build before driving E2E
 npm run dist         # package installer for current platform
 npx electron .       # run the built app (out/) without packaging
@@ -26,6 +27,32 @@ mobile/scripts/test-swift-currency.sh                   # Swift cache-currency t
 All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 
 ## Verification policy
+
+**The C++ core is the source of truth for every detector** (decided 2026-08-22).
+New detector work lands in `mobile/native/core` first; the TypeScript in
+`src/renderer/src/audio/` is a port of it, and a divergence means the TypeScript
+has drifted — not the port. What holds the two together is the six parity gates
+under `eval/`, so they are the contract, not a diagnostic: `npm run gates`
+(`scripts/run-parity-gates.sh`) runs all six on the bundled sample in ~45 s,
+building `singz-analyze` once and generating `mobile/src/gen/analysis-lib.js`
+and the sample itself rather than telling you to `npm ci` somewhere else.
+**`.github/workflows/checks.yml` runs typecheck + `npm test` + all six on every
+push and PR** — before it existed nothing ran on an ordinary push or PR at all.
+The desktop was not untested (build.yml runs typecheck and `npm test` on `v*`
+tags, a dispatch and the Monday cron; e2e-win.yml runs `npm test` again on its
+branch) but every
+one of those is armed deliberately or after the fact, so a change could be
+written, reviewed and merged without a machine seeing it. It pins
+`runs-on: ubuntu-24.04` rather than `ubuntu-latest`, because the two courts
+gates compare transcendentals and a moving image would turn a runner bump into a
+red nobody caused; that platform (glibc 2.39, g++ 13.3) was measured green
+first, as were Debian 12 x86_64 and aarch64. It uses `paths-ignore`, never an
+allow-list: an allow-list stops covering a source directory the day one is
+added. A green run is a DRIFT canary
+on a 40 s synthesized sample, not a quality corpus — real-song runs
+(`--library`, a project dir) stay a deliberate act, `beats-parity` stays
+staged, and no parity gate can see the two implementations being fed DIFFERENT
+INPUTS, which is exactly how the melody framing bug survived a year of green.
 
 UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never

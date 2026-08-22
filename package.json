@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json",
     "dist": "npm run build && electron-builder --publish never",
     "test": "vitest run",
+    "gates": "scripts/run-parity-gates.sh",
     "store-notes": "node scripts/store-notes.cjs",
     "store-notes:check": "node scripts/store-notes.cjs --check"
   },
@@ -28,6 +29,7 @@
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "esbuild": "0.25.12",
     "playwright-core": "^1.62.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

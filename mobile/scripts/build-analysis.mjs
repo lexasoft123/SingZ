@@ -30,6 +30,16 @@ const repoRoot = resolve(mobileRoot, '..')
 const audioDir = join(repoRoot, 'src', 'renderer', 'src', 'audio')
 const outDir = join(mobileRoot, 'src', 'gen')
 
+// `--lib-only` stops after analysis-lib.{js,d.ts}: the parity gates import the
+// .js and nothing else, and the worklet half below needs babel out of
+// mobile/node_modules — which a desktop-only checkout does not have, and which
+// a desktop CI job has no other reason to install. The .d.ts is written on this
+// side of the exit even though no gate reads it, so wiping gen/ and running the
+// gates cannot leave mobile's own tsc unable to resolve './gen/analysis-lib'.
+// Mobile's postinstall runs the full build; this flag is
+// scripts/run-parity-gates.sh's way in.
+const libOnly = process.argv.includes('--lib-only')
+
 let esbuild
 try {
   esbuild = createRequire(join(mobileRoot, 'package.json'))('esbuild')
@@ -82,137 +92,6 @@ await esbuild.build({
   banner: { js: banner },
   logLevel: 'warning'
 })
-
-// ---- the same detectors again, as ONE worklet ----
-//
-// Melody is ~65 s of straight-line arithmetic per song (the Phase-0 spike), so
-// it runs on a worklet runtime and not on the thread drawing the app. Worklet
-// runtimes are separate JS runtimes: they cannot see this app's modules and
-// cannot share its memory, and Hermes has no eval to load code at runtime with.
-// So the detectors travel as CODE — the whole bundle inlined in one function
-// carrying the 'worklet' directive, which the worklets babel plugin serializes
-// into the other runtime whole. That is a build-time answer to a runtime
-// problem, and it costs no app-wide Bundle Mode switch.
-//
-// The lyrics half is deliberately absent: this bundle is arithmetic only, so it
-// names no fetch, no AbortController and no timer that a worklet runtime would
-// have to provide.
-const workletEntry = `
-export { detectBeats, estimateKey, estimateKeyFromStems, BEAT_DETECT_VERSION, KEY_DETECT_VERSION } from './analysis'
-export { encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './melody'
-export { trackMelodyCore } from './pitch-core'
-export { applyUserBars } from './beat'
-`
-
-const iife = await esbuild.build({
-  stdin: { contents: workletEntry, resolveDir: audioDir, loader: 'ts' },
-  bundle: true,
-  format: 'iife',
-  globalName: 'lib',
-  platform: 'neutral',
-  target: 'es2020',
-  write: false,
-  logLevel: 'warning'
-})
-// esbuild emits `var lib = (() => { … })();` — a plain local declaration once
-// it sits inside the function below, so the bundle never touches a global.
-//
-// Lowered with Babel's block-scoping transform FIRST, and this is not
-// optional: the worklets plugin serializes a worklet's body as source and the
-// worklet runtime evaluates that source raw, and Hermes gives every closure in
-// a `for (let …)` loop the LAST iteration's binding — measured on the iOS
-// simulator: `for (let k of ['a','b','c']) fns.push(() => k)` yields c,c,c.
-// The app runtime never sees this because Metro's preset lowers block scoping
-// before Hermes does; the worklet path bypasses the preset. Unlowered, the
-// bundle's own module-export helper (a per-key getter closure in a for-of)
-// resolved EVERY export to the last one, so `lib.detectBeats` was
-// trackMelodyCore. The detectors themselves close over loop lets too, so the
-// wrong answer would not always be as loud as that.
-const babel = createRequire(join(mobileRoot, 'package.json'))('@babel/core')
-const iifeSrc = babel
-  .transformSync(iife.outputFiles[0].text, {
-    babelrc: false,
-    configFile: false,
-    compact: false,
-    plugins: [
-      createRequire(join(mobileRoot, 'package.json')).resolve('@babel/plugin-transform-block-scoping')
-    ]
-  })
-  .code.trimEnd()
-
-// A .js with a .d.ts beside it, like analysis-lib: the body is transpiled
-// output, which mobile's strict tsconfig would refuse as source (implicit
-// anys throughout) — and the worklets babel plugin reads .js just the same.
-const workletHead = `${banner}
-//
-// The worklet-runtime copy: \`loadAnalysisLib\` is one function with the whole
-// bundle in its body and nothing in its closure, so it serializes into any
-// worklet runtime as source. Compiling ~${Math.round(iifeSrc.length / 1024)} kB
-// is not free, so the result is cached on that runtime's own global — the
-// second song pays nothing.`
-
-writeFileSync(
-  join(outDir, 'analysis-worklet.js'),
-  `${workletHead}
-
-export function loadAnalysisLib() {
-  'worklet'
-  const g = globalThis
-  if (g.__singzAnalysisLib) return g.__singzAnalysisLib
-${iifeSrc
-  .split('\n')
-  .map((l) => (l ? `  ${l}` : l))
-  .join('\n')}
-  g.__singzAnalysisLib = lib
-  return lib
-}
-`
-)
-
-writeFileSync(
-  join(outDir, 'analysis-worklet.d.ts'),
-  `${workletHead}
-
-import type {
-  AudioBufferLike,
-  BeatAux,
-  DetectedBeats,
-  KeyGuess,
-  MelodyInfo,
-  MelodyTrack,
-  StoredBeatInfo
-} from './analysis-lib'
-
-export interface AnalysisLib {
-  BEAT_DETECT_VERSION: number
-  PITCH_DETECT_VERSION: number
-  KEY_DETECT_VERSION: number
-  detectBeats(
-    buffer: AudioBufferLike,
-    aux?: BeatAux,
-    debug?: Record<string, unknown>
-  ): DetectedBeats | null
-  /** Last resort only — the sung line is a poor witness to the key. */
-  estimateKey(f0: Float32Array): KeyGuess | null
-  estimateKeyFromStems(inst: AudioBufferLike[], bass: AudioBufferLike | null): KeyGuess | null
-  encodeMelody(f0: Float32Array, hopSec: number): MelodyInfo
-  melodyFitsSong(f0: Float32Array, hopSec: number, durationSec: number): boolean
-  trackMelodyCore(
-    mono: Float32Array,
-    sampleRate: number,
-    onProgress?: (p: number) => void
-  ): MelodyTrack
-  applyUserBars(info: StoredBeatInfo): StoredBeatInfo
-}
-
-/**
- * The detectors, on whichever runtime calls this. Marked 'worklet', so it can
- * be scheduled onto a worklet runtime as-is; on the app runtime it is an
- * ordinary function.
- */
-export declare function loadAnalysisLib(): AnalysisLib
-`
-)
 
 // The type surface, by hand: the sources type against the DOM AudioBuffer,
 // which mobile's tsconfig has no lib for — the structural stand-in below is
@@ -386,5 +265,142 @@ export declare function lyricsById(
 ): Promise<{ lines: LyricLineLike[]; credit: string } | null>
 `
 )
+
+if (libOnly) {
+  console.log('build-analysis: wrote mobile/src/gen/analysis-lib.{js,d.ts} (--lib-only)')
+  process.exit(0)
+}
+
+// ---- the same detectors again, as ONE worklet ----
+//
+// Melody is ~65 s of straight-line arithmetic per song (the Phase-0 spike), so
+// it runs on a worklet runtime and not on the thread drawing the app. Worklet
+// runtimes are separate JS runtimes: they cannot see this app's modules and
+// cannot share its memory, and Hermes has no eval to load code at runtime with.
+// So the detectors travel as CODE — the whole bundle inlined in one function
+// carrying the 'worklet' directive, which the worklets babel plugin serializes
+// into the other runtime whole. That is a build-time answer to a runtime
+// problem, and it costs no app-wide Bundle Mode switch.
+//
+// The lyrics half is deliberately absent: this bundle is arithmetic only, so it
+// names no fetch, no AbortController and no timer that a worklet runtime would
+// have to provide.
+const workletEntry = `
+export { detectBeats, estimateKey, estimateKeyFromStems, BEAT_DETECT_VERSION, KEY_DETECT_VERSION } from './analysis'
+export { encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './melody'
+export { trackMelodyCore } from './pitch-core'
+export { applyUserBars } from './beat'
+`
+
+const iife = await esbuild.build({
+  stdin: { contents: workletEntry, resolveDir: audioDir, loader: 'ts' },
+  bundle: true,
+  format: 'iife',
+  globalName: 'lib',
+  platform: 'neutral',
+  target: 'es2020',
+  write: false,
+  logLevel: 'warning'
+})
+// esbuild emits `var lib = (() => { … })();` — a plain local declaration once
+// it sits inside the function below, so the bundle never touches a global.
+//
+// Lowered with Babel's block-scoping transform FIRST, and this is not
+// optional: the worklets plugin serializes a worklet's body as source and the
+// worklet runtime evaluates that source raw, and Hermes gives every closure in
+// a `for (let …)` loop the LAST iteration's binding — measured on the iOS
+// simulator: `for (let k of ['a','b','c']) fns.push(() => k)` yields c,c,c.
+// The app runtime never sees this because Metro's preset lowers block scoping
+// before Hermes does; the worklet path bypasses the preset. Unlowered, the
+// bundle's own module-export helper (a per-key getter closure in a for-of)
+// resolved EVERY export to the last one, so `lib.detectBeats` was
+// trackMelodyCore. The detectors themselves close over loop lets too, so the
+// wrong answer would not always be as loud as that.
+const babel = createRequire(join(mobileRoot, 'package.json'))('@babel/core')
+const iifeSrc = babel
+  .transformSync(iife.outputFiles[0].text, {
+    babelrc: false,
+    configFile: false,
+    compact: false,
+    plugins: [
+      createRequire(join(mobileRoot, 'package.json')).resolve('@babel/plugin-transform-block-scoping')
+    ]
+  })
+  .code.trimEnd()
+
+// A .js with a .d.ts beside it, like analysis-lib: the body is transpiled
+// output, which mobile's strict tsconfig would refuse as source (implicit
+// anys throughout) — and the worklets babel plugin reads .js just the same.
+const workletHead = `${banner}
+//
+// The worklet-runtime copy: \`loadAnalysisLib\` is one function with the whole
+// bundle in its body and nothing in its closure, so it serializes into any
+// worklet runtime as source. Compiling ~${Math.round(iifeSrc.length / 1024)} kB
+// is not free, so the result is cached on that runtime's own global — the
+// second song pays nothing.`
+
+writeFileSync(
+  join(outDir, 'analysis-worklet.js'),
+  `${workletHead}
+
+export function loadAnalysisLib() {
+  'worklet'
+  const g = globalThis
+  if (g.__singzAnalysisLib) return g.__singzAnalysisLib
+${iifeSrc
+  .split('\n')
+  .map((l) => (l ? `  ${l}` : l))
+  .join('\n')}
+  g.__singzAnalysisLib = lib
+  return lib
+}
+`
+)
+
+writeFileSync(
+  join(outDir, 'analysis-worklet.d.ts'),
+  `${workletHead}
+
+import type {
+  AudioBufferLike,
+  BeatAux,
+  DetectedBeats,
+  KeyGuess,
+  MelodyInfo,
+  MelodyTrack,
+  StoredBeatInfo
+} from './analysis-lib'
+
+export interface AnalysisLib {
+  BEAT_DETECT_VERSION: number
+  PITCH_DETECT_VERSION: number
+  KEY_DETECT_VERSION: number
+  detectBeats(
+    buffer: AudioBufferLike,
+    aux?: BeatAux,
+    debug?: Record<string, unknown>
+  ): DetectedBeats | null
+  /** Last resort only — the sung line is a poor witness to the key. */
+  estimateKey(f0: Float32Array): KeyGuess | null
+  estimateKeyFromStems(inst: AudioBufferLike[], bass: AudioBufferLike | null): KeyGuess | null
+  encodeMelody(f0: Float32Array, hopSec: number): MelodyInfo
+  melodyFitsSong(f0: Float32Array, hopSec: number, durationSec: number): boolean
+  trackMelodyCore(
+    mono: Float32Array,
+    sampleRate: number,
+    onProgress?: (p: number) => void
+  ): MelodyTrack
+  applyUserBars(info: StoredBeatInfo): StoredBeatInfo
+}
+
+/**
+ * The detectors, on whichever runtime calls this. Marked 'worklet', so it can
+ * be scheduled onto a worklet runtime as-is; on the app runtime it is an
+ * ordinary function.
+ */
+export declare function loadAnalysisLib(): AnalysisLib
+`
+)
+
 
 console.log('build-analysis: wrote mobile/src/gen/analysis-lib.{js,d.ts}')
