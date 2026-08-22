@@ -45,6 +45,13 @@ set(REPO ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 # wrong language; same shape as the bash scripts and both phone builds) ------
 file(GLOB FLAC_SOURCES CONFIGURE_DEPENDS ${FLAC_DIR}/src/*.c)
 add_library(singz_flac STATIC ${FLAC_SOURCES})
+# compat.h's _WIN32 branch maps flac_fopen and friends onto the UTF-8 wrappers
+# in share/win_utf8_io — upstream's official Windows path, and the reason
+# FLAC's own file opens survive non-ASCII song folders. The phones never take
+# the branch and never compile the file (their globs stop at src/*.c).
+if(WIN32)
+  target_sources(singz_flac PRIVATE ${FLAC_DIR}/src/share/win_utf8_io/win_utf8_io.c)
+endif()
 target_compile_definitions(singz_flac PRIVATE HAVE_CONFIG_H)
 target_include_directories(singz_flac PUBLIC
   ${FLAC_DIR} ${FLAC_DIR}/include ${FLAC_DIR}/src/include ${FLAC_DIR}/src)

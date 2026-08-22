@@ -38,6 +38,15 @@ whose includers are the `lpc_intrin_*.c` files we do not take) and have been
 dropped. **When a drop contains a `deduplication/`-style directory, check
 reachability by `#include` name as well as by linking.**
 
+One pair joined later (byte-identical to the same sha256-verified tarball):
+`include/share/win_utf8_io.h` + `src/share/win_utf8_io/win_utf8_io.c`, BSD
+like the rest. `compat.h`'s `_WIN32` branch includes the header
+unconditionally and maps `flac_fopen` &co onto its UTF-8 wrappers, so the
+first MSVC build (the desktop cutover's core-win workflow) stopped at
+C1083 — none of the prior platforms ever took that branch. The `.c` sits in
+a subdirectory on purpose: the phones' globs (`src/*.c`) must not compile
+it, and only the host CMakeLists adds it, under `if(WIN32)`.
+
 Deliberately NOT taken:
 
 - `ogg_*.c` — we write native FLAC, and they need libogg, which we do not ship.
