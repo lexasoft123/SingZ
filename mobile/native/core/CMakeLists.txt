@@ -53,6 +53,13 @@ if(WIN32)
   target_sources(singz_flac PRIVATE ${FLAC_DIR}/src/share/win_utf8_io/win_utf8_io.c)
 endif()
 target_compile_definitions(singz_flac PRIVATE HAVE_CONFIG_H)
+# FLAC__NO_DLL: on MSVC, FLAC/export.h defaults FLAC_API to
+# __declspec(dllimport) — format.c then DEFINES dllimport data and dies with
+# C2491 (core-win discovery #2). The define says "static", which this build
+# is; PUBLIC because every consumer that includes a FLAC header on Windows
+# needs the same answer. export.h only consults it under MSC — a no-op for
+# clang/gcc and both phones.
+target_compile_definitions(singz_flac PUBLIC FLAC__NO_DLL)
 target_include_directories(singz_flac PUBLIC
   ${FLAC_DIR} ${FLAC_DIR}/include ${FLAC_DIR}/src/include ${FLAC_DIR}/src)
 # libm belongs on the library whose code calls it (lpc.c's log): a pure-C
