@@ -30,6 +30,7 @@ const { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require('node
 const { homedir, tmpdir } = require('node:os')
 const { join } = require('node:path')
 const { _electron } = require('playwright-core')
+const { quietLaunch } = require('./quiet-launch.cjs')
 
 const REPO = join(__dirname, '..', '..', '..')
 const APP = join(REPO, 'out', 'main', 'index.js')
@@ -55,6 +56,7 @@ const beat = () => JSON.parse(readFileSync(PJ, 'utf8')).settings.beat
 
 async function open() {
   const app = await _electron.launch({ executablePath: require('electron'), args: [APP], env })
+  await quietLaunch(app) // measurement runs must not steal the singer's focus
   const win = await app.firstWindow()
   await win.waitForLoadState('domcontentloaded')
   await win.waitForSelector('.lib-card', { timeout: 30000 })

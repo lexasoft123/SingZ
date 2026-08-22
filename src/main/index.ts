@@ -102,8 +102,18 @@ const scheduler = new SyncScheduler({
   debounceMs: process.env.SINGZ_SYNC_DEBOUNCE_MS ? Number(process.env.SINGZ_SYNC_DEBOUNCE_MS) : undefined
 })
 
-// a mark from anywhere (a save, the aligner, an import) wakes it
-onDirty(() => scheduler.notifyDirty())
+// a mark from anywhere (a save, the aligner, an import) wakes it.
+// SINGZ_NO_SYNC gates this wiring too, not just scheduler.start() below.
+// Before the gate this registration was unconditional, so a driver's
+// Check & align (writeCache -> markFileDirty) WOULD HAVE pushed the result
+// to the singer's real Drive four seconds later with the launch-sync gate
+// green — found by code trace during the Zeit forensics (that particular
+// push turned out to be the singer's own click in their real app, no gate
+// set at all; no gate-green leak was ever observed), and verified closed by
+// an align-app-e2e run on the signed-in machine that appended zero
+// sync-log rows. This is also what makes SINGZ_NO_LAUNCH_SYNC genuinely
+// the narrower opt-out the docs call it, instead of an alias.
+if (!process.env.SINGZ_NO_SYNC) onDirty(() => scheduler.notifyDirty())
 
 function createWindow(): void {
   const st = loadWindowState({ width: 1240, height: 820 })

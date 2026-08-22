@@ -39,6 +39,7 @@
  *      E2E_FETCH_DELAY_MS (per-request delay injected into main, default 4000).
  */
 const { _electron } = require('playwright-core')
+const { quietLaunch } = require('./quiet-launch.cjs')
 const { readFileSync, writeFileSync, cpSync, rmSync, existsSync, readdirSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
@@ -103,6 +104,7 @@ const readPanel = (win) =>
     args: [APP],
     env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
   })
+  await quietLaunch(app) // measurement runs must not steal the singer's focus
   app.process().stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`))
   try {
     // Hold every LRCLIB request open, in the main process, where the ladder

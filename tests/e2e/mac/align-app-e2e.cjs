@@ -12,6 +12,7 @@
  *      E2E_OUT (screenshot dir, default os.tmpdir()).
  */
 const { _electron } = require('playwright-core');
+const { quietLaunch } = require('./quiet-launch.cjs');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir, homedir } = require('node:os');
@@ -28,8 +29,9 @@ const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js');
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
-    env: { ...process.env, SINGZ_MUTE: '1' } // automated runs are silent
+    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
   });
+  await quietLaunch(app); // measurement runs must not steal the singer's focus
   const win = await app.firstWindow();
   await win.waitForLoadState('domcontentloaded');
   await win.waitForSelector('.lib-card', { timeout: 20000 });
