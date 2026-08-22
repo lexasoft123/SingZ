@@ -1,4 +1,5 @@
 #include "wav.h"
+#include "file_compat.h"
 
 #include <algorithm>
 #include <cmath>
