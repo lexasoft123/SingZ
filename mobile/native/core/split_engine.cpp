@@ -1,4 +1,5 @@
 #include "split_engine.h"
+#include "file_compat.h"
 
 #include <algorithm>
 #include <cinttypes>
