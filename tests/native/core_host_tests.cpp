@@ -453,7 +453,7 @@ static void beatsTests() {
   CHECK("beats: the windows agree (not rubato)", ok && d.consistency >= 0.6);
   CHECK("beats: the lattice has a beat every ~0.5 s", ok && std::fabs(lat.medSec - 0.5) < 0.02 &&
         lat.beatsSec.size() > 50);
-  CHECK("beats: stamp is the TS's BEAT_DETECT_VERSION", singz::kBeatDetectVersion == 21);
+  CHECK("beats: stamp is the TS's BEAT_DETECT_VERSION", singz::kBeatDetectVersion == 22);
 
   // The meter test: a straight 4/4 click train must NOT read as compound.
   // (Its 6/8 counterpart is a library fact rather than a synthesis one —

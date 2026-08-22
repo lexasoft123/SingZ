@@ -25,8 +25,11 @@
 // instrument fill, the tempo family, and the DP tracker's octave choice.
 namespace singz {
 
-/** The stamp this file reproduces — analysis.ts's BEAT_DETECT_VERSION. */
-constexpr int kBeatDetectVersion = 21;
+/** The stamp this file reproduces — analysis.ts's BEAT_DETECT_VERSION.
+ *  v22 moved for the desktop's INPUT, not the detector: it now reads stems
+ *  from their files at the file's own rate (which this core always did), so
+ *  the port itself is unchanged and the parity gates hold across the bump. */
+constexpr int kBeatDetectVersion = 22;
 
 /** A drum-free span the fill was applied to, in seconds — the caller's cue
  *  that a stretch was carried by other stems (or, when `filled` is false,

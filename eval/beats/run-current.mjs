@@ -48,6 +48,15 @@ const gridsOut = opt('--grids-out')
 const grids = {}
 // Reproduce the pre-monoOf app bug (aux read as left channel only).
 const CH0 = args.includes('--channel0')
+// --rate <hz>: decode the audio at this rate instead of the stems' own 44100,
+// leaving monoAt44k to interpolate it back down — which is what the app fed
+// the detector for as long as it tracked the PLAYING buffers on a machine
+// whose output device ran at another rate. This flag is how that path stays
+// measurable: at 48000 it reproduced Wild World's 156.6 bpm, the figure
+// library-gt.json records as "the pre-v16 wrong answer" (40/51 checks against
+// 41/51; 44 vs 45 under --ml). The default measures what the app ships now
+// (detVersion 22, stems read from their files).
+const RATE = Number(opt('--rate') ?? 44100)
 // --ml <raw.jsonl>: feed Beat This! grids (runner-beat-this.py output) as
 // aux.ml — the hybrid path the app takes when a splitter pack is installed.
 const mlPath = opt('--ml')
@@ -110,7 +119,7 @@ function decodeF32(file, { channel0 = false } = {}) {
   const filterArgs = channel0 ? ['-af', 'pan=mono|c0=c0'] : ['-ac', '1']
   const r = spawnSync(
     'ffmpeg',
-    ['-v', 'error', '-y', '-i', file, ...filterArgs, '-ar', '44100', '-f', 'f32le', tmp],
+    ['-v', 'error', '-y', '-i', file, ...filterArgs, '-ar', String(RATE), '-f', 'f32le', tmp],
     { encoding: 'utf8' }
   )
   if (r.status !== 0) {
@@ -126,7 +135,7 @@ function decodeF32(file, { channel0 = false } = {}) {
 }
 
 /** Minimal AudioBuffer stand-in — everything detectBeats touches. */
-function audioBuffer(samples, sampleRate = 44100) {
+function audioBuffer(samples, sampleRate = RATE) {
   return {
     sampleRate,
     length: samples.length,

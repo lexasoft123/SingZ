@@ -93,6 +93,79 @@ const FOLLOW_MS = 750
  * line and still saves — it is just framed by whatever rate the device runs
  * at, which is the state every project was in before this.
  */
+/**
+ * One stem, decoded at the rate its FILE states — the shared primitive under
+ * every analysis input. `decodeAudioData` resamples to its context's rate, so
+ * the context is built at the file's own and the decode is a pass-through:
+ * the analysis sees the samples the C++ core reads. Null when the file cannot
+ * say (unreadable, foreign format) — the caller decides what to fall back to,
+ * and says so out loud, because a silent fallback IS the bug this exists to
+ * fix, wearing the current stamp.
+ */
+async function decodeStemAtFileRate(path: string): Promise<AudioBuffer | null> {
+  const one = async (p: string): Promise<AudioBuffer | null> => {
+    try {
+      const bytes = await window.singz.readAudio(p)
+      const sr = stemSampleRate(bytes)
+      if (sr === null) return null
+      return await new OfflineAudioContext(1, 1, sr).decodeAudioData(bytes)
+    } catch {
+      return null
+    }
+  }
+  const direct = await one(path)
+  if (direct) return direct
+  // A .wav that no longer exists is usually the v1->v2 upgrade running
+  // beside this analysis: convertStemsToFlac writes the verified .flac and
+  // THEN unlinks the .wav, per stem, while stemPathsRef keeps naming .wav
+  // until the whole upgrade lands. One of the two files always exists — so
+  // try the sibling before falling back to the device-rate buffer, which
+  // would be the old bug auto-saved under the new stamp.
+  if (/\.wav$/i.test(path)) return one(path.replace(/\.wav$/i, '.flac'))
+  return null
+}
+
+/**
+ * The beat/key analyses' stems, decoded from their FILES at the rate the
+ * files state — never the playing buffers, which Chromium resampled to the
+ * output device's rate. The beat detector's whole octave decision rides on
+ * this: monoAt44k resamples a device-rate buffer BACK down through linear
+ * interpolation, and on that doubly-resampled audio the ground-truth harness
+ * (eval/beats/run-current.mjs, which has only ever scored the file-rate path)
+ * measured Wild World at 156.6 bpm — the exact number its GT entry records as
+ * "the pre-v16 wrong answer". detVersion 22 is the stamp of file-fed grids.
+ *
+ * Composes exactly the aux the playback refs did: `ids` is the AUDIBLE lane
+ * order, so silent guitar/piano stems stay out of the vote here too. Per-stem
+ * fallback to the playback buffer, loudly — a missing file should degrade one
+ * lane, not the song.
+ */
+async function analysisStems(
+  paths: Record<string, string> | null,
+  ids: string[],
+  fallback: { drums: AudioBuffer | null; bass: AudioBuffer | null; vocals: AudioBuffer | null; inst: AudioBuffer[] }
+): Promise<{ drums: AudioBuffer | null; bass: AudioBuffer | null; vocals: AudioBuffer | null; inst: AudioBuffer[] }> {
+  const one = async (id: string, fb: AudioBuffer | null): Promise<AudioBuffer | null> => {
+    const path = paths?.[id]
+    if (!path) return fb
+    const decoded = await decodeStemAtFileRate(path)
+    if (decoded) return decoded
+    // E2E drivers read these, the same way they read the beat-model warnings
+    console.warn(`analysis: ${path} could not be read at its own rate — using the playback buffer at ${fb?.sampleRate ?? '?'} Hz`)
+    return fb
+  }
+  const instIds = ids.filter((id) => id !== 'vocals' && id !== 'drums' && id !== 'bass')
+  const inst = (await Promise.all(instIds.map((id, i) => one(id, fallback.inst[i] ?? null)))).filter(
+    (b): b is AudioBuffer => b !== null
+  )
+  return {
+    drums: await one('drums', fallback.drums),
+    bass: await one('bass', fallback.bass),
+    vocals: await one('vocals', fallback.vocals),
+    inst
+  }
+}
+
 async function melodyInput(
   path: string | null,
   buf: AudioBuffer
@@ -107,22 +180,10 @@ async function melodyInput(
     return mono
   }
   if (path) {
-    try {
-      const bytes = await window.singz.readAudio(path)
-      const sr = stemSampleRate(bytes)
-      if (sr !== null) {
-        // decodeAudioData resamples to the context's rate, so the context is
-        // built at the file's — the decode is then a pass-through and the
-        // tracker sees the samples the core would have read.
-        const off = new OfflineAudioContext(1, 1, sr)
-        const decoded = await off.decodeAudioData(bytes)
-        return { mono: fold(decoded), sampleRate: decoded.sampleRate }
-      }
-      // E2E drivers read these, the same way they read the beat-model warnings
-      console.warn(`melody: ${path} states no readable sample rate — tracking the playback buffer at ${buf.sampleRate} Hz`)
-    } catch (e) {
-      console.warn(`melody: ${path} could not be read (${String(e)}) — tracking the playback buffer at ${buf.sampleRate} Hz`)
-    }
+    const decoded = await decodeStemAtFileRate(path)
+    if (decoded) return { mono: fold(decoded), sampleRate: decoded.sampleRate }
+    // E2E drivers read these, the same way they read the beat-model warnings
+    console.warn(`melody: ${path} could not be read at its own rate — tracking the playback buffer at ${buf.sampleRate} Hz`)
   }
   return { mono: fold(buf), sampleRate: buf.sampleRate }
 }
@@ -357,14 +418,21 @@ export default function App(): React.JSX.Element {
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
   /** Where the vocals stem in `vocalsBufRef` came from. The melody is tracked
    *  from the FILE, not from that buffer: `decodeAudioData` resamples to the
-   *  playback device's rate, and the tracker's hop is derived from whatever
-   *  rate it is handed, so tracking the buffer makes a project's stored line
-   *  depend on the machine that opened it (see audio/stem-rate.ts). Assigned by
-   *  hand next to the buffer, not read from `stemFiles` state — the load path
+   *  playback device's rate, and every analysis derives something from the
+   *  rate it is handed — the melody its hop, the beat detector its whole
+   *  octave decision (monoAt44k resamples BACK from the device rate, and the
+   *  ground-truth harness only ever scored the file-rate path; Wild World
+   *  came out at the 156.6 bpm the GT records as "the pre-v16 wrong answer").
+   *  So analyses read the FILES (see audio/stem-rate.ts). Assigned by hand
+   *  next to the buffers, not read from `stemFiles` state — the load path
    *  calls prepMelody in the same breath as `setStemFiles`, a render too early
    *  for state to have caught up, and a stale path here is silently the old
    *  bug again. */
-  const vocalsPathRef = useRef<string | null>(null)
+  const stemPathsRef = useRef<Record<string, string> | null>(null)
+  /** The AUDIBLE stems, in lane order — which of the six the analyses use.
+   *  Kept beside the paths so the file-reading path composes exactly the aux
+   *  the buffer path did: silent guitar/piano lanes stay out of the vote. */
+  const audibleIdsRef = useRef<string[]>([])
   const bassBufRef = useRef<AudioBuffer | null>(null)
   /** Non-drum, non-bass, non-vocal stems (other/guitar/piano) — the beat
    *  tracker's fill where drums are silent. */
@@ -631,7 +699,8 @@ export default function App(): React.JSX.Element {
       melodyWorkerRef.current?.terminate()
       melodyWorkerRef.current = null
       vocalsBufRef.current = null
-      vocalsPathRef.current = null
+      stemPathsRef.current = null
+      audibleIdsRef.current = []
       drumsBufRef.current = null
       instBufsRef.current = []
       bassBufRef.current = null
@@ -718,7 +787,8 @@ export default function App(): React.JSX.Element {
           setStemFiles(stems)
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
-          vocalsPathRef.current = stems.vocals ?? null
+          stemPathsRef.current = stems
+          audibleIdsRef.current = order
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
           bassBufRef.current = buffers[order.indexOf('bass')] ?? null
           instBufsRef.current = order
@@ -797,7 +867,11 @@ export default function App(): React.JSX.Element {
                 // a stale path here fails SILENTLY, falling back to the
                 // device-rate buffer under a v2 stamp, which is the old bug
                 // wearing the new stamp.
-                vocalsPathRef.current = vocalsPathRef.current?.replace(/\.wav$/, '.flac') ?? null
+                stemPathsRef.current = stemPathsRef.current
+                  ? Object.fromEntries(
+                      Object.entries(stemPathsRef.current).map(([id, f]) => [id, f.replace(/\.wav$/, '.flac')])
+                    )
+                  : null
                 setStemFiles((prev) => {
                   if (!prev) return prev
                   const next: Record<string, string> = {}
@@ -980,7 +1054,8 @@ export default function App(): React.JSX.Element {
       setDirty(true)
       setSaveState((st) => (st === 'saved' ? 'idle' : st))
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
-      vocalsPathRef.current = stems.vocals ?? null
+      stemPathsRef.current = stems
+      audibleIdsRef.current = order
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
       bassBufRef.current = buffers[order.indexOf('bass')] ?? null
       instBufsRef.current = order
@@ -1223,22 +1298,33 @@ export default function App(): React.JSX.Element {
         void (async () => {
           setBeatProg(0.02)
           try {
-            const ml = await fetchMlGridRef.current?.()
+            // The stems off DISK, at the rate the files state — the model's
+            // mix and the detector both. The playing buffers are only the
+            // per-lane fallback (analysisStems says when one is taken).
+            const stems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
+              drums,
+              bass: bassBufRef.current,
+              vocals: vocalsBufRef.current,
+              inst: instBufsRef.current
+            })
+            if (drumsBufRef.current !== drums) return // song changed mid-flight
+            const ml = await fetchMlGridRef.current?.(stems)
             if (drumsBufRef.current !== drums) return // song changed mid-flight
             // let the bar paint before the synchronous tracker blocks
             setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
             await new Promise((r) => setTimeout(r, 30))
+            if (!stems.drums) return // no file and no buffer: nothing to track
             const aux = {
-              bass: bassBufRef.current,
-              vocals: vocalsBufRef.current,
-              inst: instBufsRef.current,
+              bass: stems.bass,
+              vocals: stems.vocals,
+              inst: stems.inst,
               lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
               words: linesRef.current?.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) ?? null,
               ml
             }
             const dbg = {}
-            const det = detectBeats(drums, aux, dbg)
-            publishBeatDbg('auto', drums, aux, det, dbg)
+            const det = detectBeats(stems.drums, aux, dbg)
+            publishBeatDbg('auto', stems.drums, aux, det, dbg)
             if (det) {
               // Hand-placed bar lines are re-folded onto the FRESH beat
               // array — they are stored as times precisely so they survive a
@@ -1287,10 +1373,29 @@ export default function App(): React.JSX.Element {
       } else if (inst.length > 0 || bassBuf) {
         setSongInfo({ key: null, bpm: info?.bpm ?? null })
         void (async () => {
+          // The harmonic stems off disk too, same rule as the beat pass. The
+          // key answer measured identical across the whole library either way
+          // (17/17), which is why KEY_DETECT_VERSION does not move — but a
+          // borderline song someday should land on the file's samples, not the
+          // device's.
+          // Only the harmonic paths: handing the full map over would decode
+          // drums and vocals this pass never reads — concurrently with the
+          // beat pass's own six, which is a fleet-machine's worth of memory
+          // for nothing.
+          const allPaths = stemPathsRef.current
+          const harmonicPaths = allPaths
+            ? Object.fromEntries(Object.entries(allPaths).filter(([id]) => id !== 'drums' && id !== 'vocals'))
+            : null
+          const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, {
+            drums: null,
+            bass: bassBuf,
+            vocals: null,
+            inst
+          })
           // let the melody paint before the synchronous chroma pass blocks
           await new Promise((r) => setTimeout(r, 30))
           if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
-          const stems = estimateKeyFromStems(inst, bassBuf)
+          const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
           // A melody-histogram fallback is displayed but never stored under
           // the v2 stamp — it is the method the stamp says we left behind.
           setSongInfo((s) => ({ ...s, key: stems ?? estimateKey(f0) }))
@@ -1348,7 +1453,7 @@ export default function App(): React.JSX.Element {
     // that lands in the wrong song is not merely drawn there, it is saved
     // there (analysis auto-saves), and then adopted on every open thereafter.
     const seq = loadSeq.current
-    const path = vocalsPathRef.current
+    const path = stemPathsRef.current?.vocals ?? null
     void (async () => {
       const src = await melodyInput(path, buf)
       if (seq !== loadSeq.current) return // a different song is open now
@@ -1517,7 +1622,7 @@ export default function App(): React.JSX.Element {
       setSong((s) => (s ? { ...s, path: res.songPath } : s))
       if (res.stems) {
         setStemFiles(res.stems)
-        vocalsPathRef.current = res.stems.vocals ?? null // the folder moved
+        stemPathsRef.current = res.stems // the folder moved
       }
       reanchorCustom(res.custom)
       setInLibrary(true)
@@ -1548,7 +1653,7 @@ export default function App(): React.JSX.Element {
         setSong({ path: res.songPath, name: res.name })
         if (res.stems) {
           setStemFiles(res.stems)
-          vocalsPathRef.current = res.stems.vocals ?? null // the folder moved
+          stemPathsRef.current = res.stems // the folder moved
         }
         reanchorCustom(res.custom)
         setProjectDir(res.dir)
@@ -1701,12 +1806,17 @@ export default function App(): React.JSX.Element {
    *  the detector then takes its homegrown path unchanged). The mix is
    *  rendered offline at the model's 22.05 kHz from whatever stems are
    *  loaded: the model wants what the singer hears, not one stem. */
-  const fetchMlGrid = useCallback(async (): Promise<MlGrid | null> => {
+  const fetchMlGrid = useCallback(async (stems: {
+    drums: AudioBuffer | null
+    bass: AudioBuffer | null
+    vocals: AudioBuffer | null
+    inst: AudioBuffer[]
+  }): Promise<MlGrid | null> => {
     try {
       const avail = await window.singz.beatsMlAvailable()
       if (!avail.ok || !avail.available) return null
       const bufs: AudioBuffer[] = []
-      for (const b of [drumsBufRef.current, bassBufRef.current, vocalsBufRef.current, ...instBufsRef.current]) {
+      for (const b of [stems.drums, stems.bass, stems.vocals, ...stems.inst]) {
         if (b) bufs.push(b)
       }
       if (bufs.length === 0) return null
@@ -1755,21 +1865,30 @@ export default function App(): React.JSX.Element {
     void (async () => {
       setBeatProg(0.02)
       try {
-        const ml = await fetchMlGrid()
+        // Same as the auto pass: files first, playing buffers as fallback.
+        const stems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
+          drums: buf,
+          bass: bassBufRef.current,
+          vocals: vocalsBufRef.current,
+          inst: instBufsRef.current
+        })
+        if (drumsBufRef.current !== buf) return // song changed mid-flight
+        const ml = await fetchMlGrid(stems)
         if (drumsBufRef.current !== buf) return // song changed mid-flight
         setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
         await new Promise((r) => setTimeout(r, 30))
+        if (!stems.drums) return
         const aux = {
-          bass: bassBufRef.current,
-          vocals: vocalsBufRef.current,
-          inst: instBufsRef.current,
+          bass: stems.bass,
+          vocals: stems.vocals,
+          inst: stems.inst,
           lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
           words: linesRef.current?.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) ?? null,
           ml
         }
         const dbg = {}
-        const det = detectBeats(buf, aux, dbg)
-        publishBeatDbg('redetect', buf, aux, det, dbg)
+        const det = detectBeats(stems.drums, aux, dbg)
+        publishBeatDbg('redetect', stems.drums, aux, det, dbg)
         if (det) {
           touchSettings()
           setBeatInfo({

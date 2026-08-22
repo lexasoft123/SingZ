@@ -466,12 +466,26 @@ was driven; the gotchas that follow from it are below.
   adopted the other's line and neither ever re-derived it. The desktop now
   reads the stem file at the rate the file states (`audio/stem-rate.ts`,
   `melodyInput` in App.tsx) and `PITCH_DETECT_VERSION` is 2 to retire what the
-  old path wrote. **A parity gate that runs one rate cannot see any of this**:
-  eval/melody-parity.mjs was green throughout, because it read the rate off the
-  WAV and handed the SAME rate to both implementations — it now runs every file
-  at its own rate and at the other of the 44.1/48 pair. Any future detector
-  that takes a sample rate owes the same question: which rate, whose, and does
-  the other implementation get the same one?
+  old path wrote. **The beat detector had the same bug with a worse face**:
+  `monoAt44k` "pins" the rate by linearly interpolating the device-rate buffer
+  BACK down, and on that doubly-resampled audio the octave decision itself
+  flipped — the app detected Wild World at 156.6 bpm, the exact figure
+  library-gt.json records as "the pre-v16 wrong answer", and Zeit at half —
+  while eval/beats/run-current.mjs, which minted every ground truth, decodes
+  with ffmpeg at 44.1 kHz and so had NEVER ONCE scored the path the app
+  actually ran (41/51 checks vs 40/51; 45 vs 44 with the model; the neural
+  lattice usually masks the flip, which is why it looked pack-dependent).
+  Every analysis now reads stems from FILES (`analysisStems` in App.tsx — beat,
+  key, and the ML mix alike), `BEAT_DETECT_VERSION` is 22 to retire
+  device-rate grids, and `run-current.mjs --rate 48000` keeps the broken path
+  measurable. KEY_DETECT_VERSION deliberately did NOT move: the key answer was
+  measured identical at both rates across all 17 library songs. **A parity
+  gate that runs one rate cannot see any of this**: eval/melody-parity.mjs was
+  green throughout, because it read the rate off the WAV and handed the SAME
+  rate to both implementations — it now runs every file at its own rate and at
+  the other of the 44.1/48 pair. Any future detector that takes a sample rate
+  owes the same question: which rate, whose, and does the other implementation
+  get the same one?
 - **Analysis must not outlive the song it was started for** — pYIN runs for
   seconds in a worker, so the singer can be in another song by the time it
   answers; a line that lands late is not merely drawn in the wrong song, it is

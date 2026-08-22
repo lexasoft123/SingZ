@@ -323,8 +323,19 @@ export function estimateKeyFromStems(inst: AudioBuffer[], bass: AudioBuffer | nu
  * repair now builds its own halved view (v15 bar-anchored parity
  * partition, parity picked by continuity with the surviving lattice at
  * the zone edges) and splices at our level.
+ * v22: no detector change — the INPUT moved. The desktop now feeds every
+ * stem from its FILE at the rate the file states (App.tsx analysisStems),
+ * where it used to hand over the playing buffers Chromium had resampled to
+ * the output device's rate for monoAt44k to interpolate back down. On that
+ * doubly-resampled audio the octave decision was measured flipping — Wild
+ * World at 156.6 bpm, the exact figure library-gt.json records as "the
+ * pre-v16 wrong answer" — and eval/beats/run-current.mjs, which minted
+ * every ground truth, has only ever decoded at the file's rate: 41/51
+ * checks against 40/51 (45 vs 44 with the model). The bump retires grids
+ * derived from device-rate input; on a 44.1 kHz output device the two paths
+ * were always identical.
  */
-export const BEAT_DETECT_VERSION = 21
+export const BEAT_DETECT_VERSION = 22
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
