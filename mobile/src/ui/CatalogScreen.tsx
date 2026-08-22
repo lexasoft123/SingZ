@@ -93,6 +93,13 @@ interface Loading {
   frac: number
 }
 
+/**
+ * Sizes as a SINGER reads them, which is why this is not `fmtBytes` from the
+ * log. That one goes down to kB because a log line wants the real number;
+ * this one floors at 1 MB, so a small song is never offered for deletion as
+ * "0 MB". Two formatters on purpose — the log and the screen are different
+ * audiences.
+ */
 const fmtSize = (bytes: number): string =>
   bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`
 
@@ -108,6 +115,15 @@ export default function CatalogScreen({
   const [projects, setProjects] = useState<ProjectEntry[] | null>(null)
   const [loading, setLoading] = useState<Loading | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** What the app was doing when it died last time, if it did.
+   *
+   *  Kept apart from `error` on purpose. That one slot was carrying six
+   *  unrelated things — a crash report, a rejected file pick, a folder-picker
+   *  failure, a listing failure, a sign-in failure and a song-load failure —
+   *  so whichever spoke last silenced the rest, and nothing cleared it but the
+   *  next action that happened to. This one is durable, is the only one worth
+   *  acting on, and unlike the others it has somewhere to go: the Log. */
+  const [crashNote, setCrashNote] = useState<string | null>(null)
   /** Library source: Drive API / picked folder (SAF, iCloud) / on-device. */
   const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>('phone')
   const [driveEmail, setDriveEmail] = useState<string | null>(null)
@@ -140,6 +156,15 @@ export default function CatalogScreen({
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
   const listSeq = useRef(0)
+
+  /** A project's name for the cards that only know its directory. The split
+   *  and analysis cards were titling themselves with the folder slug while
+   *  every other surface said `doc.name` — during the longest wait in the app,
+   *  the song stopped being called by its name. */
+  const nameOf = useCallback(
+    (dir: string): string => (projects ?? []).find((p) => p.dir === dir)?.doc?.name ?? dir,
+    [projects]
+  )
 
   const loadUsage = useCallback(async () => {
     const rows = await cacheUsage()
@@ -256,7 +281,7 @@ export default function CatalogScreen({
     })
     void getCrumb().then((c) => {
       if (c) {
-        setError(`The last open crashed while ${c} — please report this.`)
+        setCrashNote(c)
         void setCrumb('')
       }
     })
@@ -292,7 +317,12 @@ export default function CatalogScreen({
       setDriveOn(true)
       await refresh()
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e))
+      const msg = String(e instanceof Error ? e.message : e)
+      // Backing out of the consent screen is a completed choice, not a fault.
+      // It was being reported back as red error text ("Google sign-in was
+      // cancelled"), telling the singer their own tap had gone wrong. Same
+      // idiom as the split and the model download.
+      if (!msg.toLowerCase().includes('cancel')) setError(msg)
     }
   }, [refresh])
 
@@ -617,6 +647,20 @@ export default function CatalogScreen({
       if (!msg.includes('cancelled')) Alert.alert('Could not download the beat models', msg)
     }
   }, [projects, kickAnalysis])
+  /** 87 MB started from a bare text link, while deleting one song took a
+   *  long-press, a menu, a destructive item and a second dialog — the ceremony
+   *  ran opposite to the consequence. This is the cheaper half to put right. */
+  const confirmBeatModels = useCallback(() => {
+    Alert.alert(
+      'Download the beat models?',
+      `${BEAT_MODELS_MB} MB, once. Every song analysed afterwards uses them.`,
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Download', onPress: () => void fetchBeatModels() }
+      ]
+    )
+  }, [fetchBeatModels])
+
   const dismissBeatModels = useCallback(() => {
     setBeatModelsUi(null)
     void setStoredText(BEAT_MODELS_DISMISSED, '1')
@@ -796,7 +840,9 @@ export default function CatalogScreen({
     try {
       const gate = await splitGate()
       if (!gate.ok) {
-        Alert.alert('Splitting needs a bigger phone', gate.reason)
+        // Not "needs a bigger phone": the device is not the singer's fault and
+        // they cannot act on it. Say what cannot happen and why.
+        Alert.alert('This song is too big to split here', gate.reason)
         return
       }
       setCancelPending(false)
@@ -838,8 +884,21 @@ export default function CatalogScreen({
    *  build without the natives never offers. */
   const canSplit = useCallback(
     (p: ProjectEntry): boolean =>
-      mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0 && !splitUi,
-    [mode, splitUi]
+      mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
+    [mode]
+  )
+  /** A split is already running, so this one has to wait its turn. Kept apart
+   *  from canSplit because the offer used to VANISH from every other card
+   *  while a job ran — no disabled state, no reason, the affordance simply
+   *  gone. A control that cannot be used right now should say so. */
+  const splitBusy = splitUi !== null
+  /** The same question minus the card whose own split it is: that one shows
+   *  no chip at all (see the card's `action`), so this is what dims the
+   *  OTHERS. Kept apart from splitBusy, which is what removes the row from
+   *  the long-press menu, where an action cannot be dimmed. */
+  const splitBusyElsewhere = useCallback(
+    (dir: string): boolean => splitUi !== null && splitUi.project !== dir,
+    [splitUi]
   )
 
   /** The one place the offer is worded. The card button and the long-press
@@ -882,22 +941,35 @@ export default function CatalogScreen({
   /** Phone-library long-press: this phone owns these projects. */
   const phoneCardMenu = useCallback(
     (p: ProjectEntry) => {
-      const buttons: Parameters<typeof Alert.alert>[2] = [
-        { text: 'Cancel', style: 'cancel' }
-      ]
+      /* Built in reading order with the destructive item LAST. It used to be
+         first, because every item was `unshift`ed and delete went in first —
+         so the top of the menu, where a thumb lands, was "Delete from this
+         phone". iOS convention puts destructive at the bottom for exactly
+         that reason. */
+      const buttons: Parameters<typeof Alert.alert>[2] = []
+      /* Six real stems end the offer; a build without the split natives (iOS
+         until P3) never offers; and while a job is running the item is left
+         OUT rather than shown inert. An alert action cannot be disabled, so a
+         "(one at a time)" item would just close the menu with nothing said.
+         The card's chip is where the unavailable-and-why lives — it can be
+         dimmed and carry a reason, which an alert row cannot. */
+      if (canSplit(p) && !splitBusy) {
+        buttons.push({ text: 'Split into stems', onPress: () => offerSplit(p) })
+      }
       if (!p.hasLyrics) {
-        buttons.unshift({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
+        buttons.push({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
       }
-      // Six real stems end the offer; a running job means the card owns it;
-      // a build without the split natives (iOS until P3) never offers.
-      if (canSplit(p)) {
-        buttons.unshift({ text: 'Split into stems', onPress: () => offerSplit(p) })
-      }
-      buttons.unshift({
-        text: 'Delete from this phone',
-        style: 'destructive',
-        onPress: () => {
-          Alert.alert('Delete this song?', `"${p.doc.name ?? p.dir}" and its files go away.`, [
+      const onDelete = (): void => {
+        Alert.alert(
+          'Delete this song?',
+          `"${p.doc.name ?? p.dir}" and its files go away.`,
+          /* cancel-first, like every other confirm in this file
+             (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
+             either order the same, but Android maps by position — the
+             reversal above is for the MENU's three actions, not for a
+             two-button confirm, and mirroring just this one would put Cancel
+             where the others put the action. */
+          [
             { text: 'Cancel', style: 'cancel' },
             {
               text: 'Delete',
@@ -908,12 +980,40 @@ export default function CatalogScreen({
                   .catch((e) => setError(String(e instanceof Error ? e.message : e)))
               }
             }
-          ])
-        }
-      })
-      Alert.alert(p.doc.name ?? p.dir, undefined, buttons)
+          ],
+          { cancelable: true }
+        )
+      }
+      buttons.push({ text: 'Delete from this phone', style: 'destructive', onPress: onDelete })
+      /*
+       * The two platforms want OPPOSITE array orders for the same screen, so
+       * the list is built in reading order above and then handed over the way
+       * each one needs it.
+       *
+       * iOS keeps the array order and floats the .cancel action to the bottom:
+       * Split, Find lyrics, Delete, Cancel — destructive last among the
+       * actions, which is the whole point of the ordering.
+       *
+       * Android takes only the first THREE (Alert.js maps them to
+       * positive/negative/neutral and slices the rest) and then stacks them
+       * neutral-first, i.e. reversed. Two consequences, both measured on an
+       * API 36 emulator: a fourth button is silently dropped — which is how
+       * Delete vanished entirely once Cancel was ahead of it, leaving the only
+       * route to deleting a song unreachable — and the array has to be
+       * reversed for Delete to land at the BOTTOM rather than under the
+       * thumb. Cancel is the one that goes, so `cancelable` has to be true or
+       * the dialog has no way out at all (Alert.js hardcodes it false).
+       */
+      Alert.alert(
+        p.doc.name ?? p.dir,
+        undefined,
+        Platform.OS === 'android'
+          ? [...buttons].reverse()
+          : [...buttons, { text: 'Cancel', style: 'cancel' }],
+        { cancelable: true }
+      )
     },
-    [canSplit, findLyricsFor, offerSplit, refresh]
+    [canSplit, splitBusy, findLyricsFor, offerSplit, refresh]
   )
 
   useEffect(() => {
@@ -1004,6 +1104,12 @@ export default function CatalogScreen({
         key={opts.key}
         onPress={opts.onPress}
         onLongPress={opts.onLongPress}
+        accessibilityRole="button"
+        /* Deliberately NO accessibilityLabel: a Pressable is already the
+           accessibility element for the whole card, and an explicit label
+           REPLACES the string RN composes from the children — title, meta and
+           the ✓/☁ status would all vanish behind the title alone. */
+        accessibilityHint={opts.onLongPress ? 'Opens the song. Long press for more actions.' : 'Opens the song.'}
         style={({ pressed }) => [
           s.card,
           opts.sample && s.cardSample,
@@ -1027,7 +1133,13 @@ export default function CatalogScreen({
           )}
         </View>
         {isLoading ? (
-          <Pressable hitSlop={10} onPress={cancelLoad} style={s.cancelBtn}>
+          <Pressable
+            hitSlop={10}
+            onPress={cancelLoad}
+            style={s.cancelBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Stop opening this song"
+          >
             <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
           </Pressable>
         ) : (
@@ -1055,7 +1167,13 @@ export default function CatalogScreen({
           <Text style={s.brand}>SingZ</Text>
           {/* where the desktop keeps it: in the header, always reachable —
               a log you can only open when things are going well is no use */}
-          <Pressable hitSlop={10} style={{ marginLeft: 'auto' }} onPress={() => setLogOpen(true)}>
+          <Pressable
+            hitSlop={10}
+            style={{ marginLeft: 'auto' }}
+            onPress={() => setLogOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Open the log"
+          >
             <Text style={s.ctxLink}>Log</Text>
           </Pressable>
         </View>
@@ -1070,10 +1188,13 @@ export default function CatalogScreen({
             }
           ]}
           active={mode}
-          onSelect={(k) => {
-            if (k === 'gdrive') void openDrive()
-            else selectMode(k as 'folder' | 'phone')
-          }}
+          // Every segment just switches segment. Drive used to sign in from
+          // here, so tapping a TAB — next to two other tabs, to see what was
+          // there — put a Google consent dialog on screen unasked, and the
+          // choice was already persisted by the time it was refused. The
+          // signed-out Drive view says "Sign in above" and carries its own
+          // Sign in link; that is where signing in belongs.
+          onSelect={(k) => selectMode(k as 'gdrive' | 'folder' | 'phone')}
         />
         <View style={s.ctx}>
           {mode === 'gdrive' &&
@@ -1086,6 +1207,7 @@ export default function CatalogScreen({
                 </Text>
                 <Text style={s.ctxDot}>·</Text>
                 <Pressable
+                  accessibilityRole="button"
                   hitSlop={8}
                   onPress={() => {
                     void driveSignOut().then(() => {
@@ -1104,7 +1226,7 @@ export default function CatalogScreen({
                   Your projects, synced from the desktop
                 </Text>
                 <Text style={s.ctxDot}>·</Text>
-                <Pressable hitSlop={8} onPress={() => void driveSignInFlow()}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void driveSignInFlow()}>
                   <Text style={s.ctxLink}>Sign in</Text>
                 </Pressable>
               </>
@@ -1115,7 +1237,7 @@ export default function CatalogScreen({
                 {root?.kind === 'picked' ? root.name : 'No folder picked yet'}
               </Text>
               <Text style={s.ctxDot}>·</Text>
-              <Pressable hitSlop={8} onPress={() => void changeFolder()}>
+              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void changeFolder()}>
                 <Text style={s.ctxLink}>Change…</Text>
               </Pressable>
             </>
@@ -1128,12 +1250,62 @@ export default function CatalogScreen({
                   : 'Files you copied onto this phone'}
               </Text>
               <Text style={s.ctxDot}>·</Text>
-              <Pressable hitSlop={8} onPress={() => void beginAdd()}>
+              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
                 <Text style={s.ctxLink}>Add a song</Text>
               </Pressable>
             </>
           )}
         </View>
+        {/* The crash notice, which is durable and actionable, and therefore
+            not in the same slot as the transient errors below it. It is the
+            most important sentence the app ever writes — it used to render as
+            the last child of the ScrollView, below every song and below the
+            sample card, and it used to end "please report this" with nowhere
+            to report it. Reporting means the Log, so that is what the button
+            opens. */}
+        {crashNote && (
+          <View style={[s.errBox, s.noteBox]}>
+            <Text style={[s.err, { color: C.text }]}>
+              The last open crashed while {crashNote}.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open the log to report this"
+              hitSlop={8}
+              onPress={() => {
+                setLogOpen(true)
+                setCrashNote(null)
+              }}
+            >
+              <Text style={s.ctxLink}>Report</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss the crash notice"
+              hitSlop={4}
+              onPress={() => setCrashNote(null)}
+            >
+              <Text style={[s.errX, { color: C.dim }]}>✕</Text>
+            </Pressable>
+          </View>
+        )}
+        {/* Transient errors sit ABOVE the list, next to the controls that
+            cause them. They used to render as the last child of the
+            ScrollView, so with a real library they were off-screen entirely.
+            Tap to dismiss — nothing else clears them until the next action
+            happens to. */}
+        {error && (
+          <Pressable
+            style={s.errBox}
+            onPress={() => setError(null)}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={`${error}. Tap to dismiss.`}
+          >
+            <Text style={s.err}>{error}</Text>
+            <Text style={s.errX}>✕</Text>
+          </Pressable>
+        )}
         <ScrollView
           style={{ flex: 1 }}
           contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
@@ -1152,7 +1324,7 @@ export default function CatalogScreen({
           {splitUi && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
-                {splitUi.project}
+                {nameOf(splitUi.project)}
               </Text>
               {splitUi.phase === 'model' && (
                 <>
@@ -1192,6 +1364,7 @@ export default function CatalogScreen({
               <View style={s.splitActions}>
                 {(splitUi.phase === 'model' || splitUi.phase === 'run') && (
                   <Pressable
+                    accessibilityRole="button"
                     hitSlop={8}
                     onPress={() =>
                       // No job exists yet in the model phase — the download
@@ -1206,10 +1379,10 @@ export default function CatalogScreen({
                 )}
                 {splitUi.phase === 'failed' && (
                   <>
-                    <Pressable hitSlop={8} onPress={() => void resumeSplit(splitUi.project)}>
+                    <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void resumeSplit(splitUi.project)}>
                       <Text style={s.ctxLink}>Resume</Text>
                     </Pressable>
-                    <Pressable hitSlop={8} onPress={discardSplit}>
+                    <Pressable accessibilityRole="button" hitSlop={8} onPress={discardSplit}>
                       <Text style={[s.ctxLink, { color: C.dim }]}>Discard</Text>
                     </Pressable>
                   </>
@@ -1220,7 +1393,7 @@ export default function CatalogScreen({
           {analysisUi && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
-                {analysisUi.dir}
+                {nameOf(analysisUi.dir)}
               </Text>
               <Text style={s.splitText}>{analysisUi.text}</Text>
               <View style={s.splitBarBed}>
@@ -1228,47 +1401,30 @@ export default function CatalogScreen({
               </View>
             </View>
           )}
-          {beatModelsUi && (
+          {/* In-flight work stays at the top, next to the split and
+              analysis cards — that is where progress belongs. The OFFER does
+              not: see below the library. */}
+          {beatModelsUi?.phase === 'downloading' && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
                 Better beats
               </Text>
-              {beatModelsUi.phase === 'offer' ? (
-                <>
-                  <Text style={s.splitText}>
-                    Download the beat models ({BEAT_MODELS_MB} MB, once) and songs analysed from now on — and any
-                    the detector found no beat in — get a grid that holds through quiet intros and rubato the
-                    drums alone lose. Songs that already have a grid keep it.
-                  </Text>
-                  <View style={s.splitActions}>
-                    <Pressable hitSlop={8} onPress={() => void fetchBeatModels()}>
-                      <Text style={s.ctxLink}>Download</Text>
-                    </Pressable>
-                    <Pressable hitSlop={8} onPress={dismissBeatModels}>
-                      <Text style={[s.ctxLink, { color: C.dim }]}>Not now</Text>
-                    </Pressable>
-                  </View>
-                </>
-              ) : (
-                <>
-                  <Text style={s.splitText}>
-                    Downloading the beat models — {beatModelsUi.gotMB} of {beatModelsUi.totalMB} MB
-                  </Text>
-                  <View style={s.splitBarBed}>
-                    <View
-                      style={[
-                        s.splitBar,
-                        { width: `${Math.min(100, (beatModelsUi.gotMB / Math.max(1, beatModelsUi.totalMB)) * 100)}%` }
-                      ]}
-                    />
-                  </View>
-                  <View style={s.splitActions}>
-                    <Pressable hitSlop={8} onPress={() => void cancelBeatModels()}>
-                      <Text style={s.ctxLink}>Cancel</Text>
-                    </Pressable>
-                  </View>
-                </>
-              )}
+              <Text style={s.splitText}>
+                Downloading the beat models — {beatModelsUi.gotMB} of {beatModelsUi.totalMB} MB
+              </Text>
+              <View style={s.splitBarBed}>
+                <View
+                  style={[
+                    s.splitBar,
+                    { width: `${Math.min(100, (beatModelsUi.gotMB / Math.max(1, beatModelsUi.totalMB)) * 100)}%` }
+                  ]}
+                />
+              </View>
+              <View style={s.splitActions}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void cancelBeatModels()}>
+                  <Text style={s.ctxLink}>Cancel</Text>
+                </Pressable>
+              </View>
             </View>
           )}
           {(projects ?? []).map((p) => {
@@ -1297,21 +1453,52 @@ export default function CatalogScreen({
                 </>
               ),
               right: (
-                <Text style={[s.status, downloaded && s.statusHave]}>
+                <Text
+                  style={[s.status, downloaded && s.statusHave]}
+                  /* A bare glyph carrying the one fact the singer most needs
+                     offline: is this song actually on the phone. */
+                  accessibilityLabel={
+                    downloaded
+                      ? 'On this phone'
+                      : p.bytes > 0
+                        ? `Not downloaded, ${fmtSize(p.bytes)}`
+                        : 'Not downloaded'
+                  }
+                >
                   {downloaded ? '✓' : p.bytes > 0 ? `☁ ${fmtSize(p.bytes)}` : '☁'}
                 </Text>
               ),
               // The whole point of an added song is splitting it, so the offer
               // belongs on the card. hitSlop keeps the tap target honest at
               // this text size, and the press must not also open the song.
-              action: canSplit(p) ? (
+              /* Nothing at all on the card whose split is RUNNING — not a
+                 disabled chip, no chip. `!splitUi` used to live inside
+                 canSplit and was doing double duty as the busy guard;
+                 splitting that out left this card's chip live, and tapping it
+                 restarts the flow: the progress card repaints to "Downloading
+                 the splitter — 0 of 136 MB", the liveness poll is torn down,
+                 both natives refuse the second job without telling JS, and a
+                 job at 70% ends up reading "Starting…" at zero. The progress
+                 card above it is already saying everything there is to say. */
+              action: canSplit(p) && splitUi?.project !== p.dir ? (
                 <Pressable
                   hitSlop={10}
+                  disabled={splitBusyElsewhere(p.dir)}
                   onPress={(e) => {
                     e.stopPropagation()
                     offerSplit(p)
                   }}
-                  style={s.splitChip}
+                  style={[s.splitChip, splitBusyElsewhere(p.dir) && { opacity: 0.4 }]}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: splitBusyElsewhere(p.dir) }}
+                  /* Not "while another song is being split": splitUi also sits
+                     in its failed phase until Resume or Discard, when nothing
+                     is running at all. Word it against what has to happen. */
+                  accessibilityLabel={
+                    splitBusyElsewhere(p.dir)
+                      ? 'Split — unavailable until the current split finishes or is discarded'
+                      : `Split ${p.doc.name ?? p.dir} into stems`
+                  }
                 >
                   <Text style={s.splitChipText}>Split</Text>
                 </Pressable>
@@ -1367,13 +1554,38 @@ export default function CatalogScreen({
                   {dirs.length} song{dirs.length > 1 ? 's' : ''} on this phone · {fmtSize(total)} —
                   playable without internet
                 </Text>
-                <Pressable hitSlop={8} onPress={() => confirmForgetAll(total)}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => confirmForgetAll(total)}>
                   <Text style={s.ctxLink}>Free up space</Text>
                 </Pressable>
               </View>
             )
           })()}
-          {error && <Text style={s.err}>{error}</Text>}
+          {/* The offer sits BELOW the library. It used to open the screen:
+              a heading, six lines of prose and two actions taking the top
+              third, above every song the singer owns — on a library of one or
+              two songs it WAS the screen. It is a suggestion about a future
+              song, so it ranks under the songs that already exist. Copy cut to
+              the two facts that decide it; the long version lives in the Song
+              sheet, where someone is already asking about the beat. */}
+          {beatModelsUi?.phase === 'offer' && (
+            <View style={[s.splitCard, { marginTop: 14 }]}>
+              <Text style={s.splitTitle} numberOfLines={1}>
+                Better beats
+              </Text>
+              <Text style={s.splitText}>
+                An {BEAT_MODELS_MB} MB download, once, that hears the beat through quiet intros and
+                rubato the drums alone lose. Songs that already have a grid keep it.
+              </Text>
+              <View style={s.splitActions}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={confirmBeatModels}>
+                  <Text style={s.ctxLink}>Download</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={dismissBeatModels}>
+                  <Text style={[s.ctxLink, { color: C.dim }]}>Not now</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
         </ScrollView>
         <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
         <AddSongSheet
@@ -1431,12 +1643,12 @@ const s = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: C.amber
   },
-  splitChipText: { color: '#1d1204', fontSize: 12, fontWeight: '700' },
+  splitChipText: { color: C.amberInk, fontSize: 12, fontWeight: '700' },
   splitActions: { flexDirection: 'row', gap: 18 },
   logSheet: { flex: 1, backgroundColor: C.bg, paddingHorizontal: 20, paddingTop: 60 },
   logHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   logTitle: { color: C.text, fontSize: 20, fontWeight: '700' },
-  logRow: { paddingVertical: 7, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#ffffff14' },
+  logRow: { paddingVertical: 7, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.hairline },
   logWhen: { color: C.dim, fontSize: 11, marginBottom: 2 },
   logMsg: { color: C.text, fontSize: 13 },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 14 },
@@ -1473,8 +1685,8 @@ const s = StyleSheet.create({
   },
   cardLoading: { backgroundColor: 'rgba(242,193,78,0.07)', borderColor: 'rgba(242,193,78,0.25)' },
   cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
-  cardMeta: { color: white(0.42), fontSize: 12.5, marginTop: 3 },
-  status: { color: C.faint, fontSize: 12, fontWeight: '600' },
+  cardMeta: { color: white(0.5), fontSize: 12.5, marginTop: 3 },
+  status: { color: C.dim, fontSize: 12, fontWeight: '600' },
   statusHave: { color: white(0.62) },
   storage: {
     flexDirection: 'row',
@@ -1484,7 +1696,7 @@ const s = StyleSheet.create({
     marginTop: 6,
     paddingHorizontal: 2
   },
-  storageText: { color: C.faint, fontSize: 12, flexShrink: 1 },
+  storageText: { color: C.dim, fontSize: 12, flexShrink: 1 },
   cancelBtn: {
     width: 30,
     height: 30,
@@ -1502,6 +1714,31 @@ const s = StyleSheet.create({
     backgroundColor: white(0.08)
   },
   progressFill: { height: 3, backgroundColor: C.amber, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
-  empty: { color: C.faint, fontSize: 14, lineHeight: 20, marginVertical: 12 },
-  err: { color: C.red, fontSize: 13, marginTop: 10 }
+  empty: { color: C.dim, fontSize: 14, lineHeight: 20, marginVertical: 12 },
+  /* The crash notice reads as information rather than alarm — it is about a
+     previous session, and the singer has already lived through it. */
+  /* gap 18 against Report's hitSlop 8 and the ✕'s 4: without the extra room
+     their touch areas overlapped and the ✕, being the later sibling, took a
+     near-miss on Report — dismissing the notice instead of opening the Log,
+     with the crumb already cleared so it never came back. */
+  noteBox: {
+    borderColor: C.hairline,
+    backgroundColor: white(0.05),
+    alignItems: 'center',
+    gap: 18
+  },
+  errBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginBottom: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,122,92,0.35)',
+    backgroundColor: 'rgba(255,122,92,0.10)'
+  },
+  err: { color: C.red, fontSize: 13, flex: 1, lineHeight: 18 },
+  errX: { color: C.red, fontSize: 13, fontWeight: '700' }
 })

@@ -42,7 +42,7 @@ import {
 } from '../model'
 import { readProjectText, type LoadedProject } from '../projects'
 import type { ProjectDoc } from '../model'
-import { b, Bar, C, Chip, MixGlyph, RoundBtn, StemTile, Stepper, white } from './bits'
+import { b, Bar, C, Chip, MixGlyph, RoundBtn, Seg, StemTile, Stepper, white } from './bits'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -131,6 +131,73 @@ export default function PlayerScreen({
   const navPad = Platform.OS === 'android' ? { paddingBottom: Math.max(30, insets.bottom + 14) } : null
   const sheetPad = Platform.OS === 'android' ? { paddingBottom: Math.max(34, insets.bottom + 18) } : null
   const [dragPos, setDragPos] = useState<number | null>(null)
+  /**
+   * A-B repeat, the thing a singer actually does with a hard bar: mark where
+   * it starts, mark where it ends, and go round until it is right. The engine
+   * has had the whole mechanism since the desktop needed it — setRegion wraps
+   * every stem natively at the region edges, on the same sample — and nothing
+   * on the phone reached it.
+   *
+   * SESSION-ONLY, and that is load-bearing rather than laziness: a saved
+   * desktop selection playing on the phone was a field bug (Jul 2026), and an
+   * armed region surviving engine.load() let one song's loop bound the next.
+   * So nothing is read from doc.settings.selection and nothing is written
+   * back; load() clears the engine's region and the effect below clears these
+   * marks with it. tests/loop-region.cjs is the guard.
+   */
+  const [loopA, setLoopA] = useState<number | null>(null)
+  const [loopB, setLoopB] = useState<number | null>(null)
+  /* The marks again as refs, because cycleLoop is a THREE-STATE machine whose
+     next move depends on both: reading them from the closure makes two calls
+     inside one tick both take the first branch, which is exactly what a driver
+     tapping through the cycle does. */
+  const loopARef = useRef<number | null>(null)
+  const loopBRef = useRef<number | null>(null)
+  const markLoop = useCallback((a: number | null, b: number | null) => {
+    loopARef.current = a
+    loopBRef.current = b
+    setLoopA(a)
+    setLoopB(b)
+  }, [])
+  useEffect(() => {
+    markLoop(null, null)
+  }, [project, markLoop])
+
+  /** Off -> A marked -> looping -> off. One button, the order a singer works in. */
+  const cycleLoop = useCallback(() => {
+    const at = engine.audioPosition
+    const a0 = loopARef.current
+    if (a0 === null) {
+      markLoop(at, null)
+      return
+    }
+    if (loopBRef.current === null) {
+      const a = Math.min(a0, at)
+      const b = Math.max(a0, at)
+      // The engine will not loop a region shorter than 0.05s, and a region
+      // that short is a mis-tap anyway — treat it as re-marking A instead of
+      // arming something that silently does nothing.
+      if (b - a < 0.4) {
+        markLoop(at, null)
+        return
+      }
+      // No seek here: setRegion re-anchors the clock and puts the playhead
+      // inside the region itself, which it has to do anyway for the internal
+      // restart path the UI cannot reach.
+      engine.setRegion({ start: a, end: b }, true)
+      /* Read the region BACK rather than assuming the marks were taken.
+         setRegion may cap `end` to the song's length, and may reject the
+         span outright once capped — leaving the button lit and a band drawn
+         over a loop that was never armed. The engine owns the region; the UI
+         draws what the engine owns, which keeps this honest for any clamp
+         added inside setRegion later. */
+      const armed = engine.regionState
+      markLoop(armed?.start ?? null, armed?.end ?? null)
+      return
+    }
+    markLoop(null, null)
+    engine.setRegion(null, false)
+  }, [engine, markLoop])
   /** Key & speed — UI + persistence-ready; audio lands with the pitch engine. */
   const [ktPitch, setKtPitch] = useState(0)
   const [ktTempo, setKtTempo] = useState(100)
@@ -317,7 +384,7 @@ export default function PlayerScreen({
 
   /* Feed the engine + apply the project's saved settings. */
   useEffect(() => {
-    engine.load(project.stems.map(({ id, buffer }) => ({ id, buffer })))
+    engine.load(project.stems.map(({ id, buffer, custom }) => ({ id, buffer, custom })))
     const st = project.doc.settings
     if (st) {
       for (const [id, t] of Object.entries(st.tracks ?? {})) {
@@ -728,6 +795,11 @@ export default function PlayerScreen({
     TEST.openMixer = () => setSheet('mixer')
     TEST.openPractice = () => setSheet('practice')
     TEST.closeSheets = () => setSheet('none')
+    /* A-B repeat through the button's own path, not engine.setRegion — the
+       engine has always been drivable; what needed a hook is the three-state
+       cycle and the marks the UI holds. loopMarks is what the band draws. */
+    TEST.cycleLoop = cycleLoop
+    TEST.loopMarks = { a: loopA, b: loopB }
     TEST.sheet = sheet
     TEST.tapLine = (i: number) => lines[i] && engine.seek(lines[i].start)
     TEST.back = onBack
@@ -820,11 +892,29 @@ export default function PlayerScreen({
   }, [lines, pos])
 
   /* ------- lyric line coloring ------- */
+  /**
+   * How bright each line sits against the sung one.
+   *
+   * Reading AHEAD is the whole act of singing from a screen, and the upcoming
+   * lines were dimmer than the ones already behind you deserved to be: 0.34
+   * for the next and 0.25 for everything past it, over a brown ground and
+   * under a 360px scrim, which put the third line down at the edge of
+   * legibility and lost the fourth entirely.
+   *
+   * C.bright here is only what a line with no word timings gets. A line the
+   * sweep is running through is drawn by SkiaLyrics instead, which lights the
+   * swept part and holds the rest at its own `dark` — so that constant, not
+   * this one, is what the next line has to stay under. Raising these without
+   * it put the words about to be sung BELOW the whole line after them.
+   *
+   * Lines already sung stay the quietest thing on screen; they are the only
+   * ones the singer has no further use for.
+   */
   const lineColor = (i: number, isSing: boolean): string => {
     if (i === currentLine) return C.bright
-    if (isSing) return 'rgba(245,199,88,0.42)'
-    if (i < currentLine) return white(0.18)
-    return Math.abs(i - currentLine) === 1 ? white(0.34) : white(0.25)
+    if (isSing) return 'rgba(245,199,88,0.55)'
+    if (i < currentLine) return white(0.22)
+    return Math.abs(i - currentLine) === 1 ? white(0.52) : white(0.4)
   }
 
   return (
@@ -854,6 +944,18 @@ export default function PlayerScreen({
               <Pressable
                 key={i}
                 onPress={() => engine.seek(lines[i].start)}
+                /* The lyrics are painted on a Skia canvas, so there is no text
+                   in the tree for a screen reader to find — the whole song's
+                   words were silent. These invisible tap targets sit exactly
+                   over each line, so they are the natural place to put them. */
+                accessibilityRole="button"
+                accessibilityLabel={
+                  // The explicit label replaces the composed one, so the 🎤
+                  // marker rendered inside this same Pressable has to be said
+                  // here or it is lost.
+                  mask?.[i] === true ? `${lines[i].text}. Your turn.` : lines[i].text
+                }
+                accessibilityHint="Jump to this line"
                 style={{ position: 'absolute', left: LYR_PAD, right: LYR_PAD, top: b.y, height: b.height }}
               >
                 {mask?.[i] === true && (
@@ -899,7 +1001,7 @@ export default function PlayerScreen({
         <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
       <View style={s.hdr} pointerEvents="box-none">
-        <Pressable onPress={onBack} hitSlop={12}>
+        <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel="Back to library">
           <Text style={s.back}>‹</Text>
         </Pressable>
         <StemTile hue={0} size={46} />
@@ -907,10 +1009,13 @@ export default function PlayerScreen({
           <Text style={s.hTitle} numberOfLines={1}>
             {project.name}
           </Text>
+          {/* "SingZ project" used to lead here, spending the most prominent
+              line under the title telling the singer that this app's song is
+              this app's song. What is left is what varies between songs. */}
           <Text style={s.hSub}>
-            SingZ project
-            {originalOnly ? ' · not split yet' : ` · ${stemIds.length - addedCount} stems`}
+            {originalOnly ? 'Not split yet' : `${stemIds.length - addedCount} stems`}
             {addedCount > 0 ? ` · ${addedCount} added` : ''}
+            {beatInfo ? ` · ${Math.round(beatInfo.bpm)} bpm` : ''}
           </Text>
         </View>
         {ktBadge.length > 0 && (
@@ -926,7 +1031,13 @@ export default function PlayerScreen({
         {/* Song sheet. Three dots rather than a gear: a gear glyph has no
             guaranteed text presentation on Android and renders as a colour
             emoji next to a monochrome header. */}
-        <Pressable onPress={() => setSheet('song')} hitSlop={12} style={s.songBtn}>
+        <Pressable
+          onPress={() => setSheet('song')}
+          hitSlop={12}
+          style={s.songBtn}
+          accessibilityRole="button"
+          accessibilityLabel="About this song"
+        >
           <Text style={s.songBtnText}>•••</Text>
         </Pressable>
       </View>
@@ -940,7 +1051,12 @@ export default function PlayerScreen({
       </View>
       <View style={[s.foot, navPad]}>
         {countInSt && (
-          <Text style={s.countInFoot}>
+          <Text
+            style={s.countInFoot}
+            /* Rendered as a run of ● and ○ characters, which a screen reader
+               reads out one bullet at a time. */
+            accessibilityLabel={`Count-in, beat ${countInSt.done} of ${countInSt.total}`}
+          >
             {Array.from({ length: countInSt.total }, (_, i) =>
               i < countInSt.done ? '●' : '○'
             ).reduce<string[]>((acc, d, i) => {
@@ -962,28 +1078,73 @@ export default function PlayerScreen({
               }}
               color="rgba(255,255,255,0.85)"
               height={26}
+              label="Position"
+              valueText={(v) => fmtTime(v * engine.duration)}
             />
+            {/* Where the loop is, drawn on the bar it belongs to. pointerEvents
+                none so it never takes the drag away from the scrubber. */}
+            {loopA !== null && engine.duration > 0 && (
+              <View pointerEvents="none" style={s.loopLayer}>
+                <View
+                  style={[
+                    s.loopBand,
+                    loopB === null
+                      ? { left: `${(loopA / engine.duration) * 100}%`, width: 2 }
+                      : {
+                          left: `${(loopA / engine.duration) * 100}%`,
+                          right: `${100 - (loopB / engine.duration) * 100}%`
+                        }
+                  ]}
+                />
+              </View>
+            )}
           </View>
           <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
+          {/* On the scrub row rather than the transport: a loop is a fact about
+              the TIMELINE, and the six transport buttons already fill 358pt —
+              a seventh would leave under 2pt between them, or force them under
+              the 44pt target. hitSlop keeps this one honest at 32pt. */}
+          <Pressable
+            onPress={cycleLoop}
+            hitSlop={8}
+            style={[s.loopBtn, loopA !== null && s.loopBtnOn]}
+            accessibilityRole="button"
+            accessibilityLabel={
+              loopA === null
+                ? 'Loop a section. Marks the start here.'
+                : loopB === null
+                  ? `Loop start marked at ${fmtTime(loopA)}. Marks the end here.`
+                  : `Looping ${fmtTime(loopA)} to ${fmtTime(loopB)}. Clears the loop.`
+            }
+          >
+            <Text style={[s.loopBtnText, loopA !== null && s.loopBtnTextOn]}>
+              {loopA !== null && loopB === null ? 'A' : 'A–B'}
+            </Text>
+          </Pressable>
         </View>
         <View style={s.btnRow}>
-          <RoundBtn onPress={() => setSheet('mixer')}>
+          <RoundBtn onPress={() => setSheet('mixer')} label="Mixer">
             <MixGlyph />
           </RoundBtn>
-          <RoundBtn onPress={() => engine.seek(0)}>
+          <RoundBtn onPress={() => engine.seek(0)} label="Back to start">
             {/* ︎ keeps the glyph monochrome (no emoji rendering) */}
             <Text style={s.toStartText}>{'⏮︎'}</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => engine.seekBy(-5)}>
+          <RoundBtn onPress={() => engine.seekBy(-5)} label="Back 5 seconds">
             <Text style={s.skipText}>−5s</Text>
           </RoundBtn>
-          <Pressable onPress={() => engine.toggle()} style={s.play}>
+          <Pressable
+            onPress={() => engine.toggle()}
+            style={s.play}
+            accessibilityRole="button"
+            accessibilityLabel={playing ? 'Pause' : 'Play'}
+          >
             <Text style={s.playText}>{playing ? '❚❚' : '▶'}</Text>
           </Pressable>
-          <RoundBtn onPress={() => engine.seekBy(5)}>
+          <RoundBtn onPress={() => engine.seekBy(5)} label="Forward 5 seconds">
             <Text style={s.skipText}>+5s</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => setSheet('practice')}>
+          <RoundBtn onPress={() => setSheet('practice')} label="Practice">
             <Text style={{ fontSize: 19 }}>🎤</Text>
           </RoundBtn>
         </View>
@@ -996,10 +1157,27 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
+        <Pressable
+          style={b.sheetWrap}
+          onPress={() => setSheet('none')}
+          /* Touch handler only. Left accessible it becomes ONE element over the
+             whole modal reading "Close, button", and everything inside — the
+             faders, the chips, the steppers — is unreachable behind it. The
+             two-finger escape gesture below is the screen-reader way out. */
+          accessible={false}
+        >
+          <Pressable
+            style={[b.sheet, sheetPad]}
+            onPress={() => {}}
+            accessible={false}
+            onAccessibilityEscape={() => setSheet('none')}
+          >
             <View style={b.grab} />
             <Text style={b.sheetTitle}>Mixer</Text>
+            {/* The lane rows had no scroll container at all, so past roughly a
+                dozen lanes they clipped with no way to reach them — and the
+                44 pt fader targets below bring that cliff closer. */}
+            <ScrollView>
             {tracks.map((t) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
@@ -1021,11 +1199,15 @@ export default function PlayerScreen({
                       color={meta.color}
                       height={22}
                       track="rgba(255,255,255,0.14)"
+                      label={`${meta.label} volume`}
                     />
                   </View>
                   <Pressable
                     hitSlop={4}
                     onPress={() => engine.setMuted(t.id, !t.muted)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Mute ${meta.label}`}
+                    accessibilityState={{ selected: t.muted }}
                     style={[s.msBtn, t.muted && { backgroundColor: C.red, borderColor: C.red }]}
                   >
                     <Text style={[s.msText, t.muted && { color: '#1d0f0d' }]}>M</Text>
@@ -1033,6 +1215,9 @@ export default function PlayerScreen({
                   <Pressable
                     hitSlop={4}
                     onPress={() => engine.setSolo(t.id, !t.solo)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Solo ${meta.label}`}
+                    accessibilityState={{ selected: t.solo }}
                     style={[s.msBtn, t.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
                   >
                     <Text style={[s.msText, t.solo && { color: C.amberInk }]}>S</Text>
@@ -1040,6 +1225,7 @@ export default function PlayerScreen({
                 </View>
               )
             })}
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
@@ -1051,8 +1237,21 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
+        <Pressable
+          style={b.sheetWrap}
+          onPress={() => setSheet('none')}
+          /* Touch handler only. Left accessible it becomes ONE element over the
+             whole modal reading "Close, button", and everything inside — the
+             faders, the chips, the steppers — is unreachable behind it. The
+             two-finger escape gesture below is the screen-reader way out. */
+          accessible={false}
+        >
+          <Pressable
+            style={[b.sheet, sheetPad]}
+            onPress={() => {}}
+            accessible={false}
+            onAccessibilityEscape={() => setSheet('none')}
+          >
             <View style={b.grab} />
             <Text style={b.sheetTitle}>{project.name}</Text>
             <ScrollView>
@@ -1099,7 +1298,16 @@ export default function PlayerScreen({
                             'read, so this row fills in a moment after the beat itself is found.'
                           : canAnalyse
                             ? 'Nothing has read the stems yet.'
-                            : Object.keys(stemFiles).length === 0
+                            : // Whether the song is SPLIT is a fact about its
+                              // lanes, which is what the header says two lines
+                              // up ("6 stems"). This asked stemFiles instead —
+                              // derived from doc.stemHashes — and the bundled
+                              // sample's project.json has no stemHashes at all,
+                              // so the one song every new singer opens first
+                              // announced "Not split yet" beside its own six
+                              // lanes and its six-lane mixer. originalOnly is
+                              // the signal the header already trusts.
+                              originalOnly
                               ? 'Not split yet — the beat is read from the drums, so it waits for the split.'
                               : 'Songs from the computer arrive with their beat already in them.'}
                 </Text>
@@ -1214,8 +1422,21 @@ export default function PlayerScreen({
         animationType="slide"
         onRequestClose={() => setSheet('none')}
       >
-        <Pressable style={b.sheetWrap} onPress={() => setSheet('none')}>
-          <Pressable style={[b.sheet, sheetPad]} onPress={() => {}}>
+        <Pressable
+          style={b.sheetWrap}
+          onPress={() => setSheet('none')}
+          /* Touch handler only. Left accessible it becomes ONE element over the
+             whole modal reading "Close, button", and everything inside — the
+             faders, the chips, the steppers — is unreachable behind it. The
+             two-finger escape gesture below is the screen-reader way out. */
+          accessible={false}
+        >
+          <Pressable
+            style={[b.sheet, sheetPad]}
+            onPress={() => {}}
+            accessible={false}
+            onAccessibilityEscape={() => setSheet('none')}
+          >
             <ScrollView bounces={false}>
               <View style={b.grab} />
               <Text style={b.sheetTitle}>Practice</Text>
@@ -1252,31 +1473,37 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>Metronome</Text>
-                <View style={b.segs}>
+                {/* Three different control semantics used to share one wrapping
+                    row of identical amber pills: a Click toggle, a three-way
+                    count-in choice, and an Accent toggle. Nothing told the
+                    singer that tapping "1 bar" clears "No count-in" while
+                    tapping "Accent on" clears nothing.
+
+                    The exclusive choice is a Seg now — it already looks like a
+                    picker with one winner. The toggles keep the pill shape and
+                    sit on their own row, and they are named for the THING
+                    rather than its state: a chip reading "Click off" while
+                    unlit made the label and the highlight two answers to the
+                    same question. Lit means on, everywhere on this sheet. */}
+                <Seg
+                  segments={[
+                    { key: '0', label: 'No count-in' },
+                    { key: '1', label: beatInfo ? '1 bar' : '3 s' },
+                    { key: '2', label: beatInfo ? '2 bars' : '6 s' }
+                  ]}
+                  active={String(met.countInBars)}
+                  onSelect={(k) => setMet((m) => ({ ...m, countInBars: Number(k) }))}
+                />
+                <View style={[b.segs, { marginTop: 10 }]}>
                   {beatInfo != null && (
                     <Chip
-                      label={met.click ? 'Click on' : 'Click off'}
+                      label="Click"
                       active={met.click}
                       onPress={() => setMet((m) => ({ ...m, click: !m.click }))}
                     />
                   )}
                   <Chip
-                    label="No count-in"
-                    active={met.countInBars === 0}
-                    onPress={() => setMet((m) => ({ ...m, countInBars: 0 }))}
-                  />
-                  <Chip
-                    label={beatInfo ? '1 bar' : '3 s'}
-                    active={met.countInBars === 1}
-                    onPress={() => setMet((m) => ({ ...m, countInBars: 1 }))}
-                  />
-                  <Chip
-                    label={beatInfo ? '2 bars' : '6 s'}
-                    active={met.countInBars === 2}
-                    onPress={() => setMet((m) => ({ ...m, countInBars: 2 }))}
-                  />
-                  <Chip
-                    label={met.accent ? 'Accent on' : 'Accent off'}
+                    label="Accent"
                     active={met.accent}
                     onPress={() => setMet((m) => ({ ...m, accent: !m.accent }))}
                   />
@@ -1314,17 +1541,22 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>Vocal training</Text>
+                {/* Same split as the metronome. "Off · By time · By lyric
+                    lines" read as one three-way choice, so with training OFF
+                    and the mode set to lines the sheet lit "By lyric lines" —
+                    which says the opposite of the truth. The switch is a
+                    toggle and stands alone; the mode is a picker. */}
                 <View style={b.segs}>
-                  <Chip label={training ? 'On' : 'Off'} active={training} onPress={armTraining} />
-                  <Chip
-                    label="By time"
-                    active={trainCfg.mode === 'time'}
-                    onPress={() => setTrainCfg((c) => ({ ...c, mode: 'time' }))}
-                  />
-                  <Chip
-                    label="By lyric lines"
-                    active={trainCfg.mode === 'lines'}
-                    onPress={() => setTrainCfg((c) => ({ ...c, mode: 'lines' }))}
+                  <Chip label="Training" active={training} onPress={armTraining} />
+                </View>
+                <View style={{ marginTop: 10 }}>
+                  <Seg
+                    segments={[
+                      { key: 'time', label: 'By time' },
+                      { key: 'lines', label: 'By lyric lines' }
+                    ]}
+                    active={trainCfg.mode}
+                    onSelect={(k) => setTrainCfg((c) => ({ ...c, mode: k as 'time' | 'lines' }))}
                   />
                 </View>
                 {trainCfg.mode === 'time' ? (
@@ -1361,7 +1593,14 @@ export default function PlayerScreen({
                     ? `Guide plays ${trainCfg.periodSec} s, then you take the next ${trainCfg.periodSec} s.`
                     : `Hear ${trainCfg.hear} line${trainCfg.hear > 1 ? 's' : ''}, then sing ${trainCfg.sing} on your own — marked 🎤 in the lyrics.`}
                 </Text>
-                <View style={[b.segs, { marginTop: 12 }]}>
+                {/* These decide WHICH lanes drop out when it is your turn, and
+                    they arrived with no label at all — a row of lane names
+                    under a hint about line counts, which reads as decoration.
+                    Multi-select toggles, so they stay pills. */}
+                <Text style={[b.hint, { marginTop: 14, marginBottom: 2 }]}>
+                  Lanes that drop out when you sing:
+                </Text>
+                <View style={[b.segs, { marginTop: 6 }]}>
                   {stemIds.map((id) => (
                     <Chip
                       key={id}
@@ -1463,7 +1702,7 @@ const s = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10
   },
-  noLyrics: { color: C.faint, fontSize: 15, marginTop: 40 },
+  noLyrics: { color: C.dim, fontSize: 15, marginTop: 40 },
 
   foot: {
     position: 'absolute',
@@ -1475,7 +1714,30 @@ const s = StyleSheet.create({
     paddingBottom: 30
   },
   scrubRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
-  tm: { color: white(0.45), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
+  tm: { color: white(0.5), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
+  loopBtn: {
+    width: 40,
+    height: 32,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    borderColor: white(0.2),
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  loopBtnOn: { backgroundColor: C.amber, borderColor: C.amber },
+  loopBtnText: { color: white(0.6), fontSize: 11.5, fontWeight: '800' },
+  loopBtnTextOn: { color: C.amberInk },
+  /* Sits exactly over the 5px rail Bar draws, which is vertically centred in
+     its 44pt touch strip. */
+  loopLayer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center'
+  },
+  loopBand: { position: 'absolute', height: 5, borderRadius: 3, backgroundColor: 'rgba(255,160,40,0.55)' },
   btnRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   skipText: { color: white(0.85), fontSize: 12.5, fontWeight: '700' },
   toStartText: { color: white(0.85), fontSize: 20, marginTop: -2 },
@@ -1487,6 +1749,14 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
+  /* Three near-black inks that stay literals. The muted M and the "your turn"
+     pill are tinted toward the fill they sit on — danger red, a lane colour —
+     and there is no token for ink on an arbitrary lane hue because the hue
+     belongs to the project, not the palette. playText is the odd one: on a
+     white button it is simply the palette's warm near-black, the same value
+     the StemTile well uses for a different reason. C.amberInk already covers
+     ink on the accent, which is why the solo glyph beside these does not
+     appear here. */
   playText: { color: '#17110a', fontSize: 24, fontWeight: '800' },
 
   mixRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 9 },

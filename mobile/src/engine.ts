@@ -23,11 +23,15 @@ import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './mo
 export interface EngineTrackInput {
   id: string
   buffer: AudioBuffer
+  /** The singer's own audio rather than part of the song. Length-wise these
+   *  are the wild card — see `songDuration`. */
+  custom?: boolean
 }
 
 interface EngineTrack {
   id: string
   buffer: AudioBuffer
+  custom: boolean
   gain: GainNode
   volume: number
   muted: boolean
@@ -206,6 +210,27 @@ export class MultitrackEngine {
     }, 400)
   }
 
+  /**
+   * How long the SONG is, as opposed to how long the longest thing loaded is.
+   *
+   * `duration` is the max over every lane, and a singer's own take can run
+   * past the end of the song — a full-length recording that ran a couple of
+   * seconds long is enough. A loop must not be armed into that overhang: it
+   * would reach past where the stems have audio, and `src.loop` is a
+   * whole-lane decision, so the stems would not loop at all. Lap one plays
+   * them, laps two onward are the harmony alone with the band gone for good.
+   *
+   * Custom lanes are EXCLUDED rather than the shortest lane winning: the
+   * shortest lane may be a four-second harmony, and letting that set the
+   * ceiling shrinks every loop in the song to four seconds (measured — see
+   * setRegion). Stems come from one six-stem split and are equal-length by
+   * construction, so this is simply the song's real length.
+   */
+  private get songDuration(): number {
+    const song = this.tracks.reduce((d, tr) => (tr.custom ? d : Math.max(d, tr.buffer.duration)), 0)
+    return song > 0 ? song : this.duration
+  }
+
   private clockPosition(lag: number): number {
     if (!this._playing) return this.startOffset
     // real seconds scale by the varispeed rate to give song seconds
@@ -241,10 +266,66 @@ export class MultitrackEngine {
    * inside the region stops at its end. Live-updatable while playing.
    */
   setRegion(region: { start: number; end: number } | null, loop: boolean): void {
-    this.region = region && region.end - region.start > 0.05 ? region : null
+    /* Where the listener actually is, read BEFORE the fold changes under us —
+     * while a loop is armed this is the folded position, and once it is gone
+     * the same elapsed time reads as the raw linear one. Clearing a loop after
+     * a few laps would otherwise jump the readout forward by every lap played
+     * and never come back, because the fold cannot re-engage. */
+    const at = this.audioPosition
+    const wasFolding = this.regionLoop && this.region !== null
+    /* NOT fitted to the shortest lane, deliberately. Lanes differ in length —
+     * the added-track test project carries a 4s harmony over a 40.8s song —
+     * so clamping the region to the shortest would let one short recording
+     * shrink every loop in the song to its own length (measured: a 2→39.5s
+     * mark came back as 2→4). A lane that ends inside the region simply does
+     * not loop (see applyLoop); it plays its part and falls silent, which is
+     * exactly what it does in ordinary playback.
+     *
+     * The mirror case cannot go silent either: `region.end` is clamped to
+     * `duration`, which is the LONGEST lane, so at least that lane always
+     * covers the region and loops. A mark past where the stems end loops only
+     * the lane that still has audio there — and the stems have already ended
+     * at that point, so there is nothing of theirs to hear either way. */
+    const capped = region
+      ? { start: region.start, end: Math.min(region.end, this.songDuration) }
+      : null
+    this.region = capped && capped.end - capped.start > 0.05 ? capped : null
     this.regionLoop = loop
     for (const src of this.sources) this.applyLoop(src)
     this.syncBoundWatcher()
+    const nowFolding = this.regionLoop && this.region !== null
+    /* Arming with the playhead outside the new region is the other half: the
+     * native side clamps the start offset into the loop and plays from there
+     * while the clock counts on from where it was. seek() puts both at the
+     * same place, and clamps into the region on the way. */
+    const outside =
+      nowFolding && this.region !== null && (at < this.region.start || at >= this.region.end - 0.05)
+    /* Only a CLEAR needs the unconditional re-anchor (the fold stops applying
+     * under a clock that was folded). Arming is covered by `outside`; when the
+     * playhead is already inside, the fold is correct as it stands and a seek
+     * would only stop every source and restart 80ms later for nothing. */
+    /* `outside` judges the folded position; the fold's PRECONDITION is about
+     * startOffset, and after a wrap startOffset sits past it quite normally. A
+     * re-arm (armed → a different region) skips the clear term and could leave
+     * startOffset beyond the new end with the fold dead. No caller does that
+     * today — cycleLoop always clears first — but draggable band edges are the
+     * obvious next turn of this UI and they are exactly this call.
+     *
+     * DO NOT narrow the `startOffset < region.start` half to match the fold's
+     * `< region.end`. It looks redundant and is not: it is what guarantees
+     * startOffset lies INSIDE an armed region, which `restartPendingStart()`
+     * depends on. That path (a beat or metronome edit landing during a
+     * count-in pre-roll) restores startOffset and calls play() directly,
+     * bypassing seek — so it never gets seek's clamp, and an offset before
+     * the region would start every source outside it and desync the clock
+     * from the audio exactly as the original blockers did. The cost of
+     * keeping it is one extra 80 ms restart when B is marked before A during
+     * playback. */
+    const offsetOutside =
+      nowFolding &&
+      this.region !== null &&
+      (this.startOffset < this.region.start || this.startOffset >= this.region.end - 0.05)
+    if ((wasFolding && !nowFolding) || outside || offsetOutside) this.seek(at)
     if (this._playing && this.ctx.currentTime >= this.startedAt) {
       this.cancelPendingClicks()
       this.armClicksFromCurrent()
@@ -260,7 +341,13 @@ export class MultitrackEngine {
     if (r && src.buffer) {
       src.loopStart = Math.max(0, r.start)
       src.loopEnd = Math.min(r.end, src.buffer.duration)
-      src.loop = src.loopEnd - src.loopStart > 0.05
+      /* Lanes may differ in length — a singer's own track is whatever they
+       * recorded. One that ends inside the region must NOT loop over the
+       * truncated window: it would cycle on a shorter period than the stems
+       * and drift out of phase with the music on the first wrap. Let it play
+       * out and stop, which is what a short lane does anyway. */
+      src.loop =
+        src.loopEnd - src.loopStart > 0.05 && src.buffer.duration >= r.end - 0.001
     } else {
       src.loop = false
     }
@@ -592,7 +679,15 @@ export class MultitrackEngine {
     this.tracks = list.map((t) => {
       const gain = this.ctx.createGain()
       gain.connect(this.master)
-      return { id: t.id, buffer: t.buffer, gain, volume: 1, muted: false, solo: false }
+      return {
+        id: t.id,
+        buffer: t.buffer,
+        custom: t.custom === true,
+        gain,
+        volume: 1,
+        muted: false,
+        solo: false
+      }
     })
     this.duration = this.tracks.reduce((d, t) => Math.max(d, t.buffer.duration), 0)
     this.startOffset = Math.min(opts.position ?? 0, this.duration)
@@ -750,7 +845,24 @@ export class MultitrackEngine {
   private restartTimer: ReturnType<typeof setTimeout> | null = null
 
   seek(t: number): void {
-    const clamped = Math.max(0, Math.min(t, this.duration))
+    /*
+     * A seek that lands outside an armed loop desynchronises the clock from
+     * the audio, and past the end it never heals. The native processor wraps
+     * `position_` into [loopStart, loopEnd] unconditionally, while
+     * clockPosition only folds when `startOffset < region.end` — so an offset
+     * at or past the end leaves the readout walking on to the end of the song
+     * while the stems loop forever. Clamping here rather than at each call
+     * site because the internal restart below seeks too, and a UI guard
+     * cannot reach it.
+     *
+     * `end - 0.05` rather than `end`: landing exactly on the end is what
+     * breaks the fold's precondition, so the offset has to stay strictly
+     * inside. While a loop is armed the transport therefore works within it,
+     * which is how every A-B repeat behaves — the way out is releasing it.
+     */
+    const r = this.regionLoop ? this.region : null
+    const inRegion = r ? Math.max(r.start, Math.min(t, r.end - 0.05)) : t
+    const clamped = Math.max(0, Math.min(inRegion, this.duration))
     if (this._playing || this.restartTimer !== null) {
       // Tearing down and instantly recreating every source per seek can
       // wedge the native render thread on device — stop now, restart once
