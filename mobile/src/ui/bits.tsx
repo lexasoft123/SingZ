@@ -137,6 +137,41 @@ export function MixGlyph({ color = W_GLYPH }: { color?: string }): React.JSX.Ele
 }
 
 /**
+ * Microphone glyph (capsule, cradle, stem), drawn with plain views.
+ *
+ * Its five neighbours in the transport are line art and this one was 🎤 — a
+ * full-colour emoji in a row of monochrome glyphs. The file already refuses
+ * that twice on purpose: ⏮︎ carries a variation selector to keep it
+ * monochrome, and the Song button is ••• rather than a gear because a gear
+ * has no guaranteed text presentation on Android. There is no microphone
+ * character with a dependable text presentation to reach for, so it is drawn,
+ * the way MixGlyph is. The 🎤 in running copy and on the sung-line marker
+ * stays: an emoji in a sentence is an emoji, not an icon in a row of icons.
+ */
+export function MicGlyph({ color = W_GLYPH }: { color?: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 22, height: 20, alignItems: 'center' }}>
+      <View style={{ width: 8, height: 11, borderRadius: 4, backgroundColor: color }} />
+      {/* the cradle: a full border with the top edge dropped, which is how a
+          half-circle is drawn without a path */}
+      <View
+        style={{
+          width: 16,
+          height: 8,
+          marginTop: -3,
+          borderWidth: 2,
+          borderColor: color,
+          borderTopColor: 'transparent',
+          borderBottomLeftRadius: 8,
+          borderBottomRightRadius: 8
+        }}
+      />
+      <View style={{ width: 2, height: 3, backgroundColor: color }} />
+    </View>
+  )
+}
+
+/**
  * A round icon button. `label` is not optional in spirit — every one of these
  * holds a glyph and nothing else, so without it a screen reader announces
  * "button" and leaves the singer to guess which of the six it landed on.
