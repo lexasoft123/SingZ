@@ -9,7 +9,9 @@ import {
   View,
   type GestureResponderEvent,
   type ImageSourcePropType,
-  type LayoutChangeEvent
+  type LayoutChangeEvent,
+  type StyleProp,
+  type ViewStyle
 } from 'react-native'
 
 /**
@@ -501,6 +503,48 @@ export function Bar({
           borderColor: KIT.bg
         }}
       />
+    </View>
+  )
+}
+
+/**
+ * A bottom sheet inside a `<Modal>`: a tap-anywhere-else scrim and the panel.
+ *
+ * The scrim is a SIBLING of the panel and never its ancestor, which is the
+ * whole point of this component existing. Wrapping the panel in the scrim's
+ * `Pressable` — the obvious way to write it — silently stops the panel
+ * scrolling on iOS: `RCTScrollViewComponentView._shouldDisableScrollInteraction`
+ * walks the native superviews of a scroll view and, on finding one that is the
+ * JS responder, makes `touchesShouldCancelInContentView:` return NO, so the pan
+ * never begins. Measured on the Practice sheet: three swipes, three touches
+ * delivered to the ScrollView, zero drags, and Trim unreachable on every song.
+ * It read as intermittent only because `setIsJSResponder` lands on the main
+ * queue and can lose the race with the first gesture after a fresh mount.
+ *
+ * A sibling scrim also needs no `onPress={() => {}}` on the panel to swallow
+ * taps: RN's responder negotiation walks the touch target's ANCESTORS, and the
+ * scrim is not one, so a tap on the panel never reaches it.
+ *
+ * `accessible={false}` on the scrim: left accessible it becomes ONE element
+ * over the whole modal reading "Close, button", with the faders, chips and
+ * steppers unreachable behind it. `onAccessibilityEscape` is the screen-reader
+ * way out.
+ */
+export function Sheet({
+  onClose,
+  pad,
+  children
+}: {
+  onClose: () => void
+  pad?: StyleProp<ViewStyle>
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <View style={b.sheetWrap}>
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
+      <View style={[b.sheet, pad]} accessible={false} onAccessibilityEscape={onClose}>
+        {children}
+      </View>
     </View>
   )
 }
