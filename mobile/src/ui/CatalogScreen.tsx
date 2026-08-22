@@ -115,6 +115,15 @@ export default function CatalogScreen({
   const [projects, setProjects] = useState<ProjectEntry[] | null>(null)
   const [loading, setLoading] = useState<Loading | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** What the app was doing when it died last time, if it did.
+   *
+   *  Kept apart from `error` on purpose. That one slot was carrying six
+   *  unrelated things — a crash report, a rejected file pick, a folder-picker
+   *  failure, a listing failure, a sign-in failure and a song-load failure —
+   *  so whichever spoke last silenced the rest, and nothing cleared it but the
+   *  next action that happened to. This one is durable, is the only one worth
+   *  acting on, and unlike the others it has somewhere to go: the Log. */
+  const [crashNote, setCrashNote] = useState<string | null>(null)
   /** Library source: Drive API / picked folder (SAF, iCloud) / on-device. */
   const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>('phone')
   const [driveEmail, setDriveEmail] = useState<string | null>(null)
@@ -147,6 +156,15 @@ export default function CatalogScreen({
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
   const listSeq = useRef(0)
+
+  /** A project's name for the cards that only know its directory. The split
+   *  and analysis cards were titling themselves with the folder slug while
+   *  every other surface said `doc.name` — during the longest wait in the app,
+   *  the song stopped being called by its name. */
+  const nameOf = useCallback(
+    (dir: string): string => (projects ?? []).find((p) => p.dir === dir)?.doc?.name ?? dir,
+    [projects]
+  )
 
   const loadUsage = useCallback(async () => {
     const rows = await cacheUsage()
@@ -263,7 +281,7 @@ export default function CatalogScreen({
     })
     void getCrumb().then((c) => {
       if (c) {
-        setError(`The last open crashed while ${c} — please report this.`)
+        setCrashNote(c)
         void setCrumb('')
       }
     })
@@ -822,7 +840,9 @@ export default function CatalogScreen({
     try {
       const gate = await splitGate()
       if (!gate.ok) {
-        Alert.alert('Splitting needs a bigger phone', gate.reason)
+        // Not "needs a bigger phone": the device is not the singer's fault and
+        // they cannot act on it. Say what cannot happen and why.
+        Alert.alert('This song is too big to split here', gate.reason)
         return
       }
       setCancelPending(false)
@@ -864,8 +884,21 @@ export default function CatalogScreen({
    *  build without the natives never offers. */
   const canSplit = useCallback(
     (p: ProjectEntry): boolean =>
-      mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0 && !splitUi,
-    [mode, splitUi]
+      mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
+    [mode]
+  )
+  /** A split is already running, so this one has to wait its turn. Kept apart
+   *  from canSplit because the offer used to VANISH from every other card
+   *  while a job ran — no disabled state, no reason, the affordance simply
+   *  gone. A control that cannot be used right now should say so. */
+  const splitBusy = splitUi !== null
+  /** The same question minus the card whose own split it is: that one shows
+   *  no chip at all (see the card's `action`), so this is what dims the
+   *  OTHERS. Kept apart from splitBusy, which is what removes the row from
+   *  the long-press menu, where an action cannot be dimmed. */
+  const splitBusyElsewhere = useCallback(
+    (dir: string): boolean => splitUi !== null && splitUi.project !== dir,
+    [splitUi]
   )
 
   /** The one place the offer is worded. The card button and the long-press
@@ -908,22 +941,35 @@ export default function CatalogScreen({
   /** Phone-library long-press: this phone owns these projects. */
   const phoneCardMenu = useCallback(
     (p: ProjectEntry) => {
-      const buttons: Parameters<typeof Alert.alert>[2] = [
-        { text: 'Cancel', style: 'cancel' }
-      ]
+      /* Built in reading order with the destructive item LAST. It used to be
+         first, because every item was `unshift`ed and delete went in first —
+         so the top of the menu, where a thumb lands, was "Delete from this
+         phone". iOS convention puts destructive at the bottom for exactly
+         that reason. */
+      const buttons: Parameters<typeof Alert.alert>[2] = []
+      /* Six real stems end the offer; a build without the split natives (iOS
+         until P3) never offers; and while a job is running the item is left
+         OUT rather than shown inert. An alert action cannot be disabled, so a
+         "(one at a time)" item would just close the menu with nothing said.
+         The card's chip is where the unavailable-and-why lives — it can be
+         dimmed and carry a reason, which an alert row cannot. */
+      if (canSplit(p) && !splitBusy) {
+        buttons.push({ text: 'Split into stems', onPress: () => offerSplit(p) })
+      }
       if (!p.hasLyrics) {
-        buttons.unshift({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
+        buttons.push({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
       }
-      // Six real stems end the offer; a running job means the card owns it;
-      // a build without the split natives (iOS until P3) never offers.
-      if (canSplit(p)) {
-        buttons.unshift({ text: 'Split into stems', onPress: () => offerSplit(p) })
-      }
-      buttons.unshift({
-        text: 'Delete from this phone',
-        style: 'destructive',
-        onPress: () => {
-          Alert.alert('Delete this song?', `"${p.doc.name ?? p.dir}" and its files go away.`, [
+      const onDelete = (): void => {
+        Alert.alert(
+          'Delete this song?',
+          `"${p.doc.name ?? p.dir}" and its files go away.`,
+          /* cancel-first, like every other confirm in this file
+             (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
+             either order the same, but Android maps by position — the
+             reversal above is for the MENU's three actions, not for a
+             two-button confirm, and mirroring just this one would put Cancel
+             where the others put the action. */
+          [
             { text: 'Cancel', style: 'cancel' },
             {
               text: 'Delete',
@@ -934,12 +980,40 @@ export default function CatalogScreen({
                   .catch((e) => setError(String(e instanceof Error ? e.message : e)))
               }
             }
-          ])
-        }
-      })
-      Alert.alert(p.doc.name ?? p.dir, undefined, buttons)
+          ],
+          { cancelable: true }
+        )
+      }
+      buttons.push({ text: 'Delete from this phone', style: 'destructive', onPress: onDelete })
+      /*
+       * The two platforms want OPPOSITE array orders for the same screen, so
+       * the list is built in reading order above and then handed over the way
+       * each one needs it.
+       *
+       * iOS keeps the array order and floats the .cancel action to the bottom:
+       * Split, Find lyrics, Delete, Cancel — destructive last among the
+       * actions, which is the whole point of the ordering.
+       *
+       * Android takes only the first THREE (Alert.js maps them to
+       * positive/negative/neutral and slices the rest) and then stacks them
+       * neutral-first, i.e. reversed. Two consequences, both measured on an
+       * API 36 emulator: a fourth button is silently dropped — which is how
+       * Delete vanished entirely once Cancel was ahead of it, leaving the only
+       * route to deleting a song unreachable — and the array has to be
+       * reversed for Delete to land at the BOTTOM rather than under the
+       * thumb. Cancel is the one that goes, so `cancelable` has to be true or
+       * the dialog has no way out at all (Alert.js hardcodes it false).
+       */
+      Alert.alert(
+        p.doc.name ?? p.dir,
+        undefined,
+        Platform.OS === 'android'
+          ? [...buttons].reverse()
+          : [...buttons, { text: 'Cancel', style: 'cancel' }],
+        { cancelable: true }
+      )
     },
-    [canSplit, findLyricsFor, offerSplit, refresh]
+    [canSplit, splitBusy, findLyricsFor, offerSplit, refresh]
   )
 
   useEffect(() => {
@@ -1182,14 +1256,44 @@ export default function CatalogScreen({
             </>
           )}
         </View>
-        {/* Errors sit ABOVE the list, next to the controls that cause them.
-            They used to render as the last child of the ScrollView — below
-            every song and below the sample card — so with a real library they
-            were off-screen entirely. The crash notice lands in this same slot
-            ("The last open crashed while …"), which made the most important
-            sentence the app ever writes the one least likely to be read.
-            Tap to dismiss: the slot is shared by six unrelated messages and
-            nothing else clears it until the next action happens to. */}
+        {/* The crash notice, which is durable and actionable, and therefore
+            not in the same slot as the transient errors below it. It is the
+            most important sentence the app ever writes — it used to render as
+            the last child of the ScrollView, below every song and below the
+            sample card, and it used to end "please report this" with nowhere
+            to report it. Reporting means the Log, so that is what the button
+            opens. */}
+        {crashNote && (
+          <View style={[s.errBox, s.noteBox]}>
+            <Text style={[s.err, { color: C.text }]}>
+              The last open crashed while {crashNote}.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open the log to report this"
+              hitSlop={8}
+              onPress={() => {
+                setLogOpen(true)
+                setCrashNote(null)
+              }}
+            >
+              <Text style={s.ctxLink}>Report</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss the crash notice"
+              hitSlop={4}
+              onPress={() => setCrashNote(null)}
+            >
+              <Text style={[s.errX, { color: C.dim }]}>✕</Text>
+            </Pressable>
+          </View>
+        )}
+        {/* Transient errors sit ABOVE the list, next to the controls that
+            cause them. They used to render as the last child of the
+            ScrollView, so with a real library they were off-screen entirely.
+            Tap to dismiss — nothing else clears them until the next action
+            happens to. */}
         {error && (
           <Pressable
             style={s.errBox}
@@ -1220,7 +1324,7 @@ export default function CatalogScreen({
           {splitUi && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
-                {splitUi.project}
+                {nameOf(splitUi.project)}
               </Text>
               {splitUi.phase === 'model' && (
                 <>
@@ -1289,7 +1393,7 @@ export default function CatalogScreen({
           {analysisUi && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
-                {analysisUi.dir}
+                {nameOf(analysisUi.dir)}
               </Text>
               <Text style={s.splitText}>{analysisUi.text}</Text>
               <View style={s.splitBarBed}>
@@ -1367,16 +1471,34 @@ export default function CatalogScreen({
               // The whole point of an added song is splitting it, so the offer
               // belongs on the card. hitSlop keeps the tap target honest at
               // this text size, and the press must not also open the song.
-              action: canSplit(p) ? (
+              /* Nothing at all on the card whose split is RUNNING — not a
+                 disabled chip, no chip. `!splitUi` used to live inside
+                 canSplit and was doing double duty as the busy guard;
+                 splitting that out left this card's chip live, and tapping it
+                 restarts the flow: the progress card repaints to "Downloading
+                 the splitter — 0 of 136 MB", the liveness poll is torn down,
+                 both natives refuse the second job without telling JS, and a
+                 job at 70% ends up reading "Starting…" at zero. The progress
+                 card above it is already saying everything there is to say. */
+              action: canSplit(p) && splitUi?.project !== p.dir ? (
                 <Pressable
                   hitSlop={10}
+                  disabled={splitBusyElsewhere(p.dir)}
                   onPress={(e) => {
                     e.stopPropagation()
                     offerSplit(p)
                   }}
-                  style={s.splitChip}
+                  style={[s.splitChip, splitBusyElsewhere(p.dir) && { opacity: 0.4 }]}
                   accessibilityRole="button"
-                  accessibilityLabel={`Split ${p.doc.name ?? p.dir} into stems`}
+                  accessibilityState={{ disabled: splitBusyElsewhere(p.dir) }}
+                  /* Not "while another song is being split": splitUi also sits
+                     in its failed phase until Resume or Discard, when nothing
+                     is running at all. Word it against what has to happen. */
+                  accessibilityLabel={
+                    splitBusyElsewhere(p.dir)
+                      ? 'Split — unavailable until the current split finishes or is discarded'
+                      : `Split ${p.doc.name ?? p.dir} into stems`
+                  }
                 >
                   <Text style={s.splitChipText}>Split</Text>
                 </Pressable>
@@ -1593,6 +1715,18 @@ const s = StyleSheet.create({
   },
   progressFill: { height: 3, backgroundColor: C.amber, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
   empty: { color: C.dim, fontSize: 14, lineHeight: 20, marginVertical: 12 },
+  /* The crash notice reads as information rather than alarm — it is about a
+     previous session, and the singer has already lived through it. */
+  /* gap 18 against Report's hitSlop 8 and the ✕'s 4: without the extra room
+     their touch areas overlapped and the ✕, being the later sibling, took a
+     near-miss on Report — dismissing the notice instead of opening the Log,
+     with the crumb already cleared so it never came back. */
+  noteBox: {
+    borderColor: C.hairline,
+    backgroundColor: white(0.05),
+    alignItems: 'center',
+    gap: 18
+  },
   errBox: {
     flexDirection: 'row',
     alignItems: 'flex-start',

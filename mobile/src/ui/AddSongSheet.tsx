@@ -275,7 +275,15 @@ export default function AddSongSheet({
         return (
           <View style={s.center}>
             <ActivityIndicator color={C.amber} />
+            {/* Cancel is hidden through this step and abandon() no-ops, because
+                a create in flight owns the import copy and the fresh folder.
+                A locked screen therefore has to say what it is doing and
+                roughly how long — a bare spinner over a full-size file copy
+                reads as a freeze. */}
             <Text style={s.dimText}>Adding it to this phone…</Text>
+            <Text style={[s.dimText, { marginTop: 2 }]}>
+              Copying the file — a few seconds for a normal song.
+            </Text>
           </View>
         )
       case 'meta':
@@ -379,6 +387,13 @@ export default function AddSongSheet({
                 <Pressable accessibilityRole="button" style={s.btn} onPress={() => void create(facts, null)}>
                   <Text style={s.btnText}>Skip</Text>
                 </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                style={s.btn}
+                onPress={() => setStep({ k: 'meta', facts })}
+              >
+                <Text style={s.btnText}>Edit title</Text>
+              </Pressable>
               </View>
             </View>
           )
@@ -394,6 +409,16 @@ export default function AddSongSheet({
                 <Pressable accessibilityRole="button" style={[s.btn, s.btnPrimary]} onPress={() => void create(facts, null)}>
                   <Text style={s.btnPrimaryText}>Add without lyrics</Text>
                 </Pressable>
+                <Pressable accessibilityRole="button" style={s.btn} onPress={() => void search(facts)}>
+                  <Text style={s.btnText}>Try again</Text>
+                </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                style={s.btn}
+                onPress={() => setStep({ k: 'meta', facts })}
+              >
+                <Text style={s.btnText}>Edit title</Text>
+              </Pressable>
               </View>
             </View>
           )
@@ -425,6 +450,13 @@ export default function AddSongSheet({
               </Pressable>
               <Pressable accessibilityRole="button" style={s.btn} onPress={() => void search(facts)}>
                 <Text style={s.btnText}>Search again</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                style={s.btn}
+                onPress={() => setStep({ k: 'meta', facts })}
+              >
+                <Text style={s.btnText}>Edit title</Text>
               </Pressable>
             </View>
           </View>
