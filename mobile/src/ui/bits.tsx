@@ -307,6 +307,38 @@ export function LyricsGlyph({ color }: { color: string }): React.JSX.Element {
   )
 }
 
+/** Magnifier glyph for the search dock. */
+export function SearchGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 16, height: 16 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: 11,
+          height: 11,
+          borderRadius: 5.5,
+          borderWidth: 2,
+          borderColor: color
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          right: 1,
+          bottom: 1,
+          width: 6,
+          height: 2,
+          borderRadius: 1,
+          backgroundColor: color,
+          transform: [{ rotate: '45deg' }]
+        }}
+      />
+    </View>
+  )
+}
+
 /** Speaker glyph for the mixer's Mute — crossed when muted. M and S were
  *  mixing-desk initials; the glyphs say what happens to the sound. Drawn
  *  with the RN border-triangle trick, the same reasoning as MicGlyph. */

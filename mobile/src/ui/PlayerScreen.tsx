@@ -1398,7 +1398,7 @@ export default function PlayerScreen({
             {/* The lane rows had no scroll container at all, so past roughly a
                 dozen lanes they clipped with no way to reach them — and the
                 44 pt fader targets below bring that cliff closer. */}
-            <ScrollView>
+            <ScrollView showsVerticalScrollIndicator={false}>
             {tracks.map((t, i) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
@@ -1491,7 +1491,7 @@ export default function PlayerScreen({
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <View style={b.grab} />
             <Text style={b.sheetTitle}>{project.name}</Text>
-            <ScrollView>
+            <ScrollView showsVerticalScrollIndicator={false}>
               <View style={[b.sec, b.secFirst]}>
                 <Text style={b.secLab}>Beat</Text>
                 <Text style={s.songVal}>
@@ -1659,7 +1659,7 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <ScrollView bounces={false}>
+            <ScrollView bounces={false} showsVerticalScrollIndicator={false}>
               <View style={b.grab} />
               <Text style={b.sheetTitle}>Practice</Text>
 

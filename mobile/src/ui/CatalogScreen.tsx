@@ -4,6 +4,7 @@ import {
   Alert,
   DeviceEventEmitter,
   Image,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -50,7 +51,7 @@ import {
 } from '../projects'
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
 import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
-import { C, Chip, FolderGlyph, LyricsGlyph, PhoneGlyph, RedetectGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, TrashGlyph, white } from './bits'
+import { C, Chip, FolderGlyph, LyricsGlyph, PhoneGlyph, RedetectGlyph, SearchGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, TrashGlyph, white } from './bits'
 import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
@@ -260,15 +261,21 @@ export default function CatalogScreen({
   const q = query.trim().toLowerCase()
   const shown = useMemo(() => (q ? sorted.filter((p) => titleOf(p).toLowerCase().includes(q)) : sorted), [sorted, q])
 
-  /** Drive mode's "On phone" filter — offline is the moment the library
-   *  matters most, and scrolling for ✓s is not a filter. Other modes ignore
-   *  the flag rather than resetting it, so flipping tabs never loses it. */
-  const [onlyLocal, setOnlyLocal] = useState(false)
-  const finalShown = useMemo(
-    () =>
-      mode === 'gdrive' && onlyLocal ? shown.filter((p) => isDownloaded(p, usage[p.dir])) : shown,
-    [shown, mode, onlyLocal, usage]
-  )
+  /** The floating search bar rides above the keyboard on iOS (Android's
+   *  adjustResize moves the whole window, so the absolute bar rises free).
+   *  Same measurement AddSongSheet trusts. */
+  const [kbInset, setKbInset] = useState(0)
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return
+    const onShow = Keyboard.addListener('keyboardWillChangeFrame', (e) =>
+      setKbInset(Math.max(0, e?.endCoordinates?.height ?? 0))
+    )
+    const onHide = Keyboard.addListener('keyboardWillHide', () => setKbInset(0))
+    return () => {
+      onShow.remove()
+      onHide.remove()
+    }
+  }, [])
 
   /* Ready or not — the library's one question: can you sing this now? A
    * split song is ready; an unsplit one states its next step. The groups
@@ -279,8 +286,8 @@ export default function CatalogScreen({
    * reorders itself when the wifi drops is churn, not honesty — the ☁ and
    * the ✓ already carry the download fact. */
   const isSplit = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
-  const readyShown = finalShown.filter(isSplit)
-  const pendingShown = finalShown.filter((p) => !isSplit(p))
+  const readyShown = shown.filter(isSplit)
+  const pendingShown = shown.filter((p) => !isSplit(p))
 
   /** The bundled sample is a song in this list like any other, so it answers
    *  to the search too — left unfiltered it sat under two matches looking
@@ -1027,10 +1034,9 @@ export default function CatalogScreen({
       mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
     [mode]
   )
-  /** The same question minus the card whose own split it is: that one shows
-   *  no chip at all (see the card's `action`), so this is what dims the
-   *  OTHERS. Kept apart from splitBusy, which is what removes the row from
-   *  the long-press menu, where an action cannot be dimmed. */
+  /** Whether a split is running for anyone BUT this card: the running card
+   *  shows no chip at all (see the card's `action`), so this is what dims
+   *  the others with a reason. */
   const splitBusyElsewhere = useCallback(
     (dir: string): boolean => splitUi !== null && splitUi.project !== dir,
     [splitUi]
@@ -1520,45 +1526,13 @@ export default function CatalogScreen({
             live, or deleting a song down past the threshold takes the box away
             and leaves the filter applied, with nothing on screen to clear it
             and no explanation of why most of the library is missing. */}
-        {/* `onlyLocal` keeps the row alive the same way a live query does: a
-            refresh shrinking the library below the threshold must not take
-            the chip away while its filter still applies. */}
-        {(sorted.length >= SEARCH_FROM || q !== '' || (mode === 'gdrive' && onlyLocal)) && (
-          <View style={s.searchRow}>
-            <TextInput
-              style={s.search}
-              value={query}
-              onChangeText={setQuery}
-              placeholder="Find a song"
-              placeholderTextColor={C.dim}
-              autoCorrect={false}
-              autoCapitalize="none"
-              returnKeyType="search"
-              clearButtonMode="while-editing"
-              accessibilityLabel="Find a song by name"
-            />
-            {/* iOS draws its own clear button inside the field; Android has
-                none, and a query with no way out strands the library. */}
-            {Platform.OS === 'android' && query.length > 0 && (
-              <Pressable
-                hitSlop={10}
-                onPress={() => setQuery('')}
-                accessibilityRole="button"
-                accessibilityLabel="Clear the search"
-              >
-                <Text style={s.searchX}>✕</Text>
-              </Pressable>
-            )}
-            {/* Offline is the moment the library matters most; scrolling for
-                ✓s is not a filter. Drive mode only — the other libraries ARE
-                the phone. */}
-            {mode === 'gdrive' && (
-              <Chip label="On phone" active={onlyLocal} onPress={() => setOnlyLocal((v) => !v)} />
-            )}
-          </View>
-        )}
         <ScrollView
           style={{ flex: 1 }}
+          /* The indicator drew ON the cards — the scroller sits inside the
+             padded wrap, so its edge is the cards' edge, not the screen's
+             (photographed on the user's phone). Hidden outright, per the
+             user's call. */
+          showsVerticalScrollIndicator={false}
           /* Belt and braces against RN's documented default. With a text
              field focused, `keyboardShouldPersistTaps` unset means 'never',
              and ScrollView.js:1487 says in as many words that the first tap
@@ -1579,7 +1553,9 @@ export default function CatalogScreen({
              keyboard connected and shows no soft keyboard, and there is no
              `simctl` way to raise one (see CLAUDE.md for the ⌘K that is). */
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
+          /* The last card must clear the floating search dock as well as the
+             home indicator, on both platforms. */
+          contentContainerStyle={{ paddingBottom: 76 + insets.bottom }}
           refreshControl={
             <RefreshControl
               refreshing={pulling}
@@ -1869,23 +1845,9 @@ export default function CatalogScreen({
               </Text>
             </View>
           )}
-          {projects !== null && finalShown.length === 0 && !sampleShown && (
+          {projects !== null && shown.length === 0 && !sampleShown && (
             <Text style={s.empty}>No song here is called “{query.trim()}”.</Text>
           )}
-          {/* The On-phone filter's own empty state. Its guard cannot ride on
-              !sampleShown — the sample always shows with no query — and it
-              must not double with the empty-library text below, hence the
-              projects.length check. */}
-          {projects !== null &&
-            projects.length > 0 &&
-            mode === 'gdrive' &&
-            onlyLocal &&
-            q === '' &&
-            finalShown.length === 0 && (
-              <Text style={s.empty}>
-                Nothing from this library is on the phone yet — open a song to download it.
-              </Text>
-            )}
           {projects !== null && projects.length === 0 && q === '' && (
             // Whichever library is open has its OWN next step — and phone mode
             // is where the app starts, so the folder advice was the first
@@ -1948,6 +1910,40 @@ export default function CatalogScreen({
             </View>
           )}
         </ScrollView>
+        {/* The search dock: bottom-anchored, floating over the list — the
+            modern place for search, and the thumb's shortest reach. Real
+            glass wants a native blur the app does not carry; a translucent
+            raised surface over this wash reads as the material. Rises with
+            the keyboard on iOS; Android's adjustResize lifts it for free. */}
+        {(sorted.length >= SEARCH_FROM || q !== '') && (
+          <View style={[s.searchDock, { bottom: Math.max(insets.bottom, 12) + kbInset }]}>
+            <SearchGlyph color={C.dim} />
+            <TextInput
+              style={s.searchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Find a song"
+              placeholderTextColor={C.dim}
+              autoCorrect={false}
+              autoCapitalize="none"
+              returnKeyType="search"
+              clearButtonMode="while-editing"
+              accessibilityLabel="Find a song by name"
+            />
+            {/* iOS draws its own clear button inside the field; Android has
+                none, and a query with no way out strands the library. */}
+            {Platform.OS === 'android' && query.length > 0 && (
+              <Pressable
+                hitSlop={10}
+                onPress={() => setQuery('')}
+                accessibilityRole="button"
+                accessibilityLabel="Clear the search"
+              >
+                <Text style={s.searchX}>✕</Text>
+              </Pressable>
+            )}
+          </View>
+        )}
         <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
         <AddSongSheet
           visible={addOpen}
@@ -2099,18 +2095,26 @@ const s = StyleSheet.create({
   },
   srcTitle: { color: C.text, fontSize: 13.5, fontWeight: '700', marginBottom: 6 },
   ctxIn: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
-  search: {
-    flex: 1,
-    height: 40,
-    borderRadius: 12,
-    paddingHorizontal: 13,
-    backgroundColor: white(0.063),
+  searchDock: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    height: 52,
+    borderRadius: 26,
+    paddingHorizontal: 18,
+    backgroundColor: 'rgba(30,26,21,0.93)',
     borderWidth: 1,
-    borderColor: white(0.07),
-    color: C.text,
-    fontSize: 15
+    borderColor: white(0.12),
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8
   },
+  searchInput: { flex: 1, color: C.text, fontSize: 15, height: '100%' },
   searchX: { color: C.dim, fontSize: 15, fontWeight: '700' },
   statusHave: { color: white(0.62) },
   storage: {
