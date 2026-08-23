@@ -1,6 +1,8 @@
-import React, { useCallback, useRef } from 'react'
+import React, { useCallback, useEffect, useRef } from 'react'
 import { KIT, STEM_COLORS } from './tokens'
 import {
+  Animated,
+  Easing,
   Image,
   Platform,
   Pressable,
@@ -821,8 +823,28 @@ export function Sheet({
   pad?: StyleProp<ViewStyle>
   children: React.ReactNode
 }): React.JSX.Element {
+  /* The scrim EASES to its 45% black instead of snapping there — the modal
+     slides its panel in, and a wash that lands fully dark on frame one reads
+     as a flash, not a dimming ("shadow animation is harsh"). 200ms
+     decelerate, native driver, one run per open; the slide itself stays the
+     system's (retiming it means replacing Modal, which this sheet's whole
+     scroll-arbitration comment is about not destabilising). Close needs no
+     fade: the Modal unmounts the scrim with the panel. */
+  const scrim = useRef(new Animated.Value(0)).current
+  useEffect(() => {
+    Animated.timing(scrim, {
+      toValue: 1,
+      duration: 200,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true
+    }).start()
+  }, [scrim])
   return (
     <View style={b.sheetWrap}>
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)', opacity: scrim }]}
+      />
       <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
       <View style={[b.sheet, pad]} accessible={false} onAccessibilityEscape={onClose}>
         {children}
@@ -884,7 +906,8 @@ export const b = StyleSheet.create({
     fontVariant: ['tabular-nums']
   },
   stepSuffix: { color: C.dim, fontSize: 12.5 },
-  sheetWrap: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
+  /* The 45% black lives on the animated scrim layer inside Sheet now. */
+  sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheet: {
     backgroundColor: C.sheet,
     borderTopLeftRadius: 22,

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
   runOnUI,
@@ -56,11 +56,13 @@ import {
   Sheet,
   SpeakerGlyph,
   StemTile,
+  STEM_TILE_COLORS,
   Stepper,
   ToStartGlyph,
   white
 } from './bits'
 import { KIT } from './tokens'
+import { Canvas, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -377,6 +379,17 @@ export default function PlayerScreen({
     [engine, sample, renderKey]
   )
   const stemIds = useMemo(() => project.stems.map((st) => st.id), [project])
+  /* Live window size for the tint washes — Android rotates and split-screens
+     and the iPad target allows all four orientations, so a module-load
+     capture would strand portrait extents on a landscape canvas. Still
+     nothing on the clock: the Canvas repaints only when these actually
+     change. */
+  const winDims = useWindowDimensions()
+  /* The same hue the catalog gave this song's card, so the artwork carries
+     over from the shelf to the stage (the sample and dir-less loads take 0,
+     matching their cards). */
+  const tileHue =
+    project.dir != null ? Math.abs(project.dir.length * 7 + project.dir.charCodeAt(0)) % 3 : 0
   /**
    * Lane name + color by id. Split stems come from TRACK_META; tracks the
    * singer added on the desktop bring their own, so the mixer shows "Harmony"
@@ -1040,6 +1053,26 @@ export default function PlayerScreen({
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      {/* The song tints its own stage: two soft washes in the song's tile
+          hues over the shared bg art, so each song's screen is faintly its
+          own. One STATIC Skia surface, painted once per song — no state on
+          the clock, per the renderer perf rules. */}
+      <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.85, winDims.height * 0.06)}
+            r={winDims.width * 0.95}
+            colors={[hexA(STEM_TILE_COLORS[tileHue][3], 0.08), hexA(STEM_TILE_COLORS[tileHue][3], 0)]}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.06, winDims.height * 0.94)}
+            r={winDims.width * 0.85}
+            colors={[hexA(STEM_TILE_COLORS[tileHue][0], 0.09), hexA(STEM_TILE_COLORS[tileHue][0], 0)]}
+          />
+        </Rect>
+      </Canvas>
 
       {/* Lyrics. The column is ONE canvas the size of the viewport, held
           still while a transform moves the lines under it — a canvas as tall as
@@ -1124,7 +1157,7 @@ export default function PlayerScreen({
         <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel="Back to library">
           <Text style={s.back}>‹</Text>
         </Pressable>
-        <StemTile hue={0} size={46} />
+        <StemTile hue={tileHue} size={46} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={s.hTitle} numberOfLines={1}>
             {project.name}
@@ -1902,6 +1935,13 @@ export default function PlayerScreen({
   )
 }
 
+/** rgba() from a #rrggbb hex, for the tint washes below. */
+const hexA = (hex: string, a: number): string => {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b0 = parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r},${g},${b0},${a})`
+}
 /** One spelling for pitch classes, shared by the Song sheet's Key row and
  *  the Practice sheet's transpose suffix. */
 const KEY_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
@@ -1956,15 +1996,6 @@ const s = StyleSheet.create({
     letterSpacing: 6,
     textAlign: 'center',
     marginBottom: 8,
-    textShadowColor: 'rgba(255,160,40,0.6)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 10
-  },
-  countIn: {
-    color: C.amber,
-    fontSize: 11,
-    letterSpacing: 5,
-    marginBottom: 4,
     textShadowColor: 'rgba(255,160,40,0.6)',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10
@@ -2053,7 +2084,6 @@ const s = StyleSheet.create({
     paddingHorizontal: 22
   },
   skipText: { color: white(0.85), fontSize: 12.5, fontWeight: '700' },
-  toStartText: { color: white(0.85), fontSize: 20, marginTop: -2 },
   play: {
     width: 66,
     height: 66,
@@ -2062,15 +2092,12 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
-  /* Three near-black inks that stay literals. The muted M and the "your turn"
-     pill are tinted toward the fill they sit on — danger red, a lane colour —
-     and there is no token for ink on an arbitrary lane hue because the hue
-     belongs to the project, not the palette. playText is the odd one: on a
-     white button it is simply the palette's warm near-black, the same value
-     the StemTile well uses for a different reason. C.amberInk already covers
-     ink on the accent, which is why the solo glyph beside these does not
-     appear here. */
-  playText: { color: '#17110a', fontSize: 24, fontWeight: '800' },
+  /* The near-black inks stay literals, riding the glyphs inline now: the
+     crossed speaker's '#1d0f0d' is tinted toward the danger fill it sits on,
+     and the play triangle's '#17110a' is the palette's warm near-black on a
+     white button (the StemTile well's value, for a different reason). There
+     is no token for ink on an arbitrary fill because the fill belongs to the
+     state, not the palette; C.amberInk already covers ink on the accent. */
 
   mixRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 9 },
   /* Section header rows: the label plus the control that used to cost its
