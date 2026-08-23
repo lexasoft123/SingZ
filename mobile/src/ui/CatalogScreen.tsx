@@ -1520,12 +1520,6 @@ export default function CatalogScreen({
             <Text style={s.errX}>✕</Text>
           </Pressable>
         )}
-        {/* Above the ScrollView, not inside it: a search box you have to
-            scroll back up to reach is not a search box. Only past
-            SEARCH_FROM songs — see the constant — but ALWAYS while a query is
-            live, or deleting a song down past the threshold takes the box away
-            and leaves the filter applied, with nothing on screen to clear it
-            and no explanation of why most of the library is missing. */}
         <ScrollView
           style={{ flex: 1 }}
           /* The indicator drew ON the cards — the scroller sits inside the
@@ -1911,7 +1905,10 @@ export default function CatalogScreen({
           )}
         </ScrollView>
         {/* The search dock: bottom-anchored, floating over the list — the
-            modern place for search, and the thumb's shortest reach. Real
+            modern place for search, and the thumb's shortest reach. Shown
+            past SEARCH_FROM songs, but ALWAYS while a query is live:
+            deleting a song below the threshold must not take the box away
+            with the filter still applied. Real
             glass wants a native blur the app does not carry; a translucent
             raised surface over this wash reads as the material. Rises with
             the keyboard on iOS; Android's adjustResize lifts it for free. */}

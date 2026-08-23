@@ -788,7 +788,13 @@ export default function PlayerScreen({
       lyrW > 0 && fonts
         ? layoutColumn(wordSpecs, fonts.line, lyrW, {
             top: LYR_TOP,
-            indents: mask ? mask.map((m) => (m ? micW : 0)) : undefined
+            /* micW alone put the first glyph ON the mic's right edge — an
+               emoji's ink fills its whole advance, and the sweep's edge
+               bloom blurs a further few px LEFT of the first glyph, so on
+               the phone the lit line's text visibly painted over the mark.
+               The +10 is the emoji's breathing room plus the bloom's
+               spread. */
+            indents: mask ? mask.map((m) => (m ? micW + 10 : 0)) : undefined
           })
         : { boxes: [], height: 0 },
     [wordSpecs, lyrW, micW, mask, fonts]
@@ -1044,9 +1050,13 @@ export default function PlayerScreen({
    * Lines already sung stay the quietest thing on screen; they are the only
    * ones the singer has no further use for.
    */
-  const lineColor = (i: number, isSing: boolean): string => {
+  const lineColor = (i: number, _isSing: boolean): string => {
+    /* Sing-to-train lines used to wear their own gold — 55% of the very hue
+       the current line's sweep lights up in, so "yours, later" was nearly
+       the same colour as "NOW" (photographed on the phone: four gold lines
+       around one gold sweep). The 🎤 mark carries the training meaning by
+       itself; the lines take the ordinary position ladder. */
     if (i === currentLine) return C.bright
-    if (isSing) return 'rgba(245,199,88,0.55)'
     if (i < currentLine) return white(0.22)
     return Math.abs(i - currentLine) === 1 ? white(0.52) : white(0.4)
   }
