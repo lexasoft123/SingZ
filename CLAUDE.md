@@ -62,11 +62,12 @@ UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
 the E2E Windows workflow, which also runs `npm test`) and the mac drivers
-in `tests/e2e/mac/` (align, wizard/consent, and the analysis-rule drivers —
-the two stem-rate ones, the two song-switch races, and stamp-upgrade; the
-`e2e-verifier` agent in `.claude/agents/` holds the current roster, which is
-where a new one is added — launch one instance per platform in parallel
-for cross-platform verification) — vitest unit tests in
+in `tests/e2e/mac/` (nine of them: align, wizard/consent, audio settings,
+bar editing, and the analysis-rule drivers — the two stem-rate ones, the two
+song-switch races, and stamp-upgrade; the `e2e-verifier` agent in
+`.claude/agents/` holds the roster of record, and a new driver is not
+finished until it is listed there — launch one instance per platform in
+parallel for cross-platform verification) — vitest unit tests in
 `tests/unit/` covering the v2 FLAC format with electron aliased to a stub).
 Load files through the hidden `<input type=file>` — same code
 path as drag-drop. Read the screenshots you take.
