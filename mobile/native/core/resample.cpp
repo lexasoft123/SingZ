@@ -59,7 +59,9 @@ Resampler::Resampler(int srcRate, int dstRate, int channels) : channels_(channel
   // renders that keep the transition band gentler agree with the ground
   // truth. The near-unity branch (the split engine's 48k->44.1k) keeps its
   // 24/10.056/full-cutoff design, byte for byte, frozen by the split
-  // parity gate.
+  // parity gate. A >=88.2 kHz split source reaches netDown >= 2 and takes
+  // THIS branch too — deliberate: stems carry no version stamp, and the
+  // swr-shaped response is the better lowpass at any real decimation.
   const bool decimating = netDown >= 2;
   // Odd tap count: the total latency (history priming + group delay,
   // 3*(taps-1)/2 input samples) becomes an integer number of OUTPUT frames,

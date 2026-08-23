@@ -70,11 +70,19 @@ class BeatsMl {
       await mkdir(tmpDir, { recursive: true })
       const mixed = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
         const child = spawn(bin, ['mlmix', f32, ...paths])
+        // The slot is held for the WHOLE job, mlmix included — without this,
+        // a second detectStems during the mix seconds passed the busy check
+        // (two model runs), and cancel() had nothing to reach.
+        this.child = child
         let errTail = ''
+        let timedOut = false
         child.stderr?.on('data', (c: Buffer) => {
           errTail = (errTail + c.toString('utf8')).slice(-2000)
         })
-        const timer = setTimeout(() => child.kill('SIGKILL'), 120_000)
+        const timer = setTimeout(() => {
+          timedOut = true
+          child.kill('SIGKILL')
+        }, 120_000)
         child.on('error', (err) => {
           clearTimeout(timer)
           resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
@@ -82,12 +90,21 @@ class BeatsMl {
         onChildSettled(child, 'mlmix', (code) => {
           clearTimeout(timer)
           if (code === 0) resolve({ ok: true })
-          else resolve({ ok: false, error: errTail.trim().split('\n').pop() ?? `mlmix exit ${code}` })
+          else if (timedOut) resolve({ ok: false, error: 'The mix render timed out.' })
+          // pop() yields '' on empty stderr, never undefined — || or the
+          // fallback can't fire (the same trap analyze.ts documents)
+          else resolve({ ok: false, error: errTail.trim().split('\n').pop() || `mlmix exit ${code}` })
         })
       })
-      if (!mixed.ok) return { ok: false, error: mixed.error ?? 'The mix could not be rendered.' }
+      if (!mixed.ok) {
+        this.child = null // a dead mlmix child must not wedge the slot
+        return { ok: false, error: mixed.error || 'The mix could not be rendered.' }
+      }
+      // run() overwrites the slot with the python child and clears it at
+      // settle; the settled mlmix child holds it across the gap harmlessly
       return await this.run(f32, 22050)
     } catch (err) {
+      this.child = null
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
       await rm(f32, { force: true }).catch(() => undefined)

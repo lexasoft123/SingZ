@@ -111,7 +111,7 @@ for (const dir of dirs) {
   const f32 = join(tmp, `${id.replace(/[^\w-]+/g, '_')}.f32`)
   const r = spawnSync(analyzeBin(), ['mlmix', f32, ...stems], { encoding: 'utf8' })
   if (r.status !== 0) {
-    console.log(`SKIP  ${id} (ffmpeg: ${String(r.stderr).trim().split('\n').pop()})`)
+    console.log(`SKIP  ${id} (mlmix: ${String(r.stderr).trim().split('\n').pop()})`)
     continue
   }
   jobs.push({ id, f32, sr: SR })
