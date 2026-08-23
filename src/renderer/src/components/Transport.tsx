@@ -11,7 +11,7 @@ import {
   type BeatInfo,
   type MetronomeConfig
 } from '../audio/beat'
-import { BEAT_DETECT_VERSION } from '../audio/analysis'
+import { analysisIsStale, BEAT_DETECT_VERSION } from '../audio/analysis'
 import { fmtClock, fmtTime, modalCoversApp, TRACK_META, type TrainingConfig } from '../model'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
@@ -500,28 +500,40 @@ function MetPopover({
               silently re-detecting v19 grids down to v17 — the mismatch was
               invisible because NOTHING in the app showed either number.
               A hand-tuned grid names itself instead: it is the singer's,
-              and no version applies. */}
+              and no version applies.
+              THREE auto cases, not two, because the rule is upgrade-only
+              (analysisIsStale): older re-derives on open, current matches,
+              and NEWER is left alone — that last one must never be painted
+              as an upgrade offer, or the copy talks the singer into
+              Re-detect (a few rows below) and hand-writes this build's
+              older grid over the newer one. */}
           <span
             className={
               grid.source !== 'auto'
                 ? 'tp-gridver-val hand'
-                : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
-                  ? 'tp-gridver-val ok'
-                  : 'tp-gridver-val stale'
+                : analysisIsStale(grid.detVersion, BEAT_DETECT_VERSION)
+                  ? 'tp-gridver-val stale'
+                  : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
+                    ? 'tp-gridver-val ok'
+                    : 'tp-gridver-val newer'
             }
             title={
               grid.source !== 'auto'
                 ? 'This grid was placed or corrected by hand — re-detection leaves it alone'
-                : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
-                  ? "The saved grid matches this build's detector"
-                  : `Saved with detector v${grid.detVersion ?? '?'}; this build has v${BEAT_DETECT_VERSION} and will re-derive on next open`
+                : analysisIsStale(grid.detVersion, BEAT_DETECT_VERSION)
+                  ? `Saved with detector v${grid.detVersion ?? '?'}; this build has v${BEAT_DETECT_VERSION} and will re-derive on next open`
+                  : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
+                    ? "The saved grid matches this build's detector"
+                    : `Saved by a newer detector (v${grid.detVersion}); this build has v${BEAT_DETECT_VERSION} and leaves it alone. Re-detect would replace it with this build's older grid.`
             }
           >
             {grid.source !== 'auto'
               ? `hand-tuned (v${grid.detVersion ?? '—'})`
-              : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
-                ? `v${grid.detVersion} — current`
-                : `v${grid.detVersion ?? '?'} → v${BEAT_DETECT_VERSION} available`}
+              : analysisIsStale(grid.detVersion, BEAT_DETECT_VERSION)
+                ? `v${grid.detVersion ?? '?'} → v${BEAT_DETECT_VERSION} available`
+                : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
+                  ? `v${grid.detVersion} — current`
+                  : `v${grid.detVersion} — newer than this build`}
           </span>
         </div>
       ) : null}

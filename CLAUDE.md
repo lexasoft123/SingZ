@@ -497,6 +497,16 @@ was driven; the gotchas that follow from it are below.
   cleaner — or `detectBeats` — WITHOUT bumping the matching constant leaves
   every saved project drawing the old answer forever. The corrected result
   saves itself into an existing project (never creating one under a raw file).
+  **Every staleness question goes through `analysisIsStale(stamp, current)`**
+  (`audio/analysis.ts`, exported to the phone through the analysis-lib entry)
+  and the rule is UPGRADE, NEVER DOWNGRADE: missing/nonsense/lower re-derives,
+  equal or NEWER is adopted untouched. `!==` stood there until the v23 catalog
+  pass met a v22 release app on the same machine — which would have re-derived
+  its own older grid and auto-saved it back, walking a whole library backwards
+  one open at a time (a phone behind a desktop is the same story). The cost is
+  that reverting a constant no longer self-heals: that is Re-detect's job. What
+  keeps `===` is the check that the VENDORED BINARY matches this build — a
+  different question from whether a project is old.
 - **An analysis is framed by the rate it is HANDED, so that rate comes from the
   file, never from the device** — the melody's hop is derived on both sides of
   the port (`hop = round(sr / DECIM * HOP_SEC)`, `hopSec = hop / (sr / DECIM)`

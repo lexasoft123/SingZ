@@ -49,6 +49,7 @@ import {
   BEAT_DETECT_VERSION,
   KEY_DETECT_VERSION,
   PITCH_DETECT_VERSION,
+  analysisIsStale,
   decodeMelody,
   melodyFitsSong
 } from '../gen/analysis-lib'
@@ -228,7 +229,8 @@ export function planAnalysis(
   const s = doc.settings ?? ({} as ProjectDoc['settings'])
   const none = s.analysisNone ?? {}
   const beatStored = s.beat
-  const beatStale = !!beatStored && beatStored.source === 'auto' && beatStored.detVersion !== BEAT_DETECT_VERSION
+  const beatStale =
+    !!beatStored && beatStored.source === 'auto' && analysisIsStale(beatStored.detVersion, BEAT_DETECT_VERSION)
   // A negative verdict from THIS detector counts as an answer — a drumless
   // song is not asked again on every open; a newer detector asks once more.
   // The verdict carries a SUB-STAMP, beatMl: whether the neural lattice was
@@ -238,7 +240,7 @@ export function planAnalysis(
   // on a phone AFTER a song was declared gridless, the version matches, the
   // verdict predates the evidence, and without this line it would bind
   // forever. Re-ask exactly once, with the better ears.
-  const noneBeatBinds = none.beat === BEAT_DETECT_VERSION && (none.beatMl === true || !mlNow)
+  const noneBeatBinds = !analysisIsStale(none.beat, BEAT_DETECT_VERSION) && (none.beatMl === true || !mlNow)
   const beatManual = beatStored?.source === 'manual'
   const beat =
     !!stems.drums && !beatManual && (force || ((!beatStored || beatStale) && !noneBeatBinds))
@@ -247,13 +249,14 @@ export function planAnalysis(
   const key =
     (INST.some((id) => stems[id]) || !!stems.bass) &&
     (force ||
-      ((!keyStored || keyStored.detVersion !== KEY_DETECT_VERSION) && none.key !== KEY_DETECT_VERSION))
+      ((!keyStored || analysisIsStale(keyStored.detVersion, KEY_DETECT_VERSION)) &&
+        analysisIsStale(none.key, KEY_DETECT_VERSION)))
 
   let melody = false
   if (stems.vocals) {
     const m = s.melody
     if (force) melody = true
-    else if (!m || m.detVersion !== PITCH_DETECT_VERSION) melody = true
+    else if (!m || analysisIsStale(m.detVersion, PITCH_DETECT_VERSION)) melody = true
     else if (durationSec != null) {
       // A stored line whose coverage is another song's length is disowned
       // and re-tracked — the rule that healed the two field projects that
