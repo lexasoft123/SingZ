@@ -9,6 +9,7 @@ import type {
   SeparationProgress
 } from '../../shared/types'
 import {
+  analysisIsStale,
   BEAT_DETECT_VERSION,
   KEY_DETECT_VERSION,
   detectBeats,
@@ -994,7 +995,7 @@ export default function App(): React.JSX.Element {
           keyInfoRef.current = kg
           setKeyInfo(kg)
           const restoredKey =
-            kg && kg.detVersion === KEY_DETECT_VERSION ? { pc: kg.pc, minor: kg.minor } : null
+            kg && !analysisIsStale(kg.detVersion, KEY_DETECT_VERSION) ? { pc: kg.pc, minor: kg.minor } : null
           if (bg || restoredKey) {
             if (bg) setBeatInfo(bg)
             setSongInfo({ key: restoredKey, bpm: bg?.bpm ?? null })
@@ -1463,7 +1464,7 @@ export default function App(): React.JSX.Element {
   }
   keyNeededRef.current = (): boolean => {
     const stored = keyInfoRef.current
-    if (stored && stored.detVersion === KEY_DETECT_VERSION) return false
+    if (stored && !analysisIsStale(stored.detVersion, KEY_DETECT_VERSION)) return false
     return instBufsRef.current.length > 0 || bassBufRef.current !== null
   }
 
@@ -1533,7 +1534,7 @@ export default function App(): React.JSX.Element {
       // fuses it with the stem cues; without a pack it changes nothing.
       const info = beatInfoRef.current
       const fresh = !info
-      const stale = info?.source === 'auto' && info.detVersion !== BEAT_DETECT_VERSION
+      const stale = info?.source === 'auto' && analysisIsStale(info.detVersion, BEAT_DETECT_VERSION)
       if ((fresh || stale) && drumsBufRef.current) {
         const drums = drumsBufRef.current
         void (async () => {
@@ -1653,7 +1654,7 @@ export default function App(): React.JSX.Element {
       const bassBuf = bassBufRef.current
       const beatPassCarriesKey =
         ((fresh || stale) && !!drumsBufRef.current) || keyCarriedBySeqRef.current === loadSeq.current
-      if (storedKey && storedKey.detVersion === KEY_DETECT_VERSION) {
+      if (storedKey && !analysisIsStale(storedKey.detVersion, KEY_DETECT_VERSION)) {
         setSongInfo({ key: { pc: storedKey.pc, minor: storedKey.minor }, bpm: info?.bpm ?? null })
       } else if (beatPassCarriesKey) {
         setSongInfo({ key: null, bpm: info?.bpm ?? null }) // the combined pass fills it in
@@ -1682,7 +1683,7 @@ export default function App(): React.JSX.Element {
     if (
       stored &&
       (!buf ||
-        (stored.info.detVersion === PITCH_DETECT_VERSION &&
+        (!analysisIsStale(stored.info.detVersion, PITCH_DETECT_VERSION) &&
           melodyFitsSong(stored.f0, stored.info.hopSec, buf.duration)))
     ) {
       storedMelodyRef.current = null
@@ -1729,7 +1730,7 @@ export default function App(): React.JSX.Element {
           // setBeatInfo/applyUserBars/publish and must not be duplicated.
           const beatInfo = beatInfoRef.current
           const wantBeats =
-            (!beatInfo || (beatInfo.source === 'auto' && beatInfo.detVersion !== BEAT_DETECT_VERSION)) &&
+            (!beatInfo || (beatInfo.source === 'auto' && analysisIsStale(beatInfo.detVersion, BEAT_DETECT_VERSION))) &&
             drumsBufRef.current !== null
           const wantKey = keyNeededRef.current?.() ?? false
           let stashStems: Awaited<ReturnType<typeof analysisStems>> | null = null

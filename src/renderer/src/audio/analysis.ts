@@ -347,6 +347,26 @@ export function estimateKeyFromStems(inst: AudioBuffer[], bass: AudioBuffer | nu
  */
 export const BEAT_DETECT_VERSION = 23
 
+/**
+ * Is a stored analysis older than what this app can produce?
+ *
+ * The rule is UPGRADE, never downgrade: re-derive only when the stamp is
+ * BELOW the app's, so an older build opening a newer project leaves it
+ * alone. `!==` used to stand here and it was a real hazard — the v23
+ * catalog pass upgraded seventeen songs, and any pre-v23 app opening one of
+ * them would have re-derived its own older grid and auto-saved it back,
+ * quietly walking the whole library backwards one song at a time (the same
+ * trap in reverse for anyone running two app versions, or a phone behind a
+ * desktop). A missing stamp is older than anything.
+ *
+ * The cost of the asymmetry is that a DOWNGRADE of the constant — reverting
+ * a detector — no longer re-derives on its own; that is a deliberate act
+ * and wants an explicit re-detect, which the transport offers.
+ */
+export function analysisIsStale(stamp: number | undefined | null, current: number): boolean {
+  return typeof stamp !== 'number' || !Number.isFinite(stamp) || stamp < current
+}
+
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */
   beats: number[]

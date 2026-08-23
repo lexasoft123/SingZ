@@ -95,6 +95,11 @@ function resampleStem(file, rate) {
     cpSync(join(ROOT, NAME), SCRATCH, { recursive: true })
     const doc = JSON.parse(readFileSync(join(SCRATCH, 'project.json'), 'utf8'))
     delete doc.settings.melody // always a fresh run, whatever the stamp is today
+    // The key too: this driver asserts the key came from the CORE, and a
+    // stored current key is adopted without any detector running (correct,
+    // and `__keySrc` then stays unset). The song used to carry no key at
+    // all, so the omission was invisible until the library gained one.
+    delete doc.settings.key
     writeFileSync(join(SCRATCH, 'project.json'), JSON.stringify(doc, null, 2))
     const vocals = stemPath(SCRATCH)
     if (!vocals) throw new Error(`${NAME} has no vocals stem to track`)

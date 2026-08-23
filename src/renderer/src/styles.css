@@ -2595,3 +2595,8 @@ body.modal-open .lyr-line::before {
 .tp-gridver-val.hand {
   color: #7adc96;
 }
+/* Newer than this build: nothing is wrong and nothing is owed — the same
+   settled colour as `hand`, never the amber that says "act on me". */
+.tp-gridver-val.newer {
+  color: #7adc96;
+}
