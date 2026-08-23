@@ -32,12 +32,15 @@ All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 **The C++ core is the source of truth for every detector** (decided 2026-08-22).
 New detector work lands in `mobile/native/core` first; the TypeScript in
 `src/renderer/src/audio/` is a port of it, and a divergence means the TypeScript
-has drifted — not the port. What holds the two together is the six parity gates
+has drifted — not the port. What holds the two together is the seven parity gates
 under `eval/`, so they are the contract, not a diagnostic: `npm run gates`
-(`scripts/run-parity-gates.sh`) runs all six on the bundled sample in ~45 s,
+(`scripts/run-parity-gates.sh`) runs all seven on the bundled sample in ~45 s
+(analyze-parity is the seventh: the combined one-child pass the desktop
+actually spawns against the individual subcommands, value-identical, with the
+lattice-and-lyrics-over-stdin leg exercised both ways),
 building `singz-analyze` once and generating `mobile/src/gen/analysis-lib.js`
 and the sample itself rather than telling you to `npm ci` somewhere else.
-**`.github/workflows/checks.yml` runs typecheck + `npm test` + all six on every
+**`.github/workflows/checks.yml` runs typecheck + `npm test` + all seven on every
 push and PR** — before it existed nothing ran on an ordinary push or PR at all.
 The desktop was not untested (build.yml runs typecheck and `npm test` on `v*`
 tags, a dispatch and the Monday cron; e2e-win.yml runs `npm test` again on its

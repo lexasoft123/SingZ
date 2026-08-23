@@ -1,7 +1,6 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { access, mkdir, rm, writeFile } from 'node:fs/promises'
-import { app } from 'electron'
+import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { onChildSettled } from './child-exit'
 import { log, logChunk } from './log'
@@ -70,164 +69,122 @@ interface CliMelody {
   rms: number[]
 }
 
-/** One job per KIND at a time (melody and key fire in parallel from the same
- *  analysis pass), cancellable — the renderer's loadSeq decides whose result
- *  counts; this only makes sure a dead song's children die too. */
+/** ONE combined job at a time — melody, key and beats run inside a single
+ *  child now, so the per-kind slots this class used to keep are gone with
+ *  the per-detector jobs. Cancellable; the renderer's loadSeq decides whose
+ *  result counts, this only makes sure a dead song's child dies too.
+ *
+ *  The spawn gate exists for a measured race: analyze:ml can be DISPATCHED
+ *  microseconds after analyze:run (the stored-melody re-track path has its
+ *  lattice in hand already), while analyzeAll is still suspended on
+ *  resolveAnalyze's threadpool access() — the map lookup found no child and
+ *  the lattice was silently dropped, leaving the child on stdin until the
+ *  hang catcher shot it at 120 s. The gate is created SYNCHRONOUSLY at
+ *  analyzeAll entry, so the paired provideMl always has something real to
+ *  await; a refused call resolves its own gate 'busy' so its paired ml can
+ *  never cross-feed the running child. */
 class Analyze {
   private children = new Map<string, ChildProcess>()
+  private spawnGate: Promise<{ child: ChildProcess } | 'busy' | 'failed'> = Promise.resolve('failed')
+  private analyzeTimer: ReturnType<typeof setTimeout> | null = null
+  private analyzeTimedOut = false
+  private armAnalyzeTimer(child: ChildProcess, why: string, ms: number): void {
+    if (this.analyzeTimer) clearTimeout(this.analyzeTimer)
+    this.analyzeTimer = setTimeout(() => {
+      this.analyzeTimedOut = true
+      log('analyze', `core analyze exceeded ${ms / 1000}s (${why}) — killing it`, 'error')
+      child.kill('SIGKILL')
+    }, ms)
+  }
 
   cancel(): void {
     for (const c of this.children.values()) c.kill('SIGKILL')
   }
 
-  async key(instPaths: string[], bassPath: string | null): Promise<KeyNativeResult> {
-    if (this.children.has('key')) return { ok: false, error: 'A key analysis is already running.' }
-    const bin = await resolveAnalyze()
-    if (bin === null) return { ok: false, error: 'singz-analyze is not in this build.' }
-    return new Promise<KeyNativeResult>((resolve) => {
-      const args = ['key']
-      for (const p of instPaths) args.push('--inst', p)
-      if (bassPath) args.push('--bass', bassPath)
-      log('key', `core: ${bin} ${args.map((a) => (a.startsWith('--') ? a : a.split('/').pop())).join(' ')}`)
-      const child = spawn(bin, args)
-      this.children.set('key', child)
-      const out: Buffer[] = []
-      let errTail = ''
-      let timedOut = false
-      const timer = setTimeout(() => {
-        timedOut = true
-        log('key', `core key exceeded ${TIMEOUT_MS / 1000}s — killing it`, 'error')
-        child.kill('SIGKILL')
-      }, TIMEOUT_MS)
-      child.stdout?.on('data', (c: Buffer) => {
-        out.push(c)
-      })
-      child.stderr?.on('data', (c: Buffer) => {
-        errTail = (errTail + c.toString('utf8')).slice(-4000)
-        logChunk('key', c.toString('utf8'))
-      })
-      child.on('error', (err) => {
-        clearTimeout(timer)
-        this.children.delete('key')
-        resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
-      })
-      onChildSettled(child, 'key', (code, signal) => {
-        clearTimeout(timer)
-        this.children.delete('key')
-        if (signal === 'SIGKILL') {
-          resolve({ ok: false, error: timedOut ? `Timed out after ${TIMEOUT_MS / 1000}s.` : 'Cancelled.' })
-          return
-        }
-        if (code !== 0) {
-          log('key', `singz-analyze exited with code ${code}`, 'error')
-          resolve({ ok: false, error: errTail.trim().split('\n').pop() || `exit ${code}` })
-          return
-        }
-        resolve(parseCliKey(Buffer.concat(out).toString('utf8')))
-      })
-    })
-  }
 
-  async beats(input: BeatsNativeInput): Promise<BeatsNativeResult> {
-    if (this.children.has('beats')) return { ok: false, error: 'A beat analysis is already running.' }
-    const bin = await resolveAnalyze()
-    if (bin === null) return { ok: false, error: 'singz-analyze is not in this build.' }
-    // NOT `singz-analyze`: build-analyze-host.sh drops the BINARY at
-    // $TMPDIR/singz-analyze on dev machines, and mkdir over a file is EEXIST
-    // even with recursive — found live as an unhandled 'beats:detect'
-    // rejection the first time the ML path ran.
-    const tmpDir = join(app.getPath('temp'), 'singz-analyze-ml')
-    const mlPath = input.ml ? join(tmpDir, `ml-${process.pid}-${Date.now()}.txt`) : null
-    try {
-      if (mlPath && input.ml) {
-        await mkdir(tmpDir, { recursive: true })
-        await writeFile(mlPath, mlFileText(input.ml))
-      }
-      return await new Promise<BeatsNativeResult>((resolve) => {
-        const args = ['beats', '--drums', input.drums]
-        if (input.bass) args.push('--bass', input.bass)
-        if (input.vocals) args.push('--vocals', input.vocals)
-        for (const p of input.inst) args.push('--inst', p)
-        for (const t of input.lineStarts ?? []) args.push('--line', String(t))
-        for (const w of input.words ?? []) args.push('--word', `${w.s}:${w.e}`)
-        if (mlPath) args.push('--ml', mlPath)
-        log('beats', `core: ${bin} beats (${input.inst.length + 1 + (input.bass ? 1 : 0) + (input.vocals ? 1 : 0)} stems, ${input.words?.length ?? 0} words, ml=${mlPath ? 'yes' : 'no'})`)
-        const child = spawn(bin, args)
-        this.children.set('beats', child)
-        const out: Buffer[] = []
-        let errTail = ''
-        let timedOut = false
-        const timer = setTimeout(() => {
-          timedOut = true
-          log('beats', `core beats exceeded ${TIMEOUT_MS / 1000}s — killing it`, 'error')
-          child.kill('SIGKILL')
-        }, TIMEOUT_MS)
-        child.stdout?.on('data', (c: Buffer) => {
-          out.push(c)
-        })
-        child.stderr?.on('data', (c: Buffer) => {
-          errTail = (errTail + c.toString('utf8')).slice(-4000)
-          logChunk('beats', c.toString('utf8'), /^progress /)
-        })
-        child.on('error', (err) => {
-          clearTimeout(timer)
-          this.children.delete('beats')
-          resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
-        })
-        onChildSettled(child, 'beats', (code, signal) => {
-          clearTimeout(timer)
-          this.children.delete('beats')
-          if (signal === 'SIGKILL') {
-            resolve({ ok: false, error: timedOut ? `Timed out after ${TIMEOUT_MS / 1000}s.` : 'Cancelled.' })
-            return
-          }
-          if (code !== 0) {
-            log('beats', `singz-analyze exited with code ${code}`, 'error')
-            resolve({ ok: false, error: errTail.trim().split('\n').pop() || `exit ${code}` })
-            return
-          }
-          resolve(parseCliBeats(Buffer.concat(out).toString('utf8')))
-        })
-      })
-    } catch (err) {
-      // IPC handlers return result objects, never throw (the repo rule) — a
-      // temp-file failure is a loud fallback, not a renderer exception.
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
-    } finally {
-      if (mlPath) await rm(mlPath, { force: true }).catch(() => undefined)
+  /** The combined pass. Spawned IMMEDIATELY — melody and key run while the
+   *  renderer's own model is still working — and the beats stage blocks on
+   *  stdin, which provideMl() feeds (the token format) and closes whenever
+   *  the lattice is ready, or closes empty on a packless machine. The caller
+   *  MUST call provideMl exactly once per run when beats are wanted, or the
+   *  child sits on stdin until the hang catcher shoots it. */
+  analyzeAll(input: AnalyzeAllInput): Promise<AnalyzeAllResult> {
+    // Everything up to the gate assignment is SYNCHRONOUS — see the class
+    // comment: the paired analyze:ml may already be queued behind this call.
+    if (this.children.has('analyze')) {
+      this.spawnGate = Promise.resolve('busy')
+      return Promise.resolve({ ok: false, error: 'An analysis is already running.' })
     }
-  }
-
-  async melody(stemPath: string): Promise<MelodyNativeResult> {
-    if (this.children.has('melody')) return { ok: false, error: 'A melody analysis is already running.' }
-    const bin = await resolveAnalyze()
-    if (bin === null) return { ok: false, error: 'singz-analyze is not in this build.' }
-    return new Promise<MelodyNativeResult>((resolve) => {
-      // --wav reads WAV and FLAC both (the core dispatches on the header);
-      // --raw carries raw+rms for the diagnostics hook E2E drivers read.
-      const args = ['melody', '--wav', stemPath, '--raw']
-      log('melody', `core: ${bin} ${args.join(' ')}`)
+    let gateResolve!: (v: { child: ChildProcess } | 'busy' | 'failed') => void
+    this.spawnGate = new Promise((r) => {
+      gateResolve = r
+    })
+    return (async () => {
+      const bin = await resolveAnalyze()
+      if (bin === null) {
+        gateResolve('failed')
+        return { ok: false, error: 'singz-analyze is not in this build.' }
+      }
+      return await new Promise<AnalyzeAllResult>((resolve) => {
+      const args = ['analyze']
+      if (input.want.melody) args.push('--melody', '--raw')
+      if (input.want.key) args.push('--key')
+      if (input.want.beats) args.push('--beats', '--ml-stdin')
+      if (input.vocals) args.push('--vocals', input.vocals)
+      if (input.drums) args.push('--drums', input.drums)
+      if (input.bass) args.push('--bass', input.bass)
+      for (const p of input.inst) args.push('--inst', p)
+      for (const t of input.lineStarts ?? []) args.push('--line', String(t))
+      for (const w of input.words ?? []) args.push('--word', `${w.s}:${w.e}`)
+      log(
+        'analyze',
+        `core: one pass, want ${Object.entries(input.want).filter(([, v]) => v).map(([k]) => k).join('+')}` +
+          ` (${[input.vocals, input.drums, input.bass, ...input.inst].filter(Boolean).length} stems; lattice+lyrics follow on stdin)`
+      )
       const child = spawn(bin, args)
-      this.children.set('melody', child)
-
+      this.children.set('analyze', child)
+      // stdin errors EMIT, they do not throw at the write site — without a
+      // listener a write-after-death is an uncaught stream error in main
+      child.stdin?.on('error', (e) => log('analyze', `stdin: ${e.message}`, 'error'))
+      if (!input.want.beats) child.stdin?.end()
+      gateResolve({ child })
       const out: Buffer[] = []
+      let outBuf = ''
       let errTail = ''
       let progBuf = ''
-      let timedOut = false
-      const timer = setTimeout(() => {
-        timedOut = true
-        log('melody', `core melody exceeded ${TIMEOUT_MS / 1000}s — killing it`, 'error')
-        child.kill('SIGKILL')
-      }, TIMEOUT_MS)
-
+      this.analyzeTimedOut = false
+      // The lattice-wait phase spans the renderer's own model run, whose
+      // sanctioned budget (beats-ml.ts) is 180 s on the slowest fleet path —
+      // a 120 s wait cap would shoot a healthy pass mid-wait. Post-feed the
+      // beats get a fresh ordinary budget (provideMl re-arms).
+      this.armAnalyzeTimer(child, input.want.beats ? 'awaiting the lattice' : 'melody/key', input.want.beats ? 240_000 : TIMEOUT_MS)
       child.stdout?.on('data', (c: Buffer) => {
         out.push(c)
+        // each part is one flushed line — validate and broadcast it the
+        // moment it completes, so the renderer adopts the melody while the
+        // beats stage is still waiting on its lattice
+        outBuf += c.toString('utf8')
+        let nl: number
+        while ((nl = outBuf.indexOf('\n')) >= 0) {
+          const line = outBuf.slice(0, nl).trim()
+          outBuf = outBuf.slice(nl + 1)
+          if (!line.startsWith('{')) continue
+          try {
+            const part = JSON.parse(line) as { melody?: CliMelody }
+            if (part.melody) {
+              const m = validateMelody(part.melody)
+              for (const win of BrowserWindow.getAllWindows()) {
+                if (!win.isDestroyed()) win.webContents.send('analyze:part', { melody: m })
+              }
+            }
+          } catch {
+            // a malformed part fails validation again at settle, loudly
+          }
+        }
       })
       child.stderr?.on('data', (c: Buffer) => {
         const text = c.toString('utf8')
         errTail = (errTail + text).slice(-4000)
-        // `progress melody 0.42` lines are protocol (the CLI prints them
-        // every ~3%); everything else on stderr is log.
         progBuf += text
         let nl: number
         while ((nl = progBuf.indexOf('\n')) >= 0) {
@@ -242,63 +199,99 @@ class Analyze {
             }
           }
         }
-        logChunk('melody', text, /^progress /)
+        logChunk('analyze', text, /^progress /)
       })
-
       child.on('error', (err) => {
-        clearTimeout(timer)
-        this.children.delete('melody')
+        if (this.analyzeTimer) clearTimeout(this.analyzeTimer)
+        this.children.delete('analyze')
         resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
       })
-
-      onChildSettled(child, 'melody', (code, signal) => {
-        clearTimeout(timer)
-        this.children.delete('melody')
+      onChildSettled(child, 'analyze', (code, signal) => {
+        if (this.analyzeTimer) clearTimeout(this.analyzeTimer)
+        this.children.delete('analyze')
         if (signal === 'SIGKILL') {
-          // A cancel's result is dropped by the renderer's seq guard before
-          // any warn, so the only SIGKILL a human ever READS is the
-          // hang-catcher's — name it, or a field hang logs as "Cancelled".
-          resolve({ ok: false, error: timedOut ? `Timed out after ${TIMEOUT_MS / 1000}s.` : 'Cancelled.' })
+          resolve({ ok: false, error: this.analyzeTimedOut ? `Timed out after ${TIMEOUT_MS / 1000}s.` : 'Cancelled.' })
           return
         }
         if (code !== 0) {
-          log('melody', `singz-analyze exited with code ${code}`, 'error')
-          // `||`, not `??`: a child that dies with a silent stderr (SIGSEGV)
-          // yields '' here, and "failed ()" is no diagnosis at all.
+          log('analyze', `singz-analyze exited with code ${code}`, 'error')
           resolve({ ok: false, error: errTail.trim().split('\n').pop() || `exit ${code}` })
           return
         }
-        resolve(parseCliMelody(Buffer.concat(out).toString('utf8')))
+        resolve(parseCliAnalyze(Buffer.concat(out).toString('utf8'), input.want))
       })
-    })
+      })
+    })()
+  }
+
+  /** The lattice for the running combined pass — writes the token format to
+   *  the child's stdin and closes it. null = no grid (packless, or the model
+   *  failed): stdin closes empty, the CLI runs the homegrown path. */
+  async provideMl(
+    ml: BeatsNativeInput['ml'],
+    aux?: { lineStarts: number[] | null; words: { s: number; e: number }[] | null }
+  ): Promise<void> {
+    // Await the gate of the run this call is PAIRED with (assigned before
+    // this IPC could have been dispatched) — never the bare children map,
+    // which is empty for the microseconds resolveAnalyze spends on the
+    // threadpool. A 'busy' gate means our run was refused: feeding the
+    // RUNNING child someone else's lattice is exactly what this prevents.
+    const gate = await this.spawnGate
+    if (gate === 'busy' || gate === 'failed') return
+    const child = gate.child
+    if (!child.stdin || child.stdin.writableEnded || child.exitCode !== null) return
+    try {
+      const text = mlFileText(ml, aux)
+      log(
+        'analyze',
+        `lattice+aux over stdin: ${ml ? `${ml.beats.length} beats` : 'no grid'}, ${aux?.words?.length ?? 0} words, ${aux?.lineStarts?.length ?? 0} lines`
+      )
+      // the wait-for-lattice budget is spent; beats get their own fresh one
+      // (the model's sanctioned budget alone is 180 s on the slowest fleet
+      // path, which the single spawn-anchored timer used to eat)
+      this.armAnalyzeTimer(child, 'beats after the lattice', TIMEOUT_MS)
+      if (text) child.stdin.write(text)
+      child.stdin.end()
+    } catch {
+      // stdin errors also EMIT; the spawn-time listener logs those
+    }
+  }
+
+
+}
+
+function lastJsonLine(stdout: string): string {
+  const line = stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('{'))
+    .pop()
+  if (!line) throw new Error('no result object on stdout')
+  return line
+}
+
+/** VALIDATE a melody object. Anything malformed is a failure, never a
+ *  partial adoption — same policy as decodeMelody. */
+function validateMelody(j: CliMelody): MelodyNativeResult {
+  if (!Array.isArray(j.f0) || !Array.isArray(j.raw) || !Array.isArray(j.rms))
+    throw new Error('result is missing f0/raw/rms')
+  if (!(j.hopSec > 0.001 && j.hopSec < 0.5)) throw new Error(`hopSec ${j.hopSec} is not a hop`)
+  if (!Number.isInteger(j.detVersion)) throw new Error('no detVersion stamp')
+  if (j.f0.length !== j.rms.length || j.f0.length !== j.raw.length)
+    throw new Error(`frame counts disagree (${j.f0.length}/${j.raw.length}/${j.rms.length})`)
+  return {
+    ok: true,
+    f0: Float32Array.from(j.f0),
+    raw: Float32Array.from(j.raw),
+    rms: Float32Array.from(j.rms),
+    hopSec: j.hopSec,
+    detVersion: j.detVersion
   }
 }
 
-/** Parse and VALIDATE the CLI's one JSON object. Anything malformed is a
- *  failure, never a partial adoption — same policy as decodeMelody. */
 export function parseCliMelody(stdout: string): MelodyNativeResult {
   try {
-    const line = stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('{'))
-      .pop()
-    if (!line) throw new Error('no result object on stdout')
-    const j = JSON.parse(line) as CliMelody
-    if (!Array.isArray(j.f0) || !Array.isArray(j.raw) || !Array.isArray(j.rms))
-      throw new Error('result is missing f0/raw/rms')
-    if (!(j.hopSec > 0.001 && j.hopSec < 0.5)) throw new Error(`hopSec ${j.hopSec} is not a hop`)
-    if (!Number.isInteger(j.detVersion)) throw new Error('no detVersion stamp')
-    if (j.f0.length !== j.rms.length || j.f0.length !== j.raw.length)
-      throw new Error(`frame counts disagree (${j.f0.length}/${j.raw.length}/${j.rms.length})`)
-    return {
-      ok: true,
-      f0: Float32Array.from(j.f0),
-      raw: Float32Array.from(j.raw),
-      rms: Float32Array.from(j.rms),
-      hopSec: j.hopSec,
-      detVersion: j.detVersion
-    }
+    return validateMelody(JSON.parse(lastJsonLine(stdout)) as CliMelody)
   } catch (err) {
     return { ok: false, error: `singz-analyze output unusable: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -314,20 +307,19 @@ export interface KeyNativeResult {
   detVersion?: number
 }
 
-export function parseCliKey(stdout: string): KeyNativeResult {
-  try {
-    const line = stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('{'))
-      .pop()
-    if (!line) throw new Error('no result object on stdout')
-    const j = JSON.parse(line) as { detVersion: number; key: { pc: number; minor: boolean } | null }
+function validateKey(j: { detVersion: number; key: { pc: number; minor: boolean } | null }): KeyNativeResult {
+  {
     if (!Number.isInteger(j.detVersion)) throw new Error('no detVersion stamp')
     if (j.key === null) return { ok: false, error: 'no key answer (silent harmonics?)' }
     if (!Number.isInteger(j.key.pc) || j.key.pc < 0 || j.key.pc > 11 || typeof j.key.minor !== 'boolean')
       throw new Error('key is not a pitch class')
     return { ok: true, pc: j.key.pc, minor: j.key.minor, detVersion: j.detVersion }
+  }
+}
+
+export function parseCliKey(stdout: string): KeyNativeResult {
+  try {
+    return validateKey(JSON.parse(lastJsonLine(stdout)) as { detVersion: number; key: { pc: number; minor: boolean } | null })
   } catch (err) {
     return { ok: false, error: `singz-analyze output unusable: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -361,25 +353,18 @@ export interface BeatsNativeResult {
  *  business. `ok:false` from the DETECTOR (no steady beat) is not an error:
  *  it crosses as ok:true with gridOk:false semantics folded into beats=[] —
  *  the renderer treats an empty grid exactly as the TS's null. */
-export function parseCliBeats(stdout: string): BeatsNativeResult {
-  try {
-    const line = stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('{'))
-      .pop()
-    if (!line) throw new Error('no result object on stdout')
-    const j = JSON.parse(line) as {
-      detVersion: number
-      ok: boolean
-      bpm: number
-      beatsPerBar: number
-      downbeat: number
-      beatsSec: number[]
-      downbeats: number[]
-      hasDownbeats: boolean
-      suspectAt?: number[]
-    }
+function validateBeats(j: {
+  detVersion: number
+  ok: boolean
+  bpm: number
+  beatsPerBar: number
+  downbeat: number
+  beatsSec: number[]
+  downbeats: number[]
+  hasDownbeats: boolean
+  suspectAt?: number[]
+}): BeatsNativeResult {
+  {
     if (!Number.isInteger(j.detVersion)) throw new Error('no detVersion stamp')
     if (j.ok !== true) return { ok: true, detVersion: j.detVersion, beats: [] } // the TS's null
     if (!Array.isArray(j.beatsSec) || j.beatsSec.length === 0) throw new Error('ok grid with no beats')
@@ -397,6 +382,12 @@ export function parseCliBeats(stdout: string): BeatsNativeResult {
       hasDownbeats: j.hasDownbeats,
       suspectAt: Array.isArray(j.suspectAt) ? j.suspectAt : []
     }
+  }
+}
+
+export function parseCliBeats(stdout: string): BeatsNativeResult {
+  try {
+    return validateBeats(JSON.parse(lastJsonLine(stdout)) as Parameters<typeof validateBeats>[0])
   } catch (err) {
     return { ok: false, error: `singz-analyze output unusable: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -406,55 +397,123 @@ export function parseCliBeats(stdout: string): BeatsNativeResult {
  *  String() — the shortest round-trip — and the CLI reads them with strtod,
  *  so every value is bit-identical on both sides (the property the harness's
  *  own writer documents; a %.17g hop would not give it on every platform). */
-export function mlFileText(ml: NonNullable<BeatsNativeInput['ml']>): string {
-  const arr = (name: string, v: number[] | undefined): string =>
+export function mlFileText(
+  ml: NonNullable<BeatsNativeInput['ml']> | null,
+  aux?: { lineStarts: number[] | null; words: { s: number; e: number }[] | null }
+): string {
+  const arr = (name: string, v: number[] | undefined | null): string =>
     v && v.length > 0 ? `${name} ${v.length} ${v.map((x) => String(x)).join(' ')}\n` : ''
+  const wordVals = aux?.words?.flatMap((w) => [w.s, w.e])
   return (
-    `fps ${ml.fps ?? 50}\n` +
-    arr('beats', ml.beats) +
-    arr('downbeats', ml.downbeats) +
-    arr('beatProb', ml.beatProb) +
-    arr('downbeatProb', ml.downbeatProb)
+    (ml
+      ? `fps ${ml.fps ?? 50}\n` +
+        arr('beats', ml.beats) +
+        arr('downbeats', ml.downbeats) +
+        arr('beatProb', ml.beatProb) +
+        arr('downbeatProb', ml.downbeatProb)
+      : '') +
+    // the lyric aux rides beside the lattice: both are only KNOWN after the
+    // child has already started tracking melody
+    arr('lineStarts', aux?.lineStarts) +
+    arr('words', wordVals)
   )
+}
+
+export interface AnalyzeAllInput {
+  want: { melody: boolean; key: boolean; beats: boolean }
+  vocals: string | null
+  drums: string | null
+  bass: string | null
+  inst: string[]
+  lineStarts: number[] | null
+  words: { s: number; e: number }[] | null
+}
+
+export interface AnalyzeAllResult {
+  ok: boolean
+  error?: string
+  melody?: MelodyNativeResult
+  key?: KeyNativeResult
+  beats?: BeatsNativeResult
+}
+
+/** The combined pass's one JSON object → per-part validated results. A
+ *  malformed PART fails that part alone (its TS fallback runs); a missing
+ *  line fails the whole call. */
+export function parseCliAnalyze(stdout: string, want: AnalyzeAllInput['want']): AnalyzeAllResult {
+  // `analyze` emits one flushed JSON line PER PART, in detector order, so the
+  // caller can adopt the melody before the beats stage has even received its
+  // lattice — merge the lines. A part that failed to arrive at all is simply
+  // absent and fails its own validation below.
+  const j: Record<string, unknown> = {}
+  try {
+    const lines = stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('{'))
+    if (lines.length === 0) throw new Error('no result lines on stdout')
+    for (const line of lines) Object.assign(j, JSON.parse(line) as Record<string, unknown>)
+  } catch (err) {
+    return { ok: false, error: `singz-analyze output unusable: ${err instanceof Error ? err.message : String(err)}` }
+  }
+  const part = <T>(name: string, wanted: boolean, validate: (x: never) => T): T | { ok: false; error: string } | undefined => {
+    if (!wanted) return undefined
+    if (!(name in j)) return { ok: false, error: `the ${name} part is missing from the combined result` }
+    try {
+      return validate(j[name] as never)
+    } catch (err) {
+      return { ok: false, error: `${name} part unusable: ${err instanceof Error ? err.message : String(err)}` }
+    }
+  }
+  return {
+    ok: true,
+    melody: part('melody', want.melody, validateMelody),
+    key: part('key', want.key, validateKey),
+    beats: part('beats', want.beats, validateBeats)
+  }
 }
 
 const analyze = new Analyze()
 
 export function registerAnalyze(): void {
   ipcMain.handle('melody:available', async () => ({ ok: true, available: (await resolveAnalyze()) !== null }))
-  ipcMain.handle('melody:track', (_e, stemPath: unknown): Promise<MelodyNativeResult> => {
-    if (typeof stemPath !== 'string') return Promise.resolve({ ok: false, error: 'bad path' })
+  ipcMain.handle('analyze:run', (_e, raw: unknown): Promise<AnalyzeAllResult> => {
+    const i = raw as AnalyzeAllInput
+    if (!i || !i.want || typeof i.want !== 'object') return Promise.resolve({ ok: false, error: 'bad input' })
+    const paths = [i.vocals, i.drums, i.bass, ...(Array.isArray(i.inst) ? i.inst : [])].filter(
+      (p): p is string => typeof p === 'string'
+    )
+    if (paths.length === 0) return Promise.resolve({ ok: false, error: 'no stems' })
     // The same gate media:read stands behind: the renderer may only point the
     // core at files the load path registered.
-    if (!isAllowed(stemPath)) return Promise.resolve({ ok: false, error: 'File is not registered.' })
-    return analyze.melody(stemPath)
+    for (const p of paths) if (!isAllowed(p)) return Promise.resolve({ ok: false, error: 'File is not registered.' })
+    return analyze.analyzeAll({
+      want: { melody: !!i.want.melody, key: !!i.want.key, beats: !!i.want.beats },
+      vocals: typeof i.vocals === 'string' ? i.vocals : null,
+      drums: typeof i.drums === 'string' ? i.drums : null,
+      bass: typeof i.bass === 'string' ? i.bass : null,
+      inst: Array.isArray(i.inst) ? i.inst.filter((p): p is string => typeof p === 'string') : [],
+      lineStarts: Array.isArray(i.lineStarts) ? i.lineStarts.filter((t) => Number.isFinite(t)) : null,
+      words: Array.isArray(i.words) ? i.words.filter((w) => w && Number.isFinite(w.s) && Number.isFinite(w.e)) : null
+    })
+  })
+  ipcMain.handle('analyze:ml', (_e, ml: unknown, aux: unknown) => {
+    const a = aux as { lineStarts?: unknown; words?: unknown } | null
+    analyze.provideMl(
+      ml && Array.isArray((ml as { beats?: unknown }).beats) && Array.isArray((ml as { downbeats?: unknown }).downbeats)
+        ? (ml as NonNullable<BeatsNativeInput['ml']>)
+        : null,
+      {
+        lineStarts: Array.isArray(a?.lineStarts) ? a.lineStarts.filter((t): t is number => Number.isFinite(t)) : null,
+        words: Array.isArray(a?.words)
+          ? a.words.filter((w): w is { s: number; e: number } => !!w && Number.isFinite(w.s) && Number.isFinite(w.e))
+          : null
+      }
+    )
+    return { ok: true }
   })
   ipcMain.handle('melody:cancel', () => {
     analyze.cancel()
     return { ok: true }
-  })
-  ipcMain.handle('beats:detect', (_e, raw: unknown): Promise<BeatsNativeResult> => {
-    const i = raw as BeatsNativeInput
-    if (!i || typeof i.drums !== 'string') return Promise.resolve({ ok: false, error: 'bad input' })
-    const paths = [i.drums, ...(i.bass ? [i.bass] : []), ...(i.vocals ? [i.vocals] : []), ...(Array.isArray(i.inst) ? i.inst : [])]
-    if (paths.some((p) => typeof p !== 'string' || !isAllowed(p)))
-      return Promise.resolve({ ok: false, error: 'File is not registered.' })
-    return analyze.beats({
-      drums: i.drums,
-      bass: i.bass ?? null,
-      vocals: i.vocals ?? null,
-      inst: Array.isArray(i.inst) ? i.inst : [],
-      lineStarts: Array.isArray(i.lineStarts) ? i.lineStarts.filter((t) => Number.isFinite(t)) : null,
-      words: Array.isArray(i.words) ? i.words.filter((w) => w && Number.isFinite(w.s) && Number.isFinite(w.e)) : null,
-      ml: i.ml && Array.isArray(i.ml.beats) && Array.isArray(i.ml.downbeats) ? i.ml : null
-    })
-  })
-  ipcMain.handle('key:detect', (_e, inst: unknown, bass: unknown): Promise<KeyNativeResult> => {
-    if (!Array.isArray(inst) || inst.some((p) => typeof p !== 'string') || (bass !== null && typeof bass !== 'string'))
-      return Promise.resolve({ ok: false, error: 'bad paths' })
-    const paths = [...(inst as string[]), ...(bass ? [bass as string] : [])]
-    if (paths.length === 0) return Promise.resolve({ ok: false, error: 'no harmonic stems' })
-    for (const p of paths) if (!isAllowed(p)) return Promise.resolve({ ok: false, error: 'File is not registered.' })
-    return analyze.key(inst as string[], bass as string | null)
   })
 }

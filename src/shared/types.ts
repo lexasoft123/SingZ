@@ -420,54 +420,55 @@ export interface SingzApi {
   cancelSeparation(): Promise<void>
   /** Does the installed splitter pack include the Beat This! beat model? */
   beatsMlAvailable(): Promise<{ ok: true; available: boolean }>
-  /** Is singz-analyze in this build? The core's own melody tracker. */
+  /** Is singz-analyze in this build? */
   melodyNativeAvailable(): Promise<{ ok: true; available: boolean }>
-  /** Track the melody of a REGISTERED stem file through the C++ core.
-   *  The caller must check `detVersion` against PITCH_DETECT_VERSION and
-   *  fall back loudly on a mismatch — a stale vendored binary must be a
-   *  visible downgrade, never a silent one. */
-  trackMelodyNative(path: string): Promise<{
-    ok: boolean
-    error?: string
-    f0?: Float32Array
-    raw?: Float32Array
-    rms?: Float32Array
-    hopSec?: number
-    detVersion?: number
-  }>
-  /** Kills every in-flight singz-analyze child (melody, key, beats). */
-  cancelAnalyzeNative(): Promise<{ ok: true }>
-  /** The key through the core, from REGISTERED harmonic stem files. Caller
-   *  checks detVersion against KEY_DETECT_VERSION and falls back loudly. */
-  detectKeyNative(
-    inst: string[],
-    bass: string | null
-  ): Promise<{ ok: boolean; error?: string; pc?: number; minor?: boolean; detVersion?: number }>
-  /** The whole beat pipeline through the core, from REGISTERED stem files.
-   *  The renderer supplies the neural grid (its own Chromium-rendered mix —
-   *  the model's canonical input) and the lyric aux; the caller checks
-   *  detVersion against BEAT_DETECT_VERSION and falls back loudly. beats=[]
-   *  with ok:true is the detector's own "no steady beat" (the TS's null). */
-  detectBeatsNative(input: {
-    drums: string
-    bass: string | null
+  /** The WHOLE analysis in one child — melody, key and beats, each opt-in,
+   *  from REGISTERED stem files. Call `analyzeProvideMl` exactly once after
+   *  this whenever beats are wanted (null = no lattice): the child starts
+   *  melody and key immediately and its beats stage blocks on stdin until
+   *  the lattice — or the empty close — arrives. Per-part results carry
+   *  their own detVersion; the caller checks each against its constant and
+   *  falls back loudly per part. */
+  analyzeNative(input: {
+    want: { melody: boolean; key: boolean; beats: boolean }
     vocals: string | null
+    drums: string | null
+    bass: string | null
     inst: string[]
     lineStarts: number[] | null
     words: { s: number; e: number }[] | null
-    ml: { beats: number[]; downbeats: number[]; beatProb?: number[]; downbeatProb?: number[]; fps?: number } | null
   }): Promise<{
     ok: boolean
     error?: string
-    detVersion?: number
-    bpm?: number
-    beatsPerBar?: number
-    downbeat?: number
-    beats?: number[]
-    downbeats?: number[]
-    hasDownbeats?: boolean
-    suspectAt?: number[]
+    melody?: { ok: boolean; error?: string; f0?: Float32Array; raw?: Float32Array; rms?: Float32Array; hopSec?: number; detVersion?: number }
+    key?: { ok: boolean; error?: string; pc?: number; minor?: boolean; detVersion?: number }
+    beats?: {
+      ok: boolean
+      error?: string
+      detVersion?: number
+      bpm?: number
+      beatsPerBar?: number
+      downbeat?: number
+      beats?: number[]
+      downbeats?: number[]
+      hasDownbeats?: boolean
+      suspectAt?: number[]
+    }
   }>
+  analyzeProvideMl(
+    ml: { beats: number[]; downbeats: number[]; beatProb?: number[]; downbeatProb?: number[]; fps?: number } | null,
+    aux?: { lineStarts: number[] | null; words: { s: number; e: number }[] | null }
+  ): Promise<{ ok: true }>
+  /** Parts of the running combined pass, the moment each completes — today
+   *  the melody, validated, so the pitch strip appears seconds before the
+   *  beats stage has its lattice. */
+  onAnalyzePart(
+    cb: (part: {
+      melody?: { ok: boolean; f0?: Float32Array; raw?: Float32Array; rms?: Float32Array; hopSec?: number; detVersion?: number }
+    }) => void
+  ): () => void
+  cancelAnalyzeNative(): Promise<{ ok: true }>
+  /** Melody progress from the combined pass (0..1). */
   onMelodyNativeProgress(cb: (p: number) => void): () => void
   /** Run ML beat/downbeat detection on raw mono float32 PCM at `sr` (22050). */
   beatsMlDetect(pcm: ArrayBuffer, sr: number): Promise<BeatsMlResult>
@@ -510,6 +511,7 @@ export interface SingzApi {
   onModelsProgress(cb: (p: ModelsProgress) => void): () => void
   /** 44.1k stereo PCM of the current song for the bundled splitter. */
   provideSplitInput(songPath: string, ch0: Float32Array, ch1: Float32Array): Promise<void>
+
   /** Diagnostic log: current buffer, live stream, save-to-file (dialog unless path given). */
   getLog(): Promise<LogEntry[]>
   saveLog(

@@ -39,7 +39,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
-ALL=(melody-parity key-parity beats-parity courts-parity courts-decide-parity mlgrid-parity)
+ALL=(melody-parity key-parity beats-parity courts-parity courts-decide-parity mlgrid-parity analyze-parity)
 BIN=""
 GATES=()
 while [ $# -gt 0 ]; do

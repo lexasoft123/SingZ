@@ -349,13 +349,19 @@ pitch-core.ts ported line for line and held bit-identical to this section's
 TS (float where the TS keeps Float32Array, double elsewhere, sums in the
 same order; the corpus gate is `singz-analyze melody` vs node, at the file's
 rate and at the other of the 44.1/48 pair); the phones call it in-process
-(`SingzSplit.analyzeMelody`), and the desktop NOW DOES too — main spawns the
-vendored `singz-analyze` like whisper-cli (`src/main/analyze.ts`), prepMelody
-takes the core first and falls back to the pitch worker LOUDLY when the
-binary is missing or its stamp disagrees with `PITCH_DETECT_VERSION` (a stale
-vendored binary must be a visible downgrade, never a silent one —
-`window.__melody.src` says which ran, and the framing driver fails on
-'worker'). Key and beats still run as renderer TS until their phases land. Bit-identity is of the CODE, and it
+(`SingzSplit.analyzeMelody`), and the desktop NOW DOES too — for ALL THREE
+detectors, in ONE child per song: main spawns the vendored `singz-analyze
+analyze` like whisper-cli (`src/main/analyze.ts`), which reads every stem file
+once and emits one flushed JSON line per part, so the melody is adopted
+seconds before the beats stage has even received its lattice; the lattice and
+the lyric aux — both only known late — arrive over the child's stdin
+(`--ml-stdin`, readMlText's token format). Every part falls back to the
+renderer TS LOUDLY when the binary is missing or its stamp disagrees with the
+matching `*_DETECT_VERSION` (a stale vendored binary must be a visible
+downgrade, never a silent one — `window.__melody.src`/`__keySrc`/
+`__beatDbg.src` say which ran, and the framing drivers fail on the TS
+lookalike). eval/analyze-parity.mjs holds the combined pass value-identical
+to the individual subcommands the other gates drive. Bit-identity is of the CODE, and it
 bought nothing for a year while the two were fed different sample rates —
 the core reads the stem file, the desktop tracked the buffer its
 AudioContext had resampled to the output device's rate, and the framing is

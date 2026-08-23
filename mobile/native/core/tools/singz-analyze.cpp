@@ -56,6 +56,72 @@ static void printFloats(const std::vector<float>& v) {
   std::printf("]");
 }
 
+// The neural grid's token format, shared by --ml <file> (the parity
+// harness's path) and the analyze subcommand's --ml-stdin (the desktop's:
+// main writes the grid when its own model run finishes, which is what lets
+// melody and key start before the lattice exists). Empty text = no grid,
+// deliberately: a packless desktop closes stdin with nothing.
+struct StdinAux {
+  std::vector<double> lineStarts;
+  std::vector<std::pair<double, double>> words;
+};
+
+static std::string readMlText(const std::string& text, singz::MlGrid& g, StdinAux* aux = nullptr) {
+  if (text.find_first_not_of(" \t\r\n") == std::string::npos) return "empty";
+  size_t pos = 0;
+    const auto token = [&](std::string& t) {
+      while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
+      const size_t start = pos;
+      while (pos < text.size() && !std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
+      t.assign(text, start, pos - start);
+      return !t.empty();
+    };
+    const auto number = [&](double& v) {
+      std::string t;
+      if (!token(t)) return false;
+      char* end = nullptr;
+      v = std::strtod(t.c_str(), &end);
+      return end == t.c_str() + t.size() && std::isfinite(v);
+    };
+    const auto array = [&](std::vector<double>& into) -> std::string {
+      double count = 0;
+      if (!number(count) || count < 0) return "bad count";
+      into.resize(static_cast<size_t>(count));
+      for (size_t i = 0; i < into.size(); i++)
+        if (!number(into[i])) return "short array";
+      return "";
+    };
+    std::string key;
+    bool sawFps = false;
+    while (token(key)) {
+      std::string err;
+      if (key == "fps") {
+        double v = 0;
+        if (!number(v)) return "bad fps";
+        g.fps = static_cast<int>(v);
+        sawFps = true;
+      } else if (key == "beats") err = array(g.beats);
+      else if (key == "downbeats") err = array(g.downbeats);
+      else if (key == "beatProb") err = array(g.beatProb);
+      else if (key == "downbeatProb") err = array(g.downbeatProb);
+      else if (key == "lineStarts" && aux != nullptr) err = array(aux->lineStarts);
+      else if (key == "words" && aux != nullptr) {
+        // `words <n> <v> ...` — n counts VALUES (start,end per word)
+        std::vector<double> flat;
+        err = array(flat);
+        if (err.empty() && flat.size() % 2 != 0) err = "odd word values";
+        if (err.empty())
+          for (size_t i2 = 0; i2 + 1 < flat.size(); i2 += 2) aux->words.push_back({flat[i2], flat[i2 + 1]});
+      }
+      else return "unknown section " + key;
+      if (!err.empty()) return err + " in " + key;
+    }
+  if (!sawFps && !(g.beats.empty() && g.beatProb.empty() && g.downbeats.empty() && g.downbeatProb.empty()))
+    return "no fps line";
+  if (!sawFps) return "no-grid";
+  return "";
+}
+
 static void onProgress(void*, const char* stage, float frac) {
   std::fprintf(stderr, "progress %s %.3f\n", stage, static_cast<double>(frac));
 }
@@ -74,6 +140,204 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--wav") == 0 && i + 1 < argc) wav = argv[++i];
     else if (std::strcmp(argv[i], "--sr") == 0 && i + 1 < argc) sr = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--raw") == 0) raw = true;
+  }
+  if (cmd == "analyze") {
+    // The whole analysis in ONE child — melody, key and beats, each opt-in:
+    //   singz-analyze analyze [--melody [--raw]] [--key] [--beats]
+    //     [--vocals v] [--drums d] [--bass b] [--inst a]...
+    //     [--line t]... [--word s:e]... [--ml file | --ml-stdin]
+    // Every stem file is read ONCE and shared by every detector that wants
+    // it. --ml-stdin is the desktop's lattice hand-off: melody and key run
+    // while the caller's own model is still working, and the beats stage
+    // blocks on stdin only when it is actually reached — the caller writes
+    // the token-format grid (or closes stdin empty on a packless machine)
+    // whenever its render finishes. Output is one JSON object with a
+    // sub-object per requested part, production fields only; the staged
+    // debug stays with the plain `beats` subcommand, which the parity
+    // harness drives.
+    bool wantMelody = false, wantKey = false, wantBeats = false, raw = false, mlStdin = false;
+    std::string drumsPath, bassPath, vocalsPath, mlPath;
+    std::vector<std::string> instPaths;
+    std::vector<double> lineStarts;
+    std::vector<std::pair<double, double>> words;
+    for (int i = 2; i < argc; i++) {
+      const std::string a = argv[i];
+      const auto pathArg = [&](std::string& into) {
+        if (i + 1 >= argc) {
+          std::fprintf(stderr, "analyze: %s needs a value\n", a.c_str());
+          std::exit(2);
+        }
+        into = argv[++i];
+      };
+      if (a == "--melody") wantMelody = true;
+      else if (a == "--key") wantKey = true;
+      else if (a == "--beats") wantBeats = true;
+      else if (a == "--raw") raw = true;
+      else if (a == "--ml-stdin") mlStdin = true;
+      else if (a == "--drums") pathArg(drumsPath);
+      else if (a == "--bass") pathArg(bassPath);
+      else if (a == "--vocals") pathArg(vocalsPath);
+      else if (a == "--ml") pathArg(mlPath);
+      else if (a == "--inst") {
+        std::string p2;
+        pathArg(p2);
+        instPaths.push_back(p2);
+      } else if (a == "--line") {
+        // strtod with a full-token check, like `beats` — atof's silent 0.0
+        // is the trap that subcommand's comment already documents
+        std::string v;
+        pathArg(v);
+        char* end = nullptr;
+        const double t = std::strtod(v.c_str(), &end);
+        if (end != v.c_str() + v.size() || !std::isfinite(t)) {
+          std::fprintf(stderr, "analyze: --line wants a number, got %s\n", v.c_str());
+          return 2;
+        }
+        lineStarts.push_back(t);
+      } else if (a == "--word") {
+        std::string w;
+        pathArg(w);
+        const size_t colon = w.find(':');
+        char* e1 = nullptr;
+        char* e2 = nullptr;
+        const double ws = colon == std::string::npos ? 0 : std::strtod(w.c_str(), &e1);
+        const double we = colon == std::string::npos ? 0 : std::strtod(w.c_str() + colon + 1, &e2);
+        if (colon == std::string::npos || e1 != w.c_str() + colon || *e2 != '\0' ||
+            !std::isfinite(ws) || !std::isfinite(we)) {
+          std::fprintf(stderr, "analyze: --word wants <start>:<end>, got %s\n", w.c_str());
+          return 2;
+        }
+        words.push_back({ws, we});
+      } else {
+        std::fprintf(stderr, "analyze: unknown argument %s\n", a.c_str());
+        return 2;
+      }
+    }
+    if (!wantMelody && !wantKey && !wantBeats) {
+      std::fprintf(stderr, "analyze: nothing requested (--melody/--key/--beats)\n");
+      return 2;
+    }
+    if (wantMelody && vocalsPath.empty()) {
+      std::fprintf(stderr, "analyze: --melody needs --vocals\n");
+      return 2;
+    }
+    if (wantBeats && drumsPath.empty()) {
+      std::fprintf(stderr, "analyze: --beats needs --drums\n");
+      return 2;
+    }
+    if (wantKey && instPaths.empty() && bassPath.empty()) {
+      std::fprintf(stderr, "analyze: --key needs --inst or --bass\n");
+      return 2;
+    }
+
+    // one read per file, shared by every consumer
+    const auto load = [&](const std::string& path, singz::AnalysisStem& into) {
+      singz::MonoWav w = singz::readWavMono(path);
+      if (!w.ok) {
+        std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
+        std::exit(1);
+      }
+      into.mono = std::move(w.samples);
+      into.sampleRate = w.sampleRate;
+    };
+    singz::AnalysisStem drums, bass, vocals;
+    std::vector<singz::AnalysisStem> inst(instPaths.size());
+    if (!drumsPath.empty()) load(drumsPath, drums);
+    if (!bassPath.empty()) load(bassPath, bass);
+    if (!vocalsPath.empty()) load(vocalsPath, vocals);
+    for (size_t i = 0; i < instPaths.size(); i++) load(instPaths[i], inst[i]);
+
+    // One JSON line PER PART, flushed as each detector finishes — the
+    // caller adopts the melody seconds before the beats stage has even
+    // received its lattice. A single end-of-run object would hold the pitch
+    // strip hostage to the model render (measured: melody adoption went
+    // 0.5 s -> 4.9 s that way).
+    if (wantMelody) {
+      singz::Progress progress;
+      progress.cb = onProgress;
+      const singz::MelodyTrack t =
+          singz::trackMelody(vocals.mono.data(), vocals.mono.size(), vocals.sampleRate, &progress);
+      std::printf("{\"melody\":{\"detVersion\":%d,\"hopSec\":%.17g,\"frames\":%zu,\"f0\":",
+                  singz::kPitchDetectVersion, t.hopSec, t.f0.size());
+      printFloats(t.f0);
+      if (raw) {
+        std::printf(",\"raw\":");
+        printFloats(t.raw);
+        std::printf(",\"rms\":");
+        printFloats(t.rms);
+      }
+      std::printf("}}\n");
+      std::fflush(stdout);
+    }
+
+    if (wantKey) {
+      const singz::KeyGuess k = singz::estimateKeyFromStems(inst, bassPath.empty() ? nullptr : &bass);
+      if (!k.ok) std::printf("{\"key\":{\"detVersion\":%d,\"key\":null}}\n", singz::kKeyDetectVersion);
+      else
+        std::printf("{\"key\":{\"detVersion\":%d,\"key\":{\"pc\":%d,\"minor\":%s}}}\n",
+                    singz::kKeyDetectVersion, k.pc, k.minor ? "true" : "false");
+      std::fflush(stdout);
+    }
+
+    if (wantBeats) {
+      // The lattice, from wherever the caller put it — read HERE, not at
+      // startup: with --ml-stdin the melody and key above have already run
+      // and printed their progress while the caller's model was still busy.
+      singz::MlGrid ml;
+      bool haveMl = false;
+      if (!mlPath.empty()) {
+        std::FILE* f = std::fopen(mlPath.c_str(), "rb");
+        if (f) {
+          std::string text;
+          char chunk[65536];
+          size_t n;
+          while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0) text.append(chunk, n);
+          std::fclose(f);
+          haveMl = readMlText(text, ml).empty();
+        }
+      } else if (mlStdin) {
+        std::string text;
+        char chunk[65536];
+        size_t n;
+        while ((n = std::fread(chunk, 1, sizeof chunk, stdin)) > 0) text.append(chunk, n);
+        StdinAux late;
+        const std::string err = readMlText(text, ml, &late);
+        haveMl = err.empty();
+        if (!haveMl && err != "empty" && err != "no-grid") {
+          std::fprintf(stderr, "analyze: --ml-stdin grid unusable: %s\n", err.c_str());
+          return 2;
+        }
+        // the lyric aux is only KNOWN late — lyrics load while melody and
+        // key already run — so it rides stdin beside the lattice and wins
+        // over whatever argv carried at spawn
+        if (!late.lineStarts.empty()) lineStarts = late.lineStarts;
+        if (!late.words.empty()) words = late.words;
+      }
+      singz::BeatAux aux;
+      aux.inst = &inst;
+      if (!vocalsPath.empty()) aux.vocals = &vocals;
+      if (!bassPath.empty()) aux.bass = &bass;
+      aux.lineStarts = lineStarts;
+      aux.words = words;
+      if (haveMl) aux.ml = &ml;
+      singz::BeatDebug d;
+      const singz::BeatGrid grid = singz::detectBeats(drums, aux, d);
+      std::printf("{\"beats\":{\"detVersion\":%d,\"ok\":%s,", singz::kBeatDetectVersion,
+                  grid.ok ? "true" : "false");
+      std::printf("\"bpm\":%.17g,\"beatsPerBar\":%d,\"downbeat\":%d,\"hasDownbeats\":%s,", grid.bpm,
+                  grid.beatsPerBar, grid.downbeat, grid.hasDownbeats ? "true" : "false");
+      std::printf("\"beatsSec\":[");
+      for (size_t i = 0; i < grid.beats.size(); i++) std::printf("%s%.17g", i ? "," : "", grid.beats[i]);
+      std::printf("],\"downbeats\":[");
+      for (size_t i = 0; i < grid.downbeats.size(); i++) std::printf("%s%d", i ? "," : "", grid.downbeats[i]);
+      std::printf("],\"suspectAt\":[");
+      for (size_t i = 0; i < grid.suspectAt.size(); i++)
+        std::printf("%s%.17g", i ? "," : "", grid.suspectAt[i]);
+      std::printf("]}}\n");
+      std::fflush(stdout);
+    }
+
+    return 0;
   }
   if (cmd == "melody") {
     std::vector<float> mono;
@@ -175,50 +439,7 @@ int main(int argc, char** argv) {
       size_t n;
       while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0) text.append(chunk, n);
       std::fclose(f);
-      size_t pos = 0;
-      const auto token = [&](std::string& t) {
-        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
-        const size_t start = pos;
-        while (pos < text.size() && !std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
-        t.assign(text, start, pos - start);
-        return !t.empty();
-      };
-      const auto number = [&](double& v) {
-        std::string t;
-        if (!token(t)) return false;
-        char* end = nullptr;
-        v = std::strtod(t.c_str(), &end);
-        return end == t.c_str() + t.size() && std::isfinite(v);
-      };
-      const auto array = [&](std::vector<double>& into) -> std::string {
-        double count = 0;
-        if (!number(count) || count < 0) return "bad count";
-        into.resize(static_cast<size_t>(count));
-        for (size_t i = 0; i < into.size(); i++)
-          if (!number(into[i])) return "short array";
-        return "";
-      };
-      std::string key;
-      bool sawFps = false;
-      while (token(key)) {
-        std::string err;
-        if (key == "fps") {
-          double v = 0;
-          if (!number(v)) return "bad fps";
-          g.fps = static_cast<int>(v);
-          sawFps = true;
-        } else if (key == "beats") err = array(g.beats);
-        else if (key == "downbeats") err = array(g.downbeats);
-        else if (key == "beatProb") err = array(g.beatProb);
-        else if (key == "downbeatProb") err = array(g.downbeatProb);
-        else return "unknown section " + key;
-        if (!err.empty()) return err + " in " + key;
-      }
-      // The producer states fps explicitly or the grid is not usable: MlGrid
-      // defaults to 50, and silently accepting that default would make a
-      // truncated file look like a healthy 50 fps one.
-      if (!sawFps) return "no fps line";
-      return "";
+      return readMlText(text, g);
     };
     // The tracker's staged debug, named exactly as analysis.ts's own `debug`
     // object names each field — the harness compares stage by stage, so a

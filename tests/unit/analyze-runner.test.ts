@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mlFileText, parseCliBeats, parseCliKey, parseCliMelody } from '../../src/main/analyze'
+import { mlFileText, parseCliAnalyze, parseCliBeats, parseCliKey, parseCliMelody } from '../../src/main/analyze'
 
 // The runner's whole job is to turn singz-analyze's one JSON object into a
 // result the renderer can trust — or into a refusal. The spawn/settle side is
@@ -138,5 +138,51 @@ describe('mlFileText', () => {
     const t = mlFileText({ beats: [1], downbeats: [] })
     expect(t).toBe('fps 50\nbeats 1 1\n')
     expect(t).not.toContain('downbeats')
+  })
+
+
+  it('carries the late lyric aux beside the lattice — and without one', () => {
+    const t = mlFileText({ beats: [1], downbeats: [] }, { lineStarts: [1.5, 3.5], words: [{ s: 1.5, e: 2 }] })
+    expect(t).toBe('fps 50\nbeats 1 1\nlineStarts 2 1.5 3.5\nwords 2 1.5 2\n')
+    expect(mlFileText(null, { lineStarts: null, words: [{ s: 1, e: 2 }] })).toBe('words 2 1 2\n')
+  })
+})
+
+describe('parseCliAnalyze', () => {
+  const want = { melody: true, key: true, beats: true }
+  const melodyLine = '{"melody":{"detVersion":2,"hopSec":0.025,"f0":[0,220],"raw":[0,220],"rms":[0,0.2]}}'
+  const keyLine = '{"key":{"detVersion":2,"key":{"pc":7,"minor":true}}}'
+  const beatsLine =
+    '{"beats":{"detVersion":22,"ok":true,"bpm":77,"beatsPerBar":4,"downbeat":0,"beatsSec":[0.5],"downbeats":[0],"hasDownbeats":true}}'
+
+  it('merges the per-part lines and validates each', () => {
+    const r = parseCliAnalyze(`${melodyLine}\n${keyLine}\n${beatsLine}\n`, want)
+    expect(r.ok).toBe(true)
+    expect(r.melody?.ok).toBe(true)
+    expect(r.key).toMatchObject({ ok: true, pc: 7, minor: true })
+    expect(r.beats?.beats).toEqual([0.5])
+  })
+
+  it('a bad part fails ALONE — the others still adopt', () => {
+    const badBeats = '{"beats":{"detVersion":22,"ok":true,"bpm":77,"beatsPerBar":4,"downbeat":0,"beatsSec":[],"downbeats":[],"hasDownbeats":true}}'
+    const r = parseCliAnalyze(`${melodyLine}\n${keyLine}\n${badBeats}`, want)
+    expect(r.ok).toBe(true)
+    expect(r.melody?.ok).toBe(true)
+    expect(r.key?.ok).toBe(true)
+    expect(r.beats?.ok).toBe(false)
+    expect(r.beats?.error).toContain('no beats')
+  })
+
+  it('a wanted part that never arrived is its own refusal', () => {
+    const r = parseCliAnalyze(`${melodyLine}`, want)
+    expect(r.melody?.ok).toBe(true)
+    expect(r.key?.ok).toBe(false)
+    expect(r.key?.error).toContain('missing')
+  })
+
+  it('an unwanted part is simply absent from the result', () => {
+    const r = parseCliAnalyze(`${melodyLine}`, { melody: true, key: false, beats: false })
+    expect(r.key).toBeUndefined()
+    expect(r.beats).toBeUndefined()
   })
 })
