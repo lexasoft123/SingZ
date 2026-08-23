@@ -50,7 +50,7 @@ import {
 } from '../projects'
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
 import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
-import { C, Chip, FolderGlyph, PhoneGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, white } from './bits'
+import { C, Chip, FolderGlyph, LyricsGlyph, PhoneGlyph, RedetectGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, TrashGlyph, white } from './bits'
 import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
@@ -108,33 +108,50 @@ interface Loading {
  * "0 MB". Two formatters on purpose — the log and the screen are different
  * audiences.
  */
+/** One optional card action, living in the swipe — icon, not word. */
+export interface CardSwipeAction {
+  key: string
+  label: string
+  icon: React.ReactNode
+  danger?: boolean
+  onPress: () => void
+}
+
 /**
- * The revealed swipe action. A component rather than inline JSX because it
- * needs a hook: at REST the action must be fully invisible — Android's
- * renderer let the salmon block's rounded corner bleed a 1px rim around the
- * card face's own corner arc, so every card wore a red outline it had not
- * earned (measured on the API 36 emulator). Opacity keyed to the swipe
- * progress kills the bleed without touching the geometry. `close` snaps the
- * card shut when the action is taken — a cancelled confirm otherwise left
- * the card hanging open.
+ * The revealed swipe actions. A component rather than inline JSX because it
+ * needs a hook: at REST the actions must be fully invisible — Android's
+ * renderer let the block's rounded corner bleed a 1px rim around the card
+ * face's own corner arc, so every card wore an outline it had not earned
+ * (measured on the API 36 emulator). Opacity keyed to the swipe progress
+ * kills the bleed without touching the geometry. Callers wrap each onPress
+ * with the Swipeable's close() so the card snaps shut when an action is
+ * taken — a cancelled confirm otherwise left it hanging open.
  */
-function SwipeAction({
+function SwipeActions({
   progress,
-  text,
-  label,
-  onPress
+  actions
 }: {
   progress: SharedValue<number>
-  text: string
-  label: string
-  onPress: () => void
+  actions: CardSwipeAction[]
 }): React.JSX.Element {
   const style = useAnimatedStyle(() => ({ opacity: progress.value > 0.02 ? 1 : 0 }))
   return (
-    <Reanimated.View style={style}>
-      <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={label} style={s.swipeAction}>
-        <Text style={s.swipeActionText}>{text}</Text>
-      </Pressable>
+    <Reanimated.View style={[style, s.swipeActionsRow]}>
+      {actions.map((a, i) => (
+        <Pressable
+          key={a.key}
+          onPress={a.onPress}
+          accessibilityRole="button"
+          accessibilityLabel={a.label}
+          style={[
+            s.swipeAction,
+            a.danger === true && s.swipeActionDanger,
+            i === actions.length - 1 && s.swipeActionLast
+          ]}
+        >
+          {a.icon}
+        </Pressable>
+      ))}
     </Reanimated.View>
   )
 }
@@ -689,15 +706,22 @@ export default function CatalogScreen({
     })
     return () => sub.remove()
   }, [refresh])
-  const kickAnalysis = useCallback(async (dir: string, stems: Record<string, string>) => {
-    let lyrics: LyricsDoc | null = null
-    try {
-      lyrics = JSON.parse(await readProjectText(dir, 'lyrics.json')) as LyricsDoc
-    } catch {
-      lyrics = null // no lyrics yet — the grid does without the line cues
-    }
-    startAnalysis(dir, stems, lyrics)
-  }, [])
+  const kickAnalysis = useCallback(
+    async (dir: string, stems: Record<string, string>, force = false) => {
+      let lyrics: LyricsDoc | null = null
+      try {
+        lyrics = JSON.parse(await readProjectText(dir, 'lyrics.json')) as LyricsDoc
+      } catch {
+        lyrics = null // no lyrics yet — the grid does without the line cues
+      }
+      /* `force` belongs to the swipe's redetect ONLY: unforced runs honour
+         every stamp and stored no-grid verdict, so on a song with a current
+         grid — the normal state — an unforced "detect again" plans nothing
+         and shows nothing, the exact silent no-op this file outlawed. */
+      startAnalysis(dir, stems, lyrics, force)
+    },
+    []
+  )
 
   /* The "better beats" offer (Phase 4b): the Beat This! models are an
    * optional 87 MB extra — the neural lattice the desktop's packs carry,
@@ -1003,11 +1027,6 @@ export default function CatalogScreen({
       mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
     [mode]
   )
-  /** A split is already running, so this one has to wait its turn. Kept apart
-   *  from canSplit because the offer used to VANISH from every other card
-   *  while a job ran — no disabled state, no reason, the affordance simply
-   *  gone. A control that cannot be used right now should say so. */
-  const splitBusy = splitUi !== null
   /** The same question minus the card whose own split it is: that one shows
    *  no chip at all (see the card's `action`), so this is what dims the
    *  OTHERS. Kept apart from splitBusy, which is what removes the row from
@@ -1065,10 +1084,9 @@ export default function CatalogScreen({
         `"${p.doc.name ?? p.dir}" and its files go away.`,
         /* cancel-first, like every other confirm in this file
            (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
-           either order the same, but Android maps by position — the
-           reversal in phoneCardMenu is for the MENU's three actions, not for
-           a two-button confirm, and mirroring just this one would put Cancel
-           where the others put the action. */
+           either order the same, but Android maps a two-button confirm by
+           position, and mirroring just this one would put Cancel where the
+           others put the action. */
         [
           { text: 'Cancel', style: 'cancel' },
           {
@@ -1085,62 +1103,6 @@ export default function CatalogScreen({
       )
     },
     [refresh]
-  )
-
-  const phoneCardMenu = useCallback(
-    (p: ProjectEntry) => {
-      /* Built in reading order with the destructive item LAST. It used to be
-         first, because every item was `unshift`ed and delete went in first —
-         so the top of the menu, where a thumb lands, was "Delete from this
-         phone". iOS convention puts destructive at the bottom for exactly
-         that reason. */
-      const buttons: Parameters<typeof Alert.alert>[2] = []
-      /* Six real stems end the offer; a build without the split natives (iOS
-         until P3) never offers; and while a job is running the item is left
-         OUT rather than shown inert. An alert action cannot be disabled, so a
-         "(one at a time)" item would just close the menu with nothing said.
-         The card's chip is where the unavailable-and-why lives — it can be
-         dimmed and carry a reason, which an alert row cannot. */
-      if (canSplit(p) && !splitBusy) {
-        buttons.push({ text: 'Split into stems', onPress: () => offerSplit(p) })
-      }
-      if (!p.hasLyrics) {
-        buttons.push({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
-      }
-      buttons.push({
-        text: 'Delete from this phone',
-        style: 'destructive',
-        onPress: () => confirmDelete(p)
-      })
-      /*
-       * The two platforms want OPPOSITE array orders for the same screen, so
-       * the list is built in reading order above and then handed over the way
-       * each one needs it.
-       *
-       * iOS keeps the array order and floats the .cancel action to the bottom:
-       * Split, Find lyrics, Delete, Cancel — destructive last among the
-       * actions, which is the whole point of the ordering.
-       *
-       * Android takes only the first THREE (Alert.js maps them to
-       * positive/negative/neutral and slices the rest) and then stacks them
-       * neutral-first, i.e. reversed. Two consequences, both measured on an
-       * API 36 emulator: a fourth button is silently dropped — which is how
-       * Delete vanished entirely once Cancel was ahead of it, leaving the only
-       * route to deleting a song unreachable — and the array has to be
-       * reversed for Delete to land at the BOTTOM rather than under the
-       * thumb. Cancel is the one that goes, so `cancelable` has to be true or
-       * the dialog has no way out at all (Alert.js hardcodes it false).
-       */
-      Alert.alert(
-        p.doc.name ?? p.dir,
-        undefined,
-        Platform.OS === 'android'
-          ? [...buttons].reverse()
-          : [...buttons, { text: 'Cancel', style: 'cancel' }],
-        { cancelable: true }
-      )
-    },
-    [canSplit, splitBusy, findLyricsFor, offerSplit, confirmDelete]
   )
 
   useEffect(() => {
@@ -1232,13 +1194,6 @@ export default function CatalogScreen({
     action?: React.ReactNode
     sample?: boolean
     onPress: () => void
-    /** The card's other actions. Long-press reaches them, and so does the •••
-     *  button this puts on the card — a long-press has no affordance, and the
-     *  code already conceded the point for Split ("the long-press menu, which
-     *  is not a place a singer finds a feature"). Omitted entirely when the
-     *  song has nothing to offer: a Drive song with nothing downloaded used to
-     *  take the long-press and silently do nothing. */
-    menu?: (() => void) | null
     /** The artist half of an "Artist — Title" name, on its own line — the
      *  one-line title kept eating the song ("Cat Stevens — Fat…"). */
     artist?: string | null
@@ -1248,30 +1203,40 @@ export default function CatalogScreen({
     tileNeutral?: boolean
     /** Ready-tile halo hue (iOS; see StemTile). */
     tileGlow?: string
-    /** Swipe-left reveals this destructive action — the delete that used to
-     *  be three taps deep. The ••• stays as the visible, discoverable path
-     *  to the same place; the swipe is the shortcut, never the only way. */
-    swipeRemove?: { text: 'Delete' | 'Remove'; label: string; onPress: () => void } | null
+    /** The card's OPTIONAL actions, all of them, revealed by swipe-left —
+     *  required actions are visible buttons on the card (Split), optional
+     *  ones live here (delete, redetect, lyrics). The ••• and the long-press
+     *  menu are gone: the ••• sat where the swipe's delete lives and read as
+     *  one control wearing two meanings on the phone. Screen readers reach
+     *  the same actions through accessibilityActions on the card. */
+    swipeActions?: CardSwipeAction[] | null
   }): React.JSX.Element => {
     const isLoading = loading?.dir === opts.dir
+    const acts = opts.swipeActions ?? []
     const body = (
       <Pressable
         key={opts.key}
         onPress={opts.onPress}
-        onLongPress={opts.menu ?? undefined}
         accessibilityRole="button"
         /* Deliberately NO accessibilityLabel: a Pressable is already the
            accessibility element for the whole card, and an explicit label
            REPLACES the string RN composes from the children — title, meta and
            the ✓/☁ status would all vanish behind the title alone. */
-        accessibilityHint={opts.menu ? 'Opens the song. Long press for more actions.' : 'Opens the song.'}
+        accessibilityHint="Opens the song."
+        /* The swipe's actions, spoken: a screen reader cannot discover a
+           swipe-reveal, so every optional action is also a rotor action on
+           the card itself. */
+        accessibilityActions={acts.map((a) => ({ name: a.key, label: a.label }))}
+        onAccessibilityAction={(e) => {
+          acts.find((a) => a.key === e.nativeEvent.actionName)?.onPress()
+        }}
         style={({ pressed }) => [
           s.card,
           opts.sample && s.cardSample,
           /* A swiped card slides over the action behind it, so its face must
              be OPAQUE — the usual white-alpha fill would show the red
              through. The literal is white(0.045) composited over C.bg. */
-          opts.swipeRemove != null && { backgroundColor: '#1f1b17', marginBottom: 0 },
+          acts.length > 0 && { backgroundColor: '#1f1b17', marginBottom: 0 },
           isLoading && s.cardLoading,
           pressed && { transform: [{ scale: 0.98 }] }
         ]}
@@ -1320,31 +1285,6 @@ export default function CatalogScreen({
                 </Text>
               )}
             </View>
-            <View style={s.moreSlot}>
-              {opts.menu && (
-                <Pressable
-                  /* Asymmetric on purpose. The Split chip beside it claims 10 of
-                     the card's 14 pt gap; ••• is the later sibling, so a near-miss
-                     to the right of Split would open the menu instead of
-                     splitting. 4 makes the two targets abut rather than overlap —
-                     the same arithmetic the crash notice's Report link needed. */
-                  hitSlop={{ top: 10, bottom: 10, left: 4, right: 10 }}
-                  onPress={(e) => {
-                    // the card underneath would otherwise open the song
-                    e.stopPropagation()
-                    opts.menu?.()
-                  }}
-                  style={s.moreBtn}
-                  accessibilityRole="button"
-                  accessibilityLabel={`More actions for ${opts.title}`}
-                >
-                  {/* ••• rather than a gear, for the reason the player's header
-                      gives: a gear glyph has no guaranteed text presentation on
-                      Android. */}
-                  <Text style={s.moreGlyph}>•••</Text>
-                </Pressable>
-              )}
-            </View>
           </>
         )}
         {isLoading && (
@@ -1354,16 +1294,15 @@ export default function CatalogScreen({
         )}
       </Pressable>
     )
-    if (opts.swipeRemove == null) return body
-    const remove = opts.swipeRemove
+    if (acts.length === 0) return body
     return (
       <Swipeable
         key={opts.key}
         ref={(m) => {
           swipeRefs.current[opts.key] = m
         }}
-        /* A LOADING card must not swipe: the revealed Remove landed under the
-           cancel ✕ (photographed on the user's phone mid-decode), and
+        /* A LOADING card must not swipe: the revealed actions landed under
+           the cancel ✕ (photographed on the user's phone mid-decode), and
            deleting a song while its stems decode is not a state anyone
            meant. */
         enabled={!isLoading}
@@ -1376,14 +1315,15 @@ export default function CatalogScreen({
         overshootRight={false}
         containerStyle={s.swipeRow}
         renderRightActions={(progress, _translation, methods) => (
-          <SwipeAction
+          <SwipeActions
             progress={progress}
-            text={remove.text}
-            label={remove.label}
-            onPress={() => {
-              methods.close()
-              remove.onPress()
-            }}
+            actions={acts.map((a) => ({
+              ...a,
+              onPress: () => {
+                methods.close()
+                a.onPress()
+              }
+            }))}
           />
         )}
       >
@@ -1849,31 +1789,49 @@ export default function CatalogScreen({
                  nothing downloaded used to take a long-press and return at
                  `if (have <= 0) return` — a gesture with no feedback and no
                  result. Now there is no ••• and no long-press on that card. */
-              menu:
-                mode === 'phone'
-                  ? () => phoneCardMenu(p)
-                  : (usage[p.dir]?.bytes ?? 0) > 0
-                    ? () => confirmForget(p)
-                    : null,
-              /* The swipe reaches the same confirms the ••• menu does — a
-                 shortcut to the delete that used to be three taps deep,
-                 never a second deletion path. */
-              swipeRemove:
-                mode === 'phone'
-                  ? {
-                      /* The visible word matches the confirm it opens: phone
-                         mode DELETES the project; the others remove a copy. */
-                      text: 'Delete' as const,
-                      label: `Delete ${p.doc.name ?? p.dir} from this phone`,
-                      onPress: () => confirmDelete(p)
-                    }
-                  : (usage[p.dir]?.bytes ?? 0) > 0
-                    ? {
-                        text: 'Remove' as const,
-                        label: `Remove ${p.doc.name ?? p.dir}'s downloaded files`,
-                        onPress: () => confirmForget(p)
-                      }
-                    : null
+              /* Every OPTIONAL action, in the swipe; a card with none does
+                 not swipe at all (a Drive song with nothing downloaded).
+                 Order: least destructive nearest the card, the trash at the
+                 far edge. The trash still opens the same confirms — the
+                 icons are doors, never a second deletion path. */
+              swipeActions: ((): CardSwipeAction[] | null => {
+                const title = p.doc.name ?? p.dir
+                const acts: CardSwipeAction[] = []
+                if (mode === 'phone') {
+                  if (split) {
+                    acts.push({
+                      key: 'redetect',
+                      label: `Detect the beat again for ${title}`,
+                      icon: <RedetectGlyph color={white(0.85)} />,
+                      onPress: () => void kickAnalysis(p.dir, p.stems, true)
+                    })
+                  }
+                  if (!p.hasLyrics) {
+                    acts.push({
+                      key: 'lyrics',
+                      label: `Find lyrics for ${title}`,
+                      icon: <LyricsGlyph color={white(0.85)} />,
+                      onPress: () => void findLyricsFor(p)
+                    })
+                  }
+                  acts.push({
+                    key: 'delete',
+                    label: `Delete ${title} from this phone`,
+                    danger: true,
+                    icon: <TrashGlyph color="#1d0f0d" />,
+                    onPress: () => confirmDelete(p)
+                  })
+                } else if ((usage[p.dir]?.bytes ?? 0) > 0) {
+                  acts.push({
+                    key: 'forget',
+                    label: `Remove ${title}'s downloaded files`,
+                    danger: true,
+                    icon: <TrashGlyph color="#1d0f0d" />,
+                    onPress: () => confirmForget(p)
+                  })
+                }
+                return acts.length > 0 ? acts : null
+              })()
             })
             }
             /* Headers only when both groups exist — a library that is all
@@ -2091,13 +2049,10 @@ const s = StyleSheet.create({
   cardArtist: { color: white(0.68), fontSize: 13, fontWeight: '600', marginTop: 1 },
   cardMeta: { color: white(0.5), fontSize: 12.5, marginTop: 3 },
   status: { color: C.dim, fontSize: 12, fontWeight: '600' },
-  moreBtn: { width: 30, height: 34, alignItems: 'center', justifyContent: 'center' },
-  moreGlyph: { color: white(0.55), fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
-  /* The fixed right rail and the always-reserved actions slot: a state fills
-     the card, it never reshapes it, so ✓/☁/Split and ••• line up down the
-     whole list. The rail spends ~30pt of every card on that alignment —
-     long titles truncate a little sooner, the price of a library that reads
-     as one system. */
+  /* The fixed right rail: a state fills the card, it never reshapes it, so
+     ✓/☁/Split and the key line line up down the whole list. (The ••• slot
+     this once shared the edge with is gone — its width went back to the
+     title.) */
   rail: { width: 86, alignItems: 'flex-end', gap: 3 },
   keyLine: {
     color: C.dim,
@@ -2105,7 +2060,6 @@ const s = StyleSheet.create({
     fontWeight: '600',
     fontVariant: ['tabular-nums']
   },
-  moreSlot: { width: 30 },
   /* Ready / Not ready yet group headers — same voice as the sheets' section
      labels. */
   grp: {
@@ -2123,16 +2077,15 @@ const s = StyleSheet.create({
      carries the card's bottom margin so the revealed red is exactly card
      height. */
   swipeRow: { marginBottom: 11 },
+  swipeActionsRow: { flexDirection: 'row', alignItems: 'stretch' },
   swipeAction: {
-    width: 96,
-    flex: 1,
-    backgroundColor: C.red,
-    borderTopRightRadius: 17,
-    borderBottomRightRadius: 17,
+    width: 64,
+    backgroundColor: white(0.14),
     alignItems: 'center',
     justifyContent: 'center'
   },
-  swipeActionText: { color: '#1d0f0d', fontSize: 13, fontWeight: '700' },
+  swipeActionDanger: { backgroundColor: C.red },
+  swipeActionLast: { borderTopRightRadius: 17, borderBottomRightRadius: 17 },
   /* The source descriptor — the one-line context grown a title, on the
      raised surface the sheets use. */
   srcCard: {

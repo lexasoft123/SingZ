@@ -237,6 +237,76 @@ export function ToStartGlyph({ color }: { color: string }): React.JSX.Element {
   )
 }
 
+/** Trash glyph for the swipe actions — the word "Delete" said less than
+ *  the shape does, and took more room. */
+export function TrashGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 14, height: 16, alignItems: 'center' }}>
+      <View style={{ width: 6, height: 2, borderTopLeftRadius: 1, borderTopRightRadius: 1, backgroundColor: color }} />
+      <View style={{ width: 14, height: 2, borderRadius: 1, backgroundColor: color, marginTop: 0.5 }} />
+      <View
+        style={{
+          width: 11,
+          height: 10,
+          marginTop: 1.5,
+          borderBottomLeftRadius: 2.5,
+          borderBottomRightRadius: 2.5,
+          backgroundColor: color
+        }}
+      />
+    </View>
+  )
+}
+
+/** Redetect glyph — a refresh arc with an arrowhead, drawn. */
+export function RedetectGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 16, height: 16 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 1,
+          top: 1,
+          width: 14,
+          height: 14,
+          borderRadius: 7,
+          borderWidth: 2,
+          borderColor: color,
+          borderTopColor: 'transparent',
+          transform: [{ rotate: '45deg' }]
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          right: -1,
+          top: 0,
+          width: 0,
+          height: 0,
+          borderLeftWidth: 6,
+          borderLeftColor: color,
+          borderTopWidth: 4,
+          borderTopColor: 'transparent',
+          borderBottomWidth: 4,
+          borderBottomColor: 'transparent',
+          transform: [{ rotate: '-15deg' }]
+        }}
+      />
+    </View>
+  )
+}
+
+/** Lyrics glyph — three text lines. */
+export function LyricsGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 14, height: 12, justifyContent: 'space-between' }}>
+      <View style={{ width: 14, height: 2, borderRadius: 1, backgroundColor: color }} />
+      <View style={{ width: 10, height: 2, borderRadius: 1, backgroundColor: color }} />
+      <View style={{ width: 12, height: 2, borderRadius: 1, backgroundColor: color }} />
+    </View>
+  )
+}
+
 /** Speaker glyph for the mixer's Mute — crossed when muted. M and S were
  *  mixing-desk initials; the glyphs say what happens to the sound. Drawn
  *  with the RN border-triangle trick, the same reasoning as MicGlyph. */
