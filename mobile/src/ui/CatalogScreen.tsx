@@ -48,7 +48,8 @@ import {
   type ProjectEntry,
   type RootInfo
 } from '../projects'
-import { C, Seg, StemTile, white } from './bits'
+import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
+import { C, Chip, FolderGlyph, PhoneGlyph, Seg, StemTile, STEM_TILE_COLORS, white } from './bits'
 import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
@@ -108,6 +109,19 @@ interface Loading {
  */
 const fmtSize = (bytes: number): string =>
   bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`
+
+/** The card's key · tempo line — singers pick songs by key, and both numbers
+ *  are already saved in project.json. Same spelling as the Song sheet's Key
+ *  row, compacted to card size. Null when the song has neither. */
+const KEY_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
+const keyTempoOf = (doc: ProjectDoc): string | null => {
+  const k = doc.settings?.key
+  const bpm = doc.settings?.beat?.bpm
+  const parts: string[] = []
+  if (k) parts.push(`${KEY_NAMES[k.pc % 12]} ${k.minor ? 'min' : 'maj'}`)
+  if (typeof bpm === 'number' && bpm > 0) parts.push(`${Math.round(bpm)} bpm`)
+  return parts.length > 0 ? parts.join(' · ') : null
+}
 
 export default function CatalogScreen({
   sampleRate,
@@ -196,6 +210,28 @@ export default function CatalogScreen({
    *  singer is looking for. */
   const q = query.trim().toLowerCase()
   const shown = useMemo(() => (q ? sorted.filter((p) => titleOf(p).toLowerCase().includes(q)) : sorted), [sorted, q])
+
+  /** Drive mode's "On phone" filter — offline is the moment the library
+   *  matters most, and scrolling for ✓s is not a filter. Other modes ignore
+   *  the flag rather than resetting it, so flipping tabs never loses it. */
+  const [onlyLocal, setOnlyLocal] = useState(false)
+  const finalShown = useMemo(
+    () =>
+      mode === 'gdrive' && onlyLocal ? shown.filter((p) => isDownloaded(p, usage[p.dir])) : shown,
+    [shown, mode, onlyLocal, usage]
+  )
+
+  /* Ready or not — the library's one question: can you sing this now? A
+   * split song is ready; an unsplit one states its next step. The groups
+   * render headers only when BOTH exist, so a library that is all one thing
+   * (every Drive library — the desktop splits before it syncs) stays the
+   * flat alphabetical list it always was. Deliberately NOT connectivity-
+   * aware: a cloud song counts as ready even offline, because a list that
+   * reorders itself when the wifi drops is churn, not honesty — the ☁ and
+   * the ✓ already carry the download fact. */
+  const isSplit = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
+  const readyShown = finalShown.filter(isSplit)
+  const pendingShown = finalShown.filter((p) => !isSplit(p))
 
   /** The bundled sample is a song in this list like any other, so it answers
    *  to the search too — left unfiltered it sat under two matches looking
@@ -987,6 +1023,38 @@ export default function CatalogScreen({
   )
 
   /** Phone-library long-press: this phone owns these projects. */
+  /** The delete confirm, shared by the ••• menu and the card's swipe —
+   *  one dialog, two doors, so the swipe cannot drift a different wording
+   *  or a different deletion path over time. */
+  const confirmDelete = useCallback(
+    (p: ProjectEntry) => {
+      Alert.alert(
+        'Delete this song?',
+        `"${p.doc.name ?? p.dir}" and its files go away.`,
+        /* cancel-first, like every other confirm in this file
+           (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
+           either order the same, but Android maps by position — the
+           reversal in phoneCardMenu is for the MENU's three actions, not for
+           a two-button confirm, and mirroring just this one would put Cancel
+           where the others put the action. */
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: () => {
+              void deleteProject(p.dir)
+                .then(() => refresh())
+                .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+            }
+          }
+        ],
+        { cancelable: true }
+      )
+    },
+    [refresh]
+  )
+
   const phoneCardMenu = useCallback(
     (p: ProjectEntry) => {
       /* Built in reading order with the destructive item LAST. It used to be
@@ -1007,32 +1075,11 @@ export default function CatalogScreen({
       if (!p.hasLyrics) {
         buttons.push({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
       }
-      const onDelete = (): void => {
-        Alert.alert(
-          'Delete this song?',
-          `"${p.doc.name ?? p.dir}" and its files go away.`,
-          /* cancel-first, like every other confirm in this file
-             (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
-             either order the same, but Android maps by position — the
-             reversal above is for the MENU's three actions, not for a
-             two-button confirm, and mirroring just this one would put Cancel
-             where the others put the action. */
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Delete',
-              style: 'destructive',
-              onPress: () => {
-                void deleteProject(p.dir)
-                  .then(() => refresh())
-                  .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-              }
-            }
-          ],
-          { cancelable: true }
-        )
-      }
-      buttons.push({ text: 'Delete from this phone', style: 'destructive', onPress: onDelete })
+      buttons.push({
+        text: 'Delete from this phone',
+        style: 'destructive',
+        onPress: () => confirmDelete(p)
+      })
       /*
        * The two platforms want OPPOSITE array orders for the same screen, so
        * the list is built in reading order above and then handed over the way
@@ -1061,7 +1108,7 @@ export default function CatalogScreen({
         { cancelable: true }
       )
     },
-    [canSplit, splitBusy, findLyricsFor, offerSplit, refresh]
+    [canSplit, splitBusy, findLyricsFor, offerSplit, confirmDelete]
   )
 
   useEffect(() => {
@@ -1151,9 +1198,19 @@ export default function CatalogScreen({
      *  song has nothing to offer: a Drive song with nothing downloaded used to
      *  take the long-press and silently do nothing. */
     menu?: (() => void) | null
+    /** The card's key · tempo line, on the fixed right rail. */
+    keyLine?: string | null
+    /** All-neutral tile lanes — an unsplit song has no stem colours yet. */
+    tileNeutral?: boolean
+    /** Ready-tile halo hue (iOS; see StemTile). */
+    tileGlow?: string
+    /** Swipe-left reveals this destructive action — the delete that used to
+     *  be three taps deep. The ••• stays as the visible, discoverable path
+     *  to the same place; the swipe is the shortcut, never the only way. */
+    swipeRemove?: { text: 'Delete' | 'Remove'; label: string; onPress: () => void } | null
   }): React.JSX.Element => {
     const isLoading = loading?.dir === opts.dir
-    return (
+    const body = (
       <Pressable
         key={opts.key}
         onPress={opts.onPress}
@@ -1167,11 +1224,15 @@ export default function CatalogScreen({
         style={({ pressed }) => [
           s.card,
           opts.sample && s.cardSample,
+          /* A swiped card slides over the action behind it, so its face must
+             be OPAQUE — the usual white-alpha fill would show the red
+             through. The literal is white(0.045) composited over C.bg. */
+          opts.swipeRemove != null && { backgroundColor: '#1f1b17', marginBottom: 0 },
           isLoading && s.cardLoading,
           pressed && { transform: [{ scale: 0.98 }] }
         ]}
       >
-        <StemTile hue={opts.hue} size={56} />
+        <StemTile hue={opts.hue} size={56} neutral={opts.tileNeutral} glow={opts.tileGlow} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={s.cardTitle} numberOfLines={1}>
             {opts.title}
@@ -1198,33 +1259,43 @@ export default function CatalogScreen({
           </Pressable>
         ) : (
           <>
-            <View style={{ alignItems: 'flex-end' }}>
+            {/* The right rail is FIXED width and the actions slot below is
+                always reserved, so a state fills the card without reshaping
+                it — statuses and ••• line up down the whole list. */}
+            <View style={s.rail}>
               {opts.right}
               {opts.action}
+              {opts.keyLine != null && opts.keyLine !== '' && (
+                <Text style={s.keyLine} numberOfLines={1}>
+                  {opts.keyLine}
+                </Text>
+              )}
             </View>
-            {opts.menu && (
-              <Pressable
-                /* Asymmetric on purpose. The Split chip beside it claims 10 of
-                   the card's 14 pt gap; ••• is the later sibling, so a near-miss
-                   to the right of Split would open the menu instead of
-                   splitting. 4 makes the two targets abut rather than overlap —
-                   the same arithmetic the crash notice's Report link needed. */
-                hitSlop={{ top: 10, bottom: 10, left: 4, right: 10 }}
-                onPress={(e) => {
-                  // the card underneath would otherwise open the song
-                  e.stopPropagation()
-                  opts.menu?.()
-                }}
-                style={s.moreBtn}
-                accessibilityRole="button"
-                accessibilityLabel={`More actions for ${opts.title}`}
-              >
-                {/* ••• rather than a gear, for the reason the player's header
-                    gives: a gear glyph has no guaranteed text presentation on
-                    Android. */}
-                <Text style={s.moreGlyph}>•••</Text>
-              </Pressable>
-            )}
+            <View style={s.moreSlot}>
+              {opts.menu && (
+                <Pressable
+                  /* Asymmetric on purpose. The Split chip beside it claims 10 of
+                     the card's 14 pt gap; ••• is the later sibling, so a near-miss
+                     to the right of Split would open the menu instead of
+                     splitting. 4 makes the two targets abut rather than overlap —
+                     the same arithmetic the crash notice's Report link needed. */
+                  hitSlop={{ top: 10, bottom: 10, left: 4, right: 10 }}
+                  onPress={(e) => {
+                    // the card underneath would otherwise open the song
+                    e.stopPropagation()
+                    opts.menu?.()
+                  }}
+                  style={s.moreBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel={`More actions for ${opts.title}`}
+                >
+                  {/* ••• rather than a gear, for the reason the player's header
+                      gives: a gear glyph has no guaranteed text presentation on
+                      Android. */}
+                  <Text style={s.moreGlyph}>•••</Text>
+                </Pressable>
+              )}
+            </View>
           </>
         )}
         {isLoading && (
@@ -1233,6 +1304,27 @@ export default function CatalogScreen({
           </View>
         )}
       </Pressable>
+    )
+    if (opts.swipeRemove == null) return body
+    const remove = opts.swipeRemove
+    return (
+      <Swipeable
+        key={opts.key}
+        overshootRight={false}
+        containerStyle={s.swipeRow}
+        renderRightActions={() => (
+          <Pressable
+            onPress={remove.onPress}
+            accessibilityRole="button"
+            accessibilityLabel={remove.label}
+            style={s.swipeAction}
+          >
+            <Text style={s.swipeActionText}>{remove.text}</Text>
+          </Pressable>
+        )}
+      >
+        {body}
+      </Swipeable>
     )
   }
 
@@ -1259,11 +1351,15 @@ export default function CatalogScreen({
         <Seg
           segments={[
             ...(driveAvailable() ? [{ key: 'gdrive', label: 'Drive', icon: GDRIVE_ICON }] : []),
-            { key: 'folder', label: 'Folder', emoji: '📁' },
+            /* Drawn glyphs, not emoji — the app has already refused emoji
+               icons twice (MicGlyph, the ••• gear) for the same reason: an
+               emoji in a row of tabs is a colour sticker in a row of icons.
+               The Drive mark stays an image: it is a logo, not an emoji. */
+            { key: 'folder', label: 'Folder', glyph: (c: string) => <FolderGlyph color={c} /> },
             {
               key: 'phone',
               label: Platform.OS === 'ios' ? 'This iPhone' : 'This phone',
-              emoji: '📱'
+              glyph: (c: string) => <PhoneGlyph color={c} />
             }
           ]}
           active={mode}
@@ -1275,7 +1371,23 @@ export default function CatalogScreen({
           // Sign in link; that is where signing in belongs.
           onSelect={(k) => selectMode(k as 'gdrive' | 'folder' | 'phone')}
         />
-        <View style={s.ctx}>
+        {/* When a source is empty or signed out, the one-line context grows a
+            title saying what this source IS — the moment the explanation
+            earns its space. Any other time it stays the one-liner; the three
+            tabs are three separate libraries, and this is where that is said. */}
+        {((): React.JSX.Element => {
+          const srcTitle =
+            mode === 'gdrive' && !driveOn
+              ? 'Your desktop’s library, synced through Drive'
+              : mode === 'folder' && root?.kind !== 'picked'
+                ? 'A shared folder this phone can read'
+                : mode === 'phone' && projects !== null && projects.length === 0
+                  ? Platform.OS === 'ios'
+                    ? 'Songs added on this iPhone'
+                    : 'Songs added on this phone'
+                  : null
+          const inner = (
+            <>
           {mode === 'gdrive' &&
             (driveOn ? (
               <>
@@ -1302,7 +1414,10 @@ export default function CatalogScreen({
             ) : (
               <>
                 <Text style={s.ctxWho} numberOfLines={1}>
-                  Your projects, synced from the desktop
+                  {/* The line renders under the srcCard title whenever Drive
+                      is signed out, so it says the next step, not the title's
+                      message again. */}
+                  Sign in to see it
                 </Text>
                 <Text style={s.ctxDot}>·</Text>
                 <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void driveSignInFlow()}>
@@ -1334,7 +1449,17 @@ export default function CatalogScreen({
               </Pressable>
             </>
           )}
-        </View>
+            </>
+          )
+          return srcTitle != null ? (
+            <View style={s.srcCard}>
+              <Text style={s.srcTitle}>{srcTitle}</Text>
+              <View style={s.ctxIn}>{inner}</View>
+            </View>
+          ) : (
+            <View style={s.ctx}>{inner}</View>
+          )
+        })()}
         {/* The crash notice, which is durable and actionable, and therefore
             not in the same slot as the transient errors below it. It is the
             most important sentence the app ever writes — it used to render as
@@ -1391,7 +1516,10 @@ export default function CatalogScreen({
             live, or deleting a song down past the threshold takes the box away
             and leaves the filter applied, with nothing on screen to clear it
             and no explanation of why most of the library is missing. */}
-        {(sorted.length >= SEARCH_FROM || q !== '') && (
+        {/* `onlyLocal` keeps the row alive the same way a live query does: a
+            refresh shrinking the library below the threshold must not take
+            the chip away while its filter still applies. */}
+        {(sorted.length >= SEARCH_FROM || q !== '' || (mode === 'gdrive' && onlyLocal)) && (
           <View style={s.searchRow}>
             <TextInput
               style={s.search}
@@ -1416,6 +1544,12 @@ export default function CatalogScreen({
               >
                 <Text style={s.searchX}>✕</Text>
               </Pressable>
+            )}
+            {/* Offline is the moment the library matters most; scrolling for
+                ✓s is not a filter. Drive mode only — the other libraries ARE
+                the phone. */}
+            {mode === 'gdrive' && (
+              <Chip label="On phone" active={onlyLocal} onPress={() => setOnlyLocal((v) => !v)} />
             )}
           </View>
         )}
@@ -1560,13 +1694,22 @@ export default function CatalogScreen({
               </View>
             </View>
           )}
-          {shown.map((p) => {
+          {((): React.ReactNode => {
+            const renderEntry = (p: ProjectEntry): React.JSX.Element => {
             const downloaded = isDownloaded(p, usage[p.dir])
             const added = addedTracks(p.doc?.settings).length
+            const split = isSplit(p)
+            const hue = Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3
             return card({
               key: p.dir,
               dir: p.dir,
-              hue: Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3,
+              hue,
+              /* A ready song is lit; an unsplit one has no stem colours yet.
+                 The tile carrying the state is a colour the meta line does
+                 not have to spend words on. */
+              tileNeutral: !split,
+              tileGlow: split ? STEM_TILE_COLORS[hue][0] : undefined,
+              keyLine: split ? keyTempoOf(p.doc) : null,
               title: p.doc.name ?? p.dir,
               meta: (
                 <>
@@ -1646,9 +1789,53 @@ export default function CatalogScreen({
                   ? () => phoneCardMenu(p)
                   : (usage[p.dir]?.bytes ?? 0) > 0
                     ? () => confirmForget(p)
+                    : null,
+              /* The swipe reaches the same confirms the ••• menu does — a
+                 shortcut to the delete that used to be three taps deep,
+                 never a second deletion path. */
+              swipeRemove:
+                mode === 'phone'
+                  ? {
+                      /* The visible word matches the confirm it opens: phone
+                         mode DELETES the project; the others remove a copy. */
+                      text: 'Delete' as const,
+                      label: `Delete ${p.doc.name ?? p.dir} from this phone`,
+                      onPress: () => confirmDelete(p)
+                    }
+                  : (usage[p.dir]?.bytes ?? 0) > 0
+                    ? {
+                        text: 'Remove' as const,
+                        label: `Remove ${p.doc.name ?? p.dir}'s downloaded files`,
+                        onPress: () => confirmForget(p)
+                      }
                     : null
             })
-          })}
+            }
+            /* Headers only when both groups exist — a library that is all
+               one thing stays the flat list it always was. The sample joins
+               READY: it is bundled, split, and always singable. */
+            const grouped = pendingShown.length > 0 && (readyShown.length > 0 || sampleShown)
+            return (
+              <>
+                {grouped && <Text style={s.grp}>Ready</Text>}
+                {readyShown.map(renderEntry)}
+                {sampleShown &&
+                  card({
+                    key: SAMPLE_DIR,
+                    dir: SAMPLE_DIR,
+                    hue: 0,
+                    tileGlow: STEM_TILE_COLORS[0][0],
+                    title: sampleTitle,
+                    meta: 'bundled · always available',
+                    right: <Text style={s.status}>✓</Text>,
+                    sample: true,
+                    onPress: () => void openSample()
+                  })}
+                {grouped && <Text style={s.grp}>Not ready yet</Text>}
+                {pendingShown.map(renderEntry)}
+              </>
+            )
+          })()}
           {projects === null && (
             <View style={{ alignItems: 'center', paddingVertical: 36 }}>
               <ActivityIndicator color={C.amber} />
@@ -1657,9 +1844,23 @@ export default function CatalogScreen({
               </Text>
             </View>
           )}
-          {projects !== null && shown.length === 0 && !sampleShown && (
+          {projects !== null && finalShown.length === 0 && !sampleShown && (
             <Text style={s.empty}>No song here is called “{query.trim()}”.</Text>
           )}
+          {/* The On-phone filter's own empty state. Its guard cannot ride on
+              !sampleShown — the sample always shows with no query — and it
+              must not double with the empty-library text below, hence the
+              projects.length check. */}
+          {projects !== null &&
+            projects.length > 0 &&
+            mode === 'gdrive' &&
+            onlyLocal &&
+            q === '' &&
+            finalShown.length === 0 && (
+              <Text style={s.empty}>
+                Nothing from this library is on the phone yet — open a song to download it.
+              </Text>
+            )}
           {projects !== null && projects.length === 0 && q === '' && (
             // Whichever library is open has its OWN next step — and phone mode
             // is where the app starts, so the folder advice was the first
@@ -1679,17 +1880,6 @@ export default function CatalogScreen({
                     : 'No projects in this folder. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
             </Text>
           )}
-          {sampleShown &&
-            card({
-              key: SAMPLE_DIR,
-              dir: SAMPLE_DIR,
-              hue: 0,
-              title: sampleTitle,
-              meta: 'bundled · always available',
-              right: <Text style={s.status}>✓</Text>,
-              sample: true,
-              onPress: () => void openSample()
-            })}
           {(() => {
             const dirs = Object.keys(usage).filter((d) => usage[d].bytes > 0)
             const total = dirs.reduce((n, d) => n + usage[d].bytes, 0)
@@ -1835,6 +2025,58 @@ const s = StyleSheet.create({
   status: { color: C.dim, fontSize: 12, fontWeight: '600' },
   moreBtn: { width: 30, height: 34, alignItems: 'center', justifyContent: 'center' },
   moreGlyph: { color: white(0.55), fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
+  /* The fixed right rail and the always-reserved actions slot: a state fills
+     the card, it never reshapes it, so ✓/☁/Split and ••• line up down the
+     whole list. The rail spends ~30pt of every card on that alignment —
+     long titles truncate a little sooner, the price of a library that reads
+     as one system. */
+  rail: { width: 86, alignItems: 'flex-end', gap: 3 },
+  keyLine: {
+    color: C.dim,
+    fontSize: 10.5,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums']
+  },
+  moreSlot: { width: 30 },
+  /* Ready / Not ready yet group headers — same voice as the sheets' section
+     labels. */
+  grp: {
+    color: C.dim,
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginTop: 3,
+    marginBottom: 10,
+    paddingHorizontal: 2
+  },
+  /* The swipe row: the action paints BEHIND the card and the card slides
+     over it — one block, native-style, not a detached button. The container
+     carries the card's bottom margin so the revealed red is exactly card
+     height. */
+  swipeRow: { marginBottom: 11 },
+  swipeAction: {
+    width: 96,
+    backgroundColor: C.red,
+    borderTopRightRadius: 17,
+    borderBottomRightRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  swipeActionText: { color: '#1d0f0d', fontSize: 13, fontWeight: '700' },
+  /* The source descriptor — the one-line context grown a title, on the
+     raised surface the sheets use. */
+  srcCard: {
+    backgroundColor: C.sheet,
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.hairline,
+    marginTop: 9,
+    marginBottom: 12
+  },
+  srcTitle: { color: C.text, fontSize: 13.5, fontWeight: '700', marginBottom: 6 },
+  ctxIn: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
   search: {
     flex: 1,

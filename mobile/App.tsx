@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { NativeModules, StatusBar, View } from 'react-native'
+import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { MultitrackEngine } from './src/engine'
@@ -562,14 +563,19 @@ export default function App(): React.JSX.Element {
 
   return (
     <SafeAreaProvider>
-      <View style={{ flex: 1, backgroundColor: C.bg }}>
-        <StatusBar barStyle="light-content" />
-        {project === null ? (
-          <CatalogScreen sampleRate={engine.sampleRate} onLoaded={setProject} />
-        ) : (
-          <PlayerScreen engine={engine} project={project} onBack={closeProject} />
-        )}
-      </View>
+      {/* Swipeable rows (the library's swipe-to-remove) need the gesture
+          handler root; without it every gesture silently falls through to
+          the plain responder system and the swipe never begins. */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <View style={{ flex: 1, backgroundColor: C.bg }}>
+          <StatusBar barStyle="light-content" />
+          {project === null ? (
+            <CatalogScreen sampleRate={engine.sampleRate} onLoaded={setProject} />
+          ) : (
+            <PlayerScreen engine={engine} project={project} onBack={closeProject} />
+          )}
+        </View>
+      </GestureHandlerRootView>
     </SafeAreaProvider>
   )
 }

@@ -87,9 +87,28 @@ export const STEM_TILE_COLORS: string[][] = [
 ]
 const TILE_WIDTHS = ['100%', '72%', '88%', '60%'] as const
 
-/** Mini artwork: four stem lanes, hue-rotated per project. */
-export function StemTile({ hue, size }: { hue: number; size: number }): React.JSX.Element {
-  const colors = STEM_TILE_COLORS[hue % STEM_TILE_COLORS.length]
+/** Mini artwork: four stem lanes, hue-rotated per project.
+ *
+ *  `neutral` draws every lane in the `original` hue — an unsplit song has no
+ *  stem colours yet, and the artwork saying so is cheaper than a word.
+ *  `glow` casts a faint halo in the given hue (a ready song is lit). iOS
+ *  only: Android's elevation shadow is black by contract, and a black halo
+ *  under a dark card reads as a smudge, not a light.
+ */
+export function StemTile({
+  hue,
+  size,
+  neutral,
+  glow
+}: {
+  hue: number
+  size: number
+  neutral?: boolean
+  glow?: string
+}): React.JSX.Element {
+  const colors = neutral
+    ? [STEM_COLORS.original, STEM_COLORS.original, STEM_COLORS.original, STEM_COLORS.original]
+    : STEM_TILE_COLORS[hue % STEM_TILE_COLORS.length]
   return (
     <View
       style={{
@@ -99,7 +118,10 @@ export function StemTile({ hue, size }: { hue: number; size: number }): React.JS
         backgroundColor: TILE_WELL,
         justifyContent: 'center',
         gap: size * 0.062,
-        paddingHorizontal: size * 0.18
+        paddingHorizontal: size * 0.18,
+        ...(glow != null && Platform.OS === 'ios'
+          ? { shadowColor: glow, shadowOpacity: 0.5, shadowRadius: 8, shadowOffset: { width: 0, height: 0 } }
+          : null)
       }}
     >
       {colors.map((c, i) => (
@@ -108,6 +130,59 @@ export function StemTile({ hue, size }: { hue: number; size: number }): React.JS
           style={{ height: size * 0.07, borderRadius: 3, backgroundColor: c, width: TILE_WIDTHS[i] }}
         />
       ))}
+    </View>
+  )
+}
+
+/** Filled folder glyph for the source tabs — drawn, like MicGlyph, because an
+ *  emoji in a row of tabs is an icon in a row of icons. Filled rather than
+ *  outlined: a 1.5px outline at this size read crude next to the label. */
+export function FolderGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 16, height: 14 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: 7,
+          height: 5,
+          backgroundColor: color,
+          borderTopLeftRadius: 2,
+          borderTopRightRadius: 2
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 4,
+          width: 16,
+          height: 10,
+          backgroundColor: color,
+          borderRadius: 2
+        }}
+      />
+    </View>
+  )
+}
+
+/** Phone glyph for the source tabs — outline with a home bar. */
+export function PhoneGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View
+      style={{
+        width: 10,
+        height: 15,
+        borderWidth: 1.5,
+        borderColor: color,
+        borderRadius: 3,
+        alignItems: 'center',
+        justifyContent: 'flex-end',
+        paddingBottom: 1
+      }}
+    >
+      <View style={{ width: 3, height: 1.5, borderRadius: 1, backgroundColor: color }} />
     </View>
   )
 }
@@ -298,7 +373,14 @@ export function Seg({
   active,
   onSelect
 }: {
-  segments: { key: string; label: string; icon?: ImageSourcePropType; emoji?: string }[]
+  segments: {
+    key: string
+    label: string
+    icon?: ImageSourcePropType
+    emoji?: string
+    /** A drawn glyph, given the colour the segment's label renders in. */
+    glyph?: (color: string) => React.ReactNode
+  }[]
   active: string
   onSelect: (key: string) => void
 }): React.JSX.Element {
@@ -318,6 +400,7 @@ export function Seg({
           >
             {s.icon != null && <Image source={s.icon} style={{ width: 13, height: 13 }} />}
             {s.emoji != null && <Text style={{ fontSize: 12 }}>{s.emoji}</Text>}
+            {s.glyph != null && s.glyph(on ? C.amberInk : white(0.5))}
             <Text style={[b.segText, on && { color: C.amberInk }]} numberOfLines={1}>
               {s.label}
             </Text>
