@@ -49,6 +49,7 @@ import {
   type RootInfo
 } from '../projects'
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
+import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import { C, Chip, FolderGlyph, PhoneGlyph, Seg, StemTile, STEM_TILE_COLORS, white } from './bits'
 import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
@@ -107,6 +108,37 @@ interface Loading {
  * "0 MB". Two formatters on purpose — the log and the screen are different
  * audiences.
  */
+/**
+ * The revealed swipe action. A component rather than inline JSX because it
+ * needs a hook: at REST the action must be fully invisible — Android's
+ * renderer let the salmon block's rounded corner bleed a 1px rim around the
+ * card face's own corner arc, so every card wore a red outline it had not
+ * earned (measured on the API 36 emulator). Opacity keyed to the swipe
+ * progress kills the bleed without touching the geometry. `close` snaps the
+ * card shut when the action is taken — a cancelled confirm otherwise left
+ * the card hanging open.
+ */
+function SwipeAction({
+  progress,
+  text,
+  label,
+  onPress
+}: {
+  progress: SharedValue<number>
+  text: string
+  label: string
+  onPress: () => void
+}): React.JSX.Element {
+  const style = useAnimatedStyle(() => ({ opacity: progress.value > 0.02 ? 1 : 0 }))
+  return (
+    <Reanimated.View style={style}>
+      <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={label} style={s.swipeAction}>
+        <Text style={s.swipeActionText}>{text}</Text>
+      </Pressable>
+    </Reanimated.View>
+  )
+}
+
 const fmtSize = (bytes: number): string =>
   bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`
 
@@ -1312,15 +1344,16 @@ export default function CatalogScreen({
         key={opts.key}
         overshootRight={false}
         containerStyle={s.swipeRow}
-        renderRightActions={() => (
-          <Pressable
-            onPress={remove.onPress}
-            accessibilityRole="button"
-            accessibilityLabel={remove.label}
-            style={s.swipeAction}
-          >
-            <Text style={s.swipeActionText}>{remove.text}</Text>
-          </Pressable>
+        renderRightActions={(progress, _translation, methods) => (
+          <SwipeAction
+            progress={progress}
+            text={remove.text}
+            label={remove.label}
+            onPress={() => {
+              methods.close()
+              remove.onPress()
+            }}
+          />
         )}
       >
         {body}
@@ -2057,6 +2090,7 @@ const s = StyleSheet.create({
   swipeRow: { marginBottom: 11 },
   swipeAction: {
     width: 96,
+    flex: 1,
     backgroundColor: C.red,
     borderTopRightRadius: 17,
     borderBottomRightRadius: 17,
