@@ -51,7 +51,7 @@ const api: SingzApi = {
   beatsMlAvailable: () => ipcRenderer.invoke('beats:mlAvailable'),
   melodyNativeAvailable: () => ipcRenderer.invoke('melody:available'),
   analyzeNative: (input) => ipcRenderer.invoke('analyze:run', input),
-  analyzeProvideMl: (ml, aux) => ipcRenderer.invoke('analyze:ml', ml, aux),
+  analyzeProvideMl: (ml, aux, token) => ipcRenderer.invoke('analyze:ml', ml, aux, token),
   onAnalyzePart: (cb) => {
     const listener = (_e: IpcRendererEvent, part: unknown): void => cb(part as Parameters<typeof cb>[0])
     ipcRenderer.on('analyze:part', listener)

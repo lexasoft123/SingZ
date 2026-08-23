@@ -430,6 +430,9 @@ export interface SingzApi {
    *  their own detVersion; the caller checks each against its constant and
    *  falls back loudly per part. */
   analyzeNative(input: {
+    /** Per-run id minted by the caller; `analyzeProvideMl` must repeat it so
+     *  main pairs the lattice with THIS run, never a neighbour's. */
+    token: string
     want: { melody: boolean; key: boolean; beats: boolean }
     vocals: string | null
     drums: string | null
@@ -457,8 +460,9 @@ export interface SingzApi {
   }>
   analyzeProvideMl(
     ml: { beats: number[]; downbeats: number[]; beatProb?: number[]; downbeatProb?: number[]; fps?: number } | null,
-    aux?: { lineStarts: number[] | null; words: { s: number; e: number }[] | null }
-  ): Promise<{ ok: true }>
+    aux: { lineStarts: number[] | null; words: { s: number; e: number }[] | null } | undefined,
+    token: string
+  ): Promise<{ ok: boolean }>
   /** Parts of the running combined pass, the moment each completes — today
    *  the melody, validated, so the pitch strip appears seconds before the
    *  beats stage has its lattice. */

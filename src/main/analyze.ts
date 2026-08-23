@@ -81,17 +81,28 @@ interface CliMelody {
  *  the lattice was silently dropped, leaving the child on stdin until the
  *  hang catcher shot it at 120 s. The gate is created SYNCHRONOUSLY at
  *  analyzeAll entry, so the paired provideMl always has something real to
- *  await; a refused call resolves its own gate 'busy' so its paired ml can
- *  never cross-feed the running child. */
+ *  await. Gates pair BY TOKEN, not by slot: a refused call gets its own
+ *  'busy' gate without touching the running owner's — one shared slot let a
+ *  mid-pass Re-detect refusal overwrite the owner's gate and starve its
+ *  provideMl (child on stdin until the 240 s catcher). The map is bounded
+ *  because refused melody/key-only runs never call provideMl to clean up. */
 class Analyze {
   private children = new Map<string, ChildProcess>()
-  private spawnGate: Promise<{ child: ChildProcess } | 'busy' | 'failed'> = Promise.resolve('failed')
+  private spawnGates = new Map<string, Promise<{ child: ChildProcess } | 'busy' | 'failed'>>()
+  private setGate(token: string, gate: Promise<{ child: ChildProcess } | 'busy' | 'failed'>): void {
+    this.spawnGates.set(token, gate)
+    while (this.spawnGates.size > 8) {
+      const oldest = this.spawnGates.keys().next().value
+      if (oldest === undefined) break
+      this.spawnGates.delete(oldest)
+    }
+  }
   private analyzeTimer: ReturnType<typeof setTimeout> | null = null
-  private analyzeTimedOut = false
+  private analyzeTimedOut: { why: string; ms: number } | null = null
   private armAnalyzeTimer(child: ChildProcess, why: string, ms: number): void {
     if (this.analyzeTimer) clearTimeout(this.analyzeTimer)
     this.analyzeTimer = setTimeout(() => {
-      this.analyzeTimedOut = true
+      this.analyzeTimedOut = { why, ms }
       log('analyze', `core analyze exceeded ${ms / 1000}s (${why}) — killing it`, 'error')
       child.kill('SIGKILL')
     }, ms)
@@ -112,13 +123,16 @@ class Analyze {
     // Everything up to the gate assignment is SYNCHRONOUS — see the class
     // comment: the paired analyze:ml may already be queued behind this call.
     if (this.children.has('analyze')) {
-      this.spawnGate = Promise.resolve('busy')
+      this.setGate(input.token, Promise.resolve('busy'))
       return Promise.resolve({ ok: false, error: 'An analysis is already running.' })
     }
     let gateResolve!: (v: { child: ChildProcess } | 'busy' | 'failed') => void
-    this.spawnGate = new Promise((r) => {
-      gateResolve = r
-    })
+    this.setGate(
+      input.token,
+      new Promise((r) => {
+        gateResolve = r
+      })
+    )
     return (async () => {
       const bin = await resolveAnalyze()
       if (bin === null) {
@@ -152,7 +166,7 @@ class Analyze {
       let outBuf = ''
       let errTail = ''
       let progBuf = ''
-      this.analyzeTimedOut = false
+      this.analyzeTimedOut = null
       // The lattice-wait phase spans the renderer's own model run, whose
       // sanctioned budget (beats-ml.ts) is 180 s on the slowest fleet path —
       // a 120 s wait cap would shoot a healthy pass mid-wait. Post-feed the
@@ -204,13 +218,16 @@ class Analyze {
       child.on('error', (err) => {
         if (this.analyzeTimer) clearTimeout(this.analyzeTimer)
         this.children.delete('analyze')
+        this.spawnGates.delete(input.token)
         resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
       })
       onChildSettled(child, 'analyze', (code, signal) => {
         if (this.analyzeTimer) clearTimeout(this.analyzeTimer)
         this.children.delete('analyze')
+        this.spawnGates.delete(input.token)
         if (signal === 'SIGKILL') {
-          resolve({ ok: false, error: this.analyzeTimedOut ? `Timed out after ${TIMEOUT_MS / 1000}s.` : 'Cancelled.' })
+          const t = this.analyzeTimedOut
+          resolve({ ok: false, error: t ? `Timed out after ${t.ms / 1000}s (${t.why}).` : 'Cancelled.' })
           return
         }
         if (code !== 0) {
@@ -229,14 +246,22 @@ class Analyze {
    *  failed): stdin closes empty, the CLI runs the homegrown path. */
   async provideMl(
     ml: BeatsNativeInput['ml'],
-    aux?: { lineStarts: number[] | null; words: { s: number; e: number }[] | null }
+    aux: { lineStarts: number[] | null; words: { s: number; e: number }[] | null } | undefined,
+    token: string
   ): Promise<void> {
     // Await the gate of the run this call is PAIRED with (assigned before
     // this IPC could have been dispatched) — never the bare children map,
     // which is empty for the microseconds resolveAnalyze spends on the
     // threadpool. A 'busy' gate means our run was refused: feeding the
     // RUNNING child someone else's lattice is exactly what this prevents.
-    const gate = await this.spawnGate
+    const gatePromise = this.spawnGates.get(token)
+    if (!gatePromise) {
+      // the run is already gone (child settled) or was evicted — dead lattice
+      log('analyze', 'a lattice arrived for a run that is gone — dropped')
+      return
+    }
+    this.spawnGates.delete(token)
+    const gate = await gatePromise
     if (gate === 'busy' || gate === 'failed') return
     const child = gate.child
     if (!child.stdin || child.stdin.writableEnded || child.exitCode !== null) return
@@ -420,6 +445,8 @@ export function mlFileText(
 }
 
 export interface AnalyzeAllInput {
+  /** Renderer-minted per-run id pairing analyze:run with its analyze:ml. */
+  token: string
   want: { melody: boolean; key: boolean; beats: boolean }
   vocals: string | null
   drums: string | null
@@ -479,7 +506,8 @@ export function registerAnalyze(): void {
   ipcMain.handle('melody:available', async () => ({ ok: true, available: (await resolveAnalyze()) !== null }))
   ipcMain.handle('analyze:run', (_e, raw: unknown): Promise<AnalyzeAllResult> => {
     const i = raw as AnalyzeAllInput
-    if (!i || !i.want || typeof i.want !== 'object') return Promise.resolve({ ok: false, error: 'bad input' })
+    if (!i || !i.want || typeof i.want !== 'object' || typeof i.token !== 'string' || i.token === '')
+      return Promise.resolve({ ok: false, error: 'bad input' })
     const paths = [i.vocals, i.drums, i.bass, ...(Array.isArray(i.inst) ? i.inst : [])].filter(
       (p): p is string => typeof p === 'string'
     )
@@ -488,6 +516,7 @@ export function registerAnalyze(): void {
     // core at files the load path registered.
     for (const p of paths) if (!isAllowed(p)) return Promise.resolve({ ok: false, error: 'File is not registered.' })
     return analyze.analyzeAll({
+      token: i.token,
       want: { melody: !!i.want.melody, key: !!i.want.key, beats: !!i.want.beats },
       vocals: typeof i.vocals === 'string' ? i.vocals : null,
       drums: typeof i.drums === 'string' ? i.drums : null,
@@ -497,7 +526,8 @@ export function registerAnalyze(): void {
       words: Array.isArray(i.words) ? i.words.filter((w) => w && Number.isFinite(w.s) && Number.isFinite(w.e)) : null
     })
   })
-  ipcMain.handle('analyze:ml', (_e, ml: unknown, aux: unknown) => {
+  ipcMain.handle('analyze:ml', (_e, ml: unknown, aux: unknown, token: unknown) => {
+    if (typeof token !== 'string' || token === '') return { ok: false as const, error: 'bad token' }
     const a = aux as { lineStarts?: unknown; words?: unknown } | null
     analyze.provideMl(
       ml && Array.isArray((ml as { beats?: unknown }).beats) && Array.isArray((ml as { downbeats?: unknown }).downbeats)
@@ -508,7 +538,8 @@ export function registerAnalyze(): void {
         words: Array.isArray(a?.words)
           ? a.words.filter((w): w is { s: number; e: number } => !!w && Number.isFinite(w.s) && Number.isFinite(w.e))
           : null
-      }
+      },
+      token
     )
     return { ok: true }
   })

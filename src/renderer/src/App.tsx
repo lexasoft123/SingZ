@@ -214,6 +214,8 @@ async function melodyInput(
  * malformed part) is a per-part `undefined` AFTER a loud warn, and the
  * caller runs that part's TS fallback.
  */
+let analyzeRunSeq = 0
+
 async function runCombinedCore(
   want: { melody: boolean; key: boolean; beats: boolean },
   paths: Record<string, string> | null,
@@ -236,8 +238,10 @@ async function runCombinedCore(
     .filter((id) => id !== 'vocals' && id !== 'drums' && id !== 'bass')
     .map((id) => paths[id])
     .filter((p): p is string => typeof p === 'string')
+  const token = `run-${++analyzeRunSeq}`
   const resP = window.singz
     .analyzeNative({
+      token,
       want,
       vocals: ids.includes('vocals') ? (paths.vocals ?? null) : null,
       drums: want.beats ? (paths.drums ?? null) : null,
@@ -265,7 +269,8 @@ async function runCombinedCore(
               ...(late.ml.fps ? { fps: late.ml.fps } : {})
             }
           : null,
-        { lineStarts: late.lineStarts, words: late.words }
+        { lineStarts: late.lineStarts, words: late.words },
+        token
       )
       .catch(() => undefined)
   }
@@ -1462,6 +1467,59 @@ export default function App(): React.JSX.Element {
     return instBufsRef.current.length > 0 || bassBufRef.current !== null
   }
 
+  /** The standalone key derivation — core first, TS stems fallback, melody
+   *  histogram as display-only last resort. Runs when the combined pass
+   *  cannot carry the key: applyMelody's standalone arm, and the release
+   *  path when a pass that CLAIMED the carry ends keyless after applyMelody
+   *  already stood down on it. Guards on the song's own buffers. */
+  const deriveStandaloneKey = useCallback((f0: Float32Array | null): void => {
+    const inst = instBufsRef.current
+    const bassBuf = bassBufRef.current
+    if (inst.length === 0 && !bassBuf) {
+      if (f0) setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
+      return
+    }
+    void (async () => {
+      const core = await runCombinedCore(
+        { melody: false, key: true, beats: false },
+        stemPathsRef.current,
+        audibleIdsRef.current,
+        async () => ({ ml: null, lineStarts: null, words: null })
+      )
+      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+      if (core.key) {
+        ;(window as { __keySrc?: string }).__keySrc = 'core'
+        applyKeyRef.current?.(core.key.pc, core.key.minor)
+        return
+      }
+      // Fallback: the TS detector on stems decoded off disk — same input
+      // rule, renderer-side. The key answer measured identical across the
+      // whole library at both input rates (17/17), which is why
+      // KEY_DETECT_VERSION does not move for any of this.
+      const allPaths = stemPathsRef.current
+      const harmonicPaths = allPaths
+        ? Object.fromEntries(Object.entries(allPaths).filter(([id]) => id !== 'drums' && id !== 'vocals'))
+        : null
+      const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, {
+        drums: null,
+        bass: bassBuf,
+        vocals: null,
+        inst
+      })
+      // let the melody paint before the synchronous chroma pass blocks
+      await new Promise((r) => setTimeout(r, 30))
+      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+      const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
+      ;(window as { __keySrc?: string }).__keySrc = stems ? 'ts' : 'melody-histogram'
+      // A melody-histogram fallback is displayed but never stored under
+      // the v2 stamp — it is the method the stamp says we left behind.
+      if (stems) applyKeyRef.current?.(stems.pc, stems.minor)
+      else if (f0) setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
+    })()
+  }, [])
+  const deriveStandaloneKeyRef = useRef(deriveStandaloneKey)
+  deriveStandaloneKeyRef.current = deriveStandaloneKey
+
   const applyMelody = useCallback(
     (f0: Float32Array, hopSec: number, tracked: boolean) => {
       const next: MelodyState = { status: 'ready', f0, hopSec }
@@ -1601,43 +1659,7 @@ export default function App(): React.JSX.Element {
         setSongInfo({ key: null, bpm: info?.bpm ?? null }) // the combined pass fills it in
       } else if (inst.length > 0 || bassBuf) {
         setSongInfo({ key: null, bpm: info?.bpm ?? null })
-        void (async () => {
-          const core = await runCombinedCore(
-            { melody: false, key: true, beats: false },
-            stemPathsRef.current,
-            audibleIdsRef.current,
-            async () => ({ ml: null, lineStarts: null, words: null })
-          )
-          if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
-          if (core.key) {
-            ;(window as { __keySrc?: string }).__keySrc = 'core'
-            applyKeyRef.current?.(core.key.pc, core.key.minor)
-            return
-          }
-          // Fallback: the TS detector on stems decoded off disk — same input
-          // rule, renderer-side. The key answer measured identical across the
-          // whole library at both input rates (17/17), which is why
-          // KEY_DETECT_VERSION does not move for any of this.
-          const allPaths = stemPathsRef.current
-          const harmonicPaths = allPaths
-            ? Object.fromEntries(Object.entries(allPaths).filter(([id]) => id !== 'drums' && id !== 'vocals'))
-            : null
-          const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, {
-            drums: null,
-            bass: bassBuf,
-            vocals: null,
-            inst
-          })
-          // let the melody paint before the synchronous chroma pass blocks
-          await new Promise((r) => setTimeout(r, 30))
-          if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
-          const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
-          ;(window as { __keySrc?: string }).__keySrc = stems ? 'ts' : 'melody-histogram'
-          // A melody-histogram fallback is displayed but never stored under
-          // the v2 stamp — it is the method the stamp says we left behind.
-          if (stems) applyKeyRef.current?.(stems.pc, stems.minor)
-          else setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
-        })()
+        deriveStandaloneKeyRef.current?.(f0)
       } else {
         setSongInfo({ key: estimateKey(f0), bpm: info?.bpm ?? null })
       }
@@ -1777,8 +1799,11 @@ export default function App(): React.JSX.Element {
             } else {
               // the pass could not answer the key — release the carry so the
               // fallback machinery (the beat block's arm, or the standalone
-              // path on a later prep) is allowed to run it
+              // path on a later prep) is allowed to run it. If the part event
+              // already ran applyMelody, its standalone arm stood down on the
+              // carry and will not come back this session: run it now.
               keyCarriedBySeqRef.current = null
+              if (melodyAdopted) deriveStandaloneKeyRef.current?.(core.melody?.f0 ?? null)
             }
           }
           if (melodyAdopted) return // the part event already applied it
