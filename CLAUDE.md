@@ -117,12 +117,16 @@ bundle are the same picture.
 (end-user checks/demos). Desktop drivers launch with `SINGZ_MUTE=1`
 (→ Chromium mute-audio; analysers, sinkId and timing behave exactly as
 audible — permanent drivers set it themselves, scratchpad drivers must
-too); **and every driver launch goes through
-`tests/e2e/mac/quiet-launch.cjs`** — permanent AND scratchpad alike: an app
-window stealing the singer's focus mid-work is how a measurement session
-makes itself unwelcome, and it happened twice (all eight permanent drivers
-were patched, then a scratchpad driver written before the helper did it
-again four runs in a row); sim tests zero `__test.engine.master.gain` after the hook-wait
+too); **and every driver launch sets `SINGZ_E2E_HIDDEN: '1'` in the env** —
+permanent AND scratchpad alike: main then never shows the window at all and
+disables backgroundThrottling so timers run full-rate hidden. An app window
+over the singer's work mid-session is how a measurement run makes itself
+unwelcome, and it happened THREE times before this landed: eight permanent
+drivers patched with a showInactive helper, a scratchpad driver missed it,
+and then the helper itself lost its race (it patches over IPC after launch,
+and even winning, showInactive still raises a window over the work —
+focusless is not invisible). `quiet-launch.cjs` survives only as the
+fallback for builds that predate the env; drivers do both; sim tests zero `__test.engine.master.gain` after the hook-wait
 (metronome clicks bypass master, so that test passes `volume: 0` —
 `clickCount` still counts); the Android emulator gets
 `adb shell cmd media_session volume --stream 3 --set 0` (the old

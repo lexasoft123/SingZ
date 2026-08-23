@@ -67,7 +67,7 @@ const GT = JSON.parse(
     app = await _electron.launch({
       executablePath: require('electron'),
       args: [APP],
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' } // silent, never the real Drive
+      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, never the real Drive
     })
     await quietLaunch(app)
     const win = await app.firstWindow()

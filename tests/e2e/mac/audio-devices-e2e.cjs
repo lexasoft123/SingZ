@@ -65,7 +65,7 @@ const launch = async () => {
     args: [APP],
     // SINGZ_MUTE silences the device only — enumeration, sinkId moves and the
     // fake-mic pitch path stay real, so every assertion here is mute-proof.
-    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' }
+    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' }
   })
   await quietLaunch(app) // measurement runs must not steal the singer's focus
   return app
