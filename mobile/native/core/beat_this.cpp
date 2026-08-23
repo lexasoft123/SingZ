@@ -311,11 +311,29 @@ std::vector<float> sumStemsTo22k(const std::vector<std::string>& stemPaths, std:
     // w's ~40 MB per stem-minute goes back here, before the next read — the
     // peak is mix + one stem, never mix + six.
   }
+  // Equal-power downmix level: readWavMono folds stereo at 0.5(L+R); the
+  // model wants the -3 dB pan-law level (0.707(L+R)) — measured, not taste:
+  // the 17-song fused GT scores 54/55 at this level against 51/55 without
+  // it (two downbeat rotations flip), the SAME mixes merely scaled, and the
+  // whole research record (docs/BEAT-DETECTION.md) was calibrated through
+  // ffmpeg mixes that carry exactly this convention. beat_this normalizes
+  // nothing (log1p(1000*mel)), so input level IS part of the model's input
+  // contract and this constant is where it is written down.
+  const float kEqualPowerGain = 1.4142135623730951f;
+  for (float& v : mix) v *= kEqualPowerGain;
   Resampler rs(44100, kBeatThisSr, 1);
   std::vector<float> out;
   out.reserve(mix.size() / 2 + 16);
   rs.process(mix.data(), static_cast<int64_t>(mix.size()), out);
   rs.flush(out);
+  // Time-true: drop the filter's latency and cut the flush tail, so sample
+  // i is the song at i/22050 s — Chromium and swr both align this way, and
+  // the fusion downstream compares these times against features computed
+  // from the unshifted stems.
+  const size_t latency = static_cast<size_t>(rs.latencyOutFrames());
+  const size_t wanted = mix.size() / 2;
+  if (out.size() > latency) out.erase(out.begin(), out.begin() + static_cast<long>(latency));
+  if (out.size() > wanted) out.resize(wanted);
   return out;
 }
 

@@ -292,18 +292,23 @@ was driven; the gotchas that follow from it are below.
   the 2:1 response itself. When a new consumer uses a shared DSP block at
   a new ratio, measure the response at THAT ratio before trusting the
   header's number.
-- **There is no resampler-independent Beat This! grid** — three good
-  renders of the same stems (Chromium's OfflineAudioContext, the core's
-  Kaiser, soxr) agree to 0.01 dB to 10 kHz and still give three grids
-  (119/43, 120/37, 117/39); the model is that sensitive to sub-frame delay
-  and the top 500 Hz. Chromium's — the desktop's actual input — is the
-  least filtered of the three and yet the one that ships. The phone suites
-  therefore gate the LATTICE (beat F1 ≥ 0.98 at 70 ms, tempo, downbeat F1
-  ≥ 0.80) against an oracle rendered by Chromium itself
-  (`scripts/render-ml-mix.cjs`), never bit-equality of probabilities across
-  renders; bit-equality is asserted only where the input is the same bytes
-  (the wav suites). A suite demanding bit parity across resamplers would
-  have to be tuned until it passed.
+- **There is no resampler-independent Beat This! grid — so ONE render, the
+  core's, is the input everywhere** (v23; the study is
+  docs/BEAT-DETECTION.md §10). Three good renders of the same stems agree
+  to 0.01 dB to 10 kHz and still differ in grids; raw lattices are
+  render-equal on GT but the FUSED rotations are not, and what actually
+  moved them was the LEVEL — beat_this normalizes nothing, and ffmpeg-style
+  equal-power mono (+3 dB over WebAudio's 0.5·(L+R)) scores 54/55 fused
+  against Chromium's 52/55. `sumStemsTo22k` (swr-shaped 65-tap Kaiser,
+  time-true via `latencyOutFrames`, ×√2) renders the mix for the desktop
+  (main spawns `singz-analyze mlmix` — `fetchMlGrid` renders nothing), the
+  phones and the eval harness alike; `scripts/render-ml-mix.cjs` only
+  reproduces the pre-v23 Chromium input for archaeology. The phone suites
+  still gate the LATTICE (beat F1 ≥ 0.98 at 70 ms, tempo, downbeat F1
+  ≥ 0.80) — the python and ORT model backends keep bit-equality off the
+  table even on one render — and their oracle recordings regenerate from
+  `mlmix`, not Chromium. Bit-equality is asserted only where the input is
+  the same bytes (the wav suites).
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —

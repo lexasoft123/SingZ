@@ -1561,7 +1561,7 @@ export default function App(): React.JSX.Element {
                 inst: instBufsRef.current
               }))
             if (drumsBufRef.current !== drums) return // song changed mid-flight
-            const ml = stashed?.stems ? stashed.ml : ((await fetchMlGridRef.current?.(stems)) ?? null)
+            const ml = stashed?.stems ? stashed.ml : ((await fetchMlGridRef.current?.()) ?? null)
             if (drumsBufRef.current !== drums) return // song changed mid-flight
             // let the bar paint before the synchronous tracker blocks
             setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
@@ -1778,7 +1778,7 @@ export default function App(): React.JSX.Element {
                 inst: instBufsRef.current
               })
               if (seq !== loadSeq.current) return { ml: null, lineStarts: null, words: null }
-              stashMl = (await fetchMlGridRef.current?.(stashStems)) ?? null
+              stashMl = (await fetchMlGridRef.current?.()) ?? null
               // gathered NOW, after the model render — the lyrics have loaded
               // by this point where at spawn they had not (measured: 0 words)
               return {
@@ -2179,34 +2179,21 @@ export default function App(): React.JSX.Element {
    *  the detector then takes its homegrown path unchanged). The mix is
    *  rendered offline at the model's 22.05 kHz from whatever stems are
    *  loaded: the model wants what the singer hears, not one stem. */
-  const fetchMlGrid = useCallback(async (stems: {
-    drums: AudioBuffer | null
-    bass: AudioBuffer | null
-    vocals: AudioBuffer | null
-    inst: AudioBuffer[]
-  }): Promise<MlGrid | null> => {
+  const fetchMlGrid = useCallback(async (): Promise<MlGrid | null> => {
     try {
       const avail = await window.singz.beatsMlAvailable()
       if (!avail.ok || !avail.available) return null
-      const bufs: AudioBuffer[] = []
-      for (const b of [stems.drums, stems.bass, stems.vocals, ...stems.inst]) {
-        if (b) bufs.push(b)
-      }
-      if (bufs.length === 0) return null
-      const dur = Math.max(...bufs.map((b) => b.duration))
-      const ctx = new OfflineAudioContext(1, Math.ceil(dur * 22050), 22050)
-      for (const b of bufs) {
-        const s = ctx.createBufferSource()
-        s.buffer = b
-        s.connect(ctx.destination)
-        s.start(0)
-      }
-      const mix = await ctx.startRendering()
-      const pcm = mix.getChannelData(0)
-      const res = await window.singz.beatsMlDetect(
-        pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength),
-        22050
-      )
+      // The mix is rendered by the CORE from the stem FILES (main spawns
+      // singz-analyze mlmix) — never by an OfflineAudioContext here, whose
+      // render moved with every Electron upgrade and whose input rode the
+      // playback buffers (the device-rate bug class, twice fixed).
+      const paths = stemPathsRef.current
+      const ids = audibleIdsRef.current
+      const stemPaths = ids
+        .map((id) => paths?.[id])
+        .filter((p): p is string => typeof p === 'string')
+      if (stemPaths.length === 0) return null
+      const res = await window.singz.beatsMlDetectStems(stemPaths)
       if (!res.ok) {
         // A failed model run is a silent quality downgrade (the detector
         // falls back to drums-only) — it must at least be diagnosable.
@@ -2246,7 +2233,7 @@ export default function App(): React.JSX.Element {
           inst: instBufsRef.current
         })
         if (drumsBufRef.current !== buf) return // song changed mid-flight
-        const ml = await fetchMlGrid(stems)
+        const ml = await fetchMlGrid()
         if (drumsBufRef.current !== buf) return // song changed mid-flight
         setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
         await new Promise((r) => setTimeout(r, 30))

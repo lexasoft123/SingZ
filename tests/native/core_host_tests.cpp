@@ -143,9 +143,17 @@ static void resamplerTests() {
       return 20.0 * std::log10(std::sqrt(A * A + B * B) / 0.5);
     };
     char label[128];
-    const double g10k = gainAt(10000.0), a14k = gainAt(14000.0), a12k = gainAt(12000.0);
-    std::snprintf(label, sizeof label, "2:1 passband flat to 10 kHz (%.2f dB)", g10k);
-    CHECK(label, g10k > -0.5);
+    const double g9k = gainAt(9000.0), g10k = gainAt(10000.0), a14k = gainAt(14000.0), a12k = gainAt(12000.0);
+    // The decimating design is swresample's published one (32 taps/net
+    // decimation, beta 9, cutoff 0.97) — adopted by GT measurement over the
+    // old brick wall (resample.cpp says why). Its passband edge droops like
+    // the winner's: ffmpeg-swr itself measures -0.01 dB at 9 kHz and
+    // -1.29 dB at 10 kHz on this exact ratio, and our port sits within
+    // 0.11 dB of that. Gate the shape we adopted, not the wall we left.
+    std::snprintf(label, sizeof label, "2:1 passband flat to 9 kHz (%.2f dB)", g9k);
+    CHECK(label, g9k > -0.15);
+    std::snprintf(label, sizeof label, "2:1 edge at 10 kHz within swr's droop (%.2f dB)", g10k);
+    CHECK(label, g10k > -2.0 && g10k < -0.7);
     std::snprintf(label, sizeof label, "2:1 alias of 14 kHz below -60 dB (%.1f dB)", a14k);
     CHECK(label, a14k < -60.0);
     std::snprintf(label, sizeof label, "2:1 alias of 12 kHz below -30 dB (%.1f dB)", a12k);
@@ -463,7 +471,7 @@ static void beatsTests() {
   CHECK("beats: the windows agree (not rubato)", ok && d.consistency >= 0.6);
   CHECK("beats: the lattice has a beat every ~0.5 s", ok && std::fabs(lat.medSec - 0.5) < 0.02 &&
         lat.beatsSec.size() > 50);
-  CHECK("beats: stamp is the TS's BEAT_DETECT_VERSION", singz::kBeatDetectVersion == 22);
+  CHECK("beats: stamp is the TS's BEAT_DETECT_VERSION", singz::kBeatDetectVersion == 23);
 
   // The meter test: a straight 4/4 click train must NOT read as compound.
   // (Its 6/8 counterpart is a library fact rather than a synthesis one —
@@ -524,23 +532,31 @@ static void sumStemsTests() {
   const std::vector<float> got = singz::sumStemsTo22k({a, b}, err);
   CHECK("two stems sum without error", err.empty());
 
-  // The reference: hand-sum (padding b with silence), then the very
-  // Resampler the function is contracted to use.
+  // The reference: hand-sum (padding b with silence), the equal-power gain,
+  // then the very Resampler the function is contracted to use, made
+  // time-true the same way — latency dropped, tail cut to inLen/2. The
+  // contract this pins moved twice by measurement (beat_this.cpp says why):
+  // the model's input is sample i == the song at i/22050 s, at -3 dB
+  // pan-law level.
   std::vector<float> mix(static_cast<size_t>(an), 0.0f);
   for (int i = 0; i < an; i++) mix[static_cast<size_t>(i)] += av[static_cast<size_t>(i)];
   for (int i = 0; i < bn; i++) mix[static_cast<size_t>(i)] += bv[static_cast<size_t>(i)];
+  for (float& v : mix) v *= 1.4142135623730951f;
   singz::Resampler rs(44100, singz::kBeatThisSr, 1);
   std::vector<float> want;
   rs.process(mix.data(), an, want);
   rs.flush(want);
+  const size_t latency = static_cast<size_t>(rs.latencyOutFrames());
+  if (want.size() > latency) want.erase(want.begin(), want.begin() + static_cast<long>(latency));
+  if (want.size() > static_cast<size_t>(an) / 2) want.resize(static_cast<size_t>(an) / 2);
   bool same = got.size() == want.size();
   for (size_t i = 0; same && i < got.size(); i++) same = got[i] == want[i];
-  CHECK("sum+decimate == Resampler(hand-sum), tail included", same);
-  // Half the frames plus the filter tail that flush() drains — at most one
-  // output sample per tap, never less than half. A missing flush() would
-  // land at exactly an/2 and fail the identity check above too.
-  CHECK("output is decimated (half the frames plus the filter tail)",
-        got.size() >= static_cast<size_t>(an / 2) && got.size() <= static_cast<size_t>(an / 2 + 128));
+  CHECK("sum+decimate == Resampler(hand-sum), time-true", same);
+  // Exactly half the frames now: latency dropped at the head, the flush
+  // tail cut at inLen/2 — time-true output has no filter overhang. A
+  // missing flush() would come up short and fail the identity check above.
+  CHECK("output is exactly half the frames (time-true)",
+        got.size() == static_cast<size_t>(an / 2));
 
   // Refusals say why, with the path in the message.
   const std::vector<float> none = singz::sumStemsTo22k({}, err);

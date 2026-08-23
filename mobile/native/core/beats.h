@@ -29,7 +29,7 @@ namespace singz {
  *  v22 moved for the desktop's INPUT, not the detector: it now reads stems
  *  from their files at the file's own rate (which this core always did), so
  *  the port itself is unchanged and the parity gates hold across the bump. */
-constexpr int kBeatDetectVersion = 22;
+constexpr int kBeatDetectVersion = 23;
 
 /** A drum-free span the fill was applied to, in seconds — the caller's cue
  *  that a stretch was carried by other stems (or, when `filled` is false,

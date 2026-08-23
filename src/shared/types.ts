@@ -475,8 +475,11 @@ export interface SingzApi {
   /** Melody progress from the combined pass (0..1). */
   onMelodyNativeProgress(cb: (p: number) => void): () => void
   /** Run ML beat/downbeat detection on raw mono float32 PCM at `sr` (22050). */
-  beatsMlDetect(pcm: ArrayBuffer, sr: number): Promise<BeatsMlResult>
-  /** Beat-model progress (0..1) while beatsMlDetect runs. Returns unsubscribe. */
+  /** Beat This! on the CORE-rendered mix of these REGISTERED stem files
+   *  (singz-analyze mlmix -> the pack's python runner). The renderer never
+   *  renders the model's input — one render for every platform. */
+  beatsMlDetectStems(paths: string[]): Promise<BeatsMlResult>
+  /** Beat-model progress (0..1) while beatsMlDetectStems runs. Returns unsubscribe. */
   onBeatsProgress(cb: (p: number) => void): () => void
   revealInFolder(path: string): Promise<void>
   openExternal(url: string): Promise<void>

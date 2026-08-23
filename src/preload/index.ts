@@ -68,7 +68,7 @@ const api: SingzApi = {
     }
   },
 
-  beatsMlDetect: (pcm, sr) => ipcRenderer.invoke('beats:mlDetect', pcm, sr),
+  beatsMlDetectStems: (paths) => ipcRenderer.invoke('beats:mlDetectStems', paths),
 
   revealInFolder: (path) => ipcRenderer.invoke('stems:reveal', path),
 

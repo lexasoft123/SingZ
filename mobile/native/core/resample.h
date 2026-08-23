@@ -30,6 +30,15 @@ class Resampler {
   // Push the remaining history through (call once, at end of input).
   void flush(std::vector<float>& out);
 
+  // Output frames to drop for a time-true signal: the zero history primes
+  // (tapsPerPhase_-1) input samples of delay and the linear-phase kernel
+  // another (tapsPerPhase_-1)/2. Exact (integer) for the decimating design,
+  // whose odd tap count is chosen for it; callers that only care about
+  // steady-state content (the split engine's near-unity path) ignore it.
+  int64_t latencyOutFrames() const {
+    return static_cast<int64_t>(3) * (tapsPerPhase_ - 1) / 2 * up_ / down_;
+  }
+
  private:
   int up_ = 1;
   int down_ = 1;

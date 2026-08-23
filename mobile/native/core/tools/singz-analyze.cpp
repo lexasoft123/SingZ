@@ -339,6 +339,37 @@ int main(int argc, char** argv) {
 
     return 0;
   }
+  if (cmd == "mlmix") {
+    // Dev/eval: the Beat This input as the CORE renders it (sumStemsTo22k),
+    // raw float32 mono 22.05 kHz — the render-study's core leg, and the
+    // reference for any desktop switch off Chromium's render.
+    if (argc < 4) {
+      std::fprintf(stderr, "usage: singz-analyze mlmix <out.f32> <stem> [<stem>...]\n");
+      return 2;
+    }
+    std::vector<std::string> stems;
+    for (int i = 3; i < argc; i++) stems.emplace_back(argv[i]);
+    std::string err;
+    const std::vector<float> mix = singz::sumStemsTo22k(stems, err);
+    if (!err.empty()) {
+      std::fprintf(stderr, "mlmix: %s\n", err.c_str());
+      return 1;
+    }
+    FILE* f = std::fopen(argv[2], "wb");
+    if (!f) {
+      std::fprintf(stderr, "mlmix: cannot write %s\n", argv[2]);
+      return 1;
+    }
+    const size_t wrote = std::fwrite(mix.data(), sizeof(float), mix.size(), f);
+    std::fclose(f);
+    if (wrote != mix.size()) {
+      std::fprintf(stderr, "mlmix: short write\n");
+      return 1;
+    }
+    std::printf("{\"samples\":%zu,\"sr\":22050}\n", mix.size());
+    return 0;
+  }
+
   if (cmd == "melody") {
     std::vector<float> mono;
     if (!wav.empty()) {

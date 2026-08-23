@@ -1,17 +1,12 @@
 #!/usr/bin/env node
 /**
- * Render the Beat This! input the way the desktop app does — stems decoded
- * and summed by Chromium's OfflineAudioContext at 22 050 Hz (App.tsx
- * fetchMlGrid) — and write the mono float32 out. This is the reference the
- * phone's native sum (sumStemsTo22k) is measured against: not soxr, not the
- * core's own resampler, but the renderer whose grids the desktop ships.
- *
- * "The way", not "exactly": the desktop decodes stems through the engine's
- * AudioContext at the DEVICE rate (48 kHz on most Macs), so its model input
- * is 44.1k -> 48k -> 22.05k, while this decodes at 44.1k. Chromium is the
- * same, the hop is not — this oracle is one of the desktop's own answers,
- * not the answer, which is exactly why the device suites gate the beat
- * LATTICE (F1 at 70 ms) against it and never bit-equality.
+ * HISTORICAL REFERENCE: the Chromium render the desktop used to ship —
+ * stems decoded and summed by an OfflineAudioContext at 22 050 Hz, the old
+ * fetchMlGrid path. The desktop now renders the model's input in the CORE
+ * (singz-analyze mlmix -> sumStemsTo22k: time-true, -3 dB pan-law level;
+ * BEAT_DETECT_VERSION 23, study in docs/BEAT-DETECTION.md), so the device
+ * suites' oracle mixes come from mlmix, not from here. This script remains
+ * the way to reproduce the pre-v23 input when investigating an old grid.
  *
  *   node scripts/render-ml-mix.cjs <out.f32> <stem.wav> [<stem.wav> …]
  *

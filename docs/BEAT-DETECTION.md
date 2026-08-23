@@ -738,6 +738,54 @@ design before any of 5c's complexity is paid for. 5d is valuable even if 5a–c
 all die — pins alone would have fixed every meter complaint this week, by
 hand, in seconds per song.
 
+## 10. The render study (2026-08-24) — the model's input moves into the core
+
+The question that opened it: can the desktop stop rendering the model's mix
+in Chromium's `OfflineAudioContext` (an input that moves with every Electron
+upgrade and cannot be reproduced on a phone) without changing the answers?
+Method: 17 library songs x three renders of the same six stems to 22.05 kHz
+mono (Chromium; the core's `sumStemsTo22k`; ffmpeg swresample), one model
+(final0, mps), scored raw AND through the real fused `detectBeats` against
+the ground-truth harness.
+
+What fell out, in order:
+
+1. **Raw lattices are render-equal, fused grids are not.** All three renders
+   give identical GT outcomes on the bare model (10/16 each, beat F1 0.99
+   between any pair) — but through the fusion, Chromium scored 52/55, the
+   core's old brick-wall Kaiser 50/55, ffmpeg 54/55, with two downbeat
+   ROTATIONS flipped (Father and Son, Zeit). Stable under a one-sample
+   shift: real content differences, not seam luck.
+2. **The filter was not the difference.** Rebuilding the core's decimating
+   branch to swresample's published design (32 taps/net decimation, beta 9,
+   cutoff 0.97 — replacing 48-tap/beta-10.056/full-cutoff) and making it
+   time-true (odd tap count, `latencyOutFrames()` compensation; the old
+   output ran ~2.1 ms late, history priming + group delay) brought the core
+   mix to −32 dB residual against Chromium's… and still 51/55.
+3. **The LEVEL was the difference.** ffmpeg's mono downmix is equal-power
+   (0.707·(L+R)), +3.00 dB over WebAudio's 0.5·(L+R). The same core mixes
+   scaled by sqrt(2): **54/55**, both rotations landing with the ground
+   truth. Chromium's mix at +3 dB: 52/55 — so at equal level the sinc
+   renders beat the linear-interpolation one, and `beat_this` normalizes
+   nothing (`log1p(1000·mel)`), so input level is part of the model's
+   contract. Every historical score in this document was minted through
+   ffmpeg mixes — the research record was always calibrated at the hot
+   level; the app ran 3 dB below its own rig.
+
+Shipped as **v23**: `sumStemsTo22k` = swr-shaped 65-tap Kaiser, time-true,
+×sqrt(2) equal-power level; the desktop's mix comes from `singz-analyze
+mlmix` (main-side — `fetchMlGrid` renders nothing); `make-ml-grids.mjs` and
+`run-beat-this.mjs` mix through the same subcommand, so the product, the
+phones and this document's harness hear one input for good. Known-good
+fused, v23 input: **54/55** (the one FAIL is Father and Son's `barLenAt`
+105.5 s seam, want 3 got 4 — the meter-change class §9 exists for). Found
+while landing this: `make-ml-grids.mjs` wrote RAW names where run-current
+looks up SLUGS, so every multi-word song had been silently lattice-less in
+every historical `--ml` run — the recorded "45/51 with the model" was a
+partial-lattice score. Ids are slugged at mint now; 45/51 partial and 54/55
+full-lattice are not comparable numbers. `scripts/render-ml-mix.cjs` survives as
+the way to reproduce a pre-v23 grid.
+
 ## Appendix: version history (one line each)
 
 | v | What | Trigger |
@@ -755,3 +803,5 @@ hand, in seconds per song.
 | 15 | Acoustic octave tiebreak, per-span bar-anchored parity, `__beatDbg` | Puppe drift + app/harness divergence |
 | 16 | Per-span model level (both-set membership + insert level check), model-ambivalence-gated octave window | Wild World: wrong bpm, half-tempo last third |
 | 17 | Adopted lattices flattened to one level; doubling gated on the model having committed to one; symmetric level-mix statistic | Father and Son: 136 bpm with a 250 bpm intro |
+| 22 | Every analysis reads stems from FILES at the file's rate | Device-rate octave flips (§6) |
+| 23 | Model input rendered by the core: swr-shaped time-true resampler, equal-power (+3 dB) level, `mlmix` everywhere | The render study (§10) |
