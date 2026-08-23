@@ -167,6 +167,159 @@ export function FolderGlyph({ color }: { color: string }): React.JSX.Element {
   )
 }
 
+/** Play/pause for the transport — drawn triangles and bars instead of the
+ *  ▶/❚❚ text glyphs, which Android faces render at whatever weight they
+ *  please. */
+export function PlayPauseGlyph({
+  playing,
+  color
+}: {
+  playing: boolean
+  color: string
+}): React.JSX.Element {
+  return playing ? (
+    <View style={{ flexDirection: 'row', gap: 5 }}>
+      <View style={{ width: 5, height: 20, borderRadius: 1.5, backgroundColor: color }} />
+      <View style={{ width: 5, height: 20, borderRadius: 1.5, backgroundColor: color }} />
+    </View>
+  ) : (
+    <View
+      style={{
+        marginLeft: 4,
+        width: 0,
+        height: 0,
+        borderLeftWidth: 18,
+        borderLeftColor: color,
+        borderTopWidth: 11,
+        borderTopColor: 'transparent',
+        borderBottomWidth: 11,
+        borderBottomColor: 'transparent'
+      }}
+    />
+  )
+}
+
+/** Back-to-start: a bar and a left-pointing triangle, replacing ⏮︎. */
+export function ToStartGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
+      <View style={{ width: 2.5, height: 13, borderRadius: 1, backgroundColor: color }} />
+      <View
+        style={{
+          width: 0,
+          height: 0,
+          borderRightWidth: 11,
+          borderRightColor: color,
+          borderTopWidth: 7,
+          borderTopColor: 'transparent',
+          borderBottomWidth: 7,
+          borderBottomColor: 'transparent'
+        }}
+      />
+    </View>
+  )
+}
+
+/** Speaker glyph for the mixer's Mute — crossed when muted. M and S were
+ *  mixing-desk initials; the glyphs say what happens to the sound. Drawn
+ *  with the RN border-triangle trick, the same reasoning as MicGlyph. */
+export function SpeakerGlyph({
+  color,
+  slashed
+}: {
+  color: string
+  slashed?: boolean
+}): React.JSX.Element {
+  return (
+    <View style={{ width: 13, height: 14 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 4,
+          width: 4,
+          height: 6,
+          borderRadius: 1,
+          backgroundColor: color
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: 3,
+          top: 1,
+          width: 0,
+          height: 0,
+          borderRightWidth: 8,
+          borderRightColor: color,
+          borderTopWidth: 6,
+          borderTopColor: 'transparent',
+          borderBottomWidth: 6,
+          borderBottomColor: 'transparent'
+        }}
+      />
+      {slashed === true && (
+        <View
+          style={{
+            position: 'absolute',
+            left: -2,
+            top: 6,
+            width: 17,
+            height: 2,
+            borderRadius: 1,
+            backgroundColor: color,
+            transform: [{ rotate: '-45deg' }]
+          }}
+        />
+      )}
+    </View>
+  )
+}
+
+/** Headphones glyph for the mixer's Solo — hear only this. */
+export function HeadphonesGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 14, height: 12 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: 14,
+          height: 12,
+          borderWidth: 2,
+          borderColor: color,
+          borderBottomWidth: 0,
+          borderTopLeftRadius: 7,
+          borderTopRightRadius: 7
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: -1,
+          bottom: 0,
+          width: 4,
+          height: 6,
+          borderRadius: 1.5,
+          backgroundColor: color
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          right: -1,
+          bottom: 0,
+          width: 4,
+          height: 6,
+          borderRadius: 1.5,
+          backgroundColor: color
+        }}
+      />
+    </View>
+  )
+}
+
 /** Phone glyph for the source tabs — outline with a home bar. */
 export function PhoneGlyph({ color }: { color: string }): React.JSX.Element {
   return (
@@ -419,7 +572,8 @@ export function Bar({
   height = 22,
   track = W_TRACK,
   label,
-  valueText
+  valueText,
+  rail
 }: {
   value: number
   onChange: (v: number) => void
@@ -431,6 +585,10 @@ export function Bar({
   label?: string
   /** How to say the current value out loud (defaults to a percentage). */
   valueText?: (v: number) => string
+  /** Replace the default 5px track + knob with a custom rail (the player's
+   *  waveform seek bar). Gets the displayed fraction; the touch strip, the
+   *  gesture arbitration and the screen-reader surface stay Bar's. */
+  rail?: (pct: number) => React.ReactNode
 }): React.JSX.Element {
   const width = useRef(1)
   const last = useRef(0)
@@ -593,34 +751,40 @@ export function Bar({
       onResponderRelease={commit}
       onResponderTerminate={terminate}
     >
-      <View style={{ height: 5, borderRadius: 3, backgroundColor: track, overflow: 'hidden' }}>
-        <View
-          pointerEvents="none"
-          style={{
-            width: `${pct * 100}%`,
-            height: '100%',
-            borderRadius: 3,
-            backgroundColor: color
-          }}
-        />
-      </View>
-      {/* The knob. Without it a fader at 100% — which every stem is by default
-          — was a solid coloured line with no handle and a track too dim to
-          read: it looked like a divider, not something you could drag. */}
-      <View
-        pointerEvents="none"
-        style={{
-          position: 'absolute',
-          left: `${pct * 100}%`,
-          marginLeft: -7,
-          width: 14,
-          height: 14,
-          borderRadius: 7,
-          backgroundColor: color,
-          borderWidth: 2,
-          borderColor: KIT.bg
-        }}
-      />
+      {rail != null ? (
+        rail(pct)
+      ) : (
+        <>
+          <View style={{ height: 5, borderRadius: 3, backgroundColor: track, overflow: 'hidden' }}>
+            <View
+              pointerEvents="none"
+              style={{
+                width: `${pct * 100}%`,
+                height: '100%',
+                borderRadius: 3,
+                backgroundColor: color
+              }}
+            />
+          </View>
+          {/* The knob. Without it a fader at 100% — which every stem is by default
+              — was a solid coloured line with no handle and a track too dim to
+              read: it looked like a divider, not something you could drag. */}
+          <View
+            pointerEvents="none"
+            style={{
+              position: 'absolute',
+              left: `${pct * 100}%`,
+              marginLeft: -7,
+              width: 14,
+              height: 14,
+              borderRadius: 7,
+              backgroundColor: color,
+              borderWidth: 2,
+              borderColor: KIT.bg
+            }}
+          />
+        </>
+      )}
     </View>
   )
 }
