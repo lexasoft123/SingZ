@@ -55,6 +55,7 @@ import {
   Seg,
   Sheet,
   SpeakerGlyph,
+  splitSongName,
   StemTile,
   STEM_TILE_COLORS,
   Stepper,
@@ -1160,12 +1161,15 @@ export default function PlayerScreen({
         <StemTile hue={tileHue} size={46} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={s.hTitle} numberOfLines={1}>
-            {project.name}
+            {splitSongName(project.name).title}
           </Text>
           {/* "SingZ project" used to lead here, spending the most prominent
               line under the title telling the singer that this app's song is
               this app's song. What is left is what varies between songs. */}
-          <Text style={s.hSub}>
+          <Text style={s.hSub} numberOfLines={1}>
+            {splitSongName(project.name).artist != null
+              ? `${splitSongName(project.name).artist} · `
+              : ''}
             {originalOnly ? 'Not split yet' : `${stemIds.length - addedCount} stems`}
             {addedCount > 0 ? ` · ${addedCount} added` : ''}
             {beatInfo ? ` · ${Math.round(beatInfo.bpm)} bpm` : ''}

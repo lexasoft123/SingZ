@@ -89,6 +89,21 @@ export const STEM_TILE_COLORS: string[][] = [
 ]
 const TILE_WIDTHS = ['100%', '72%', '88%', '60%'] as const
 
+/**
+ * "Artist — Title" project names, split for display. Desktop-synced songs
+ * commonly carry the artist in the name, and on a card one line wide the
+ * artist ate the title ("Cat Stevens — Fat…" told nobody which song this
+ * is). Splits on the FIRST spaced dash — em, en or hyphen; the spaces are
+ * what keep hyphenated words ("Mr-X") whole. The SORT stays on the full
+ * name on purpose: an artist's songs clustering together is a feature, and
+ * this helper is display only.
+ */
+export function splitSongName(name: string): { title: string; artist: string | null } {
+  const m = /^(.+?)\s+[—–-]\s+(.+)$/.exec(name)
+  if (m == null) return { title: name, artist: null }
+  return { title: m[2], artist: m[1] }
+}
+
 /** Mini artwork: four stem lanes, hue-rotated per project.
  *
  *  `neutral` draws every lane in the `original` hue — an unsplit song has no

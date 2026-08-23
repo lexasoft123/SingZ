@@ -50,7 +50,7 @@ import {
 } from '../projects'
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
 import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
-import { C, Chip, FolderGlyph, PhoneGlyph, Seg, StemTile, STEM_TILE_COLORS, white } from './bits'
+import { C, Chip, FolderGlyph, PhoneGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, white } from './bits'
 import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
@@ -1210,6 +1210,15 @@ export default function CatalogScreen({
     TEST.dismissBeatModels = dismissBeatModels
   })
 
+  /** Open-row handles by card key: a row that starts LOADING is snapped
+   *  shut. `enabled={false}` alone froze an already-open row — a live
+   *  Remove beside the cancel ✕ for the whole decode, reachable by
+   *  swipe-open-then-tap-the-face. */
+  const swipeRefs = useRef<Record<string, { close: () => void } | null>>({})
+  useEffect(() => {
+    if (loading?.dir != null) swipeRefs.current[loading.dir]?.close()
+  }, [loading?.dir])
+
   const card = (opts: {
     key: string
     dir: string
@@ -1230,6 +1239,9 @@ export default function CatalogScreen({
      *  song has nothing to offer: a Drive song with nothing downloaded used to
      *  take the long-press and silently do nothing. */
     menu?: (() => void) | null
+    /** The artist half of an "Artist — Title" name, on its own line — the
+     *  one-line title kept eating the song ("Cat Stevens — Fat…"). */
+    artist?: string | null
     /** The card's key · tempo line, on the fixed right rail. */
     keyLine?: string | null
     /** All-neutral tile lanes — an unsplit song has no stem colours yet. */
@@ -1269,6 +1281,11 @@ export default function CatalogScreen({
           <Text style={s.cardTitle} numberOfLines={1}>
             {opts.title}
           </Text>
+          {opts.artist != null && (
+            <Text style={s.cardArtist} numberOfLines={1}>
+              {opts.artist}
+            </Text>
+          )}
           {isLoading ? (
             <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={1}>
               {loading.msg}
@@ -1342,6 +1359,20 @@ export default function CatalogScreen({
     return (
       <Swipeable
         key={opts.key}
+        ref={(m) => {
+          swipeRefs.current[opts.key] = m
+        }}
+        /* A LOADING card must not swipe: the revealed Remove landed under the
+           cancel ✕ (photographed on the user's phone mid-decode), and
+           deleting a song while its stems decode is not a state anyone
+           meant. */
+        enabled={!isLoading}
+        /* Default activation is 10px — inside a real finger's tap jitter, so
+           on the phone a plain TAP could fling the row open (the simulator's
+           mouse taps are pixel-perfect, which is why it never showed there).
+           24px demands a deliberate pull and costs an intentional swipe
+           nothing. */
+        dragOffsetFromRight={-24}
         overshootRight={false}
         containerStyle={s.swipeRow}
         renderRightActions={(progress, _translation, methods) => (
@@ -1743,7 +1774,8 @@ export default function CatalogScreen({
               tileNeutral: !split,
               tileGlow: split ? STEM_TILE_COLORS[hue][0] : undefined,
               keyLine: split ? keyTempoOf(p.doc) : null,
-              title: p.doc.name ?? p.dir,
+              title: splitSongName(p.doc.name ?? p.dir).title,
+              artist: splitSongName(p.doc.name ?? p.dir).artist,
               meta: (
                 <>
                   {Object.keys(p.stems).length > 0
@@ -1858,6 +1890,8 @@ export default function CatalogScreen({
                     dir: SAMPLE_DIR,
                     hue: 0,
                     tileGlow: STEM_TILE_COLORS[0][0],
+                    /* NOT split: "Sample — Sing with me" would grow a fake
+                       artist called Sample. */
                     title: sampleTitle,
                     meta: 'bundled · always available',
                     right: <Text style={s.status}>✓</Text>,
@@ -2054,6 +2088,7 @@ const s = StyleSheet.create({
   },
   cardLoading: { backgroundColor: 'rgba(242,193,78,0.07)', borderColor: 'rgba(242,193,78,0.25)' },
   cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
+  cardArtist: { color: white(0.68), fontSize: 13, fontWeight: '600', marginTop: 1 },
   cardMeta: { color: white(0.5), fontSize: 12.5, marginTop: 3 },
   status: { color: C.dim, fontSize: 12, fontWeight: '600' },
   moreBtn: { width: 30, height: 34, alignItems: 'center', justifyContent: 'center' },
