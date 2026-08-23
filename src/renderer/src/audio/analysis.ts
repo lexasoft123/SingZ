@@ -334,8 +334,18 @@ export function estimateKeyFromStems(inst: AudioBuffer[], bass: AudioBuffer | nu
  * checks against 40/51 (45 vs 44 with the model). The bump retires grids
  * derived from device-rate input; on a 44.1 kHz output device the two paths
  * were always identical.
+ *
+ * v23: the model's mix is rendered by the CORE (sumStemsTo22k — swr-shaped
+ * 65-tap Kaiser, time-true, -3 dB pan-law level), not by Chromium's
+ * OfflineAudioContext, so desktop and phone lattices come from one render
+ * that no Electron upgrade can move. Measured on the 17-song library, fused:
+ * 54/55 GT checks against 52/55 for the Chromium render — the gain is the
+ * level (beat_this normalizes nothing, and the whole research record was
+ * calibrated through ffmpeg mixes carrying exactly this level), the render
+ * itself is value-neutral at equal level. The bump retires grids whose
+ * lattice heard the old input.
  */
-export const BEAT_DETECT_VERSION = 22
+export const BEAT_DETECT_VERSION = 23
 
 export interface DetectedBeats {
   /** Beat times in seconds, ascending. Follows real tempo drift. */

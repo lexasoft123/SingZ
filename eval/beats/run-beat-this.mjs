@@ -66,16 +66,16 @@ function decodeTo(dest, file) {
   if (r.status !== 0) throw new Error(`ffmpeg failed on ${file}: ${r.stderr}`)
 }
 
-/** Sum several stems into one f32le mono 22.05k mix at dest. */
+/** Sum several stems into one f32le mono 22.05k mix at dest — the CORE's own
+ *  render (singz-analyze mlmix), the same input the app ships and the phones
+ *  run. The ffmpeg amix this replaced carried the same -3 dB pan-law level,
+ *  so historical scores stay comparable. */
+let cachedBin = null
 function mixTo(dest, files) {
-  const inputs = files.flatMap((f) => ['-i', f])
-  const filter = `amix=inputs=${files.length}:duration=longest:normalize=0`
-  const r = spawnSync(
-    'ffmpeg',
-    ['-v', 'error', '-y', ...inputs, '-filter_complex', filter, '-ac', '1', '-ar', String(SR), '-f', 'f32le', dest],
-    { encoding: 'utf8' }
-  )
-  if (r.status !== 0) throw new Error(`ffmpeg mix failed (${files.join(', ')}): ${r.stderr}`)
+  if (!cachedBin)
+    cachedBin = spawnSync('bash', [join(HERE, '..', '..', 'scripts', 'build-analyze-host.sh')], { encoding: 'utf8' }).stdout.trim()
+  const r = spawnSync(cachedBin, ['mlmix', dest, ...files], { encoding: 'utf8' })
+  if (r.status !== 0) throw new Error(`mlmix failed (${files.join(', ')}): ${r.stderr}`)
 }
 
 /* ---- Runner invocation --------------------------------------------------- */

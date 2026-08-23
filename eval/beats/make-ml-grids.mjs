@@ -7,11 +7,11 @@
  * matters here is that the grid is a real one — the branches a synthetic
  * lattice reaches are the branches someone thought to write, not the ones
  * real songs take (the doubling test, the waltz adoption, the level-mixed
- * splice views). Which mixer produced the model's input does not matter to a
- * parity run and is not claimed to match the desktop's: this sums the stems
- * with ffmpeg, where the app renders them through Chromium, and the two give
- * different grids (docs/BEAT-DETECTION.md — the model is that sensitive).
- * Both are real answers; only one input reaches both sides of the gate.
+ * splice views). The mixer IS the desktop's now: singz-analyze mlmix — the
+ * core's sumStemsTo22k, the same render the app ships and the phones run
+ * (docs/BEAT-DETECTION.md records the study that unified them; the ffmpeg
+ * mixes this replaced carried the same -3 dB pan-law level, so the research
+ * record's provenance is continuous).
  *
  *   node eval/beats/make-ml-grids.mjs --library [--out <file.jsonl>]
  *   node eval/beats/make-ml-grids.mjs <project-dir> ... --out <file.jsonl>
@@ -31,6 +31,12 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SR = 22050
 const PACK_PY = join(homedir(), 'Library', 'Application Support', 'SingZ', 'gpu-splitter', 'python', 'bin', 'python3')
 const PY = process.env.BEAT_THIS_PY ?? PACK_PY
+let cachedBin = null
+const analyzeBin = () => {
+  if (!cachedBin)
+    cachedBin = spawnSync('bash', [join(HERE, '..', '..', 'scripts', 'build-analyze-host.sh')], { encoding: 'utf8' }).stdout.trim()
+  return cachedBin
+}
 
 const args = process.argv.slice(2)
 const dirs = []
@@ -87,7 +93,11 @@ const tmp = join(tmpdir(), `singz-ml-mix-${process.pid}`)
 mkdirSync(tmp, { recursive: true })
 const jobs = []
 for (const dir of dirs) {
-  const id = basename(dir)
+  // The id is SLUGGED — run-current.mjs looks lattices up by
+  // name.replace(/[^\w-]+/g,'_'), and raw names left every multi-word song
+  // silently lattice-less in --ml runs (found 2026-08-24; the historical
+  // "45/51 with the model" was a partial-lattice run).
+  const id = basename(dir).replace(/[^\w-]+/g, '_')
   if (have.has(id)) continue
   const stemDir = join(dir, 'stems')
   const stems = readdirSync(stemDir)
@@ -99,17 +109,9 @@ for (const dir of dirs) {
     continue
   }
   const f32 = join(tmp, `${id.replace(/[^\w-]+/g, '_')}.f32`)
-  // normalize=0: amix scales its inputs by 1/n unless told otherwise, and a
-  // sum quieter than the model was trained on is a different input.
-  const r = spawnSync(
-    'ffmpeg',
-    ['-v', 'error', '-y', ...stems.flatMap((f) => ['-i', f]),
-      '-filter_complex', `amix=inputs=${stems.length}:duration=longest:normalize=0`,
-      '-ac', '1', '-ar', String(SR), '-f', 'f32le', f32],
-    { encoding: 'utf8' }
-  )
+  const r = spawnSync(analyzeBin(), ['mlmix', f32, ...stems], { encoding: 'utf8' })
   if (r.status !== 0) {
-    console.log(`SKIP  ${id} (ffmpeg: ${String(r.stderr).trim().split('\n').pop()})`)
+    console.log(`SKIP  ${id} (mlmix: ${String(r.stderr).trim().split('\n').pop()})`)
     continue
   }
   jobs.push({ id, f32, sr: SR })

@@ -30,7 +30,7 @@
 #     framing bug survived a year of green runs. That class needs the rate axis
 #     inside melody-parity and tests/e2e/mac/melody-stem-rate-e2e.cjs.
 #
-# Needs: node, a C++ toolchain, ffmpeg. courts-parity and courts-decide-parity
+# Needs: node, a C++ toolchain, cmake, ffmpeg. courts-parity and courts-decide-parity
 # additionally need the platform's libm to agree with V8 on cos/sin/log2/log1p
 # /hypot — see the header of eval/courts-parity.mjs, which lists what has been
 # measured: macOS/arm64, the pinned CI runner, and Debian 12 on two
@@ -39,7 +39,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
-ALL=(melody-parity key-parity beats-parity courts-parity courts-decide-parity mlgrid-parity)
+ALL=(melody-parity key-parity beats-parity courts-parity courts-decide-parity mlgrid-parity analyze-parity)
 BIN=""
 GATES=()
 while [ $# -gt 0 ]; do

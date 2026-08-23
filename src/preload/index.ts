@@ -49,8 +49,26 @@ const api: SingzApi = {
   cancelSeparation: () => ipcRenderer.invoke('separation:cancel'),
 
   beatsMlAvailable: () => ipcRenderer.invoke('beats:mlAvailable'),
+  melodyNativeAvailable: () => ipcRenderer.invoke('melody:available'),
+  analyzeNative: (input) => ipcRenderer.invoke('analyze:run', input),
+  analyzeProvideMl: (ml, aux, token) => ipcRenderer.invoke('analyze:ml', ml, aux, token),
+  onAnalyzePart: (cb) => {
+    const listener = (_e: IpcRendererEvent, part: unknown): void => cb(part as Parameters<typeof cb>[0])
+    ipcRenderer.on('analyze:part', listener)
+    return () => {
+      ipcRenderer.removeListener('analyze:part', listener)
+    }
+  },
+  cancelAnalyzeNative: () => ipcRenderer.invoke('melody:cancel'),
+  onMelodyNativeProgress: (cb) => {
+    const listener = (_e: IpcRendererEvent, p: number): void => cb(p)
+    ipcRenderer.on('melody:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('melody:progress', listener)
+    }
+  },
 
-  beatsMlDetect: (pcm, sr) => ipcRenderer.invoke('beats:mlDetect', pcm, sr),
+  beatsMlDetectStems: (paths) => ipcRenderer.invoke('beats:mlDetectStems', paths),
 
   revealInFolder: (path) => ipcRenderer.invoke('stems:reveal', path),
 

@@ -1,9 +1,11 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { BeatsMlResult } from '../shared/types'
 import { log, logChunk } from './log'
+import { resolveAnalyze } from './analyze'
+import { isAllowed } from './media'
 import { packBeatsAvailable, packDir, packPython } from './models'
 import { spawnEnv } from './separation'
 import { onChildSettled } from './child-exit'
@@ -43,7 +45,15 @@ class BeatsMl {
     return this.child !== null
   }
 
-  async detect(pcm: ArrayBuffer, sr: number): Promise<BeatsMlResult> {
+  /** The model's input is rendered by the CORE (singz-analyze mlmix →
+   *  sumStemsTo22k: swr-shaped Kaiser, time-true, -3 dB pan-law level), not
+   *  by the renderer's OfflineAudioContext — one render for desktop, phone
+   *  and the eval harness, that no Electron upgrade can move. Measured over
+   *  the 17-song library before the switch: fused GT 54/55 against the
+   *  Chromium render's 52/55 (the level is the difference; the render is
+   *  value-neutral at equal level), BEAT_DETECT_VERSION 23 retires what the
+   *  old input produced. */
+  async detectStems(paths: string[]): Promise<BeatsMlResult> {
     if (this.child) return { ok: false, error: 'Beat detection is already running.' }
     if (!(await packBeatsAvailable())) {
       return {
@@ -52,13 +62,49 @@ class BeatsMl {
           'The installed splitter pack does not include the beat model yet — re-download it in the model manager.'
       }
     }
+    const bin = await resolveAnalyze()
+    if (bin === null) return { ok: false, error: 'singz-analyze is not in this build.' }
     const tmpDir = join(app.getPath('temp'), 'singz-beats')
-    const f32 = join(tmpDir, `pcm-${process.pid}-${Date.now()}.f32`)
+    const f32 = join(tmpDir, `mix-${process.pid}-${Date.now()}.f32`)
     try {
       await mkdir(tmpDir, { recursive: true })
-      await writeFile(f32, Buffer.from(pcm))
-      return await this.run(f32, sr)
+      const mixed = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        const child = spawn(bin, ['mlmix', f32, ...paths])
+        // The slot is held for the WHOLE job, mlmix included — without this,
+        // a second detectStems during the mix seconds passed the busy check
+        // (two model runs), and cancel() had nothing to reach.
+        this.child = child
+        let errTail = ''
+        let timedOut = false
+        child.stderr?.on('data', (c: Buffer) => {
+          errTail = (errTail + c.toString('utf8')).slice(-2000)
+        })
+        const timer = setTimeout(() => {
+          timedOut = true
+          child.kill('SIGKILL')
+        }, 120_000)
+        child.on('error', (err) => {
+          clearTimeout(timer)
+          resolve({ ok: false, error: `Could not start singz-analyze: ${err.message}` })
+        })
+        onChildSettled(child, 'mlmix', (code) => {
+          clearTimeout(timer)
+          if (code === 0) resolve({ ok: true })
+          else if (timedOut) resolve({ ok: false, error: 'The mix render timed out.' })
+          // pop() yields '' on empty stderr, never undefined — || or the
+          // fallback can't fire (the same trap analyze.ts documents)
+          else resolve({ ok: false, error: errTail.trim().split('\n').pop() || `mlmix exit ${code}` })
+        })
+      })
+      if (!mixed.ok) {
+        this.child = null // a dead mlmix child must not wedge the slot
+        return { ok: false, error: mixed.error || 'The mix could not be rendered.' }
+      }
+      // run() overwrites the slot with the python child and clears it at
+      // settle; the settled mlmix child holds it across the gap harmlessly
+      return await this.run(f32, 22050)
     } catch (err) {
+      this.child = null
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
       await rm(f32, { force: true }).catch(() => undefined)
@@ -188,15 +234,13 @@ export function registerBeatsIpc(): void {
     }
   })
 
-  ipcMain.handle('beats:mlDetect', (_e, pcm: unknown, sr: unknown): Promise<BeatsMlResult> => {
-    if (!(pcm instanceof ArrayBuffer) || pcm.byteLength === 0) {
-      return Promise.resolve({ ok: false, error: 'No audio was provided.' })
-    }
-    const rate = Number(sr)
-    if (!Number.isFinite(rate) || rate <= 0) {
-      return Promise.resolve({ ok: false, error: 'Invalid sample rate.' })
-    }
-    return beatsMl.detect(pcm, rate)
+  ipcMain.handle('beats:mlDetectStems', (_e, raw: unknown): Promise<BeatsMlResult> => {
+    const paths = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === 'string') : []
+    if (paths.length === 0) return Promise.resolve({ ok: false, error: 'No stems were provided.' })
+    // The same gate media:read stands behind: only files the load path
+    // registered may reach the mix.
+    for (const p of paths) if (!isAllowed(p)) return Promise.resolve({ ok: false, error: 'File is not registered.' })
+    return beatsMl.detectStems(paths)
   })
 }
 

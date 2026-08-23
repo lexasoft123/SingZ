@@ -103,7 +103,7 @@ function resampleStem(file, rate) {
     app = await _electron.launch({
       executablePath: require('electron'),
       args: [APP],
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
+      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
     })
     await quietLaunch(app) // measurement runs must not steal the singer's focus
     app.process().stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`))
@@ -143,9 +143,28 @@ function resampleStem(file, rate) {
       const got = await win.evaluate(() => ({
         hopSec: window.__melody.hopSec,
         frames: window.__melody.f0.length,
-        stored: !!window.__melody.stored
+        stored: !!window.__melody.stored,
+        src: window.__melody.src ?? '(untagged)'
       }))
-      console.log(`open #${pass}: hop ${got.hopSec}, ${got.frames} frames, adopted from disk: ${got.stored}`)
+      console.log(`open #${pass}: hop ${got.hopSec}, ${got.frames} frames, adopted from disk: ${got.stored}, src: ${got.src}`)
+      // Which implementation tracked is part of what this driver certifies:
+      // a dev/packaged build carries singz-analyze, so the fresh line must be
+      // the CORE's — a 'worker' here means the loud-fallback fired, i.e. the
+      // binary is missing or stale, and that must fail the run rather than
+      // pass on the lookalike TS answer (the parity gates make them
+      // indistinguishable in the line, which is exactly why the tag exists).
+      if (pass === 1 && got.src !== 'core')
+        fail.push(`open #1 tracked via '${got.src}' — expected the core binary (missing or stale singz-analyze?)`)
+      // The key rides the same binary and the same loud-fallback rule; its
+      // detector runs in this very pass, so certify it here too.
+      if (pass === 1) {
+        const keySrc = await win
+          .waitForFunction(() => window.__keySrc, null, { timeout: 120000 })
+          .then(() => win.evaluate(() => window.__keySrc))
+          .catch(() => '(never set)')
+        console.log(`key detected via: ${keySrc}`)
+        if (keySrc !== 'core') fail.push(`key detected via '${keySrc}' — expected the core binary`)
+      }
 
       if (pass === 1) {
         if (got.stored) fail.push('open #1 adopted a line instead of tracking — settings.melody was not stripped')

@@ -15,6 +15,7 @@ import {
   estimateKey,
   estimateKeyFromStems,
   sanitizeKeyInfo,
+  type DetectedBeats,
   type KeyGuess,
   type MlGrid
 } from './audio/analysis'
@@ -188,6 +189,147 @@ async function melodyInput(
   return { mono: fold(buf), sampleRate: buf.sampleRate }
 }
 
+/**
+ * The beat grid through the core, when the binary is here — Phase 4 of the
+ * cutover. The renderer still decodes the stems (the neural mix is rendered
+ * HERE, from Chromium's decode — the model's canonical input, docs/BEAT-
+ * DETECTION.md) and still produces the ML grid; what moves out is the
+ * 1.7-second synchronous detectBeats call. The parity gate held every branch
+ * of the ML fork IDENTICAL over the whole library with real grids before this
+ * swap (eval/beats-parity.mjs --library --ml), which is what licensed it.
+ * Returns null when the core cannot answer — wrong stamp, missing binary,
+ * failed run — after saying WHY out loud; the caller then runs the TS.
+ */
+/**
+ * One combined core pass — Phase 5 of the cutover, the shape the user set:
+ * "the core can do melody/key/beats in one pass, configurable via cli args;
+ * the TS asks for all simultaneously." One child, every stem file read once
+ * BY THE CORE (file paths, never streamed buffers: analysisStems' per-lane
+ * fallback can hand back a device-rate playback buffer, and streaming would
+ * carry that into the core silently — the rate-bug class this session
+ * closed twice). The lattice arrives late over the child's stdin, so melody
+ * and key run while the renderer's own model is still busy.
+ *
+ * Returns the per-part results; every refusal (missing binary, wrong stamp,
+ * malformed part) is a per-part `undefined` AFTER a loud warn, and the
+ * caller runs that part's TS fallback.
+ */
+let analyzeRunSeq = 0
+
+async function runCombinedCore(
+  want: { melody: boolean; key: boolean; beats: boolean },
+  paths: Record<string, string> | null,
+  ids: string[],
+  provideMl: () => Promise<{
+    ml: MlGrid | null
+    lineStarts: number[] | null
+    words: { s: number; e: number }[] | null
+  }>
+): Promise<{
+  melody?: { f0: Float32Array; raw?: Float32Array; rms?: Float32Array; hopSec: number }
+  key?: { pc: number; minor: boolean }
+  beats?: DetectedBeats | null
+}> {
+  const out: Awaited<ReturnType<typeof runCombinedCore>> = {}
+  if (!paths) return out
+  const avail = await window.singz.melodyNativeAvailable().catch(() => ({ ok: false, available: false }))
+  if (!avail.available) return out
+  const instPaths = ids
+    .filter((id) => id !== 'vocals' && id !== 'drums' && id !== 'bass')
+    .map((id) => paths[id])
+    .filter((p): p is string => typeof p === 'string')
+  const token = `run-${++analyzeRunSeq}`
+  const resP = window.singz
+    .analyzeNative({
+      token,
+      want,
+      vocals: ids.includes('vocals') ? (paths.vocals ?? null) : null,
+      drums: want.beats ? (paths.drums ?? null) : null,
+      bass: ids.includes('bass') ? (paths.bass ?? null) : null,
+      inst: instPaths,
+      // the lyric aux is only KNOWN late (lyrics load while the child is
+      // already tracking melody) — it travels with the lattice over stdin
+      lineStarts: null,
+      words: null
+    })
+    .catch((e) => ({ ok: false as const, error: String(e) }))
+  if (want.beats) {
+    // the model's own render happens renderer-side while the child already
+    // tracks melody and key; the child's beats stage blocks on stdin for the
+    // lattice AND the lyric aux, gathered at this late moment
+    const late = await provideMl().catch(() => ({ ml: null, lineStarts: null, words: null }))
+    await window.singz
+      .analyzeProvideMl(
+        late.ml
+          ? {
+              beats: Array.from(late.ml.beats),
+              downbeats: Array.from(late.ml.downbeats),
+              ...(late.ml.beatProb ? { beatProb: Array.from(late.ml.beatProb) } : {}),
+              ...(late.ml.downbeatProb ? { downbeatProb: Array.from(late.ml.downbeatProb) } : {}),
+              ...(late.ml.fps ? { fps: late.ml.fps } : {})
+            }
+          : null,
+        { lineStarts: late.lineStarts, words: late.words },
+        token
+      )
+      .catch(() => undefined)
+  }
+  const res = await resP
+  if (!res.ok) {
+    // E2E drivers read these, like the beat-model warnings
+    console.warn(`analysis: singz-analyze failed (${res.error}) — falling back to the in-app detectors`)
+    return out
+  }
+  const combined = res
+  if (want.melody) {
+    const m = combined.melody
+    if (m?.ok && m.f0 && m.hopSec && m.detVersion === PITCH_DETECT_VERSION) {
+      out.melody = { f0: m.f0, raw: m.raw, rms: m.rms, hopSec: m.hopSec }
+    } else if (m) {
+      console.warn(
+        m.ok
+          ? `melody: singz-analyze is stamped v${m.detVersion} but the app is v${PITCH_DETECT_VERSION} — a stale binary; falling back to the in-app tracker`
+          : `melody: singz-analyze failed (${m.error}) — falling back to the in-app tracker`
+      )
+    }
+  }
+  if (want.key) {
+    const k = combined.key
+    if (k?.ok && k.pc !== undefined && k.minor !== undefined && k.detVersion === KEY_DETECT_VERSION) {
+      out.key = { pc: k.pc, minor: k.minor }
+    } else if (k) {
+      console.warn(
+        k.ok
+          ? `key: singz-analyze is stamped v${k.detVersion} but the app is v${KEY_DETECT_VERSION} — a stale binary; falling back to the in-app detector`
+          : `key: singz-analyze failed (${k.error}) — falling back to the in-app detector`
+      )
+    }
+  }
+  if (want.beats) {
+    const b = combined.beats
+    if (b?.ok && b.detVersion === BEAT_DETECT_VERSION) {
+      out.beats =
+        !b.beats || b.beats.length === 0
+          ? null // the detector's own "no steady beat"
+          : {
+              beats: b.beats,
+              bpm: b.bpm ?? 0,
+              beatsPerBar: b.beatsPerBar ?? 4,
+              downbeat: b.downbeat ?? 0,
+              ...(b.hasDownbeats && b.downbeats ? { downbeats: b.downbeats } : {}),
+              ...(b.suspectAt && b.suspectAt.length > 0 ? { suspectAt: b.suspectAt } : {})
+            }
+    } else if (b) {
+      console.warn(
+        b.ok
+          ? `beats: singz-analyze is stamped v${b.detVersion} but the app is v${BEAT_DETECT_VERSION} — a stale binary; falling back to the in-app detector`
+          : `beats: singz-analyze failed (${b.error}) — falling back to the in-app detector`
+      )
+    }
+  }
+  return out
+}
+
 /** Guitar/piano lanes only appear when the song actually has them. */
 function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[]; buffers: AudioBuffer[] } {
   const keptOrder: string[] = []
@@ -216,6 +358,7 @@ function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[
  *  invisible without this. */
 function publishBeatDbg(
   why: string,
+  src: 'core' | 'ts',
   drums: AudioBuffer,
   aux: {
     bass: AudioBuffer | null
@@ -231,6 +374,7 @@ function publishBeatDbg(
     b ? { sr: b.sampleRate, n: b.length, ch: b.numberOfChannels } : null
   ;(window as { __beatDbg?: unknown }).__beatDbg = {
     why,
+    src,
     drums: stat(drums),
     bass: stat(aux.bass),
     vocals: stat(aux.vocals),
@@ -446,6 +590,36 @@ export default function App(): React.JSX.Element {
   /** A saved project's stored pitch line, waiting for prepMelody to adopt it
    *  (or throw it away as the work of an older tracker). */
   const storedMelodyRef = useRef<{ info: MelodyInfo; f0: Float32Array } | null>(null)
+  /** Adopt a detected key (store + display + autosave) — one implementation
+   *  for every path that produces one, core or TS, combined or standalone. */
+  const applyKeyRef = useRef<((pc: number, minor: boolean) => void) | null>(null)
+  /** Does THIS song still owe a key? Read by the combined pass so beats and
+   *  key share one child when both are owed. */
+  const keyNeededRef = useRef<(() => boolean) | null>(null)
+  /** The seq whose combined pass CARRIES the key — the standalone key path
+   *  must stand down for it, or the early melody part races it into the
+   *  single-flight (the same race the beats stash kills, on the key-only
+   *  lane: a no-drums song warned "already running" and burned a duplicate
+   *  harmonic decode on a machine where the core had already answered). */
+  const keyCarriedBySeqRef = useRef<number | null>(null)
+  /** A combined core pass prepMelody is running (or ran) for THIS song —
+   *  ARMED BEFORE the pass starts, because the melody part streams out of
+   *  the child seconds ahead of the final result, and applyMelody's beat
+   *  block fires on it: without the promise it would spawn a SECOND combined
+   *  child into the single-flight (measured: "An analysis is already
+   *  running." and everything falling back to TS). The block awaits the
+   *  promise instead. stems null = the pass never got that far (no binary):
+   *  the block decodes its own. `beats` undefined = the core could not
+   *  answer that part (TS fallback); null = the detector's own "no beat". */
+  const pendingCoreAnalysisRef = useRef<{
+    seq: number
+    promise: Promise<{
+      stems: Awaited<ReturnType<typeof analysisStems>> | null
+      ml: MlGrid | null
+      beats: DetectedBeats | null | undefined
+      key: { pc: number; minor: boolean } | undefined
+    }>
+  } | null>(null)
   /** pYIN's worker while it runs — held so leaving the song can stop it. */
   const melodyWorkerRef = useRef<Worker | null>(null)
   const selectionRef = useRef(selection)
@@ -698,6 +872,7 @@ export default function App(): React.JSX.Element {
       // being left, not the one arriving.
       melodyWorkerRef.current?.terminate()
       melodyWorkerRef.current = null
+      void window.singz.cancelAnalyzeNative() // the core's children die with the song too
       vocalsBufRef.current = null
       stemPathsRef.current = null
       audibleIdsRef.current = []
@@ -1279,6 +1454,72 @@ export default function App(): React.JSX.Element {
    * `tracked` says pYIN just ran, so the line is new to this project and has
    * to be written down; a line adopted from project.json is already there.
    */
+  applyKeyRef.current = (pc: number, minor: boolean): void => {
+    setSongInfo((s) => ({ ...s, key: { pc, minor } }))
+    const ki = { pc, minor, detVersion: KEY_DETECT_VERSION }
+    keyInfoRef.current = ki
+    setKeyInfo(ki)
+    setAnalysisAutoSave(true)
+  }
+  keyNeededRef.current = (): boolean => {
+    const stored = keyInfoRef.current
+    if (stored && stored.detVersion === KEY_DETECT_VERSION) return false
+    return instBufsRef.current.length > 0 || bassBufRef.current !== null
+  }
+
+  /** The standalone key derivation — core first, TS stems fallback, melody
+   *  histogram as display-only last resort. Runs when the combined pass
+   *  cannot carry the key: applyMelody's standalone arm, and the release
+   *  path when a pass that CLAIMED the carry ends keyless after applyMelody
+   *  already stood down on it. Guards on the song's own buffers. */
+  const deriveStandaloneKey = useCallback((f0: Float32Array | null): void => {
+    const inst = instBufsRef.current
+    const bassBuf = bassBufRef.current
+    if (inst.length === 0 && !bassBuf) {
+      if (f0) setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
+      return
+    }
+    void (async () => {
+      const core = await runCombinedCore(
+        { melody: false, key: true, beats: false },
+        stemPathsRef.current,
+        audibleIdsRef.current,
+        async () => ({ ml: null, lineStarts: null, words: null })
+      )
+      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+      if (core.key) {
+        ;(window as { __keySrc?: string }).__keySrc = 'core'
+        applyKeyRef.current?.(core.key.pc, core.key.minor)
+        return
+      }
+      // Fallback: the TS detector on stems decoded off disk — same input
+      // rule, renderer-side. The key answer measured identical across the
+      // whole library at both input rates (17/17), which is why
+      // KEY_DETECT_VERSION does not move for any of this.
+      const allPaths = stemPathsRef.current
+      const harmonicPaths = allPaths
+        ? Object.fromEntries(Object.entries(allPaths).filter(([id]) => id !== 'drums' && id !== 'vocals'))
+        : null
+      const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, {
+        drums: null,
+        bass: bassBuf,
+        vocals: null,
+        inst
+      })
+      // let the melody paint before the synchronous chroma pass blocks
+      await new Promise((r) => setTimeout(r, 30))
+      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+      const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
+      ;(window as { __keySrc?: string }).__keySrc = stems ? 'ts' : 'melody-histogram'
+      // A melody-histogram fallback is displayed but never stored under
+      // the v2 stamp — it is the method the stamp says we left behind.
+      if (stems) applyKeyRef.current?.(stems.pc, stems.minor)
+      else if (f0) setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
+    })()
+  }, [])
+  const deriveStandaloneKeyRef = useRef(deriveStandaloneKey)
+  deriveStandaloneKeyRef.current = deriveStandaloneKey
+
   const applyMelody = useCallback(
     (f0: Float32Array, hopSec: number, tracked: boolean) => {
       const next: MelodyState = { status: 'ready', f0, hopSec }
@@ -1298,17 +1539,29 @@ export default function App(): React.JSX.Element {
         void (async () => {
           setBeatProg(0.02)
           try {
+            // A combined pass prepMelody armed for this song leaves a
+            // PROMISE of its stems, lattice and results — await it rather
+            // than decode, render and spawn again (spawning here raced the
+            // single-flight the first time: the melody part event fires
+            // seconds before the pass finishes). Otherwise (stored/worker
+            // melody) this block does the whole job itself.
+            const pending = pendingCoreAnalysisRef.current
+            pendingCoreAnalysisRef.current = null
+            const stashed = pending && pending.seq === loadSeq.current ? await pending.promise : null
+            if (drumsBufRef.current !== drums) return // song changed while awaiting the pass
             // The stems off DISK, at the rate the files state — the model's
             // mix and the detector both. The playing buffers are only the
             // per-lane fallback (analysisStems says when one is taken).
-            const stems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
-              drums,
-              bass: bassBufRef.current,
-              vocals: vocalsBufRef.current,
-              inst: instBufsRef.current
-            })
+            const stems =
+              stashed?.stems ??
+              (await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
+                drums,
+                bass: bassBufRef.current,
+                vocals: vocalsBufRef.current,
+                inst: instBufsRef.current
+              }))
             if (drumsBufRef.current !== drums) return // song changed mid-flight
-            const ml = await fetchMlGridRef.current?.(stems)
+            const ml = stashed?.stems ? stashed.ml : ((await fetchMlGridRef.current?.()) ?? null)
             if (drumsBufRef.current !== drums) return // song changed mid-flight
             // let the bar paint before the synchronous tracker blocks
             setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
@@ -1323,8 +1576,33 @@ export default function App(): React.JSX.Element {
               ml
             }
             const dbg = {}
-            const det = detectBeats(stems.drums, aux, dbg)
-            publishBeatDbg('auto', stems.drums, aux, det, dbg)
+            // ONE combined child for beats + key when nothing is stashed
+            // (melody is already in hand on this path — stored or worker).
+            const keyWanted = keyNeededRef.current?.() ?? false
+            const core = stashed?.stems
+              ? { beats: stashed.beats, key: stashed.key }
+              : await runCombinedCore(
+                  { melody: false, key: keyWanted, beats: true },
+                  stemPathsRef.current,
+                  audibleIdsRef.current,
+                  async () => ({ ml, lineStarts: aux.lineStarts, words: aux.words })
+                )
+            if (drumsBufRef.current !== drums) return // song changed mid-flight
+            const det = core.beats !== undefined ? core.beats : detectBeats(stems.drums, aux, dbg)
+            publishBeatDbg('auto', core.beats !== undefined ? 'core' : 'ts', stems.drums, aux, det, dbg)
+            if (keyWanted) {
+              if (!stashed && core.key) {
+                ;(window as { __keySrc?: string }).__keySrc = 'core'
+                applyKeyRef.current?.(core.key.pc, core.key.minor)
+              } else if (keyNeededRef.current?.() ?? false) {
+                // the TS fallback — including for a stash whose key part
+                // failed (prepMelody released the carry in that case)
+                const k = estimateKeyFromStems(stems.inst, stems.bass)
+                ;(window as { __keySrc?: string }).__keySrc = k ? 'ts' : 'melody-histogram'
+                if (k) applyKeyRef.current?.(k.pc, k.minor)
+                else setSongInfo((s2) => ({ ...s2, key: estimateKey(f0) })) // the last resort, displayed never stored
+              }
+            }
             if (det) {
               // Hand-placed bar lines are re-folded onto the FRESH beat
               // array — they are stored as times precisely so they survive a
@@ -1365,47 +1643,23 @@ export default function App(): React.JSX.Element {
       // touches its Gm tonic on 1.3% of voiced frames and the histogram of it
       // answered A major. The melody histogram survives only as the answer of
       // last resort for a project whose stems went missing.
+      //
+      // When the BEAT pass above runs, the key rides its combined child (one
+      // spawn for beats + key + sometimes melody). This standalone path is
+      // only for songs the beat pass skips — no drums, or a current grid —
+      // where the key still has to come from somewhere.
       const storedKey = keyInfoRef.current
       const inst = instBufsRef.current
       const bassBuf = bassBufRef.current
+      const beatPassCarriesKey =
+        ((fresh || stale) && !!drumsBufRef.current) || keyCarriedBySeqRef.current === loadSeq.current
       if (storedKey && storedKey.detVersion === KEY_DETECT_VERSION) {
         setSongInfo({ key: { pc: storedKey.pc, minor: storedKey.minor }, bpm: info?.bpm ?? null })
+      } else if (beatPassCarriesKey) {
+        setSongInfo({ key: null, bpm: info?.bpm ?? null }) // the combined pass fills it in
       } else if (inst.length > 0 || bassBuf) {
         setSongInfo({ key: null, bpm: info?.bpm ?? null })
-        void (async () => {
-          // The harmonic stems off disk too, same rule as the beat pass. The
-          // key answer measured identical across the whole library either way
-          // (17/17), which is why KEY_DETECT_VERSION does not move — but a
-          // borderline song someday should land on the file's samples, not the
-          // device's.
-          // Only the harmonic paths: handing the full map over would decode
-          // drums and vocals this pass never reads — concurrently with the
-          // beat pass's own six, which is a fleet-machine's worth of memory
-          // for nothing.
-          const allPaths = stemPathsRef.current
-          const harmonicPaths = allPaths
-            ? Object.fromEntries(Object.entries(allPaths).filter(([id]) => id !== 'drums' && id !== 'vocals'))
-            : null
-          const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, {
-            drums: null,
-            bass: bassBuf,
-            vocals: null,
-            inst
-          })
-          // let the melody paint before the synchronous chroma pass blocks
-          await new Promise((r) => setTimeout(r, 30))
-          if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
-          const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
-          // A melody-histogram fallback is displayed but never stored under
-          // the v2 stamp — it is the method the stamp says we left behind.
-          setSongInfo((s) => ({ ...s, key: stems ?? estimateKey(f0) }))
-          if (stems) {
-            const ki = { pc: stems.pc, minor: stems.minor, detVersion: KEY_DETECT_VERSION }
-            keyInfoRef.current = ki
-            setKeyInfo(ki)
-            setAnalysisAutoSave(true)
-          }
-        })()
+        deriveStandaloneKeyRef.current?.(f0)
       } else {
         setSongInfo({ key: estimateKey(f0), bpm: info?.bpm ?? null })
       }
@@ -1433,6 +1687,7 @@ export default function App(): React.JSX.Element {
     ) {
       storedMelodyRef.current = null
       ;(window as { __melody?: unknown }).__melody = {
+        src: 'stored',
         f0: stored.f0,
         hopSec: stored.info.hopSec,
         stored: true
@@ -1455,6 +1710,123 @@ export default function App(): React.JSX.Element {
     const seq = loadSeq.current
     const path = stemPathsRef.current?.vocals ?? null
     void (async () => {
+      // The C++ core first (singz-analyze, spawned by main like whisper-cli).
+      // It reads the stem FILE at the file's own rate — the same input
+      // discipline melodyInput enforces below — and the parity gates hold it
+      // bit-identical to the worker's TS, so which one ran is invisible in
+      // the line and visible only in __melody.src. The worker survives as
+      // the fallback for a build with no binary, and every fallback says so
+      // out loud: silent substitution is how input bugs shipped before.
+      if (path) {
+        const avail = await window.singz.melodyNativeAvailable().catch(() => ({ ok: false, available: false }))
+        if (seq !== loadSeq.current) return
+        if (avail.available) {
+          // Everything this song still owes, in the ONE child: melody now,
+          // and — when they are owed too — key and beats ride along. The
+          // stems and the lattice are prepared inside provideMl (the child is
+          // already tracking melody while the model renders), then stashed
+          // with the results for applyMelody's adoption machinery, which owns
+          // setBeatInfo/applyUserBars/publish and must not be duplicated.
+          const beatInfo = beatInfoRef.current
+          const wantBeats =
+            (!beatInfo || (beatInfo.source === 'auto' && beatInfo.detVersion !== BEAT_DETECT_VERSION)) &&
+            drumsBufRef.current !== null
+          const wantKey = keyNeededRef.current?.() ?? false
+          let stashStems: Awaited<ReturnType<typeof analysisStems>> | null = null
+          let stashMl: MlGrid | null = null
+          let melodyAdopted = false
+          if (wantKey) keyCarriedBySeqRef.current = seq
+          let resolveStash!: (v: Awaited<NonNullable<typeof pendingCoreAnalysisRef.current>['promise']> extends infer T ? T : never) => void
+          if (wantBeats) {
+            pendingCoreAnalysisRef.current = {
+              seq,
+              promise: new Promise((r) => {
+                resolveStash = r
+              })
+            }
+          }
+          const unsub = window.singz.onMelodyNativeProgress((p) => {
+            if (seq === loadSeq.current) setMelody({ status: 'computing', p })
+          })
+          // The melody part streams out of the child the moment the tracker
+          // finishes — seconds before the beats stage even has its lattice.
+          // Adopt it here; the final result's copy is only the fallthrough.
+          const unsubPart = window.singz.onAnalyzePart((part) => {
+            if (seq !== loadSeq.current || melodyAdopted) return
+            const m = part.melody
+            if (m?.ok && m.f0 && m.hopSec && m.detVersion === PITCH_DETECT_VERSION) {
+              melodyAdopted = true
+              ;(window as { __melody?: unknown }).__melody = {
+                src: 'core',
+                f0: m.f0,
+                raw: m.raw,
+                rms: m.rms,
+                hopSec: m.hopSec
+              }
+              applyMelody(m.f0, m.hopSec, true)
+            }
+          })
+          const core = await runCombinedCore(
+            { melody: true, key: wantKey, beats: wantBeats },
+            stemPathsRef.current,
+            audibleIdsRef.current,
+            async () => {
+              stashStems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
+                drums: drumsBufRef.current,
+                bass: bassBufRef.current,
+                vocals: vocalsBufRef.current,
+                inst: instBufsRef.current
+              })
+              if (seq !== loadSeq.current) return { ml: null, lineStarts: null, words: null }
+              stashMl = (await fetchMlGridRef.current?.()) ?? null
+              // gathered NOW, after the model render — the lyrics have loaded
+              // by this point where at spawn they had not (measured: 0 words)
+              return {
+                ml: stashMl,
+                lineStarts: linesRef.current?.map((l) => l.words[0]?.s ?? l.start) ?? null,
+                words: linesRef.current?.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e }))) ?? null
+              }
+            }
+          )
+          unsub()
+          unsubPart()
+          if (wantBeats) resolveStash({ stems: stashStems, ml: stashMl, beats: core.beats, key: core.key })
+          if (seq !== loadSeq.current) return
+          if (wantKey) {
+            if (core.key) {
+              ;(window as { __keySrc?: string }).__keySrc = 'core'
+              applyKeyRef.current?.(core.key.pc, core.key.minor)
+            } else {
+              // the pass could not answer the key — release the carry so the
+              // fallback machinery (the beat block's arm, or the standalone
+              // path on a later prep) is allowed to run it. If the part event
+              // already ran applyMelody, its standalone arm stood down on the
+              // carry and will not come back this session: run it now.
+              keyCarriedBySeqRef.current = null
+              // beats owed → the beat block's own keyNeeded arm covers this;
+              // kicking too would spawn a redundant key-only child
+              if (melodyAdopted && !wantBeats) deriveStandaloneKeyRef.current?.(core.melody?.f0 ?? null)
+            }
+          }
+          if (melodyAdopted) return // the part event already applied it
+          if (core.melody) {
+            // belt: the event can only have been missed by a subscription
+            // race — the validated final copy is identical
+            ;(window as { __melody?: unknown }).__melody = {
+              src: 'core',
+              f0: core.melody.f0,
+              raw: core.melody.raw,
+              rms: core.melody.rms,
+              hopSec: core.melody.hopSec
+            }
+            applyMelody(core.melody.f0, core.melody.hopSec, true)
+            return
+          }
+          // the melody part fell through (warned inside runCombinedCore) —
+          // the worker below takes it, and any stashed beats/key still adopt
+          // when applyMelody fires at its end.
+        }
+      }
       const src = await melodyInput(path, buf)
       if (seq !== loadSeq.current) return // a different song is open now
       const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
@@ -1471,6 +1843,7 @@ export default function App(): React.JSX.Element {
         } else if (e.data.type === 'done' && e.data.f0 && e.data.hopSec) {
           // diagnostics hook: E2E drivers dump this to tune the melody cleaner
           ;(window as { __melody?: unknown }).__melody = {
+            src: 'worker',
             f0: e.data.f0,
             raw: e.data.raw,
             clarity: e.data.clarity,
@@ -1806,34 +2179,21 @@ export default function App(): React.JSX.Element {
    *  the detector then takes its homegrown path unchanged). The mix is
    *  rendered offline at the model's 22.05 kHz from whatever stems are
    *  loaded: the model wants what the singer hears, not one stem. */
-  const fetchMlGrid = useCallback(async (stems: {
-    drums: AudioBuffer | null
-    bass: AudioBuffer | null
-    vocals: AudioBuffer | null
-    inst: AudioBuffer[]
-  }): Promise<MlGrid | null> => {
+  const fetchMlGrid = useCallback(async (): Promise<MlGrid | null> => {
     try {
       const avail = await window.singz.beatsMlAvailable()
       if (!avail.ok || !avail.available) return null
-      const bufs: AudioBuffer[] = []
-      for (const b of [stems.drums, stems.bass, stems.vocals, ...stems.inst]) {
-        if (b) bufs.push(b)
-      }
-      if (bufs.length === 0) return null
-      const dur = Math.max(...bufs.map((b) => b.duration))
-      const ctx = new OfflineAudioContext(1, Math.ceil(dur * 22050), 22050)
-      for (const b of bufs) {
-        const s = ctx.createBufferSource()
-        s.buffer = b
-        s.connect(ctx.destination)
-        s.start(0)
-      }
-      const mix = await ctx.startRendering()
-      const pcm = mix.getChannelData(0)
-      const res = await window.singz.beatsMlDetect(
-        pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength),
-        22050
-      )
+      // The mix is rendered by the CORE from the stem FILES (main spawns
+      // singz-analyze mlmix) — never by an OfflineAudioContext here, whose
+      // render moved with every Electron upgrade and whose input rode the
+      // playback buffers (the device-rate bug class, twice fixed).
+      const paths = stemPathsRef.current
+      const ids = audibleIdsRef.current
+      const stemPaths = ids
+        .map((id) => paths?.[id])
+        .filter((p): p is string => typeof p === 'string')
+      if (stemPaths.length === 0) return null
+      const res = await window.singz.beatsMlDetectStems(stemPaths)
       if (!res.ok) {
         // A failed model run is a silent quality downgrade (the detector
         // falls back to drums-only) — it must at least be diagnosable.
@@ -1873,7 +2233,7 @@ export default function App(): React.JSX.Element {
           inst: instBufsRef.current
         })
         if (drumsBufRef.current !== buf) return // song changed mid-flight
-        const ml = await fetchMlGrid(stems)
+        const ml = await fetchMlGrid()
         if (drumsBufRef.current !== buf) return // song changed mid-flight
         setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
         await new Promise((r) => setTimeout(r, 30))
@@ -1887,8 +2247,15 @@ export default function App(): React.JSX.Element {
           ml
         }
         const dbg = {}
-        const det = detectBeats(stems.drums, aux, dbg)
-        publishBeatDbg('redetect', stems.drums, aux, det, dbg)
+        const core = await runCombinedCore(
+          { melody: false, key: false, beats: true },
+          stemPathsRef.current,
+          audibleIdsRef.current,
+          async () => ({ ml: ml ?? null, lineStarts: aux.lineStarts, words: aux.words })
+        )
+        if (drumsBufRef.current !== buf) return // song changed mid-flight
+        const det = core.beats !== undefined ? core.beats : detectBeats(stems.drums, aux, dbg)
+        publishBeatDbg('redetect', core.beats !== undefined ? 'core' : 'ts', stems.drums, aux, det, dbg)
         if (det) {
           touchSettings()
           setBeatInfo({

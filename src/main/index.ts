@@ -33,6 +33,7 @@ import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
 import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, trtrtxFlagPath } from './models'
 import { Separator } from './separation'
+import { registerAnalyze } from './analyze'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
@@ -142,7 +143,12 @@ function createWindow(): void {
         : { backgroundColor: '#12100d' }),
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.mjs'),
-      sandbox: false
+      sandbox: false,
+      // E2E/measurement runs: the window is NEVER SHOWN (see ready-to-show),
+      // and a hidden window's timers and rAF are throttled to ~1 Hz unless
+      // throttling is off — which would stall every waitForFunction a driver
+      // hangs on. Only this env pays the always-on-timers cost.
+      ...(process.env.SINGZ_E2E_HIDDEN ? { backgroundThrottling: false } : {})
     }
   })
 
@@ -150,6 +156,13 @@ function createWindow(): void {
   win.on('maximize', () => win.webContents.send('win:maximized', true))
   win.on('unmaximize', () => win.webContents.send('win:maximized', false))
   win.on('ready-to-show', () => {
+    // Drivers run while the singer works in something else. showInactive was
+    // tried first and is NOT enough: it races the driver's patch, and even
+    // when it wins it still puts a window OVER the singer's work, only
+    // without focus. Under SINGZ_E2E_HIDDEN the window simply never appears —
+    // deterministic, no race, nothing to cover anything (throttling is
+    // disabled above so the app runs at full rate regardless).
+    if (process.env.SINGZ_E2E_HIDDEN) return
     if (st.maximized) win.maximize()
     win.show()
   })
@@ -240,6 +253,7 @@ function registerIpc(): void {
 
   // ML beat/downbeat analysis (Beat This! runner inside the splitter pack)
   registerBeatsIpc()
+  registerAnalyze()
 
   ipcMain.handle(
     'lyrics:get',

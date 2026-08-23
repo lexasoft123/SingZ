@@ -51,7 +51,7 @@ cpSync(join(SRC_ROOT, PROJECT), join(LIB, PROJECT), { recursive: true })
 // the library root is a setting, not an env var
 writeFileSync(join(PROFILE, 'settings.json'), JSON.stringify({ projectsRoot: LIB }, null, 2))
 
-const env = { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1', SINGZ_USERDATA_DIR: PROFILE }
+const env = { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_USERDATA_DIR: PROFILE }
 const beat = () => JSON.parse(readFileSync(PJ, 'utf8')).settings.beat
 
 async function open() {

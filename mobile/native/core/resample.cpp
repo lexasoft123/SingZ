@@ -49,10 +49,30 @@ Resampler::Resampler(int srcRate, int dstRate, int channels) : channels_(channel
   // -134 dB) and leaves every ratio with down_ < 2*up_ — the split engine's
   // 48k->44.1k among them — at the 24 it was gated with, byte for byte.
   const int64_t netDown = down_ / up_;  // 48k->44.1k: 1; 44.1k->22.05k: 2
-  tapsPerPhase_ = netDown >= 2 ? static_cast<int>(48 * netDown) : 24;
+  // Decimating ratios take swresample's published design instead of the
+  // near-unity one: 32 taps per unit of net decimation, beta 9, cutoff at
+  // 0.97 of the output Nyquist. Chosen by measurement, not taste: on the
+  // 17-song library the beat model's FUSED grids scored 54/55 GT checks
+  // from an ffmpeg-swr mix against 52/55 from Chromium's (what shipped) and
+  // 50/55 from the old beta-10/96-tap brick wall here — two downbeat
+  // ROTATIONS flipped under the brick wall (Father and Son, Zeit) and both
+  // renders that keep the transition band gentler agree with the ground
+  // truth. The near-unity branch (the split engine's 48k->44.1k) keeps its
+  // 24/10.056/full-cutoff design, byte for byte, frozen by the split
+  // parity gate. A >=88.2 kHz split source reaches netDown >= 2 and takes
+  // THIS branch too — deliberate: stems carry no version stamp, and the
+  // swr-shaped response is the better lowpass at any real decimation.
+  const bool decimating = netDown >= 2;
+  // Odd tap count: the total latency (history priming + group delay,
+  // 3*(taps-1)/2 input samples) becomes an integer number of OUTPUT frames,
+  // so latencyOutFrames() can compensate exactly — the model's input must be
+  // time-true, or every lattice beat sits ~2 ms behind the homegrown
+  // features it is fused against (measured: impulse at 2095 of 2048).
+  tapsPerPhase_ = decimating ? static_cast<int>(32 * netDown) + 1 : 24;
   const int64_t n = static_cast<int64_t>(tapsPerPhase_) * up_;
-  const double cutoff = 0.5 / std::max(up_, down_);  // cycles per zero-stuffed sample
-  const double beta = 10.056;
+  const double cutoff =
+      (decimating ? 0.97 : 1.0) * 0.5 / std::max(up_, down_);  // cycles per zero-stuffed sample
+  const double beta = decimating ? 9.0 : 10.056;
   const double denom = besselI0(beta);
   filter_.resize(static_cast<size_t>(n));
   const double center = (static_cast<double>(n) - 1.0) / 2.0;

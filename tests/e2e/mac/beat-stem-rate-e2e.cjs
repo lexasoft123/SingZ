@@ -67,7 +67,7 @@ const GT = JSON.parse(
     app = await _electron.launch({
       executablePath: require('electron'),
       args: [APP],
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' } // silent, never the real Drive
+      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, never the real Drive
     })
     await quietLaunch(app)
     const win = await app.firstWindow()
@@ -93,10 +93,15 @@ const GT = JSON.parse(
       bpm: window.__beatDbg.det.bpm,
       beats: window.__beatDbg.det.beats.length,
       inputRate: window.__beatDbg.drums.sr,
-      ml: window.__beatDbg.ml
+      ml: window.__beatDbg.ml,
+      src: window.__beatDbg.src ?? '(untagged)'
     }))
     console.log(`${NAME}: GT wants ~${gt.want} bpm (±${gt.tolPct}%) · device plays at ${deviceRate} Hz`)
-    console.log(`detected: ${got.bpm.toFixed(4)} bpm, ${got.beats} beats · detectBeats was fed ${got.inputRate} Hz · ml=${got.ml ? 'PRESENT (stub failed!)' : 'off'}`)
+    console.log(`detected: ${got.bpm.toFixed(4)} bpm, ${got.beats} beats · detectBeats was fed ${got.inputRate} Hz · ml=${got.ml ? 'PRESENT (stub failed!)' : 'off'} · src=${got.src}`)
+    // Which implementation built the grid is certified here too (Phase 4):
+    // a 'ts' on a build that carries singz-analyze means the loud fallback
+    // fired, and that must fail rather than pass on the lookalike answer.
+    if (got.src !== 'core') fail.push(`beat grid built via '${got.src}' — expected the core binary`)
     if (deviceRate === 44100)
       console.log('NOTE: this machine plays at 44.1 kHz, so buffer- and file-feeding coincide here — the input check below is the discriminating one')
 

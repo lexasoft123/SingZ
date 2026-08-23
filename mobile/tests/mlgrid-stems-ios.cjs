@@ -9,12 +9,14 @@
  * mlGridFromStems — the core reads the 44.1 kHz stems, sums them and
  * decimates to 22 050 Hz ITSELF (sumStemsTo22k). That sum is the one piece
  * of the production path the other suite never executes, and it is the
- * phone's stand-in for the desktop's OfflineAudioContext render. This suite
+ * phone's stand-in — and since v23 the DESKTOP'S OWN render too (main runs
+ * singz-analyze mlmix; the OfflineAudioContext path is gone). This suite
  * hands the native the stems and compares its grid against an oracle
- * recorded from the mix THE DESKTOP ITSELF would render — Chromium's
- * OfflineAudioContext at 22 050 Hz (scripts/render-ml-mix.cjs, the verbatim
- * fetchMlGrid path) — so what is being tested is whether the phone hears
- * what the desktop hears, not whether one resampler equals itself.
+ * recorded from the mix the desktop itself renders — regenerate it with
+ *   singz-analyze mlmix mix.f32 <stems…>
+ * (scripts/render-ml-mix.cjs reproduces the pre-v23 Chromium mix if an old
+ * grid needs investigating) — so what is being tested is whether the phone
+ * hears what the desktop hears, not whether one resampler equals itself.
  *
  * WHAT CAN AND CANNOT BE EQUAL HERE, measured before this gate was set:
  * three good renders of the same three stems (Chromium, the core's Kaiser,
@@ -42,7 +44,7 @@
  *     node mobile/tests/mlgrid-stems-ios.cjs <recording-dir> <stems-dir>
  *
  * <stems-dir> holds the 44.1 kHz wavs; the recording was made by
- *   node scripts/render-ml-mix.cjs mix.f32 <stems…>
+ *   <singz-analyze> mlmix mix.f32 <stems…>   (build-analyze-host.sh prints the path)
  *   scripts/dump-beat-oracle.py --replay mix.f32 <models> <recording-dir>
  * Preconditions: Debug app installed in a booted sim, Metro, and both beat
  * models in the container's Documents/mlt (the same dir mlgrid-ios.cjs

@@ -17,6 +17,7 @@ npm run build        # bundle into out/  — ALWAYS build before driving E2E
 npm run dist         # package installer for current platform
 npx electron .       # run the built app (out/) without packaging
 scripts/vendor-whisper.sh   # build whisper-cli into vendor/<platform>-<arch>/
+scripts/vendor-analyze.sh   # build singz-analyze into vendor/ (ships dark; cmake, one defn with the host scripts)
 scripts/build-gpu-pack.sh   # torch/MPS splitter pack (Apple Silicon)
 scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
 cd mobile && npx jest                                  # phone-side Drive logic
@@ -31,12 +32,15 @@ All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 **The C++ core is the source of truth for every detector** (decided 2026-08-22).
 New detector work lands in `mobile/native/core` first; the TypeScript in
 `src/renderer/src/audio/` is a port of it, and a divergence means the TypeScript
-has drifted — not the port. What holds the two together is the six parity gates
+has drifted — not the port. What holds the two together is the seven parity gates
 under `eval/`, so they are the contract, not a diagnostic: `npm run gates`
-(`scripts/run-parity-gates.sh`) runs all six on the bundled sample in ~45 s,
+(`scripts/run-parity-gates.sh`) runs all seven on the bundled sample in ~45 s
+(analyze-parity is the seventh: the combined one-child pass the desktop
+actually spawns against the individual subcommands, value-identical, with the
+lattice-and-lyrics-over-stdin leg exercised both ways),
 building `singz-analyze` once and generating `mobile/src/gen/analysis-lib.js`
 and the sample itself rather than telling you to `npm ci` somewhere else.
-**`.github/workflows/checks.yml` runs typecheck + `npm test` + all six on every
+**`.github/workflows/checks.yml` runs typecheck + `npm test` + all seven on every
 push and PR** — before it existed nothing ran on an ordinary push or PR at all.
 The desktop was not untested (build.yml runs typecheck and `npm test` on `v*`
 tags, a dispatch and the Monday cron; e2e-win.yml runs `npm test` again on its
@@ -116,7 +120,16 @@ bundle are the same picture.
 (end-user checks/demos). Desktop drivers launch with `SINGZ_MUTE=1`
 (→ Chromium mute-audio; analysers, sinkId and timing behave exactly as
 audible — permanent drivers set it themselves, scratchpad drivers must
-too); sim tests zero `__test.engine.master.gain` after the hook-wait
+too); **and every driver launch sets `SINGZ_E2E_HIDDEN: '1'` in the env** —
+permanent AND scratchpad alike: main then never shows the window at all and
+disables backgroundThrottling so timers run full-rate hidden. An app window
+over the singer's work mid-session is how a measurement run makes itself
+unwelcome, and it happened THREE times before this landed: eight permanent
+drivers patched with a showInactive helper, a scratchpad driver missed it,
+and then the helper itself lost its race (it patches over IPC after launch,
+and even winning, showInactive still raises a window over the work —
+focusless is not invisible). `quiet-launch.cjs` survives only as the
+fallback for builds that predate the env; drivers do both; sim tests zero `__test.engine.master.gain` after the hook-wait
 (metronome clicks bypass master, so that test passes `volume: 0` —
 `clickCount` still counts); the Android emulator gets
 `adb shell cmd media_session volume --stream 3 --set 0` (the old
@@ -279,18 +292,23 @@ was driven; the gotchas that follow from it are below.
   the 2:1 response itself. When a new consumer uses a shared DSP block at
   a new ratio, measure the response at THAT ratio before trusting the
   header's number.
-- **There is no resampler-independent Beat This! grid** — three good
-  renders of the same stems (Chromium's OfflineAudioContext, the core's
-  Kaiser, soxr) agree to 0.01 dB to 10 kHz and still give three grids
-  (119/43, 120/37, 117/39); the model is that sensitive to sub-frame delay
-  and the top 500 Hz. Chromium's — the desktop's actual input — is the
-  least filtered of the three and yet the one that ships. The phone suites
-  therefore gate the LATTICE (beat F1 ≥ 0.98 at 70 ms, tempo, downbeat F1
-  ≥ 0.80) against an oracle rendered by Chromium itself
-  (`scripts/render-ml-mix.cjs`), never bit-equality of probabilities across
-  renders; bit-equality is asserted only where the input is the same bytes
-  (the wav suites). A suite demanding bit parity across resamplers would
-  have to be tuned until it passed.
+- **There is no resampler-independent Beat This! grid — so ONE render, the
+  core's, is the input everywhere** (v23; the study is
+  docs/BEAT-DETECTION.md §10). Three good renders of the same stems agree
+  to 0.01 dB to 10 kHz and still differ in grids; raw lattices are
+  render-equal on GT but the FUSED rotations are not, and what actually
+  moved them was the LEVEL — beat_this normalizes nothing, and ffmpeg-style
+  equal-power mono (+3 dB over WebAudio's 0.5·(L+R)) scores 54/55 fused
+  against Chromium's 52/55. `sumStemsTo22k` (swr-shaped 65-tap Kaiser,
+  time-true via `latencyOutFrames`, ×√2) renders the mix for the desktop
+  (main spawns `singz-analyze mlmix` — `fetchMlGrid` renders nothing), the
+  phones and the eval harness alike; `scripts/render-ml-mix.cjs` only
+  reproduces the pre-v23 Chromium input for archaeology. The phone suites
+  still gate the LATTICE (beat F1 ≥ 0.98 at 70 ms, tempo, downbeat F1
+  ≥ 0.80) — the python and ORT model backends keep bit-equality off the
+  table even on one render — and their oracle recordings regenerate from
+  `mlmix`, not Chromium. Bit-equality is asserted only where the input is
+  the same bytes (the wav suites).
 - **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
   give every sibling an explicit `gridRow` or they land in implicit rows.
 - **React-managed `className` wipes imperative classes** on re-render —

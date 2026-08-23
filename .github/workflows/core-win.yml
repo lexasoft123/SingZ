@@ -1,0 +1,50 @@
+name: Core Windows
+
+# The C++ core had never been compiled on Windows until this workflow — Android
+# has its own CMake, iOS its own Xcode target, and the host scripts ran only on
+# the Macs and the Linux canary. The desktop cutover (docs/PHONE-STANDALONE.md,
+# Phase 4c) ships singz-analyze to the Windows fleet, so MSVC gets the REAL
+# suite, not a smoke: core_host_tests synthesizes its own audio and checks
+# every detector's framing, stamps and answers, and flac_roundtrip proves the
+# vendored libFLAC — via ctest, no ffmpeg, no node, no fixtures.
+#
+# Runs on pushes that touch the core, its vendored FLAC, the host tests or the
+# build definition — the android canary covers the same set on Linux; this is
+# the MSVC half.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'mobile/native/core/**'
+      - 'mobile/native/third_party/flac/**'
+      - 'tests/native/**'
+      - '.github/workflows/core-win.yml'
+
+concurrency:
+  group: core-win-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msvc:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S mobile/native/core -B build
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Host test suite (ctest)
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: singz-analyze answers
+        shell: bash
+        # The tool itself: exit 2 + usage is its documented no-args answer,
+        # which proves the exe runs at all under the runner's loader.
+        # GitHub's bash runs -eo pipefail, so the exit-2 the tool documents
+        # would abort the step before any assertion saw it — capture it first.
+        run: |
+          rc=0; ./build/Release/singz-analyze.exe 2>usage.txt || rc=$?
+          head -1 usage.txt
+          [ "$rc" -eq 2 ]
