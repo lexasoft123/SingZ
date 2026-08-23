@@ -1803,7 +1803,9 @@ export default function App(): React.JSX.Element {
               // already ran applyMelody, its standalone arm stood down on the
               // carry and will not come back this session: run it now.
               keyCarriedBySeqRef.current = null
-              if (melodyAdopted) deriveStandaloneKeyRef.current?.(core.melody?.f0 ?? null)
+              // beats owed → the beat block's own keyNeeded arm covers this;
+              // kicking too would spawn a redundant key-only child
+              if (melodyAdopted && !wantBeats) deriveStandaloneKeyRef.current?.(core.melody?.f0 ?? null)
             }
           }
           if (melodyAdopted) return // the part event already applied it
