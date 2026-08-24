@@ -106,6 +106,33 @@ photographs the old app perfectly.
 song titles you would not publish, a half-loaded waveform, an empty state where
 you expected content.
 
+**And read the crops with the brightness up, because the phone's chrome is
+translucent now.** The transport dock and the header pill are the same smoked
+glass — `rgba(24,20,17,0.55)` with no blur — so a lyric line under either is
+legible THROUGH it at raised exposure while the control looks like empty dark
+chrome at normal brightness. It survives the reduction into the finished poster
+— the words came back off a shipped 1024px plate. That is the one place somebody
+else's words can ride into a published image without anyone seeing them, because
+the plate is made from a control crop. So brighten every control crop before
+shipping it, or take the crop from a song whose words are ours. Check at CROP
+time, not after rendering: the leak is plainer before the reduction.
+
+```python
+# +4 stops in linear light. Legible at +2, unmistakable at +4.
+# convert('RGB') is not optional: a crop cut by the ffmpeg step above is RGBA,
+# and .point() with a 768-entry LUT raises on a 4-band image. Only the RENDERED
+# poster is already flat, so testing this on one is the way to miss the crash.
+from PIL import Image
+lin = lambda v: (v/255/12.92 if v/255 <= 0.04045 else ((v/255+0.055)/1.055)**2.4)
+srgb = lambda x: round(255*(12.92*x if x <= 0.0031308 else 1.055*x**(1/2.4)-0.055))
+g = 2.0 ** 4
+Image.open('zoom.png').convert('RGB').point([min(255, srgb(min(1, lin(v)*g))) for v in range(256)] * 3).save('check.png')
+```
+
+(The desktop transport is translucent too, but its live blur smears small text
+and `body.win` makes it solid outright — the phone is the exposed case precisely
+because it has no blur.)
+
 ## The zoomed detail is what sells it
 
 At chat-column size, a whole app window is texture — pleasant, unreadable, and
