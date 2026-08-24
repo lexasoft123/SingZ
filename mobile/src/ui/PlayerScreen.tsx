@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { BackHandler, DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
+  runOnJS,
   runOnUI,
   scrollTo,
   useAnimatedRef,
@@ -10,6 +11,7 @@ import Animated, {
   useScrollOffset,
   useSharedValue
 } from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
@@ -57,13 +59,12 @@ import {
   SpeakerGlyph,
   splitSongName,
   StemTile,
-  STEM_TILE_COLORS,
   Stepper,
   ToStartGlyph,
   white
 } from './bits'
 import { KIT } from './tokens'
-import { Canvas, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
+import { Canvas, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -74,7 +75,6 @@ import SkiaLyrics, {
 import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
 
-const BG = require('../../assets/bg/player.png')
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 
@@ -153,7 +153,6 @@ export default function PlayerScreen({
   const insets = useSafeAreaInsets()
   /* Android 15 draws edge-to-edge: keep controls clear of the system bar.
    * iOS keeps its hand-tuned paddings. */
-  const navPad = Platform.OS === 'android' ? { paddingBottom: Math.max(30, insets.bottom + 14) } : null
   const sheetPad = Platform.OS === 'android' ? { paddingBottom: Math.max(34, insets.bottom + 18) } : null
   const [dragPos, setDragPos] = useState<number | null>(null)
   /**
@@ -386,6 +385,41 @@ export default function PlayerScreen({
      nothing on the clock: the Canvas repaints only when these actually
      change. */
   const winDims = useWindowDimensions()
+  /* Swipe back to the library: a clearly-rightward pull from the left edge.
+     The strip is 24pt wide — ending BEFORE the lyric tap targets at
+     LYR_PAD 26 — and spans only the mid-screen, clearing the header's own
+     back button above and the full-bleed seek band below. The pan fails on
+     vertical movement, and the worklet body is one comparison — nothing for
+     the unlowered-Hermes loop trap to bite. Cost accepted knowingly: the
+     24pt column cannot START a lyric scroll (the same dead zone every
+     RNGH-based back gesture ships). */
+  const backPan = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetX(16)
+        .failOffsetY([-14, 14])
+        .onEnd((e) => {
+          'worklet'
+          if (e.translationX > 60) runOnJS(onBack)()
+        }),
+    [onBack]
+  )
+
+  /* Android system back → the catalog. Gesture-nav phones claim the left
+     edge for the SYSTEM back gesture before the app ever sees it, so the
+     strip above cannot fire there — and without this handler that system
+     gesture would finish the whole activity from the player. RN's Modal
+     consumes its own back event while a sheet is open, so this only runs
+     with no sheet up. */
+  useEffect(() => {
+    if (Platform.OS !== 'android') return
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onBack()
+      return true
+    })
+    return () => sub.remove()
+  }, [onBack])
+
   /* The same hue the catalog gave this song's card, so the artwork carries
      over from the shelf to the stage (the sample and dir-less loads take 0,
      matching their cards). */
@@ -1063,24 +1097,59 @@ export default function PlayerScreen({
 
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
-      {/* The song tints its own stage: two soft washes in the song's tile
-          hues over the shared bg art, so each song's screen is faintly its
-          own. One STATIC Skia surface, painted once per song — no state on
-          the clock, per the renderer perf rules. */}
+      {/* The stage: a dusk room, fully out of focus — chosen from the design
+          canvas against the user's references. A defocused photograph of warm
+          light rather than a drawn pattern: a golden window glow upper-left,
+          soft amber air on the right, dark masses in the lower corners, and a
+          vignette. Nothing is in focus, so nothing competes with the lyrics.
+          ONE static Skia surface, painted once, nothing on the clock — a
+          radial gradient falling to transparent IS the defocused blob, no
+          blur filter needed. Same look for every song on purpose: the room
+          is the app's, the song shows in the stem tile and the seek bar. */}
       <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
         <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.85, winDims.height * 0.06)}
-            r={winDims.width * 0.95}
-            colors={[hexA(STEM_TILE_COLORS[tileHue][3], 0.08), hexA(STEM_TILE_COLORS[tileHue][3], 0)]}
+          <SkLinearGradient
+            start={vec(winDims.width * 0.15, 0)}
+            end={vec(winDims.width * 0.85, winDims.height)}
+            colors={['#3a2517', '#2a1c12', '#1c130d', '#120c09']}
+            positions={[0, 0.3, 0.58, 1]}
           />
         </Rect>
         <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
           <RadialGradient
-            c={vec(winDims.width * 0.06, winDims.height * 0.94)}
-            r={winDims.width * 0.85}
-            colors={[hexA(STEM_TILE_COLORS[tileHue][0], 0.09), hexA(STEM_TILE_COLORS[tileHue][0], 0)]}
+            c={vec(winDims.width * 0.25, winDims.height * 0.16)}
+            r={winDims.width * 0.62}
+            colors={['rgba(236,164,84,0.55)', 'rgba(210,130,60,0.22)', 'rgba(210,130,60,0)']}
+            positions={[0, 0.55, 1]}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.86, winDims.height * 0.34)}
+            r={winDims.width * 0.5}
+            colors={['rgba(190,120,60,0.3)', 'rgba(190,120,60,0)']}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.28, winDims.height * 0.93)}
+            r={winDims.width * 0.55}
+            colors={['rgba(28,16,10,0.85)', 'rgba(28,16,10,0)']}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.9, winDims.height * 0.9)}
+            r={winDims.width * 0.45}
+            colors={['rgba(52,28,14,0.75)', 'rgba(52,28,14,0)']}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.5, winDims.height * 0.46)}
+            r={winDims.width * 1.1}
+            colors={['rgba(10,7,5,0)', 'rgba(10,7,5,0)', 'rgba(10,7,5,0.5)']}
+            positions={[0, 0.42, 1]}
           />
         </Rect>
       </Canvas>
@@ -1157,13 +1226,18 @@ export default function PlayerScreen({
         {lines.length === 0 && <Text style={s.noLyrics}>No lyrics in this project yet.</Text>}
       </View>
 
-      {/* header (scrim fades into the lyrics — no hard edge) */}
+      {/* header: a dark glass pill floating on the room (the references'
+          card material — charcoal translucency, hairline rim, warm light
+          bleeding around it). The scrim is shorter and softer than the old
+          full-bleed black: it only fades scrolled lyrics before they reach
+          the status bar, without flattening the window glow. */}
       <View
         pointerEvents="none"
-        style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 215 }}
+        style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 140, opacity: 0.8 }}
       >
         <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
+      <View pointerEvents="none" style={s.hdrGlass} />
       <View style={s.hdr} pointerEvents="box-none">
         <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel="Back to library">
           <Text style={s.back}>‹</Text>
@@ -1217,14 +1291,20 @@ export default function PlayerScreen({
         </Pressable>
       </View>
 
-      {/* footer controls (scrim rises out of the lyrics) */}
+      {/* footer: the transport rides ONE floating dark glass dock — the
+          same card material as the header pill. A scrim still lives under
+          it, shorter and softer than the old 360px black: real glass blurs
+          what is behind it, and without a live blur the coming lines read
+          straight through the fill (photographed on the sim: three lines
+          legible through and BELOW the dock). The fade does the blur's job
+          of quieting them before they reach the glass. */}
       <View
         pointerEvents="none"
-        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 360 }}
+        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 340 }}
       >
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
-      <View style={[s.foot, navPad]}>
+      <View style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }]}>
         {countInSt && (
           <Text
             style={s.countInFoot}
@@ -1377,6 +1457,11 @@ export default function PlayerScreen({
         </View>
       </View>
 
+      {/* The swipe-back edge (see backPan above). */}
+      <GestureDetector gesture={backPan}>
+        <View style={s.backEdge} />
+      </GestureDetector>
+
       {/* ---------- Mixer sheet ---------- */}
       <Modal
         visible={sheet === 'mixer'}
@@ -1516,6 +1601,18 @@ export default function PlayerScreen({
                           ? 'Reading the song…'
                           : 'Not detected yet'}
                 </Text>
+                {/* The record behind the row: which detector wrote this grid,
+                    and what rides on it. Dim — it is provenance, not news. */}
+                {beatRow === 'grid' && settings?.beat != null && (
+                  <Text style={s.songMeta}>
+                    {settings.beat.source === 'manual'
+                      ? 'hand-made on the computer'
+                      : `detector v${settings.beat.detVersion ?? '?'}`}
+                    {settings.beat.userBars?.length
+                      ? ` · ${settings.beat.userBars.length} hand-set bar${settings.beat.userBars.length > 1 ? 's' : ''}`
+                      : ''}
+                  </Text>
+                )}
                 <Text style={b.hint}>
                   {beatRow === 'progress'
                     ? 'Listening now — the click and the count-in pick the beat up the moment it is found.'
@@ -1623,6 +1720,9 @@ export default function PlayerScreen({
                           ? 'Reading the song…'
                           : 'Not detected yet'}
                 </Text>
+                {keyRow === 'grid' && settings?.key != null && (
+                  <Text style={s.songMeta}>detector v{settings.key.detVersion}</Text>
+                )}
                 {keyRow === 'verdict' && (
                   <Text style={b.hint}>
                     The harmony the key is read from — the guitar, piano and bass lanes —
@@ -1642,6 +1742,12 @@ export default function PlayerScreen({
                         ? 'Reading the song…'
                         : 'Not tracked yet'}
                 </Text>
+                {melodyRow === 'grid' && settings?.melody != null && (
+                  <Text style={s.songMeta}>
+                    detector v{settings.melody.detVersion} · one frame every{' '}
+                    {(settings.melody.hopSec * 1000).toFixed(1)} ms
+                  </Text>
+                )}
                 <Text style={b.hint}>
                   The sung line under the lyrics, and what the pitch strip draws.
                 </Text>
@@ -1655,6 +1761,73 @@ export default function PlayerScreen({
                         ? ' · word timings'
                         : ' · line timings only')
                     : 'None'}
+                </Text>
+                {project.doc.lyricsHash != null && (
+                  <Text style={s.songMeta}>{fmtInfoSize(project.doc.lyricsHash.size)}</Text>
+                )}
+              </View>
+
+              {/* ---------- The full record: every lane, every byte -------- */}
+              <View style={b.sec}>
+                <Text style={b.secLab}>Stems</Text>
+                {project.stems.map((st) => {
+                  const meta = laneMeta[st.id] ?? { label: st.id, color: C.dim }
+                  const file = stemFileInfo(project.doc, st.id)
+                  return (
+                    <View key={st.id} style={s.stemRow}>
+                      <View style={[s.dot, { backgroundColor: meta.color }]} />
+                      <Text style={s.stemName} numberOfLines={1}>
+                        {meta.label}
+                      </Text>
+                      <Text style={s.stemInfo}>
+                        {file != null ? `${file.ext} · ${fmtInfoSize(file.size)}` : '—'}
+                      </Text>
+                    </View>
+                  )
+                })}
+                <Text style={s.songMeta}>
+                  {((): string => {
+                    const total = Object.values(project.doc.stemHashes ?? {}).reduce(
+                      (n, h) => n + h.size,
+                      0
+                    )
+                    /* The decoded buffer's rate is the decode TARGET — the
+                       device rate every stem is resampled to on open — not
+                       the rate the files carry (the doc doesn't record that
+                       one). Label it as what it is; an unlabelled "48.0 kHz"
+                       here would print the exact file-rate-vs-device-rate
+                       confusion the v22/v2 detector bumps were about. */
+                    const sr = project.stems[0]?.buffer.sampleRate
+                    const parts: string[] = []
+                    if (total > 0) parts.push(`${fmtInfoSize(total)} on disk`)
+                    if (sr != null) parts.push(`plays at ${(sr / 1000).toFixed(1)} kHz`)
+                    parts.push(fmtTime(engine.duration))
+                    return parts.join(' · ')
+                  })()}
+                </Text>
+              </View>
+
+              <View style={b.sec}>
+                <Text style={b.secLab}>Project</Text>
+                <Text style={s.songVal}>
+                  {`Format v${project.doc.version}` +
+                    (project.doc.version >= 2 ? ' · FLAC stems' : ' · WAV stems')}
+                </Text>
+                <Text style={s.songMeta}>
+                  {[
+                    project.doc.savedAt
+                      ? `saved ${new Date(project.doc.savedAt).toLocaleDateString()}`
+                      : null,
+                    project.library === 'gdrive'
+                      ? 'from Google Drive'
+                      : project.library === 'folder'
+                        ? 'from a folder'
+                        : project.library === 'phone'
+                          ? 'on this phone'
+                          : 'bundled sample'
+                  ]
+                    .filter((x) => x != null)
+                    .join(' · ')}
                 </Text>
               </View>
             </ScrollView>
@@ -1949,13 +2122,26 @@ export default function PlayerScreen({
   )
 }
 
-/** rgba() from a #rrggbb hex, for the tint washes below. */
-const hexA = (hex: string, a: number): string => {
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b0 = parseInt(hex.slice(5, 7), 16)
-  return `rgba(${r},${g},${b0},${a})`
+/** Sizes for the Song sheet's record — down to kB, unlike the catalog's
+ *  singer-facing formatter, because this sheet IS the fine print. */
+const fmtInfoSize = (bytes: number): string =>
+  bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} kB`
+
+/** A lane's on-disk record, matched by stem name against the doc's
+ *  stemHashes (keys are filenames — 'vocals.flac', 'custom-x.m4a'). */
+const stemFileInfo = (
+  doc: { stemHashes?: Record<string, { size: number }> },
+  laneId: string
+): { ext: string; size: number } | null => {
+  for (const [name, h] of Object.entries(doc.stemHashes ?? {})) {
+    const dot = name.lastIndexOf('.')
+    if (dot > 0 && name.slice(0, dot) === laneId) {
+      return { ext: name.slice(dot + 1).toUpperCase(), size: h.size }
+    }
+  }
+  return null
 }
+
 /** One spelling for pitch classes, shared by the Song sheet's Key row and
  *  the Practice sheet's transpose suffix. */
 const KEY_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
@@ -1979,6 +2165,41 @@ const s = StyleSheet.create({
   // The dots sit optically low in the box; lift them rather than centre them.
   songBtnText: { color: white(0.72), fontSize: 15, fontWeight: '800', marginTop: -3 },
   songVal: { color: C.bright, fontSize: 16, fontWeight: '700' },
+  songMeta: { color: C.dim, fontSize: 12, marginTop: 4, fontVariant: ['tabular-nums'] },
+  stemRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 4 },
+  stemName: { color: C.text, fontSize: 13.5, flexShrink: 1 },
+  stemInfo: {
+    color: C.dim,
+    fontSize: 12,
+    marginLeft: 'auto',
+    fontVariant: ['tabular-nums']
+  },
+  /* The dark glass the references are built from: charcoal translucency
+     over the warm room, a faint all-round border with a brighter top edge
+     standing in for the inset specular rim CSS would draw. No live blur —
+     the backdrop is static, so fill + rim reads identically and costs
+     nothing per frame. */
+  /* Radii follow iOS 26's concentric rule: a floating element's corner
+     radius is the display corner radius (~55pt on the Pro phones) minus its
+     inset from the edge, capped at a capsule. Pill: capsule (62/2). Dock:
+     55 − 10 inset ≈ 44, continuous curve. Waveband: concentric would be
+     44 − 12 padding = 32, capped at its own capsule (40/2). */
+  hdrGlass: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    top: 54,
+    height: 62,
+    borderRadius: 31,
+    borderCurve: 'continuous',
+    backgroundColor: 'rgba(24,20,17,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,240,220,0.05)',
+    borderTopColor: 'rgba(255,240,220,0.14)',
+    ...(Platform.OS === 'ios'
+      ? { shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 14, shadowOffset: { width: 0, height: 10 } }
+      : null)
+  },
   hdr: {
     position: 'absolute',
     top: 0,
@@ -1987,8 +2208,8 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingTop: 58,
-    paddingHorizontal: 18,
+    paddingTop: 63,
+    paddingHorizontal: 26,
     paddingBottom: 14
   },
   back: { color: white(0.85), fontSize: 30, fontWeight: '600', paddingRight: 4, marginTop: -4 },
@@ -2018,17 +2239,32 @@ const s = StyleSheet.create({
 
   foot: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    /* No horizontal padding: the seek bar runs edge to edge — it is the
-       player's primary control and the layout says so. The rows below carry
-       their own 22. */
-    paddingTop: 26,
-    paddingBottom: 30
+    left: 10,
+    right: 10,
+    /* bottom set inline from the safe-area inset */
+    borderRadius: 44,
+    borderCurve: 'continuous',
+    backgroundColor: 'rgba(24,20,17,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,240,220,0.05)',
+    borderTopColor: 'rgba(255,240,220,0.14)',
+    ...(Platform.OS === 'ios'
+      ? { shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 15, shadowOffset: { width: 0, height: 12 } }
+      : null),
+    /* The seek bar still owns (almost) the full width: the dock's 10+12 a
+       side is the cost of the card material the user chose over the old
+       edge-to-edge band. */
+    paddingTop: 14,
+    paddingHorizontal: 12,
+    paddingBottom: 16
   },
   waveWrap: {},
-  waveBand: { height: 40, backgroundColor: white(0.05), overflow: 'hidden' },
+  waveBand: {
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+    overflow: 'hidden'
+  },
   waveRow: {
     position: 'absolute',
     left: 0,
@@ -2056,7 +2292,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 22,
+    paddingHorizontal: 10,
     paddingTop: 8,
     paddingBottom: 10
   },
@@ -2064,7 +2300,7 @@ const s = StyleSheet.create({
   loopBtn: {
     width: 40,
     height: 32,
-    borderRadius: 9,
+    borderRadius: 16,
     borderWidth: 1.5,
     borderColor: white(0.2),
     alignItems: 'center',
@@ -2073,6 +2309,7 @@ const s = StyleSheet.create({
   loopBtnOn: { backgroundColor: C.amber, borderColor: C.amber },
   loopBtnText: { color: white(0.6), fontSize: 11.5, fontWeight: '800' },
   loopBtnTextOn: { color: C.amberInk },
+  backEdge: { position: 'absolute', left: 0, top: 120, bottom: 250, width: 24 },
   /* Overlays the band Bar draws (40pt centred in its 44pt touch strip). */
   loopLayer: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
   loopUnderline: {
@@ -2095,7 +2332,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 22
+    paddingHorizontal: 6
   },
   skipText: { color: white(0.85), fontSize: 12.5, fontWeight: '700' },
   play: {
