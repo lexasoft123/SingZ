@@ -191,7 +191,14 @@ const keyTempoOf = (doc: ProjectDoc): string | null => {
  * project docs and stem metadata, no audio: the buffers are the player's
  * and `releaseProject` frees those on the way out.
  */
-let lastShelf: { mode: 'gdrive' | 'folder' | 'phone'; items: ProjectEntry[] } | null = null
+let lastShelf: {
+  mode: 'gdrive' | 'folder' | 'phone'
+  items: ProjectEntry[]
+  /** What each project holds on disk — what the ✓ and the cloud badge read. */
+  usage: Record<string, CacheUsage>
+  driveOn: boolean
+  driveEmail: string | null
+} | null = null
 
 export default function CatalogScreen({
   sampleRate,
@@ -220,12 +227,15 @@ export default function CatalogScreen({
      session the last mode IS the mode; the pref read below still runs and
      still wins, it just usually agrees. */
   const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>(lastShelf?.mode ?? 'phone')
-  const [driveEmail, setDriveEmail] = useState<string | null>(null)
-  const [driveOn, setDriveOn] = useState(false)
+  /* Seeded with the rows, because they are read TOGETHER: a signed-in Drive
+     library remounting with driveOn false renders its own "Sign in to see
+     it" banner over the songs for a frame (photographed on the phone). */
+  const [driveEmail, setDriveEmail] = useState<string | null>(lastShelf?.driveEmail ?? null)
+  const [driveOn, setDriveOn] = useState(lastShelf?.driveOn ?? false)
   const [pulling, setPulling] = useState(false)
   /** What each project holds on this phone: total bytes and the size of every
    *  file present, which is what the ✓ compares against project.json. */
-  const [usage, setUsage] = useState<Record<string, CacheUsage>>({})
+  const [usage, setUsage] = useState<Record<string, CacheUsage>>(lastShelf?.usage ?? {})
   /** The listing on screen is the stored one; the refresh behind it failed. */
   const [offline, setOffline] = useState(false)
   /** The diagnostic log — the only evidence a release build leaves behind. */
@@ -335,8 +345,13 @@ export default function CatalogScreen({
     [projects]
   )
 
-  const loadUsage = useCallback(async () => {
+  /** `seq` is a listing's `listSeq` ticket: an overtaken refresh must not
+   *  write usage, because usage rides in the shelf cache and would be filed
+   *  against the winning listing's mode. The delete paths pass nothing —
+   *  they answer to a tap, not to a listing. */
+  const loadUsage = useCallback(async (seq?: number) => {
     const rows = await cacheUsage()
+    if (seq != null && seq !== listSeq.current) return
     const map: Record<string, CacheUsage> = {}
     for (const r of rows) map[r.project] = r
     setUsage(map)
@@ -398,12 +413,19 @@ export default function CatalogScreen({
           if (my !== listSeq.current) return
           setProjects(cached?.length ? cached : null)
           const signed = await driveSignedIn()
+          /* Guarded like the setProjects around it, and for a sharper reason
+             since the shelf cache existed: these are cache WRITERS now, so an
+             overtaken refresh landing one of them would file the library it
+             was listing under the name of the library that overtook it. */
+          if (my !== listSeq.current) return
           setDriveOn(signed)
           if (!signed) {
-            if (my === listSeq.current) setProjects([])
+            setProjects([])
             return
           }
-          setDriveEmail(await driveAccountEmail())
+          const email = await driveAccountEmail()
+          if (my !== listSeq.current) return
+          setDriveEmail(email)
           try {
             const fresh = await driveListProjects(force)
             if (my === listSeq.current) {
@@ -425,7 +447,7 @@ export default function CatalogScreen({
             setProjects(list)
           }
         }
-        void loadUsage()
+        void loadUsage(my)
       } catch (e) {
         if (my === listSeq.current) {
           setError(String(e instanceof Error ? e.message : e))
@@ -440,10 +462,17 @@ export default function CatalogScreen({
     void refresh()
   }, [refresh])
 
-  /* One writer for the cache above, so no listing path can forget it. */
+  /* One writer for the cache above, so no listing path can forget it. The
+     four facts are cached together because they are READ together: rows with
+     no usage draw every song as a cloud to download, and a signed-in library
+     with driveOn false draws a sign-in banner over songs it already has. A
+     shelf seeded from three of the four is still a flicker, just a subtler
+     one. `offline` deliberately stays out: it is a fact about this second's
+     network, and the header would claim "no signal" before anything looked. */
   useEffect(() => {
-    if (projects != null) lastShelf = { mode: modeOfList.current, items: projects }
-  }, [projects])
+    if (projects != null)
+      lastShelf = { mode: modeOfList.current, items: projects, usage, driveOn, driveEmail }
+  }, [projects, usage, driveOn, driveEmail])
 
   useEffect(() => {
     void getStoredText('singz.libMode').then((m) => {
