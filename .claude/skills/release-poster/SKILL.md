@@ -266,7 +266,21 @@ Telegram allows **1024 characters on a photo caption**; aim well under. Shape:
 <one smaller change worth knowing, one line>
 
 iPhone · Android · Mac · Windows
+⬇ [Windows](<exe url>) · [Mac](<arm64 dmg url>) · [Android](<apk url>) · [all builds](<releases/latest>)
 ```
+
+**Put the links IN the text.** A caption may carry `[label](https://…)`, which
+becomes a real link in the post — and it costs the LABEL, never the URL, because
+Telegram's link entities sit outside the 1024-character budget. So embedding
+four links is *cheaper* than spelling one URL out. The copy button puts both a
+rich and a plain flavour on the clipboard, so a paste into Telegram Desktop keeps
+the links while anything plain-text-only gets the labels.
+
+Count what Telegram counts: the visible text, in UTF-16 units. The kit does this
+for you: an over-limit caption still WRITES the page — so you can open it and see
+where to cut — but exits non-zero, so a script cannot post it by accident. Note
+this is the opposite rule from `store-notes.cjs`, which counts code points
+because Play counts characters.
 
 Write from the singer's side: "Add a song right on your phone. Tap Split." —
 not "on-device separation is now supported". Sizes and times earn their place
@@ -279,11 +293,26 @@ A PNG path plus two `.txt` files makes the human do that assembly every time,
 and retyping a caption is how a typo reaches a channel. So the deliverable is a
 single page with a copy button on each piece:
 
+First build the download list from the release itself — asset names carry the
+version and the release decides them, so a link typed from memory is a 404
+posted to a channel:
+
+```bash
+gh release view v<version> --json tagName,assets > <out>/release.json
+```
+
+Turn that into `[{label, file, url, mb}]` at `<out>/dl.json`, keeping only what
+a singer installs: the Windows `.exe`, both `.dmg`s, the Android `.apk`, and the
+release page as a last row. The splitter packs are fetched by the app itself,
+the `.aab` is Play's upload format, and the `.blockmap`/`.yml` files are updater
+plumbing — none of them belong on a channel post.
+
 ```bash
 node .claude/skills/release-poster/scripts/make-post-kit.cjs \
   --poster docs/release-notes/v<version>-poster.png \
   --preview <out>/v<version>-poster-phone-preview.png \
   --en <out>/caption-en.txt --ru <out>/caption-ru.txt \
+  --downloads <out>/dl.json \
   --version v<version> --out <out>/post-kit.html
 ```
 

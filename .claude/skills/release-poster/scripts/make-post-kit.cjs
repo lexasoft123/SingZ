@@ -13,7 +13,13 @@
  *
  * Usage:
  *   node make-post-kit.cjs --poster p.png --en en.txt --ru ru.txt \
- *                          --version v0.16.0 --out post-kit.html [--preview pre.png]
+ *                          --version v0.16.0 --out post-kit.html \
+ *                          [--preview pre.png] [--downloads dl.json]
+ *
+ * --downloads takes [{label, file, url, mb?}] and renders a real link per
+ * platform. Build it from `gh release view --json assets` rather than by hand:
+ * an asset name is a thing the release decides, and a link typed from memory is
+ * a 404 posted to a channel. Omit the flag and the section is simply absent.
  */
 const { readFileSync, writeFileSync, existsSync } = require('node:fs');
 const { basename, resolve } = require('node:path');
@@ -30,6 +36,7 @@ const RU = arg('ru');
 const VERSION = arg('version', 'v0.0.0');
 const OUT = arg('out', 'post-kit.html');
 const PREVIEW = arg('preview');
+const DOWNLOADS = arg('downloads');
 const REPO = process.env.SINGZ_REPO
   ?? require('node:path').resolve(__dirname, '..', '..', '..', '..'); // <repo>/.claude/skills/release-poster/scripts
 
@@ -50,13 +57,52 @@ const fontFace = existsSync(FONT)
   ? `@font-face{font-family:'Bricolage';src:url(data:font/woff2;base64,${b64(FONT)}) format('woff2');font-weight:200 800;}`
   : '';
 
+let downloads = [];
+if (DOWNLOADS) {
+  if (!existsSync(DOWNLOADS)) {
+    console.error(`missing or unreadable --downloads: ${DOWNLOADS}`);
+    process.exit(1);
+  }
+  downloads = JSON.parse(readFileSync(DOWNLOADS, 'utf8'));
+  // Only http(s) may become an href here. The list is generated, but this page
+  // is handed around, and a javascript: or data: URL arriving through a JSON
+  // file would execute on click.
+  for (const d of downloads) {
+    if (!/^https?:\/\//i.test(d.url ?? '')) {
+      console.error(`--downloads: refusing a non-http url for ${d.label ?? '?'}: ${d.url}`);
+      process.exit(1);
+    }
+  }
+}
+
 const en = readFileSync(EN, 'utf8').trim();
 const ru = readFileSync(RU, 'utf8').trim();
 const LIMIT = 1024; // Telegram photo caption
 
-// Captions land inside <pre> and only need text escaping; --version also lands
-// in an attribute (the download filename), where an unescaped quote would
-// break out of it. Escape both contexts rather than trusting argv.
+// --version lands in an attribute (the download filename), where an unescaped quote would
+// break out of it. Escape rather than trusting argv.
+/*
+ * Captions may carry [label](https://…). It becomes a REAL <a> inside the
+ * <pre>, which is what makes the whole thing work: textContent then yields the
+ * label alone — exactly the plain text Telegram counts against its 1024, and
+ * exactly what a plain-text paste should be — while innerHTML yields the rich
+ * flavour whose links survive a paste into Telegram Desktop. Embedding a link
+ * this way is also SHORTER than spelling the URL out, so it buys caption room
+ * rather than spending it.
+ *
+ * http(s) only, same rule as --downloads: a caption is a file someone edits by
+ * hand, and a javascript: href here would execute on click.
+ */
+// ONE definition. The render, the CLI count and the page counter are three
+// readings of this rule and the change's whole value is that they agree; a
+// second copy edited alone makes them disagree silently.
+const LINK_RE = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+
+const renderCaption = (text) => esc(text).replace(
+  LINK_RE,
+  (_, label, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+);
+
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const VERSION_SAFE = esc(VERSION);
@@ -105,6 +151,16 @@ button.primary:hover{background:#ffae45}
 button.done{background:var(--ok);color:#08210f;border-color:transparent}
 button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 a.dl{text-decoration:none}
+pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.dls{display:flex;flex-direction:column;gap:10px}
+.dlrow{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:13px 16px;border:1px solid var(--line);border-radius:12px;
+  background:var(--panel);text-decoration:none;color:inherit}
+.dlrow:hover{border-color:var(--accent)}
+.dlrow .who{font-weight:700;font-size:15.5px}
+.dlrow .what{color:var(--dim);font-size:13px;font-family:ui-monospace,Menlo,monospace;
+  overflow-wrap:anywhere}
+.dlrow .mb{color:var(--dim);font-size:13.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .note{grid-column:1/-1;color:var(--faint);font-size:13.5px;border-top:1px solid var(--line);
   padding-top:18px;margin-top:8px}
 .note code{font-family:ui-monospace,monospace;color:var(--dim)}
@@ -132,13 +188,23 @@ a.dl{text-decoration:none}
       <img src="${previewURI}" alt="poster at phone chat width" style="width:200px;border-radius:8px;border:1px solid var(--line)" /></div>` : ''}
   </section>
 
+  ${downloads.length ? `<section>
+    <h2>Downloads</h2>
+    <div class="dls">
+      ${downloads.map((d) => `<a class="dlrow" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">
+        <span><span class="who">${esc(d.label)}</span><br /><span class="what">${esc(d.file)}</span></span>
+        <span class="mb">${d.mb ? esc(d.mb) + ' MB' : '&rarr;'}</span>
+      </a>`).join('\n      ')}
+    </div>
+  </section>` : ''}
+
   <section>
     <div class="card">
       <div class="card-top">
         <h2 style="margin:0">English</h2>
         <span class="count" data-count-for="en"></span>
       </div>
-      <pre id="en">${esc(en)}</pre>
+      <pre id="en">${renderCaption(en)}</pre>
       <div class="row"><button class="primary" data-copy="en">Copy English</button></div>
     </div>
 
@@ -147,7 +213,7 @@ a.dl{text-decoration:none}
         <h2 style="margin:0">Russian</h2>
         <span class="count" data-count-for="ru"></span>
       </div>
-      <pre id="ru">${esc(ru)}</pre>
+      <pre id="ru">${renderCaption(ru)}</pre>
       <div class="row"><button class="primary" data-copy="ru">Copy Russian</button></div>
     </div>
   </section>
@@ -169,9 +235,26 @@ const flash = (btn, label) => {
 
 for (const btn of document.querySelectorAll('[data-copy]')) {
   btn.addEventListener('click', async () => {
-    const text = document.getElementById(btn.dataset.copy).textContent;
+    const el = document.getElementById(btn.dataset.copy);
+    const text = el.textContent;
     try {
-      await navigator.clipboard.writeText(text);
+      // Two flavours on one clipboard. Telegram Desktop takes the HTML and
+      // keeps the embedded links; anything that only understands plain text
+      // gets the labels, which is the caption Telegram counts. writeText alone
+      // would silently drop every link, which is the whole point here.
+      if (el.querySelector('a') && window.ClipboardItem) {
+        await navigator.clipboard.write([new ClipboardItem({
+          // The pre's white-space:pre-wrap lives in this page's stylesheet and
+          // does NOT travel with the fragment, so under the default
+          // white-space:normal every blank line collapses to a space and the
+          // caption arrives as one run-on paragraph — links intact, shape gone.
+          // br rather than wrapping in pre, which Telegram reads as a code block.
+          'text/html': new Blob([el.innerHTML.replace(/\\n/g, '<br>')], { type: 'text/html' }),
+          'text/plain': new Blob([text], { type: 'text/plain' })
+        })]);
+      } else {
+        await navigator.clipboard.writeText(text);
+      }
       flash(btn, 'Copied ✓');
     } catch {
       // Clipboard refused (rare on file://) — select it so ⌘C still works.
@@ -206,4 +289,21 @@ for (const el of document.querySelectorAll('[data-count-for]')) {
 
 writeFileSync(OUT, html);
 console.log(`POST KIT ${OUT}`);
-console.log(`  english ${en.length}/${LIMIT}   russian ${ru.length}/${LIMIT}`);
+// Count what Telegram counts: the VISIBLE text. A [label](url) costs the
+// label, never the URL — link entities sit outside the caption's character
+// budget — so measuring the raw source reports a caption of 928 as 1260 and
+// sends someone cutting good copy to fit a limit they were never near.
+const visible = (t) => t.replace(LINK_RE, '$1');
+// UTF-16 units, not code points, and NOT the same rule as store-notes.cjs:
+// Play counts characters, so that script counts code points on purpose, while
+// Telegram addresses message entities by UTF-16 offset and counts the caption
+// the same way. The 🎤 these captions open with is one code point and two
+// units — count code points and the page's own counter disagrees by one, and
+// the disagreement is in the unsafe direction.
+const enN = visible(en).length;
+const ruN = visible(ru).length;
+console.log(`  english ${enN}/${LIMIT}   russian ${ruN}/${LIMIT}`);
+if (enN > LIMIT || ruN > LIMIT) {
+  console.error('  a caption is over the limit — it will be refused as a photo caption');
+  process.exit(1);
+}
