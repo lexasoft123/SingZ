@@ -173,6 +173,26 @@ const keyTempoOf = (doc: ProjectDoc): string | null => {
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
+/**
+ * The shelf this screen showed last, kept at MODULE scope on purpose.
+ *
+ * `projects` starts null on every mount and the screen renders a spinner
+ * until the listing lands — measured at 75 ms on the sim with four phone
+ * projects, more on a real phone — so returning from a song flashed a
+ * spinner over an interface the singer had just been looking at ("Catalog
+ * page flickering when swiping back from player"). Seeding from the last
+ * list paints the shelf immediately and lets the refresh below replace it
+ * quietly: the same stale-while-revalidate the Drive path already does
+ * deliberately, applied to the mount.
+ *
+ * Carries its mode, because a folder library's list says nothing about the
+ * phone's — and the mode state seeds from it too, so the header and the rows
+ * cannot disagree for a frame. What it costs is the entries staying alive —
+ * project docs and stem metadata, no audio: the buffers are the player's
+ * and `releaseProject` frees those on the way out.
+ */
+let lastShelf: { mode: 'gdrive' | 'folder' | 'phone'; items: ProjectEntry[] } | null = null
+
 export default function CatalogScreen({
   sampleRate,
   onLoaded
@@ -182,7 +202,7 @@ export default function CatalogScreen({
 }): React.JSX.Element {
   const insets = useSafeAreaInsets()
   const [root, setRoot] = useState<RootInfo | null>(null)
-  const [projects, setProjects] = useState<ProjectEntry[] | null>(null)
+  const [projects, setProjects] = useState<ProjectEntry[] | null>(lastShelf?.items ?? null)
   const [loading, setLoading] = useState<Loading | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** What the app was doing when it died last time, if it did.
@@ -195,7 +215,11 @@ export default function CatalogScreen({
    *  acting on, and unlike the others it has somewhere to go: the Log. */
   const [crashNote, setCrashNote] = useState<string | null>(null)
   /** Library source: Drive API / picked folder (SAF, iCloud) / on-device. */
-  const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>('phone')
+  /* Seeded from the same cache as the shelf, so the source the header names
+     and the rows underneath it agree on the very first frame. Within a
+     session the last mode IS the mode; the pref read below still runs and
+     still wins, it just usually agrees. */
+  const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>(lastShelf?.mode ?? 'phone')
   const [driveEmail, setDriveEmail] = useState<string | null>(null)
   const [driveOn, setDriveOn] = useState(false)
   const [pulling, setPulling] = useState(false)
@@ -226,6 +250,13 @@ export default function CatalogScreen({
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
   const listSeq = useRef(0)
+  /* Which library the newest listing was asked for. The cache below pairs
+     items with THIS, not with whatever `mode` happens to be current when the
+     items land: a mode switch renders before its refresh resolves, so the
+     current value there would file the old library's rows under the new
+     library's name. Set by the listing that wins `listSeq`, so an overtaken
+     refresh cannot claim the pairing either. */
+  const modeOfList = useRef<'gdrive' | 'folder' | 'phone'>(lastShelf?.mode ?? 'phone')
 
   /** What the singer typed into the library search box (see `shown`). */
   const [query, setQuery] = useState('')
@@ -349,6 +380,7 @@ export default function CatalogScreen({
   const refresh = useCallback(
     async (force = false) => {
       const my = ++listSeq.current
+      modeOfList.current = mode
       try {
         setError(null)
         if (mode === 'gdrive') {
@@ -407,6 +439,11 @@ export default function CatalogScreen({
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  /* One writer for the cache above, so no listing path can forget it. */
+  useEffect(() => {
+    if (projects != null) lastShelf = { mode: modeOfList.current, items: projects }
+  }, [projects])
 
   useEffect(() => {
     void getStoredText('singz.libMode').then((m) => {
