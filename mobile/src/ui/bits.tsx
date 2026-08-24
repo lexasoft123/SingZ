@@ -1,5 +1,12 @@
-import React, { useCallback, useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef } from 'react'
 import { KIT, STEM_COLORS } from './tokens'
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler'
+import Reanimated, {
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming
+} from 'react-native-reanimated'
 import {
   Animated,
   Easing,
@@ -956,17 +963,53 @@ export function Sheet({
       useNativeDriver: true
     }).start()
   }, [scrim])
+  /* Swipe-down on the handle dismisses. The grab bar used to be drawn by
+     every caller as decoration with NOTHING behind it — a handle that is a
+     lie ("Modal sheets swipe area does not work", from the phone). It lives
+     here now, above the content, with the pan attached: the panel follows
+     the finger and past 110pt (or a flick) the sheet closes. The gesture is
+     on the HANDLE ZONE only — the sheets carry ScrollViews and sliders, and
+     a whole-panel pan would fight both. Close hands off to the Modal's own
+     slide-out, which continues from wherever the finger left the panel. */
+  const ty = useSharedValue(0)
+  const drag = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetY(6)
+        .onUpdate((e) => {
+          'worklet'
+          ty.value = Math.max(0, e.translationY)
+        })
+        .onEnd((e) => {
+          'worklet'
+          if (e.translationY > 110 || e.velocityY > 700) runOnJS(onClose)()
+          else ty.value = withTiming(0, { duration: 180 })
+        }),
+    [onClose, ty]
+  )
+  const follow = useAnimatedStyle(() => ({ transform: [{ translateY: ty.value }] }))
   return (
-    <View style={b.sheetWrap}>
+    /* GestureHandlerRootView, not View: on Android, RNGH gestures inside a
+       Modal are dead without a root view of their own in that window. */
+    <GestureHandlerRootView style={b.sheetWrap}>
       <Animated.View
         pointerEvents="none"
         style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)', opacity: scrim }]}
       />
       <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
-      <View style={[b.sheet, pad]} accessible={false} onAccessibilityEscape={onClose}>
+      <Reanimated.View
+        style={[b.sheet, pad, follow]}
+        accessible={false}
+        onAccessibilityEscape={onClose}
+      >
+        <GestureDetector gesture={drag}>
+          <View style={b.grabZone} collapsable={false}>
+            <View style={b.grab} />
+          </View>
+        </GestureDetector>
         {children}
-      </View>
-    </View>
+      </Reanimated.View>
+    </GestureHandlerRootView>
   )
 }
 
@@ -1033,14 +1076,14 @@ export const b = StyleSheet.create({
     paddingBottom: 34,
     maxHeight: '80%'
   },
+  /* The 5pt bar is the visual; the zone is the 34pt target the finger
+     actually gets (44pt-rule territory once the panel's radius is counted). */
+  grabZone: { alignItems: 'center', justifyContent: 'center', height: 34, marginBottom: 5 },
   grab: {
     width: 40,
     height: 5,
     borderRadius: 3,
-    backgroundColor: white(0.25),
-    alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 14
+    backgroundColor: white(0.25)
   },
   sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', marginBottom: 14, letterSpacing: -0.2 },
   sec: { borderTopWidth: 1, borderTopColor: C.hairline, paddingVertical: 15 },

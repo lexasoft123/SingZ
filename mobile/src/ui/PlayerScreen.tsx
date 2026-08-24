@@ -6,10 +6,12 @@ import Animated, {
   runOnUI,
   scrollTo,
   useAnimatedRef,
+  useAnimatedStyle,
   useDerivedValue,
   useFrameCallback,
   useScrollOffset,
-  useSharedValue
+  useSharedValue,
+  withTiming
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -389,20 +391,47 @@ export default function PlayerScreen({
      The strip is 24pt wide — ending BEFORE the lyric tap targets at
      LYR_PAD 26 — and spans only the mid-screen, clearing the header's own
      back button above and the full-bleed seek band below. The pan fails on
-     vertical movement, and the worklet body is one comparison — nothing for
-     the unlowered-Hermes loop trap to bite. Cost accepted knowingly: the
-     24pt column cannot START a lyric scroll (the same dead zone every
-     RNGH-based back gesture ships). */
+     vertical movement. Cost accepted knowingly: the 24pt column cannot
+     START a lyric scroll (the same dead zone every RNGH-based back gesture
+     ships).
+
+     The screen TRACKS the finger and leaves rightward, the way a native push
+     does — the first cut only measured the release and unmounted, so the
+     player "just suddenly disappeared" (from the phone). Past a third of the
+     width, or on a flick, it finishes the slide and only THEN calls onBack;
+     short of that it eases home. `if (finished)` is what makes a cancelled
+     slide silent: a second pan landing mid-animation overrides backX, that
+     timing reports unfinished, and onBack never fires for it (closeProject
+     survives a double call anyway — both unload() and releaseProject are
+     idempotent — but the guard means it doesn't get one).
+
+     The library is not mounted behind (App renders one screen), so what the
+     slide reveals is the app's own ground rather than a parallaxing catalog:
+     the motion is real, the layer underneath is honest. Mounting the catalog
+     back there would buy the parallax for a heavy mount mid-gesture and its
+     load effects running under a playing song. */
+  const backX = useSharedValue(0)
+  const backSlide = useAnimatedStyle(() => ({ transform: [{ translateX: backX.value }] }))
   const backPan = useMemo(
     () =>
       Gesture.Pan()
         .activeOffsetX(16)
         .failOffsetY([-14, 14])
+        .onUpdate((e) => {
+          'worklet'
+          backX.value = Math.max(0, e.translationX)
+        })
         .onEnd((e) => {
           'worklet'
-          if (e.translationX > 60) runOnJS(onBack)()
+          const done = e.translationX > winDims.width * 0.33 || e.velocityX > 900
+          if (done)
+            backX.value = withTiming(winDims.width, { duration: 190 }, (finished) => {
+              'worklet'
+              if (finished) runOnJS(onBack)()
+            })
+          else backX.value = withTiming(0, { duration: 200 })
         }),
-    [onBack]
+    [onBack, backX, winDims.width]
   )
 
   /* Android system back → the catalog. Gesture-nav phones claim the left
@@ -1096,7 +1125,7 @@ export default function PlayerScreen({
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: C.bg }}>
+    <Animated.View style={[{ flex: 1, backgroundColor: C.bg }, backSlide]}>
       {/* The stage: a dusk room, fully out of focus — chosen from the design
           canvas against the user's references. A defocused photograph of warm
           light rather than a drawn pattern: a golden window glow upper-left,
@@ -1470,7 +1499,6 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <View style={b.grab} />
             <Text style={b.sheetTitle}>Mixer</Text>
             {/* One tap for the thing the app exists to do. Only offered when
                 the song has a vocal lane — an unsplit song has nothing to
@@ -1584,7 +1612,6 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <View style={b.grab} />
             <Text style={b.sheetTitle}>{project.name}</Text>
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={[b.sec, b.secFirst]}>
@@ -1843,7 +1870,6 @@ export default function PlayerScreen({
       >
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <ScrollView bounces={false} showsVerticalScrollIndicator={false}>
-              <View style={b.grab} />
               <Text style={b.sheetTitle}>Practice</Text>
 
               <View style={[b.sec, b.secFirst]}>
@@ -2118,7 +2144,7 @@ export default function PlayerScreen({
             </ScrollView>
         </Sheet>
       </Modal>
-    </View>
+    </Animated.View>
   )
 }
 
