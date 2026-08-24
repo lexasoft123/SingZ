@@ -38,6 +38,32 @@ class DeferredMicSource extends FakeMicSource {
   }
 }
 
+class SequencedDeferredMicSource extends FakeMicSource {
+  private readonly gates: Array<{
+    promise: Promise<void>
+    resolve: () => void
+    reject: (error: Error) => void
+  }> = []
+  async start(): Promise<void> {
+    this.starts++
+    let resolve!: () => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<void>((done, fail) => {
+      resolve = done
+      reject = fail
+    })
+    this.gates.push({ promise, resolve, reject })
+    await promise
+    this.active = true
+  }
+  resolve(index: number): void {
+    this.gates[index]?.resolve()
+  }
+  reject(index: number, error: Error): void {
+    this.gates[index]?.reject(error)
+  }
+}
+
 const context = (currentTime = 1): AudioContext => ({ currentTime }) as AudioContext
 
 describe('desktop training microphone capture', () => {
@@ -100,8 +126,75 @@ describe('desktop training microphone capture', () => {
     source.resolve()
     await Promise.all([first, concurrent])
     expect(capture.read().timestampMs).toBe(3000)
+    await expect(capture.start(context(4))).rejects.toThrow('already attached')
+  })
+
+  it.each([
+    ['the same context', false],
+    ['a different context', true]
+  ])('drains an explicitly stopped pending start before restarting on %s', async (_label, changeContext) => {
+    const source = new SequencedDeferredMicSource()
+    const capture = new DesktopTrainingMicCapture({ source })
+    const firstContext = context(5)
+    const replacementContext = changeContext ? context(8) : firstContext
+    const first = capture.start(firstContext)
+    const firstResult = expect(first).rejects.toThrow('cancelled')
+
+    capture.stop()
+    const replacement = capture.start(replacementContext)
+    const duplicateReplacement = capture.start(replacementContext)
+    expect(source.starts).toBe(1)
+
+    source.resolve(0)
+    await firstResult
+    await flushMicrotasks()
+    expect(source.starts).toBe(2)
+    expect(source.active).toBe(false)
+
+    source.resolve(1)
+    await Promise.all([replacement, duplicateReplacement])
+    expect(source.starts).toBe(2)
+    expect(source.active).toBe(true)
+    expect(capture.read().timestampMs).toBe(changeContext ? 8000 : 5000)
+    expect(source.stops).toBe(2)
+  })
+
+  it('rejects a queued restart cleanly when capture is disposed before the predecessor drains', async () => {
+    const source = new SequencedDeferredMicSource()
+    const capture = new DesktopTrainingMicCapture({ source })
+    const first = capture.start(context(2))
+    const firstResult = expect(first).rejects.toThrow('cancelled')
+    capture.stop()
+    const queued = capture.start(context(3))
+    const queuedResult = expect(queued).rejects.toThrow('disposed')
+    capture.dispose()
+
+    source.resolve(0)
+    await Promise.all([firstResult, queuedResult])
+    expect(source.starts).toBe(1)
+    expect(source.active).toBe(false)
+    await expect(capture.start(context(4))).rejects.toThrow('disposed')
+  })
+
+  it('does not hide an unexpected predecessor failure behind a queued restart', async () => {
+    const source = new SequencedDeferredMicSource()
+    const capture = new DesktopTrainingMicCapture({ source })
+    const first = capture.start(context(2))
+    const firstResult = expect(first).rejects.toThrow('permission failed')
+    capture.stop()
+    const queued = capture.start(context(2))
+    const queuedResult = expect(queued).rejects.toThrow('permission failed')
+
+    source.reject(0, new Error('permission failed'))
+    await Promise.all([firstResult, queuedResult])
+    expect(source.starts).toBe(1)
+    expect(source.active).toBe(false)
   })
 })
+
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 8; index++) await Promise.resolve()
+}
 
 class FakeTrack {
   stopCount = 0

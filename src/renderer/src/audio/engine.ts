@@ -134,8 +134,7 @@ export class MultitrackEngine {
   createTrainingCueController(): DesktopTrainingCueController {
     this.trainingCues?.dispose()
     this.trainingCues = new DesktopTrainingCueController(this.ctx, this.trainingGain, () => {
-      if (this._playing) this.pause()
-      else this.generation++ // invalidate a play() still awaiting AudioContext.resume()
+      this.pause()
     })
     return this.trainingCues
   }
@@ -750,6 +749,9 @@ export class MultitrackEngine {
   }
 
   pause(): void {
+    // A play request can be awaiting AudioContext.resume() without having
+    // created sources or set _playing yet. Pausing still revokes that request.
+    this.generation++
     if (!this._playing) return
     this.startOffset = this.position
     this._playing = false

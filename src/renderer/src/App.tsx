@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type {
   CustomTrack,
   EngineStatus,
@@ -31,6 +31,7 @@ import {
   type MetronomeConfig
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
+import { DesktopTrainingMicCapture } from './audio/training-mic'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
@@ -47,6 +48,7 @@ import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
+import VocalTraining from './components/VocalTraining'
 import {
   cleanSongName,
   customTrackId,
@@ -64,6 +66,11 @@ import {
   type TrainingConfig,
   type UITrack
 } from './model'
+import {
+  desktopTrainingReducer,
+  INITIAL_DESKTOP_TRAINING_STATE,
+  type AppSection
+} from './training-ui-state'
 
 type Phase = 'empty' | 'loading' | 'ready'
 
@@ -445,6 +452,15 @@ export default function App(): React.JSX.Element {
     ;(window as unknown as { __engine: MultitrackEngine }).__engine = e
     return e
   })
+  const [trainingCues] = useState(() => engine.createTrainingCueController())
+  const [trainingMic] = useState(() => new DesktopTrainingMicCapture())
+  const [appSection, setAppSection] = useState<AppSection>('songs')
+  const appSectionRef = useRef<AppSection>('songs')
+  appSectionRef.current = appSection
+  const [desktopTraining, dispatchDesktopTraining] = useReducer(
+    desktopTrainingReducer,
+    INITIAL_DESKTOP_TRAINING_STATE
+  )
   const [phase, setPhase] = useState<Phase>('empty')
   const [song, setSong] = useState<{ path: string; name: string } | null>(null)
   const [tracks, setTracks] = useState<UITrack[]>([])
@@ -655,6 +671,16 @@ export default function App(): React.JSX.Element {
     engine.setMasterVolume(masterVol)
   }, [engine, masterVol])
 
+  // These are app-owned resources: section switches stop them immediately,
+  // and renderer teardown releases the microphone plus every scheduled node.
+  useEffect(
+    () => () => {
+      trainingMic.dispose()
+      trainingCues.dispose()
+    },
+    [trainingCues, trainingMic]
+  )
+
   const changeMasterVol = useCallback((v: number) => {
     setAudioPrefs((p) => ({ ...p, master: Math.max(0, Math.min(1, v)) }))
   }, [])
@@ -821,6 +847,9 @@ export default function App(): React.JSX.Element {
         (tgt instanceof HTMLInputElement && tgt.type !== 'range') ||
         tgt instanceof HTMLTextAreaElement
       if (inText) return
+      // Song transport shortcuts never leak into the training section. The
+      // exercise owns Space/arrow semantics while it is visible.
+      if (appSectionRef.current !== 'songs') return
       if (e.code === 'Escape') {
         if (showCatalogRef.current) {
           setShowCatalog(false)
@@ -2452,6 +2481,23 @@ export default function App(): React.JSX.Element {
     [clampView, stopFollow]
   )
 
+  const switchSection = useCallback(
+    (section: AppSection) => {
+      if (section === appSectionRef.current) return
+      // One audible world at a time. The loaded song, playhead and exercise
+      // reducer remain untouched; only active sound/capture is stopped.
+      engine.pause()
+      trainingCues.cancel()
+      trainingMic.stop()
+      setMicDevice(null)
+      if (appSectionRef.current === 'training') {
+        dispatchDesktopTraining({ type: 'interrupt-runtime' })
+      }
+      setAppSection(section)
+    },
+    [engine, trainingCues, trainingMic]
+  )
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -2460,7 +2506,25 @@ export default function App(): React.JSX.Element {
           Sing<span>Z</span>
           {ver && <em className="ver">{ver}</em>}
         </div>
-        {phase === 'ready' && (
+        <nav className="app-sections no-drag" aria-label="SingZ sections">
+          <button
+            type="button"
+            className={appSection === 'songs' ? 'active' : ''}
+            aria-current={appSection === 'songs' ? 'page' : undefined}
+            onClick={() => switchSection('songs')}
+          >
+            Songs
+          </button>
+          <button
+            type="button"
+            className={appSection === 'training' ? 'active' : ''}
+            aria-current={appSection === 'training' ? 'page' : undefined}
+            onClick={() => switchSection('training')}
+          >
+            Vocal training
+          </button>
+        </nav>
+        {appSection === 'songs' && phase === 'ready' && (
           <button
             type="button"
             className={`pill ghost small catalog-btn${showCatalog ? ' active' : ''}`}
@@ -2506,7 +2570,7 @@ export default function App(): React.JSX.Element {
             <span className="dot idle" /> update {update.percent}%
           </span>
         )}
-        {song && phase === 'ready' && (
+        {appSection === 'songs' && song && phase === 'ready' && (
           <div className="song-title no-drag">
             {editName === null ? (
               <>
@@ -2537,7 +2601,7 @@ export default function App(): React.JSX.Element {
           </div>
         )}
         <div className="header-right no-drag">
-          {phase === 'ready' && (
+          {appSection === 'songs' && phase === 'ready' && (
             <button
               type="button"
               className="pill ghost small"
@@ -2561,7 +2625,7 @@ export default function App(): React.JSX.Element {
               )}
             </button>
           )}
-          {phase === 'ready' && isProject && !inLibrary && (
+          {appSection === 'songs' && phase === 'ready' && isProject && !inLibrary && (
             <button
               type="button"
               className="pill ghost small"
@@ -2572,7 +2636,7 @@ export default function App(): React.JSX.Element {
             </button>
           )}
           {/* the catalog page already lists the library — no second door to it */}
-          {phase === 'ready' && !showCatalog && (
+          {appSection === 'songs' && phase === 'ready' && !showCatalog && (
             <button type="button" className="pill ghost small" onClick={() => setShowProjects(true)}>
               Open…
             </button>
@@ -2609,7 +2673,17 @@ export default function App(): React.JSX.Element {
         </div>
       </header>
 
-      {phase === 'ready' && !showCatalog ? (
+      {appSection === 'training' ? (
+        <VocalTraining
+          state={desktopTraining}
+          dispatch={dispatchDesktopTraining}
+          engine={engine}
+          cues={trainingCues}
+          mic={trainingMic}
+          inputId={audioPrefs.inputId}
+          onMicDevice={setMicDevice}
+        />
+      ) : phase === 'ready' && !showCatalog ? (
         <>
           <div className="main-row">
             <div className="main-col">

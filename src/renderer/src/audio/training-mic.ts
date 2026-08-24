@@ -27,6 +27,8 @@ export class DesktopTrainingMicCapture {
   private readonly injectedNowMs: (() => number) | undefined
   private context: AudioContext | null = null
   private startPending: Promise<void> | null = null
+  /** True only after stop() explicitly revoked the operation in startPending. */
+  private pendingCancelled = false
   private generation = 0
   private disposed = false
 
@@ -43,20 +45,46 @@ export class DesktopTrainingMicCapture {
       return
     }
     if (this.startPending) {
+      if (this.pendingCancelled)
+        return this.launchStart(context, options, this.startPending)
       if (this.context !== context)
         throw new Error('Training microphone is starting on another audio context.')
       return this.startPending
     }
+    return this.launchStart(context, options)
+  }
+
+  private launchStart(
+    context: AudioContext,
+    options: TrainingMicStartOptions,
+    predecessor?: Promise<void>
+  ): Promise<void> {
     this.context = context
     const generation = ++this.generation
-    const pending = this.startNow(context, options, generation)
-    this.startPending = pending
-    try {
-      await pending
-    } finally {
-      if (this.startPending === pending) this.startPending = null
-      if (this.generation === generation && !this.source.active) this.context = null
+    this.pendingCancelled = false
+    const operation = async (): Promise<void> => {
+      if (predecessor) {
+        try {
+          await predecessor
+        } catch (error) {
+          if (!isExpectedStartCancellation(error)) throw error
+        }
+        if (this.disposed) throw new Error('Training microphone capture is disposed.')
+        if (this.generation !== generation)
+          throw new Error('Training microphone start was cancelled.')
+      }
+      await this.startNow(context, options, generation)
     }
+    let tracked!: Promise<void>
+    tracked = operation().finally(() => {
+      if (this.startPending === tracked) {
+        this.startPending = null
+        this.pendingCancelled = false
+      }
+      if (this.generation === generation && !this.source.active) this.context = null
+    })
+    this.startPending = tracked
+    return tracked
   }
 
   private async startNow(
@@ -98,6 +126,7 @@ export class DesktopTrainingMicCapture {
   stop(): void {
     this.generation++
     this.context = null
+    if (this.startPending) this.pendingCancelled = true
     this.source.stop()
   }
 
@@ -106,6 +135,11 @@ export class DesktopTrainingMicCapture {
     this.disposed = true
     this.generation++
     this.context = null
+    if (this.startPending) this.pendingCancelled = true
     this.source.stop()
   }
+}
+
+function isExpectedStartCancellation(error: unknown): boolean {
+  return /cancelled|canceled/i.test(error instanceof Error ? error.message : String(error))
 }

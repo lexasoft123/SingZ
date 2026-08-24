@@ -227,6 +227,27 @@ describe('desktop training cue scheduling', () => {
 describe('engine-owned training audio', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  it('lets a section pause revoke song play while AudioContext.resume is pending', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    const context = FakeAudioContext.last!
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    const resume = deferred()
+    context.state = 'suspended'
+    context.resumeGate = resume.promise
+
+    const pendingPlay = engine.play({ countIn: false })
+    await Promise.resolve()
+    expect(context.resumeCount).toBe(1)
+    engine.pause()
+    resume.resolve()
+    await pendingPlay
+
+    expect(engine.playing).toBe(false)
+    expect(context.bufferSources).toHaveLength(0)
+  })
+
   it('follows master volume and makes song playback mutually exclusive with cues', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
