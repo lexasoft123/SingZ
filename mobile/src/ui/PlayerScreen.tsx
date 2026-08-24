@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BackHandler, DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
+  Easing,
   runOnJS,
   runOnUI,
   scrollTo,
@@ -425,10 +426,18 @@ export default function PlayerScreen({
           'worklet'
           const done = e.translationX > winDims.width * 0.33 || e.velocityX > 900
           if (done)
-            backX.value = withTiming(winDims.width, { duration: 190 }, (finished) => {
-              'worklet'
-              if (finished) runOnJS(onBack)()
-            })
+            /* Easing.out, not the default inOut: a flick releases with the
+               screen already moving, and an ease-IN curve has zero slope at
+               t=0 — the slide would stop dead at the moment the finger left
+               and start again, which is the stall the whole fix is about. */
+            backX.value = withTiming(
+              winDims.width,
+              { duration: 190, easing: Easing.out(Easing.quad) },
+              (finished) => {
+                'worklet'
+                if (finished) runOnJS(onBack)()
+              }
+            )
           else backX.value = withTiming(0, { duration: 200 })
         }),
     [onBack, backX, winDims.width]

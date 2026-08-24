@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef } from 'react'
 import { KIT, STEM_COLORS } from './tokens'
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler'
 import Reanimated, {
+  Easing as REasing,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
@@ -983,7 +984,7 @@ export function Sheet({
         .onEnd((e) => {
           'worklet'
           if (e.translationY > 110 || e.velocityY > 700) runOnJS(onClose)()
-          else ty.value = withTiming(0, { duration: 180 })
+          else ty.value = withTiming(0, { duration: 180, easing: REasing.out(REasing.quad) })
         }),
     [onClose, ty]
   )
@@ -1003,7 +1004,27 @@ export function Sheet({
         onAccessibilityEscape={onClose}
       >
         <GestureDetector gesture={drag}>
-          <View style={b.grabZone} collapsable={false}>
+          <View
+            style={b.grabZone}
+            collapsable={false}
+            /* The swipe is the sighted exit; this is the other one. Same
+               shape as the fader above and the catalog's swipe rows:
+               `accessible` is what makes it an element at all (ViewProps
+               defaults it false, and iOS maps it straight to
+               isAccessibilityElement), onAccessibilityTap carries the
+               activation on iOS, and Android needs a declared 'activate'
+               action because it has no tap hook. Not a Pressable: that
+               would close the sheet on a sighted tap of the handle too. */
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+            accessibilityHint="Closes this sheet."
+            onAccessibilityTap={onClose}
+            accessibilityActions={Platform.OS === 'android' ? [{ name: 'activate' }] : []}
+            onAccessibilityAction={(e) => {
+              if (e.nativeEvent.actionName === 'activate') onClose()
+            }}
+          >
             <View style={b.grab} />
           </View>
         </GestureDetector>
