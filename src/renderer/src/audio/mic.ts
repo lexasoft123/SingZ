@@ -1,4 +1,4 @@
-import { yinPitch } from './pitch'
+import { yinPitchInfo, type PitchFrame } from './pitch'
 
 export interface MicDevice {
   id: string
@@ -21,12 +21,41 @@ export class MicPitch {
   private buf: Float32Array<ArrayBuffer> | null = null
   private dev: MicDevice | null = null
   private onEnded: (() => void) | null = null
+  private endedTrack: MediaStreamTrack | null = null
+  private endedHandler: (() => void) | null = null
+  private context: AudioContext | null = null
+  private startPending: Promise<void> | null = null
+  private generation = 0
 
   async start(
     ctx: AudioContext,
     opts: { deviceId?: string; onEnded?: () => void } = {}
   ): Promise<void> {
-    if (this.stream) return
+    if (this.stream) {
+      if (this.context !== ctx) throw new Error('Microphone is already attached to another audio context.')
+      return
+    }
+    if (this.startPending) {
+      if (this.context !== ctx) throw new Error('Microphone is starting on another audio context.')
+      return this.startPending
+    }
+    this.context = ctx
+    const generation = ++this.generation
+    const pending = this.startNow(ctx, opts, generation)
+    this.startPending = pending
+    try {
+      await pending
+    } finally {
+      if (this.startPending === pending) this.startPending = null
+      if (this.generation === generation && !this.stream) this.context = null
+    }
+  }
+
+  private async startNow(
+    ctx: AudioContext,
+    opts: { deviceId?: string; onEnded?: () => void },
+    generation: number
+  ): Promise<void> {
     const base = { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
     let fallback = false
     let stream: MediaStream
@@ -44,27 +73,49 @@ export class MicPitch {
       if (!opts.deviceId || !recoverable.includes(name)) {
         throw err
       }
+      this.assertStarting(generation)
       stream = await navigator.mediaDevices.getUserMedia({ audio: base })
       fallback = true
     }
-    this.stream = stream
-    this.onEnded = opts.onEnded ?? null
-    const track = stream.getAudioTracks()[0]
-    if (track) {
-      this.dev = { id: track.getSettings().deviceId ?? '', label: track.label, fallback }
-      // unplugged mid-song: release everything and tell the UI, instead of
-      // leaving a silent "Mic on" state
-      track.addEventListener('ended', () => {
+    let source: MediaStreamAudioSourceNode | null = null
+    let analyser: AnalyserNode | null = null
+    try {
+      this.assertStarting(generation)
+      source = ctx.createMediaStreamSource(stream)
+      analyser = ctx.createAnalyser()
+      analyser.fftSize = 2048
+      source.connect(analyser)
+      const buf = new Float32Array(analyser.fftSize)
+      this.assertStarting(generation)
+
+      const track = stream.getAudioTracks()[0] ?? null
+      const onEnded = (): void => {
         const cb = this.onEnded
         this.stop()
         cb?.()
-      })
+      }
+      if (track) track.addEventListener('ended', onEnded)
+      this.stream = stream
+      this.source = source
+      this.analyser = analyser
+      this.buf = buf
+      this.onEnded = opts.onEnded ?? null
+      this.endedTrack = track
+      this.endedHandler = track ? onEnded : null
+      this.dev = track
+        ? { id: track.getSettings().deviceId ?? '', label: track.label, fallback }
+        : null
+    } catch (error) {
+      source?.disconnect()
+      analyser?.disconnect()
+      stream.getTracks().forEach((track) => track.stop())
+      throw error
     }
-    this.source = ctx.createMediaStreamSource(stream)
-    this.analyser = ctx.createAnalyser()
-    this.analyser.fftSize = 2048
-    this.source.connect(this.analyser)
-    this.buf = new Float32Array(this.analyser.fftSize)
+  }
+
+  private assertStarting(generation: number): void {
+    if (this.generation !== generation || this.context === null)
+      throw new Error('Microphone start was cancelled.')
   }
 
   get active(): boolean {
@@ -78,20 +129,34 @@ export class MicPitch {
 
   /** Current sung pitch in Hz (0 = silent/unvoiced). */
   read(): number {
-    if (!this.analyser || !this.buf) return 0
+    return this.readInfo().f0
+  }
+
+  /** Current pitch plus confidence evidence for reusable training capture. */
+  readInfo(): PitchFrame {
+    if (!this.analyser || !this.buf) return { f0: 0, clarity: 0, rms: 0 }
     this.analyser.getFloatTimeDomainData(this.buf)
-    return yinPitch(this.buf, this.analyser.context.sampleRate)
+    return yinPitchInfo(this.buf, this.analyser.context.sampleRate)
   }
 
   stop(): void {
-    this.stream?.getTracks().forEach((t) => t.stop())
-    this.source?.disconnect()
-    this.analyser?.disconnect()
+    this.generation++
+    const stream = this.stream
+    const source = this.source
+    const analyser = this.analyser
+    if (this.endedTrack && this.endedHandler)
+      this.endedTrack.removeEventListener('ended', this.endedHandler)
     this.stream = null
     this.source = null
     this.analyser = null
     this.buf = null
     this.dev = null
     this.onEnded = null
+    this.endedTrack = null
+    this.endedHandler = null
+    this.context = null
+    stream?.getTracks().forEach((track) => track.stop())
+    source?.disconnect()
+    analyser?.disconnect()
   }
 }

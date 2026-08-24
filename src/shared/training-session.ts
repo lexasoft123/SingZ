@@ -52,6 +52,7 @@ const MAX_NOTES_PER_CUE = 3
 const RESULT_CLASSIFICATIONS: readonly TrainingResultClassification[] = [
   'on-target',
   'close',
+  'wrong-note',
   'wrong-octave',
   'other-chord-tone',
   'non-chord-tone',
@@ -62,7 +63,7 @@ const RESULT_CLASSIFICATIONS: readonly TrainingResultClassification[] = [
 
 type Rng = () => number
 const trustedSessions = new WeakSet<object>()
-export const TRAINING_SESSION_FORMAT_VERSION = 1
+export const TRAINING_SESSION_FORMAT_VERSION = 2
 
 export function generateTrainingPrompts(config: TrainingSessionConfig): TrainingPrompt[] {
   validateConfig(config)

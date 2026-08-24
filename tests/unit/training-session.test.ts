@@ -462,6 +462,7 @@ describe('serializable session state', () => {
       JSON.parse(
         JSON.stringify(createTrainingSession({ ...base('note'), length }))
       ) as TrainingSessionData
+    expect(plain().formatVersion).toBe(2)
 
     const wrongVersion = plain()
     ;(wrongVersion as { formatVersion: number }).formatVersion = TRAINING_SESSION_FORMAT_VERSION + 1
@@ -510,7 +511,7 @@ describe('serializable session state', () => {
     expect(Object.isFrozen(payload)).toBe(false)
   })
 
-  it('rejects unknown prompt and stored-result fields under strict v1', () => {
+  it('rejects unknown prompt and stored-result fields under strict v2', () => {
     const promptExtra = JSON.parse(
       JSON.stringify(createTrainingSession({ ...base('note'), length: 1 }))
     ) as TrainingSessionData

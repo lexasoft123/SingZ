@@ -8,6 +8,7 @@ import {
   type BeatInfo,
   type MetronomeConfig
 } from './beat'
+import { DesktopTrainingCueController } from './training-audio'
 
 export interface EngineTrackInput {
   id: string
@@ -78,6 +79,9 @@ export class MultitrackEngine {
   private beatsInfo: BeatInfo | null = null
   private met: MetronomeConfig = { ...MET_DEFAULTS }
   private clickGain = this.ctx.createGain()
+  /** Exercise cues bypass pitch/stretch processing but follow the user's master volume. */
+  private trainingGain = this.ctx.createGain()
+  private trainingCues: DesktopTrainingCueController | null = null
   /** Output level for everything the singer hears, mix and click alike. */
   private masterVol = 1
   private clickBufs: { accent: AudioBuffer; beat: AudioBuffer } | null = null
@@ -103,6 +107,8 @@ export class MultitrackEngine {
     // gains must never color the metronome.
     this.clickGain.gain.value = this.met.volume
     this.clickGain.connect(this.ctx.destination)
+    this.trainingGain.gain.value = this.masterVol
+    this.trainingGain.connect(this.ctx.destination)
   }
 
   subscribe(fn: () => void): () => void {
@@ -122,6 +128,16 @@ export class MultitrackEngine {
 
   get context(): AudioContext {
     return this.ctx
+  }
+
+  /** Create the one active cue controller; replacing it cleans up the previous owner's nodes. */
+  createTrainingCueController(): DesktopTrainingCueController {
+    this.trainingCues?.dispose()
+    this.trainingCues = new DesktopTrainingCueController(this.ctx, this.trainingGain, () => {
+      if (this._playing) this.pause()
+      else this.generation++ // invalidate a play() still awaiting AudioContext.resume()
+    })
+    return this.trainingCues
   }
 
   /** Current output device id ('' = system default). */
@@ -207,6 +223,7 @@ export class MultitrackEngine {
     this.masterVol = Math.max(0, Math.min(1, v))
     this.master.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
     this.clickGain.gain.setTargetAtTime(this.met.volume * this.masterVol, this.ctx.currentTime, 0.02)
+    this.trainingGain.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
     this.emit()
   }
 
@@ -635,7 +652,10 @@ export class MultitrackEngine {
 
   async play(opts: { countIn?: boolean } = {}): Promise<void> {
     if (this._playing || this.tracks.length === 0) return
+    this.trainingCues?.cancel()
+    const requestGeneration = ++this.generation
     if (this.ctx.state === 'suspended') await this.ctx.resume()
+    if (requestGeneration !== this.generation) return
     if (this.startOffset >= this.duration - 0.01) this.startOffset = 0
 
     const gen = ++this.generation

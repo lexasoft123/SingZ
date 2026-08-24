@@ -138,6 +138,7 @@ export type TrainingPrompt =
 export type TrainingResultClassification =
   | 'on-target'
   | 'close'
+  | 'wrong-note'
   | 'wrong-octave'
   | 'other-chord-tone'
   | 'non-chord-tone'
@@ -146,10 +147,15 @@ export type TrainingResultClassification =
   | 'out-of-range'
 
 export interface TrainingAttemptMetrics {
+  /** Signed median error: negative = flat, positive = sharp. */
   readonly medianCentsError?: number
+  /** Fraction of confidently voiced time held near the attempt's median pitch. */
   readonly stableHoldRatio?: number
+  /** Elapsed time from the target-window start until a stable hold begins. */
   readonly timeToSettleMs?: number
+  /** Fraction of the scored target window containing a confident voiced pitch. */
   readonly voicedCoverage?: number
+  /** Robust fractional MIDI estimate; unlike pitch-class scoring, this preserves octave. */
   readonly detectedMidi?: number
 }
 
