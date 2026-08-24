@@ -1,3 +1,8 @@
+/* Gesture-handler ships its own jest mock — without it the module
+ * import throws for the missing native TurboModule, the same failure
+ * mode the audio-api mock below exists for. */
+require('react-native-gesture-handler/jestSetup')
+
 /**
  * react-native-audio-api throws at import time when its native module is
  * missing, which is always true under jest. Everything audio is verified by

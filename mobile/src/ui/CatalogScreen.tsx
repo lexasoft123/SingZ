@@ -4,6 +4,7 @@ import {
   Alert,
   DeviceEventEmitter,
   Image,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -48,7 +49,9 @@ import {
   type ProjectEntry,
   type RootInfo
 } from '../projects'
-import { C, Seg, StemTile, white } from './bits'
+import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
+import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
+import { C, Chip, FolderGlyph, LyricsGlyph, PhoneGlyph, RedetectGlyph, SearchGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, TrashGlyph, white } from './bits'
 import { TEST } from './testhooks'
 import AddSongSheet from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
@@ -106,8 +109,96 @@ interface Loading {
  * "0 MB". Two formatters on purpose — the log and the screen are different
  * audiences.
  */
+/** One optional card action, living in the swipe — icon, not word. */
+export interface CardSwipeAction {
+  key: string
+  label: string
+  icon: React.ReactNode
+  danger?: boolean
+  onPress: () => void
+}
+
+/**
+ * The revealed swipe actions. A component rather than inline JSX because it
+ * needs a hook: at REST the actions must be fully invisible — Android's
+ * renderer let the block's rounded corner bleed a 1px rim around the card
+ * face's own corner arc, so every card wore an outline it had not earned
+ * (measured on the API 36 emulator). Opacity keyed to the swipe progress
+ * kills the bleed without touching the geometry. Callers wrap each onPress
+ * with the Swipeable's close() so the card snaps shut when an action is
+ * taken — a cancelled confirm otherwise left it hanging open.
+ */
+function SwipeActions({
+  progress,
+  actions
+}: {
+  progress: SharedValue<number>
+  actions: CardSwipeAction[]
+}): React.JSX.Element {
+  const style = useAnimatedStyle(() => ({ opacity: progress.value > 0.02 ? 1 : 0 }))
+  return (
+    <Reanimated.View style={[style, s.swipeActionsRow]}>
+      {actions.map((a, i) => (
+        <Pressable
+          key={a.key}
+          onPress={a.onPress}
+          accessibilityRole="button"
+          accessibilityLabel={a.label}
+          style={[
+            s.swipeAction,
+            a.danger === true && s.swipeActionDanger,
+            i === actions.length - 1 && s.swipeActionLast
+          ]}
+        >
+          {a.icon}
+        </Pressable>
+      ))}
+    </Reanimated.View>
+  )
+}
+
 const fmtSize = (bytes: number): string =>
   bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`
+
+/** The card's key · tempo line — singers pick songs by key, and both numbers
+ *  are already saved in project.json. Same spelling as the Song sheet's Key
+ *  row, compacted to card size. Null when the song has neither. */
+const KEY_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
+const keyTempoOf = (doc: ProjectDoc): string | null => {
+  const k = doc.settings?.key
+  const bpm = doc.settings?.beat?.bpm
+  const parts: string[] = []
+  if (k) parts.push(`${KEY_NAMES[k.pc % 12]} ${k.minor ? 'min' : 'maj'}`)
+  if (typeof bpm === 'number' && bpm > 0) parts.push(`${Math.round(bpm)} bpm`)
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
+/**
+ * The shelf this screen showed last, kept at MODULE scope on purpose.
+ *
+ * `projects` starts null on every mount and the screen renders a spinner
+ * until the listing lands — measured at 75 ms on the sim with four phone
+ * projects, more on a real phone — so returning from a song flashed a
+ * spinner over an interface the singer had just been looking at ("Catalog
+ * page flickering when swiping back from player"). Seeding from the last
+ * list paints the shelf immediately and lets the refresh below replace it
+ * quietly: the same stale-while-revalidate the Drive path already does
+ * deliberately, applied to the mount.
+ *
+ * Carries its mode, because a folder library's list says nothing about the
+ * phone's — and the mode state seeds from it too, so the header and the rows
+ * cannot disagree for a frame. What it costs is the entries staying alive —
+ * project docs and stem metadata, no audio: the buffers are the player's
+ * and `releaseProject` frees those on the way out.
+ */
+let lastShelf: {
+  mode: 'gdrive' | 'folder' | 'phone'
+  items: ProjectEntry[]
+  /** What each project holds on disk — what the ✓ and the cloud badge read. */
+  usage: Record<string, CacheUsage>
+  driveOn: boolean
+  driveEmail: string | null
+} | null = null
 
 export default function CatalogScreen({
   sampleRate,
@@ -118,7 +209,7 @@ export default function CatalogScreen({
 }): React.JSX.Element {
   const insets = useSafeAreaInsets()
   const [root, setRoot] = useState<RootInfo | null>(null)
-  const [projects, setProjects] = useState<ProjectEntry[] | null>(null)
+  const [projects, setProjects] = useState<ProjectEntry[] | null>(lastShelf?.items ?? null)
   const [loading, setLoading] = useState<Loading | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** What the app was doing when it died last time, if it did.
@@ -131,13 +222,20 @@ export default function CatalogScreen({
    *  acting on, and unlike the others it has somewhere to go: the Log. */
   const [crashNote, setCrashNote] = useState<string | null>(null)
   /** Library source: Drive API / picked folder (SAF, iCloud) / on-device. */
-  const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>('phone')
-  const [driveEmail, setDriveEmail] = useState<string | null>(null)
-  const [driveOn, setDriveOn] = useState(false)
+  /* Seeded from the same cache as the shelf, so the source the header names
+     and the rows underneath it agree on the very first frame. Within a
+     session the last mode IS the mode; the pref read below still runs and
+     still wins, it just usually agrees. */
+  const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>(lastShelf?.mode ?? 'phone')
+  /* Seeded with the rows, because they are read TOGETHER: a signed-in Drive
+     library remounting with driveOn false renders its own "Sign in to see
+     it" banner over the songs for a frame (photographed on the phone). */
+  const [driveEmail, setDriveEmail] = useState<string | null>(lastShelf?.driveEmail ?? null)
+  const [driveOn, setDriveOn] = useState(lastShelf?.driveOn ?? false)
   const [pulling, setPulling] = useState(false)
   /** What each project holds on this phone: total bytes and the size of every
    *  file present, which is what the ✓ compares against project.json. */
-  const [usage, setUsage] = useState<Record<string, CacheUsage>>({})
+  const [usage, setUsage] = useState<Record<string, CacheUsage>>(lastShelf?.usage ?? {})
   /** The listing on screen is the stored one; the refresh behind it failed. */
   const [offline, setOffline] = useState(false)
   /** The diagnostic log — the only evidence a release build leaves behind. */
@@ -162,6 +260,13 @@ export default function CatalogScreen({
   const token = useRef(0)
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
   const listSeq = useRef(0)
+  /* Which library the newest listing was asked for. The cache below pairs
+     items with THIS, not with whatever `mode` happens to be current when the
+     items land: a mode switch renders before its refresh resolves, so the
+     current value there would file the old library's rows under the new
+     library's name. Set by the listing that wins `listSeq`, so an overtaken
+     refresh cannot claim the pairing either. */
+  const modeOfList = useRef<'gdrive' | 'folder' | 'phone'>(lastShelf?.mode ?? 'phone')
 
   /** What the singer typed into the library search box (see `shown`). */
   const [query, setQuery] = useState('')
@@ -197,6 +302,34 @@ export default function CatalogScreen({
   const q = query.trim().toLowerCase()
   const shown = useMemo(() => (q ? sorted.filter((p) => titleOf(p).toLowerCase().includes(q)) : sorted), [sorted, q])
 
+  /** The floating search bar rides above the keyboard on iOS (Android's
+   *  adjustResize moves the whole window, so the absolute bar rises free).
+   *  Same measurement AddSongSheet trusts. */
+  const [kbInset, setKbInset] = useState(0)
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return
+    const onShow = Keyboard.addListener('keyboardWillChangeFrame', (e) =>
+      setKbInset(Math.max(0, e?.endCoordinates?.height ?? 0))
+    )
+    const onHide = Keyboard.addListener('keyboardWillHide', () => setKbInset(0))
+    return () => {
+      onShow.remove()
+      onHide.remove()
+    }
+  }, [])
+
+  /* Ready or not — the library's one question: can you sing this now? A
+   * split song is ready; an unsplit one states its next step. The groups
+   * render headers only when BOTH exist, so a library that is all one thing
+   * (every Drive library — the desktop splits before it syncs) stays the
+   * flat alphabetical list it always was. Deliberately NOT connectivity-
+   * aware: a cloud song counts as ready even offline, because a list that
+   * reorders itself when the wifi drops is churn, not honesty — the ☁ and
+   * the ✓ already carry the download fact. */
+  const isSplit = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
+  const readyShown = shown.filter(isSplit)
+  const pendingShown = shown.filter((p) => !isSplit(p))
+
   /** The bundled sample is a song in this list like any other, so it answers
    *  to the search too — left unfiltered it sat under two matches looking
    *  like a third. */
@@ -212,8 +345,13 @@ export default function CatalogScreen({
     [projects]
   )
 
-  const loadUsage = useCallback(async () => {
+  /** `seq` is a listing's `listSeq` ticket: an overtaken refresh must not
+   *  write usage, because usage rides in the shelf cache and would be filed
+   *  against the winning listing's mode. The delete paths pass nothing —
+   *  they answer to a tap, not to a listing. */
+  const loadUsage = useCallback(async (seq?: number) => {
     const rows = await cacheUsage()
+    if (seq != null && seq !== listSeq.current) return
     const map: Record<string, CacheUsage> = {}
     for (const r of rows) map[r.project] = r
     setUsage(map)
@@ -257,6 +395,7 @@ export default function CatalogScreen({
   const refresh = useCallback(
     async (force = false) => {
       const my = ++listSeq.current
+      modeOfList.current = mode
       try {
         setError(null)
         if (mode === 'gdrive') {
@@ -274,12 +413,19 @@ export default function CatalogScreen({
           if (my !== listSeq.current) return
           setProjects(cached?.length ? cached : null)
           const signed = await driveSignedIn()
+          /* Guarded like the setProjects around it, and for a sharper reason
+             since the shelf cache existed: these are cache WRITERS now, so an
+             overtaken refresh landing one of them would file the library it
+             was listing under the name of the library that overtook it. */
+          if (my !== listSeq.current) return
           setDriveOn(signed)
           if (!signed) {
-            if (my === listSeq.current) setProjects([])
+            setProjects([])
             return
           }
-          setDriveEmail(await driveAccountEmail())
+          const email = await driveAccountEmail()
+          if (my !== listSeq.current) return
+          setDriveEmail(email)
           try {
             const fresh = await driveListProjects(force)
             if (my === listSeq.current) {
@@ -301,7 +447,7 @@ export default function CatalogScreen({
             setProjects(list)
           }
         }
-        void loadUsage()
+        void loadUsage(my)
       } catch (e) {
         if (my === listSeq.current) {
           setError(String(e instanceof Error ? e.message : e))
@@ -315,6 +461,18 @@ export default function CatalogScreen({
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  /* One writer for the cache above, so no listing path can forget it. The
+     four facts are cached together because they are READ together: rows with
+     no usage draw every song as a cloud to download, and a signed-in library
+     with driveOn false draws a sign-in banner over songs it already has. A
+     shelf seeded from three of the four is still a flicker, just a subtler
+     one. `offline` deliberately stays out: it is a fact about this second's
+     network, and the header would claim "no signal" before anything looked. */
+  useEffect(() => {
+    if (projects != null)
+      lastShelf = { mode: modeOfList.current, items: projects, usage, driveOn, driveEmail }
+  }, [projects, usage, driveOn, driveEmail])
 
   useEffect(() => {
     void getStoredText('singz.libMode').then((m) => {
@@ -621,15 +779,22 @@ export default function CatalogScreen({
     })
     return () => sub.remove()
   }, [refresh])
-  const kickAnalysis = useCallback(async (dir: string, stems: Record<string, string>) => {
-    let lyrics: LyricsDoc | null = null
-    try {
-      lyrics = JSON.parse(await readProjectText(dir, 'lyrics.json')) as LyricsDoc
-    } catch {
-      lyrics = null // no lyrics yet — the grid does without the line cues
-    }
-    startAnalysis(dir, stems, lyrics)
-  }, [])
+  const kickAnalysis = useCallback(
+    async (dir: string, stems: Record<string, string>, force = false) => {
+      let lyrics: LyricsDoc | null = null
+      try {
+        lyrics = JSON.parse(await readProjectText(dir, 'lyrics.json')) as LyricsDoc
+      } catch {
+        lyrics = null // no lyrics yet — the grid does without the line cues
+      }
+      /* `force` belongs to the swipe's redetect ONLY: unforced runs honour
+         every stamp and stored no-grid verdict, so on a song with a current
+         grid — the normal state — an unforced "detect again" plans nothing
+         and shows nothing, the exact silent no-op this file outlawed. */
+      startAnalysis(dir, stems, lyrics, force)
+    },
+    []
+  )
 
   /* The "better beats" offer (Phase 4b): the Beat This! models are an
    * optional 87 MB extra — the neural lattice the desktop's packs carry,
@@ -935,15 +1100,9 @@ export default function CatalogScreen({
       mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
     [mode]
   )
-  /** A split is already running, so this one has to wait its turn. Kept apart
-   *  from canSplit because the offer used to VANISH from every other card
-   *  while a job ran — no disabled state, no reason, the affordance simply
-   *  gone. A control that cannot be used right now should say so. */
-  const splitBusy = splitUi !== null
-  /** The same question minus the card whose own split it is: that one shows
-   *  no chip at all (see the card's `action`), so this is what dims the
-   *  OTHERS. Kept apart from splitBusy, which is what removes the row from
-   *  the long-press menu, where an action cannot be dimmed. */
+  /** Whether a split is running for anyone BUT this card: the running card
+   *  shows no chip at all (see the card's `action`), so this is what dims
+   *  the others with a reason. */
   const splitBusyElsewhere = useCallback(
     (dir: string): boolean => splitUi !== null && splitUi.project !== dir,
     [splitUi]
@@ -987,81 +1146,35 @@ export default function CatalogScreen({
   )
 
   /** Phone-library long-press: this phone owns these projects. */
-  const phoneCardMenu = useCallback(
+  /** The delete confirm, shared by the ••• menu and the card's swipe —
+   *  one dialog, two doors, so the swipe cannot drift a different wording
+   *  or a different deletion path over time. */
+  const confirmDelete = useCallback(
     (p: ProjectEntry) => {
-      /* Built in reading order with the destructive item LAST. It used to be
-         first, because every item was `unshift`ed and delete went in first —
-         so the top of the menu, where a thumb lands, was "Delete from this
-         phone". iOS convention puts destructive at the bottom for exactly
-         that reason. */
-      const buttons: Parameters<typeof Alert.alert>[2] = []
-      /* Six real stems end the offer; a build without the split natives (iOS
-         until P3) never offers; and while a job is running the item is left
-         OUT rather than shown inert. An alert action cannot be disabled, so a
-         "(one at a time)" item would just close the menu with nothing said.
-         The card's chip is where the unavailable-and-why lives — it can be
-         dimmed and carry a reason, which an alert row cannot. */
-      if (canSplit(p) && !splitBusy) {
-        buttons.push({ text: 'Split into stems', onPress: () => offerSplit(p) })
-      }
-      if (!p.hasLyrics) {
-        buttons.push({ text: 'Find lyrics', onPress: () => void findLyricsFor(p) })
-      }
-      const onDelete = (): void => {
-        Alert.alert(
-          'Delete this song?',
-          `"${p.doc.name ?? p.dir}" and its files go away.`,
-          /* cancel-first, like every other confirm in this file
-             (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
-             either order the same, but Android maps by position — the
-             reversal above is for the MENU's three actions, not for a
-             two-button confirm, and mirroring just this one would put Cancel
-             where the others put the action. */
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Delete',
-              style: 'destructive',
-              onPress: () => {
-                void deleteProject(p.dir)
-                  .then(() => refresh())
-                  .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-              }
-            }
-          ],
-          { cancelable: true }
-        )
-      }
-      buttons.push({ text: 'Delete from this phone', style: 'destructive', onPress: onDelete })
-      /*
-       * The two platforms want OPPOSITE array orders for the same screen, so
-       * the list is built in reading order above and then handed over the way
-       * each one needs it.
-       *
-       * iOS keeps the array order and floats the .cancel action to the bottom:
-       * Split, Find lyrics, Delete, Cancel — destructive last among the
-       * actions, which is the whole point of the ordering.
-       *
-       * Android takes only the first THREE (Alert.js maps them to
-       * positive/negative/neutral and slices the rest) and then stacks them
-       * neutral-first, i.e. reversed. Two consequences, both measured on an
-       * API 36 emulator: a fourth button is silently dropped — which is how
-       * Delete vanished entirely once Cancel was ahead of it, leaving the only
-       * route to deleting a song unreachable — and the array has to be
-       * reversed for Delete to land at the BOTTOM rather than under the
-       * thumb. Cancel is the one that goes, so `cancelable` has to be true or
-       * the dialog has no way out at all (Alert.js hardcodes it false).
-       */
       Alert.alert(
-        p.doc.name ?? p.dir,
-        undefined,
-        Platform.OS === 'android'
-          ? [...buttons].reverse()
-          : [...buttons, { text: 'Cancel', style: 'cancel' }],
+        'Delete this song?',
+        `"${p.doc.name ?? p.dir}" and its files go away.`,
+        /* cancel-first, like every other confirm in this file
+           (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
+           either order the same, but Android maps a two-button confirm by
+           position, and mirroring just this one would put Cancel where the
+           others put the action. */
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: () => {
+              void deleteProject(p.dir)
+                .then(() => refresh())
+                .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+            }
+          }
+        ],
         { cancelable: true }
       )
     },
-    [canSplit, splitBusy, findLyricsFor, offerSplit, refresh]
+    [refresh]
   )
 
   useEffect(() => {
@@ -1131,6 +1244,15 @@ export default function CatalogScreen({
     TEST.dismissBeatModels = dismissBeatModels
   })
 
+  /** Open-row handles by card key: a row that starts LOADING is snapped
+   *  shut. `enabled={false}` alone froze an already-open row — a live
+   *  Remove beside the cancel ✕ for the whole decode, reachable by
+   *  swipe-open-then-tap-the-face. */
+  const swipeRefs = useRef<Record<string, { close: () => void } | null>>({})
+  useEffect(() => {
+    if (loading?.dir != null) swipeRefs.current[loading.dir]?.close()
+  }, [loading?.dir])
+
   const card = (opts: {
     key: string
     dir: string
@@ -1144,38 +1266,63 @@ export default function CatalogScreen({
     action?: React.ReactNode
     sample?: boolean
     onPress: () => void
-    /** The card's other actions. Long-press reaches them, and so does the •••
-     *  button this puts on the card — a long-press has no affordance, and the
-     *  code already conceded the point for Split ("the long-press menu, which
-     *  is not a place a singer finds a feature"). Omitted entirely when the
-     *  song has nothing to offer: a Drive song with nothing downloaded used to
-     *  take the long-press and silently do nothing. */
-    menu?: (() => void) | null
+    /** The artist half of an "Artist — Title" name, on its own line — the
+     *  one-line title kept eating the song ("Cat Stevens — Fat…"). */
+    artist?: string | null
+    /** The card's key · tempo line, on the fixed right rail. */
+    keyLine?: string | null
+    /** All-neutral tile lanes — an unsplit song has no stem colours yet. */
+    tileNeutral?: boolean
+    /** Ready-tile halo hue (iOS; see StemTile). */
+    tileGlow?: string
+    /** The card's OPTIONAL actions, all of them, revealed by swipe-left —
+     *  required actions are visible buttons on the card (Split), optional
+     *  ones live here (delete, redetect, lyrics). The ••• and the long-press
+     *  menu are gone: the ••• sat where the swipe's delete lives and read as
+     *  one control wearing two meanings on the phone. Screen readers reach
+     *  the same actions through accessibilityActions on the card. */
+    swipeActions?: CardSwipeAction[] | null
   }): React.JSX.Element => {
     const isLoading = loading?.dir === opts.dir
-    return (
+    const acts = opts.swipeActions ?? []
+    const body = (
       <Pressable
         key={opts.key}
         onPress={opts.onPress}
-        onLongPress={opts.menu ?? undefined}
         accessibilityRole="button"
         /* Deliberately NO accessibilityLabel: a Pressable is already the
            accessibility element for the whole card, and an explicit label
            REPLACES the string RN composes from the children — title, meta and
            the ✓/☁ status would all vanish behind the title alone. */
-        accessibilityHint={opts.menu ? 'Opens the song. Long press for more actions.' : 'Opens the song.'}
+        accessibilityHint="Opens the song."
+        /* The swipe's actions, spoken: a screen reader cannot discover a
+           swipe-reveal, so every optional action is also a rotor action on
+           the card itself. */
+        accessibilityActions={acts.map((a) => ({ name: a.key, label: a.label }))}
+        onAccessibilityAction={(e) => {
+          acts.find((a) => a.key === e.nativeEvent.actionName)?.onPress()
+        }}
         style={({ pressed }) => [
           s.card,
           opts.sample && s.cardSample,
+          /* A swiped card slides over the action behind it, so its face must
+             be OPAQUE — the usual white-alpha fill would show the red
+             through. The literal is white(0.045) composited over C.bg. */
+          acts.length > 0 && { backgroundColor: '#1f1b17', marginBottom: 0 },
           isLoading && s.cardLoading,
           pressed && { transform: [{ scale: 0.98 }] }
         ]}
       >
-        <StemTile hue={opts.hue} size={56} />
+        <StemTile hue={opts.hue} size={56} neutral={opts.tileNeutral} glow={opts.tileGlow} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={s.cardTitle} numberOfLines={1}>
             {opts.title}
           </Text>
+          {opts.artist != null && (
+            <Text style={s.cardArtist} numberOfLines={1}>
+              {opts.artist}
+            </Text>
+          )}
           {isLoading ? (
             <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={1}>
               {loading.msg}
@@ -1198,33 +1345,18 @@ export default function CatalogScreen({
           </Pressable>
         ) : (
           <>
-            <View style={{ alignItems: 'flex-end' }}>
+            {/* The right rail is FIXED width and the actions slot below is
+                always reserved, so a state fills the card without reshaping
+                it — statuses and ••• line up down the whole list. */}
+            <View style={s.rail}>
               {opts.right}
               {opts.action}
+              {opts.keyLine != null && opts.keyLine !== '' && (
+                <Text style={s.keyLine} numberOfLines={1}>
+                  {opts.keyLine}
+                </Text>
+              )}
             </View>
-            {opts.menu && (
-              <Pressable
-                /* Asymmetric on purpose. The Split chip beside it claims 10 of
-                   the card's 14 pt gap; ••• is the later sibling, so a near-miss
-                   to the right of Split would open the menu instead of
-                   splitting. 4 makes the two targets abut rather than overlap —
-                   the same arithmetic the crash notice's Report link needed. */
-                hitSlop={{ top: 10, bottom: 10, left: 4, right: 10 }}
-                onPress={(e) => {
-                  // the card underneath would otherwise open the song
-                  e.stopPropagation()
-                  opts.menu?.()
-                }}
-                style={s.moreBtn}
-                accessibilityRole="button"
-                accessibilityLabel={`More actions for ${opts.title}`}
-              >
-                {/* ••• rather than a gear, for the reason the player's header
-                    gives: a gear glyph has no guaranteed text presentation on
-                    Android. */}
-                <Text style={s.moreGlyph}>•••</Text>
-              </Pressable>
-            )}
           </>
         )}
         {isLoading && (
@@ -1233,6 +1365,42 @@ export default function CatalogScreen({
           </View>
         )}
       </Pressable>
+    )
+    if (acts.length === 0) return body
+    return (
+      <Swipeable
+        key={opts.key}
+        ref={(m) => {
+          swipeRefs.current[opts.key] = m
+        }}
+        /* A LOADING card must not swipe: the revealed actions landed under
+           the cancel ✕ (photographed on the user's phone mid-decode), and
+           deleting a song while its stems decode is not a state anyone
+           meant. */
+        enabled={!isLoading}
+        /* Default activation is 10px — inside a real finger's tap jitter, so
+           on the phone a plain TAP could fling the row open (the simulator's
+           mouse taps are pixel-perfect, which is why it never showed there).
+           24px demands a deliberate pull and costs an intentional swipe
+           nothing. */
+        dragOffsetFromRight={-24}
+        overshootRight={false}
+        containerStyle={s.swipeRow}
+        renderRightActions={(progress, _translation, methods) => (
+          <SwipeActions
+            progress={progress}
+            actions={acts.map((a) => ({
+              ...a,
+              onPress: () => {
+                methods.close()
+                a.onPress()
+              }
+            }))}
+          />
+        )}
+      >
+        {body}
+      </Swipeable>
     )
   }
 
@@ -1259,11 +1427,15 @@ export default function CatalogScreen({
         <Seg
           segments={[
             ...(driveAvailable() ? [{ key: 'gdrive', label: 'Drive', icon: GDRIVE_ICON }] : []),
-            { key: 'folder', label: 'Folder', emoji: '📁' },
+            /* Drawn glyphs, not emoji — the app has already refused emoji
+               icons twice (MicGlyph, the ••• gear) for the same reason: an
+               emoji in a row of tabs is a colour sticker in a row of icons.
+               The Drive mark stays an image: it is a logo, not an emoji. */
+            { key: 'folder', label: 'Folder', glyph: (c: string) => <FolderGlyph color={c} /> },
             {
               key: 'phone',
               label: Platform.OS === 'ios' ? 'This iPhone' : 'This phone',
-              emoji: '📱'
+              glyph: (c: string) => <PhoneGlyph color={c} />
             }
           ]}
           active={mode}
@@ -1275,7 +1447,23 @@ export default function CatalogScreen({
           // Sign in link; that is where signing in belongs.
           onSelect={(k) => selectMode(k as 'gdrive' | 'folder' | 'phone')}
         />
-        <View style={s.ctx}>
+        {/* When a source is empty or signed out, the one-line context grows a
+            title saying what this source IS — the moment the explanation
+            earns its space. Any other time it stays the one-liner; the three
+            tabs are three separate libraries, and this is where that is said. */}
+        {((): React.JSX.Element => {
+          const srcTitle =
+            mode === 'gdrive' && !driveOn
+              ? 'Your desktop’s library, synced through Drive'
+              : mode === 'folder' && root?.kind !== 'picked'
+                ? 'A shared folder this phone can read'
+                : mode === 'phone' && projects !== null && projects.length === 0
+                  ? Platform.OS === 'ios'
+                    ? 'Songs added on this iPhone'
+                    : 'Songs added on this phone'
+                  : null
+          const inner = (
+            <>
           {mode === 'gdrive' &&
             (driveOn ? (
               <>
@@ -1302,7 +1490,10 @@ export default function CatalogScreen({
             ) : (
               <>
                 <Text style={s.ctxWho} numberOfLines={1}>
-                  Your projects, synced from the desktop
+                  {/* The line renders under the srcCard title whenever Drive
+                      is signed out, so it says the next step, not the title's
+                      message again. */}
+                  Sign in to see it
                 </Text>
                 <Text style={s.ctxDot}>·</Text>
                 <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void driveSignInFlow()}>
@@ -1334,7 +1525,17 @@ export default function CatalogScreen({
               </Pressable>
             </>
           )}
-        </View>
+            </>
+          )
+          return srcTitle != null ? (
+            <View style={s.srcCard}>
+              <Text style={s.srcTitle}>{srcTitle}</Text>
+              <View style={s.ctxIn}>{inner}</View>
+            </View>
+          ) : (
+            <View style={s.ctx}>{inner}</View>
+          )
+        })()}
         {/* The crash notice, which is durable and actionable, and therefore
             not in the same slot as the transient errors below it. It is the
             most important sentence the app ever writes — it used to render as
@@ -1385,42 +1586,13 @@ export default function CatalogScreen({
             <Text style={s.errX}>✕</Text>
           </Pressable>
         )}
-        {/* Above the ScrollView, not inside it: a search box you have to
-            scroll back up to reach is not a search box. Only past
-            SEARCH_FROM songs — see the constant — but ALWAYS while a query is
-            live, or deleting a song down past the threshold takes the box away
-            and leaves the filter applied, with nothing on screen to clear it
-            and no explanation of why most of the library is missing. */}
-        {(sorted.length >= SEARCH_FROM || q !== '') && (
-          <View style={s.searchRow}>
-            <TextInput
-              style={s.search}
-              value={query}
-              onChangeText={setQuery}
-              placeholder="Find a song"
-              placeholderTextColor={C.dim}
-              autoCorrect={false}
-              autoCapitalize="none"
-              returnKeyType="search"
-              clearButtonMode="while-editing"
-              accessibilityLabel="Find a song by name"
-            />
-            {/* iOS draws its own clear button inside the field; Android has
-                none, and a query with no way out strands the library. */}
-            {Platform.OS === 'android' && query.length > 0 && (
-              <Pressable
-                hitSlop={10}
-                onPress={() => setQuery('')}
-                accessibilityRole="button"
-                accessibilityLabel="Clear the search"
-              >
-                <Text style={s.searchX}>✕</Text>
-              </Pressable>
-            )}
-          </View>
-        )}
         <ScrollView
           style={{ flex: 1 }}
+          /* The indicator drew ON the cards — the scroller sits inside the
+             padded wrap, so its edge is the cards' edge, not the screen's
+             (photographed on the user's phone). Hidden outright, per the
+             user's call. */
+          showsVerticalScrollIndicator={false}
           /* Belt and braces against RN's documented default. With a text
              field focused, `keyboardShouldPersistTaps` unset means 'never',
              and ScrollView.js:1487 says in as many words that the first tap
@@ -1441,7 +1613,9 @@ export default function CatalogScreen({
              keyboard connected and shows no soft keyboard, and there is no
              `simctl` way to raise one (see CLAUDE.md for the ⌘K that is). */
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingBottom: 40 + (Platform.OS === 'android' ? insets.bottom : 0) }}
+          /* The last card must clear the floating search dock as well as the
+             home indicator, on both platforms. */
+          contentContainerStyle={{ paddingBottom: 76 + insets.bottom }}
           refreshControl={
             <RefreshControl
               refreshing={pulling}
@@ -1560,14 +1734,24 @@ export default function CatalogScreen({
               </View>
             </View>
           )}
-          {shown.map((p) => {
+          {((): React.ReactNode => {
+            const renderEntry = (p: ProjectEntry): React.JSX.Element => {
             const downloaded = isDownloaded(p, usage[p.dir])
             const added = addedTracks(p.doc?.settings).length
+            const split = isSplit(p)
+            const hue = Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3
             return card({
               key: p.dir,
               dir: p.dir,
-              hue: Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3,
-              title: p.doc.name ?? p.dir,
+              hue,
+              /* A ready song is lit; an unsplit one has no stem colours yet.
+                 The tile carrying the state is a colour the meta line does
+                 not have to spend words on. */
+              tileNeutral: !split,
+              tileGlow: split ? STEM_TILE_COLORS[hue][0] : undefined,
+              keyLine: split ? keyTempoOf(p.doc) : null,
+              title: splitSongName(p.doc.name ?? p.dir).title,
+              artist: splitSongName(p.doc.name ?? p.dir).artist,
               meta: (
                 <>
                   {Object.keys(p.stems).length > 0
@@ -1641,14 +1825,78 @@ export default function CatalogScreen({
                  nothing downloaded used to take a long-press and return at
                  `if (have <= 0) return` — a gesture with no feedback and no
                  result. Now there is no ••• and no long-press on that card. */
-              menu:
-                mode === 'phone'
-                  ? () => phoneCardMenu(p)
-                  : (usage[p.dir]?.bytes ?? 0) > 0
-                    ? () => confirmForget(p)
-                    : null
+              /* Every OPTIONAL action, in the swipe; a card with none does
+                 not swipe at all (a Drive song with nothing downloaded).
+                 Order: least destructive nearest the card, the trash at the
+                 far edge. The trash still opens the same confirms — the
+                 icons are doors, never a second deletion path. */
+              swipeActions: ((): CardSwipeAction[] | null => {
+                const title = p.doc.name ?? p.dir
+                const acts: CardSwipeAction[] = []
+                if (mode === 'phone') {
+                  if (split) {
+                    acts.push({
+                      key: 'redetect',
+                      label: `Detect the beat again for ${title}`,
+                      icon: <RedetectGlyph color={white(0.85)} />,
+                      onPress: () => void kickAnalysis(p.dir, p.stems, true)
+                    })
+                  }
+                  if (!p.hasLyrics) {
+                    acts.push({
+                      key: 'lyrics',
+                      label: `Find lyrics for ${title}`,
+                      icon: <LyricsGlyph color={white(0.85)} />,
+                      onPress: () => void findLyricsFor(p)
+                    })
+                  }
+                  acts.push({
+                    key: 'delete',
+                    label: `Delete ${title} from this phone`,
+                    danger: true,
+                    icon: <TrashGlyph color="#1d0f0d" />,
+                    onPress: () => confirmDelete(p)
+                  })
+                } else if ((usage[p.dir]?.bytes ?? 0) > 0) {
+                  acts.push({
+                    key: 'forget',
+                    label: `Remove ${title}'s downloaded files`,
+                    danger: true,
+                    icon: <TrashGlyph color="#1d0f0d" />,
+                    onPress: () => confirmForget(p)
+                  })
+                }
+                return acts.length > 0 ? acts : null
+              })()
             })
-          })}
+            }
+            /* Headers only when both groups exist — a library that is all
+               one thing stays the flat list it always was. The sample joins
+               READY: it is bundled, split, and always singable. */
+            const grouped = pendingShown.length > 0 && (readyShown.length > 0 || sampleShown)
+            return (
+              <>
+                {grouped && <Text style={s.grp}>Ready</Text>}
+                {readyShown.map(renderEntry)}
+                {sampleShown &&
+                  card({
+                    key: SAMPLE_DIR,
+                    dir: SAMPLE_DIR,
+                    hue: 0,
+                    tileGlow: STEM_TILE_COLORS[0][0],
+                    /* NOT split: "Sample — Sing with me" would grow a fake
+                       artist called Sample. */
+                    title: sampleTitle,
+                    meta: 'bundled · always available',
+                    right: <Text style={s.status}>✓</Text>,
+                    sample: true,
+                    onPress: () => void openSample()
+                  })}
+                {grouped && <Text style={s.grp}>Not ready yet</Text>}
+                {pendingShown.map(renderEntry)}
+              </>
+            )
+          })()}
           {projects === null && (
             <View style={{ alignItems: 'center', paddingVertical: 36 }}>
               <ActivityIndicator color={C.amber} />
@@ -1679,17 +1927,6 @@ export default function CatalogScreen({
                     : 'No projects in this folder. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
             </Text>
           )}
-          {sampleShown &&
-            card({
-              key: SAMPLE_DIR,
-              dir: SAMPLE_DIR,
-              hue: 0,
-              title: sampleTitle,
-              meta: 'bundled · always available',
-              right: <Text style={s.status}>✓</Text>,
-              sample: true,
-              onPress: () => void openSample()
-            })}
           {(() => {
             const dirs = Object.keys(usage).filter((d) => usage[d].bytes > 0)
             const total = dirs.reduce((n, d) => n + usage[d].bytes, 0)
@@ -1733,6 +1970,43 @@ export default function CatalogScreen({
             </View>
           )}
         </ScrollView>
+        {/* The search dock: bottom-anchored, floating over the list — the
+            modern place for search, and the thumb's shortest reach. Shown
+            past SEARCH_FROM songs, but ALWAYS while a query is live:
+            deleting a song below the threshold must not take the box away
+            with the filter still applied. Real
+            glass wants a native blur the app does not carry; a translucent
+            raised surface over this wash reads as the material. Rises with
+            the keyboard on iOS; Android's adjustResize lifts it for free. */}
+        {(sorted.length >= SEARCH_FROM || q !== '') && (
+          <View style={[s.searchDock, { bottom: Math.max(insets.bottom, 12) + kbInset }]}>
+            <SearchGlyph color={C.dim} />
+            <TextInput
+              style={s.searchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Find a song"
+              placeholderTextColor={C.dim}
+              autoCorrect={false}
+              autoCapitalize="none"
+              returnKeyType="search"
+              clearButtonMode="while-editing"
+              accessibilityLabel="Find a song by name"
+            />
+            {/* iOS draws its own clear button inside the field; Android has
+                none, and a query with no way out strands the library. */}
+            {Platform.OS === 'android' && query.length > 0 && (
+              <Pressable
+                hitSlop={10}
+                onPress={() => setQuery('')}
+                accessibilityRole="button"
+                accessibilityLabel="Clear the search"
+              >
+                <Text style={s.searchX}>✕</Text>
+              </Pressable>
+            )}
+          </View>
+        )}
         <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
         <AddSongSheet
           visible={addOpen}
@@ -1831,22 +2105,79 @@ const s = StyleSheet.create({
   },
   cardLoading: { backgroundColor: 'rgba(242,193,78,0.07)', borderColor: 'rgba(242,193,78,0.25)' },
   cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
+  cardArtist: { color: white(0.68), fontSize: 13, fontWeight: '600', marginTop: 1 },
   cardMeta: { color: white(0.5), fontSize: 12.5, marginTop: 3 },
   status: { color: C.dim, fontSize: 12, fontWeight: '600' },
-  moreBtn: { width: 30, height: 34, alignItems: 'center', justifyContent: 'center' },
-  moreGlyph: { color: white(0.55), fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
-  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
-  search: {
-    flex: 1,
-    height: 40,
-    borderRadius: 12,
-    paddingHorizontal: 13,
-    backgroundColor: white(0.063),
-    borderWidth: 1,
-    borderColor: white(0.07),
-    color: C.text,
-    fontSize: 15
+  /* The fixed right rail: a state fills the card, it never reshapes it, so
+     ✓/☁/Split and the key line line up down the whole list. (The ••• slot
+     this once shared the edge with is gone — its width went back to the
+     title.) */
+  rail: { width: 86, alignItems: 'flex-end', gap: 3 },
+  keyLine: {
+    color: C.dim,
+    fontSize: 10.5,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums']
   },
+  /* Ready / Not ready yet group headers — same voice as the sheets' section
+     labels. */
+  grp: {
+    color: C.dim,
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginTop: 3,
+    marginBottom: 10,
+    paddingHorizontal: 2
+  },
+  /* The swipe row: the action paints BEHIND the card and the card slides
+     over it — one block, native-style, not a detached button. The container
+     carries the card's bottom margin so the revealed red is exactly card
+     height. */
+  swipeRow: { marginBottom: 11 },
+  swipeActionsRow: { flexDirection: 'row', alignItems: 'stretch' },
+  swipeAction: {
+    width: 64,
+    backgroundColor: white(0.14),
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  swipeActionDanger: { backgroundColor: C.red },
+  swipeActionLast: { borderTopRightRadius: 17, borderBottomRightRadius: 17 },
+  /* The source descriptor — the one-line context grown a title, on the
+     raised surface the sheets use. */
+  srcCard: {
+    backgroundColor: C.sheet,
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.hairline,
+    marginTop: 9,
+    marginBottom: 12
+  },
+  srcTitle: { color: C.text, fontSize: 13.5, fontWeight: '700', marginBottom: 6 },
+  ctxIn: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  searchDock: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    height: 52,
+    borderRadius: 26,
+    paddingHorizontal: 18,
+    backgroundColor: 'rgba(30,26,21,0.93)',
+    borderWidth: 1,
+    borderColor: white(0.12),
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8
+  },
+  searchInput: { flex: 1, color: C.text, fontSize: 15, height: '100%' },
   searchX: { color: C.dim, fontSize: 15, fontWeight: '700' },
   statusHave: { color: white(0.62) },
   storage: {

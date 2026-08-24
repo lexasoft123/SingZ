@@ -1,15 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { BackHandler, DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
+  Easing,
+  runOnJS,
   runOnUI,
   scrollTo,
   useAnimatedRef,
+  useAnimatedStyle,
   useDerivedValue,
   useFrameCallback,
   useScrollOffset,
-  useSharedValue
+  useSharedValue,
+  withTiming
 } from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
@@ -42,7 +47,27 @@ import {
 } from '../model'
 import { readProjectText, type LoadedProject } from '../projects'
 import type { ProjectDoc } from '../model'
-import { b, Bar, C, Chip, MicGlyph, MixGlyph, RoundBtn, Seg, Sheet, StemTile, Stepper, white } from './bits'
+import {
+  b,
+  Bar,
+  C,
+  Chip,
+  HeadphonesGlyph,
+  MicGlyph,
+  MixGlyph,
+  PlayPauseGlyph,
+  RoundBtn,
+  Seg,
+  Sheet,
+  SpeakerGlyph,
+  splitSongName,
+  StemTile,
+  Stepper,
+  ToStartGlyph,
+  white
+} from './bits'
+import { KIT } from './tokens'
+import { Canvas, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -53,7 +78,6 @@ import SkiaLyrics, {
 import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
 
-const BG = require('../../assets/bg/player.png')
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 
@@ -78,6 +102,10 @@ export default function PlayerScreen({
   onBack: () => void
 }): React.JSX.Element {
   const [tracks, setTracks] = useState<TrackState[]>([])
+  /** The fader being dragged right now, for the value bubble — set on every
+   *  move, cleared on commit (Bar fires commit on release AND on the
+   *  scroller stealing an engaged drag, so the bubble cannot strand). */
+  const [dragVol, setDragVol] = useState<{ id: string; v: number } | null>(null)
   const [ducked, setDucked] = useState<string[]>([])
   const [playing, setPlaying] = useState(false)
   const [pos, setPos] = useState(0)
@@ -128,7 +156,6 @@ export default function PlayerScreen({
   const insets = useSafeAreaInsets()
   /* Android 15 draws edge-to-edge: keep controls clear of the system bar.
    * iOS keeps its hand-tuned paddings. */
-  const navPad = Platform.OS === 'android' ? { paddingBottom: Math.max(30, insets.bottom + 14) } : null
   const sheetPad = Platform.OS === 'android' ? { paddingBottom: Math.max(34, insets.bottom + 18) } : null
   const [dragPos, setDragPos] = useState<number | null>(null)
   /**
@@ -355,6 +382,87 @@ export default function PlayerScreen({
     [engine, sample, renderKey]
   )
   const stemIds = useMemo(() => project.stems.map((st) => st.id), [project])
+  /* Live window size for the tint washes — Android rotates and split-screens
+     and the iPad target allows all four orientations, so a module-load
+     capture would strand portrait extents on a landscape canvas. Still
+     nothing on the clock: the Canvas repaints only when these actually
+     change. */
+  const winDims = useWindowDimensions()
+  /* Swipe back to the library: a clearly-rightward pull from the left edge.
+     The strip is 24pt wide — ending BEFORE the lyric tap targets at
+     LYR_PAD 26 — and spans only the mid-screen, clearing the header's own
+     back button above and the full-bleed seek band below. The pan fails on
+     vertical movement. Cost accepted knowingly: the 24pt column cannot
+     START a lyric scroll (the same dead zone every RNGH-based back gesture
+     ships).
+
+     The screen TRACKS the finger and leaves rightward, the way a native push
+     does — the first cut only measured the release and unmounted, so the
+     player "just suddenly disappeared" (from the phone). Past a third of the
+     width, or on a flick, it finishes the slide and only THEN calls onBack;
+     short of that it eases home. `if (finished)` is what makes a cancelled
+     slide silent: a second pan landing mid-animation overrides backX, that
+     timing reports unfinished, and onBack never fires for it (closeProject
+     survives a double call anyway — both unload() and releaseProject are
+     idempotent — but the guard means it doesn't get one).
+
+     The library is not mounted behind (App renders one screen), so what the
+     slide reveals is the app's own ground rather than a parallaxing catalog:
+     the motion is real, the layer underneath is honest. Mounting the catalog
+     back there would buy the parallax for a heavy mount mid-gesture and its
+     load effects running under a playing song. */
+  const backX = useSharedValue(0)
+  const backSlide = useAnimatedStyle(() => ({ transform: [{ translateX: backX.value }] }))
+  const backPan = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetX(16)
+        .failOffsetY([-14, 14])
+        .onUpdate((e) => {
+          'worklet'
+          backX.value = Math.max(0, e.translationX)
+        })
+        .onEnd((e) => {
+          'worklet'
+          const done = e.translationX > winDims.width * 0.33 || e.velocityX > 900
+          if (done)
+            /* Easing.out, not the default inOut: a flick releases with the
+               screen already moving, and an ease-IN curve has zero slope at
+               t=0 — the slide would stop dead at the moment the finger left
+               and start again, which is the stall the whole fix is about. */
+            backX.value = withTiming(
+              winDims.width,
+              { duration: 190, easing: Easing.out(Easing.quad) },
+              (finished) => {
+                'worklet'
+                if (finished) runOnJS(onBack)()
+              }
+            )
+          else backX.value = withTiming(0, { duration: 200 })
+        }),
+    [onBack, backX, winDims.width]
+  )
+
+  /* Android system back → the catalog. Gesture-nav phones claim the left
+     edge for the SYSTEM back gesture before the app ever sees it, so the
+     strip above cannot fire there — and without this handler that system
+     gesture would finish the whole activity from the player. RN's Modal
+     consumes its own back event while a sheet is open, so this only runs
+     with no sheet up. */
+  useEffect(() => {
+    if (Platform.OS !== 'android') return
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onBack()
+      return true
+    })
+    return () => sub.remove()
+  }, [onBack])
+
+  /* The same hue the catalog gave this song's card, so the artwork carries
+     over from the shelf to the stage (the sample and dir-less loads take 0,
+     matching their cards). */
+  const tileHue =
+    project.dir != null ? Math.abs(project.dir.length * 7 + project.dir.charCodeAt(0)) % 3 : 0
   /**
    * Lane name + color by id. Split stems come from TRACK_META; tracks the
    * singer added on the desktop bring their own, so the mixer shows "Harmony"
@@ -371,6 +479,93 @@ export default function PlayerScreen({
     }
     return map
   }, [project])
+  /**
+   * The seek bar's waveform: one bucket per sliver, each carrying the mix's
+   * level and the hue of the loudest lane at that moment — red where the
+   * voice leads, so a stretch with no vocal red is a stretch with nothing to
+   * sing. Computed ONCE per song from small windowed reads
+   * (copyFromChannel), never whole-lane copies — a lane is ~46 MB a minute
+   * and getChannelData would copy it (the jetsam rule). Deferred a tick so
+   * it never lands inside the load path, and cancelled on unmount: the
+   * buffers are released the moment the song closes, and a read after that
+   * is the analysis-outliving-the-song bug in miniature.
+   */
+  const [wave, setWave] = useState<{ h: number; color: string }[] | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setWave(null)
+    const stems = project.stems
+    if (stems.length === 0) return
+    const N = 96
+    const WIN = 2048
+    const t = setTimeout(() => {
+      try {
+        const frames = Math.max(...stems.map((st) => st.buffer.length))
+        const scratch = new Float32Array(WIN)
+        const raw: { level: number; color: string }[] = []
+        for (let i = 0; i < N; i++) {
+          if (cancelled) return
+          const start = Math.floor((i / N) * frames)
+          let total = 0
+          let bestRms = 0
+          let bestColor: string = C.dim
+          for (const st of stems) {
+            const b0 = st.buffer
+            // A lane shorter than the song (a custom track) is silent past
+            // its own end, not a repeat of its tail.
+            if (start >= b0.length) continue
+            b0.copyFromChannel(scratch, 0, Math.min(start, Math.max(0, b0.length - WIN)))
+            let sum = 0
+            for (let k = 0; k < WIN; k += 4) sum += scratch[k] * scratch[k]
+            const rms = Math.sqrt(sum / (WIN / 4))
+            total += rms * rms
+            if (rms > bestRms) {
+              bestRms = rms
+              bestColor = laneMeta[st.id]?.color ?? C.dim
+            }
+          }
+          raw.push({ level: Math.sqrt(total), color: bestColor })
+        }
+        const peak = Math.max(0.0001, ...raw.map((r) => r.level))
+        if (!cancelled)
+          setWave(raw.map((r) => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color })))
+      } catch {
+        // A released buffer mid-read: the song is gone; nothing to draw.
+      }
+    }, 0)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [project, laneMeta])
+  /** Measured band width, for the played-clip's inner copy. */
+  const [bandW, setBandW] = useState(0)
+
+  /* Mixer presets — one tap for the thing the app exists to do. They act on
+   * mute/solo ONLY, never volumes: the volumes are the singer's mix. A chip
+   * lights only when the lanes exactly match it; any hand-set state lights
+   * nothing, so the chips never claim a mix they did not make. */
+  const hasVocals = tracks.some((t) => t.id === 'vocals')
+  const mutedIds = tracks.filter((t) => t.muted).map((t) => t.id)
+  const soloIds = tracks.filter((t) => t.solo).map((t) => t.id)
+  const mixPreset: 'full' | 'novocals' | 'vocalsonly' | null =
+    soloIds.length === 0 && mutedIds.length === 0
+      ? 'full'
+      : soloIds.length === 0 && mutedIds.length === 1 && mutedIds[0] === 'vocals'
+        ? 'novocals'
+        : mutedIds.length === 0 && soloIds.length === 1 && soloIds[0] === 'vocals'
+          ? 'vocalsonly'
+          : null
+  const applyMixPreset = useCallback(
+    (p: 'full' | 'novocals' | 'vocalsonly'): void => {
+      for (const t of engine.getTrackStates()) {
+        engine.setMuted(t.id, p === 'novocals' && t.id === 'vocals')
+        engine.setSolo(t.id, p === 'vocalsonly' && t.id === 'vocals')
+      }
+    },
+    [engine]
+  )
+
   // The pre-split original lane is the app's, not the singer's: counting it
   // made an unsplit song read "0 stems · 1 added".
   const addedCount = useMemo(
@@ -500,8 +695,7 @@ export default function PlayerScreen({
   const keyText = ((): string | null => {
     const k = settings?.key
     if (!k) return null
-    const NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
-    return `${NAMES[k.pc % 12]} ${k.minor ? 'minor' : 'major'}`
+    return `${KEY_NAMES[k.pc % 12]} ${k.minor ? 'minor' : 'major'}`
   })()
   /* The Key row had the Beat row's bug exactly: the detector stores a "the
    * harmonic bed is silent, there is no key here" verdict, and the row read
@@ -666,7 +860,13 @@ export default function PlayerScreen({
       lyrW > 0 && fonts
         ? layoutColumn(wordSpecs, fonts.line, lyrW, {
             top: LYR_TOP,
-            indents: mask ? mask.map((m) => (m ? micW : 0)) : undefined
+            /* micW alone put the first glyph ON the mic's right edge — an
+               emoji's ink fills its whole advance, and the sweep's edge
+               bloom blurs a further few px LEFT of the first glyph, so on
+               the phone the lit line's text visibly painted over the mark.
+               The +10 is the emoji's breathing room plus the bloom's
+               spread. */
+            indents: mask ? mask.map((m) => (m ? micW + 10 : 0)) : undefined
           })
         : { boxes: [], height: 0 },
     [wordSpecs, lyrW, micW, mask, fonts]
@@ -867,7 +1067,19 @@ export default function PlayerScreen({
   }, [engine, ktPitch, ktTempo])
 
   const ktBadge: string[] = []
-  if (ktPitch !== 0) ktBadge.push(ktPitch > 0 ? `+${ktPitch}♯` : `${ktPitch}♭`)
+  /* Name the destination, not the arithmetic: a singer transposing wants to
+     know the key they will sing in. Falls back to the semitone count when
+     the song's key is unknown. */
+  if (ktPitch !== 0) {
+    const k = settings?.key
+    ktBadge.push(
+      k != null
+        ? `${KEY_NAMES[k.pc % 12]} → ${KEY_NAMES[(k.pc + ((ktPitch % 12) + 12)) % 12]}`
+        : ktPitch > 0
+          ? `+${ktPitch}♯`
+          : `${ktPitch}♭`
+    )
+  }
   if (ktTempo !== 100) ktBadge.push(`${ktTempo}%`)
 
   /**
@@ -910,16 +1122,75 @@ export default function PlayerScreen({
    * Lines already sung stay the quietest thing on screen; they are the only
    * ones the singer has no further use for.
    */
-  const lineColor = (i: number, isSing: boolean): string => {
+  const lineColor = (i: number, _isSing: boolean): string => {
+    /* Sing-to-train lines used to wear their own gold — 55% of the very hue
+       the current line's sweep lights up in, so "yours, later" was nearly
+       the same colour as "NOW" (photographed on the phone: four gold lines
+       around one gold sweep). The 🎤 mark carries the training meaning by
+       itself; the lines take the ordinary position ladder. */
     if (i === currentLine) return C.bright
-    if (isSing) return 'rgba(245,199,88,0.55)'
     if (i < currentLine) return white(0.22)
     return Math.abs(i - currentLine) === 1 ? white(0.52) : white(0.4)
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
+    <Animated.View style={[{ flex: 1, backgroundColor: C.bg }, backSlide]}>
+      {/* The stage: a dusk room, fully out of focus — chosen from the design
+          canvas against the user's references. A defocused photograph of warm
+          light rather than a drawn pattern: a golden window glow upper-left,
+          soft amber air on the right, dark masses in the lower corners, and a
+          vignette. Nothing is in focus, so nothing competes with the lyrics.
+          ONE static Skia surface, painted once, nothing on the clock — a
+          radial gradient falling to transparent IS the defocused blob, no
+          blur filter needed. Same look for every song on purpose: the room
+          is the app's, the song shows in the stem tile and the seek bar. */}
+      <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <SkLinearGradient
+            start={vec(winDims.width * 0.15, 0)}
+            end={vec(winDims.width * 0.85, winDims.height)}
+            colors={['#3a2517', '#2a1c12', '#1c130d', '#120c09']}
+            positions={[0, 0.3, 0.58, 1]}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.25, winDims.height * 0.16)}
+            r={winDims.width * 0.62}
+            colors={['rgba(236,164,84,0.55)', 'rgba(210,130,60,0.22)', 'rgba(210,130,60,0)']}
+            positions={[0, 0.55, 1]}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.86, winDims.height * 0.34)}
+            r={winDims.width * 0.5}
+            colors={['rgba(190,120,60,0.3)', 'rgba(190,120,60,0)']}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.28, winDims.height * 0.93)}
+            r={winDims.width * 0.55}
+            colors={['rgba(28,16,10,0.85)', 'rgba(28,16,10,0)']}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.9, winDims.height * 0.9)}
+            r={winDims.width * 0.45}
+            colors={['rgba(52,28,14,0.75)', 'rgba(52,28,14,0)']}
+          />
+        </Rect>
+        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
+          <RadialGradient
+            c={vec(winDims.width * 0.5, winDims.height * 0.46)}
+            r={winDims.width * 1.1}
+            colors={['rgba(10,7,5,0)', 'rgba(10,7,5,0)', 'rgba(10,7,5,0.5)']}
+            positions={[0, 0.42, 1]}
+          />
+        </Rect>
+      </Canvas>
 
       {/* Lyrics. The column is ONE canvas the size of the viewport, held
           still while a transform moves the lines under it — a canvas as tall as
@@ -993,29 +1264,40 @@ export default function PlayerScreen({
         {lines.length === 0 && <Text style={s.noLyrics}>No lyrics in this project yet.</Text>}
       </View>
 
-      {/* header (scrim fades into the lyrics — no hard edge) */}
+      {/* header: a dark glass pill floating on the room (the references'
+          card material — charcoal translucency, hairline rim, warm light
+          bleeding around it). The scrim is shorter and softer than the old
+          full-bleed black: it only fades scrolled lyrics before they reach
+          the status bar, without flattening the window glow. */}
       <View
         pointerEvents="none"
-        style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 215 }}
+        style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 140, opacity: 0.8 }}
       >
         <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
+      <View pointerEvents="none" style={s.hdrGlass} />
       <View style={s.hdr} pointerEvents="box-none">
         <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel="Back to library">
           <Text style={s.back}>‹</Text>
         </Pressable>
-        <StemTile hue={0} size={46} />
+        <StemTile hue={tileHue} size={46} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={s.hTitle} numberOfLines={1}>
-            {project.name}
+            {splitSongName(project.name).title}
           </Text>
           {/* "SingZ project" used to lead here, spending the most prominent
               line under the title telling the singer that this app's song is
               this app's song. What is left is what varies between songs. */}
-          <Text style={s.hSub}>
+          <Text style={s.hSub} numberOfLines={1}>
+            {splitSongName(project.name).artist != null
+              ? `${splitSongName(project.name).artist} · `
+              : ''}
             {originalOnly ? 'Not split yet' : `${stemIds.length - addedCount} stems`}
             {addedCount > 0 ? ` · ${addedCount} added` : ''}
             {beatInfo ? ` · ${Math.round(beatInfo.bpm)} bpm` : ''}
+            {settings?.key != null
+              ? ` · ${KEY_NAMES[settings.key.pc % 12]} ${settings.key.minor ? 'min' : 'maj'}`
+              : ''}
           </Text>
         </View>
         {ktBadge.length > 0 && (
@@ -1047,14 +1329,20 @@ export default function PlayerScreen({
         </Pressable>
       </View>
 
-      {/* footer controls (scrim rises out of the lyrics) */}
+      {/* footer: the transport rides ONE floating dark glass dock — the
+          same card material as the header pill. A scrim still lives under
+          it, shorter and softer than the old 360px black: real glass blurs
+          what is behind it, and without a live blur the coming lines read
+          straight through the fill (photographed on the sim: three lines
+          legible through and BELOW the dock). The fade does the blur's job
+          of quieting them before they reach the glass. */}
       <View
         pointerEvents="none"
-        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 360 }}
+        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 340 }}
       >
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
-      <View style={[s.foot, navPad]}>
+      <View style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }]}>
         {countInSt && (
           <Text
             style={s.countInFoot}
@@ -1071,44 +1359,94 @@ export default function PlayerScreen({
             }, []).join('')}
           </Text>
         )}
-        <View style={s.scrubRow}>
-          <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
-          <View style={{ flex: 1 }}>
-            <Bar
-              value={dragPos ?? (engine.duration > 0 ? pos / engine.duration : 0)}
-              onChange={setDragPos}
-              onCommit={(v) => {
-                setDragPos(null)
-                engine.seek(v * engine.duration)
-              }}
-              color="rgba(255,255,255,0.85)"
-              height={26}
-              label="Position"
-              valueText={(v) => fmtTime(v * engine.duration)}
-            />
-            {/* Where the loop is, drawn on the bar it belongs to. pointerEvents
-                none so it never takes the drag away from the scrubber. */}
-            {loopA !== null && engine.duration > 0 && (
-              <View pointerEvents="none" style={s.loopLayer}>
-                <View
-                  style={[
-                    s.loopBand,
-                    loopB === null
-                      ? { left: `${(loopA / engine.duration) * 100}%`, width: 2 }
-                      : {
-                          left: `${(loopA / engine.duration) * 100}%`,
-                          right: `${100 - (loopB / engine.duration) * 100}%`
-                        }
-                  ]}
-                />
+        {/* The seek bar is the player's primary control, and the layout says
+            so: full screen width, thumb height, drawn as the song's waveform
+            — scrub by shape, see the chorus coming. The gesture, the touch
+            strip and the screen-reader surface are still Bar's; only the
+            painting changed. */}
+        <View style={s.waveWrap}>
+          <Bar
+            value={dragPos ?? (engine.duration > 0 ? pos / engine.duration : 0)}
+            onChange={setDragPos}
+            onCommit={(v) => {
+              setDragPos(null)
+              engine.seek(v * engine.duration)
+            }}
+            color="rgba(255,255,255,0.85)"
+            height={40}
+            label="Position"
+            valueText={(v) => fmtTime(v * engine.duration)}
+            rail={(pct) => (
+              <View
+                style={s.waveBand}
+                onLayout={(e) => setBandW(Math.round(e.nativeEvent.layout.width))}
+              >
+                {wave != null && bandW > 0 ? (
+                  <>
+                    {/* Unplayed: every sliver in its loudest lane's hue, dim.
+                        Played: the same slivers bright, revealed by a clip
+                        whose width is the position — two static rows, no
+                        per-sliver recolouring on the clock. */}
+                    <View pointerEvents="none" style={s.waveRow}>
+                      {wave.map((w, i) => (
+                        <View
+                          key={i}
+                          style={[
+                            s.waveBar,
+                            { height: `${Math.round(w.h * 100)}%`, backgroundColor: w.color, opacity: 0.35 }
+                          ]}
+                        />
+                      ))}
+                    </View>
+                    <View pointerEvents="none" style={[s.waveClip, { width: bandW * pct }]}>
+                      <View style={[s.waveRow, { width: bandW }]}>
+                        {wave.map((w, i) => (
+                          <View
+                            key={i}
+                            style={[
+                              s.waveBar,
+                              { height: `${Math.round(w.h * 100)}%`, backgroundColor: w.color }
+                            ]}
+                          />
+                        ))}
+                      </View>
+                    </View>
+                  </>
+                ) : (
+                  /* Buckets still computing: a plain fill, same geometry. */
+                  <View pointerEvents="none" style={[s.waveFill, { width: `${pct * 100}%` }]} />
+                )}
+                <View pointerEvents="none" style={[s.wavePlayhead, { left: `${pct * 100}%` }]} />
               </View>
             )}
-          </View>
-          <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
-          {/* On the scrub row rather than the transport: a loop is a fact about
-              the TIMELINE, and the six transport buttons already fill 358pt —
-              a seventh would leave under 2pt between them, or force them under
-              the 44pt target. hitSlop keeps this one honest at 32pt. */}
+          />
+          {/* The loop draws INSIDE the band — an amber underline with edge
+              handles. pointerEvents none so it never takes the drag away
+              from the scrubber. */}
+          {loopA !== null && engine.duration > 0 && (
+            <View pointerEvents="none" style={s.loopLayer}>
+              {loopB !== null && (
+                <View
+                  style={[
+                    s.loopUnderline,
+                    {
+                      left: `${(loopA / engine.duration) * 100}%`,
+                      right: `${100 - (loopB / engine.duration) * 100}%`
+                    }
+                  ]}
+                />
+              )}
+              <View style={[s.loopEdge, { left: `${(loopA / engine.duration) * 100}%` }]} />
+              {loopB !== null && (
+                <View style={[s.loopEdge, { left: `${(loopB / engine.duration) * 100}%` }]} />
+              )}
+            </View>
+          )}
+        </View>
+        {/* Times and the loop button on their own row beneath the band —
+            elapsed left, loop centre, total right. */}
+        <View style={s.timeRow}>
+          <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
           <Pressable
             onPress={cycleLoop}
             hitSlop={8}
@@ -1126,14 +1464,16 @@ export default function PlayerScreen({
               {loopA !== null && loopB === null ? 'A' : 'A–B'}
             </Text>
           </Pressable>
+          <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
         </View>
         <View style={s.btnRow}>
           <RoundBtn onPress={() => setSheet('mixer')} label="Mixer">
             <MixGlyph />
           </RoundBtn>
           <RoundBtn onPress={() => engine.seek(0)} label="Back to start">
-            {/* ︎ keeps the glyph monochrome (no emoji rendering) */}
-            <Text style={s.toStartText}>{'⏮︎'}</Text>
+            {/* Drawn, like MicGlyph — Android faces render text glyphs at
+                whatever weight they please. */}
+            <ToStartGlyph color={white(0.85)} />
           </RoundBtn>
           <RoundBtn onPress={() => engine.seekBy(-5)} label="Back 5 seconds">
             <Text style={s.skipText}>−5s</Text>
@@ -1144,7 +1484,7 @@ export default function PlayerScreen({
             accessibilityRole="button"
             accessibilityLabel={playing ? 'Pause' : 'Play'}
           >
-            <Text style={s.playText}>{playing ? '❚❚' : '▶'}</Text>
+            <PlayPauseGlyph playing={playing} color="#17110a" />
           </Pressable>
           <RoundBtn onPress={() => engine.seekBy(5)} label="Forward 5 seconds">
             <Text style={s.skipText}>+5s</Text>
@@ -1155,6 +1495,11 @@ export default function PlayerScreen({
         </View>
       </View>
 
+      {/* The swipe-back edge (see backPan above). */}
+      <GestureDetector gesture={backPan}>
+        <View style={s.backEdge} />
+      </GestureDetector>
+
       {/* ---------- Mixer sheet ---------- */}
       <Modal
         visible={sheet === 'mixer'}
@@ -1163,17 +1508,48 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <View style={b.grab} />
             <Text style={b.sheetTitle}>Mixer</Text>
+            {/* One tap for the thing the app exists to do. Only offered when
+                the song has a vocal lane — an unsplit song has nothing to
+                mute. */}
+            {hasVocals && (
+              <View style={[b.segs, { marginBottom: 6 }]}>
+                <Chip label="Full mix" active={mixPreset === 'full'} onPress={() => applyMixPreset('full')} />
+                <Chip
+                  label="No vocals"
+                  active={mixPreset === 'novocals'}
+                  onPress={() => applyMixPreset('novocals')}
+                />
+                <Chip
+                  label="Vocals only"
+                  active={mixPreset === 'vocalsonly'}
+                  onPress={() => applyMixPreset('vocalsonly')}
+                />
+              </View>
+            )}
             {/* The lane rows had no scroll container at all, so past roughly a
                 dozen lanes they clipped with no way to reach them — and the
                 44 pt fader targets below bring that cliff closer. */}
-            <ScrollView>
-            {tracks.map((t) => {
+            <ScrollView showsVerticalScrollIndicator={false}>
+            {tracks.map((t, i) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
+              /* The six stems are the song; everything after them is the
+                 singer's own. The header lands before the FIRST added lane
+                 (they sit together at the end of the track list). The
+                 pre-split original lane is the app's, not the singer's —
+                 the same exemption addedCount makes — or an unsplit song
+                 would render an "Added" header over its own audio. */
+              const isCustom = !(t.id in TRACK_META) && t.id !== ORIGINAL_LANE_ID
+              const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META)
               return (
-                <View key={t.id} style={s.mixRow}>
+                <React.Fragment key={t.id}>
+                  {firstCustom && (
+                    <View style={s.addedRule}>
+                      <Text style={s.addedLab}>Added</Text>
+                    </View>
+                  )}
+                  <View style={s.mixRow}>
                   <View style={[s.dot, { backgroundColor: meta.color }]} />
                   <Text style={s.mixName} numberOfLines={1}>
                     {meta.label}
@@ -1186,12 +1562,25 @@ export default function PlayerScreen({
                   <View style={{ flex: 1 }}>
                     <Bar
                       value={t.volume}
-                      onChange={(v) => engine.setVolume(t.id, v)}
+                      onChange={(v) => {
+                        engine.setVolume(t.id, v)
+                        setDragVol({ id: t.id, v })
+                      }}
+                      onCommit={() => setDragVol(null)}
                       color={meta.color}
                       height={22}
                       track="rgba(255,255,255,0.14)"
                       label={`${meta.label} volume`}
                     />
+                    {/* The value while a finger drags; at rest, nothing. */}
+                    {dragVol?.id === t.id && (
+                      <View pointerEvents="none" style={[s.volWrap, { left: `${dragVol.v * 100}%` }]}>
+                        <View style={s.volBubble}>
+                          <Text style={s.volBubbleText}>{Math.round(dragVol.v * 100)}%</Text>
+                        </View>
+                        <View style={s.volCaret} />
+                      </View>
+                    )}
                   </View>
                   <Pressable
                     hitSlop={4}
@@ -1201,7 +1590,10 @@ export default function PlayerScreen({
                     accessibilityState={{ selected: t.muted }}
                     style={[s.msBtn, t.muted && { backgroundColor: C.red, borderColor: C.red }]}
                   >
-                    <Text style={[s.msText, t.muted && { color: '#1d0f0d' }]}>M</Text>
+                    {/* Drawn, not "M" — mixing-desk initials say nothing to a
+                        singer; a crossed speaker says what happened to the
+                        sound. */}
+                    <SpeakerGlyph color={t.muted ? '#1d0f0d' : white(0.55)} slashed={t.muted} />
                   </Pressable>
                   <Pressable
                     hitSlop={4}
@@ -1211,9 +1603,10 @@ export default function PlayerScreen({
                     accessibilityState={{ selected: t.solo }}
                     style={[s.msBtn, t.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
                   >
-                    <Text style={[s.msText, t.solo && { color: C.amberInk }]}>S</Text>
+                    <HeadphonesGlyph color={t.solo ? C.amberInk : white(0.55)} />
                   </Pressable>
-                </View>
+                  </View>
+                </React.Fragment>
               )
             })}
             </ScrollView>
@@ -1228,9 +1621,8 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <View style={b.grab} />
             <Text style={b.sheetTitle}>{project.name}</Text>
-            <ScrollView>
+            <ScrollView showsVerticalScrollIndicator={false}>
               <View style={[b.sec, b.secFirst]}>
                 <Text style={b.secLab}>Beat</Text>
                 <Text style={s.songVal}>
@@ -1245,6 +1637,18 @@ export default function PlayerScreen({
                           ? 'Reading the song…'
                           : 'Not detected yet'}
                 </Text>
+                {/* The record behind the row: which detector wrote this grid,
+                    and what rides on it. Dim — it is provenance, not news. */}
+                {beatRow === 'grid' && settings?.beat != null && (
+                  <Text style={s.songMeta}>
+                    {settings.beat.source === 'manual'
+                      ? 'hand-made on the computer'
+                      : `detector v${settings.beat.detVersion ?? '?'}`}
+                    {settings.beat.userBars?.length
+                      ? ` · ${settings.beat.userBars.length} hand-set bar${settings.beat.userBars.length > 1 ? 's' : ''}`
+                      : ''}
+                  </Text>
+                )}
                 <Text style={b.hint}>
                   {beatRow === 'progress'
                     ? 'Listening now — the click and the count-in pick the beat up the moment it is found.'
@@ -1352,6 +1756,9 @@ export default function PlayerScreen({
                           ? 'Reading the song…'
                           : 'Not detected yet'}
                 </Text>
+                {keyRow === 'grid' && settings?.key != null && (
+                  <Text style={s.songMeta}>detector v{settings.key.detVersion}</Text>
+                )}
                 {keyRow === 'verdict' && (
                   <Text style={b.hint}>
                     The harmony the key is read from — the guitar, piano and bass lanes —
@@ -1371,6 +1778,12 @@ export default function PlayerScreen({
                         ? 'Reading the song…'
                         : 'Not tracked yet'}
                 </Text>
+                {melodyRow === 'grid' && settings?.melody != null && (
+                  <Text style={s.songMeta}>
+                    detector v{settings.melody.detVersion} · one frame every{' '}
+                    {(settings.melody.hopSec * 1000).toFixed(1)} ms
+                  </Text>
+                )}
                 <Text style={b.hint}>
                   The sung line under the lyrics, and what the pitch strip draws.
                 </Text>
@@ -1385,6 +1798,73 @@ export default function PlayerScreen({
                         : ' · line timings only')
                     : 'None'}
                 </Text>
+                {project.doc.lyricsHash != null && (
+                  <Text style={s.songMeta}>{fmtInfoSize(project.doc.lyricsHash.size)}</Text>
+                )}
+              </View>
+
+              {/* ---------- The full record: every lane, every byte -------- */}
+              <View style={b.sec}>
+                <Text style={b.secLab}>Stems</Text>
+                {project.stems.map((st) => {
+                  const meta = laneMeta[st.id] ?? { label: st.id, color: C.dim }
+                  const file = stemFileInfo(project.doc, st.id)
+                  return (
+                    <View key={st.id} style={s.stemRow}>
+                      <View style={[s.dot, { backgroundColor: meta.color }]} />
+                      <Text style={s.stemName} numberOfLines={1}>
+                        {meta.label}
+                      </Text>
+                      <Text style={s.stemInfo}>
+                        {file != null ? `${file.ext} · ${fmtInfoSize(file.size)}` : '—'}
+                      </Text>
+                    </View>
+                  )
+                })}
+                <Text style={s.songMeta}>
+                  {((): string => {
+                    const total = Object.values(project.doc.stemHashes ?? {}).reduce(
+                      (n, h) => n + h.size,
+                      0
+                    )
+                    /* The decoded buffer's rate is the decode TARGET — the
+                       device rate every stem is resampled to on open — not
+                       the rate the files carry (the doc doesn't record that
+                       one). Label it as what it is; an unlabelled "48.0 kHz"
+                       here would print the exact file-rate-vs-device-rate
+                       confusion the v22/v2 detector bumps were about. */
+                    const sr = project.stems[0]?.buffer.sampleRate
+                    const parts: string[] = []
+                    if (total > 0) parts.push(`${fmtInfoSize(total)} on disk`)
+                    if (sr != null) parts.push(`plays at ${(sr / 1000).toFixed(1)} kHz`)
+                    parts.push(fmtTime(engine.duration))
+                    return parts.join(' · ')
+                  })()}
+                </Text>
+              </View>
+
+              <View style={b.sec}>
+                <Text style={b.secLab}>Project</Text>
+                <Text style={s.songVal}>
+                  {`Format v${project.doc.version}` +
+                    (project.doc.version >= 2 ? ' · FLAC stems' : ' · WAV stems')}
+                </Text>
+                <Text style={s.songMeta}>
+                  {[
+                    project.doc.savedAt
+                      ? `saved ${new Date(project.doc.savedAt).toLocaleDateString()}`
+                      : null,
+                    project.library === 'gdrive'
+                      ? 'from Google Drive'
+                      : project.library === 'folder'
+                        ? 'from a folder'
+                        : project.library === 'phone'
+                          ? 'on this phone'
+                          : 'bundled sample'
+                  ]
+                    .filter((x) => x != null)
+                    .join(' · ')}
+                </Text>
               </View>
             </ScrollView>
         </Sheet>
@@ -1398,23 +1878,16 @@ export default function PlayerScreen({
         onRequestClose={() => setSheet('none')}
       >
         <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <ScrollView bounces={false}>
-              <View style={b.grab} />
+            <ScrollView bounces={false} showsVerticalScrollIndicator={false}>
               <Text style={b.sheetTitle}>Practice</Text>
 
               <View style={[b.sec, b.secFirst]}>
-                <Text style={b.secLab}>Key & speed</Text>
-                <Stepper
-                  label="Pitch"
-                  valueText={`${ktPitch > 0 ? '+' : ''}${ktPitch} st`}
-                  onStep={(d) => setKtPitch((v) => Math.max(-12, Math.min(12, v + d)))}
-                />
-                <Stepper
-                  label="Tempo"
-                  valueText={`${ktTempo}%`}
-                  onStep={(d) => setKtTempo((v) => Math.max(50, Math.min(150, v + d * 5)))}
-                />
-                <View style={[b.segs, { marginTop: 12 }]}>
+                {/* Reset lives on the header row — a control row it used to
+                    cost is a control row the sheet gets back. The hint went
+                    with it: the suffixes below say what pitch and tempo DO
+                    better than a sentence did. */}
+                <View style={s.secHead}>
+                  <Text style={[b.secLab, s.secHeadLab]}>Key & speed</Text>
                   {(ktPitch !== 0 || ktTempo !== 100) && (
                     <Chip
                       label="Reset"
@@ -1426,14 +1899,39 @@ export default function PlayerScreen({
                     />
                   )}
                 </View>
-                <Text style={b.hint}>
-                  Pitch shifts the key without changing speed; tempo changes speed without
-                  changing pitch. Applied live to playback.
-                </Text>
+                <Stepper
+                  label="Pitch"
+                  valueText={`${ktPitch > 0 ? '+' : ''}${ktPitch} st`}
+                  onStep={(d) => setKtPitch((v) => Math.max(-12, Math.min(12, v + d)))}
+                  /* The consequence, not the arithmetic: the key you will
+                     actually sing in. Unknown key or no shift, no suffix. */
+                  suffix={
+                    settings?.key != null && ktPitch !== 0
+                      ? `→ ${KEY_NAMES[(settings.key.pc + ((ktPitch % 12) + 12)) % 12]} ${settings.key.minor ? 'min' : 'maj'}`
+                      : undefined
+                  }
+                />
+                <Stepper
+                  label="Tempo"
+                  valueText={`${ktTempo}%`}
+                  onStep={(d) => setKtTempo((v) => Math.max(50, Math.min(150, v + d * 5)))}
+                  suffix={
+                    beatInfo != null && ktTempo !== 100
+                      ? `→ ${Math.round((beatInfo.bpm * ktTempo) / 100)} bpm`
+                      : undefined
+                  }
+                />
               </View>
 
               <View style={b.sec}>
-                <Text style={b.secLab}>Metronome</Text>
+                <View style={s.secHead}>
+                  <Text style={[b.secLab, s.secHeadLab]}>Metronome</Text>
+                  {/* The fact the old hint led with, in five words on the
+                      header row instead of a sentence under the controls. */}
+                  {beatInfo != null && (
+                    <Text style={s.secFact}>{Math.round(beatInfo.bpm)} bpm, from the song</Text>
+                  )}
+                </View>
                 {/* Three different control semantics used to share one wrapping
                     row of identical amber pills: a Click toggle, a three-way
                     count-in choice, and an Accent toggle. Nothing told the
@@ -1480,11 +1978,9 @@ export default function PlayerScreen({
                     engine.previewClick(met.accent)
                   }}
                 />
+                {beatInfo == null && (
                 <Text style={b.hint}>
-                  {beatInfo
-                    ? `${Math.round(beatInfo.bpm)} bpm from the project — clicks and the ` +
-                      `count-in follow the song's own beat, drift and all.`
-                    : stepAt('beat')
+                  {stepAt('beat')
                       ? `${stepAt('beat')} — the click and the count-in pick the beat up ` +
                         'the moment it is found.'
                       : busyHere
@@ -1498,28 +1994,28 @@ export default function PlayerScreen({
                             'starts. If the song has a steady beat, opening it on desktop reads ' +
                             'one from the drums.'}
                 </Text>
+                )}
               </View>
 
               <View style={b.sec}>
-                <Text style={b.secLab}>Vocal training</Text>
                 {/* Same split as the metronome. "Off · By time · By lyric
                     lines" read as one three-way choice, so with training OFF
                     and the mode set to lines the sheet lit "By lyric lines" —
                     which says the opposite of the truth. The switch is a
-                    toggle and stands alone; the mode is a picker. */}
-                <View style={b.segs}>
+                    toggle and stands alone, on the header row; the mode is a
+                    picker. */}
+                <View style={s.secHead}>
+                  <Text style={[b.secLab, s.secHeadLab]}>Vocal training</Text>
                   <Chip label="Training" active={training} onPress={armTraining} />
                 </View>
-                <View style={{ marginTop: 10 }}>
-                  <Seg
-                    segments={[
-                      { key: 'time', label: 'By time' },
-                      { key: 'lines', label: 'By lyric lines' }
-                    ]}
-                    active={trainCfg.mode}
-                    onSelect={(k) => setTrainCfg((c) => ({ ...c, mode: k as 'time' | 'lines' }))}
-                  />
-                </View>
+                <Seg
+                  segments={[
+                    { key: 'time', label: 'By time' },
+                    { key: 'lines', label: 'By lyric lines' }
+                  ]}
+                  active={trainCfg.mode}
+                  onSelect={(k) => setTrainCfg((c) => ({ ...c, mode: k as 'time' | 'lines' }))}
+                />
                 {trainCfg.mode === 'time' ? (
                   <Stepper
                     label="Interval"
@@ -1532,28 +2028,89 @@ export default function PlayerScreen({
                     }
                   />
                 ) : (
-                  <>
-                    <Stepper
-                      label="Hear"
-                      valueText={String(trainCfg.hear)}
-                      onStep={(d) =>
-                        setTrainCfg((c) => ({ ...c, hear: Math.max(1, Math.min(8, c.hear + d)) }))
-                      }
-                    />
-                    <Stepper
-                      label="Sing"
-                      valueText={String(trainCfg.sing)}
-                      onStep={(d) =>
-                        setTrainCfg((c) => ({ ...c, sing: Math.max(1, Math.min(8, c.sing + d)) }))
-                      }
-                    />
-                  </>
+                  /* Hear and Sing share a row at full control size — the
+                     sheet gets a row back without a single target shrinking
+                     below its shipped 33pt. */
+                  <View style={s.hearSingRow}>
+                    <Text style={s.hearSingLab}>Hear</Text>
+                    <Pressable
+                      style={b.stepBtn}
+                      hitSlop={6}
+                      onPress={() => setTrainCfg((c) => ({ ...c, hear: Math.max(1, c.hear - 1) }))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Decrease Hear"
+                    >
+                      <Text style={b.stepBtnText}>−</Text>
+                    </Pressable>
+                    <Text style={s.hearSingVal} accessibilityLabel={`Hear, ${trainCfg.hear}`}>
+                      {trainCfg.hear}
+                    </Text>
+                    <Pressable
+                      style={b.stepBtn}
+                      hitSlop={6}
+                      onPress={() => setTrainCfg((c) => ({ ...c, hear: Math.min(8, c.hear + 1) }))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Increase Hear"
+                    >
+                      <Text style={b.stepBtnText}>+</Text>
+                    </Pressable>
+                    <View style={{ width: 8 }} />
+                    <Text style={s.hearSingLab}>Sing</Text>
+                    <Pressable
+                      style={b.stepBtn}
+                      hitSlop={6}
+                      onPress={() => setTrainCfg((c) => ({ ...c, sing: Math.max(1, c.sing - 1) }))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Decrease Sing"
+                    >
+                      <Text style={b.stepBtnText}>−</Text>
+                    </Pressable>
+                    <Text style={s.hearSingVal} accessibilityLabel={`Sing, ${trainCfg.sing}`}>
+                      {trainCfg.sing}
+                    </Text>
+                    <Pressable
+                      style={b.stepBtn}
+                      hitSlop={6}
+                      onPress={() => setTrainCfg((c) => ({ ...c, sing: Math.min(8, c.sing + 1) }))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Increase Sing"
+                    >
+                      <Text style={b.stepBtnText}>+</Text>
+                    </Pressable>
+                  </View>
                 )}
-                <Text style={b.hint}>
-                  {trainCfg.mode === 'time'
-                    ? `Guide plays ${trainCfg.periodSec} s, then you take the next ${trainCfg.periodSec} s.`
-                    : `Hear ${trainCfg.hear} line${trainCfg.hear > 1 ? 's' : ''}, then sing ${trainCfg.sing} on your own — marked 🎤 in the lyrics.`}
-                </Text>
+                {/* The schedule the numbers describe, as a strip instead of a
+                    sentence: dim blocks with the singer, amber blocks yours.
+                    Lines mode draws the hear/sing pattern twice; time mode
+                    alternates equal periods. */}
+                <View
+                  style={s.schedStrip}
+                  accessible
+                  accessibilityLabel={
+                    trainCfg.mode === 'time'
+                      ? `With the singer ${trainCfg.periodSec} seconds, then your turn ${trainCfg.periodSec} seconds, repeating`
+                      : `Hear ${trainCfg.hear} line${trainCfg.hear > 1 ? 's' : ''} with the singer, then sing ${trainCfg.sing} on your own, repeating — marked 🎤 in the lyrics`
+                  }
+                >
+                  {(trainCfg.mode === 'time'
+                    ? [false, true, false, true, false, true]
+                    : Array.from({ length: 2 * (trainCfg.hear + trainCfg.sing) }, (_, i) => {
+                        const k = i % (trainCfg.hear + trainCfg.sing)
+                        return k >= trainCfg.hear
+                      })
+                  ).map((sing, i) => (
+                    <View
+                      key={i}
+                      style={[s.schedBlock, { backgroundColor: sing ? C.amber : white(0.18) }]}
+                    />
+                  ))}
+                </View>
+                <View style={s.schedCaps}>
+                  <Text style={s.schedCapDim}>with the singer</Text>
+                  <Text style={s.schedCapYou}>
+                    {trainCfg.mode === 'lines' ? 'your turn 🎤' : 'your turn'}
+                  </Text>
+                </View>
                 {/* These decide WHICH lanes drop out when it is your turn, and
                     they arrived with no label at all — a row of lane names
                     under a hint about line counts, which reads as decoration.
@@ -1596,9 +2153,33 @@ export default function PlayerScreen({
             </ScrollView>
         </Sheet>
       </Modal>
-    </View>
+    </Animated.View>
   )
 }
+
+/** Sizes for the Song sheet's record — down to kB, unlike the catalog's
+ *  singer-facing formatter, because this sheet IS the fine print. */
+const fmtInfoSize = (bytes: number): string =>
+  bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} kB`
+
+/** A lane's on-disk record, matched by stem name against the doc's
+ *  stemHashes (keys are filenames — 'vocals.flac', 'custom-x.m4a'). */
+const stemFileInfo = (
+  doc: { stemHashes?: Record<string, { size: number }> },
+  laneId: string
+): { ext: string; size: number } | null => {
+  for (const [name, h] of Object.entries(doc.stemHashes ?? {})) {
+    const dot = name.lastIndexOf('.')
+    if (dot > 0 && name.slice(0, dot) === laneId) {
+      return { ext: name.slice(dot + 1).toUpperCase(), size: h.size }
+    }
+  }
+  return null
+}
+
+/** One spelling for pitch classes, shared by the Song sheet's Key row and
+ *  the Practice sheet's transpose suffix. */
+const KEY_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
 
 /** How the detector's `beatsPerBar` is written on a page. Six is the compound
  *  meter counted in six — 6/8, not 6/4 (analysis.ts:334); everything else is
@@ -1619,6 +2200,41 @@ const s = StyleSheet.create({
   // The dots sit optically low in the box; lift them rather than centre them.
   songBtnText: { color: white(0.72), fontSize: 15, fontWeight: '800', marginTop: -3 },
   songVal: { color: C.bright, fontSize: 16, fontWeight: '700' },
+  songMeta: { color: C.dim, fontSize: 12, marginTop: 4, fontVariant: ['tabular-nums'] },
+  stemRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 4 },
+  stemName: { color: C.text, fontSize: 13.5, flexShrink: 1 },
+  stemInfo: {
+    color: C.dim,
+    fontSize: 12,
+    marginLeft: 'auto',
+    fontVariant: ['tabular-nums']
+  },
+  /* The dark glass the references are built from: charcoal translucency
+     over the warm room, a faint all-round border with a brighter top edge
+     standing in for the inset specular rim CSS would draw. No live blur —
+     the backdrop is static, so fill + rim reads identically and costs
+     nothing per frame. */
+  /* Radii follow iOS 26's concentric rule: a floating element's corner
+     radius is the display corner radius (~55pt on the Pro phones) minus its
+     inset from the edge, capped at a capsule. Pill: capsule (62/2). Dock:
+     55 − 10 inset ≈ 44, continuous curve. Waveband: concentric would be
+     44 − 12 padding = 32, capped at its own capsule (40/2). */
+  hdrGlass: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    top: 54,
+    height: 62,
+    borderRadius: 31,
+    borderCurve: 'continuous',
+    backgroundColor: 'rgba(24,20,17,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,240,220,0.05)',
+    borderTopColor: 'rgba(255,240,220,0.14)',
+    ...(Platform.OS === 'ios'
+      ? { shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 14, shadowOffset: { width: 0, height: 10 } }
+      : null)
+  },
   hdr: {
     position: 'absolute',
     top: 0,
@@ -1627,8 +2243,8 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingTop: 58,
-    paddingHorizontal: 18,
+    paddingTop: 63,
+    paddingHorizontal: 26,
     paddingBottom: 14
   },
   back: { color: white(0.85), fontSize: 30, fontWeight: '600', paddingRight: 4, marginTop: -4 },
@@ -1645,6 +2261,7 @@ const s = StyleSheet.create({
   /* metronome count-in: dots fill beat by beat above the scrubber */
   countInFoot: {
     color: C.amber,
+    paddingHorizontal: 22,
     fontSize: 13,
     letterSpacing: 6,
     textAlign: 'center',
@@ -1653,32 +2270,72 @@ const s = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10
   },
-  countIn: {
-    color: C.amber,
-    fontSize: 11,
-    letterSpacing: 5,
-    marginBottom: 4,
-    textShadowColor: 'rgba(255,160,40,0.6)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 10
-  },
   noLyrics: { color: C.dim, fontSize: 15, marginTop: 40 },
 
   foot: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingTop: 26,
-    paddingHorizontal: 22,
-    paddingBottom: 30
+    left: 10,
+    right: 10,
+    /* bottom set inline from the safe-area inset */
+    borderRadius: 44,
+    borderCurve: 'continuous',
+    backgroundColor: 'rgba(24,20,17,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,240,220,0.05)',
+    borderTopColor: 'rgba(255,240,220,0.14)',
+    ...(Platform.OS === 'ios'
+      ? { shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 15, shadowOffset: { width: 0, height: 12 } }
+      : null),
+    /* The seek bar still owns (almost) the full width: the dock's 10+12 a
+       side is the cost of the card material the user chose over the old
+       edge-to-edge band. */
+    paddingTop: 14,
+    paddingHorizontal: 12,
+    paddingBottom: 16
   },
-  scrubRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
+  waveWrap: {},
+  waveBand: {
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+    overflow: 'hidden'
+  },
+  waveRow: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 1.5,
+    paddingHorizontal: 4,
+    paddingVertical: 5
+  },
+  waveBar: { flex: 1, borderRadius: 1 },
+  waveClip: { position: 'absolute', left: 0, top: 0, bottom: 0, overflow: 'hidden' },
+  waveFill: { position: 'absolute', left: 0, top: 0, bottom: 0, backgroundColor: white(0.22) },
+  wavePlayhead: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 3,
+    marginLeft: -1.5,
+    backgroundColor: '#ffffff'
+  },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 10
+  },
   tm: { color: white(0.5), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
   loopBtn: {
     width: 40,
     height: 32,
-    borderRadius: 9,
+    borderRadius: 16,
     borderWidth: 1.5,
     borderColor: white(0.2),
     alignItems: 'center',
@@ -1687,20 +2344,32 @@ const s = StyleSheet.create({
   loopBtnOn: { backgroundColor: C.amber, borderColor: C.amber },
   loopBtnText: { color: white(0.6), fontSize: 11.5, fontWeight: '800' },
   loopBtnTextOn: { color: C.amberInk },
-  /* Sits exactly over the 5px rail Bar draws, which is vertically centred in
-     its 44pt touch strip. */
-  loopLayer: {
+  backEdge: { position: 'absolute', left: 0, top: 120, bottom: 250, width: 24 },
+  /* Overlays the band Bar draws (40pt centred in its 44pt touch strip). */
+  loopLayer: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
+  loopUnderline: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    justifyContent: 'center'
+    bottom: 4,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: C.amber
   },
-  loopBand: { position: 'absolute', height: 5, borderRadius: 3, backgroundColor: 'rgba(255,160,40,0.55)' },
-  btnRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  loopEdge: {
+    position: 'absolute',
+    top: 4,
+    bottom: 4,
+    width: 3,
+    borderRadius: 1.5,
+    marginLeft: -1.5,
+    backgroundColor: C.amber
+  },
+  btnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 6
+  },
   skipText: { color: white(0.85), fontSize: 12.5, fontWeight: '700' },
-  toStartText: { color: white(0.85), fontSize: 20, marginTop: -2 },
   play: {
     width: 66,
     height: 66,
@@ -1709,17 +2378,73 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
-  /* Three near-black inks that stay literals. The muted M and the "your turn"
-     pill are tinted toward the fill they sit on — danger red, a lane colour —
-     and there is no token for ink on an arbitrary lane hue because the hue
-     belongs to the project, not the palette. playText is the odd one: on a
-     white button it is simply the palette's warm near-black, the same value
-     the StemTile well uses for a different reason. C.amberInk already covers
-     ink on the accent, which is why the solo glyph beside these does not
-     appear here. */
-  playText: { color: '#17110a', fontSize: 24, fontWeight: '800' },
+  /* The near-black inks stay literals, riding the glyphs inline now: the
+     crossed speaker's '#1d0f0d' is tinted toward the danger fill it sits on,
+     and the play triangle's '#17110a' is the palette's warm near-black on a
+     white button (the StemTile well's value, for a different reason). There
+     is no token for ink on an arbitrary fill because the fill belongs to the
+     state, not the palette; C.amberInk already covers ink on the accent. */
 
   mixRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 9 },
+  /* Section header rows: the label plus the control that used to cost its
+     own row (Reset, Training, the bpm fact). minHeight keeps headers level
+     whether or not the right side is present. */
+  secHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 32,
+    marginBottom: 9
+  },
+  secHeadLab: { marginBottom: 0 },
+  secFact: { color: C.dim, fontSize: 12 },
+  hearSingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 },
+  hearSingLab: { color: C.text, fontSize: 14.5, width: 40 },
+  hearSingVal: {
+    color: C.text,
+    fontSize: 16,
+    fontWeight: '700',
+    minWidth: 26,
+    textAlign: 'center',
+    fontVariant: ['tabular-nums']
+  },
+  schedStrip: { flexDirection: 'row', gap: 4, marginTop: 14 },
+  schedBlock: { flex: 1, height: 10, borderRadius: 3 },
+  schedCaps: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
+  schedCapDim: { color: C.dim, fontSize: 11 },
+  schedCapYou: { color: C.amber, fontSize: 11, fontWeight: '700' },
+  /* The added-lanes divider: the six stems are the song, the rest is the
+     singer's own. Same voice as the sheets' section labels. */
+  addedRule: { borderTopWidth: 1, borderTopColor: C.hairline, paddingTop: 12, marginTop: 4 },
+  addedLab: {
+    color: C.dim,
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8
+  },
+  /* The drag value bubble, centred over the knob with a caret pointing at
+     it. pointerEvents none — it must never take the drag. */
+  volWrap: { position: 'absolute', top: -16, marginLeft: -21, width: 42, alignItems: 'center' },
+  volBubble: {
+    backgroundColor: KIT.panelDeep,
+    borderWidth: 1,
+    borderColor: KIT.lineStrong,
+    borderRadius: 7,
+    paddingHorizontal: 7,
+    paddingVertical: 1
+  },
+  volBubbleText: { color: C.text, fontSize: 11, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  volCaret: {
+    width: 6,
+    height: 6,
+    marginTop: -3,
+    backgroundColor: KIT.panelDeep,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: KIT.lineStrong,
+    transform: [{ rotate: '45deg' }]
+  },
   dot: { width: 11, height: 11, borderRadius: 6 },
   mixName: { color: C.text, fontSize: 14.5, fontWeight: '600', width: 96 },
   msBtn: {
@@ -1731,7 +2456,6 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
-  msText: { color: white(0.55), fontSize: 12, fontWeight: '800' },
   youPill: { borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1 },
   youPillText: { color: '#191510', fontSize: 10, fontWeight: '800' }
 })

@@ -1,6 +1,16 @@
-import React, { useCallback, useRef } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef } from 'react'
 import { KIT, STEM_COLORS } from './tokens'
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler'
+import Reanimated, {
+  Easing as REasing,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming
+} from 'react-native-reanimated'
 import {
+  Animated,
+  Easing,
   Image,
   Platform,
   Pressable,
@@ -87,9 +97,43 @@ export const STEM_TILE_COLORS: string[][] = [
 ]
 const TILE_WIDTHS = ['100%', '72%', '88%', '60%'] as const
 
-/** Mini artwork: four stem lanes, hue-rotated per project. */
-export function StemTile({ hue, size }: { hue: number; size: number }): React.JSX.Element {
-  const colors = STEM_TILE_COLORS[hue % STEM_TILE_COLORS.length]
+/**
+ * "Artist — Title" project names, split for display. Desktop-synced songs
+ * commonly carry the artist in the name, and on a card one line wide the
+ * artist ate the title ("Cat Stevens — Fat…" told nobody which song this
+ * is). Splits on the FIRST spaced dash — em, en or hyphen; the spaces are
+ * what keep hyphenated words ("Mr-X") whole. The SORT stays on the full
+ * name on purpose: an artist's songs clustering together is a feature, and
+ * this helper is display only.
+ */
+export function splitSongName(name: string): { title: string; artist: string | null } {
+  const m = /^(.+?)\s+[—–-]\s+(.+)$/.exec(name)
+  if (m == null) return { title: name, artist: null }
+  return { title: m[2], artist: m[1] }
+}
+
+/** Mini artwork: four stem lanes, hue-rotated per project.
+ *
+ *  `neutral` draws every lane in the `original` hue — an unsplit song has no
+ *  stem colours yet, and the artwork saying so is cheaper than a word.
+ *  `glow` casts a faint halo in the given hue (a ready song is lit). iOS
+ *  only: Android's elevation shadow is black by contract, and a black halo
+ *  under a dark card reads as a smudge, not a light.
+ */
+export function StemTile({
+  hue,
+  size,
+  neutral,
+  glow
+}: {
+  hue: number
+  size: number
+  neutral?: boolean
+  glow?: string
+}): React.JSX.Element {
+  const colors = neutral
+    ? [STEM_COLORS.original, STEM_COLORS.original, STEM_COLORS.original, STEM_COLORS.original]
+    : STEM_TILE_COLORS[hue % STEM_TILE_COLORS.length]
   return (
     <View
       style={{
@@ -99,7 +143,10 @@ export function StemTile({ hue, size }: { hue: number; size: number }): React.JS
         backgroundColor: TILE_WELL,
         justifyContent: 'center',
         gap: size * 0.062,
-        paddingHorizontal: size * 0.18
+        paddingHorizontal: size * 0.18,
+        ...(glow != null && Platform.OS === 'ios'
+          ? { shadowColor: glow, shadowOpacity: 0.5, shadowRadius: 8, shadowOffset: { width: 0, height: 0 } }
+          : null)
       }}
     >
       {colors.map((c, i) => (
@@ -108,6 +155,314 @@ export function StemTile({ hue, size }: { hue: number; size: number }): React.JS
           style={{ height: size * 0.07, borderRadius: 3, backgroundColor: c, width: TILE_WIDTHS[i] }}
         />
       ))}
+    </View>
+  )
+}
+
+/** Filled folder glyph for the source tabs — drawn, like MicGlyph, because an
+ *  emoji in a row of tabs is an icon in a row of icons. Filled rather than
+ *  outlined: a 1.5px outline at this size read crude next to the label. */
+export function FolderGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 16, height: 14 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: 7,
+          height: 5,
+          backgroundColor: color,
+          borderTopLeftRadius: 2,
+          borderTopRightRadius: 2
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 4,
+          width: 16,
+          height: 10,
+          backgroundColor: color,
+          borderRadius: 2
+        }}
+      />
+    </View>
+  )
+}
+
+/** Play/pause for the transport — drawn triangles and bars instead of the
+ *  ▶/❚❚ text glyphs, which Android faces render at whatever weight they
+ *  please. */
+export function PlayPauseGlyph({
+  playing,
+  color
+}: {
+  playing: boolean
+  color: string
+}): React.JSX.Element {
+  return playing ? (
+    <View style={{ flexDirection: 'row', gap: 5 }}>
+      <View style={{ width: 5, height: 20, borderRadius: 1.5, backgroundColor: color }} />
+      <View style={{ width: 5, height: 20, borderRadius: 1.5, backgroundColor: color }} />
+    </View>
+  ) : (
+    <View
+      style={{
+        marginLeft: 4,
+        width: 0,
+        height: 0,
+        borderLeftWidth: 18,
+        borderLeftColor: color,
+        borderTopWidth: 11,
+        borderTopColor: 'transparent',
+        borderBottomWidth: 11,
+        borderBottomColor: 'transparent'
+      }}
+    />
+  )
+}
+
+/** Back-to-start: a bar and a left-pointing triangle, replacing ⏮︎. */
+export function ToStartGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
+      <View style={{ width: 2.5, height: 13, borderRadius: 1, backgroundColor: color }} />
+      <View
+        style={{
+          width: 0,
+          height: 0,
+          borderRightWidth: 11,
+          borderRightColor: color,
+          borderTopWidth: 7,
+          borderTopColor: 'transparent',
+          borderBottomWidth: 7,
+          borderBottomColor: 'transparent'
+        }}
+      />
+    </View>
+  )
+}
+
+/** Trash glyph for the swipe actions — the word "Delete" said less than
+ *  the shape does, and took more room. */
+export function TrashGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 14, height: 16, alignItems: 'center' }}>
+      <View style={{ width: 6, height: 2, borderTopLeftRadius: 1, borderTopRightRadius: 1, backgroundColor: color }} />
+      <View style={{ width: 14, height: 2, borderRadius: 1, backgroundColor: color, marginTop: 0.5 }} />
+      <View
+        style={{
+          width: 11,
+          height: 10,
+          marginTop: 1.5,
+          borderBottomLeftRadius: 2.5,
+          borderBottomRightRadius: 2.5,
+          backgroundColor: color
+        }}
+      />
+    </View>
+  )
+}
+
+/** Redetect glyph — a refresh arc with an arrowhead, drawn. */
+export function RedetectGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 16, height: 16 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 1,
+          top: 1,
+          width: 14,
+          height: 14,
+          borderRadius: 7,
+          borderWidth: 2,
+          borderColor: color,
+          borderTopColor: 'transparent',
+          transform: [{ rotate: '45deg' }]
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          right: -1,
+          top: 0,
+          width: 0,
+          height: 0,
+          borderLeftWidth: 6,
+          borderLeftColor: color,
+          borderTopWidth: 4,
+          borderTopColor: 'transparent',
+          borderBottomWidth: 4,
+          borderBottomColor: 'transparent',
+          transform: [{ rotate: '-15deg' }]
+        }}
+      />
+    </View>
+  )
+}
+
+/** Lyrics glyph — three text lines. */
+export function LyricsGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 14, height: 12, justifyContent: 'space-between' }}>
+      <View style={{ width: 14, height: 2, borderRadius: 1, backgroundColor: color }} />
+      <View style={{ width: 10, height: 2, borderRadius: 1, backgroundColor: color }} />
+      <View style={{ width: 12, height: 2, borderRadius: 1, backgroundColor: color }} />
+    </View>
+  )
+}
+
+/** Magnifier glyph for the search dock. */
+export function SearchGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 16, height: 16 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: 11,
+          height: 11,
+          borderRadius: 5.5,
+          borderWidth: 2,
+          borderColor: color
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          right: 1,
+          bottom: 1,
+          width: 6,
+          height: 2,
+          borderRadius: 1,
+          backgroundColor: color,
+          transform: [{ rotate: '45deg' }]
+        }}
+      />
+    </View>
+  )
+}
+
+/** Speaker glyph for the mixer's Mute — crossed when muted. M and S were
+ *  mixing-desk initials; the glyphs say what happens to the sound. Drawn
+ *  with the RN border-triangle trick, the same reasoning as MicGlyph. */
+export function SpeakerGlyph({
+  color,
+  slashed
+}: {
+  color: string
+  slashed?: boolean
+}): React.JSX.Element {
+  return (
+    <View style={{ width: 13, height: 14 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 4,
+          width: 4,
+          height: 6,
+          borderRadius: 1,
+          backgroundColor: color
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: 3,
+          top: 1,
+          width: 0,
+          height: 0,
+          borderRightWidth: 8,
+          borderRightColor: color,
+          borderTopWidth: 6,
+          borderTopColor: 'transparent',
+          borderBottomWidth: 6,
+          borderBottomColor: 'transparent'
+        }}
+      />
+      {slashed === true && (
+        <View
+          style={{
+            position: 'absolute',
+            left: -2,
+            top: 6,
+            width: 17,
+            height: 2,
+            borderRadius: 1,
+            backgroundColor: color,
+            transform: [{ rotate: '-45deg' }]
+          }}
+        />
+      )}
+    </View>
+  )
+}
+
+/** Headphones glyph for the mixer's Solo — hear only this. */
+export function HeadphonesGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 14, height: 12 }}>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: 14,
+          height: 12,
+          borderWidth: 2,
+          borderColor: color,
+          borderBottomWidth: 0,
+          borderTopLeftRadius: 7,
+          borderTopRightRadius: 7
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: -1,
+          bottom: 0,
+          width: 4,
+          height: 6,
+          borderRadius: 1.5,
+          backgroundColor: color
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          right: -1,
+          bottom: 0,
+          width: 4,
+          height: 6,
+          borderRadius: 1.5,
+          backgroundColor: color
+        }}
+      />
+    </View>
+  )
+}
+
+/** Phone glyph for the source tabs — outline with a home bar. */
+export function PhoneGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View
+      style={{
+        width: 10,
+        height: 15,
+        borderWidth: 1.5,
+        borderColor: color,
+        borderRadius: 3,
+        alignItems: 'center',
+        justifyContent: 'flex-end',
+        paddingBottom: 1
+      }}
+    >
+      <View style={{ width: 3, height: 1.5, borderRadius: 1, backgroundColor: color }} />
     </View>
   )
 }
@@ -298,7 +653,14 @@ export function Seg({
   active,
   onSelect
 }: {
-  segments: { key: string; label: string; icon?: ImageSourcePropType; emoji?: string }[]
+  segments: {
+    key: string
+    label: string
+    icon?: ImageSourcePropType
+    emoji?: string
+    /** A drawn glyph, given the colour the segment's label renders in. */
+    glyph?: (color: string) => React.ReactNode
+  }[]
   active: string
   onSelect: (key: string) => void
 }): React.JSX.Element {
@@ -318,6 +680,7 @@ export function Seg({
           >
             {s.icon != null && <Image source={s.icon} style={{ width: 13, height: 13 }} />}
             {s.emoji != null && <Text style={{ fontSize: 12 }}>{s.emoji}</Text>}
+            {s.glyph != null && s.glyph(on ? C.amberInk : white(0.5))}
             <Text style={[b.segText, on && { color: C.amberInk }]} numberOfLines={1}>
               {s.label}
             </Text>
@@ -336,7 +699,8 @@ export function Bar({
   height = 22,
   track = W_TRACK,
   label,
-  valueText
+  valueText,
+  rail
 }: {
   value: number
   onChange: (v: number) => void
@@ -348,6 +712,10 @@ export function Bar({
   label?: string
   /** How to say the current value out loud (defaults to a percentage). */
   valueText?: (v: number) => string
+  /** Replace the default 5px track + knob with a custom rail (the player's
+   *  waveform seek bar). Gets the displayed fraction; the touch strip, the
+   *  gesture arbitration and the screen-reader surface stay Bar's. */
+  rail?: (pct: number) => React.ReactNode
 }): React.JSX.Element {
   const width = useRef(1)
   const last = useRef(0)
@@ -510,34 +878,40 @@ export function Bar({
       onResponderRelease={commit}
       onResponderTerminate={terminate}
     >
-      <View style={{ height: 5, borderRadius: 3, backgroundColor: track, overflow: 'hidden' }}>
-        <View
-          pointerEvents="none"
-          style={{
-            width: `${pct * 100}%`,
-            height: '100%',
-            borderRadius: 3,
-            backgroundColor: color
-          }}
-        />
-      </View>
-      {/* The knob. Without it a fader at 100% — which every stem is by default
-          — was a solid coloured line with no handle and a track too dim to
-          read: it looked like a divider, not something you could drag. */}
-      <View
-        pointerEvents="none"
-        style={{
-          position: 'absolute',
-          left: `${pct * 100}%`,
-          marginLeft: -7,
-          width: 14,
-          height: 14,
-          borderRadius: 7,
-          backgroundColor: color,
-          borderWidth: 2,
-          borderColor: KIT.bg
-        }}
-      />
+      {rail != null ? (
+        rail(pct)
+      ) : (
+        <>
+          <View style={{ height: 5, borderRadius: 3, backgroundColor: track, overflow: 'hidden' }}>
+            <View
+              pointerEvents="none"
+              style={{
+                width: `${pct * 100}%`,
+                height: '100%',
+                borderRadius: 3,
+                backgroundColor: color
+              }}
+            />
+          </View>
+          {/* The knob. Without it a fader at 100% — which every stem is by default
+              — was a solid coloured line with no handle and a track too dim to
+              read: it looked like a divider, not something you could drag. */}
+          <View
+            pointerEvents="none"
+            style={{
+              position: 'absolute',
+              left: `${pct * 100}%`,
+              marginLeft: -7,
+              width: 14,
+              height: 14,
+              borderRadius: 7,
+              backgroundColor: color,
+              borderWidth: 2,
+              borderColor: KIT.bg
+            }}
+          />
+        </>
+      )}
     </View>
   )
 }
@@ -574,13 +948,89 @@ export function Sheet({
   pad?: StyleProp<ViewStyle>
   children: React.ReactNode
 }): React.JSX.Element {
+  /* The scrim EASES to its 45% black instead of snapping there — the modal
+     slides its panel in, and a wash that lands fully dark on frame one reads
+     as a flash, not a dimming ("shadow animation is harsh"). 200ms
+     decelerate, native driver, one run per open; the slide itself stays the
+     system's (retiming it means replacing Modal, which this sheet's whole
+     scroll-arbitration comment is about not destabilising). Close needs no
+     fade: the Modal unmounts the scrim with the panel. */
+  const scrim = useRef(new Animated.Value(0)).current
+  useEffect(() => {
+    Animated.timing(scrim, {
+      toValue: 1,
+      duration: 200,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true
+    }).start()
+  }, [scrim])
+  /* Swipe-down on the handle dismisses. The grab bar used to be drawn by
+     every caller as decoration with NOTHING behind it — a handle that is a
+     lie ("Modal sheets swipe area does not work", from the phone). It lives
+     here now, above the content, with the pan attached: the panel follows
+     the finger and past 110pt (or a flick) the sheet closes. The gesture is
+     on the HANDLE ZONE only — the sheets carry ScrollViews and sliders, and
+     a whole-panel pan would fight both. Close hands off to the Modal's own
+     slide-out, which continues from wherever the finger left the panel. */
+  const ty = useSharedValue(0)
+  const drag = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetY(6)
+        .onUpdate((e) => {
+          'worklet'
+          ty.value = Math.max(0, e.translationY)
+        })
+        .onEnd((e) => {
+          'worklet'
+          if (e.translationY > 110 || e.velocityY > 700) runOnJS(onClose)()
+          else ty.value = withTiming(0, { duration: 180, easing: REasing.out(REasing.quad) })
+        }),
+    [onClose, ty]
+  )
+  const follow = useAnimatedStyle(() => ({ transform: [{ translateY: ty.value }] }))
   return (
-    <View style={b.sheetWrap}>
+    /* GestureHandlerRootView, not View: on Android, RNGH gestures inside a
+       Modal are dead without a root view of their own in that window. */
+    <GestureHandlerRootView style={b.sheetWrap}>
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)', opacity: scrim }]}
+      />
       <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
-      <View style={[b.sheet, pad]} accessible={false} onAccessibilityEscape={onClose}>
+      <Reanimated.View
+        style={[b.sheet, pad, follow]}
+        accessible={false}
+        onAccessibilityEscape={onClose}
+      >
+        <GestureDetector gesture={drag}>
+          <View
+            style={b.grabZone}
+            collapsable={false}
+            /* The swipe is the sighted exit; this is the other one. Same
+               shape as the fader above and the catalog's swipe rows:
+               `accessible` is what makes it an element at all (ViewProps
+               defaults it false, and iOS maps it straight to
+               isAccessibilityElement), onAccessibilityTap carries the
+               activation on iOS, and Android needs a declared 'activate'
+               action because it has no tap hook. Not a Pressable: that
+               would close the sheet on a sighted tap of the handle too. */
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+            accessibilityHint="Closes this sheet."
+            onAccessibilityTap={onClose}
+            accessibilityActions={Platform.OS === 'android' ? [{ name: 'activate' }] : []}
+            onAccessibilityAction={(e) => {
+              if (e.nativeEvent.actionName === 'activate') onClose()
+            }}
+          >
+            <View style={b.grab} />
+          </View>
+        </GestureDetector>
         {children}
-      </View>
-    </View>
+      </Reanimated.View>
+    </GestureHandlerRootView>
   )
 }
 
@@ -637,7 +1087,8 @@ export const b = StyleSheet.create({
     fontVariant: ['tabular-nums']
   },
   stepSuffix: { color: C.dim, fontSize: 12.5 },
-  sheetWrap: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
+  /* The 45% black lives on the animated scrim layer inside Sheet now. */
+  sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheet: {
     backgroundColor: C.sheet,
     borderTopLeftRadius: 22,
@@ -646,14 +1097,14 @@ export const b = StyleSheet.create({
     paddingBottom: 34,
     maxHeight: '80%'
   },
+  /* The 5pt bar is the visual; the zone is the 34pt target the finger
+     actually gets (44pt-rule territory once the panel's radius is counted). */
+  grabZone: { alignItems: 'center', justifyContent: 'center', height: 34, marginBottom: 5 },
   grab: {
     width: 40,
     height: 5,
     borderRadius: 3,
-    backgroundColor: white(0.25),
-    alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 14
+    backgroundColor: white(0.25)
   },
   sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', marginBottom: 14, letterSpacing: -0.2 },
   sec: { borderTopWidth: 1, borderTopColor: C.hairline, paddingVertical: 15 },
