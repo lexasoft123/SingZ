@@ -77,6 +77,13 @@ Today SingZ has three separate audio paths:
    providers, physical-channel selection, timestamp provenance, bounded
    delivery and an off-real-time 2,048/512 analysis adapter.
 
+The PR #13 sources are already cross-platform, but their path still says that
+mobile owns them. That is now an architectural mismatch. Before adding the
+graph, move the reusable native source tree to top-level `zcore/` and create
+the graph as the sibling top-level library `zdsp/`. `mobile/`, Electron and
+native command-line tools become consumers of those libraries, not owners of
+their source.
+
 The migration must preserve these proven invariants:
 
 - all song lanes start sample-locked;
@@ -443,44 +450,70 @@ Each provider is a separate class in a separate OS file:
 | iOS | duplex RemoteIO | AUv3 nodes later | one AVAudioSession coordinator |
 | Android | Oboe (AAudio on supported devices) | measured direct-AAudio escape hatch | one serialized engine/session coordinator |
 
-Recommended files:
+Target repository layout:
 
 ```text
-mobile/native/core/dsp/
-  audio_bus.h
-  process_context.h
-  processor.h
-  realtime_arena.{h,cpp}
-  graph_description.{h,cpp}
-  graph_compiler.{h,cpp}
-  compiled_graph.{h,cpp}
-  graph_runner.{h,cpp}
-  parameter_queue.{h,cpp}
-  analyzer_tap.{h,cpp}
+zcore/
+  CMakeLists.txt
+  include/zcore/             # shared audio/time/device and analysis contracts
+  src/                       # analysis, codecs and other portable compute
+  platform/{macos,windows,ios,android}/
+  tools/
+  third_party/
+
+zdsp/
+  CMakeLists.txt
+  include/zdsp/
+    audio_bus.h
+    process_context.h
+    processor.h
+  src/
+    realtime_arena.{h,cpp}
+    graph_description.{h,cpp}
+    graph_compiler.{h,cpp}
+    compiled_graph.{h,cpp}
+    graph_runner.{h,cpp}
+    parameter_queue.{h,cpp}
+    analyzer_tap.{h,cpp}
   nodes/...
   plugins/plugin_format.h
   plugins/plugin_node.{h,cpp}
   plugins/desktop/vst3_format.{h,cpp}
 
-mobile/native/core/audio_host.h
-mobile/native/core/audio_host_macos.mm
-mobile/native/core/audio_host_windows.cpp
-mobile/native/core/audio_host_ios.mm
-mobile/native/core/audio_host_android.cpp
-mobile/native/core/audio_host_asio_windows.cpp
+mobile/native/bindings/android/  # SingZ package-specific JNI only
+mobile/ios/SingzCore/            # CocoaPods/product bridge and generated copy
+src/main/native/                 # Electron/product bridge
 ```
 
-Android shared C++ stays under `mobile/native/core`; it must not be placed next
-to the React Native app CMakeLists where source globs change `appmodules`.
-iOS additions must go through `mobile/scripts/sync-singzcore.js` and the
-SingzCore pod build. The current sync and podspec copy/glob only top-level core
-files, so Phase 1 must add an explicit recursive allowlist for `dsp/` while
-excluding desktop plug-in adapters. Host CMake and Android CMake also enumerate
-sources explicitly and must be updated in the same commit. A host-only unit
-test is not proof of mobile integration: CI must compile iOS, Android and host
-targets and verify a graph-kernel symbol/version literal exists in each rebuilt
-mobile binary. Platform implementations must not be combined into one
-preprocessor-heavy class.
+`zcore` is the dependency root. It owns the narrow float32 bus, device,
+timestamp/clock and diagnostics contracts plus the existing reusable analysis,
+codec and audio-I/O implementation. `zdsp` owns graph compilation, processors,
+parameter delivery and plug-in adapters. `zdsp` may depend on public `zcore`
+contracts; `zcore` must never depend on `zdsp`. The app-level host adapter links
+both and supplies a `zdsp::GraphRunner` through `zcore::RealtimeRender`, which
+keeps that dependency acyclic.
+
+Neither reusable library belongs under the React Native CMake tree. Product
+bindings stay with their product: package-specific JNI under
+`mobile/native/bindings/android`, Objective-C++ pod wrappers under
+`mobile/ios/SingzCore`, and Electron adapters under `src/main/native`. In
+particular, Android C++ must not be placed next to the app CMakeLists where
+React Native source globs change `appmodules`. These bindings marshal only and
+link the top-level libraries; they do not own reusable audio behavior. The
+Android Gradle/CMake target, the iOS SingzCore pod, desktop host build and CLI
+all consume the top-level libraries.
+`mobile/scripts/sync-singzcore.js` may continue materializing real source files
+for CocoaPods during the migration, but its source becomes `zcore/`; generated
+copies remain gitignored and are never a second authoritative source. Phase 1
+must add an explicit recursive allowlist for `zdsp/` while excluding desktop
+plug-in adapters. Root, host and Android CMake definitions and the podspec all
+enumerate sources explicitly and must change with the relevant library.
+
+A host-only unit test is not proof of mobile integration: CI must compile iOS,
+Android and host targets and verify `zcore` and, after Phase 1, a `zdsp`
+kernel/version literal exists in each rebuilt mobile binary. Platform
+implementations remain separate OS files rather than one preprocessor-heavy
+class.
 
 `AudioHost::enumerate()` is side-effect free: it never opens a stream, changes
 focus/category/route or activates a session. On Android, Oboe/AAudio do not
@@ -687,7 +720,68 @@ Use a standalone, versioned graph document rather than adding opaque objects to
 
 ## Implementation phases
 
-### Phase 0 — Freeze contracts and measurements
+### Phase 0A — Extract `zcore` and establish `zdsp`
+
+Implement as a dedicated, behavior-preserving PR before graph work:
+
+- Move the authoritative reusable tree from `mobile/native/core/` to top-level
+  `zcore/` with `git mv`, preserving history. Move the shared native
+  dependencies it owns from `mobile/native/third_party/` into
+  `zcore/third_party/`; leave genuinely app-specific React Native code under
+  `mobile/`.
+- Split source ownership while moving: portable implementation goes under
+  `zcore/src/`, OS device/session providers under `zcore/platform/`, narrow
+  public contracts under `zcore/include/zcore/`, and CLI entry points under
+  `zcore/tools/`. Move `singz_core_jni.cpp` and any other package-specific JNI
+  out to `mobile/native/bindings/android/`; retain the product Objective-C++
+  pod wrappers under `mobile/ios/SingzCore/` and Electron adapters under
+  `src/main/native/`. Bindings marshal only; reusable behavior stays in
+  `zcore`/`zdsp`.
+- Make `zcore` an ordinary CMake library with one public include root and
+  explicit source lists. Preserve current exported C/JNI behavior and packaged
+  library names during this phase so relocation is not mixed with an ABI
+  migration.
+- Add the top-level `zdsp/` library skeleton and public namespace, but no app
+  playback ownership yet. Its CMake target may link only public `zcore`
+  contracts and approved third-party DSP dependencies. Add a dependency check
+  that fails if `zcore` imports or links `zdsp`.
+- Repoint `scripts/build-analyze-host.sh`, `scripts/run-core-host-tests.sh`,
+  `scripts/vendor-analyze.sh`, parity gates, tests and documentation to
+  `zcore/`. Repoint Android CMake/Gradle and
+  `mobile/scripts/sync-singzcore.js`; keep the iOS materialized pod copy
+  generated and gitignored.
+- Give CMake consumers stable exported targets such as `SingZ::zcore` and
+  `SingZ::zdsp`. App targets link those targets instead of compiling ad hoc
+  overlapping source lists wherever the platform build permits it.
+- Add ownership documentation: `zcore` contains reusable native foundations;
+  `zdsp` contains the real-time graph; `mobile/` and `src/main/` contain
+  package/product bindings and UI/process orchestration only.
+- Remove or fail CI on stale source references to `mobile/native/core` after
+  the move. Do not leave forwarding headers, symlinks or a checked-in copied
+  tree that can diverge.
+
+Verification:
+
+- Existing host unit/parity suites pass without fixture or tolerance changes.
+- Root typecheck/tests still pass, and the analyze CLI performs the same smoke
+  analyses from its new source root.
+- Android debug and iOS native artifacts are rebuilt, not reused; binary symbol
+  checks prove the relocated `zcore` implementation is linked into each.
+- macOS and Windows host builds consume the same `zcore` target. The Dell gate
+  covers the Windows configuration, including WASAPI capture enumeration.
+- A repository search finds no authoritative native implementation remaining
+  under `mobile/native/core` and no production include using that old path.
+
+Avoid:
+
+- Combining the move with graph behavior, namespace-wide ABI churn or audio
+  algorithm changes; a pure relocation must be bisectable.
+- Making CocoaPods' generated copy authoritative or editing it by hand.
+- Letting Android or Apple bindings leak JNI, Java, Objective-C or Swift types
+  into public `zcore`/`zdsp` headers.
+- Creating a `zcore` ↔ `zdsp` dependency cycle to connect the render callback.
+
+### Phase 0B — Freeze contracts and measurements
 
 Implement:
 
@@ -712,8 +806,8 @@ Implement:
 
 References:
 
-- `mobile/native/core/audio_input.h`
-- `mobile/native/core/audio_input_backend.h`
+- `zcore/include/zcore/audio_input.h`
+- `zcore/include/zcore/audio_input_backend.h`
 - `tests/native/core_host_tests.cpp`
 - platform audio documents in `docs/`
 
@@ -812,7 +906,7 @@ References:
 - `audio_input_analysis_adapter.{h,cpp}`
 - `mobile/src/{ios,android}-audio-input-session.ts`
 - `src/renderer/src/audio/mic.ts`
-- `mobile/native/core/tools/singz-analyze.cpp`
+- `zcore/tools/singz-analyze.cpp`
 
 Verification:
 
@@ -841,7 +935,7 @@ Implement one provider at a time behind `AudioHost`:
    exclusive mode where supported;
 3. iOS duplex RemoteIO under the existing AVAudioSession coordinator;
 4. Android duplex Oboe over AAudio where supported, retaining direct AAudio
-   only if Phase 0 measurements show it is the lower-risk SingZ host;
+   only if Phase 0B measurements show it is the lower-risk SingZ host;
 5. ASIO as a distinct `audio_host_asio_windows.cpp` only after the legal gate.
 
 Add output inventory, negotiated formats, full-duplex start/stop, xrun/status
@@ -905,7 +999,7 @@ Implement:
   Web Audio/RNAudioAPI engine, transfers the public session owner, starts the
   native host, and reverses the sequence on fallback. The two output engines
   are never active concurrently.
-- Native song-source provisioning from the Phase 0 ADR: allowlisted
+- Native song-source provisioning from the Phase 0B ADR: allowlisted
   desktop handles/paths, folder and Drive-local mobile files, FLAC v2, legacy
   WAV and the supported custom-track codec matrix. Decode/streaming, seek and
   cancellation run off RT with latest-load generation guards; unequal lane
@@ -1106,12 +1200,12 @@ that changes native sources, bridges, sessions, hosts or playback must also:
 
 ## Acceptance gates
 
-These are initial gates; Phase 0 replaces assumptions with hardware baselines.
+These are initial gates; Phase 0B replaces assumptions with hardware baselines.
 
 | Gate | Target |
 | --- | --- |
 | Graph overhead | runner entry and empty graph reported in microseconds and percentage of negotiated callback deadline; p50/p95/p99/max, explicit safety margin, zero deadline misses |
-| Analyzer handoff | measured separately from RT render; retain platform baseline/goal (Windows hardware p95 ≤ 3 ms, portable fake host <10 ms until Phase 0 replaces it) |
+| Analyzer handoff | measured separately from RT render; retain platform baseline/goal (Windows hardware p95 ≤ 3 ms, portable fake host <10 ms until Phase 0B replaces it) |
 | RT safety | zero steady-state allocations/frees, mutex waits, logging or bridge calls |
 | Stability | zero unbounded queue growth; every overflow/xrun counted |
 | Graph update | complete snapshot at a block boundary; no partial graph, RT destruction or device restart |
