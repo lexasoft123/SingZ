@@ -43,6 +43,9 @@ const PORT_LABELS: Record<string, string> = {
   Headphones: 'Headphones',
   CarAudio: 'CarPlay',
   BluetoothA2DPOutput: 'Bluetooth',
+  BluetoothHFP: 'Bluetooth headset',
+  BluetoothLE: 'Bluetooth LE audio',
+  HearingAid: 'Hearing aid',
   AirPlay: 'AirPlay',
   HDMIOutput: 'HDMI',
   'USB Audio': 'USB audio'

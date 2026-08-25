@@ -14,14 +14,15 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.singzplayer.audio.AudioRoutePolicy
 import kotlin.concurrent.thread
 
 /**
- * Android counterpart of the iOS AudioRouteInfo module. Android has no public
- * output-latency API, so autoSec only carries the IO buffer duration and the
- * per-route user trim (persisted here in SharedPreferences) does the heavy
- * lifting for Bluetooth/car units. Port type strings reuse the iOS names so
- * the JS label map needs no platform branches.
+ * Android counterpart of the iOS AudioRouteInfo module. A short silent
+ * AudioTrack probe measures the presentation queue on the actual playing
+ * route; the AudioManager IO-buffer property is only its fallback. Per-route
+ * user trim remains available for device-specific residual delay. Port type
+ * strings reuse the iOS names so the JS label map needs no platform branches.
  */
 class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
   ReactContextBaseJavaModule(ctx) {
@@ -41,7 +42,15 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
    * has actually presented. Unlike any AudioManager property this includes
    * the HAL/DSP chain (vendor sound effects are the usual 100 ms+ culprit).
    */
-  private fun probeOutputLatencySec(): Double {
+  data class RoutedProbe(
+    val latencySec: Double,
+    val portType: String,
+    val portName: String,
+    val portUid: String
+  )
+
+  @Synchronized
+  private fun probePlayingOutput(): RoutedProbe {
     var track: AudioTrack? = null
     return try {
       val sr = 48000
@@ -71,6 +80,7 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
       var written = 0L
       val ts = AudioTimestamp()
       var best = -1.0
+      var routed: AudioDeviceInfo? = null
       // non-blocking writes only: a blocking write on a track another engine
       // (our Oboe stream) contends with can wedge forever and the promise
       // would never resolve — the exact bug this replaces
@@ -78,6 +88,15 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
       while (System.nanoTime() < deadline) {
         val n = track.write(silence, 0, silence.size, AudioTrack.WRITE_NON_BLOCKING)
         if (n > 0) written += (n / 2).toLong() else Thread.sleep(10)
+        routed = track.routedDevice ?: routed
+        val route = AudioRoutePolicy.classifyRouted(routed?.type)
+        val name = routed?.productName?.toString()?.ifBlank { null } ?: route.fallbackName
+        val key = "${route.portType}:${routed?.id ?: 0}:$name"
+        // Route identity still comes from the playing track, but a known
+        // unchanged route need not spend another 900 ms measuring silence.
+        if (routed != null && key == probedKey && probedSec >= 0) {
+          return RoutedProbe(probedSec, route.portType, name, "android:routed:$key")
+        }
         // let the pipeline reach steady state before trusting the timestamp
         if (written > sr / 5 && track.getTimestamp(ts)) {
           val presented = ts.framePosition +
@@ -89,24 +108,33 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
           }
         }
       }
-      best
+      val route = AudioRoutePolicy.classifyRouted(routed?.type)
+      val name = routed?.productName?.toString()?.ifBlank { null } ?: route.fallbackName
+      val key = "${route.portType}:${routed?.id ?: 0}:$name"
+      if (routed != null && best >= 0) {
+        probedKey = key
+        probedSec = best
+      }
+      RoutedProbe(
+        if (best >= 0) best else 0.0,
+        route.portType,
+        name,
+        "android:routed:$key"
+      )
     } catch (e: Exception) {
-      -1.0
+      RoutedProbe(0.0, "UnknownOutput", "Output route unknown", "android:routed:none")
     } finally {
       try {
         track?.stop()
-        track?.release()
-      } catch (_: Exception) {}
+      } catch (_: Exception) {
+      } finally {
+        // release must not be skipped when a disconnected route makes stop()
+        // throw: AudioTrack owns native resources independently of playback.
+        try {
+          track?.release()
+        } catch (_: Exception) {}
+      }
     }
-  }
-
-  private fun priority(type: Int): Int = when (type) {
-    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> 6
-    AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> 5
-    AudioDeviceInfo.TYPE_HDMI -> 4
-    AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> 3
-    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> 1
-    else -> 0
   }
 
   @ReactMethod
@@ -116,30 +144,17 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
         val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val sr = am.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toDoubleOrNull() ?: 48000.0
         val frames = am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toDoubleOrNull() ?: 256.0
-        val pick = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-          .filter { priority(it.type) > 0 }
-          .maxByOrNull { priority(it.type) }
-        val (portType, portName) = when (pick?.type) {
-          AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ->
-            "BluetoothA2DPOutput" to (pick.productName?.toString() ?: "Bluetooth")
-          AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET ->
-            "USB Audio" to (pick.productName?.toString() ?: "USB audio")
-          AudioDeviceInfo.TYPE_HDMI -> "HDMIOutput" to "HDMI"
-          AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET ->
-            "Headphones" to "Headphones"
-          else -> "Speaker" to "Speaker"
-        }
-        val key = "$portType:$portName"
-        if (probedKey != key || probedSec < 0) {
-          probedSec = probeOutputLatencySec()
-          probedKey = key
-        }
+        val routed = probePlayingOutput()
+        val latency = AudioRoutePolicy.latency(
+          routed.latencySec,
+          if (sr > 0) frames / sr else 0.0
+        )
         val map = Arguments.createMap()
-        map.putDouble("outputLatency", if (probedSec > 0) probedSec else 0.0)
-        map.putDouble("ioBufferDuration", if (sr > 0) frames / sr else 0.0)
-        map.putString("portType", portType)
-        map.putString("portName", portName)
-        map.putString("portUid", key)
+        map.putDouble("outputLatency", latency.outputLatency)
+        map.putDouble("ioBufferDuration", latency.ioBufferDuration)
+        map.putString("portType", routed.portType)
+        map.putString("portName", routed.portName)
+        map.putString("portUid", routed.portUid)
         // Media volume, so the log can say why a song was inaudible. A phone
         // sitting at zero plays silently and the volume keys move the ringtone
         // until something is audibly playing — indistinguishable, from the
