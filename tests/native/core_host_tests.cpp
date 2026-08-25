@@ -8,14 +8,22 @@
 // Built by scripts/run-core-host-tests.sh (plain c++, no NDK), run by the
 // Android CI canary.
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <limits>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "analysis.h"
+#include "audio_input.h"
+#include "audio_input_backend.h"
 #include "flac_io.h"
 #include "beat_this.h"
 #include "beats.h"
@@ -24,6 +32,88 @@
 #include "wav.h"
 
 static int failures = 0;
+
+static std::atomic<int> fakeFailureAfter{-1};
+static std::atomic<bool> fakeNoSleep{false};
+static std::atomic<bool> fakeStartFails{false};
+static std::atomic<bool> fakeInvalidRate{false};
+static std::atomic<bool> fakeSuppressCallbacks{false};
+
+class FakeAudioInputBackend final : public singz::AudioInputBackend {
+ public:
+  ~FakeAudioInputBackend() override { stop(); }
+
+  singz::AudioInputResult open(const singz::AudioInputConfig& config,
+                               singz::AudioInputPush push, void* context) override {
+    channel_ = config.channel;
+    push_ = push;
+    context_ = context;
+    return {true, singz::AudioInputState::Starting, {},
+            fakeInvalidRate.load() ? std::numeric_limits<double>::quiet_NaN() : 48000,
+            channel_};
+  }
+
+  singz::AudioInputResult start() override {
+    if (fakeStartFails.load())
+      return {false, singz::AudioInputState::Error, "simulated start failure", 0, channel_};
+    stop_.store(false);
+    if (fakeSuppressCallbacks.load())
+      return {true, singz::AudioInputState::Running, {}, 48000, channel_};
+    producer_ = std::thread([this] {
+      float samples[128];
+      for (int i = 0; i < 128; ++i)
+        samples[i] = static_cast<float>(0.2 * std::sin(2 * M_PI * 440 * i / 48000));
+      uint64_t host = 1000000000;
+      int callbacks = 0;
+      while (!stop_.load()) {
+        const uint64_t callbackTime = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (push_) push_(context_, samples, 128, host, callbackTime);
+        host += 2666667;
+        if (fakeFailureAfter.load() >= 0 && ++callbacks >= fakeFailureAfter.load()) {
+          failed_.store(true);
+          break;
+        }
+        if (!fakeNoSleep.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+    return {true, singz::AudioInputState::Running, {}, 48000, channel_};
+  }
+
+  void stop() override {
+    stop_.store(true);
+    if (producer_.joinable() && producer_.get_id() != std::this_thread::get_id()) producer_.join();
+  }
+
+  bool takeFailure(std::string& error) override {
+    if (!failed_.exchange(false)) return false;
+    error = "simulated input device disconnected";
+    return true;
+  }
+
+ private:
+  singz::AudioInputPush push_ = nullptr;
+  void* context_ = nullptr;
+  uint32_t channel_ = 0;
+  std::atomic<bool> stop_{false};
+  std::atomic<bool> failed_{false};
+  std::thread producer_;
+};
+
+static std::unique_ptr<singz::AudioInputBackend> fakeAudioInputBackend() {
+  return std::make_unique<FakeAudioInputBackend>();
+}
+
+static bool waitForState(singz::AudioInput& input, singz::AudioInputState wanted,
+                         int timeoutMs = 1000) {
+  const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  while (std::chrono::steady_clock::now() < until) {
+    if (input.state() == wanted) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return input.state() == wanted;
+}
 
 // Scratch directory for the wav/flac fixtures the suites write. TMPDIR is the
 // POSIX answer; Windows sets TEMP (never TMPDIR) and has no /tmp, which made
@@ -54,6 +144,360 @@ static std::vector<float> sine(double hz, int rate, int frames, int channels) {
     for (int c = 0; c < channels; c++) out[static_cast<size_t>(i) * channels + c] = v;
   }
   return out;
+}
+
+static void audioInputTests() {
+  {
+    singz::AudioInputRing ring(2, 4);
+    CHECK("audio input ring: valid preallocated shape", ring.valid() && ring.capacity() == 2);
+    const float a[4] = {1, 2, 3, 4};
+    const float b[2] = {5, 6};
+    const float c[3] = {7, 8, 9};
+    CHECK("audio input ring: first block accepted", ring.push(a, 4, 100));
+    CHECK("audio input ring: second block accepted", ring.push(b, 2, 200));
+    CHECK("audio input ring: full ring drops newest", !ring.push(c, 3, 300));
+    CHECK("audio input ring: overflow is counted", ring.overruns() == 1);
+    singz::AudioInputBlockView out;
+    CHECK("audio input ring: first block pops",
+          ring.peek(out, 48000) && out.sequence == 0 && out.sampleHostTimeNs == 100 &&
+              out.sampleRate == 48000 && out.frames == 4 &&
+              std::equal(out.mono, out.mono + out.frames, a));
+    const float* firstSlot = out.mono;
+    ring.consume();
+    CHECK("audio input ring: wrap slot accepts after pop", ring.push(c, 3, 300));
+    CHECK("audio input ring: second block keeps order",
+          ring.peek(out, 48000) && out.sequence == 1 && out.sampleHostTimeNs == 200 &&
+              out.frames == 2 && std::equal(out.mono, out.mono + out.frames, b));
+    ring.consume();
+    CHECK("audio input ring: wrapped block exposes dropped-attempt gap",
+          ring.peek(out, 48000) && out.sequence == 3 && out.sampleHostTimeNs == 300 &&
+              out.frames == 3 && std::equal(out.mono, out.mono + out.frames, c));
+    CHECK("audio input ring: preallocated slots are reused without delivery allocation",
+          out.mono == firstSlot);
+    ring.consume();
+    CHECK("audio input ring: empty pop is non-blocking", !ring.peek(out, 48000));
+    CHECK("audio input ring: oversized callback is rejected", !ring.push(a, 5, 400));
+    CHECK("audio input ring: invalid construction is inert",
+          !singz::AudioInputRing(1, 4).valid() && !singz::AudioInputRing(2, 0).valid());
+    singz::AudioInputRing corruptRing(2, 4);
+    const float corrupt[4] = {1, std::numeric_limits<float>::quiet_NaN(),
+                              std::numeric_limits<float>::infinity(), -1};
+    CHECK("audio input ring: corrupt hardware block is accepted for delivery",
+          corruptRing.push(corrupt, 4, 500) && corruptRing.peek(out, 48000));
+    CHECK("audio input ring: non-finite PCM is sanitized off the RT thread",
+          out.frames == 4 && out.mono[0] == 1 && out.mono[1] == 0 &&
+              out.mono[2] == 0 && out.mono[3] == -1);
+    corruptRing.consume();
+  }
+  {
+    singz::AudioInputDevice device;
+    device.uid = "stable-device";
+    device.label = "Interface";
+    device.sampleRate = 48000;
+    device.channels = 16;
+    for (int i = 1; i <= 16; ++i) device.channelLabels.push_back("Channel " + std::to_string(i));
+    std::string error;
+    singz::AudioInputConfig config;
+    config.deviceUid = device.uid;
+    config.channel = 2;
+    CHECK("audio input config: zero-based channel 2 of 16 is valid",
+          singz::validateAudioInputConfig(config, {device}, error));
+    int32_t mapped = -1;
+    CHECK("audio input config: mono map contains exact zero-based lane",
+          singz::makeAudioInputChannelMap(2, 16, mapped, error) && mapped == 2);
+    CHECK("audio input config: mono map refuses an out-of-bounds lane",
+          !singz::makeAudioInputChannelMap(16, 16, mapped, error));
+    config.channel = 16;
+    CHECK("audio input config: channel count itself is out of bounds",
+          !singz::validateAudioInputConfig(config, {device}, error) &&
+              error.find("out of range") != std::string::npos);
+    config.channel = 2;
+    config.ringBlocks = 1;
+    CHECK("audio input config: ring bounds are strict",
+          !singz::validateAudioInputConfig(config, {device}, error));
+    config.ringBlocks = 32;
+    config.deviceUid = "other-device";
+    CHECK("audio input config: transient index cannot substitute for stable UID",
+          !singz::validateAudioInputConfig(config, {device}, error));
+  }
+  {
+    singz::AudioInputDevice fake;
+    fake.uid = "fake-input";
+    fake.label = "Fake input";
+    fake.sampleRate = 48000;
+    fake.channels = 4;
+    fake.channelLabels = {"One", "Two", "Three", "Four"};
+    singz::setAudioInputBackendForTests(fakeAudioInputBackend, {fake});
+    singz::AudioInputConfig config;
+    config.deviceUid = fake.uid;
+    config.channel = 2;
+
+    singz::AudioInput selfStopping;
+    std::atomic<int> selfCalls{0};
+    std::atomic<bool> ratePublished{false};
+    fakeFailureAfter.store(-1);
+    fakeNoSleep.store(true);
+    const auto selfStopBegan = std::chrono::steady_clock::now();
+    const singz::AudioInputResult selfStarted = selfStopping.start(
+        config, [&](const singz::AudioInputBlockView& block) {
+          ratePublished.store(block.sampleRate == 48000);
+          if (selfCalls.fetch_add(1) == 0) selfStopping.stop();
+        });
+    CHECK("audio input lifecycle: fake backend starts", selfStarted.ok);
+    CHECK("audio input lifecycle: sink-triggered stop never self-joins",
+          waitForState(selfStopping, singz::AudioInputState::Stopped));
+    CHECK("audio input lifecycle: sustained producer self-stop is bounded",
+          std::chrono::steady_clock::now() - selfStopBegan < std::chrono::seconds(1));
+    CHECK("audio input lifecycle: negotiated rate published before callback",
+          ratePublished.load());
+    selfStopping.stop();  // joins the already-finished delivery thread
+    fakeNoSleep.store(false);
+
+    singz::AudioInput wakeRestart;
+    std::atomic<int> saturatedBlocks{0};
+    fakeNoSleep.store(true);
+    const singz::AudioInputResult saturatedStarted = wakeRestart.start(
+        config, [&](const singz::AudioInputBlockView&) {
+          if (saturatedBlocks.fetch_add(1) >= 127) wakeRestart.stop();
+        });
+    CHECK("audio input wake: saturated capture reaches a bounded self-stop",
+          saturatedStarted.ok &&
+              waitForState(wakeRestart, singz::AudioInputState::Stopped));
+    wakeRestart.stop();
+    fakeNoSleep.store(false);
+    fakeSuppressCallbacks.store(true);
+    const singz::AudioInputResult quietRestart = wakeRestart.start(
+        config, [](const singz::AudioInputBlockView&) {});
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const singz::AudioInputStats quietStats = wakeRestart.stats();
+    CHECK("audio input wake: restart has no stale semaphore-token spin",
+          quietRestart.ok && quietStats.deliveredBlocks == 0 &&
+              quietStats.deliveryWakeups <= 1);
+    wakeRestart.stop();
+    fakeSuppressCallbacks.store(false);
+
+    singz::AudioInput latencyInput;
+    std::vector<double> handoffMs;
+    bool rawBlocksUnbatched = true;
+    const singz::AudioInputResult latencyStarted = latencyInput.start(
+        config, [&](const singz::AudioInputBlockView& block) {
+          const uint64_t now = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count());
+          rawBlocksUnbatched = rawBlocksUnbatched && block.frames == 128;
+          if (block.callbackHostTimeNs && now >= block.callbackHostTimeNs)
+            handoffMs.push_back((now - block.callbackHostTimeNs) / 1000000.0);
+          if (handoffMs.size() >= 64) latencyInput.stop();
+        });
+    CHECK("audio input latency: raw hardware blocks start without analysis batching",
+          latencyStarted.ok && waitForState(latencyInput, singz::AudioInputState::Stopped) &&
+              rawBlocksUnbatched && handoffMs.size() >= 64);
+    latencyInput.stop();
+    std::sort(handoffMs.begin(), handoffMs.end());
+    const double fakeP95 = handoffMs.empty()
+                               ? 999
+                               : handoffMs[static_cast<size_t>(
+                                     std::floor((handoffMs.size() - 1) * 0.95))];
+    CHECK("audio input latency: polling handoff remains bounded below 10 ms",
+          fakeP95 < 10.0);
+
+    singz::AudioInput recursive;
+    std::atomic<bool> recursiveRejected{false};
+    const singz::AudioInputResult recursiveStarted = recursive.start(
+        config, [&](const singz::AudioInputBlockView&) {
+          const singz::AudioInputResult nested = recursive.start(
+              config, [](const singz::AudioInputBlockView&) {});
+          recursiveRejected.store(!nested.ok && nested.error.find("sink") != std::string::npos);
+          recursive.stop();
+        });
+    CHECK("audio input lifecycle: recursive sink start begins outer capture",
+          recursiveStarted.ok);
+    CHECK("audio input lifecycle: recursive sink start is rejected without deadlock",
+          waitForState(recursive, singz::AudioInputState::Stopped) && recursiveRejected.load());
+    recursive.stop();
+
+    std::atomic<singz::AudioInput*> ownedFromSink{new singz::AudioInput()};
+    std::atomic<bool> destroyedFromSink{false};
+    singz::AudioInput* destroyTarget = ownedFromSink.load();
+    const singz::AudioInputResult destroyStarted = destroyTarget->start(
+        config, [&](const singz::AudioInputBlockView&) {
+          singz::AudioInput* owned = ownedFromSink.exchange(nullptr);
+          if (owned) delete owned;
+          destroyedFromSink.store(true);
+        });
+    CHECK("audio input lifecycle: callback-owned instance starts", destroyStarted.ok);
+    const auto destroyUntil = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!destroyedFromSink.load() && std::chrono::steady_clock::now() < destroyUntil)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    CHECK("audio input lifecycle: destruction inside sink is safe and bounded",
+          destroyedFromSink.load());
+    if (singz::AudioInput* leftover = ownedFromSink.exchange(nullptr)) delete leftover;
+
+    fakeStartFails.store(true);
+    singz::AudioInput startFailure;
+    const singz::AudioInputResult failedStart = startFailure.start(
+        config, [](const singz::AudioInputBlockView&) {});
+    CHECK("audio input lifecycle: synchronous backend failure never reports ready",
+          !failedStart.ok && failedStart.state == singz::AudioInputState::Error &&
+              startFailure.state() == singz::AudioInputState::Error);
+    startFailure.stop();
+    fakeStartFails.store(false);
+
+    fakeInvalidRate.store(true);
+    singz::AudioInput invalidRate;
+    const singz::AudioInputResult invalidRateStart = invalidRate.start(
+        config, [](const singz::AudioInputBlockView&) {});
+    CHECK("audio input lifecycle: non-finite negotiated rate is rejected",
+          !invalidRateStart.ok && invalidRateStart.error.find("sample rate") != std::string::npos);
+    invalidRate.stop();
+    fakeInvalidRate.store(false);
+
+    singz::AudioInput throwing;
+    const singz::AudioInputResult throwingStarted = throwing.start(
+        config, [](const singz::AudioInputBlockView&) { throw std::runtime_error("sink"); });
+    CHECK("audio input lifecycle: throwing sink starts", throwingStarted.ok);
+    CHECK("audio input lifecycle: escaping sink exception becomes error state",
+          waitForState(throwing, singz::AudioInputState::Error) &&
+              throwing.lastError().find("sink threw") != std::string::npos);
+    throwing.stop();
+
+    singz::AudioInput unplugged;
+    fakeFailureAfter.store(3);
+    const singz::AudioInputResult unplugStarted = unplugged.start(
+        config, [](const singz::AudioInputBlockView&) {});
+    CHECK("audio input lifecycle: simulated unplug starts", unplugStarted.ok);
+    CHECK("audio input lifecycle: backend failure reaches core state",
+          waitForState(unplugged, singz::AudioInputState::Error) &&
+              unplugged.lastError().find("disconnected") != std::string::npos);
+    unplugged.stop();
+
+    fakeFailureAfter.store(-1);
+    singz::AudioInput raced;
+    std::atomic<bool> controllersDone{false};
+    std::thread statsReader([&] {
+      while (!controllersDone.load()) {
+        (void)raced.state();
+        (void)raced.stats();
+        (void)raced.lastError();
+      }
+    });
+    auto controller = [&] {
+      for (int i = 0; i < 20; ++i) {
+        (void)raced.start(config, [](const singz::AudioInputBlockView&) {});
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        raced.stop();
+      }
+    };
+    std::thread controllerA(controller), controllerB(controller);
+    controllerA.join();
+    controllerB.join();
+    controllersDone.store(true);
+    statsReader.join();
+    raced.stop();
+    CHECK("audio input lifecycle: concurrent start/stop/stats settles stopped",
+          raced.state() == singz::AudioInputState::Stopped);
+    singz::setAudioInputBackendForTests(nullptr, {});
+  }
+  {
+    const int rate = 48000;
+    const std::vector<float> tone = sine(440, rate, 4096, 1);
+    const singz::LiveInputFrame frame = singz::analyzeLiveInput(tone.data(), tone.size(), rate);
+    // Golden values from renderer/audio/pitch.ts::yinPitchInfo over this
+    // exact Float32 tone. This holds the native detector's Float32 store
+    // boundaries, fixed CMND window and interpolation to the existing mic
+    // semantics rather than merely accepting any detector near 440 Hz.
+    CHECK("live input analysis: renderer YIN frequency parity",
+          std::fabs(frame.frequency - 440.01758519081193) < 1e-5);
+    CHECK("live input analysis: renderer YIN clarity parity",
+          std::fabs(frame.clarity - 0.9999863087477934) < 1e-7);
+    CHECK("live input analysis: renderer RMS parity",
+          std::fabs(frame.rms - 0.3533426141796633) < 1e-9);
+    CHECK("live input analysis: 440 Hz tone is within one hertz",
+          std::fabs(frame.frequency - 440.0) < 1.0);
+    CHECK("live input analysis: periodic tone has high clarity", frame.clarity > 0.95);
+    CHECK("live input analysis: sine RMS is amplitude/sqrt(2)",
+          std::fabs(frame.rms - 0.5 / std::sqrt(2.0)) < 0.001);
+    CHECK("live input analysis: dBFS derives from RMS",
+          std::fabs(frame.dbfs - 20.0 * std::log10(frame.rms)) < 1e-9);
+    std::vector<float> silence(1024, 0);
+    const singz::LiveInputFrame quiet =
+        singz::analyzeLiveInput(silence.data(), silence.size(), rate);
+    CHECK("live input analysis: silence is unvoiced at -120 dBFS",
+          quiet.frequency == 0 && quiet.clarity == 0 && quiet.rms == 0 && quiet.dbfs == -120);
+    std::vector<float> corrupt = tone;
+    corrupt[10] = std::numeric_limits<float>::quiet_NaN();
+    corrupt[20] = std::numeric_limits<float>::infinity();
+    const singz::LiveInputFrame safe =
+        singz::analyzeLiveInput(corrupt.data(), corrupt.size(), rate);
+    CHECK("live input analysis: non-finite PCM never escapes as non-finite scalars",
+          std::isfinite(safe.frequency) && std::isfinite(safe.clarity) &&
+              std::isfinite(safe.rms) && std::isfinite(safe.dbfs));
+    constexpr double e2 = 82.4068892282175;
+    const std::vector<float> lowTone = sine(e2, rate, 2048, 1);
+    const singz::LiveInputFrame low =
+        singz::analyzeLiveInput(lowTone.data(), lowTone.size(), rate);
+    CHECK("live input analysis: 2048-frame window resolves E2 at 48 kHz",
+          std::fabs(low.frequency - e2) < 0.5 && low.clarity > 0.95);
+
+    const int highRate = 192000;
+    const std::vector<float> highRateLowTone = sine(e2, highRate, highRate / 5, 1);
+    singz::Resampler lowTap(highRate, rate, 1);
+    std::vector<float> downsampledLow;
+    downsampledLow.reserve(highRateLowTone.size() / 4 + 128);
+    for (size_t offset = 0; offset < highRateLowTone.size(); offset += 512) {
+      const size_t count = std::min<size_t>(512, highRateLowTone.size() - offset);
+      lowTap.process(highRateLowTone.data() + offset,
+                     static_cast<int64_t>(count), downsampledLow);
+    }
+    const size_t settled = 1024;
+    singz::LiveInputFrame resampledLow;
+    if (downsampledLow.size() >= settled + 2048)
+      resampledLow = singz::analyzeLiveInput(
+          downsampledLow.data() + settled, 2048, rate);
+    CHECK("live input analysis: 192k->48k tap preserves E2",
+          downsampledLow.size() >= settled + 2048 &&
+              std::fabs(resampledLow.frequency - e2) < 0.5 &&
+              resampledLow.clarity > 0.95);
+    CHECK("live input analysis: resampler output remains finite",
+          std::all_of(downsampledLow.begin(), downsampledLow.end(),
+                      [](float sample) { return std::isfinite(sample); }));
+
+    const std::vector<float> ultrasonic = sine(60000, highRate, highRate / 5, 1);
+    singz::Resampler aliasTap(highRate, rate, 1);
+    std::vector<float> downsampledAlias;
+    downsampledAlias.reserve(ultrasonic.size() / 4 + 128);
+    for (size_t offset = 0; offset < ultrasonic.size(); offset += 512) {
+      const size_t count = std::min<size_t>(512, ultrasonic.size() - offset);
+      aliasTap.process(ultrasonic.data() + offset,
+                       static_cast<int64_t>(count), downsampledAlias);
+    }
+    double aliasSquares = 0;
+    for (size_t i = settled; i < downsampledAlias.size(); ++i)
+      aliasSquares += static_cast<double>(downsampledAlias[i]) *
+                      downsampledAlias[i];
+    const double aliasRms = std::sqrt(
+        aliasSquares / std::max<size_t>(1, downsampledAlias.size() - settled));
+    CHECK("live input analysis: 192k tap suppresses ultrasonic alias",
+          aliasRms < 0.001);
+  }
+  {
+    singz::AudioInput input;
+    CHECK("audio input lifecycle: begins idle", input.state() == singz::AudioInputState::Idle);
+    if (!singz::audioInputBackendSupported()) {
+      singz::AudioInputConfig config;
+      config.deviceUid = "none";
+      const singz::AudioInputResult result = input.start(config, nullptr);
+      CHECK("audio input lifecycle: unsupported platform is explicit",
+            !result.ok && result.state == singz::AudioInputState::Unsupported &&
+                input.state() == singz::AudioInputState::Unsupported);
+      input.stop();
+      CHECK("audio input lifecycle: unsupported instance still stops cleanly",
+            input.state() == singz::AudioInputState::Stopped);
+    } else {
+      CHECK("audio input lifecycle: host backend advertises support",
+            singz::audioInputBackendSupported());
+    }
+  }
 }
 
 static void resamplerTests() {
@@ -696,6 +1140,7 @@ static void flacTests() {
 }
 
 int main() {
+  audioInputTests();
   resamplerTests();
   wavTests();
   flacTests();

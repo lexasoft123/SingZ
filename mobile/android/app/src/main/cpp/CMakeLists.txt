@@ -52,6 +52,8 @@ target_include_directories(singzflac PRIVATE
 # whose *.cpp files ReactNative-application.cmake globs into appmodules.
 add_library(singzcore SHARED
     ${CORE_DIR}/android/singz_core_jni.cpp
+    ${CORE_DIR}/audio_input.cpp
+    ${CORE_DIR}/audio_input_macos.cpp
     ${CORE_DIR}/analysis.cpp
     ${CORE_DIR}/beats.cpp
     ${CORE_DIR}/beat_this.cpp

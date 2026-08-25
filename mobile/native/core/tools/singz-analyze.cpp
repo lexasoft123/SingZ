@@ -3,6 +3,9 @@
 // 4c) and the parity harness's oracle (tests compare its output with the TS
 // detectors' on the same samples). One implementation, every platform.
 //
+//   singz-analyze input-devices
+//   singz-analyze live-input --device-uid <uid> --channel <zero-based>
+//                            [--frames <analysis-window>] [--latency]
 //   singz-analyze melody --f32 <mono float32 file> --sr <rate> [--raw]
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
 //   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
@@ -22,11 +25,29 @@
 // values, not text.
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <condition_variable>
+#include <csignal>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <mutex>
+#include <deque>
 #include <string>
+#include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <fcntl.h>
+#include <mach/mach_time.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
+
+#include "../audio_input.h"
+#include "../resample.h"
 #include "../analysis.h"
 #include "../beat_this.h"
 #include "../beats.h"
@@ -126,12 +147,923 @@ static void onProgress(void*, const char* stage, float frac) {
   std::fprintf(stderr, "progress %s %.3f\n", stage, static_cast<double>(frac));
 }
 
+static std::string jsonString(const std::string& value) {
+  std::string out;
+  out.reserve(std::min<size_t>(value.size() + 2, 8194));
+  out.push_back('"');
+  // Driver strings are bounded before escaping so hostile device metadata
+  // cannot turn this tiny protocol into an unbounded allocation.
+  size_t count = std::min<size_t>(value.size(), 8192);
+  // Do not cut a UTF-8 scalar in half at the protocol bound. CoreAudio gives
+  // us valid CFString UTF-8; stepping back over continuation bytes keeps the
+  // bounded prefix valid JSON text as well.
+  if (count < value.size())
+    while (count > 0 && (static_cast<unsigned char>(value[count]) & 0xc0) == 0x80) --count;
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < count; ++i) {
+    const unsigned char c = static_cast<unsigned char>(value[i]);
+    if (c == '"' || c == '\\') {
+      out.push_back('\\');
+      out.push_back(static_cast<char>(c));
+    } else if (c == '\b') out += "\\b";
+    else if (c == '\f') out += "\\f";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else if (c < 0x20) {
+      out += "\\u00";
+      out.push_back(hex[c >> 4]);
+      out.push_back(hex[c & 15]);
+    } else {
+      out.push_back(static_cast<char>(c));
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+static bool unsignedArgument(const char* text, uint32_t& value) {
+  if (!text || !*text || *text == '-') return false;
+  errno = 0;
+  char* end = nullptr;
+  const unsigned long parsed = std::strtoul(text, &end, 10);
+  if (errno || *end || parsed > std::numeric_limits<uint32_t>::max()) return false;
+  value = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+static volatile std::sig_atomic_t liveInputStop = 0;
+static void stopLiveInput(int) { liveInputStop = 1; }
+
+#if defined(__APPLE__)
+static uint64_t monotonicHostTimeNs() {
+  static const double nsPerTick = [] {
+    mach_timebase_info_data_t timebase{};
+    return mach_timebase_info(&timebase) == KERN_SUCCESS && timebase.denom
+               ? static_cast<double>(timebase.numer) / timebase.denom
+               : 0.0;
+  }();
+  return nsPerTick > 0 ? static_cast<uint64_t>(mach_absolute_time() * nsPerTick) : 0;
+}
+#endif
+
+class NdjsonWriter {
+ public:
+  NdjsonWriter() {
+#if defined(__APPLE__)
+    std::signal(SIGPIPE, SIG_IGN);
+    const int flags = fcntl(STDOUT_FILENO, F_GETFL, 0);
+    if (flags >= 0) fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK);
+#endif
+    thread_ = std::thread([this] { run(); });
+  }
+
+  ~NdjsonWriter() { close(); }
+
+  bool enqueue(std::string line) {
+    line.push_back('\n');
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closing_ || queue_.size() >= kMaximumLines) {
+        fail(2);
+        return false;
+      }
+      queue_.push_back(std::move(line));
+    }
+    ready_.notify_one();
+    return true;
+  }
+
+  void close(std::vector<std::string> finalLines = {}) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closing_ && !thread_.joinable()) return;
+      if (!closing_) {
+        closing_ = true;
+        // Live capture frames are disposable telemetry. On shutdown replace
+        // queued frames with only the terminal protocol records so EOF,
+        // SIGTERM, or a dead parent cannot prolong teardown indefinitely.
+        queue_.clear();
+        for (std::string& line : finalLines) {
+          line.push_back('\n');
+          queue_.push_back(std::move(line));
+        }
+        closeDeadlineNs_.store(steadyNanos() + kWriteDeadlineNs,
+                               std::memory_order_release);
+      }
+    }
+    ready_.notify_one();
+    if (thread_.joinable()) thread_.join();
+  }
+
+  bool stopRequested() const { return stopRequested_.load(std::memory_order_acquire); }
+
+  const char* failureMessage() const {
+    switch (failure_.load(std::memory_order_acquire)) {
+      case 1: return "live-input: stdout was closed";
+      case 2: return "live-input: stdout consumer is too slow";
+      case 3: return "live-input: stdout write failed";
+      default: return "";
+    }
+  }
+
+ private:
+  static constexpr size_t kMaximumLines = 256;
+  static constexpr int64_t kWriteDeadlineNs = 500000000;
+
+  static int64_t steadyNanos() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+  void fail(int code) {
+    int expected = 0;
+    failure_.compare_exchange_strong(expected, code, std::memory_order_acq_rel);
+    stopRequested_.store(true, std::memory_order_release);
+    ready_.notify_one();
+  }
+
+  bool writeLine(const std::string& line) {
+#if defined(__APPLE__)
+    size_t offset = 0;
+    const int64_t lineDeadline = steadyNanos() + kWriteDeadlineNs;
+    while (offset < line.size()) {
+      const int64_t closeDeadline = closeDeadlineNs_.load(std::memory_order_acquire);
+      const int64_t deadline = closeDeadline > 0
+                                   ? std::min(lineDeadline, closeDeadline)
+                                   : lineDeadline;
+      if (steadyNanos() >= deadline) {
+        fail(2);
+        return false;
+      }
+      const ssize_t written = ::write(STDOUT_FILENO, line.data() + offset, line.size() - offset);
+      if (written > 0) {
+        offset += static_cast<size_t>(written);
+        continue;
+      }
+      if (written < 0 && errno == EINTR) continue;
+      if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        pollfd output{STDOUT_FILENO, POLLOUT, 0};
+        const int64_t remainingMs = std::max<int64_t>(
+            1, std::min<int64_t>(100, (deadline - steadyNanos()) / 1000000));
+        const int polled = poll(&output, 1, static_cast<int>(remainingMs));
+        if (polled < 0 && errno != EINTR) {
+          fail(3);
+          return false;
+        }
+        continue;
+      }
+      fail(written < 0 && errno == EPIPE ? 1 : 3);
+      return false;
+    }
+    return true;
+#else
+    if (std::fwrite(line.data(), 1, line.size(), stdout) != line.size() ||
+        std::fflush(stdout) != 0) {
+      fail(errno == EPIPE ? 1 : 3);
+      return false;
+    }
+    return true;
+#endif
+  }
+
+  void run() {
+    for (;;) {
+      std::string line;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ready_.wait(lock, [&] { return closing_ || !queue_.empty(); });
+        if (queue_.empty()) {
+          if (closing_) break;
+          continue;
+        }
+        line = std::move(queue_.front());
+        queue_.pop_front();
+      }
+      if (!writeLine(line)) break;
+    }
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<std::string> queue_;
+  bool closing_ = false;
+  std::atomic<bool> stopRequested_{false};
+  std::atomic<int> failure_{0};
+  std::atomic<int64_t> closeDeadlineNs_{0};
+  std::thread thread_;
+};
+
+template <size_t N, typename... Args>
+static std::string jsonLine(const char (&format)[N], Args... args) {
+  const int needed = std::snprintf(nullptr, 0, format, args...);
+  if (needed <= 0 || needed > 65536) return {};
+  std::vector<char> text(static_cast<size_t>(needed) + 1);
+  std::snprintf(text.data(), text.size(), format, args...);
+  return std::string(text.data(), static_cast<size_t>(needed));
+}
+
+static int printInputDevices(std::vector<singz::AudioInputDevice> devices,
+                             const std::string& error) {
+  if (devices.size() > 256) devices.resize(256);
+  std::printf("{\"version\":1,\"devices\":[");
+  for (size_t i = 0; i < devices.size(); ++i) {
+    const singz::AudioInputDevice& device = devices[i];
+    const double sampleRate = std::isfinite(device.sampleRate) && device.sampleRate > 0
+                                  ? device.sampleRate
+                                  : 0;
+    std::printf("%s{\"uid\":%s,\"label\":%s,\"isDefault\":%s,\"sampleRate\":%.17g,"
+                "\"channels\":%u,\"channelLabels\":[",
+                i ? "," : "", jsonString(device.uid).c_str(),
+                jsonString(device.label).c_str(), device.isDefault ? "true" : "false",
+                sampleRate, device.channels);
+    const size_t labels = std::min<size_t>(device.channelLabels.size(), 4096);
+    for (size_t channel = 0; channel < labels; ++channel)
+      std::printf("%s%s", channel ? "," : "",
+                  jsonString(device.channelLabels[channel]).c_str());
+    std::printf("]}");
+  }
+  std::printf("]");
+  if (!error.empty()) std::printf(",\"error\":%s", jsonString(error).c_str());
+  std::printf("}\n");
+  std::fflush(stdout);
+  return error.empty() ? 0 : 1;
+}
+
+static int inputDevicesCommand(int argc) {
+  if (argc != 2) {
+    std::fprintf(stderr, "input-devices: no arguments expected\n");
+    return 2;
+  }
+  std::string error;
+  return printInputDevices(singz::enumerateAudioInputDevices(&error), error);
+}
+
+struct LiveContinuityState {
+  bool haveBlock = false;
+  uint64_t expectedSequence = 0;
+  uint64_t lastHostTime = 0;
+  size_t lastFrames = 0;
+};
+
+struct LiveContinuityObservation {
+  bool sequenceGap = false;
+  bool hostTimeGap = false;
+  uint64_t expectedSequence = 0;
+  uint64_t droppedAttempts = 0;
+};
+
+constexpr double kLiveInputMinFrequencyHz = 70.0;
+constexpr uint32_t kMaxLiveInputAnalysisFrames = 8192;
+
+struct LiveInputAnalysisPlan {
+  uint32_t frames = 0;
+  uint32_t hopFrames = 0;
+  double minFrequencyHz = kLiveInputMinFrequencyHz;
+  double deviceSampleRate = 0;
+  double analysisSampleRate = 0;
+  uint32_t resamplerLatencyFrames = 0;
+};
+
+static bool makeLiveInputAnalysisPlan(double sampleRate, bool explicitFrames,
+                                      uint32_t requestedFrames,
+                                      LiveInputAnalysisPlan& plan,
+                                      std::string& error) {
+  if (!std::isfinite(sampleRate) || sampleRate <= 0) {
+    error = "live-input: negotiated sample rate is invalid";
+    return false;
+  }
+  const double roundedDeviceRate = std::round(sampleRate);
+  if (roundedDeviceRate < 1 || roundedDeviceRate > 1000000 ||
+      std::fabs(sampleRate - roundedDeviceRate) > 0.001) {
+    error = jsonLine("live-input: unsupported non-integral sample rate %.17g",
+                     sampleRate);
+    return false;
+  }
+  plan.deviceSampleRate = sampleRate;
+  plan.analysisSampleRate = std::min(sampleRate, 48000.0);
+  const int deviceRate = static_cast<int>(roundedDeviceRate);
+  const int analysisRate = static_cast<int>(std::llround(plan.analysisSampleRate));
+  const double requiredDouble =
+      std::ceil(2.0 * plan.analysisSampleRate / kLiveInputMinFrequencyHz);
+  if (!std::isfinite(requiredDouble) ||
+      requiredDouble > kMaxLiveInputAnalysisFrames) {
+    error = jsonLine(
+        "live-input: sample rate %.17g needs more than %u analysis frames "
+        "to cover %.9g Hz",
+        plan.analysisSampleRate, kMaxLiveInputAnalysisFrames,
+        kLiveInputMinFrequencyHz);
+    return false;
+  }
+  const uint32_t requiredFrames = static_cast<uint32_t>(requiredDouble);
+  if (explicitFrames) {
+    if (requestedFrames < requiredFrames) {
+      error = jsonLine(
+          "live-input: --frames %u is too short for %.9g Hz at %.17g Hz; "
+          "use at least %u",
+          requestedFrames, kLiveInputMinFrequencyHz,
+          plan.analysisSampleRate, requiredFrames);
+      return false;
+    }
+    plan.frames = requestedFrames;
+  } else {
+    plan.frames = 128;
+    while (plan.frames < requiredFrames &&
+           plan.frames < kMaxLiveInputAnalysisFrames)
+      plan.frames *= 2;
+    if (plan.frames < requiredFrames) {
+      error = "live-input: could not derive a bounded analysis window";
+      return false;
+    }
+  }
+  // Overlap consecutive windows so low notes get the longer context they
+  // need without slowing UI updates to one full window. For the common
+  // 44.1/48/96/192 kHz rates this is a roughly 10-12 ms cadence.
+  plan.hopFrames = std::max<uint32_t>(128, plan.frames / 4);
+  plan.hopFrames = std::min(plan.hopFrames, plan.frames);
+  if (deviceRate != analysisRate) {
+    singz::Resampler latencyProbe(deviceRate, analysisRate, 1);
+    plan.resamplerLatencyFrames = static_cast<uint32_t>(
+        std::max<int64_t>(0, latencyProbe.latencyOutFrames()));
+  }
+  return true;
+}
+
+static std::string liveInputAnalysisMetadataFields(
+    const LiveInputAnalysisPlan& plan) {
+  return jsonLine(
+      "\"analysisFrames\":%u,\"analysisHopFrames\":%u,"
+      "\"minFrequencyHz\":%.9g,\"deviceSampleRate\":%.17g,"
+      "\"analysisSampleRate\":%.17g,\"resamplerLatencyFrames\":%u,"
+      "\"resamplerLatencyMs\":%.9g,\"analysisWindowMs\":%.9g,"
+      "\"analysisCadenceMs\":%.9g",
+      plan.frames, plan.hopFrames, plan.minFrequencyHz,
+      plan.deviceSampleRate, plan.analysisSampleRate,
+      plan.resamplerLatencyFrames,
+      1000.0 * plan.resamplerLatencyFrames / plan.analysisSampleRate,
+      1000.0 * plan.frames / plan.analysisSampleRate,
+      1000.0 * plan.hopFrames / plan.analysisSampleRate);
+}
+
+class LiveInputAnalysisStream {
+ public:
+  explicit LiveInputAnalysisStream(const LiveInputAnalysisPlan& plan)
+      : plan_(plan) {
+    output_.reserve(16384);
+    reset();
+  }
+
+  void reset() {
+    output_.clear();
+    latencyFramesRemaining_ = plan_.resamplerLatencyFrames;
+    if (plan_.deviceSampleRate != plan_.analysisSampleRate) {
+      resampler_ = std::make_unique<singz::Resampler>(
+          static_cast<int>(std::llround(plan_.deviceSampleRate)),
+          static_cast<int>(std::llround(plan_.analysisSampleRate)), 1);
+    } else {
+      resampler_.reset();
+    }
+  }
+
+  size_t append(const float* mono, uint32_t frames,
+                std::vector<float>& pending) {
+    if (!resampler_) {
+      pending.insert(pending.end(), mono, mono + frames);
+      return frames;
+    }
+    output_.clear();
+    resampler_->process(mono, frames, output_);
+    const size_t skipped = std::min<size_t>(latencyFramesRemaining_, output_.size());
+    latencyFramesRemaining_ -= static_cast<uint32_t>(skipped);
+    pending.insert(pending.end(), output_.begin() + skipped, output_.end());
+    return output_.size() - skipped;
+  }
+
+ private:
+  LiveInputAnalysisPlan plan_;
+  std::unique_ptr<singz::Resampler> resampler_;
+  std::vector<float> output_;
+  uint32_t latencyFramesRemaining_ = 0;
+};
+
+static std::string liveInputReadyLine(double sampleRate, uint32_t channel,
+                                      const LiveInputAnalysisPlan& plan) {
+  const std::string metadata = liveInputAnalysisMetadataFields(plan);
+  return jsonLine(
+      "{\"version\":1,\"type\":\"ready\",\"state\":\"running\","
+      "\"sampleRate\":%.17g,\"channel\":%u,\"frames\":%u,%s}",
+      sampleRate, channel, plan.frames, metadata.c_str());
+}
+
+static void printLiveInputUsage(FILE* stream) {
+  std::fprintf(
+      stream,
+      "usage: singz-analyze live-input --device-uid <uid> --channel "
+      "<zero-based> [--frames <128..8192>] [--latency]\n"
+      "       The default analysis window is derived after device start to "
+      "cover 70 Hz; explicit windows that cannot cover 70 Hz are rejected.\n"
+      "       Device audio above 48 kHz uses an anti-aliased 48 kHz analyzer "
+      "tap; raw AudioInput blocks stay at the native device rate.\n");
+}
+
+static LiveContinuityObservation observeContinuity(
+    LiveContinuityState& state, const singz::AudioInputBlockView& block, double sampleRate) {
+  LiveContinuityObservation observation;
+  observation.expectedSequence = state.expectedSequence;
+  observation.sequenceGap = state.haveBlock && block.sequence != state.expectedSequence;
+  if (observation.sequenceGap)
+    observation.droppedAttempts = block.sequence > state.expectedSequence
+                                      ? block.sequence - state.expectedSequence
+                                      : 1;
+  if (state.haveBlock && sampleRate > 0) {
+    const long double expectedHost =
+        state.lastHostTime + 1000000000.0L * state.lastFrames / sampleRate;
+    // Below one callback duration, so even a missing hardware callback that
+    // never attempted a ring push is detected by host time alone.
+    const long double tolerance = std::max<long double>(
+        2000000.0L, 0.5L * 1000000000.0L * state.lastFrames / sampleRate);
+    observation.hostTimeGap = block.sampleHostTimeNs <= state.lastHostTime ||
+                              std::fabs(static_cast<long double>(block.sampleHostTimeNs) -
+                                        expectedHost) > tolerance;
+  }
+  state.haveBlock = true;
+  state.expectedSequence = block.sequence + 1;
+  state.lastHostTime = block.sampleHostTimeNs;
+  state.lastFrames = block.frames;
+  return observation;
+}
+
+#if defined(SINGZ_CORE_TESTS)
+static int inputDevicesFixtureCommand(int argc) {
+  if (argc != 2) return 2;
+  singz::AudioInputDevice fixture;
+  fixture.uid = "fixture:stable-uid";
+  fixture.label = "Fixture interface";
+  fixture.isDefault = true;
+  fixture.sampleRate = 48000;
+  fixture.channels = 24;
+  for (uint32_t channel = 1; channel <= fixture.channels; ++channel)
+    fixture.channelLabels.push_back("Channel " + std::to_string(channel));
+  return printInputDevices({fixture}, {});
+}
+
+static int liveInputAnalysisPlanFixture() {
+  const struct {
+    double rate;
+    double analysisRate;
+    uint32_t frames;
+    uint32_t hop;
+    uint32_t latency;
+  } cases[] = {{44100, 44100, 2048, 512, 0},
+               {48000, 48000, 2048, 512, 0},
+               {96000, 48000, 2048, 512, 48},
+               {192000, 48000, 2048, 512, 48}};
+  std::string error;
+  for (const auto& item : cases) {
+    LiveInputAnalysisPlan candidate;
+    if (!makeLiveInputAnalysisPlan(item.rate, false, 0, candidate, error) ||
+        candidate.analysisSampleRate != item.analysisRate ||
+        candidate.frames != item.frames || candidate.hopFrames != item.hop ||
+        candidate.resamplerLatencyFrames != item.latency)
+      return 1;
+  }
+  LiveInputAnalysisPlan rejected;
+  error.clear();
+  if (makeLiveInputAnalysisPlan(48000, true, 1024, rejected, error) ||
+      error.find("too short") == std::string::npos)
+    return 1;
+  LiveInputAnalysisPlan plan;
+  error.clear();
+  if (!makeLiveInputAnalysisPlan(48000, false, 0, plan, error)) return 1;
+  LiveInputAnalysisPlan resetPlan;
+  if (!makeLiveInputAnalysisPlan(192000, false, 0, resetPlan, error)) return 1;
+  LiveInputAnalysisStream resetStream(resetPlan);
+  std::vector<float> resetInput(512, 0.25f), beforeReset, afterReset;
+  resetStream.append(resetInput.data(), 512, beforeReset);
+  resetStream.reset();
+  resetStream.append(resetInput.data(), 512, afterReset);
+  if (beforeReset != afterReset) return 1;
+  const std::string metadata = liveInputAnalysisMetadataFields(plan);
+  std::printf("%s\n", liveInputReadyLine(48000, 2, plan).c_str());
+  std::printf(
+      "{\"version\":1,\"type\":\"latency\",\"samples\":500,%s}\n",
+      metadata.c_str());
+  std::printf(
+      "{\"version\":1,\"type\":\"analysis-plan-fixture\","
+      "\"rates\":[44100,48000,96000,192000],"
+      "\"plans\":[{\"deviceSampleRate\":44100,\"analysisSampleRate\":44100,"
+      "\"frames\":2048,\"hop\":512},{\"deviceSampleRate\":48000,"
+      "\"analysisSampleRate\":48000,\"frames\":2048,\"hop\":512},"
+      "{\"deviceSampleRate\":96000,\"analysisSampleRate\":48000,"
+      "\"frames\":2048,\"hop\":512,\"resamplerLatencyFrames\":48},"
+      "{\"deviceSampleRate\":192000,\"analysisSampleRate\":48000,"
+      "\"frames\":2048,\"hop\":512,\"resamplerLatencyFrames\":48}],"
+      "\"explicitShortRejected\":true}\n");
+  return 0;
+}
+
+static int liveInputAnalysisThroughputFixture() {
+  constexpr double toneHz = 82.4068892282175;
+  constexpr double seconds = 0.5;
+  const int rates[] = {44100, 48000, 96000, 192000};
+  std::printf("{\"version\":1,\"type\":\"analysis-throughput-fixture\","
+              "\"rates\":[");
+  for (size_t rateIndex = 0; rateIndex < std::size(rates); ++rateIndex) {
+    const int rate = rates[rateIndex];
+    LiveInputAnalysisPlan plan;
+    std::string error;
+    if (!makeLiveInputAnalysisPlan(rate, false, 0, plan, error) ||
+        plan.analysisSampleRate > 48000 || plan.frames > 2048 ||
+        plan.hopFrames < 512)
+      return 1;
+    LiveInputAnalysisStream stream(plan);
+    std::vector<float> pending;
+    pending.reserve(plan.frames + 16384u);
+    std::vector<float> block(512);
+    size_t analyses = 0;
+    bool finite = true;
+    const int totalFrames = static_cast<int>(rate * seconds);
+    const auto began = std::chrono::steady_clock::now();
+    for (int offset = 0; offset < totalFrames; offset += 512) {
+      const int count = std::min(512, totalFrames - offset);
+      for (int i = 0; i < count; ++i)
+        block[static_cast<size_t>(i)] = static_cast<float>(
+            0.5 * std::sin(2.0 * M_PI * toneHz * (offset + i) / rate));
+      stream.append(block.data(), static_cast<uint32_t>(count), pending);
+      while (pending.size() >= plan.frames) {
+        const singz::LiveInputFrame frame = singz::analyzeLiveInput(
+            pending.data(), plan.frames, plan.analysisSampleRate,
+            plan.minFrequencyHz);
+        finite = finite && std::isfinite(frame.frequency) &&
+                 std::isfinite(frame.clarity) && std::isfinite(frame.rms) &&
+                 std::isfinite(frame.dbfs);
+        pending.erase(pending.begin(), pending.begin() + plan.hopFrames);
+        ++analyses;
+      }
+    }
+    const double elapsedMs = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - began)
+                                 .count();
+    if (!finite || analyses < 20 || elapsedMs > 10000) return 1;
+    std::printf(
+        "%s{\"deviceSampleRate\":%d,\"analysisSampleRate\":%.17g,"
+        "\"frames\":%u,\"hop\":%u,\"analyses\":%zu,"
+        "\"elapsedMs\":%.9g}",
+        rateIndex ? "," : "", rate, plan.analysisSampleRate, plan.frames,
+        plan.hopFrames, analyses, elapsedMs);
+  }
+  std::printf("],\"budgetFramesMax\":2048,\"budgetAnalysisRateMax\":48000}\n");
+  return 0;
+}
+
+#if defined(__APPLE__)
+static int ndjsonWriterFailureFixture(bool closedPipe) {
+  int descriptors[2] = {-1, -1};
+  if (pipe(descriptors) != 0) return 2;
+  if (closedPipe) {
+    close(descriptors[0]);
+    descriptors[0] = -1;
+  } else {
+    const int flags = fcntl(descriptors[1], F_GETFL, 0);
+    if (flags < 0 || fcntl(descriptors[1], F_SETFL, flags | O_NONBLOCK) < 0) return 2;
+    const std::string fill(4096, 'x');
+    while (write(descriptors[1], fill.data(), fill.size()) > 0) {}
+    if (errno != EAGAIN && errno != EWOULDBLOCK) return 2;
+  }
+  if (dup2(descriptors[1], STDOUT_FILENO) < 0) return 2;
+  close(descriptors[1]);
+  NdjsonWriter writer;
+  const auto began = std::chrono::steady_clock::now();
+  writer.close({"{\"version\":1,\"type\":\"fixture\"}"});
+  const auto elapsed = std::chrono::steady_clock::now() - began;
+  if (descriptors[0] >= 0) close(descriptors[0]);
+  const int expected = closedPipe ? 1 : 2;
+  return writer.stopRequested() &&
+                 std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 1500 &&
+                 ((expected == 1 && std::strstr(writer.failureMessage(), "closed")) ||
+                  (expected == 2 && std::strstr(writer.failureMessage(), "slow")))
+             ? 0
+             : 1;
+}
+
+static int liveInputDiscontinuityFixture() {
+  LiveContinuityState state;
+  float fixtureSamples[128] = {};
+  singz::AudioInputBlockView first;
+  first.sequence = 0;
+  first.sampleHostTimeNs = 1000000000;
+  first.mono = fixtureSamples;
+  first.frames = 128;
+  singz::AudioInputBlockView afterGap = first;
+  afterGap.sequence = 2;
+  afterGap.sampleHostTimeNs += 2 * 2666667;
+  (void)observeContinuity(state, first, 48000);
+  const LiveContinuityObservation gap = observeContinuity(state, afterGap, 48000);
+  std::vector<float> pending(64, 1);
+  if (gap.sequenceGap || gap.hostTimeGap) pending.clear();
+  if (!gap.sequenceGap || !gap.hostTimeGap || !pending.empty()) return 1;
+  std::printf("{\"version\":1,\"type\":\"overrun\",\"count\":%llu}\n",
+              static_cast<unsigned long long>(gap.droppedAttempts));
+  std::printf("{\"version\":1,\"type\":\"discontinuity\","
+              "\"sequenceGap\":true,\"hostTimeGap\":true,\"pendingReset\":true}\n");
+  return 0;
+}
+#endif
+#endif
+
+static int liveInputCommand(int argc, char** argv) {
+  singz::AudioInputConfig config;
+  uint32_t requestedAnalysisFrames = 0;
+  LiveInputAnalysisPlan analysisPlan;
+  bool haveUid = false, haveChannel = false;
+  bool haveAnalysisFrames = false;
+  bool measureLatency = false;
+  for (int i = 2; i < argc; ++i) {
+    const std::string argument = argv[i];
+    if (argument == "--help") {
+      printLiveInputUsage(stdout);
+      return 0;
+    }
+    if ((argument == "--device-uid" || argument == "--channel" || argument == "--frames") &&
+        i + 1 >= argc) {
+      std::fprintf(stderr, "live-input: %s needs a value\n", argument.c_str());
+      return 2;
+    }
+    if (argument == "--device-uid") {
+      config.deviceUid = argv[++i];
+      haveUid = true;
+    } else if (argument == "--channel") {
+      if (!unsignedArgument(argv[++i], config.channel)) {
+        std::fprintf(stderr, "live-input: --channel wants a zero-based integer\n");
+        return 2;
+      }
+      haveChannel = true;
+    } else if (argument == "--frames") {
+      if (!unsignedArgument(argv[++i], requestedAnalysisFrames) ||
+          requestedAnalysisFrames < 128 ||
+          requestedAnalysisFrames > kMaxLiveInputAnalysisFrames) {
+        std::fprintf(stderr, "live-input: --frames must be between 128 and 8192\n");
+        return 2;
+      }
+      haveAnalysisFrames = true;
+    } else if (argument == "--latency") {
+      measureLatency = true;
+    } else {
+      std::fprintf(stderr, "live-input: unknown argument %s\n", argument.c_str());
+      return 2;
+    }
+  }
+  if (!haveUid || !haveChannel || config.deviceUid.empty()) {
+    std::fprintf(stderr, "live-input: --device-uid and --channel are required\n");
+    return 2;
+  }
+
+#if !defined(__APPLE__)
+  // Sustained capture currently has only the macOS AUHAL backend. Refuse it
+  // before constructing the writer on platforms where stdout cannot be made
+  // portably non-blocking; input-devices still reports the explicit
+  // unsupported backend normally.
+  std::fprintf(stderr, "live-input: audio input is unsupported on this platform\n");
+  return 3;
+#endif
+
+  liveInputStop = 0;
+  std::signal(SIGINT, stopLiveInput);
+  std::signal(SIGTERM, stopLiveInput);
+  NdjsonWriter writer;
+  std::atomic<bool> ready{false};
+  std::vector<float> pending;
+  std::unique_ptr<LiveInputAnalysisStream> analysisStream;
+  uint64_t pendingHostTime = 0;
+  uint64_t frameSequence = 0;
+  double activeRate = 0;
+  LiveContinuityState continuity;
+  std::vector<double> callbackToSinkMs;
+  std::vector<double> sampleHostToSinkMs;
+  std::vector<uint32_t> callbackFrames;
+#if defined(__APPLE__)
+  if (measureLatency) (void)monotonicHostTimeNs();  // initialize off delivery
+#endif
+
+  singz::AudioInput input;
+  const singz::AudioInputResult started = input.start(
+      config, [&](const singz::AudioInputBlockView& block) {
+        if (!ready.load(std::memory_order_acquire)) return;
+#if defined(__APPLE__)
+        if (measureLatency) {
+          const uint64_t deliveredAt = monotonicHostTimeNs();
+          if (block.callbackHostTimeNs && deliveredAt >= block.callbackHostTimeNs)
+            callbackToSinkMs.push_back(
+                (deliveredAt - block.callbackHostTimeNs) / 1000000.0);
+          if (block.sampleHostTimeNs && deliveredAt >= block.sampleHostTimeNs)
+            sampleHostToSinkMs.push_back(
+                (deliveredAt - block.sampleHostTimeNs) / 1000000.0);
+          callbackFrames.push_back(block.frames);
+        }
+#endif
+        const LiveContinuityObservation observed =
+            observeContinuity(continuity, block, activeRate);
+        const bool sequenceGap = observed.sequenceGap;
+        const bool hostGap = observed.hostTimeGap;
+        const bool discontinuity = sequenceGap || hostGap;
+        if (discontinuity) {
+          pending.clear();
+          pendingHostTime = 0;
+          if (analysisStream) analysisStream->reset();
+          if (sequenceGap) {
+            writer.enqueue(jsonLine(
+                "{\"version\":1,\"type\":\"overrun\",\"count\":%llu,"
+                "\"expectedSequence\":%llu,\"actualSequence\":%llu}",
+                static_cast<unsigned long long>(observed.droppedAttempts),
+                static_cast<unsigned long long>(observed.expectedSequence),
+                static_cast<unsigned long long>(block.sequence)));
+          }
+          writer.enqueue(jsonLine(
+              "{\"version\":1,\"type\":\"discontinuity\",\"sequenceGap\":%s,"
+              "\"hostTimeGap\":%s,\"sequence\":%llu,\"hostTimeNs\":%llu}",
+              sequenceGap ? "true" : "false", hostGap ? "true" : "false",
+              static_cast<unsigned long long>(block.sequence),
+              static_cast<unsigned long long>(block.sampleHostTimeNs)));
+        }
+        if (writer.stopRequested()) return;
+        const bool pendingWasEmpty = pending.empty();
+        const size_t appended =
+            analysisStream ? analysisStream->append(block.mono, block.frames, pending) : 0;
+        if (pendingWasEmpty && appended > 0)
+          pendingHostTime = block.sampleHostTimeNs;
+        while (pending.size() >= analysisPlan.frames) {
+          const singz::LiveInputFrame analysis = singz::analyzeLiveInput(
+              pending.data(), analysisPlan.frames,
+              analysisPlan.analysisSampleRate,
+              analysisPlan.minFrequencyHz);
+          const double frequency = std::isfinite(analysis.frequency) ? analysis.frequency : 0;
+          const double clarity = std::isfinite(analysis.clarity) ? analysis.clarity : 0;
+          const double rms = std::isfinite(analysis.rms) ? analysis.rms : 0;
+          const double dbfs = std::isfinite(analysis.dbfs) ? analysis.dbfs : -120;
+          if (!writer.enqueue(jsonLine(
+                  "{\"version\":1,\"type\":\"frame\",\"sequence\":%llu,"
+                  "\"hostTimeNs\":%llu,\"frequency\":%.9g,\"clarity\":%.9g,"
+                  "\"rms\":%.9g,\"dbfs\":%.9g}",
+                  static_cast<unsigned long long>(frameSequence++),
+                  static_cast<unsigned long long>(pendingHostTime), frequency,
+                  clarity, rms, dbfs)))
+            return;
+          pending.erase(pending.begin(),
+                        pending.begin() + analysisPlan.hopFrames);
+          pendingHostTime += static_cast<uint64_t>(
+              1000000000.0 * analysisPlan.hopFrames /
+              analysisPlan.analysisSampleRate);
+        }
+      });
+  if (!started.ok) {
+    std::fprintf(stderr, "live-input: %s\n", started.error.c_str());
+    const std::string errorLine = jsonLine(
+        "{\"version\":1,\"type\":\"error\",\"state\":%s,\"message\":%s}",
+        jsonString(singz::audioInputStateName(started.state)).c_str(),
+        jsonString(started.error).c_str());
+    writer.close({errorLine});
+    return started.state == singz::AudioInputState::Unsupported ? 3 : 1;
+  }
+  activeRate = started.sampleRate;
+  std::string planError;
+  if (!makeLiveInputAnalysisPlan(activeRate, haveAnalysisFrames,
+                                 requestedAnalysisFrames, analysisPlan,
+                                 planError)) {
+    ready.store(false, std::memory_order_release);
+    input.stop();
+    std::fprintf(stderr, "%s\n", planError.c_str());
+    writer.close({jsonLine(
+        "{\"version\":1,\"type\":\"error\",\"state\":\"stopped\","
+        "\"message\":%s}",
+        jsonString(planError).c_str())});
+    return 2;
+  }
+  pending.reserve(analysisPlan.frames + 16384u);
+  analysisStream = std::make_unique<LiveInputAnalysisStream>(analysisPlan);
+  if (!writer.enqueue(liveInputReadyLine(activeRate, started.channel,
+                                         analysisPlan))) {
+    ready.store(false, std::memory_order_release);
+    input.stop();
+    writer.close();
+    return 1;
+  }
+  ready.store(true, std::memory_order_release);
+
+  uint64_t reportedOverruns = 0;
+  std::string runtimeError;
+  while (!liveInputStop && !writer.stopRequested()) {
+#if defined(__APPLE__)
+    pollfd descriptor{STDIN_FILENO, POLLIN | POLLHUP, 0};
+    const int polled = poll(&descriptor, 1, 100);
+    if (polled > 0 && (descriptor.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
+      char byte = 0;
+      if (descriptor.revents & POLLNVAL || read(STDIN_FILENO, &byte, 1) <= 0 ||
+          descriptor.revents & (POLLHUP | POLLERR))
+        liveInputStop = 1;
+      else
+        liveInputStop = 1;
+    }
+#else
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+#endif
+    const uint64_t overruns = input.stats().overruns;
+    if (overruns != reportedOverruns) {
+      writer.enqueue(jsonLine(
+          "{\"version\":1,\"type\":\"overrun\",\"count\":%llu,\"cumulative\":true}",
+          static_cast<unsigned long long>(overruns)));
+      reportedOverruns = overruns;
+    }
+    if (input.state() == singz::AudioInputState::Error) {
+      runtimeError = input.lastError();
+      break;
+    }
+  }
+  ready.store(false, std::memory_order_release);
+  input.stop();
+  const singz::AudioInputStats stats = input.stats();
+  std::vector<std::string> terminalLines;
+  if (!runtimeError.empty()) {
+    terminalLines.push_back(jsonLine(
+        "{\"version\":1,\"type\":\"error\",\"state\":\"error\",\"message\":%s}",
+        jsonString(runtimeError).c_str()));
+  }
+  if (measureLatency && !callbackToSinkMs.empty() && !callbackFrames.empty()) {
+    const auto percentile = [](std::vector<double> values, double p) {
+      std::sort(values.begin(), values.end());
+      return values[static_cast<size_t>(
+          std::floor((values.size() - 1) * p))];
+    };
+    const uint32_t minCallbackFrames =
+        *std::min_element(callbackFrames.begin(), callbackFrames.end());
+    const uint32_t maxCallbackFrames =
+        *std::max_element(callbackFrames.begin(), callbackFrames.end());
+    const double callbackP95 = percentile(callbackToSinkMs, 0.95);
+    const bool accepted = callbackToSinkMs.size() >= 500 && callbackP95 <= 3.0;
+    std::string sampleHostSummary = "null";
+    if (!sampleHostToSinkMs.empty()) {
+      sampleHostSummary = jsonLine(
+          "{\"p50\":%.9g,\"p95\":%.9g,\"p99\":%.9g,\"max\":%.9g}",
+          percentile(sampleHostToSinkMs, 0.50),
+          percentile(sampleHostToSinkMs, 0.95),
+          percentile(sampleHostToSinkMs, 0.99),
+          *std::max_element(sampleHostToSinkMs.begin(), sampleHostToSinkMs.end()));
+    }
+    const std::string analysisMetadata =
+        liveInputAnalysisMetadataFields(analysisPlan);
+    terminalLines.push_back(jsonLine(
+        "{\"version\":1,\"type\":\"latency\",\"samples\":%zu,"
+        "\"minimumSamples\":500,"
+        "\"callbackFramesMin\":%u,\"callbackFramesMax\":%u,"
+        "\"blockDurationMs\":%.9g,\"callbackToSinkMs\":{"
+        "\"first\":%.9g,\"p50\":%.9g,\"p95\":%.9g,\"p99\":%.9g,"
+        "\"max\":%.9g,\"acceptanceP95Ms\":3,\"accepted\":%s},"
+        "\"sampleHostToSinkMs\":%s,%s}",
+        callbackToSinkMs.size(), minCallbackFrames, maxCallbackFrames,
+        1000.0 * minCallbackFrames / activeRate,
+        callbackToSinkMs.front(),
+        percentile(callbackToSinkMs, 0.50), callbackP95,
+        percentile(callbackToSinkMs, 0.99),
+        *std::max_element(callbackToSinkMs.begin(), callbackToSinkMs.end()),
+        accepted ? "true" : "false", sampleHostSummary.c_str(),
+        analysisMetadata.c_str()));
+  }
+  terminalLines.push_back(jsonLine(
+      "{\"version\":1,\"type\":\"ended\",\"state\":\"stopped\","
+      "\"deliveredBlocks\":%llu,\"deliveredFrames\":%llu,\"overruns\":%llu}",
+      static_cast<unsigned long long>(stats.deliveredBlocks),
+      static_cast<unsigned long long>(stats.deliveredFrames),
+      static_cast<unsigned long long>(stats.overruns)));
+  writer.close(std::move(terminalLines));
+  if (writer.stopRequested()) std::fprintf(stderr, "%s\n", writer.failureMessage());
+  return runtimeError.empty() && !writer.stopRequested() ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: singz-analyze melody --f32 <path> --sr <rate> [--raw]\n");
+    printLiveInputUsage(stderr);
+    std::fprintf(stderr,
+                 "       singz-analyze melody --f32 <path> --sr <rate> [--raw]\n");
     return 2;
   }
   const std::string cmd = argv[1];
+  if (cmd == "input-devices") return inputDevicesCommand(argc);
+#if defined(SINGZ_CORE_TESTS)
+  if (cmd == "input-devices-fixture") return inputDevicesFixtureCommand(argc);
+  if (cmd == "live-input-analysis-plan-fixture" && argc == 2)
+    return liveInputAnalysisPlanFixture();
+  if (cmd == "live-input-analysis-throughput-fixture" && argc == 2)
+    return liveInputAnalysisThroughputFixture();
+#if defined(__APPLE__)
+  if (cmd == "ndjson-writer-closed-fixture" && argc == 2)
+    return ndjsonWriterFailureFixture(true);
+  if (cmd == "ndjson-writer-blocked-fixture" && argc == 2)
+    return ndjsonWriterFailureFixture(false);
+  if (cmd == "live-input-discontinuity-fixture" && argc == 2)
+    return liveInputDiscontinuityFixture();
+#endif
+#endif
+  if (cmd == "live-input") return liveInputCommand(argc, argv);
   std::string f32, wav;
   double sr = 44100;
   bool raw = false;

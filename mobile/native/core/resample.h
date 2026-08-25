@@ -47,6 +47,9 @@ class Resampler {
   int64_t phase_ = 0;  // position in units of 1/up_ input frames
   std::vector<float> filter_;   // up_ * tapsPerPhase_, polyphase-ordered
   std::vector<float> history_;  // interleaved, tapsPerPhase_-1 frames
+  // Reused concatenated history+input storage. Keeping it on the instance
+  // avoids one heap allocation per block for live streaming consumers.
+  std::vector<float> work_;
 };
 
 }  // namespace singz

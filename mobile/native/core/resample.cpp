@@ -100,10 +100,10 @@ void Resampler::process(const float* in, int64_t frames, std::vector<float>& out
   // phase_ counts in 1/up_ input frames, RELATIVE TO THE BUFFER START; it is
   // rebased when history rolls forward at the end of each call.
   const int histFrames = tapsPerPhase_ - 1;
-  std::vector<float> buf(history_.size() + static_cast<size_t>(frames) * channels_);
-  std::copy(history_.begin(), history_.end(), buf.begin());
+  work_.resize(history_.size() + static_cast<size_t>(frames) * channels_);
+  std::copy(history_.begin(), history_.end(), work_.begin());
   std::copy(in, in + frames * channels_,
-            buf.begin() + static_cast<int64_t>(history_.size()));
+            work_.begin() + static_cast<int64_t>(history_.size()));
   const int64_t bufFrames = histFrames + frames;
 
   // Polyphase decomposition of the prototype: output at phase P reads input
@@ -119,7 +119,7 @@ void Resampler::process(const float* in, int64_t frames, std::vector<float>& out
         const int64_t frame = base - j;
         if (frame < 0) break;  // leading edge: history was zero-seeded anyway
         acc += static_cast<double>(filter_[static_cast<size_t>(j) * up_ + poly]) *
-               static_cast<double>(buf[frame * channels_ + c]);
+               static_cast<double>(work_[frame * channels_ + c]);
       }
       out.push_back(static_cast<float>(acc));
     }
@@ -128,7 +128,7 @@ void Resampler::process(const float* in, int64_t frames, std::vector<float>& out
 
   // Keep the newest histFrames frames as history; rebase phase_ to it.
   const int64_t keepFrom = bufFrames - histFrames;
-  history_.assign(buf.begin() + keepFrom * channels_, buf.end());
+  std::copy(work_.begin() + keepFrom * channels_, work_.end(), history_.begin());
   phase_ -= keepFrom * up_;
 }
 
