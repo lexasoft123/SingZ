@@ -166,7 +166,7 @@ export default function RootNavigator({
             options={{
               presentation: 'formSheet',
               gestureEnabled: true,
-              sheetAllowedDetents: [0.6, 0.93],
+              sheetAllowedDetents: [0.42, 0.93],
               sheetInitialDetentIndex: 0,
               sheetGrabberVisible: true,
               contentStyle: styles.sheet

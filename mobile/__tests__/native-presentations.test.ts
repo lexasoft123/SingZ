@@ -35,7 +35,7 @@ test('every app-owned modal is a native-stack presentation', () => {
 
   const root = read('src/ui/RootNavigator.tsx')
   expect(root).toMatch(
-    /name="AddSong"[\s\S]*presentation: 'formSheet'[\s\S]*sheetInitialDetentIndex: 0/
+    /name="AddSong"[\s\S]*presentation: 'formSheet'[\s\S]*sheetAllowedDetents: \[0\.42, 0\.93\][\s\S]*sheetInitialDetentIndex: 0/
   )
   expect(root).toMatch(/name="Log"[\s\S]*presentation: 'fullScreenModal'/)
 })
