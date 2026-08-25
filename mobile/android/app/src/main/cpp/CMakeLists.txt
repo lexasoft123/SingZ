@@ -53,8 +53,15 @@ target_include_directories(singzflac PRIVATE
 add_library(singzcore SHARED
     ${CORE_DIR}/android/singz_core_jni.cpp
     ${CORE_DIR}/audio_input.cpp
+    ${CORE_DIR}/audio_input_analysis_adapter.cpp
+    ${CORE_DIR}/audio_input_android.cpp
+    ${CORE_DIR}/audio_input_android_policy.cpp
+    ${CORE_DIR}/audio_input_android_registry.cpp
+    ${CORE_DIR}/audio_input_timestamp.cpp
+    ${CORE_DIR}/audio_input_convert.cpp
     ${CORE_DIR}/audio_input_macos.cpp
     ${CORE_DIR}/audio_input_wake.cpp
+    ${CORE_DIR}/audio_input_wake_android.cpp
     ${CORE_DIR}/analysis.cpp
     ${CORE_DIR}/beats.cpp
     ${CORE_DIR}/beat_this.cpp
@@ -74,4 +81,4 @@ target_compile_options(singzcore PRIVATE -fexceptions -frtti)
 # overflow plain fseek/ftell; the engine uses fseeko/ftello throughout.
 target_compile_definitions(singzcore PRIVATE _FILE_OFFSET_BITS=64)
 target_include_directories(singzcore PRIVATE ${CORE_DIR} ${ORT_SDK_DIR}/headers ${FLAC_DIR}/include)
-target_link_libraries(singzcore singzflac onnxruntime log)
+target_link_libraries(singzcore singzflac onnxruntime aaudio android dl log)

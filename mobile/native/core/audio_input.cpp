@@ -29,6 +29,8 @@ struct RingSlot {
   uint64_t sequence = 0;
   uint64_t sampleHostTimeNs = 0;
   uint64_t callbackHostTimeNs = 0;
+  AudioInputTimestampQuality timestampQuality =
+      AudioInputTimestampQuality::Unknown;
 };
 
 bool isFinitePositive(double value) { return std::isfinite(value) && value > 0; }
@@ -93,7 +95,8 @@ AudioInputRing::~AudioInputRing() = default;
 bool AudioInputRing::valid() const { return impl_ != nullptr; }
 
 bool AudioInputRing::push(const float* mono, uint32_t frames, uint64_t sampleHostTimeNs,
-                          uint64_t callbackHostTimeNs) {
+                          uint64_t callbackHostTimeNs,
+                          AudioInputTimestampQuality timestampQuality) {
   if (!impl_) return false;
   // A sequence describes a hardware callback ATTEMPT, not a ring insertion.
   // The next accepted block therefore exposes any dropped callback as a gap.
@@ -114,6 +117,7 @@ bool AudioInputRing::push(const float* mono, uint32_t frames, uint64_t sampleHos
   slot.sequence = attemptSequence;
   slot.sampleHostTimeNs = sampleHostTimeNs;
   slot.callbackHostTimeNs = callbackHostTimeNs;
+  slot.timestampQuality = timestampQuality;
   impl_->write.store(write + 1, std::memory_order_release);
   return true;
 }
@@ -126,6 +130,7 @@ bool AudioInputRing::peek(AudioInputBlockView& out, double sampleRate) {
   out.sequence = slot.sequence;
   out.sampleHostTimeNs = slot.sampleHostTimeNs;
   out.callbackHostTimeNs = slot.callbackHostTimeNs;
+  out.timestampQuality = slot.timestampQuality;
   out.sampleRate = sampleRate;
   // Hardware/driver faults must not inject NaN or infinity into downstream
   // vocal processors. This scan is on the ordinary consumer thread, never
@@ -247,9 +252,11 @@ LiveInputFrame analyzeLiveInput(const float* mono, size_t frames, double sampleR
 
 bool audioInputBackendSupported() {
   if (haveTestAudioInputBackend()) return true;
-#if defined(__APPLE__) && TARGET_OS_OSX
+#if defined(__APPLE__) && (TARGET_OS_OSX || TARGET_OS_IOS)
   return true;
 #elif defined(_WIN32)
+  return true;
+#elif defined(__ANDROID__)
   return true;
 #else
   return false;
@@ -364,13 +371,15 @@ struct AudioInput::Impl {
   }
 
   static bool push(void* context, const float* mono, uint32_t frames,
-                   uint64_t sampleHostTimeNs, uint64_t callbackHostTimeNs) {
+                   uint64_t sampleHostTimeNs, uint64_t callbackHostTimeNs,
+                   AudioInputTimestampQuality timestampQuality) {
     Impl* self = static_cast<Impl*>(context);
     // ring is published before backend start and is not reset until the
     // backend has stopped and delivery has joined.
     if (!self || !self->ring) return false;
     const bool pushed =
-        self->ring->push(mono, frames, sampleHostTimeNs, callbackHostTimeNs);
+        self->ring->push(mono, frames, sampleHostTimeNs, callbackHostTimeNs,
+                         timestampQuality);
     // Platform event signaling is a fixed-size kernel operation: no app lock,
     // allocation, logging, JSON, or DSP on the real-time producer.
     if (pushed) self->notifyDeliveryFromProducer();
@@ -468,8 +477,8 @@ AudioInput::~AudioInput() {
 
 AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSink sink) {
   if (Impl::deliveringImpl == impl_.get()) {
-    return {false, state(), "audio input cannot be restarted from its sink", 0,
-            config.channel};
+    return AudioInputResult::failure(
+        state(), "audio input cannot be restarted from its sink", config.channel);
   }
   std::lock_guard<std::mutex> lifecycle(impl_->lifecycle);
   // Retire any prior self-stopped or failed delivery before replacing state.
@@ -500,16 +509,18 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
   impl_->state.store(AudioInputState::Starting, std::memory_order_release);
   if (!audioInputBackendSupported()) {
     impl_->state.store(AudioInputState::Unsupported, std::memory_order_release);
-    return {false, AudioInputState::Unsupported, "audio input is unsupported on this platform", 0,
-            config.channel};
+    return AudioInputResult::failure(
+        AudioInputState::Unsupported, "audio input is unsupported on this platform",
+        config.channel);
   }
   std::string enumerateError;
   const std::vector<AudioInputDevice> devices = enumerateAudioInputDevices(&enumerateError);
   std::string validationError;
   if (!validateAudioInputConfig(config, devices, validationError)) {
     impl_->state.store(AudioInputState::Error, std::memory_order_release);
-    return {false, AudioInputState::Error,
-            enumerateError.empty() ? validationError : enumerateError, 0, config.channel};
+    return AudioInputResult::failure(
+        AudioInputState::Error,
+        enumerateError.empty() ? validationError : enumerateError, config.channel);
   }
   {
     std::lock_guard<std::mutex> control(impl_->control);
@@ -520,7 +531,8 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
   }
   if (!impl_->ring->valid() || !impl_->backend) {
     impl_->state.store(AudioInputState::Error, std::memory_order_release);
-    return {false, AudioInputState::Error, "could not create audio input", 0, config.channel};
+    return AudioInputResult::failure(
+        AudioInputState::Error, "could not create audio input", config.channel);
   }
   AudioInputResult result;
   {
@@ -544,7 +556,8 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
     impl_->sink = nullptr;
     impl_->failure = "audio input backend returned an invalid sample rate";
     impl_->state.store(AudioInputState::Error, std::memory_order_release);
-    return {false, AudioInputState::Error, impl_->failure, 0, config.channel};
+    return AudioInputResult::failure(AudioInputState::Error, impl_->failure,
+                                     config.channel);
   }
   // Immutable delivery configuration is published before the backend can
   // invoke a callback. No thread writes sampleRate/config until delivery joins.
@@ -576,7 +589,8 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
     impl_->deliveryArmed.store(true, std::memory_order_release);
   } catch (...) {
     impl_->fail("could not create audio input delivery thread");
-    return {false, AudioInputState::Error, impl_->failure, 0, config.channel};
+    return AudioInputResult::failure(AudioInputState::Error, impl_->failure,
+                                     config.channel);
   }
   return result;
 }
@@ -638,7 +652,8 @@ std::string AudioInput::lastError() const {
   return impl_->failure;
 }
 
-#if (!defined(__APPLE__) || !TARGET_OS_OSX) && !defined(_WIN32)
+#if (!defined(__APPLE__) || (!TARGET_OS_OSX && !TARGET_OS_IOS)) && !defined(_WIN32) && \
+    !defined(__ANDROID__)
 std::unique_ptr<AudioInputBackend> createPlatformAudioInputBackend() { return nullptr; }
 std::vector<AudioInputDevice> enumeratePlatformAudioInputDevices(std::string* error) {
   if (error) *error = "audio input is unsupported on this platform";

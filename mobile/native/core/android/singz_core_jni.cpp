@@ -4,17 +4,26 @@
 #include <android/log.h>
 #include <jni.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "analysis.h"
+#include "audio_input.h"
+#include "audio_input_analysis_adapter.h"
+#include "audio_input_android_registry.h"
 #include "beat_this.h"
 #include "beats.h"
 #include "melody.h"
 #include "ort_env.h"
 #include "progress.h"
+#include "resample.h"
 #include "split_engine.h"
 #include "wav.h"
 #include "flac_io.h"
@@ -29,12 +38,80 @@ std::string toStd(JNIEnv* env, jstring s) {
   return out;
 }
 
+jobjectArray stringArray(JNIEnv* env, const std::vector<std::string>& values) {
+  jclass stringClass = env->FindClass("java/lang/String");
+  if (!stringClass) return nullptr;
+  jobjectArray result =
+      env->NewObjectArray(static_cast<jsize>(values.size()), stringClass, nullptr);
+  env->DeleteLocalRef(stringClass);
+  if (!result) return nullptr;
+  for (jsize i = 0; i < static_cast<jsize>(values.size()); ++i) {
+    jstring value = env->NewStringUTF(values[static_cast<size_t>(i)].c_str());
+    if (!value) return result;
+    env->SetObjectArrayElement(result, i, value);
+    env->DeleteLocalRef(value);
+  }
+  return result;
+}
+
 // One split at a time per process (the :split service enforces that too).
 // The Progress lives at namespace scope so cancelSplit can never write into
 // a dead stack frame; runSplit resets the flag at entry (a cancel pressed
 // before the next job starts targets the job that was running, not the new
 // one).
 singz::Progress gProgress;
+
+std::mutex gAudioInputMutex;
+std::unique_ptr<singz::AudioInput> gAudioInput;
+
+struct AudioInputListenerBridge {
+  JavaVM* vm = nullptr;
+  jobject listener = nullptr;
+  jmethodID onFrame = nullptr;
+  std::atomic<bool> active{true};
+  singz::LiveInputAnalysisAdapter analysisAdapter;
+
+  ~AudioInputListenerBridge() {
+    active.store(false, std::memory_order_release);
+    if (!vm || !listener) return;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+      if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+      attached = true;
+    }
+    env->DeleteGlobalRef(listener);
+    if (attached) vm->DetachCurrentThread();
+  }
+
+  void emit(const singz::AudioInputBlockView& block) {
+    if (!active.load(std::memory_order_acquire) || !vm || !listener || !onFrame) return;
+    (void)analysisAdapter.push(block, [&](const singz::LiveInputAnalysisWindow& window) {
+      if (!active.load(std::memory_order_acquire)) return;
+      JNIEnv* env = nullptr;
+      bool attached = false;
+      if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+      }
+      env->CallVoidMethod(listener, onFrame, static_cast<jlong>(window.startSequence),
+                          static_cast<jlong>(window.endSequence),
+                          static_cast<jlong>(window.sampleHostTimeStartNs),
+                          static_cast<jlong>(window.sampleHostTimeEndNs),
+                          static_cast<jlong>(window.callbackHostTimeNs),
+                          static_cast<jint>(window.timestampQuality),
+                          static_cast<jdouble>(window.sampleRate),
+                          static_cast<jdouble>(window.analysis.frequency),
+                          static_cast<jdouble>(window.analysis.clarity),
+                          static_cast<jdouble>(window.analysis.rms),
+                          static_cast<jdouble>(window.analysis.dbfs));
+      if (env->ExceptionCheck()) env->ExceptionClear();
+      if (attached) vm->DetachCurrentThread();
+    });
+  }
+};
+
+std::shared_ptr<AudioInputListenerBridge> gAudioInputListener;
 
 struct JniCallback {
   JNIEnv* env;
@@ -61,6 +138,136 @@ void chunkTramp(void* user, int64_t done, int64_t total) {
 }
 
 }  // namespace
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_singzplayer_split_SingzCore_replaceAudioInputDevices(
+    JNIEnv* env, jobject /*thiz*/, jobjectArray juids, jobjectArray jlabels,
+    jdoubleArray jrates, jintArray jchannels) {
+  if (!juids || !jlabels || !jrates || !jchannels) {
+    singz::replaceAndroidAudioInputDevices({});
+    return;
+  }
+  const jsize count = env->GetArrayLength(juids);
+  if (count < 0 || count > 256 || env->GetArrayLength(jlabels) != count ||
+      env->GetArrayLength(jrates) != count || env->GetArrayLength(jchannels) != count) {
+    singz::replaceAndroidAudioInputDevices({});
+    return;
+  }
+  std::vector<jdouble> rates(static_cast<size_t>(count));
+  std::vector<jint> channels(static_cast<size_t>(count));
+  if (count) {
+    env->GetDoubleArrayRegion(jrates, 0, count, rates.data());
+    env->GetIntArrayRegion(jchannels, 0, count, channels.data());
+  }
+  std::vector<singz::AudioInputDevice> devices;
+  devices.reserve(static_cast<size_t>(count));
+  for (jsize i = 0; i < count; ++i) {
+    auto* juid = static_cast<jstring>(env->GetObjectArrayElement(juids, i));
+    auto* jlabel = static_cast<jstring>(env->GetObjectArrayElement(jlabels, i));
+    singz::AudioInputDevice device;
+    device.uid = toStd(env, juid);
+    device.label = toStd(env, jlabel);
+    device.sampleRate = rates[static_cast<size_t>(i)];
+    device.channels = channels[static_cast<size_t>(i)] > 0
+                          ? static_cast<uint32_t>(channels[static_cast<size_t>(i)])
+                          : 0;
+    // Android has no public "active/default capture endpoint" query. The UI
+    // carries its own explicitly named isPreferred heuristic; the portable
+    // core must not misrepresent that as an OS default.
+    device.isDefault = false;
+    device.channelLabels.reserve(device.channels);
+    for (uint32_t channel = 0; channel < device.channels; ++channel)
+      device.channelLabels.push_back("Channel " + std::to_string(channel + 1));
+    devices.push_back(std::move(device));
+    if (juid) env->DeleteLocalRef(juid);
+    if (jlabel) env->DeleteLocalRef(jlabel);
+  }
+  singz::replaceAndroidAudioInputDevices(std::move(devices));
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_singzplayer_split_SingzCore_startAudioInput(
+    JNIEnv* env, jobject /*thiz*/, jstring juid, jint channel, jobject listener) {
+  if (channel < 0 || !listener)
+    return stringArray(env, {"Android audio input arguments are invalid"});
+  std::lock_guard<std::mutex> lock(gAudioInputMutex);
+  if (gAudioInput)
+    return stringArray(env, {"Another Android audio input owner is active"});
+
+  auto bridge = std::make_shared<AudioInputListenerBridge>();
+  env->GetJavaVM(&bridge->vm);
+  bridge->listener = env->NewGlobalRef(listener);
+  jclass listenerClass = env->GetObjectClass(listener);
+  bridge->onFrame = env->GetMethodID(listenerClass, "onFrame", "(JJJJJIDDDDD)V");
+  env->DeleteLocalRef(listenerClass);
+  if (!bridge->vm || !bridge->listener || !bridge->onFrame) {
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return stringArray(env, {"Android audio input listener is invalid"});
+  }
+
+  auto input = std::make_unique<singz::AudioInput>();
+  singz::AudioInputConfig config;
+  config.deviceUid = toStd(env, juid);
+  config.channel = static_cast<uint32_t>(channel);
+  config.ringBlocks = 32;
+  const singz::AudioInputResult result = input->start(
+      config, [bridge](const singz::AudioInputBlockView& block) { bridge->emit(block); });
+  if (!result.ok) {
+    bridge->active.store(false, std::memory_order_release);
+    return stringArray(env, {result.error});
+  }
+  gAudioInputListener = std::move(bridge);
+  gAudioInput = std::move(input);
+  return stringArray(
+      env, {"", result.deviceUid, std::to_string(result.sampleRate),
+            std::to_string(result.deviceChannels), std::to_string(result.channel),
+            result.sampleFormat, result.sharingMode, result.performanceMode,
+            result.inputPreset, result.timestampSource});
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_singzplayer_split_SingzCore_stopAudioInput(JNIEnv*, jobject /*thiz*/) {
+  std::unique_ptr<singz::AudioInput> input;
+  std::shared_ptr<AudioInputListenerBridge> listener;
+  {
+    std::lock_guard<std::mutex> lock(gAudioInputMutex);
+    input = std::move(gAudioInput);
+    listener = std::move(gAudioInputListener);
+    if (listener) listener->active.store(false, std::memory_order_release);
+  }
+  if (input) input->stop();
+  // AudioInput::stop joins delivery and the platform backend synchronously.
+  // Kotlin must retain its ownership token until this confirmation returns.
+  return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_audioInputState(JNIEnv* env, jobject /*thiz*/) {
+  std::lock_guard<std::mutex> lock(gAudioInputMutex);
+  if (!gAudioInput) return env->NewStringUTF("idle");
+  return env->NewStringUTF(singz::audioInputStateName(gAudioInput->state()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_audioInputLastError(JNIEnv* env, jobject /*thiz*/) {
+  std::lock_guard<std::mutex> lock(gAudioInputMutex);
+  const std::string error = gAudioInput ? gAudioInput->lastError() : "";
+  return env->NewStringUTF(error.c_str());
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_singzplayer_split_SingzCore_audioInputStats(JNIEnv* env, jobject /*thiz*/) {
+  std::lock_guard<std::mutex> lock(gAudioInputMutex);
+  const singz::AudioInputStats stats = gAudioInput ? gAudioInput->stats()
+                                                   : singz::AudioInputStats{};
+  const jlong values[] = {static_cast<jlong>(stats.deliveredBlocks),
+                          static_cast<jlong>(stats.deliveredFrames),
+                          static_cast<jlong>(stats.overruns),
+                          static_cast<jlong>(stats.deliveryWakeups)};
+  jlongArray result = env->NewLongArray(4);
+  if (result) env->SetLongArrayRegion(result, 0, 4, values);
+  return result;
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_singzplayer_split_SingzCore_ortProbe(JNIEnv* env, jobject /*thiz*/,

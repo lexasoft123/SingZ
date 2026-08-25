@@ -4,7 +4,8 @@
 #include <TargetConditionals.h>
 #endif
 
-#if (!defined(__APPLE__) || !TARGET_OS_OSX) && !defined(_WIN32)
+#if (!defined(__APPLE__) || (!TARGET_OS_OSX && !TARGET_OS_IOS)) && !defined(_WIN32) && \
+    !defined(__ANDROID__)
 
 #include <chrono>
 #include <thread>

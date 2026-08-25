@@ -7,7 +7,7 @@ import com.facebook.react.uimanager.ViewManager
 
 class SingZPackage : ReactPackage {
   override fun createNativeModules(ctx: ReactApplicationContext): List<NativeModule> =
-    listOf(FolderAccessModule(ctx), AudioRouteInfoModule(ctx), SplitModule(ctx))
+    listOf(FolderAccessModule(ctx), AudioRouteInfoModule(ctx), AudioInputModule(ctx), SplitModule(ctx))
 
   override fun createViewManagers(ctx: ReactApplicationContext): List<ViewManager<*, *>> =
     emptyList()

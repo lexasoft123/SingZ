@@ -478,11 +478,14 @@ struct LiveContinuityState {
   uint64_t expectedSequence = 0;
   uint64_t lastHostTime = 0;
   size_t lastFrames = 0;
+  singz::AudioInputTimestampQuality timestampQuality =
+      singz::AudioInputTimestampQuality::Unknown;
 };
 
 struct LiveContinuityObservation {
   bool sequenceGap = false;
   bool hostTimeGap = false;
+  bool timestampQualityChanged = false;
   uint64_t expectedSequence = 0;
   uint64_t droppedAttempts = 0;
 };
@@ -646,11 +649,16 @@ static LiveContinuityObservation observeContinuity(
   LiveContinuityObservation observation;
   observation.expectedSequence = state.expectedSequence;
   observation.sequenceGap = state.haveBlock && block.sequence != state.expectedSequence;
+  observation.timestampQualityChanged =
+      state.haveBlock && block.timestampQuality != state.timestampQuality;
   if (observation.sequenceGap)
     observation.droppedAttempts = block.sequence > state.expectedSequence
                                       ? block.sequence - state.expectedSequence
                                       : 1;
-  if (state.haveBlock && sampleRate > 0) {
+  // A quality transition deliberately changes the timestamp source. It is an
+  // analysis boundary, but comparing its new origin with the previous source
+  // would misreport that boundary as a device timing discontinuity.
+  if (state.haveBlock && !observation.timestampQualityChanged && sampleRate > 0) {
     const long double expectedHost =
         state.lastHostTime + 1000000000.0L * state.lastFrames / sampleRate;
     // Below one callback duration, so even a missing hardware callback that
@@ -665,7 +673,13 @@ static LiveContinuityObservation observeContinuity(
   state.expectedSequence = block.sequence + 1;
   state.lastHostTime = block.sampleHostTimeNs;
   state.lastFrames = block.frames;
+  state.timestampQuality = block.timestampQuality;
   return observation;
+}
+
+static bool needsLiveAnalysisReset(const LiveContinuityObservation& observation) {
+  return observation.sequenceGap || observation.hostTimeGap ||
+         observation.timestampQualityChanged;
 }
 
 #if defined(SINGZ_CORE_TESTS)
@@ -893,6 +907,89 @@ static int liveInputDiscontinuityFixture() {
               "\"sequenceGap\":true,\"hostTimeGap\":true,\"pendingReset\":true}\n");
   return 0;
 }
+
+static int liveInputTimestampProvenanceFixture() {
+  LiveInputAnalysisPlan plan;
+  std::string error;
+  if (!makeLiveInputAnalysisPlan(48000, false, 0, plan, error)) return 1;
+  LiveInputAnalysisStream stream(plan);
+  LiveContinuityState continuity;
+  std::vector<float> samples(plan.frames, 0.0f);
+  std::vector<float> pending;
+  uint64_t pendingHostTime = 0;
+  struct EmittedWindow {
+    uint64_t hostTimeNs;
+    singz::AudioInputTimestampQuality quality;
+  };
+  std::vector<EmittedWindow> emitted;
+
+  const auto consume = [&](const singz::AudioInputBlockView& block) {
+    const LiveContinuityObservation observation =
+        observeContinuity(continuity, block, plan.deviceSampleRate);
+    if (needsLiveAnalysisReset(observation)) {
+      pending.clear();
+      pendingHostTime = 0;
+      stream.reset();
+    }
+    const bool pendingWasEmpty = pending.empty();
+    const size_t appended = stream.append(block.mono, block.frames, pending);
+    if (pendingWasEmpty && appended > 0) pendingHostTime = block.sampleHostTimeNs;
+    while (pending.size() >= plan.frames) {
+      emitted.push_back({pendingHostTime, block.timestampQuality});
+      pending.erase(pending.begin(), pending.begin() + plan.hopFrames);
+      pendingHostTime += static_cast<uint64_t>(
+          1000000000.0 * plan.hopFrames / plan.analysisSampleRate);
+    }
+    return observation;
+  };
+
+  singz::AudioInputBlockView estimate;
+  estimate.sequence = 0;
+  estimate.sampleHostTimeNs = 1000000000ull;
+  estimate.timestampQuality = singz::AudioInputTimestampQuality::CallbackEstimate;
+  estimate.sampleRate = 48000;
+  estimate.mono = samples.data();
+  estimate.frames = 960;
+  (void)consume(estimate);
+  estimate.sequence = 1;
+  estimate.sampleHostTimeNs = 1020000000ull;
+  (void)consume(estimate);
+  if (pending.size() != 1920 || !emitted.empty()) return 1;
+
+  singz::AudioInputBlockView hardware = estimate;
+  hardware.sequence = 2;
+  // Expected continuation is 1.040 s. The 1 ms shift is inside the old
+  // 10 ms host-gap tolerance, proving provenance—not gap detection—resets.
+  hardware.sampleHostTimeNs = 1041000000ull;
+  hardware.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+  hardware.frames = plan.frames;
+  const LiveContinuityObservation toHardware = consume(hardware);
+
+  singz::AudioInputBlockView fallback = hardware;
+  fallback.sequence = 3;
+  fallback.sampleHostTimeNs = 1084666667ull;
+  fallback.timestampQuality = singz::AudioInputTimestampQuality::CallbackEstimate;
+  const LiveContinuityObservation toEstimate = consume(fallback);
+
+  const bool valid = toHardware.timestampQualityChanged &&
+      !toHardware.sequenceGap && !toHardware.hostTimeGap &&
+      toEstimate.timestampQualityChanged &&
+      !toEstimate.sequenceGap && !toEstimate.hostTimeGap &&
+      emitted.size() == 2 &&
+      emitted[0].hostTimeNs == hardware.sampleHostTimeNs &&
+      emitted[0].quality == singz::AudioInputTimestampQuality::Hardware &&
+      emitted[1].hostTimeNs == fallback.sampleHostTimeNs &&
+      emitted[1].quality == singz::AudioInputTimestampQuality::CallbackEstimate;
+  if (!valid) return 1;
+  std::printf(
+      "{\"version\":1,\"type\":\"timestamp-provenance\","
+      "\"estimateToHardwareReset\":true,\"hardwareWindowHostTimeNs\":%llu,"
+      "\"hardwareToEstimateReset\":true,\"estimateWindowHostTimeNs\":%llu,"
+      "\"sequenceDiscontinuities\":0,\"hostDiscontinuities\":0}\n",
+      static_cast<unsigned long long>(emitted[0].hostTimeNs),
+      static_cast<unsigned long long>(emitted[1].hostTimeNs));
+  return 0;
+}
 #endif
 
 static int liveInputCommand(int argc, char** argv) {
@@ -997,10 +1094,12 @@ static int liveInputCommand(int argc, char** argv) {
         const bool sequenceGap = observed.sequenceGap;
         const bool hostGap = observed.hostTimeGap;
         const bool discontinuity = sequenceGap || hostGap;
-        if (discontinuity) {
+        if (needsLiveAnalysisReset(observed)) {
           pending.clear();
           pendingHostTime = 0;
           if (analysisStream) analysisStream->reset();
+        }
+        if (discontinuity) {
           if (sequenceGap) {
             writer.enqueue(jsonLine(
                 "{\"version\":1,\"type\":\"overrun\",\"count\":%llu,"
@@ -1197,6 +1296,8 @@ int main(int argc, char** argv) {
 #endif
   if (cmd == "live-input-discontinuity-fixture" && argc == 2)
     return liveInputDiscontinuityFixture();
+  if (cmd == "live-input-timestamp-provenance-fixture" && argc == 2)
+    return liveInputTimestampProvenanceFixture();
 #endif
   if (cmd == "live-input") return liveInputCommand(argc, argv);
   std::string f32, wav;

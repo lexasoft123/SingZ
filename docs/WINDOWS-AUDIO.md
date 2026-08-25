@@ -23,6 +23,20 @@ with `wasapi:` so another provider can describe the same physical interface
 without an identity collision. WASAPI does not reliably publish per-lane
 hardware names, so lanes fall back to `Channel 1`, `Channel 2`, and so on.
 
+## Timestamp contract
+
+For each packet, `callbackHostTimeNs` is sampled from QPC before conversion or
+ring delivery. A nonzero WASAPI QPC position without
+`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR` is marked `Hardware`. A zero position or
+timestamp-error packet instead gets a bounded first-sample estimate of callback
+entry minus the packet duration and is marked `CallbackEstimate`; zero/error
+timestamps are never presented as hardware. The shared analysis adapter resets
+on either provenance transition so an analysis window cannot combine the two
+timelines. Capture timestamps remain raw and receive no output-latency
+compensation. AUHAL follows the same rule on macOS: only a nonzero
+`kAudioTimeStampHostTimeValid` value is hardware, while a missing value uses the
+callback-entry estimate.
+
 ## ASIO provider gate
 
 ASIO is a separate future `AsioAudioInputBackend`, selected by an `asio:` UID.

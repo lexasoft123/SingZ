@@ -24,6 +24,8 @@
 #include <thread>
 #include <vector>
 
+#include "audio_input_timestamp.h"
+
 namespace singz {
 namespace {
 
@@ -166,20 +168,21 @@ class MacAudioInputBackend final : public AudioInputBackend {
       }
     }
     if (selected == kAudioObjectUnknown)
-      return {false, AudioInputState::Error,
-              enumerationError.empty() ? "audio input device disappeared" : enumerationError,
-              0, config.channel};
+      return AudioInputResult::failure(
+          AudioInputState::Error,
+          enumerationError.empty() ? "audio input device disappeared" : enumerationError,
+          config.channel);
     const uint32_t channels = inputChannelCount(selected);
     if (config.channel >= channels)
-      return {false, AudioInputState::Error, "audio input channel disappeared", 0,
-              config.channel};
+      return AudioInputResult::failure(
+          AudioInputState::Error, "audio input channel disappeared", config.channel);
     UInt32 alive = 0;
     if (!getProperty(selected,
                      address(kAudioDevicePropertyDeviceIsAlive,
                              kAudioObjectPropertyScopeGlobal),
                      alive) || !alive)
-      return {false, AudioInputState::Error, "audio input device is not alive", 0,
-              config.channel};
+      return AudioInputResult::failure(
+          AudioInputState::Error, "audio input device is not alive", config.channel);
     selectedDevice_ = selected;
     channel_ = config.channel;
 
@@ -188,8 +191,8 @@ class MacAudioInputBackend final : public AudioInputBackend {
                      address(kAudioDevicePropertyNominalSampleRate,
                              kAudioObjectPropertyScopeGlobal),
                     nominalRate) || !std::isfinite(nominalRate) || nominalRate <= 0) {
-      return {false, AudioInputState::Error, "audio input sample rate is unavailable", 0,
-              config.channel};
+      return AudioInputResult::failure(
+          AudioInputState::Error, "audio input sample rate is unavailable", config.channel);
     }
 
     AudioComponentDescription description{};
@@ -198,8 +201,8 @@ class MacAudioInputBackend final : public AudioInputBackend {
     description.componentManufacturer = kAudioUnitManufacturer_Apple;
     const AudioComponent component = AudioComponentFindNext(nullptr, &description);
     if (!component)
-      return {false, AudioInputState::Error, "CoreAudio HAL output unit is unavailable", 0,
-              config.channel};
+      return AudioInputResult::failure(
+          AudioInputState::Error, "CoreAudio HAL output unit is unavailable", config.channel);
     OSStatus status = AudioComponentInstanceNew(component, &unit_);
     if (status != noErr) return fail("AudioComponentInstanceNew", status, config.channel);
 
@@ -288,16 +291,17 @@ class MacAudioInputBackend final : public AudioInputBackend {
     }
     sampleRate_ = nominalRate;
     callbackFailure_.store(0, std::memory_order_relaxed);
-    return {true, AudioInputState::Starting, {}, sampleRate_, channel_};
+    return AudioInputResult::success(AudioInputState::Starting, sampleRate_, channel_);
   }
 
   AudioInputResult start() override {
     if (!unit_ || !initialized_)
-      return {false, AudioInputState::Error, "AUHAL is not prepared", 0, channel_};
+      return AudioInputResult::failure(
+          AudioInputState::Error, "AUHAL is not prepared", channel_);
     const OSStatus status = AudioOutputUnitStart(unit_);
     if (status != noErr) return fail("start AUHAL", status, channel_);
     started_ = true;
-    return {true, AudioInputState::Running, {}, sampleRate_, channel_};
+    return AudioInputResult::success(AudioInputState::Running, sampleRate_, channel_);
   }
 
   void stop() override {
@@ -386,6 +390,7 @@ class MacAudioInputBackend final : public AudioInputBackend {
   static OSStatus renderCallback(void* context, AudioUnitRenderActionFlags* flags,
                                  const AudioTimeStamp* timestamp, UInt32,
                                  UInt32 frames, AudioBufferList*) {
+    const uint64_t callbackTicks = mach_absolute_time();
     MacAudioInputBackend* self = static_cast<MacAudioInputBackend*>(context);
     if (!self || !self->unit_ || !self->push_ || frames == 0)
       return noErr;
@@ -405,13 +410,23 @@ class MacAudioInputBackend final : public AudioInputBackend {
       self->callbackFailure_.store(static_cast<int32_t>(status), std::memory_order_release);
       return status;
     }
-    const uint64_t ticks = timestamp && (timestamp->mFlags & kAudioTimeStampHostTimeValid)
-                               ? timestamp->mHostTime
-                               : mach_absolute_time();
-    const uint64_t callbackTicks = mach_absolute_time();
+    const uint64_t callbackNs = static_cast<uint64_t>(
+        static_cast<long double>(callbackTicks) *
+        static_cast<long double>(self->nsPerHostTick_));
+    const bool hardwareValid =
+        timestamp && (timestamp->mFlags & kAudioTimeStampHostTimeValid) &&
+        timestamp->mHostTime != 0;
+    const uint64_t hardwareNs = hardwareValid
+        ? static_cast<uint64_t>(static_cast<long double>(timestamp->mHostTime) *
+                                static_cast<long double>(self->nsPerHostTick_))
+        : 0;
+    const AudioInputTimestampProjection projected = resolveAudioInputTimestamp(
+        hardwareValid, hardwareNs, callbackNs, frames, self->sampleRate_);
     self->push_(self->context_, self->renderBuffer_.data(), frames,
-                static_cast<uint64_t>(ticks * self->nsPerHostTick_),
-                static_cast<uint64_t>(callbackTicks * self->nsPerHostTick_));
+                projected.sampleHostTimeNs, callbackNs,
+                projected.usedHardwareAnchor
+                    ? AudioInputTimestampQuality::Hardware
+                    : AudioInputTimestampQuality::CallbackEstimate);
     return noErr;
   }
 
@@ -421,7 +436,7 @@ class MacAudioInputBackend final : public AudioInputBackend {
 
   AudioInputResult failMessage(std::string message, uint32_t channel) {
     stop();
-    return {false, AudioInputState::Error, std::move(message), 0, channel};
+    return AudioInputResult::failure(AudioInputState::Error, std::move(message), channel);
   }
 
   AudioUnit unit_ = nullptr;

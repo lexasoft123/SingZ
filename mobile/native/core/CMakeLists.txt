@@ -97,7 +97,11 @@ endif()
 # ---- the core ---------------------------------------------------------------
 add_library(singz_core STATIC
   audio_input.cpp
+  audio_input_analysis_adapter.cpp
+  audio_input_android_policy.cpp
+  audio_input_timestamp.cpp
   audio_input_convert.cpp
+  audio_input_ios_session.cpp
   audio_input_macos.cpp
   audio_input_wake.cpp
   audio_input_wake_macos.cpp
@@ -194,6 +198,11 @@ if(SINGZ_CORE_TESTS)
   set_tests_properties(live_input_discontinuity_event PROPERTIES
     PASS_REGULAR_EXPRESSION
       "\"type\":\"discontinuity\".*\"pendingReset\":true")
+  add_test(NAME live_input_timestamp_provenance
+           COMMAND singz-analyze live-input-timestamp-provenance-fixture)
+  set_tests_properties(live_input_timestamp_provenance PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "\"type\":\"timestamp-provenance\".*\"estimateToHardwareReset\":true.*\"hardwareWindowHostTimeNs\":1041000000.*\"hardwareToEstimateReset\":true.*\"estimateWindowHostTimeNs\":1084666667.*\"sequenceDiscontinuities\":0.*\"hostDiscontinuities\":0")
   if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     add_test(NAME ndjson_writer_closed_pipe
              COMMAND singz-analyze ndjson-writer-closed-fixture)

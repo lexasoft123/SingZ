@@ -6,18 +6,21 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace singz {
 
-// Portable description of a physical input. `uid` is the operating system's
-// stable identifier, never a transient enumeration index. Channels are always
+// Portable description of an input endpoint. `uid` identifies one endpoint in
+// the current platform inventory; callers that persist it MUST re-enumerate
+// and fall back when it disappears (Android IDs may change after reconnect or
+// reboot). It is never a transient list index. Channels are always
 // zero-based in the core; labels are display-only and may fall back to
 // "Channel N" when a driver publishes no names.
 struct AudioInputDevice {
   std::string uid;
   std::string label;
-  bool isDefault = false;
+  bool isDefault = false;  // OS default only when the platform exposes one
   double sampleRate = 0;
   uint32_t channels = 0;
   std::vector<std::string> channelLabels;
@@ -40,11 +43,45 @@ enum class AudioInputState {
 };
 
 struct AudioInputResult {
+  AudioInputResult() = default;
+
+  static AudioInputResult success(AudioInputState resultState,
+                                  double negotiatedSampleRate,
+                                  uint32_t selectedChannel) {
+    AudioInputResult result;
+    result.ok = true;
+    result.state = resultState;
+    result.sampleRate = negotiatedSampleRate;
+    result.channel = selectedChannel;
+    return result;
+  }
+
+  static AudioInputResult failure(AudioInputState resultState,
+                                  std::string message,
+                                  uint32_t selectedChannel) {
+    AudioInputResult result;
+    result.ok = false;
+    result.state = resultState;
+    result.error = std::move(message);
+    result.channel = selectedChannel;
+    return result;
+  }
+
   bool ok = false;
   AudioInputState state = AudioInputState::Error;
   std::string error;
   double sampleRate = 0;
   uint32_t channel = 0;
+  // Negotiated platform facts. Inventory values are only a request; a host
+  // bridge must expose these fields after open/start rather than repeating
+  // its discovery guesses. Platforms without a value leave it empty/zero.
+  std::string deviceUid;
+  uint32_t deviceChannels = 0;
+  std::string sampleFormat;
+  std::string sharingMode;
+  std::string performanceMode;
+  std::string inputPreset;
+  std::string timestampSource;
 };
 
 struct AudioInputStats {
@@ -52,6 +89,16 @@ struct AudioInputStats {
   uint64_t deliveredFrames = 0;
   uint64_t overruns = 0;
   uint64_t deliveryWakeups = 0;
+};
+
+// Per-block provenance, not merely a session capability. Android begins with
+// a bounded callback-entry estimate until its non-RT AAudio timestamp sampler
+// publishes a sane hardware anchor, and can fall back again if that anchor
+// becomes stale. Consumers must not combine samples across a quality change.
+enum class AudioInputTimestampQuality : uint8_t {
+  Unknown = 0,
+  Hardware = 1,
+  CallbackEstimate = 2,
 };
 
 // Callback-scoped view of one selected, contiguous mono input plane in a
@@ -64,11 +111,16 @@ struct AudioInputStats {
 struct AudioInputBlockView {
   uint64_t sequence = 0;
   // Same monotonic host clock per backend: sampleHostTimeNs comes from AUHAL's
-  // buffer timestamp on macOS or WASAPI's 100 ns QPC position on Windows;
-  // callbackHostTimeNs is captured immediately before the RT push. Other
-  // backends must document the same clock or set either value to 0.
+  // buffer timestamp on macOS, WASAPI's 100 ns QPC position on Windows, or
+  // Android's non-RT AAudio hardware frame/monotonic anchor (with a bounded
+  // callback-entry-minus-block-duration fallback until the anchor is sane);
+  // callbackHostTimeNs is
+  // captured immediately before the RT push. Other backends must document the
+  // same clock or set either value to 0.
   uint64_t sampleHostTimeNs = 0;
   uint64_t callbackHostTimeNs = 0;
+  AudioInputTimestampQuality timestampQuality =
+      AudioInputTimestampQuality::Unknown;
   double sampleRate = 0;
   const float* mono = nullptr;
   uint32_t frames = 0;
@@ -88,7 +140,9 @@ class AudioInputRing {
 
   bool valid() const;
   bool push(const float* mono, uint32_t frames, uint64_t sampleHostTimeNs,
-            uint64_t callbackHostTimeNs = 0);
+            uint64_t callbackHostTimeNs = 0,
+            AudioInputTimestampQuality timestampQuality =
+                AudioInputTimestampQuality::Unknown);
   bool peek(AudioInputBlockView& out, double sampleRate);
   void consume();
   uint64_t overruns() const;

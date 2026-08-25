@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include "audio_input_convert.h"
+#include "audio_input_timestamp.h"
 
 namespace singz {
 namespace {
@@ -327,7 +329,7 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
 
  private:
   AudioInputResult failureResult(std::string message, uint32_t channel) const {
-    return {false, AudioInputState::Error, std::move(message), 0, channel};
+    return AudioInputResult::failure(AudioInputState::Error, std::move(message), channel);
   }
 
   void publishOpen(AudioInputResult result) {
@@ -473,7 +475,8 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
                                    ? static_cast<uint64_t>(qpcFrequency.QuadPart)
                                    : 0;
     sampleRate_ = format->nSamplesPerSec;
-    publishOpen({true, AudioInputState::Starting, {}, sampleRate_, channel_});
+    publishOpen(AudioInputResult::success(
+        AudioInputState::Starting, sampleRate_, channel_));
 
     HANDLE beforeStart[] = {stopEvent_, startEvent_};
     const DWORD startWait = WaitForMultipleObjects(2, beforeStart, FALSE, INFINITE);
@@ -489,7 +492,8 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
       publishStart(failureResult(hresultMessage("WASAPI capture start", result), channel_));
       return;
     }
-    publishStart({true, AudioInputState::Running, {}, sampleRate_, channel_});
+    publishStart(AudioInputResult::success(
+        AudioInputState::Running, sampleRate_, channel_));
 
     HANDLE captureEvents[] = {stopEvent_, audioEvent_};
     bool running = true;
@@ -523,9 +527,20 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
           break;
         }
         const uint64_t callbackTime = qpcNowNs(frequency);
-        const uint64_t sampleTime = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR
-                                        ? 0
-                                        : qpcPosition100ns * 100ull;
+        const bool hardwareTimestampValid =
+            !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) &&
+            qpcPosition100ns != 0 &&
+            qpcPosition100ns <= std::numeric_limits<uint64_t>::max() / 100ull;
+        const uint64_t hardwareTime = hardwareTimestampValid
+                                          ? qpcPosition100ns * 100ull
+                                          : 0;
+        const AudioInputTimestampProjection projected = resolveAudioInputTimestamp(
+            hardwareTimestampValid, hardwareTime, callbackTime, frames,
+            sampleRate_);
+        const AudioInputTimestampQuality timestampQuality =
+            projected.usedHardwareAnchor
+                ? AudioInputTimestampQuality::Hardware
+                : AudioInputTimestampQuality::CallbackEstimate;
         bool converted = frames > 0 && frames <= mono.size();
         if (converted && (flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
           std::fill_n(mono.data(), frames, 0.0f);
@@ -540,8 +555,11 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
           // dropped capture attempt in the portable sequence contract.
           if (haveDeliveredPacket &&
               (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY))
-            (void)push_(context_, nullptr, 0, sampleTime, callbackTime);
-          (void)push_(context_, mono.data(), frames, sampleTime, callbackTime);
+            (void)push_(context_, nullptr, 0, projected.sampleHostTimeNs,
+                        callbackTime, timestampQuality);
+          (void)push_(context_, mono.data(), frames,
+                      projected.sampleHostTimeNs, callbackTime,
+                      timestampQuality);
           haveDeliveredPacket = true;
         }
         const HRESULT releaseResult = capture->ReleaseBuffer(frames);

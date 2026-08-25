@@ -36,6 +36,48 @@ object SingzCore {
     fun onChunk(done: Long, total: Long)
   }
 
+  /** Analyzed live-input evidence. Raw microphone PCM never crosses JNI. */
+  interface AudioInputListener {
+    fun onFrame(
+      startSequence: Long,
+      endSequence: Long,
+      sampleHostTimeStartNs: Long,
+      sampleHostTimeEndNs: Long,
+      callbackHostTimeNs: Long,
+      timestampQuality: Int,
+      sampleRate: Double,
+      frequency: Double,
+      clarity: Double,
+      rms: Double,
+      dbfs: Double
+    )
+  }
+
+  /** Replace the AudioManager-owned endpoint snapshot used by AAudio. */
+  external fun replaceAudioInputDevices(
+    uids: Array<String>,
+    labels: Array<String>,
+    sampleRates: DoubleArray,
+    channels: IntArray
+  )
+
+  /**
+   * [error, actualDeviceUid, sampleRate, deviceChannels, selectedChannel,
+   * sampleFormat, sharingMode, performanceMode, inputPreset, timestampSource].
+   */
+  external fun startAudioInput(
+    deviceUid: String,
+    channel: Int,
+    listener: AudioInputListener
+  ): Array<String>
+
+  /** Synchronously tears down capture; true means the native owner is gone. */
+  external fun stopAudioInput(): Boolean
+  external fun audioInputState(): String
+  external fun audioInputLastError(): String
+  /** delivered blocks, delivered frames, core-ring overruns, wakeups. */
+  external fun audioInputStats(): LongArray
+
   /** Phase-0 smoke: load a model, run one dummy-shaped inference. JSON out. */
   external fun ortProbe(modelPath: String): String
 

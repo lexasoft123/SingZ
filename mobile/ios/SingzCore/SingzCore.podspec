@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.3.1'
+  s.version      = '0.3.2'
   s.summary      = 'SingZ shared C++ core: audio input, stem split, and beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -19,7 +19,7 @@ Pod::Spec.new do |s|
   # are #included by lpc.c/bitreader.c and must stay out of source_files or
   # they compile standalone and fail; they ride in preserve_paths with the
   # headers instead.
-  s.source_files = '*.{h,mm}', 'core/*.{h,cpp}', 'flac/src/*.c'
+  s.source_files = '*.{h,mm}', 'core/*.{h,cpp,mm}', 'flac/src/*.c'
   s.preserve_paths = 'flac/**/*'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
@@ -36,7 +36,7 @@ Pod::Spec.new do |s|
     # private/ tree, in that order.
     'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core" "$(PODS_ROOT)/onnxruntime-c/Headers" "$(PODS_TARGET_SRCROOT)/flac/include" "$(PODS_TARGET_SRCROOT)/flac" "$(PODS_TARGET_SRCROOT)/flac/src/include" "$(PODS_TARGET_SRCROOT)/flac/src"'
   }
-  s.frameworks   = 'AVFoundation', 'BackgroundTasks', 'UIKit'
+  s.frameworks   = 'AudioToolbox', 'AVFoundation', 'BackgroundTasks', 'UIKit'
   s.dependency 'React-Core'
   # Same 1.23.x minor the desktop packs and the Android AAR pin (trunk's
   # closest pod to their 1.23.2 is 1.23.0 — a patch-level skew the Phase-2

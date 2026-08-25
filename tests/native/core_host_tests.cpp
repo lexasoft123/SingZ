@@ -8,6 +8,7 @@
 // Built by scripts/run-core-host-tests.sh (plain c++, no NDK), run by the
 // Android CI canary.
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -23,8 +24,13 @@
 
 #include "analysis.h"
 #include "audio_input.h"
+#include "audio_input_analysis_adapter.h"
+#include "audio_input_android_policy.h"
 #include "audio_input_backend.h"
+#include "audio_input_callback_gate.h"
 #include "audio_input_convert.h"
+#include "audio_input_ios_session.h"
+#include "audio_input_timestamp.h"
 #include "flac_io.h"
 #include "beat_this.h"
 #include "beats.h"
@@ -49,17 +55,20 @@ class FakeAudioInputBackend final : public singz::AudioInputBackend {
     channel_ = config.channel;
     push_ = push;
     context_ = context;
-    return {true, singz::AudioInputState::Starting, {},
-            fakeInvalidRate.load() ? std::numeric_limits<double>::quiet_NaN() : 48000,
-            channel_};
+    return singz::AudioInputResult::success(
+        singz::AudioInputState::Starting,
+        fakeInvalidRate.load() ? std::numeric_limits<double>::quiet_NaN() : 48000,
+        channel_);
   }
 
   singz::AudioInputResult start() override {
     if (fakeStartFails.load())
-      return {false, singz::AudioInputState::Error, "simulated start failure", 0, channel_};
+      return singz::AudioInputResult::failure(
+          singz::AudioInputState::Error, "simulated start failure", channel_);
     stop_.store(false);
     if (fakeSuppressCallbacks.load())
-      return {true, singz::AudioInputState::Running, {}, 48000, channel_};
+      return singz::AudioInputResult::success(
+          singz::AudioInputState::Running, 48000, channel_);
     producer_ = std::thread([this] {
       float samples[128];
       for (int i = 0; i < 128; ++i)
@@ -70,7 +79,9 @@ class FakeAudioInputBackend final : public singz::AudioInputBackend {
         const uint64_t callbackTime = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
-        if (push_) push_(context_, samples, 128, host, callbackTime);
+        if (push_)
+          push_(context_, samples, 128, host, callbackTime,
+                singz::AudioInputTimestampQuality::Hardware);
         host += 2666667;
         if (fakeFailureAfter.load() >= 0 && ++callbacks >= fakeFailureAfter.load()) {
           failed_.store(true);
@@ -79,7 +90,8 @@ class FakeAudioInputBackend final : public singz::AudioInputBackend {
         if (!fakeNoSleep.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     });
-    return {true, singz::AudioInputState::Running, {}, 48000, channel_};
+    return singz::AudioInputResult::success(
+        singz::AudioInputState::Running, 48000, channel_);
   }
 
   void stop() override {
@@ -175,6 +187,295 @@ static void audioInputConversionTests() {
   }
 }
 
+static void audioInputAnalysisAdapterTests() {
+  constexpr double rate = 48000;
+  constexpr uint64_t startNs = 2000000000ull;
+  auto timestamp = [](uint64_t start, uint64_t frame) {
+    return static_cast<uint64_t>(static_cast<long double>(start) +
+                                 static_cast<long double>(frame) * 1000000000.0L / rate);
+  };
+  std::vector<float> block960(960, 0.0f);
+  std::vector<singz::LiveInputAnalysisWindow> windows;
+  singz::LiveInputAnalysisAdapter adapter;
+  for (uint64_t sequence = 0; sequence < 3; ++sequence) {
+    singz::AudioInputBlockView block;
+    block.sequence = sequence;
+    block.sampleHostTimeNs = timestamp(startNs, sequence * block960.size());
+    block.callbackHostTimeNs = 3000000000ull + sequence * 20000000ull;
+    block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+    block.sampleRate = rate;
+    block.mono = block960.data();
+    block.frames = static_cast<uint32_t>(block960.size());
+    CHECK("live adapter: variable 960-frame callback accepted",
+          adapter.push(block, [&](const auto& window) { windows.push_back(window); }));
+  }
+  CHECK("live adapter: consumes every available 512-frame hop",
+        windows.size() == 2 && adapter.emittedWindows() == 2);
+  CHECK("live adapter: bounded circular backlog after multiple outputs",
+        adapter.bufferedFrames() == 1856 &&
+            adapter.bufferedFrames() <= singz::LiveInputAnalysisAdapter::analysisFrames());
+  CHECK("live adapter: first window spans the contributing callbacks",
+        windows.size() == 2 && windows[0].startSequence == 0 &&
+            windows[0].endSequence == 2);
+  CHECK("live adapter: window start/end timestamps align to sample positions",
+        windows.size() == 2 && windows[0].sampleHostTimeStartNs == startNs &&
+            windows[0].sampleHostTimeEndNs == timestamp(startNs, 2048) &&
+            windows[1].sampleHostTimeStartNs == timestamp(startNs, 512) &&
+            windows[1].sampleHostTimeEndNs == timestamp(startNs, 2560));
+  CHECK("live adapter: window timestamps are monotonic",
+        windows.size() == 2 &&
+            windows[1].sampleHostTimeStartNs > windows[0].sampleHostTimeStartNs &&
+            windows[1].sampleHostTimeEndNs > windows[0].sampleHostTimeEndNs);
+
+  std::vector<float> maximumBlock(16384, 0.0f);
+  windows.clear();
+  adapter.reset();
+  singz::AudioInputBlockView large;
+  large.sequence = 20;
+  large.sampleHostTimeNs = 5000000000ull;
+  large.callbackHostTimeNs = 5100000000ull;
+  large.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+  large.sampleRate = rate;
+  large.mono = maximumBlock.data();
+  large.frames = static_cast<uint32_t>(maximumBlock.size());
+  CHECK("live adapter: maximum callback is accepted",
+        adapter.push(large, [&](const auto& window) { windows.push_back(window); }));
+  CHECK("live adapter: one large callback emits all 29 windows",
+        windows.size() == 29 && adapter.emittedWindows() == 31);
+  CHECK("live adapter: maximum callback leaves only fixed overlap",
+        adapter.bufferedFrames() == 1536);
+
+  adapter.reset();
+  windows.clear();
+  singz::AudioInputBlockView beforeGap = large;
+  beforeGap.sequence = 40;
+  beforeGap.frames = 960;
+  beforeGap.mono = block960.data();
+  beforeGap.sampleHostTimeNs = 7000000000ull;
+  CHECK("live adapter: pre-gap partial window accepted",
+        adapter.push(beforeGap, [&](const auto& window) { windows.push_back(window); }));
+  singz::AudioInputBlockView afterGap = large;
+  afterGap.sequence = 42;
+  afterGap.frames = 2048;
+  afterGap.mono = maximumBlock.data();
+  afterGap.sampleHostTimeNs = 9000000000ull;
+  afterGap.callbackHostTimeNs = 9100000000ull;
+  CHECK("live adapter: post-gap block accepted",
+        adapter.push(afterGap, [&](const auto& window) { windows.push_back(window); }));
+  CHECK("live adapter: sequence gap resets partial audio and resampler state",
+        windows.size() == 1 && windows[0].startSequence == 42 &&
+            windows[0].endSequence == 42 && adapter.resets() == 3);
+  CHECK("live adapter: post-gap timestamps restart at the new raw anchor",
+        windows.size() == 1 && windows[0].sampleHostTimeStartNs == 9000000000ull &&
+            windows[0].sampleHostTimeEndNs == timestamp(9000000000ull, 2048));
+
+  // AAudio starts before its non-RT timestamp sampler has a hardware anchor.
+  // Partial estimate-domain audio must not leak into the first hardware
+  // analysis window; the inverse transition on a stale anchor is isolated too.
+  singz::LiveInputAnalysisAdapter qualityAdapter;
+  windows.clear();
+  for (uint64_t sequence = 0; sequence < 2; ++sequence) {
+    singz::AudioInputBlockView estimate;
+    estimate.sequence = sequence;
+    estimate.sampleHostTimeNs = timestamp(8000000000ull, sequence * block960.size());
+    estimate.callbackHostTimeNs = estimate.sampleHostTimeNs + 20000000ull;
+    estimate.timestampQuality = singz::AudioInputTimestampQuality::CallbackEstimate;
+    estimate.sampleRate = rate;
+    estimate.mono = block960.data();
+    estimate.frames = static_cast<uint32_t>(block960.size());
+    CHECK("live adapter: initial callback-estimate block accepted",
+          qualityAdapter.push(estimate,
+                              [&](const auto& window) { windows.push_back(window); }));
+  }
+  CHECK("live adapter: partial callback-estimate window remains pending",
+        windows.empty() && qualityAdapter.bufferedFrames() == 1920);
+  for (uint64_t sequence = 2; sequence < 5; ++sequence) {
+    singz::AudioInputBlockView hardware;
+    hardware.sequence = sequence;
+    hardware.sampleHostTimeNs = timestamp(9000000000ull,
+                                          (sequence - 2) * block960.size());
+    hardware.callbackHostTimeNs = hardware.sampleHostTimeNs + 20000000ull;
+    hardware.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+    hardware.sampleRate = rate;
+    hardware.mono = block960.data();
+    hardware.frames = static_cast<uint32_t>(block960.size());
+    CHECK("live adapter: hardware-anchor block accepted after fallback",
+          qualityAdapter.push(hardware,
+                              [&](const auto& window) { windows.push_back(window); }));
+  }
+  CHECK("live adapter: estimate-to-hardware transition drops mixed-domain overlap",
+        windows.size() == 2 && windows[0].startSequence == 2 &&
+            windows[0].timestampQuality == singz::AudioInputTimestampQuality::Hardware &&
+            windows[0].sampleHostTimeStartNs == 9000000000ull &&
+            qualityAdapter.resets() == 1);
+
+  windows.clear();
+  singz::AudioInputBlockView staleFallback;
+  staleFallback.sequence = 5;
+  staleFallback.sampleHostTimeNs = 11000000000ull;
+  staleFallback.callbackHostTimeNs = 11050000000ull;
+  staleFallback.timestampQuality = singz::AudioInputTimestampQuality::CallbackEstimate;
+  staleFallback.sampleRate = rate;
+  staleFallback.mono = maximumBlock.data();
+  staleFallback.frames = 2048;
+  CHECK("live adapter: stale-anchor callback fallback is accepted",
+        qualityAdapter.push(staleFallback,
+                            [&](const auto& window) { windows.push_back(window); }));
+  CHECK("live adapter: hardware-to-estimate transition also reanchors",
+        windows.size() == 1 && windows[0].startSequence == 5 &&
+            windows[0].endSequence == 5 &&
+            windows[0].timestampQuality ==
+                singz::AudioInputTimestampQuality::CallbackEstimate &&
+            windows[0].sampleHostTimeStartNs == 11000000000ull &&
+            qualityAdapter.resets() == 2);
+}
+
+static void androidAudioInputPresetPolicyTests() {
+  using singz::AndroidAudioInputPreset;
+  CHECK("Android input preset: opened voice-performance is explicitly verified",
+        singz::androidAudioInputPresetMetadata(
+            static_cast<int32_t>(AndroidAudioInputPreset::VoicePerformance),
+            true, false) == "voice-performance-verified");
+  CHECK("Android input preset: setter-only result is labeled requested/unverified",
+        singz::androidAudioInputPresetMetadata(
+            static_cast<int32_t>(AndroidAudioInputPreset::Unprocessed),
+            false, true) == "unprocessed-requested-unverified");
+  CHECK("Android input preset: API 26-27 default is labeled unverified",
+        singz::androidAudioInputPresetMetadata(
+            static_cast<int32_t>(AndroidAudioInputPreset::VoiceRecognition),
+            false, false) == "voice-recognition-default-unverified");
+  CHECK("Android input preset: vendor values remain honest instead of guessed",
+        singz::androidAudioInputPresetMetadata(12345, true, false) ==
+            "unknown-verified");
+}
+
+static void audioInputCallbackGateTests() {
+  singz::AudioInputCallbackGate gate;
+  CHECK("audio callback gate: closed gate rejects entry", !gate.enter());
+  gate.open();
+  CHECK("audio callback gate: open gate admits callback", gate.enter());
+  CHECK("audio callback gate: admitted callback is counted", gate.inFlight() == 1);
+  gate.beginClose();
+  CHECK("audio callback gate: teardown rejects a late callback", !gate.enter());
+  CHECK("audio callback gate: rejected callback leaves count unchanged", gate.inFlight() == 1);
+  gate.leave();
+  CHECK("audio callback gate: admitted callback quiesces before destruction",
+        gate.inFlight() == 0 && !gate.accepting());
+}
+
+static void audioInputTimestampTests() {
+  constexpr int32_t rate = 48000;
+  constexpr uint32_t frames = 480;
+  constexpr uint64_t callback = 2000000000ull;
+  constexpr uint64_t duration = 10000000ull;
+
+  const singz::AudioInputTimestampProjection validHardware =
+      singz::resolveAudioInputTimestamp(true, 1500000000ull, callback,
+                                        frames, rate);
+  CHECK("audio timestamp policy: valid OS timestamp remains hardware",
+        validHardware.usedHardwareAnchor &&
+            validHardware.sampleHostTimeNs == 1500000000ull);
+  const singz::AudioInputTimestampProjection invalidHardware =
+      singz::resolveAudioInputTimestamp(false, 1500000000ull, callback,
+                                        frames, rate);
+  CHECK("audio timestamp policy: invalid OS timestamp uses callback estimate",
+        !invalidHardware.usedHardwareAnchor &&
+            invalidHardware.sampleHostTimeNs == callback - duration);
+  const singz::AudioInputTimestampProjection missingHardware =
+      singz::resolveAudioInputTimestamp(true, 0, callback, frames, rate);
+  CHECK("audio timestamp policy: zero OS timestamp is never hardware",
+        !missingHardware.usedHardwareAnchor &&
+            missingHardware.sampleHostTimeNs == callback - duration);
+  CHECK("audio timestamp policy: callback estimate clamps underflow nonzero",
+        singz::audioInputCallbackEntryFallback(5, frames, rate) == 1);
+
+  singz::AudioInputTimestampProjector projector;
+
+  const auto empty = projector.project(0, frames, rate, callback);
+  CHECK("audio timestamp: no hardware anchor uses bounded callback fallback",
+        !empty.usedHardwareAnchor &&
+            empty.sampleHostTimeNs == callback - duration);
+
+  CHECK("audio timestamp: accepts a sane non-RT hardware anchor",
+        projector.publish(4800, 1000000000ll, 1010000000ull));
+  const auto aligned = projector.project(5280, frames, rate, 1020000000ull);
+  CHECK("audio timestamp: projects the block start in the AAudio frame domain",
+        aligned.usedHardwareAnchor && aligned.sampleHostTimeNs == 1010000000ull);
+  const auto next = projector.project(5760, frames, rate, 1030000000ull);
+  CHECK("audio timestamp: consecutive blocks remain monotonic and frame-aligned",
+        next.usedHardwareAnchor &&
+            next.sampleHostTimeNs == aligned.sampleHostTimeNs + duration);
+
+  const auto stale = projector.project(6240, frames, rate, 1600000000ull);
+  CHECK("audio timestamp: stale sampler anchor falls back at callback entry",
+        !stale.usedHardwareAnchor &&
+            stale.sampleHostTimeNs == 1600000000ull - duration);
+  CHECK("audio timestamp: rejects an anchor implausibly ahead of its sample clock",
+        !projector.publish(0, 3000000000ll, 1000000000ull));
+
+  projector.reset();
+  const auto reset = projector.project(0, frames, rate, callback);
+  CHECK("audio timestamp: reset disowns the prior stream frame domain",
+        !reset.usedHardwareAnchor && reset.sampleHostTimeNs == callback - duration);
+
+  singz::AudioInputTimestampQueryGate gate;
+  CHECK("audio timestamp query gate: closed gate rejects sampler", !gate.enter());
+  gate.open();
+  CHECK("audio timestamp query gate: open stream admits sampler", gate.enter());
+  CHECK("audio timestamp query gate: admitted query is counted", gate.inFlight() == 1);
+  gate.beginClose();
+  CHECK("audio timestamp query gate: teardown rejects a late timestamp query",
+        !gate.enter());
+  gate.leave();
+  CHECK("audio timestamp query gate: admitted query quiesces before stream close",
+        gate.inFlight() == 0 && !gate.accepting());
+
+  // macOS/iOS AudioUnit and Windows WASAPI all use the policy above. Replay
+  // each backend shape through the production adapter to hold the essential
+  // contract: fallback audio cannot cross into the first hardware window.
+  constexpr std::array<const char*, 3> backends = {"macOS", "iOS", "Windows"};
+  std::vector<float> partial(960, 0.0f);
+  std::vector<float> full(2048, 0.0f);
+  for (const char* backend : backends) {
+    singz::LiveInputAnalysisAdapter adapter;
+    std::vector<singz::LiveInputAnalysisWindow> windows;
+    const auto fallback = singz::resolveAudioInputTimestamp(
+        false, 0, 8020000000ull, static_cast<uint32_t>(partial.size()), rate);
+    singz::AudioInputBlockView estimate;
+    estimate.sequence = 0;
+    estimate.sampleHostTimeNs = fallback.sampleHostTimeNs;
+    estimate.callbackHostTimeNs = 8020000000ull;
+    estimate.timestampQuality = singz::AudioInputTimestampQuality::CallbackEstimate;
+    estimate.sampleRate = rate;
+    estimate.mono = partial.data();
+    estimate.frames = static_cast<uint32_t>(partial.size());
+    const bool acceptedEstimate = adapter.push(
+        estimate, [&](const auto& window) { windows.push_back(window); });
+
+    const auto hardware = singz::resolveAudioInputTimestamp(
+        true, 9000000000ull, 9043000000ull,
+        static_cast<uint32_t>(full.size()), rate);
+    singz::AudioInputBlockView anchored;
+    anchored.sequence = 1;
+    anchored.sampleHostTimeNs = hardware.sampleHostTimeNs;
+    anchored.callbackHostTimeNs = 9043000000ull;
+    anchored.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+    anchored.sampleRate = rate;
+    anchored.mono = full.data();
+    anchored.frames = static_cast<uint32_t>(full.size());
+    const bool acceptedHardware = adapter.push(
+        anchored, [&](const auto& window) { windows.push_back(window); });
+    const std::string label = std::string("audio timestamp policy: ") + backend +
+                              " fallback-to-hardware resets adapter";
+    CHECK(label.c_str(), acceptedEstimate && acceptedHardware &&
+          windows.size() == 1 && windows[0].startSequence == 1 &&
+          windows[0].sampleHostTimeStartNs == 9000000000ull &&
+          windows[0].timestampQuality ==
+              singz::AudioInputTimestampQuality::Hardware &&
+          adapter.resets() == 1);
+  }
+}
+
 // Scratch directory for the wav/flac fixtures the suites write. TMPDIR is the
 // POSIX answer; Windows sets TEMP (never TMPDIR) and has no /tmp, which made
 // every hardcoded literal here a harness failure on the first MSVC run — the
@@ -185,35 +486,143 @@ static std::string scratchDir() {
   return "/tmp";
 }
 static std::vector<float> sine(double hz, int rate, int frames, int channels) {
-  std::vector<float> out(static_cast<size_t>(frames) * channels);
+  std::vector<float> out(static_cast<size_t>(frames) *
+                         static_cast<size_t>(channels));
   for (int i = 0; i < frames; i++) {
     const float v = static_cast<float>(0.5 * std::sin(2.0 * M_PI * hz * i / rate));
-    for (int c = 0; c < channels; c++) out[static_cast<size_t>(i) * channels + c] = v;
+    for (int c = 0; c < channels; c++)
+      out[static_cast<size_t>(i) * static_cast<size_t>(channels) +
+          static_cast<size_t>(c)] = v;
   }
   return out;
 }
 
 static void audioInputTests() {
   {
+    using Route = singz::IosAudioOutputRouteKind;
+    CHECK("iOS buffer policy: built-in output requests low latency",
+          singz::shouldRequestLowLatencyIosInputBuffer(Route::BuiltIn));
+    CHECK("iOS buffer policy: wired output requests low latency",
+          singz::shouldRequestLowLatencyIosInputBuffer(Route::Wired));
+    CHECK("iOS buffer policy: USB output requests low latency",
+          singz::shouldRequestLowLatencyIosInputBuffer(Route::Usb));
+    CHECK("iOS buffer policy: Bluetooth HFP keeps route-controlled duration",
+          !singz::shouldRequestLowLatencyIosInputBuffer(Route::BluetoothHfp));
+    CHECK("iOS buffer policy: Bluetooth A2DP keeps route-controlled duration",
+          !singz::shouldRequestLowLatencyIosInputBuffer(Route::BluetoothA2dp));
+    CHECK("iOS buffer policy: Bluetooth LE keeps route-controlled duration",
+          !singz::shouldRequestLowLatencyIosInputBuffer(Route::BluetoothLe));
+    CHECK("iOS buffer policy: AirPlay keeps route-controlled duration",
+          !singz::shouldRequestLowLatencyIosInputBuffer(Route::AirPlay));
+    CHECK("iOS buffer policy: CarPlay keeps route-controlled duration",
+          !singz::shouldRequestLowLatencyIosInputBuffer(Route::CarAudio));
+  }
+  {
+    using Status = singz::IosAudioInputSavedRouteStatus;
+    CHECK("iOS preference cleanup: current saved route is present",
+          singz::classifyIosAudioInputSavedRoute(true, true, false) ==
+              Status::Present);
+    CHECK("iOS preference cleanup: available saved route is present",
+          singz::classifyIosAudioInputSavedRoute(false, true, true) ==
+              Status::Present);
+    CHECK("iOS preference cleanup: known inventory proves unplugged route",
+          singz::classifyIosAudioInputSavedRoute(false, true, false) ==
+              Status::Gone);
+    CHECK("iOS preference cleanup: unavailable inventory is inconclusive",
+          singz::classifyIosAudioInputSavedRoute(false, false, false) ==
+              Status::Unknown);
+  }
+  {
+    singz::IosAudioInputSessionSnapshot state;
+    std::string error;
+    CHECK("iOS audio session policy: undetermined permission is not ready",
+          !singz::validateIosAudioInputSession(state, "ios:mic", 0, error) &&
+              error.find("permission") != std::string::npos);
+    state.permission = singz::IosAudioInputPermission::Granted;
+    state.leaseActive = true;
+    state.leaseToken = 9;
+    state.routeGeneration = 4;
+    state.leaseRouteGeneration = 4;
+    state.leaseDeviceUid = "ios:mic";
+    state.leaseMinimumChannels = 3;
+    state.recordCapable = true;
+    state.activeInputRoute = true;
+    state.currentDeviceUid = "ios:mic";
+    state.sampleRate = 48000;
+    state.channels = 4;
+    CHECK("iOS audio session policy: prepared selected lane is ready",
+          singz::validateIosAudioInputSession(state, "ios:mic", 2, error));
+    state.routeGeneration++;
+    CHECK("iOS audio session policy: route generation invalidates lease",
+          !singz::validateIosAudioInputSession(state, "ios:mic", 2, error) &&
+              error.find("route changed") != std::string::npos);
+    state.routeGeneration = state.leaseRouteGeneration;
+    state.sampleRate = 0;
+    CHECK("iOS audio session policy: inactive/unknown rate is rejected",
+          !singz::validateIosAudioInputSession(state, "ios:mic", 2, error) &&
+              error.find("sample rate") != std::string::npos);
+    state.sampleRate = 48000;
+    state.currentDeviceUid = "ios:other";
+    CHECK("iOS audio session policy: selected device must be active",
+          !singz::validateIosAudioInputSession(state, "ios:mic", 2, error));
+  }
+  {
+    singz::IosAudioInputLeaseRegistry leases;
+    std::string error;
+    uint64_t first = 0;
+    uint64_t second = 0;
+    CHECK("iOS audio lease: first route policy is committed atomically",
+          leases.acquire(10, "ios:usb", 4, first, error) && first != 0);
+    const singz::IosAudioInputLeaseState firstState = leases.snapshot();
+    CHECK("iOS audio lease: snapshot contains one coherent policy",
+          firstState.token == first && firstState.routeGeneration == 10 &&
+              firstState.deviceUid == "ios:usb" &&
+              firstState.minimumChannels == 4);
+    CHECK("iOS audio lease: overlapping acquisition is rejected",
+          !leases.acquire(11, "ios:other", 1, second, error) &&
+              leases.snapshot().token == first);
+    leases.release(first);
+    CHECK("iOS audio lease: a new generation can follow release",
+          leases.acquire(12, "ios:new", 2, second, error) && second != first);
+    leases.release(first);
+    const singz::IosAudioInputLeaseState afterOldRelease = leases.snapshot();
+    CHECK("iOS audio lease: delayed old release cannot clear a newer lease",
+          afterOldRelease.token == second &&
+              afterOldRelease.routeGeneration == 12 &&
+              afterOldRelease.deviceUid == "ios:new" &&
+              afterOldRelease.minimumChannels == 2);
+    leases.release(second);
+    CHECK("iOS audio lease: matching release clears the complete policy",
+          leases.snapshot().token == 0 &&
+              leases.snapshot().deviceUid.empty());
+  }
+  {
     singz::AudioInputRing ring(2, 4);
     CHECK("audio input ring: valid preallocated shape", ring.valid() && ring.capacity() == 2);
     const float a[4] = {1, 2, 3, 4};
     const float b[2] = {5, 6};
     const float c[3] = {7, 8, 9};
-    CHECK("audio input ring: first block accepted", ring.push(a, 4, 100));
-    CHECK("audio input ring: second block accepted", ring.push(b, 2, 200));
+    CHECK("audio input ring: first block accepted",
+          ring.push(a, 4, 100, 110,
+                    singz::AudioInputTimestampQuality::Hardware));
+    CHECK("audio input ring: second block accepted",
+          ring.push(b, 2, 200, 210,
+                    singz::AudioInputTimestampQuality::CallbackEstimate));
     CHECK("audio input ring: full ring drops newest", !ring.push(c, 3, 300));
     CHECK("audio input ring: overflow is counted", ring.overruns() == 1);
     singz::AudioInputBlockView out;
     CHECK("audio input ring: first block pops",
           ring.peek(out, 48000) && out.sequence == 0 && out.sampleHostTimeNs == 100 &&
               out.sampleRate == 48000 && out.frames == 4 &&
+              out.timestampQuality == singz::AudioInputTimestampQuality::Hardware &&
               std::equal(out.mono, out.mono + out.frames, a));
     const float* firstSlot = out.mono;
     ring.consume();
     CHECK("audio input ring: wrap slot accepts after pop", ring.push(c, 3, 300));
     CHECK("audio input ring: second block keeps order",
           ring.peek(out, 48000) && out.sequence == 1 && out.sampleHostTimeNs == 200 &&
+              out.timestampQuality ==
+                  singz::AudioInputTimestampQuality::CallbackEstimate &&
               out.frames == 2 && std::equal(out.mono, out.mono + out.frames, b));
     ring.consume();
     CHECK("audio input ring: wrapped block exposes dropped-attempt gap",
@@ -333,7 +742,8 @@ static void audioInputTests() {
                   std::chrono::steady_clock::now().time_since_epoch()).count());
           rawBlocksUnbatched = rawBlocksUnbatched && block.frames == 128;
           if (block.callbackHostTimeNs && now >= block.callbackHostTimeNs)
-            handoffMs.push_back((now - block.callbackHostTimeNs) / 1000000.0);
+            handoffMs.push_back(
+                static_cast<double>(now - block.callbackHostTimeNs) / 1000000.0);
           if (handoffMs.size() >= 64) latencyInput.stop();
         });
     CHECK("audio input latency: raw hardware blocks start without analysis batching",
@@ -344,7 +754,8 @@ static void audioInputTests() {
     const double fakeP95 = handoffMs.empty()
                                ? 999
                                : handoffMs[static_cast<size_t>(
-                                     std::floor((handoffMs.size() - 1) * 0.95))];
+                                     std::floor(static_cast<double>(handoffMs.size() - 1) *
+                                                0.95))];
     CHECK("audio input latency: polling handoff remains bounded below 10 ms",
           fakeP95 < 10.0);
 
@@ -523,7 +934,8 @@ static void audioInputTests() {
       aliasSquares += static_cast<double>(downsampledAlias[i]) *
                       downsampledAlias[i];
     const double aliasRms = std::sqrt(
-        aliasSquares / std::max<size_t>(1, downsampledAlias.size() - settled));
+        aliasSquares /
+        static_cast<double>(std::max<size_t>(1, downsampledAlias.size() - settled)));
     CHECK("live input analysis: 192k tap suppresses ultrasonic alias",
           aliasRms < 0.001);
   }
@@ -627,7 +1039,8 @@ static void resamplerTests() {
       const double f = hz < dstRate / 2.0 ? hz : std::fabs(hz - dstRate);
       double ss = 0, sc = 0, cc = 0, ys = 0, yc = 0;
       for (int i = head; i < n - tail; i++) {
-        const double ph = 2.0 * M_PI * f * i / dstRate, sn = std::sin(ph), cs = std::cos(ph), y = out[i];
+        const double ph = 2.0 * M_PI * f * i / dstRate, sn = std::sin(ph), cs = std::cos(ph),
+                     y = out[static_cast<size_t>(i)];
         ss += sn * sn; sc += sn * cs; cc += cs * cs; ys += y * sn; yc += y * cs;
       }
       const double det = ss * cc - sc * sc, A = (ys * cc - yc * sc) / det, B = (yc * ss - ys * sc) / det;
@@ -782,7 +1195,7 @@ static void melodyTests() {
   auto median = [&](double t0, double t1) {
     std::vector<double> v;
     for (size_t i = 0; i < t.f0.size(); i++) {
-      const double tt = i * t.hopSec;
+      const double tt = static_cast<double>(i) * t.hopSec;
       if (tt >= t0 && tt < t1 && t.f0[i] > 0) v.push_back(t.f0[i]);
     }
     if (v.empty()) return 0.0;
@@ -792,7 +1205,7 @@ static void melodyTests() {
   auto voicedFrac = [&](double t0, double t1) {
     int n = 0, v = 0;
     for (size_t i = 0; i < t.f0.size(); i++) {
-      const double tt = i * t.hopSec;
+      const double tt = static_cast<double>(i) * t.hopSec;
       if (tt >= t0 && tt < t1) {
         n++;
         if (t.f0[i] > 0) v++;
@@ -1189,6 +1602,10 @@ static void flacTests() {
 int main() {
   audioInputConversionTests();
   audioInputTests();
+  audioInputAnalysisAdapterTests();
+  androidAudioInputPresetPolicyTests();
+  audioInputCallbackGateTests();
+  audioInputTimestampTests();
   resamplerTests();
   wavTests();
   flacTests();
