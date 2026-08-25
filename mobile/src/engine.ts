@@ -3,7 +3,8 @@ import {
   decodeAudioData,
   type AudioBuffer,
   type AudioBufferSourceNode,
-  type GainNode
+  type GainNode,
+  type OscillatorNode
 } from 'react-native-audio-api'
 import { accentIndex, barLengthAt, beatIndexAtOrAfter, beatTime } from './beat'
 import { describeOutput } from './latency'
@@ -11,6 +12,7 @@ import { log } from './log'
 // fmtTime here is the song-position one (M:SS); log.ts exports a same-named
 // wall-clock formatter, which is not what a play/pause line wants.
 import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
+import { planTrainingCues, type VocalTrainingCue } from './training/cues'
 
 /**
  * Port of the desktop MultitrackEngine (src/renderer/src/audio/engine.ts) onto
@@ -67,6 +69,11 @@ interface StretchHost {
 export class MultitrackEngine {
   private ctx = new AudioContext()
   private master = this.ctx.createGain()
+  /** Cues bypass the song master/stretch chain: transposing or slowing a song
+   * must never change the reference pitch the exercise core requested. */
+  private trainingGain = this.ctx.createGain()
+  private trainingNodes: { oscillator: OscillatorNode; gain: GainNode }[] = []
+  private trainingCueGeneration = 0
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
   private generation = 0
@@ -122,6 +129,66 @@ export class MultitrackEngine {
       )
     } else {
       this.master.connect(this.ctx.destination)
+    }
+    this.trainingGain.gain.value = 0.18
+    this.trainingGain.connect(this.ctx.destination)
+  }
+
+  get trainingCurrentTime(): number {
+    return this.ctx.currentTime
+  }
+
+  /** Route latency used when mapping recorder timestamps to what was heard. */
+  get outputDisplayLatency(): number {
+    return this.displayLag
+  }
+
+  setTrainingCueMuted(muted: boolean): void {
+    this.trainingGain.gain.value = muted ? 0 : 0.18
+  }
+
+  /** Schedule a compact sine reference phrase on the engine clock. Song
+   * playback is paused first, making cue and karaoke ownership exclusive. */
+  async playTrainingCues(cues: readonly VocalTrainingCue[]): Promise<{ ok: true; endsAt: number } | { ok: false; error: string }> {
+    try {
+      this.pause()
+      this.cancelTrainingCues()
+      const generation = ++this.trainingCueGeneration
+      if (this.ctx.state === 'suspended') await this.ctx.resume()
+      if (generation !== this.trainingCueGeneration)
+        return { ok: false, error: 'Training cue was cancelled.' }
+      const plan = planTrainingCues(cues, this.ctx.currentTime + START_DELAY)
+      for (const voice of plan.voices) {
+          if (generation !== this.trainingCueGeneration) return { ok: false, error: 'Training cue was cancelled.' }
+          const oscillator = this.ctx.createOscillator()
+          const gain = this.ctx.createGain()
+          const { start, end } = voice
+          oscillator.type = 'sine'
+          oscillator.frequency.value = 440 * 2 ** ((voice.midi - 69) / 12)
+          gain.gain.setValueAtTime(0.0001, start)
+          gain.gain.exponentialRampToValueAtTime(1, start + 0.015)
+          gain.gain.setValueAtTime(1, end - 0.06)
+          gain.gain.exponentialRampToValueAtTime(0.0001, end)
+          oscillator.connect(gain)
+          gain.connect(this.trainingGain)
+          oscillator.start(start)
+          oscillator.stop(end + 0.01)
+          this.trainingNodes.push({ oscillator, gain })
+      }
+      return { ok: true, endsAt: plan.endsAt }
+    } catch (error) {
+      this.cancelTrainingCues()
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  cancelTrainingCues(): void {
+    this.trainingCueGeneration++
+    const now = this.ctx.currentTime
+    for (const { oscillator, gain } of this.trainingNodes.splice(0)) {
+      try { oscillator.stop(now) } catch { /* already ended */ }
+      try { oscillator.disconnect() } catch { /* already disconnected */ }
+      try { gain.disconnect() } catch { /* already disconnected */ }
     }
   }
 
@@ -989,6 +1056,7 @@ export class MultitrackEngine {
    * per-process-limit jetsam kill after a few songs.
    */
   unload(): void {
+    this.cancelTrainingCues()
     // Leaving a song unloads then releases, and the teardown path can reach
     // here twice; the second call has nothing to free and saying so twice
     // just spends lines of a 400-line log.

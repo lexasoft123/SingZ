@@ -17,7 +17,11 @@ jest.mock('react-native-audio-api', () => ({
     resetLockScreenInfo: jest.fn(),
     enableRemoteCommand: jest.fn(),
     observeAudioInterruptions: jest.fn(),
+    addSystemEventListener: jest.fn(() => ({ remove: jest.fn() })),
+    checkRecordingPermissions: jest.fn(() => Promise.resolve('Granted')),
+    requestRecordingPermissions: jest.fn(() => Promise.resolve('Granted')),
   },
+  AudioRecorder: jest.fn(),
   AudioContext: jest.fn(() => ({
     createGain: jest.fn(),
     createBufferSource: jest.fn(),
@@ -46,12 +50,19 @@ jest.mock('react-native-audio-api', () => ({
 jest.mock('./src/engine', () => ({
   MultitrackEngine: jest.fn(() => ({
     duration: 0,
+    sampleRate: 48000,
+    trainingCurrentTime: 0,
+    outputDisplayLatency: 0,
     position: 0,
     playing: false,
     load: jest.fn(() => Promise.resolve()),
     unload: jest.fn(() => Promise.resolve()),
     seek: jest.fn(),
     stop: jest.fn(),
+    pause: jest.fn(),
+    cancelTrainingCues: jest.fn(),
+    setTrainingCueMuted: jest.fn(),
+    playTrainingCues: jest.fn(() => Promise.resolve({ ok: true, endsAt: 0 })),
     setRegion: jest.fn(),
   })),
 }));

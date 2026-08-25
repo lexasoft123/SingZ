@@ -4,8 +4,16 @@ import {
   recordTrainingResult,
   startTrainingSession
 } from '../../shared/training-session'
-import { diatonicTriads, effectiveTrainingKey, spellPitchClass } from '../../shared/music-theory'
-import type { KeyInfo } from '../../shared/types'
+import { diatonicTriads, spellPitchClass } from '../../shared/music-theory'
+import {
+  effectiveSongPreparationKey,
+  songPreparationMatches,
+  songPreparationSetup,
+  trainingLengthOptionLabel,
+  trainingLengthOptions,
+  trainingSetupRequirements,
+  type SongPreparationChoice
+} from '../../shared/training-preparation'
 import type {
   TrainingAttemptInput,
   TrainingAttemptResult,
@@ -24,7 +32,7 @@ import type { TrainingTargetWindow } from '../../shared/training-scoring'
 export type AppSection = 'songs' | 'training'
 export type DesktopTrainingRoute = 'home' | 'setup' | 'session' | 'summary' | 'progress'
 export type DesktopExercisePhase = 'ready' | 'cue' | 'respond' | 'feedback'
-export type SongPreparationChoice = 'notes' | 'intervals' | 'chords' | 'mixed'
+export type { SongPreparationChoice, TrainingSetupRequirements } from '../../shared/training-preparation'
 
 export function stopTrainingForSongLoad(runtime: {
   pauseSong: () => void
@@ -331,86 +339,13 @@ export function trainingScoringRange(
 }
 
 /** KeyInfo has no confidence field in existing projects; a valid present key is accepted. */
-export function effectiveSongPreparationKey(
-  keyInfo: Pick<KeyInfo, 'pc' | 'minor' | 'detVersion'> | null | undefined,
-  transpose: number,
-  currentDetectVersion: number
-): ReturnType<typeof effectiveTrainingKey> | null {
-  if (!keyInfo || keyInfo.detVersion < currentDetectVersion) return null
-  try {
-    return effectiveTrainingKey(keyInfo, transpose)
-  } catch {
-    return null
-  }
-}
-
-export function songPreparationSetup(
-  setup: DesktopTrainingSetup,
-  key: { readonly tonicPc: number; readonly mode: 'major' | 'minor' },
-  choice: SongPreparationChoice
-): DesktopTrainingSetup {
-  const recipes: Record<SongPreparationChoice, { exercise: TrainingExerciseSelection; mixedKinds?: readonly TrainingExerciseKind[] }> = {
-    notes: { exercise: 'scale-degree' },
-    intervals: { exercise: 'interval' },
-    chords: { exercise: 'mixed', mixedKinds: ['chord-tone', 'arpeggio'] },
-    mixed: { exercise: 'mixed', mixedKinds: ['scale-degree', 'interval', 'chord-tone', 'arpeggio'] }
-  }
-  const recipe = recipes[choice]
-  return {
-    ...setup,
-    tonicPc: key.tonicPc,
-    keyMode: key.mode,
-    exercise: recipe.exercise,
-    mixedKinds: recipe.mixedKinds,
-    intervalSizes: [2, 3, 4, 5, 6, 7, 8],
-    length: choice === 'mixed' ? 8 : 6
-  }
-}
-
-export interface TrainingSetupRequirements {
-  readonly intervalsRequired: boolean
-  readonly chordsRequired: boolean
-  readonly directionUsed: boolean
-}
-
-const ALL_TRAINING_EXERCISE_KINDS: readonly TrainingExerciseKind[] = [
-  'note',
-  'scale-degree',
-  'interval',
-  'chord-tone',
-  'arpeggio'
-]
-
-/** Setup controls follow the concrete prompt kinds included by the recipe. */
-export function trainingSetupRequirements(
-  setup: Pick<DesktopTrainingSetup, 'exercise' | 'mixedKinds'>
-): TrainingSetupRequirements {
-  const kinds = setup.exercise === 'mixed'
-    ? (setup.mixedKinds ?? ALL_TRAINING_EXERCISE_KINDS)
-    : [setup.exercise]
-  return {
-    intervalsRequired: kinds.includes('interval'),
-    chordsRequired: kinds.includes('chord-tone') || kinds.includes('arpeggio'),
-    directionUsed: kinds.includes('interval') || kinds.includes('arpeggio')
-  }
-}
-
-const STANDARD_TRAINING_LENGTHS = [5, 10, 15] as const
-
-/** Keep recipe-sized sessions selectable without removing the standard choices. */
-export function trainingLengthOptions(currentLength: number): number[] {
-  return [...new Set<number>([...STANDARD_TRAINING_LENGTHS, currentLength])].sort((a, b) => a - b)
-}
-
-export function trainingLengthOptionLabel(length: number): string {
-  return `${length} ${length === 1 ? 'exercise' : 'exercises'}`
-}
-
-export function songPreparationMatches(
-  preparation: Pick<SongPreparationContext, 'sourceSongId'> | null,
-  currentSongId: string | null
-): boolean {
-  return Boolean(preparation && currentSongId && preparation.sourceSongId === currentSongId)
+export {
+  effectiveSongPreparationKey,
+  songPreparationMatches,
+  songPreparationSetup,
+  trainingLengthOptionLabel,
+  trainingLengthOptions,
+  trainingSetupRequirements
 }
 
 export interface DesktopTrainingSummary {

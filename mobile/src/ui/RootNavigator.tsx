@@ -3,6 +3,8 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import type { MultitrackEngine } from '../engine'
+import type { RouteLatency } from '../latency'
+import type { ProjectDoc } from '../model'
 import { releaseProject, type LoadedProject } from '../projects'
 import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
 import CatalogScreen from './CatalogScreen'
@@ -37,18 +39,42 @@ const theme = {
  * route and releases the engine before releasing the buffers.
  */
 export function PlayerRoute({
+  active = true,
   engine,
   project,
+  route = null,
+  trimMs = 0,
+  onTrim = () => undefined,
+  onTrainingFacts,
   onBack,
   onClosed
 }: {
+  active?: boolean
   engine: MultitrackEngine
   project: LoadedProject
+  route?: RouteLatency | null
+  trimMs?: number
+  onTrim?: (ms: number) => void
+  onTrainingFacts?: (facts: {
+    keyInfo: NonNullable<NonNullable<ProjectDoc['settings']>['key']> | null
+    transpose: number
+  }) => void
   onBack: () => void
   onClosed: (project: LoadedProject) => void
 }): React.JSX.Element {
   useEffect(() => () => onClosed(project), [onClosed, project])
-  return <PlayerScreen engine={engine} project={project} onBack={onBack} />
+  return (
+    <PlayerScreen
+      active={active}
+      engine={engine}
+      project={project}
+      route={route}
+      trimMs={trimMs}
+      onTrim={onTrim}
+      onTrainingFacts={onTrainingFacts}
+      onBack={onBack}
+    />
+  )
 }
 
 export function closePlayerProject(engine: MultitrackEngine, project: LoadedProject): void {
@@ -94,9 +120,26 @@ function AddSongRoute({
 }
 
 export default function RootNavigator({
-  engine
+  active = true,
+  engine,
+  route,
+  trimMs,
+  onTrim,
+  onProjectLoaded,
+  onProjectClosed,
+  onTrainingFacts
 }: {
+  active?: boolean
   engine: MultitrackEngine
+  route: RouteLatency | null
+  trimMs: number
+  onTrim: (ms: number) => void
+  onProjectLoaded: (project: LoadedProject) => void
+  onProjectClosed: () => void
+  onTrainingFacts: (facts: {
+    keyInfo: NonNullable<NonNullable<ProjectDoc['settings']>['key']> | null
+    transpose: number
+  }) => void
 }): React.JSX.Element {
   const [project, setProject] = useState<LoadedProject | null>(null)
   const [addSong, setAddSong] = useState<AddSongRequest | null>(null)
@@ -105,8 +148,9 @@ export default function RootNavigator({
     (closing: LoadedProject): void => {
       closePlayerProject(engine, closing)
       setProject((current) => (current === closing ? null : current))
+      onProjectClosed()
     },
-    [engine]
+    [engine, onProjectClosed]
   )
 
   const finishAddSong = useCallback((request: AddSongRequest, addedDir: string | null): void => {
@@ -127,6 +171,7 @@ export default function RootNavigator({
           <Stack.Screen name="Catalog">
             {({ navigation }) => (
               <CatalogScreen
+                active={active}
                 sampleRate={engine.sampleRate}
                 onOpenLog={() => navigation.navigate('Log')}
                 onOpenAddSong={request => {
@@ -136,6 +181,7 @@ export default function RootNavigator({
                 onCloseAddSong={() => navigation.goBack()}
                 onLoaded={loaded => {
                   setProject(loaded)
+                  onProjectLoaded(loaded)
                   navigation.navigate('Player')
                 }}
               />
@@ -153,8 +199,13 @@ export default function RootNavigator({
                 <View style={styles.root} />
               ) : (
                 <PlayerRoute
+                  active={active}
                   engine={engine}
                   project={project}
+                  route={route}
+                  trimMs={trimMs}
+                  onTrim={onTrim}
+                  onTrainingFacts={onTrainingFacts}
                   onBack={() => navigation.goBack()}
                   onClosed={closeProject}
                 />
