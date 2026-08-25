@@ -6,6 +6,7 @@
 //   singz-analyze input-devices
 //   singz-analyze live-input --device-uid <uid> --channel <zero-based>
 //                            [--frames <analysis-window>] [--latency]
+//                            [--duration <seconds>]
 //   singz-analyze melody --f32 <mono float32 file> --sr <rate> [--raw]
 //   singz-analyze melody --wav <file> [--raw]        (any channel count; folded)
 //   singz-analyze key --inst <a.wav> [--inst <b.wav> ...] [--bass <c.wav>]
@@ -25,6 +26,7 @@
 // values, not text.
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -44,6 +46,11 @@
 #include <mach/mach_time.h>
 #include <poll.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 #include "../audio_input.h"
@@ -195,8 +202,9 @@ static bool unsignedArgument(const char* text, uint32_t& value) {
 static volatile std::sig_atomic_t liveInputStop = 0;
 static void stopLiveInput(int) { liveInputStop = 1; }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
 static uint64_t monotonicHostTimeNs() {
+#if defined(__APPLE__)
   static const double nsPerTick = [] {
     mach_timebase_info_data_t timebase{};
     return mach_timebase_info(&timebase) == KERN_SUCCESS && timebase.denom
@@ -204,6 +212,16 @@ static uint64_t monotonicHostTimeNs() {
                : 0.0;
   }();
   return nsPerTick > 0 ? static_cast<uint64_t>(mach_absolute_time() * nsPerTick) : 0;
+#else
+  LARGE_INTEGER frequency{}, now{};
+  if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
+      !QueryPerformanceCounter(&now))
+    return 0;
+  const uint64_t ticks = static_cast<uint64_t>(now.QuadPart);
+  const uint64_t rate = static_cast<uint64_t>(frequency.QuadPart);
+  return ticks / rate * 1000000000ull +
+         ticks % rate * 1000000000ull / rate;
+#endif
 }
 #endif
 
@@ -214,6 +232,19 @@ class NdjsonWriter {
     std::signal(SIGPIPE, SIG_IGN);
     const int flags = fcntl(STDOUT_FILENO, F_GETFL, 0);
     if (flags >= 0) fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK);
+#elif defined(_WIN32)
+    outputHandle_ = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!outputHandle_ || outputHandle_ == INVALID_HANDLE_VALUE) {
+      fail(3);
+    } else if (GetFileType(outputHandle_) == FILE_TYPE_PIPE) {
+      DWORD mode = PIPE_NOWAIT;
+      if (!SetNamedPipeHandleState(outputHandle_, &mode, nullptr, nullptr)) {
+        // Never fall through to a potentially blocking WriteFile when the
+        // inherited pipe cannot be put in bounded nonblocking mode.
+        outputHandle_ = INVALID_HANDLE_VALUE;
+        fail(3);
+      }
+    }
 #endif
     thread_ = std::thread([this] { run(); });
   }
@@ -224,7 +255,8 @@ class NdjsonWriter {
     line.push_back('\n');
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (closing_ || queue_.size() >= kMaximumLines) {
+      if (stopRequested_.load(std::memory_order_acquire) || closing_ ||
+          queue_.size() >= kMaximumLines) {
         fail(2);
         return false;
       }
@@ -318,6 +350,44 @@ class NdjsonWriter {
       return false;
     }
     return true;
+#elif defined(_WIN32)
+    if (!outputHandle_ || outputHandle_ == INVALID_HANDLE_VALUE) {
+      fail(3);
+      return false;
+    }
+    size_t offset = 0;
+    const int64_t lineDeadline = steadyNanos() + kWriteDeadlineNs;
+    while (offset < line.size()) {
+      const int64_t closeDeadline = closeDeadlineNs_.load(std::memory_order_acquire);
+      const int64_t deadline = closeDeadline > 0
+                                   ? std::min(lineDeadline, closeDeadline)
+                                   : lineDeadline;
+      if (steadyNanos() >= deadline) {
+        fail(2);
+        return false;
+      }
+      DWORD written = 0;
+      const DWORD wanted = static_cast<DWORD>(
+          std::min<size_t>(line.size() - offset, std::numeric_limits<DWORD>::max()));
+      if (WriteFile(outputHandle_, line.data() + offset, wanted, &written, nullptr)) {
+        if (written > 0) {
+          offset += written;
+          continue;
+        }
+      } else {
+        const DWORD error = GetLastError();
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
+          fail(1);
+          return false;
+        }
+        if (error != ERROR_NO_DATA && error != ERROR_PIPE_BUSY) {
+          fail(3);
+          return false;
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return true;
 #else
     if (std::fwrite(line.data(), 1, line.size(), stdout) != line.size() ||
         std::fflush(stdout) != 0) {
@@ -353,6 +423,9 @@ class NdjsonWriter {
   std::atomic<int> failure_{0};
   std::atomic<int64_t> closeDeadlineNs_{0};
   std::thread thread_;
+#if defined(_WIN32)
+  HANDLE outputHandle_ = INVALID_HANDLE_VALUE;
+#endif
 };
 
 template <size_t N, typename... Args>
@@ -560,7 +633,8 @@ static void printLiveInputUsage(FILE* stream) {
   std::fprintf(
       stream,
       "usage: singz-analyze live-input --device-uid <uid> --channel "
-      "<zero-based> [--frames <128..8192>] [--latency]\n"
+      "<zero-based> [--frames <128..8192>] [--latency] "
+      "[--duration <seconds>]\n"
       "       The default analysis window is derived after device start to "
       "cover 70 Hz; explicit windows that cannot cover 70 Hz are rejected.\n"
       "       Device audio above 48 kHz uses an anti-aliased 48 kHz analyzer "
@@ -717,8 +791,9 @@ static int liveInputAnalysisThroughputFixture() {
   return 0;
 }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
 static int ndjsonWriterFailureFixture(bool closedPipe) {
+#if defined(__APPLE__)
   int descriptors[2] = {-1, -1};
   if (pipe(descriptors) != 0) return 2;
   if (closedPipe) {
@@ -738,14 +813,63 @@ static int ndjsonWriterFailureFixture(bool closedPipe) {
   writer.close({"{\"version\":1,\"type\":\"fixture\"}"});
   const auto elapsed = std::chrono::steady_clock::now() - began;
   if (descriptors[0] >= 0) close(descriptors[0]);
+#else
+  HANDLE readPipe = nullptr, writePipe = nullptr;
+  if (!CreatePipe(&readPipe, &writePipe, nullptr, 4096)) return 2;
+  DWORD mode = PIPE_NOWAIT;
+  if (!SetNamedPipeHandleState(writePipe, &mode, nullptr, nullptr)) {
+    CloseHandle(readPipe);
+    CloseHandle(writePipe);
+    return 2;
+  }
+  const HANDLE originalOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (!SetStdHandle(STD_OUTPUT_HANDLE, writePipe)) {
+    CloseHandle(readPipe);
+    CloseHandle(writePipe);
+    return 2;
+  }
+  if (closedPipe) {
+    CloseHandle(readPipe);
+    readPipe = nullptr;
+  } else {
+    const char fill[4096] = {};
+    DWORD written = 0;
+    SetLastError(ERROR_SUCCESS);
+    while (WriteFile(writePipe, fill, sizeof(fill), &written, nullptr) && written > 0) {}
+    const DWORD fillError = written == 0 ? ERROR_NO_DATA : GetLastError();
+    if (fillError != ERROR_NO_DATA && fillError != ERROR_PIPE_BUSY) {
+      SetStdHandle(STD_OUTPUT_HANDLE, originalOutput);
+      CloseHandle(readPipe);
+      CloseHandle(writePipe);
+      return 2;
+    }
+  }
+  NdjsonWriter writer;
+  const auto began = std::chrono::steady_clock::now();
+  writer.close({"{\"version\":1,\"type\":\"fixture\"}"});
+  const auto elapsed = std::chrono::steady_clock::now() - began;
+  SetStdHandle(STD_OUTPUT_HANDLE, originalOutput);
+  if (readPipe) CloseHandle(readPipe);
+  CloseHandle(writePipe);
+#endif
   const int expected = closedPipe ? 1 : 2;
+  const bool matchedFailure =
+      (expected == 1 && std::strstr(writer.failureMessage(), "closed")) ||
+      (expected == 2 && std::strstr(writer.failureMessage(), "slow"))
+#if defined(_WIN32)
+      // A closed anonymous pipe in PIPE_NOWAIT mode may report zero-byte
+      // progress rather than ERROR_BROKEN_PIPE. It is still bounded by the
+      // same deadline; accept the resulting slow-consumer classification.
+      || (closedPipe && std::strstr(writer.failureMessage(), "slow"))
+#endif
+      ;
   return writer.stopRequested() &&
                  std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 1500 &&
-                 ((expected == 1 && std::strstr(writer.failureMessage(), "closed")) ||
-                  (expected == 2 && std::strstr(writer.failureMessage(), "slow")))
+                 matchedFailure
              ? 0
              : 1;
 }
+#endif
 
 static int liveInputDiscontinuityFixture() {
   LiveContinuityState state;
@@ -770,7 +894,6 @@ static int liveInputDiscontinuityFixture() {
   return 0;
 }
 #endif
-#endif
 
 static int liveInputCommand(int argc, char** argv) {
   singz::AudioInputConfig config;
@@ -779,13 +902,15 @@ static int liveInputCommand(int argc, char** argv) {
   bool haveUid = false, haveChannel = false;
   bool haveAnalysisFrames = false;
   bool measureLatency = false;
+  double durationSeconds = 0;
   for (int i = 2; i < argc; ++i) {
     const std::string argument = argv[i];
     if (argument == "--help") {
       printLiveInputUsage(stdout);
       return 0;
     }
-    if ((argument == "--device-uid" || argument == "--channel" || argument == "--frames") &&
+    if ((argument == "--device-uid" || argument == "--channel" ||
+         argument == "--frames" || argument == "--duration") &&
         i + 1 >= argc) {
       std::fprintf(stderr, "live-input: %s needs a value\n", argument.c_str());
       return 2;
@@ -809,6 +934,15 @@ static int liveInputCommand(int argc, char** argv) {
       haveAnalysisFrames = true;
     } else if (argument == "--latency") {
       measureLatency = true;
+    } else if (argument == "--duration") {
+      char* end = nullptr;
+      durationSeconds = std::strtod(argv[++i], &end);
+      if (!end || *end || !std::isfinite(durationSeconds) ||
+          durationSeconds <= 0 || durationSeconds > 3600) {
+        std::fprintf(stderr,
+                     "live-input: --duration must be between 0 and 3600 seconds\n");
+        return 2;
+      }
     } else {
       std::fprintf(stderr, "live-input: unknown argument %s\n", argument.c_str());
       return 2;
@@ -819,11 +953,7 @@ static int liveInputCommand(int argc, char** argv) {
     return 2;
   }
 
-#if !defined(__APPLE__)
-  // Sustained capture currently has only the macOS AUHAL backend. Refuse it
-  // before constructing the writer on platforms where stdout cannot be made
-  // portably non-blocking; input-devices still reports the explicit
-  // unsupported backend normally.
+#if !defined(__APPLE__) && !defined(_WIN32)
   std::fprintf(stderr, "live-input: audio input is unsupported on this platform\n");
   return 3;
 #endif
@@ -842,7 +972,7 @@ static int liveInputCommand(int argc, char** argv) {
   std::vector<double> callbackToSinkMs;
   std::vector<double> sampleHostToSinkMs;
   std::vector<uint32_t> callbackFrames;
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
   if (measureLatency) (void)monotonicHostTimeNs();  // initialize off delivery
 #endif
 
@@ -850,7 +980,7 @@ static int liveInputCommand(int argc, char** argv) {
   const singz::AudioInputResult started = input.start(
       config, [&](const singz::AudioInputBlockView& block) {
         if (!ready.load(std::memory_order_acquire)) return;
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
         if (measureLatency) {
           const uint64_t deliveredAt = monotonicHostTimeNs();
           if (block.callbackHostTimeNs && deliveredAt >= block.callbackHostTimeNs)
@@ -952,6 +1082,10 @@ static int liveInputCommand(int argc, char** argv) {
 
   uint64_t reportedOverruns = 0;
   std::string runtimeError;
+  const auto stopAt = durationSeconds > 0
+                          ? std::chrono::steady_clock::now() +
+                                std::chrono::duration<double>(durationSeconds)
+                          : std::chrono::steady_clock::time_point::max();
   while (!liveInputStop && !writer.stopRequested()) {
 #if defined(__APPLE__)
     pollfd descriptor{STDIN_FILENO, POLLIN | POLLHUP, 0};
@@ -967,6 +1101,7 @@ static int liveInputCommand(int argc, char** argv) {
 #else
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 #endif
+    if (std::chrono::steady_clock::now() >= stopAt) liveInputStop = 1;
     const uint64_t overruns = input.stats().overruns;
     if (overruns != reportedOverruns) {
       writer.enqueue(jsonLine(
@@ -1054,14 +1189,14 @@ int main(int argc, char** argv) {
     return liveInputAnalysisPlanFixture();
   if (cmd == "live-input-analysis-throughput-fixture" && argc == 2)
     return liveInputAnalysisThroughputFixture();
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
   if (cmd == "ndjson-writer-closed-fixture" && argc == 2)
     return ndjsonWriterFailureFixture(true);
   if (cmd == "ndjson-writer-blocked-fixture" && argc == 2)
     return ndjsonWriterFailureFixture(false);
+#endif
   if (cmd == "live-input-discontinuity-fixture" && argc == 2)
     return liveInputDiscontinuityFixture();
-#endif
 #endif
   if (cmd == "live-input") return liveInputCommand(argc, argv);
   std::string f32, wav;

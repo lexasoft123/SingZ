@@ -54,6 +54,7 @@ add_library(singzcore SHARED
     ${CORE_DIR}/android/singz_core_jni.cpp
     ${CORE_DIR}/audio_input.cpp
     ${CORE_DIR}/audio_input_macos.cpp
+    ${CORE_DIR}/audio_input_wake.cpp
     ${CORE_DIR}/analysis.cpp
     ${CORE_DIR}/beats.cpp
     ${CORE_DIR}/beat_this.cpp

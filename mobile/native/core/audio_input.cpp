@@ -9,14 +9,10 @@
 #include <thread>
 
 #include "audio_input_backend.h"
+#include "audio_input_wake.h"
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
-#if TARGET_OS_OSX
-#include <mach/mach.h>
-#include <mach/semaphore.h>
-#include <mach/task.h>
-#endif
 #endif
 
 namespace singz {
@@ -253,6 +249,8 @@ bool audioInputBackendSupported() {
   if (haveTestAudioInputBackend()) return true;
 #if defined(__APPLE__) && TARGET_OS_OSX
   return true;
+#elif defined(_WIN32)
+  return true;
 #else
   return false;
 #endif
@@ -314,8 +312,8 @@ bool makeAudioInputChannelMap(uint32_t selectedChannel, uint32_t deviceChannels,
     error = "audio input channel is out of range";
     return false;
   }
-  // One mono destination channel sourced from exactly one physical lane.
-  // AUHAL consumes this as a one-entry kAudioOutputUnitProperty_ChannelMap.
+  // One mono destination channel sourced from exactly one physical lane. The
+  // platform backend consumes this as its deinterleave/channel-map index.
   sourceChannel = static_cast<int32_t>(selectedChannel);
   return true;
 }
@@ -334,20 +332,6 @@ const char* audioInputStateName(AudioInputState state) {
 }
 
 struct AudioInput::Impl {
-  Impl() {
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (semaphore_create(mach_task_self(), &wakeSemaphore, SYNC_POLICY_FIFO, 0) != KERN_SUCCESS)
-      wakeSemaphore = SEMAPHORE_NULL;
-#endif
-  }
-
-  ~Impl() {
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (wakeSemaphore != SEMAPHORE_NULL)
-      semaphore_destroy(mach_task_self(), wakeSemaphore);
-#endif
-  }
-
   std::mutex lifecycle;
   mutable std::mutex control;
   std::mutex backendControl;
@@ -366,30 +350,17 @@ struct AudioInput::Impl {
   std::unique_ptr<AudioInputBackend> backend;
   AudioInputSink sink;
   std::thread delivery;
-#if defined(__APPLE__) && TARGET_OS_OSX
-  semaphore_t wakeSemaphore = SEMAPHORE_NULL;
-#endif
+  AudioInputWake wake;
 
-  void wakeDelivery() {
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (wakeSemaphore != SEMAPHORE_NULL) (void)semaphore_signal(wakeSemaphore);
-#endif
-  }
+  void wakeDelivery() { wake.signal(); }
 
   void notifyDeliveryFromProducer() {
-#if defined(__APPLE__) && TARGET_OS_OSX
     if (!wakePending.exchange(true, std::memory_order_acq_rel)) wakeDelivery();
-#endif
   }
 
   void resetDeliveryWake() {
     wakePending.store(false, std::memory_order_release);
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (wakeSemaphore != SEMAPHORE_NULL) {
-      const mach_timespec_t immediate{0, 0};
-      while (semaphore_timedwait(wakeSemaphore, immediate) == KERN_SUCCESS) {}
-    }
-#endif
+    wake.drain();
   }
 
   static bool push(void* context, const float* mono, uint32_t frames,
@@ -400,7 +371,7 @@ struct AudioInput::Impl {
     if (!self || !self->ring) return false;
     const bool pushed =
         self->ring->push(mono, frames, sampleHostTimeNs, callbackHostTimeNs);
-    // Mach semaphore signaling is a fixed-size kernel operation: no app lock,
+    // Platform event signaling is a fixed-size kernel operation: no app lock,
     // allocation, logging, JSON, or DSP on the real-time producer.
     if (pushed) self->notifyDeliveryFromProducer();
     return pushed;
@@ -458,21 +429,13 @@ struct AudioInput::Impl {
         // reads a producer's true, its acquire half makes that producer's ring
         // release visible to the recheck. A producer racing after the exchange
         // sees false and signals. Thus no edge is lost on weakly ordered CPUs,
-        // and at most one semaphore token can remain for the next idle pass.
+        // and at most one event token can remain for the next idle pass.
         [[maybe_unused]] const bool acquiredProducerPublication =
             wakePending.exchange(false, std::memory_order_acq_rel);
         AudioInputBlockView racedBlock;
         if (ring && ring->peek(racedBlock, sampleRate)) continue;
-#if defined(__APPLE__) && TARGET_OS_OSX
-        if (wakeSemaphore != SEMAPHORE_NULL) {
-          mach_timespec_t timeout{0, 5000000};
-          if (semaphore_timedwait(wakeSemaphore, timeout) == KERN_SUCCESS)
-            deliveryWakeups.fetch_add(1, std::memory_order_relaxed);
-        } else
-#endif
-        {
-          std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        if (wake.wait(5))
+          deliveryWakeups.fetch_add(1, std::memory_order_relaxed);
       }
     }
     // Stop hardware before returning from a stop request and deliberately
@@ -583,8 +546,8 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
     impl_->state.store(AudioInputState::Error, std::memory_order_release);
     return {false, AudioInputState::Error, impl_->failure, 0, config.channel};
   }
-  // Immutable delivery configuration is published before AUHAL can invoke a
-  // callback. No thread writes sampleRate/config until this delivery joins.
+  // Immutable delivery configuration is published before the backend can
+  // invoke a callback. No thread writes sampleRate/config until delivery joins.
   impl_->sampleRate = result.sampleRate;
   impl_->quit.store(false, std::memory_order_release);
   {
@@ -675,7 +638,7 @@ std::string AudioInput::lastError() const {
   return impl_->failure;
 }
 
-#if !defined(__APPLE__) || !TARGET_OS_OSX
+#if (!defined(__APPLE__) || !TARGET_OS_OSX) && !defined(_WIN32)
 std::unique_ptr<AudioInputBackend> createPlatformAudioInputBackend() { return nullptr; }
 std::vector<AudioInputDevice> enumeratePlatformAudioInputDevices(std::string* error) {
   if (error) *error = "audio input is unsupported on this platform";

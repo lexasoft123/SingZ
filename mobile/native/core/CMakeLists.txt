@@ -20,6 +20,25 @@ cmake_minimum_required(VERSION 3.16)
 project(singz-core LANGUAGES C CXX)
 
 option(SINGZ_CORE_TESTS "Build the host test suite" ON)
+option(SINGZ_ENABLE_ASIO "Build the optional Steinberg ASIO input provider" OFF)
+set(SINGZ_ASIO_SDK_DIR "" CACHE PATH
+    "Path to a separately licensed Steinberg ASIO SDK checkout")
+
+if(SINGZ_ENABLE_ASIO)
+  if(NOT WIN32)
+    message(FATAL_ERROR "SINGZ_ENABLE_ASIO is available only for Windows builds")
+  endif()
+  if(NOT EXISTS "${SINGZ_ASIO_SDK_DIR}/common/asio.h")
+    message(FATAL_ERROR
+      "SINGZ_ENABLE_ASIO requires SINGZ_ASIO_SDK_DIR to point at a separately "
+      "licensed Steinberg ASIO SDK (common/asio.h was not found). The SDK is "
+      "intentionally not vendored in SingZ.")
+  endif()
+  message(FATAL_ERROR
+    "The ASIO provider is intentionally gated pending SingZ's signed SDK "
+    "agreement and the separate AsioAudioInputBackend implementation. Keep "
+    "SINGZ_ENABLE_ASIO=OFF for shipping builds.")
+endif()
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
@@ -47,6 +66,9 @@ find_package(Threads REQUIRED)
 # ---- vendored libFLAC (C, compiled apart — a C++ compile of C99 is the
 # wrong language; same shape as the bash scripts and both phone builds) ------
 file(GLOB FLAC_SOURCES CONFIGURE_DEPENDS ${FLAC_DIR}/src/*.c)
+# Archives made on macOS can carry AppleDouble `._name.c` sidecars. They are
+# metadata, not C, and Windows extraction makes them ordinary matching files.
+list(FILTER FLAC_SOURCES EXCLUDE REGEX "/\\._[^/]+\\.c$")
 add_library(singz_flac STATIC ${FLAC_SOURCES})
 # compat.h's _WIN32 branch maps flac_fopen and friends onto the UTF-8 wrappers
 # in share/win_utf8_io — upstream's official Windows path, and the reason
@@ -75,7 +97,12 @@ endif()
 # ---- the core ---------------------------------------------------------------
 add_library(singz_core STATIC
   audio_input.cpp
+  audio_input_convert.cpp
   audio_input_macos.cpp
+  audio_input_wake.cpp
+  audio_input_wake_macos.cpp
+  audio_input_wake_windows.cpp
+  audio_input_windows.cpp
   analysis.cpp
   beats.cpp
   beat_this.cpp
@@ -88,6 +115,11 @@ target_include_directories(singz_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(singz_core PUBLIC singz_flac Threads::Threads)
 if(SINGZ_CORE_TESTS)
   target_compile_definitions(singz_core PRIVATE SINGZ_CORE_TESTS=1)
+endif()
+if(WIN32)
+  target_compile_definitions(singz_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                                  _WIN32_WINNT=0x0A00)
+  target_link_libraries(singz_core PUBLIC avrt ole32 uuid)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   set_source_files_properties(audio_input_macos.cpp PROPERTIES COMPILE_OPTIONS "-fblocks")
@@ -121,8 +153,8 @@ if(SINGZ_CORE_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
   # Protocol smoke: discovery is one bounded versioned JSON object. The
-  # hardware-independent parser rejection runs everywhere; real device shape
-  # is asserted on macOS, the only backend currently implemented.
+  # hardware-independent parser rejection runs everywhere; runtime discovery
+  # accepts an empty list on headless CI and is exercised on real machines.
   add_test(NAME live_input_parser_bounds
            COMMAND singz-analyze live-input --device-uid test --channel 0 --frames 64)
   set_tests_properties(live_input_parser_bounds PROPERTIES
@@ -153,24 +185,26 @@ if(SINGZ_CORE_TESTS)
   set_tests_properties(live_input_latency_analysis_metadata PROPERTIES
     PASS_REGULAR_EXPRESSION
       "\"type\":\"latency\".*\"analysisFrames\":2048.*\"analysisHopFrames\":512.*\"minFrequencyHz\":70.*\"deviceSampleRate\":48000.*\"analysisSampleRate\":48000.*\"resamplerLatencyFrames\":0.*\"analysisWindowMs\":42.6666667.*\"analysisCadenceMs\":10.6666667")
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  add_test(NAME live_input_overrun_event
+           COMMAND singz-analyze live-input-discontinuity-fixture)
+  set_tests_properties(live_input_overrun_event PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"type\":\"overrun\"")
+  add_test(NAME live_input_discontinuity_event
+           COMMAND singz-analyze live-input-discontinuity-fixture)
+  set_tests_properties(live_input_discontinuity_event PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "\"type\":\"discontinuity\".*\"pendingReset\":true")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     add_test(NAME ndjson_writer_closed_pipe
              COMMAND singz-analyze ndjson-writer-closed-fixture)
     set_tests_properties(ndjson_writer_closed_pipe PROPERTIES TIMEOUT 3)
     add_test(NAME ndjson_writer_blocked_pipe
              COMMAND singz-analyze ndjson-writer-blocked-fixture)
     set_tests_properties(ndjson_writer_blocked_pipe PROPERTIES TIMEOUT 3)
-    add_test(NAME live_input_overrun_event
-             COMMAND singz-analyze live-input-discontinuity-fixture)
-    set_tests_properties(live_input_overrun_event PROPERTIES
-      PASS_REGULAR_EXPRESSION "\"type\":\"overrun\"")
-    add_test(NAME live_input_discontinuity_event
-             COMMAND singz-analyze live-input-discontinuity-fixture)
-    set_tests_properties(live_input_discontinuity_event PROPERTIES
-      PASS_REGULAR_EXPRESSION
-        "\"type\":\"discontinuity\".*\"pendingReset\":true")
+  endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     # Runtime protocol shape only: an empty device list is valid on CI. Real
-    # hardware lane counts are proven separately by the explicit Zen smoke.
+    # hardware lane counts and capture are proven by platform hardware smokes.
     add_test(NAME input_devices_runtime_schema COMMAND singz-analyze input-devices)
     set_tests_properties(input_devices_runtime_schema PROPERTIES
       PASS_REGULAR_EXPRESSION "\\{\"version\":1,\"devices\":\\[")

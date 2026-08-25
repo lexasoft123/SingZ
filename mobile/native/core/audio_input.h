@@ -63,9 +63,10 @@ struct AudioInputStats {
 // DSP graph; this transport API does not host analyzers or plugin nodes.
 struct AudioInputBlockView {
   uint64_t sequence = 0;
-  // Same monotonic host clock on macOS: sampleHostTimeNs comes from AUHAL's
-  // buffer timestamp; callbackHostTimeNs is captured immediately before the
-  // RT push. Other backends must document the same clock or set either to 0.
+  // Same monotonic host clock per backend: sampleHostTimeNs comes from AUHAL's
+  // buffer timestamp on macOS or WASAPI's 100 ns QPC position on Windows;
+  // callbackHostTimeNs is captured immediately before the RT push. Other
+  // backends must document the same clock or set either value to 0.
   uint64_t sampleHostTimeNs = 0;
   uint64_t callbackHostTimeNs = 0;
   double sampleRate = 0;

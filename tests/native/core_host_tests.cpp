@@ -24,6 +24,7 @@
 #include "analysis.h"
 #include "audio_input.h"
 #include "audio_input_backend.h"
+#include "audio_input_convert.h"
 #include "flac_io.h"
 #include "beat_this.h"
 #include "beats.h"
@@ -115,6 +116,65 @@ static bool waitForState(singz::AudioInput& input, singz::AudioInputState wanted
   return input.state() == wanted;
 }
 
+// Keep the internal name unlike any likely caller local: the old `ok` macro
+// captured an `ok` variable and silently tested uninitialized storage.
+#define CHECK(label, cond)                                        \
+  do {                                                            \
+    const bool check_ok_ = (cond);                                \
+    std::printf("%s  %s\n", check_ok_ ? "PASS" : "FAIL", label);  \
+    if (!check_ok_) failures++;                                   \
+  } while (0)
+
+static void audioInputConversionTests() {
+  {
+    const float interleaved[] = {0.25f, -0.5f, 0.75f, -1.0f};
+    float mono[2] = {};
+    CHECK("audio input conversion: float32 channel selection",
+          singz::convertAudioInputChannel(
+              reinterpret_cast<const uint8_t*>(interleaved), 2, 2, 1,
+              singz::AudioInputEncoding::Float32, 32, mono) &&
+              mono[0] == -0.5f && mono[1] == -1.0f);
+  }
+  {
+    const int16_t interleaved[] = {-32768, 16384, 32767, -16384};
+    float mono[2] = {};
+    CHECK("audio input conversion: PCM16 normalization",
+          singz::convertAudioInputChannel(
+              reinterpret_cast<const uint8_t*>(interleaved), 2, 2, 0,
+              singz::AudioInputEncoding::Pcm16, 16, mono) &&
+              mono[0] == -1.0f && std::fabs(mono[1] - 32767.0f / 32768.0f) < 1e-7f);
+  }
+  {
+    // Two stereo frames: selected right lane is minimum then maximum PCM24.
+    const uint8_t interleaved[] = {
+        0, 0, 0, 0, 0, 0x80,
+        0, 0, 0, 0xff, 0xff, 0x7f,
+    };
+    float mono[2] = {};
+    CHECK("audio input conversion: packed PCM24 normalization",
+          singz::convertAudioInputChannel(interleaved, 2, 2, 1,
+                                          singz::AudioInputEncoding::Pcm24,
+                                          24, mono) &&
+              mono[0] == -1.0f && mono[1] > 0.999999f);
+  }
+  {
+    // 24 valid bits in a 32-bit container are left-aligned.
+    const int32_t interleaved[] = {
+        std::numeric_limits<int32_t>::min(), 0x7fffff00,
+    };
+    float mono[2] = {};
+    CHECK("audio input conversion: extensible PCM valid bits",
+          singz::convertAudioInputChannel(
+              reinterpret_cast<const uint8_t*>(interleaved), 2, 1, 0,
+              singz::AudioInputEncoding::Pcm32, 24, mono) &&
+              mono[0] == -1.0f && mono[1] > 0.999999f);
+    CHECK("audio input conversion: rejects invalid channel",
+          !singz::convertAudioInputChannel(
+              reinterpret_cast<const uint8_t*>(interleaved), 2, 1, 1,
+              singz::AudioInputEncoding::Pcm32, 24, mono));
+  }
+}
+
 // Scratch directory for the wav/flac fixtures the suites write. TMPDIR is the
 // POSIX answer; Windows sets TEMP (never TMPDIR) and has no /tmp, which made
 // every hardcoded literal here a harness failure on the first MSVC run — the
@@ -124,19 +184,6 @@ static std::string scratchDir() {
   if (const char* t = std::getenv("TEMP")) return t;
   return "/tmp";
 }
-// The internal name is deliberately ugly: it used to be `ok`, and a test
-// whose own local was called `ok` expanded to `const bool ok = (ok);` —
-// self-initialisation, so the check read garbage and reported FAIL on code
-// that was working (measured: the beats front-end, which the CLI and a
-// standalone probe both ran correctly at the same moment). A macro that
-// silently captures the caller's names is a trap for every test after it.
-#define CHECK(label, cond)                                        \
-  do {                                                            \
-    const bool check_ok_ = (cond);                                \
-    std::printf("%s  %s\n", check_ok_ ? "PASS" : "FAIL", label);  \
-    if (!check_ok_) failures++;                                   \
-  } while (0)
-
 static std::vector<float> sine(double hz, int rate, int frames, int channels) {
   std::vector<float> out(static_cast<size_t>(frames) * channels);
   for (int i = 0; i < frames; i++) {
@@ -1140,6 +1187,7 @@ static void flacTests() {
 }
 
 int main() {
+  audioInputConversionTests();
   audioInputTests();
   resamplerTests();
   wavTests();
