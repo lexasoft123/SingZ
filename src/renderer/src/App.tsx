@@ -860,10 +860,18 @@ export default function App(): React.JSX.Element {
     [engine]
   )
 
-  const changeInput = useCallback((id: string | undefined) => {
+  const changeInput = useCallback((nativeInputUid: string | undefined, inputId: string | undefined) => {
     // stored right away; PitchStrip restarts a running mic and validation
     // surfaces through micDevice when the mic next starts
-    setAudioPrefs((p) => ({ ...p, inputId: id }))
+    setAudioPrefs((p) => ({ ...p, nativeInputUid, inputId, inputChannel: 0 }))
+  }, [])
+
+  const migrateNativeInput = useCallback((nativeInputUid: string) => {
+    setAudioPrefs((p) => ({ ...p, nativeInputUid }))
+  }, [])
+
+  const changeInputChannel = useCallback((inputChannel: number) => {
+    setAudioPrefs((p) => ({ ...p, inputChannel }))
   }, [])
 
   useEffect(() => {
@@ -2836,7 +2844,10 @@ export default function App(): React.JSX.Element {
           cues={trainingCues}
           mic={trainingMic}
           inputId={audioPrefs.inputId}
+          nativeInputUid={audioPrefs.nativeInputUid}
+          inputChannel={audioPrefs.inputChannel}
           onMicDevice={setMicDevice}
+          settingsOwnsMic={showSettings}
           onSetupChange={changeDesktopTrainingSetup}
           progress={trainingProgress}
           songPreparation={
@@ -2891,7 +2902,9 @@ export default function App(): React.JSX.Element {
                   onViewPan={panView}
                   info={songInfo}
                   inputId={audioPrefs.inputId}
+                  inputChannel={audioPrefs.inputChannel}
                   onMicDevice={setMicDevice}
+                  settingsOwnsMic={showSettings}
                 />
               )}
             </div>
@@ -3007,6 +3020,8 @@ export default function App(): React.JSX.Element {
           audio={audioPrefs}
           onChangeOutput={(id) => void changeOutput(id)}
           onChangeInput={changeInput}
+          onMigrateNativeInput={migrateNativeInput}
+          onChangeInputChannel={changeInputChannel}
           outputStatus={outputStatus}
           micDevice={micDevice}
           onClose={() => setShowSettings(false)}

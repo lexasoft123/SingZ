@@ -1,17 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DesktopTrainingMicCapture,
+  NativeTrainingMicSource,
+  type TrainingMicStartOptions,
   type TrainingMicSource
 } from '../../src/renderer/src/audio/training-mic'
-import { MicPitch } from '../../src/renderer/src/audio/mic'
+import { MicPitch, shouldAdoptInputChannel } from '../../src/renderer/src/audio/mic'
 
 class FakeMicSource implements TrainingMicSource {
   active = false
   device = null
   starts = 0
   stops = 0
-  async start(): Promise<void> {
+  lastOptions: TrainingMicStartOptions = {}
+  async start(_context: AudioContext, options: TrainingMicStartOptions = {}): Promise<void> {
     this.starts++
+    this.lastOptions = options
     this.active = true
   }
   readInfo(): { f0: number; clarity: number; rms: number } {
@@ -192,6 +196,103 @@ describe('desktop training microphone capture', () => {
   })
 })
 
+describe('desktop native training microphone source', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('uses shared-core analysis frames and stops the matching native owner', async () => {
+    let listener!: (token: string, event: any) => void
+    const stopDesktopAudioInput = vi.fn(async () => ({ ok: true }))
+    vi.stubGlobal('window', {
+      singz: {
+        onDesktopAudioInputEvent: (callback: typeof listener) => {
+          listener = callback
+          return vi.fn()
+        },
+        startDesktopAudioInput: vi.fn(async () => ({
+          ok: true,
+          token: 'capture-1',
+          device: {
+            uid: 'auhal:studio',
+            label: 'Studio interface',
+            isDefault: true,
+            sampleRate: 48_000,
+            channels: 4,
+            channelLabels: ['1', '2', '3', '4']
+          },
+          channel: 2
+        })),
+        stopDesktopAudioInput
+      }
+    })
+    const fallback = new FakeMicSource()
+    const source = new NativeTrainingMicSource(fallback)
+    await source.start(context(), { nativeDeviceUid: 'auhal:studio', channelIndex: 2 })
+    listener('capture-1', {
+      type: 'frame',
+      frequency: 440,
+      clarity: 0.93,
+      rms: 0.2,
+      dbfs: -14
+    })
+
+    expect(fallback.starts).toBe(0)
+    expect(source.active).toBe(true)
+    expect(source.device).toMatchObject({
+      id: 'auhal:studio',
+      channelIndex: 2,
+      channelCount: 4
+    })
+    expect(source.readInfo()).toEqual({ f0: 440, clarity: 0.93, rms: 0.2 })
+    expect(window.singz.startDesktopAudioInput).toHaveBeenCalledWith({
+      deviceUid: 'auhal:studio',
+      channel: 2
+    })
+    source.stop()
+    expect(stopDesktopAudioInput).toHaveBeenCalledWith('capture-1')
+  })
+
+  it('falls back to Web Audio only when the bundled core predates AudioInput', async () => {
+    vi.stubGlobal('window', {
+      singz: {
+        onDesktopAudioInputEvent: () => vi.fn(),
+        startDesktopAudioInput: async () => ({
+          ok: false,
+          kind: 'unavailable-core',
+          error: 'unknown command input-devices'
+        }),
+        stopDesktopAudioInput: vi.fn()
+      }
+    })
+    const fallback = new FakeMicSource()
+    const source = new NativeTrainingMicSource(fallback)
+    await source.start(context())
+    expect(fallback.starts).toBe(1)
+    expect(source.active).toBe(true)
+    source.stop()
+    expect(fallback.stops).toBe(1)
+  })
+
+  it('preserves a legacy Chromium selection until it has a migrated native uid', async () => {
+    const startDesktopAudioInput = vi.fn()
+    vi.stubGlobal('window', {
+      singz: {
+        onDesktopAudioInputEvent: () => vi.fn(),
+        startDesktopAudioInput,
+        stopDesktopAudioInput: vi.fn()
+      }
+    })
+    const fallback = new FakeMicSource()
+    const source = new NativeTrainingMicSource(fallback)
+    await source.start(context(), { deviceId: 'legacy-chromium-id', channelIndex: 2 })
+    expect(startDesktopAudioInput).not.toHaveBeenCalled()
+    expect(fallback.starts).toBe(1)
+    expect(fallback.lastOptions).toMatchObject({
+      deviceId: 'legacy-chromium-id',
+      channelIndex: 2
+    })
+  })
+})
+
 async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 8; index++) await Promise.resolve()
 }
@@ -200,8 +301,9 @@ class FakeTrack {
   stopCount = 0
   label = 'Test microphone'
   private ended: (() => void) | null = null
+  constructor(readonly channelCount = 1) {}
   getSettings(): MediaTrackSettings {
-    return { deviceId: 'mic-1' }
+    return { deviceId: 'mic-1', channelCount: this.channelCount }
   }
   addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
     if (type === 'ended') this.ended = listener as () => void
@@ -226,7 +328,9 @@ class FakeStream {
 
 class FakeSourceNode {
   disconnectCount = 0
-  connect(): void {}
+  channelCount = 1
+  connectedTo: unknown = null
+  connect(target?: unknown): void { this.connectedTo = target }
   disconnect(): void {
     this.disconnectCount++
   }
@@ -235,25 +339,68 @@ class FakeSourceNode {
 class FakeAnalyserNode extends FakeSourceNode {
   fftSize = 0
   context = { sampleRate: 48000 }
-  getFloatTimeDomainData(): void {}
+  samples = 0
+  getFloatTimeDomainData(data: Float32Array): void { data.fill(this.samples) }
 }
 
-type FakeMicContext = AudioContext & { readonly sourceNode: FakeSourceNode }
+class FakeSplitterNode extends FakeSourceNode {
+  failConnect = false
+  outputIndex: number | null = null
+  connect(target?: unknown, outputIndex?: number): void {
+    if (this.failConnect) throw new Error('splitter connection failed')
+    super.connect(target)
+    this.outputIndex = outputIndex ?? 0
+  }
+}
 
-const micContext = (opts: { failAnalyser?: boolean } = {}): FakeMicContext => {
+type FakeMicContext = AudioContext & {
+  readonly sourceNode: FakeSourceNode
+  readonly analyserNode: FakeAnalyserNode
+  readonly splitterNode: FakeSplitterNode | null
+}
+
+const micContext = (opts: {
+  failAnalyser?: boolean
+  channels?: number
+  splitter?: boolean
+  failSplitterFactory?: boolean
+  failSplitterConnect?: boolean
+} = {}): FakeMicContext => {
   const source = new FakeSourceNode()
-  return {
+  source.channelCount = opts.channels ?? 1
+  const analyser = new FakeAnalyserNode()
+  const splitter = opts.splitter === false ? null : new FakeSplitterNode()
+  if (splitter) splitter.failConnect = opts.failSplitterConnect ?? false
+  const result = {
     createMediaStreamSource: () => source,
     createAnalyser: () => {
       if (opts.failAnalyser) throw new Error('analyser setup failed')
-      return new FakeAnalyserNode()
+      return analyser
     },
-    sourceNode: source
+    sourceNode: source,
+    analyserNode: analyser,
+    splitterNode: splitter
   } as unknown as FakeMicContext
+  if (splitter) result.createChannelSplitter = () => {
+    if (opts.failSplitterFactory) throw new Error('splitter factory failed')
+    return splitter as unknown as ChannelSplitterNode
+  }
+  return result
 }
 
 describe('MicPitch start lifecycle', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it('adopts a real-device channel clamp but preserves a saved interface lane during default fallback', () => {
+    const device = {
+      id: 'mic', label: 'Mic', channelIndex: 1, channelCount: 2,
+      fallback: false, channelFallback: true
+    }
+    expect(shouldAdoptInputChannel(device, 7)).toBe(true)
+    expect(shouldAdoptInputChannel({ ...device, fallback: true }, 7)).toBe(false)
+    expect(shouldAdoptInputChannel({ ...device, channelFallback: false }, 7)).toBe(false)
+    expect(shouldAdoptInputChannel(device, 1)).toBe(false)
+  })
 
   it('stops a late permission stream after stop during getUserMedia', async () => {
     let resolvePermission!: (stream: MediaStream) => void
@@ -301,5 +448,126 @@ describe('MicPitch start lifecycle', () => {
     expect(stream.track.stopCount).toBe(1)
     expect(context.sourceNode.disconnectCount).toBe(1)
     expect(mic.active).toBe(false)
+  })
+
+  it('preserves multichannel capture and connects only the selected splitter output', async () => {
+    const stream = new FakeStream(new FakeTrack(4))
+    const getUserMedia = vi.fn(async () => stream as unknown as MediaStream)
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } })
+    const context = micContext({ channels: 4 })
+    const mic = new MicPitch()
+    await mic.start(context, { deviceId: 'mic-1', channelIndex: 2 })
+
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: expect.objectContaining({
+        deviceId: { exact: 'mic-1' },
+        channelCount: { ideal: 32 },
+        echoCancellation: true,
+        noiseSuppression: false,
+        autoGainControl: false
+      })
+    })
+    expect(context.sourceNode.connectedTo).toBe(context.splitterNode)
+    expect(context.splitterNode?.connectedTo).toBe(context.analyserNode)
+    expect(context.splitterNode?.outputIndex).toBe(2)
+    expect(mic.device).toMatchObject({ channelIndex: 2, channelCount: 4, channelFallback: false })
+
+    mic.stop()
+    expect(stream.track.stopCount).toBe(1)
+    expect(context.sourceNode.disconnectCount).toBe(1)
+    expect(context.splitterNode?.disconnectCount).toBe(1)
+    expect(context.analyserNode.disconnectCount).toBe(1)
+  })
+
+  it('pins the system default for both an unselected input and selected-device fallback', async () => {
+    const calls: MediaStreamConstraints[] = []
+    const streams = [new FakeStream(), new FakeStream(), new FakeStream()]
+    const getUserMedia = vi.fn(async (constraints: MediaStreamConstraints) => {
+      calls.push(constraints)
+      const exact = (constraints.audio as MediaTrackConstraints).deviceId as { exact?: string }
+      if (exact.exact === 'missing') throw new DOMException('', 'NotFoundError')
+      return streams.shift() as unknown as MediaStream
+    })
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } })
+    const first = new MicPitch()
+    await first.start(micContext())
+    expect((calls[0].audio as MediaTrackConstraints).deviceId).toEqual({ exact: 'default' })
+    first.stop()
+
+    const fallback = new MicPitch()
+    await fallback.start(micContext(), { deviceId: 'missing' })
+    expect((calls[1].audio as MediaTrackConstraints).deviceId).toEqual({ exact: 'missing' })
+    expect((calls[2].audio as MediaTrackConstraints).deviceId).toEqual({ exact: 'default' })
+    expect(fallback.device?.fallback).toBe(true)
+    fallback.stop()
+  })
+
+  it('clamps an unavailable channel to the last real hardware input', async () => {
+    const stream = new FakeStream(new FakeTrack(3))
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: async () => stream as unknown as MediaStream } })
+    const context = micContext({ channels: 3 })
+    const mic = new MicPitch()
+    await mic.start(context, { channelIndex: 9 })
+    expect(context.splitterNode?.outputIndex).toBe(2)
+    expect(mic.device).toMatchObject({ channelIndex: 2, channelCount: 3, channelFallback: true })
+    mic.stop()
+  })
+
+  it('uses a truthful direct mono fallback when createChannelSplitter is unavailable', async () => {
+    const stream = new FakeStream(new FakeTrack(4))
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: async () => stream as unknown as MediaStream } })
+    const context = micContext({ channels: 4, splitter: false })
+    const mic = new MicPitch()
+    await mic.start(context, { channelIndex: 3 })
+    expect(context.sourceNode.connectedTo).toBe(context.analyserNode)
+    expect(mic.device).toMatchObject({ channelIndex: 0, channelCount: 1, channelFallback: true })
+    mic.stop()
+  })
+
+  it.each(['factory', 'connection'] as const)(
+    'uses direct mono and releases a partial splitter when splitter %s fails',
+    async (failure) => {
+      const stream = new FakeStream(new FakeTrack(4))
+      vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: async () => stream as unknown as MediaStream } })
+      const context = micContext({
+        channels: 4,
+        failSplitterFactory: failure === 'factory',
+        failSplitterConnect: failure === 'connection'
+      })
+      const mic = new MicPitch()
+      await mic.start(context, { channelIndex: 3 })
+      expect(context.sourceNode.connectedTo).toBe(context.analyserNode)
+      expect(mic.device).toMatchObject({ channelIndex: 0, channelCount: 1, channelFallback: true })
+      if (failure === 'connection') expect(context.splitterNode?.disconnectCount).toBeGreaterThan(0)
+      mic.stop()
+      expect(stream.track.stopCount).toBe(1)
+    }
+  )
+
+  it('works when a browser track does not implement getSettings', async () => {
+    const track = new FakeTrack(1) as FakeTrack & { getSettings?: () => MediaTrackSettings }
+    track.getSettings = undefined
+    const stream = new FakeStream(track)
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: async () => stream as unknown as MediaStream } })
+    const mic = new MicPitch()
+    await mic.start(micContext({ channels: 1 }), { channelIndex: 7 })
+    expect(mic.device).toMatchObject({ id: '', channelIndex: 0, channelCount: 1, channelFallback: true })
+    mic.stop()
+    expect(track.stopCount).toBe(1)
+  })
+
+  it('reads stable selected-channel RMS and dBFS without connecting an output destination', async () => {
+    const stream = new FakeStream()
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: async () => stream as unknown as MediaStream } })
+    const context = micContext()
+    const mic = new MicPitch()
+    await mic.start(context)
+    context.analyserNode.samples = 0.1
+    expect(mic.readLevel()).toMatchObject({ signal: true })
+    expect(mic.readLevel().rms).toBeCloseTo(0.1)
+    expect(mic.readLevel().dbfs).toBeCloseTo(-20)
+    context.analyserNode.samples = 0
+    expect(mic.readLevel()).toEqual({ rms: 0, dbfs: -72, signal: false })
+    mic.stop()
   })
 })

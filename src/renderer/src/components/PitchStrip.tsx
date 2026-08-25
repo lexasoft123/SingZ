@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { KeyGuess } from '../audio/analysis'
 import type { MultitrackEngine } from '../audio/engine'
-import { MicPitch, type MicDevice } from '../audio/mic'
+import { type MicPitch, type MicDevice } from '../audio/mic'
+import { PitchStripMicOwner } from '../audio/pitch-strip-mic'
 import { CONTROLS_W, fmtTime, sanitizePitchHeight, type TimeView } from '../model'
 import { modalCoversApp } from '../model'
 import { midiOfHz, segmentMelodyNotes, toNoteSegments } from '../audio/notes'
@@ -40,8 +41,12 @@ interface Props {
   info: { key: KeyGuess | null; bpm: number | null }
   /** Chosen microphone (settings) — absent = system default. */
   inputId?: string
+  /** Zero-based hardware channel selected in Settings. */
+  inputChannel?: number
   /** Reports the device actually in use after every mic start/stop. */
   onMicDevice?: (d: MicDevice | null) => void
+  /** Settings owns the physical input exclusively while its meter is open. */
+  settingsOwnsMic?: boolean
 }
 
 const keyName = (k: KeyGuess, shift: number): string =>
@@ -58,7 +63,9 @@ export default function PitchStrip({
   onViewPan,
   info,
   inputId,
-  onMicDevice
+  inputChannel,
+  onMicDevice,
+  settingsOwnsMic = false
 }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nowRef = useRef<HTMLDivElement>(null)
@@ -131,11 +138,34 @@ export default function PitchStrip({
   const onMicDeviceRef = useRef(onMicDevice)
   onMicDeviceRef.current = onMicDevice
 
+  const micOwnerRef = useRef<PitchStripMicOwner | null>(null)
+  if (!micOwnerRef.current) {
+    micOwnerRef.current = new PitchStripMicOwner({
+      context: engine.context,
+      askAccess: () => window.singz.askMicAccess(),
+      onChange: (state, capture) => {
+        micRef.current = capture
+        if (!capture) trailRef.current = []
+        if (state === 'on') {
+          scoreAcc.current = { hit: 0, total: 0 }
+          if (scoreRef.current) scoreRef.current.textContent = 'sing!'
+        }
+        setMic(state)
+      },
+      onDevice: (device) => onMicDeviceRef.current?.(device)
+    }, { deviceId: inputId, channelIndex: inputChannel })
+  }
+
   useEffect(() => {
+    const owner = micOwnerRef.current
+    const visibility = (): void => {
+      if (document.hidden) owner?.suspend()
+    }
+    document.addEventListener('visibilitychange', visibility)
     return () => {
-      micRef.current?.stop()
-      micRef.current = null
-      onMicDeviceRef.current?.(null)
+      document.removeEventListener('visibilitychange', visibility)
+      owner?.dispose()
+      micOwnerRef.current = null
     }
   }, [])
 
@@ -439,82 +469,16 @@ export default function PitchStrip({
     return () => cancelAnimationFrame(raf)
   }, [engine])
 
-  /** Start a MicPitch on the chosen device; the caller owns the instance. */
-  const startMic = async (deviceId?: string): Promise<MicPitch | null> => {
-    const m = new MicPitch()
-    try {
-      await m.start(engine.context, {
-        deviceId,
-        onEnded: () => {
-          // the device vanished mid-song (unplugged, BT died)
-          if (micRef.current === m) {
-            micRef.current = null
-            trailRef.current = []
-            setMic('off')
-            onMicDeviceRef.current?.(null)
-          }
-        }
-      })
-      return m
-    } catch {
-      return null
-    }
-  }
-
-  const toggleMic = async (): Promise<void> => {
-    if (micRef.current?.active) {
-      micRef.current.stop()
-      micRef.current = null
-      trailRef.current = []
-      setMic('off')
-      onMicDeviceRef.current?.(null)
-      return
-    }
-    setMic('starting')
-    const allowed = await window.singz.askMicAccess()
-    if (!allowed) {
-      setMic('denied')
-      return
-    }
-    const m = await startMic(inputId)
-    if (!m) {
-      setMic('denied')
-      return
-    }
-    micRef.current = m
-    trailRef.current = []
-    scoreAcc.current = { hit: 0, total: 0 }
-    if (scoreRef.current) scoreRef.current.textContent = 'sing!'
-    setMic('on')
-    onMicDeviceRef.current?.(m.device)
-  }
-
-  // Live device switch: restart an active mic when settings change the pick.
-  const micGen = useRef(0)
-  const inputIdRef = useRef(inputId)
   useEffect(() => {
-    if (inputId === inputIdRef.current) return
-    inputIdRef.current = inputId
-    if (!micRef.current?.active) return
-    const gen = ++micGen.current
-    micRef.current.stop()
-    micRef.current = null
-    void startMic(inputId).then((m) => {
-      if (gen !== micGen.current) {
-        // a newer switch already won — this stream is stale
-        m?.stop()
-        return
-      }
-      micRef.current = m
-      if (m) {
-        onMicDeviceRef.current?.(m.device)
-      } else {
-        trailRef.current = []
-        setMic('off')
-        onMicDeviceRef.current?.(null)
-      }
-    })
-  }, [inputId])
+    micOwnerRef.current?.setRoute({ deviceId: inputId, channelIndex: inputChannel })
+  }, [inputChannel, inputId])
+
+  // Layout phase releases exclusive-mode interfaces before Settings' passive
+  // preview effect requests them, and restores the latest selected route when
+  // the modal closes.
+  useLayoutEffect(() => {
+    micOwnerRef.current?.setSuspended(settingsOwnsMic)
+  }, [settingsOwnsMic])
 
   return (
     <div className="pitch-strip" ref={stripRef} style={{ height: stripH }}>
@@ -607,7 +571,8 @@ export default function PitchStrip({
         <button
           type="button"
           className={`pill ghost small mic-toggle${mic === 'on' ? ' active' : ''}`}
-          onClick={() => void toggleMic()}
+          disabled={mic === 'starting'}
+          onClick={() => micOwnerRef.current?.toggle()}
         >
           <svg width="12" height="12" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
             <path d="M7 1a2.6 2.6 0 0 0-2.6 2.6v3a2.6 2.6 0 1 0 5.2 0v-3A2.6 2.6 0 0 0 7 1Z" />

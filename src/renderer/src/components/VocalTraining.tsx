@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -67,7 +68,11 @@ interface VocalTrainingProps {
   readonly cues: DesktopTrainingCueController
   readonly mic: DesktopTrainingMicCapture
   readonly inputId?: string
+  readonly nativeInputUid?: string
+  readonly inputChannel?: number
   readonly onMicDevice: (device: MicDevice | null) => void
+  /** Settings takes exclusive capture ownership and interrupts this attempt. */
+  readonly settingsOwnsMic?: boolean
   readonly onSetupChange: (patch: Partial<DesktopTrainingSetup>) => void
   readonly progress: TrainingProgress
   readonly songPreparation: {
@@ -113,7 +118,10 @@ export default function VocalTraining({
   cues,
   mic,
   inputId,
+  nativeInputUid,
+  inputChannel,
   onMicDevice,
+  settingsOwnsMic = false,
   onSetupChange,
   progress,
   songPreparation,
@@ -171,6 +179,14 @@ export default function VocalTraining({
     if (interruptTrainingForeground(phase, stopRuntime))
       dispatch({ type: 'interrupt-runtime' })
   }, [dispatch, stopRuntime])
+
+  // Settings' level meter owns the physical input. Revoke a pending/live
+  // Imitate attempt in layout phase, before the modal preview requests the
+  // exclusive interface. The exercise returns to Ready and is not silently
+  // resumed; its next explicit start uses the new channel.
+  useLayoutEffect(() => {
+    if (settingsOwnsMic) interruptRuntime()
+  }, [interruptRuntime, settingsOwnsMic])
 
   useEffect(() => {
     const checkForeground = (): void => {
@@ -325,6 +341,8 @@ export default function VocalTraining({
             async () => {
               await mic.start(engine.context, {
                 deviceId: inputId,
+                nativeDeviceUid: nativeInputUid,
+                channelIndex: inputChannel,
                 onEnded: () => {
                   dispatch({
                     type: 'set-error',
@@ -354,7 +372,7 @@ export default function VocalTraining({
         if (releaseTrainingBegin(beginLock.current, beginRun)) setBeginBusy(false)
       })
     },
-    [dispatch, engine.context, inputId, interruptRuntime, mic, onMicDevice, playPrompt, reportError, stopRuntime]
+    [dispatch, engine.context, inputChannel, inputId, interruptRuntime, mic, nativeInputUid, onMicDevice, playPrompt, reportError, stopRuntime]
   )
 
   const beginSession = (): void => {

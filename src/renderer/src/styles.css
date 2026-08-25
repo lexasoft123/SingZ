@@ -1777,6 +1777,131 @@ button.chip-status:hover {
   color: var(--danger);
 }
 
+.mic-input-strip {
+  margin-top: 14px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--panel-deep) 84%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+
+.mic-input-heading,
+.mic-meter-head,
+.mic-channel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mic-input-heading .settings-label {
+  margin: 0 0 7px;
+}
+
+.mic-route {
+  color: var(--accent);
+  font: 700 10px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
+.mic-channel-row {
+  min-height: 32px;
+  margin-top: 9px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.settings-select.channel-select {
+  width: 142px;
+}
+
+.mic-mono-state {
+  color: var(--faint);
+}
+
+.mic-meter-head {
+  margin-top: 13px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.mic-meter-head output {
+  color: var(--faint);
+  font: 10px/1.2 var(--font-mono);
+  text-align: right;
+}
+
+.mic-meter {
+  position: relative;
+  height: 22px;
+  margin-top: 7px;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, transparent 0 66.66%, rgba(255, 180, 75, 0.06) 66.66% 83.33%, rgba(255, 98, 76, 0.08) 83.33%),
+    #0c0b09;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+}
+
+.mic-meter-fill {
+  position: absolute;
+  inset: 4px auto 4px 4px;
+  max-width: calc(100% - 8px);
+  border-radius: 2px;
+  background: linear-gradient(90deg, #5e8f82 0 67%, #d5a54e 82%, #d46655 100%);
+  box-shadow: 0 0 8px rgba(94, 143, 130, 0.3);
+  transition: width 80ms linear;
+}
+
+.mic-meter-peak {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: #f6dca9;
+  opacity: 0.9;
+  transition: left 80ms linear;
+}
+
+.mic-meter.error .mic-meter-fill,
+.mic-meter.error .mic-meter-peak {
+  opacity: 0;
+}
+
+.mic-meter-tick {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  color: rgba(243, 230, 205, 0.38);
+  font: 8px/18px var(--font-mono);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  padding-left: 2px;
+  pointer-events: none;
+}
+
+.mic-meter-tick.tick-48 { left: 33.33%; }
+.mic-meter-tick.tick-24 { left: 66.66%; }
+.mic-meter-tick.tick-12 { left: 83.33%; }
+.mic-meter-tick.tick-0 { right: 2px; }
+
+.mic-preview-status {
+  min-height: 16px;
+  margin: 6px 0 0 !important;
+  color: var(--faint) !important;
+  font: 10px/1.4 var(--font-mono) !important;
+}
+
+.mic-preview-status.warn {
+  color: var(--danger) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mic-meter-fill,
+  .mic-meter-peak {
+    transition: none;
+  }
+}
+
 /* ---------- project picker ---------- */
 
 .modal-card.picker-card {

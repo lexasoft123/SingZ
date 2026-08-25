@@ -392,6 +392,36 @@ export interface LogEntry {
   line: string
 }
 
+export interface DesktopAudioInputDevice {
+  uid: string
+  label: string
+  isDefault: boolean
+  sampleRate: number
+  channels: number
+  channelLabels: string[]
+}
+
+export type DesktopAudioInputEvent =
+  | { type: 'frame'; frequency: number; clarity: number; rms: number; dbfs: number }
+  | { type: 'overrun'; count: number }
+  | { type: 'discontinuity' }
+  | { type: 'error'; error: string }
+  | { type: 'ended' }
+
+export type DesktopAudioInputStartResult =
+  | {
+      ok: true
+      token: string
+      device: DesktopAudioInputDevice
+      channel: number
+      fallback: boolean
+    }
+  | {
+      ok: false
+      kind: 'busy' | 'unavailable' | 'unavailable-core'
+      error: string
+    }
+
 export interface SingzApi {
   /** Windows splitting engine preference (backed by the dml-disabled marker). */
   getSplitterMode(): Promise<{ mode: 'auto' | 'cpu'; reason?: string }>
@@ -424,6 +454,19 @@ export interface SingzApi {
   beatsMlAvailable(): Promise<{ ok: true; available: boolean }>
   /** Is singz-analyze in this build? */
   melodyNativeAvailable(): Promise<{ ok: true; available: boolean }>
+  /** Native-rate float32 microphone core. PCM stays in the core; only the
+   * fixed-window analysis evidence crosses IPC. */
+  listDesktopAudioInputs(): Promise<
+    { ok: true; devices: DesktopAudioInputDevice[] } | { ok: false; error: string }
+  >
+  startDesktopAudioInput(options?: {
+    deviceUid?: string
+    channel?: number
+  }): Promise<DesktopAudioInputStartResult>
+  stopDesktopAudioInput(token: string): Promise<{ ok: boolean; error?: string }>
+  onDesktopAudioInputEvent(
+    cb: (token: string, event: DesktopAudioInputEvent) => void
+  ): () => void
   /** The WHOLE analysis in one child — melody, key and beats, each opt-in,
    *  from REGISTERED stem files. Call `analyzeProvideMl` exactly once after
    *  this whenever beats are wanted (null = no lattice): the child starts

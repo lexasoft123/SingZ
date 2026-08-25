@@ -74,10 +74,16 @@ export function sanitizePitchHeight(raw: unknown): number {
   return Number.isFinite(n) ? Math.max(120, Math.min(420, n)) : PITCH_H_DEFAULT
 }
 
-/** Chosen audio devices; absent = system default. Ids are Chromium's. */
+/** Chosen audio devices; absent = system default. Chromium and the native
+ * AudioInput core use unrelated id namespaces, so both identities are kept. */
 export interface AudioPrefs {
   outputId?: string
+  /** Chromium id, used only by Web Audio playback/preview and legacy fallback. */
   inputId?: string
+  /** Stable native AudioInput uid, used by vocal training. */
+  nativeInputUid?: string
+  /** Zero-based hardware input channel. Absent and 0 both mean channel 1. */
+  inputChannel?: number
   /** Master output level 0..1 — belongs to the machine, not to a project. */
   master?: number
 }
@@ -96,7 +102,20 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     typeof r.master === 'number' && Number.isFinite(r.master)
       ? Math.max(0, Math.min(1, r.master))
       : undefined
-  return { outputId: id(r.outputId), inputId: id(r.inputId), master }
+  const inputChannel =
+    typeof r.inputChannel === 'number' &&
+    Number.isInteger(r.inputChannel) &&
+    r.inputChannel >= 0 &&
+    r.inputChannel < 32
+      ? r.inputChannel
+      : undefined
+  return {
+    outputId: id(r.outputId),
+    inputId: id(r.inputId),
+    nativeInputUid: id(r.nativeInputUid),
+    inputChannel,
+    master
+  }
 }
 
 /**

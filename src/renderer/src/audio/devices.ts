@@ -17,6 +17,38 @@ export interface AudioDevices {
   inputLabelsHidden: boolean
 }
 
+/** A native uid is always the training identity. This label match is only a
+ * best-effort bridge for Chromium's live preview; ambiguous labels deliberately
+ * fall back to Chromium's system default instead of selecting the wrong mic. */
+export function chromiumInputIdForNative(
+  nativeDevice: DesktopAudioInputDevice,
+  chromiumInputs: readonly AudioDeviceInfo[]
+): string | undefined {
+  const label = nativeDevice.label.trim().toLocaleLowerCase()
+  if (!label) return undefined
+  const matches = chromiumInputs.filter(
+    (candidate) => candidate.label.trim().toLocaleLowerCase() === label
+  )
+  return matches.length === 1 ? matches[0].id : undefined
+}
+
+/** Upgrade bridge for prefs written before native AudioInput UIDs existed.
+ * Both sides must have one unambiguous label match; otherwise the caller must
+ * keep using the legacy Chromium capture until the singer makes a new choice. */
+export function nativeInputUidForChromium(
+  chromiumId: string,
+  chromiumInputs: readonly AudioDeviceInfo[],
+  nativeInputs: readonly DesktopAudioInputDevice[]
+): string | undefined {
+  const chromium = chromiumInputs.find((candidate) => candidate.id === chromiumId)
+  const label = chromium?.label.trim().toLocaleLowerCase()
+  if (!label) return undefined
+  const matches = nativeInputs.filter(
+    (candidate) => candidate.label.trim().toLocaleLowerCase() === label
+  )
+  return matches.length === 1 ? matches[0].uid : undefined
+}
+
 /**
  * Drop Chromium's synthetic rows ('default'/'communications' on Windows) —
  * the picker's own "System default" row covers them — and give unnamed
@@ -46,12 +78,13 @@ export function shapeDevices(
   return { inputs: ins.devs, outputs: outs.devs, inputLabelsHidden: ins.hidden }
 }
 
-export async function getAudioDevices(): Promise<AudioDevices> {
+export async function getAudioDevices(options: { requestAccess?: boolean } = {}): Promise<AudioDevices> {
   // mac shows the TCC prompt on first use; other platforms answer instantly.
   // A denial still lets us enumerate — inputs just come back unnamed.
-  const allowed = await window.singz.askMicAccess().catch(() => false)
+  const shouldRequest = options.requestAccess !== false
+  const allowed = shouldRequest ? await window.singz.askMicAccess().catch(() => false) : false
   let list = await navigator.mediaDevices.enumerateDevices()
-  if (allowed && list.some((d) => d.kind === 'audioinput' && !d.label)) {
+  if (shouldRequest && allowed && list.some((d) => d.kind === 'audioinput' && !d.label)) {
     // Labels unlock after one real capture — open the shortest-lived
     // stream possible and ask again.
     try {
@@ -64,3 +97,4 @@ export async function getAudioDevices(): Promise<AudioDevices> {
   }
   return shapeDevices(list)
 }
+import type { DesktopAudioInputDevice } from '../../../shared/types'
