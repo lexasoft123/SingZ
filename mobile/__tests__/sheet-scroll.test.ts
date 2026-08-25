@@ -20,8 +20,8 @@ import { parse } from '@babel/parser'
  * No headless suite can swipe, so the rule is guarded at the source, and
  * across the whole tree rather than at the three sheets that had it: the next
  * scrollable written the old way is the same bug again, wherever it lands.
- * `Sheet` (bits.tsx) is the shape that satisfies it — a scrim SIBLING of the
- * panel, and a panel that is a plain View.
+ * Native-stack form sheets satisfy it structurally: UIKit/Android own the
+ * scrim and gesture outside React, while `Sheet` is a plain content View.
  *
  * This PARSES rather than pattern-matching, because the tags are not
  * separable from the rest of the language by eye: a hand-rolled scan read the
@@ -114,9 +114,9 @@ test.each(files.map((f) => [f.slice(ROOT.length + 1), f]))('%s puts no scrollabl
   expect(offenders).toEqual([])
 })
 
-test('the player builds its sheets out of Sheet', () => {
+test('the player presents its Sheet content through native-stack form sheets', () => {
   const player = readFileSync(join(ROOT, 'src', 'ui', 'PlayerScreen.tsx'), 'utf8')
   expect(player).toMatch(/<Sheet onClose=/)
-  // a Pressable carrying b.sheetWrap is the shape that broke
-  expect(player).not.toMatch(/<Pressable[\s\S]{0,80}b\.sheetWrap/)
+  expect(player).toMatch(/presentation: 'formSheet'/)
+  expect(player).not.toMatch(/<Modal\b/)
 })

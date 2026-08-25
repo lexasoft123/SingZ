@@ -1,16 +1,20 @@
 import { DarkTheme, NavigationContainer } from '@react-navigation/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import type { MultitrackEngine } from '../engine'
 import { releaseProject, type LoadedProject } from '../projects'
+import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
 import CatalogScreen from './CatalogScreen'
+import LogPanel from './LogPanel'
 import PlayerScreen from './PlayerScreen'
 import { C } from './bits'
 
 type RootStackParamList = {
   Catalog: undefined
   Player: undefined
+  AddSong: undefined
+  Log: undefined
 }
 
 const Stack = createNativeStackNavigator<RootStackParamList>()
@@ -52,12 +56,50 @@ export function closePlayerProject(engine: MultitrackEngine, project: LoadedProj
   releaseProject(project)
 }
 
+function AddSongRoute({
+  request,
+  onFinished,
+  onBack
+}: {
+  request: AddSongRequest
+  onFinished: (request: AddSongRequest, addedDir: string | null) => void
+  onBack: () => void
+}): React.JSX.Element {
+  const finished = useRef(false)
+  const finish = useCallback(
+    (addedDir: string | null): void => {
+      if (finished.current) return
+      finished.current = true
+      onFinished(request, addedDir)
+    },
+    [onFinished, request]
+  )
+
+  /* A native pull-down has no component button to call. Route ownership makes
+     that path identical to Cancel, while the explicit completion path marks
+     itself first and therefore cannot be reported twice. */
+  useEffect(() => () => finish(null), [finish])
+
+  return (
+    <AddSongSheet
+      src={request.src}
+      sampleRate={request.sampleRate}
+      onStep={request.onStep}
+      onClose={addedDir => {
+        finish(addedDir)
+        onBack()
+      }}
+    />
+  )
+}
+
 export default function RootNavigator({
   engine
 }: {
   engine: MultitrackEngine
 }): React.JSX.Element {
   const [project, setProject] = useState<LoadedProject | null>(null)
+  const [addSong, setAddSong] = useState<AddSongRequest | null>(null)
 
   const closeProject = useCallback(
     (closing: LoadedProject): void => {
@@ -66,6 +108,11 @@ export default function RootNavigator({
     },
     [engine]
   )
+
+  const finishAddSong = useCallback((request: AddSongRequest, addedDir: string | null): void => {
+    request.onClose(addedDir)
+    setAddSong(current => (current === request ? null : current))
+  }, [])
 
   return (
     <View style={styles.root}>
@@ -81,6 +128,12 @@ export default function RootNavigator({
             {({ navigation }) => (
               <CatalogScreen
                 sampleRate={engine.sampleRate}
+                onOpenLog={() => navigation.navigate('Log')}
+                onOpenAddSong={request => {
+                  setAddSong(request)
+                  navigation.navigate('AddSong')
+                }}
+                onCloseAddSong={() => navigation.goBack()}
                 onLoaded={loaded => {
                   setProject(loaded)
                   navigation.navigate('Player')
@@ -108,6 +161,40 @@ export default function RootNavigator({
               )
             }
           </Stack.Screen>
+          <Stack.Screen
+            name="AddSong"
+            options={{
+              presentation: 'formSheet',
+              gestureEnabled: true,
+              sheetAllowedDetents: [0.6, 0.93],
+              sheetInitialDetentIndex: 1,
+              sheetGrabberVisible: true,
+              contentStyle: styles.sheet
+            }}
+            listeners={{
+              transitionEnd: event => {
+                if (!event.data.closing) addSong?.onShown?.()
+              }
+            }}
+          >
+            {({ navigation }) =>
+              addSong == null ? (
+                <View style={styles.sheet} />
+              ) : (
+                <AddSongRoute
+                  request={addSong}
+                  onFinished={finishAddSong}
+                  onBack={() => navigation.goBack()}
+                />
+              )
+            }
+          </Stack.Screen>
+          <Stack.Screen
+            name="Log"
+            options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}
+          >
+            {({ navigation }) => <LogPanel onClose={() => navigation.goBack()} />}
+          </Stack.Screen>
         </Stack.Navigator>
       </NavigationContainer>
     </View>
@@ -115,5 +202,6 @@ export default function RootNavigator({
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: C.bg }
+  root: { flex: 1, backgroundColor: C.bg },
+  sheet: { flex: 1, backgroundColor: C.sheet }
 })

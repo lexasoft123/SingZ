@@ -28,7 +28,10 @@ test('the add sheet never opens the picker itself', () => {
 
 test('the catalog picks first and opens the sheet with the file', () => {
   const catalog = read('ui/CatalogScreen.tsx')
+  const navigator = read('ui/RootNavigator.tsx')
   expect(catalog).toMatch(/\bpickAudioFile\s*\(\)/)
-  // the sheet is handed what was picked — never opened empty
-  expect(catalog).toMatch(/<AddSongSheet[\s\S]{0,200}src=\{addSrc\}/)
+  // The picked file is handed to navigation state outside route params, and
+  // the native sheet route hands that exact request to the flow.
+  expect(catalog).toMatch(/onOpenAddSong\(\{[\s\S]{0,80}\bsrc,/)
+  expect(navigator).toMatch(/<AddSongSheet[\s\S]{0,120}src=\{request\.src\}/)
 })

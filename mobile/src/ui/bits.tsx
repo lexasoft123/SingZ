@@ -1,16 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react'
+import React, { useCallback, useRef } from 'react'
 import { KIT, STEM_COLORS } from './tokens'
-import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler'
-import Reanimated, {
-  Easing as REasing,
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withTiming
-} from 'react-native-reanimated'
 import {
-  Animated,
-  Easing,
   Image,
   Platform,
   Pressable,
@@ -917,27 +907,10 @@ export function Bar({
 }
 
 /**
- * A bottom sheet inside a `<Modal>`: a tap-anywhere-else scrim and the panel.
- *
- * The scrim is a SIBLING of the panel and never its ancestor, which is the
- * whole point of this component existing. Wrapping the panel in the scrim's
- * `Pressable` — the obvious way to write it — silently stops the panel
- * scrolling on iOS: `RCTScrollViewComponentView._shouldDisableScrollInteraction`
- * walks the native superviews of a scroll view and, on finding one that is the
- * JS responder, makes `touchesShouldCancelInContentView:` return NO, so the pan
- * never begins. Measured on the Practice sheet: three swipes, three touches
- * delivered to the ScrollView, zero drags, and Trim unreachable on every song.
- * It read as intermittent only because `setIsJSResponder` lands on the main
- * queue and can lose the race with the first gesture after a fresh mount.
- *
- * A sibling scrim also needs no `onPress={() => {}}` on the panel to swallow
- * taps: RN's responder negotiation walks the touch target's ANCESTORS, and the
- * scrim is not one, so a tap on the panel never reaches it.
- *
- * `accessible={false}` on the scrim: left accessible it becomes ONE element
- * over the whole modal reading "Close, button", with the faders, chips and
- * steppers unreachable behind it. `onAccessibilityEscape` is the screen-reader
- * way out.
+ * Content surface for a native-stack form sheet. Presentation, dimming,
+ * detents, grabber, interactive movement and system back all belong to the
+ * native navigator; this component keeps only the app surface and an explicit
+ * accessible Done action.
  */
 export function Sheet({
   onClose,
@@ -948,89 +921,19 @@ export function Sheet({
   pad?: StyleProp<ViewStyle>
   children: React.ReactNode
 }): React.JSX.Element {
-  /* The scrim EASES to its 45% black instead of snapping there — the modal
-     slides its panel in, and a wash that lands fully dark on frame one reads
-     as a flash, not a dimming ("shadow animation is harsh"). 200ms
-     decelerate, native driver, one run per open; the slide itself stays the
-     system's (retiming it means replacing Modal, which this sheet's whole
-     scroll-arbitration comment is about not destabilising). Close needs no
-     fade: the Modal unmounts the scrim with the panel. */
-  const scrim = useRef(new Animated.Value(0)).current
-  useEffect(() => {
-    Animated.timing(scrim, {
-      toValue: 1,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true
-    }).start()
-  }, [scrim])
-  /* Swipe-down on the handle dismisses. The grab bar used to be drawn by
-     every caller as decoration with NOTHING behind it — a handle that is a
-     lie ("Modal sheets swipe area does not work", from the phone). It lives
-     here now, above the content, with the pan attached: the panel follows
-     the finger and past 110pt (or a flick) the sheet closes. The gesture is
-     on the HANDLE ZONE only — the sheets carry ScrollViews and sliders, and
-     a whole-panel pan would fight both. Close hands off to the Modal's own
-     slide-out, which continues from wherever the finger left the panel. */
-  const ty = useSharedValue(0)
-  const drag = useMemo(
-    () =>
-      Gesture.Pan()
-        .activeOffsetY(6)
-        .onUpdate((e) => {
-          'worklet'
-          ty.value = Math.max(0, e.translationY)
-        })
-        .onEnd((e) => {
-          'worklet'
-          if (e.translationY > 110 || e.velocityY > 700) runOnJS(onClose)()
-          else ty.value = withTiming(0, { duration: 180, easing: REasing.out(REasing.quad) })
-        }),
-    [onClose, ty]
-  )
-  const follow = useAnimatedStyle(() => ({ transform: [{ translateY: ty.value }] }))
   return (
-    /* GestureHandlerRootView, not View: on Android, RNGH gestures inside a
-       Modal are dead without a root view of their own in that window. */
-    <GestureHandlerRootView style={b.sheetWrap}>
-      <Animated.View
-        pointerEvents="none"
-        style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)', opacity: scrim }]}
-      />
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
-      <Reanimated.View
-        style={[b.sheet, pad, follow]}
-        accessible={false}
-        onAccessibilityEscape={onClose}
+    <View style={[b.sheet, pad]} accessible={false} onAccessibilityEscape={onClose}>
+      <Pressable
+        style={b.sheetClose}
+        hitSlop={10}
+        onPress={onClose}
+        accessibilityRole="button"
+        accessibilityLabel="Close this sheet"
       >
-        <GestureDetector gesture={drag}>
-          <View
-            style={b.grabZone}
-            collapsable={false}
-            /* The swipe is the sighted exit; this is the other one. Same
-               shape as the fader above and the catalog's swipe rows:
-               `accessible` is what makes it an element at all (ViewProps
-               defaults it false, and iOS maps it straight to
-               isAccessibilityElement), onAccessibilityTap carries the
-               activation on iOS, and Android needs a declared 'activate'
-               action because it has no tap hook. Not a Pressable: that
-               would close the sheet on a sighted tap of the handle too. */
-            accessible
-            accessibilityRole="button"
-            accessibilityLabel="Close"
-            accessibilityHint="Closes this sheet."
-            onAccessibilityTap={onClose}
-            accessibilityActions={Platform.OS === 'android' ? [{ name: 'activate' }] : []}
-            onAccessibilityAction={(e) => {
-              if (e.nativeEvent.actionName === 'activate') onClose()
-            }}
-          >
-            <View style={b.grab} />
-          </View>
-        </GestureDetector>
-        {children}
-      </Reanimated.View>
-    </GestureHandlerRootView>
+        <Text style={b.sheetCloseText}>Done</Text>
+      </Pressable>
+      {children}
+    </View>
   )
 }
 
@@ -1087,26 +990,17 @@ export const b = StyleSheet.create({
     fontVariant: ['tabular-nums']
   },
   stepSuffix: { color: C.dim, fontSize: 12.5 },
-  /* The 45% black lives on the animated scrim layer inside Sheet now. */
-  sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheet: {
+    flex: 1,
     backgroundColor: C.sheet,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
     paddingHorizontal: 22,
+    paddingTop: 18,
     paddingBottom: 34,
-    maxHeight: '80%'
+    overflow: 'hidden'
   },
-  /* The 5pt bar is the visual; the zone is the 34pt target the finger
-     actually gets (44pt-rule territory once the panel's radius is counted). */
-  grabZone: { alignItems: 'center', justifyContent: 'center', height: 34, marginBottom: 5 },
-  grab: {
-    width: 40,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: white(0.25)
-  },
-  sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', marginBottom: 14, letterSpacing: -0.2 },
+  sheetClose: { position: 'absolute', right: 22, top: 17, zIndex: 1 },
+  sheetCloseText: { color: C.amber, fontSize: 15, fontWeight: '700' },
+  sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', marginBottom: 14, marginRight: 60, letterSpacing: -0.2 },
   sec: { borderTopWidth: 1, borderTopColor: C.hairline, paddingVertical: 15 },
   secFirst: { borderTopWidth: 0, paddingTop: 2 },
   secLab: {

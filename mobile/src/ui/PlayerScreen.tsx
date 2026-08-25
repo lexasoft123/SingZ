@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { DeviceEventEmitter, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import {
+  createNativeStackNavigator,
+  type NativeStackNavigationProp,
+  type NativeStackNavigationOptions
+} from '@react-navigation/native-stack'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
   runOnUI,
@@ -75,6 +80,43 @@ import { TEST } from './testhooks'
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 
+type PlayerStackParamList = {
+  Stage: undefined
+  Mixer: undefined
+  Song: undefined
+  Practice: undefined
+}
+
+const PlayerStack = createNativeStackNavigator<PlayerStackParamList>()
+const PLAYER_SHEET_ROUTES = {
+  mixer: 'Mixer',
+  song: 'Song',
+  practice: 'Practice'
+} as const
+const PLAYER_SHEET_OPTIONS: NativeStackNavigationOptions = {
+  presentation: 'formSheet',
+  headerShown: false,
+  gestureEnabled: true,
+  sheetAllowedDetents: [0.55, 0.93],
+  sheetInitialDetentIndex: 1,
+  sheetGrabberVisible: true,
+  contentStyle: { backgroundColor: C.sheet }
+}
+
+/** Native-stack can remove a popped screen before delivering `blur`. Route
+ *  content unmount is the reliable completion signal for both a system swipe
+ *  and an explicit Done pop, so sheet state is released from here. */
+function PlayerSheetRoute({
+  onDismiss,
+  children
+}: {
+  onDismiss: () => void
+  children: React.ReactNode
+}): React.JSX.Element {
+  useEffect(() => () => onDismiss(), [onDismiss])
+  return <>{children}</>
+}
+
 /**
  * Karaoke anticipates: words light a breath BEFORE they are sung so the
  * singer can catch the entry (marking on/after onset reads as lagging).
@@ -107,7 +149,25 @@ export default function PlayerScreen({
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
   const [route, setRoute] = useState<RouteLatency | null>(null)
   const [trimMs, setTrim] = useState(0)
-  const [sheet, setSheet] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
+  const [sheet, setSheetState] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
+  const sheetRef = useRef(sheet)
+  sheetRef.current = sheet
+  const sheetNavigation = useRef<NativeStackNavigationProp<PlayerStackParamList> | null>(null)
+  const setSheet = useCallback((next: 'none' | 'mixer' | 'practice' | 'song'): void => {
+    if (sheetRef.current === next) return
+    sheetRef.current = next
+    setSheetState(next)
+    const navigation = sheetNavigation.current
+    if (next === 'none') {
+      if (navigation?.canGoBack()) navigation.goBack()
+    } else {
+      navigation?.navigate(PLAYER_SHEET_ROUTES[next])
+    }
+  }, [])
+  const sheetDismissed = useCallback((): void => {
+    sheetRef.current = 'none'
+    setSheetState('none')
+  }, [])
   /* ---- the Song sheet: what has been detected, and what can be asked for --
    *
    * The gap this closes: analysis runs invisibly. A song with no grid, a song
@@ -1058,7 +1118,15 @@ export default function PlayerScreen({
   }
 
   return (
-    <Animated.View style={{ flex: 1, backgroundColor: C.bg }}>
+    <PlayerStack.Navigator
+      initialRouteName="Stage"
+      screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}
+    >
+      <PlayerStack.Screen name="Stage">
+        {({ navigation }) => {
+          sheetNavigation.current = navigation
+          return (
+            <Animated.View style={{ flex: 1, backgroundColor: C.bg }}>
       {/* The stage: a dusk room, fully out of focus — chosen from the design
           canvas against the user's references. A defocused photograph of warm
           light rather than a drawn pattern: a golden window glow upper-left,
@@ -1419,14 +1487,19 @@ export default function PlayerScreen({
         </View>
       </View>
 
+            </Animated.View>
+          )
+        }}
+      </PlayerStack.Screen>
+
       {/* ---------- Mixer sheet ---------- */}
-      <Modal
-        visible={sheet === 'mixer'}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setSheet('none')}
+      <PlayerStack.Screen
+        name="Mixer"
+        options={PLAYER_SHEET_OPTIONS}
       >
-        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
+        {() => (
+          <PlayerSheetRoute onDismiss={sheetDismissed}>
+            <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <Text style={b.sheetTitle}>Mixer</Text>
             {/* One tap for the thing the app exists to do. Only offered when
                 the song has a vocal lane — an unsplit song has nothing to
@@ -1529,17 +1602,19 @@ export default function PlayerScreen({
               )
             })}
             </ScrollView>
-        </Sheet>
-      </Modal>
+            </Sheet>
+          </PlayerSheetRoute>
+        )}
+      </PlayerStack.Screen>
 
       {/* ---------- Song sheet: what is known about this song ---------- */}
-      <Modal
-        visible={sheet === 'song'}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setSheet('none')}
+      <PlayerStack.Screen
+        name="Song"
+        options={PLAYER_SHEET_OPTIONS}
       >
-        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
+        {() => (
+          <PlayerSheetRoute onDismiss={sheetDismissed}>
+            <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <Text style={b.sheetTitle}>{project.name}</Text>
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={[b.sec, b.secFirst]}>
@@ -1786,17 +1861,19 @@ export default function PlayerScreen({
                 </Text>
               </View>
             </ScrollView>
-        </Sheet>
-      </Modal>
+            </Sheet>
+          </PlayerSheetRoute>
+        )}
+      </PlayerStack.Screen>
 
       {/* ---------- Practice sheet ---------- */}
-      <Modal
-        visible={sheet === 'practice'}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setSheet('none')}
+      <PlayerStack.Screen
+        name="Practice"
+        options={PLAYER_SHEET_OPTIONS}
       >
-        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
+        {() => (
+          <PlayerSheetRoute onDismiss={sheetDismissed}>
+            <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
             <ScrollView bounces={false} showsVerticalScrollIndicator={false}>
               <Text style={b.sheetTitle}>Practice</Text>
 
@@ -2070,9 +2147,11 @@ export default function PlayerScreen({
                 )}
               </View>
             </ScrollView>
-        </Sheet>
-      </Modal>
-    </Animated.View>
+            </Sheet>
+          </PlayerSheetRoute>
+        )}
+      </PlayerStack.Screen>
+    </PlayerStack.Navigator>
   )
 }
 
