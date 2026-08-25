@@ -21,6 +21,7 @@ import {
 } from './projects'
 import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
 import { readSettings } from './settings'
+import { loadTrainingProgress, recordTrainingCompletion, saveTrainingPreferences } from './training-progress'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
@@ -341,6 +342,11 @@ function registerIpc(): void {
     }
     return res
   })
+
+  ipcMain.handle('training-progress:load', () => loadTrainingProgress())
+  ipcMain.handle('training-preferences:save', (_e, raw: unknown) => saveTrainingPreferences(raw))
+  ipcMain.on('training-preferences:save-sync', (event, raw: unknown) => { event.returnValue = saveTrainingPreferences(raw) })
+  ipcMain.handle('training-completion:record', (_e, raw: unknown) => recordTrainingCompletion(raw))
 
   ipcMain.handle('gdrive:status', () => ({
     configured: gdriveConfigured(),

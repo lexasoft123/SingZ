@@ -9,6 +9,10 @@ import React, {
   type RefObject
 } from 'react'
 import { keyName, midiNoteName } from '../../../shared/music-theory'
+import {
+  summarizeTrainingProgress,
+  type TrainingProgress
+} from '../../../shared/training-progress'
 import { scoreVocalTrainingAttempt, type TrainingPitchObservation } from '../../../shared/training-scoring'
 import type {
   TrainingAttemptResult,
@@ -43,10 +47,15 @@ import {
   trainingFocusTarget,
   trainingPromptKindLabel,
   trainingSummaryPitchCopy,
+  trainingScoringRange,
+  trainingLengthOptionLabel,
+  trainingLengthOptions,
+  trainingSetupRequirements,
   type DesktopTrainingAction,
   type DesktopTrainingSetup,
   type DesktopTrainingState,
   type SelectedTrainingExercise,
+  type SongPreparationChoice,
   type TrainingBeginLock,
   type TrainingSubmissionLock
 } from '../training-ui-state'
@@ -59,6 +68,15 @@ interface VocalTrainingProps {
   readonly mic: DesktopTrainingMicCapture
   readonly inputId?: string
   readonly onMicDevice: (device: MicDevice | null) => void
+  readonly onSetupChange: (patch: Partial<DesktopTrainingSetup>) => void
+  readonly progress: TrainingProgress
+  readonly songPreparation: {
+    readonly sourceSongId: string
+    readonly songName: string
+    readonly key: { readonly tonicPc: number; readonly mode: 'major' | 'minor' } | null
+    readonly transpose: number
+  } | null
+  readonly onBackToSong: (sourceSongId: string) => void
 }
 
 interface LivePitch {
@@ -86,6 +104,7 @@ const EXERCISES: readonly {
 
 const KEY_NAMES = ['C', 'D♭', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
 const INTERVAL_LABELS = ['Unison', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Octave']
+let trainingSeedSequence = 0
 
 export default function VocalTraining({
   state,
@@ -94,7 +113,11 @@ export default function VocalTraining({
   cues,
   mic,
   inputId,
-  onMicDevice
+  onMicDevice,
+  onSetupChange,
+  progress,
+  songPreparation,
+  onBackToSong
 }: VocalTrainingProps): React.JSX.Element {
   const [live, setLive] = useState<LivePitch | null>(null)
   const [coarseGuidance, setCoarseGuidance] = useState('Listening for your voice.')
@@ -196,15 +219,15 @@ export default function VocalTraining({
           frame.current = null
           try {
             const session = stateRef.current.session
-            if (session)
-              releasePromptMicrophoneIfFinal(session, prompt, mic, () => onMicDevice(null))
+            if (!session) throw new Error('This training session is no longer active.')
+            releasePromptMicrophoneIfFinal(session, prompt, mic, () => onMicDevice(null))
             dispatch({
               type: 'record-result',
               result: scoreVocalTrainingAttempt({
                 prompt,
                 targetWindows: windows,
                 observations,
-                range: state.setup,
+                range: trainingScoringRange(stateRef.current)!,
                 completedAt: Date.now()
               })
             })
@@ -372,8 +395,45 @@ export default function VocalTraining({
     dispatch({ type: 'back-home' })
   }
 
+  const backToSong = (): void => {
+    const sourceSongId = stateRef.current.preparation?.sourceSongId
+    if (!sourceSongId) return
+    resetIdentify()
+    stopRuntime()
+    onBackToSong(sourceSongId)
+  }
+
   if (state.route === 'home') {
-    return <TrainingHome onChoose={(exercise) => dispatch({ type: 'choose-exercise', exercise })} />
+    return (
+      <TrainingHome
+        progress={progress}
+        songPreparation={songPreparation}
+        onChoose={(exercise) => dispatch({ type: 'choose-exercise', exercise })}
+        onPrepare={(choice) => {
+          if (!songPreparation?.key) {
+            dispatch({
+              type: 'setup-song-preparation',
+              sourceSongId: songPreparation?.sourceSongId ?? '',
+              songName: songPreparation?.songName ?? 'this song',
+              choice
+            })
+            return
+          }
+          dispatch({
+            type: 'start-song-preparation',
+            sourceSongId: songPreparation.sourceSongId,
+            songName: songPreparation.songName,
+            choice,
+            key: songPreparation.key,
+            seed: newTrainingSessionSeed(`${songPreparation.songName}:${songPreparation.key.tonicPc}:${songPreparation.key.mode}:${choice}`)
+          })
+        }}
+        onProgress={() => dispatch({ type: 'show-progress' })}
+      />
+    )
+  }
+  if (state.route === 'progress') {
+    return <TrainingProgressScreen progress={progress} onBack={() => dispatch({ type: 'back-home' })} />
   }
   if (state.route === 'setup') {
     return (
@@ -381,8 +441,8 @@ export default function VocalTraining({
         setup={state.setup}
         error={state.error}
         micAvailable={hasMicrophoneApi()}
-        onChange={(patch) => dispatch({ type: 'update-setup', patch })}
-        onStart={() => dispatch({ type: 'start-session', seed: Date.now() })}
+        onChange={onSetupChange}
+        onStart={() => dispatch({ type: 'start-session', seed: newTrainingSessionSeed('custom') })}
         onBack={() => dispatch({ type: 'back-home' })}
       />
     )
@@ -391,11 +451,13 @@ export default function VocalTraining({
     return (
       <TrainingSummary
         session={state.session}
+        preparation={state.preparation}
         onRestart={() => {
           resetIdentify()
-          dispatch({ type: 'restart', seed: Date.now() })
+          dispatch({ type: 'restart', seed: newTrainingSessionSeed('restart') })
         }}
         onBack={backHome}
+        onBackToSong={backToSong}
       />
     )
   }
@@ -413,20 +475,54 @@ export default function VocalTraining({
       onAnswer={submitIdentifyAnswer}
       onNext={nextPrompt}
       onExit={backHome}
+      preparation={state.preparation}
+      onBackToSong={backToSong}
     />
   )
 }
 
 function TrainingHome({
-  onChoose
+  progress,
+  songPreparation,
+  onChoose,
+  onPrepare,
+  onProgress
 }: {
+  progress: TrainingProgress
+  songPreparation: VocalTrainingProps['songPreparation']
   onChoose: (exercise: TrainingExerciseSelection) => void
+  onPrepare: (choice: SongPreparationChoice) => void
+  onProgress: () => void
 }): React.JSX.Element {
+  const headingRef = useRouteHeadingFocus()
+  const snapshot = summarizeTrainingProgress(progress)
   return (
     <main className="vt-screen vt-home">
+      {songPreparation && (
+        <section className="vt-song-prep" aria-labelledby="vt-song-prep-title">
+          <div>
+            <p className="vt-eyebrow">Loaded song</p>
+            <h2 id="vt-song-prep-title">Prepare for “{songPreparation.songName}”</h2>
+            {songPreparation.key ? (
+              <p><strong>{keyName(songPreparation.key)}</strong>{songPreparation.transpose === 0 ? '' : ` · transposed ${songPreparation.transpose > 0 ? '+' : ''}${songPreparation.transpose}`}</p>
+            ) : (
+              <p><strong>Confirm the song key first</strong></p>
+            )}
+            <p>Practise its notes, intervals and chords.</p>
+          </div>
+          <div className="vt-song-prep-actions" aria-label={`Prepare for ${songPreparation.songName}`}>
+            {(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => (
+              <button type="button" key={choice} onClick={() => onPrepare(choice)}>
+                {choice === 'mixed' ? 'Mixed warm-up' : choice[0].toUpperCase() + choice.slice(1)}
+              </button>
+            ))}
+          </div>
+          {!songPreparation.key && <p className="vt-help">Choose any preparation focus to open setup, then confirm or change the key manually.</p>}
+        </section>
+      )}
       <div className="vt-home-head">
         <p className="vt-eyebrow">A focused pitch rehearsal</p>
-        <h1>What do you want to hear more clearly?</h1>
+        <h1 ref={headingRef} tabIndex={-1}>What do you want to hear more clearly?</h1>
         <p>Choose one skill. SingZ will keep the session inside your comfortable range.</p>
       </div>
       <div className="vt-score" aria-label="Training exercises">
@@ -446,9 +542,48 @@ function TrainingHome({
           </button>
         ))}
       </div>
+      <button type="button" className="vt-progress-entry" onClick={onProgress}>
+        <span><strong>Progress</strong><small>{snapshot.sessions === 0 ? 'Your practice history will appear here.' : `${snapshot.sessions} completed ${snapshot.sessions === 1 ? 'session' : 'sessions'} · ${snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} landed`}</small></span>
+        <span aria-hidden>→</span>
+      </button>
       <p className="vt-home-note">Microphone audio is analysed live and is never saved.</p>
     </main>
   )
+}
+
+function TrainingProgressScreen({ progress, onBack }: { progress: TrainingProgress; onBack: () => void }): React.JSX.Element {
+  const headingRef = useRouteHeadingFocus()
+  const snapshot = summarizeTrainingProgress(progress)
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? 'Not enough pitch data yet' : snapshot.tendency === 'centered' ? 'Centered overall' : `Usually ${snapshot.tendency}`
+  return (
+    <main className="vt-screen vt-summary vt-progress-screen">
+      <header className="vt-page-head">
+        <button type="button" className="vt-back" onClick={onBack}>← Training</button>
+        <p className="vt-eyebrow">Practice history</p>
+        <h1 ref={headingRef} tabIndex={-1}>Progress</h1>
+        <p>Completed sessions only. Your microphone audio is never stored.</p>
+      </header>
+      {snapshot.sessions === 0 ? (
+        <section className="vt-progress-empty"><h2>No completed sessions yet</h2><p>Start a short practice session to build your first snapshot.</p><button type="button" className="pill primary" onClick={onBack}>Start practice</button></section>
+      ) : (
+        <>
+          <div className="vt-summary-strip" aria-label="Training progress statistics">
+            <SummaryMetric label="Completed sessions" value={`${snapshot.sessions}`} />
+            <SummaryMetric label="Accuracy and close" value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} />
+            <SummaryMetric label="Intonation tendency" value={tendency} />
+            <SummaryMetric label="Voiced" value={formatRatio(snapshot.voicedRatio)} />
+            <SummaryMetric label="Stable" value={formatRatio(snapshot.stableRatio)} />
+          </div>
+          <section className="vt-weaknesses" aria-labelledby="vt-focus-next"><h2 id="vt-focus-next">Useful next focus</h2><ProgressWeakness label="Exercise types" values={snapshot.weakerExercises.map(readableWeakness)} /><ProgressWeakness label="Scale degrees" values={snapshot.weakerScaleDegrees.map((degree) => `Degree ${degree}`)} /><ProgressWeakness label="Intervals" values={snapshot.weakerIntervals.map(readableIntervalWeakness)} /><ProgressWeakness label="Chord roles" values={snapshot.weakerChordRoles.map(readableWeakness)} /></section>
+          <section className="vt-recent" aria-labelledby="vt-recent-title"><h2 id="vt-recent-title">Recent sessions</h2><ol>{progress.recent.map((item) => <li key={item.sessionId}><span>{new Date(item.completedAt).toLocaleDateString()}</span><strong>{keyName(item.key)} · {readableWeakness(item.exercise)}</strong><em>{item.onTarget + item.close} of {item.attempts} landed</em></li>)}</ol></section>
+        </>
+      )}
+    </main>
+  )
+}
+
+function ProgressWeakness({ label, values }: { label: string; values: readonly string[] }): React.JSX.Element {
+  return <div><span>{label}</span><strong>{values.length === 0 ? 'More sessions needed' : values.join(', ')}</strong></div>
 }
 
 function TrainingSetup({
@@ -471,9 +606,7 @@ function TrainingSetup({
   }, [micAvailable, onChange, setup.taskMode])
   const exercise = EXERCISES.find((item) => item.value === setup.exercise)!
   const key = { tonicPc: setup.tonicPc, mode: setup.keyMode } as const
-  const intervalsRequired = setup.exercise === 'interval' || setup.exercise === 'mixed'
-  const chordsRequired =
-    setup.exercise === 'chord-tone' || setup.exercise === 'arpeggio' || setup.exercise === 'mixed'
+  const { intervalsRequired, chordsRequired, directionUsed } = trainingSetupRequirements(setup)
   const invalidSelection =
     (intervalsRequired && setup.intervalSizes.length === 0) ||
     (chordsRequired && setup.chordDegrees.length === 0)
@@ -524,7 +657,7 @@ function TrainingSetup({
             </p>
             {!micAvailable && <p className="vt-inline-error">No microphone is available. Identify still works as ear-only practice.</p>}
           </div>
-          {(setup.exercise === 'interval' || setup.exercise === 'arpeggio' || setup.exercise === 'mixed') && (
+          {directionUsed && (
             <div className="vt-form-row">
               <span className="vt-label">Direction</span>
               <div className="vt-segment" role="group" aria-label="Direction">
@@ -582,7 +715,9 @@ function TrainingSetup({
         <label className="vt-length">
           <span>Exercises</span>
           <select value={setup.length} onChange={(event) => onChange({ length: Number(event.target.value) })}>
-            {[5, 10, 15].map((length) => <option key={length} value={length}>{length}</option>)}
+            {trainingLengthOptions(setup.length).map((length) => (
+              <option key={length} value={length} aria-label={trainingLengthOptionLabel(length)}>{length}</option>
+            ))}
           </select>
         </label>
         <button type="button" className="pill primary" disabled={invalidSelection} onClick={onStart}>Review session</button>
@@ -613,7 +748,9 @@ function TrainingSession({
   onBegin,
   onAnswer,
   onNext,
-  onExit
+  onExit,
+  preparation,
+  onBackToSong
 }: {
   state: DesktopTrainingState
   selected: SelectedTrainingExercise | null
@@ -627,6 +764,8 @@ function TrainingSession({
   onAnswer: (answer: TrainingIdentifyAnswer) => void
   onNext: () => void
   onExit: () => void
+  preparation: DesktopTrainingState['preparation']
+  onBackToSong: () => void
 }): React.JSX.Element {
   const feedbackHeadingRef = useRef<HTMLHeadingElement>(null)
   const readyButtonRef = useRef<HTMLButtonElement>(null)
@@ -655,7 +794,7 @@ function TrainingSession({
   return (
     <main className="vt-screen vt-session">
       <header className="vt-session-head">
-        <button type="button" className="vt-back" onClick={onExit}>← End session</button>
+        <button type="button" className="vt-back" onClick={preparation ? onBackToSong : onExit}>{preparation ? '← Back to song' : '← End session'}</button>
         <div className="vt-progress-copy"><span>Exercise {selected.displayNumber} of {session.prompts.length}</span><span role="status" aria-live="polite">{phaseCopy(state.exercisePhase)}</span></div>
         <div className="vt-progress" role="progressbar" aria-label="Session progress" aria-valuemin={0} aria-valuemax={session.prompts.length} aria-valuenow={selected.completedCount}>
           <span style={{ width: `${(selected.completedCount / session.prompts.length) * 100}%` }} />
@@ -753,13 +892,14 @@ function Feedback({ headingRef, result, prompt, final, beginBusy, onNext }: { he
   )
 }
 
-function TrainingSummary({ session, onRestart, onBack }: { session: NonNullable<DesktopTrainingState['session']>; onRestart: () => void; onBack: () => void }): React.JSX.Element {
+function TrainingSummary({ session, preparation, onRestart, onBack, onBackToSong }: { session: NonNullable<DesktopTrainingState['session']>; preparation: DesktopTrainingState['preparation']; onRestart: () => void; onBack: () => void; onBackToSong: () => void }): React.JSX.Element {
+  const headingRef = useRouteHeadingFocus()
   const summary = useMemo(() => summarizeTrainingSession(session), [session])
   return (
     <main className="vt-screen vt-summary">
       <header className="vt-page-head">
         <p className="vt-eyebrow">Session complete</p>
-        <h1>{summary.correct + summary.close} of {summary.attempts} landed</h1>
+        <h1 ref={headingRef} tabIndex={-1}>{summary.correct + summary.close} of {summary.attempts} landed</h1>
         <p>{trainingSummaryPitchCopy(session, summary)}</p>
       </header>
       <div className="vt-summary-strip" aria-label="Session metrics">
@@ -777,6 +917,7 @@ function TrainingSummary({ session, onRestart, onBack }: { session: NonNullable<
       <div className="vt-summary-actions">
         <button type="button" className="pill primary" onClick={onRestart}>Restart</button>
         <button type="button" className="pill ghost" onClick={onBack}>Back to training</button>
+        {preparation && <button type="button" className="pill ghost" onClick={onBackToSong}>Back to song</button>}
       </div>
     </main>
   )
@@ -863,4 +1004,27 @@ function formatRatio(value: number | null): string {
 
 function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value))
+}
+
+function useRouteHeadingFocus(): RefObject<HTMLHeadingElement | null> {
+  const ref = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    const timer = window.setTimeout(() => ref.current?.focus(), 0)
+    return () => window.clearTimeout(timer)
+  }, [])
+  return ref
+}
+
+function readableWeakness(value: string): string {
+  return value.replaceAll('-', ' ').replace(/^./, (letter) => letter.toUpperCase())
+}
+
+function readableIntervalWeakness(value: string): string {
+  const [number, direction] = value.split('-')
+  return `${INTERVAL_LABELS[Number(number) - 1] ?? `Interval ${number}`} ${direction ?? ''}`.trim()
+}
+
+function newTrainingSessionSeed(prefix: string): string {
+  trainingSeedSequence++
+  return `${prefix}:${Date.now()}:${trainingSeedSequence}`
 }

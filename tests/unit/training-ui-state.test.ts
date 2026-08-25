@@ -2,12 +2,16 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import VocalTraining from '../../src/renderer/src/components/VocalTraining'
+import { emptyTrainingProgress } from '../../src/shared/training-progress'
 import {
   audibleCueEndTimeSec,
   claimIdentifySubmission,
   claimTrainingBegin,
+  continueAfterSourceRegistration,
+  createLoadedSongIdentity,
   createTrainingTargetWindows,
   desktopTrainingReducer,
+  effectiveSongPreparationKey,
   ensureCurrentPromptMicrophone,
   ensurePromptMicrophone,
   identifyAnswerReveal,
@@ -16,14 +20,23 @@ import {
   interruptTrainingForeground,
   releasePromptMicrophoneIfFinal,
   releaseTrainingBegin,
+  reanchorLoadedSongIdentity,
+  stopTrainingForSongLoad,
   resetIdentifySubmission,
   selectTrainingExercise,
+  SongLoadRequestEpoch,
   shouldReleaseMicrophoneAfterResult,
   trainingCaptureDecision,
   trainingFocusTarget,
   trainingPromptKindLabel,
   trainingSummaryPitchCopy,
-  summarizeTrainingSession
+  trainingScoringRange,
+  trainingLengthOptionLabel,
+  trainingLengthOptions,
+  trainingSetupRequirements,
+  summarizeTrainingSession,
+  songPreparationMatches,
+  songPreparationSetup
 } from '../../src/renderer/src/training-ui-state'
 import type {
   TrainingAttemptInput,
@@ -32,6 +45,284 @@ import type {
 } from '../../src/shared/training-types'
 
 describe('desktop vocal-training orchestration', () => {
+  it('does not stop an active runtime until source registration succeeds', () => {
+    const onValid=vi.fn(),onError=vi.fn()
+    expect(continueAfterSourceRegistration({ok:false,error:'Unsupported file.'},onValid,onError)).toBe(false)
+    expect(onValid).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledWith('Unsupported file.')
+    expect(continueAfterSourceRegistration({ok:true},onValid,onError)).toBe(true)
+    expect(onValid).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the newest registered song when an older request resolves late',async()=>{
+    const epoch=new SongLoadRequestEpoch(),published:string[]=[],reset:string[]=[]
+    const aRegistration=deferredValue<boolean>(),bRegistration=deferredValue<boolean>()
+    const run=async(name:string,registration:Promise<boolean>):Promise<void>=>{
+      const request=epoch.begin()
+      const valid=await registration
+      if(!epoch.isLatest(request)||!valid)return
+      if(!epoch.acceptIfLatest(request))return
+      await Promise.resolve() // cancellation boundary before UI publication
+      if(!epoch.isAccepted(request))return
+      reset.push(name);published.push(name)
+    }
+    const a=run('A',aRegistration.promise),b=run('B',bRegistration.promise)
+    bRegistration.resolve(true);await b
+    aRegistration.resolve(true);await a
+    expect(published).toEqual(['B'])
+    expect(reset).toEqual(['B'])
+  })
+
+  it('prevents an older accepted load from publishing after its cancellation await',async()=>{
+    const epoch=new SongLoadRequestEpoch(),published:string[]=[]
+    const aCancellation=deferred()
+    const run=async(name:string,cancellation:Promise<void>):Promise<void>=>{
+      const request=epoch.begin()
+      if(!epoch.acceptIfLatest(request))return
+      await cancellation
+      if(!epoch.isAccepted(request))return
+      published.push(name)
+    }
+    const a=run('A',aCancellation.promise)
+    await run('B',Promise.resolve())
+    aCancellation.resolve();await a
+    expect(published).toEqual(['B'])
+  })
+
+  it('does not revoke an accepted load when a newer registration is invalid',()=>{
+    const epoch=new SongLoadRequestEpoch(),accepted=epoch.begin()
+    expect(epoch.acceptIfLatest(accepted)).toBe(true)
+    const invalid=epoch.begin()
+    expect(epoch.isLatest(invalid)).toBe(true)
+    // App reports the failed registration without accepting it.
+    expect(epoch.isAccepted(accepted)).toBe(true)
+  })
+
+  it('builds transposed song-key preparation recipes without mutating KeyInfo', () => {
+    const stored = { pc: 7, minor: false, detVersion: 2 }
+    const effective = effectiveSongPreparationKey(stored, 2, 2)
+    expect(effective).toEqual({ tonicPc: 9, mode: 'major' })
+    expect(stored).toEqual({ pc: 7, minor: false, detVersion: 2 })
+    expect(effectiveSongPreparationKey({ ...stored, detVersion: 1 }, 2, 2)).toBeNull()
+    expect(effectiveSongPreparationKey(null, 2, 2)).toBeNull()
+    expect(effectiveSongPreparationKey(stored, 12, 2)).toEqual({ tonicPc: 7, mode: 'major' })
+    expect(effectiveSongPreparationKey(stored, -12, 2)).toEqual({ tonicPc: 7, mode: 'major' })
+    expect(effectiveSongPreparationKey(stored, -2, 2)).toEqual({ tonicPc: 5, mode: 'major' })
+
+    const chords = songPreparationSetup(INITIAL_DESKTOP_TRAINING_STATE.setup, effective!, 'chords')
+    expect(chords).toMatchObject({ tonicPc: 9, keyMode: 'major', exercise: 'mixed', length: 6 })
+    expect(chords.mixedKinds).toEqual(['chord-tone', 'arpeggio'])
+    expect(chords.intervalSizes).toEqual([2, 3, 4, 5, 6, 7, 8])
+    const mixed = songPreparationSetup(INITIAL_DESKTOP_TRAINING_STATE.setup, { tonicPc: 9, mode: 'minor' }, 'mixed')
+    expect(mixed.mixedKinds).toEqual(['scale-degree', 'interval', 'chord-tone', 'arpeggio'])
+
+    const manual = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'setup-song-preparation', sourceSongId: '/songs/a', songName: 'Unknown key', choice: 'chords'
+    })
+    expect(manual.route).toBe('setup')
+    expect(manual.preparation).toEqual({ sourceSongId: '/songs/a', songName: 'Unknown key', choice: 'chords' })
+    expect(manual.error).toMatch(/confirm or change/i)
+  })
+
+  it('keeps reviewed interval and chord preparation edits when starting', () => {
+    let intervals = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'setup-song-preparation', sourceSongId: '/songs/intervals', songName: 'Intervals', choice: 'intervals'
+    })
+    expect(intervals.setup.intervalSizes).toEqual([2, 3, 4, 5, 6, 7, 8])
+    intervals = desktopTrainingReducer(intervals, {
+      type: 'update-setup',
+      patch: {
+        intervalSizes: [3, 6],
+        direction: 'descending',
+        taskMode: 'identify',
+        length: 10,
+        lowMidi: 43,
+        highMidi: 71
+      }
+    })
+    intervals = desktopTrainingReducer(intervals, { type: 'start-session', seed: 'reviewed-intervals' })
+    expect(intervals.route).toBe('session')
+    expect(intervals.session?.config).toMatchObject({
+      exercise: 'interval',
+      intervalSizes: [3, 6],
+      direction: 'descending',
+      taskMode: 'identify',
+      length: 10,
+      range: { lowMidi: 43, highMidi: 71 }
+    })
+    expect(intervals.session?.prompts).toHaveLength(10)
+    for (const prompt of intervals.session?.prompts ?? []) {
+      if (prompt.kind !== 'interval') throw new Error('Expected interval preparation.')
+      expect([3, 6]).toContain(prompt.intervalNumber)
+      expect(prompt.direction).toBe('descending')
+    }
+
+    let chords = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'setup-song-preparation', sourceSongId: '/songs/chords', songName: 'Chords', choice: 'chords'
+    })
+    chords = desktopTrainingReducer(chords, {
+      type: 'update-setup',
+      patch: {
+        intervalSizes: [],
+        chordDegrees: [2, 5],
+        direction: 'ascending',
+        taskMode: 'identify',
+        length: 5,
+        lowMidi: 40,
+        highMidi: 76
+      }
+    })
+    chords = desktopTrainingReducer(chords, { type: 'start-session', seed: 'reviewed-chords' })
+    expect(chords.route).toBe('session')
+    expect(chords.error).toBeNull()
+    expect(chords.session?.config).toMatchObject({
+      exercise: 'mixed',
+      mixedKinds: ['chord-tone', 'arpeggio'],
+      intervalSizes: [],
+      chordDegrees: [2, 5],
+      direction: 'ascending',
+      taskMode: 'identify',
+      length: 5,
+      range: { lowMidi: 40, highMidi: 76 }
+    })
+    for (const prompt of chords.session?.prompts ?? []) {
+      expect(['chord-tone', 'arpeggio']).toContain(prompt.kind)
+      if (prompt.kind !== 'chord-tone' && prompt.kind !== 'arpeggio') throw new Error('Expected chord preparation.')
+      expect([2, 5]).toContain(prompt.chord.scaleDegree)
+    }
+  })
+
+  it('derives setup controls and validation from concrete exercise kinds', () => {
+    expect(trainingSetupRequirements({ exercise: 'mixed', mixedKinds: ['chord-tone', 'arpeggio'] }))
+      .toEqual({ intervalsRequired: false, chordsRequired: true, directionUsed: true })
+    expect(trainingSetupRequirements({ exercise: 'mixed', mixedKinds: ['note', 'scale-degree'] }))
+      .toEqual({ intervalsRequired: false, chordsRequired: false, directionUsed: false })
+    expect(trainingSetupRequirements({ exercise: 'interval' }))
+      .toEqual({ intervalsRequired: true, chordsRequired: false, directionUsed: true })
+    expect(trainingSetupRequirements({ exercise: 'chord-tone' }))
+      .toEqual({ intervalsRequired: false, chordsRequired: true, directionUsed: false })
+    expect(trainingSetupRequirements({ exercise: 'arpeggio' }))
+      .toEqual({ intervalsRequired: false, chordsRequired: true, directionUsed: true })
+    expect(trainingSetupRequirements({ exercise: 'mixed', mixedKinds: ['scale-degree', 'interval', 'chord-tone'] }))
+      .toEqual({ intervalsRequired: true, chordsRequired: true, directionUsed: true })
+    expect(trainingSetupRequirements({ exercise: 'mixed' }))
+      .toEqual({ intervalsRequired: true, chordsRequired: true, directionUsed: true })
+  })
+
+  it('keeps active recipe lengths in the standard selector with accessible count labels', () => {
+    expect(trainingLengthOptions(6)).toEqual([5, 6, 10, 15])
+    expect(trainingLengthOptions(8)).toEqual([5, 8, 10, 15])
+    expect(trainingLengthOptions(10)).toEqual([5, 10, 15])
+    expect(trainingLengthOptionLabel(1)).toBe('1 exercise')
+    expect(trainingLengthOptionLabel(6)).toBe('6 exercises')
+
+    for (const choice of ['intervals', 'chords'] as const) {
+      const setup = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+        type: 'setup-song-preparation',
+        sourceSongId: `/songs/unknown-${choice}`,
+        songName: 'Unknown key',
+        choice
+      })
+      expect(setup.route).toBe('setup')
+      expect(setup.setup.length).toBe(6)
+      const html = renderTraining(setup)
+      const selected = html.match(/<option[^>]*selected=""[^>]*>6<\/option>/)?.[0]
+      expect(selected).toBeDefined()
+      expect(selected).toContain('value="6"')
+      expect(selected).toContain('aria-label="6 exercises"')
+    }
+  })
+
+  it('renders only the selection controls used by a preparation recipe', () => {
+    const chordOnly = {
+      ...INITIAL_DESKTOP_TRAINING_STATE,
+      route: 'setup' as const,
+      setup: {
+        ...INITIAL_DESKTOP_TRAINING_STATE.setup,
+        exercise: 'mixed' as const,
+        mixedKinds: ['chord-tone', 'arpeggio'] as const,
+        intervalSizes: [],
+        chordDegrees: [1]
+      }
+    }
+    const chordHtml = renderTraining(chordOnly)
+    expect(chordHtml).not.toContain('<legend>Intervals</legend>')
+    expect(chordHtml).toContain('<legend>Chord degrees</legend>')
+    const chordReview = chordHtml.match(/<button[^>]*>Review session<\/button>/)?.[0]
+    expect(chordReview).toBeDefined()
+    expect(chordReview).not.toContain('disabled')
+
+    const notesOnly = {
+      ...chordOnly,
+      setup: {
+        ...chordOnly.setup,
+        mixedKinds: ['note', 'scale-degree'] as const,
+        chordDegrees: []
+      }
+    }
+    const notesHtml = renderTraining(notesOnly)
+    expect(notesHtml).not.toContain('<legend>Intervals</legend>')
+    expect(notesHtml).not.toContain('<legend>Chord degrees</legend>')
+    expect(notesHtml).not.toContain('Choose at least one item for this session.')
+  })
+
+  it('uses the configured range for preparation, reports impossible ranges, and returns only to a loaded paused song', () => {
+    let state = desktopTrainingReducer({
+      ...INITIAL_DESKTOP_TRAINING_STATE,
+      setup: { ...INITIAL_DESKTOP_TRAINING_STATE.setup, lowMidi: 60, highMidi: 60 }
+    }, {
+      type: 'start-song-preparation', sourceSongId: '/songs/a', songName: 'Test', choice: 'intervals',
+      key: { tonicPc: 0, mode: 'major' }, seed: 'too-tight'
+    })
+    expect(state.route).toBe('setup')
+    expect(state.error).toMatch(/range/i)
+    expect(songPreparationMatches(state.preparation, '/songs/a')).toBe(true)
+    expect(songPreparationMatches(state.preparation, '/songs/b')).toBe(false)
+    state = desktopTrainingReducer(state, { type: 'invalidate-song-preparation', currentSongId: '/songs/b' })
+    expect(state.route).toBe('home')
+    expect(state.preparation).toBeNull()
+    expect(state.session).toBeNull()
+  })
+
+  it('keeps one loaded-song identity through save, import, rename, and path changes', () => {
+    const preparation = { sourceSongId: 'song-load-12' }
+    let song = createLoadedSongIdentity('/loose/song.wav', 'Song', 'song-load-12')
+    expect(songPreparationMatches(preparation, song.preparationSourceId)).toBe(true)
+
+    // Saving anchors a loose file in its project, importing moves/copies the
+    // project, and rename changes both folder and display name. None is a new
+    // load, so an active preparation and Back to song remain valid.
+    song = reanchorLoadedSongIdentity(song, { path: '/library/Song/project.json' })
+    song = reanchorLoadedSongIdentity(song, { path: '/new-library/Song/project.json' })
+    song = reanchorLoadedSongIdentity(song, {
+      path: '/new-library/Renamed/project.json',
+      name: 'Renamed'
+    })
+    expect(song.preparationSourceId).toBe('song-load-12')
+    expect(songPreparationMatches(preparation, song.preparationSourceId)).toBe(true)
+
+    const nextLoad = createLoadedSongIdentity(song.path, song.name, 'song-load-13')
+    expect(songPreparationMatches(preparation, nextLoad.preparationSourceId)).toBe(false)
+  })
+
+  it('covers chord tones and arpeggios in major and harmonic-dominant minor preparation', () => {
+    for (const key of [{ tonicPc: 7, mode: 'major' }, { tonicPc: 9, mode: 'minor' }] as const) {
+      const initial = {
+        ...INITIAL_DESKTOP_TRAINING_STATE,
+        setup: { ...INITIAL_DESKTOP_TRAINING_STATE.setup, chordDegrees: [5], lowMidi: 36, highMidi: 84 }
+      }
+      const state = desktopTrainingReducer(initial, {
+        type: 'start-song-preparation', sourceSongId: `/songs/${key.mode}`, songName: 'Harmony', choice: 'chords', key, seed: `chords-${key.mode}`
+      })
+      expect(state.session?.prompts.map((prompt) => prompt.kind)).toContain('chord-tone')
+      expect(state.session?.prompts.map((prompt) => prompt.kind)).toContain('arpeggio')
+      for (const prompt of state.session?.prompts ?? []) {
+        if (prompt.kind !== 'chord-tone' && prompt.kind !== 'arpeggio') throw new Error('Expected chord preparation.')
+        expect(prompt.chord.scaleDegree).toBe(5)
+        expect(prompt.chord.quality).toBe('major')
+      }
+    }
+  })
   it('keeps setup state explicit and derives identify correctness through the shared session transition', () => {
     let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
       type: 'choose-exercise',
@@ -66,6 +357,15 @@ describe('desktop vocal-training orchestration', () => {
     expect(state.exercisePhase).toBe('feedback')
     expect(selectTrainingExercise(state)?.result).toMatchObject({ response: 'identify', correct: true })
     expect(state.session?.currentIndex).toBe(1)
+  })
+
+  it('scores against the session range even if setup changes after creation', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { lowMidi: 45, highMidi: 68 }
+    })
+    state = desktopTrainingReducer(state, { type: 'start-session', seed: 'immutable-range' })
+    state = desktopTrainingReducer(state, { type: 'update-setup', patch: { lowMidi: 55, highMidi: 75 } })
+    expect(trainingScoringRange(state)).toEqual({ lowMidi: 45, highMidi: 68 })
   })
 
   it('creates ordered target windows from the cue audio clock, not render frames', () => {
@@ -466,7 +766,11 @@ describe('desktop vocal-training orchestration', () => {
         engine: {} as never,
         cues: {} as never,
         mic: {} as never,
-        onMicDevice: vi.fn()
+        onMicDevice: vi.fn(),
+        onSetupChange: vi.fn(),
+        progress: emptyTrainingProgress(),
+        songPreparation: null,
+        onBackToSong: vi.fn()
       })
     )
     expect(html).toContain('aria-label="Training exercises"')
@@ -477,7 +781,41 @@ describe('desktop vocal-training orchestration', () => {
     expect(html).toContain('Arpeggios')
     expect(html).toContain('Mixed practice')
     expect(html).toContain('Microphone audio is analysed live and is never saved.')
-    expect((html.match(/<button/g) ?? [])).toHaveLength(6)
+    expect((html.match(/<button/g) ?? [])).toHaveLength(7)
+  })
+
+  it('abandons active training and clears song identity before a new song load', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'start-song-preparation', sourceSongId: '/songs/a', songName: 'Song A',
+      choice: 'notes', key: { tonicPc: 0, mode: 'major' }, seed: 'load-switch'
+    })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    state = desktopTrainingReducer(state, { type: 'end-for-song-load' })
+    expect(state).toMatchObject({ route: 'home', preparation: null, exercisePhase: 'ready' })
+    expect(state.session).toBeNull()
+  })
+
+  it('revokes song audio, cues, microphone, and training state synchronously before loading', () => {
+    const calls: string[] = []
+    stopTrainingForSongLoad({
+      pauseSong: () => calls.push('pause'), cancelCues: () => calls.push('cues'),
+      stopMicrophone: () => calls.push('mic'), clearMicrophoneDevice: () => calls.push('device'),
+      endTrainingState: () => calls.push('state')
+    })
+    expect(calls).toEqual(['pause', 'cues', 'mic', 'device', 'state'])
+  })
+
+  it('renders the loaded-song preparation strip with exact effective-key text and four recipes', () => {
+    const html = renderToStaticMarkup(createElement(VocalTraining, {
+      state: INITIAL_DESKTOP_TRAINING_STATE,
+      dispatch: vi.fn(), engine: {} as never, cues: {} as never, mic: {} as never,
+      onMicDevice: vi.fn(), onSetupChange: vi.fn(), progress: emptyTrainingProgress(), onBackToSong: vi.fn(),
+      songPreparation: { sourceSongId: '/songs/night', songName: 'Night Song', key: { tonicPc: 8, mode: 'major' }, transpose: 1 }
+    }))
+    expect(html).toContain('Prepare for “Night Song”')
+    expect(html).toContain('<strong>A♭ major</strong> · transposed +1')
+    expect(html).toContain('Practise its notes, intervals and chords.')
+    for (const label of ['Notes', 'Intervals', 'Chords', 'Mixed warm-up']) expect(html).toContain(`>${label}<`)
   })
 })
 
@@ -493,6 +831,11 @@ function identifyResponseState(exercise: TrainingExerciseSelection, seed: string
   state = desktopTrainingReducer(state, { type: 'start-session', seed })
   state = desktopTrainingReducer(state, { type: 'activate-session' })
   return desktopTrainingReducer(state, { type: 'cue-complete' })
+}
+
+function deferredValue<T>():{promise:Promise<T>;resolve:(value:T)=>void}{
+  let resolve!:(value:T)=>void
+  return{promise:new Promise<T>((done)=>{resolve=done}),resolve}
 }
 
 function vocalResult(
@@ -567,7 +910,11 @@ function renderTraining(state: ReturnType<typeof desktopTrainingReducer>): strin
       engine: { context: { currentTime: 0 } } as never,
       cues: {} as never,
       mic: {} as never,
-      onMicDevice: vi.fn()
+      onMicDevice: vi.fn(),
+      onSetupChange: vi.fn(),
+      progress: emptyTrainingProgress(),
+      songPreparation: null,
+      onBackToSong: vi.fn()
     })
   )
 }

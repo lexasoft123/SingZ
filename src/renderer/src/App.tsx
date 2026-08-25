@@ -9,6 +9,13 @@ import type {
   SeparationProgress
 } from '../../shared/types'
 import {
+  createTrainingCompletionReceipt,
+  emptyTrainingProgress,
+  restoreTrainingProgress,
+  updateTrainingPreferences,
+  type TrainingProgress
+} from '../../shared/training-progress'
+import {
   analysisIsStale,
   BEAT_DETECT_VERSION,
   KEY_DETECT_VERSION,
@@ -49,6 +56,7 @@ import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
 import VocalTraining from './components/VocalTraining'
+import { TrainingProgressMutations } from './training-progress-persistence'
 import {
   cleanSongName,
   customTrackId,
@@ -67,9 +75,18 @@ import {
   type UITrack
 } from './model'
 import {
+  createLoadedSongIdentity,
   desktopTrainingReducer,
+  effectiveSongPreparationKey,
   INITIAL_DESKTOP_TRAINING_STATE,
-  type AppSection
+  reanchorLoadedSongIdentity,
+  SongLoadRequestEpoch,
+  songPreparationMatches,
+  continueAfterSourceRegistration,
+  stopTrainingForSongLoad,
+  type AppSection,
+  type DesktopTrainingSetup,
+  type LoadedSongIdentity
 } from './training-ui-state'
 
 type Phase = 'empty' | 'loading' | 'ready'
@@ -461,8 +478,30 @@ export default function App(): React.JSX.Element {
     desktopTrainingReducer,
     INITIAL_DESKTOP_TRAINING_STATE
   )
+  const desktopTrainingRef = useRef(desktopTraining)
+  desktopTrainingRef.current = desktopTraining
+  const [trainingProgress, setTrainingProgress] = useState<TrainingProgress>(() => emptyTrainingProgress())
+  const trainingProgressRef = useRef(trainingProgress)
+  trainingProgressRef.current = trainingProgress
+  const [trainingProgressLoaded, setTrainingProgressLoaded] = useState(false)
+  const [trainingLoadError, setTrainingLoadError] = useState<string | null>(null)
+  const [trainingLoadAttempt, setTrainingLoadAttempt] = useState(0)
+  const [trainingSaveError, setTrainingSaveError] = useState<string | null>(null)
+  const [trainingProgressMutations] = useState(() => new TrainingProgressMutations(
+    {
+      savePreferences: (preferences) => window.singz.saveTrainingPreferences(preferences),
+      recordCompletion: (receipt) => window.singz.recordTrainingCompletion(receipt)
+    },
+    (progress) => { trainingProgressRef.current = progress; setTrainingProgress(progress) },
+    (profile) => {
+      const progress = { ...trainingProgressRef.current, profile }
+      trainingProgressRef.current = progress
+      setTrainingProgress(progress)
+    },
+    setTrainingSaveError
+  ))
   const [phase, setPhase] = useState<Phase>('empty')
-  const [song, setSong] = useState<{ path: string; name: string } | null>(null)
+  const [song, setSong] = useState<LoadedSongIdentity | null>(null)
   const [tracks, setTracks] = useState<UITrack[]>([])
   const [split, setSplit] = useState(false)
   const [stemFiles, setStemFiles] = useState<Record<string, string> | null>(null)
@@ -568,10 +607,80 @@ export default function App(): React.JSX.Element {
       return MET_DEFAULTS
     }
   })
+
+  useEffect(() => {
+    let current = true
+    void window.singz.loadTrainingProgress().then((result) => {
+      if (!current) return
+      if (!result.ok) throw new Error(result.error)
+      const restored = restoreTrainingProgress(result.progress)
+      trainingProgressRef.current = restored
+      trainingProgressMutations.markLoaded(restored)
+      setTrainingProgress(restored)
+      if (desktopTrainingRef.current.route === 'home' && !desktopTrainingRef.current.session)
+        dispatchDesktopTraining({
+          type: 'update-setup',
+          patch: {
+            lowMidi: restored.profile.range.lowMidi,
+            highMidi: restored.profile.range.highMidi,
+            taskMode: restored.profile.taskMode,
+            direction: restored.profile.direction,
+            intervalSizes: restored.profile.intervalSizes,
+            chordDegrees: restored.profile.chordDegrees
+          }
+        })
+      setTrainingLoadError(null)
+      setTrainingProgressLoaded(true)
+    }).catch((error) => {
+      if (current) setTrainingLoadError(error instanceof Error ? error.message : String(error))
+    })
+    return () => { current = false }
+  }, [trainingLoadAttempt, trainingProgressMutations])
+
+  useEffect(() => {
+    const flush = (): void => { trainingProgressMutations.flushPreferencesSync(window.singz.saveTrainingPreferencesSync) }
+    window.addEventListener('beforeunload', flush)
+    return () => window.removeEventListener('beforeunload', flush)
+  }, [trainingProgressMutations])
+
+  useEffect(() => {
+    dispatchDesktopTraining({ type: 'invalidate-song-preparation', currentSongId: song?.preparationSourceId ?? null })
+  }, [song?.preparationSourceId])
+
+  useEffect(() => {
+    const session = desktopTraining.session
+    if (!trainingProgressLoaded || session?.status !== 'completed') return
+    trainingProgressMutations.recordCompletion(createTrainingCompletionReceipt(session))
+  }, [desktopTraining.session, trainingProgressLoaded, trainingProgressMutations])
+
+  const changeDesktopTrainingSetup = useCallback(
+    (patch: Partial<DesktopTrainingSetup>) => {
+      const setup = { ...desktopTrainingRef.current.setup, ...patch }
+      // React may batch several committed controls before rendering. Mirror
+      // each patch now so the next preference mutation cannot lose this one.
+      desktopTrainingRef.current = { ...desktopTrainingRef.current, setup }
+      dispatchDesktopTraining({ type: 'update-setup', patch })
+      if (!trainingProgressLoaded) return
+      const current = trainingProgressRef.current
+      const next = updateTrainingPreferences(current, {
+        range: { lowMidi: setup.lowMidi, highMidi: setup.highMidi },
+        taskMode: setup.taskMode,
+        direction: setup.direction,
+        intervalSizes: setup.intervalSizes,
+        chordDegrees: setup.chordDegrees
+      })
+      if (JSON.stringify(next.profile) === JSON.stringify(current.profile)) return
+      // A committed control change starts its serialized IPC mutation before
+      // the event returns. Main returns the authoritative merged profile/history.
+      trainingProgressMutations.savePreferences(next.profile)
+    },
+    [trainingProgressLoaded, trainingProgressMutations]
+  )
   const beatInfoRef = useRef(beatInfo)
   beatInfoRef.current = beatInfo
   const drumsBufRef = useRef<AudioBuffer | null>(null)
   const loadSeq = useRef(0)
+  const songLoadRequests=useRef(new SongLoadRequestEpoch())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const trackInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
@@ -880,14 +989,29 @@ export default function App(): React.JSX.Element {
 
   const loadPath = useCallback(
     async (path: string) => {
+      const request=songLoadRequests.current.begin()
+      // Validate/register first: an invalid drop must not tear down a live
+      // exercise. Every successful file/project entry point then converges on
+      // the same synchronous runtime revocation before loading begins.
       const reg = await window.singz.registerSource(path)
-      if (!reg.ok) {
-        setError(reg.error)
-        return
-      }
+      if(!songLoadRequests.current.isLatest(request))return
+      if(!reg.ok){continueAfterSourceRegistration(reg,()=>{},setError);return}
+      if(!songLoadRequests.current.acceptIfLatest(request))return
+      continueAfterSourceRegistration(reg,()=>stopTrainingForSongLoad({
+        pauseSong: () => engine.pause(),
+        cancelCues: () => trainingCues.cancel(),
+        stopMicrophone: () => trainingMic.stop(),
+        clearMicrophoneDevice: () => setMicDevice(null),
+        endTrainingState: () => dispatchDesktopTraining({ type: 'end-for-song-load' })
+      }),setError)
+      appSectionRef.current = 'songs'
+      setAppSection('songs')
+      setShowCatalog(false)
       const seq = ++loadSeq.current
       await window.singz.cancelSeparation()
+      if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
       await window.singz.cancelLyrics()
+      if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
       setSep(null)
       setSplit(false)
       setStemFiles(null)
@@ -928,7 +1052,7 @@ export default function App(): React.JSX.Element {
       setDirty(false)
       setSaveState('idle')
       setPhase('loading')
-      setSong({ path: reg.path, name: reg.name })
+      setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
       setIsProject(Boolean(reg.project))
       setInLibrary(reg.project?.inLibrary ?? true)
       setProjectDir(reg.project?.dir ?? null)
@@ -1132,7 +1256,7 @@ export default function App(): React.JSX.Element {
         setError('Could not decode that audio file.')
       }
     },
-    [engine]
+    [engine, trainingCues, trainingMic]
   )
 
   const loadFile = useCallback(
@@ -1968,7 +2092,7 @@ export default function App(): React.JSX.Element {
       setSaveState('saved')
       // The song now lives inside its project folder — anchor there so
       // renaming and future saves act on the project, not the original file.
-      setSong((s) => (s ? { ...s, path: res.songPath } : s))
+      setSong((s) => (s ? reanchorLoadedSongIdentity(s,{path:res.songPath}) : s))
       setIsProject(true)
       setInLibrary(res.inLibrary)
       setProjectDir(res.dir)
@@ -2022,7 +2146,7 @@ export default function App(): React.JSX.Element {
         return
       }
       // the copy in the library is the one we keep working on from here
-      setSong((s) => (s ? { ...s, path: res.songPath } : s))
+      setSong((s) => (s ? reanchorLoadedSongIdentity(s,{path:res.songPath}) : s))
       if (res.stems) {
         setStemFiles(res.stems)
         stemPathsRef.current = res.stems // the folder moved
@@ -2053,7 +2177,7 @@ export default function App(): React.JSX.Element {
           setError(res.error)
           return
         }
-        setSong({ path: res.songPath, name: res.name })
+        setSong(reanchorLoadedSongIdentity(song,{path:res.songPath,name:res.name}))
         if (res.stems) {
           setStemFiles(res.stems)
           stemPathsRef.current = res.stems // the folder moved
@@ -2062,7 +2186,7 @@ export default function App(): React.JSX.Element {
         setProjectDir(res.dir)
         setNotice(`Renamed — the project folder is now ${res.dir}`)
       } else {
-        setSong({ ...song, name })
+        setSong(reanchorLoadedSongIdentity(song,{name}))
         setSaveState('idle')
       }
     },
@@ -2498,6 +2622,17 @@ export default function App(): React.JSX.Element {
     [engine, trainingCues, trainingMic]
   )
 
+  const backToSong = useCallback((sourceSongId: string) => {
+    if (!songPreparationMatches({ sourceSongId }, song?.preparationSourceId ?? null)) {
+      dispatchDesktopTraining({ type: 'invalidate-song-preparation', currentSongId: song?.preparationSourceId ?? null })
+      return
+    }
+    engine.pause()
+    setShowCatalog(false)
+    dispatchDesktopTraining({ type: 'back-home' })
+    switchSection('songs')
+  }, [engine, song, switchSection])
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -2673,7 +2808,27 @@ export default function App(): React.JSX.Element {
         </div>
       </header>
 
-      {appSection === 'training' ? (
+      {appSection === 'training' && !trainingProgressLoaded ? (
+        <main className="vt-screen vt-empty" aria-busy={!trainingLoadError}>
+          <p className="vt-eyebrow">Vocal training</p>
+          <h1>{trainingLoadError ? 'Practice profile unavailable' : 'Loading your practice profile…'}</h1>
+          {trainingLoadError && (
+            <>
+              <p>Your saved training data was not changed. Retry when storage is available.</p>
+              <button
+                type="button"
+                className="pill primary"
+                onClick={() => {
+                  setTrainingLoadError(null)
+                  setTrainingLoadAttempt((attempt) => attempt + 1)
+                }}
+              >
+                Retry
+              </button>
+            </>
+          )}
+        </main>
+      ) : appSection === 'training' ? (
         <VocalTraining
           state={desktopTraining}
           dispatch={dispatchDesktopTraining}
@@ -2682,6 +2837,19 @@ export default function App(): React.JSX.Element {
           mic={trainingMic}
           inputId={audioPrefs.inputId}
           onMicDevice={setMicDevice}
+          onSetupChange={changeDesktopTrainingSetup}
+          progress={trainingProgress}
+          songPreparation={
+            song
+              ? {
+                  songName: cleanSongName(song.name),
+                  sourceSongId: song.preparationSourceId,
+                  key: effectiveSongPreparationKey(keyInfo, transpose, KEY_DETECT_VERSION),
+                  transpose
+                }
+              : null
+          }
+          onBackToSong={backToSong}
         />
       ) : phase === 'ready' && !showCatalog ? (
         <>
@@ -2812,6 +2980,13 @@ export default function App(): React.JSX.Element {
       )}
 
       {notice && !error && <div className="toast ok">{notice}</div>}
+
+      {trainingSaveError && (
+        <div className="toast training-save-warning" role="alert">
+          <span>Training profile or session history was not saved: {trainingSaveError}</span>
+          <button type="button" onClick={() => trainingProgressMutations.retry()}>Retry</button>
+        </div>
+      )}
 
       {showSetup && (
         <SetupModal

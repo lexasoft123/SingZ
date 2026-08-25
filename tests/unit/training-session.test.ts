@@ -5,6 +5,7 @@ import {
   generateTrainingPrompts,
   recordTrainingResult,
   restoreTrainingSession,
+  stableHash128,
   startTrainingSession,
   TRAINING_SESSION_FORMAT_VERSION
 } from '../../src/shared/training-session'
@@ -25,6 +26,15 @@ const base = (exercise: TrainingExerciseSelection, seed: string | number = 'less
   length: 12,
   seed
 })
+
+function fnv32(value: string): number {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
 
 describe('seeded training generation', () => {
   it('is deterministic for every exercise family', () => {
@@ -63,6 +73,31 @@ describe('seeded training generation', () => {
       chordDegrees: [1, 4, 6],
       mixedKinds: ['note', 'interval', 'arpeggio']
     })
+  })
+
+  it('validates only the selections used by the concrete exercise kinds', () => {
+    expect(() => createTrainingSession({
+      ...base('mixed'),
+      mixedKinds: ['chord-tone', 'arpeggio'],
+      intervalSizes: [],
+      chordDegrees: [1, 5]
+    })).not.toThrow()
+    expect(() => createTrainingSession({
+      ...base('mixed'),
+      mixedKinds: ['note', 'scale-degree'],
+      intervalSizes: [],
+      chordDegrees: []
+    })).not.toThrow()
+    expect(() => createTrainingSession({ ...base('interval'), intervalSizes: [] }))
+      .toThrow(/Interval sizes/)
+    expect(() => createTrainingSession({ ...base('chord-tone'), chordDegrees: [] }))
+      .toThrow(/Chord degrees/)
+    expect(() => createTrainingSession({
+      ...base('mixed'),
+      mixedKinds: ['scale-degree', 'interval', 'arpeggio'],
+      intervalSizes: [],
+      chordDegrees: [1]
+    })).toThrow(/Interval sizes/)
   })
 
   it('generates concrete, range-safe note and scale-degree prompts', () => {
@@ -462,7 +497,7 @@ describe('serializable session state', () => {
       JSON.parse(
         JSON.stringify(createTrainingSession({ ...base('note'), length }))
       ) as TrainingSessionData
-    expect(plain().formatVersion).toBe(2)
+    expect(plain().formatVersion).toBe(3)
 
     const wrongVersion = plain()
     ;(wrongVersion as { formatVersion: number }).formatVersion = TRAINING_SESSION_FORMAT_VERSION + 1
@@ -479,6 +514,15 @@ describe('serializable session state', () => {
     const duplicatePromptIds = plain()
     ;(duplicatePromptIds.prompts[1] as { id: string }).id = duplicatePromptIds.prompts[0].id
     expect(() => restoreTrainingSession(duplicatePromptIds)).toThrow('canonical generator output')
+  })
+
+  it('uses a 128-bit identity that separates known FNV-1a-32 collisions', () => {
+    expect(fnv32('costarring')).toBe(fnv32('liquid'))
+    expect(stableHash128('costarring')).not.toBe(stableHash128('liquid'))
+    const first = createTrainingSession({ ...base('note'), seed: 'costarring' })
+    const second = createTrainingSession({ ...base('note'), seed: 'liquid' })
+    expect(first.id).toMatch(/^training-[a-f0-9]{32}$/)
+    expect(first.id).not.toBe(second.id)
   })
 
   it('restores valid JSON independently of object property insertion order', () => {

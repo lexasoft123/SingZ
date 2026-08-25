@@ -63,7 +63,7 @@ const RESULT_CLASSIFICATIONS: readonly TrainingResultClassification[] = [
 
 type Rng = () => number
 const trustedSessions = new WeakSet<object>()
-export const TRAINING_SESSION_FORMAT_VERSION = 2
+export const TRAINING_SESSION_FORMAT_VERSION = 3
 
 export function generateTrainingPrompts(config: TrainingSessionConfig): TrainingPrompt[] {
   validateConfig(config)
@@ -548,8 +548,6 @@ function validateConfig(config: TrainingSessionConfig): void {
     validateOneOf(config.minorScaleForm, ['natural', 'harmonic'], 'Minor scale form')
   if (config.minorHarmony !== undefined)
     validateOneOf(config.minorHarmony, ['natural', 'harmonic-dominant'], 'Minor harmony')
-  validateNumberList(config.intervalSizes, 2, 8, 7, 'Interval sizes')
-  validateNumberList(config.chordDegrees, 1, 7, 7, 'Chord degrees')
   if (config.mixedKinds !== undefined) {
     if (
       !Array.isArray(config.mixedKinds) ||
@@ -562,6 +560,24 @@ function validateConfig(config: TrainingSessionConfig): void {
     if (new Set(config.mixedKinds).size !== config.mixedKinds.length)
       throw new RangeError('Mixed exercise kinds must be unique.')
   }
+  const exerciseKinds =
+    config.exercise === 'mixed' ? (config.mixedKinds ?? DEFAULT_MIXED_KINDS) : [config.exercise]
+  validateNumberList(
+    config.intervalSizes,
+    2,
+    8,
+    7,
+    'Interval sizes',
+    exerciseKinds.includes('interval')
+  )
+  validateNumberList(
+    config.chordDegrees,
+    1,
+    7,
+    7,
+    'Chord degrees',
+    exerciseKinds.includes('chord-tone') || exerciseKinds.includes('arpeggio')
+  )
 }
 
 function validateSession(session: TrainingSessionData): void {
@@ -847,9 +863,11 @@ function validateNumberList(
   min: number,
   max: number,
   maxEntries: number,
-  label: string
+  label: string,
+  required: boolean
 ): void {
   if (values === undefined) return
+  if (Array.isArray(values) && values.length === 0 && !required) return
   if (
     !Array.isArray(values) ||
     values.length === 0 ||
@@ -1111,6 +1129,21 @@ function seedHash(value: string): number {
   return hash >>> 0
 }
 
+/** Pure BigInt FNV-1a-128 over UTF-16 bytes, identical in desktop and mobile JS. */
+export function stableHash128(value: string): string {
+  const prime = 0x0000000001000000000000000000013bn
+  const mask = (1n << 128n) - 1n
+  let hash = 0x6c62272e07bb014262b821756295c58dn
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    hash ^= BigInt(code & 0xff)
+    hash = (hash * prime) & mask
+    hash ^= BigInt(code >>> 8)
+    hash = (hash * prime) & mask
+  }
+  return hash.toString(16).padStart(32, '0')
+}
+
 function stableConfig(config: TrainingSessionConfig): string {
   return canonicalJson({
     key: { tonicPc: config.key.tonicPc, mode: config.key.mode },
@@ -1130,7 +1163,7 @@ function stableConfig(config: TrainingSessionConfig): string {
 
 function trainingSessionId(config: TrainingSessionConfig): string {
   const identity = `${TRAINING_SESSION_FORMAT_VERSION}:${stableConfig(config)}`
-  return `training-${seedHash(identity).toString(16).padStart(8, '0')}`
+  return `training-${stableHash128(identity)}`
 }
 
 function canonicalJson(value: unknown): string {

@@ -4,11 +4,13 @@ import {
   recordTrainingResult,
   startTrainingSession
 } from '../../shared/training-session'
-import { diatonicTriads, spellPitchClass } from '../../shared/music-theory'
+import { diatonicTriads, effectiveTrainingKey, spellPitchClass } from '../../shared/music-theory'
+import type { KeyInfo } from '../../shared/types'
 import type {
   TrainingAttemptInput,
   TrainingAttemptResult,
   TrainingDirectionChoice,
+  TrainingExerciseKind,
   TrainingExerciseSelection,
   TrainingIdentifyAnswer,
   TrainingPrompt,
@@ -20,8 +22,76 @@ import type {
 import type { TrainingTargetWindow } from '../../shared/training-scoring'
 
 export type AppSection = 'songs' | 'training'
-export type DesktopTrainingRoute = 'home' | 'setup' | 'session' | 'summary'
+export type DesktopTrainingRoute = 'home' | 'setup' | 'session' | 'summary' | 'progress'
 export type DesktopExercisePhase = 'ready' | 'cue' | 'respond' | 'feedback'
+export type SongPreparationChoice = 'notes' | 'intervals' | 'chords' | 'mixed'
+
+export function stopTrainingForSongLoad(runtime: {
+  pauseSong: () => void
+  cancelCues: () => void
+  stopMicrophone: () => void
+  clearMicrophoneDevice: () => void
+  endTrainingState: () => void
+}): void {
+  runtime.pauseSong()
+  runtime.cancelCues()
+  runtime.stopMicrophone()
+  runtime.clearMicrophoneDevice()
+  runtime.endTrainingState()
+}
+
+export function continueAfterSourceRegistration(
+  result:{readonly ok:boolean;readonly error?:string},
+  onValid:()=>void,
+  onError:(error:string)=>void
+):boolean{
+  if(!result.ok){onError(result.error??'Could not open that file.');return false}
+  onValid();return true
+}
+
+export interface SongLoadRequestToken{readonly identity:symbol}
+
+/** Registration is asynchronous and must finish before a valid request may
+ * tear down the current runtime. Requested and accepted generations are kept
+ * separate so a later invalid drop does not revoke an already accepted load. */
+export class SongLoadRequestEpoch{
+  private latest:SongLoadRequestToken|null=null
+  private accepted:SongLoadRequestToken|null=null
+  begin():SongLoadRequestToken{const token={identity:Symbol('song-load-request')};this.latest=token;return token}
+  isLatest(token:SongLoadRequestToken):boolean{return this.latest===token}
+  acceptIfLatest(token:SongLoadRequestToken):boolean{
+    if(this.latest!==token)return false
+    this.accepted=token
+    return true
+  }
+  isAccepted(token:SongLoadRequestToken):boolean{return this.accepted===token}
+}
+
+/** Identity used by song-linked practice for one successful load. Paths and
+ * display names legitimately change when that same song is saved, imported,
+ * or renamed, so neither is suitable as the preparation identity. */
+export interface LoadedSongIdentity {
+  readonly path: string
+  readonly name: string
+  readonly preparationSourceId: string
+}
+
+export function createLoadedSongIdentity(path:string,name:string,loadToken:string):LoadedSongIdentity{
+  return{path,name,preparationSourceId:loadToken}
+}
+
+export function reanchorLoadedSongIdentity(
+  song:LoadedSongIdentity,
+  patch:Partial<Pick<LoadedSongIdentity,'path'|'name'>>
+):LoadedSongIdentity{
+  return{...song,...patch,preparationSourceId:song.preparationSourceId}
+}
+
+export interface SongPreparationContext {
+  readonly sourceSongId: string
+  readonly songName: string
+  readonly choice: SongPreparationChoice
+}
 
 export interface DesktopTrainingSetup {
   readonly tonicPc: number
@@ -34,6 +104,7 @@ export interface DesktopTrainingSetup {
   readonly highMidi: number
   readonly intervalSizes: readonly number[]
   readonly chordDegrees: readonly number[]
+  readonly mixedKinds?: readonly TrainingExerciseKind[]
 }
 
 export interface DesktopTrainingState {
@@ -44,6 +115,7 @@ export interface DesktopTrainingState {
   /** True when the same unscored prompt must regain keyboard focus at Ready. */
   readonly interrupted: boolean
   readonly error: string | null
+  readonly preparation: SongPreparationContext | null
 }
 
 export const DEFAULT_DESKTOP_TRAINING_SETUP: Readonly<DesktopTrainingSetup> = Object.freeze({
@@ -65,13 +137,31 @@ export const INITIAL_DESKTOP_TRAINING_STATE: Readonly<DesktopTrainingState> = Ob
   session: null,
   exercisePhase: 'ready',
   interrupted: false,
-  error: null
+  error: null,
+  preparation: null
 })
 
 export type DesktopTrainingAction =
   | { readonly type: 'choose-exercise'; readonly exercise: TrainingExerciseSelection }
   | { readonly type: 'update-setup'; readonly patch: Partial<DesktopTrainingSetup> }
   | { readonly type: 'start-session'; readonly seed: string | number }
+  | {
+      readonly type: 'start-song-preparation'
+      readonly sourceSongId: string
+      readonly songName: string
+      readonly choice: SongPreparationChoice
+      readonly key: { readonly tonicPc: number; readonly mode: 'major' | 'minor' }
+      readonly seed: string | number
+    }
+  | {
+      readonly type: 'setup-song-preparation'
+      readonly sourceSongId: string
+      readonly songName: string
+      readonly choice: SongPreparationChoice
+    }
+  | { readonly type: 'show-progress' }
+  | { readonly type: 'invalidate-song-preparation'; readonly currentSongId: string | null }
+  | { readonly type: 'end-for-song-load' }
   | { readonly type: 'activate-session' }
   | { readonly type: 'cue-complete' }
   | { readonly type: 'record-result'; readonly result: TrainingAttemptInput }
@@ -90,13 +180,61 @@ export function desktopTrainingReducer(
       return {
         ...state,
         route: 'setup',
-        setup: { ...state.setup, exercise: action.exercise },
-        error: null
+        setup: { ...state.setup, exercise: action.exercise, mixedKinds: undefined },
+        error: null,
+        preparation: null
       }
     case 'update-setup':
       return { ...state, setup: { ...state.setup, ...action.patch }, error: null }
     case 'start-session':
       return createSessionState(state, action.seed)
+    case 'start-song-preparation':
+      return createSessionState(
+        {
+          ...state,
+          setup: songPreparationSetup(state.setup, action.key, action.choice),
+          preparation: { sourceSongId: action.sourceSongId, songName: action.songName, choice: action.choice }
+        },
+        action.seed
+      )
+    case 'setup-song-preparation':
+      return {
+        ...state,
+        route: 'setup',
+        setup: songPreparationSetup(
+          state.setup,
+          { tonicPc: state.setup.tonicPc, mode: state.setup.keyMode },
+          action.choice
+        ),
+        preparation: { sourceSongId: action.sourceSongId, songName: action.songName, choice: action.choice },
+        error: 'Confirm or change the song key, then review the preparation session.'
+      }
+    case 'show-progress':
+      return { ...state, route: 'progress', error: null }
+    case 'invalidate-song-preparation':
+      if (!state.preparation || state.preparation.sourceSongId === action.currentSongId) return state
+      return {
+        ...state,
+        route: 'home',
+        session:
+          state.session && (state.session.status === 'ready' || state.session.status === 'active')
+            ? abandonTrainingSession(state.session)
+            : null,
+        preparation: null,
+        exercisePhase: 'ready',
+        interrupted: false,
+        error: null
+      }
+    case 'end-for-song-load':
+      return {
+        ...state,
+        route: 'home',
+        session: null,
+        preparation: null,
+        exercisePhase: 'ready',
+        interrupted: false,
+        error: null
+      }
     case 'activate-session':
       if (!state.session) return { ...state, error: 'Set up a session before starting.' }
       return {
@@ -180,8 +318,99 @@ export function trainingConfigFromSetup(
     seed,
     direction: setup.direction,
     intervalSizes: setup.intervalSizes,
-    chordDegrees: setup.chordDegrees
+    chordDegrees: setup.chordDegrees,
+    mixedKinds: setup.mixedKinds
   }
+}
+
+/** Attempts are always scored against the immutable range captured at session creation. */
+export function trainingScoringRange(
+  state: Pick<DesktopTrainingState, 'session'>
+): TrainingSessionData['config']['range'] | null {
+  return state.session?.config.range ?? null
+}
+
+/** KeyInfo has no confidence field in existing projects; a valid present key is accepted. */
+export function effectiveSongPreparationKey(
+  keyInfo: Pick<KeyInfo, 'pc' | 'minor' | 'detVersion'> | null | undefined,
+  transpose: number,
+  currentDetectVersion: number
+): ReturnType<typeof effectiveTrainingKey> | null {
+  if (!keyInfo || keyInfo.detVersion < currentDetectVersion) return null
+  try {
+    return effectiveTrainingKey(keyInfo, transpose)
+  } catch {
+    return null
+  }
+}
+
+export function songPreparationSetup(
+  setup: DesktopTrainingSetup,
+  key: { readonly tonicPc: number; readonly mode: 'major' | 'minor' },
+  choice: SongPreparationChoice
+): DesktopTrainingSetup {
+  const recipes: Record<SongPreparationChoice, { exercise: TrainingExerciseSelection; mixedKinds?: readonly TrainingExerciseKind[] }> = {
+    notes: { exercise: 'scale-degree' },
+    intervals: { exercise: 'interval' },
+    chords: { exercise: 'mixed', mixedKinds: ['chord-tone', 'arpeggio'] },
+    mixed: { exercise: 'mixed', mixedKinds: ['scale-degree', 'interval', 'chord-tone', 'arpeggio'] }
+  }
+  const recipe = recipes[choice]
+  return {
+    ...setup,
+    tonicPc: key.tonicPc,
+    keyMode: key.mode,
+    exercise: recipe.exercise,
+    mixedKinds: recipe.mixedKinds,
+    intervalSizes: [2, 3, 4, 5, 6, 7, 8],
+    length: choice === 'mixed' ? 8 : 6
+  }
+}
+
+export interface TrainingSetupRequirements {
+  readonly intervalsRequired: boolean
+  readonly chordsRequired: boolean
+  readonly directionUsed: boolean
+}
+
+const ALL_TRAINING_EXERCISE_KINDS: readonly TrainingExerciseKind[] = [
+  'note',
+  'scale-degree',
+  'interval',
+  'chord-tone',
+  'arpeggio'
+]
+
+/** Setup controls follow the concrete prompt kinds included by the recipe. */
+export function trainingSetupRequirements(
+  setup: Pick<DesktopTrainingSetup, 'exercise' | 'mixedKinds'>
+): TrainingSetupRequirements {
+  const kinds = setup.exercise === 'mixed'
+    ? (setup.mixedKinds ?? ALL_TRAINING_EXERCISE_KINDS)
+    : [setup.exercise]
+  return {
+    intervalsRequired: kinds.includes('interval'),
+    chordsRequired: kinds.includes('chord-tone') || kinds.includes('arpeggio'),
+    directionUsed: kinds.includes('interval') || kinds.includes('arpeggio')
+  }
+}
+
+const STANDARD_TRAINING_LENGTHS = [5, 10, 15] as const
+
+/** Keep recipe-sized sessions selectable without removing the standard choices. */
+export function trainingLengthOptions(currentLength: number): number[] {
+  return [...new Set<number>([...STANDARD_TRAINING_LENGTHS, currentLength])].sort((a, b) => a - b)
+}
+
+export function trainingLengthOptionLabel(length: number): string {
+  return `${length} ${length === 1 ? 'exercise' : 'exercises'}`
+}
+
+export function songPreparationMatches(
+  preparation: Pick<SongPreparationContext, 'sourceSongId'> | null,
+  currentSongId: string | null
+): boolean {
+  return Boolean(preparation && currentSongId && preparation.sourceSongId === currentSongId)
 }
 
 export interface DesktopTrainingSummary {

@@ -143,6 +143,11 @@ const api: SingzApi = {
 
   appVersion: () => ipcRenderer.invoke('app:version'),
 
+  loadTrainingProgress: () => ipcRenderer.invoke('training-progress:load'),
+  saveTrainingPreferences: (preferences) => ipcRenderer.invoke('training-preferences:save', preferences),
+  saveTrainingPreferencesSync: (preferences) => ipcRenderer.sendSync('training-preferences:save-sync', preferences),
+  recordTrainingCompletion: (receipt) => ipcRenderer.invoke('training-completion:record', receipt),
+
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings),
 

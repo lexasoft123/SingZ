@@ -1,3 +1,5 @@
+import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
+
 export const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 export type StemName = (typeof STEMS)[number]
 
@@ -527,6 +529,11 @@ export interface SingzApi {
   onLogLine(cb: (e: LogEntry) => void): () => void
   /** App version for the titlebar ("dev" outside packaged builds). */
   appVersion(): Promise<string>
+  /** Main-owned app-level profile/history. Completion receipts never contain song paths or raw observations. */
+  loadTrainingProgress(): Promise<{ok:true;progress:TrainingProgress}|{ok:false;error:string}>
+  saveTrainingPreferences(preferences:TrainingPreferences):Promise<{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}>
+  saveTrainingPreferencesSync(preferences:TrainingPreferences):{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}
+  recordTrainingCompletion(receipt:TrainingCompletionReceipt):Promise<{ok:true;progress:TrainingProgress;alreadyRecorded:boolean}|{ok:false;error:string}>
   /**
    * Save the current song + stems + lyrics + settings. A loose song lands in a
    * new folder under the library root; a song already inside a project folder
