@@ -16,6 +16,7 @@ import {
   View
 } from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
+import { useFocusEffect, useIsFocused } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   driveAccountEmail,
@@ -207,6 +208,7 @@ export default function CatalogScreen({
   sampleRate: number
   onLoaded: (p: LoadedProject) => void
 }): React.JSX.Element {
+  const isFocused = useIsFocused()
   const insets = useSafeAreaInsets()
   const [root, setRoot] = useState<RootInfo | null>(null)
   const [projects, setProjects] = useState<ProjectEntry[] | null>(lastShelf?.items ?? null)
@@ -458,9 +460,15 @@ export default function CatalogScreen({
     [mode, loadUsage]
   )
 
-  useEffect(() => {
-    void refresh()
-  }, [refresh])
+  /* Native-stack keeps the catalog mounted underneath the player so the iOS
+     back gesture can reveal the real shelf. Re-read it whenever that shelf
+     becomes current; the old conditional router got the same refresh from a
+     full remount after every song. */
+  useFocusEffect(
+    useCallback(() => {
+      void refresh()
+    }, [refresh])
+  )
 
   /* One writer for the cache above, so no listing path can forget it. The
      four facts are cached together because they are READ together: rows with
@@ -1178,7 +1186,11 @@ export default function CatalogScreen({
   )
 
   useEffect(() => {
-    if (!TEST) return
+    /* The catalog stays mounted behind Player now. Its background job events
+       can still render it, but they must not tell device drivers that the
+       visible route changed. useIsFocused flips on the navigation state, not
+       on whether a native transition happened to finish painting. */
+    if (!TEST || !isFocused) return
     TEST.screen = 'catalog'
     TEST.refresh = refresh
     TEST.openSample = openSample
