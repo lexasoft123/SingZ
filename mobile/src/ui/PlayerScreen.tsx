@@ -102,10 +102,14 @@ const PLAYER_SHEET_OPTIONS: NativeStackNavigationOptions = {
   sheetGrabberVisible: true,
   contentStyle: { backgroundColor: C.sheet }
 }
+const MIXER_SHEET_OPTIONS: NativeStackNavigationOptions = {
+  ...PLAYER_SHEET_OPTIONS,
+  sheetInitialDetentIndex: 0
+}
 
 /** Native-stack can remove a popped screen before delivering `blur`. Route
  *  content unmount is the reliable completion signal for both a system swipe
- *  and an explicit Done pop, so sheet state is released from here. */
+ *  and a navigator pop, so sheet state is released from here. */
 function PlayerSheetRoute({
   onDismiss,
   children
@@ -1495,12 +1499,11 @@ export default function PlayerScreen({
       {/* ---------- Mixer sheet ---------- */}
       <PlayerStack.Screen
         name="Mixer"
-        options={PLAYER_SHEET_OPTIONS}
+        options={MIXER_SHEET_OPTIONS}
       >
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
-            <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <Text style={b.sheetTitle}>Mixer</Text>
+            <Sheet title="Mixer" onClose={() => setSheet('none')} pad={sheetPad}>
             {/* One tap for the thing the app exists to do. Only offered when
                 the song has a vocal lane — an unsplit song has nothing to
                 mute. */}
@@ -1522,7 +1525,12 @@ export default function PlayerScreen({
             {/* The lane rows had no scroll container at all, so past roughly a
                 dozen lanes they clipped with no way to reach them — and the
                 44 pt fader targets below bring that cliff closer. */}
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <ScrollView
+              style={b.sheetScroll}
+              contentContainerStyle={b.sheetScrollContent}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+            >
             {tracks.map((t, i) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
@@ -1614,9 +1622,13 @@ export default function PlayerScreen({
       >
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
-            <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <Text style={b.sheetTitle}>{project.name}</Text>
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <Sheet title={project.name} onClose={() => setSheet('none')} pad={sheetPad}>
+            <ScrollView
+              style={b.sheetScroll}
+              contentContainerStyle={b.sheetScrollContent}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+            >
               <View style={[b.sec, b.secFirst]}>
                 <Text style={b.secLab}>Beat</Text>
                 <Text style={s.songVal}>
@@ -1873,9 +1885,14 @@ export default function PlayerScreen({
       >
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
-            <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <ScrollView bounces={false} showsVerticalScrollIndicator={false}>
-              <Text style={b.sheetTitle}>Practice</Text>
+            <Sheet title="Practice" onClose={() => setSheet('none')} pad={sheetPad}>
+            <ScrollView
+              style={b.sheetScroll}
+              contentContainerStyle={b.sheetScrollContent}
+              bounces={false}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+            >
 
               <View style={[b.sec, b.secFirst]}>
                 {/* Reset lives on the header row — a control row it used to

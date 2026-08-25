@@ -21,9 +21,22 @@ test('every app-owned modal is a native-stack presentation', () => {
   expect(player).toMatch(/name="Mixer"/)
   expect(player).toMatch(/name="Song"/)
   expect(player).toMatch(/name="Practice"/)
+  expect(player).toMatch(/MIXER_SHEET_OPTIONS[\s\S]*sheetInitialDetentIndex: 0/)
+  expect(player).toMatch(/name="Mixer"[\s\S]*options=\{MIXER_SHEET_OPTIONS\}/)
+  expect(player.match(/<Sheet title=/g)).toHaveLength(3)
+  expect(player).not.toMatch(/actionLabel=/)
+  expect(player.match(/contentInsetAdjustmentBehavior="never"/g)).toHaveLength(3)
+
+  const bits = read('src/ui/bits.tsx')
+  expect(bits).toMatch(/<View style=\{b\.sheetHeader\}>[\s\S]*<View style=\{b\.sheetBody\}>/)
+
+  const add = read('src/ui/AddSongSheet.tsx')
+  expect(add).toMatch(/<Sheet[\s\S]*title="Add a song"[\s\S]*actionLabel="Cancel"/)
 
   const root = read('src/ui/RootNavigator.tsx')
-  expect(root).toMatch(/name="AddSong"[\s\S]*presentation: 'formSheet'/)
+  expect(root).toMatch(
+    /name="AddSong"[\s\S]*presentation: 'formSheet'[\s\S]*sheetInitialDetentIndex: 0/
+  )
   expect(root).toMatch(/name="Log"[\s\S]*presentation: 'fullScreenModal'/)
 })
 

@@ -909,30 +909,45 @@ export function Bar({
 /**
  * Content surface for a native-stack form sheet. Presentation, dimming,
  * detents, grabber, interactive movement and system back all belong to the
- * native navigator; this component keeps only the app surface and an explicit
- * accessible Done action.
+ * native navigator; this component keeps only the app surface and an optional
+ * action for flows such as Add Song that need more than simple dismissal.
  */
 export function Sheet({
   onClose,
+  title,
+  actionLabel,
+  actionHidden = false,
+  actionAccessibilityLabel,
   pad,
   children
 }: {
   onClose: () => void
+  title: string
+  actionLabel?: string
+  actionHidden?: boolean
+  actionAccessibilityLabel?: string
   pad?: StyleProp<ViewStyle>
   children: React.ReactNode
 }): React.JSX.Element {
   return (
     <View style={[b.sheet, pad]} accessible={false} onAccessibilityEscape={onClose}>
-      <Pressable
-        style={b.sheetClose}
-        hitSlop={10}
-        onPress={onClose}
-        accessibilityRole="button"
-        accessibilityLabel="Close this sheet"
-      >
-        <Text style={b.sheetCloseText}>Done</Text>
-      </Pressable>
-      {children}
+      <View style={b.sheetHeader}>
+        <Text style={b.sheetTitle} numberOfLines={1}>
+          {title}
+        </Text>
+        {!actionHidden && actionLabel != null && (
+          <Pressable
+            style={b.sheetClose}
+            hitSlop={10}
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel={actionAccessibilityLabel ?? actionLabel}
+          >
+            <Text style={b.sheetCloseText}>{actionLabel}</Text>
+          </Pressable>
+        )}
+      </View>
+      <View style={b.sheetBody}>{children}</View>
     </View>
   )
 }
@@ -994,13 +1009,23 @@ export const b = StyleSheet.create({
     flex: 1,
     backgroundColor: C.sheet,
     paddingHorizontal: 22,
-    paddingTop: 18,
+    paddingTop: 0,
     paddingBottom: 34,
     overflow: 'hidden'
   },
-  sheetClose: { position: 'absolute', right: 22, top: 17, zIndex: 1 },
+  sheetHeader: {
+    minHeight: Platform.OS === 'ios' ? 62 : 50,
+    paddingTop: Platform.OS === 'ios' ? 16 : 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16
+  },
+  sheetBody: { flex: 1, minWidth: 0, width: '100%', overflow: 'hidden' },
+  sheetClose: { flexShrink: 0 },
   sheetCloseText: { color: C.amber, fontSize: 15, fontWeight: '700' },
-  sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', marginBottom: 14, marginRight: 60, letterSpacing: -0.2 },
+  sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', letterSpacing: -0.2, flex: 1 },
+  sheetScroll: { flex: 1, minWidth: 0 },
+  sheetScrollContent: { paddingBottom: 4 },
   sec: { borderTopWidth: 1, borderTopColor: C.hairline, paddingVertical: 15 },
   secFirst: { borderTopWidth: 0, paddingTop: 2 },
   secLab: {

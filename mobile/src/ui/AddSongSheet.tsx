@@ -22,7 +22,7 @@ import { log } from '../log'
 import type { LyricLine } from '../model'
 import { clearCache } from '../projects'
 import type { PickedFile } from '../writer'
-import { C, white } from './bits'
+import { C, Sheet, white } from './bits'
 
 /**
  * The add-a-song flow (Phase 1): pick → read the file → confirm title/artist
@@ -463,68 +463,36 @@ export default function AddSongSheet({
   }
 
   return (
-    <View
-      style={s.sheet}
-      accessible={false}
-      onAccessibilityEscape={() => abandon('accessibility escape')}
+    <Sheet
+      title="Add a song"
+      actionLabel="Cancel"
+      actionHidden={step.k === 'creating'}
+      actionAccessibilityLabel="Cancel adding this song"
+      onClose={() => abandon('closed')}
     >
-      {step.k !== 'creating' && (
-        <Pressable
-          style={s.closeButton}
-          hitSlop={10}
-          onPress={() => abandon('closed')}
-          accessibilityRole="button"
-          accessibilityLabel="Cancel adding this song"
+      {/* The native form sheet gives this view a bounded height and moves it
+          with the keyboard. The ScrollView now owns only content scrolling;
+          no second RN Modal window or hand-measured keyboard inset exists. */}
+      <View style={s.scrollClip}>
+        <ScrollView
+          style={s.scroll}
+          bounces={false}
+          keyboardShouldPersistTaps="handled"
+          contentInsetAdjustmentBehavior="never"
+          contentContainerStyle={s.content}
         >
-          <Text style={s.close}>Cancel</Text>
-        </Pressable>
-      )}
-      <View style={s.contentFrame}>
-        <Text style={s.title}>Add a song</Text>
-        {/* The native form sheet gives this view a bounded height and moves it
-            with the keyboard. The ScrollView now owns only content scrolling;
-            no second RN Modal window or hand-measured keyboard inset exists. */}
-        <View style={s.scrollClip}>
-          <ScrollView
-            style={s.scroll}
-            bounces={false}
-            keyboardShouldPersistTaps="handled"
-            contentInsetAdjustmentBehavior="never"
-            contentContainerStyle={s.content}
-          >
-            {error && <Text style={s.err}>{error}</Text>}
-            {body()}
-          </ScrollView>
-        </View>
+          {error && <Text style={s.err}>{error}</Text>}
+          {body()}
+        </ScrollView>
       </View>
-    </View>
+    </Sheet>
   )
 }
 
 const s = StyleSheet.create({
-  sheet: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    backgroundColor: C.sheet
-  },
-
   content: { paddingBottom: 4 },
-  contentFrame: { position: 'absolute', top: 18, right: 22, bottom: 34, left: 22 },
   scrollClip: { flex: 1, overflow: 'hidden' },
   scroll: { flex: 1 },
-  closeButton: { position: 'absolute', right: 22, top: 17, zIndex: 1 },
-  title: {
-    color: C.bright,
-    fontSize: 19,
-    fontWeight: '800',
-    letterSpacing: -0.2,
-    marginBottom: 14,
-    marginRight: 70
-  },
-  close: { color: C.amber, fontSize: 15 },
   center: { alignItems: 'center', paddingVertical: 28, gap: 10 },
   label: { color: C.dim, fontSize: 12, marginBottom: 4, marginTop: 8 },
   input: {
