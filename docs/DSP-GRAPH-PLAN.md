@@ -1,8 +1,10 @@
 # Future DSP graph architecture
 
 Status: proposed roadmap, not an implemented subsystem
-Last reviewed: 2026-08-25
+Last reviewed: 2026-08-26
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
+
+Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
 
 This document is the implementation plan for moving SingZ from two fixed
 playback graphs plus a capture pipeline to one reusable, low-latency native DSP
@@ -219,10 +221,13 @@ struct ProcessContext {
 ```
 
 One compiled graph has one sample rate, a declared maximum block size and
-declared bus layouts. Actual callback sizes may vary from 1 to the prepared
-maximum. Platform adapters deinterleave/interleave and convert only at the
-boundary. A block-size adapter is an explicit node/host utility, never an
-assumption hidden inside a processor.
+declared bus layouts. A device callback and `GraphRunner` receive 1 through the
+prepared maximum frames. Processor and plug-in adapters must additionally
+tolerate a zero-frame call used only to flush parameter/events; they must not
+read or write audio buffers in that call. Platform adapters
+deinterleave/interleave and convert only at the boundary. A block-size adapter
+is an explicit node/host utility, never an assumption hidden inside a
+processor.
 
 Before the first block after a generation change, sequence gap, sample-rate
 change, route generation, timestamp-quality transition or hard clock
@@ -254,9 +259,10 @@ class AudioProcessor {
 Rules:
 
 - `prepare` runs off the real-time thread and receives all durable memory.
-- `process` may not allocate/free, lock, wait, log, call filesystem/network
-  APIs, call JNI/JSI or interact with the Objective-C/Swift runtime, or destroy
-  another node.
+- `process` may not allocate/free, lock, perform an OS/blocking wait, log, call
+  filesystem/network APIs, call JNI/JSI or interact with the
+  Objective-C/Swift runtime, or destroy another node. The only future
+  exception is the explicitly budgeted real-time spin join described below.
 - `reset` clears transitory state without changing parameters.
 - node state serialization is a control-domain adapter, not a `process`
   method.
@@ -269,6 +275,22 @@ Rules:
 - non-finite samples are contained at trust boundaries: device conversion and
   plug-in outputs replace NaN/Inf with zero, increment an atomic counter and
   request off-RT bypass after a bounded repeated-failure policy.
+
+### Parallel execution policy
+
+The first graph runner is serial. A later measured optimization may execute
+independent expensive stages on a fixed, pre-created real-time worker pool. It
+may use a spin join only with a precomputed absolute budget ending before the
+device deadline; it never performs an OS wait. Each worker writes a
+slot-private buffer. On a miss, the block uses a prepared emergency dry/silent
+path and the miss is counted. The whole parallel stage/processor generation,
+including its state and arena slots, is then quarantined until every late
+worker acknowledges its epoch. Subsequent blocks use an independently prepared
+fallback snapshot; they never invoke the same stateful processors serially
+while a late worker may still mutate them. Only after acknowledgement may the
+old generation be retired or reused and serial execution of those instances be
+enabled. No worker writes directly to a returned device buffer. Small stages
+and graphs with inadequate measured deadline margin remain serial.
 
 ### Graph description and compiler
 
@@ -609,7 +631,8 @@ initialize → setupProcessing → setActive(true)
            → setProcessing(false) → setActive(false) → terminate
 ```
 
-Actual `ProcessData::numSamples` may vary from 1 to the prepared maximum.
+Actual `ProcessData::numSamples` may vary from zero to the prepared maximum;
+zero samples is a parameter/event flush and carries no audio-buffer access.
 Query `IProcessContextRequirements` between initialization and activation and
 populate requested fields from SingZ `TransportContext` with validity flags.
 Map `IParameterChanges`, `IEventList` and realtime/prefetch/offline process

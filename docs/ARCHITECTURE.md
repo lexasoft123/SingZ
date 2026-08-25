@@ -19,7 +19,9 @@ App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ
 The current playback and capture paths are intentionally still separate. The
 phased proposal for a shared native input/output graph, built-in processors,
 analyzer taps and desktop plug-in hosting is in
-[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md).
+[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md). Its platform, DAW/effects-engine,
+real-time scheduling, zero-copy and acceleration research is recorded in
+[DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md).
 
 ## Audio playback (`renderer/src/audio/engine.ts`)
 
