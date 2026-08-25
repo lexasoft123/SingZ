@@ -231,6 +231,10 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
 
 ## Ideas parked for later
 
+- Native configurable input/output DSP graph, analyzer taps and desktop
+  plug-in hosting: see [DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md). The current
+  shared `AudioInput` core is its capture/analyzer foundation, not its future
+  direct-monitoring callback.
 - demucs-mlx as the Apple Silicon pack: ~2.6× faster than torch/MPS and much
   smaller; would also make an htdemucs_ft quality tier cheap.
 - htdemucs_ft quality mode (4-stem only upstream; ~4× slower, measured 38 s vs

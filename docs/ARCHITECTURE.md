@@ -16,6 +16,11 @@ LogPanel (diagnostics)                            log.ts       ring-buffer app l
 App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
 
+The current playback and capture paths are intentionally still separate. The
+phased proposal for a shared native input/output graph, built-in processors,
+analyzer taps and desktop plug-in hosting is in
+[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md).
+
 ## Audio playback (`renderer/src/audio/engine.ts`)
 
 All stems are `AudioBufferSourceNode`s scheduled at the same context time →
