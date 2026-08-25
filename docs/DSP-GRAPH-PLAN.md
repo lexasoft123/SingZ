@@ -6,6 +6,8 @@ Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
 
 Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
 
+Native language, target and layout design: [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md)
+
 This document is the implementation plan for moving SingZ from two fixed
 playback graphs plus a capture pipeline to one reusable, low-latency native DSP
 engine. It is intentionally parked until a feature needs the next phase. Each
@@ -475,45 +477,47 @@ Each provider is a separate class in a separate OS file:
 Target repository layout:
 
 ```text
-zcore/
-  CMakeLists.txt
-  include/zcore/             # shared audio/time/device and analysis contracts
-  src/                       # analysis, codecs and other portable compute
-  platform/{macos,windows,ios,android}/
-  tools/
-  third_party/
+CMakeLists.txt                 # native superbuild, not an application build
+CMakePresets.json
+cmake/                         # target-scoped warnings, RT flags, sanitizers
+third_party/native/            # pinned wrapper targets; no public type leakage
 
-zdsp/
+zcore/                         # package, not one monolithic library
   CMakeLists.txt
-  include/zdsp/
-    audio_bus.h
-    process_context.h
-    processor.h
-  src/
-    realtime_arena.{h,cpp}
-    graph_description.{h,cpp}
-    graph_compiler.{h,cpp}
-    compiled_graph.{h,cpp}
-    graph_runner.{h,cpp}
-    parameter_queue.{h,cpp}
-    analyzer_tap.{h,cpp}
-  nodes/...
-  plugins/plugin_format.h
-  plugins/plugin_node.{h,cpp}
-  plugins/desktop/vst3_format.{h,cpp}
+  include/zcore/{base,audio,device,media}/
+  src/{base,audio,device,media}/
+  platform/{macos,windows,ios,android}/
+  tests/
+
+zdsp/                          # package, not one monolithic library
+  CMakeLists.txt
+  include/zdsp/                # processor/graph/event contracts
+  src/{graph,runtime}/         # compiler, arena, runner and retirement
+  nodes/{basic,filters,dynamics,time,analysis}/
+  backends/{scalar,accelerate,highway}/
+  offline/                     # melody, beat and ML adapters
+  plugins/{api,vst3,au,clap,bridge}/
+  tests/
+  benchmarks/
+
+tools/native/                  # singz-analyze and offline graph tools
 
 mobile/native/bindings/android/  # SingZ package-specific JNI only
 mobile/ios/SingzCore/            # CocoaPods/product bridge and generated copy
 src/main/native/                 # Electron/product bridge
 ```
 
-`zcore` is the dependency root. It owns the narrow float32 bus, device,
-timestamp/clock and diagnostics contracts plus the existing reusable analysis,
-codec and audio-I/O implementation. `zdsp` owns graph compilation, processors,
-parameter delivery and plug-in adapters. `zdsp` may depend on public `zcore`
-contracts; `zcore` must never depend on `zdsp`. The app-level host adapter links
-both and supplies a `zdsp::GraphRunner` through `zcore::RealtimeRender`, which
-keeps that dependency acyclic.
+`zcore` is the dependency root, but consumers link narrow component targets:
+`SingZ::zcore_base`, `SingZ::zcore_audio`, `SingZ::zcore_device` or
+`SingZ::zcore_media`. `zdsp` similarly produces `SingZ::zdsp_api`,
+`SingZ::zdsp_runtime`, node, analysis, ML and plug-in targets. The real-time
+runner does not transitively link FLAC, ONNX Runtime or plug-in SDKs. `zdsp`
+may depend on public `zcore_base`/`zcore_audio` contracts; `zcore` must never
+depend on `zdsp`. The app-level host coordinator links device and runner
+targets and supplies a `zdsp::GraphRunner` through `zcore::RealtimeRender`,
+which keeps that dependency acyclic. Detailed ownership, language and build
+rules are in
+[NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
 
 Neither reusable library belongs under the React Native CMake tree. Product
 bindings stay with their product: package-specific JNI under
@@ -528,8 +532,10 @@ all consume the top-level libraries.
 for CocoaPods during the migration, but its source becomes `zcore/`; generated
 copies remain gitignored and are never a second authoritative source. Phase 1
 must add an explicit recursive allowlist for `zdsp/` while excluding desktop
-plug-in adapters. Root, host and Android CMake definitions and the podspec all
-enumerate sources explicitly and must change with the relevant library.
+plug-in adapters. Root, host and Android builds share the same CMake target
+definitions. The transitional pod packaging is checked against those component
+manifests; the durable iOS target consumes a CMake-built XCFramework so adding
+a source never requires maintaining a second library definition.
 
 A host-only unit test is not proof of mobile integration: CI must compile iOS,
 Android and host targets and verify `zcore` and, after Phase 1, a `zdsp`
@@ -748,22 +754,24 @@ Use a standalone, versioned graph document rather than adding opaque objects to
 Implement as a dedicated, behavior-preserving PR before graph work:
 
 - Move the authoritative reusable tree from `mobile/native/core/` to top-level
-  `zcore/` with `git mv`, preserving history. Move the shared native
-  dependencies it owns from `mobile/native/third_party/` into
-  `zcore/third_party/`; leave genuinely app-specific React Native code under
-  `mobile/`.
+  `zcore/` with `git mv`, preserving history. Move native third-party sources
+  from `mobile/native/third_party/` into root `third_party/native/`, where
+  narrow wrapper targets own their licenses and compile requirements; leave
+  genuinely app-specific React Native code under `mobile/`.
 - Split source ownership while moving: portable implementation goes under
   `zcore/src/`, OS device/session providers under `zcore/platform/`, narrow
   public contracts under `zcore/include/zcore/`, and CLI entry points under
-  `zcore/tools/`. Move `singz_core_jni.cpp` and any other package-specific JNI
+  `tools/native/`. Move `singz_core_jni.cpp` and any other package-specific JNI
   out to `mobile/native/bindings/android/`; retain the product Objective-C++
   pod wrappers under `mobile/ios/SingzCore/` and Electron adapters under
   `src/main/native/`. Bindings marshal only; reusable behavior stays in
   `zcore`/`zdsp`.
-- Make `zcore` an ordinary CMake library with one public include root and
-  explicit source lists. Preserve current exported C/JNI behavior and packaged
-  library names during this phase so relocation is not mixed with an ABI
-  migration.
+- Make root CMake the authoritative native build with explicit source lists.
+  Split at least `zcore_base`, `zcore_audio`, `zcore_device` and `zcore_media`;
+  a temporary `SingZ::zcore_legacy` may preserve current C/JNI behavior and
+  packaged library names so relocation is not mixed with a product ABI
+  migration. ORT/ML code must not force exceptions, RTTI or link dependencies
+  onto the device/RT targets.
 - Add the top-level `zdsp/` library skeleton and public namespace, but no app
   playback ownership yet. Its CMake target may link only public `zcore`
   contracts and approved third-party DSP dependencies. Add a dependency check
@@ -773,9 +781,15 @@ Implement as a dedicated, behavior-preserving PR before graph work:
   `zcore/`. Repoint Android CMake/Gradle and
   `mobile/scripts/sync-singzcore.js`; keep the iOS materialized pod copy
   generated and gitignored.
-- Give CMake consumers stable exported targets such as `SingZ::zcore` and
-  `SingZ::zdsp`. App targets link those targets instead of compiling ad hoc
-  overlapping source lists wherever the platform build permits it.
+- Give CMake consumers stable narrow exported targets such as
+  `SingZ::zcore_audio`, `SingZ::zcore_device`, `SingZ::zdsp_api` and
+  `SingZ::zdsp_runtime`. Android and host consumers link those targets instead
+  of compiling overlapping source lists. No shipping target uses an umbrella
+  link that drags media, ML and plug-in dependencies into live audio.
+- Adopt target-scoped C++20 after MSVC, Apple Clang, Android arm64 and armv7
+  gates pass. Callback/runtime targets compile without exceptions/RTTI and use
+  only the real-time-safe feature profile; ORT and other exception-requiring
+  adapters remain isolated targets.
 - Add ownership documentation: `zcore` contains reusable native foundations;
   `zdsp` contains the real-time graph; `mobile/` and `src/main/` contain
   package/product bindings and UI/process orchestration only.
@@ -829,8 +843,8 @@ Implement:
 
 References:
 
-- `zcore/include/zcore/audio_input.h`
-- `zcore/include/zcore/audio_input_backend.h`
+- `zcore/include/zcore/device/audio_input.h`
+- `zcore/include/zcore/device/audio_input_backend.h`
 - `tests/native/core_host_tests.cpp`
 - platform audio documents in `docs/`
 
@@ -929,7 +943,7 @@ References:
 - `audio_input_analysis_adapter.{h,cpp}`
 - `mobile/src/{ios,android}-audio-input-session.ts`
 - `src/renderer/src/audio/mic.ts`
-- `zcore/tools/singz-analyze.cpp`
+- `tools/native/singz-analyze.cpp`
 
 Verification:
 

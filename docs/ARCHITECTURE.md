@@ -21,7 +21,9 @@ phased proposal for a shared native input/output graph, built-in processors,
 analyzer taps and desktop plug-in hosting is in
 [DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md). Its platform, DAW/effects-engine,
 real-time scheduling, zero-copy and acceleration research is recorded in
-[DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md).
+[DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md). The native
+C++ language profile, component targets, dependencies and scalable repository
+layout are in [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
 
 ## Audio playback (`renderer/src/audio/engine.ts`)
 

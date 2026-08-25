@@ -4,6 +4,9 @@ Status: research basis for [DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md)
 
 Last reviewed: 2026-08-26
 
+Language, library and source/target layout decisions are specified in
+[NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
+
 This note distils primary platform documentation and production open-source
 audio engines into implementation rules for `zcore` and `zdsp`. It covers
 real-time execution, graph mutation, buffer ownership, scheduling, hardware
