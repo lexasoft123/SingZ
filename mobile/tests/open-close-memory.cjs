@@ -25,6 +25,7 @@ const WebSocket = require('ws');
 
 const BUNDLE = 'com.lexasoft.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
+const DEVICE_NAME = process.env.SIM_DEVICE_NAME || 'iPhone 16 Pro';
 /* Another worktree's Metro on 8081 would hand us ITS app: keep them apart with
  * a second simulator, RCT_METRO_PORT=8082 + the RCT_jsLocation default, and
  * METRO_PORT here (see offline-cache.cjs). */
@@ -90,7 +91,7 @@ function rssMb() {
       const l = await getJson(`http://localhost:${PORT}/json`);
       // Metro lists EVERY connected app — an Android emulator sharing this
       // port would answer the sim's evals. Pick by device name.
-      target = l.find((t) => t.webSocketDebuggerUrl && /iphone|ipad/i.test(t.deviceName || '')) ?? null;
+      target = l.find((t) => t.webSocketDebuggerUrl && t.deviceName === DEVICE_NAME) ?? null;
     } catch {}
     if (!target) await sleep(1000);
   }

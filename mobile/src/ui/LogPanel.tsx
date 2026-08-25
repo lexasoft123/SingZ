@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Alert, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native'
+import { Alert, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { clearLog, fmtTime, formatLog, logEntries, onLogLine, type LogEntry } from '../log'
 import { C } from './bits'
@@ -10,10 +10,8 @@ import { C } from './bits'
  * Copy — a phone log is worth nothing until it can leave the phone.
  */
 export default function LogPanel({
-  visible,
   onClose
 }: {
-  visible: boolean
   onClose: () => void
 }): React.JSX.Element {
   const insets = useSafeAreaInsets()
@@ -23,7 +21,6 @@ export default function LogPanel({
   const stick = useRef(true)
 
   useEffect(() => {
-    if (!visible) return
     let alive = true
     void logEntries().then((all) => {
       if (alive) setEntries(all)
@@ -33,7 +30,7 @@ export default function LogPanel({
       alive = false
       off()
     }
-  }, [visible])
+  }, [])
 
   const share = useCallback(() => {
     void Share.share({ message: formatLog(entries) })
@@ -53,50 +50,48 @@ export default function LogPanel({
   }, [])
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={[s.sheet, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 10 }]}>
-        <View style={s.head}>
-          <Text style={s.title}>Log</Text>
-          <Text style={s.count}>{entries.length} lines</Text>
-          <View style={s.actions}>
-            <Pressable hitSlop={8} onPress={share} accessibilityRole="button" accessibilityLabel="Share the log">
-              <Text style={s.link}>Share</Text>
-            </Pressable>
-            <Pressable
-              hitSlop={8}
-              onPress={confirmClear}
-              accessibilityRole="button"
-              accessibilityLabel="Clear the log"
-            >
-              <Text style={s.link}>Clear</Text>
-            </Pressable>
-            <Pressable hitSlop={8} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close the log">
-              <Text style={s.link}>Close</Text>
-            </Pressable>
-          </View>
+    <View style={[s.sheet, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 10 }]}>
+      <View style={s.head}>
+        <Text style={s.title}>Log</Text>
+        <Text style={s.count}>{entries.length} lines</Text>
+        <View style={s.actions}>
+          <Pressable hitSlop={8} onPress={share} accessibilityRole="button" accessibilityLabel="Share the log">
+            <Text style={s.link}>Share</Text>
+          </Pressable>
+          <Pressable
+            hitSlop={8}
+            onPress={confirmClear}
+            accessibilityRole="button"
+            accessibilityLabel="Clear the log"
+          >
+            <Text style={s.link}>Clear</Text>
+          </Pressable>
+          <Pressable hitSlop={8} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close the log">
+            <Text style={s.link}>Close</Text>
+          </Pressable>
         </View>
-        <ScrollView
-          ref={body}
-          onScroll={(e) => {
-            const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent
-            stick.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 40
-          }}
-          scrollEventThrottle={100}
-          onContentSizeChange={() => {
-            if (stick.current) body.current?.scrollToEnd({ animated: false })
-          }}
-        >
-          {entries.length === 0 && <Text style={s.empty}>Nothing logged yet.</Text>}
-          {entries.map((e, i) => (
-            <View key={`${e.t}-${i}`} style={s.row}>
-              <Text style={s.time}>{fmtTime(e.t)}</Text>
-              <Text style={s.src}>{e.source}</Text>
-              <Text style={[s.msg, e.level !== 'info' && { color: C.red }]}>{e.line}</Text>
-            </View>
-          ))}
-        </ScrollView>
       </View>
-    </Modal>
+      <ScrollView
+        ref={body}
+        onScroll={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent
+          stick.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 40
+        }}
+        scrollEventThrottle={100}
+        onContentSizeChange={() => {
+          if (stick.current) body.current?.scrollToEnd({ animated: false })
+        }}
+      >
+        {entries.length === 0 && <Text style={s.empty}>Nothing logged yet.</Text>}
+        {entries.map((e, i) => (
+          <View key={`${e.t}-${i}`} style={s.row}>
+            <Text style={s.time}>{fmtTime(e.t)}</Text>
+            <Text style={s.src}>{e.source}</Text>
+            <Text style={[s.msg, e.level !== 'info' && { color: C.red }]}>{e.line}</Text>
+          </View>
+        ))}
+      </ScrollView>
+    </View>
   )
 }
 
