@@ -8,7 +8,7 @@ import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
 import CatalogScreen from './CatalogScreen'
 import LogPanel from './LogPanel'
 import PlayerScreen from './PlayerScreen'
-import { C } from './bits'
+import { C, NATIVE_SHEET_FIT_SUPPORTED } from './bits'
 
 type RootStackParamList = {
   Catalog: undefined
@@ -166,8 +166,8 @@ export default function RootNavigator({
             options={{
               presentation: 'formSheet',
               gestureEnabled: true,
-              sheetAllowedDetents: [0.42, 0.93],
-              sheetInitialDetentIndex: 0,
+              sheetAllowedDetents: NATIVE_SHEET_FIT_SUPPORTED ? 'fitToContents' : [0.42, 0.93],
+              ...(!NATIVE_SHEET_FIT_SUPPORTED ? { sheetInitialDetentIndex: 0 } : {}),
               sheetGrabberVisible: true,
               contentStyle: styles.sheet
             }}

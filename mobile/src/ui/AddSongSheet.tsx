@@ -22,7 +22,7 @@ import { log } from '../log'
 import type { LyricLine } from '../model'
 import { clearCache } from '../projects'
 import type { PickedFile } from '../writer'
-import { C, Sheet, white } from './bits'
+import { C, NATIVE_SHEET_FIT_SUPPORTED, Sheet, SheetScrollView, white } from './bits'
 
 /**
  * The add-a-song flow (Phase 1): pick → read the file → confirm title/artist
@@ -468,31 +468,27 @@ export default function AddSongSheet({
       actionLabel="Cancel"
       actionHidden={step.k === 'creating'}
       actionAccessibilityLabel="Cancel adding this song"
+      fitContent={NATIVE_SHEET_FIT_SUPPORTED}
       onClose={() => abandon('closed')}
     >
       {/* The native form sheet gives this view a bounded height and moves it
           with the keyboard. The ScrollView now owns only content scrolling;
           no second RN Modal window or hand-measured keyboard inset exists. */}
-      <View style={s.scrollClip}>
-        <ScrollView
-          style={s.scroll}
-          bounces={false}
-          keyboardShouldPersistTaps="handled"
-          contentInsetAdjustmentBehavior="never"
-          contentContainerStyle={s.content}
-        >
-          {error && <Text style={s.err}>{error}</Text>}
-          {body()}
-        </ScrollView>
-      </View>
+      <SheetScrollView
+        bounces={false}
+        keyboardShouldPersistTaps="handled"
+        contentInsetAdjustmentBehavior="never"
+        contentContainerStyle={s.content}
+      >
+        {error && <Text style={s.err}>{error}</Text>}
+        {body()}
+      </SheetScrollView>
     </Sheet>
   )
 }
 
 const s = StyleSheet.create({
   content: { paddingBottom: 4 },
-  scrollClip: { flex: 1, overflow: 'hidden' },
-  scroll: { flex: 1 },
   center: { alignItems: 'center', paddingVertical: 28, gap: 10 },
   label: { color: C.dim, fontSize: 12, marginBottom: 4, marginTop: 8 },
   input: {

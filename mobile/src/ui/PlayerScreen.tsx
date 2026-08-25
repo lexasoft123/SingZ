@@ -54,10 +54,12 @@ import {
   HeadphonesGlyph,
   MicGlyph,
   MixGlyph,
+  NATIVE_SHEET_FIT_SUPPORTED,
   PlayPauseGlyph,
   RoundBtn,
   Seg,
   Sheet,
+  SheetScrollView,
   SpeakerGlyph,
   splitSongName,
   StemTile,
@@ -97,15 +99,14 @@ const PLAYER_SHEET_OPTIONS: NativeStackNavigationOptions = {
   presentation: 'formSheet',
   headerShown: false,
   gestureEnabled: true,
-  sheetAllowedDetents: [0.55, 0.93],
-  sheetInitialDetentIndex: 1,
+  sheetAllowedDetents: NATIVE_SHEET_FIT_SUPPORTED ? 'fitToContents' : [0.55, 0.93],
+  ...(!NATIVE_SHEET_FIT_SUPPORTED ? { sheetInitialDetentIndex: 1 } : {}),
   sheetGrabberVisible: true,
   contentStyle: { backgroundColor: C.sheet }
 }
-const MIXER_SHEET_OPTIONS: NativeStackNavigationOptions = {
-  ...PLAYER_SHEET_OPTIONS,
-  sheetInitialDetentIndex: 0
-}
+const MIXER_SHEET_OPTIONS: NativeStackNavigationOptions = NATIVE_SHEET_FIT_SUPPORTED
+  ? PLAYER_SHEET_OPTIONS
+  : { ...PLAYER_SHEET_OPTIONS, sheetInitialDetentIndex: 0 }
 
 /** Native-stack can remove a popped screen before delivering `blur`. Route
  *  content unmount is the reliable completion signal for both a system swipe
@@ -1503,7 +1504,17 @@ export default function PlayerScreen({
       >
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
-            <Sheet title="Mixer" onClose={() => setSheet('none')} pad={sheetPad}>
+            <Sheet
+              title="Mixer"
+              onClose={() => setSheet('none')}
+              fitContent={NATIVE_SHEET_FIT_SUPPORTED}
+              pad={sheetPad}
+            >
+            <SheetScrollView
+              contentContainerStyle={b.sheetScrollContent}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+            >
             {/* One tap for the thing the app exists to do. Only offered when
                 the song has a vocal lane — an unsplit song has nothing to
                 mute. */}
@@ -1525,12 +1536,6 @@ export default function PlayerScreen({
             {/* The lane rows had no scroll container at all, so past roughly a
                 dozen lanes they clipped with no way to reach them — and the
                 44 pt fader targets below bring that cliff closer. */}
-            <ScrollView
-              style={b.sheetScroll}
-              contentContainerStyle={b.sheetScrollContent}
-              contentInsetAdjustmentBehavior="never"
-              showsVerticalScrollIndicator={false}
-            >
             {tracks.map((t, i) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
@@ -1609,7 +1614,7 @@ export default function PlayerScreen({
                 </React.Fragment>
               )
             })}
-            </ScrollView>
+            </SheetScrollView>
             </Sheet>
           </PlayerSheetRoute>
         )}
@@ -1622,9 +1627,13 @@ export default function PlayerScreen({
       >
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
-            <Sheet title={project.name} onClose={() => setSheet('none')} pad={sheetPad}>
-            <ScrollView
-              style={b.sheetScroll}
+            <Sheet
+              title={project.name}
+              onClose={() => setSheet('none')}
+              fitContent={NATIVE_SHEET_FIT_SUPPORTED}
+              pad={sheetPad}
+            >
+            <SheetScrollView
               contentContainerStyle={b.sheetScrollContent}
               contentInsetAdjustmentBehavior="never"
               showsVerticalScrollIndicator={false}
@@ -1872,7 +1881,7 @@ export default function PlayerScreen({
                     .join(' · ')}
                 </Text>
               </View>
-            </ScrollView>
+            </SheetScrollView>
             </Sheet>
           </PlayerSheetRoute>
         )}
@@ -1885,9 +1894,13 @@ export default function PlayerScreen({
       >
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
-            <Sheet title="Practice" onClose={() => setSheet('none')} pad={sheetPad}>
-            <ScrollView
-              style={b.sheetScroll}
+            <Sheet
+              title="Practice"
+              onClose={() => setSheet('none')}
+              fitContent={NATIVE_SHEET_FIT_SUPPORTED}
+              pad={sheetPad}
+            >
+            <SheetScrollView
               contentContainerStyle={b.sheetScrollContent}
               bounces={false}
               contentInsetAdjustmentBehavior="never"
@@ -2163,7 +2176,7 @@ export default function PlayerScreen({
                   </View>
                 )}
               </View>
-            </ScrollView>
+            </SheetScrollView>
             </Sheet>
           </PlayerSheetRoute>
         )}

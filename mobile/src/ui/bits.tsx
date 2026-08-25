@@ -4,15 +4,24 @@ import {
   Image,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
   type GestureResponderEvent,
   type ImageSourcePropType,
   type LayoutChangeEvent,
+  type ScrollViewProps,
   type StyleProp,
   type ViewStyle
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+
+/** react-native-screens implements native fit-to-contents sheets on iOS 16+.
+ * Android supports them through its own form-sheet implementation. */
+export const NATIVE_SHEET_FIT_SUPPORTED =
+  Platform.OS !== 'ios' || Number.parseInt(String(Platform.Version), 10) >= 16
 
 /**
  * White at some opacity — the phone's most-used colour by far.
@@ -918,6 +927,7 @@ export function Sheet({
   actionLabel,
   actionHidden = false,
   actionAccessibilityLabel,
+  fitContent = false,
   pad,
   children
 }: {
@@ -926,11 +936,27 @@ export function Sheet({
   actionLabel?: string
   actionHidden?: boolean
   actionAccessibilityLabel?: string
+  /** The native fit-to-contents detent already adds the iOS bottom inset.
+   *  Drop this surface's fixed inset there so the safe area is not counted
+   *  twice below the last control. */
+  fitContent?: boolean
   pad?: StyleProp<ViewStyle>
   children: React.ReactNode
 }): React.JSX.Element {
+  const { height: windowHeight } = useWindowDimensions()
+  const insets = useSafeAreaInsets()
+
   return (
-    <View style={[b.sheet, pad]} accessible={false} onAccessibilityEscape={onClose}>
+    <View
+      style={[
+        b.sheet,
+        fitContent && b.sheetFitContent,
+        fitContent && { maxHeight: Math.max(0, windowHeight - insets.top) },
+        pad
+      ]}
+      accessible={false}
+      onAccessibilityEscape={onClose}
+    >
       <View style={b.sheetHeader}>
         <Text style={b.sheetTitle} numberOfLines={1}>
           {title}
@@ -947,8 +973,43 @@ export function Sheet({
           </Pressable>
         )}
       </View>
-      <View style={b.sheetBody}>{children}</View>
+      <View style={[b.sheetBody, fitContent && b.sheetBodyFitContent]}>{children}</View>
     </View>
+  )
+}
+
+/** A form-sheet ScrollView whose viewport follows its rendered content until
+ *  that content reaches the safe screen height. Native fitToContents then
+ *  receives an exact short height, while a long sheet receives a bounded
+ *  viewport that can actually scroll instead of a content-height view clipped
+ *  by UIKit's maximum detent. */
+export function SheetScrollView({
+  style,
+  onContentSizeChange,
+  ...props
+}: ScrollViewProps): React.JSX.Element {
+  const { height: windowHeight } = useWindowDimensions()
+  const insets = useSafeAreaInsets()
+  const [contentHeight, setContentHeight] = React.useState(1)
+  const headerHeight = Platform.OS === 'ios' ? 62 : 50
+  const bottomInset = Platform.OS === 'ios' ? 0 : Math.max(34, insets.bottom + 18)
+  const maxHeight = Math.max(1, windowHeight - insets.top - headerHeight - bottomInset)
+
+  return (
+    <ScrollView
+      {...props}
+      style={[
+        style,
+        b.sheetScroll,
+        NATIVE_SHEET_FIT_SUPPORTED
+          ? { height: Math.min(contentHeight, maxHeight) }
+          : b.sheetScrollFill
+      ]}
+      onContentSizeChange={(width, height) => {
+        if (NATIVE_SHEET_FIT_SUPPORTED) setContentHeight(height)
+        onContentSizeChange?.(width, height)
+      }}
+    />
   )
 }
 
@@ -1013,6 +1074,11 @@ export const b = StyleSheet.create({
     paddingBottom: 34,
     overflow: 'hidden'
   },
+  sheetFitContent: {
+    flex: 0,
+    width: '100%',
+    paddingBottom: Platform.OS === 'ios' ? 0 : 34
+  },
   sheetHeader: {
     minHeight: Platform.OS === 'ios' ? 62 : 50,
     paddingTop: Platform.OS === 'ios' ? 16 : 0,
@@ -1021,10 +1087,12 @@ export const b = StyleSheet.create({
     gap: 16
   },
   sheetBody: { flex: 1, minWidth: 0, width: '100%', overflow: 'hidden' },
+  sheetBodyFitContent: { flex: 0 },
   sheetClose: { flexShrink: 0 },
   sheetCloseText: { color: C.amber, fontSize: 15, fontWeight: '700' },
   sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', letterSpacing: -0.2, flex: 1 },
-  sheetScroll: { flex: 1, minWidth: 0 },
+  sheetScroll: { minWidth: 0 },
+  sheetScrollFill: { flex: 1 },
   sheetScrollContent: { paddingBottom: 4 },
   sec: { borderTopWidth: 1, borderTopColor: C.hairline, paddingVertical: 15 },
   secFirst: { borderTopWidth: 0, paddingTop: 2 },

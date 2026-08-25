@@ -39,7 +39,7 @@ const nameOf = (n: Node): string =>
       : ''
 
 const TOUCHABLE = /^(Pressable|Touchable\w*)$/
-const SCROLLABLE = /^(Animated\.)?(ScrollView|FlatList|SectionList|VirtualizedList)$/
+const SCROLLABLE = /^(SheetScrollView|(Animated\.)?(ScrollView|FlatList|SectionList|VirtualizedList))$/
 
 /**
  * Every scrollable ELEMENT in one file, with the elements open around it.
@@ -116,7 +116,7 @@ test.each(files.map((f) => [f.slice(ROOT.length + 1), f]))('%s puts no scrollabl
 
 test('the player presents its Sheet content through native-stack form sheets', () => {
   const player = readFileSync(join(ROOT, 'src', 'ui', 'PlayerScreen.tsx'), 'utf8')
-  expect(player).toMatch(/<Sheet title=/)
+  expect(player).toMatch(/<Sheet\b/)
   expect(player).toMatch(/presentation: 'formSheet'/)
   expect(player).not.toMatch(/<Modal\b/)
 })
