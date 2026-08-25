@@ -190,7 +190,7 @@ static void audioInputConversionTests() {
 static void audioInputAnalysisAdapterTests() {
   constexpr double rate = 48000;
   constexpr uint64_t startNs = 2000000000ull;
-  auto timestamp = [](uint64_t start, uint64_t frame) {
+  auto timestamp = [rate](uint64_t start, uint64_t frame) {
     return static_cast<uint64_t>(static_cast<long double>(start) +
                                  static_cast<long double>(frame) * 1000000000.0L / rate);
   };
