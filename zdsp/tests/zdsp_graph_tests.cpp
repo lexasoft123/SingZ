@@ -1,32 +1,14 @@
 #include "zdsp/offline_renderer.h"
+#include "allocation_trap.h"
 
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <new>
 #include <thread>
 #include <vector>
-
-namespace {
-std::atomic<bool> trapAllocations{false};
-std::atomic<uint64_t> trappedAllocations{0};
-}
-
-void* operator new(std::size_t size) {
-  if (trapAllocations.load(std::memory_order_relaxed))
-    trappedAllocations.fetch_add(1, std::memory_order_relaxed);
-  if (void* value = std::malloc(size)) return value;
-  throw std::bad_alloc();
-}
-void* operator new[](std::size_t size) { return ::operator new(size); }
-void operator delete(void* value) noexcept { std::free(value); }
-void operator delete[](void* value) noexcept { std::free(value); }
-void operator delete(void* value, std::size_t) noexcept { std::free(value); }
-void operator delete[](void* value, std::size_t) noexcept { std::free(value); }
 
 namespace {
 using namespace zdsp;
@@ -2928,11 +2910,11 @@ void queuesContainmentAndAllocationTrap() {
   ProcessContext context{kProcessContextInterfaceVersion, kProcessContextV1RequiredSize,
       {{1}, {1}, {0}, {0}, {0}, RenderTimeNone}, nullptr, {48000.0}, {8},
       nullptr, 0, nullptr, 0, {nullptr, 0}, {DiscontinuityReason::None, 0}};
-  trappedAllocations.store(0, std::memory_order_relaxed);
-  trapAllocations.store(true, std::memory_order_release);
+  test::resetAllocationTrap();
+  test::setAllocationTrapEnabled(true);
   const Status status = renderGraphBlock(&runner, context, &input, 1, &output, 1);
-  trapAllocations.store(false, std::memory_order_release);
-  expect(succeeded(status) && trappedAllocations.load() == 0,
+  test::setAllocationTrapEnabled(false);
+  expect(succeeded(status) && test::trappedAllocationCount() == 0,
          "steady-state runner performs no allocation");
   expect(outputSamples[1] == 0.0f && outputSamples[2] == 0.0f &&
          outputSamples[3] == 0.0f && outputSamples[4] == 1.0f &&
@@ -2969,6 +2951,44 @@ void queuesContainmentAndAllocationTrap() {
          containedMix == 0.0f &&
          mixDiagnostics.nonFiniteSamples.load() == 1,
          "builtin overflow is contained and published once per node/block");
+}
+
+void allocationTrapReplacementForms() {
+  constexpr std::size_t size = 64;
+  constexpr std::align_val_t alignment{64};
+  test::resetAllocationTrap();
+  test::setAllocationTrapEnabled(true);
+  void* scalar = ::operator new(size);
+  void* sizedScalar = ::operator new(size);
+  void* array = ::operator new[](size);
+  void* sizedArray = ::operator new[](size);
+  void* nothrowScalar = ::operator new(size, std::nothrow);
+  void* nothrowArray = ::operator new[](size, std::nothrow);
+  void* alignedScalar = ::operator new(size, alignment);
+  void* sizedAlignedScalar = ::operator new(size, alignment);
+  void* alignedArray = ::operator new[](size, alignment);
+  void* sizedAlignedArray = ::operator new[](size, alignment);
+  void* nothrowAlignedScalar = ::operator new(size, alignment, std::nothrow);
+  void* nothrowAlignedArray = ::operator new[](size, alignment, std::nothrow);
+  test::setAllocationTrapEnabled(false);
+
+  expect(nothrowScalar != nullptr && nothrowArray != nullptr &&
+             nothrowAlignedScalar != nullptr && nothrowAlignedArray != nullptr &&
+             test::trappedAllocationCount() == 12,
+         "allocation trap covers scalar, array, aligned, sized and nothrow forms");
+
+  ::operator delete(scalar);
+  ::operator delete(sizedScalar, size);
+  ::operator delete[](array);
+  ::operator delete[](sizedArray, size);
+  ::operator delete(nothrowScalar, std::nothrow);
+  ::operator delete[](nothrowArray, std::nothrow);
+  ::operator delete(alignedScalar, alignment);
+  ::operator delete(sizedAlignedScalar, size, alignment);
+  ::operator delete[](alignedArray, alignment);
+  ::operator delete[](sizedAlignedArray, size, alignment);
+  ::operator delete(nothrowAlignedScalar, alignment, std::nothrow);
+  ::operator delete[](nothrowAlignedArray, alignment, std::nothrow);
 }
 
 void publicationTransitionAndRetirement() {
@@ -3601,6 +3621,7 @@ int main() {
   shutdownBusyAndCallbackGuard();
   boundedAndNonDestructiveQueueDrains();
   queuesContainmentAndAllocationTrap();
+  allocationTrapReplacementForms();
   publicationTransitionAndRetirement();
   reverseLatencyHistoryPriming();
   multiOutputTransitions();

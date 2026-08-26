@@ -120,6 +120,19 @@ if(SINGZ_CORE_TESTS)
 
   add_executable(zdsp_graph_tests
     ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_graph_tests.cpp)
+  set(_zdsp_allocation_trap_source
+    "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_sources(zdsp_graph_tests PRIVATE
+    "${_zdsp_allocation_trap_source}"
+    "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h")
+  target_include_directories(zdsp_graph_tests PRIVATE
+    "${SINGZ_REPO_ROOT}/zdsp/tests")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # This test-only replacement allocation API intentionally pairs malloc/free.
+    # Keep GCC's heuristic suppression local so real mismatches remain errors.
+    set_source_files_properties("${_zdsp_allocation_trap_source}" PROPERTIES
+      COMPILE_OPTIONS "-Wno-mismatched-new-delete")
+  endif()
   target_compile_features(zdsp_graph_tests PRIVATE cxx_std_20)
   set_target_properties(zdsp_graph_tests PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_graph_tests PRIVATE SingZ::zdsp_offline Threads::Threads)
