@@ -23,7 +23,7 @@ AudioInputWake::~AudioInputWake() {
   if (impl_ && impl_->fd >= 0) close(impl_->fd);
 }
 
-void AudioInputWake::signal() {
+void AudioInputWake::signal() noexcept {
   if (!impl_ || impl_->fd < 0) return;
   const uint64_t one = 1;
   // eventfd is a fixed-size nonblocking kernel operation. EAGAIN only means

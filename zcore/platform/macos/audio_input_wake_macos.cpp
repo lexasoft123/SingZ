@@ -30,7 +30,7 @@ AudioInputWake::~AudioInputWake() {
     semaphore_destroy(mach_task_self(), impl_->semaphore);
 }
 
-void AudioInputWake::signal() {
+void AudioInputWake::signal() noexcept {
   if (impl_ && impl_->semaphore != SEMAPHORE_NULL)
     (void)semaphore_signal(impl_->semaphore);
 }

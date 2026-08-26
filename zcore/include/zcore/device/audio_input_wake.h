@@ -14,7 +14,7 @@ class AudioInputWake {
   AudioInputWake(const AudioInputWake&) = delete;
   AudioInputWake& operator=(const AudioInputWake&) = delete;
 
-  void signal();
+  void signal() noexcept;
   void drain();
   bool wait(uint32_t timeoutMs);
 

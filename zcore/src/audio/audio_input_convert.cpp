@@ -8,7 +8,7 @@ namespace singz {
 bool convertAudioInputChannel(const uint8_t* interleaved, uint32_t frames,
                               uint32_t channels, uint32_t selectedChannel,
                               AudioInputEncoding encoding, uint16_t validBits,
-                              float* mono) {
+                              float* mono) noexcept {
   if (!interleaved || !mono || frames == 0 || channels == 0 ||
       selectedChannel >= channels)
     return false;

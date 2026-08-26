@@ -24,7 +24,7 @@ uint32_t high32(uint64_t value) {
 
 uint64_t audioInputCallbackEntryFallback(uint64_t callbackEntryNs,
                                          uint32_t blockFrames,
-                                         double sampleRate) {
+                                         double sampleRate) noexcept {
   if (callbackEntryNs == 0 || blockFrames == 0 ||
       !std::isfinite(sampleRate) || sampleRate <= 0) {
     return 0;
@@ -39,7 +39,8 @@ uint64_t audioInputCallbackEntryFallback(uint64_t callbackEntryNs,
 
 AudioInputTimestampProjection resolveAudioInputTimestamp(
     bool hardwareTimestampValid, uint64_t hardwareTimestampNs,
-    uint64_t callbackEntryNs, uint32_t blockFrames, double sampleRate) {
+    uint64_t callbackEntryNs, uint32_t blockFrames,
+    double sampleRate) noexcept {
   if (hardwareTimestampValid && hardwareTimestampNs != 0)
     return {hardwareTimestampNs, true};
   return {audioInputCallbackEntryFallback(callbackEntryNs, blockFrames,
@@ -47,7 +48,7 @@ AudioInputTimestampProjection resolveAudioInputTimestamp(
           false};
 }
 
-void AudioInputTimestampProjector::reset() {
+void AudioInputTimestampProjector::reset() noexcept {
   sequence_.fetch_add(1, std::memory_order_acq_rel);
   frameLow_.store(0, std::memory_order_relaxed);
   frameHigh_.store(0, std::memory_order_relaxed);
@@ -60,7 +61,7 @@ void AudioInputTimestampProjector::reset() {
 
 bool AudioInputTimestampProjector::publish(int64_t framePosition,
                                            int64_t frameTimeNs,
-                                           uint64_t sampledAtNs) {
+                                           uint64_t sampledAtNs) noexcept {
   if (framePosition < 0 || frameTimeNs <= 0 || sampledAtNs == 0) return false;
   const uint64_t time = static_cast<uint64_t>(frameTimeNs);
   if (time > sampledAtNs + kMaximumProjectionAheadOfCallbackNs ||
@@ -81,7 +82,7 @@ bool AudioInputTimestampProjector::publish(int64_t framePosition,
 
 AudioInputTimestampProjection AudioInputTimestampProjector::project(
     int64_t blockStartFrame, uint32_t blockFrames, int32_t sampleRate,
-    uint64_t callbackEntryNs) const {
+    uint64_t callbackEntryNs) const noexcept {
   const uint64_t fallback = audioInputCallbackEntryFallback(
       callbackEntryNs, blockFrames, sampleRate);
   if (blockStartFrame < 0 || sampleRate <= 0 || callbackEntryNs == 0)
@@ -109,7 +110,7 @@ AudioInputTimestampProjection AudioInputTimestampProjector::project(
   return {result, true};
 }
 
-bool AudioInputTimestampProjector::snapshot(Snapshot& out) const {
+bool AudioInputTimestampProjector::snapshot(Snapshot& out) const noexcept {
   for (int attempt = 0; attempt < 3; ++attempt) {
     const uint32_t before = sequence_.load(std::memory_order_acquire);
     if ((before & 1u) != 0) continue;
@@ -130,11 +131,12 @@ bool AudioInputTimestampProjector::snapshot(Snapshot& out) const {
 }
 
 uint64_t AudioInputTimestampProjector::joinUnsigned(uint32_t low,
-                                                    uint32_t high) {
+                                                    uint32_t high) noexcept {
   return static_cast<uint64_t>(low) | (static_cast<uint64_t>(high) << 32u);
 }
 
-int64_t AudioInputTimestampProjector::joinSigned(uint32_t low, uint32_t high) {
+int64_t AudioInputTimestampProjector::joinSigned(uint32_t low,
+                                                uint32_t high) noexcept {
   return static_cast<int64_t>(joinUnsigned(low, high));
 }
 

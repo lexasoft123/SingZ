@@ -11,6 +11,8 @@
 #include <zcore/device/audio_input_backend.h>
 #include <zcore/device/audio_input_wake.h>
 
+#include "audio_input_callback.h"
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -150,7 +152,6 @@ struct AudioInput::Impl {
   std::atomic<uint64_t> deliveredFrames{0};
   std::atomic<uint64_t> lastOverruns{0};
   std::atomic<uint64_t> deliveryWakeups{0};
-  std::atomic<bool> wakePending{false};
   double sampleRate = 0;
   AudioInputConfig config;
   std::string failure;
@@ -159,32 +160,17 @@ struct AudioInput::Impl {
   AudioInputSink sink;
   std::thread delivery;
   AudioInputWake wake;
+  AudioInputCallbackEndpoint callback;
 
-  void wakeDelivery() { wake.signal(); }
+  void wakeDelivery() noexcept { wake.signal(); }
 
-  void notifyDeliveryFromProducer() {
-    if (!wakePending.exchange(true, std::memory_order_acq_rel)) wakeDelivery();
+  static void notifyDelivery(void* context) noexcept {
+    if (context) static_cast<Impl*>(context)->wakeDelivery();
   }
 
   void resetDeliveryWake() {
-    wakePending.store(false, std::memory_order_release);
+    callback.resetNotification();
     wake.drain();
-  }
-
-  static bool push(void* context, const float* mono, uint32_t frames,
-                   uint64_t sampleHostTimeNs, uint64_t callbackHostTimeNs,
-                   AudioInputTimestampQuality timestampQuality) {
-    Impl* self = static_cast<Impl*>(context);
-    // ring is published before backend start and is not reset until the
-    // backend has stopped and delivery has joined.
-    if (!self || !self->ring) return false;
-    const bool pushed =
-        self->ring->push(mono, frames, sampleHostTimeNs, callbackHostTimeNs,
-                         timestampQuality);
-    // Platform event signaling is a fixed-size kernel operation: no app lock,
-    // allocation, logging, JSON, or DSP on the real-time producer.
-    if (pushed) self->notifyDeliveryFromProducer();
-    return pushed;
   }
 
   void stopBackend() {
@@ -241,7 +227,7 @@ struct AudioInput::Impl {
         // sees false and signals. Thus no edge is lost on weakly ordered CPUs,
         // and at most one event token can remain for the next idle pass.
         [[maybe_unused]] const bool acquiredProducerPublication =
-            wakePending.exchange(false, std::memory_order_acq_rel);
+            callback.rearmNotification();
         AudioInputBlockView racedBlock;
         if (ring && ring->peek(racedBlock, sampleRate)) continue;
         if (wake.wait(5))
@@ -295,6 +281,7 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
     if (impl_->ring)
       impl_->lastOverruns.store(impl_->ring->overruns(), std::memory_order_relaxed);
     impl_->backend.reset();
+    impl_->callback.clear();
     impl_->ring.reset();
     impl_->sink = nullptr;
   }
@@ -327,6 +314,8 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
     std::lock_guard<std::mutex> control(impl_->control);
     impl_->config = config;
     impl_->ring = std::make_unique<AudioInputRing>(config.ringBlocks, kMaxCallbackFrames);
+    impl_->callback.prepare(impl_->ring->producer(), Impl::notifyDelivery,
+                            impl_.get());
     impl_->sink = std::move(sink);
     impl_->backend = makeAudioInputBackend();
   }
@@ -338,12 +327,14 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
   AudioInputResult result;
   {
     std::lock_guard<std::mutex> backend(impl_->backendControl);
-    result = impl_->backend->open(config, Impl::push, impl_.get());
+    result = impl_->backend->open(config, AudioInputCallbackEndpoint::push,
+                                  &impl_->callback);
   }
   if (!result.ok) {
     impl_->stopBackend();
     std::lock_guard<std::mutex> control(impl_->control);
     impl_->backend.reset();
+    impl_->callback.clear();
     impl_->ring.reset();
     impl_->sink = nullptr;
     impl_->state.store(result.state, std::memory_order_release);
@@ -353,6 +344,7 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
     impl_->stopBackend();
     std::lock_guard<std::mutex> control(impl_->control);
     impl_->backend.reset();
+    impl_->callback.clear();
     impl_->ring.reset();
     impl_->sink = nullptr;
     impl_->failure = "audio input backend returned an invalid sample rate";
@@ -425,6 +417,7 @@ void AudioInput::stop() {
     if (impl_->ring)
       impl_->lastOverruns.store(impl_->ring->overruns(), std::memory_order_relaxed);
     impl_->backend.reset();
+    impl_->callback.clear();
     impl_->ring.reset();
     impl_->sink = nullptr;
     impl_->state.store(AudioInputState::Stopped, std::memory_order_release);

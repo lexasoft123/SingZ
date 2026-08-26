@@ -62,12 +62,12 @@ target_link_libraries(singzcore PRIVATE
     dl
     log)
 
-# JNIEXPORT functions remain default-visible. Internal same-toolchain zdsp C++
-# and the link-smoke anchor must never become an accidental shared-library ABI.
+# JNIEXPORT functions remain default-visible. Internal same-toolchain zdsp and
+# zcore callback symbols must never become an accidental shared-library ABI.
 add_custom_command(TARGET singzcore POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         "-DSINGZ_SHARED_BINARY=$<TARGET_FILE:singzcore>"
         "-DSINGZ_NM=${CMAKE_NM}"
         -P "${SINGZ_NATIVE_ROOT}/cmake/CheckZdspSharedExports.cmake"
     VERBATIM
-    COMMENT "Checking libsingzcore zdsp export surface")
+    COMMENT "Checking libsingzcore internal export surface")

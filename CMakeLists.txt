@@ -59,6 +59,7 @@ set(SINGZ_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 add_subdirectory(third_party/native)
 add_subdirectory(zcore)
 add_subdirectory(zdsp)
+get_property(SINGZ_ZCORE_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZCORE_RT_MANIFEST)
 get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 
 if(NOT SINGZ_BUILD_HOST_TOOLS)
@@ -84,6 +85,16 @@ if(SINGZ_CORE_TESTS)
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZCORE_ROOT=${SINGZ_REPO_ROOT}/zcore"
       -P "${SINGZ_REPO_ROOT}/cmake/CheckZcoreBoundaries.cmake")
+  add_test(NAME zcore_realtime_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ZCORE_RT_MANIFEST=${SINGZ_ZCORE_RT_MANIFEST}"
+      -P "${SINGZ_REPO_ROOT}/cmake/CheckZcoreRealtime.cmake")
+  add_test(NAME zcore_realtime_policy_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ZCORE_RT_MANIFEST=${SINGZ_ZCORE_RT_MANIFEST}"
+      "-DSINGZ_ZCORE_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckZcoreRealtime.cmake"
+      "-DSINGZ_ZCORE_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/zcore-rt-negative"
+      -P "${SINGZ_REPO_ROOT}/cmake/TestZcoreRealtimePolicy.cmake")
   add_test(NAME zdsp_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_ZDSP_RT_MANIFEST}"
@@ -92,6 +103,8 @@ if(SINGZ_CORE_TESTS)
   add_dependencies(core_host_tests singz_check_zcore_boundaries)
   target_compile_features(core_host_tests PRIVATE cxx_std_20)
   target_compile_definitions(core_host_tests PRIVATE SINGZ_CORE_TESTS=1)
+  target_include_directories(core_host_tests PRIVATE
+    "${SINGZ_REPO_ROOT}/zcore/src/device")
   target_link_libraries(core_host_tests PRIVATE SingZ::zcore_legacy)
   add_test(NAME core_host_tests COMMAND core_host_tests)
 

@@ -15,11 +15,14 @@ libraries. Each package produces narrow CMake targets so an audio callback does
 not inherit codecs, ONNX Runtime, plug-in SDKs or product bindings it never
 uses.
 
-Phase 0A implementation note: `zcore_device` is temporarily a mixed
-control/delivery/provider compatibility target, not a strict real-time leaf.
-Its callback entry points keep their noexcept/no-allocation contract, but
-lifecycle code intentionally catches thread-creation exceptions. Split a
-callback-only leaf before Phase 1. The generated iOS `SingzCore` pod also
+Phase 0B prerequisite implementation note: `zcore_device` remains the mixed
+control/delivery/provider compatibility target, while
+`zcore_device_callback` is its strict callback-only leaf. The leaf owns sample
+conversion, timestamp projection, the prepared SPSC producer and notification
+endpoint; it is compiled as C++20 without exceptions/RTTI, with hidden
+visibility and an actual-target-derived forbidden-facility scan. Lifecycle,
+inventory, platform providers, threads and framework links remain in
+`zcore_device`. The generated iOS `SingzCore` pod also
 remains a broad device/media/analysis/ORT packaging exception; replace it with
 component pods or a CMake-built XCFramework with isolated flags before native
 graph rendering.
@@ -54,7 +57,8 @@ generalizes these decisions instead of replacing them for novelty.
 
 ```mermaid
 flowchart TD
-  B[zcore_base] --> A[zcore_audio]
+  B[zcore_base] --> C[zcore_device_callback]
+  C --> A[zcore_audio]
   A --> D[zcore_device]
   B --> M[zcore_media]
 
@@ -78,9 +82,16 @@ Rules:
 - `zcore_base` contains general status/result, bounded utility/identity types
   and units whose meaning is shared outside DSP, plus platform/compiler
   definitions. It has no audio device, codec or framework dependency.
-- `zcore_audio` contains the device/capture transport layer: callback buffer
-  spans, driver timestamp provenance, channel conversion, SPSC transport and
-  bounded diagnostics. It does not own graph buses or process contexts.
+- `zcore_audio` contains the owning/control half of the device capture
+  transport and bounded diagnostics. Its CMake target links
+  `zcore_device_callback` transitively for compatibility; the two targets
+  remain separate static-library artifacts. It does not own graph buses or
+  process contexts.
+- `zcore_device_callback` contains only callback-reachable sample conversion,
+  timestamp projection, a narrow SPSC producer view and notification code.
+  Prepared storage remains owned by `zcore_audio`; the callback leaf headers
+  contain no owning transport or consumer API. It owns no thread, provider,
+  framework or device lifecycle policy.
 - `zcore_device` contains `AudioHost`, inventory/session contracts and the
   selected platform backend targets. It does not know about `zdsp`; the product
   coordinator installs a render function plus opaque context.
@@ -112,7 +123,7 @@ layer. The broad generated iOS pod is the documented
 Phase 0A packaging exception, not an acceptable graph-runtime dependency.
 During Phase 0A the allocating fixed-ratio resampler remains under
 `zcore/legacy` and in `zcore_legacy`; it must move into `zdsp_analysis` rather
-than weakening the strict `zcore_audio` callback leaf.
+than weakening the strict `zcore_device_callback` leaf.
 
 ## Repository layout
 
@@ -205,6 +216,14 @@ target_compile_features(zcore_audio PUBLIC cxx_std_20)
 target_include_directories(zcore_audio
   PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_link_libraries(zcore_audio PUBLIC SingZ::zcore_base)
+
+add_library(zcore_device_callback STATIC)
+add_library(SingZ::zcore_device_callback ALIAS zcore_device_callback)
+target_compile_features(zcore_device_callback PUBLIC cxx_std_20)
+target_link_libraries(zcore_device_callback PUBLIC SingZ::zcore_base)
+singz_configure_realtime_target(zcore_device_callback)
+
+target_link_libraries(zcore_audio PUBLIC SingZ::zcore_device_callback)
 
 add_library(zdsp_runtime STATIC)
 add_library(SingZ::zdsp_runtime ALIAS zdsp_runtime)

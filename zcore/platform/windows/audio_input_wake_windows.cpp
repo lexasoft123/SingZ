@@ -21,7 +21,7 @@ AudioInputWake::~AudioInputWake() {
   if (impl_ && impl_->event) CloseHandle(impl_->event);
 }
 
-void AudioInputWake::signal() {
+void AudioInputWake::signal() noexcept {
   if (impl_ && impl_->event) (void)SetEvent(impl_->event);
 }
 

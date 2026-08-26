@@ -799,8 +799,9 @@ Implement as a dedicated, behavior-preserving PR before graph work:
   XCFramework must isolate device, media and ORT before native graph rendering.
 - Adopt target-scoped C++20 after MSVC, Apple Clang, Android arm64 and armv7
   gates pass. Genuinely callback/runtime leaf targets compile without
-  exceptions/RTTI. `zcore_device` remains a mixed lifecycle/provider target
-  until its strict callback leaf is extracted; ORT remains isolated.
+  exceptions/RTTI. `zcore_device` remains a mixed lifecycle/provider target;
+  its extracted `zcore_device_callback` leaf carries the strict RT policy and
+  actual-target source scan. ORT remains isolated.
 - Add ownership documentation: `zcore` contains reusable native foundations;
   `zdsp` contains the real-time graph; `mobile/` and `src/main/` contain
   package/product bindings and UI/process orchestration only.

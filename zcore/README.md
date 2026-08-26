@@ -9,13 +9,16 @@ The root `CMakeLists.txt` is authoritative. Host and Android builds consume the
 same narrow targets:
 
 - `SingZ::zcore_base` — dependency-free native contracts and utilities;
-- `SingZ::zcore_audio` — callback-safe sample conversion, timestamps and the
-  preallocated SPSC transport; it is the current strict no-exceptions/no-RTTI
-  leaf;
-- `SingZ::zcore_device` — a Phase 0A compatibility target combining lifecycle,
-  delivery and per-OS providers. Callback entry points keep their
-  no-allocation/no-blocking contract, but lifecycle code intentionally catches
-  thread-creation exceptions, so the whole target is not an RT leaf;
+- `SingZ::zcore_audio` — ownership and ordinary-thread consumption for the
+  preallocated SPSC transport. The CMake target links the callback target
+  transitively for compatibility; their static archives remain separate;
+- `SingZ::zcore_device_callback` — the callback-only sample conversion,
+  timestamp, SPSC producer and notification leaf. It is C++20, hidden by
+  default, built without exceptions/RTTI and scanned from its actual CMake
+  source membership for blocking, allocation and unbounded facilities;
+- `SingZ::zcore_device` — lifecycle, delivery and per-OS providers. It owns
+  threads, OS frameworks and driver setup, and composes the strict callback
+  leaf without inheriting those facilities into it;
 - `SingZ::zcore_media` — WAV/FLAC I/O, excluded from live device dependencies;
 - `SingZ::zcore_legacy` — temporary ORT-free analysis implementation,
   including the allocating/offline resampler until `zdsp_analysis` owns it;

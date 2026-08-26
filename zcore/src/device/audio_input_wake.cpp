@@ -16,7 +16,7 @@ struct AudioInputWake::Impl {};
 
 AudioInputWake::AudioInputWake() : impl_(std::make_unique<Impl>()) {}
 AudioInputWake::~AudioInputWake() = default;
-void AudioInputWake::signal() {}
+void AudioInputWake::signal() noexcept {}
 void AudioInputWake::drain() {}
 bool AudioInputWake::wait(uint32_t timeoutMs) {
   std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));

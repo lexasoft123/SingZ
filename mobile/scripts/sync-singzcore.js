@@ -53,7 +53,9 @@ const copyTree = (from, to, accept) => {
 // inputs. Android/macOS/Windows providers and product bindings never enter
 // the Apple artifact.
 copyTree(join(src, 'include'), join(dst, 'include'), name => /\.(h|hpp)$/.test(name))
-copyTree(join(src, 'src'), join(dst, 'src'), name => /\.(cpp|mm)$/.test(name))
+// Private implementation headers under src/ travel beside their translation
+// units; they are not exported by the pod but quoted includes must resolve.
+copyTree(join(src, 'src'), join(dst, 'src'), name => /\.(cpp|mm|h|hpp)$/.test(name))
 copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
   name => /\.(cpp|mm)$/.test(name))
 

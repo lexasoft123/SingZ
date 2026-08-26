@@ -10,7 +10,7 @@
 namespace singz {
 
 using AudioInputPush = bool (*)(void*, const float*, uint32_t, uint64_t,
-                                uint64_t, AudioInputTimestampQuality);
+                                uint64_t, AudioInputTimestampQuality) noexcept;
 
 class AudioInputBackend {
  public:
