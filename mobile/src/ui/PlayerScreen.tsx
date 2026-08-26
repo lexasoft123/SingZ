@@ -1,20 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BackHandler, DeviceEventEmitter, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { DeviceEventEmitter, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import {
+  createNativeStackNavigator,
+  type NativeStackNavigationProp,
+  type NativeStackNavigationOptions
+} from '@react-navigation/native-stack'
 import { AudioManager } from 'react-native-audio-api'
 import Animated, {
-  Easing,
-  runOnJS,
   runOnUI,
   scrollTo,
   useAnimatedRef,
-  useAnimatedStyle,
-  useDerivedValue,
   useFrameCallback,
   useScrollOffset,
-  useSharedValue,
-  withTiming
+  useSharedValue
 } from 'react-native-reanimated'
-import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
@@ -55,10 +54,12 @@ import {
   HeadphonesGlyph,
   MicGlyph,
   MixGlyph,
+  NATIVE_SHEET_FIT_SUPPORTED,
   PlayPauseGlyph,
   RoundBtn,
   Seg,
   Sheet,
+  SheetScrollView,
   SpeakerGlyph,
   splitSongName,
   StemTile,
@@ -80,6 +81,46 @@ import { TEST } from './testhooks'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
+
+type PlayerStackParamList = {
+  Stage: undefined
+  Mixer: undefined
+  Song: undefined
+  Practice: undefined
+}
+
+const PlayerStack = createNativeStackNavigator<PlayerStackParamList>()
+const PLAYER_SHEET_ROUTES = {
+  mixer: 'Mixer',
+  song: 'Song',
+  practice: 'Practice'
+} as const
+const PLAYER_SHEET_OPTIONS: NativeStackNavigationOptions = {
+  presentation: 'formSheet',
+  headerShown: false,
+  gestureEnabled: true,
+  sheetAllowedDetents: NATIVE_SHEET_FIT_SUPPORTED ? 'fitToContents' : [0.55, 0.93],
+  ...(!NATIVE_SHEET_FIT_SUPPORTED ? { sheetInitialDetentIndex: 1 } : {}),
+  sheetGrabberVisible: true,
+  contentStyle: { backgroundColor: C.sheet }
+}
+const MIXER_SHEET_OPTIONS: NativeStackNavigationOptions = NATIVE_SHEET_FIT_SUPPORTED
+  ? PLAYER_SHEET_OPTIONS
+  : { ...PLAYER_SHEET_OPTIONS, sheetInitialDetentIndex: 0 }
+
+/** Native-stack can remove a popped screen before delivering `blur`. Route
+ *  content unmount is the reliable completion signal for both a system swipe
+ *  and a navigator pop, so sheet state is released from here. */
+function PlayerSheetRoute({
+  onDismiss,
+  children
+}: {
+  onDismiss: () => void
+  children: React.ReactNode
+}): React.JSX.Element {
+  useEffect(() => () => onDismiss(), [onDismiss])
+  return <>{children}</>
+}
 
 /**
  * Karaoke anticipates: words light a breath BEFORE they are sung so the
@@ -113,7 +154,25 @@ export default function PlayerScreen({
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
   const [route, setRoute] = useState<RouteLatency | null>(null)
   const [trimMs, setTrim] = useState(0)
-  const [sheet, setSheet] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
+  const [sheet, setSheetState] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
+  const sheetRef = useRef(sheet)
+  sheetRef.current = sheet
+  const sheetNavigation = useRef<NativeStackNavigationProp<PlayerStackParamList> | null>(null)
+  const setSheet = useCallback((next: 'none' | 'mixer' | 'practice' | 'song'): void => {
+    if (sheetRef.current === next) return
+    sheetRef.current = next
+    setSheetState(next)
+    const navigation = sheetNavigation.current
+    if (next === 'none') {
+      if (navigation?.canGoBack()) navigation.goBack()
+    } else {
+      navigation?.navigate(PLAYER_SHEET_ROUTES[next])
+    }
+  }, [])
+  const sheetDismissed = useCallback((): void => {
+    sheetRef.current = 'none'
+    setSheetState('none')
+  }, [])
   /* ---- the Song sheet: what has been detected, and what can be asked for --
    *
    * The gap this closes: analysis runs invisibly. A song with no grid, a song
@@ -388,76 +447,6 @@ export default function PlayerScreen({
      nothing on the clock: the Canvas repaints only when these actually
      change. */
   const winDims = useWindowDimensions()
-  /* Swipe back to the library: a clearly-rightward pull from the left edge.
-     The strip is 24pt wide — ending BEFORE the lyric tap targets at
-     LYR_PAD 26 — and spans only the mid-screen, clearing the header's own
-     back button above and the full-bleed seek band below. The pan fails on
-     vertical movement. Cost accepted knowingly: the 24pt column cannot
-     START a lyric scroll (the same dead zone every RNGH-based back gesture
-     ships).
-
-     The screen TRACKS the finger and leaves rightward, the way a native push
-     does — the first cut only measured the release and unmounted, so the
-     player "just suddenly disappeared" (from the phone). Past a third of the
-     width, or on a flick, it finishes the slide and only THEN calls onBack;
-     short of that it eases home. `if (finished)` is what makes a cancelled
-     slide silent: a second pan landing mid-animation overrides backX, that
-     timing reports unfinished, and onBack never fires for it (closeProject
-     survives a double call anyway — both unload() and releaseProject are
-     idempotent — but the guard means it doesn't get one).
-
-     The library is not mounted behind (App renders one screen), so what the
-     slide reveals is the app's own ground rather than a parallaxing catalog:
-     the motion is real, the layer underneath is honest. Mounting the catalog
-     back there would buy the parallax for a heavy mount mid-gesture and its
-     load effects running under a playing song. */
-  const backX = useSharedValue(0)
-  const backSlide = useAnimatedStyle(() => ({ transform: [{ translateX: backX.value }] }))
-  const backPan = useMemo(
-    () =>
-      Gesture.Pan()
-        .activeOffsetX(16)
-        .failOffsetY([-14, 14])
-        .onUpdate((e) => {
-          'worklet'
-          backX.value = Math.max(0, e.translationX)
-        })
-        .onEnd((e) => {
-          'worklet'
-          const done = e.translationX > winDims.width * 0.33 || e.velocityX > 900
-          if (done)
-            /* Easing.out, not the default inOut: a flick releases with the
-               screen already moving, and an ease-IN curve has zero slope at
-               t=0 — the slide would stop dead at the moment the finger left
-               and start again, which is the stall the whole fix is about. */
-            backX.value = withTiming(
-              winDims.width,
-              { duration: 190, easing: Easing.out(Easing.quad) },
-              (finished) => {
-                'worklet'
-                if (finished) runOnJS(onBack)()
-              }
-            )
-          else backX.value = withTiming(0, { duration: 200 })
-        }),
-    [onBack, backX, winDims.width]
-  )
-
-  /* Android system back → the catalog. Gesture-nav phones claim the left
-     edge for the SYSTEM back gesture before the app ever sees it, so the
-     strip above cannot fire there — and without this handler that system
-     gesture would finish the whole activity from the player. RN's Modal
-     consumes its own back event while a sheet is open, so this only runs
-     with no sheet up. */
-  useEffect(() => {
-    if (Platform.OS !== 'android') return
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      onBack()
-      return true
-    })
-    return () => sub.remove()
-  }, [onBack])
-
   /* The same hue the catalog gave this song's card, so the artwork carries
      over from the shelf to the stage (the sample and dir-less loads take 0,
      matching their cards). */
@@ -1134,7 +1123,15 @@ export default function PlayerScreen({
   }
 
   return (
-    <Animated.View style={[{ flex: 1, backgroundColor: C.bg }, backSlide]}>
+    <PlayerStack.Navigator
+      initialRouteName="Stage"
+      screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}
+    >
+      <PlayerStack.Screen name="Stage">
+        {({ navigation }) => {
+          sheetNavigation.current = navigation
+          return (
+            <Animated.View style={{ flex: 1, backgroundColor: C.bg }}>
       {/* The stage: a dusk room, fully out of focus — chosen from the design
           canvas against the user's references. A defocused photograph of warm
           light rather than a drawn pattern: a golden window glow upper-left,
@@ -1495,20 +1492,29 @@ export default function PlayerScreen({
         </View>
       </View>
 
-      {/* The swipe-back edge (see backPan above). */}
-      <GestureDetector gesture={backPan}>
-        <View style={s.backEdge} />
-      </GestureDetector>
+            </Animated.View>
+          )
+        }}
+      </PlayerStack.Screen>
 
       {/* ---------- Mixer sheet ---------- */}
-      <Modal
-        visible={sheet === 'mixer'}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setSheet('none')}
+      <PlayerStack.Screen
+        name="Mixer"
+        options={MIXER_SHEET_OPTIONS}
       >
-        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <Text style={b.sheetTitle}>Mixer</Text>
+        {() => (
+          <PlayerSheetRoute onDismiss={sheetDismissed}>
+            <Sheet
+              title="Mixer"
+              onClose={() => setSheet('none')}
+              fitContent={NATIVE_SHEET_FIT_SUPPORTED}
+              pad={sheetPad}
+            >
+            <SheetScrollView
+              contentContainerStyle={b.sheetScrollContent}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+            >
             {/* One tap for the thing the app exists to do. Only offered when
                 the song has a vocal lane — an unsplit song has nothing to
                 mute. */}
@@ -1530,7 +1536,6 @@ export default function PlayerScreen({
             {/* The lane rows had no scroll container at all, so past roughly a
                 dozen lanes they clipped with no way to reach them — and the
                 44 pt fader targets below bring that cliff closer. */}
-            <ScrollView showsVerticalScrollIndicator={false}>
             {tracks.map((t, i) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
@@ -1609,20 +1614,30 @@ export default function PlayerScreen({
                 </React.Fragment>
               )
             })}
-            </ScrollView>
-        </Sheet>
-      </Modal>
+            </SheetScrollView>
+            </Sheet>
+          </PlayerSheetRoute>
+        )}
+      </PlayerStack.Screen>
 
       {/* ---------- Song sheet: what is known about this song ---------- */}
-      <Modal
-        visible={sheet === 'song'}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setSheet('none')}
+      <PlayerStack.Screen
+        name="Song"
+        options={PLAYER_SHEET_OPTIONS}
       >
-        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <Text style={b.sheetTitle}>{project.name}</Text>
-            <ScrollView showsVerticalScrollIndicator={false}>
+        {() => (
+          <PlayerSheetRoute onDismiss={sheetDismissed}>
+            <Sheet
+              title={project.name}
+              onClose={() => setSheet('none')}
+              fitContent={NATIVE_SHEET_FIT_SUPPORTED}
+              pad={sheetPad}
+            >
+            <SheetScrollView
+              contentContainerStyle={b.sheetScrollContent}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+            >
               <View style={[b.sec, b.secFirst]}>
                 <Text style={b.secLab}>Beat</Text>
                 <Text style={s.songVal}>
@@ -1866,20 +1881,31 @@ export default function PlayerScreen({
                     .join(' · ')}
                 </Text>
               </View>
-            </ScrollView>
-        </Sheet>
-      </Modal>
+            </SheetScrollView>
+            </Sheet>
+          </PlayerSheetRoute>
+        )}
+      </PlayerStack.Screen>
 
       {/* ---------- Practice sheet ---------- */}
-      <Modal
-        visible={sheet === 'practice'}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setSheet('none')}
+      <PlayerStack.Screen
+        name="Practice"
+        options={PLAYER_SHEET_OPTIONS}
       >
-        <Sheet onClose={() => setSheet('none')} pad={sheetPad}>
-            <ScrollView bounces={false} showsVerticalScrollIndicator={false}>
-              <Text style={b.sheetTitle}>Practice</Text>
+        {() => (
+          <PlayerSheetRoute onDismiss={sheetDismissed}>
+            <Sheet
+              title="Practice"
+              onClose={() => setSheet('none')}
+              fitContent={NATIVE_SHEET_FIT_SUPPORTED}
+              pad={sheetPad}
+            >
+            <SheetScrollView
+              contentContainerStyle={b.sheetScrollContent}
+              bounces={false}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+            >
 
               <View style={[b.sec, b.secFirst]}>
                 {/* Reset lives on the header row — a control row it used to
@@ -2150,10 +2176,12 @@ export default function PlayerScreen({
                   </View>
                 )}
               </View>
-            </ScrollView>
-        </Sheet>
-      </Modal>
-    </Animated.View>
+            </SheetScrollView>
+            </Sheet>
+          </PlayerSheetRoute>
+        )}
+      </PlayerStack.Screen>
+    </PlayerStack.Navigator>
   )
 }
 
@@ -2344,7 +2372,6 @@ const s = StyleSheet.create({
   loopBtnOn: { backgroundColor: C.amber, borderColor: C.amber },
   loopBtnText: { color: white(0.6), fontSize: 11.5, fontWeight: '800' },
   loopBtnTextOn: { color: C.amberInk },
-  backEdge: { position: 'absolute', left: 0, top: 120, bottom: 250, width: 24 },
   /* Overlays the band Bar draws (40pt centred in its 44pt touch strip). */
   loopLayer: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
   loopUnderline: {

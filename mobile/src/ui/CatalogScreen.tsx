@@ -5,7 +5,6 @@ import {
   DeviceEventEmitter,
   Image,
   Keyboard,
-  Modal,
   Platform,
   Pressable,
   RefreshControl,
@@ -16,6 +15,7 @@ import {
   View
 } from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
+import { useFocusEffect, useIsFocused } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   driveAccountEmail,
@@ -28,7 +28,6 @@ import {
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { fmtBytes, fmtMs, log } from '../log'
-import LogPanel from './LogPanel'
 import { addedTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
   cacheUsage,
@@ -51,9 +50,9 @@ import {
 } from '../projects'
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
 import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
-import { C, Chip, FolderGlyph, LyricsGlyph, PhoneGlyph, RedetectGlyph, SearchGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, TrashGlyph, white } from './bits'
+import { C, FolderGlyph, LyricsGlyph, PhoneGlyph, RedetectGlyph, SearchGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, TrashGlyph, white } from './bits'
 import { TEST } from './testhooks'
-import AddSongSheet from './AddSongSheet'
+import type { AddSongRequest } from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
 import { deleteProject, pickAudioFile, writeLyrics, type PickedFile } from '../writer'
 import {
@@ -202,11 +201,18 @@ let lastShelf: {
 
 export default function CatalogScreen({
   sampleRate,
-  onLoaded
+  onLoaded,
+  onOpenLog,
+  onOpenAddSong,
+  onCloseAddSong
 }: {
   sampleRate: number
   onLoaded: (p: LoadedProject) => void
+  onOpenLog: () => void
+  onOpenAddSong: (request: AddSongRequest) => void
+  onCloseAddSong: () => void
 }): React.JSX.Element {
+  const isFocused = useIsFocused()
   const insets = useSafeAreaInsets()
   const [root, setRoot] = useState<RootInfo | null>(null)
   const [projects, setProjects] = useState<ProjectEntry[] | null>(lastShelf?.items ?? null)
@@ -238,17 +244,16 @@ export default function CatalogScreen({
   const [usage, setUsage] = useState<Record<string, CacheUsage>>(lastShelf?.usage ?? {})
   /** The listing on screen is the stored one; the refresh behind it failed. */
   const [offline, setOffline] = useState(false)
-  /** The diagnostic log — the only evidence a release build leaves behind. */
-  const [logOpen, setLogOpen] = useState(false)
-  /** The add-a-song sheet (phone library only), and the file it was opened
-   *  for. The pick happens BEFORE the sheet exists, and that order is the
+  /** The add-a-song sheet (phone library only). The pick happens BEFORE the
+   *  native route exists, and that order is the
    *  whole point: iOS presents one view controller at a time, so a sheet that
    *  opened its own picker put two presentations in flight from one commit —
    *  UIKit kept the picker ("waiting for a delayed presention to complete")
    *  and silently refused the sheet, which then ran its whole flow invisibly.
-   *  One presentation at a time makes that unrepresentable. */
+  *  One presentation at a time makes that unrepresentable. */
   const [addOpen, setAddOpen] = useState(false)
-  const [addSrc, setAddSrc] = useState<PickedFile | null>(null)
+  const refreshRef = useRef<(() => Promise<void>) | null>(null)
+  const presentAddRef = useRef<(src: PickedFile) => void>(() => {})
   /** A pick is on screen: no sheet exists yet to hold that state. */
   const picking = useRef(false)
   /** A cancel during the model load has to wait for ORT's blocking load to
@@ -358,7 +363,7 @@ export default function CatalogScreen({
   }, [])
 
   /** Add a song: the system picker first, the sheet only once a file is in
-   *  hand (see addSrc — presenting both at once loses the sheet). Cancelling
+   *  hand (presenting both at once loses the sheet). Cancelling
    *  the picker leaves nothing open, which is what cancelling should do. */
   const beginAdd = useCallback(async () => {
     // A pick in flight has no sheet to speak for it, so the second tap is
@@ -387,9 +392,7 @@ export default function CatalogScreen({
       return
     }
     log('song', `add-song: picked ${picked.name} (${fmtBytes(picked.size)})`)
-    if (TEST) TEST.addSheetShown = false
-    setAddSrc(picked)
-    setAddOpen(true)
+    presentAddRef.current(picked)
   }, [addOpen])
 
   const refresh = useCallback(
@@ -458,9 +461,44 @@ export default function CatalogScreen({
     [mode, loadUsage]
   )
 
-  useEffect(() => {
-    void refresh()
-  }, [refresh])
+  refreshRef.current = () => refresh()
+  const presentAdd = useCallback(
+    (src: PickedFile): void => {
+      if (TEST) TEST.addSheetShown = false
+      setAddOpen(true)
+      onOpenAddSong({
+        src,
+        sampleRate,
+        onShown: () => {
+          log('song', 'add-song sheet: on screen')
+          if (TEST) TEST.addSheetShown = true
+        },
+        onStep: (k, seconds) => {
+          if (TEST) {
+            TEST.addSheetStep = k
+            TEST.addSheetSecs = seconds
+          }
+        },
+        onClose: addedDir => {
+          setAddOpen(false)
+          if (TEST) TEST.addSheetShown = false
+          if (addedDir) void refreshRef.current?.()
+        }
+      })
+    },
+    [onOpenAddSong, sampleRate]
+  )
+  presentAddRef.current = presentAdd
+
+  /* Native-stack keeps the catalog mounted underneath the player so the iOS
+     back gesture can reveal the real shelf. Re-read it whenever that shelf
+     becomes current; the old conditional router got the same refresh from a
+     full remount after every song. */
+  useFocusEffect(
+    useCallback(() => {
+      void refresh()
+    }, [refresh])
+  )
 
   /* One writer for the cache above, so no listing path can forget it. The
      four facts are cached together because they are READ together: rows with
@@ -1178,7 +1216,11 @@ export default function CatalogScreen({
   )
 
   useEffect(() => {
-    if (!TEST) return
+    /* The catalog stays mounted behind Player now. Its background job events
+       can still render it, but they must not tell device drivers that the
+       visible route changed. useIsFocused flips on the navigation state, not
+       on whether a native transition happened to finish painting. */
+    if (!TEST || !isFocused) return
     TEST.screen = 'catalog'
     TEST.refresh = refresh
     TEST.openSample = openSample
@@ -1200,15 +1242,15 @@ export default function CatalogScreen({
     TEST.offline = offline
     TEST.forget = forget
     TEST.addOpen = addOpen
-    TEST.setAddOpen = setAddOpen
+    TEST.setAddOpen = (open: boolean) => {
+      if (!open && addOpen) onCloseAddSong()
+    }
     /** Open the real sheet on a seeded file — everything beginAdd does once
      *  the picker has answered (the picker itself needs a finger). Paired
      *  with addSheetShown, this is how a driver proves the sheet is ON SCREEN
      *  and not merely open in state. */
     TEST.openAddSheet = (path: string, name: string, size = 0) => {
-      if (TEST) TEST.addSheetShown = false
-      setAddSrc({ path, name, size })
-      setAddOpen(true)
+      presentAdd({ path, name, size })
     }
     TEST.addSongFrom = (path: string, name: string) =>
       addSongHeadless(path, name, sampleRate).then(async (r) => {
@@ -1417,7 +1459,7 @@ export default function CatalogScreen({
           <Pressable
             hitSlop={10}
             style={{ marginLeft: 'auto' }}
-            onPress={() => setLogOpen(true)}
+            onPress={onOpenLog}
             accessibilityRole="button"
             accessibilityLabel="Open the log"
           >
@@ -1553,7 +1595,7 @@ export default function CatalogScreen({
               accessibilityLabel="Open the log to report this"
               hitSlop={8}
               onPress={() => {
-                setLogOpen(true)
+                onOpenLog()
                 setCrashNote(null)
               }}
             >
@@ -2007,30 +2049,6 @@ export default function CatalogScreen({
             )}
           </View>
         )}
-        <LogPanel visible={logOpen} onClose={() => setLogOpen(false)} />
-        <AddSongSheet
-          visible={addOpen}
-          src={addSrc}
-          sampleRate={sampleRate}
-          // Presented-for-real, and how far it walked: drivers only, written
-          // where onStep writes so release pays no render for either. Cleared
-          // on close, so no opener can hand a driver a stale true.
-          onShown={() => {
-            if (TEST) TEST.addSheetShown = true
-          }}
-          onStep={(k, seconds) => {
-            if (TEST) {
-              TEST.addSheetStep = k
-              TEST.addSheetSecs = seconds
-            }
-          }}
-          onClose={(added) => {
-            setAddOpen(false)
-            setAddSrc(null)
-            if (TEST) TEST.addSheetShown = false
-            if (added) void refresh()
-          }}
-        />
       </View>
     </View>
   )

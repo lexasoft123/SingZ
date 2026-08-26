@@ -1,10 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
-  Dimensions,
-  Keyboard,
-  Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,6 +8,7 @@ import {
   TextInput,
   View
 } from 'react-native'
+import { useNavigation, usePreventRemove } from '@react-navigation/native'
 import {
   addSong,
   findLyrics,
@@ -25,7 +22,7 @@ import { log } from '../log'
 import type { LyricLine } from '../model'
 import { clearCache } from '../projects'
 import type { PickedFile } from '../writer'
-import { C, white } from './bits'
+import { C, NATIVE_SHEET_FIT_SUPPORTED, Sheet, SheetScrollView, white } from './bits'
 
 /**
  * The add-a-song flow (Phase 1): pick → read the file → confirm title/artist
@@ -48,25 +45,26 @@ type Step =
     }
   | { k: 'creating' }
 
+export type AddSongRequest = {
+  src: PickedFile
+  sampleRate: number
+  onShown?: () => void
+  onStep?: (step: string, seconds: number) => void
+  onClose: (addedDir: string | null) => void
+}
+
 export default function AddSongSheet({
-  visible,
   src,
   sampleRate,
-  onShown,
   onStep,
   onClose
 }: {
-  visible: boolean
   /** The already-picked file. The CALLER picks, before this sheet exists:
    *  iOS presents one view controller at a time, and a sheet that opened its
    *  own picker raced its own presentation and lost it — the flow then ran
    *  invisibly to the end. */
   src: PickedFile | null
   sampleRate: number
-  /** Fired when the sheet is REALLY on screen (Modal onShow — iOS calls it
-   *  after the presentation completes, so it is the one signal that tells a
-   *  refused presentation from a working one; JS state cannot). */
-  onShown?: () => void
   /** Which card is up, for drivers (reading → meta → searching → lyrics), and
    *  the duration the read produced — 0 on the card that reports a file this
    *  phone cannot open, which wears the same 'meta' name. */
@@ -74,39 +72,8 @@ export default function AddSongSheet({
   /** dir of the created project, or null when the flow was abandoned. */
   onClose: (addedDir: string | null) => void
 }): React.JSX.Element {
-  /**
-   * How much of the screen the keyboard is eating.
-   *
-   * The sheet is bottom-anchored, so a raised keyboard sits ON it: iOS covered
-   * the fields and every button, Android pushed the whole sheet off-screen with
-   * nothing left but the catalog behind it. Either way the singer could neither
-   * see what they typed nor reach an action.
-   *
-   * Measured rather than delegated to KeyboardAvoidingView: a Modal gets its
-   * own window, which does not honour the activity's adjustResize, and KAV's
-   * `height` behaviour computed no adjustment at all there (verified on an
-   * API 36 emulator — the sheet stayed off-screen). The height the keyboard
-   * itself reports needs no window to cooperate, and is the same on both.
-   */
-  const [kbInset, setKbInset] = useState(0)
-  /** The scrim's own laid-out height — see `pad` below. */
-  const [scrimH, setScrimH] = useState(0)
-  useEffect(() => {
-    // iOS gets the will- pair so the sheet travels with the keyboard rather
-    // than jumping after it; Android only ever fires the did- pair.
-    const showEvt = Platform.OS === 'ios' ? 'keyboardWillChangeFrame' : 'keyboardDidShow'
-    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide'
-    const onShow = Keyboard.addListener(showEvt, (e) =>
-      setKbInset(Math.max(0, e?.endCoordinates?.height ?? 0))
-    )
-    const onHide = Keyboard.addListener(hideEvt, () => setKbInset(0))
-    return () => {
-      onShow.remove()
-      onHide.remove()
-    }
-  }, [])
-
   const [step, setStep] = useState<Step>({ k: 'reading' })
+  const navigation = useNavigation()
   const stepRef = useRef<Step['k']>('reading')
   stepRef.current = step.k
   const onStepRef = useRef(onStep)
@@ -121,11 +88,30 @@ export default function AddSongSheet({
   const [error, setError] = useState<string | null>(null)
   /** The sheet outlives taps; a stale async step must not repaint it. */
   const seq = useRef(0)
+  /** Explicit Cancel or successful creation already performed route cleanup. */
+  const finished = useRef(false)
+  /** Successful creation unlocks route removal first, then closes from an
+   *  effect after the prevent-remove hook and gesture option have updated. */
+  const [completedDir, setCompletedDir] = useState<string | null>(null)
   /** The parent hands a fresh onClose every render; the pick effect must not
    *  re-run on that (a re-run mid-pick rejects "busy" and drops the user's
    *  actual pick into a stale seq). */
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+
+  /* Project creation owns the import copy and the destination folder. Native
+     sheet dismissal and Android back are disabled only for that critical
+     section; every earlier card can use the system swipe and is cleaned up on
+     unmount. */
+  const creationLocked = step.k === 'creating' && completedDir == null
+  usePreventRemove(creationLocked, () => {})
+  useEffect(() => {
+    navigation.setOptions({ gestureEnabled: !creationLocked })
+  }, [creationLocked, navigation])
+  useEffect(() => {
+    if (completedDir == null) return
+    onCloseRef.current(completedDir)
+  }, [completedDir])
 
   const abandon = useCallback(
     (msg?: string) => {
@@ -133,6 +119,7 @@ export default function AddSongSheet({
       // sweeping under it strands a doc-less project. The button is hidden
       // then too; this guard covers the hardware back path.
       if (stepRef.current === 'creating') return
+      finished.current = true
       seq.current++
       setError(null)
       // the import copy is durable storage — an abandoned add must not keep it
@@ -143,14 +130,27 @@ export default function AddSongSheet({
     []
   )
 
-  // The sheet opens on a file the parent already picked. Depends on
-  // [visible] alone — parent re-renders must not re-run the read.
+  useEffect(
+    () => () => {
+      /* A native swipe removes the route without calling a component button.
+         Cancel the stale async chain and sweep its durable import exactly as
+         the explicit Cancel path does. Creation itself cannot be dismissed. */
+      if (finished.current || stepRef.current === 'creating') return
+      seq.current++
+      void clearCache('imports').catch(() => {})
+      log('song', 'add-song flow abandoned — native sheet dismissed')
+    },
+    []
+  )
+
+  // The native route mounts only after the picker has returned, so one mount
+  // is one picked file and one flow.
   useEffect(() => {
-    if (!visible) return
     // No file, no flow — a sheet opened without one would sit on the reading
     // spinner forever, which is the very failure this rewrite removes.
     if (!src) {
       log('song', 'add-song sheet: opened with no file — closing', 'warn')
+      finished.current = true
       onCloseRef.current(null)
       return
     }
@@ -184,8 +184,7 @@ export default function AddSongSheet({
         setStep({ k: 'meta', facts: { durationSec: 0, title: '' } })
       }
     })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible])
+  }, [sampleRate, src])
 
   const search = useCallback(
     async (facts: SongFacts) => {
@@ -237,7 +236,8 @@ export default function AddSongSheet({
           lyrics
         })
         if (my !== seq.current) return
-        onCloseRef.current(dir)
+        finished.current = true
+        setCompletedDir(dir)
       } catch (e) {
         if (my !== seq.current) return
         setError(String(e instanceof Error ? e.message : e))
@@ -258,9 +258,6 @@ export default function AddSongSheet({
     },
     []
   )
-
-  const screenH = Dimensions.get('screen').height
-  const absorbedByWindow = kbInset > 0 && scrimH > 0 && scrimH < screenH - kbInset * 0.5
 
   const body = (): React.JSX.Element => {
     switch (step.k) {
@@ -466,90 +463,32 @@ export default function AddSongSheet({
   }
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="slide"
-      onShow={() => {
-        log('song', 'add-song sheet: on screen')
-        onShown?.()
-      }}
-      onRequestClose={() => abandon('back')}
+    <Sheet
+      title="Add a song"
+      actionLabel="Cancel"
+      actionHidden={step.k === 'creating'}
+      actionAccessibilityLabel="Cancel adding this song"
+      fitContent={NATIVE_SHEET_FIT_SUPPORTED}
+      onClose={() => abandon('closed')}
     >
-      {/* RN puts SOFT_INPUT_ADJUST_RESIZE on the Modal's own window, so on
-          Android 14 and below that window ALREADY ends above the keyboard and
-          padding it again would lift the sheet a second full keyboard height.
-          On 15+ targetSdk 36 forces edge-to-edge and the resize does nothing,
-          which is the case measured here. Rather than sniff the version, ask
-          the layout: a scrim already shorter than the screen by about the
-          keyboard means the window absorbed it. iOS never resizes, so this is
-          always false there. */}
-      <View
-        style={[s.scrim, { paddingBottom: absorbedByWindow ? 0 : kbInset }]}
-        onLayout={(e) => setScrimH(Math.round(e.nativeEvent.layout.height))}
+      {/* The native form sheet gives this view a bounded height and moves it
+          with the keyboard. The ScrollView now owns only content scrolling;
+          no second RN Modal window or hand-measured keyboard inset exists. */}
+      <SheetScrollView
+        bounces={false}
+        keyboardShouldPersistTaps="handled"
+        contentInsetAdjustmentBehavior="never"
+        contentContainerStyle={s.content}
       >
-        <View style={s.sheet}>
-          <View style={s.head}>
-            <Text style={s.title}>Add a song</Text>
-            {step.k !== 'creating' && (
-              <Pressable
-                hitSlop={10}
-                onPress={() => abandon('closed')}
-                accessibilityRole="button"
-                accessibilityLabel="Cancel adding this song"
-              >
-                <Text style={s.close}>Cancel</Text>
-              </Pressable>
-            )}
-          </View>
-          {/* With the keyboard up the sheet can be taller than what is left of
-              the screen; let it scroll rather than clip its own buttons.
-              keyboardShouldPersistTaps keeps the first tap on a button from
-              being eaten by the keyboard dismiss. */}
-          <ScrollView
-            bounces={false}
-            keyboardShouldPersistTaps="handled"
-            contentContainerStyle={{ paddingBottom: 4 }}
-          >
-            {error && <Text style={s.err}>{error}</Text>}
-            {body()}
-          </ScrollView>
-        </View>
-      </View>
-    </Modal>
+        {error && <Text style={s.err}>{error}</Text>}
+        {body()}
+      </SheetScrollView>
+    </Sheet>
   )
 }
 
 const s = StyleSheet.create({
-  /* Deliberately NOT tappable-to-close, unlike the other three sheets: this
-     one owns a flow with side effects — abandoning sweeps the import copy out
-     of durable storage — so a stray tap beside the keyboard must not throw the
-     song away. Cancel is the way out, and it is always on screen. */
-  scrim: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
-  sheet: {
-    // Lets the sheet shrink inside the keyboard avoider, which is what gives
-    // the ScrollView above a bounded height — an unbounded one measures its
-    // own content, decides everything fits, and silently never scrolls.
-    flexShrink: 1,
-    // Same surface, radius and scrim as the other three sheets (b.sheet in
-     // bits.tsx). This one is hand-rolled rather than reusing them because it
-     // is a FLOW with side effects, not a panel. The surface, radius, scrim
-     // and title match; the DISMISSAL does not, and deliberately: no grab
-     // handle and no tap-to-close, because both advertise throwing the sheet
-     // away by gesture and abandoning sweeps the import copy out of durable
-     // storage. Cancel is the one way out and it is always on screen. A grab
-     // handle here would re-promise exactly the gesture the scrim refuses.
-    backgroundColor: C.sheet,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    paddingHorizontal: 22,
-    paddingTop: 20,
-    paddingBottom: 34
-  },
-
-  head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
-  title: { color: C.bright, fontSize: 19, fontWeight: '800', letterSpacing: -0.2 },
-  close: { color: C.amber, fontSize: 15 },
+  content: { paddingBottom: 4 },
   center: { alignItems: 'center', paddingVertical: 28, gap: 10 },
   label: { color: C.dim, fontSize: 12, marginBottom: 4, marginTop: 8 },
   input: {
