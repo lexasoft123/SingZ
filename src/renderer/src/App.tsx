@@ -22,13 +22,13 @@ import {
   detectBeats,
   estimateKey,
   estimateKeyFromStems,
+  gridFromDetection,
   sanitizeKeyInfo,
   type DetectedBeats,
   type KeyGuess,
   type MlGrid
 } from './audio/analysis'
 import {
-  applyUserBars,
   clearUserBar,
   MET_DEFAULTS,
   sanitizeBeatInfo,
@@ -1791,22 +1791,30 @@ export default function App(): React.JSX.Element {
               // re-detection that renumbers every beat. This is what lets a
               // song the singer corrected go on receiving detector work
               // instead of being frozen at whatever version fixed it.
-              const auto = det.downbeats ?? undefined
-              setBeatInfo(
-                applyUserBars({
-                  beats: det.beats,
-                  bpm: det.bpm,
-                  beatsPerBar: det.beatsPerBar,
-                  downbeat: det.downbeat,
-                  ...(auto ? { downbeats: auto, autoDownbeats: auto } : {}),
-                  ...(det.suspectAt ? { suspectAt: det.suspectAt } : {}),
-                  ...(info?.userBars ? { userBars: info.userBars } : {}),
-                  source: 'auto',
-                  detVersion: BEAT_DETECT_VERSION
-                })
-              )
-              if (stale) touchSettings()
-              setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+              // `gridFromDetection` does that fold for BOTH re-derivations;
+              // Re-detect used to have its own copy of this object and lost
+              // the singer's bar lines through it.
+              //
+              // Everything here is decided AT THE COMMIT, not from the `info`
+              // snapshot this pass started from. The pass runs for seconds
+              // with the Metronome popover open and enabled (it is gated on
+              // `engine.duration`, nothing else) and the grid's drag handles
+              // live, so both halves of that panel can land work while
+              // "Finding the beat" is on screen — and this used to overwrite
+              // it and then auto-save the loss:
+              //
+              //   a bar line dragged in the meantime, folded away by a grid
+              //   captured before it existed; and a tempo tapped or typed in
+              //   the meantime, which lands a whole 'manual' grid. The rule
+              //   at the top of this block — a hand-tuned track wins over
+              //   re-detection — has to hold at the commit too, and the
+              //   `fresh || stale` gate above only sampled it seconds ago.
+              const live = beatInfoRef.current
+              if (!live || live.source === 'auto') {
+                setBeatInfo((prev) => (prev && prev.source !== 'auto' ? prev : gridFromDetection(det, prev)))
+                if (stale) touchSettings()
+                setSongInfo((s) => ({ ...s, bpm: det.bpm }))
+              }
             }
             // What analysis just worked out must reach the project file — and
             // through Drive the phones, which have neither detector of their
@@ -1908,7 +1916,7 @@ export default function App(): React.JSX.Element {
           // stems and the lattice are prepared inside provideMl (the child is
           // already tracking melody while the model renders), then stashed
           // with the results for applyMelody's adoption machinery, which owns
-          // setBeatInfo/applyUserBars/publish and must not be duplicated.
+          // setBeatInfo/gridFromDetection/publish and must not be duplicated.
           const beatInfo = beatInfoRef.current
           const wantBeats =
             (!beatInfo || (beatInfo.source === 'auto' && analysisIsStale(beatInfo.detVersion, BEAT_DETECT_VERSION))) &&
@@ -2440,15 +2448,12 @@ export default function App(): React.JSX.Element {
         publishBeatDbg('redetect', core.beats !== undefined ? 'core' : 'ts', stems.drums, aux, det, dbg)
         if (det) {
           touchSettings()
-          setBeatInfo({
-            beats: det.beats,
-            bpm: det.bpm,
-            beatsPerBar: det.beatsPerBar,
-            downbeat: det.downbeat,
-            ...(det.downbeats ? { downbeats: det.downbeats } : {}),
-            source: 'auto',
-            detVersion: BEAT_DETECT_VERSION
-          })
+          // The singer's bar lines ride across, re-folded onto the new beat
+          // array — same conversion as the automatic pass, because it is the
+          // same detector and the same grid. What this button re-reads is the
+          // drums; the singer's corrections are evidence about the song, not
+          // about the grid they were made on.
+          setBeatInfo((prev) => gridFromDetection(det, prev))
           setSongInfo((s) => ({ ...s, bpm: det.bpm }))
         } else {
           setNotice('No steady beat found — tap the tempo instead.')
