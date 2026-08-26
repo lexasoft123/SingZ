@@ -12,12 +12,14 @@
  * re-evaluates) or Xcode keeps building the stale copy.
  */
 const { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } = require('node:fs')
-const { join } = require('node:path')
+const { dirname, join } = require('node:path')
 
 const mobileRoot = join(__dirname, '..')
 const repoRoot = join(mobileRoot, '..')
 const src = join(repoRoot, 'zcore')
 const dst = join(mobileRoot, 'ios', 'SingzCore', 'core')
+const dspSrc = join(repoRoot, 'zdsp')
+const dspDst = join(mobileRoot, 'ios', 'SingzCore', 'dsp')
 
 // The previous materialization is intentionally read-only. Some Node/macOS
 // combinations refuse recursive removal of those files even though the parent
@@ -55,6 +57,30 @@ copyTree(join(src, 'src'), join(dst, 'src'), name => /\.(cpp|mm)$/.test(name))
 copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
   name => /\.(cpp|mm)$/.test(name))
 
+// Phase 0B compile/link smoke only. This is an explicit allowlist: future DSP
+// nodes, the fixture codec and fake host must not silently enter the product
+// because a recursive pod glob happened to find them. A component XCFramework
+// replaces this broad Phase 0A compatibility pod before Phase 1.
+unlockTree(dspDst)
+rmSync(dspDst, { recursive: true, force: true })
+const dspAllowlist = [
+  'include/zdsp/types.h',
+  'include/zdsp/events.h',
+  'include/zdsp/clock.h',
+  'include/zdsp/audio_bus.h',
+  'include/zdsp/process_context.h',
+  'include/zdsp/processor.h',
+  'include/zdsp/latency.h',
+  'src/api/contracts.cpp',
+]
+for (const relative of dspAllowlist) {
+  const target = join(dspDst, relative)
+  mkdirSync(dirname(target), { recursive: true })
+  copyFileSync(join(dspSrc, relative), target)
+  chmodSync(target, 0o444)
+  n++
+}
+
 // The vendored libFLAC rides along the same way (Phase 5): the pod compiles
 // flac/src/*.c and wav.cpp dispatches to it. Directory structure is
 // preserved — deduplication/ holds #included fragments the podspec must NOT
@@ -64,4 +90,4 @@ const flacDst = join(mobileRoot, 'ios', 'SingzCore', 'flac')
 unlockTree(flacDst)
 rmSync(flacDst, { recursive: true, force: true })
 copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
-console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,flac}/`)
+console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac}/`)

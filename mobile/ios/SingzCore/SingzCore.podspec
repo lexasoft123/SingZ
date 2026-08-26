@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.3.3'
+  s.version      = '0.3.5'
   s.summary      = 'SingZ shared C++ core: audio input, stem split, and beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -24,7 +24,10 @@ Pod::Spec.new do |s|
   # XCFramework must isolate callback-safe targets and their compile flags.
   s.source_files = '*.{h,mm}', 'core/include/**/*.{h,hpp}',
                    'core/src/**/*.{cpp,mm}',
-                   'core/platform/ios/**/*.{cpp,mm}', 'flac/src/*.c'
+                   'core/platform/ios/**/*.{cpp,mm}',
+                   'dsp/include/zdsp/{types,events,clock,audio_bus,process_context,processor,latency}.h',
+                   'dsp/src/api/contracts.cpp',
+                   'flac/src/*.c'
   s.preserve_paths = 'flac/**/*'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
@@ -39,7 +42,7 @@ Pod::Spec.new do |s|
     # (not inside the xcframework), and dependents don't inherit a search
     # path for them. The flac paths serve <FLAC/…>, <config.h> and the
     # private/ tree, in that order.
-    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core/include" "$(PODS_ROOT)/onnxruntime-c/Headers" "$(PODS_TARGET_SRCROOT)/flac/include" "$(PODS_TARGET_SRCROOT)/flac" "$(PODS_TARGET_SRCROOT)/flac/src/include" "$(PODS_TARGET_SRCROOT)/flac/src"'
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core/include" "$(PODS_TARGET_SRCROOT)/dsp/include" "$(PODS_ROOT)/onnxruntime-c/Headers" "$(PODS_TARGET_SRCROOT)/flac/include" "$(PODS_TARGET_SRCROOT)/flac" "$(PODS_TARGET_SRCROOT)/flac/src/include" "$(PODS_TARGET_SRCROOT)/flac/src"'
   }
   s.frameworks   = 'AudioToolbox', 'AVFoundation', 'BackgroundTasks', 'UIKit'
   s.dependency 'React-Core'

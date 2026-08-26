@@ -58,7 +58,7 @@ flowchart TD
   A --> D[zcore_device]
   B --> M[zcore_media]
 
-  A --> API[zdsp_api]
+  B --> API[zdsp_api]
   API --> RT[zdsp_runtime]
   API --> N[zdsp_nodes]
   API --> AN[zdsp_analysis]
@@ -75,18 +75,20 @@ flowchart TD
 
 Rules:
 
-- `zcore_base` contains status/result, strong units, bounded utility types and
-  platform/compiler definitions. It has no audio device, codec or framework
-  dependency.
-- `zcore_audio` contains audio bus views, formats, clocks/timestamps, channel
-  layouts, SPSC transport and bounded diagnostics.
+- `zcore_base` contains general status/result, bounded utility/identity types
+  and units whose meaning is shared outside DSP, plus platform/compiler
+  definitions. It has no audio device, codec or framework dependency.
+- `zcore_audio` contains the device/capture transport layer: callback buffer
+  spans, driver timestamp provenance, channel conversion, SPSC transport and
+  bounded diagnostics. It does not own graph buses or process contexts.
 - `zcore_device` contains `AudioHost`, inventory/session contracts and the
   selected platform backend targets. It does not know about `zdsp`; the product
   coordinator installs a render function plus opaque context.
 - `zcore_media` contains WAV/FLAC and later streaming decode. It never appears
   in the live graph's transitive link interface.
-- `zdsp_api` contains processor, graph-description, parameter/event and
-  latency contracts.
+- `zdsp_api` contains the foundational DSP-facing clock, bus, process,
+  processor, parameter/event and latency contracts. Its strong wrappers are
+  part of that append-compatible interface, not general `zcore` units.
 - `zdsp_runtime` contains graph compilation, immutable snapshots, the real-time
   arena, buffer planner, runner and retirement.
 - `zdsp_nodes` contains prepared built-in real-time processors.
@@ -98,8 +100,15 @@ Rules:
 - UI, Electron, React Native, JNI, Swift/Objective-C and Java/Kotlin types stay
   in product bindings, never in public `zcore` or `zdsp` headers.
 
-`zcore` never depends on `zdsp`. `zdsp` links only the narrow `zcore_base` and
-`zcore_audio` targets it uses. The broad generated iOS pod is the documented
+`zcore` never depends on `zdsp`. In Phase 0B `zdsp_api` and `zdsp_runtime` link
+only `zcore_base`; neither links `zcore_audio`. The product `AudioHost`
+coordinator is the adapter boundary: it consumes device/capture values from
+`zcore_audio`/`zcore_device`, explicitly constructs the corresponding
+`zdsp_api` clock, bus and process values, and invokes the runner. This avoids
+duplicating graph contracts in `zcore_audio` and avoids the forbidden
+`zcore`→`zdsp` dependency. A future reusable host adapter remains a higher
+layer linking both sides; it does not move DSP contracts into the device
+layer. The broad generated iOS pod is the documented
 Phase 0A packaging exception, not an acceptable graph-runtime dependency.
 During Phase 0A the allocating fixed-ratio resampler remains under
 `zcore/legacy` and in `zcore_legacy`; it must move into `zdsp_analysis` rather
@@ -120,8 +129,8 @@ third_party/native/
 zcore/
   CMakeLists.txt
   include/zcore/
-    base/                         # Result, strong units, bounded IDs
-    audio/                        # AudioBusView, format, clock, channel layout
+    base/                         # General Result/units/bounded IDs
+    audio/                        # Device buffers, capture time, transport
     device/                       # AudioHost and route/session contracts
     media/                        # non-RT codec/source contracts
   src/
@@ -201,8 +210,7 @@ add_library(zdsp_runtime STATIC)
 add_library(SingZ::zdsp_runtime ALIAS zdsp_runtime)
 target_compile_features(zdsp_runtime PUBLIC cxx_std_20)
 target_link_libraries(zdsp_runtime
-  PUBLIC SingZ::zdsp_api
-  PRIVATE SingZ::zcore_audio)
+  PUBLIC SingZ::zdsp_api)
 singz_configure_realtime_target(zdsp_runtime)
 ```
 
@@ -297,6 +305,13 @@ trivial wrappers such as `SampleRateHz`, `FrameCount`, `FramePosition`,
 `HostTimeNs`, `LatencyFrames` and `RouteGeneration`. Conversions are explicit
 and happen outside inner sample loops.
 
+Ownership follows semantic boundary, not spelling. A general unit used with
+the same meaning across native subsystems belongs in `zcore_base`. A wrapper
+whose validity, versioning or clock meaning is defined by the processor
+contract belongs in `zdsp_api`, even if a device-facing `zcore_audio` value has
+a similar representation. The product host converts explicitly between them;
+`zcore_audio` must not include `zdsp` merely to avoid a one-line conversion.
+
 `AudioBusView` is non-owning and trivial: channel pointers, channel/frame
 counts, stride/layout and capacity. Const input and mutable output are separate
 types. A view never extends driver-buffer or arena-slot lifetime.
@@ -353,6 +368,12 @@ C ABI or their platform ABI with POD descriptors, explicit sizes and opaque
 handles. Never expose STL containers, exceptions, allocators or C++ class
 layout across those boundaries.
 
+Phase 0B's `ProcessorVTable` is the first category only: same-toolchain static
+C++20 despite its POD shape and version fields. A future shared boundary needs
+a separate exported `extern "C"` factory, explicit calling/export conventions,
+fixed-width C POD, opaque handles and output status; it must not return the
+internal C++ vtable directly.
+
 ## Memory and cache policy
 
 - The graph compiler computes buffer liveness, aligns slots and records the
@@ -392,7 +413,7 @@ known.
 | Signalsmith Stretch | Evaluate the native C++ library as one prepared time/pitch node; pin version/license and retain phase-coherent whole-song-bus semantics. |
 | PFFFT or another permissive FFT | Benchmark only if vDSP is unavailable or insufficient. Plans and scratch allocate off RT; do not expose its types. |
 | Resampler library | Do not choose by quality marketing alone. Compare the existing resampler and permissive candidates for dynamic-ratio drift correction, small-block delay, CPU and reset/discontinuity behavior. |
-| [VST3 SDK](https://github.com/steinbergmedia/vst3sdk/blob/master/LICENSE.txt) | The current SDK is MIT-licensed; pin an exact release in `zdsp_plugins_vst3`, preserve notices and follow separate VST trademark guidance. This does not change ASIO's separate licensing gate. |
+| [VST3 SDK](https://github.com/steinbergmedia/vst3sdk/commit/9fad9770f2ae8542ab1a548a68c1ad1ac690abe0) | Pin the upstream commit named `VST SDK 3.8.0`, `9fad9770f2ae8542ab1a548a68c1ad1ac690abe0`, plus its recorded gitlinks in `zdsp_plugins_vst3`; upstream publishes no GitHub release/tag for this point. Preserve root/submodule licenses and `VST3_Usage_Guidelines.pdf`. This does not change ASIO's separate licensing gate. |
 | JUCE/Tracktion | Reference or separately licensed comparison only; neither defines SingZ's ABI or target graph. |
 | SPSC queue/RT arena | Keep the small SingZ-owned implementations because their ownership, overflow and armv7 atomic contracts are product-specific and auditable. |
 | [Google Benchmark](https://github.com/google/benchmark) | Development-only `zdsp_benchmarks` dependency. Use `DoNotOptimize`, repetitions/statistics and custom throughput/deadline counters; never link it into products. |
@@ -436,8 +457,10 @@ multiply compile time/code size across every node without measured benefit.
    armv7 builds. Replace global standard flags with target features.
 3. Split `zcore_base`, `zcore_audio`, `zcore_device` and `zcore_media`; keep a
    temporary `SingZ::zcore_legacy` compatibility target only for migration.
-4. Create the format-neutral `zdsp_api` target and contracts without changing
-   application playback.
+4. Create the format-neutral `zdsp_api` target and DSP-facing clock/bus/process
+   contracts without changing application playback. Keep device transport in
+   `zcore_audio`; adapt between the two only in a host/product layer that links
+   both targets.
 5. Isolate current analysis/resampling in `zdsp_analysis` and ONNX/stem work in
    `zdsp_ml`, preserving outputs and tolerances; both may now depend on
    `zdsp_api`.

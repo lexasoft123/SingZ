@@ -1,12 +1,16 @@
 # Future DSP graph architecture
 
-Status: proposed roadmap, not an implemented subsystem
+Status: roadmap; Phase 0A and the Phase 0B contract/prototype slice are implemented
 Last reviewed: 2026-08-26
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
 
 Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
 
 Native language, target and layout design: [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md)
+
+Phase 0B contracts and decisions: [ADRs](adr/)
+
+Performance evidence: [DSP-PERFORMANCE-BASELINE.md](DSP-PERFORMANCE-BASELINE.md)
 
 This document is the implementation plan for moving SingZ from two fixed
 playback graphs plus a capture pipeline to one reusable, low-latency native DSP
@@ -510,11 +514,14 @@ src/main/native/                 # Electron/product bridge
 `SingZ::zcore_media`. `zdsp` similarly produces `SingZ::zdsp_api`,
 `SingZ::zdsp_runtime`, node, analysis, ML and plug-in targets. The real-time
 runner does not transitively link FLAC, ONNX Runtime or plug-in SDKs. `zdsp`
-may depend on public `zcore_base`/`zcore_audio` contracts; `zcore` must never
-depend on `zdsp`. The app-level host coordinator links device and runner
-targets and supplies a `zdsp::GraphRunner` through `zcore::RealtimeRender`,
-which keeps that dependency acyclic. Detailed ownership, language and build
-rules are in
+may depend on public `zcore_base` contracts; Phase 0B intentionally does not
+link `zcore_audio`. `zcore` must never depend on `zdsp`. The app-level host
+coordinator links device and runner targets, maps device/capture timestamps and
+buffers into `zdsp_api` values, then invokes the graph through a plain render
+thunk. Clock/bus/process types live in `zdsp_api` because their validity and
+versioning are DSP-interface semantics; `zcore_audio` retains only device
+transport contracts. This keeps the dependency acyclic without duplicating a
+second graph contract. Detailed ownership, language and build rules are in
 [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
 
 Neither reusable library belongs under the React Native CMake tree. Product
@@ -584,9 +591,13 @@ over the new host; it should not be deleted in the first graph PR.
 
 ### Formats
 
-1. **VST3** is the first desktop format for Windows and macOS. Pin one SDK
-   version and include its notices. VST3 SDK 3.8.1 is MIT-licensed as of this
-   review; reverify the exact pinned release. VST2 is explicitly out of scope.
+1. **VST3** is the first desktop format for Windows and macOS. Phase 0B pins
+   the upstream commit named `VST SDK 3.8.0`,
+   `9fad9770f2ae8542ab1a548a68c1ad1ac690abe0`, plus its recorded gitlinks.
+   The repository publishes no GitHub release/tag for this point. The root at
+   that commit is MIT-licensed; preserve the root and submodule licenses plus
+   `VST3_Usage_Guidelines.pdf`.
+   VST2 is explicitly out of scope.
    Marketing use of the VST name/logo has separate trademark/attribution rules
    and belongs on the release legal checklist.
 2. **AUv3** is a later Apple adapter. It is useful on macOS and is the only
@@ -607,7 +618,8 @@ agreement or has deliberately adopted a GPLv3-compatible distribution model.
 
 ### Adapter obligations
 
-The format-neutral SingZ ABI stays smaller than any plug-in SDK, but adapters
+The internal same-toolchain SingZ processor interface stays smaller than any
+plug-in SDK, but adapters
 must honor each format's lifecycle rather than flatten it incorrectly.
 
 For VST3 the adapter must cover:
@@ -819,9 +831,16 @@ Avoid:
 
 ### Phase 0B — Freeze contracts and measurements
 
+Implementation note (2026-08-26): the accepted ADRs, same-toolchain static C++20 interface,
+gain→meter fake host, contract tests, JSON-emitting benchmark and native
+host/Android/iOS compile wiring are implemented. The checked-in baseline marks
+physical device-loopback numbers and miniaudio/JUCE comparisons as evidence
+gaps; those remain gates and are not inferred. Application playback still owns
+no native graph.
+
 Implement:
 
-- Write ADRs for the processor ABI, graph swap/retirement, clock domains,
+- Write ADRs for the processor interface and future C adapter boundary, graph swap/retirement, clock domains,
   discontinuities, plugin execution modes, graph persistence and serialized
   legacy↔native engine/session handoff.
 - Write the source-provisioning ADR: allowlisted file/handle ownership, FLAC
@@ -837,7 +856,7 @@ Implement:
 - Decide the exact VST3 SDK version and notices; keep ASIO disabled.
 - Benchmark a minimal SingZ-owned kernel against miniaudio as a substrate and
   against JUCE only as a commercially licensed option. Neither may define the
-  public node ABI; JUCE 8's AGPL/commercial boundary must be resolved before
+  internal node interface; JUCE 8's AGPL/commercial boundary must be resolved before
   any proprietary integration.
 
 References:
@@ -852,7 +871,8 @@ Verification:
 - A checked-in baseline report identifies rate, block size, device latency,
   callback-to-runner p50/p95/p99, xruns and test hardware.
 - Fake host covers 1-frame, normal, maximum and changing block sizes.
-- ADR review resolves every open item that changes ABI or persistence.
+- ADR review resolves every open item that changes the internal interface,
+  future C adapter ABI or persistence.
 - Build wiring proves the kernel compiles into host, iOS and Android artifacts;
   a stale mobile binary cannot satisfy this phase.
 
@@ -1260,11 +1280,20 @@ mode and route dominate it: wired professional interfaces can be suitable for
 monitoring, while Bluetooth and vehicle routes are presentation paths whose
 large/variable delay must be reported and calibrated, not disguised.
 
-## Open decisions to resolve in ADRs
+## Remaining decisions
 
-- Whether the graph ABI is private C++ initially or frozen as a C ABI for
-  separately built first-party nodes.
-- Exact channel-layout representation and maximum supported buses/channels.
+Phase 0B resolved the two interface-shaping questions: the first contract is a
+same-toolchain static C++20 interface, not a shared C ABI, and prepare topology
+uses explicit planar-float32 mono/stereo/discrete bus descriptors with channel
+roles, up to 16 buses and 64 channels per bus. A future shared-library/plug-in
+bridge requires its own true C adapter described in ADR 0001.
+
+Phase 0B also freezes ownership of those foundational DSP-facing types:
+`zdsp_api` owns graph clocks, bus views, process context and their strong
+wrappers while depending only on `zcore_base`. `zcore_audio` owns device
+capture/transport and must not import `zdsp`; future hosts adapt explicitly at
+the higher layer that already links both sides.
+
 - The first RT-safe drift resampler and quality/CPU modes.
 - Desktop process placement for the native device callback independent of
   Electron renderer lifetime.
@@ -1276,8 +1305,7 @@ large/variable delay must be reported and calibrated, not disguised.
   Windows host.
 - Whether AUv3 on iOS is valuable enough to justify its UX and latency scope.
 
-None of these should block Phase 1's offline graph kernel except the processor
-ABI and channel-layout decisions.
+None of these should block Phase 1's offline graph kernel.
 
 ## Authoritative references
 

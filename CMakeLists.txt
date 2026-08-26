@@ -59,6 +59,7 @@ set(SINGZ_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 add_subdirectory(third_party/native)
 add_subdirectory(zcore)
 add_subdirectory(zdsp)
+get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 
 if(NOT SINGZ_BUILD_HOST_TOOLS)
   return()
@@ -83,12 +84,28 @@ if(SINGZ_CORE_TESTS)
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZCORE_ROOT=${SINGZ_REPO_ROOT}/zcore"
       -P "${SINGZ_REPO_ROOT}/cmake/CheckZcoreBoundaries.cmake")
+  add_test(NAME zdsp_realtime_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_ZDSP_RT_MANIFEST}"
+      -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
   add_executable(core_host_tests ${SINGZ_REPO_ROOT}/tests/native/core_host_tests.cpp)
   add_dependencies(core_host_tests singz_check_zcore_boundaries)
   target_compile_features(core_host_tests PRIVATE cxx_std_20)
   target_compile_definitions(core_host_tests PRIVATE SINGZ_CORE_TESTS=1)
   target_link_libraries(core_host_tests PRIVATE SingZ::zcore_legacy)
   add_test(NAME core_host_tests COMMAND core_host_tests)
+
+  add_executable(zdsp_contract_tests
+    ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_contract_tests.cpp)
+  target_compile_features(zdsp_contract_tests PRIVATE cxx_std_20)
+  target_link_libraries(zdsp_contract_tests PRIVATE
+    SingZ::zdsp_prototype SingZ::zdsp_control)
+  add_test(NAME zdsp_contract_tests COMMAND zdsp_contract_tests)
+
+  add_executable(zdsp_fake_host_benchmark
+    ${SINGZ_REPO_ROOT}/zdsp/benchmarks/fake_host_benchmark.cpp)
+  target_compile_features(zdsp_fake_host_benchmark PRIVATE cxx_std_20)
+  target_link_libraries(zdsp_fake_host_benchmark PRIVATE SingZ::zdsp_prototype)
 
   add_executable(flac_roundtrip ${SINGZ_REPO_ROOT}/tests/native/flac_roundtrip.c)
   add_dependencies(flac_roundtrip singz_check_zcore_boundaries)

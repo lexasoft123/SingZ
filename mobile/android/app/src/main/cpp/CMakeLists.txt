@@ -42,13 +42,18 @@ add_subdirectory(${SINGZ_NATIVE_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/singz-native)
 # This file is deliberately outside src/main/cpp because React Native globs
 # that directory into appmodules. The shipped library name remains unchanged.
 add_library(singzcore SHARED
-    ${SINGZ_NATIVE_ROOT}/mobile/native/bindings/android/singz_core_jni.cpp)
+    ${SINGZ_NATIVE_ROOT}/mobile/native/bindings/android/singz_core_jni.cpp
+    ${SINGZ_NATIVE_ROOT}/mobile/native/bindings/android/zdsp_compile_smoke.cpp)
 add_dependencies(singzcore singz_check_zcore_boundaries)
 target_compile_features(singzcore PRIVATE cxx_std_20)
+set_target_properties(singzcore PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
 # 32-bit ABIs (armeabi-v7a, x86) have 32-bit long — a >2 GB mix would
 # overflow plain fseek/ftell; the engine uses fseeko/ftello throughout.
 target_compile_definitions(singzcore PRIVATE _FILE_OFFSET_BITS=64)
 target_link_libraries(singzcore PRIVATE
+    SingZ::zdsp_runtime
     SingZ::zcore_ml
     SingZ::zcore_device
     SingZ::zcore_media
@@ -56,3 +61,13 @@ target_link_libraries(singzcore PRIVATE
     android
     dl
     log)
+
+# JNIEXPORT functions remain default-visible. Internal same-toolchain zdsp C++
+# and the link-smoke anchor must never become an accidental shared-library ABI.
+add_custom_command(TARGET singzcore POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        "-DSINGZ_SHARED_BINARY=$<TARGET_FILE:singzcore>"
+        "-DSINGZ_NM=${CMAKE_NM}"
+        -P "${SINGZ_NATIVE_ROOT}/cmake/CheckZdspSharedExports.cmake"
+    VERBATIM
+    COMMENT "Checking libsingzcore zdsp export surface")
