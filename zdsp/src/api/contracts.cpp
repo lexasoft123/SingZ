@@ -117,6 +117,16 @@ Status validateProcessContext(const ProcessContext& context) noexcept {
       (context.scratch.size != 0 && context.scratch.data == nullptr)) {
     return {StatusCode::InvalidArgument, 1};
   }
+  constexpr uint32_t kKnownProcessFlags = ProcessContextFlagTailDrain;
+  if ((processContextFlags(context) & ~kKnownProcessFlags) != 0)
+    return {StatusCode::InvalidArgument, 2};
+  if ((processContextFlags(context) & ProcessContextFlagTailDrain) != 0 &&
+      (context.parameterCount != 0 || context.eventCount != 0 ||
+       (context.transport != nullptr &&
+        (context.transport->stateFlags &
+         (TransportStatePlaying | TransportStateRecording |
+          TransportStateCycling)) != 0)))
+    return {StatusCode::InvalidArgument, 3};
   const Status validDiscontinuity = validateDiscontinuity(context);
   if (!succeeded(validDiscontinuity)) return validDiscontinuity;
   if (context.transport != nullptr) {

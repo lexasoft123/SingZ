@@ -42,6 +42,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  zdsp-sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict Release and sanitizer graph gates
+        run: bash zdsp/run-sanitizer-gates.sh
+
   checks:
     # PINNED, not `ubuntu-latest`. courts-parity and courts-decide-parity compare
     # transcendentals (cos/sin/log2/log1p/hypot) and their own header says

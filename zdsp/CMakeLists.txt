@@ -5,11 +5,15 @@ target_include_directories(zdsp_api INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(zdsp_api INTERFACE SingZ::zcore_base)
 
-# Phase 0B freezes the same-toolchain static interface. The production runtime
-# currently contains contract validation only; the graph compiler/runner
-# arrives in Phase 1.
+# The runtime is the allocation-free serial graph kernel. Compilation and
+# preparation use the same fixed-capacity implementation off RT; render entry
+# never acquires product, platform, codec, ML or plug-in dependencies.
 add_library(zdsp_runtime STATIC
-  src/api/contracts.cpp)
+  src/api/contracts.cpp
+  src/runtime/realtime_arena.cpp
+  src/runtime/builtin_nodes.cpp
+  src/runtime/graph_compiler.cpp
+  src/runtime/graph_runner.cpp)
 add_library(SingZ::zdsp_runtime ALIAS zdsp_runtime)
 target_compile_features(zdsp_runtime PUBLIC cxx_std_20)
 target_include_directories(zdsp_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -21,12 +25,47 @@ target_sources(zdsp_runtime PRIVATE
   include/zdsp/audio_bus.h
   include/zdsp/process_context.h
   include/zdsp/processor.h
-  include/zdsp/latency.h)
+  include/zdsp/latency.h
+  include/zdsp/realtime_arena.h
+  include/zdsp/queues.h
+  include/zdsp/builtin_nodes.h
+  include/zdsp/graph.h
+  include/zdsp/graph_runner.h
+  src/runtime/graph_internal.h)
 set_target_properties(zdsp_runtime PROPERTIES
+  CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE YES
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN YES)
 singz_configure_realtime_target(zdsp_runtime)
+
+# Offline rendering shares the compiled graph and processor implementations,
+# but WAV serialization is deliberately outside the callback-reachable leaf.
+add_library(zdsp_offline STATIC EXCLUDE_FROM_ALL
+  src/offline/offline_renderer.cpp)
+add_library(SingZ::zdsp_offline ALIAS zdsp_offline)
+target_compile_features(zdsp_offline PUBLIC cxx_std_20)
+target_include_directories(zdsp_offline PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(zdsp_offline PUBLIC SingZ::zdsp_runtime)
+set_target_properties(zdsp_offline PROPERTIES
+  CXX_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE YES
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES)
+singz_configure_realtime_target(zdsp_offline)
+
+# Inert Apple packaging evidence. This produces isolated static component
+# archives for device and simulator without linking an RN pod, starting an
+# audio session or taking product playback ownership.
+if(APPLE)
+  add_custom_target(zdsp_apple_component_smoke
+    COMMAND bash
+      "${CMAKE_CURRENT_SOURCE_DIR}/build-apple-component-smoke.sh"
+      "${CMAKE_CURRENT_SOURCE_DIR}/.."
+      "${CMAKE_CURRENT_BINARY_DIR}/apple-component-smoke"
+    VERBATIM
+    COMMENT "Building isolated zdsp Apple device/simulator components")
+endif()
 
 # Deterministic test support. This target must never be linked into products.
 add_library(zdsp_prototype STATIC EXCLUDE_FROM_ALL src/prototype/gain_meter.cpp)
@@ -36,6 +75,7 @@ target_include_directories(zdsp_prototype PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/in
 target_link_libraries(zdsp_prototype PUBLIC SingZ::zdsp_runtime)
 target_sources(zdsp_prototype PRIVATE include/zdsp/prototype_gain_meter.h)
 set_target_properties(zdsp_prototype PROPERTIES
+  CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE YES
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN YES)
@@ -86,6 +126,7 @@ target_compile_features(zdsp_control PUBLIC cxx_std_20)
 target_include_directories(zdsp_control PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(zdsp_control PUBLIC SingZ::zdsp_api)
 set_target_properties(zdsp_control PROPERTIES
+  CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE YES
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN YES)

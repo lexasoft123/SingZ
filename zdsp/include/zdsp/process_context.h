@@ -49,6 +49,13 @@ struct TransportContext {
   int32_t timeSignatureDenominator;
 };
 struct ScratchView { uint8_t* data; uint32_t size; };
+enum ProcessContextFlags : uint32_t {
+  ProcessContextFlagNone = 0,
+  // The host is draining already-created processor state after graph
+  // replacement. Sources must not generate, and processors must not consume
+  // automation/events or treat transport as running.
+  ProcessContextFlagTailDrain = 1u << 0,
+};
 struct ProcessContext {
   uint32_t interfaceVersion;
   uint32_t structSize;
@@ -62,10 +69,18 @@ struct ProcessContext {
   uint32_t eventCount;
   ScratchView scratch;
   Discontinuity discontinuity;
+  uint32_t flags{ProcessContextFlagNone};
 };
 inline constexpr uint32_t kProcessContextV1RequiredSize =
     static_cast<uint32_t>(offsetof(ProcessContext, discontinuity) +
                           sizeof(decltype(ProcessContext::discontinuity)));
+inline constexpr uint32_t kProcessContextV2RequiredSize =
+    static_cast<uint32_t>(offsetof(ProcessContext, flags) +
+                          sizeof(decltype(ProcessContext::flags)));
+constexpr uint32_t processContextFlags(const ProcessContext& context) noexcept {
+  return context.structSize >= kProcessContextV2RequiredSize
+      ? context.flags : ProcessContextFlagNone;
+}
 [[nodiscard]] ZDSP_INTERNAL_API Status validateProcessContext(
     const ProcessContext& context) noexcept;
 

@@ -37,6 +37,9 @@ using ProcessorLatencyFn = LatencyFrames (*)(const void*) noexcept;
 using ProcessorTailFn = TailInfo (*)(const void*) noexcept;
 using ProcessorDeactivateFn = Status (*)(void*) noexcept;
 using ProcessorDestroyFn = Status (*)(void*) noexcept;
+// Optional append-only V2 hook. A processor batches samples it contained
+// internally and the runner consumes the count once after each process call.
+using ProcessorConsumeNonFiniteFn = uint32_t (*)(void*) noexcept;
 
 // This is a same-toolchain, statically linked C++20 interface. POD and an
 // opaque state keep product components decoupled, but this vtable is not a
@@ -52,10 +55,14 @@ struct ProcessorVTable {
   ProcessorTailFn tail;
   ProcessorDeactivateFn deactivate;
   ProcessorDestroyFn destroy;
+  ProcessorConsumeNonFiniteFn consumeNonFinite{nullptr};
 };
 inline constexpr uint32_t kProcessorVTableV1RequiredSize =
     static_cast<uint32_t>(offsetof(ProcessorVTable, destroy) +
                           sizeof(decltype(ProcessorVTable::destroy)));
+inline constexpr uint32_t kProcessorVTableV2RequiredSize =
+    static_cast<uint32_t>(offsetof(ProcessorVTable, consumeNonFinite) +
+                          sizeof(decltype(ProcessorVTable::consumeNonFinite)));
 struct ProcessorHandle { void* state; const ProcessorVTable* functions; };
 [[nodiscard]] ZDSP_INTERNAL_API Status validateProcessor(
     const ProcessorHandle& processor) noexcept;

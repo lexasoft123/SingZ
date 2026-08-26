@@ -8,6 +8,8 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   project(singz-native LANGUAGES C CXX)
 endif()
 
+find_package(Threads REQUIRED)
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mobile/native/core" OR
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mobile/native/third_party")
   message(FATAL_ERROR
@@ -111,14 +113,36 @@ if(SINGZ_CORE_TESTS)
   add_executable(zdsp_contract_tests
     ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_contract_tests.cpp)
   target_compile_features(zdsp_contract_tests PRIVATE cxx_std_20)
+  set_target_properties(zdsp_contract_tests PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_contract_tests PRIVATE
     SingZ::zdsp_prototype SingZ::zdsp_control)
   add_test(NAME zdsp_contract_tests COMMAND zdsp_contract_tests)
 
+  add_executable(zdsp_graph_tests
+    ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_graph_tests.cpp)
+  target_compile_features(zdsp_graph_tests PRIVATE cxx_std_20)
+  set_target_properties(zdsp_graph_tests PROPERTIES CXX_EXTENSIONS OFF)
+  target_link_libraries(zdsp_graph_tests PRIVATE SingZ::zdsp_offline Threads::Threads)
+  add_test(NAME zdsp_graph_tests COMMAND zdsp_graph_tests)
+  if(APPLE)
+    add_test(NAME zdsp_apple_component_smoke
+      COMMAND bash
+        "${SINGZ_REPO_ROOT}/zdsp/build-apple-component-smoke.sh"
+        "${SINGZ_REPO_ROOT}"
+        "${CMAKE_CURRENT_BINARY_DIR}/zdsp-apple-component-ctest")
+  endif()
+
   add_executable(zdsp_fake_host_benchmark
     ${SINGZ_REPO_ROOT}/zdsp/benchmarks/fake_host_benchmark.cpp)
   target_compile_features(zdsp_fake_host_benchmark PRIVATE cxx_std_20)
+  set_target_properties(zdsp_fake_host_benchmark PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_fake_host_benchmark PRIVATE SingZ::zdsp_prototype)
+
+  add_executable(zdsp_graph_benchmark
+    ${SINGZ_REPO_ROOT}/zdsp/benchmarks/graph_benchmark.cpp)
+  target_compile_features(zdsp_graph_benchmark PRIVATE cxx_std_20)
+  set_target_properties(zdsp_graph_benchmark PROPERTIES CXX_EXTENSIONS OFF)
+  target_link_libraries(zdsp_graph_benchmark PRIVATE SingZ::zdsp_offline)
 
   add_executable(flac_roundtrip ${SINGZ_REPO_ROOT}/tests/native/flac_roundtrip.c)
   add_dependencies(flac_roundtrip singz_check_zcore_boundaries)

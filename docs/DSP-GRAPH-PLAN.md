@@ -354,6 +354,11 @@ rather than stopping the device for ordinary graph edits.
 Parameters enter through fixed-capacity single-producer queues and are copied
 into a preallocated per-block event span:
 
+The render callback captures the available count once for each queue after graph
+and block preflight, then consumes at most that captured count. Producer writes
+published during the drain remain for the next block. A callback with no
+renderable graph, a rejected replacement, or tail-drain context consumes none.
+
 ```cpp
 struct ParameterEvent {
   NodeId node;
@@ -885,6 +890,30 @@ Avoid:
 - Starting a native output host while Web Audio/RNAudioAPI still owns playback.
 
 ### Phase 1 — Native graph kernel and offline runner
+
+Status: implemented on the WIP DSP branch; product playback cutover remains a
+later phase. The implementation lives entirely in `zdsp_runtime` and
+`zdsp_offline`, with the Phase 0B prototype/control fixtures still isolated.
+Windows/MSVC and physical-device verification remain deferred to the next
+phase by agreement; no platform latency claim is inferred from the host-only
+runner benchmark.
+
+The Phase 1 review hardening pins real external-copy lifetimes, quarantines
+failed processor teardown, atomically claims publications before inspection,
+validates both transition endpoints, renders bounded tail policy in the runner,
+publishes telemetry without data races, preserves newest parameter state under
+bounded overload, and uses only always-lock-free callback counter widths. The
+replacement review additionally binds every transition to exact graph/generation
+identities, splits crossfade/tail work at an in-callback endpoint, carries capture
+metadata through intrinsic and compensation delay history, and protects copied
+telemetry with generation plus per-slot versions across slot reuse. The
+checked-in `zdsp_apple_component_smoke` target produces isolated device and
+simulator archives; RN pod/product playback integration remains a later phase.
+Final audit hardening reserves generation zero as unpublished, tracks every
+snapshot through atomic pending/claimed/active/fading/retirement ownership,
+provides bounded quiescent shutdown extraction, cancels transitions and clears
+history on typed reset discontinuities, and checks the graph suite continuously
+under strict Release, ASan+UBSan and TSan presets.
 
 Implement:
 

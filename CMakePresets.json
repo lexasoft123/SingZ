@@ -25,6 +25,56 @@
         "SINGZ_BUILD_HOST_TOOLS": "ON",
         "SINGZ_CORE_TESTS": "ON"
       }
+    },
+    {
+      "name": "zdsp-release-strict",
+      "displayName": "zdsp strict Release graph gate",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": ["Linux", "Darwin"]
+      },
+      "binaryDir": "${sourceDir}/build/native/zdsp-release-strict",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-Wall -Wextra -Wpedantic -Werror",
+        "SINGZ_BUILD_HOST_TOOLS": "ON",
+        "SINGZ_CORE_TESTS": "ON"
+      }
+    },
+    {
+      "name": "zdsp-asan-ubsan",
+      "displayName": "zdsp ASan and UBSan graph gate",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": ["Linux", "Darwin"]
+      },
+      "binaryDir": "${sourceDir}/build/native/zdsp-asan-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "SINGZ_BUILD_HOST_TOOLS": "ON",
+        "SINGZ_CORE_TESTS": "ON"
+      }
+    },
+    {
+      "name": "zdsp-tsan",
+      "displayName": "zdsp TSan graph gate",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": ["Linux", "Darwin"]
+      },
+      "binaryDir": "${sourceDir}/build/native/zdsp-tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+        "SINGZ_BUILD_HOST_TOOLS": "ON",
+        "SINGZ_CORE_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -35,6 +85,21 @@
     {
       "name": "host-release",
       "configurePreset": "host-release"
+    },
+    {
+      "name": "zdsp-release-strict",
+      "configurePreset": "zdsp-release-strict",
+      "targets": ["zdsp_graph_tests"]
+    },
+    {
+      "name": "zdsp-asan-ubsan",
+      "configurePreset": "zdsp-asan-ubsan",
+      "targets": ["zdsp_graph_tests"]
+    },
+    {
+      "name": "zdsp-tsan",
+      "configurePreset": "zdsp-tsan",
+      "targets": ["zdsp_graph_tests"]
     }
   ],
   "testPresets": [
@@ -46,6 +111,24 @@
     {
       "name": "host-release",
       "configurePreset": "host-release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "zdsp-release-strict",
+      "configurePreset": "zdsp-release-strict",
+      "filter": { "include": { "name": "^zdsp_(graph_tests|realtime_source_policy)$" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "zdsp-asan-ubsan",
+      "configurePreset": "zdsp-asan-ubsan",
+      "filter": { "include": { "name": "^zdsp_graph_tests$" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "zdsp-tsan",
+      "configurePreset": "zdsp-tsan",
+      "filter": { "include": { "name": "^zdsp_graph_tests$" } },
       "output": { "outputOnFailure": true }
     }
   ]

@@ -35,6 +35,7 @@ enum class StatusCode : uint32_t {
   CapacityExceeded,
   VersionMismatch,
   MalformedData,
+  Busy,
 };
 
 struct Status { StatusCode code; uint32_t detail; };
