@@ -6,7 +6,7 @@
 # gates capture stdout as the path.
 #   scripts/build-analyze-host.sh [out-path]     default: $TMPDIR/singz-analyze
 #
-# A thin wrapper over mobile/native/core/CMakeLists.txt — the ONE definition
+# A thin wrapper over the root CMakeLists.txt — the ONE definition
 # of the host build, shared with run-core-host-tests.sh, the vendor step and
 # the Windows workflow. This script used to carry its own compiler line and
 # object cache; two build definitions of one binary is the same trap as two
@@ -16,7 +16,9 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="${1:-${TMPDIR:-/tmp}/singz-analyze}"
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build}"
+# Keep the post-relocation default distinct from caches configured against the
+# former mobile/native/core source tree. Explicit overrides remain authoritative.
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host}"
 
 # Compiler cache when the machine has one — same launchers, base_dir and
 # hash_dir story as vendor-whisper.sh (a sibling worktree hits only with
@@ -30,7 +32,7 @@ fi
 # -DSINGZ_CORE_TESTS=OFF here: the option would persist in the cmake cache,
 # and run-core-host-tests.sh may share this build dir via SINGZ_CORE_BUILD_DIR
 # — tests default ON and cost nothing when only the tool target is built.
-cmake -S "$ROOT/mobile/native/core" -B "$BUILD" 1>&2
+cmake -S "$ROOT" -B "$BUILD" 1>&2
 cmake --build "$BUILD" --target singz-analyze -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" 1>&2
 
 cp "$BUILD/singz-analyze" "$OUT"

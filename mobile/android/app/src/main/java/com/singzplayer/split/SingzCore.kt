@@ -1,7 +1,7 @@
 package com.singzplayer.split
 
 /**
- * The shared C++ engine core (mobile/native/core, docs/PHONE-STANDALONE.md).
+ * The shared top-level C++ zcore package (docs/PHONE-STANDALONE.md).
  * Loading is lazy and failure is a value, not a crash: an ABI the core does
  * not ship for (or a broken .so) must degrade to "splitting unavailable on
  * this phone", never take the player down with it.

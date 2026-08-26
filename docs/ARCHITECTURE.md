@@ -353,7 +353,7 @@ transpose-aware in the pitch strip's info card.
 
 **The detectors are moving into the shared C++ core, one implementation for
 every platform** (docs/PHONE-STANDALONE.md, Phase 4c): the melody tracker
-is there already — `mobile/native/core/melody.cpp` is pyin.ts + pitch.ts +
+is there already — `zcore/src/legacy/melody.cpp` is pyin.ts + pitch.ts +
 pitch-core.ts ported line for line and held bit-identical to this section's
 TS (float where the TS keeps Float32Array, double elsewhere, sums in the
 same order; the corpus gate is `singz-analyze melody` vs node, at the file's

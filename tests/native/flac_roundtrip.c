@@ -1,5 +1,5 @@
 /*
- * The vendored libFLAC's gate (mobile/native/third_party/flac).
+ * The vendored libFLAC's gate (third_party/native/flac).
  *
  * What this is really testing is the VENDORING, not libFLAC: that the fifteen
  * .c files taken from the tarball are a complete, linkable encoder+decoder on

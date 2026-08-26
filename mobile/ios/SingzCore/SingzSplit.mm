@@ -1,4 +1,4 @@
-// iOS binding of the shared C++ engine core (mobile/native/core) — the same
+// iOS binding of the shared top-level zcore package — the same
 // marshalling-only rule as Android's singz_core_jni.cpp/SplitModule.kt: the
 // module name, method arity and the event payloads are identical on both
 // platforms, so the JS pipeline has one surface (service.ts flips on via its
@@ -15,13 +15,13 @@
 
 #import "SingzSplitRunner.h"
 
-#include "ort_env.h"
-#include "analysis.h"
-#include "flac_io.h"
-#include "beat_this.h"
-#include "beats.h"
-#include "melody.h"
-#include "wav.h"
+#include <zcore/legacy/ort_env.h>
+#include <zcore/legacy/analysis.h>
+#include <zcore/media/flac_io.h>
+#include <zcore/legacy/beat_this.h>
+#include <zcore/legacy/beats.h>
+#include <zcore/legacy/melody.h>
+#include <zcore/media/wav.h>
 
 @interface SingzSplit : RCTEventEmitter <RCTBridgeModule>
 @end

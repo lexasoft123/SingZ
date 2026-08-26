@@ -5,7 +5,7 @@
 # skip-guard on the existing output, delete vendor/… to force.
 #   scripts/vendor-analyze.sh [target]   e.g. darwin-arm64, darwin-x64, win32-x64
 #
-# One build definition: mobile/native/core/CMakeLists.txt, shared with
+# One build definition: the root CMakeLists.txt, shared with
 # build-analyze-host.sh, run-core-host-tests.sh and the Core Windows workflow.
 # darwin-x64 cross-compiles from an arm64 Mac via CMAKE_OSX_ARCHITECTURES —
 # the tree is plain C/C++ with no arch-conditional sources.
@@ -30,14 +30,16 @@ if command -v ccache >/dev/null 2>&1; then
   export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
 fi
 
-BUILD="${TMPDIR:-/tmp}/singz-analyze-vendor-$TARGET"
+# Keep the post-relocation default distinct from caches configured against the
+# former mobile/native/core source tree.
+BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET"
 CONFIG_ARGS=(-DSINGZ_CORE_TESTS=OFF)
 case "$TARGET" in
   darwin-arm64) CONFIG_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=arm64) ;;
   darwin-x64) CONFIG_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=x86_64) ;;
 esac
 
-cmake -S "$ROOT/mobile/native/core" -B "$BUILD" "${CONFIG_ARGS[@]}"
+cmake -S "$ROOT" -B "$BUILD" "${CONFIG_ARGS[@]}"
 cmake --build "$BUILD" --target singz-analyze --config Release -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 mkdir -p "$OUT_DIR"

@@ -44,7 +44,7 @@ It will not be implemented inside or as a mode of the WASAPI class. The build
 switch is off by default and the Steinberg SDK is never stored in this repo:
 
 ```powershell
-cmake -S mobile/native/core -B build `
+cmake -S . -B build `
   -DSINGZ_ENABLE_ASIO=ON `
   -DSINGZ_ASIO_SDK_DIR=C:\path\to\asio
 ```

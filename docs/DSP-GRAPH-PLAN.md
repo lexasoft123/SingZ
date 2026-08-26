@@ -76,17 +76,15 @@ Today SingZ has three separate audio paths:
    bypasses the master bus.
 2. Mobile playback mirrors that shape in `mobile/src/engine.ts` using
    `react-native-audio-api`, including a patched native stretch node.
-3. PR #13 added a shared float32 capture transport in
-   `mobile/native/core/audio_input.*` with AUHAL, WASAPI, RemoteIO and AAudio
+3. PR #13 added a shared float32 capture transport, now located under
+   `zcore/`, with AUHAL, WASAPI, RemoteIO and AAudio
    providers, physical-channel selection, timestamp provenance, bounded
    delivery and an off-real-time 2,048/512 analysis adapter.
 
-The PR #13 sources are already cross-platform, but their path still says that
-mobile owns them. That is now an architectural mismatch. Before adding the
-graph, move the reusable native source tree to top-level `zcore/` and create
-the graph as the sibling top-level library `zdsp/`. `mobile/`, Electron and
-native command-line tools become consumers of those libraries, not owners of
-their source.
+Phase 0A makes the reusable native source tree top-level `zcore/` and
+establishes the sibling `zdsp/` package. `mobile/`, Electron and native
+command-line tools are consumers of those libraries, not owners of their
+source.
 
 The migration must preserve these proven invariants:
 
@@ -784,12 +782,13 @@ Implement as a dedicated, behavior-preserving PR before graph work:
 - Give CMake consumers stable narrow exported targets such as
   `SingZ::zcore_audio`, `SingZ::zcore_device`, `SingZ::zdsp_api` and
   `SingZ::zdsp_runtime`. Android and host consumers link those targets instead
-  of compiling overlapping source lists. No shipping target uses an umbrella
-  link that drags media, ML and plug-in dependencies into live audio.
+  of compiling overlapping source lists. The generated iOS SingzCore pod is a
+  temporary Phase 0A packaging exception: component pods or a CMake-built
+  XCFramework must isolate device, media and ORT before native graph rendering.
 - Adopt target-scoped C++20 after MSVC, Apple Clang, Android arm64 and armv7
-  gates pass. Callback/runtime targets compile without exceptions/RTTI and use
-  only the real-time-safe feature profile; ORT and other exception-requiring
-  adapters remain isolated targets.
+  gates pass. Genuinely callback/runtime leaf targets compile without
+  exceptions/RTTI. `zcore_device` remains a mixed lifecycle/provider target
+  until its strict callback leaf is extracted; ORT remains isolated.
 - Add ownership documentation: `zcore` contains reusable native foundations;
   `zdsp` contains the real-time graph; `mobile/` and `src/main/` contain
   package/product bindings and UI/process orchestration only.

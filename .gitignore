@@ -1,6 +1,7 @@
 node_modules/
 out/
 dist/
+/build/native/
 vendor
 .engines-src/
 *.log
@@ -30,7 +31,7 @@ mobile/src/gdrive-config.ts
 mobile/src/gen/
 
 # SingzCore pod's copy of the shared C++ core — materialized from
-# mobile/native/core by mobile/scripts/sync-singzcore.js (postinstall);
+# top-level zcore by mobile/scripts/sync-singzcore.js (postinstall);
 # CocoaPods cannot glob outside the pod dir, so the copy exists only locally
 mobile/ios/SingzCore/core/
 # …and the vendored libFLAC, synced beside it by the same script

@@ -1,0 +1,8 @@
+function(singz_configure_realtime_target target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /GR- /EHs-c-)
+  else()
+    target_compile_options(${target} PRIVATE -fno-exceptions -fno-rtti)
+  endif()
+  target_compile_definitions(${target} PRIVATE SINGZ_REALTIME_LEAF=1)
+endfunction()

@@ -1,4 +1,4 @@
-// Host-compiled checks for the ORT-free half of mobile/native/core: the
+// Host-compiled checks for the ORT-free zcore component targets: the
 // resampler's quality claim and the WAV writer's byte contract. The
 // overlap-add loop and the resume tail live inside split_engine.cpp next to
 // the ORT session and are proven on-device instead (the LSB-parity gate and
@@ -22,21 +22,22 @@
 #include <thread>
 #include <vector>
 
-#include "analysis.h"
-#include "audio_input.h"
-#include "audio_input_analysis_adapter.h"
-#include "audio_input_android_policy.h"
-#include "audio_input_backend.h"
-#include "audio_input_callback_gate.h"
-#include "audio_input_convert.h"
-#include "audio_input_ios_session.h"
-#include "audio_input_timestamp.h"
-#include "flac_io.h"
-#include "beat_this.h"
-#include "beats.h"
-#include "melody.h"
-#include "resample.h"
-#include "wav.h"
+#include <zcore/legacy/analysis.h>
+#include <zcore/device/audio_input.h>
+#include <zcore/legacy/audio_input_analysis_adapter.h>
+#include <zcore/device/audio_input_android_policy.h>
+#include <zcore/device/audio_input_backend.h>
+#include <zcore/device/audio_input_callback_gate.h>
+#include <zcore/audio/audio_input_convert.h>
+#include <zcore/device/audio_input_ios_session.h>
+#include <zcore/audio/audio_input_timestamp.h>
+#include <zcore/media/flac_io.h>
+#include <zcore/legacy/beat_this.h>
+#include <zcore/legacy/beats.h>
+#include <zcore/legacy/live_input_analysis.h>
+#include <zcore/legacy/melody.h>
+#include <zcore/legacy/resample.h>
+#include <zcore/media/wav.h>
 
 static int failures = 0;
 

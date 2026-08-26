@@ -15,6 +15,15 @@ libraries. Each package produces narrow CMake targets so an audio callback does
 not inherit codecs, ONNX Runtime, plug-in SDKs or product bindings it never
 uses.
 
+Phase 0A implementation note: `zcore_device` is temporarily a mixed
+control/delivery/provider compatibility target, not a strict real-time leaf.
+Its callback entry points keep their noexcept/no-allocation contract, but
+lifecycle code intentionally catches thread-creation exceptions. Split a
+callback-only leaf before Phase 1. The generated iOS `SingzCore` pod also
+remains a broad device/media/analysis/ORT packaging exception; replace it with
+component pods or a CMake-built XCFramework with isolated flags before native
+graph rendering.
+
 ## Why the current layout will not scale
 
 PR #13 correctly proved one reusable implementation across four operating
@@ -90,19 +99,20 @@ Rules:
   in product bindings, never in public `zcore` or `zdsp` headers.
 
 `zcore` never depends on `zdsp`. `zdsp` links only the narrow `zcore_base` and
-`zcore_audio` targets it uses. No production target links an umbrella “all
-native features” library.
+`zcore_audio` targets it uses. The broad generated iOS pod is the documented
+Phase 0A packaging exception, not an acceptable graph-runtime dependency.
+During Phase 0A the allocating fixed-ratio resampler remains under
+`zcore/legacy` and in `zcore_legacy`; it must move into `zdsp_analysis` rather
+than weakening the strict `zcore_audio` callback leaf.
 
 ## Repository layout
 
 ```text
 CMakeLists.txt                    # native superbuild; options and add_subdirectory only
-CMakePresets.json                 # checked-in host/CI/dev/sanitizer presets
+CMakePresets.json                 # checked-in host debug/release presets
 cmake/
-  SingZCompilerWarnings.cmake
+  CheckZcoreBoundaries.cmake
   SingZRealtimeTarget.cmake
-  SingZSanitizers.cmake
-  SingZThirdParty.cmake
 third_party/native/
   CMakeLists.txt                  # pinned wrapper targets and license inventory
   flac/

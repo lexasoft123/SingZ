@@ -16,6 +16,12 @@ on:
     branches: [main]
     paths:
       - 'mobile/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'zcore/**'
+      - 'zdsp/**'
+      - 'third_party/native/**'
+      - 'tools/native/**'
       - '.github/workflows/android.yml'
       # editing the release notes should check the store text they generate
       - 'docs/release-notes/**'

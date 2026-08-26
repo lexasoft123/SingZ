@@ -30,7 +30,7 @@ All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 ## Verification policy
 
 **The C++ core is the source of truth for every detector** (decided 2026-08-22).
-New detector work lands in `mobile/native/core` first; the TypeScript in
+New detector work lands in `zcore/src/legacy` first; the TypeScript in
 `src/renderer/src/audio/` is a port of it, and a divergence means the TypeScript
 has drifted — not the port. What holds the two together is the seven parity gates
 under `eval/`, so they are the contract, not a diagnostic: `npm run gates`
@@ -439,8 +439,9 @@ was driven; the gotchas that follow from it are below.
   ReactNative-application.cmake)` first or `libappmodules.so` silently vanishes
   and the app dies at boot with "PlatformConstants could not be found". That
   include also GLOBS every `*.cpp` beside the CMakeLists into appmodules —
-  own sources live in `mobile/native/core/` (the shared C++ engine core; JNI
-  shim under `core/android/`), never next to the CMakeLists. The ORT Android
+  own reusable sources live in top-level `zcore/`; the package-specific JNI
+  shim lives under `mobile/native/bindings/android/`, never next to the
+  CMakeLists. The ORT Android
   AAR is legacy-layout (headers/ + jni/<abi>/, no prefab) — the `extractOrtSdk`
   gradle task unzips it and CMake imports the .so via `ORT_SDK_DIR`.
 - **A piped gradle build reports its failure as success** — `./gradlew … |

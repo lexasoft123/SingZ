@@ -310,7 +310,7 @@ async function main() {
   check('adoption: six stem rows', STEMS.every((s) => rows1.includes(`${s}.wav`)))
 
   // Phase 4c: the melody in project.json came from the CORE's tracker
-  // (native/core/melody.cpp via JNI), and on this device it agrees with the
+  // (zcore/src/legacy/melody.cpp via JNI), and on this device it agrees with the
   // desktop TS to the bit — asserted on song.wav (the seed as added; the
   // split's vocals stem of a synthetic vocal is silent, so it would be a
   // vacuous pass). The TS side decodes song.wav through audio-api INSIDE

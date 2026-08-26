@@ -36,7 +36,7 @@
  *    and a process killed in that minute still leaves the useful half saved.
  *
  * Memory: NOTHING crosses a JS runtime here any more. The grid, the key and
- * the melody all read their own stem files in the core (native/core —
+ * the melody all read their own stem files in top-level zcore —
  * detectBeats, estimateKeyFromStems and the pyin tracker, each bit-identical
  * to the desktop's), on a native thread. Where the core cannot read a stem —
  * a copied desktop project's FLAC, or an older native beside newer JS —

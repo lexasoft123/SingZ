@@ -5,21 +5,23 @@
 # mobile/** push and by hand after touching the core.
 #   scripts/run-core-host-tests.sh
 #
-# A thin wrapper over mobile/native/core/CMakeLists.txt — the ONE definition
+# A thin wrapper over the root CMakeLists.txt — the ONE definition
 # of the host build, shared with build-analyze-host.sh, the vendor step and
 # the Windows workflow (which runs these same two binaries through ctest on
 # MSVC). The binaries are run directly rather than through ctest here so
 # their full PASS listing stays in the canary's log, the way it always has.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build-tests}"
+# Keep the post-relocation default distinct from caches configured against the
+# former mobile/native/core source tree. Explicit overrides remain authoritative.
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests}"
 
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
   export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
 fi
 
-cmake -S "$ROOT/mobile/native/core" -B "$BUILD"
+cmake -S "$ROOT" -B "$BUILD"
 cmake --build "$BUILD" --target core_host_tests flac_roundtrip -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 "$BUILD/core_host_tests"
