@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -74,10 +73,11 @@ class LiveInputAnalysisAdapter {
   static constexpr size_t kCapacity = 2048;
   static constexpr uint32_t kMaximumInputFrames = 16384;
   static constexpr size_t kMaximumConvertedFrames = 65536;
-  std::array<float, kCapacity> samples_{};
-  std::array<CaptureTime, kCapacity> captures_{};
-  std::array<uint64_t, kCapacity> callbackTimes_{};
-  std::array<float, kCapacity> contiguous_{};
+  struct Storage;
+  // The fixed analysis ring is allocated once on the ordinary control thread.
+  // Keeping it out of the facade prevents a few stack-allocated adapters from
+  // exhausting Windows' default 1 MiB thread stack.
+  std::unique_ptr<Storage> storage_;
   size_t read_ = 0;
   size_t size_ = 0;
   uint64_t firstOutputFrame_ = 0;

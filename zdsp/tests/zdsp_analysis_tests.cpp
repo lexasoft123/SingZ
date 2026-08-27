@@ -12,6 +12,12 @@
 #include <type_traits>
 #include <vector>
 
+// Delivery adapters are routinely stack-owned by platform bridge contexts.
+// Their preallocated PCM/capture ring must therefore live behind the facade,
+// particularly on Windows where worker threads default to a 1 MiB stack.
+static_assert(sizeof(zdsp::analysis::LiveInputAnalysisAdapter) <= 512,
+              "analysis adapter must not inline its fixed capture ring");
+
 namespace {
 int failures = 0;
 #if defined(__has_feature)
@@ -70,8 +76,8 @@ std::vector<float> tone(size_t frames, double sampleRate,
                         uint64_t sourceFrame = 0) {
   std::vector<float> result(frames);
   for (size_t index = 0; index < frames; ++index)
-    result[index] = 0.25f * std::sin(
-        2.0 * M_PI * 440.0 * (sourceFrame + index) / sampleRate);
+    result[index] = static_cast<float>(0.25 * std::sin(
+        2.0 * M_PI * 440.0 * (sourceFrame + index) / sampleRate));
   return result;
 }
 }  // namespace
@@ -79,7 +85,8 @@ std::vector<float> tone(size_t frames, double sampleRate,
 int main() {
   std::vector<float> sine(2048);
   for (size_t index = 0; index < sine.size(); ++index)
-    sine[index] = 0.25f * std::sin(2.0 * M_PI * 440.0 * index / 48000.0);
+    sine[index] = static_cast<float>(
+        0.25 * std::sin(2.0 * M_PI * 440.0 * index / 48000.0));
 
   auto input = block(sine, 12, 4096);
   zdsp::CaptureTime adapted;

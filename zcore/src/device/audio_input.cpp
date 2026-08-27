@@ -153,7 +153,17 @@ const char* audioInputStateName(AudioInputState state) {
   return "error";
 }
 
-struct AudioInput::Impl {
+#if defined(__GNUC__) || defined(__clang__)
+#define SINGZ_ZCORE_IMPL_LOCAL __attribute__((visibility("hidden")))
+#else
+#define SINGZ_ZCORE_IMPL_LOCAL
+#endif
+
+// Impl is an out-of-line ownership detail, not part of zcore's ABI. Keep its
+// visibility equal to the callback endpoint it owns; otherwise GCC correctly
+// rejects the default-visible aggregate containing a hidden field under the
+// strict build.
+struct SINGZ_ZCORE_IMPL_LOCAL AudioInput::Impl {
   std::mutex lifecycle;
   mutable std::mutex control;
   std::mutex backendControl;
@@ -261,6 +271,8 @@ struct AudioInput::Impl {
 
   static thread_local Impl* deliveringImpl;
 };
+
+#undef SINGZ_ZCORE_IMPL_LOCAL
 
 thread_local AudioInput::Impl* AudioInput::Impl::deliveringImpl = nullptr;
 

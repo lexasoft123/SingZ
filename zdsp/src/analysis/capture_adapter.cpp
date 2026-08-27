@@ -4,11 +4,20 @@
 #include <zcore/legacy/resample.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <type_traits>
 
 namespace zdsp::analysis {
+
+struct LiveInputAnalysisAdapter::Storage {
+  std::array<float, kCapacity> samples{};
+  std::array<CaptureTime, kCapacity> captures{};
+  std::array<uint64_t, kCapacity> callbackTimes{};
+  std::array<float, kCapacity> contiguous{};
+};
+
 namespace {
 
 CaptureTimestampQuality mapQuality(
@@ -126,7 +135,8 @@ constexpr uint32_t kAnchorValidityMask =
 }  // namespace
 
 LiveInputAnalysisAdapter::LiveInputAnalysisAdapter(uint64_t generation)
-    : ownershipGeneration_(generation ? generation : 1) {
+    : storage_(std::make_unique<Storage>()),
+      ownershipGeneration_(generation ? generation : 1) {
   converted_.reserve(kMaximumConvertedFrames);
 }
 
@@ -209,8 +219,9 @@ DiscontinuityReason LiveInputAnalysisAdapter::continuityReason(
         1000000000.0L * previousFrames_ / sourceRate;
     const long double tolerance = std::max<long double>(
         2000000.0L, 0.5L * 1000000000.0L * previousFrames_ / sourceRate);
-    const long double actual = current.sampleHostTime.value;
-    if (actual <= previous_.sampleHostTime.value ||
+    const long double actual =
+        static_cast<long double>(current.sampleHostTime.value);
+    if (actual <= static_cast<long double>(previous_.sampleHostTime.value) ||
         std::fabs(actual - expected) > tolerance)
       return DiscontinuityReason::ClockReanchored;
   }
@@ -249,30 +260,31 @@ void LiveInputAnalysisAdapter::append(float sample, const CaptureTime& capture,
                                       const Sink& sink) {
   if (size_ >= kCapacity) return;
   const size_t write = (read_ + size_) % kCapacity;
-  samples_[write] = std::isfinite(sample) ? sample : 0.0f;
-  captures_[write] = capture;
-  callbackTimes_[write] = callbackHostTimeNs;
+  storage_->samples[write] = std::isfinite(sample) ? sample : 0.0f;
+  storage_->captures[write] = capture;
+  storage_->callbackTimes[write] = callbackHostTimeNs;
   if (size_ == 0) firstOutputFrame_ = nextOutputFrame_;
   ++size_;
   ++nextOutputFrame_;
   while (size_ == kCapacity) {
     for (size_t i = 0; i < kCapacity; ++i)
-      contiguous_[i] = samples_[(read_ + i) % kCapacity];
+      storage_->contiguous[i] = storage_->samples[(read_ + i) % kCapacity];
     AnalysisWindow window;
-    window.start = captures_[read_];
-    window.end = captures_[(read_ + kCapacity - 1) % kCapacity];
+    window.start = storage_->captures[read_];
+    window.end = storage_->captures[(read_ + kCapacity - 1) % kCapacity];
     window.start.sampleHostTime = {hostTimeForOutputFrame(firstOutputFrame_)};
     window.end.sampleHostTime = {
         hostTimeForOutputFrame(firstOutputFrame_ + kCapacity)};
     window.start.sourceFrame = {sourceFrameForOutputFrame(firstOutputFrame_)};
     window.end.sourceFrame = {
         sourceFrameForOutputFrame(firstOutputFrame_ + kCapacity)};
-    window.deliveredAt = {callbackTimes_[(read_ + kCapacity - 1) % kCapacity]};
+    window.deliveredAt = {
+        storage_->callbackTimes[(read_ + kCapacity - 1) % kCapacity]};
     window.sampleRate = {static_cast<double>(analysisRate_)};
     window.ownershipGeneration = ownershipGeneration_;
     window.resetCount = resets_;
     window.resetReason = lastResetReason_;
-    window.analysis = analyzeLiveInput(contiguous_.data(), kCapacity,
+    window.analysis = analyzeLiveInput(storage_->contiguous.data(), kCapacity,
                                        analysisRate_);
     if (!cancelled_.load(std::memory_order_acquire)) sink(window);
     ++emitted_;
