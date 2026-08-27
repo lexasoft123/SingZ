@@ -44,7 +44,10 @@ fi
 
 # Keep the post-relocation default distinct from caches configured against the
 # former mobile/native/core source tree.
-BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET"
+# Keyed on the checkout — see build-analyze-host.sh: a fixed $TMPDIR name is
+# one CMake cache shared across worktrees, and CMake refuses a cache whose
+# source dir was a different checkout.
+BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET-$(basename "$ROOT")"
 CONFIG_ARGS=(-DSINGZ_CORE_TESTS=OFF)
 case "$TARGET" in
   darwin-arm64) CONFIG_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=arm64) ;;

@@ -14,7 +14,10 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # Keep the post-relocation default distinct from caches configured against the
 # former mobile/native/core source tree. Explicit overrides remain authoritative.
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests}"
+# Keyed on the checkout — see build-analyze-host.sh: a fixed $TMPDIR name is
+# one CMake cache shared across worktrees, and CMake refuses a cache whose
+# source dir was a different checkout.
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests-$(basename "$ROOT")}"
 
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache

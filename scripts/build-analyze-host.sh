@@ -18,7 +18,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="${1:-${TMPDIR:-/tmp}/singz-analyze}"
 # Keep the post-relocation default distinct from caches configured against the
 # former mobile/native/core source tree. Explicit overrides remain authoritative.
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host}"
+# Keyed on the checkout: $TMPDIR is per-user, so a fixed name is one CMake
+# cache SHARED by every worktree on the machine, and CMake hard-errors when
+# the previous user was a different checkout ("does not match the source ...
+# used to generate cache") — it cost two sessions failed gates runs in one day.
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host-$(basename "$ROOT")}"
 
 # Compiler cache when the machine has one — same launchers, base_dir and
 # hash_dir story as vendor-whisper.sh (a sibling worktree hits only with
