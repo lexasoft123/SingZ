@@ -112,6 +112,19 @@ const api: SingzApi = {
 
   askMicAccess: () => ipcRenderer.invoke('mic:ask'),
 
+  listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
+  startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
+  stopDesktopAudioInput: (token) => ipcRenderer.invoke('audio-input:stop', token),
+  onDesktopAudioInputEvent: (cb) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      token: string,
+      event: import('../shared/types').DesktopAudioInputEvent
+    ): void => cb(token, event)
+    ipcRenderer.on('audio-input:event', listener)
+    return () => ipcRenderer.removeListener('audio-input:event', listener)
+  },
+
   modelsStatus: () => ipcRenderer.invoke('models:status'),
 
   downloadModels: (ids) => ipcRenderer.invoke('models:download', ids),
@@ -142,6 +155,11 @@ const api: SingzApi = {
   },
 
   appVersion: () => ipcRenderer.invoke('app:version'),
+
+  loadTrainingProgress: () => ipcRenderer.invoke('training-progress:load'),
+  saveTrainingPreferences: (preferences) => ipcRenderer.invoke('training-preferences:save', preferences),
+  saveTrainingPreferencesSync: (preferences) => ipcRenderer.sendSync('training-preferences:save-sync', preferences),
+  recordTrainingCompletion: (receipt) => ipcRenderer.invoke('training-completion:record', receipt),
 
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings),

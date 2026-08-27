@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type {
   CustomTrack,
   EngineStatus,
@@ -8,6 +8,13 @@ import type {
   ProjectSettings,
   SeparationProgress
 } from '../../shared/types'
+import {
+  createTrainingCompletionReceipt,
+  emptyTrainingProgress,
+  restoreTrainingProgress,
+  updateTrainingPreferences,
+  type TrainingProgress
+} from '../../shared/training-progress'
 import {
   analysisIsStale,
   BEAT_DETECT_VERSION,
@@ -31,6 +38,7 @@ import {
   type MetronomeConfig
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
+import { DesktopTrainingMicCapture } from './audio/training-mic'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
@@ -47,6 +55,12 @@ import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
+import VocalTraining from './components/VocalTrainingRoute'
+import { TrainingProgressMutations } from './training-progress-persistence'
+import {
+  DEFAULT_TRAINING_REFERENCE_VOLUME,
+  restoreDesktopTrainingPracticeSettings
+} from './training-practice'
 import {
   cleanSongName,
   customTrackId,
@@ -64,6 +78,20 @@ import {
   type TrainingConfig,
   type UITrack
 } from './model'
+import {
+  createLoadedSongIdentity,
+  desktopTrainingReducer,
+  effectiveSongPreparationKey,
+  INITIAL_DESKTOP_TRAINING_STATE,
+  reanchorLoadedSongIdentity,
+  SongLoadRequestEpoch,
+  songPreparationMatches,
+  continueAfterSourceRegistration,
+  stopTrainingForSongLoad,
+  type AppSection,
+  type DesktopTrainingSetup,
+  type LoadedSongIdentity
+} from './training-ui-state'
 
 type Phase = 'empty' | 'loading' | 'ready'
 
@@ -445,8 +473,39 @@ export default function App(): React.JSX.Element {
     ;(window as unknown as { __engine: MultitrackEngine }).__engine = e
     return e
   })
+  const [trainingCues] = useState(() => engine.createTrainingCueController())
+  const [trainingMic] = useState(() => new DesktopTrainingMicCapture())
+  const [appSection, setAppSection] = useState<AppSection>('songs')
+  const appSectionRef = useRef<AppSection>('songs')
+  appSectionRef.current = appSection
+  const [desktopTraining, dispatchDesktopTraining] = useReducer(
+    desktopTrainingReducer,
+    INITIAL_DESKTOP_TRAINING_STATE
+  )
+  const desktopTrainingRef = useRef(desktopTraining)
+  desktopTrainingRef.current = desktopTraining
+  const [trainingProgress, setTrainingProgress] = useState<TrainingProgress>(() => emptyTrainingProgress())
+  const trainingProgressRef = useRef(trainingProgress)
+  trainingProgressRef.current = trainingProgress
+  const [trainingProgressLoaded, setTrainingProgressLoaded] = useState(false)
+  const [trainingLoadError, setTrainingLoadError] = useState<string | null>(null)
+  const [trainingLoadAttempt, setTrainingLoadAttempt] = useState(0)
+  const [trainingSaveError, setTrainingSaveError] = useState<string | null>(null)
+  const [trainingProgressMutations] = useState(() => new TrainingProgressMutations(
+    {
+      savePreferences: (preferences) => window.singz.saveTrainingPreferences(preferences),
+      recordCompletion: (receipt) => window.singz.recordTrainingCompletion(receipt)
+    },
+    (progress) => { trainingProgressRef.current = progress; setTrainingProgress(progress) },
+    (profile) => {
+      const progress = { ...trainingProgressRef.current, profile }
+      trainingProgressRef.current = progress
+      setTrainingProgress(progress)
+    },
+    setTrainingSaveError
+  ))
   const [phase, setPhase] = useState<Phase>('empty')
-  const [song, setSong] = useState<{ path: string; name: string } | null>(null)
+  const [song, setSong] = useState<LoadedSongIdentity | null>(null)
   const [tracks, setTracks] = useState<UITrack[]>([])
   const [split, setSplit] = useState(false)
   const [stemFiles, setStemFiles] = useState<Record<string, string> | null>(null)
@@ -461,11 +520,19 @@ export default function App(): React.JSX.Element {
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
     try {
       const raw = localStorage.getItem('singz.audio')
-      return raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
+      const stored = raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
+      if (stored.referenceVolume !== undefined) return stored
+      const legacy = restoreDesktopTrainingPracticeSettings(
+        localStorage.getItem('singz.training.practice')
+      )
+      return { ...stored, referenceVolume: legacy.referenceVolume }
     } catch {
-      return {}
+      return { referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME }
     }
   })
+  const changeTrainingReferenceVolume = useCallback((referenceVolume: number) => {
+    setAudioPrefs((current) => sanitizeAudioPrefs({ ...current, referenceVolume }))
+  }, [])
   /** App-level verdict on the saved output ("not connected", "not allowed"). */
   const [outputStatus, setOutputStatus] = useState<string | null>(null)
   /** What the mic is actually listening through, when it's on. */
@@ -552,10 +619,88 @@ export default function App(): React.JSX.Element {
       return MET_DEFAULTS
     }
   })
+
+  useEffect(() => {
+    let current = true
+    void window.singz.loadTrainingProgress().then((result) => {
+      if (!current) return
+      if (!result.ok) throw new Error(result.error)
+      const restored = restoreTrainingProgress(result.progress)
+      trainingProgressRef.current = restored
+      trainingProgressMutations.markLoaded(restored)
+      setTrainingProgress(restored)
+      if (desktopTrainingRef.current.route === 'home' && !desktopTrainingRef.current.session)
+        dispatchDesktopTraining({
+          type: 'update-setup',
+          patch: {
+            tonicPc: restored.profile.tonicPc,
+            keyMode: restored.profile.keyMode,
+            exercise: restored.profile.exercise,
+            length: restored.profile.length,
+            lowMidi: restored.profile.range.lowMidi,
+            highMidi: restored.profile.range.highMidi,
+            taskMode: restored.profile.taskMode,
+            direction: restored.profile.direction,
+            intervalSizes: restored.profile.intervalSizes,
+            chordDegrees: restored.profile.chordDegrees
+          }
+        })
+      setTrainingLoadError(null)
+      setTrainingProgressLoaded(true)
+    }).catch((error) => {
+      if (current) setTrainingLoadError(error instanceof Error ? error.message : String(error))
+    })
+    return () => { current = false }
+  }, [trainingLoadAttempt, trainingProgressMutations])
+
+  useEffect(() => {
+    const flush = (): void => { trainingProgressMutations.flushPreferencesSync(window.singz.saveTrainingPreferencesSync) }
+    window.addEventListener('beforeunload', flush)
+    return () => window.removeEventListener('beforeunload', flush)
+  }, [trainingProgressMutations])
+
+  useEffect(() => {
+    dispatchDesktopTraining({ type: 'invalidate-song-preparation', currentSongId: song?.preparationSourceId ?? null })
+  }, [song?.preparationSourceId])
+
+  useEffect(() => {
+    const session = desktopTraining.session
+    if (!trainingProgressLoaded || session?.status !== 'completed') return
+    trainingProgressMutations.recordCompletion(createTrainingCompletionReceipt(session))
+  }, [desktopTraining.session, trainingProgressLoaded, trainingProgressMutations])
+
+  const changeDesktopTrainingSetup = useCallback(
+    (patch: Partial<DesktopTrainingSetup>) => {
+      const setup = { ...desktopTrainingRef.current.setup, ...patch }
+      // React may batch several committed controls before rendering. Mirror
+      // each patch now so the next preference mutation cannot lose this one.
+      desktopTrainingRef.current = { ...desktopTrainingRef.current, setup }
+      dispatchDesktopTraining({ type: 'update-setup', patch })
+      if (!trainingProgressLoaded) return
+      const current = trainingProgressRef.current
+      const next = updateTrainingPreferences(current, {
+        tonicPc: setup.tonicPc,
+        keyMode: setup.keyMode,
+        exercise: setup.exercise,
+        length: setup.length,
+        range: { lowMidi: setup.lowMidi, highMidi: setup.highMidi },
+        taskMode: setup.taskMode,
+        direction: setup.direction,
+        intervalSizes: setup.intervalSizes,
+        chordDegrees: setup.chordDegrees
+      })
+      if (JSON.stringify(next.profile) === JSON.stringify(current.profile)) return
+      // A committed control change starts its serialized IPC mutation before
+      // the event returns. Main returns the authoritative merged profile/history.
+      trainingProgressMutations.savePreferences(next.profile)
+    },
+    [trainingProgressLoaded, trainingProgressMutations]
+  )
   const beatInfoRef = useRef(beatInfo)
   beatInfoRef.current = beatInfo
   const drumsBufRef = useRef<AudioBuffer | null>(null)
   const loadSeq = useRef(0)
+  const songLoadRequests=useRef(new SongLoadRequestEpoch())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const trackInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
@@ -655,6 +800,16 @@ export default function App(): React.JSX.Element {
     engine.setMasterVolume(masterVol)
   }, [engine, masterVol])
 
+  // These are app-owned resources: section switches stop them immediately,
+  // and renderer teardown releases the microphone plus every scheduled node.
+  useEffect(
+    () => () => {
+      trainingMic.dispose()
+      trainingCues.dispose()
+    },
+    [trainingCues, trainingMic]
+  )
+
   const changeMasterVol = useCallback((v: number) => {
     setAudioPrefs((p) => ({ ...p, master: Math.max(0, Math.min(1, v)) }))
   }, [])
@@ -725,10 +880,18 @@ export default function App(): React.JSX.Element {
     [engine]
   )
 
-  const changeInput = useCallback((id: string | undefined) => {
+  const changeInput = useCallback((nativeInputUid: string | undefined, inputId: string | undefined) => {
     // stored right away; PitchStrip restarts a running mic and validation
     // surfaces through micDevice when the mic next starts
-    setAudioPrefs((p) => ({ ...p, inputId: id }))
+    setAudioPrefs((p) => ({ ...p, nativeInputUid, inputId, inputChannel: 0 }))
+  }, [])
+
+  const migrateNativeInput = useCallback((nativeInputUid: string) => {
+    setAudioPrefs((p) => ({ ...p, nativeInputUid }))
+  }, [])
+
+  const changeInputChannel = useCallback((inputChannel: number) => {
+    setAudioPrefs((p) => ({ ...p, inputChannel }))
   }, [])
 
   useEffect(() => {
@@ -821,6 +984,9 @@ export default function App(): React.JSX.Element {
         (tgt instanceof HTMLInputElement && tgt.type !== 'range') ||
         tgt instanceof HTMLTextAreaElement
       if (inText) return
+      // Song transport shortcuts never leak into the training section. The
+      // exercise owns Space/arrow semantics while it is visible.
+      if (appSectionRef.current !== 'songs') return
       if (e.code === 'Escape') {
         if (showCatalogRef.current) {
           setShowCatalog(false)
@@ -851,14 +1017,29 @@ export default function App(): React.JSX.Element {
 
   const loadPath = useCallback(
     async (path: string) => {
+      const request=songLoadRequests.current.begin()
+      // Validate/register first: an invalid drop must not tear down a live
+      // exercise. Every successful file/project entry point then converges on
+      // the same synchronous runtime revocation before loading begins.
       const reg = await window.singz.registerSource(path)
-      if (!reg.ok) {
-        setError(reg.error)
-        return
-      }
+      if(!songLoadRequests.current.isLatest(request))return
+      if(!reg.ok){continueAfterSourceRegistration(reg,()=>{},setError);return}
+      if(!songLoadRequests.current.acceptIfLatest(request))return
+      continueAfterSourceRegistration(reg,()=>stopTrainingForSongLoad({
+        pauseSong: () => engine.pause(),
+        cancelCues: () => trainingCues.cancel(),
+        stopMicrophone: () => trainingMic.stop(),
+        clearMicrophoneDevice: () => setMicDevice(null),
+        endTrainingState: () => dispatchDesktopTraining({ type: 'end-for-song-load' })
+      }),setError)
+      appSectionRef.current = 'songs'
+      setAppSection('songs')
+      setShowCatalog(false)
       const seq = ++loadSeq.current
       await window.singz.cancelSeparation()
+      if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
       await window.singz.cancelLyrics()
+      if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
       setSep(null)
       setSplit(false)
       setStemFiles(null)
@@ -899,7 +1080,7 @@ export default function App(): React.JSX.Element {
       setDirty(false)
       setSaveState('idle')
       setPhase('loading')
-      setSong({ path: reg.path, name: reg.name })
+      setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
       setIsProject(Boolean(reg.project))
       setInLibrary(reg.project?.inLibrary ?? true)
       setProjectDir(reg.project?.dir ?? null)
@@ -1103,7 +1284,7 @@ export default function App(): React.JSX.Element {
         setError('Could not decode that audio file.')
       }
     },
-    [engine]
+    [engine, trainingCues, trainingMic]
   )
 
   const loadFile = useCallback(
@@ -1939,7 +2120,7 @@ export default function App(): React.JSX.Element {
       setSaveState('saved')
       // The song now lives inside its project folder — anchor there so
       // renaming and future saves act on the project, not the original file.
-      setSong((s) => (s ? { ...s, path: res.songPath } : s))
+      setSong((s) => (s ? reanchorLoadedSongIdentity(s,{path:res.songPath}) : s))
       setIsProject(true)
       setInLibrary(res.inLibrary)
       setProjectDir(res.dir)
@@ -1993,7 +2174,7 @@ export default function App(): React.JSX.Element {
         return
       }
       // the copy in the library is the one we keep working on from here
-      setSong((s) => (s ? { ...s, path: res.songPath } : s))
+      setSong((s) => (s ? reanchorLoadedSongIdentity(s,{path:res.songPath}) : s))
       if (res.stems) {
         setStemFiles(res.stems)
         stemPathsRef.current = res.stems // the folder moved
@@ -2024,7 +2205,7 @@ export default function App(): React.JSX.Element {
           setError(res.error)
           return
         }
-        setSong({ path: res.songPath, name: res.name })
+        setSong(reanchorLoadedSongIdentity(song,{path:res.songPath,name:res.name}))
         if (res.stems) {
           setStemFiles(res.stems)
           stemPathsRef.current = res.stems // the folder moved
@@ -2033,7 +2214,7 @@ export default function App(): React.JSX.Element {
         setProjectDir(res.dir)
         setNotice(`Renamed — the project folder is now ${res.dir}`)
       } else {
-        setSong({ ...song, name })
+        setSong(reanchorLoadedSongIdentity(song,{name}))
         setSaveState('idle')
       }
     },
@@ -2452,6 +2633,34 @@ export default function App(): React.JSX.Element {
     [clampView, stopFollow]
   )
 
+  const switchSection = useCallback(
+    (section: AppSection) => {
+      if (section === appSectionRef.current) return
+      // One audible world at a time. The loaded song, playhead and exercise
+      // reducer remain untouched; only active sound/capture is stopped.
+      engine.pause()
+      trainingCues.cancel()
+      trainingMic.stop()
+      setMicDevice(null)
+      if (appSectionRef.current === 'training') {
+        dispatchDesktopTraining({ type: 'interrupt-runtime' })
+      }
+      setAppSection(section)
+    },
+    [engine, trainingCues, trainingMic]
+  )
+
+  const backToSong = useCallback((sourceSongId: string) => {
+    if (!songPreparationMatches({ sourceSongId }, song?.preparationSourceId ?? null)) {
+      dispatchDesktopTraining({ type: 'invalidate-song-preparation', currentSongId: song?.preparationSourceId ?? null })
+      return
+    }
+    engine.pause()
+    setShowCatalog(false)
+    dispatchDesktopTraining({ type: 'back-home' })
+    switchSection('songs')
+  }, [engine, song, switchSection])
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -2460,7 +2669,25 @@ export default function App(): React.JSX.Element {
           Sing<span>Z</span>
           {ver && <em className="ver">{ver}</em>}
         </div>
-        {phase === 'ready' && (
+        <nav className="app-sections no-drag" aria-label="SingZ sections">
+          <button
+            type="button"
+            className={appSection === 'songs' ? 'active' : ''}
+            aria-current={appSection === 'songs' ? 'page' : undefined}
+            onClick={() => switchSection('songs')}
+          >
+            Songs
+          </button>
+          <button
+            type="button"
+            className={appSection === 'training' ? 'active' : ''}
+            aria-current={appSection === 'training' ? 'page' : undefined}
+            onClick={() => switchSection('training')}
+          >
+            Vocal training
+          </button>
+        </nav>
+        {appSection === 'songs' && phase === 'ready' && (
           <button
             type="button"
             className={`pill ghost small catalog-btn${showCatalog ? ' active' : ''}`}
@@ -2506,7 +2733,7 @@ export default function App(): React.JSX.Element {
             <span className="dot idle" /> update {update.percent}%
           </span>
         )}
-        {song && phase === 'ready' && (
+        {appSection === 'songs' && song && phase === 'ready' && (
           <div className="song-title no-drag">
             {editName === null ? (
               <>
@@ -2537,7 +2764,7 @@ export default function App(): React.JSX.Element {
           </div>
         )}
         <div className="header-right no-drag">
-          {phase === 'ready' && (
+          {appSection === 'songs' && phase === 'ready' && (
             <button
               type="button"
               className="pill ghost small"
@@ -2561,7 +2788,7 @@ export default function App(): React.JSX.Element {
               )}
             </button>
           )}
-          {phase === 'ready' && isProject && !inLibrary && (
+          {appSection === 'songs' && phase === 'ready' && isProject && !inLibrary && (
             <button
               type="button"
               className="pill ghost small"
@@ -2572,7 +2799,7 @@ export default function App(): React.JSX.Element {
             </button>
           )}
           {/* the catalog page already lists the library — no second door to it */}
-          {phase === 'ready' && !showCatalog && (
+          {appSection === 'songs' && phase === 'ready' && !showCatalog && (
             <button type="button" className="pill ghost small" onClick={() => setShowProjects(true)}>
               Open…
             </button>
@@ -2609,7 +2836,56 @@ export default function App(): React.JSX.Element {
         </div>
       </header>
 
-      {phase === 'ready' && !showCatalog ? (
+      {appSection === 'training' && !trainingProgressLoaded ? (
+        <main className="vt-screen vt-empty" aria-busy={!trainingLoadError}>
+          <p className="vt-eyebrow">Vocal training</p>
+          <h1>{trainingLoadError ? 'Practice profile unavailable' : 'Loading your practice profile…'}</h1>
+          {trainingLoadError && (
+            <>
+              <p>Your saved training data was not changed. Retry when storage is available.</p>
+              <button
+                type="button"
+                className="pill primary"
+                onClick={() => {
+                  setTrainingLoadError(null)
+                  setTrainingLoadAttempt((attempt) => attempt + 1)
+                }}
+              >
+                Retry
+              </button>
+            </>
+          )}
+        </main>
+      ) : appSection === 'training' ? (
+        <VocalTraining
+          state={desktopTraining}
+          dispatch={dispatchDesktopTraining}
+          engine={engine}
+          cues={trainingCues}
+          mic={trainingMic}
+          inputId={audioPrefs.inputId}
+          nativeInputUid={audioPrefs.nativeInputUid}
+          inputChannel={audioPrefs.inputChannel}
+          onMicDevice={setMicDevice}
+          settingsOwnsMic={showSettings}
+          onSetupChange={changeDesktopTrainingSetup}
+          referenceVolume={audioPrefs.referenceVolume ?? DEFAULT_TRAINING_REFERENCE_VOLUME}
+          onReferenceVolumeChange={changeTrainingReferenceVolume}
+          progress={trainingProgress}
+          songPreparation={
+            song
+              ? {
+                  songName: cleanSongName(song.name),
+                  sourceSongId: song.preparationSourceId,
+                  key: effectiveSongPreparationKey(keyInfo, transpose, KEY_DETECT_VERSION),
+                  transpose
+                }
+              : null
+          }
+          onBackToSong={backToSong}
+          onBackToSongs={() => switchSection('songs')}
+        />
+      ) : phase === 'ready' && !showCatalog ? (
         <>
           <div className="main-row">
             <div className="main-col">
@@ -2649,7 +2925,9 @@ export default function App(): React.JSX.Element {
                   onViewPan={panView}
                   info={songInfo}
                   inputId={audioPrefs.inputId}
+                  inputChannel={audioPrefs.inputChannel}
                   onMicDevice={setMicDevice}
+                  settingsOwnsMic={showSettings}
                 />
               )}
             </div>
@@ -2739,6 +3017,13 @@ export default function App(): React.JSX.Element {
 
       {notice && !error && <div className="toast ok">{notice}</div>}
 
+      {trainingSaveError && (
+        <div className="toast training-save-warning" role="alert">
+          <span>Training profile or session history was not saved: {trainingSaveError}</span>
+          <button type="button" onClick={() => trainingProgressMutations.retry()}>Retry</button>
+        </div>
+      )}
+
       {showSetup && (
         <SetupModal
           status={engineStatus}
@@ -2758,6 +3043,8 @@ export default function App(): React.JSX.Element {
           audio={audioPrefs}
           onChangeOutput={(id) => void changeOutput(id)}
           onChangeInput={changeInput}
+          onMigrateNativeInput={migrateNativeInput}
+          onChangeInputChannel={changeInputChannel}
           outputStatus={outputStatus}
           micDevice={micDevice}
           onClose={() => setShowSettings(false)}

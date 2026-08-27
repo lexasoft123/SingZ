@@ -9,14 +9,15 @@
   "scripts": {
     "dev": "electron-vite dev",
     "postinstall": "node scripts/apply-gdrive-config.cjs && node mobile/scripts/apply-gdrive-config.js",
-    "build": "node scripts/apply-gdrive-config.cjs && electron-vite build",
+    "build": "node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json",
     "dist": "npm run build && electron-builder --publish never",
     "test": "vitest run",
     "gates": "scripts/run-parity-gates.sh",
     "store-notes": "node scripts/store-notes.cjs",
-    "store-notes:check": "node scripts/store-notes.cjs --check"
+    "store-notes:check": "node scripts/store-notes.cjs --check",
+    "sync:kit-native": "node scripts/sync-kit-native.mjs"
   },
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",

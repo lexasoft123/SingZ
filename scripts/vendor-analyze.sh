@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build singz-analyze into vendor/<platform>-<arch>/ for bundling — the core's
 # detectors shipped beside whisper-cli, dark until main learns to spawn them
-# (docs/PHONE-STANDALONE.md, Phase 4c). Same contract as vendor-whisper.sh:
-# skip-guard on the existing output, delete vendor/… to force.
+# (docs/PHONE-STANDALONE.md, Phase 4c). A source fingerprint guards the cache:
+# an older helper may still run melody correctly while lacking newer commands
+# such as input-devices, so existence alone is not proof that it is current.
 #   scripts/vendor-analyze.sh [target]   e.g. darwin-arm64, darwin-x64, win32-x64
 #
 # One build definition: mobile/native/core/CMakeLists.txt, shared with
@@ -18,7 +19,17 @@ EXT=""
 case "$TARGET" in win32-*) EXT=".exe" ;; esac
 OUT_DIR="$ROOT/vendor/$TARGET"
 OUT="$OUT_DIR/singz-analyze$EXT"
-if [ -f "$OUT" ]; then
+STAMP="$OUT.source-hash"
+SOURCE_HASH=$(
+  {
+    find "$ROOT/mobile/native/core" -type f -print
+    printf '%s\n' "$ROOT/scripts/vendor-analyze.sh"
+  } | LC_ALL=C sort | while IFS= read -r source; do
+    printf '%s ' "${source#"$ROOT/"}"
+    git -C "$ROOT" hash-object "$source"
+  done | git -C "$ROOT" hash-object --stdin
+)
+if [ -f "$OUT" ] && [ -f "$STAMP" ] && [ "$(tr -d '\r\n' < "$STAMP")" = "$SOURCE_HASH" ]; then
   echo "cached: vendor/$TARGET/singz-analyze$EXT"
   exit 0
 fi
@@ -47,4 +58,5 @@ if [ -f "$BUILD/Release/singz-analyze$EXT" ]; then
 else
   cp "$BUILD/singz-analyze$EXT" "$OUT"
 fi
+printf '%s\n' "$SOURCE_HASH" > "$STAMP"
 echo "built: vendor/$TARGET/singz-analyze$EXT"

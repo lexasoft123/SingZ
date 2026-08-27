@@ -3,7 +3,9 @@ import {
   decodeAudioData,
   type AudioBuffer,
   type AudioBufferSourceNode,
-  type GainNode
+  type GainNode,
+  type OscillatorNode,
+  type WaveShaperNode
 } from 'react-native-audio-api'
 import { accentIndex, barLengthAt, beatIndexAtOrAfter, beatTime } from './beat'
 import { describeOutput } from './latency'
@@ -11,6 +13,13 @@ import { log } from './log'
 // fmtTime here is the song-position one (M:SS); log.ts exports a same-named
 // wall-clock formatter, which is not what a play/pause line wants.
 import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
+import {
+  DEFAULT_TRAINING_REFERENCE_VOLUME,
+  clampTrainingReferenceVolume,
+  planTrainingCues,
+  trainingOrganOscillators,
+  type VocalTrainingCue
+} from './training/cues'
 
 /**
  * Port of the desktop MultitrackEngine (src/renderer/src/audio/engine.ts) onto
@@ -57,6 +66,16 @@ const CLICK_TICK_MS = 60
 const SEC_COUNT_TICKS = 3
 const SEC_COUNT_PERIOD = 1
 
+function trainingLimiterCurve(size = 2_049, drive = 1.55): Float32Array {
+  const curve = new Float32Array(size)
+  const normalization = Math.tanh(drive)
+  for (let index = 0; index < size; index++) {
+    const input = index * 2 / (size - 1) - 1
+    curve[index] = Math.tanh(input * drive) / normalization
+  }
+  return curve
+}
+
 /** SingzStretchNode host object (patch 3 in scripts/patch-audio-api.js). */
 interface StretchHost {
   setSemitones(semitones: number): void
@@ -66,7 +85,16 @@ interface StretchHost {
 
 export class MultitrackEngine {
   private ctx = new AudioContext()
+  private backgrounded = false
   private master = this.ctx.createGain()
+  /** Cues bypass the song master/stretch chain: transposing or slowing a song
+   * must never change the reference pitch the exercise core requested. */
+  private trainingGain = this.ctx.createGain()
+  private trainingLimiter: WaveShaperNode = this.ctx.createWaveShaper()
+  private trainingCueVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
+  private trainingCueMuted = false
+  private trainingNodes: { oscillator: OscillatorNode; gain: GainNode }[] = []
+  private trainingCueGeneration = 0
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
   private generation = 0
@@ -123,6 +151,121 @@ export class MultitrackEngine {
     } else {
       this.master.connect(this.ctx.destination)
     }
+    this.trainingGain.gain.value = this.trainingCueVolume
+    this.trainingLimiter.curve = trainingLimiterCurve()
+    this.trainingLimiter.oversample = '2x'
+    this.trainingGain.connect(this.trainingLimiter)
+    this.trainingLimiter.connect(this.ctx.destination)
+  }
+
+  get trainingCurrentTime(): number {
+    return this.ctx.currentTime
+  }
+
+  /** Route latency used when mapping recorder timestamps to what was heard. */
+  get outputDisplayLatency(): number {
+    return this.displayLag
+  }
+
+  setTrainingCueMuted(muted: boolean): void {
+    this.trainingCueMuted = muted
+    this.applyTrainingCueVolume()
+  }
+
+  setTrainingCueVolume(volume: number): void {
+    this.trainingCueVolume = clampTrainingReferenceVolume(volume)
+    this.applyTrainingCueVolume()
+  }
+
+  get trainingReferenceVolume(): number {
+    return this.trainingCueVolume
+  }
+
+  private applyTrainingCueVolume(): void {
+    this.trainingGain.gain.value = this.trainingCueMuted ? 0 : this.trainingCueVolume
+  }
+
+  /** Schedule a compact warm reference phrase on the engine clock. Song
+   * playback is paused first, making cue and karaoke ownership exclusive. */
+  async playTrainingCues(cues: readonly VocalTrainingCue[]): Promise<{ ok: true; endsAt: number } | { ok: false; error: string }> {
+    try {
+      if (this.backgrounded) return { ok: false, error: 'Audio is paused while SingZ is in the background.' }
+      this.pause()
+      this.cancelTrainingCues()
+      const generation = ++this.trainingCueGeneration
+      if (this.ctx.state === 'suspended') await this.ctx.resume()
+      if (this.backgrounded || generation !== this.trainingCueGeneration)
+        return { ok: false, error: 'Training cue was cancelled.' }
+      const plan = planTrainingCues(cues, this.ctx.currentTime + START_DELAY)
+      for (const voice of plan.voices) {
+        if (generation !== this.trainingCueGeneration) return { ok: false, error: 'Training cue was cancelled.' }
+        const { start, end } = voice
+        const fundamental = 440 * 2 ** ((voice.midi - 69) / 12)
+        const concurrentVoices = plan.voices.filter((candidate) => candidate.start < end && candidate.end > start).length
+        const voiceScale = 1 / Math.max(1, concurrentVoices)
+        // Hammond-like drawbars turn the reference into a small instrument:
+        // a dominant fundamental, woody upper harmonics and restrained
+        // chorus on the three strongest drawbars.
+        // Overlapping chord voices share unity gain so even the remembered
+        // 100% setting retains a small amount of digital peak headroom.
+        for (const partial of trainingOrganOscillators()) {
+          const oscillator = this.ctx.createOscillator()
+          const gain = this.ctx.createGain()
+          oscillator.type = 'sine'
+          oscillator.frequency.value = fundamental * partial.frequencyRatio
+          gain.gain.setValueAtTime(0.0001, start)
+          const level = partial.level * voiceScale
+          const duration = end - start
+          const attackEnd = start + Math.min(0.032, duration * 0.18)
+          const bloomEnd = start + Math.min(0.18, duration * 0.55)
+          const releaseStart = Math.max(bloomEnd, end - Math.min(0.22, duration * 0.36))
+          gain.gain.exponentialRampToValueAtTime(level * 0.86, attackEnd)
+          gain.gain.linearRampToValueAtTime(level, bloomEnd)
+          gain.gain.setValueAtTime(level, releaseStart)
+          gain.gain.exponentialRampToValueAtTime(0.0001, end)
+          oscillator.connect(gain)
+          gain.connect(this.trainingGain)
+          oscillator.start(start)
+          oscillator.stop(end + 0.01)
+          this.trainingNodes.push({ oscillator, gain })
+        }
+      }
+      return { ok: true, endsAt: plan.endsAt }
+    } catch (error) {
+      this.cancelTrainingCues()
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  cancelTrainingCues(): void {
+    this.trainingCueGeneration++
+    const now = this.ctx.currentTime
+    for (const { oscillator, gain } of this.trainingNodes.splice(0)) {
+      try { oscillator.stop(now) } catch { /* already ended */ }
+      try { oscillator.disconnect() } catch { /* already disconnected */ }
+      try { gain.disconnect() } catch { /* already disconnected */ }
+    }
+  }
+
+  /** Stop native render work before the OS backgrounds the app. Keeping a
+   * running WebAudio graph across that transition can leave Android rendering
+   * stale oscillator/source buffers as distorted fragments. Foregrounding only
+   * re-arms user actions; it never resumes sound by itself. */
+  async suspendForBackground(): Promise<void> {
+    this.backgrounded = true
+    this.pause()
+    this.cancelTrainingCues()
+    this.cancelPendingClicks()
+    if (this.ctx.state !== 'running') return
+    try {
+      await this.ctx.suspend()
+    } catch (error) {
+      log('engine', `background suspend failed · ${error instanceof Error ? error.message : String(error)}`, 'warn')
+    }
+  }
+
+  allowForegroundAudio(): void {
+    this.backgrounded = false
   }
 
   /** Decode stem bytes/asset at the context rate (no runtime resampling). */
@@ -464,6 +607,7 @@ export class MultitrackEngine {
 
   /** One immediate click — loudness preview in the practice sheet. */
   previewClick(accent = false): void {
+    if (this.backgrounded) return
     if (this.ctx.state === 'suspended') void this.ctx.resume()
     this.scheduleClick(this.ctx.currentTime, accent)
   }
@@ -703,8 +847,9 @@ export class MultitrackEngine {
   }
 
   async play(opts: { countIn?: boolean } = {}): Promise<void> {
-    if (this._playing || this.tracks.length === 0) return
+    if (this.backgrounded || this._playing || this.tracks.length === 0) return
     if (this.ctx.state === 'suspended') await this.ctx.resume()
+    if (this.backgrounded) return
     if (this.startOffset >= this.duration - 0.01) this.startOffset = 0
 
     const gen = ++this.generation
@@ -989,6 +1134,7 @@ export class MultitrackEngine {
    * per-process-limit jetsam kill after a few songs.
    */
   unload(): void {
+    this.cancelTrainingCues()
     // Leaving a song unloads then releases, and the teardown path can reach
     // here twice; the second call has nothing to free and saying so twice
     // just spends lines of a 400-line log.

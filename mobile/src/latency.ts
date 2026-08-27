@@ -51,13 +51,24 @@ const PORT_LABELS: Record<string, string> = {
   'USB Audio': 'USB audio'
 }
 
+async function outputWithTimeout(timeoutMessage: string): ReturnType<AudioRouteInfoApi['getOutput']> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      Native.getOutput(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), 3000)
+      })
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 export async function getRouteLatency(): Promise<RouteLatency> {
   // A wedged native probe must degrade to "no compensation", never to a
   // player with no route (that also hides the trim control).
-  const o = await Promise.race([
-    Native.getOutput(),
-    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('route probe timeout')), 3000))
-  ]).catch(() => ({
+  const o = await outputWithTimeout('route probe timeout').catch(() => ({
     outputLatency: 0,
     ioBufferDuration: 0.02,
     portType: 'Speaker',
@@ -84,10 +95,7 @@ export async function getRouteLatency(): Promise<RouteLatency> {
  * now says it outright.
  */
 export async function describeOutput(): Promise<{ text: string; silent: boolean }> {
-  const o = await Promise.race([
-    Native.getOutput(),
-    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
-  ]).catch(() => null)
+  const o = await outputWithTimeout('timeout').catch(() => null)
   if (o === null) return { text: 'route unknown', silent: false }
 
   const where = (PORT_LABELS[o.portType] ?? o.portType) + (o.portName && o.portName !== o.portType ? ` (${o.portName})` : '')

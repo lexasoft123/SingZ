@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { shapeDevices } from '../../src/renderer/src/audio/devices'
+import {
+  chromiumInputIdForNative,
+  nativeInputUidForChromium,
+  shapeDevices
+} from '../../src/renderer/src/audio/devices'
 import { sanitizeAudioPrefs } from '../../src/renderer/src/model'
 
 const dev = (kind: string, deviceId: string, label = ''): {
@@ -39,11 +43,55 @@ describe('shapeDevices', () => {
   })
 })
 
+describe('chromiumInputIdForNative', () => {
+  const native = {
+    uid: 'auhal:studio',
+    label: 'Studio interface',
+    isDefault: false,
+    sampleRate: 48_000,
+    channels: 8,
+    channelLabels: []
+  }
+
+  it('bridges a unique label for preview without replacing the native identity', () => {
+    expect(chromiumInputIdForNative(native, [{ id: 'chromium-1', label: 'Studio interface' }]))
+      .toBe('chromium-1')
+  })
+
+  it('does not guess when Chromium exposes duplicate labels', () => {
+    expect(chromiumInputIdForNative(native, [
+      { id: 'chromium-1', label: 'Studio interface' },
+      { id: 'chromium-2', label: 'Studio interface' }
+    ])).toBeUndefined()
+  })
+})
+
+describe('nativeInputUidForChromium', () => {
+  const chromium = [{ id: 'chromium-1', label: 'Studio interface' }]
+  const native = (uid: string) => ({
+    uid,
+    label: 'Studio interface',
+    isDefault: false,
+    sampleRate: 48_000,
+    channels: 8,
+    channelLabels: []
+  })
+
+  it('migrates a legacy id only across a unique label match', () => {
+    expect(nativeInputUidForChromium('chromium-1', chromium, [native('core-1')]))
+      .toBe('core-1')
+    expect(nativeInputUidForChromium('chromium-1', chromium, [native('core-1'), native('core-2')]))
+      .toBeUndefined()
+  })
+})
+
 describe('sanitizeAudioPrefs', () => {
   it('keeps opaque ids and drops everything else', () => {
-    expect(sanitizeAudioPrefs({ outputId: 'x1', inputId: 'y2', junk: 3 })).toEqual({
+    expect(sanitizeAudioPrefs({ outputId: 'x1', inputId: 'y2', nativeInputUid: 'core-3', inputChannel: 7, junk: 3 })).toEqual({
       outputId: 'x1',
-      inputId: 'y2'
+      inputId: 'y2',
+      nativeInputUid: 'core-3',
+      inputChannel: 7
     })
     expect(sanitizeAudioPrefs({ outputId: '', inputId: 42 })).toEqual({})
     expect(sanitizeAudioPrefs(null)).toEqual({})
@@ -52,5 +100,19 @@ describe('sanitizeAudioPrefs', () => {
 
   it('never persists the pseudo-devices', () => {
     expect(sanitizeAudioPrefs({ outputId: 'default', inputId: 'communications' })).toEqual({})
+  })
+
+  it('keeps only bounded zero-based integer input channels', () => {
+    expect(sanitizeAudioPrefs({ inputChannel: 0 }).inputChannel).toBe(0)
+    expect(sanitizeAudioPrefs({ inputChannel: 31 }).inputChannel).toBe(31)
+    for (const inputChannel of [-1, 32, 1.5, Number.NaN, '2'])
+      expect(sanitizeAudioPrefs({ inputChannel }).inputChannel).toBeUndefined()
+  })
+
+  it('keeps reference-tone gain with the app-wide audio preferences', () => {
+    expect(sanitizeAudioPrefs({ referenceVolume: 0.9 }).referenceVolume).toBe(0.9)
+    expect(sanitizeAudioPrefs({ referenceVolume: 8 }).referenceVolume).toBe(2)
+    expect(sanitizeAudioPrefs({ referenceVolume: -1 }).referenceVolume).toBe(0.2)
+    expect(sanitizeAudioPrefs({ referenceVolume: 'loud' }).referenceVolume).toBeUndefined()
   })
 })

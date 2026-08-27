@@ -36,7 +36,7 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string></string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>SingZ uses the microphone to show your pitch and help you practise singing.</string>
+	<string>SingZ listens while you practise so it can show whether each note is on pitch.</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UIBackgroundModes</key>
