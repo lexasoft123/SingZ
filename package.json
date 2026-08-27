@@ -16,7 +16,8 @@
     "test": "vitest run",
     "gates": "scripts/run-parity-gates.sh",
     "store-notes": "node scripts/store-notes.cjs",
-    "store-notes:check": "node scripts/store-notes.cjs --check"
+    "store-notes:check": "node scripts/store-notes.cjs --check",
+    "capture:addon": "node scripts/build-capture-addon.cjs"
   },
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",

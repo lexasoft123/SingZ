@@ -32,7 +32,7 @@ import {
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
-import type { MicDevice } from './audio/mic'
+import { clearStaleMicError, type MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
 import { stemSampleRate } from './audio/stem-rate'
 import DropScreen from './components/DropScreen'
@@ -461,15 +461,16 @@ export default function App(): React.JSX.Element {
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
     try {
       const raw = localStorage.getItem('singz.audio')
-      return raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
+      return raw ? sanitizeAudioPrefs(JSON.parse(raw)) : sanitizeAudioPrefs(null)
     } catch {
-      return {}
+      return sanitizeAudioPrefs(null)
     }
   })
   /** App-level verdict on the saved output ("not connected", "not allowed"). */
   const [outputStatus, setOutputStatus] = useState<string | null>(null)
   /** What the mic is actually listening through, when it's on. */
   const [micDevice, setMicDevice] = useState<MicDevice | null>(null)
+  const [micLevelDbfs, setMicLevelDbfs] = useState(-120)
   const [notice, setNotice] = useState<string | null>(null)
   const [ver, setVer] = useState('')
   const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
@@ -728,8 +729,17 @@ export default function App(): React.JSX.Element {
   const changeInput = useCallback((id: string | undefined) => {
     // stored right away; PitchStrip restarts a running mic and validation
     // surfaces through micDevice when the mic next starts
-    setAudioPrefs((p) => ({ ...p, inputId: id }))
+    setMicDevice(clearStaleMicError)
+    setAudioPrefs((p) => ({ ...p, inputId: id, inputChannel: 0 }))
   }, [])
+
+  const changeInputChannel = useCallback((inputChannel: number) => {
+    if (!Number.isInteger(inputChannel) || inputChannel < 0) return
+    setMicDevice(clearStaleMicError)
+    setAudioPrefs((p) => ({ ...p, inputChannel }))
+  }, [])
+
+  const clearMicError = useCallback(() => setMicDevice(clearStaleMicError), [])
 
   useEffect(() => {
     engine.setBeats(beatInfo)
@@ -2649,7 +2659,9 @@ export default function App(): React.JSX.Element {
                   onViewPan={panView}
                   info={songInfo}
                   inputId={audioPrefs.inputId}
+                  inputChannel={audioPrefs.inputChannel}
                   onMicDevice={setMicDevice}
+                  onMicLevel={showSettings ? setMicLevelDbfs : undefined}
                 />
               )}
             </div>
@@ -2758,8 +2770,11 @@ export default function App(): React.JSX.Element {
           audio={audioPrefs}
           onChangeOutput={(id) => void changeOutput(id)}
           onChangeInput={changeInput}
+          onChangeInputChannel={changeInputChannel}
           outputStatus={outputStatus}
           micDevice={micDevice}
+          micLevelDbfs={micLevelDbfs}
+          onClearMicError={clearMicError}
           onClose={() => setShowSettings(false)}
         />
       )}

@@ -5,16 +5,24 @@
  * blanks audioinput labels until granted.
  */
 
-export interface AudioDeviceInfo {
+export interface AudioOutputDeviceInfo {
   id: string
   label: string
 }
 
+export interface AudioInputDeviceInfo {
+  id: string
+  label: string
+  isDefault: boolean
+  sampleRate: number
+  channels: number
+  channelLabels: string[]
+}
+
 export interface AudioDevices {
-  inputs: AudioDeviceInfo[]
-  outputs: AudioDeviceInfo[]
-  /** Input names are hidden pending mic permission (mac System Settings). */
-  inputLabelsHidden: boolean
+  inputs: AudioInputDeviceInfo[]
+  outputs: AudioOutputDeviceInfo[]
+  inputError?: string
 }
 
 /**
@@ -22,45 +30,30 @@ export interface AudioDevices {
  * the picker's own "System default" row covers them — and give unnamed
  * devices stable placeholder names.
  */
-export function shapeDevices(
+export function shapeOutputDevices(
   list: Pick<MediaDeviceInfo, 'deviceId' | 'kind' | 'label'>[]
-): AudioDevices {
-  const pick = (
-    kind: string,
-    name: string
-  ): { devs: AudioDeviceInfo[]; hidden: boolean } => {
-    const rows = list.filter(
+): AudioOutputDeviceInfo[] {
+  return list
+    .filter(
       (d) =>
-        d.kind === kind &&
+        d.kind === 'audiooutput' &&
         d.deviceId !== '' &&
         d.deviceId !== 'default' &&
         d.deviceId !== 'communications'
     )
-    return {
-      devs: rows.map((d, i) => ({ id: d.deviceId, label: d.label || `${name} ${i + 1}` })),
-      hidden: rows.some((d) => !d.label)
-    }
-  }
-  const ins = pick('audioinput', 'Microphone')
-  const outs = pick('audiooutput', 'Speakers')
-  return { inputs: ins.devs, outputs: outs.devs, inputLabelsHidden: ins.hidden }
+    .map((d, i) => ({ id: d.deviceId, label: d.label || `Speakers ${i + 1}` }))
 }
 
 export async function getAudioDevices(): Promise<AudioDevices> {
-  // mac shows the TCC prompt on first use; other platforms answer instantly.
-  // A denial still lets us enumerate — inputs just come back unnamed.
-  const allowed = await window.singz.askMicAccess().catch(() => false)
-  let list = await navigator.mediaDevices.enumerateDevices()
-  if (allowed && list.some((d) => d.kind === 'audioinput' && !d.label)) {
-    // Labels unlock after one real capture — open the shortest-lived
-    // stream possible and ask again.
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      stream.getTracks().forEach((t) => t.stop())
-      list = await navigator.mediaDevices.enumerateDevices()
-    } catch {
-      // capture refused — unnamed rows still work, they are just anonymous
-    }
+  const [nativeInputs, browserDevices] = await Promise.all([
+    window.singz.captureInputDevices(),
+    navigator.mediaDevices.enumerateDevices()
+  ])
+  return {
+    inputs: nativeInputs.ok
+      ? nativeInputs.devices.map((device) => ({ ...device, id: device.uid }))
+      : [],
+    outputs: shapeOutputDevices(browserDevices),
+    ...(!nativeInputs.ok ? { inputError: nativeInputs.error } : {})
   }
-  return shapeDevices(list)
 }

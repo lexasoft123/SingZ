@@ -10,7 +10,7 @@
  * machine's device list instead of expecting "Fake Audio Input" rows.
  *
  * Prereqs: `npm run build` done; the dev Electron binary has mac microphone
- * permission (TCC) so getUserMedia can open.
+ * permission (TCC) so the native capture backend can open it.
  *
  * Env: E2E_OUT (screenshot + profile dir, default os.tmpdir()).
  */
@@ -117,6 +117,23 @@ const launch = async () => {
   const stored = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
   if (stored.inputId !== ins[0].v) throw new Error('input pick not persisted')
 
+  // Preview is explicit: Settings never opens the microphone merely because
+  // the dialog appeared. It works before a song exists and stops on request.
+  await win.click('.settings-mic-test')
+  await win.waitForFunction(
+    () => document.querySelector('.settings-mic-test')?.textContent?.includes('Stop microphone test'),
+    null,
+    { timeout: 15000 }
+  )
+  await win.waitForSelector('.settings-level', { timeout: 15000 })
+  await win.click('.settings-mic-test')
+  await win.waitForFunction(
+    () => document.querySelector('.settings-mic-test')?.textContent?.includes('Test microphone'),
+    null,
+    { timeout: 15000 }
+  )
+  await win.waitForSelector('.settings-level', { state: 'detached', timeout: 5000 })
+
   // ---- output pick (guarded — machine hardware) ----
   const realOuts = outOpts.filter((o) => o.v)
   let pickedOut = null
@@ -150,7 +167,7 @@ const launch = async () => {
   // ---- settings shows the live device; flipping restarts the mic ----
   await win.click('.pill.gear')
   await win.waitForFunction(
-    () => [...document.querySelectorAll('.settings-hint')].some((el) => el.textContent?.includes('Listening through')),
+    () => [...document.querySelectorAll('.settings-hint')].some((el) => el.textContent?.includes('Song capture:')),
     null,
     { timeout: 15000 }
   )

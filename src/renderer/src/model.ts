@@ -78,6 +78,8 @@ export function sanitizePitchHeight(raw: unknown): number {
 export interface AudioPrefs {
   outputId?: string
   inputId?: string
+  /** Zero-based physical input channel on the selected native device. */
+  inputChannel: number
   /** Master output level 0..1 — belongs to the machine, not to a project. */
   master?: number
 }
@@ -96,7 +98,11 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     typeof r.master === 'number' && Number.isFinite(r.master)
       ? Math.max(0, Math.min(1, r.master))
       : undefined
-  return { outputId: id(r.outputId), inputId: id(r.inputId), master }
+  const inputChannel =
+    typeof r.inputChannel === 'number' && Number.isInteger(r.inputChannel) && r.inputChannel >= 0
+      ? Math.min(1023, r.inputChannel)
+      : 0
+  return { outputId: id(r.outputId), inputId: id(r.inputId), inputChannel, master }
 }
 
 /**

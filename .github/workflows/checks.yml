@@ -42,6 +42,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  capture-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Build and load native capture addon in Electron
+        run: |
+          npm run capture:addon
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs
+
+  capture-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Build and load native capture addon in Electron
+        run: |
+          npm run capture:addon -- win32-x64
+          node_modules/.bin/electron.cmd tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
+
   zdsp-sanitizers:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

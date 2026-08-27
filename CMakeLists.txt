@@ -20,6 +20,11 @@ endif()
 option(SINGZ_CORE_TESTS "Build the host test suite" ON)
 option(SINGZ_BUILD_HOST_TOOLS "Build singz-analyze and native host tests" ON)
 option(SINGZ_BUILD_ML "Build the ONNX-backed mobile analysis/split adapter" OFF)
+option(SINGZ_BUILD_ELECTRON_CAPTURE "Build the stable Node-API capture addon" OFF)
+set(SINGZ_NODE_INCLUDE_DIR "" CACHE PATH
+    "Electron Node-API include directory (the directory containing node_api.h)")
+set(SINGZ_NODE_LIBRARY "" CACHE FILEPATH
+    "Electron node.lib for Windows addon builds")
 option(SINGZ_ENABLE_ASIO "Build the optional Steinberg ASIO input provider" OFF)
 set(SINGZ_ASIO_SDK_DIR "" CACHE PATH
     "Path to a separately licensed Steinberg ASIO SDK checkout")
@@ -63,6 +68,49 @@ add_subdirectory(zcore)
 add_subdirectory(zdsp)
 get_property(SINGZ_ZCORE_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZCORE_RT_MANIFEST)
 get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
+
+if(SINGZ_BUILD_ELECTRON_CAPTURE)
+  if(NOT EXISTS "${SINGZ_NODE_INCLUDE_DIR}/node_api.h")
+    message(FATAL_ERROR
+      "SINGZ_BUILD_ELECTRON_CAPTURE requires SINGZ_NODE_INCLUDE_DIR to contain node_api.h")
+  endif()
+  add_library(singz_capture MODULE native/electron/capture_addon.cpp)
+  target_compile_features(singz_capture PRIVATE cxx_std_20)
+  target_include_directories(singz_capture PRIVATE "${SINGZ_NODE_INCLUDE_DIR}")
+  target_compile_definitions(singz_capture PRIVATE
+    NAPI_VERSION=8 NODE_GYP_MODULE_NAME=singz_capture)
+  target_link_libraries(singz_capture PRIVATE
+    SingZ::native_build_options
+    SingZ::zcore_device
+    SingZ::zdsp_analysis)
+  set_target_properties(singz_capture PROPERTIES
+    PREFIX ""
+    SUFFIX ".node"
+    OUTPUT_NAME "singz-capture"
+    CXX_EXTENSIONS OFF
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
+  if(APPLE)
+    target_link_options(singz_capture PRIVATE "-undefined" "dynamic_lookup")
+  elseif(WIN32)
+    target_sources(singz_capture PRIVATE
+      native/electron/win_delay_load_hook.cc)
+    target_compile_definitions(singz_capture PRIVATE
+      WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
+      HOST_BINARY=\"node.exe\")
+    if(NOT EXISTS "${SINGZ_NODE_LIBRARY}")
+      message(FATAL_ERROR
+        "Windows Electron addon builds require SINGZ_NODE_LIBRARY=node.lib")
+    endif()
+    # Electron's node.lib imports N-API from node.exe even though the shipping
+    # host binary is electron.exe. Match node-gyp's Windows addon contract:
+    # delay-load that import and resolve it to the current process image.
+    target_link_options(singz_capture PRIVATE "/DELAYLOAD:node.exe")
+    target_link_libraries(singz_capture PRIVATE
+      "${SINGZ_NODE_LIBRARY}"
+      delayimp)
+  endif()
+endif()
 
 if(NOT SINGZ_BUILD_HOST_TOOLS)
   return()

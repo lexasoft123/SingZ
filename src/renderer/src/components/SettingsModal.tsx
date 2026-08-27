@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getAudioDevices, type AudioDevices } from '../audio/devices'
-import type { MicDevice } from '../audio/mic'
+import { MIC_OPEN_FAILURE, MicPreview, settingsMicDisplay, type MicDevice } from '../audio/mic'
 import type { AudioPrefs } from '../model'
 import { Modal } from '@singz/ui'
 
@@ -9,8 +9,11 @@ interface Props {
   /** Apply-then-commit lives in App; a failed pick simply never lands in `audio`. */
   onChangeOutput: (id: string | undefined) => void
   onChangeInput: (id: string | undefined) => void
+  onChangeInputChannel: (channel: number) => void
   outputStatus: string | null
   micDevice: MicDevice | null
+  micLevelDbfs: number
+  onClearMicError: () => void
   onClose: () => void
 }
 
@@ -20,12 +23,22 @@ export default function SettingsModal({
   audio,
   onChangeOutput,
   onChangeInput,
+  onChangeInputChannel,
   outputStatus,
   micDevice,
+  micLevelDbfs,
+  onClearMicError,
   onClose
 }: Props): React.JSX.Element {
   const [page, setPage] = useState<Page>('audio')
   const [devices, setDevices] = useState<AudioDevices | null>(null)
+  const previewRef = useRef(new MicPreview())
+  const previewActionRef = useRef(0)
+  const [previewState, setPreviewState] = useState<'off' | 'starting' | 'on' | 'error'>('off')
+  const [previewDevice, setPreviewDevice] = useState<MicDevice | null>(null)
+  const [previewLevel, setPreviewLevel] = useState(-120)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const songMicLive = Boolean(micDevice && !micDevice.error)
 
   useEffect(() => {
     let live = true
@@ -55,8 +68,86 @@ export default function SettingsModal({
     return () => window.removeEventListener('keydown', onKey, { capture: true })
   }, [onClose])
 
+  // A preview is explicit and belongs to this dialog. Changing the selected
+  // physical channel, a live song mic taking ownership, or closing the dialog
+  // invalidates pending permission/start work and synchronously retires its
+  // local owner; MicPitch performs the awaited native teardown.
+  useEffect(() => {
+    ++previewActionRef.current
+    void previewRef.current.stop()
+    setPreviewState('off')
+    setPreviewDevice(null)
+    setPreviewLevel(-120)
+    setPreviewError(null)
+    return () => {
+      ++previewActionRef.current
+      void previewRef.current.stop()
+    }
+  }, [audio.inputId, audio.inputChannel, songMicLive])
+
   const savedGone = (id: string | undefined, rows: { id: string }[] | undefined): boolean =>
     Boolean(id && rows && !rows.some((d) => d.id === id))
+  const selectedInput = audio.inputId
+    ? devices?.inputs.find((device) => device.id === audio.inputId)
+    : devices?.inputs.find((device) => device.isDefault)
+  const channelLabels = selectedInput?.channelLabels ?? []
+  const shown = settingsMicDisplay(micDevice, previewDevice, previewState === 'on')
+  const shownDevice = shown.device
+  const shownLevel = shown.source === 'song' ? micLevelDbfs : previewLevel
+
+  const togglePreview = async (): Promise<void> => {
+    if (songMicLive) return
+    if (previewState === 'starting' || previewState === 'on') {
+      ++previewActionRef.current
+      await previewRef.current.stop()
+      setPreviewState('off')
+      setPreviewDevice(null)
+      setPreviewLevel(-120)
+      return
+    }
+    const action = ++previewActionRef.current
+    setPreviewState('starting')
+    setPreviewError(null)
+    const allowed = await window.singz.askMicAccess().catch(() => false)
+    if (action !== previewActionRef.current) return
+    if (!allowed) {
+      setPreviewState('error')
+      setPreviewError('Microphone access is blocked in System Settings.')
+      return
+    }
+    try {
+      let lastLevelAt = 0
+      const device = await previewRef.current.start({
+        deviceId: audio.inputId,
+        inputChannel: audio.inputChannel,
+        onAnalysis: (window) => {
+          if (action !== previewActionRef.current) return
+          const now = performance.now()
+          if (now - lastLevelAt < 50) return
+          lastLevelAt = now
+          setPreviewLevel(window.dbfs)
+        },
+        onEnded: () => {
+          if (action !== previewActionRef.current) return
+          setPreviewState('off')
+          setPreviewDevice(null)
+          setPreviewLevel(-120)
+        }
+      })
+      if (action !== previewActionRef.current || !device) return
+      // A successful explicit test supersedes an older song-switch failure.
+      // Current preview failures take the catch path and remain visible.
+      onClearMicError()
+      setPreviewDevice(device)
+      setPreviewState('on')
+    } catch {
+      if (action !== previewActionRef.current) return
+      setPreviewState('error')
+      setPreviewError(MIC_OPEN_FAILURE)
+      setPreviewDevice(null)
+      setPreviewLevel(-120)
+    }
+  }
 
   return (
     <Modal onClose={onClose} cardClassName="settings-card">
@@ -114,19 +205,65 @@ export default function SettingsModal({
                     <option value={audio.inputId}>Saved device (not connected)</option>
                   )}
                 </select>
-                {micDevice && (
-                  <p className={`settings-hint${micDevice.fallback ? ' warn' : ''}`}>
-                    {micDevice.fallback
-                      ? `That microphone wasn't available — listening through ${micDevice.label || 'the default one'}`
-                      : `Listening through ${micDevice.label || 'the microphone'}`}
-                  </p>
+                <label className="settings-label" htmlFor="settings-input-channel">
+                  Input channel
+                </label>
+                <select
+                  id="settings-input-channel"
+                  className="settings-select"
+                  value={audio.inputChannel}
+                  disabled={!selectedInput}
+                  onChange={(e) => onChangeInputChannel(Number(e.target.value))}
+                >
+                  {selectedInput ? (
+                    Array.from({ length: selectedInput.channels }, (_, channel) => (
+                      <option key={channel} value={channel}>
+                        {channelLabels[channel] || `Channel ${channel + 1}`}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={audio.inputChannel}>
+                      {audio.inputId ? 'Saved channel (device not connected)' : 'No input device'}
+                    </option>
+                  )}
+                </select>
+                {shownDevice && (
+                  <>
+                    <p className={`settings-hint${shownDevice.error ? ' warn' : ''}`}>
+                      {shownDevice.error ??
+                        `${shown.source === 'song' ? 'Song capture' : 'Test capture'}: ${shownDevice.label || 'the microphone'}, ${channelLabels[shownDevice.inputChannel] || `channel ${shownDevice.inputChannel + 1}`}`}
+                    </p>
+                    {!shownDevice.error && (
+                      <meter
+                        className="settings-level"
+                        min={-60}
+                        max={0}
+                        low={-42}
+                        high={-12}
+                        optimum={-18}
+                        value={Math.max(-60, Math.min(0, shownLevel))}
+                        aria-label="Microphone level"
+                      />
+                    )}
+                  </>
                 )}
+                {!songMicLive && (
+                  <button
+                    type="button"
+                    className="pill ghost small settings-mic-test"
+                    disabled={!selectedInput || previewState === 'starting'}
+                    onClick={() => void togglePreview()}
+                  >
+                    {previewState === 'on'
+                      ? 'Stop microphone test'
+                      : previewState === 'starting'
+                        ? 'Starting test…'
+                        : 'Test microphone'}
+                  </button>
+                )}
+                {previewError && <p className="settings-hint warn">{previewError}</p>}
                 {!devices && <p className="settings-hint">Looking for audio devices…</p>}
-                {devices?.inputLabelsHidden && (
-                  <p className="settings-hint">
-                    Allow microphone access in System Settings to see device names.
-                  </p>
-                )}
+                {devices?.inputError && <p className="settings-hint warn">{devices.inputError}</p>}
                 {audio.outputId && (
                   <p className="settings-hint">
                     Tip: on a non-default speaker, sing with headphones — echo cancellation

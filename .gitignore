@@ -2,6 +2,7 @@ node_modules/
 out/
 dist/
 /build/native/
+/build/capture-*/
 vendor
 .engines-src/
 *.log

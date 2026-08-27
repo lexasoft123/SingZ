@@ -39,7 +39,7 @@ mac:
   extraResources:
     - from: vendor/darwin-${arch}
       to: engines
-      filter: ['whisper-cli*', 'singz-analyze*']
+      filter: ['whisper-cli*', 'singz-analyze*', 'singz-capture.node']
   target:
     - target: dmg
 dmg:
@@ -48,7 +48,7 @@ win:
   extraResources:
     - from: vendor/win32-x64
       to: engines
-      filter: ['whisper-cli*', 'singz-analyze*']
+      filter: ['whisper-cli*', 'singz-analyze*', 'singz-capture.node']
   target:
     - target: nsis
       arch: [x64]

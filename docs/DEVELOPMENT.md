@@ -9,6 +9,27 @@ scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
 npm run dev
 ```
 
+Desktop microphone capture is a stable Node-API addon built explicitly for
+the Electron version installed in `node_modules`:
+
+```bash
+npm run capture:addon                    # current platform/architecture
+npm run capture:addon -- darwin-arm64   # release inputs on macOS
+npm run capture:addon -- darwin-x64
+npm run capture:addon -- win32-x64      # on Windows
+node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs
+```
+
+The script downloads Electron headers into ignored `.engines-src/`, builds
+with CMake under ignored `build/capture-*`, and writes the ignored product to
+`vendor/<platform>-<arch>/singz-capture.node`. `electron-builder` copies it
+outside the asar beside the engines. `SINGZ_CAPTURE_ADDON=/absolute/file.node`
+overrides development resolution. A plain system-Node load is not the ABI
+gate; the Electron smoke above is. On Windows, Electron's `node.lib` still
+names `node.exe`, so the CMake target must retain its delay-load hook and
+`/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads in Node but fails
+before module initialization in `electron.exe`.
+
 Local clang builds pick up **ccache** automatically when it is installed
 (`brew install ccache`): `vendor-whisper.sh` and `npm run android` export
 CMake's compiler-launcher env (the mechanism the Android CI uses), and the

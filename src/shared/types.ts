@@ -390,6 +390,93 @@ export interface LogEntry {
   line: string
 }
 
+export type CaptureStateName =
+  | 'idle'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'stopped'
+  | 'unsupported'
+  | 'error'
+
+export type CaptureDiscontinuity =
+  | 'none'
+  | 'stream-generation-changed'
+  | 'sequence-gap'
+  | 'sample-rate-changed'
+  | 'route-generation-changed'
+  | 'timestamp-quality-changed'
+  | 'clock-reanchored'
+  | 'source-seek'
+  | 'source-loop'
+  | 'device-lost'
+  | 'source-frame-overflow'
+
+/** Native capture inventory. UIDs and channels belong to the OS HAL, not Chromium. */
+export interface CaptureInputDevice {
+  uid: string
+  label: string
+  isDefault: boolean
+  sampleRate: number
+  channels: number
+  channelLabels: string[]
+}
+
+export interface CaptureTimeValue {
+  clockDomainId: string
+  streamGeneration: string
+  sequence: string
+  sourceFrame: string
+  sampleHostTimeNs: string
+  callbackHostTimeNs: string
+  quality: 'unknown' | 'estimated' | 'hardware'
+  discontinuity: CaptureDiscontinuity
+  flags: number
+}
+
+/** Copied scalar evidence only. PCM and native storage never cross IPC. */
+export interface CaptureAnalysisWindow {
+  ownershipGeneration: string
+  resetCount: string
+  resetReason: CaptureDiscontinuity
+  start: CaptureTimeValue
+  end: CaptureTimeValue
+  deliveredAtNs: string
+  bridgeHostTimeNs: string
+  callbackToBridgeMs: number
+  sampleRate: number
+  frequency: number
+  clarity: number
+  peak: number
+  rms: number
+  dbfs: number
+}
+
+export interface CaptureStartResult {
+  ok: boolean
+  state: CaptureStateName
+  error?: string
+  sampleRate: number
+  inputChannel: number
+  deviceUid: string
+  deviceLabel: string
+  deviceChannels: number
+  sampleFormat: string
+  sharingMode: string
+  performanceMode: string
+  timestampSource: string
+}
+
+export interface CaptureStats {
+  deliveredBlocks: string
+  deliveredFrames: string
+  overruns: string
+  deliveryWakeups: string
+  droppedEvents: string
+  /** Scalar analysis windows coalesced before JS consumed the latest one. */
+  overwrittenWindows: string
+}
+
 export interface SingzApi {
   /** Windows splitting engine preference (backed by the dml-disabled marker). */
   getSplitterMode(): Promise<{ mode: 'auto' | 'cpu'; reason?: string }>
@@ -509,6 +596,23 @@ export interface SingzApi {
   onLyricsProgress(cb: (p: LyricsProgress) => void): () => void
   /** Ask the OS for microphone permission (macOS prompts; other platforms return true). */
   askMicAccess(): Promise<boolean>
+  captureInputDevices(): Promise<
+    { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string }
+  >
+  beginCapture(
+    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
+    ownershipGeneration: string
+  ): Promise<CaptureStartResult>
+  cancelCapture(
+    ownershipGeneration: string
+  ): Promise<{ ok: true; cancelled: boolean } | { ok: false; error: string }>
+  captureState(): Promise<{
+    state: CaptureStateName
+    ownershipGeneration: string
+    error: string
+  }>
+  captureStats(): Promise<CaptureStats>
+  onCaptureWindow(cb: (window: CaptureAnalysisWindow) => void): () => void
   /** First-run setup: model inventory and the shared download flow. */
   modelsStatus(): Promise<ModelInfo[]>
   downloadModels(

@@ -1,6 +1,6 @@
 # ADR 0009: Capture analysis ownership and product bridges
 
-Status: accepted for the Phase 2 portable/mobile slice
+Status: accepted and implemented for Phase 2 capture analysis
 Date: 2026-08-27
 
 ## Decision
@@ -44,7 +44,7 @@ wait for delivery to join before destroying the adapter or bridge context.
 Android's Kotlin owner remains latched until JNI confirms that stop; iOS's
 session owner remains latched until native stop resolves.
 
-For the later Electron slice, use one long-lived main-process Node-API owner,
+Electron uses one long-lived main-process stable Node-API owner,
 not a helper process, for this capture-only path. Its proposed surface is:
 
 - `beginCapture(config, ownershipGeneration)` returning negotiated scalar
@@ -60,10 +60,26 @@ later default for untrusted plug-ins and crash isolation; adding it to this
 capture-only path now would add a copy/scheduling hop without improving the
 current trust boundary.
 
+The addon is an explicit build artifact outside the asar at
+`resources/engines/singz-capture.node`. Development resolves the matching
+`vendor/<platform>-<arch>` artifact. It is built against the installed
+Electron version's headers (and Electron `node.lib` on Windows), then loaded
+by a real Electron smoke; a system-Node build is not accepted as evidence.
+The main owner binds capture to both renderer id and ownership generation.
+Native cancel suppresses analyzer delivery, stops and joins `AudioInput`, then
+destroys analyzer/input state and releases the event bridge before the IPC
+promise resolves. Renderer destruction and app quit execute the same stop.
+
+Native input UIDs are deliberately distinct from Chromium output device IDs.
+The saved input channel is zero-based and validated against the exact native
+device. If a saved device/channel is unavailable, capture fails visibly and
+does not substitute another physical channel; Web Audio remains the unchanged
+playback/output owner.
+
 ## Consequences
 
 Raw capture time stays independent of Bluetooth, AirPlay and CarPlay output
 latency. A future duplex render host can consume the same metadata through a
 different render-domain adapter without relabeling this delivery sink as a
-monitoring graph. Desktop binding, renderer cutover and deletion of
-`getUserMedia` remain intentionally unimplemented.
+monitoring graph. This capture-only slice does not authorize Phase 3 output,
+monitoring, full-duplex ownership or plug-in hosting.

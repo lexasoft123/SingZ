@@ -112,6 +112,22 @@ const api: SingzApi = {
 
   askMicAccess: () => ipcRenderer.invoke('mic:ask'),
 
+  captureInputDevices: () => ipcRenderer.invoke('capture:devices'),
+  beginCapture: (config, ownershipGeneration) =>
+    ipcRenderer.invoke('capture:begin', config, ownershipGeneration),
+  cancelCapture: (ownershipGeneration) =>
+    ipcRenderer.invoke('capture:cancel', ownershipGeneration),
+  captureState: () => ipcRenderer.invoke('capture:state'),
+  captureStats: () => ipcRenderer.invoke('capture:stats'),
+  onCaptureWindow: (cb) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      window: import('../shared/types').CaptureAnalysisWindow
+    ): void => cb(window)
+    ipcRenderer.on('capture:window', listener)
+    return () => ipcRenderer.removeListener('capture:window', listener)
+  },
+
   modelsStatus: () => ipcRenderer.invoke('models:status'),
 
   downloadModels: (ids) => ipcRenderer.invoke('models:download', ids),

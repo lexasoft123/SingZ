@@ -972,8 +972,11 @@ Avoid:
 Portable/mobile slice implemented 2026-08-27: typed zcore ring provenance,
 the explicit `zdsp_analysis` adapter, native level/pitch evidence, continuity
 resets, Android scalar metadata parity and the iOS generation-bound capture
-bridge are present. Electron ownership and renderer cutover remain pending;
-see ADR 0009.
+bridge are present. The Electron capture slice is implemented on the same
+date: one stable Node-API main-process owner, context-isolated scalar IPC,
+native device/channel inventory and the renderer pitch/meter cutover are
+present; physical multichannel/latency verification remains a release gate.
+See ADR 0009.
 
 Implement:
 
@@ -1337,8 +1340,6 @@ capture/transport and must not import `zdsp`; future hosts adapt explicitly at
 the higher layer that already links both sides.
 
 - The first RT-safe drift resampler and quality/CPU modes.
-- Desktop process placement for the native device callback independent of
-  Electron renderer lifetime.
 - Whether verified plug-ins default to in-process or safe bridged mode.
 - Graph document location and how/when it participates in Drive sync.
 - Whether measured devices justify retaining any direct-AAudio graph host
