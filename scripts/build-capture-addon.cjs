@@ -122,8 +122,8 @@ function sourceFingerprint() {
   return hash.digest('hex')
 }
 
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd: root, stdio: 'inherit' })
+function run(command, args, cwd = root) {
+  const result = spawnSync(command, args, { cwd, stdio: 'inherit' })
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`)
 }
 
@@ -162,7 +162,11 @@ async function main() {
         archive
       )
     }
-    run('tar', ['-xzf', archive, '-C', headersRoot])
+    // Extract from inside headersRoot with a bare filename: an absolute
+    // Windows path ("D:\...") makes Git Bash's GNU tar parse the drive
+    // letter as a remote host ("Cannot connect to D:"), while bsdtar has no
+    // --force-local. A colon-free relative invocation works under both.
+    run('tar', ['-xzf', `node-v${electronVersion}-headers.tar.gz`], headersRoot)
   }
   if (platform === 'win32' && !existsSync(nodeLibrary)) {
     mkdirSync(join(headersRoot, 'win-x64'), { recursive: true })
