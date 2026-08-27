@@ -244,6 +244,12 @@ describe('desktop native training microphone source', () => {
     })
     expect(source.readInfo()).toEqual({ f0: 440, clarity: 0.93, rms: 0.2 })
     expect(source.readLevel()).toEqual({ rms: 0.2, dbfs: -14, signal: true })
+
+    // The core's floor is -120 dBFS and the meter's scale stops at -72: a level
+    // off the bottom of its own scale is not one a meter can announce, and the
+    // Web Audio path has always clamped. Measured at -100 on a real machine.
+    listener('capture-1', { type: 'frame', frequency: 0, clarity: 0, rms: 1e-6, dbfs: -100 })
+    expect(source.readLevel()).toEqual({ rms: 1e-6, dbfs: -72, signal: false })
     expect(window.singz.startDesktopAudioInput).toHaveBeenCalledWith({
       deviceUid: 'auhal:studio',
       channel: 2

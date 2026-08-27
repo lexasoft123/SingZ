@@ -31,7 +31,11 @@ export function shouldAdoptInputChannel(
   )
 }
 
-const METER_FLOOR_DB = -72
+/** Where a captured level bottoms out, so that silence reads as the same
+ *  number whichever path captured it. It must MATCH the meter's scale in
+ *  SettingsModal — ticks, fill width and aria-valuemin — which still spells
+ *  -72 itself; move one without the other and silence paints a partial fill. */
+export const METER_FLOOR_DB = -72
 const MAX_CAPTURE_CHANNELS = 32
 
 /**

@@ -2,7 +2,7 @@ import {
   frequencyToFractionalMidi,
   type TrainingPitchObservation
 } from '../../../shared/training-scoring'
-import { MicPitch, type MicDevice, type MicLevel } from './mic'
+import { METER_FLOOR_DB, MicPitch, type MicDevice, type MicLevel } from './mic'
 import type { PitchFrame } from './pitch'
 import type { DesktopAudioInputEvent } from '../../../shared/types'
 
@@ -32,7 +32,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
   private unsubscribe: (() => void) | null = null
   private dev: MicDevice | null = null
   private frame: PitchFrame = { f0: 0, clarity: 0, rms: 0 }
-  private dbfs = -72
+  private dbfs = METER_FLOOR_DB
   private usingFallback = false
   private ended: (() => void) | undefined
 
@@ -97,16 +97,18 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     return this.usingFallback ? this.fallback.readInfo() : this.frame
   }
 
-  /** Settings uses the same native capture owner as training. The native
-   * frame already carries its bounded dBFS value, so the meter never needs a
-   * second Chromium stream pointed at a different device or channel. */
+  /** Settings uses the same native capture owner as training, so the meter
+   * never needs a second Chromium stream pointed at a different device or
+   * channel. Both paths clamp to the meter's own floor: the core reports true
+   * digital silence at -120 dBFS, which is off the bottom of a scale whose
+   * ticks, fill width and aria-valuemin all stop at -72 — a level outside its
+   * own scale is not one a meter can announce, and silence must read the same
+   * number however it was captured. */
   readLevel(): MicLevel {
-    if (this.usingFallback) {
-      const rms = this.fallback.readInfo().rms
-      const dbfs = Math.max(-72, Math.min(0, 20 * Math.log10(Math.max(rms, 1e-8))))
-      return { rms, dbfs, signal: dbfs > -72 }
-    }
-    return { rms: this.frame.rms, dbfs: this.dbfs, signal: this.dbfs > -72 }
+    const rms = this.usingFallback ? this.fallback.readInfo().rms : this.frame.rms
+    const raw = this.usingFallback ? 20 * Math.log10(Math.max(rms, 1e-8)) : this.dbfs
+    const dbfs = Math.max(METER_FLOOR_DB, Math.min(0, raw))
+    return { rms, dbfs, signal: dbfs > METER_FLOOR_DB }
   }
 
   stop(): void {
@@ -120,7 +122,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     this.unsubscribe = null
     this.dev = null
     this.frame = { f0: 0, clarity: 0, rms: 0 }
-    this.dbfs = -72
+    this.dbfs = METER_FLOOR_DB
     this.ended = undefined
     if (token) void window.singz.stopDesktopAudioInput(token)
   }

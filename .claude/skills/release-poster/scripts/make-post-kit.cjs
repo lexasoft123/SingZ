@@ -151,6 +151,11 @@ button.primary:hover{background:#ffae45}
 button.done{background:var(--ok);color:#08210f;border-color:transparent}
 button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 a.dl{text-decoration:none}
+.phonehint{margin-top:16px;font-size:13.5px;line-height:1.5;color:var(--dim);
+  border-left:2px solid var(--line);padding-left:12px}
+.phonehint b{color:var(--text)}
+.phonehint code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--accent)}
+.phonehint.live{border-left-color:var(--accent)}
 pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 .dls{display:flex;flex-direction:column;gap:10px}
 .dlrow{display:flex;align-items:center;justify-content:space-between;gap:16px;
@@ -184,6 +189,11 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
       <button class="primary" data-img>Copy image</button>
       <a class="dl" href="${posterURI}" download="singz-${VERSION_SAFE}-poster.png"><button>Save PNG</button></a>
     </div>
+    <p class="phonehint" id="phonehint"><b>On a phone:</b> press and hold the poster above, then
+      Save to Photos — and press and hold a caption to copy it. The buttons need a clipboard, which
+      a browser grants on <code>file://</code>, <code>localhost</code> and HTTPS but not on a plain
+      <code>http://</code> address — and iOS will not open this from a file at all, so a phone
+      arrives by IP and has none.</p>
     ${previewURI ? `<div style="margin-top:24px"><h2>How it lands in a chat</h2>
       <img src="${previewURI}" alt="poster at phone chat width" style="width:200px;border-radius:8px;border:1px solid var(--line)" /></div>` : ''}
   </section>
@@ -233,6 +243,10 @@ const flash = (btn, label) => {
   setTimeout(() => { btn.textContent = original; btn.classList.remove('done'); }, 1600);
 };
 
+// No pointer that can hover = a touch screen, which is the thing that decides
+// whether ⌘C and a data: download are available to the reader.
+const TOUCH = matchMedia('(hover: none)').matches;
+
 for (const btn of document.querySelectorAll('[data-copy]')) {
   btn.addEventListener('click', async () => {
     const el = document.getElementById(btn.dataset.copy);
@@ -258,10 +272,13 @@ for (const btn of document.querySelectorAll('[data-copy]')) {
       flash(btn, 'Copied ✓');
     } catch {
       // Clipboard refused (rare on file://) — select it so ⌘C still works.
+      // Which gesture to name is a question about the DEVICE, not the origin:
+      // a desktop at the same http:// LAN address has no clipboard either and
+      // still has a ⌘ key.
       const r = document.createRange();
       r.selectNodeContents(document.getElementById(btn.dataset.copy));
       const s = getSelection(); s.removeAllRanges(); s.addRange(r);
-      flash(btn, 'Selected — press ⌘C');
+      flash(btn, TOUCH ? 'Tap and hold the text to copy' : 'Selected — press ⌘C');
     }
   });
 }
@@ -274,9 +291,22 @@ for (const btn of document.querySelectorAll('[data-img]')) {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
       flash(btn, 'Image copied ✓');
     } catch (e) {
-      flash(btn, 'Use Save PNG instead');
+      // On touch, Save PNG is a second dead end: it is a data: URI download and
+      // iOS Safari blocks those at top level. Long-press needs neither the
+      // clipboard nor a download. On a desktop Save PNG works, insecure origin
+      // or not, so that is still where a mouse gets sent.
+      flash(btn, TOUCH ? 'Press and hold the poster' : 'Use Save PNG instead');
     }
   });
+}
+
+// No clipboard at all (a page reached by IP, or any insecure origin) means the
+// two Copy buttons cannot work however they are pressed. Say so before the press.
+if (!navigator.clipboard) {
+  const h = document.getElementById('phonehint');
+  if (h) h.classList.add('live');
+  for (const b of document.querySelectorAll('[data-copy],[data-img]')) b.title =
+    'This browser gives no clipboard on an insecure origin — press and hold the poster or the caption instead.';
 }
 
 for (const el of document.querySelectorAll('[data-count-for]')) {
