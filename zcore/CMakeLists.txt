@@ -15,6 +15,16 @@ target_compile_features(zcore_base INTERFACE cxx_std_20)
 target_include_directories(zcore_base INTERFACE "${ZCORE_INCLUDE_ROOT}")
 target_link_libraries(zcore_base INTERFACE SingZ::native_build_options)
 
+# Narrow ordinary-delivery-thread compatibility implementation shared by the
+# legacy facade and zdsp_analysis. Keeping one compiled YIN/resampler source
+# prevents algorithm drift without making any zcore target depend on zdsp.
+add_library(zcore_live_analysis_compat STATIC
+  src/legacy/live_input_analysis.cpp
+  src/legacy/resample.cpp)
+add_library(SingZ::zcore_live_analysis_compat ALIAS zcore_live_analysis_compat)
+singz_zcore_target(zcore_live_analysis_compat)
+target_link_libraries(zcore_live_analysis_compat PUBLIC SingZ::zcore_base)
+
 add_library(zcore_audio STATIC
   src/audio/audio_input_transport.cpp)
 add_library(SingZ::zcore_audio ALIAS zcore_audio)
@@ -173,20 +183,20 @@ if(ANDROID)
   target_compile_definitions(zcore_media PRIVATE _FILE_OFFSET_BITS=64)
 endif()
 
-# Temporary home for the proven analysis implementation while Phase 0B
-# freezes the new graph contracts. It deliberately excludes ONNX Runtime.
+# Remaining legacy facade during Phase 2. Shared live YIN/resampling sources
+# compile only in zcore_live_analysis_compat above. This target deliberately
+# excludes ONNX Runtime.
 add_library(zcore_legacy STATIC
   src/legacy/audio_input_analysis_adapter.cpp
   src/legacy/analysis.cpp
   src/legacy/beat_this.cpp
   src/legacy/beats.cpp
   src/legacy/courts.cpp
-  src/legacy/live_input_analysis.cpp
-  src/legacy/melody.cpp
-  src/legacy/resample.cpp)
+  src/legacy/melody.cpp)
 add_library(SingZ::zcore_legacy ALIAS zcore_legacy)
 singz_zcore_target(zcore_legacy)
 target_link_libraries(zcore_legacy PUBLIC
+  SingZ::zcore_live_analysis_compat
   SingZ::zcore_audio
   SingZ::zcore_device
   SingZ::zcore_media)

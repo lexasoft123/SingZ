@@ -74,7 +74,8 @@ target_compile_features(singz-analyze PRIVATE cxx_std_20)
 add_dependencies(singz-analyze singz_check_zcore_boundaries)
 target_link_libraries(singz-analyze PRIVATE
   SingZ::native_build_options
-  SingZ::zcore_legacy)
+  SingZ::zcore_legacy
+  SingZ::zdsp_analysis)
 
 # ---- the host test suite (tests/native at the repo root) --------------------
 # The wav suites and flac_roundtrip synthesize their own audio, so ctest needs
@@ -137,6 +138,14 @@ if(SINGZ_CORE_TESTS)
   set_target_properties(zdsp_graph_tests PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_graph_tests PRIVATE SingZ::zdsp_offline Threads::Threads)
   add_test(NAME zdsp_graph_tests COMMAND zdsp_graph_tests)
+
+  add_executable(zdsp_analysis_tests
+    ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_analysis_tests.cpp)
+  target_compile_features(zdsp_analysis_tests PRIVATE cxx_std_20)
+  set_target_properties(zdsp_analysis_tests PROPERTIES CXX_EXTENSIONS OFF)
+  target_link_libraries(zdsp_analysis_tests PRIVATE
+    SingZ::zdsp_analysis SingZ::zcore_legacy Threads::Threads)
+  add_test(NAME zdsp_analysis_tests COMMAND zdsp_analysis_tests)
   if(APPLE)
     add_test(NAME zdsp_apple_component_smoke
       COMMAND bash

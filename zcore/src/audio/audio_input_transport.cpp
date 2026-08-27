@@ -16,13 +16,17 @@ constexpr uint32_t kMaxCallbackFrames = 16384;
 }  // namespace
 
 struct AudioInputRing::Impl {
-  Impl(uint32_t count, uint32_t frames)
+  Impl(uint32_t count, uint32_t frames, uint64_t clockDomain,
+       uint64_t generation, uint64_t initialSourceFrame)
       : slots(count), samples(static_cast<size_t>(count) * frames) {
     for (uint32_t slot = 0; slot < count; ++slot)
       slots[slot].samples = samples.data() + static_cast<size_t>(slot) * frames;
     callback.slots = slots.data();
     callback.slotCount = count;
     callback.maxFrames = frames;
+    callback.clockDomainId = clockDomain;
+    callback.streamGeneration = generation;
+    callback.nextSourceFrame = initialSourceFrame;
   }
 
   std::vector<AudioInputRingSlot> slots;
@@ -33,10 +37,15 @@ struct AudioInputRing::Impl {
   mutable uint64_t widenedDropped = 0;
 };
 
-AudioInputRing::AudioInputRing(uint32_t blocks, uint32_t maxFrames) {
+AudioInputRing::AudioInputRing(uint32_t blocks, uint32_t maxFrames,
+                               uint64_t clockDomainId,
+                               uint64_t streamGeneration,
+                               uint64_t initialSourceFrame) {
   if (blocks >= kMinRingBlocks && blocks <= kMaxRingBlocks && maxFrames > 0 &&
-      maxFrames <= kMaxCallbackFrames) {
-    impl_ = std::make_unique<Impl>(blocks, maxFrames);
+      maxFrames <= kMaxCallbackFrames && clockDomainId != 0 &&
+      streamGeneration != 0) {
+    impl_ = std::make_unique<Impl>(blocks, maxFrames, clockDomainId,
+                                  streamGeneration, initialSourceFrame);
     callback_ = &impl_->callback;
   }
 }
@@ -61,6 +70,7 @@ bool AudioInputRing::peek(AudioInputBlockView& out, double sampleRate) {
   if (consumer == state.producerCursor.load(std::memory_order_acquire))
     return false;
   AudioInputRingSlot& slot = impl_->slots[consumer % state.slotCount];
+  out.capture = slot.capture;
   out.sequence = slot.sequence;
   out.sampleHostTimeNs = slot.sampleHostTimeNs;
   out.callbackHostTimeNs = slot.callbackHostTimeNs;

@@ -34,6 +34,7 @@ enum class DiscontinuityReason : uint32_t {
   SourceSeek,
   SourceLoop,
   DeviceLost,
+  SourceFrameOverflow,
 };
 enum DiscontinuityFlags : uint32_t {
   DiscontinuityFlagNone = 0,

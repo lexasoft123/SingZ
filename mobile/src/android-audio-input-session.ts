@@ -28,17 +28,50 @@ export interface AndroidAudioInputDevice {
 
 export interface AndroidAudioInputFrame {
   generation: number
+  clockDomainId: string
+  streamGeneration: string
   startSequence: string
   endSequence: string
+  startSourceFrame: string
+  endSourceFrame: string
   sampleHostTimeStartNs: string
   sampleHostTimeEndNs: string
   callbackHostTimeNs: string
+  startFlags: number
+  endFlags: number
   timestampQuality: 'hardware' | 'callback-estimate' | 'unknown'
+  discontinuityReason:
+    | 'none'
+    | 'stream-generation'
+    | 'sequence-gap'
+    | 'sample-rate'
+    | 'timestamp-quality'
+    | 'clock-reanchored'
+    | 'device-lost'
+    | 'source-frame-overflow'
+  resetCount: string
   sampleRate: number
   frequency: number
   clarity: number
+  peak: number
   rms: number
   dbfs: number
+}
+
+const isUint32 = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) &&
+  value >= 0 && value <= 0xffff_ffff
+
+/** Preserve all native flag bits. Known-bit policy belongs to the graph; the
+ * scalar bridge only rejects values that cannot be an exact uint32. */
+export const parseAndroidAudioInputFrame = (
+  value: unknown
+): AndroidAudioInputFrame | null => {
+  if (!value || typeof value !== 'object') return null
+  const frame = value as Partial<AndroidAudioInputFrame>
+  return isUint32(frame.startFlags) && isUint32(frame.endFlags)
+    ? value as AndroidAudioInputFrame
+    : null
 }
 
 export interface AndroidAudioInputState {
@@ -264,7 +297,13 @@ export const acquireAndroidAudioInputSession = (
 export const subscribeAndroidAudioInputFrames = (
   callback: (frame: AndroidAudioInputFrame) => void
 ): (() => void) => {
-  const subscription = DeviceEventEmitter.addListener('singzAudioInputFrame', callback)
+  const subscription = DeviceEventEmitter.addListener(
+    'singzAudioInputFrame',
+    (value: unknown) => {
+      const frame = parseAndroidAudioInputFrame(value)
+      if (frame) callback(frame)
+    }
+  )
   return () => subscription.remove()
 }
 

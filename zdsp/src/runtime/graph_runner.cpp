@@ -59,12 +59,18 @@ Status validateGraphBlock(const CompiledGraph* graph,
       const CaptureTime& capture = *inputs[bus].capture;
       constexpr uint32_t kKnownCaptureFlags =
           CaptureTimeSourceFrameValid | CaptureTimeSampleHostValid |
-          CaptureTimeCallbackHostValid | CaptureTimeStaleAnchor;
+          CaptureTimeCallbackHostValid | CaptureTimeStaleAnchor |
+          CaptureTimeTimestampQualityValid;
       if (capture.quality > CaptureTimestampQuality::Hardware ||
-          capture.discontinuity.reason > DiscontinuityReason::DeviceLost ||
+          capture.discontinuity.reason > DiscontinuityReason::SourceFrameOverflow ||
           (capture.discontinuity.flags &
            ~(DiscontinuityFlagResetState | DiscontinuityFlagTimeValid)) != 0 ||
-          (capture.flags & ~kKnownCaptureFlags) != 0)
+          (capture.flags & ~kKnownCaptureFlags) != 0 ||
+          ((capture.flags & CaptureTimeStaleAnchor) != 0 &&
+           (capture.flags & (CaptureTimeSampleHostValid |
+                             CaptureTimeTimestampQualityValid)) !=
+               (CaptureTimeSampleHostValid |
+                CaptureTimeTimestampQualityValid)))
         return {StatusCode::InvalidArgument, bus + 60};
     }
   }

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -16,7 +17,7 @@
 
 #include <zcore/legacy/analysis.h>
 #include <zcore/device/audio_input.h>
-#include <zcore/legacy/audio_input_analysis_adapter.h>
+#include <zdsp/analysis/capture_adapter.h>
 #include <zcore/device/audio_input_android_registry.h>
 #include <zcore/legacy/beat_this.h>
 #include <zcore/legacy/beats.h>
@@ -36,6 +37,11 @@ std::string toStd(JNIEnv* env, jstring s) {
   std::string out = chars != nullptr ? chars : "";
   if (chars != nullptr) env->ReleaseStringUTFChars(s, chars);
   return out;
+}
+
+jlong unsignedBits(uint64_t value) noexcept {
+  static_assert(sizeof(jlong) == sizeof(value));
+  return std::bit_cast<jlong>(value);
 }
 
 jobjectArray stringArray(JNIEnv* env, const std::vector<std::string>& values) {
@@ -69,7 +75,10 @@ struct AudioInputListenerBridge {
   jobject listener = nullptr;
   jmethodID onFrame = nullptr;
   std::atomic<bool> active{true};
-  singz::LiveInputAnalysisAdapter analysisAdapter;
+  explicit AudioInputListenerBridge(uint64_t generation)
+      : analysisAdapter(generation) {}
+
+  zdsp::analysis::LiveInputAnalysisAdapter analysisAdapter;
 
   ~AudioInputListenerBridge() {
     active.store(false, std::memory_order_release);
@@ -86,7 +95,7 @@ struct AudioInputListenerBridge {
 
   void emit(const singz::AudioInputBlockView& block) {
     if (!active.load(std::memory_order_acquire) || !vm || !listener || !onFrame) return;
-    (void)analysisAdapter.push(block, [&](const singz::LiveInputAnalysisWindow& window) {
+    (void)analysisAdapter.push(block, [&](const zdsp::analysis::AnalysisWindow& window) {
       if (!active.load(std::memory_order_acquire)) return;
       JNIEnv* env = nullptr;
       bool attached = false;
@@ -94,15 +103,33 @@ struct AudioInputListenerBridge {
         if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
         attached = true;
       }
-      env->CallVoidMethod(listener, onFrame, static_cast<jlong>(window.startSequence),
-                          static_cast<jlong>(window.endSequence),
-                          static_cast<jlong>(window.sampleHostTimeStartNs),
-                          static_cast<jlong>(window.sampleHostTimeEndNs),
-                          static_cast<jlong>(window.callbackHostTimeNs),
-                          static_cast<jint>(window.timestampQuality),
-                          static_cast<jdouble>(window.sampleRate),
+      env->CallVoidMethod(listener, onFrame,
+                          static_cast<jlong>(window.ownershipGeneration),
+                          unsignedBits(window.start.clockDomain.value),
+                          unsignedBits(window.start.streamGeneration.value),
+                          unsignedBits(window.start.sequence),
+                          unsignedBits(window.end.sequence),
+                          unsignedBits(window.start.sourceFrame.value),
+                          unsignedBits(window.end.sourceFrame.value),
+                          unsignedBits(window.start.sampleHostTime.value),
+                          unsignedBits(window.end.sampleHostTime.value),
+                          unsignedBits(window.deliveredAt.value),
+                          static_cast<jint>(window.start.flags),
+                          static_cast<jint>(window.end.flags),
+                          static_cast<jint>(
+                              window.start.quality ==
+                                      zdsp::CaptureTimestampQuality::Hardware
+                                  ? 1
+                                  : window.start.quality ==
+                                            zdsp::CaptureTimestampQuality::Estimated
+                                        ? 2
+                                        : 0),
+                          static_cast<jint>(window.resetReason),
+                          unsignedBits(window.resetCount),
+                          static_cast<jdouble>(window.sampleRate.value),
                           static_cast<jdouble>(window.analysis.frequency),
                           static_cast<jdouble>(window.analysis.clarity),
+                          static_cast<jdouble>(window.analysis.peak),
                           static_cast<jdouble>(window.analysis.rms),
                           static_cast<jdouble>(window.analysis.dbfs));
       if (env->ExceptionCheck()) env->ExceptionClear();
@@ -187,18 +214,21 @@ Java_com_singzplayer_split_SingzCore_replaceAudioInputDevices(
 
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_singzplayer_split_SingzCore_startAudioInput(
-    JNIEnv* env, jobject /*thiz*/, jstring juid, jint channel, jobject listener) {
-  if (channel < 0 || !listener)
+    JNIEnv* env, jobject /*thiz*/, jstring juid, jint channel,
+    jlong ownershipGeneration, jobject listener) {
+  if (channel < 0 || ownershipGeneration <= 0 || !listener)
     return stringArray(env, {"Android audio input arguments are invalid"});
   std::lock_guard<std::mutex> lock(gAudioInputMutex);
   if (gAudioInput)
     return stringArray(env, {"Another Android audio input owner is active"});
 
-  auto bridge = std::make_shared<AudioInputListenerBridge>();
+  auto bridge = std::make_shared<AudioInputListenerBridge>(
+      static_cast<uint64_t>(ownershipGeneration));
   env->GetJavaVM(&bridge->vm);
   bridge->listener = env->NewGlobalRef(listener);
   jclass listenerClass = env->GetObjectClass(listener);
-  bridge->onFrame = env->GetMethodID(listenerClass, "onFrame", "(JJJJJIDDDDD)V");
+  bridge->onFrame = env->GetMethodID(
+      listenerClass, "onFrame", "(JJJJJJJJJJIIIIJDDDDDD)V");
   env->DeleteLocalRef(listenerClass);
   if (!bridge->vm || !bridge->listener || !bridge->onFrame) {
     if (env->ExceptionCheck()) env->ExceptionClear();
@@ -222,7 +252,8 @@ Java_com_singzplayer_split_SingzCore_startAudioInput(
       env, {"", result.deviceUid, std::to_string(result.sampleRate),
             std::to_string(result.deviceChannels), std::to_string(result.channel),
             result.sampleFormat, result.sharingMode, result.performanceMode,
-            result.inputPreset, result.timestampSource});
+            result.inputPreset, result.timestampSource,
+            zdsp::analysis::analysisBuildId()});
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

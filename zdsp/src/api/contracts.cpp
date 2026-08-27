@@ -52,7 +52,7 @@ Status validateDiscontinuity(const ProcessContext& context) noexcept {
       DiscontinuityFlagResetState | DiscontinuityFlagTimeValid;
   if ((context.time.flags & ~kKnownRenderTimeFlags) != 0 ||
       (context.discontinuity.flags & ~kKnownDiscontinuityFlags) != 0 ||
-      context.discontinuity.reason > DiscontinuityReason::DeviceLost)
+      context.discontinuity.reason > DiscontinuityReason::SourceFrameOverflow)
     return {StatusCode::InvalidArgument, 210};
   const bool typed = context.discontinuity.reason != DiscontinuityReason::None;
   const bool marked = (context.time.flags & RenderTimeDiscontinuous) != 0;

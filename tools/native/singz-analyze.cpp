@@ -54,7 +54,7 @@
 #endif
 
 #include <zcore/device/audio_input.h>
-#include <zcore/legacy/live_input_analysis.h>
+#include <zdsp/analysis/live_input_analysis.h>
 #include <zcore/legacy/resample.h>
 #include <zcore/legacy/analysis.h>
 #include <zcore/legacy/beat_this.h>
@@ -781,7 +781,8 @@ static int liveInputAnalysisThroughputFixture() {
             0.5 * std::sin(2.0 * M_PI * toneHz * (offset + i) / rate));
       stream.append(block.data(), static_cast<uint32_t>(count), pending);
       while (pending.size() >= plan.frames) {
-        const singz::LiveInputFrame frame = singz::analyzeLiveInput(
+        const zdsp::analysis::LiveInputFrame frame =
+            zdsp::analysis::analyzeLiveInput(
             pending.data(), plan.frames, plan.analysisSampleRate,
             plan.minFrequencyHz);
         finite = finite && std::isfinite(frame.frequency) &&
@@ -1123,7 +1124,8 @@ static int liveInputCommand(int argc, char** argv) {
         if (pendingWasEmpty && appended > 0)
           pendingHostTime = block.sampleHostTimeNs;
         while (pending.size() >= analysisPlan.frames) {
-          const singz::LiveInputFrame analysis = singz::analyzeLiveInput(
+          const zdsp::analysis::LiveInputFrame analysis =
+              zdsp::analysis::analyzeLiveInput(
               pending.data(), analysisPlan.frames,
               analysisPlan.analysisSampleRate,
               analysisPlan.minFrequencyHz);

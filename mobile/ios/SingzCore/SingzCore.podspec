@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.3.7'
+  s.version      = '0.3.9'
   s.summary      = 'SingZ shared C++ core: audio input, stem split, and beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -26,7 +26,11 @@ Pod::Spec.new do |s|
                    'core/src/**/*.{cpp,mm}',
                    'core/platform/ios/**/*.{cpp,mm}',
                    'dsp/include/zdsp/{types,events,clock,audio_bus,process_context,processor,latency}.h',
+                   'dsp/include/zdsp/analysis/live_input_analysis.h',
+                   'dsp/include/zdsp/analysis/capture_adapter.h',
                    'dsp/src/api/contracts.cpp',
+                   'dsp/src/analysis/live_input_analyzer.cpp',
+                   'dsp/src/analysis/capture_adapter.cpp',
                    'flac/src/*.c'
   s.preserve_paths = 'flac/**/*'
   s.pod_target_xcconfig = {

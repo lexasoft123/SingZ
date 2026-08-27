@@ -39,15 +39,25 @@ object SingzCore {
   /** Analyzed live-input evidence. Raw microphone PCM never crosses JNI. */
   interface AudioInputListener {
     fun onFrame(
+      ownershipGeneration: Long,
+      clockDomainId: Long,
+      streamGeneration: Long,
       startSequence: Long,
       endSequence: Long,
+      startSourceFrame: Long,
+      endSourceFrame: Long,
       sampleHostTimeStartNs: Long,
       sampleHostTimeEndNs: Long,
       callbackHostTimeNs: Long,
+      startFlags: Int,
+      endFlags: Int,
       timestampQuality: Int,
+      discontinuityReason: Int,
+      resetCount: Long,
       sampleRate: Double,
       frequency: Double,
       clarity: Double,
+      peak: Double,
       rms: Double,
       dbfs: Double
     )
@@ -68,6 +78,7 @@ object SingzCore {
   external fun startAudioInput(
     deviceUid: String,
     channel: Int,
+    ownershipGeneration: Long,
     listener: AudioInputListener
   ): Array<String>
 

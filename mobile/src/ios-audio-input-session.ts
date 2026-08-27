@@ -1,4 +1,4 @@
-import { NativeModules } from 'react-native'
+import { NativeEventEmitter, NativeModules } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 
 type Permission = 'Undetermined' | 'Denied' | 'Granted'
@@ -38,10 +38,64 @@ export interface IosAudioInputLeaseNative {
   verifyPlaybackSession(): Promise<void>
   acquireLease(deviceUid: string, minimumChannels: number): Promise<string>
   releaseLease(token: string): Promise<void>
+  startCapture(
+    leaseToken: string,
+    deviceUid: string,
+    channel: number,
+    ownershipGeneration: number
+  ): Promise<{ ok: boolean; error?: string; sampleRate?: number }>
+  stopCapture(ownershipGeneration: number): Promise<void>
 }
 
 export interface IosAudioInputLease {
+  readonly generation?: number
   release(): Promise<void>
+}
+
+export interface IosAudioInputFrame {
+  generation: number
+  clockDomainId: string
+  streamGeneration: string
+  startSequence: string
+  endSequence: string
+  startSourceFrame: string
+  endSourceFrame: string
+  sampleHostTimeStartNs: string
+  sampleHostTimeEndNs: string
+  callbackHostTimeNs: string
+  startFlags: number
+  endFlags: number
+  timestampQuality: 'hardware' | 'callback-estimate' | 'unknown'
+  discontinuityReason: string
+  resetCount: string
+  sampleRate: number
+  frequency: number
+  clarity: number
+  peak: number
+  rms: number
+  dbfs: number
+}
+
+const isUint32 = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) &&
+  value >= 0 && value <= 0xffff_ffff
+
+/** Preserve all native flag bits. Known-bit policy belongs to the graph; the
+ * scalar bridge only rejects values that cannot be an exact uint32. */
+export const parseIosAudioInputFrame = (
+  value: unknown
+): IosAudioInputFrame | null => {
+  if (!value || typeof value !== 'object') return null
+  const frame = value as Partial<IosAudioInputFrame>
+  return isUint32(frame.startFlags) && isUint32(frame.endFlags)
+    ? value as IosAudioInputFrame
+    : null
+}
+
+export interface IosAudioInputState {
+  generation: number
+  state: 'running' | 'stopped' | 'error'
+  error?: string
 }
 
 export interface AcquireIosAudioInputOptions {
@@ -129,6 +183,8 @@ interface SessionContext {
   inputRestored: boolean
   playbackTransitionAttempted: boolean
   playbackRestored: boolean
+  captureGeneration?: number
+  captureStopped: boolean
 }
 
 type CoordinatorState =
@@ -143,6 +199,7 @@ type CoordinatorState =
 export class IosAudioInputSessionCoordinator {
   private tail: Promise<void> = Promise.resolve()
   private state: CoordinatorState | null = null
+  private nextCaptureGeneration = 1
 
   constructor(
     private readonly owner: IosAudioSessionOwner,
@@ -174,7 +231,8 @@ export class IosAudioInputSessionCoordinator {
         preferencesRestored: false,
         inputRestored: false,
         playbackTransitionAttempted: false,
-        playbackRestored: false
+        playbackRestored: false,
+        captureStopped: true
       }
       let transitionStarted = false
       try {
@@ -205,6 +263,16 @@ export class IosAudioInputSessionCoordinator {
           throw new Error(prepared.error ?? 'Could not prepare iOS capture preferences')
         await this.native.verifyCaptureSession(portableUid, minimumChannels)
         context.leaseToken = await this.native.acquireLease(portableUid, minimumChannels)
+        context.captureGeneration = this.nextCaptureGeneration++
+        const started = await this.native.startCapture(
+          context.leaseToken,
+          portableUid,
+          channel,
+          context.captureGeneration
+        )
+        if (!started.ok)
+          throw new Error(started.error ?? 'Could not start iOS audio input')
+        context.captureStopped = false
         this.state = { kind: 'active', context }
       } catch (acquisitionError) {
         if (!transitionStarted) throw acquisitionError
@@ -222,6 +290,7 @@ export class IosAudioInputSessionCoordinator {
 
       let released = false
       return {
+        generation: context.captureGeneration,
         release: async (): Promise<void> => {
           if (released) return
           await this.exclusive(async () => {
@@ -267,6 +336,20 @@ export class IosAudioInputSessionCoordinator {
   private async restore(context: SessionContext): Promise<void> {
     const errors: string[] = []
     let restorationRetryRequired = false
+    if (!context.captureStopped) {
+      try {
+        if (context.captureGeneration)
+          await this.native.stopCapture(context.captureGeneration)
+        context.captureStopped = true
+      } catch (error) {
+        // Native stop joins the AudioInput delivery thread. No session/route
+        // owner may be released or mutated while that join is unconfirmed.
+        throw new IosAudioSessionRestoreError(
+          [`stop native capture: ${errorMessage(error)}`],
+          true
+        )
+      }
+    }
     if (!context.leaseReleased) {
       try {
         if (context.leaseToken) await this.native.releaseLease(context.leaseToken)
@@ -454,3 +537,33 @@ export const acquireIosAudioInputSession = (
 
 export const retryIosAudioInputSessionRelease = (): Promise<void> =>
   coordinator.retryRelease()
+
+export const subscribeIosAudioInputFrames = (
+  callback: (frame: IosAudioInputFrame) => void
+): (() => void) => {
+  // RCTEventEmitter listener accounting drives startObserving/stopObserving;
+  // subscribing through DeviceEventEmitter would leave the native module at
+  // zero listeners and suppress its scalar capture events.
+  const subscription = new NativeEventEmitter(
+    NativeModules.AudioInputSession
+  ).addListener(
+    'singzAudioInputFrame',
+    (value: unknown) => {
+      const frame = parseIosAudioInputFrame(value)
+      if (frame) callback(frame)
+    }
+  )
+  return () => subscription.remove()
+}
+
+export const subscribeIosAudioInputState = (
+  callback: (state: IosAudioInputState) => void
+): (() => void) => {
+  const subscription = new NativeEventEmitter(
+    NativeModules.AudioInputSession
+  ).addListener(
+    'singzAudioInputState',
+    callback
+  )
+  return () => subscription.remove()
+}

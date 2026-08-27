@@ -33,10 +33,13 @@ LiveInputFrame analyzeLiveInput(const float* mono, size_t frames,
     }
   }
   double sumSquares = 0;
+  double peak = 0;
   for (size_t i = 0; i < frames; ++i) {
     const double sample = data[i];
     sumSquares += sample * sample;
+    peak = std::max(peak, std::fabs(sample));
   }
+  result.peak = peak;
   result.rms = std::sqrt(sumSquares / static_cast<double>(frames));
   result.dbfs = result.rms > 0
                     ? std::max(-120.0, 20.0 * std::log10(result.rms))

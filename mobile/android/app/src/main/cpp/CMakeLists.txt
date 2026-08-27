@@ -54,6 +54,7 @@ set_target_properties(singzcore PROPERTIES
 target_compile_definitions(singzcore PRIVATE _FILE_OFFSET_BITS=64)
 target_link_libraries(singzcore PRIVATE
     SingZ::zdsp_runtime
+    SingZ::zdsp_analysis
     SingZ::zcore_ml
     SingZ::zcore_device
     SingZ::zcore_media

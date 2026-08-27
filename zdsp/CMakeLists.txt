@@ -5,6 +5,29 @@ target_include_directories(zdsp_api INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(zdsp_api INTERFACE SingZ::zcore_base)
 
+# Delivery/analysis-domain capture adapters. This is the explicit higher layer
+# that may link both packages; zcore_audio retains no zdsp dependency. It is
+# intentionally separate from the callback-reachable runtime target.
+add_library(zdsp_analysis STATIC
+  src/analysis/capture_adapter.cpp
+  src/analysis/live_input_analyzer.cpp)
+add_library(SingZ::zdsp_analysis ALIAS zdsp_analysis)
+target_compile_features(zdsp_analysis PUBLIC cxx_std_20)
+target_include_directories(zdsp_analysis PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(zdsp_analysis PUBLIC
+  SingZ::zdsp_api
+  SingZ::zcore_audio
+  SingZ::zcore_live_analysis_compat)
+target_sources(zdsp_analysis PRIVATE
+  include/zdsp/analysis/capture_adapter.h
+  include/zdsp/analysis/live_input_analysis.h)
+set_target_properties(zdsp_analysis PROPERTIES
+  CXX_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE YES
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES)
+
 # The runtime is the allocation-free serial graph kernel. Compilation and
 # preparation use the same fixed-capacity implementation off RT; render entry
 # never acquires product, platform, codec, ML or plug-in dependencies.

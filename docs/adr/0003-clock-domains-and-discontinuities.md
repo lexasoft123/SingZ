@@ -34,6 +34,15 @@ requires that range; and a flagged time signature has a positive numerator
 and a positive power-of-two denominator. Signed sample positions deliberately
 allow negative pre-roll.
 
+Capture timestamp-quality validity is independent from the quality enum value
+and is preserved with source, sample-host and callback-host validity at every
+scalar boundary. `CaptureTimeStaleAnchor` is meaningful only when both the
+sample-host anchor and its timestamp quality are valid; the runner rejects a
+stale bit without those two validity bits before graph mutation. Unknown flag
+bits are likewise rejected by the graph, while lossless mobile scalar bridges
+transport any exact uint32 so a newer native producer cannot be silently
+rewritten by an older bridge.
+
 Audible projection is
 `graphHostNs + inGraphLatencyFrames * 1e9/rate + graphToAudibleNs`. UI and
 scoring use that projection. Gain/training automation remains on graph/render

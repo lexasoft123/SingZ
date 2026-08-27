@@ -15,6 +15,7 @@ enum CaptureTimeFlags : uint32_t {
   CaptureTimeSampleHostValid = 1u << 1,
   CaptureTimeCallbackHostValid = 1u << 2,
   CaptureTimeStaleAnchor = 1u << 3,
+  CaptureTimeTimestampQualityValid = 1u << 4,
 };
 struct CaptureTime {
   ClockDomainId clockDomain;

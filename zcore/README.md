@@ -20,8 +20,12 @@ same narrow targets:
   threads, OS frameworks and driver setup, and composes the strict callback
   leaf without inheriting those facilities into it;
 - `SingZ::zcore_media` — WAV/FLAC I/O, excluded from live device dependencies;
-- `SingZ::zcore_legacy` — temporary ORT-free analysis implementation,
-  including the allocating/offline resampler until `zdsp_analysis` owns it;
+- `SingZ::zcore_live_analysis_compat` — temporary ordinary-thread YIN and
+  fixed-ratio resampler implementation shared by the legacy facade and
+  `zdsp_analysis`; it is outside `zcore_base` and callback reachability;
+- `SingZ::zcore_legacy` — the remaining temporary ORT-free compatibility
+  facade, linking `zcore_live_analysis_compat` rather than compiling a second
+  YIN/resampler implementation;
 - `SingZ::zcore_ml` — optional ONNX adapter, the only target that opts into
   exceptions and RTTI on Android.
 

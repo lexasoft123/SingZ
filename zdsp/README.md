@@ -8,6 +8,12 @@ ownership of app playback:
   `SingZ::zcore_base`. It intentionally owns DSP-facing clock, bus, process and
   strong-unit types; device/capture transport remains in `zcore_audio` and a
   higher host layer adapts between them;
+- `SingZ::zdsp_analysis` is that explicit ordinary-delivery-domain adapter for
+  capture analysis. It maps typed provenance, owns bounded peak/RMS and live
+  pitch windows, and emits copied scalar evidence; it is not callback
+  reachable, an output host or a product bridge. During migration it links the
+  narrow `zcore_live_analysis_compat` target so legacy and new delivery paths
+  share one resampler/YIN implementation instead of drifting;
 - `SingZ::zdsp_runtime` contains contract validation, the fixed-capacity graph
   compiler, arena-backed buffer/latency plan, built-in processors, serial
   runner, immutable publication and epoch retirement. Its callback-reachable

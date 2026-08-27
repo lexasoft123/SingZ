@@ -210,27 +210,44 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
       try {
         val listener = object : SingzCore.AudioInputListener {
           override fun onFrame(
+            ownershipGeneration: Long,
+            clockDomainId: Long,
+            streamGeneration: Long,
             startSequence: Long,
             endSequence: Long,
+            startSourceFrame: Long,
+            endSourceFrame: Long,
             sampleHostTimeStartNs: Long,
             sampleHostTimeEndNs: Long,
             callbackHostTimeNs: Long,
+            startFlags: Int,
+            endFlags: Int,
             timestampQuality: Int,
+            discontinuityReason: Int,
+            resetCount: Long,
             sampleRate: Double,
             frequency: Double,
             clarity: Double,
+            peak: Double,
             rms: Double,
             dbfs: Double
           ) {
-            if (!ownership.isCurrent(held)) return
+            if (ownershipGeneration != held.generation ||
+              !ownership.isCurrent(held)) return
             val frame = Arguments.createMap()
             frame.putDouble("generation", held.generation.toDouble())
             // Nanosecond host times exceed JavaScript's exact integer range.
-            frame.putString("startSequence", startSequence.toString())
-            frame.putString("endSequence", endSequence.toString())
-            frame.putString("sampleHostTimeStartNs", sampleHostTimeStartNs.toString())
-            frame.putString("sampleHostTimeEndNs", sampleHostTimeEndNs.toString())
-            frame.putString("callbackHostTimeNs", callbackHostTimeNs.toString())
+            frame.putString("clockDomainId", java.lang.Long.toUnsignedString(clockDomainId))
+            frame.putString("streamGeneration", java.lang.Long.toUnsignedString(streamGeneration))
+            frame.putString("startSequence", java.lang.Long.toUnsignedString(startSequence))
+            frame.putString("endSequence", java.lang.Long.toUnsignedString(endSequence))
+            frame.putString("startSourceFrame", java.lang.Long.toUnsignedString(startSourceFrame))
+            frame.putString("endSourceFrame", java.lang.Long.toUnsignedString(endSourceFrame))
+            frame.putString("sampleHostTimeStartNs", java.lang.Long.toUnsignedString(sampleHostTimeStartNs))
+            frame.putString("sampleHostTimeEndNs", java.lang.Long.toUnsignedString(sampleHostTimeEndNs))
+            frame.putString("callbackHostTimeNs", java.lang.Long.toUnsignedString(callbackHostTimeNs))
+            frame.putDouble("startFlags", Integer.toUnsignedLong(startFlags).toDouble())
+            frame.putDouble("endFlags", Integer.toUnsignedLong(endFlags).toDouble())
             frame.putString(
               "timestampQuality",
               when (timestampQuality) {
@@ -239,9 +256,24 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
                 else -> "unknown"
               }
             )
+            frame.putString(
+              "discontinuityReason",
+              when (discontinuityReason) {
+                1 -> "stream-generation"
+                2 -> "sequence-gap"
+                3 -> "sample-rate"
+                5 -> "timestamp-quality"
+                6 -> "clock-reanchored"
+                9 -> "device-lost"
+                10 -> "source-frame-overflow"
+                else -> "none"
+              }
+            )
+            frame.putString("resetCount", java.lang.Long.toUnsignedString(resetCount))
             frame.putDouble("sampleRate", sampleRate)
             frame.putDouble("frequency", frequency)
             frame.putDouble("clarity", clarity)
+            frame.putDouble("peak", peak)
             frame.putDouble("rms", rms)
             frame.putDouble("dbfs", dbfs)
             emit("singzAudioInputFrame", frame)
@@ -253,7 +285,8 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
         // call is attempted, every exceptional exit must therefore stop the
         // native owner, even if Kotlin never observed a successful result.
         nativeStartAttempted = true
-        val nativeResult = SingzCore.startAudioInput(device.uid, selectedChannel, listener)
+        val nativeResult = SingzCore.startAudioInput(
+          device.uid, selectedChannel, held.generation, listener)
         val error = nativeResult.getOrElse(0) { "Android native audio input returned no result" }
         if (error.isNotEmpty()) {
           bestEffortStopNative()

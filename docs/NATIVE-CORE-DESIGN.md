@@ -121,9 +121,11 @@ duplicating graph contracts in `zcore_audio` and avoids the forbidden
 layer linking both sides; it does not move DSP contracts into the device
 layer. The broad generated iOS pod is the documented
 Phase 0A packaging exception, not an acceptable graph-runtime dependency.
-During Phase 0A the allocating fixed-ratio resampler remains under
-`zcore/legacy` and in `zcore_legacy`; it must move into `zdsp_analysis` rather
-than weakening the strict `zcore_device_callback` leaf.
+During Phase 2 the allocating fixed-ratio resampler and YIN remain under
+`zcore/legacy` but compile once in `zcore_live_analysis_compat`, linked by both
+the `zcore_legacy` facade and `zdsp_analysis`. They remain ordinary-thread-only
+and must eventually move behind a neutral analysis implementation without
+weakening the strict `zcore_device_callback` leaf.
 
 ## Repository layout
 
@@ -480,9 +482,10 @@ multiply compile time/code size across every node without measured benefit.
    contracts without changing application playback. Keep device transport in
    `zcore_audio`; adapt between the two only in a host/product layer that links
    both targets.
-5. Isolate current analysis/resampling in `zdsp_analysis` and ONNX/stem work in
-   `zdsp_ml`, preserving outputs and tolerances; both may now depend on
-   `zdsp_api`.
+5. Isolate the current YIN/resampler once in
+   `zcore_live_analysis_compat`; link it from both the legacy facade and
+   `zdsp_analysis` while preserving outputs and tolerances. ONNX/stem work
+   remains separately owned; DSP adapters may depend on `zdsp_api`.
 6. Make Android link the root targets rather than repeat source lists. Keep the
    iOS copy generated until a dedicated pod/XCFramework integration passes
    clean and stale-binary tests.

@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include <zcore/audio/capture_block.h>
+
 #if defined(__GNUC__) || defined(__clang__)
 #define SINGZ_ZCORE_CALLBACK_LOCAL __attribute__((visibility("hidden")))
 #else
@@ -11,12 +13,6 @@
 namespace singz {
 
 struct AudioInputRingCallbackState;
-
-enum class AudioInputTimestampQuality : uint8_t {
-  Unknown = 0,
-  Hardware = 1,
-  CallbackEstimate = 2,
-};
 
 // Narrow, non-owning producer view prepared by AudioInputRing off RT. This is
 // the only ring type visible to the strict callback target: storage ownership,

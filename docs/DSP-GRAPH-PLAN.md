@@ -969,12 +969,21 @@ Avoid:
 
 ### Phase 2 — Capture source and analyzer migration
 
+Portable/mobile slice implemented 2026-08-27: typed zcore ring provenance,
+the explicit `zdsp_analysis` adapter, native level/pitch evidence, continuity
+resets, Android scalar metadata parity and the iOS generation-bound capture
+bridge are present. Electron ownership and renderer cutover remain pending;
+see ADR 0009.
+
 Implement:
 
 - Common block metadata shared with PR #13.
 - An analyzer-tap adapter around the current `AudioInput` delivery path.
 - Native RMS/peak and the existing `LiveInputAnalysisAdapter` as the first
   production analysis consumers.
+- Keep one ordinary-thread compatibility implementation while migration is in
+  progress: `zcore_live_analysis_compat` holds the legacy resampler/YIN used by
+  both wrappers, outside `zcore_base` and every callback-reachable target.
 - Desktop long-lived main/preload ownership for native capture, with typed
   scalar telemetry and cancellation; replace renderer `getUserMedia` pitch
   only after device/channel/meter behavior reaches parity.
@@ -999,6 +1008,9 @@ Verification:
 - Multichannel device/channel selection and level meter on macOS and Windows.
 - iOS/Android permission, interruption, route change, disconnect and retry.
 - Timestamp-quality and sequence gaps reset scoring windows.
+- Validity transitions and hard forward/backward clock-anchor changes reset
+  before new samples; bounded callback jitter does not. Rejected non-empty
+  callbacks still advance attempted source time, with saturating typed overflow.
 - Callback-to-asynchronous-analyzer delivery keeps its platform baseline: the
   existing Windows hardware goal is p95 ≤ 3 ms, while the portable fake-host
   fixture currently allows <10 ms. Graph runner-entry time is a separate

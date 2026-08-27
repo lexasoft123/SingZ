@@ -955,6 +955,72 @@ static void audioInputTests() {
           out.frames == 4 && out.mono[0] == 1 && out.mono[1] == 0 &&
               out.mono[2] == 0 && out.mono[3] == -1);
     corruptRing.consume();
+
+    singz::AudioInputRing fallbackRing(8, 4, 31, 32);
+    CHECK("audio input ring: hardware and fallback domain blocks publish",
+          fallbackRing.push(a, 4, 1000, 1010,
+                            singz::AudioInputTimestampQuality::Hardware) &&
+              fallbackRing.push(a, 4, 2000, 2010,
+                                singz::AudioInputTimestampQuality::CallbackEstimate) &&
+              fallbackRing.push(a, 4, 3000, 3010,
+                                singz::AudioInputTimestampQuality::CallbackEstimate) &&
+              fallbackRing.push(a, 4, 4000, 4010,
+                                singz::AudioInputTimestampQuality::CallbackEstimate) &&
+              fallbackRing.push(a, 4, 5000, 5010,
+                                singz::AudioInputTimestampQuality::Hardware));
+    CHECK("audio input ring: initial hardware domain is fresh",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 0 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) == 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: fallback entry is typed and stale",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 1 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::TimestampQualityChanged &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) != 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: fallback stale state persists without a second edge",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 2 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) != 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: later fallback blocks remain stale and continuous",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 3 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) != 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: hardware return clears stale with one typed edge",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 4 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::TimestampQualityChanged &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) == 0);
+    fallbackRing.consume();
+
+    singz::AudioInputRing overflowDomainRing(
+        4, 4, 33, 34, std::numeric_limits<uint64_t>::max() - 2);
+    CHECK("audio input ring: overflow domain blocks publish",
+          overflowDomainRing.push(a, 4, 6000, 6010,
+                                  singz::AudioInputTimestampQuality::Hardware) &&
+              overflowDomainRing.push(a, 4, 7000, 7010,
+                                      singz::AudioInputTimestampQuality::Hardware));
+    CHECK("audio input ring: valid-to-invalid source edge is typed once",
+          overflowDomainRing.peek(out, 48000) && out.capture.sequence == 0 &&
+              out.capture.sourceFrame ==
+                  std::numeric_limits<uint64_t>::max() - 2 &&
+              (out.capture.flags & singz::AudioInputSourceFrameValid) == 0 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::SourceFrameOverflow);
+    overflowDomainRing.consume();
+    CHECK("audio input ring: saturated invalid source domain stays quiet",
+          overflowDomainRing.peek(out, 48000) && out.capture.sequence == 1 &&
+              out.capture.sourceFrame == std::numeric_limits<uint64_t>::max() &&
+              (out.capture.flags & singz::AudioInputSourceFrameValid) == 0 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None);
+    overflowDomainRing.consume();
   }
   {
     singz::AudioInputDevice device;

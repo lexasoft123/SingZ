@@ -1162,7 +1162,8 @@ void discontinuitiesAndFailedPrepare() {
       DiscontinuityReason::SampleRateChanged, DiscontinuityReason::RouteGenerationChanged,
       DiscontinuityReason::TimestampQualityChanged, DiscontinuityReason::ClockReanchored,
       DiscontinuityReason::SourceSeek, DiscontinuityReason::SourceLoop,
-      DiscontinuityReason::DeviceLost};
+      DiscontinuityReason::DeviceLost,
+      DiscontinuityReason::SourceFrameOverflow};
   for (uint32_t index = 0; index < sizeof(reasons) / sizeof(reasons[0]); ++index) {
     ProcessContext context{kProcessContextInterfaceVersion,
         kProcessContextV1RequiredSize,
@@ -1333,6 +1334,49 @@ void externalBoundariesAndProvenance() {
                                     outputs, 1)) &&
          transparentProbe.capture == &capture,
          "one-source transparent transform preserves capture provenance");
+
+  constexpr uint32_t fullCaptureFlags =
+      CaptureTimeSourceFrameValid | CaptureTimeSampleHostValid |
+      CaptureTimeCallbackHostValid | CaptureTimeStaleAnchor |
+      CaptureTimeTimestampQualityValid;
+  capture.clockDomain = {7};
+  capture.streamGeneration = {8};
+  capture.sequence = 9;
+  capture.sourceFrame = {10};
+  capture.sampleHostTime = {11};
+  capture.callbackHostTime = {12};
+  capture.quality = CaptureTimestampQuality::Hardware;
+  capture.flags = fullCaptureFlags;
+  expect(succeeded(renderGraphBlock(&transparentRunner, context, inputs, 1,
+                                    outputs, 1)) &&
+         transparentProbe.capture != nullptr &&
+         transparentProbe.capture->flags == fullCaptureFlags,
+         "full known capture-validity mask reaches the input bus losslessly");
+
+  const uint32_t processesBeforeInvalidFlags = transparentProbe.processes;
+  const uint32_t epochBeforeInvalidFlags =
+      acknowledgedEpoch(transparentRunner);
+  firstOutput = 123.0f;
+  capture.flags = fullCaptureFlags | (1u << 5);
+  expect(!succeeded(renderGraphBlock(&transparentRunner, context, inputs, 1,
+                                     outputs, 1)) &&
+         transparentProbe.processes == processesBeforeInvalidFlags &&
+         acknowledgedEpoch(transparentRunner) == epochBeforeInvalidFlags &&
+         firstOutput == 123.0f,
+         "unknown capture flag rejects before graph or output mutation");
+
+  capture.flags = CaptureTimeStaleAnchor;
+  expect(!succeeded(renderGraphBlock(&transparentRunner, context, inputs, 1,
+                                     outputs, 1)) &&
+         transparentProbe.processes == processesBeforeInvalidFlags,
+         "stale anchor without sample and quality validity is rejected");
+  capture.flags = CaptureTimeStaleAnchor | CaptureTimeSampleHostValid |
+                  CaptureTimeTimestampQualityValid;
+  expect(succeeded(renderGraphBlock(&transparentRunner, context, inputs, 1,
+                                    outputs, 1)) &&
+         transparentProbe.capture != nullptr &&
+         transparentProbe.capture->flags == capture.flags,
+         "stale anchor with sample and quality validity is accepted");
 
   ProbeState fanInProbe{};
   Builder fanIn;
@@ -2463,7 +2507,8 @@ void discontinuitiesCancelFadeAndTail() {
   const Scenario scenarios[]{
       {DiscontinuityReason::SourceSeek, false},
       {DiscontinuityReason::RouteGenerationChanged, true},
-      {DiscontinuityReason::DeviceLost, true}};
+      {DiscontinuityReason::DeviceLost, true},
+      {DiscontinuityReason::SourceFrameOverflow, true}};
   for (const Scenario scenario : scenarios) {
     TailProbeState oldTail{{TailKind::Finite, {4}}, 0, 0, 0, 0};
     Builder oldGraph; oldGraph.input(1);

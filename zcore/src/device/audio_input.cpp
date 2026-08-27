@@ -24,6 +24,18 @@ namespace {
 constexpr uint32_t kMinRingBlocks = 2;
 constexpr uint32_t kMaxRingBlocks = 256;
 constexpr uint32_t kMaxCallbackFrames = 16384;
+std::atomic<uint64_t> nextStreamGeneration{1};
+
+uint64_t captureClockDomain(const std::string& uid) {
+  // Stable nonzero FNV-1a identity for the selected endpoint. A new open gets
+  // a distinct stream generation while retaining the endpoint clock domain.
+  uint64_t value = 14695981039346656037ull;
+  for (const unsigned char byte : uid) {
+    value ^= byte;
+    value *= 1099511628211ull;
+  }
+  return value ? value : 1;
+}
 
 bool isFinitePositive(double value) { return std::isfinite(value) && value > 0; }
 
@@ -313,7 +325,12 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
   {
     std::lock_guard<std::mutex> control(impl_->control);
     impl_->config = config;
-    impl_->ring = std::make_unique<AudioInputRing>(config.ringBlocks, kMaxCallbackFrames);
+    uint64_t generation = nextStreamGeneration.fetch_add(1, std::memory_order_relaxed);
+    if (generation == 0)
+      generation = nextStreamGeneration.fetch_add(1, std::memory_order_relaxed);
+    impl_->ring = std::make_unique<AudioInputRing>(
+        config.ringBlocks, kMaxCallbackFrames,
+        captureClockDomain(config.deviceUid), generation);
     impl_->callback.prepare(impl_->ring->producer(), Impl::notifyDelivery,
                             impl_.get());
     impl_->sink = std::move(sink);

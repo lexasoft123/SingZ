@@ -59,10 +59,11 @@ copyTree(join(src, 'src'), join(dst, 'src'), name => /\.(cpp|mm|h|hpp)$/.test(na
 copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
   name => /\.(cpp|mm)$/.test(name))
 
-// Phase 0B compile/link smoke only. This is an explicit allowlist: future DSP
-// nodes, the fixture codec and fake host must not silently enter the product
-// because a recursive pod glob happened to find them. A component XCFramework
-// replaces this broad Phase 0A compatibility pod before Phase 1.
+// Phase 2 capture-analysis bridge only. This is an explicit allowlist: future
+// DSP nodes, the fixture codec and fake host must not silently enter the
+// product because a recursive pod glob happened to find them. Component pods
+// or a CMake-built XCFramework replace the broad zcore compatibility half
+// before native graph rendering.
 unlockTree(dspDst)
 rmSync(dspDst, { recursive: true, force: true })
 const dspAllowlist = [
@@ -73,7 +74,11 @@ const dspAllowlist = [
   'include/zdsp/process_context.h',
   'include/zdsp/processor.h',
   'include/zdsp/latency.h',
+  'include/zdsp/analysis/live_input_analysis.h',
+  'include/zdsp/analysis/capture_adapter.h',
   'src/api/contracts.cpp',
+  'src/analysis/live_input_analyzer.cpp',
+  'src/analysis/capture_adapter.cpp',
 ]
 for (const relative of dspAllowlist) {
   const target = join(dspDst, relative)

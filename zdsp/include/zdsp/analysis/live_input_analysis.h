@@ -2,7 +2,9 @@
 
 #include <cstddef>
 
-namespace singz {
+namespace zdsp::analysis {
+
+const char* analysisBuildId() noexcept;
 
 struct LiveInputFrame {
   double frequency = 0;
@@ -12,11 +14,9 @@ struct LiveInputFrame {
   double dbfs = -120;
 };
 
-// Delivery/analysis-thread YIN + level analysis. This is deliberately outside
-// the callback transport and device lifecycle contracts.
 LiveInputFrame analyzeLiveInput(const float* mono, size_t frames,
                                 double sampleRate,
                                 double minFrequency = 70.0,
                                 double maxFrequency = 1050.0);
 
-}  // namespace singz
+}  // namespace zdsp::analysis
