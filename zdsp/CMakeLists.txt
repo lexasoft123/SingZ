@@ -62,6 +62,26 @@ set_target_properties(zdsp_runtime PROPERTIES
   VISIBILITY_INLINES_HIDDEN YES)
 singz_configure_realtime_target(zdsp_runtime)
 
+# Standalone Phase 3A bridge. This is deliberately above both packages:
+# AudioHost remains a graph-agnostic zcore contract, while this callback-safe
+# adapter maps host metadata and planar buses into the zdsp runtime.
+add_library(zdsp_host_adapter STATIC
+  src/runtime/audio_host_graph_adapter.cpp)
+add_library(SingZ::zdsp_host_adapter ALIAS zdsp_host_adapter)
+target_compile_features(zdsp_host_adapter PUBLIC cxx_std_20)
+target_include_directories(zdsp_host_adapter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(zdsp_host_adapter PUBLIC
+  SingZ::zdsp_runtime
+  SingZ::zcore_device)
+target_sources(zdsp_host_adapter PRIVATE
+  include/zdsp/audio_host_graph_adapter.h)
+set_target_properties(zdsp_host_adapter PROPERTIES
+  CXX_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE YES
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES)
+singz_configure_realtime_target(zdsp_host_adapter)
+
 # Offline rendering shares the compiled graph and processor implementations,
 # but WAV serialization is deliberately outside the callback-reachable leaf.
 add_library(zdsp_offline STATIC EXCLUDE_FROM_ALL
@@ -109,7 +129,7 @@ singz_configure_realtime_target(zdsp_prototype)
 # drift and every newly added target source is scanned automatically.
 set(_zdsp_rt_manifest "${CMAKE_CURRENT_BINARY_DIR}/zdsp-realtime-sources.cmake")
 set(_zdsp_rt_files)
-foreach(_target IN ITEMS zdsp_runtime zdsp_prototype)
+foreach(_target IN ITEMS zdsp_runtime zdsp_host_adapter zdsp_prototype)
   get_target_property(_target_source_dir "${_target}" SOURCE_DIR)
   get_target_property(_target_sources "${_target}" SOURCES)
   foreach(_source IN LISTS _target_sources)
@@ -138,6 +158,7 @@ add_custom_target(singz_check_zdsp_realtime ALL
   VERBATIM
   COMMENT "Checking zdsp real-time source policy")
 add_dependencies(zdsp_runtime singz_check_zdsp_realtime)
+add_dependencies(zdsp_host_adapter singz_check_zdsp_realtime)
 add_dependencies(zdsp_prototype singz_check_zdsp_realtime)
 
 # Persistence is control-domain code and a separate target even though the

@@ -41,7 +41,8 @@ add_library(zcore_device_callback STATIC
   src/audio/audio_input_timestamp.cpp
   src/audio/audio_input_transport_callback.cpp
   src/device/audio_input_callback.cpp
-  src/device/audio_input_callback_gate.cpp)
+  src/device/audio_input_callback_gate.cpp
+  src/device/audio_host_callback.cpp)
 add_library(SingZ::zcore_device_callback ALIAS zcore_device_callback)
 singz_zcore_target(zcore_device_callback)
 target_link_libraries(zcore_device_callback PUBLIC SingZ::zcore_base)
@@ -50,6 +51,8 @@ target_sources(zcore_device_callback PRIVATE
   include/zcore/audio/audio_input_producer.h
   include/zcore/audio/audio_input_timestamp.h
   include/zcore/device/audio_input_callback_gate.h
+  include/zcore/device/audio_host_callback.h
+  include/zcore/device/audio_host_render.h
   src/audio/audio_input_transport_internal.h
   src/device/audio_input_callback.h)
 set_target_properties(zcore_device_callback PROPERTIES
@@ -95,32 +98,40 @@ add_dependencies(zcore_device_callback singz_check_zcore_realtime)
 set(ZCORE_DEVICE_SOURCES
   src/device/audio_input.cpp
   src/device/audio_input_wake.cpp
+  src/device/audio_host.cpp
+  src/device/audio_host_unsupported.cpp
   platform/android/audio_input_android_policy.cpp)
 if(ANDROID)
   list(APPEND ZCORE_DEVICE_SOURCES
+    platform/android/audio_host_android.cpp
     platform/android/audio_input_android.cpp
     platform/android/audio_input_android_registry.cpp
     platform/android/audio_input_wake_android.cpp)
 elseif(APPLE)
   if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND ZCORE_DEVICE_SOURCES
+      platform/ios/audio_host_ios.cpp
       platform/ios/audio_input_ios.mm
       platform/ios/audio_input_ios_session.cpp
       platform/ios/audio_input_ios_session.mm
       platform/ios/audio_input_wake_ios.cpp)
   else()
     list(APPEND ZCORE_DEVICE_SOURCES
+      platform/macos/audio_host_macos.cpp
       platform/ios/audio_input_ios_session.cpp
       platform/macos/audio_input_macos.cpp
       platform/macos/audio_input_wake_macos.cpp)
   endif()
 elseif(WIN32)
   list(APPEND ZCORE_DEVICE_SOURCES
+    platform/windows/audio_host_windows.cpp
     platform/ios/audio_input_ios_session.cpp
     platform/windows/audio_input_windows.cpp
     platform/windows/audio_input_wake_windows.cpp)
 else()
-  list(APPEND ZCORE_DEVICE_SOURCES platform/ios/audio_input_ios_session.cpp)
+  list(APPEND ZCORE_DEVICE_SOURCES
+    platform/ios/audio_input_ios_session.cpp
+    platform/unsupported/audio_host_unsupported.cpp)
 endif()
 
 add_library(zcore_device STATIC ${ZCORE_DEVICE_SOURCES})
@@ -146,9 +157,33 @@ elseif(APPLE)
   if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     target_link_libraries(zcore_device PUBLIC "-framework AVFoundation")
   else()
-    set_source_files_properties(platform/macos/audio_input_macos.cpp
+    set_source_files_properties(
+      platform/macos/audio_input_macos.cpp
+      platform/macos/audio_host_macos.cpp
       PROPERTIES COMPILE_OPTIONS "-fblocks")
   endif()
+endif()
+
+# Deterministic standalone/test provider. Keep threads and synthetic sample
+# generation out of shipping device archives and mobile product links.
+add_library(zcore_device_fake STATIC EXCLUDE_FROM_ALL
+  test_support/audio_host_fake.cpp)
+add_library(SingZ::zcore_device_fake ALIAS zcore_device_fake)
+singz_zcore_target(zcore_device_fake)
+target_link_libraries(zcore_device_fake PUBLIC
+  SingZ::zcore_device
+  Threads::Threads)
+target_sources(zcore_device_fake PRIVATE
+  include/zcore/device/audio_host_fake.h)
+
+if(APPLE)
+  add_custom_target(zcore_apple_audio_host_smoke
+    COMMAND bash
+      "${CMAKE_CURRENT_SOURCE_DIR}/build-apple-audio-host-smoke.sh"
+      "${CMAKE_CURRENT_SOURCE_DIR}/.."
+      "${CMAKE_CURRENT_BINARY_DIR}/apple-audio-host-smoke"
+    VERBATIM
+    COMMENT "Building isolated zcore AudioHost iOS device/simulator contracts")
 endif()
 
 get_target_property(_zcore_callback_links zcore_device_callback LINK_LIBRARIES)

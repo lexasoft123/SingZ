@@ -12,8 +12,20 @@ const { sourceFingerprint } = require('./build-capture-addon.cjs')
 
 const root = resolve(__dirname, '..')
 
+function spawnOptions(command, platform = process.platform) {
+  return {
+    cwd: root,
+    stdio: 'inherit',
+    // Node 22/24 on Windows can return EINVAL when CreateProcess receives a
+    // .cmd shim directly. The only such command here is the fixed npm.cmd
+    // executable with fixed `run build` arguments; no user input is joined.
+    shell: platform === 'win32' && /\.cmd$/i.test(command)
+  }
+}
+
 function run(command, args) {
-  const result = spawnSync(command, args, { cwd: root, stdio: 'inherit' })
+  const result = spawnSync(command, args, spawnOptions(command))
+  if (result.error) throw new Error(`Failed to run ${command}: ${result.error.message}`)
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`)
 }
 
@@ -92,5 +104,6 @@ if (require.main === module) main()
 module.exports = {
   electronBuilderArgs,
   finalVerifyCaptureSnapshots,
-  hasExplicitPublishArg
+  hasExplicitPublishArg,
+  spawnOptions
 }

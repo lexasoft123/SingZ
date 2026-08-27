@@ -1,8 +1,8 @@
 # `zcore` and `zdsp` native design
 
-Status: proposed implementation standard
+Status: active implementation standard (Phase 3A standalone host present)
 
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-27
 
 This document defines the language profile, component boundaries, design
 patterns, target layout and dependency policy for the native SingZ audio
@@ -69,7 +69,7 @@ flowchart TD
   AN --> ML[zdsp_ml]
   API --> PL[zdsp_plugins]
 
-  D --> H[product AudioHost coordinator]
+  D --> H[zdsp_host_adapter / future product coordinator]
   RT --> H
   M --> APP[app/offline tools]
   AN --> APP
@@ -88,7 +88,8 @@ Rules:
   remain separate static-library artifacts. It does not own graph buses or
   process contexts.
 - `zcore_device_callback` contains only callback-reachable sample conversion,
-  timestamp projection, a narrow SPSC producer view and notification code.
+  timestamp projection, a narrow SPSC producer view, notification code and the
+  full-duplex `AudioHost` render-thunk leaf.
   Prepared storage remains owned by `zcore_audio`; the callback leaf headers
   contain no owning transport or consumer API. It owns no thread, provider,
   framework or device lifecycle policy.
@@ -102,6 +103,10 @@ Rules:
   part of that append-compatible interface, not general `zcore` units.
 - `zdsp_runtime` contains graph compilation, immutable snapshots, the real-time
   arena, buffer planner, runner and retirement.
+- `zdsp_host_adapter` is the callback-safe higher layer that links
+  `zcore_device` and `zdsp_runtime`, maps planar host buses/times into
+  `ProcessContext`, and contains a rejected render to silence. It is a
+  standalone conformance component in Phase 3A, not product playback.
 - `zdsp_nodes` contains prepared built-in real-time processors.
 - `zdsp_analysis` contains live taps and offline music-analysis algorithms.
 - `zdsp_ml` contains ONNX/other inference adapters. It is not linked into a
@@ -117,9 +122,10 @@ coordinator is the adapter boundary: it consumes device/capture values from
 `zcore_audio`/`zcore_device`, explicitly constructs the corresponding
 `zdsp_api` clock, bus and process values, and invokes the runner. This avoids
 duplicating graph contracts in `zcore_audio` and avoids the forbidden
-`zcore`→`zdsp` dependency. A future reusable host adapter remains a higher
-layer linking both sides; it does not move DSP contracts into the device
-layer. The broad generated iOS pod is the documented
+`zcore`→`zdsp` dependency. The Phase 3A reusable `zdsp_host_adapter` is that
+higher layer linking both sides; it does not move DSP contracts into the
+device layer. It remains disconnected from Electron and React Native output,
+whose Web Audio/RNAudioAPI engines retain sole ownership. The broad generated iOS pod is the documented
 Phase 0A packaging exception, not an acceptable graph-runtime dependency.
 During Phase 2 the allocating fixed-ratio resampler and YIN remain under
 `zcore/legacy` but compile once in `zcore_live_analysis_compat`, linked by both

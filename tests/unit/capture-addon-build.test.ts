@@ -62,6 +62,11 @@ const dist = require('../../scripts/dist.cjs') as {
     }) => void
   }): void
   hasExplicitPublishArg(args: string[]): boolean
+  spawnOptions(command: string, platform?: string): {
+    cwd: string
+    stdio: string
+    shell: boolean
+  }
 }
 const afterPack = require('../../scripts/afterPack.cjs') as {
   verifyCopiedCapture(context: {
@@ -87,6 +92,13 @@ const read = (path: string): string =>
   readFileSync(resolve(root, path), 'utf8').replaceAll('\r\n', '\n')
 
 describe('Electron capture addon build', () => {
+  it('uses the Windows command shell only for fixed cmd shims', () => {
+    expect(dist.spawnOptions('npm.cmd', 'win32')).toMatchObject({ shell: true })
+    expect(dist.spawnOptions('npm', 'win32')).toMatchObject({ shell: false })
+    expect(dist.spawnOptions('node.exe', 'win32')).toMatchObject({ shell: false })
+    expect(dist.spawnOptions('npm.cmd', 'darwin')).toMatchObject({ shell: false })
+    expect(read('scripts/dist.cjs')).toContain('if (result.error)')
+  })
   it.runIf(process.platform === 'darwin')(
     'keeps build-time and packaged-runtime Mach-O canonicalization identical',
     () => {

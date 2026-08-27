@@ -25,6 +25,12 @@ real-time scheduling, zero-copy and acceleration research is recorded in
 C++ language profile, component targets, dependencies and scalable repository
 layout are in [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
 
+Phase 3A adds a standalone native conformance path only:
+`zcore_device` AudioHost/provider → `zdsp_host_adapter` → `zdsp_runtime`.
+Its headless muted CLI and fake/macOS AUHAL providers are not wired to the
+Electron renderer or either mobile app. Web Audio below and RNAudioAPI on
+mobile remain the only product playback/session owners until Phase 4.
+
 ## Audio playback (`renderer/src/audio/engine.ts`)
 
 All stems are `AudioBufferSourceNode`s scheduled at the same context time →

@@ -1029,6 +1029,45 @@ Avoid:
 
 ### Phase 3 — Standalone full-duplex host conformance
 
+Phase 3A standalone slice implemented 2026-08-27 (not a product cutover):
+
+- zcore's `singz::AudioHost` now owns the graph-agnostic inventory, two-stage
+  open/start lifecycle, negotiated float32-planar format, physical input and
+  output channel maps, four distinct latency fields, output-master clock
+  metadata, generations and bounded lock-free telemetry. Its lifecycle and
+  status methods are serialized in the control domain; only the callback's
+  lock-free telemetry atomics may update concurrently with a status snapshot.
+- `zcore_device_callback` contains the plain `noexcept` render-thunk leaf. It
+  validates every block, contains failure to silence and uses saturating
+  lock-free 32-bit callback counters so armeabi-v7a cannot acquire a hidden
+  64-bit atomic lock. It is not the capture-only `AudioInput` ring.
+- `SingZ::zdsp_host_adapter` is the intentionally higher target linking
+  `zcore_device` and `zdsp_runtime`; zcore remains independent of zdsp. It
+  keeps input capture provenance distinct from output render time and maps
+  callback sequence, source frame, clock domain, generations, host times and
+  discontinuities into the graph contracts.
+- The deterministic fake full-duplex provider and headless
+  `singz-audio-host` tool are the portable conformance harness. Hardware runs
+  are muted; for the Zen input wired to physical channel 3 use zero-based
+  `--input-channels 2` and an explicit same-device UID/output map.
+- macOS has a same-device AUHAL provider in its own OS source. Windows, iOS,
+  Android and other builds select explicit compiling unsupported providers;
+  this phase does not claim their native output implementation.
+
+The AUHAL slice deliberately rejects different input/output UIDs. A bounded
+cross-device FIFO, drift estimator/resampler and aggregate-device policy are
+deferred, as are WASAPI, RemoteIO, Oboe and the separately licensed ASIO
+provider. Web Audio/RNAudioAPI remains the sole product output/session owner;
+no renderer, Electron playback, mobile playback or UI path links this host.
+
+The review invocation is intentionally explicit and bounded:
+
+```bash
+singz-audio-host --run --device-uid '<CoreAudio UID>' \
+  --input-channels 2 --output-channels 0,1 --rate 48000 \
+  --buffer 64 --maximum-frames 1024 --milliseconds 750
+```
+
 Implement one provider at a time behind `AudioHost`:
 
 1. macOS duplex AUHAL;

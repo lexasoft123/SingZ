@@ -134,6 +134,15 @@ target_link_libraries(singz-analyze PRIVATE
   SingZ::zcore_legacy
   SingZ::zdsp_analysis)
 
+# Standalone, headless Phase 3A ownership boundary. This never starts product
+# playback and emits silence for hardware runs.
+add_executable(singz-audio-host tools/native/singz-audio-host.cpp)
+target_compile_features(singz-audio-host PRIVATE cxx_std_20)
+add_dependencies(singz-audio-host singz_check_zcore_boundaries)
+target_link_libraries(singz-audio-host PRIVATE
+  SingZ::native_build_options
+  SingZ::zcore_device_fake)
+
 # ---- the host test suite (tests/native at the repo root) --------------------
 # The wav suites and flac_roundtrip synthesize their own audio, so ctest needs
 # no fixtures, no ffmpeg and no node — which is exactly what lets the Windows
@@ -167,6 +176,27 @@ if(SINGZ_CORE_TESTS)
     "${SINGZ_REPO_ROOT}/zcore/src/device")
   target_link_libraries(core_host_tests PRIVATE SingZ::zcore_legacy)
   add_test(NAME core_host_tests COMMAND core_host_tests)
+
+  add_executable(audio_host_tests
+    ${SINGZ_REPO_ROOT}/tests/native/audio_host_tests.cpp)
+  target_compile_features(audio_host_tests PRIVATE cxx_std_20)
+  target_include_directories(audio_host_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(audio_host_tests PRIVATE
+    SingZ::zcore_device_fake Threads::Threads)
+  add_test(NAME audio_host_tests COMMAND audio_host_tests)
+
+  add_executable(audio_host_graph_adapter_tests
+    ${SINGZ_REPO_ROOT}/zdsp/tests/audio_host_graph_adapter_tests.cpp)
+  target_compile_features(audio_host_graph_adapter_tests PRIVATE cxx_std_20)
+  target_link_libraries(audio_host_graph_adapter_tests PRIVATE
+    SingZ::zdsp_host_adapter)
+  add_test(NAME audio_host_graph_adapter_tests COMMAND audio_host_graph_adapter_tests)
+
+  add_test(NAME audio_host_fake_cli
+    COMMAND singz-audio-host --fake --blocks 6 --maximum-frames 1024)
+  set_tests_properties(audio_host_fake_cli PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "\"callbacks\":6.*\"xruns\":1.*\"deadlineMisses\":1.*\"varying\":1.*\"maximumSeen\":1024.*\"state\":\"stopped\"")
 
   add_executable(zdsp_contract_tests
     ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_contract_tests.cpp)
@@ -204,6 +234,11 @@ if(SINGZ_CORE_TESTS)
     SingZ::zdsp_analysis SingZ::zcore_legacy Threads::Threads)
   add_test(NAME zdsp_analysis_tests COMMAND zdsp_analysis_tests)
   if(APPLE)
+    add_test(NAME zcore_apple_audio_host_smoke
+      COMMAND bash
+        "${SINGZ_REPO_ROOT}/zcore/build-apple-audio-host-smoke.sh"
+        "${SINGZ_REPO_ROOT}"
+        "${CMAKE_CURRENT_BINARY_DIR}/zcore-apple-audio-host-ctest")
     add_test(NAME zdsp_apple_component_smoke
       COMMAND bash
         "${SINGZ_REPO_ROOT}/zdsp/build-apple-component-smoke.sh"
