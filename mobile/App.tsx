@@ -706,6 +706,16 @@ export default function App(): React.JSX.Element {
     [changeTab, navigationRef]
   )
 
+  // A driver could READ which tab is showing (TEST.screen) and never change
+  // it, so nothing automated could reach Vocal training at all — the tab bar
+  // shipped without a way in. Declared HERE rather than beside TEST.screen:
+  // the dependency array is evaluated during render, and navigateToTab is a
+  // const 100 lines further down, so up there it is a temporal-dead-zone
+  // ReferenceError on the first paint.
+  useEffect(() => {
+    if (TEST) TEST.navigateToTab = navigateToTab
+  }, [navigateToTab])
+
   const updateTrainingFacts = useCallback(
     (facts: { keyInfo: MobileSongTrainingFacts['keyInfo']; transpose: number }) => {
       setSongFacts((current) => (current ? { ...current, ...facts } : current))
