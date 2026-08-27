@@ -345,8 +345,15 @@ node .claude/skills/release-poster/scripts/make-post-kit.cjs \
 
 It embeds the poster and the display face, so the page is self-contained and
 survives being moved or emailed. **Copy image** puts the PNG on the clipboard —
-paste straight into Telegram — with **Save PNG** as the fallback, and each
-caption shows its length against the 1024 limit.
+paste straight into Telegram — and each caption shows its length against the
+1024 limit. **Save PNG** is a desktop fallback only: it is a `data:` URI
+download, which iOS Safari blocks at top level. On a phone the page says so
+itself and points at press-and-hold, which needs neither clipboard nor
+download. A phone cannot open this file at all (iOS offers to save it to
+Files), so it arrives over `http://` by IP, where there is no clipboard API —
+which the page detects and says. It picks its advice by `(hover: none)`, not by
+the origin: a desktop at that same LAN URL has no clipboard either and is still
+told about ⌘C and Save PNG, both of which work there.
 
 Keep it a **local** file. A published artifact cannot hand the viewer a
 download and is a poor place for clipboard work; this page exists to be
