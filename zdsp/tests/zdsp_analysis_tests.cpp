@@ -20,19 +20,27 @@ static_assert(sizeof(zdsp::analysis::LiveInputAnalysisAdapter) <= 512,
 
 namespace {
 int failures = 0;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    defined(__SANITIZE_UNDEFINED__)
+constexpr bool kSanitizerMacroInstrumented = true;
+#else
+constexpr bool kSanitizerMacroInstrumented = false;
+#endif
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer) || \
     __has_feature(thread_sanitizer)
-constexpr bool kSanitizerInstrumented = true;
+constexpr bool kSanitizerFeatureInstrumented = true;
 #else
-constexpr bool kSanitizerInstrumented = false;
+constexpr bool kSanitizerFeatureInstrumented = false;
 #endif
-#elif defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
-    defined(__SANITIZE_UNDEFINED__)
-constexpr bool kSanitizerInstrumented = true;
 #else
-constexpr bool kSanitizerInstrumented = false;
+constexpr bool kSanitizerFeatureInstrumented = false;
 #endif
+// Some GCC versions expose __has_feature without reporting TSan through it,
+// while still defining __SANITIZE_THREAD__. Treat the two compiler mechanisms
+// independently instead of allowing a false feature probe to mask the macro.
+constexpr bool kSanitizerInstrumented =
+    kSanitizerMacroInstrumented || kSanitizerFeatureInstrumented;
 #define CHECK(name, condition)                                                   \
   do {                                                                           \
     if (!(condition)) {                                                          \
@@ -602,15 +610,19 @@ int main() {
                     sine.data(), sine.size(), 48000).frequency;
   const double averageMs = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count() / 20.0;
-  std::printf("analysis handoff average: %.3f ms; window: %zu frames; hop: %zu frames\n",
+  std::printf("analysis handoff average: %.3f ms; window: %zu frames; hop: %zu frames; "
+              "sanitizer: %s\n",
               averageMs,
               zdsp::analysis::LiveInputAnalysisAdapter::analysisFrames(),
-              zdsp::analysis::LiveInputAnalysisAdapter::hopFrames());
-  // Sanitizers intentionally distort this microbenchmark; the same binary is
-  // budget-gated in strict Release while sanitizer runs retain functional and
-  // ownership coverage.
-  CHECK("fake analyzer handoff stays under portable 10 ms budget",
-        checksum > 0 && (kSanitizerInstrumented || averageMs < 10.0));
+              zdsp::analysis::LiveInputAnalysisAdapter::hopFrames(),
+              kSanitizerInstrumented ? "yes" : "no");
+  CHECK("fake analyzer fixture produces stable pitch", checksum > 0);
+  // Sanitizer wall time is intentionally not a latency result. Strict Release
+  // retains the real portable 10 ms gate; sanitizer builds retain the same
+  // functional, ownership, and race coverage without weakening that budget.
+  if constexpr (!kSanitizerInstrumented)
+    CHECK("fake analyzer handoff stays under portable 10 ms budget",
+          averageMs < 10.0);
   CHECK("analyzer window latency remains separately declared",
         zdsp::analysis::LiveInputAnalysisAdapter::analysisFrames() == 2048 &&
             zdsp::analysis::LiveInputAnalysisAdapter::hopFrames() == 512);
