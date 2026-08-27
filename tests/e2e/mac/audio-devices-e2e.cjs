@@ -10,6 +10,14 @@
  * tone on channel 2. Device enumeration stays real, so the hardware picker
  * branch is still exercised without making meter assertions machine-dependent.
  *
+ * That fixture reaches the WEB AUDIO path only. With a current core binary the
+ * meter and training capture natively instead, on this machine's real default
+ * input, and the fixture's silent/tone pair says nothing about it — so the
+ * meter assertions fork on `nativeMode`: the fixture pair when the app is on
+ * Web Audio, and "inside the scale it declares, on the lane that was picked"
+ * when it is native. Written after a machine whose default input is a
+ * 24-channel aggregate failed both halves while the app was working.
+ *
  * Prereqs: `npm run build` done; the dev Electron binary has mac microphone
  * permission (TCC) so getUserMedia can open.
  *
@@ -172,8 +180,25 @@ const launch = async () => {
     { timeout: 20000 }
   )
   if (!(await win.$('.mic-meter[role="meter"]'))) throw new Error('accessible mic meter missing')
-  const silentLevel = await win.$eval('.mic-meter[role="meter"]', (el) => Number(el.getAttribute('aria-valuenow')))
-  if (silentLevel !== -72) throw new Error(`channel 1 fixture should be silent, got ${silentLevel} dBFS`)
+  const meterLevel = () =>
+    win.$eval('.mic-meter[role="meter"]', (el) => Number(el.getAttribute('aria-valuenow')))
+  const silentLevel = await meterLevel()
+  // The fixture is a renderer-installed getUserMedia stream, so it feeds the
+  // Web Audio path ONLY. In native mode this meter is a real device on this
+  // machine's real default input, whatever that happens to be — asserting the
+  // fixture's silence there measures the room, not the app. What native mode
+  // can promise is that the meter stays inside the scale it declares.
+  if (nativeMode) {
+    // Number(null) is 0, which is inside the scale — check the attribute is
+    // really there, or a meter that stopped reporting would read as healthy.
+    const raw = await win.$eval('.mic-meter[role="meter"]', (el) => el.getAttribute('aria-valuenow'))
+    if (raw === null || raw === '' || !Number.isFinite(Number(raw)))
+      throw new Error(`meter published no level: aria-valuenow=${JSON.stringify(raw)}`)
+    if (!(silentLevel >= -72 && silentLevel <= 0))
+      throw new Error(`meter read ${silentLevel} dBFS, outside its own -72..0 scale`)
+  } else if (silentLevel !== -72) {
+    throw new Error(`channel 1 fixture should be silent, got ${silentLevel} dBFS`)
+  }
   const initialChannelOptions = await win.$$('#settings-input-channel option')
   const initialNative = nativeMode
     ? nativeInventory.devices.find((device) => device.isDefault) ?? nativeInventory.devices[0]
@@ -190,18 +215,64 @@ const launch = async () => {
       (selected) => JSON.parse(localStorage.getItem('singz.audio') ?? '{}').inputChannel === selected,
       previewChannel
     )
-    await win.waitForFunction(
-      () => Number(document.querySelector('.mic-meter[role="meter"]')?.getAttribute('aria-valuenow')) > -72
-    )
-    const signalLevel = await win.$eval('.mic-meter[role="meter"]', (el) => Number(el.getAttribute('aria-valuenow')))
-    if (signalLevel === silentLevel) throw new Error('channel meter did not change between silent and signal lanes')
-    console.log(`fixture preview: ${silentLevel} dBFS → ${signalLevel} dBFS; picker lanes: ${initialChannelOptions.length}`)
+    if (nativeMode) {
+      // Wait for the preview to be BACK, on the new lane, before reading it:
+      // selecting a channel calls setPreview(INITIAL_PREVIEW) in a layout
+      // effect and reopens the device asynchronously, while the localStorage
+      // gate above lands in a passive effect that runs sooner. Reading in that
+      // window measures the -72 placeholder with device still null, where the
+      // fallback warning cannot render either — both assertions vacuous.
+      await win.waitForFunction(
+        (channel) => document.querySelector('.mic-preview-status')?.textContent?.includes(`channel ${channel} of `) === true,
+        previewChannel + 1,
+        { timeout: 20000 }
+      )
+      // A real lane may legitimately be silent, so the promise here is that
+      // the lane you picked is the lane being previewed — the app says so
+      // itself by NOT showing its channel-fallback warning — and that the
+      // meter keeps reporting inside its scale on it.
+      const nativeLevel = await meterLevel()
+      if (!(nativeLevel >= -72 && nativeLevel <= 0))
+        throw new Error(`channel ${previewChannel + 1} read ${nativeLevel} dBFS, outside the meter's scale`)
+      const laneWarning = await win.$eval('.settings-card', (card) =>
+        [...card.querySelectorAll('.settings-hint.warn')].map((el) => el.textContent ?? '').find((t) => t.includes('lane')) ?? null
+      )
+      if (laneWarning) throw new Error(`channel ${previewChannel + 1} not opened: ${laneWarning}`)
+      console.log(`native lane: channel ${previewChannel + 1} at ${nativeLevel} dBFS; picker lanes: ${initialChannelOptions.length}`)
+    } else {
+      await win.waitForFunction(
+        () => Number(document.querySelector('.mic-meter[role="meter"]')?.getAttribute('aria-valuenow')) > -72
+      )
+      const signalLevel = await meterLevel()
+      if (signalLevel === silentLevel) throw new Error('channel meter did not change between silent and signal lanes')
+      console.log(`fixture preview: ${silentLevel} dBFS → ${signalLevel} dBFS; picker lanes: ${initialChannelOptions.length}`)
+    }
   }
   await win.screenshot({ path: join(OUT, 'settings-audio.png') })
 
   await win.selectOption('#settings-input', ins[0].v)
   const stored = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
   if (stored[inputPrefKey] !== ins[0].v) throw new Error(`${inputPrefKey} pick not persisted`)
+  // ---- output pick (guarded — machine hardware) ----
+  const realOuts = outOpts.filter((o) => o.v)
+  let pickedOut = null
+  if (realOuts.length > 0) {
+    pickedOut = realOuts[0].v
+    await win.selectOption('#settings-output', pickedOut)
+    await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
+      timeout: 10000
+    })
+    console.log('output moved to:', realOuts[0].t)
+  } else {
+    console.log('skip output pick (no outputs listed)')
+  }
+  await win.click('.settings-card .modal-actions .pill')
+
+  // Settings' own preview owns the native input for as long as the panel is
+  // open, so a raw start here is refused ('Another training microphone is
+  // starting/active') — that is the exclusivity working, not a failure. The
+  // smoke therefore runs with the panel CLOSED and nothing else holding the
+  // device; the pitch strip's mic stays off until a singer asks for it.
   if (nativeMode) {
     const nativeSmoke = await win.evaluate(async (deviceUid) => {
       let resolveFrame
@@ -209,7 +280,15 @@ const launch = async () => {
       const unsubscribe = window.singz.onDesktopAudioInputEvent((token, event) => {
         if (event.type === 'frame') resolveFrame(event)
       })
-      const started = await window.singz.startDesktopAudioInput({ deviceUid, channel: 0 })
+      // Settings' preview releases the device asynchronously, so the start
+      // gate can still be holding a claim for a beat after the panel closes.
+      // 'busy' is that claim, and it is short-lived by construction — retry
+      // it rather than reporting the app's own exclusivity as a failure.
+      let started = await window.singz.startDesktopAudioInput({ deviceUid, channel: 0 })
+      for (let attempt = 0; attempt < 20 && !started.ok && started.kind === 'busy'; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        started = await window.singz.startDesktopAudioInput({ deviceUid, channel: 0 })
+      }
       if (!started.ok) {
         unsubscribe()
         return { started }
@@ -227,45 +306,40 @@ const launch = async () => {
     console.log('native capture:', nativeSmoke.started.device.label, 'channel 1')
   }
 
-  // ---- output pick (guarded — machine hardware) ----
-  const realOuts = outOpts.filter((o) => o.v)
-  let pickedOut = null
-  if (realOuts.length > 0) {
-    pickedOut = realOuts[0].v
-    await win.selectOption('#settings-output', pickedOut)
-    await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
-      timeout: 10000
-    })
-    console.log('output moved to:', realOuts[0].t)
-  } else {
-    console.log('skip output pick (no outputs listed)')
-  }
-  await win.click('.settings-card .modal-actions .pill')
-
   // ---- active Imitate yields exclusively to Settings and stays interrupted ----
   await win.click('.app-sections button:has-text("Vocal training")')
   await win.waitForSelector('.vt-exercise:has-text("Match a note")', { timeout: 20000 })
   await win.click('.vt-exercise:has-text("Match a note")')
   await win.click('button:has-text("Start practice")')
-  if (nativeMode) {
-    await win.waitForFunction(
-      () => document.querySelector('.vt-progress-copy [role="status"]')?.textContent !== 'Ready',
-      null,
-      { timeout: 15000 }
-    )
-  } else {
-    await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
-  }
+  // The handover is asserted against what the SCREEN shows, because that is
+  // the half both capture paths share: `__singzE2eMic` counts getUserMedia
+  // and sees nothing at all when the app is capturing natively. Listening =
+  // the practice transport; interrupted = the paused card and its Continue
+  // button (`exercisePhase` is internal state, never text on screen).
+  await win.waitForSelector('.vt-transport-status', { timeout: 20000 })
   await win.click('.pill.gear')
   await win.waitForSelector('.settings-card', { timeout: 10000 })
-  await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
-  const trainingOwnership = await win.evaluate(() => window.__singzE2eMic)
-  if (trainingOwnership.maxActive > 1)
-    throw new Error(`training/settings capture overlapped: ${JSON.stringify(trainingOwnership)}`)
+  await win.waitForFunction(
+    () => document.querySelector('.vt-ready')?.textContent?.includes('Practice paused') === true,
+    null,
+    { timeout: 15000 }
+  )
+  if (await win.$('.vt-transport-status'))
+    throw new Error('training kept listening while Settings owned the microphone')
+  if (!nativeMode) {
+    await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
+    const trainingOwnership = await win.evaluate(() => window.__singzE2eMic)
+    if (trainingOwnership.maxActive > 1)
+      throw new Error(`training/settings capture overlapped: ${JSON.stringify(trainingOwnership)}`)
+  }
   await win.click('.settings-card .modal-actions .pill')
-  await win.waitForFunction(() => window.__singzE2eMic.active === 0, null, { timeout: 10000 })
-  const trainingStatus = await win.$eval('[role="status"][aria-live="polite"]', (el) => el.textContent)
-  if (trainingStatus !== 'Ready') throw new Error(`training resumed under Settings close: ${trainingStatus}`)
+  if (!nativeMode) await win.waitForFunction(() => window.__singzE2eMic.active === 0, null, { timeout: 10000 })
+  // Closing Settings must not silently put the singer back on the mic.
+  const paused = await win.$eval('.vt-ready', (el) => el.textContent ?? '')
+  if (!paused.includes('Practice paused'))
+    throw new Error(`training resumed under Settings close: ${paused}`)
+  if (!(await win.$('button:has-text("Continue practice")')))
+    throw new Error('paused practice offers no way back in')
   await win.click('.app-sections button:has-text("Songs")')
 
   // ---- load the tone, split from cache, karaoke + mic on ----
@@ -295,7 +369,18 @@ const launch = async () => {
   )
   if (ins.length >= 2) {
     await win.selectOption('#settings-input', ins[1].v)
-    await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
+    if (nativeMode) {
+      // __singzE2eMic counts getUserMedia, and the native preview never calls
+      // it — the app says which device it reopened on instead.
+      // The option text is "<label> · <n> ch"; the status names the label.
+      await win.waitForFunction(
+        (label) => document.querySelector('.mic-preview-status')?.textContent?.includes(`Listening through ${label}`) === true,
+        ins[1].t.split(' · ')[0].trim(),
+        { timeout: 20000 }
+      )
+    } else {
+      await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
+    }
     const prefs2 = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
     if (prefs2[inputPrefKey] !== ins[1].v) throw new Error('live input switch not persisted')
     console.log('live mic switch: restarted on', ins[1].t)
@@ -318,10 +403,19 @@ const launch = async () => {
     console.log('input channel:', Number(pickedChannel) + 1)
     expectedInputChannel = Number(pickedChannel)
   }
-  await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
-  const ownership = await win.evaluate(() => window.__singzE2eMic)
-  if (ownership.active !== 1 || ownership.maxActive > 1)
-    throw new Error(`microphone ownership overlapped: ${JSON.stringify(ownership)}`)
+  // Exclusivity, read from whichever counter can see it: on Web Audio the one
+  // live stream is Settings' own; natively Settings holds the device outside
+  // Chromium, so the proof is that karaoke's stream LET GO and never doubled.
+  if (nativeMode) {
+    const ownership = await win.evaluate(() => window.__singzE2eMic)
+    if (ownership.active !== 0 || ownership.maxActive > 1)
+      throw new Error(`karaoke did not yield to the native preview: ${JSON.stringify(ownership)}`)
+  } else {
+    await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
+    const ownership = await win.evaluate(() => window.__singzE2eMic)
+    if (ownership.active !== 1 || ownership.maxActive > 1)
+      throw new Error(`microphone ownership overlapped: ${JSON.stringify(ownership)}`)
+  }
 
   // ---- Esc closes settings without killing karaoke underneath ----
   await win.keyboard.press('Escape')
