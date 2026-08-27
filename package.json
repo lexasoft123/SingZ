@@ -12,12 +12,13 @@
     "build": "node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json",
-    "dist": "npm run build && electron-builder --publish never",
+    "dist": "node scripts/dist.cjs",
     "test": "vitest run",
     "gates": "scripts/run-parity-gates.sh",
     "store-notes": "node scripts/store-notes.cjs",
     "store-notes:check": "node scripts/store-notes.cjs --check",
     "capture:addon": "node scripts/build-capture-addon.cjs",
+    "capture:verify": "electron tests/e2e/capture-addon-smoke.cjs --current-source",
     "sync:kit-native": "node scripts/sync-kit-native.mjs"
   },
   "devDependencies": {

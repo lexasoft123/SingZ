@@ -46,17 +46,24 @@ publish:
   owner: lexasoft123
   repo: SingZ
 mac:
-  # No signing certificate wired up yet — ships unsigned (right-click → Open).
-  # To sign later: remove `identity`, add CSC_LINK/CSC_KEY_PASSWORD secrets in CI.
+  # No Developer ID is wired up yet; afterPack applies an ad-hoc fallback.
+  # To sign for release: remove `identity`, add CSC_LINK/CSC_KEY_PASSWORD; the
+  # later electron-builder signing pass replaces the fallback signature.
   identity: null
   category: public.app-category.music
   darkModeSupport: true
+  # Universal packaging receives the same already-lipo'd capture addon in
+  # both thin staging apps; do not attempt to merge that binary a second time.
+  x64ArchFiles: '**/engines/singz-capture.node'
   extendInfo:
     NSMicrophoneUsageDescription: SingZ listens to your singing to show how well you match the melody.
   extraResources:
     - from: vendor/darwin-${arch}
       to: engines
-      filter: ['whisper-cli*', 'singz-analyze*', 'singz-capture.node']
+      filter: ['whisper-cli*', 'singz-analyze*']
+    - from: build/capture-package/darwin-${arch}
+      to: engines
+      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json']
   target:
     - target: dmg
 dmg:
@@ -65,7 +72,10 @@ win:
   extraResources:
     - from: vendor/win32-x64
       to: engines
-      filter: ['whisper-cli*', 'singz-analyze*', 'singz-capture.node']
+      filter: ['whisper-cli*', 'singz-analyze*']
+    - from: build/capture-package/win32-x64
+      to: engines
+      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json']
   target:
     - target: nsis
       arch: [x64]

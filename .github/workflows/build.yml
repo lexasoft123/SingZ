@@ -73,10 +73,9 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/build-capture-addon.cjs', 'native/electron/**', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh', 'node_modules/electron/package.json') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       - name: Cache engine sources and build trees
-        if: steps.engines-out.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: .engines-src
@@ -95,13 +94,6 @@ jobs:
           bash scripts/build-gpu-pack.sh
           bash scripts/build-onnx-pack.sh darwin-x64
 
-      - name: Build native capture addons (macOS universal packaging inputs)
-        if: runner.os == 'macOS'
-        run: |
-          npm run capture:addon -- darwin-arm64
-          npm run capture:addon -- darwin-x64
-          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs
-
       - name: Build engines and splitter pack (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -112,18 +104,8 @@ jobs:
           bash scripts/vendor-analyze.sh win32-x64
           bash scripts/build-onnx-pack.sh win32-x64
 
-      - name: Build and load native capture addon (Windows)
-        if: runner.os == 'Windows'
-        # bash, not the default pwsh: pwsh fails a step only on the LAST
-        # command's exit code, and a failed rebuild here would be masked by
-        # the cache-restored addon passing the smoke — shipping it green.
-        shell: bash
-        run: |
-          npm run capture:addon -- win32-x64
-          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
-
       - name: Package
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        run: npm run dist -- ${{ matrix.args }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

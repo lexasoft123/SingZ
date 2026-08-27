@@ -47,7 +47,8 @@ fi
 # Keyed on the checkout — see build-analyze-host.sh: a fixed $TMPDIR name is
 # one CMake cache shared across worktrees, and CMake refuses a cache whose
 # source dir was a different checkout.
-BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET-$(basename "$ROOT")"
+CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
+BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET-$CHECKOUT_KEY"
 CONFIG_ARGS=(-DSINGZ_CORE_TESTS=OFF)
 case "$TARGET" in
   darwin-arm64) CONFIG_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=arm64) ;;

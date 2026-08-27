@@ -57,7 +57,42 @@ jobs:
       - name: Build and load native capture addon in Electron
         run: |
           npm run capture:addon
-          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs --current-source
+          node tests/e2e/capture-artifact-rebuild.cjs
+
+      - name: Universal capture package merge and signature
+        run: |
+          # This job exercises capture packaging, not the unrelated downloaded
+          # engines. Identical inert files satisfy extraResources without
+          # pretending whisper/analyze themselves were tested here.
+          for target in darwin-arm64 darwin-x64; do
+            mkdir -p "vendor/$target"
+            printf '#!/bin/sh\nexit 1\n' > "vendor/$target/whisper-cli"
+            printf '#!/bin/sh\nexit 1\n' > "vendor/$target/singz-analyze"
+            printf 'capture-package-check\n' > "vendor/$target/singz-analyze.source-hash"
+            chmod +x "vendor/$target/whisper-cli" "vendor/$target/singz-analyze"
+          done
+          npm run dist -- --mac --universal --dir
+          ADDON=dist/mac-universal/SingZ.app/Contents/Resources/engines/singz-capture.node
+          lipo "$ADDON" -verify_arch x86_64 arm64
+          node tests/e2e/capture-addon-signed-mac.cjs dist/mac-universal/SingZ.app
+
+  capture-macos-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Build and load the thin Intel capture addon in Electron
+        run: |
+          npm run capture:addon -- darwin-x64
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs build/capture-package/darwin-x64/singz-capture.node --current-source
 
   capture-windows:
     runs-on: windows-latest
@@ -77,7 +112,18 @@ jobs:
         shell: bash
         run: |
           npm run capture:addon -- win32-x64
-          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs build/capture-package/win32-x64/singz-capture.node --current-source
+          node tests/e2e/capture-artifact-rebuild.cjs win32-x64
+
+      - name: Package and load-smoke win-unpacked
+        shell: bash
+        run: |
+          mkdir -p vendor/win32-x64
+          printf 'inert capture-package check\n' > vendor/win32-x64/whisper-cli
+          printf 'inert capture-package check\n' > vendor/win32-x64/singz-analyze
+          printf 'capture-package-check\n' > vendor/win32-x64/singz-analyze.source-hash
+          npm run dist -- --win --x64 --dir
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs dist/win-unpacked/resources/engines/singz-capture.node --current-source
 
   zdsp-sanitizers:
     runs-on: ubuntu-24.04

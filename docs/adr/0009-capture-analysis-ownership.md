@@ -61,10 +61,24 @@ capture-only path now would add a copy/scheduling hop without improving the
 current trust boundary.
 
 The addon is an explicit build artifact outside the asar at
-`resources/engines/singz-capture.node`. Development resolves the matching
-`vendor/<platform>-<arch>` artifact. It is built against the installed
-Electron version's headers (and Electron `node.lib` on Windows), then loaded
+`resources/engines/singz-capture.node` with its checksum/source manifest.
+The checksum is exact before packaging and on Windows. macOS signing mutates
+the nested Mach-O after that checksum is emitted, so only the default packaged
+Mac path may substitute a strict valid code signature for raw-byte equality;
+the signature-invariant canonical Mach-O digest, sidecars, manifest and
+compiled Electron/source identity must still agree. Re-signing changed code
+cannot manufacture the sealed canonical digest.
+Development independently fingerprints this checkout and resolves the matching
+immutable artifact under
+`build/capture-runtime/<target>/<source>/<binary-sha>/<generation>/`; the
+shared `vendor/` tree is never part of capture-addon selection. It is built
+against the installed Electron version's headers (and Electron `node.lib` on Windows), then loaded
 by a real Electron smoke; a system-Node build is not accepted as evidence.
+Before native loading, main reads the selected addon once and materializes
+those exact bytes at a unique process-private `.node` path. Hash, signature,
+canonical checks and `require()` all use that stable snapshot, closing selector
+replacement races and giving retries distinct module-cache identities; a
+successful path remains for mapped-DLL lifetime.
 The main owner binds capture to both renderer id and ownership generation.
 Native cancel suppresses analyzer delivery, stops and joins `AudioInput`, then
 destroys analyzer/input state and releases the event bridge before the IPC

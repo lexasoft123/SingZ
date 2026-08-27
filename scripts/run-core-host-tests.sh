@@ -17,7 +17,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # Keyed on the checkout — see build-analyze-host.sh: a fixed $TMPDIR name is
 # one CMake cache shared across worktrees, and CMake refuses a cache whose
 # source dir was a different checkout.
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests-$(basename "$ROOT")}"
+CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests-$CHECKOUT_KEY}"
 
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache

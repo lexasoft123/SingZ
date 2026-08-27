@@ -23,18 +23,97 @@ npm run capture:addon                    # current platform/architecture
 npm run capture:addon -- darwin-arm64   # release inputs on macOS
 npm run capture:addon -- darwin-x64
 npm run capture:addon -- win32-x64      # on Windows
-node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs
+npm run capture:verify                  # load + compiled identity check
+npm run dist                            # host package; builds/verifies addon
+npm run dist -- --mac --x64             # cross-architecture package input
+npm run dist -- --mac --universal       # builds arm64 + x64 capture inputs
 ```
 
 The script downloads Electron headers into ignored `.engines-src/`, builds
-with CMake under ignored `build/capture-*`, and writes the ignored product to
-`vendor/<platform>-<arch>/singz-capture.node`. `electron-builder` copies it
-outside the asar beside the engines. `SINGZ_CAPTURE_ADDON=/absolute/file.node`
-overrides development resolution. A plain system-Node load is not the ABI
-gate; the Electron smoke above is. On Windows, Electron's `node.lib` still
-names `node.exe`, so the CMake target must retain its delay-load hook and
-`/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads in Node but fails
-before module initialization in `electron.exe`.
+with CMake under ignored `build/capture-<target>`, and publishes an immutable,
+content-addressed runtime artifact under this checkout's ignored
+`build/capture-runtime/<target>/<source-fingerprint>/<artifact-sha>/<generation>/`.
+The artifact carries a source sidecar, raw SHA-256 sidecar and manifest. Mac
+manifests also seal a signature-invariant canonical Mach-O digest: signatures
+are removed on a private copy, only codesign-owned `__LINKEDIT` virtual size is
+normalized, and meaningful thin/fat slices are hashed by CPU identity;
+`current.json` selects that exact immutable generation. A corrupt generation is
+never overwritten (especially important for a loaded Windows DLL): rebuilding
+publishes a fresh path, validates its Mach-O/PE architecture, then moves the
+selector. The builder fingerprints the source tree again after CMake and before
+selector publication, aborting if an edit raced the build. Capture never publishes into `vendor/`: that
+directory is shared by all worktrees, while `build/` is deliberately local.
+The app independently fingerprints this checkout's native inputs and only
+resolves the matching immutable path, so another worktree cannot redirect it.
+
+Each build also prepares a coherent per-worktree packaging snapshot under
+`build/capture-package/<target>/`. `electron-builder` copies that snapshot
+outside the asar beside the engines, including its manifest and both sidecars.
+The `dist.cjs` wrapper interprets builder platform/architecture flags, builds
+every requested capture target, verifies every checksum/manifest, load-smokes
+the host architecture inside Electron, then forwards the original flags. This
+is why release workflows call `npm run dist -- ...`, not electron-builder
+directly. Input/config/prepackaged overrides and ambiguous combined or valued
+target flags are rejected because they could make electron-builder package a
+different project, extraResources set or architecture than the addon wrapper
+verified. Cross-architecture Mac builds are supported; cross-OS builds are
+rejected until the project has a real toolchain (`--win` runs on Windows and
+`--mac` on macOS). A local universal package also needs the pre-existing whisper/analyze
+engines for both Mac architectures; the release workflow prepares those before
+calling the wrapper. The wrapper lipos both capture slices first and gives each
+temporary app the same addon and identity evidence; ad-hoc signing is deferred
+until electron-builder has merged the final universal bundle. A plain
+system-Node load is not the ABI gate.
+
+macOS signing rewrites the nested addon's Mach-O signature bytes after the
+package snapshot's SHA-256 was written. Development, environment overrides,
+Windows and every pre-package snapshot therefore require exact raw SHA-256.
+Only the default addon inside a packaged macOS app may differ: its sidecars
+must still exactly match the validated manifest, `codesign --verify --strict`
+must accept the transformed Mach-O, its canonical digest must equal the sealed
+manifest digest, and the loaded addon's compiled Electron and source identity
+must match the manifest. A new self-consistent ad-hoc signature is therefore
+not evidence for changed code. The package E2E deliberately
+removes and recreates the nested signature, reseals the app, proves the raw
+bytes changed, and load-smokes that narrow path; it then changes a compiled
+source-stamp byte, re-signs again, and proves canonical verification rejects it
+before native code loads.
+
+Package snapshots have one writer per checkout. This is the same repository
+rule that requires parallel sessions to use separate worktrees; the publisher
+does not add a stale lock. It validates a per-process staging directory, moves
+the last good snapshot aside, and restores it if installation fails. Old
+runtime generations are pruned only after a seven-day grace while retaining
+the eight newest; `current.json` is never removed, macOS mappings reported by
+`lsof` are skipped, and Windows skips all generations while `tasklist` reports
+any loaded capture addon. Abandoned staging/backup directories are pruned
+best-effort.
+
+Any metadata, checksum, or `require()` failure happens before a native binding
+is returned and may be retried after rebuilding. Only a successfully returned
+binding whose compiled Electron/source identity is wrong is cached and requires
+a restart. The loader reads the selected addon once, stages those exact bytes
+under a cryptographically random process-private temporary `.node` path, and
+hashes, code-signature/canonical-checks and `require()`s that one stable path.
+A selector/source replacement after the read therefore cannot change executed
+bytes, and every retry gets a new require-cache identity. Pre-load validation
+or `require()` failure removes the private attempt; once native loading returns,
+the path is retained (even if compiled identity is then refused) for the
+process lifetime because Windows may keep the DLL mapped. Bounded stale cleanup
+removes only old, strictly named, same-owner directories whose recorded PID is
+confirmed dead; every live PID (including another worktree's SingZ) is preserved.
+`SINGZ_CAPTURE_ADDON=/absolute/file.node` overrides the selected path
+for diagnostics only; it does not bypass identity checks. The file must match
+this checkout (in development) and carry its own matching
+`singz-capture.manifest.json`, `.source-hash` and `.sha256` files beside the
+override. On Windows,
+Electron's `node.lib` still names `node.exe`, so the CMake target must retain its
+delay-load hook and `/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads
+in Node but fails before module initialization in `electron.exe`.
+
+The zcore host scripts key their temporary CMake directories on a hash of the
+complete checkout path, not its basename; two unrelated `foo` checkouts cannot
+reuse one CMake cache.
 
 Local clang builds pick up **ccache** automatically when it is installed
 (`brew install ccache`): `vendor-whisper.sh` and `npm run android` export
@@ -125,6 +204,7 @@ Manifest.lock". If it was restored, re-sync with
 |---|---|
 | `npm test` | vitest: the desktop unit suites **and** `tests/roundtrip/` — the real `gdriveSync` writing to a fake Drive and the real phone code reading it back out of the same store |
 | `npm run typecheck` | node + web configs, plus `tsconfig.tests.json` over `tests/shared/` (the harness both roots import — vitest transpiles without typechecking, so nothing else checks it) |
+| `node tests/e2e/capture-artifact-rebuild.cjs` | corrupts the ignored current capture artifact, proves the builder detects/repairs it, and restores the original bytes if repair fails |
 | `cd mobile && npx jest` | the phone's Drive protocol, offline fallbacks, ✓ rule and log |
 | `cd mobile/android && ./gradlew :app:testDebugUnitTest` | Kotlin's half of the shared cache-currency table |
 | `mobile/scripts/test-swift-currency.sh` | Swift's half — swiftc only, no simulator, no Pods |
@@ -199,7 +279,7 @@ Rules learned the hard way:
 | `SINGZ_WHISPER_MODEL` | whisper size (tiny/base/small/…, default large-v3-turbo) |
 
 Full clean-OS check (as CI can't do): package with
-`npx electron-builder --mac --dir`, then drive
+`npm run dist -- --mac --arm64 --dir`, then drive
 `dist/mac-arm64/SingZ.app/Contents/MacOS/SingZ` with
 `SINGZ_NO_SYSTEM_ENGINES=1` + fresh `SINGZ_MODELS_DIR`/`SINGZ_PACK_DIR` —
 the setup wizard must appear, download the pack for real, and a split must
@@ -240,7 +320,8 @@ pack that cannot split on a machine without homebrew or network.
 Builds ship ad-hoc signed (mac) / unsigned (win). To sign for real: remove
 `identity: null` from electron-builder.yml, add `CSC_LINK`/`CSC_KEY_PASSWORD`
 (+ `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` for notarization)
-as CI secrets — the afterPack hook steps aside automatically. Windows options:
+as CI secrets. The afterPack hook first applies the ad-hoc fallback; the later
+electron-builder signing pass replaces it with the configured real identity. Windows options:
 Azure Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
 
 ## Renderer performance rules

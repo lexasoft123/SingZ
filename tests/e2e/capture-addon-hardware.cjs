@@ -1,18 +1,35 @@
 const assert = require('node:assert/strict')
 const { join, resolve } = require('node:path')
+const {
+  currentRuntimeArtifact,
+  verifyCaptureArtifact
+} = require('../../scripts/capture-artifact.cjs')
+const { sourceFingerprint } = require('../../scripts/build-capture-addon.cjs')
 
 const embeddedNode = process.env.ELECTRON_RUN_AS_NODE === '1'
 const electron = embeddedNode ? null : require('electron')
 
 const ready = embeddedNode ? Promise.resolve() : electron.app.whenReady()
 ready.then(async () => {
-  if (process.platform === 'darwin') {
+  if (process.platform === 'darwin' && !embeddedNode) {
     const allowed = await electron.systemPreferences.askForMediaAccess('microphone')
     assert.equal(allowed, true, 'microphone permission')
   }
-  const addonPath = process.env.SINGZ_CAPTURE_ADDON ??
-    join('vendor', `${process.platform}-${process.arch}`, 'singz-capture.node')
-  const addon = require(resolve(addonPath))
+  const target = `${process.platform}-${process.arch}`
+  const requested = process.env.SINGZ_CAPTURE_ADDON
+  const current = requested ? null : currentRuntimeArtifact(process.cwd(), target)
+  const addonPath = requested ? resolve(requested) : current.addonPath
+  const { manifest } = verifyCaptureArtifact({
+    manifestPath: current?.manifestPath ??
+      join(resolve(addonPath, '..'), 'singz-capture.manifest.json'),
+    addonPath,
+    expectedTargets: process.platform === 'darwin' ? [target, 'darwin-universal'] : target,
+    electronVersion: process.versions.electron,
+    expectedSourceStamp: sourceFingerprint()
+  })
+  const addon = require(addonPath)
+  assert.equal(addon.buildInfo?.electronVersion, manifest.electronVersion, 'Electron build identity')
+  assert.equal(addon.buildInfo?.sourceStamp, manifest.sourceStamp, 'compiled source identity')
   const deviceUid = process.env.SINGZ_CAPTURE_UID ?? ''
   const inputChannel = Number(process.env.SINGZ_CAPTURE_CHANNEL ?? 0)
   const durationMs = Number(process.env.SINGZ_CAPTURE_DURATION_MS ?? 2500)

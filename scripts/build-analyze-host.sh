@@ -22,7 +22,10 @@ OUT="${1:-${TMPDIR:-/tmp}/singz-analyze}"
 # cache SHARED by every worktree on the machine, and CMake hard-errors when
 # the previous user was a different checkout ("does not match the source ...
 # used to generate cache") — it cost two sessions failed gates runs in one day.
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host-$(basename "$ROOT")}"
+# A basename is not unique (`/a/foo` and `/b/foo`); git's object hash is
+# available on every supported dev shell, including Git Bash on Windows.
+CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host-$CHECKOUT_KEY}"
 
 # Compiler cache when the machine has one — same launchers, base_dir and
 # hash_dir story as vendor-whisper.sh (a sibling worktree hits only with
