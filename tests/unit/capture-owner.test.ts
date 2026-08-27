@@ -80,10 +80,13 @@ describe('CaptureOwner', () => {
       platform: 'darwin' as const,
       arch: 'arm64'
     }
-    expect(resolveCaptureAddonPath(runtime)).toBe(
+    // join() uses the host separator — normalize so the assertion holds on
+    // the Windows E2E runner too.
+    const posix = (p: string): string => p.replaceAll('\\', '/')
+    expect(posix(resolveCaptureAddonPath(runtime))).toBe(
       '/checkout/vendor/darwin-arm64/singz-capture.node'
     )
-    expect(resolveCaptureAddonPath({ ...runtime, packaged: true })).toBe(
+    expect(posix(resolveCaptureAddonPath({ ...runtime, packaged: true }))).toBe(
       '/Applications/SingZ.app/Contents/Resources/engines/singz-capture.node'
     )
     expect(resolveCaptureAddonPath({ ...runtime, envOverride: './fixture.node' })).toBe(
