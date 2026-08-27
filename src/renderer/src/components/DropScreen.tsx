@@ -412,7 +412,7 @@ export default function DropScreen({
               This erases the whole project folder — {doomed.stemCount > 0
                 ? `${doomed.stemCount} stems`
                 : 'the song'}
-              {doomed.hasLyrics ? ', its lyrics' : ''}, your mix, transpose and training settings,{' '}
+              {doomed.hasLyrics ? ', its lyrics' : ''}, your mix, transpose and Carry the line settings,{' '}
               {fmtSize(doomed.bytes)} in all. It does not go to the Trash and it cannot be undone
               here.
             </p>

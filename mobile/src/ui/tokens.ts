@@ -10,43 +10,42 @@
  * fails if this file drifts from it — the same shape as
  * tests/shared/currency-cases.json, one table read by three runners.
  *
- * Regenerate: node scripts/sync-kit-tokens.mjs
+ * Regenerate native kit artifacts: npm run sync:kit-native
  */
 
-/** Chrome palette. Values are the desktop's — see the kit's tokens.ts. */
+import { CUSTOM_COLORS as KIT_CUSTOM_COLORS, STEM_META } from './uikit/tokens/stems.js'
+import { tokens } from './uikit/tokens/tokens.js'
+
+/** Chrome palette. Values resolve directly from the vendored kit artifact. */
 export const KIT = {
-  bg: '#12100d',
-  panel: '#1b1814',
-  panelDeep: '#0f0d0a',
-  line: 'rgba(255, 240, 214, 0.08)',
-  lineStrong: 'rgba(255, 240, 214, 0.2)',
-  text: '#f4efe6',
-  dim: '#9b917e',
-  faint: '#6b6355',
-  accent: '#ffa028',
-  accentDeep: '#ff8a1f',
-  accentSoft: 'rgba(255, 160, 40, 0.13)',
-  accentInk: '#241705',
-  surfaceRaised: '#1e1a15',
-  danger: '#ff7a5c',
-  success: '#58d68a'
+  bg: tokens.bg,
+  panel: tokens.panel,
+  panelDeep: tokens['panel-deep'],
+  glassFill: tokens['glass-fill'],
+  glassLine: tokens['glass-line'],
+  glassRim: tokens['glass-rim'],
+  controlFill: tokens['control-fill'],
+  controlLine: tokens['control-line'],
+  controlRim: tokens['control-rim'],
+  footerFill: tokens['footer-fill'],
+  shadow: tokens.shadow,
+  line: tokens.line,
+  lineStrong: tokens['line-strong'],
+  text: tokens.text,
+  dim: tokens.dim,
+  faint: tokens.faint,
+  accent: tokens.accent,
+  accentDeep: tokens['accent-deep'],
+  accentSoft: tokens['accent-soft'],
+  accentInk: tokens['accent-ink'],
+  surfaceRaised: tokens['surface-raised'],
+  danger: tokens.danger,
+  success: tokens.success
 } as const
 
 /** Per-stem hues. The desktop draws the same project in these. */
-export const STEM_COLORS: Record<string, string> = {
-  original: '#bfb49d',
-  vocals: '#ff5c65',
-  drums: '#ffc53d',
-  bass: '#527dff',
-  guitar: '#f98424',
-  piano: '#da81da',
-  other: '#27e7bb'
-}
+export const STEM_COLORS: Record<string, string> = Object.fromEntries(
+  Object.entries(STEM_META).map(([id, meta]) => [id, meta.color])
+)
 
-export const CUSTOM_COLORS: string[] = [
-  '#c7e06a',
-  '#ff9ad5',
-  '#6fd8ff',
-  '#e8dcc0',
-  '#a98cff'
-]
+export const CUSTOM_COLORS: string[] = [...KIT_CUSTOM_COLORS]

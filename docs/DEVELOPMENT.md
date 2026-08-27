@@ -9,8 +9,14 @@ scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
 npm run dev
 ```
 
-Desktop microphone capture is a stable Node-API addon built explicitly for
-the Electron version installed in `node_modules`:
+The desktop capture *addon* is a stable Node-API module built explicitly for
+the Electron version installed in `node_modules`. It is the in-process
+transport for the shared `AudioInput` core — built, smoke-loaded and shipped,
+but not yet what the renderer runs: karaoke mic matching still captures via
+`getUserMedia` (echo cancellation intact), and vocal training talks to the
+same core through the spawned `singz-analyze` session (`src/main/audio-input.ts`).
+Swapping either onto the addon is a deliberate future step, not a side effect
+of building it:
 
 ```bash
 npm run capture:addon                    # current platform/architecture

@@ -200,12 +200,14 @@ let lastShelf: {
 } | null = null
 
 export default function CatalogScreen({
+  active = true,
   sampleRate,
   onLoaded,
   onOpenLog,
   onOpenAddSong,
   onCloseAddSong
 }: {
+  active?: boolean
   sampleRate: number
   onLoaded: (p: LoadedProject) => void
   onOpenLog: () => void
@@ -807,16 +809,17 @@ export default function CatalogScreen({
   /* Beat / key / melody for a phone-library project (Phase 4). One queue
    * app-wide (analysis/run.ts); the card below is a viewer over its progress. */
   const [analysisUi, setAnalysisUi] = useState<AnalysisProgress | null>(null)
-  useEffect(() => subscribeAnalysis(setAnalysisUi), [])
+  useEffect(() => active ? subscribeAnalysis(setAnalysisUi) : undefined, [active])
   // A landed analysis changed a doc on disk; the listing must say so, or the
   // next open of that song would ask for the same analysis again off a stale
   // entry.doc.
   useEffect(() => {
+    if (!active) return
     const sub = DeviceEventEmitter.addListener(ANALYSIS_EVENT, (e: AnalysisDone) => {
       if (e.changed) void refresh()
     })
     return () => sub.remove()
-  }, [refresh])
+  }, [active, refresh])
   const kickAnalysis = useCallback(
     async (dir: string, stems: Record<string, string>, force = false) => {
       let lyrics: LyricsDoc | null = null
@@ -857,6 +860,7 @@ export default function CatalogScreen({
   // offer stayed hidden after the files were gone, because the effect had
   // no reason to look again).
   useEffect(() => {
+    if (!active) return
     const anyStemmed = (projects ?? []).some((p) => Object.keys(p.stems).length > 0)
     if (mode !== 'phone' || !nativeMlGridAvailable() || !anyStemmed) {
       setBeatModelsUi((cur) => (cur?.phase === 'downloading' ? cur : null))
@@ -874,7 +878,7 @@ export default function CatalogScreen({
     return () => {
       alive = false
     }
-  }, [mode, projects])
+  }, [active, mode, projects])
   const fetchBeatModels = useCallback(async () => {
     setBeatModelsUi({ phase: 'downloading', gotMB: 0, totalMB: BEAT_MODELS_MB })
     try {
@@ -956,9 +960,11 @@ export default function CatalogScreen({
     })
   }, [])
 
-  // One subscription for the screen's life: events only flow while the
-  // service lives, and every terminal state is re-checked against the file.
+  // One subscription while this retained scene is visible: events only flow
+  // while the service lives, and every terminal state is re-checked against
+  // the durable file when the scene becomes active again.
   useEffect(() => {
+    if (!active) return
     const unsubscribe = subscribeSplit(
       (p) => {
         setSplitUi((cur) => {
@@ -995,13 +1001,14 @@ export default function CatalogScreen({
       }
     )
     return unsubscribe
-  }, [adoptDone, showFailed])
+  }, [active, adoptDone, showFailed])
 
   // Liveness while the card claims "running": the service heartbeats
   // job.json at every stage, so a file frozen past 90 s means the :split
   // process died without a verdict — a relaunch seconds after a kill sees
   // fresh timestamps and would otherwise show progress forever.
   useEffect(() => {
+    if (!active) return
     if (splitUi?.phase !== 'run') return
     const timer = setInterval(() => {
       void splitStatus().then((status) => {
@@ -1048,10 +1055,11 @@ export default function CatalogScreen({
       })
     }, 20_000)
     return () => clearInterval(timer)
-  }, [splitUi?.phase, cancelPending, adoptDone, showFailed])
+  }, [active, splitUi?.phase, cancelPending, adoptDone, showFailed])
 
   // The durable handoff: a job finished (or died) while the app was away.
   useEffect(() => {
+    if (!active) return
     void splitStatus().then((status) => {
       if (!status) return
       if (status.state === 'done') {
@@ -1079,9 +1087,9 @@ export default function CatalogScreen({
         }
       }
     })
-    // Once, at mount: later states arrive over the subscription.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    // Recheck whenever this retained scene becomes visible again; while
+    // hidden it owns no polling timer or event subscription.
+  }, [active, adoptDone, showFailed])
 
   const startSplitFor = useCallback(async (
     dir: string,
@@ -1219,9 +1227,10 @@ export default function CatalogScreen({
     /* The catalog stays mounted behind Player now. Its background job events
        can still render it, but they must not tell device drivers that the
        visible route changed. useIsFocused flips on the navigation state, not
-       on whether a native transition happened to finish painting. */
-    if (!TEST || !isFocused) return
-    TEST.screen = 'catalog'
+       on whether a native transition happened to finish painting. The root
+       tab can hide the entire Songs navigator while this route remains
+       focused, so `active` is the second half of visible ownership. */
+    if (!TEST || !isFocused || !active) return
     TEST.refresh = refresh
     TEST.openSample = openSample
     TEST.openProject = (dir: string) => {

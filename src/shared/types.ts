@@ -1,3 +1,5 @@
+import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
+
 export const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 export type StemName = (typeof STEMS)[number]
 
@@ -412,8 +414,8 @@ export type CaptureDiscontinuity =
   | 'device-lost'
   | 'source-frame-overflow'
 
-/** Native capture inventory. UIDs and channels belong to the OS HAL, not Chromium. */
-export interface CaptureInputDevice {
+/** Native input inventory. UIDs and channels belong to the OS HAL, not Chromium. */
+export interface DesktopAudioInputDevice {
   uid: string
   label: string
   isDefault: boolean
@@ -421,6 +423,9 @@ export interface CaptureInputDevice {
   channels: number
   channelLabels: string[]
 }
+
+/** The capture addon's view of the same inventory — one HAL shape, two transports. */
+export type CaptureInputDevice = DesktopAudioInputDevice
 
 export interface CaptureTimeValue {
   clockDomainId: string
@@ -477,6 +482,27 @@ export interface CaptureStats {
   overwrittenWindows: string
 }
 
+export type DesktopAudioInputEvent =
+  | { type: 'frame'; frequency: number; clarity: number; rms: number; dbfs: number }
+  | { type: 'overrun'; count: number }
+  | { type: 'discontinuity' }
+  | { type: 'error'; error: string }
+  | { type: 'ended' }
+
+export type DesktopAudioInputStartResult =
+  | {
+      ok: true
+      token: string
+      device: DesktopAudioInputDevice
+      channel: number
+      fallback: boolean
+    }
+  | {
+      ok: false
+      kind: 'busy' | 'unavailable' | 'unavailable-core'
+      error: string
+    }
+
 export interface SingzApi {
   /** Windows splitting engine preference (backed by the dml-disabled marker). */
   getSplitterMode(): Promise<{ mode: 'auto' | 'cpu'; reason?: string }>
@@ -509,6 +535,19 @@ export interface SingzApi {
   beatsMlAvailable(): Promise<{ ok: true; available: boolean }>
   /** Is singz-analyze in this build? */
   melodyNativeAvailable(): Promise<{ ok: true; available: boolean }>
+  /** Native-rate float32 microphone core. PCM stays in the core; only the
+   * fixed-window analysis evidence crosses IPC. */
+  listDesktopAudioInputs(): Promise<
+    { ok: true; devices: DesktopAudioInputDevice[] } | { ok: false; error: string }
+  >
+  startDesktopAudioInput(options?: {
+    deviceUid?: string
+    channel?: number
+  }): Promise<DesktopAudioInputStartResult>
+  stopDesktopAudioInput(token: string): Promise<{ ok: boolean; error?: string }>
+  onDesktopAudioInputEvent(
+    cb: (token: string, event: DesktopAudioInputEvent) => void
+  ): () => void
   /** The WHOLE analysis in one child — melody, key and beats, each opt-in,
    *  from REGISTERED stem files. Call `analyzeProvideMl` exactly once after
    *  this whenever beats are wanted (null = no lattice): the child starts
@@ -631,6 +670,11 @@ export interface SingzApi {
   onLogLine(cb: (e: LogEntry) => void): () => void
   /** App version for the titlebar ("dev" outside packaged builds). */
   appVersion(): Promise<string>
+  /** Main-owned app-level profile/history. Completion receipts never contain song paths or raw observations. */
+  loadTrainingProgress(): Promise<{ok:true;progress:TrainingProgress}|{ok:false;error:string}>
+  saveTrainingPreferences(preferences:TrainingPreferences):Promise<{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}>
+  saveTrainingPreferencesSync(preferences:TrainingPreferences):{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}
+  recordTrainingCompletion(receipt:TrainingCompletionReceipt):Promise<{ok:true;progress:TrainingProgress;alreadyRecorded:boolean}|{ok:false;error:string}>
   /**
    * Save the current song + stems + lyrics + settings. A loose song lands in a
    * new folder under the library root; a song already inside a project folder

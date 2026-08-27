@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { STEM_META, CUSTOM_COLORS } from '@singz/ui/stems'
 import { tokens } from '@singz/ui/tokens'
 import { KIT, STEM_COLORS, CUSTOM_COLORS as PHONE_CUSTOM } from '../../mobile/src/ui/tokens'
+import { tokens as nativeTokens } from '../../mobile/src/ui/uikit/tokens/tokens.js'
 
 describe('kit tokens reach the phone unchanged', () => {
   it('every stem colour matches', () => {
@@ -46,5 +47,16 @@ describe('kit tokens reach the phone unchanged', () => {
     // Guards the specific drift this work existed to end.
     expect(KIT.accent).toBe('#ffa028')
     expect(STEM_COLORS.vocals).toBe('#ff5c65')
+  })
+
+  it('native glass materials come from the vendored kit tokens', () => {
+    expect(KIT.glassFill).toBe(nativeTokens['glass-fill'])
+    expect(KIT.glassLine).toBe(nativeTokens['glass-line'])
+    expect(KIT.glassRim).toBe(nativeTokens['glass-rim'])
+    expect(KIT.controlFill).toBe(nativeTokens['control-fill'])
+    expect(KIT.controlLine).toBe(nativeTokens['control-line'])
+    expect(KIT.controlRim).toBe(nativeTokens['control-rim'])
+    expect(KIT.footerFill).toBe(nativeTokens['footer-fill'])
+    expect(KIT.shadow).toBe(nativeTokens.shadow)
   })
 })

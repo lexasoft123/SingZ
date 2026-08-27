@@ -5,7 +5,6 @@ import {
   type NativeStackNavigationProp,
   type NativeStackNavigationOptions
 } from '@react-navigation/native-stack'
-import { AudioManager } from 'react-native-audio-api'
 import Animated, {
   runOnUI,
   scrollTo,
@@ -15,8 +14,9 @@ import Animated, {
   useSharedValue
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { syncFrameCallbackVisibility } from './frame-visibility'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
-import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from '../latency'
+import type { RouteLatency } from '../latency'
 import {
   ANALYSIS_EVENT,
   analysisPending,
@@ -78,6 +78,7 @@ import SkiaLyrics, {
 } from './SkiaLyrics'
 import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
+import { nativeGlassStyle, nightStudioNativeTheme } from './uikit/native/index.js'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
@@ -134,13 +135,23 @@ const LYR_TOP = 250
 const LYR_BOTTOM = 300
 
 export default function PlayerScreen({
+  active = true,
   engine,
   project,
-  onBack
+  route,
+  trimMs,
+  onTrim,
+  onBack,
+  onTrainingFacts
 }: {
+  active?: boolean
   engine: MultitrackEngine
   project: LoadedProject
+  route: RouteLatency | null
+  trimMs: number
+  onTrim: (ms: number) => void
   onBack: () => void
+  onTrainingFacts?: (facts: { keyInfo: NonNullable<NonNullable<ProjectDoc['settings']>['key']> | null; transpose: number }) => void
 }): React.JSX.Element {
   const [tracks, setTracks] = useState<TrackState[]>([])
   /** The fader being dragged right now, for the value bubble — set on every
@@ -152,8 +163,6 @@ export default function PlayerScreen({
   const [pos, setPos] = useState(0)
   const [training, setTraining] = useState(false)
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
-  const [route, setRoute] = useState<RouteLatency | null>(null)
-  const [trimMs, setTrim] = useState(0)
   const [sheet, setSheetState] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
   const sheetRef = useRef(sheet)
   sheetRef.current = sheet
@@ -347,7 +356,7 @@ export default function PlayerScreen({
   const lastTs = useSharedValue(0)
   const lastSample = useRef({ t: 0, pos: 0 })
   const smoothRate = useRef(0)
-  useFrameCallback((info) => {
+  const lyricFrame = useFrameCallback((info) => {
     'worklet'
     uiFrames.value += 1
     const s0 = sample.value
@@ -386,7 +395,7 @@ export default function PlayerScreen({
       clock.value += dt * s0.rate + err * 0.15 // otherwise close the gap gently
     }
     uiWrites.value += 1
-  })
+  }, false)
 
   /**
    * Everything the screen draws that moves with the playhead: which line is
@@ -440,6 +449,17 @@ export default function PlayerScreen({
     },
     [engine, sample, renderKey]
   )
+  useEffect(() => {
+    syncFrameCallbackVisibility(lyricFrame, active, () => {
+      lastTs.value = 0
+      pendingMs.value = 0
+      sinceSample.value = 0
+      lastSample.current = { t: Date.now(), pos: engine.position }
+      smoothRate.current = 0
+      pushPos(engine.position)
+    })
+    return () => lyricFrame.setActive(false)
+  }, [active, engine, lastTs, lyricFrame, pendingMs, pushPos, sinceSample])
   const stemIds = useMemo(() => project.stems.map((st) => st.id), [project])
   /* Live window size for the tint washes — Android rotates and split-screens
      and the iPad target allows all four orientations, so a module-load
@@ -604,13 +624,13 @@ export default function PlayerScreen({
   }, [engine, pushPos])
 
   useEffect(() => {
-    if (!playing) return
+    if (!active || !playing) return
     const t = setInterval(() => {
       pushPos(engine.position)
       setCountInSt(engine.countInStatus)
     }, 100)
     return () => clearInterval(t)
-  }, [engine, playing, pushPos])
+  }, [active, engine, playing, pushPos])
 
   /* Beat track + metronome prefs -> engine. */
   useEffect(() => {
@@ -738,6 +758,7 @@ export default function PlayerScreen({
     }
   }, [])
   useEffect(() => {
+    if (!active) return
     const dir = project.dir
     if (!dir || project.library !== 'phone') return
     const sub = DeviceEventEmitter.addListener(ANALYSIS_EVENT, (e: AnalysisDone) => {
@@ -761,48 +782,11 @@ export default function PlayerScreen({
       sub.remove()
       unsub()
     }
-  }, [project])
+  }, [active, project, refreshDoc])
 
   useEffect(() => {
     engine.setMetronome(met)
   }, [engine, met])
-
-  /* Route-latency compensation (auto + persisted per-route trim). */
-  useEffect(() => {
-    let alive = true
-    const load = async (): Promise<void> => {
-      try {
-        const r = await getRouteLatency()
-        const t = await getTrimMs(r.key)
-        if (!alive) return
-        setRoute(r)
-        setTrim(t)
-        engine.setDisplayLatency(r.autoSec + t / 1000)
-      } catch {
-        // no native module — play uncompensated
-      }
-    }
-    void load()
-    const sub = AudioManager.addSystemEventListener('routeChange', () => {
-      setTimeout(() => void load(), 400)
-    })
-    return () => {
-      alive = false
-      sub?.remove()
-    }
-  }, [engine])
-
-  const applyTrim = useCallback(
-    (ms: number) => {
-      const clamped = Math.max(-2000, Math.min(2000, Math.round(ms)))
-      setTrim(clamped)
-      if (route) {
-        void setTrimMs(route.key, clamped)
-        engine.setDisplayLatency(route.autoSec + clamped / 1000)
-      }
-    },
-    [engine, route]
-  )
 
   /* Training schedule -> engine spec (same derivation as desktop). */
   useEffect(() => {
@@ -935,7 +919,6 @@ export default function PlayerScreen({
 
   useEffect(() => {
     if (!TEST) return
-    TEST.screen = 'player'
     TEST.project = project.name
     TEST.beatInfo = beatInfo
     /** PROJECT-WIDE: the line for whatever detector is running, whichever it
@@ -998,7 +981,7 @@ export default function PlayerScreen({
       trimMs,
       appliedMs: Math.round(engine.displayLatency * 1000)
     })
-    TEST.setTrim = applyTrim
+    TEST.setTrim = onTrim
     TEST.showSyncPanel = () => setSheet('practice')
     TEST.perfStart = () => perf.start()
     TEST.perfStop = () => perf.stop()
@@ -1054,6 +1037,10 @@ export default function PlayerScreen({
   useEffect(() => {
     engine.setPitchTempo(ktPitch, ktTempo / 100)
   }, [engine, ktPitch, ktTempo])
+
+  useEffect(() => {
+    onTrainingFacts?.({ keyInfo: settings?.key ?? null, transpose: ktPitch })
+  }, [ktPitch, onTrainingFacts, settings?.key])
 
   const ktBadge: string[] = []
   /* Name the destination, not the arithmetic: a singer transposing wants to
@@ -1131,7 +1118,12 @@ export default function PlayerScreen({
         {({ navigation }) => {
           sheetNavigation.current = navigation
           return (
-            <Animated.View style={{ flex: 1, backgroundColor: C.bg }}>
+            <Animated.View
+              style={{ flex: 1, backgroundColor: C.bg }}
+              pointerEvents={active ? 'auto' : 'none'}
+              accessibilityElementsHidden={!active}
+              importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
+            >
       {/* The stage: a dusk room, fully out of focus — chosen from the design
           canvas against the user's references. A defocused photograph of warm
           light rather than a drawn pattern: a golden window glow upper-left,
@@ -2164,7 +2156,7 @@ export default function PlayerScreen({
                   label="Trim"
                   valueText={String(trimMs)}
                   suffix="ms"
-                  onStep={(d) => applyTrim(trimMs + d * 25)}
+                  onStep={(d) => onTrim(trimMs + d * 25)}
                 />
                 <Text style={b.hint}>
                   Highlights are shifted {Math.round(engine.displayLatency * 1000)} ms to match what
@@ -2172,7 +2164,7 @@ export default function PlayerScreen({
                 </Text>
                 {trimMs !== 0 && (
                   <View style={[b.segs, { marginTop: 10 }]}>
-                    <Chip label="Reset" active={false} onPress={() => applyTrim(0)} />
+                    <Chip label="Reset" active={false} onPress={() => onTrim(0)} />
                   </View>
                 )}
               </View>
@@ -2248,20 +2240,14 @@ const s = StyleSheet.create({
      55 − 10 inset ≈ 44, continuous curve. Waveband: concentric would be
      44 − 12 padding = 32, capped at its own capsule (40/2). */
   hdrGlass: {
+    ...nativeGlassStyle(nightStudioNativeTheme, 'surface'),
     position: 'absolute',
     left: 12,
     right: 12,
     top: 54,
     height: 62,
     borderRadius: 31,
-    borderCurve: 'continuous',
-    backgroundColor: 'rgba(24,20,17,0.55)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,240,220,0.05)',
-    borderTopColor: 'rgba(255,240,220,0.14)',
-    ...(Platform.OS === 'ios'
-      ? { shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 14, shadowOffset: { width: 0, height: 10 } }
-      : null)
+    borderCurve: 'continuous'
   },
   hdr: {
     position: 'absolute',
@@ -2301,19 +2287,13 @@ const s = StyleSheet.create({
   noLyrics: { color: C.dim, fontSize: 15, marginTop: 40 },
 
   foot: {
+    ...nativeGlassStyle(nightStudioNativeTheme, 'dock'),
     position: 'absolute',
     left: 10,
     right: 10,
     /* bottom set inline from the safe-area inset */
     borderRadius: 44,
     borderCurve: 'continuous',
-    backgroundColor: 'rgba(24,20,17,0.55)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,240,220,0.05)',
-    borderTopColor: 'rgba(255,240,220,0.14)',
-    ...(Platform.OS === 'ios'
-      ? { shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 15, shadowOffset: { width: 0, height: 12 } }
-      : null),
     /* The seek bar still owns (almost) the full width: the dock's 10+12 a
        side is the cost of the card material the user chose over the old
        edge-to-edge band. */

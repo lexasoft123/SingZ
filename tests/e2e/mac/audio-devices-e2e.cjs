@@ -5,14 +5,17 @@
  *
  * Runs against an isolated scratch profile (SINGZ_USERDATA_DIR) with a
  * pre-seeded stems cache, so no library and no splitter engine are needed.
- * NOTE: SINGZ_FAKE_MIC fakes the capture *stream* only — device enumeration
- * stays real on mac (verified on Electron 43), so assertions adapt to the
- * machine's device list instead of expecting "Fake Audio Input" rows.
+ * SINGZ_FAKE_MIC grants capture without touching hardware. A renderer-only,
+ * driver-installed stereo fixture then supplies silence on channel 1 and a
+ * tone on channel 2. Device enumeration stays real, so the hardware picker
+ * branch is still exercised without making meter assertions machine-dependent.
  *
  * Prereqs: `npm run build` done; the dev Electron binary has mac microphone
- * permission (TCC) so the native capture backend can open it.
+ * permission (TCC) so getUserMedia can open.
  *
- * Env: E2E_OUT (screenshot + profile dir, default os.tmpdir()).
+ * Env: E2E_OUT (screenshot + profile dir, default os.tmpdir()). Set
+ * SINGZ_ANALYZE to a freshly built core binary to exercise native UID/channel
+ * persistence; an older vendored binary deliberately exercises fallback.
  */
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
@@ -68,6 +71,51 @@ const launch = async () => {
     env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' }
   })
   await quietLaunch(app) // measurement runs must not steal the singer's focus
+  const win = await app.firstWindow()
+  await win.addInitScript(() => {
+    const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+    const state = { active: 0, maxActive: 0 }
+    Object.defineProperty(window, '__singzE2eMic', { value: state, configurable: true })
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      if (!constraints?.audio) return original(constraints)
+      const context = new AudioContext()
+      const merger = context.createChannelMerger(2)
+      const silent = context.createConstantSource()
+      silent.offset.value = 0
+      silent.connect(merger, 0, 0)
+      const tone = context.createOscillator()
+      tone.frequency.value = 440
+      const gain = context.createGain()
+      gain.gain.value = 0.2
+      tone.connect(gain).connect(merger, 0, 1)
+      const destination = context.createMediaStreamDestination()
+      merger.connect(destination)
+      silent.start()
+      tone.start()
+      await context.resume()
+      const stream = destination.stream
+      const track = stream.getAudioTracks()[0]
+      const requested = typeof constraints.audio === 'object'
+        ? constraints.audio.deviceId?.exact
+        : undefined
+      track.getSettings = () => ({ deviceId: typeof requested === 'string' ? requested : 'default', channelCount: 2 })
+      const stop = track.stop.bind(track)
+      let live = true
+      track.stop = () => {
+        if (!live) return
+        live = false
+        state.active--
+        stop()
+        silent.stop()
+        tone.stop()
+        void context.close()
+      }
+      state.active++
+      state.maxActive = Math.max(state.maxActive, state.active)
+      return stream
+    }
+  })
+  await win.reload()
   return app
 }
 
@@ -97,6 +145,10 @@ const launch = async () => {
     null,
     { timeout: 20000 }
   )
+  const nativeInventory = await win.evaluate(() => window.singz.listDesktopAudioInputs())
+  const nativeMode = nativeInventory.ok
+  const inputPrefKey = nativeMode ? 'nativeInputUid' : 'inputId'
+  console.log('microphone mode:', nativeMode ? 'native AudioInput' : 'Web Audio fallback')
   const inOpts = await win.$$eval('#settings-input option', (os) =>
     os.map((o) => ({ v: o.value, t: o.textContent ?? '' }))
   )
@@ -111,28 +163,69 @@ const launch = async () => {
   ins.sort((a, b) => Number(/built-in|macbook/i.test(b.t)) - Number(/built-in|macbook/i.test(a.t)))
   if (ins.length < 1) throw new Error('no audio inputs on this machine')
   console.log('inputs:', ins.map((f) => f.t).join(' | '))
+  await win.waitForFunction(
+    () => {
+      const text = document.querySelector('.mic-meter-head output')?.textContent ?? ''
+      return text.includes('dBFS') || text.includes('No signal') || text.includes('blocked')
+    },
+    null,
+    { timeout: 20000 }
+  )
+  if (!(await win.$('.mic-meter[role="meter"]'))) throw new Error('accessible mic meter missing')
+  const silentLevel = await win.$eval('.mic-meter[role="meter"]', (el) => Number(el.getAttribute('aria-valuenow')))
+  if (silentLevel !== -72) throw new Error(`channel 1 fixture should be silent, got ${silentLevel} dBFS`)
+  const initialChannelOptions = await win.$$('#settings-input-channel option')
+  const initialNative = nativeMode
+    ? nativeInventory.devices.find((device) => device.isDefault) ?? nativeInventory.devices[0]
+    : null
+  const expectedInitialChannels = nativeMode
+    ? (initialNative?.channels ?? 1) > 1 ? initialNative.channels : 0
+    : 2
+  if (initialChannelOptions.length !== expectedInitialChannels)
+    throw new Error(`input picker exposed ${initialChannelOptions.length} channels, expected ${expectedInitialChannels}`)
+  if (initialChannelOptions.length > 1) {
+    const previewChannel = 1
+    await win.selectOption('#settings-input-channel', String(previewChannel))
+    await win.waitForFunction(
+      (selected) => JSON.parse(localStorage.getItem('singz.audio') ?? '{}').inputChannel === selected,
+      previewChannel
+    )
+    await win.waitForFunction(
+      () => Number(document.querySelector('.mic-meter[role="meter"]')?.getAttribute('aria-valuenow')) > -72
+    )
+    const signalLevel = await win.$eval('.mic-meter[role="meter"]', (el) => Number(el.getAttribute('aria-valuenow')))
+    if (signalLevel === silentLevel) throw new Error('channel meter did not change between silent and signal lanes')
+    console.log(`fixture preview: ${silentLevel} dBFS → ${signalLevel} dBFS; picker lanes: ${initialChannelOptions.length}`)
+  }
   await win.screenshot({ path: join(OUT, 'settings-audio.png') })
 
   await win.selectOption('#settings-input', ins[0].v)
   const stored = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
-  if (stored.inputId !== ins[0].v) throw new Error('input pick not persisted')
-
-  // Preview is explicit: Settings never opens the microphone merely because
-  // the dialog appeared. It works before a song exists and stops on request.
-  await win.click('.settings-mic-test')
-  await win.waitForFunction(
-    () => document.querySelector('.settings-mic-test')?.textContent?.includes('Stop microphone test'),
-    null,
-    { timeout: 15000 }
-  )
-  await win.waitForSelector('.settings-level', { timeout: 15000 })
-  await win.click('.settings-mic-test')
-  await win.waitForFunction(
-    () => document.querySelector('.settings-mic-test')?.textContent?.includes('Test microphone'),
-    null,
-    { timeout: 15000 }
-  )
-  await win.waitForSelector('.settings-level', { state: 'detached', timeout: 5000 })
+  if (stored[inputPrefKey] !== ins[0].v) throw new Error(`${inputPrefKey} pick not persisted`)
+  if (nativeMode) {
+    const nativeSmoke = await win.evaluate(async (deviceUid) => {
+      let resolveFrame
+      const frame = new Promise((resolve) => { resolveFrame = resolve })
+      const unsubscribe = window.singz.onDesktopAudioInputEvent((token, event) => {
+        if (event.type === 'frame') resolveFrame(event)
+      })
+      const started = await window.singz.startDesktopAudioInput({ deviceUid, channel: 0 })
+      if (!started.ok) {
+        unsubscribe()
+        return { started }
+      }
+      const observed = await Promise.race([
+        frame,
+        new Promise((resolve) => setTimeout(() => resolve(null), 6000))
+      ])
+      const stopped = await window.singz.stopDesktopAudioInput(started.token)
+      unsubscribe()
+      return { started, observed, stopped }
+    }, ins[0].v)
+    if (!nativeSmoke.started.ok || nativeSmoke.started.device.uid !== ins[0].v || !nativeSmoke.observed || !nativeSmoke.stopped.ok)
+      throw new Error(`native UID capture failed: ${JSON.stringify(nativeSmoke)}`)
+    console.log('native capture:', nativeSmoke.started.device.label, 'channel 1')
+  }
 
   // ---- output pick (guarded — machine hardware) ----
   const realOuts = outOpts.filter((o) => o.v)
@@ -149,6 +242,32 @@ const launch = async () => {
   }
   await win.click('.settings-card .modal-actions .pill')
 
+  // ---- active Imitate yields exclusively to Settings and stays interrupted ----
+  await win.click('.app-sections button:has-text("Vocal training")')
+  await win.waitForSelector('.vt-exercise:has-text("Match a note")', { timeout: 20000 })
+  await win.click('.vt-exercise:has-text("Match a note")')
+  await win.click('button:has-text("Start practice")')
+  if (nativeMode) {
+    await win.waitForFunction(
+      () => document.querySelector('.vt-progress-copy [role="status"]')?.textContent !== 'Ready',
+      null,
+      { timeout: 15000 }
+    )
+  } else {
+    await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
+  }
+  await win.click('.pill.gear')
+  await win.waitForSelector('.settings-card', { timeout: 10000 })
+  await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
+  const trainingOwnership = await win.evaluate(() => window.__singzE2eMic)
+  if (trainingOwnership.maxActive > 1)
+    throw new Error(`training/settings capture overlapped: ${JSON.stringify(trainingOwnership)}`)
+  await win.click('.settings-card .modal-actions .pill')
+  await win.waitForFunction(() => window.__singzE2eMic.active === 0, null, { timeout: 10000 })
+  const trainingStatus = await win.$eval('[role="status"][aria-live="polite"]', (el) => el.textContent)
+  if (trainingStatus !== 'Ready') throw new Error(`training resumed under Settings close: ${trainingStatus}`)
+  await win.click('.app-sections button:has-text("Songs")')
+
   // ---- load the tone, split from cache, karaoke + mic on ----
   await win.setInputFiles('input[type="file"]:not([data-testid])', wav)
   await win.waitForSelector('.pill.primary:has-text("Split into stems")', { timeout: 30000 })
@@ -164,32 +283,58 @@ const launch = async () => {
     { timeout: 20000 }
   )
 
-  // ---- settings shows the live device; flipping restarts the mic ----
+  // ---- settings owns a live analyser preview; flipping restarts runtime + preview ----
   await win.click('.pill.gear')
   await win.waitForFunction(
-    () => [...document.querySelectorAll('.settings-hint')].some((el) => el.textContent?.includes('Song capture:')),
+    () => {
+      const text = document.querySelector('.mic-meter-head output')?.textContent ?? ''
+      return text.includes('dBFS') || text.includes('No signal')
+    },
     null,
     { timeout: 15000 }
   )
   if (ins.length >= 2) {
     await win.selectOption('#settings-input', ins[1].v)
-    // restart must complete with the mic still on and a live-device hint
-    await win.waitForFunction(
-      () => document.querySelector('.mic-toggle')?.textContent?.includes('Mic on'),
-      null,
-      { timeout: 15000 }
-    )
+    await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
     const prefs2 = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
-    if (prefs2.inputId !== ins[1].v) throw new Error('live input switch not persisted')
+    if (prefs2[inputPrefKey] !== ins[1].v) throw new Error('live input switch not persisted')
     console.log('live mic switch: restarted on', ins[1].t)
   } else {
     console.log('skip live switch (single input machine)')
   }
+  const channelOptions = await win.$$('#settings-input-channel option')
+  let expectedInputChannel = 0
+  if (channelOptions.length > 1) {
+    const pickedChannel = String(channelOptions.length - 1)
+    await win.selectOption('#settings-input-channel', pickedChannel)
+    await win.waitForFunction(
+      (channel) => JSON.parse(localStorage.getItem('singz.audio') ?? '{}').inputChannel === channel,
+      Number(pickedChannel)
+    )
+    await win.waitForFunction(
+      (channel) => document.querySelector('.mic-route')?.textContent?.includes(`IN ${channel + 1}/`),
+      Number(pickedChannel)
+    )
+    console.log('input channel:', Number(pickedChannel) + 1)
+    expectedInputChannel = Number(pickedChannel)
+  }
+  await win.waitForFunction(() => window.__singzE2eMic.active === 1, null, { timeout: 15000 })
+  const ownership = await win.evaluate(() => window.__singzE2eMic)
+  if (ownership.active !== 1 || ownership.maxActive > 1)
+    throw new Error(`microphone ownership overlapped: ${JSON.stringify(ownership)}`)
 
   // ---- Esc closes settings without killing karaoke underneath ----
   await win.keyboard.press('Escape')
   await win.waitForSelector('.settings-card', { state: 'detached', timeout: 5000 })
   if (!(await win.$('.pitch-strip'))) throw new Error('Esc closed karaoke, not just settings')
+  await win.waitForFunction(
+    () => document.querySelector('.mic-toggle')?.textContent?.includes('Mic on'),
+    null,
+    { timeout: 15000 }
+  )
+  const restoredOwnership = await win.evaluate(() => window.__singzE2eMic)
+  if (restoredOwnership.active !== 1 || restoredOwnership.maxActive > 1)
+    throw new Error(`karaoke capture did not restore exclusively: ${JSON.stringify(restoredOwnership)}`)
 
   // ---- pitch strip: drag the top edge, drawing scales, height persists ----
   const before = await win.$eval('.pitch-strip', (el) => el.clientHeight)
@@ -219,7 +364,8 @@ const launch = async () => {
   win = await app.firstWindow()
   await win.waitForSelector('.pill.gear', { timeout: 60000 })
   const prefs = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
-  if (prefs.inputId !== expectInput) throw new Error('input pref lost across relaunch')
+  if (prefs[inputPrefKey] !== expectInput) throw new Error(`${inputPrefKey} pref lost across relaunch`)
+  if (prefs.inputChannel !== expectedInputChannel) throw new Error(`input channel lost across relaunch: ${prefs.inputChannel}`)
   if (pickedOut) {
     await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
       timeout: 15000

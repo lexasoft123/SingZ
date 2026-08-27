@@ -700,7 +700,7 @@ function MetPopover({
   )
 }
 
-/** Vocal-training setup: on/off, the alternation mode and who sings what. */
+/** Carry-the-line setup: on/off, the alternation mode and who sings what. */
 function TrainPopover({
   training,
   cfg,
@@ -754,7 +754,7 @@ function TrainPopover({
   return (
     <div className="train-pop" ref={ref}>
       <div className="tp-head">
-        <span className="tp-title">Vocal training</span>
+        <span className="tp-title">Carry the line</span>
         <div className="mode-seg">
           <button type="button" className={training ? '' : 'on'} onClick={training ? onToggle : undefined}>
             Off
@@ -1004,7 +1004,8 @@ export default function Transport({
               type="button"
               className={`round-ghost train${training ? ' active' : ''}${ducking ? ' ducking' : ''}`}
               aria-pressed={training}
-              title="Vocal training — the guide drops out on a schedule so you carry the line yourself"
+              aria-label="Carry the line"
+              title="Carry the line — guide stems drop out on a schedule while you carry the song"
               onClick={() => setTrainOpen((o) => !o)}
             >
               <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>

@@ -21,6 +21,7 @@ import {
 } from './projects'
 import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
 import { readSettings } from './settings'
+import { loadTrainingProgress, recordTrainingCompletion, saveTrainingPreferences } from './training-progress'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
@@ -34,6 +35,7 @@ import { installUpdate, startUpdater, updateState } from './updater'
 import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, trtrtxFlagPath } from './models'
 import { Separator } from './separation'
 import { registerAnalyze } from './analyze'
+import { registerDesktopAudioInput } from './audio-input'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { CaptureOwner } from './capture'
 
@@ -256,6 +258,7 @@ function registerIpc(): void {
   // ML beat/downbeat analysis (Beat This! runner inside the splitter pack)
   registerBeatsIpc()
   registerAnalyze()
+  registerDesktopAudioInput()
 
   ipcMain.handle(
     'lyrics:get',
@@ -343,6 +346,11 @@ function registerIpc(): void {
     }
     return res
   })
+
+  ipcMain.handle('training-progress:load', () => loadTrainingProgress())
+  ipcMain.handle('training-preferences:save', (_e, raw: unknown) => saveTrainingPreferences(raw))
+  ipcMain.on('training-preferences:save-sync', (event, raw: unknown) => { event.returnValue = saveTrainingPreferences(raw) })
+  ipcMain.handle('training-completion:record', (_e, raw: unknown) => recordTrainingCompletion(raw))
 
   ipcMain.handle('gdrive:status', () => ({
     configured: gdriveConfigured(),

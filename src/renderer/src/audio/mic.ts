@@ -1,159 +1,201 @@
-import type { CaptureAnalysisWindow } from '../../../shared/types'
-import type { CaptureStateName } from '../../../shared/types'
+import { yinPitchInfo, type PitchFrame } from './pitch'
 
 export interface MicDevice {
   id: string
   label: string
-  inputChannel: number
-  /** Native capture never substitutes another physical device or channel. */
-  fallback: false
-  error?: string
+  /** The asked-for device was unavailable — this is the default instead. */
+  fallback: boolean
+  /** The hardware channel actually connected to the analyser (zero-based). */
+  channelIndex: number
+  /** Channels Chromium exposed for this capture. */
+  channelCount: number
+  /** The requested channel was outside the exposed range and was clamped. */
+  channelFallback: boolean
 }
 
-export const MIC_OPEN_FAILURE =
-  'Could not open that microphone and channel. Your selection is still saved — reconnect or free the device, then try again.'
-
-export type MicUiState = 'off' | 'starting' | 'on' | 'denied' | 'unavailable'
-
-export function micToggleCopy(state: MicUiState): { label: string; title: string } {
-  switch (state) {
-    case 'on':
-      return { label: 'Mic on', title: 'Stop matching my singing' }
-    case 'starting':
-      return { label: 'Starting…', title: 'Starting the saved microphone and channel' }
-    case 'denied':
-      return {
-        label: 'Mic blocked — check System Settings',
-        title: 'Microphone access is blocked. Allow SingZ in System Settings, then try again.'
-      }
-    case 'unavailable':
-      return {
-        label: 'Mic unavailable — check Audio settings',
-        title:
-          'The saved microphone or channel is unavailable. Open Settings → Audio to reconnect or choose another one, then try again.'
-      }
-    default:
-      return { label: 'Match my singing', title: 'Match my singing with the saved microphone and channel' }
-  }
+export interface MicLevel {
+  /** Linear RMS, useful to tests and non-visual consumers. */
+  rms: number
+  /** Stable full-scale decibels, clamped to the meter's noise floor. */
+  dbfs: number
+  signal: boolean
 }
 
-export type SettingsMicDisplay = {
-  device: MicDevice | null
-  source: 'song' | 'preview' | 'song-error' | 'none'
-}
-
-/** Display precedence for the shared Settings meter/error surface. */
-export function settingsMicDisplay(
-  songDevice: MicDevice | null,
-  previewDevice: MicDevice | null,
-  previewActive: boolean
-): SettingsMicDisplay {
-  if (songDevice && !songDevice.error) return { device: songDevice, source: 'song' }
-  if (previewActive && previewDevice) return { device: previewDevice, source: 'preview' }
-  if (songDevice?.error) return { device: songDevice, source: 'song-error' }
-  return { device: null, source: 'none' }
-}
-
-/** A new user attempt retires only an old failure, never a live capture. */
-export function clearStaleMicError(device: MicDevice | null): MicDevice | null {
-  return device?.error ? null : device
-}
-
-let nextGeneration = 1n
-
-export function captureStateEnded(
-  state: { state: CaptureStateName; ownershipGeneration: string },
-  generation: string
-): boolean {
-  if (state.ownershipGeneration === '') {
-    // Main/preload failures cannot always recover the native generation. An
-    // active renderer owner still has to retire on an explicit terminal
-    // state, while a blank running/idle response is not allowed to impersonate
-    // another generation.
-    return state.state === 'error' || state.state === 'unsupported' || state.state === 'stopped'
-  }
-  if (state.ownershipGeneration !== generation) {
-    // A nonempty different/zero generation means main-process ownership has
-    // already moved or stopped. A late scalar poll must retire this old UI.
-    return state.ownershipGeneration !== ''
-  }
-  return (
-    (state.state === 'error' || state.state === 'unsupported' || state.state === 'stopped')
+/** Never let a temporary default-device fallback rewrite another device's lane. */
+export function shouldAdoptInputChannel(
+  device: MicDevice | null,
+  savedChannel: number | undefined
+): device is MicDevice {
+  return Boolean(
+    device?.channelFallback && !device.fallback && device.channelIndex !== (savedChannel ?? 0)
   )
 }
 
-/** Native zcore → zdsp capture. The renderer receives scalar analysis only. */
+const METER_FLOOR_DB = -72
+const MAX_CAPTURE_CHANNELS = 32
+
+/**
+ * Live microphone pitch: mic → AnalyserNode, polled from the UI's rAF loop.
+ * Echo cancellation stays on so the speakers' backing track doesn't leak into
+ * the analysis; AGC/noise-suppression stay off to keep the voice unprocessed.
+ * A chosen device is asked for exactly, then dropped for the default rather
+ * than not singing at all (`device.fallback` says which one answered).
+ */
 export class MicPitch {
-  private generation = ''
-  private unsubscribe: (() => void) | null = null
-  private latest: CaptureAnalysisWindow | null = null
+  private stream: MediaStream | null = null
+  private source: MediaStreamAudioSourceNode | null = null
+  private splitter: ChannelSplitterNode | null = null
+  private analyser: AnalyserNode | null = null
+  private buf: Float32Array<ArrayBuffer> | null = null
   private dev: MicDevice | null = null
   private onEnded: (() => void) | null = null
-  private stateTimer: ReturnType<typeof setInterval> | null = null
-  private ending = false
+  private endedTrack: MediaStreamTrack | null = null
+  private endedHandler: (() => void) | null = null
+  private context: AudioContext | null = null
+  private startPending: Promise<void> | null = null
+  private generation = 0
 
-  async start(opts: MicPitchStartOptions = {}): Promise<boolean> {
-    if (this.generation) return false
-    const generation = String(nextGeneration++)
-    this.generation = generation
-    this.ending = false
-    this.onEnded = opts.onEnded ?? null
-    this.unsubscribe = window.singz.onCaptureWindow((window) => {
-      if (window.ownershipGeneration !== generation) return
-      this.latest = window
-      opts.onAnalysis?.(window)
-      if (window.resetReason === 'device-lost' && !this.ending) {
-        this.ending = true
-        const ended = this.onEnded
-        void this.stop().then(() => ended?.())
-      }
-    })
-    const inputChannel = opts.inputChannel ?? 0
-    let result
+  async start(
+    ctx: AudioContext,
+    opts: { deviceId?: string; channelIndex?: number; onEnded?: () => void } = {}
+  ): Promise<void> {
+    if (this.stream) {
+      if (this.context !== ctx) throw new Error('Microphone is already attached to another audio context.')
+      return
+    }
+    if (this.startPending) {
+      if (this.context !== ctx) throw new Error('Microphone is starting on another audio context.')
+      return this.startPending
+    }
+    this.context = ctx
+    const generation = ++this.generation
+    const pending = this.startNow(ctx, opts, generation)
+    this.startPending = pending
     try {
-      result = await window.singz.beginCapture(
-        { deviceUid: opts.deviceId, inputChannel },
-        generation
-      )
+      await pending
+    } finally {
+      if (this.startPending === pending) this.startPending = null
+      if (this.generation === generation && !this.stream) this.context = null
+    }
+  }
+
+  private async startNow(
+    ctx: AudioContext,
+    opts: { deviceId?: string; channelIndex?: number; onEnded?: () => void },
+    generation: number
+  ): Promise<void> {
+    const base = {
+      echoCancellation: true,
+      noiseSuppression: false,
+      autoGainControl: false,
+      // Interfaces commonly default to a stereo pair even when they expose
+      // more inputs. An ideal request preserves as many discrete lanes as
+      // Chromium/the driver can provide without making older devices fail.
+      channelCount: { ideal: MAX_CAPTURE_CHANNELS }
+    }
+    let fallback = false
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { ...base, deviceId: { exact: opts.deviceId ?? 'default' } }
+      })
+    } catch (err) {
+      // Missing (OverconstrainedError/NotFoundError) or busy (NotReadable/
+      // Abort — exclusive-mode holds are everyday life on Windows): drop the
+      // pick and sing on the default rather than not at all. NotAllowedError
+      // stays fatal — no constraint change can fix a permission denial.
+      const name = err instanceof DOMException ? err.name : ''
+      const recoverable = ['OverconstrainedError', 'NotFoundError', 'NotReadableError', 'AbortError']
+      if (!opts.deviceId || !recoverable.includes(name)) {
+        throw err
+      }
+      this.assertStarting(generation)
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { ...base, deviceId: { exact: 'default' } }
+      })
+      fallback = true
+    }
+    let source: MediaStreamAudioSourceNode | null = null
+    let splitter: ChannelSplitterNode | null = null
+    let analyser: AnalyserNode | null = null
+    try {
+      this.assertStarting(generation)
+      source = ctx.createMediaStreamSource(stream)
+      analyser = ctx.createAnalyser()
+      analyser.fftSize = 2048
+      const track = stream.getAudioTracks()[0] ?? null
+      if (!track) throw new Error('The microphone returned no audio track.')
+      const settings = typeof track.getSettings === 'function' ? track.getSettings() : {}
+      const settingsCount = positiveChannelCount(settings.channelCount)
+      const sourceCount = positiveChannelCount(source.channelCount)
+      const exposedCount = Math.min(MAX_CAPTURE_CHANNELS, settingsCount ?? sourceCount ?? 1)
+      const wantedChannel = sanitizeChannelIndex(opts.channelIndex)
+      let channelCount = exposedCount
+      let channelIndex = Math.min(wantedChannel, exposedCount - 1)
+      if (exposedCount > 1 && typeof ctx.createChannelSplitter === 'function') {
+        try {
+          splitter = ctx.createChannelSplitter(exposedCount)
+          source.connect(splitter)
+          splitter.connect(analyser, channelIndex)
+        } catch {
+          // Some drivers report multiple lanes while their WebAudio source
+          // refuses discrete routing. Release the partial graph and keep a
+          // truthful, usable direct-mono capture.
+          source.disconnect()
+          splitter?.disconnect()
+          splitter = null
+          source.connect(analyser)
+          channelCount = 1
+          channelIndex = 0
+        }
+      } else {
+        // Test doubles and older WebAudio implementations may not expose a
+        // splitter. A direct mono path remains usable and truthful.
+        channelCount = 1
+        channelIndex = 0
+        source.connect(analyser)
+      }
+      const buf = new Float32Array(analyser.fftSize)
+      this.assertStarting(generation)
+
+      const onEnded = (): void => {
+        const cb = this.onEnded
+        this.stop()
+        cb?.()
+      }
+      if (track) track.addEventListener('ended', onEnded)
+      this.stream = stream
+      this.source = source
+      this.splitter = splitter
+      this.analyser = analyser
+      this.buf = buf
+      this.onEnded = opts.onEnded ?? null
+      this.endedTrack = track
+      this.endedHandler = track ? onEnded : null
+      this.dev = {
+        id: typeof settings.deviceId === 'string' ? settings.deviceId : '',
+        label: track.label,
+        fallback,
+        channelIndex,
+        channelCount,
+        channelFallback: channelIndex !== wantedChannel
+      }
     } catch (error) {
-      // stop() may have invalidated this pending start while IPC was in
-      // flight. That stale completion is cancellation, not a new UI error.
-      if (this.generation !== generation) return false
-      this.clearLocal(generation)
+      source?.disconnect()
+      splitter?.disconnect()
+      analyser?.disconnect()
+      stream.getTracks().forEach((track) => track.stop())
       throw error
     }
-    if (this.generation !== generation) {
-      // A stop/device change won while beginCapture was pending. Cancel once
-      // more after the reply so even an IPC ordering edge cannot resurrect it.
-      if (result.ok) await window.singz.cancelCapture(generation).catch(() => undefined)
-      return false
-    }
-    if (!result.ok) {
-      this.clearLocal(generation)
-      throw new Error(result.error || 'Could not start native microphone capture.')
-    }
-    this.dev = {
-      id: result.deviceUid,
-      label: result.deviceLabel || result.deviceUid,
-      inputChannel: result.inputChannel,
-      fallback: false
-    }
-    // Device loss can move AudioInput to Error without delivering another
-    // analysis window. Poll one copied scalar state at 4 Hz so the renderer
-    // cannot remain falsely latched "Mic on" after unplug/busy/driver errors.
-    this.stateTimer = setInterval(() => {
-      void window.singz.captureState()
-        .then((state) => {
-          if (!captureStateEnded(state, generation)) return
-          this.endGeneration(generation)
-        })
-        .catch(() => this.endGeneration(generation))
-    }, 250)
-    return true
+  }
+
+  private assertStarting(generation: number): void {
+    if (this.generation !== generation || this.context === null)
+      throw new Error('Microphone start was cancelled.')
   }
 
   get active(): boolean {
-    return this.generation !== ''
+    return this.stream !== null
   }
 
   /** The device actually answering (from the live track); null when off. */
@@ -161,82 +203,62 @@ export class MicPitch {
     return this.dev
   }
 
+  /** Current sung pitch in Hz (0 = silent/unvoiced). */
   read(): number {
-    return this.latest?.frequency ?? 0
+    return this.readInfo().f0
   }
 
-  level(): { peak: number; rms: number; dbfs: number } {
-    return this.latest
-      ? { peak: this.latest.peak, rms: this.latest.rms, dbfs: this.latest.dbfs }
-      : { peak: 0, rms: 0, dbfs: -120 }
+  /** Current pitch plus confidence evidence for reusable training capture. */
+  readInfo(): PitchFrame {
+    if (!this.analyser || !this.buf) return { f0: 0, clarity: 0, rms: 0 }
+    this.analyser.getFloatTimeDomainData(this.buf)
+    return yinPitchInfo(this.buf, this.analyser.context.sampleRate)
   }
 
-  async stop(): Promise<void> {
-    const generation = this.generation
-    this.clearLocal(generation)
-    if (generation) await window.singz.cancelCapture(generation).catch(() => undefined)
+  /** Current selected-channel loudness. This never retains raw samples. */
+  readLevel(): MicLevel {
+    if (!this.analyser || !this.buf) return { rms: 0, dbfs: METER_FLOOR_DB, signal: false }
+    this.analyser.getFloatTimeDomainData(this.buf)
+    let energy = 0
+    for (const sample of this.buf) energy += sample * sample
+    const rms = Math.sqrt(energy / Math.max(1, this.buf.length))
+    const dbfs = Math.max(METER_FLOOR_DB, Math.min(0, 20 * Math.log10(Math.max(rms, 1e-8))))
+    return { rms, dbfs, signal: dbfs > METER_FLOOR_DB }
   }
 
-  private endGeneration(generation: string): void {
-    if (this.generation !== generation || this.ending) return
-    this.ending = true
-    const ended = this.onEnded
-    void this.stop().then(() => ended?.())
-  }
-
-  private clearLocal(generation: string): void {
-    if (generation && this.generation !== generation) return
-    this.generation = ''
-    this.ending = true
-    if (this.stateTimer) clearInterval(this.stateTimer)
-    this.stateTimer = null
-    this.unsubscribe?.()
-    this.unsubscribe = null
-    this.latest = null
+  stop(): void {
+    this.generation++
+    const stream = this.stream
+    const source = this.source
+    const splitter = this.splitter
+    const analyser = this.analyser
+    if (this.endedTrack && this.endedHandler)
+      this.endedTrack.removeEventListener('ended', this.endedHandler)
+    this.stream = null
+    this.source = null
+    this.splitter = null
+    this.analyser = null
+    this.buf = null
     this.dev = null
     this.onEnded = null
+    this.endedTrack = null
+    this.endedHandler = null
+    this.context = null
+    stream?.getTracks().forEach((track) => track.stop())
+    source?.disconnect()
+    splitter?.disconnect()
+    analyser?.disconnect()
   }
 }
 
-export interface MicPitchStartOptions {
-  deviceId?: string
-  inputChannel?: number
-  onEnded?: () => void
-  onAnalysis?: (window: CaptureAnalysisWindow) => void
+function positiveChannelCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1
+    ? Math.max(1, Math.floor(value))
+    : null
 }
 
-/** Latest-request-wins ownership used by the explicit Settings mic preview. */
-export class MicPreview {
-  private request = 0
-  private mic: MicPitch | null = null
-
-  async start(opts: MicPitchStartOptions): Promise<MicDevice | null> {
-    const request = ++this.request
-    const previous = this.mic
-    this.mic = null
-    await previous?.stop()
-    if (request !== this.request) return null
-
-    const mic = new MicPitch()
-    this.mic = mic
-    try {
-      const started = await mic.start(opts)
-      if (!started || request !== this.request || this.mic !== mic) {
-        await mic.stop()
-        return null
-      }
-      return mic.device
-    } catch (error) {
-      if (request !== this.request || this.mic !== mic) return null
-      this.mic = null
-      throw error
-    }
-  }
-
-  async stop(): Promise<void> {
-    ++this.request
-    const mic = this.mic
-    this.mic = null
-    await mic?.stop()
-  }
+function sanitizeChannelIndex(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? Math.min(MAX_CAPTURE_CHANNELS - 1, value)
+    : 0
 }
