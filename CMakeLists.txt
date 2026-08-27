@@ -77,8 +77,17 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
   add_library(singz_capture MODULE native/electron/capture_addon.cpp)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
   target_include_directories(singz_capture PRIVATE "${SINGZ_NODE_INCLUDE_DIR}")
+  # Build identity, compiled in and exported: the loader refuses an addon
+  # whose Electron version differs from the process it runs in, and the
+  # source stamp lets harnesses tell a foreign/stale binary from this one
+  # (build-capture-addon.cjs passes both; bare cmake builds carry blanks and
+  # are refused by the app's loader by design).
+  set(SINGZ_CAPTURE_ELECTRON "" CACHE STRING "Electron version this addon targets")
+  set(SINGZ_CAPTURE_SOURCE_STAMP "" CACHE STRING "Fingerprint of the addon's build inputs")
   target_compile_definitions(singz_capture PRIVATE
-    NAPI_VERSION=8 NODE_GYP_MODULE_NAME=singz_capture)
+    NAPI_VERSION=8 NODE_GYP_MODULE_NAME=singz_capture
+    SINGZ_CAPTURE_ELECTRON="${SINGZ_CAPTURE_ELECTRON}"
+    SINGZ_CAPTURE_SOURCE_STAMP="${SINGZ_CAPTURE_SOURCE_STAMP}")
   target_link_libraries(singz_capture PRIVATE
     SingZ::native_build_options
     SingZ::zcore_device

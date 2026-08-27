@@ -21,6 +21,8 @@ export interface NativeCaptureBinding {
   cancelCapture(generation: bigint): { ok: true; cancelled: boolean }
   captureState(): { state: CaptureStateName; ownershipGeneration: string; error: string }
   captureStats(): CaptureStats
+  /** Compiled-in identity — which Electron and which source tree built this binary. */
+  buildInfo: { electronVersion: string; sourceStamp: string }
 }
 
 const require = createRequire(import.meta.url)
@@ -53,7 +55,18 @@ export function captureAddonPath(): string {
 }
 
 export function loadCaptureBinding(): NativeCaptureBinding {
-  return require(captureAddonPath()) as NativeCaptureBinding
+  const binding = require(captureAddonPath()) as NativeCaptureBinding
+  // The addon is ABI-coupled to one Electron; a shape check alone would load
+  // a stale or foreign-worktree binary and misbehave later. Refuse here — a
+  // pre-identity or bare-cmake build reads as "an unknown Electron".
+  const built = binding.buildInfo?.electronVersion || 'an unknown Electron'
+  if (built !== process.versions.electron) {
+    throw new Error(
+      `singz-capture.node was built for Electron ${built}, this app runs ` +
+        `${process.versions.electron} — rebuild it with npm run capture:addon`
+    )
+  }
+  return binding
 }
 
 function parseGeneration(raw: string): bigint | null {
@@ -115,10 +128,15 @@ export class CaptureOwner {
   }
 
   private native(): NativeCaptureBinding | null {
-    if (this.binding || this.loadError) return this.binding
+    if (this.binding) return this.binding
     try {
       this.binding = loadCaptureBinding()
+      this.loadError = null
     } catch (error) {
+      // Retry on every call and keep only the LATEST failure: the addon can
+      // appear after launch (first build finishing, a copy landing in
+      // vendor/), and a latched first error would report a stale
+      // "unavailable" for the whole process lifetime.
       this.loadError = `Native microphone support is unavailable: ${String(error)}`
     }
     return this.binding

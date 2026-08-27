@@ -72,9 +72,12 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Build and load native capture addon in Electron
+        # bash for fail-fast per line — default pwsh only reports the last
+        # command's exit code.
+        shell: bash
         run: |
           npm run capture:addon -- win32-x64
-          node_modules/.bin/electron.cmd tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
 
   zdsp-sanitizers:
     runs-on: ubuntu-24.04

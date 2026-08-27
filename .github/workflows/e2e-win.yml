@@ -22,10 +22,9 @@ jobs:
       - run: npm ci
 
       - name: Build and load native capture addon in Electron
-        shell: pwsh
         run: |
           npm run capture:addon -- win32-x64
-          node_modules/.bin/electron.cmd tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
 
       - name: Unit tests (FLAC roundtrip, v1->v2 migration)
         run: npm test
@@ -44,7 +43,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/build-capture-addon.cjs', 'native/electron/**', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/build-capture-addon.cjs', 'native/electron/**', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh', 'node_modules/electron/package.json') }}
 
       # Mirror build.yml's key EXACTLY (this step is restore-only — build.yml
       # is the sole saver, so a drifted string here becomes an orphan key that

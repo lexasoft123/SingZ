@@ -438,6 +438,14 @@ napi_value init(napi_env env, napi_value exports) {
       {"captureStats", nullptr, stats, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
+  // Build identity: the loader refuses an addon whose Electron differs from
+  // the running process, and the source stamp names exactly which tree built
+  // this binary — the vendored-binary-matches-this-build rule, addon edition.
+  napi_value buildInfo;
+  napi_create_object(env, &buildInfo);
+  set(env, buildInfo, "electronVersion", stringValue(env, SINGZ_CAPTURE_ELECTRON));
+  set(env, buildInfo, "sourceStamp", stringValue(env, SINGZ_CAPTURE_SOURCE_STAMP));
+  set(env, exports, "buildInfo", buildInfo);
   return exports;
 }
 

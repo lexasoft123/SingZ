@@ -336,7 +336,11 @@ int main() {
       }
       sourceFrame += blockFrames;
     }
-    const double analysisRate = std::min(rate, 48000.0);
+    // Mirrors the adapter's rate-family rule: 44.1 kHz multiples analyze at
+    // 44.1 kHz (integer decimation), everything else caps at 48 kHz.
+    const double analysisRate = std::fmod(rate, 44100.0) == 0.0
+                                    ? std::min(rate, 44100.0)
+                                    : std::min(rate, 48000.0);
     const uint64_t expectedEndSource = static_cast<uint64_t>(
         2048.0L * rate / analysisRate);
     const uint64_t expectedEndHost = 1000000000ull + static_cast<uint64_t>(

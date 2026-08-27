@@ -46,6 +46,7 @@ function fakeBinding(): NativeCaptureBinding & {
 } {
   return {
     cancelled: [],
+    buildInfo: { electronVersion: 'test', sourceStamp: 'test' },
     inputDevices: () => ({
       ok: true,
       devices: [{

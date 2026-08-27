@@ -44,7 +44,11 @@ void LiveInputAnalysisAdapter::configure(const AudioInputBlockView& block) {
   streamHostTimeNs_ = block.sampleHostTimeNs;
   timestampQuality_ = block.timestampQuality;
   sourceRate_ = static_cast<int>(std::llround(block.sampleRate));
-  analysisRate_ = std::min(sourceRate_, 48000);
+  // Mirrors zdsp's capture adapter: 44.1 kHz-family sources analyze at
+  // 44.1 kHz so the Resampler's tap heuristic sees an integer decimation
+  // (min(rate, 48000) put 88.2 kHz on the 24-tap near-unity branch).
+  analysisRate_ = sourceRate_ % 44100 == 0 ? std::min(sourceRate_, 44100)
+                                           : std::min(sourceRate_, 48000);
   if (sourceRate_ != analysisRate_) {
     resampler_ = std::make_unique<Resampler>(sourceRate_, analysisRate_, 1);
     latencyToDrop_ = resampler_->latencyOutFrames();

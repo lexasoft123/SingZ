@@ -499,9 +499,17 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
     bool running = true;
     bool haveDeliveredPacket = false;
     while (running) {
-      const DWORD waited = WaitForMultipleObjects(2, captureEvents, FALSE, INFINITE);
+      // Never INFINITE: a removed or re-enumerated endpoint can stop
+      // signaling audioEvent_ forever (nothing here registers an
+      // IMMNotificationClient), which would park this worker with the
+      // session still reporting Running — the UI then stays latched "Mic
+      // on" with a frozen meter. A timed wake probes the client below, and a
+      // dead device surfaces AUDCLNT_E_DEVICE_INVALIDATED from
+      // GetNextPacketSize within one period; a healthy-but-idle stream just
+      // reads zero packets, twice a second.
+      const DWORD waited = WaitForMultipleObjects(2, captureEvents, FALSE, 500);
       if (waited == WAIT_OBJECT_0 || stopRequested_.load(std::memory_order_acquire)) break;
-      if (waited != WAIT_OBJECT_0 + 1) {
+      if (waited != WAIT_OBJECT_0 + 1 && waited != WAIT_TIMEOUT) {
         runtimeFailure_.store(RuntimeFailure::CaptureFailed, std::memory_order_release);
         break;
       }

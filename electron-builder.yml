@@ -8,6 +8,23 @@ files:
   - '!build/*'
   - '!vendor/*'
   - '!.engines-src/*'
+  # The native source trees ship as compiled engines (extraResources), never
+  # as source in the asar — the negation-only list means everything not
+  # negated here IS packaged.
+  - '!zcore/*'
+  - '!zdsp/*'
+  - '!third_party/*'
+  - '!tools/*'
+  - '!native/*'
+  - '!cmake/*'
+  - '!{CMakeLists.txt,CMakePresets.json}'
+  # Pre-existing instances of the same trap (the phone app's whole source
+  # tree — plus its node_modules on any machine that ran mobile npm ci —
+  # the test suites, and the agent config all shipped inside the asar).
+  - '!mobile/*'
+  - '!tests/*'
+  - '!.claude/*'
+  - '!{CLAUDE.md,vitest.config.ts,tsconfig.tests.json}'
   - '!scripts/*'
   - '!docs/*'
   - '!eval/*'

@@ -73,7 +73,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/build-capture-addon.cjs', 'native/electron/**', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/build-capture-addon.cjs', 'native/electron/**', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh', 'node_modules/electron/package.json') }}
 
       - name: Cache engine sources and build trees
         if: steps.engines-out.outputs.cache-hit != 'true'
@@ -114,9 +114,13 @@ jobs:
 
       - name: Build and load native capture addon (Windows)
         if: runner.os == 'Windows'
+        # bash, not the default pwsh: pwsh fails a step only on the LAST
+        # command's exit code, and a failed rebuild here would be masked by
+        # the cache-restored addon passing the smoke — shipping it green.
+        shell: bash
         run: |
           npm run capture:addon -- win32-x64
-          node_modules/.bin/electron.cmd tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
+          node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs vendor/win32-x64/singz-capture.node
 
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never

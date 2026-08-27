@@ -175,7 +175,13 @@ bool LiveInputAnalysisAdapter::configure(const CaptureTime& capture,
   streamHostTimeNs_ = capture.sampleHostTime.value;
   streamSourceFrame_ = capture.sourceFrame.value;
   sourceRate_ = static_cast<int>(std::llround(sourceRate));
-  analysisRate_ = std::min(sourceRate_, 48000);
+  // Stay inside the source's rate family: 88.2/176.4 kHz analyze at 44.1 kHz
+  // so the shared Resampler sees a true integer decimation (2:1/4:1) and
+  // designs a real lowpass. A flat min(rate, 48000) put 88.2 kHz on the
+  // 24-tap near-unity branch at an actual 1.84:1 — aliases folded in at
+  // −8 dB (the "new consumer at a new ratio" trap resample.cpp records).
+  analysisRate_ = sourceRate_ % 44100 == 0 ? std::min(sourceRate_, 44100)
+                                           : std::min(sourceRate_, 48000);
   if (sourceRate_ != analysisRate_) {
     resampler_ = std::make_unique<singz::Resampler>(sourceRate_, analysisRate_, 1);
     latencyToDrop_ = resampler_->latencyOutFrames();

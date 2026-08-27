@@ -61,7 +61,10 @@ INPUTS, which is exactly how the melody framing bug survived a year of green.
 UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
-the E2E Windows workflow, which also runs `npm test`) and the mac drivers
+the E2E Windows workflow, which also runs `npm test`), the two capture-addon
+harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
+gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
+it opens the real microphone), and the mac drivers
 in `tests/e2e/mac/` (nine of them: align, wizard/consent, audio settings,
 bar editing, and the analysis-rule drivers — the two stem-rate ones, the two
 song-switch races, and stamp-upgrade; the `e2e-verifier` agent in
