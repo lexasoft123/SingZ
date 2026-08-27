@@ -243,6 +243,7 @@ describe('desktop native training microphone source', () => {
       channelCount: 4
     })
     expect(source.readInfo()).toEqual({ f0: 440, clarity: 0.93, rms: 0.2 })
+    expect(source.readLevel()).toEqual({ rms: 0.2, dbfs: -14, signal: true })
     expect(window.singz.startDesktopAudioInput).toHaveBeenCalledWith({
       deviceUid: 'auhal:studio',
       channel: 2

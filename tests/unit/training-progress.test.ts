@@ -4,6 +4,33 @@ import { createTrainingSession,recordTrainingResult,startTrainingSession } from 
 import type { TrainingSessionData } from '../../src/shared/training-types'
 
 describe('training completion receipts',()=>{
+  it('remembers every exercise setup field and migrates the legacy profile',()=>{
+    const remembered=restoreTrainingPreferences({
+      ...defaultTrainingPreferences(),
+      tonicPc:9,
+      keyMode:'minor',
+      exercise:'interval',
+      length:30,
+      range:{lowMidi:45,highMidi:75},
+      taskMode:'find',
+      direction:'descending',
+      intervalSizes:[3,5],
+      chordDegrees:[2,6]
+    })
+    expect(remembered).toMatchObject({tonicPc:9,keyMode:'minor',exercise:'interval',length:30,range:{lowMidi:45,highMidi:75},taskMode:'find',direction:'descending',intervalSizes:[3,5],chordDegrees:[2,6]})
+
+    const legacy=restoreTrainingPreferences({
+      formatVersion:1,
+      range:{lowMidi:46,highMidi:74},
+      notation:'note-names',
+      taskMode:'identify',
+      direction:'ascending',
+      intervalSizes:[2,4],
+      chordDegrees:[1,5]
+    })
+    expect(legacy).toMatchObject({formatVersion:2,tonicPc:0,keyMode:'major',exercise:'note',length:20,range:{lowMidi:46,highMidi:74},taskMode:'identify',direction:'ascending',intervalSizes:[2,4],chordDegrees:[1,5]})
+  })
+
   it('strictly validates preferences, receipts, and derived progress',()=>{
     const receipt=createTrainingCompletionReceipt(completedVocalSession('strict',5,.8,.6),1)
     expect(restoreTrainingCompletionReceipt(JSON.parse(JSON.stringify(receipt)))).toEqual(receipt)
@@ -38,6 +65,19 @@ describe('training completion receipts',()=>{
     const snapshot=summarizeTrainingProgress(progress)
     expect(snapshot).toMatchObject({sessions:3,attempts:3,tendency:'sharp',averageSignedCents:20,stableRatio:.8,voicedRatio:.6})
     expect(snapshot.landedRate).toBeCloseTo(2/3)
+  })
+
+  it('completes and deduplicates a session without counting skipped prompts as attempts',()=>{
+    let session=startTrainingSession(createTrainingSession({key:{tonicPc:0,mode:'major'},range:{lowMidi:48,highMidi:72},exercise:'note',taskMode:'find',length:2,seed:'one-skip'}))
+    const skipped=session.prompts[0]
+    session=recordTrainingResult(session,{response:'skipped',promptId:skipped.id,completedAt:100})
+    const attempted=session.prompts[1]
+    session=recordTrainingResult(session,{response:'vocal',promptId:attempted.id,completedAt:101,targets:attempted.targets.map((_,targetIndex)=>({targetIndex,classification:'on-target',metrics:{medianCentsError:4}}))})
+
+    const receipt=createTrainingCompletionReceipt(session,200)
+    expect(receipt.aggregate).toMatchObject({sessions:1,attempts:1,onTarget:1,close:0})
+    expect(receipt.aggregate.byExercise.note).toEqual({attempts:1,onTarget:1,close:0})
+    expect(restoreTrainingCompletionReceipt(JSON.parse(JSON.stringify(receipt)))).toEqual(receipt)
   })
 
   it('records every distinct interval and arpeggio target degree',()=>{

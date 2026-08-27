@@ -94,11 +94,12 @@ export class TrainingMicrophone {
   private cleanupError: string | null = null
   private latestMidi: number | null = null
   private latestConfidence = 0
+  private latestTimestampMs: number | null = null
 
   constructor(private readonly deps: TrainingMicDependencies = nativeDependencies) {}
 
-  get live(): { readonly midi: number | null; readonly confidence: number } {
-    return { midi: this.latestMidi, confidence: this.latestConfidence }
+  get live(): { readonly midi: number | null; readonly confidence: number; readonly timestampMs: number | null } {
+    return { midi: this.latestMidi, confidence: this.latestConfidence, timestampMs: this.latestTimestampMs }
   }
 
   snapshot(): readonly TrainingPitchObservation[] {
@@ -107,6 +108,9 @@ export class TrainingMicrophone {
 
   resetObservations(): void {
     this.observations = []
+    this.latestMidi = null
+    this.latestConfidence = 0
+    this.latestTimestampMs = null
   }
 
   isRequestingPermission(): boolean {
@@ -134,6 +138,7 @@ export class TrainingMicrophone {
       this.clockEpochMs = null
       this.latestMidi = null
       this.latestConfidence = 0
+      this.latestTimestampMs = null
     })
   }
 
@@ -305,6 +310,7 @@ export class TrainingMicrophone {
     }
     this.latestMidi = midi
     this.latestConfidence = frame.clarity
+    this.latestTimestampMs = timestampMs
     this.observations.push(observation)
     if (this.observations.length > MAX_OBSERVATIONS)
       this.observations.splice(0, this.observations.length - MAX_OBSERVATIONS)
@@ -325,6 +331,7 @@ export class TrainingMicrophone {
       }
       this.latestMidi = midi
       this.latestConfidence = frame.clarity
+      this.latestTimestampMs = observation.timestampMs
       this.observations.push(observation)
       if (this.observations.length > MAX_OBSERVATIONS)
         this.observations.splice(0, this.observations.length - MAX_OBSERVATIONS)

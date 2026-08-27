@@ -28,6 +28,24 @@ interface ActiveInput {
   resolveStopped: () => void
 }
 
+/** Inventory and process spawn are asynchronous, so checking `active` alone
+ * is not atomic: two renderer starts can both pass the check before either
+ * installs its child. Hold one short-lived claim until the winning start has
+ * either reached ready or failed. */
+export class AudioInputStartGate {
+  private occupied = false
+
+  async run<T>(operation: () => Promise<T>, refused: () => T): Promise<T> {
+    if (this.occupied) return refused()
+    this.occupied = true
+    try {
+      return await operation()
+    } finally {
+      this.occupied = false
+    }
+  }
+}
+
 const finite = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value)
 
@@ -154,6 +172,7 @@ function runInventory(bin: string): Promise<DesktopAudioInputDevice[]> {
 
 class DesktopAudioInput {
   private active: ActiveInput | null = null
+  private readonly startGate = new AudioInputStartGate()
 
   async list(): Promise<{ ok: true; devices: DesktopAudioInputDevice[] } | { ok: false; error: string }> {
     try {
@@ -166,6 +185,13 @@ class DesktopAudioInput {
   }
 
   async start(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
+    return this.startGate.run(
+      () => this.startClaimed(sender, raw),
+      () => ({ ok: false, kind: 'busy', error: 'Another training microphone is starting.' })
+    )
+  }
+
+  private async startClaimed(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
     const previous = this.active
     if (previous?.stopping) await waitForStopped(previous, 2500)
     if (this.active) return { ok: false, kind: 'busy', error: 'Another training microphone is active.' }

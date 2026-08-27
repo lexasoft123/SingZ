@@ -1,4 +1,9 @@
 import type { TrainingCue, TrainingCuePurpose } from '../../../shared/training-types'
+import {
+  DEFAULT_TRAINING_REFERENCE_VOLUME,
+  clampTrainingReferenceVolume,
+  trainingOrganOscillators
+} from '../training-practice'
 
 export interface TrainingCueTimingOptions {
   /** Scheduling headroom from AudioContext.currentTime. */
@@ -22,7 +27,7 @@ export const DEFAULT_TRAINING_CUE_TIMING: Readonly<TrainingCueTimingOptions> = O
   answerGapSec: 0.25,
   attackSec: 0.012,
   releaseSec: 0.05,
-  peakGain: 0.12
+  peakGain: 1
 })
 
 export interface ScheduledTrainingNote {
@@ -61,6 +66,7 @@ export class DesktopTrainingCueController {
   private readonly voices = new Set<OwnedVoice>()
   private generation = 0
   private disposed = false
+  private referenceVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
 
   constructor(
     private readonly context: AudioContext,
@@ -89,13 +95,14 @@ export class DesktopTrainingCueController {
     try {
       for (let cueIndex = 0; cueIndex < cues.length; cueIndex++) {
         const cue = cues[cueIndex]
+        const concurrentScale = cue.articulation === 'together' ? 1 / Math.max(1, cue.notes.length) : 1
         const notes = cue.notes.map((midi, noteIndex) => {
           const noteStart =
             cue.articulation === 'together'
               ? cursor
               : cursor + noteIndex * (timing.noteDurationSec + timing.sequenceGapSec)
           const noteEnd = noteStart + timing.noteDurationSec
-          this.scheduleVoice(midi, noteStart, noteEnd, timing)
+          this.scheduleVoice(midi, noteStart, noteEnd, timing, concurrentScale)
           return { midi, startTime: noteStart, endTime: noteEnd }
         })
         const cueEnd = notes.reduce((latest, note) => Math.max(latest, note.endTime), cursor)
@@ -120,6 +127,14 @@ export class DesktopTrainingCueController {
     this.cancel()
   }
 
+  setReferenceVolume(volume: number): void {
+    this.referenceVolume = clampTrainingReferenceVolume(volume)
+  }
+
+  getReferenceVolume(): number {
+    return this.referenceVolume
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.generation++
@@ -131,23 +146,29 @@ export class DesktopTrainingCueController {
     midi: number,
     startTime: number,
     endTime: number,
-    timing: TrainingCueTimingOptions
+    timing: TrainingCueTimingOptions,
+    concurrentScale: number
   ): void {
-    const oscillator = this.context.createOscillator()
-    const gain = this.context.createGain()
-    const voice = { oscillator, gain }
-    oscillator.type = 'sine'
-    oscillator.frequency.setValueAtTime(440 * 2 ** ((midi - 69) / 12), startTime)
-    gain.gain.setValueAtTime(0, startTime)
-    gain.gain.linearRampToValueAtTime(timing.peakGain, startTime + timing.attackSec)
-    gain.gain.setValueAtTime(timing.peakGain, endTime - timing.releaseSec)
-    gain.gain.linearRampToValueAtTime(0, endTime)
-    oscillator.connect(gain)
-    gain.connect(this.output)
-    oscillator.onended = () => this.releaseVoice(voice, false)
-    this.voices.add(voice)
-    oscillator.start(startTime)
-    oscillator.stop(endTime)
+    const fundamental = 440 * 2 ** ((midi - 69) / 12)
+    for (const partial of trainingOrganOscillators()) {
+      const oscillator = this.context.createOscillator()
+      const gain = this.context.createGain()
+      const voice = { oscillator, gain }
+      const level = partial.level * this.referenceVolume * timing.peakGain * concurrentScale
+      oscillator.type = 'sine'
+      oscillator.frequency.setValueAtTime(fundamental * partial.frequencyRatio, startTime)
+      gain.gain.setValueAtTime(0, startTime)
+      gain.gain.linearRampToValueAtTime(level * 0.86, startTime + timing.attackSec)
+      gain.gain.linearRampToValueAtTime(level, startTime + Math.min(0.18, (endTime - startTime) * 0.55))
+      gain.gain.setValueAtTime(level, endTime - timing.releaseSec)
+      gain.gain.linearRampToValueAtTime(0, endTime)
+      oscillator.connect(gain)
+      gain.connect(this.output)
+      oscillator.onended = () => this.releaseVoice(voice, false)
+      this.voices.add(voice)
+      oscillator.start(startTime)
+      oscillator.stop(endTime)
+    }
   }
 
   private releaseVoice(voice: OwnedVoice, stop: boolean): void {

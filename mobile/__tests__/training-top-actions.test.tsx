@@ -14,6 +14,10 @@ function nativeAction(tree: ReactTestRenderer.ReactTestRenderer, label: string):
   )[0]
 }
 
+function nodeText(node: ReactTestRenderer.ReactTestInstance): string {
+  return node.children.map((child) => typeof child === 'string' ? child : nodeText(child)).join('')
+}
+
 test('setup and summary Back use an elevated 48dp native hit surface', async () => {
   const onBack = jest.fn()
   let tree!: ReactTestRenderer.ReactTestRenderer
@@ -21,6 +25,8 @@ test('setup and summary Back use an elevated 48dp native hit surface', async () 
     tree = ReactTestRenderer.create(<TrainingHeader title="Set up the session" onBack={onBack} />)
   })
   const back = nativeAction(tree, 'Back')
+  expect(nodeText(back)).toBe('‹')
+  expect(nodeText(tree.root)).toContain('Set up the session')
   expect(back.props.collapsable).toBe(false)
   expect(back.props.hitSlop).toBe(10)
   const style = StyleSheet.flatten(back.props.style({ pressed: false }))
@@ -51,6 +57,7 @@ test('session End uses the same native hit surface and handler', async () => {
     )
   })
   const end = nativeAction(tree, 'End session')
+  expect(nodeText(end)).toBe('‹')
   expect(end.props.hitSlop).toBe(10)
   expect(StyleSheet.flatten(end.props.style({ pressed: false })).minHeight).toBeGreaterThanOrEqual(48)
   await ReactTestRenderer.act(() => end.props.onPress())

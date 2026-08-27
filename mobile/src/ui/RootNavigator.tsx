@@ -1,4 +1,3 @@
-import { DarkTheme, NavigationContainer } from '@react-navigation/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
@@ -20,15 +19,6 @@ type RootStackParamList = {
 }
 
 const Stack = createNativeStackNavigator<RootStackParamList>()
-
-const theme = {
-  ...DarkTheme,
-  colors: {
-    ...DarkTheme.colors,
-    background: C.bg,
-    card: C.bg
-  }
-}
 
 /**
  * Owns one loaded song for exactly as long as its Player route exists.
@@ -155,99 +145,96 @@ export default function RootNavigator({
 
   const finishAddSong = useCallback((request: AddSongRequest, addedDir: string | null): void => {
     request.onClose(addedDir)
-    setAddSong(current => (current === request ? null : current))
+    setAddSong((current) => (current === request ? null : current))
   }, [])
 
   return (
     <View style={styles.root}>
-      <NavigationContainer theme={theme}>
-        <Stack.Navigator
-          initialRouteName="Catalog"
-          screenOptions={{
-            headerShown: false,
+      <Stack.Navigator
+        initialRouteName="Catalog"
+        screenOptions={{
+          headerShown: false,
+          contentStyle: styles.root
+        }}
+      >
+        <Stack.Screen name="Catalog">
+          {({ navigation }) => (
+            <CatalogScreen
+              active={active}
+              sampleRate={engine.sampleRate}
+              onOpenLog={() => navigation.navigate('Log')}
+              onOpenAddSong={(request) => {
+                setAddSong(request)
+                navigation.navigate('AddSong')
+              }}
+              onCloseAddSong={() => navigation.goBack()}
+              onLoaded={(loaded) => {
+                setProject(loaded)
+                onProjectLoaded(loaded)
+                navigation.navigate('Player')
+              }}
+            />
+          )}
+        </Stack.Screen>
+        <Stack.Screen
+          name="Player"
+          options={{
+            gestureEnabled: true,
+            fullScreenGestureEnabled: false
+          }}
+        >
+          {({ navigation }) =>
+            project == null ? (
+              <View style={styles.root} />
+            ) : (
+              <PlayerRoute
+                active={active}
+                engine={engine}
+                project={project}
+                route={route}
+                trimMs={trimMs}
+                onTrim={onTrim}
+                onTrainingFacts={onTrainingFacts}
+                onBack={() => navigation.goBack()}
+                onClosed={closeProject}
+              />
+            )
+          }
+        </Stack.Screen>
+        <Stack.Screen
+          name="AddSong"
+          options={{
+            presentation: 'formSheet',
+            gestureEnabled: true,
+            sheetAllowedDetents: NATIVE_SHEET_FIT_SUPPORTED ? 'fitToContents' : [0.42, 0.93],
+            ...(!NATIVE_SHEET_FIT_SUPPORTED ? { sheetInitialDetentIndex: 0 } : {}),
+            sheetGrabberVisible: true,
+            contentStyle: styles.sheet
+          }}
+          listeners={{
+            transitionEnd: (event) => {
+              if (!event.data.closing) addSong?.onShown?.()
+            }
+          }}
+        >
+          {({ navigation }) =>
+            addSong == null ? (
+              <View style={styles.sheet} />
+            ) : (
+              <AddSongRoute request={addSong} onFinished={finishAddSong} onBack={() => navigation.goBack()} />
+            )
+          }
+        </Stack.Screen>
+        <Stack.Screen
+          name="Log"
+          options={{
+            presentation: 'fullScreenModal',
             contentStyle: styles.root
           }}
         >
-          <Stack.Screen name="Catalog">
-            {({ navigation }) => (
-              <CatalogScreen
-                active={active}
-                sampleRate={engine.sampleRate}
-                onOpenLog={() => navigation.navigate('Log')}
-                onOpenAddSong={request => {
-                  setAddSong(request)
-                  navigation.navigate('AddSong')
-                }}
-                onCloseAddSong={() => navigation.goBack()}
-                onLoaded={loaded => {
-                  setProject(loaded)
-                  onProjectLoaded(loaded)
-                  navigation.navigate('Player')
-                }}
-              />
-            )}
-          </Stack.Screen>
-          <Stack.Screen
-            name="Player"
-            options={{
-              gestureEnabled: true,
-              fullScreenGestureEnabled: false
-            }}
-          >
-            {({ navigation }) =>
-              project == null ? (
-                <View style={styles.root} />
-              ) : (
-                <PlayerRoute
-                  active={active}
-                  engine={engine}
-                  project={project}
-                  route={route}
-                  trimMs={trimMs}
-                  onTrim={onTrim}
-                  onTrainingFacts={onTrainingFacts}
-                  onBack={() => navigation.goBack()}
-                  onClosed={closeProject}
-                />
-              )
-            }
-          </Stack.Screen>
-          <Stack.Screen
-            name="AddSong"
-            options={{
-              presentation: 'formSheet',
-              gestureEnabled: true,
-              sheetAllowedDetents: NATIVE_SHEET_FIT_SUPPORTED ? 'fitToContents' : [0.42, 0.93],
-              ...(!NATIVE_SHEET_FIT_SUPPORTED ? { sheetInitialDetentIndex: 0 } : {}),
-              sheetGrabberVisible: true,
-              contentStyle: styles.sheet
-            }}
-            listeners={{
-              transitionEnd: event => {
-                if (!event.data.closing) addSong?.onShown?.()
-              }
-            }}
-          >
-            {({ navigation }) =>
-              addSong == null ? (
-                <View style={styles.sheet} />
-              ) : (
-                <AddSongRoute
-                  request={addSong}
-                  onFinished={finishAddSong}
-                  onBack={() => navigation.goBack()}
-                />
-              )
-            }
-          </Stack.Screen>
-          <Stack.Screen
-            name="Log"
-            options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}
-          >
-            {({ navigation }) => <LogPanel onClose={() => navigation.goBack()} />}
-          </Stack.Screen>
-        </Stack.Navigator>
-      </NavigationContainer>
+          {({ navigation }) => <LogPanel onClose={() => navigation.goBack()} />}
+        </Stack.Screen>
+      </Stack.Navigator>
     </View>
   )
 }

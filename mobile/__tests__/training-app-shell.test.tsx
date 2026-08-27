@@ -1,5 +1,6 @@
 import React from 'react'
 import ReactTestRenderer from 'react-test-renderer'
+import { AppState } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import { trainingTargetWindows } from '../src/training/runtime'
 import { readFileSync } from 'node:fs'
@@ -29,9 +30,12 @@ jest.mock('../src/engine', () => ({
     outputDisplayLatency = 0
     pause = jest.fn()
     cancelTrainingCues = jest.fn()
+    suspendForBackground = jest.fn(() => Promise.resolve())
+    allowForegroundAudio = jest.fn()
     unload = jest.fn()
     setDisplayLatency = jest.fn((seconds: number) => { this.outputDisplayLatency = seconds })
     setTrainingCueMuted = jest.fn()
+    setTrainingCueVolume = jest.fn()
     constructor() {
       ;(globalThis as Record<string, unknown>).shellEngine = this
     }
@@ -39,9 +43,32 @@ jest.mock('../src/engine', () => ({
 }))
 jest.mock('react-native-safe-area-context', () => {
   const ReactModule = require('react')
+  const metrics = {
+    frame: { x: 0, y: 0, width: 390, height: 844 },
+    insets: { top: 0, right: 0, bottom: 0, left: 0 }
+  }
+  const SafeAreaInsetsContext = ReactModule.createContext(metrics.insets)
+  const SafeAreaFrameContext = ReactModule.createContext(metrics.frame)
   return {
-    SafeAreaProvider: ({ children }: { children: React.ReactNode }) => ReactModule.createElement(ReactModule.Fragment, null, children),
-    useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 })
+    SafeAreaInsetsContext,
+    SafeAreaFrameContext,
+    SafeAreaInsetsConsumer: SafeAreaInsetsContext.Consumer,
+    SafeAreaFrameConsumer: SafeAreaFrameContext.Consumer,
+    initialWindowMetrics: metrics,
+    SafeAreaProvider: ({
+      children,
+      initialMetrics = metrics
+    }: {
+      children: React.ReactNode
+      initialMetrics?: typeof metrics
+    }) =>
+      ReactModule.createElement(
+        SafeAreaFrameContext.Provider,
+        { value: initialMetrics.frame },
+        ReactModule.createElement(SafeAreaInsetsContext.Provider, { value: initialMetrics.insets }, children)
+      ),
+    useSafeAreaInsets: () => ReactModule.useContext(SafeAreaInsetsContext),
+    useSafeAreaFrame: () => ReactModule.useContext(SafeAreaFrameContext)
   }
 })
 jest.mock('../src/log', () => ({ logStartup: jest.fn() }))
@@ -201,6 +228,34 @@ describe('mobile training app shell', () => {
     expect(shellEngine().unload).toHaveBeenCalled()
     expect(mockReleaseProject).toHaveBeenCalledWith(project)
     expect(shellEngine().unload.mock.invocationCallOrder.at(-1)).toBeLessThan(mockReleaseProject.mock.invocationCallOrder[0])
+  })
+
+  test('silences native audio on background without auto-resuming it on foreground', async () => {
+    let appStateChange!: (state: 'active' | 'background' | 'inactive' | 'unknown' | 'extension') => void
+    const remove = jest.fn()
+    const add = AppState.addEventListener as jest.Mock
+    const defaultImplementation = add.getMockImplementation()
+    add.mockImplementation((type, listener) => {
+      if (type === 'change') appStateChange = listener
+      return { remove }
+    })
+    let tree!: ReactTestRenderer.ReactTestRenderer
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<App />)
+      await Promise.resolve()
+    })
+
+    await ReactTestRenderer.act(() => appStateChange('inactive'))
+    expect(shellEngine().suspendForBackground).not.toHaveBeenCalled()
+    await ReactTestRenderer.act(() => appStateChange('background'))
+    expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
+    await ReactTestRenderer.act(() => appStateChange('active'))
+    expect(shellEngine().allowForegroundAudio).toHaveBeenCalledTimes(1)
+    expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
+
+    await ReactTestRenderer.act(() => tree.unmount())
+    expect(remove).toHaveBeenCalledTimes(1)
+    add.mockImplementation(defaultImplementation)
   })
 
   test('root route owner applies stored latency in Train and follows a post-mic route change', async () => {

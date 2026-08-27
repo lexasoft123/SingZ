@@ -173,6 +173,14 @@ export interface VocalTrainingAttemptResult {
   readonly completedAt?: number
 }
 
+/** A completed prompt with no attempt. It advances a session but is never scored. */
+export interface SkippedTrainingAttemptResult {
+  readonly response: 'skipped'
+  readonly promptId: string
+  /** Epoch milliseconds supplied by the caller; the generator has no clock. */
+  readonly completedAt?: number
+}
+
 export type TrainingIdentifyAnswer =
   | { readonly kind: 'note'; readonly pitchClass: number }
   | { readonly kind: 'scale-degree'; readonly scaleDegree: number }
@@ -201,8 +209,14 @@ export interface IdentifyTrainingAttemptResult extends IdentifyTrainingAttemptIn
   readonly correct: boolean
 }
 
-export type TrainingAttemptResult = VocalTrainingAttemptResult | IdentifyTrainingAttemptResult
-export type TrainingAttemptInput = VocalTrainingAttemptResult | IdentifyTrainingAttemptInput
+export type TrainingAttemptResult =
+  | VocalTrainingAttemptResult
+  | IdentifyTrainingAttemptResult
+  | SkippedTrainingAttemptResult
+export type TrainingAttemptInput =
+  | VocalTrainingAttemptResult
+  | IdentifyTrainingAttemptInput
+  | SkippedTrainingAttemptResult
 
 export type TrainingSessionStatus = 'ready' | 'active' | 'completed' | 'abandoned'
 

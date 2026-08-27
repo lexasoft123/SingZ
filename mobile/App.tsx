@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { NativeModules, StatusBar, StyleSheet, View } from 'react-native'
+import { DarkTheme, NavigationContainer, useIsFocused, useNavigationContainerRef } from '@react-navigation/native'
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
+import { AppState, NativeModules, StatusBar } from 'react-native'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
@@ -8,14 +10,24 @@ import { logStartup } from './src/log'
 import type { LoadedProject } from './src/projects'
 import { replaySplitTrail } from './src/split/service'
 import RootNavigator from './src/ui/RootNavigator'
-import BottomTabs, { type RootTab } from './src/ui/BottomTabs'
+import BottomTabs, { type RootTab, type RootTabParamList } from './src/ui/BottomTabs'
 import TrainingScreen, { type MobileSongTrainingFacts } from './src/ui/TrainingScreen'
+import { C } from './src/ui/bits'
 import { KEY_DETECT_VERSION } from './src/gen/analysis-lib'
 import { LoadedSongSequence } from './src/training/runtime'
 import { TEST } from './src/ui/testhooks'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from './src/latency'
 
 const engine = new MultitrackEngine()
+const Tabs = createBottomTabNavigator<RootTabParamList>()
+const navigationTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    background: C.bg,
+    card: C.bg
+  }
+}
 if (TEST) {
   TEST.engine = engine
   TEST.setTrainingMuted = (muted: boolean): void => engine.setTrainingCueMuted(muted)
@@ -546,10 +558,19 @@ export function activeMobileScreen(tab: RootTab, hasProject: boolean): 'catalog'
   return tab === 'training' ? 'training' : hasProject ? 'player' : 'catalog'
 }
 
+function SongsTabScene(props: Omit<React.ComponentProps<typeof RootNavigator>, 'active'>): React.JSX.Element {
+  return <RootNavigator {...props} active={useIsFocused()} />
+}
+
+function TrainingTabScene(props: Omit<React.ComponentProps<typeof TrainingScreen>, 'active'>): React.JSX.Element {
+  return <TrainingScreen {...props} active={useIsFocused()} />
+}
+
 export default function App(): React.JSX.Element {
   const [tab, setTab] = useState<RootTab>('songs')
   const tabRef = useRef<RootTab>(tab)
   tabRef.current = tab
+  const navigationRef = useNavigationContainerRef<RootTabParamList>()
   const [hasProject, setHasProject] = useState(false)
   const [songFacts, setSongFacts] = useState<MobileSongTrainingFacts | null>(null)
   const [routeLatency, setRouteLatency] = useState<{ route: RouteLatency; trimMs: number } | null>(null)
@@ -577,7 +598,12 @@ export default function App(): React.JSX.Element {
     AudioManager.setAudioSessionOptions({ iosCategory: 'playback', iosMode: 'default' })
     AudioManager.observeAudioInterruptions(true)
     void AudioManager.setAudioSessionActivity(true)
+    const appState = AppState.addEventListener('change', (next) => {
+      if (next === 'background') void engine.suspendForBackground()
+      else if (next === 'active') engine.allowForegroundAudio()
+    })
     return () => {
+      appState.remove()
       engine.unload()
     }
   }, [])
@@ -630,25 +656,32 @@ export default function App(): React.JSX.Element {
    * completed a genuine successful load. Save/rename/analysis/transpose and
    * tab changes never pass through this callback, so they cannot invalidate
    * a song-linked session. */
-  const acceptLoadedProject = useCallback((loaded: LoadedProject) => {
-    engine.cancelTrainingCues()
-    engine.pause()
-    const sourceSongId = loadSequence.next()
-    setHasProject(true)
-    setSongFacts({
-      sourceSongId,
-      songName: loaded.name,
-      keyInfo: loaded.doc.settings?.key ?? null,
-      transpose: Math.round(loaded.doc.settings?.transpose ?? 0),
-      keyDetectVersion: KEY_DETECT_VERSION
-    })
-    tabRef.current = 'songs'
-    setTab('songs')
-  }, [loadSequence])
+  const acceptLoadedProject = useCallback(
+    (loaded: LoadedProject) => {
+      engine.cancelTrainingCues()
+      engine.pause()
+      const sourceSongId = loadSequence.next()
+      setHasProject(true)
+      setSongFacts({
+        sourceSongId,
+        songName: loaded.name,
+        keyInfo: loaded.doc.settings?.key ?? null,
+        transpose: Math.round(loaded.doc.settings?.transpose ?? 0),
+        keyDetectVersion: KEY_DETECT_VERSION
+      })
+      // A load can finish after the singer has already switched to Train. The
+      // successful song owns the next screen, so bring its retained stack back
+      // without running the transport stop twice.
+      tabRef.current = 'songs'
+      setTab('songs')
+      if (navigationRef.isReady()) navigationRef.navigate('songs')
+    },
+    [loadSequence, navigationRef]
+  )
 
   const changeTab = useCallback((next: RootTab) => {
-    // A selected tab is navigation state, not a transport control. Keep the
-    // ref in sync eagerly so two presses before React commits are no-ops too.
+    // Navigation state changes stop the transport once. Re-selecting a tab
+    // produces no state change, so the retained audio scene remains untouched.
     if (next === tabRef.current) return
     tabRef.current = next
     engine.pause()
@@ -656,49 +689,82 @@ export default function App(): React.JSX.Element {
     setTab(next)
   }, [])
 
-  const updateTrainingFacts = useCallback((facts: { keyInfo: MobileSongTrainingFacts['keyInfo']; transpose: number }) => {
-    setSongFacts((current) => current ? { ...current, ...facts } : current)
-  }, [])
+  const syncTabFromNavigation = useCallback(() => {
+    if (!navigationRef.isReady()) return
+    const state = navigationRef.getRootState()
+    if (!state) return
+    const next = state.routes[state.index]?.name
+    if (next === 'songs' || next === 'training') changeTab(next)
+  }, [changeTab, navigationRef])
+
+  const navigateToTab = useCallback(
+    (next: RootTab) => {
+      if (next === tabRef.current) return
+      changeTab(next)
+      if (navigationRef.isReady()) navigationRef.navigate(next)
+    },
+    [changeTab, navigationRef]
+  )
+
+  const updateTrainingFacts = useCallback(
+    (facts: { keyInfo: MobileSongTrainingFacts['keyInfo']; transpose: number }) => {
+      setSongFacts((current) => (current ? { ...current, ...facts } : current))
+    },
+    []
+  )
   return (
     <SafeAreaProvider>
       {/* Swipeable rows (the library's swipe-to-remove) need the gesture
           handler root; without it every gesture silently falls through to
           the plain responder system and the swipe never begins. */}
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <View style={{ flex: 1 }}>
-          <StatusBar barStyle="light-content" />
-          <View style={{ flex: 1 }}>
-            <View
-              style={[StyleSheet.absoluteFill, { display: tab === 'songs' ? 'flex' : 'none' }]}
-              pointerEvents={tab === 'songs' ? 'auto' : 'none'}
-              accessibilityElementsHidden={tab !== 'songs'}
-              importantForAccessibility={tab === 'songs' ? 'auto' : 'no-hide-descendants'}
-            >
-              <RootNavigator
-                active={tab === 'songs'}
-                engine={engine}
-                route={routeLatency?.route ?? null}
-                trimMs={routeLatency?.trimMs ?? 0}
-                onTrim={applyRouteTrim}
-                onProjectLoaded={acceptLoadedProject}
-                onProjectClosed={closeProject}
-                onTrainingFacts={updateTrainingFacts}
-              />
-            </View>
-            <View style={[StyleSheet.absoluteFill, { display: tab === 'training' ? 'flex' : 'none' }]}>
-              <TrainingScreen
-                active={tab === 'training'}
-                engine={engine}
-                song={songFacts}
-                onBackToSong={(sourceSongId) => {
-                  if (songFacts?.sourceSongId !== sourceSongId) return
-                  changeTab('songs')
-                }}
-              />
-            </View>
-          </View>
-          <BottomTabs active={tab} onChange={changeTab} />
-        </View>
+        <StatusBar barStyle="light-content" />
+        <NavigationContainer
+          ref={navigationRef}
+          theme={navigationTheme}
+          onReady={syncTabFromNavigation}
+          onStateChange={syncTabFromNavigation}
+        >
+          <Tabs.Navigator
+            initialRouteName="songs"
+            backBehavior="history"
+            detachInactiveScreens={false}
+            screenOptions={{
+              headerShown: false,
+              lazy: false,
+              freezeOnBlur: false,
+              popToTopOnBlur: false,
+              sceneStyle: { backgroundColor: C.bg }
+            }}
+            tabBar={BottomTabs}
+          >
+            <Tabs.Screen name="songs" options={{ title: 'Songs', tabBarAccessibilityLabel: 'Songs' }}>
+              {() => (
+                <SongsTabScene
+                  engine={engine}
+                  route={routeLatency?.route ?? null}
+                  trimMs={routeLatency?.trimMs ?? 0}
+                  onTrim={applyRouteTrim}
+                  onProjectLoaded={acceptLoadedProject}
+                  onProjectClosed={closeProject}
+                  onTrainingFacts={updateTrainingFacts}
+                />
+              )}
+            </Tabs.Screen>
+            <Tabs.Screen name="training" options={{ title: 'Train', tabBarAccessibilityLabel: 'Train' }}>
+              {() => (
+                <TrainingTabScene
+                  engine={engine}
+                  song={songFacts}
+                  onBackToSong={(sourceSongId) => {
+                    if (songFacts?.sourceSongId !== sourceSongId) return
+                    navigateToTab('songs')
+                  }}
+                />
+              )}
+            </Tabs.Screen>
+          </Tabs.Navigator>
+        </NavigationContainer>
       </GestureHandlerRootView>
     </SafeAreaProvider>
   )

@@ -418,6 +418,35 @@ describe('serializable session state', () => {
     ).toThrow('does not match')
   })
 
+  it('preserves a deliberate skip as a distinct immutable session result', () => {
+    const active = startTrainingSession(createTrainingSession({ ...base('note'), length: 1 }))
+    const prompt = active.prompts[0]
+    const completed = recordTrainingResult(active, {
+      response: 'skipped',
+      promptId: prompt.id,
+      completedAt: 123
+    })
+
+    expect(completed).toMatchObject({ status: 'completed', currentIndex: 1 })
+    expect(completed.results[0]).toEqual({ response: 'skipped', promptId: prompt.id, completedAt: 123 })
+    expect(restoreTrainingSession(JSON.parse(JSON.stringify(completed)))).toEqual(completed)
+    expect(Object.isFrozen(completed.results[0])).toBe(true)
+    const legacyActive = startTrainingSession(createTrainingSession({ ...base('note'), length: 1 }))
+    const legacyPrompt = legacyActive.prompts[0]
+    const legacyCompleted = recordTrainingResult(legacyActive, {
+      response: 'vocal',
+      promptId: legacyPrompt.id,
+      targets: [{ targetIndex: 0, classification: 'on-target', metrics: {} }]
+    })
+    expect(legacyCompleted.formatVersion).toBe(3)
+    expect(restoreTrainingSession(JSON.parse(JSON.stringify(legacyCompleted)))).toEqual(legacyCompleted)
+    expect(() => recordTrainingResult(active, {
+      response: 'skipped',
+      promptId: prompt.id,
+      targets: [{ targetIndex: 0, classification: 'on-target', metrics: {} }]
+    } as TrainingAttemptResult)).toThrow(/unknown field/i)
+  })
+
   it('derives identify correctness instead of trusting the caller', () => {
     const active = startTrainingSession(
       createTrainingSession({ ...base('scale-degree'), taskMode: 'identify', length: 1 })

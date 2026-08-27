@@ -265,19 +265,20 @@ export function TrashGlyph({ color }: { color: string }): React.JSX.Element {
   )
 }
 
-/** Redetect glyph — a refresh arc with an arrowhead, drawn. */
-export function RedetectGlyph({ color }: { color: string }): React.JSX.Element {
+/** Circular action arrow shared by replay and redetect controls. */
+export function CircularArrowGlyph({ color, size = 16 }: { color: string; size?: number }): React.JSX.Element {
+  const scale = size / 16
   return (
-    <View style={{ width: 16, height: 16 }}>
+    <View testID="circular-arrow-glyph" style={{ width: size, height: size }}>
       <View
         style={{
           position: 'absolute',
-          left: 1,
-          top: 1,
-          width: 14,
-          height: 14,
-          borderRadius: 7,
-          borderWidth: 2,
+          left: scale,
+          top: scale,
+          width: 14 * scale,
+          height: 14 * scale,
+          borderRadius: 7 * scale,
+          borderWidth: 2 * scale,
           borderColor: color,
           borderTopColor: 'transparent',
           transform: [{ rotate: '45deg' }]
@@ -286,21 +287,26 @@ export function RedetectGlyph({ color }: { color: string }): React.JSX.Element {
       <View
         style={{
           position: 'absolute',
-          right: -1,
+          right: -scale,
           top: 0,
           width: 0,
           height: 0,
-          borderLeftWidth: 6,
+          borderLeftWidth: 6 * scale,
           borderLeftColor: color,
-          borderTopWidth: 4,
+          borderTopWidth: 4 * scale,
           borderTopColor: 'transparent',
-          borderBottomWidth: 4,
+          borderBottomWidth: 4 * scale,
           borderBottomColor: 'transparent',
           transform: [{ rotate: '-15deg' }]
         }}
       />
     </View>
   )
+}
+
+/** Redetect glyph — a refresh arc with an arrowhead, drawn. */
+export function RedetectGlyph({ color }: { color: string }): React.JSX.Element {
+  return <CircularArrowGlyph color={color} />
 }
 
 /** Lyrics glyph — three text lines. */

@@ -8,10 +8,10 @@ import type { MicDevice, MicLevel, MicPitch } from '../../src/renderer/src/audio
 
 class FakeMic {
   active = false
-  starts: Array<{ deviceId?: string; channelIndex?: number }> = []
+  starts: Array<{ deviceId?: string; nativeDeviceUid?: string; channelIndex?: number }> = []
   stops = 0
   device: MicDevice | null = null
-  async start(_context: AudioContext, options: { deviceId?: string; channelIndex?: number }): Promise<void> {
+  async start(_context: AudioContext, options: { deviceId?: string; nativeDeviceUid?: string; channelIndex?: number }): Promise<void> {
     this.starts.push(options)
     this.active = true
     this.device = {
@@ -49,8 +49,12 @@ describe('settings microphone preview', () => {
       makeContext: () => context,
       askAccess: async () => true
     })
-    await preview.start({ deviceId: 'interface-1', channelIndex: 5 })
-    expect(mic.starts).toEqual([{ deviceId: 'interface-1', channelIndex: 5 }])
+    await preview.start({ deviceId: 'interface-1', nativeDeviceUid: 'native-interface-1', channelIndex: 5 })
+    expect(mic.starts).toEqual([{
+      deviceId: 'interface-1',
+      nativeDeviceUid: 'native-interface-1',
+      channelIndex: 5
+    }])
     expect(context.resumeCount).toBe(1)
     expect(preview.device).toMatchObject({ id: 'interface-1', channelIndex: 5, channelCount: 8 })
     expect(preview.readLevel()).toMatchObject({ dbfs: -12.041, signal: true })

@@ -55,8 +55,12 @@ import SetupModal from './components/SetupModal'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
-import VocalTraining from './components/VocalTraining'
+import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
+import {
+  DEFAULT_TRAINING_REFERENCE_VOLUME,
+  restoreDesktopTrainingPracticeSettings
+} from './training-practice'
 import {
   cleanSongName,
   customTrackId,
@@ -516,11 +520,19 @@ export default function App(): React.JSX.Element {
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
     try {
       const raw = localStorage.getItem('singz.audio')
-      return raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
+      const stored = raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
+      if (stored.referenceVolume !== undefined) return stored
+      const legacy = restoreDesktopTrainingPracticeSettings(
+        localStorage.getItem('singz.training.practice')
+      )
+      return { ...stored, referenceVolume: legacy.referenceVolume }
     } catch {
-      return {}
+      return { referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME }
     }
   })
+  const changeTrainingReferenceVolume = useCallback((referenceVolume: number) => {
+    setAudioPrefs((current) => sanitizeAudioPrefs({ ...current, referenceVolume }))
+  }, [])
   /** App-level verdict on the saved output ("not connected", "not allowed"). */
   const [outputStatus, setOutputStatus] = useState<string | null>(null)
   /** What the mic is actually listening through, when it's on. */
@@ -621,6 +633,10 @@ export default function App(): React.JSX.Element {
         dispatchDesktopTraining({
           type: 'update-setup',
           patch: {
+            tonicPc: restored.profile.tonicPc,
+            keyMode: restored.profile.keyMode,
+            exercise: restored.profile.exercise,
+            length: restored.profile.length,
             lowMidi: restored.profile.range.lowMidi,
             highMidi: restored.profile.range.highMidi,
             taskMode: restored.profile.taskMode,
@@ -663,6 +679,10 @@ export default function App(): React.JSX.Element {
       if (!trainingProgressLoaded) return
       const current = trainingProgressRef.current
       const next = updateTrainingPreferences(current, {
+        tonicPc: setup.tonicPc,
+        keyMode: setup.keyMode,
+        exercise: setup.exercise,
+        length: setup.length,
         range: { lowMidi: setup.lowMidi, highMidi: setup.highMidi },
         taskMode: setup.taskMode,
         direction: setup.direction,
@@ -2849,6 +2869,8 @@ export default function App(): React.JSX.Element {
           onMicDevice={setMicDevice}
           settingsOwnsMic={showSettings}
           onSetupChange={changeDesktopTrainingSetup}
+          referenceVolume={audioPrefs.referenceVolume ?? DEFAULT_TRAINING_REFERENCE_VOLUME}
+          onReferenceVolumeChange={changeTrainingReferenceVolume}
           progress={trainingProgress}
           songPreparation={
             song
@@ -2861,6 +2883,7 @@ export default function App(): React.JSX.Element {
               : null
           }
           onBackToSong={backToSong}
+          onBackToSongs={() => switchSection('songs')}
         />
       ) : phase === 'ready' && !showCatalog ? (
         <>

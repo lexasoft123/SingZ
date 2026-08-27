@@ -147,11 +147,12 @@ describe('desktop training cue scheduling', () => {
     expect(timeline.cues[2].startTime).toBeCloseTo(12.15)
     expect(timeline.cues[3].startTime).toBeCloseTo(13.05)
     expect(timeline.endTime).toBeCloseTo(13.55)
-    expect(context.oscillators).toHaveLength(7)
-    expect(context.oscillators[0].frequency.calls[0][1]).toBeCloseTo(261.6256, 3)
+    expect(context.oscillators).toHaveLength(7 * 15)
+    expect(context.oscillators[0].frequency.calls[0][1]).toBeCloseTo(130.8128, 3)
+    expect(context.oscillators[2].frequency.calls[0][1]).toBeCloseTo(261.6256, 1)
     expect(context.oscillators.every((oscillator) => oscillator.starts.length === 1)).toBe(true)
     expect(context.gains.every((gain) => gain.connected === output)).toBe(true)
-    expect(context.gains[0].gain.calls.map((call) => call[0])).toEqual(['set', 'ramp', 'set', 'ramp'])
+    expect(context.gains[0].gain.calls.map((call) => call[0])).toEqual(['set', 'ramp', 'ramp', 'set', 'ramp'])
     expect(context.resumeCount).toBe(1)
   })
 
@@ -174,6 +175,15 @@ describe('desktop training cue scheduling', () => {
     controller.dispose()
     expect(final.stops).toHaveLength(2)
     await expect(controller.schedule(cues)).rejects.toThrow('disposed')
+  })
+
+  it('remembers a bounded reference volume with headroom', async () => {
+    const context = new FakeAudioContext('running')
+    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, output)
+    controller.setReferenceVolume(9)
+    expect(controller.getReferenceVolume()).toBe(2)
+    await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [69] }])
+    expect(context.gains[0].gain.calls[1][1]).toBeCloseTo(0.043)
   })
 
   it('disconnects a naturally ended voice without stopping it twice', async () => {

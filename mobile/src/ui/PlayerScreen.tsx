@@ -78,6 +78,7 @@ import SkiaLyrics, {
 } from './SkiaLyrics'
 import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
+import { nativeGlassStyle, nightStudioNativeTheme } from './uikit/native/index.js'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
@@ -2239,20 +2240,14 @@ const s = StyleSheet.create({
      55 − 10 inset ≈ 44, continuous curve. Waveband: concentric would be
      44 − 12 padding = 32, capped at its own capsule (40/2). */
   hdrGlass: {
+    ...nativeGlassStyle(nightStudioNativeTheme, 'surface'),
     position: 'absolute',
     left: 12,
     right: 12,
     top: 54,
     height: 62,
     borderRadius: 31,
-    borderCurve: 'continuous',
-    backgroundColor: 'rgba(24,20,17,0.55)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,240,220,0.05)',
-    borderTopColor: 'rgba(255,240,220,0.14)',
-    ...(Platform.OS === 'ios'
-      ? { shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 14, shadowOffset: { width: 0, height: 10 } }
-      : null)
+    borderCurve: 'continuous'
   },
   hdr: {
     position: 'absolute',
@@ -2292,19 +2287,13 @@ const s = StyleSheet.create({
   noLyrics: { color: C.dim, fontSize: 15, marginTop: 40 },
 
   foot: {
+    ...nativeGlassStyle(nightStudioNativeTheme, 'dock'),
     position: 'absolute',
     left: 10,
     right: 10,
     /* bottom set inline from the safe-area inset */
     borderRadius: 44,
     borderCurve: 'continuous',
-    backgroundColor: 'rgba(24,20,17,0.55)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,240,220,0.05)',
-    borderTopColor: 'rgba(255,240,220,0.14)',
-    ...(Platform.OS === 'ios'
-      ? { shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 15, shadowOffset: { width: 0, height: 12 } }
-      : null),
     /* The seek bar still owns (almost) the full width: the dock's 10+12 a
        side is the cost of the card material the user chose over the old
        edge-to-edge band. */

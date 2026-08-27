@@ -246,8 +246,7 @@ const launch = async () => {
   await win.click('.app-sections button:has-text("Vocal training")')
   await win.waitForSelector('.vt-exercise:has-text("Match a note")', { timeout: 20000 })
   await win.click('.vt-exercise:has-text("Match a note")')
-  await win.click('button:has-text("Review session")')
-  await win.click('button:has-text("Start microphone and begin")')
+  await win.click('button:has-text("Start practice")')
   if (nativeMode) {
     await win.waitForFunction(
       () => document.querySelector('.vt-progress-copy [role="status"]')?.textContent !== 'Ready',

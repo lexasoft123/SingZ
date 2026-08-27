@@ -2,7 +2,7 @@ import {
   frequencyToFractionalMidi,
   type TrainingPitchObservation
 } from '../../../shared/training-scoring'
-import { MicPitch, type MicDevice } from './mic'
+import { MicPitch, type MicDevice, type MicLevel } from './mic'
 import type { PitchFrame } from './pitch'
 import type { DesktopAudioInputEvent } from '../../../shared/types'
 
@@ -32,6 +32,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
   private unsubscribe: (() => void) | null = null
   private dev: MicDevice | null = null
   private frame: PitchFrame = { f0: 0, clarity: 0, rms: 0 }
+  private dbfs = -72
   private usingFallback = false
   private ended: (() => void) | undefined
 
@@ -96,6 +97,18 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     return this.usingFallback ? this.fallback.readInfo() : this.frame
   }
 
+  /** Settings uses the same native capture owner as training. The native
+   * frame already carries its bounded dBFS value, so the meter never needs a
+   * second Chromium stream pointed at a different device or channel. */
+  readLevel(): MicLevel {
+    if (this.usingFallback) {
+      const rms = this.fallback.readInfo().rms
+      const dbfs = Math.max(-72, Math.min(0, 20 * Math.log10(Math.max(rms, 1e-8))))
+      return { rms, dbfs, signal: dbfs > -72 }
+    }
+    return { rms: this.frame.rms, dbfs: this.dbfs, signal: this.dbfs > -72 }
+  }
+
   stop(): void {
     if (this.usingFallback) {
       this.fallback.stop()
@@ -107,6 +120,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     this.unsubscribe = null
     this.dev = null
     this.frame = { f0: 0, clarity: 0, rms: 0 }
+    this.dbfs = -72
     this.ended = undefined
     if (token) void window.singz.stopDesktopAudioInput(token)
   }
@@ -115,6 +129,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     if (!this.token || token !== this.token) return
     if (event.type === 'frame') {
       this.frame = { f0: event.frequency, clarity: event.clarity, rms: event.rms }
+      this.dbfs = event.dbfs
       return
     }
     if (event.type === 'error' || event.type === 'ended') {

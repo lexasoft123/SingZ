@@ -108,4 +108,11 @@ describe('sanitizeAudioPrefs', () => {
     for (const inputChannel of [-1, 32, 1.5, Number.NaN, '2'])
       expect(sanitizeAudioPrefs({ inputChannel }).inputChannel).toBeUndefined()
   })
+
+  it('keeps reference-tone gain with the app-wide audio preferences', () => {
+    expect(sanitizeAudioPrefs({ referenceVolume: 0.9 }).referenceVolume).toBe(0.9)
+    expect(sanitizeAudioPrefs({ referenceVolume: 8 }).referenceVolume).toBe(2)
+    expect(sanitizeAudioPrefs({ referenceVolume: -1 }).referenceVolume).toBe(0.2)
+    expect(sanitizeAudioPrefs({ referenceVolume: 'loud' }).referenceVolume).toBeUndefined()
+  })
 })

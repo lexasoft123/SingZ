@@ -95,12 +95,12 @@ export type MobileTrainingAction =
 
 export function setupFromPreferences(profile: TrainingPreferences): MobileTrainingSetup {
   return {
-    tonicPc: 0,
-    keyMode: 'major',
-    exercise: 'note',
-    taskMode: profile.taskMode === 'identify' ? 'identify' : 'imitate',
+    tonicPc: profile.tonicPc,
+    keyMode: profile.keyMode,
+    exercise: profile.exercise,
+    taskMode: profile.taskMode,
     direction: profile.direction,
-    length: 5,
+    length: profile.length,
     lowMidi: profile.range.lowMidi,
     highMidi: profile.range.highMidi,
     intervalSizes: [...profile.intervalSizes],
@@ -132,7 +132,12 @@ export function mobileTrainingReducer(
       return {
         ...state,
         route: 'setup',
-        setup: { ...state.setup, exercise: action.exercise, mixedKinds: undefined },
+        setup: {
+          ...state.setup,
+          exercise: action.exercise,
+          taskMode: action.exercise === 'note' ? 'imitate' : state.setup.taskMode,
+          mixedKinds: undefined
+        },
         preparation: null,
         error: null
       }

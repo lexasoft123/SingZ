@@ -1,27 +1,33 @@
 import { MicPitch, type MicDevice, type MicLevel } from './mic'
+import { NativeTrainingMicSource } from './training-mic'
 
 export type MicPreviewErrorKind = 'permission' | 'busy' | 'unavailable' | 'unknown'
 
 /** Settings-owned capture with no timer and no destination connection. */
 export class MicrophonePreview {
-  private readonly makeMic: () => MicPitch
+  private readonly makeMic: () => MicPitch | NativeTrainingMicSource
   private readonly makeContext: () => AudioContext
   private readonly askAccess: () => Promise<boolean>
   private context: AudioContext | null = null
-  private mic: MicPitch | null = null
+  private mic: MicPitch | NativeTrainingMicSource | null = null
   private generation = 0
 
   constructor(options: {
-    makeMic?: () => MicPitch
+    makeMic?: () => MicPitch | NativeTrainingMicSource
     makeContext?: () => AudioContext
     askAccess?: () => Promise<boolean>
   } = {}) {
-    this.makeMic = options.makeMic ?? (() => new MicPitch())
+    this.makeMic = options.makeMic ?? (() => new NativeTrainingMicSource())
     this.makeContext = options.makeContext ?? (() => new AudioContext({ latencyHint: 'interactive' }))
     this.askAccess = options.askAccess ?? (() => window.singz.askMicAccess())
   }
 
-  async start(options: { deviceId?: string; channelIndex?: number; onEnded?: () => void }): Promise<void> {
+  async start(options: {
+    deviceId?: string
+    nativeDeviceUid?: string
+    channelIndex?: number
+    onEnded?: () => void
+  }): Promise<void> {
     this.stop()
     const generation = ++this.generation
     let allowed: boolean

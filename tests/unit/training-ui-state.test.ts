@@ -1,7 +1,8 @@
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import VocalTraining from '../../src/renderer/src/components/VocalTraining'
+import VocalTraining, { shouldShowTrainingPitchMarker } from '../../src/renderer/src/components/VocalTraining'
 import { emptyTrainingProgress } from '../../src/shared/training-progress'
 import {
   audibleCueEndTimeSec,
@@ -24,10 +25,12 @@ import {
   stopTrainingForSongLoad,
   resetIdentifySubmission,
   selectTrainingExercise,
+  skippedTrainingResult,
   SongLoadRequestEpoch,
   shouldReleaseMicrophoneAfterResult,
   trainingCaptureDecision,
   trainingFocusTarget,
+  trainingFeedbackCopy,
   trainingPromptKindLabel,
   trainingSummaryPitchCopy,
   trainingScoringRange,
@@ -248,9 +251,9 @@ describe('desktop vocal-training orchestration', () => {
     const chordHtml = renderTraining(chordOnly)
     expect(chordHtml).not.toContain('<legend>Intervals</legend>')
     expect(chordHtml).toContain('<legend>Chord degrees</legend>')
-    const chordReview = chordHtml.match(/<button[^>]*>Review session<\/button>/)?.[0]
-    expect(chordReview).toBeDefined()
-    expect(chordReview).not.toContain('disabled')
+    const chordStart = chordHtml.match(/<button[^>]*>Start practice<\/button>/)?.[0]
+    expect(chordStart).toBeDefined()
+    expect(chordStart).not.toContain('disabled')
 
     const notesOnly = {
       ...chordOnly,
@@ -399,6 +402,89 @@ describe('desktop vocal-training orchestration', () => {
     expect(state.session?.currentIndex).toBe(0)
   })
 
+  it('replays without advancing and records Skip as an unscored outcome', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 5, taskMode: 'imitate' }
+    })
+    state = desktopTrainingReducer(state, { type: 'start-session', seed: 'replay-skip' })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    const prompt = state.session!.prompts[0]
+
+    state = desktopTrainingReducer(state, { type: 'replay-cue' })
+    expect(state.exercisePhase).toBe('cue')
+    expect(state.session).toMatchObject({ currentIndex: 0, results: [] })
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    state = desktopTrainingReducer(state, {
+      type: 'record-result',
+      result: skippedTrainingResult(prompt, 123)
+    })
+
+    expect(state.session).toMatchObject({ currentIndex: 1 })
+    expect(state.session?.results[0]).toEqual({ response: 'skipped', promptId: prompt.id, completedAt: 123 })
+    expect(trainingFeedbackCopy(state.session!.results[0])).toEqual({
+      heading: 'Skipped', detail: 'This exercise was not scored.', good: false
+    })
+    expect(summarizeTrainingSession(state.session!)).toMatchObject({ attempts: 0, correct: 0, close: 0 })
+    expect(summarizeTrainingSession(state.session!).outcomes[0].result).toBe('Skipped')
+
+    state = desktopTrainingReducer(state, { type: 'next-prompt' })
+    expect(renderTraining(state)).toContain('This exercise was not scored.')
+  })
+
+  it('keeps result detail visible throughout the next cue without a second live region', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 5, taskMode: 'imitate' }
+    })
+    state = desktopTrainingReducer(state, { type: 'start-session', seed: 'persistent-feedback' })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    const prompt = state.session!.prompts[0]
+    state = desktopTrainingReducer(state, {
+      type: 'record-result', result: vocalResult(prompt, 'wrong-octave', -1_200)
+    })
+    const detail = trainingFeedbackCopy(state.session!.results[0]).detail
+    const feedbackHtml = renderTraining(state)
+    expect(feedbackHtml).toContain(detail)
+    expect(feedbackHtml).toMatch(/class="vt-result-ack"[^>]*role="status"[^>]*aria-live="polite"/)
+
+    state = desktopTrainingReducer(state, { type: 'next-prompt' })
+    const cueHtml = renderTraining(state)
+    expect(cueHtml).toContain(detail)
+    expect(cueHtml).toContain('Get ready. Listen now, then sing when the countdown ends.')
+    expect(cueHtml.match(/class="vt-result-ack"/g)).toHaveLength(1)
+    expect(cueHtml.match(/role="status"/g)).toHaveLength(1)
+
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    expect(state.acknowledgementPromptId).toBeNull()
+    expect(renderTraining(state)).not.toContain(detail)
+  })
+
+  it('clears prompt one acknowledgement when prompt two is replayed', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 5, taskMode: 'imitate' }
+    })
+    state = desktopTrainingReducer(state, { type: 'start-session', seed: 'second-prompt-replay' })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    const firstPrompt = state.session!.prompts[0]
+    state = desktopTrainingReducer(state, {
+      type: 'record-result', result: vocalResult(firstPrompt, 'wrong-octave', -1_200)
+    })
+    const firstDetail = trainingFeedbackCopy(state.session!.results[0]).detail
+    state = desktopTrainingReducer(state, { type: 'next-prompt' })
+    const secondPrompt = selectTrainingExercise(state)!.prompt
+    expect(state.acknowledgementPromptId).toBe(firstPrompt.id)
+    expect(renderTraining(state)).toContain(firstDetail)
+
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    expect(state.acknowledgementPromptId).toBeNull()
+    state = desktopTrainingReducer(state, { type: 'replay-cue' })
+    expect(selectTrainingExercise(state)!.prompt.id).toBe(secondPrompt.id)
+    expect(state.acknowledgementPromptId).toBeNull()
+    expect(renderTraining(state)).not.toContain(firstDetail)
+  })
+
   it('pairs mixed feedback with the completed arpeggio before a following single-note prompt', () => {
     let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
       type: 'choose-exercise',
@@ -441,8 +527,8 @@ describe('desktop vocal-training orchestration', () => {
     const interval = selectTrainingExercise(intervalState)!.prompt
     if (interval.kind !== 'interval') throw new Error('Expected interval prompt.')
     const intervalHtml = renderTraining(intervalState)
-    expect(trainingPromptKindLabel(interval, false)).toBe('Diatonic interval · number and direction')
-    expect(intervalHtml).toContain('Diatonic interval · number and direction')
+    expect(trainingPromptKindLabel(interval, false)).toBe('Listen and choose an interval')
+    expect(intervalHtml).toContain('Listen and choose an interval')
     expect(intervalHtml).not.toContain(interval.intervalName)
     for (const target of interval.targets) {
       expect(intervalHtml).not.toContain(target.noteName)
@@ -455,7 +541,7 @@ describe('desktop vocal-training orchestration', () => {
     if (chord.kind !== 'arpeggio') throw new Error('Expected arpeggio prompt.')
     const chordAnswer = `${chord.chord.rootName} ${chord.chord.quality}`
     const chordHtml = renderTraining(chordState)
-    expect(chordHtml).toContain('Diatonic chord identification')
+    expect(chordHtml).toContain('Listen and choose a chord')
     expect(chordHtml).not.toContain(chordAnswer)
     expect(chordHtml).not.toContain(chord.chord.rootName)
 
@@ -632,14 +718,14 @@ describe('desktop vocal-training orchestration', () => {
     expect(releaseTrainingBegin(lock, newRun!)).toBe(true)
   })
 
-  it('selects stable keyboard focus targets for Ready, Identify response, and Feedback', () => {
+  it('auto-starts Ready and focuses only Identify answers and interruption recovery', () => {
     let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
       type: 'update-setup',
       patch: { taskMode: 'identify' }
     })
     state = desktopTrainingReducer(state, { type: 'start-session', seed: 'focus' })
-    expect(trainingFocusTarget(state)).toBe('ready-action')
-    expect(renderTraining(state)).toContain('data-training-focus="ready-action"')
+    expect(trainingFocusTarget(state)).toBeNull()
+    expect(renderTraining(state)).not.toContain('data-training-focus="ready-action"')
 
     state = desktopTrainingReducer(state, { type: 'activate-session' })
     state = desktopTrainingReducer(state, { type: 'cue-complete' })
@@ -650,7 +736,11 @@ describe('desktop vocal-training orchestration', () => {
       type: 'record-result',
       result: correctIdentifyResult(selectTrainingExercise(state)!.prompt)
     })
-    expect(trainingFocusTarget(state)).toBe('feedback')
+    expect(trainingFocusTarget(state)).toBeNull()
+
+    state = { ...state, exercisePhase: 'ready', interrupted: true }
+    expect(trainingFocusTarget(state)).toBe('ready-action')
+    expect(renderTraining(state)).toContain('data-training-focus="ready-action"')
   })
 
   it('resets Identify submission before the second question becomes focusable', () => {
@@ -754,8 +844,173 @@ describe('desktop vocal-training orchestration', () => {
       result: vocalResult(vocalPrompt, 'wrong-octave', -1200)
     })
     expect(trainingSummaryPitchCopy(vocal.session!)).toBe(
-      'No steady centered notes were detected in this session.'
+      'No steady in-tune notes were detected in this session.'
     )
+  })
+
+  it('shows the tuner marker only after a real pitch is available', () => {
+    expect(shouldShowTrainingPitchMarker(null)).toBe(false)
+    expect(shouldShowTrainingPitchMarker({ midi: null })).toBe(false)
+    expect(shouldShowTrainingPitchMarker({ midi: 60 })).toBe(true)
+  })
+
+  it('labels the countdown once and groups the practice transport', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 1, taskMode: 'imitate' }
+    })
+    state = desktopTrainingReducer(state, { type: 'start-session', seed: 'session-a11y' })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    const cueHtml = renderTraining(state)
+    expect(cueHtml).toMatch(/class="vt-countdown" aria-hidden="true"/)
+    expect(cueHtml).toMatch(/role="status" aria-live="polite">Get ready\. Listen now, then sing when the countdown ends\./)
+
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    const respondHtml = renderTraining(state)
+    expect(respondHtml).toContain('class="vt-transport" role="group" aria-label="Practice controls"')
+    expect(respondHtml).toContain('aria-label="Replay target note"')
+    expect(respondHtml).toContain('role="status" aria-label="Microphone listening"')
+    expect(respondHtml).toContain('aria-label="Skip this note"')
+    expect(respondHtml).not.toContain('Mic on')
+  })
+
+  it('omits the redundant single-note sequence pill but preserves multi-note sequences', () => {
+    let single = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 1, taskMode: 'imitate' }
+    })
+    single = desktopTrainingReducer(single, { type: 'start-session', seed: 'single-target' })
+    single = desktopTrainingReducer(single, { type: 'activate-session' })
+    expect(selectTrainingExercise(single)?.prompt.targets).toHaveLength(1)
+    expect(renderTraining(single)).not.toContain('class="vt-target-sequence"')
+
+    let interval = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'choose-exercise', exercise: 'interval'
+    })
+    interval = desktopTrainingReducer(interval, {
+      type: 'update-setup', patch: { length: 1, taskMode: 'imitate', lowMidi: 36, highMidi: 84 }
+    })
+    interval = desktopTrainingReducer(interval, { type: 'start-session', seed: 'multi-target' })
+    interval = desktopTrainingReducer(interval, { type: 'activate-session' })
+    expect(selectTrainingExercise(interval)?.prompt.targets).toHaveLength(2)
+    expect(renderTraining(interval)).toContain('class="vt-target-sequence"')
+  })
+
+  it('uses plain-language setup, identify, progress, and summary copy', () => {
+    const setup = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'choose-exercise', exercise: 'note'
+    })
+    const setupHtml = renderTraining(setup)
+    expect(setupHtml).toContain('Find the note yourself')
+    expect(setupHtml).toContain('Listen and choose')
+    expect(setupHtml).toContain('Your singing range')
+    expect(setupHtml).toContain('Note playback volume')
+    expect(setupHtml).toContain('Pitch tolerance')
+
+    const progress = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, { type: 'show-progress' })
+    expect(renderTraining(progress)).toContain('Choose an exercise')
+
+    let identify = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 1, taskMode: 'identify' }
+    })
+    identify = desktopTrainingReducer(identify, { type: 'start-session', seed: 'plain-identify' })
+    identify = desktopTrainingReducer(identify, { type: 'activate-session' })
+    expect(renderTraining(identify)).toContain('Get ready. Listen and choose when the countdown ends.')
+
+    let summary = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 1, taskMode: 'imitate' }
+    })
+    summary = desktopTrainingReducer(summary, { type: 'start-session', seed: 'plain-summary' })
+    summary = desktopTrainingReducer(summary, { type: 'activate-session' })
+    const prompt = selectTrainingExercise(summary)!.prompt
+    summary = desktopTrainingReducer(summary, {
+      type: 'record-result', result: vocalResult(prompt, 'on-target', 4)
+    })
+    summary = desktopTrainingReducer(summary, { type: 'next-prompt' })
+    const summaryHtml = renderTraining(summary)
+    const finalCopy = trainingFeedbackCopy(summary.session!.results[0])
+    expect(summaryHtml).toContain('Average error · on target or close')
+    expect(summaryHtml).toContain(`landed · ${finalCopy.heading}</h1>`)
+    expect(summaryHtml).toContain('aria-describedby="vt-summary-description"')
+    expect(summaryHtml).toContain(`id="vt-summary-description">Your average pitch stayed in tune. ${finalCopy.detail}</p>`)
+    expect(summaryHtml).not.toContain('role="status"')
+    expect(summaryHtml).not.toContain('aria-live=')
+    expect(summaryHtml).toMatch(/class="vt-result-ack"[^>]*aria-hidden="true"/)
+    expect(summaryHtml).toContain('Voice detected')
+    expect(summaryHtml).toContain('Pitch held steady')
+    expect(summaryHtml).not.toMatch(/>Voiced<|>Stable</)
+  })
+
+  it('includes the final Identify answer in the focused Summary description', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'update-setup', patch: { length: 1, taskMode: 'identify' }
+    })
+    state = desktopTrainingReducer(state, { type: 'start-session', seed: 'identify-summary-answer' })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    state = desktopTrainingReducer(state, { type: 'cue-complete' })
+    const prompt = selectTrainingExercise(state)!.prompt
+    state = desktopTrainingReducer(state, {
+      type: 'record-result', result: correctIdentifyResult(prompt)
+    })
+    state = desktopTrainingReducer(state, { type: 'next-prompt' })
+
+    const answer = identifyAnswerReveal(prompt)!
+    const html = renderTraining(state)
+    expect(html).toContain('aria-describedby="vt-summary-description"')
+    expect(html).toMatch(new RegExp(`id="vt-summary-description">[^<]*${answer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^<]*</p>`))
+    expect(html).not.toContain('role="status"')
+    expect(html).not.toContain('aria-live=')
+  })
+
+  it('keeps session controls visible in short windows and uses one canonical tuner rule set', () => {
+    const css = readFileSync('src/renderer/src/styles.css', 'utf8')
+    const shortHeightStart = css.indexOf('@media (max-height: 680px)')
+    const canonicalCss = css.slice(0, shortHeightStart)
+    const shortHeightCss = css.slice(shortHeightStart)
+    expect(css).toContain('@media (max-height: 680px)')
+    expect(canonicalCss).toMatch(/\.vt-setup-footer\s*\{[^}]*position:\s*sticky/s)
+    expect(shortHeightCss).toMatch(/\.vt-setup-footer\s*\{[^}]*position:\s*static/s)
+    expect(css).toMatch(/\.vt-target-stage\s*\{[^}]*height:\s*clamp\(176px, 28vh, 226px\)/s)
+    expect(css).toMatch(/\.vt-runway\s*\{[^}]*height:\s*clamp\(88px, 14vh, 112px\)/s)
+    expect(css).toMatch(/\.vt-transport\s*\{[^}]*width:\s*min\(360px, calc\(100% - 32px\)\)[^}]*min-height:\s*88px/s)
+    expect(css.match(/^\.vt-runway \{/gm)).toHaveLength(1)
+    for (const selector of ['.vt-home', '.vt-setup', '.vt-summary', '.vt-exercise', '.vt-progress-entry', '.vt-fieldset', '.vt-answer-set', '.vt-progress-empty', '.vt-transport-status']) {
+      const escaped = selector.replace('.', '\\.')
+      expect(canonicalCss.match(new RegExp(`^${escaped}(?:,| \\{)`, 'gm'))).toHaveLength(1)
+    }
+    expect(css).not.toMatch(/\.vt-home,\s*\n\.vt-setup,\s*\n\.vt-summary/)
+    expect(css).not.toMatch(/\.vt-exercise,\s*\n\.vt-progress-entry/)
+    expect(css).not.toContain('.vt-runway-help')
+    expect(readFileSync('src/renderer/src/components/VocalTraining.tsx', 'utf8')).not.toContain('vt-runway-help')
+  })
+
+  it('uses one icon-only session exit and no duplicate header progress bar', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'choose-exercise', exercise: 'note'
+    })
+    state = desktopTrainingReducer(state, { type: 'start-session', seed: 'compact-session-head' })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    const html = renderTraining(state)
+    expect(html).toContain('class="vt-back vt-session-back"')
+    expect(html).toContain('aria-label="End session"')
+    expect(html).not.toContain('>End session<')
+    expect(html).toContain('aria-label="Exercise 1 of 20"')
+    expect(html).toContain('>1 / 20<')
+    expect(html).not.toContain('aria-label="Session progress"')
+  })
+
+  it('rejects stale specialist copy and the repeated setup key/range footer', () => {
+    const source = readFileSync('src/renderer/src/components/VocalTraining.tsx', 'utf8')
+    for (const stale of ['Accuracy and close', 'Voiced', 'Stable', 'tonal home', 'Diatonic interval', 'Diatonic chord identification'])
+      expect(source).not.toContain(stale)
+
+    const setup = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'choose-exercise', exercise: 'note'
+    })
+    const footer = renderTraining(setup).match(/<footer class="vt-setup-footer">([\s\S]*?)<\/footer>/)?.[1]
+    expect(footer).toBeDefined()
+    expect(footer).toContain('Exercises')
+    expect(footer).toContain('Start practice')
+    expect(footer).not.toContain('C major')
+    expect(footer).not.toContain('C3')
   })
 
   it('renders focused, button-based exercise choices and the microphone privacy copy', () => {

@@ -2,10 +2,11 @@ import React from 'react'
 import ReactTestRenderer from 'react-test-renderer'
 import { AppState } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
+import { NavigationContainer } from '@react-navigation/native'
 
 jest.mock('../src/training/mic', () => ({
   TrainingMicrophone: class {
-    live = { midi: null, confidence: 0 }
+    live = { midi: null, confidence: 0, timestampMs: null }
     isRequestingPermission = jest.fn(() => false)
     snapshot = jest.fn(() => [])
     resetObservations = jest.fn()
@@ -30,8 +31,10 @@ jest.mock('../src/training/persistence', () => {
     MobileTrainingPersistence: class {
       progress = emptyTrainingProgress()
       error = null
-      load = jest.fn(async () => ({ ok: true as const, progress: this.progress }))
+      load = jest.fn(async () => ({ ok: true as const, progress: this.progress, referenceVolume: 0.65, pitchWindowCents: 10 }))
       savePreferences = jest.fn()
+      saveReferenceVolume = jest.fn()
+      savePitchWindowCents = jest.fn()
       recordCompletion = jest.fn()
       flush = jest.fn(async () => undefined)
       constructor() {
@@ -43,6 +46,10 @@ jest.mock('../src/training/persistence', () => {
 
 import type { MultitrackEngine } from '../src/engine'
 import TrainingScreen from '../src/ui/TrainingScreen'
+
+function TrainingTestScreen(props: React.ComponentProps<typeof TrainingScreen>): React.JSX.Element {
+  return <NavigationContainer><TrainingScreen {...props} /></NavigationContainer>
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -60,7 +67,7 @@ function button(tree: ReactTestRenderer.ReactTestRenderer, label: string): React
   return tree.root.findAll((node) =>
     node.props.accessibilityRole === 'button' &&
     typeof node.props.onPress === 'function' &&
-    nodeText(node).includes(label)
+    (node.props.accessibilityLabel === label || nodeText(node).includes(label))
   )[0]
 }
 
@@ -74,8 +81,82 @@ function flushRender(tree: ReactTestRenderer.ReactTestRenderer, render: () => vo
 
 async function openSingleNotePrompt(tree: ReactTestRenderer.ReactTestRenderer): Promise<void> {
   await ReactTestRenderer.act(() => button(tree, 'Single notes').props.onPress())
-  await ReactTestRenderer.act(() => button(tree, 'Start session').props.onPress())
+  await ReactTestRenderer.act(async () => {
+    button(tree, 'Start practice').props.onPress()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
 }
+
+test('the production Skip path completes a session without scoring audio or receipt attempts', async () => {
+  jest.useFakeTimers()
+  const engine = {
+    trainingCurrentTime: 1,
+    outputDisplayLatency: 0,
+    pause: jest.fn(),
+    cancelTrainingCues: jest.fn(),
+    setTrainingCueVolume: jest.fn(),
+    playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
+  } as unknown as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(
+      <TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />
+    )
+    await Promise.resolve()
+  })
+
+  await ReactTestRenderer.act(() => button(tree, 'Single notes').props.onPress())
+  const tenNotes = tree.root.findAll((node) =>
+    node.props.accessibilityRole === 'button' &&
+    typeof node.props.onPress === 'function' &&
+    nodeText(node) === '10'
+  )[0]
+  await ReactTestRenderer.act(() => tenNotes.props.onPress())
+  await ReactTestRenderer.act(async () => {
+    button(tree, 'Start practice').props.onPress()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+
+  for (let index = 0; index < 10; index++) {
+    await ReactTestRenderer.act(async () => {
+      jest.advanceTimersByTime(3_000)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(button(tree, 'Skip')).toBeTruthy()
+    await ReactTestRenderer.act(async () => {
+      button(tree, 'Skip').props.onPress()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  const mic = (globalThis as unknown as { trainingMic: { snapshot: jest.Mock } }).trainingMic
+  expect(mic.snapshot).not.toHaveBeenCalled()
+  const persistence = (globalThis as unknown as {
+    trainingPersistence: { recordCompletion: jest.Mock }
+  }).trainingPersistence
+  expect(persistence.recordCompletion).toHaveBeenCalledTimes(1)
+  const receipt = persistence.recordCompletion.mock.calls[0][0]
+  expect(receipt.aggregate).toMatchObject({
+    sessions: 1,
+    attempts: 0,
+    onTarget: 0,
+    close: 0,
+    centeredCentsCount: 0,
+    stableRatioCount: 0,
+    voicedRatioCount: 0,
+    byExercise: {},
+    byScaleDegree: {},
+    byInterval: {},
+    byChordRole: {}
+  })
+
+  await ReactTestRenderer.act(() => tree.unmount())
+  jest.useRealTimers()
+})
 
 test('recorder error mid-cue cancels the run and no late cue completion records a result', async () => {
   let finishCue!: (value: { ok: true; endsAt: number }) => void
@@ -85,20 +166,20 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(() => cue)
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(async () => {
     tree = ReactTestRenderer.create(
-      <TrainingScreen active engine={engine} song={null} onBackToSong={jest.fn()} />
+      <TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />
     )
     await Promise.resolve()
   })
 
   await openSingleNotePrompt(tree)
-  ReactTestRenderer.act(() => { void button(tree, 'Start exercise').props.onPress() })
   await ReactTestRenderer.act(async () => { await Promise.resolve(); await Promise.resolve() })
-  expect(allText(tree)).toContain('Listen')
+  expect(allText(tree)).toContain('SING IN')
 
   const onError = (globalThis as unknown as { trainingMicError: (error: string) => void }).trainingMicError
   ReactTestRenderer.act(() => onError('Input route disappeared.'))
@@ -106,12 +187,12 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
   expect(mic.stop).toHaveBeenCalled()
   expect(engine.cancelTrainingCues).toHaveBeenCalled()
   expect(allText(tree)).toContain('Input route disappeared.')
-  expect(allText(tree)).toContain('Start exercise')
+  expect(allText(tree)).toContain('Try again')
 
   finishCue({ ok: true, endsAt: 1 })
   await ReactTestRenderer.act(async () => { await cue; await Promise.resolve() })
   expect(allText(tree)).not.toContain('Correct')
-  expect(allText(tree)).not.toContain('Next exercise')
+  expect(allText(tree)).not.toContain('Next note')
   const persistence = (globalThis as unknown as { trainingPersistence: { recordCompletion: jest.Mock } }).trainingPersistence
   expect(persistence.recordCompletion).not.toHaveBeenCalled()
   await ReactTestRenderer.act(() => tree.unmount())
@@ -133,12 +214,13 @@ test('inactive retained training ignores interruptions and only flushes on backg
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn()
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(async () => {
     tree = ReactTestRenderer.create(
-      <TrainingScreen active={false} engine={engine} song={null} onBackToSong={jest.fn()} />
+      <TrainingTestScreen active={false} engine={engine} song={null} onBackToSong={jest.fn()} />
     )
     await Promise.resolve()
   })
@@ -174,23 +256,23 @@ test('an inactive render cannot adopt a deferred microphone start before passive
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
   } as unknown as MultitrackEngine
   const onBackToSong = jest.fn()
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(async () => {
     tree = ReactTestRenderer.create(
-      <TrainingScreen active engine={engine} song={null} onBackToSong={onBackToSong} />
+      <TrainingTestScreen active engine={engine} song={null} onBackToSong={onBackToSong} />
     )
     await Promise.resolve()
   })
   await openSingleNotePrompt(tree)
-  ReactTestRenderer.act(() => { void button(tree, 'Start exercise').props.onPress() })
   await ReactTestRenderer.act(async () => { await Promise.resolve() })
 
   ReactTestRenderer.act(() => {
     flushRender(tree, () => {
-      tree.update(<TrainingScreen active={false} engine={engine} song={null} onBackToSong={onBackToSong} />)
+      tree.update(<TrainingTestScreen active={false} engine={engine} song={null} onBackToSong={onBackToSong} />)
     })
   })
   await ReactTestRenderer.act(async () => {
@@ -200,7 +282,7 @@ test('an inactive render cannot adopt a deferred microphone start before passive
   })
 
   expect(engine.playTrainingCues).not.toHaveBeenCalled()
-  expect(allText(tree)).not.toContain('Next exercise')
+  expect(allText(tree)).not.toContain('Next note')
   const persistence = (globalThis as unknown as { trainingPersistence: { recordCompletion: jest.Mock } }).trainingPersistence
   expect(persistence.recordCompletion).not.toHaveBeenCalled()
   await ReactTestRenderer.act(() => tree.unmount())
@@ -216,24 +298,24 @@ test('an inactive render cannot adopt a deferred cue completion before passive c
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(() => cue)
   } as unknown as MultitrackEngine
   const onBackToSong = jest.fn()
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(async () => {
     tree = ReactTestRenderer.create(
-      <TrainingScreen active engine={engine} song={null} onBackToSong={onBackToSong} />
+      <TrainingTestScreen active engine={engine} song={null} onBackToSong={onBackToSong} />
     )
     await Promise.resolve()
   })
   await openSingleNotePrompt(tree)
-  ReactTestRenderer.act(() => { void button(tree, 'Start exercise').props.onPress() })
   await ReactTestRenderer.act(async () => { await Promise.resolve(); await Promise.resolve() })
-  expect(allText(tree)).toContain('Listen')
+  expect(allText(tree)).toContain('SING IN')
 
   ReactTestRenderer.act(() => {
     flushRender(tree, () => {
-      tree.update(<TrainingScreen active={false} engine={engine} song={null} onBackToSong={onBackToSong} />)
+      tree.update(<TrainingTestScreen active={false} engine={engine} song={null} onBackToSong={onBackToSong} />)
     })
   })
   await ReactTestRenderer.act(async () => {
@@ -242,7 +324,7 @@ test('an inactive render cannot adopt a deferred cue completion before passive c
     await Promise.resolve()
   })
 
-  expect(allText(tree)).not.toContain('Next exercise')
+  expect(allText(tree)).not.toContain('Next note')
   const persistence = (globalThis as unknown as { trainingPersistence: { recordCompletion: jest.Mock } }).trainingPersistence
   expect(persistence.recordCompletion).not.toHaveBeenCalled()
   await ReactTestRenderer.act(() => tree.unmount())

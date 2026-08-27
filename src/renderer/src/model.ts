@@ -86,6 +86,8 @@ export interface AudioPrefs {
   inputChannel?: number
   /** Master output level 0..1 — belongs to the machine, not to a project. */
   master?: number
+  /** Reference-tone gain shared by every exercise, stored with app audio prefs. */
+  referenceVolume?: number
 }
 
 /** Clamp stored audio prefs — ids are opaque non-empty strings, and the
@@ -102,6 +104,10 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     typeof r.master === 'number' && Number.isFinite(r.master)
       ? Math.max(0, Math.min(1, r.master))
       : undefined
+  const referenceVolume =
+    typeof r.referenceVolume === 'number' && Number.isFinite(r.referenceVolume)
+      ? Math.max(0.2, Math.min(2, r.referenceVolume))
+      : undefined
   const inputChannel =
     typeof r.inputChannel === 'number' &&
     Number.isInteger(r.inputChannel) &&
@@ -114,7 +120,8 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     inputId: id(r.inputId),
     nativeInputUid: id(r.nativeInputUid),
     inputChannel,
-    master
+    master,
+    referenceVolume
   }
 }
 

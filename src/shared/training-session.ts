@@ -63,6 +63,12 @@ const RESULT_CLASSIFICATIONS: readonly TrainingResultClassification[] = [
 
 type Rng = () => number
 const trustedSessions = new WeakSet<object>()
+/**
+ * This version identifies the reproducible config/prompt graph, not durable
+ * attempt storage. Apps persist only normalized completion receipts; session
+ * snapshots are transient. The additive `skipped` result discriminant is
+ * therefore accepted alongside older version-3 results without changing IDs.
+ */
 export const TRAINING_SESSION_FORMAT_VERSION = 3
 
 export function generateTrainingPrompts(config: TrainingSessionConfig): TrainingPrompt[] {
@@ -913,6 +919,9 @@ function validateResult(result: TrainingAttemptResult, prompt: TrainingPrompt): 
       if (prompt.taskMode !== 'identify') throw new RangeError('Vocal prompts require a vocal response.')
       validateIdentifyResult(result, prompt)
       return
+    case 'skipped':
+      assertExactKeys(result, ['response', 'promptId', 'completedAt'], 'Skipped result')
+      return
     default:
       return assertNever(result)
   }
@@ -949,6 +958,9 @@ function normalizeResultInput(input: TrainingAttemptInput, prompt: TrainingPromp
         ...(input.completedAt === undefined ? {} : { completedAt: input.completedAt })
       })
     }
+    case 'skipped':
+      assertExactKeys(input, ['response', 'promptId', 'completedAt'], 'Skipped result input')
+      return deepFreeze(cloneResult(input))
     default:
       return assertNever(input)
   }
@@ -1326,6 +1338,12 @@ function cloneResult(result: TrainingAttemptResult): TrainingAttemptResult {
         promptId: result.promptId,
         answer: cloneIdentifyAnswer(result.answer),
         correct: result.correct,
+        ...(result.completedAt === undefined ? {} : { completedAt: result.completedAt })
+      }
+    case 'skipped':
+      return {
+        response: 'skipped',
+        promptId: result.promptId,
         ...(result.completedAt === undefined ? {} : { completedAt: result.completedAt })
       }
     default:

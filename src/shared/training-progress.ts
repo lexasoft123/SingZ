@@ -1,13 +1,13 @@
 import type { ChordToneRole, TrainingDirectionChoice, TrainingExerciseKind, TrainingExerciseSelection, TrainingRange, TrainingSessionData, TrainingTaskMode } from './training-types'
 
 export const TRAINING_PROGRESS_FORMAT_VERSION = 1
-export const TRAINING_PREFERENCES_FORMAT_VERSION = 1
+export const TRAINING_PREFERENCES_FORMAT_VERSION = 2
 export const TRAINING_RECEIPT_FORMAT_VERSION = 1
 export const TRAINING_PROGRESS_HISTORY_LIMIT = 100
 export const TRAINING_RECEIPT_MAX_BYTES = 16 * 1024
 
 export type TrainingNotationPreference = 'note-names' | 'scale-degrees' | 'movable-do'
-export interface TrainingPreferences { readonly formatVersion: typeof TRAINING_PREFERENCES_FORMAT_VERSION; readonly range: TrainingRange; readonly notation: TrainingNotationPreference; readonly taskMode: TrainingTaskMode; readonly direction: TrainingDirectionChoice; readonly intervalSizes: readonly number[]; readonly chordDegrees: readonly number[] }
+export interface TrainingPreferences { readonly formatVersion: typeof TRAINING_PREFERENCES_FORMAT_VERSION; readonly tonicPc: number; readonly keyMode: 'major' | 'minor'; readonly exercise: TrainingExerciseSelection; readonly length: number; readonly range: TrainingRange; readonly notation: TrainingNotationPreference; readonly taskMode: TrainingTaskMode; readonly direction: TrainingDirectionChoice; readonly intervalSizes: readonly number[]; readonly chordDegrees: readonly number[] }
 export interface TrainingOutcomeCounter { readonly attempts: number; readonly onTarget: number; readonly close: number }
 export interface TrainingProgressAggregate {
   readonly sessions: number; readonly attempts: number; readonly onTarget: number; readonly close: number
@@ -26,18 +26,24 @@ export interface TrainingCompletionReceipt { readonly formatVersion: typeof TRAI
 export interface TrainingProgress { readonly formatVersion: typeof TRAINING_PROGRESS_FORMAT_VERSION; readonly profile: TrainingPreferences; readonly recent: readonly TrainingRecentSession[]; readonly aggregate: TrainingProgressAggregate }
 export interface TrainingProgressSnapshot { readonly sessions: number; readonly attempts: number; readonly landedRate: number | null; readonly tendency: 'sharp' | 'flat' | 'centered' | 'not-enough-pitch'; readonly averageSignedCents: number | null; readonly stableRatio: number | null; readonly voicedRatio: number | null; readonly weakerExercises: readonly string[]; readonly weakerScaleDegrees: readonly string[]; readonly weakerIntervals: readonly string[]; readonly weakerChordRoles: readonly string[] }
 
-export function defaultTrainingPreferences(): TrainingPreferences { return { formatVersion:TRAINING_PREFERENCES_FORMAT_VERSION, range: { lowMidi: 48, highMidi: 72 }, notation: 'note-names', taskMode: 'find', direction: 'both', intervalSizes: [2,3,4,5,6,7,8], chordDegrees: [1,2,3,4,5,6,7] } }
+export function defaultTrainingPreferences(): TrainingPreferences { return { formatVersion:TRAINING_PREFERENCES_FORMAT_VERSION, tonicPc:0, keyMode:'major', exercise:'note', length:20, range: { lowMidi: 48, highMidi: 72 }, notation: 'note-names', taskMode: 'imitate', direction: 'both', intervalSizes: [2,3,4,5,6,7,8], chordDegrees: [1,2,3,4,5,6,7] } }
 export function emptyTrainingProgress(profile = defaultTrainingPreferences()): TrainingProgress { return { formatVersion: TRAINING_PROGRESS_FORMAT_VERSION, profile: clonePreferences(profile), recent: [], aggregate: emptyAggregate() } }
 
 export function restoreTrainingPreferences(raw: unknown): TrainingPreferences {
-  const v = object(raw, 'Training preferences'); exactKeys(v, ['formatVersion','range','notation','taskMode','direction','intervalSizes','chordDegrees'], 'Training preferences')
-  if(v.formatVersion!==TRAINING_PREFERENCES_FORMAT_VERSION)throw new RangeError('Unsupported training preferences version.')
+  const v = object(raw, 'Training preferences')
+  const legacy=v.formatVersion===1
+  if(!legacy&&v.formatVersion!==TRAINING_PREFERENCES_FORMAT_VERSION)throw new RangeError('Unsupported training preferences version.')
+  exactKeys(v,legacy
+    ? ['formatVersion','range','notation','taskMode','direction','intervalSizes','chordDegrees']
+    : ['formatVersion','tonicPc','keyMode','exercise','length','range','notation','taskMode','direction','intervalSizes','chordDegrees'], 'Training preferences')
   const range = object(v.range, 'Training range'); exactKeys(range, ['lowMidi','highMidi'], 'Training range')
   const lowMidi = integer(range.lowMidi,36,84,'Low note'), highMidi = integer(range.highMidi,lowMidi,84,'High note')
   if (!['note-names','scale-degrees','movable-do'].includes(String(v.notation))) throw new RangeError('Notation preference is invalid.')
   if (!['imitate','find','identify'].includes(String(v.taskMode))) throw new RangeError('Task preference is invalid.')
   if (!['ascending','descending','both'].includes(String(v.direction))) throw new RangeError('Direction preference is invalid.')
-  return { formatVersion:TRAINING_PREFERENCES_FORMAT_VERSION, range:{lowMidi,highMidi}, notation:v.notation as TrainingNotationPreference, taskMode:v.taskMode as TrainingTaskMode, direction:v.direction as TrainingDirectionChoice, intervalSizes:numberList(v.intervalSizes,2,8,'Interval preferences'), chordDegrees:numberList(v.chordDegrees,1,7,'Chord preferences') }
+  if(!legacy&&!['major','minor'].includes(String(v.keyMode)))throw new RangeError('Key mode preference is invalid.')
+  if(!legacy&&!isExerciseSelection(v.exercise))throw new RangeError('Exercise preference is invalid.')
+  return { formatVersion:TRAINING_PREFERENCES_FORMAT_VERSION, tonicPc:legacy?0:integer(v.tonicPc,0,11,'Key pitch class'), keyMode:legacy?'major':v.keyMode as 'major'|'minor', exercise:legacy?'note':v.exercise as TrainingExerciseSelection, length:legacy?20:integer(v.length,1,1_000,'Session length'), range:{lowMidi,highMidi}, notation:v.notation as TrainingNotationPreference, taskMode:v.taskMode as TrainingTaskMode, direction:v.direction as TrainingDirectionChoice, intervalSizes:numberList(v.intervalSizes,2,8,'Interval preferences'), chordDegrees:numberList(v.chordDegrees,1,7,'Chord preferences') }
 }
 export function updateTrainingPreferences(progress: TrainingProgress, patch: Partial<TrainingPreferences>): TrainingProgress { return { ...progress, profile: restoreTrainingPreferences({ ...progress.profile, ...patch }) } }
 
@@ -48,6 +54,7 @@ export function createTrainingCompletionReceipt(session: TrainingSessionData, co
   for (const result of session.results) {
     const prompt = session.prompts.find((p) => p.id === result.promptId)
     if (!prompt) throw new RangeError('Training result has no matching prompt.')
+    if (result.response === 'skipped') continue
     const exercise = ensureCounter(a.byExercise,prompt.kind); exercise.attempts++; a.attempts++
     let landed: 'onTarget'|'close'|null = null
     if (result.response === 'identify') landed = result.correct ? 'onTarget' : null

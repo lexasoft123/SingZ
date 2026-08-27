@@ -8,6 +8,10 @@ import { initialTrainingState, mobileTrainingAttemptView, mobileTrainingReducer 
 
 const profile: TrainingPreferences = {
   formatVersion: TRAINING_PREFERENCES_FORMAT_VERSION,
+  tonicPc: 0,
+  keyMode: 'major',
+  exercise: 'note',
+  length: 20,
   range: { lowMidi: 48, highMidi: 72 },
   notation: 'note-names',
   taskMode: 'imitate',
@@ -17,6 +21,47 @@ const profile: TrainingPreferences = {
 }
 
 describe('mobile training state', () => {
+  test('restores the complete remembered exercise setup', () => {
+    const state = initialTrainingState({
+      ...profile,
+      tonicPc: 9,
+      keyMode: 'minor',
+      exercise: 'interval',
+      length: 30,
+      range: { lowMidi: 45, highMidi: 75 },
+      taskMode: 'find',
+      direction: 'descending',
+      intervalSizes: [3, 5],
+      chordDegrees: [2, 6]
+    })
+    expect(state.setup).toMatchObject({
+      tonicPc: 9,
+      keyMode: 'minor',
+      exercise: 'interval',
+      length: 30,
+      lowMidi: 45,
+      highMidi: 75,
+      taskMode: 'find',
+      direction: 'descending',
+      intervalSizes: [3, 5],
+      chordDegrees: [2, 6]
+    })
+  })
+
+  test('single notes opens as a useful vocal practice rather than the persisted generic mode', () => {
+    const identifyProfile = { ...profile, taskMode: 'identify' as const }
+    const state = mobileTrainingReducer(initialTrainingState(identifyProfile), {
+      type: 'choose-exercise', exercise: 'note'
+    })
+    expect(state.route).toBe('setup')
+    expect(state.setup).toMatchObject({ exercise: 'note', taskMode: 'imitate', length: 20 })
+  })
+
+  test.each(['interval', 'chord-tone', 'arpeggio'] as const)('%s also opens with a holder-friendly session length', (exercise) => {
+    const state = mobileTrainingReducer(initialTrainingState(profile), { type: 'choose-exercise', exercise })
+    expect(state.setup.length).toBeGreaterThanOrEqual(20)
+  })
+
   test('uses only current stamped keys and applies live transpose', () => {
     expect(effectiveSongPreparationKey({ pc: 7, minor: false, detVersion: 4 }, 2, 4)).toEqual({ tonicPc: 9, mode: 'major' })
     expect(effectiveSongPreparationKey({ pc: 7, minor: false, detVersion: 3 }, 2, 4)).toBeNull()
@@ -66,6 +111,25 @@ describe('mobile training state', () => {
     state = mobileTrainingReducer(state, { type: 'next' })
     expect(state.phase).toBe('ready')
     expect(mobileTrainingAttemptView(state)).toMatchObject({ index: 1, result: null })
+  })
+
+  test('keeps a targetless skipped outcome distinct from unvoiced feedback', () => {
+    let state = initialTrainingState(profile)
+    state = mobileTrainingReducer(state, {
+      type: 'change-setup', patch: { length: 2, exercise: 'note', taskMode: 'imitate' }
+    })
+    state = mobileTrainingReducer(state, { type: 'start', seed: 'skip-outcome' })
+    state = mobileTrainingReducer(state, { type: 'activate' })
+    state = mobileTrainingReducer(state, { type: 'cue-complete' })
+    const prompt = state.session!.prompts[0]
+    state = mobileTrainingReducer(state, {
+      type: 'record', result: { response: 'skipped', promptId: prompt.id, completedAt: 1 }
+    })
+
+    expect(mobileTrainingAttemptView(state)?.result).toEqual({
+      response: 'skipped', promptId: prompt.id, completedAt: 1
+    })
+    expect(state.session?.currentIndex).toBe(1)
   })
 
   test('final one-prompt feedback remains visible and reaches summary', () => {

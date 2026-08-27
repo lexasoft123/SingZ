@@ -1,4 +1,5 @@
 import { getStoredText, setStoredText } from '../latency'
+import { MobileAudioPreferences } from '../audio/preferences'
 import {
   defaultTrainingPreferences,
   deriveTrainingProgress,
@@ -9,9 +10,15 @@ import {
   type TrainingPreferences,
   type TrainingProgress
 } from '../gen/training-lib'
+import {
+  DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS,
+  SINGLE_NOTE_PITCH_WINDOW_OPTIONS,
+  clampSingleNotePitchWindow
+} from './runtime'
 
 const PROFILE_KEY = 'singz.training.profile'
 const RECEIPTS_KEY = 'singz.training.receipts'
+const PITCH_WINDOW_KEY = 'singz.training.pitch-window'
 const RECEIPTS_FORMAT = 1
 const MAX_RECEIPTS_DOCUMENT_BYTES = 4 * 1024 * 1024
 
@@ -23,11 +30,12 @@ export interface TrainingPersistenceApi {
 const nativeApi: TrainingPersistenceApi = { get: getStoredText, set: setStoredText }
 
 export type TrainingPersistenceLoad =
-  | { readonly ok: true; readonly progress: TrainingProgress }
-  | { readonly ok: false; readonly error: string; readonly progress: TrainingProgress }
+  | { readonly ok: true; readonly progress: TrainingProgress; readonly referenceVolume: number; readonly pitchWindowCents: number }
+  | { readonly ok: false; readonly error: string; readonly progress: TrainingProgress; readonly referenceVolume: number; readonly pitchWindowCents: number }
 
-/** Dedicated mobile training persistence. It never touches projects, Drive,
- * library settings, cue graphs, targets, observations, or audio buffers. */
+/** Dedicated mobile training profile/history persistence. App-wide sound
+ * preferences are delegated to MobileAudioPreferences instead of being
+ * embedded in the training document. */
 export class MobileTrainingPersistence {
   private profile = defaultTrainingPreferences()
   private receipts: TrainingCompletionReceipt[] = []
@@ -35,15 +43,23 @@ export class MobileTrainingPersistence {
   private desiredProfile: TrainingPreferences | null = null
   private profilePump: Promise<void> | null = null
   private completionPump: Promise<void> | null = null
+  private readonly audioPreferences: MobileAudioPreferences
+  private pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS
+  private desiredPitchWindowCents: number | null = null
+  private pitchWindowPump: Promise<void> | null = null
   private completionQueue: TrainingCompletionReceipt[] = []
   private _error: string | null = null
 
-  constructor(private readonly api: TrainingPersistenceApi = nativeApi) {}
+  constructor(private readonly api: TrainingPersistenceApi = nativeApi) {
+    this.audioPreferences = new MobileAudioPreferences(api)
+  }
 
   async load(): Promise<TrainingPersistenceLoad> {
-    const [profileRaw, receiptsRaw] = await Promise.all([
+    const [profileRaw, receiptsRaw, audioLoaded, pitchWindowRaw] = await Promise.all([
       this.api.get(PROFILE_KEY),
-      this.api.get(RECEIPTS_KEY)
+      this.api.get(RECEIPTS_KEY),
+      this.audioPreferences.load(),
+      this.api.get(PITCH_WINDOW_KEY)
     ])
     const errors: string[] = []
     try {
@@ -61,9 +77,19 @@ export class MobileTrainingPersistence {
       this.receipts = []
       errors.push(`History: ${message(error)}`)
     }
+    if (!audioLoaded.ok) errors.push(`Audio preferences: ${audioLoaded.error}`)
+    try {
+      this.pitchWindowCents = pitchWindowRaw === null
+        ? DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS
+        : restorePitchWindowText(pitchWindowRaw)
+    } catch (error) {
+      this.pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS
+      errors.push(`Pitch window: ${message(error)}`)
+    }
     this.ids = new Set(this.receipts.map((receipt) => receipt.sessionId))
-    if (errors.length) return { ok: false, error: errors.join(' '), progress: this.progress }
-    return { ok: true, progress: this.progress }
+    const loaded = { progress: this.progress, referenceVolume: audioLoaded.preferences.referenceVolume, pitchWindowCents: this.pitchWindowCents }
+    if (errors.length) return { ok: false, error: errors.join(' '), ...loaded }
+    return { ok: true, ...loaded }
   }
 
   get progress(): TrainingProgress {
@@ -71,12 +97,21 @@ export class MobileTrainingPersistence {
   }
 
   get error(): string | null {
-    return this._error
+    return this._error ?? this.audioPreferences.error
   }
 
   savePreferences(raw: TrainingPreferences): void {
     this.desiredProfile = restoreTrainingPreferences(raw)
     if (!this.profilePump) this.profilePump = this.pumpProfile()
+  }
+
+  saveReferenceVolume(raw: number): void {
+    this.audioPreferences.saveReferenceVolume(raw)
+  }
+
+  savePitchWindowCents(raw: number): void {
+    this.desiredPitchWindowCents = clampSingleNotePitchWindow(raw)
+    if (!this.pitchWindowPump) this.pitchWindowPump = this.pumpPitchWindow()
   }
 
   recordCompletion(raw: TrainingCompletionReceipt): void {
@@ -95,14 +130,18 @@ export class MobileTrainingPersistence {
 
   async flush(): Promise<void> {
     this.retry()
-    while (this.profilePump || this.completionPump) {
-      await Promise.all([this.profilePump, this.completionPump].filter(Boolean))
+    while (this.profilePump || this.completionPump || this.pitchWindowPump) {
+      await Promise.all([this.profilePump, this.completionPump, this.pitchWindowPump].filter(Boolean))
     }
+    await this.audioPreferences.flush()
   }
 
   retry(): void {
     if (this.desiredProfile && !this.profilePump) this.profilePump = this.pumpProfile()
     if (this.completionQueue.length && !this.completionPump) this.completionPump = this.pumpCompletions()
+    this.audioPreferences.retry()
+    if (this.desiredPitchWindowCents !== null && !this.pitchWindowPump)
+      this.pitchWindowPump = this.pumpPitchWindow()
   }
 
   private async pumpProfile(): Promise<void> {
@@ -149,6 +188,23 @@ export class MobileTrainingPersistence {
       this.completionPump = null
     }
   }
+
+  private async pumpPitchWindow(): Promise<void> {
+    while (this.desiredPitchWindowCents !== null) {
+      const cents = this.desiredPitchWindowCents
+      this.desiredPitchWindowCents = null
+      try {
+        await this.api.set(PITCH_WINDOW_KEY, JSON.stringify({ formatVersion: 1, cents }))
+        this.pitchWindowCents = cents
+        this._error = null
+      } catch (error) {
+        if (this.desiredPitchWindowCents === null) this.desiredPitchWindowCents = cents
+        this._error = message(error)
+        break
+      }
+    }
+    this.pitchWindowPump = null
+  }
 }
 
 function restoreProfileText(text: string): TrainingPreferences {
@@ -177,6 +233,19 @@ function restoreReceiptsText(text: string): TrainingCompletionReceipt[] {
     seen.add(receipt.sessionId)
     return receipt
   })
+}
+
+function restorePitchWindowText(text: string): number {
+  if (text.length > 256) throw new RangeError('Pitch window is invalid.')
+  const raw = JSON.parse(text) as unknown
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+    throw new RangeError('Pitch window is invalid.')
+  const value = raw as Record<string, unknown>
+  if (Object.keys(value).length !== 2 || value.formatVersion !== 1 || typeof value.cents !== 'number')
+    throw new RangeError('Unsupported pitch window document.')
+  if (!SINGLE_NOTE_PITCH_WINDOW_OPTIONS.includes(value.cents as typeof SINGLE_NOTE_PITCH_WINDOW_OPTIONS[number]))
+    throw new RangeError('Pitch window is outside the supported range.')
+  return value.cents
 }
 
 function message(error: unknown): string {

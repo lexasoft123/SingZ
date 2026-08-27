@@ -120,6 +120,8 @@ export interface DesktopTrainingState {
   readonly setup: DesktopTrainingSetup
   readonly session: TrainingSessionData | null
   readonly exercisePhase: DesktopExercisePhase
+  /** Result announced during feedback and, briefly, the following cue only. */
+  readonly acknowledgementPromptId: string | null
   /** True when the same unscored prompt must regain keyboard focus at Ready. */
   readonly interrupted: boolean
   readonly error: string | null
@@ -130,9 +132,9 @@ export const DEFAULT_DESKTOP_TRAINING_SETUP: Readonly<DesktopTrainingSetup> = Ob
   tonicPc: 0,
   keyMode: 'major',
   exercise: 'note',
-  taskMode: 'find',
+  taskMode: 'imitate',
   direction: 'both',
-  length: 5,
+  length: 20,
   lowMidi: 48,
   highMidi: 72,
   intervalSizes: Object.freeze([2, 3, 4, 5, 6, 7, 8]),
@@ -144,6 +146,7 @@ export const INITIAL_DESKTOP_TRAINING_STATE: Readonly<DesktopTrainingState> = Ob
   setup: DEFAULT_DESKTOP_TRAINING_SETUP,
   session: null,
   exercisePhase: 'ready',
+  acknowledgementPromptId: null,
   interrupted: false,
   error: null,
   preparation: null
@@ -173,6 +176,7 @@ export type DesktopTrainingAction =
   | { readonly type: 'activate-session' }
   | { readonly type: 'cue-complete' }
   | { readonly type: 'record-result'; readonly result: TrainingAttemptInput }
+  | { readonly type: 'replay-cue' }
   | { readonly type: 'next-prompt' }
   | { readonly type: 'restart'; readonly seed: string | number }
   | { readonly type: 'back-home' }
@@ -188,9 +192,15 @@ export function desktopTrainingReducer(
       return {
         ...state,
         route: 'setup',
-        setup: { ...state.setup, exercise: action.exercise, mixedKinds: undefined },
+        setup: {
+          ...state.setup,
+          exercise: action.exercise,
+          taskMode: action.exercise === 'note' ? 'imitate' : state.setup.taskMode,
+          mixedKinds: undefined
+        },
         error: null,
-        preparation: null
+        preparation: null,
+        acknowledgementPromptId: null
       }
     case 'update-setup':
       return { ...state, setup: { ...state.setup, ...action.patch }, error: null }
@@ -215,10 +225,11 @@ export function desktopTrainingReducer(
           action.choice
         ),
         preparation: { sourceSongId: action.sourceSongId, songName: action.songName, choice: action.choice },
+        acknowledgementPromptId: null,
         error: 'Confirm or change the song key, then review the preparation session.'
       }
     case 'show-progress':
-      return { ...state, route: 'progress', error: null }
+      return { ...state, route: 'progress', acknowledgementPromptId: null, error: null }
     case 'invalidate-song-preparation':
       if (!state.preparation || state.preparation.sourceSongId === action.currentSongId) return state
       return {
@@ -230,6 +241,7 @@ export function desktopTrainingReducer(
             : null,
         preparation: null,
         exercisePhase: 'ready',
+        acknowledgementPromptId: null,
         interrupted: false,
         error: null
       }
@@ -240,6 +252,7 @@ export function desktopTrainingReducer(
         session: null,
         preparation: null,
         exercisePhase: 'ready',
+        acknowledgementPromptId: null,
         interrupted: false,
         error: null
       }
@@ -249,12 +262,13 @@ export function desktopTrainingReducer(
         ...state,
         session: startTrainingSession(state.session),
         exercisePhase: 'cue',
+        acknowledgementPromptId: null,
         interrupted: false,
         error: null
       }
     case 'cue-complete':
       if (!state.session || state.session.status !== 'active') return state
-      return { ...state, exercisePhase: 'respond', interrupted: false }
+      return { ...state, exercisePhase: 'respond', acknowledgementPromptId: null, interrupted: false }
     case 'record-result': {
       if (!state.session) return { ...state, error: 'This exercise is no longer active.' }
       // Event activation can race a React commit. A repeated answer for the
@@ -266,6 +280,7 @@ export function desktopTrainingReducer(
           ...state,
           session,
           exercisePhase: 'feedback',
+          acknowledgementPromptId: action.result.promptId,
           interrupted: false,
           error: null
         }
@@ -273,6 +288,9 @@ export function desktopTrainingReducer(
         return { ...state, error: errorMessage(error) }
       }
     }
+    case 'replay-cue':
+      if (!state.session || state.session.status !== 'active') return state
+      return { ...state, exercisePhase: 'cue', acknowledgementPromptId: null, interrupted: false, error: null }
     case 'next-prompt':
       if (!state.session) return state
       if (state.session.status === 'completed') {
@@ -290,6 +308,7 @@ export function desktopTrainingReducer(
             ? abandonTrainingSession(state.session)
             : state.session,
         exercisePhase: 'ready',
+        acknowledgementPromptId: null,
         interrupted: false,
         error: null
       }
@@ -297,7 +316,7 @@ export function desktopTrainingReducer(
       // A section switch, hidden document, or covering modal preserves the
       // prompt/results. An interrupted cue/capture deliberately restarts.
       return state.exercisePhase === 'cue' || state.exercisePhase === 'respond'
-        ? { ...state, exercisePhase: 'ready', interrupted: true, error: null }
+        ? { ...state, exercisePhase: 'ready', acknowledgementPromptId: null, interrupted: true, error: null }
         : state
     case 'set-error':
       return {
@@ -306,6 +325,10 @@ export function desktopTrainingReducer(
           action.error && (state.exercisePhase === 'cue' || state.exercisePhase === 'respond')
             ? 'ready'
             : state.exercisePhase,
+        acknowledgementPromptId:
+          action.error && (state.exercisePhase === 'cue' || state.exercisePhase === 'respond')
+            ? null
+            : state.acknowledgementPromptId,
         interrupted:
           Boolean(action.error) && (state.exercisePhase === 'cue' || state.exercisePhase === 'respond'),
         error: action.error
@@ -373,6 +396,13 @@ export function summarizeTrainingSession(session: TrainingSessionData): DesktopT
   const stable: number[] = []
   const outcomes = session.results.map((result, index) => {
     const prompt = session.prompts[index]
+    if (result.response === 'skipped') {
+      return {
+        promptId: result.promptId,
+        label: prompt?.instruction ?? `Exercise ${index + 1}`,
+        result: 'Skipped'
+      }
+    }
     if (result.response === 'identify') {
       if (result.correct) correct++
       return {
@@ -409,7 +439,7 @@ export function summarizeTrainingSession(session: TrainingSessionData): DesktopT
   })
   const averageSignedCents = average(cents)
   return {
-    attempts: session.results.length,
+    attempts: session.results.filter((result) => result.response !== 'skipped').length,
     correct,
     close,
     averageAbsoluteCents: average(cents.map(Math.abs)),
@@ -511,15 +541,15 @@ export function trainingPromptKindLabel(prompt: TrainingPrompt, revealAnswer: bo
   if (prompt.taskMode === 'identify' && !revealAnswer) {
     switch (prompt.kind) {
       case 'note':
-        return 'Note identification'
+        return 'Listen and choose a note'
       case 'scale-degree':
-        return 'Scale-degree identification'
+        return 'Listen and choose a number'
       case 'interval':
-        return 'Diatonic interval · number and direction'
+        return 'Listen and choose an interval'
       case 'chord-tone':
-        return 'Chord-tone role'
+        return 'Listen and choose a chord note'
       case 'arpeggio':
-        return 'Diatonic chord identification'
+        return 'Listen and choose a chord'
     }
   }
   switch (prompt.kind) {
@@ -561,12 +591,14 @@ export interface FeedbackCopy {
 }
 
 export function trainingFeedbackCopy(result: TrainingAttemptResult): FeedbackCopy {
+  if (result.response === 'skipped')
+    return { heading: 'Skipped', detail: 'This exercise was not scored.', good: false }
   if (result.response === 'identify') {
     return result.correct
       ? { heading: 'Correct', detail: 'Keep that sound in mind before the next question.', good: true }
       : {
           heading: 'Not this time',
-          detail: 'Listen for the tonal home and compare the shape again.',
+          detail: 'Listen for the key and compare the notes again.',
           good: false
         }
   }
@@ -582,8 +614,20 @@ export function trainingFeedbackCopy(result: TrainingAttemptResult): FeedbackCop
   const classification = classes.find((item) => item !== 'on-target') ?? 'wrong-note'
   return {
     heading: TRAINING_CLASSIFICATION_COPY[classification],
-    detail: 'Release the note, remember the cue, and continue when ready.',
+    detail: 'Release the note, reset, and listen for the next cue.',
     good: false
+  }
+}
+
+/** A deliberate skip completes the prompt but never contributes a scored attempt. */
+export function skippedTrainingResult(
+  prompt: TrainingPrompt,
+  completedAt = Date.now()
+): TrainingAttemptInput {
+  return {
+    response: 'skipped',
+    promptId: prompt.id,
+    completedAt
   }
 }
 
@@ -742,21 +786,16 @@ export function trainingCaptureDecision(
   return 'sample'
 }
 
-export type TrainingFocusTarget = 'ready-action' | 'identify-answer' | 'feedback' | null
+export type TrainingFocusTarget = 'ready-action' | 'identify-answer' | null
 
 /** Coarse focus destinations for state transitions; never follows live pitch updates. */
 export function trainingFocusTarget(
   state: Pick<DesktopTrainingState, 'session' | 'exercisePhase' | 'interrupted'>,
   selected: SelectedTrainingExercise | null = selectTrainingExercise(state)
 ): TrainingFocusTarget {
-  if (state.exercisePhase === 'feedback' && selected?.result) return 'feedback'
   if (state.exercisePhase === 'respond' && selected?.prompt.taskMode === 'identify')
     return 'identify-answer'
-  if (
-    state.exercisePhase === 'ready' &&
-    (state.interrupted || state.session?.status === 'ready')
-  )
-    return 'ready-action'
+  if (state.exercisePhase === 'ready' && state.interrupted) return 'ready-action'
   return null
 }
 
@@ -767,9 +806,9 @@ export function trainingSummaryPitchCopy(
   if (summary.tendency === 'not-enough-pitch')
     return session.config.taskMode === 'identify'
       ? 'This ear-only session did not use pitch metrics.'
-      : 'No steady centered notes were detected in this session.'
+      : 'No steady in-tune notes were detected in this session.'
   return summary.tendency === 'centered'
-    ? 'Your average pitch stayed centered.'
+    ? 'Your average pitch stayed in tune.'
     : `Your average pitch tended ${summary.tendency}.`
 }
 
@@ -804,6 +843,7 @@ function createSessionState(state: DesktopTrainingState, seed: string | number):
       route: 'session',
       session: createTrainingSession(trainingConfigFromSetup(state.setup, seed)),
       exercisePhase: 'ready',
+      acknowledgementPromptId: null,
       interrupted: false,
       error: null
     }

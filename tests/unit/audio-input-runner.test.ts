@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AudioInputStartGate,
   parseDesktopAudioInputDevices,
   parseDesktopAudioInputEvent
 } from '../../src/main/audio-input'
 
 describe('desktop native audio-input protocol', () => {
+  it('allows only one asynchronous inventory/spawn start at a time', async () => {
+    const gate = new AudioInputStartGate()
+    let release!: (value: string) => void
+    const first = gate.run(
+      () => new Promise<string>((resolve) => { release = resolve }),
+      () => 'busy'
+    )
+    await expect(gate.run(async () => 'second', () => 'busy')).resolves.toBe('busy')
+    release('first')
+    await expect(first).resolves.toBe('first')
+    await expect(gate.run(async () => 'third', () => 'busy')).resolves.toBe('third')
+  })
+
   it('validates the native inventory and preserves multichannel lanes', () => {
     expect(
       parseDesktopAudioInputDevices(

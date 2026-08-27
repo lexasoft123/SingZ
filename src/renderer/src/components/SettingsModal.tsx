@@ -110,6 +110,7 @@ export default function SettingsModal({
       try {
         await capture.start({
           deviceId: audio.inputId,
+          nativeDeviceUid: audio.nativeInputUid,
           channelIndex: audio.inputChannel,
           onEnded: () => {
             if (!live) return
@@ -138,7 +139,7 @@ export default function SettingsModal({
       document.removeEventListener('visibilitychange', visibility)
       stop()
     }
-  }, [audio.inputChannel, audio.inputId, previewEpoch, refreshDevices])
+  }, [audio.inputChannel, audio.inputId, audio.nativeInputUid, previewEpoch, refreshDevices])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -240,7 +241,7 @@ export default function SettingsModal({
             </div>
             <p className={`mic-preview-status${preview.status === 'error' ? ' warn' : ''}`}>{routeCopy}</p>
             {preview.device?.fallback && <p className="settings-hint warn">The saved microphone is unavailable — previewing the system default.</p>}
-            {preview.device?.channelFallback && <p className="settings-hint warn">The Web Audio preview cannot open that lane — previewing channel {previewChannelIndex + 1}. Native training keeps channel {channelIndex + 1}.</p>}
+            {preview.device?.channelFallback && <p className="settings-hint warn">That lane is unavailable — previewing channel {previewChannelIndex + 1}.</p>}
           </section>
 
           {!devices && <p className="settings-hint">Looking for audio devices…</p>}

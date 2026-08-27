@@ -6,6 +6,8 @@ import {
   startTrainingSession
 } from '../src/gen/training-lib'
 import { MobileTrainingPersistence, type TrainingPersistenceApi } from '../src/training/persistence'
+import { DEFAULT_TRAINING_REFERENCE_VOLUME } from '../src/training/cues'
+import { DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS } from '../src/training/runtime'
 
 function receipt(seed: string) {
   let session = createTrainingSession({
@@ -60,10 +62,72 @@ describe('mobile training persistence', () => {
     const store = new MobileTrainingPersistence(api)
     await store.load()
     const profile = defaultTrainingPreferences()
-    store.savePreferences({ ...profile, range: { lowMidi: 47, highMidi: 73 } })
-    store.savePreferences({ ...profile, range: { lowMidi: 50, highMidi: 70 } })
+    store.savePreferences({ ...profile, tonicPc: 2, keyMode: 'minor', exercise: 'interval', length: 30, range: { lowMidi: 47, highMidi: 73 } })
+    store.savePreferences({ ...profile, tonicPc: 7, keyMode: 'major', exercise: 'arpeggio', length: 50, range: { lowMidi: 50, highMidi: 70 } })
     await store.flush()
-    expect(JSON.parse(api.values.get('singz.training.profile')!).profile.range).toEqual({ lowMidi: 50, highMidi: 70 })
+    expect(JSON.parse(api.values.get('singz.training.profile')!).profile).toMatchObject({
+      tonicPc: 7,
+      keyMode: 'major',
+      exercise: 'arpeggio',
+      length: 50,
+      range: { lowMidi: 50, highMidi: 70 }
+    })
+  })
+
+  test('remembers one reference volume for every exercise setup', async () => {
+    const api = memoryApi()
+    const store = new MobileTrainingPersistence(api)
+    const initial = await store.load()
+    expect(initial.referenceVolume).toBe(DEFAULT_TRAINING_REFERENCE_VOLUME)
+
+    store.saveReferenceVolume(0.9)
+    await store.flush()
+    expect(JSON.parse(api.values.get('singz.audio.preferences')!)).toEqual({
+      formatVersion: 1,
+      referenceVolume: 0.9
+    })
+
+    const restored = await new MobileTrainingPersistence(api).load()
+    expect(restored.referenceVolume).toBe(0.9)
+  })
+
+  test('migrates the old training-only volume into app audio preferences', async () => {
+    const api = memoryApi({
+      'singz.training.reference-volume': JSON.stringify({ formatVersion: 1, volume: 1.2 })
+    })
+    const loaded = await new MobileTrainingPersistence(api).load()
+    expect(loaded.referenceVolume).toBe(1.2)
+    expect(JSON.parse(api.values.get('singz.audio.preferences')!)).toEqual({
+      formatVersion: 1,
+      referenceVolume: 1.2
+    })
+  })
+
+  test('remembers the single-note pitch window', async () => {
+    const api = memoryApi()
+    const store = new MobileTrainingPersistence(api)
+    const initial = await store.load()
+    expect(initial.pitchWindowCents).toBe(DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS)
+
+    store.savePitchWindowCents(15)
+    await store.flush()
+    expect(JSON.parse(api.values.get('singz.training.pitch-window')!)).toEqual({
+      formatVersion: 1,
+      cents: 15
+    })
+    expect((await new MobileTrainingPersistence(api).load()).pitchWindowCents).toBe(15)
+  })
+
+  test('rejects malformed remembered volume without overwriting it', async () => {
+    const malformed = JSON.stringify({ formatVersion: 1, referenceVolume: 4 })
+    const api = memoryApi({ 'singz.audio.preferences': malformed })
+    const loaded = await new MobileTrainingPersistence(api).load()
+    expect(loaded.ok).toBe(false)
+    if (loaded.ok) throw new Error('Expected invalid volume to be reported.')
+    expect(loaded.error).toMatch(/Audio preferences:/)
+    expect(loaded.referenceVolume).toBe(DEFAULT_TRAINING_REFERENCE_VOLUME)
+    expect(api.values.get('singz.audio.preferences')).toBe(malformed)
+    expect(api.writes).toEqual([])
   })
 
   test('reports malformed durable bytes without replacing them', async () => {
