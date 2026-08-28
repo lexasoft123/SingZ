@@ -1,6 +1,7 @@
 # Future DSP graph architecture
 
-Status: roadmap; Phase 4A native monitoring preview is in progress
+Status: roadmap; Phase 4A native monitoring preview is product-wired, with
+hardware listening verification still pending
 Last reviewed: 2026-08-28
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
 
@@ -1219,13 +1220,18 @@ Audio with the native output, add recording, add ASIO, support cross-device
 macOS monitoring, or claim Bluetooth/vehicle routes are low latency. See
 [ADR 0010](adr/0010-desktop-monitoring-preview.md).
 
-Acceptance evidence is a silent deterministic fake-host suite proving initial
+Acceptance evidence includes a silent deterministic fake-host suite proving initial
 mute, enabled/ramped gain, mono-to-stereo mapping, the -1 dBFS ceiling,
 pre/post meters, stale-generation rejection, device-loss silence, teardown and
 zero callback allocations; addon-owner call-order/race tests; a real Electron
 addon smoke proving exact integer, lossless BigInt and boolean schemas; Release
-and sanitizer/realtime policy gates that include the monitor targets; and separate headphone
-listening on macOS and Windows only after the product lease is wired.
+and sanitizer/realtime policy gates that include the monitor targets; and the
+desktop product coordinator and Settings controls now prove, without starting
+native output in automation, that Web Audio releases its physical sink before a
+generation-bound begin, failed/closed/hidden sessions stop before restoration,
+monitoring and its wired-headphone confirmation default off, and unsupported
+platforms/routes remain blocked. Separate human headphone listening on macOS
+remains pending; Windows stays visibly platform-not-ready in this phase.
 
 Implement:
 

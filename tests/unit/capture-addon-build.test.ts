@@ -118,11 +118,15 @@ describe('Electron capture addon build', () => {
     expect(hook).toContain('__pfnDliNotifyHook2 = loadHostBinary')
   })
 
-  it('retires capture on renderer crash and main-document navigation', () => {
+  it('retires capture and monitoring on renderer crash, navigation and app quit', () => {
     const main = read('src/main/index.ts')
-    expect(main).toContain("e.sender.on('render-process-gone', gone)")
-    expect(main).toContain("e.sender.on('did-start-navigation'")
+    expect(main).toContain("sender.on('render-process-gone', gone)")
+    expect(main).toContain("sender.on('did-start-navigation'")
     expect(main).toContain('if (isMainFrame) gone()')
+    expect(main).toContain("ipcMain.handle('audio-host:monitor-begin'")
+    expect(main).toContain("ipcMain.handle('audio-host:monitor-end'")
+    expect(main).toContain("app.on('before-quit', () => {")
+    expect(main).toContain('captureOwner.stop()')
   })
 
   it('keeps only the latest scalar window instead of a deep TSFN FIFO', () => {

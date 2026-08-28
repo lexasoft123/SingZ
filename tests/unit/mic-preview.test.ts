@@ -74,10 +74,47 @@ describe('settings microphone preview', () => {
     await preview.start({ deviceId: 'b', channelIndex: 2 })
     expect(contexts[0].closeCount).toBe(1)
     expect(mics[0].stops).toBe(1)
-    preview.stop()
+    await preview.stopAndWait()
     expect(contexts[1].closeCount).toBe(1)
     expect(preview.active).toBe(false)
     expect(mics[1].stops).toBe(1)
+  })
+
+  it('retains a stopping owner after failure and retries it before release', async () => {
+    let attempts = 0
+    const mic = {
+      active: false,
+      device: null as MicDevice | null,
+      async start(): Promise<void> {
+        this.active = true
+        this.device = {
+          id: 'native-interface', label: 'Studio interface', fallback: false,
+          channelIndex: 2, channelCount: 8, channelFallback: false
+        }
+      },
+      readLevel: (): MicLevel => ({ rms: 0.2, dbfs: -14, signal: true }),
+      async stop(): Promise<void> {
+        attempts++
+        if (attempts === 1) throw new Error('stop not confirmed')
+        this.active = false
+        this.device = null
+      }
+    }
+    const context = fakeContext()
+    const preview = new MicrophonePreview({
+      makeMic: () => mic as unknown as MicPitch,
+      makeContext: () => context,
+      askAccess: async () => true
+    })
+    await preview.start({ nativeDeviceUid: 'native-interface', channelIndex: 2 })
+
+    await expect(preview.stopAndWait()).rejects.toThrow('stop not confirmed')
+    expect(preview.active).toBe(true)
+    expect(context.closeCount).toBe(0)
+    await expect(preview.stopAndWait()).resolves.toBeUndefined()
+    expect(preview.active).toBe(false)
+    expect(context.closeCount).toBe(1)
+    expect(attempts).toBe(2)
   })
 
   it('surfaces a current OS permission denial without creating a capture context', async () => {
@@ -150,6 +187,48 @@ describe('settings microphone preview', () => {
     expect(preview.active).toBe(true)
     expect(preview.device).toMatchObject({ id: 'b', channelIndex: 2 })
     expect(created[1].stops).toBe(0)
+  })
+
+  it('retains a stale local owner when first cleanup fails and drains it on retry', async () => {
+    let finishFirst!: () => void
+    let firstStopAttempts = 0
+    const firstMic = new FakeMic()
+    firstMic.start = async (_context, options): Promise<void> => {
+      firstMic.starts.push(options)
+      await new Promise<void>((resolve) => { finishFirst = resolve })
+      firstMic.active = true
+      firstMic.device = {
+        id: options.deviceId ?? 'old', label: 'Old interface', fallback: false,
+        channelIndex: 0, channelCount: 2, channelFallback: false
+      }
+    }
+    firstMic.stop = (): void => {
+      firstStopAttempts++
+      if (firstStopAttempts === 1) throw new Error('native stop not confirmed')
+      firstMic.active = false
+      firstMic.device = null
+    }
+    const currentMic = new FakeMic()
+    const mics = [firstMic, currentMic]
+    const contexts = [fakeContext(), fakeContext()]
+    const preview = new MicrophonePreview({
+      makeMic: () => mics.shift() as unknown as MicPitch,
+      makeContext: () => contexts.shift() as AudioContext,
+      askAccess: async () => true
+    })
+
+    const stale = preview.start({ deviceId: 'old' })
+    await vi.waitFor(() => expect(firstMic.starts).toHaveLength(1))
+    await preview.start({ deviceId: 'current' })
+    finishFirst()
+    await expect(stale).rejects.toThrow('cancelled')
+    expect(firstMic.active).toBe(true)
+
+    await expect(preview.stopAndWait()).resolves.toBeUndefined()
+    expect(firstStopAttempts).toBe(2)
+    expect(firstMic.active).toBe(false)
+    expect(currentMic.stops).toBe(1)
+    expect(preview.active).toBe(false)
   })
 
   it('cancels pending capture on hide or close without touching a later operation', async () => {

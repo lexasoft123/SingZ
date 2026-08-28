@@ -15,6 +15,13 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import type {
+  DesktopAudioHostDevice,
+  DesktopAudioHostInventoryResult,
+  DesktopMonitorConfig,
+  DesktopMonitorFormat,
+  DesktopMonitorLatency,
+  DesktopMonitorResult,
+  DesktopMonitorStatus,
   CaptureAnalysisWindow,
   CaptureInputDevice,
   CaptureStartResult,
@@ -35,6 +42,11 @@ export interface NativeCaptureBinding {
   cancelCapture(generation: bigint): { ok: true; cancelled: boolean }
   captureState(): { state: CaptureStateName; ownershipGeneration: string; error: string }
   captureStats(): CaptureStats
+  audioHostDevices(): Omit<DesktopAudioHostInventoryResult, 'platform'>
+  beginMonitor(config: DesktopMonitorConfig, generation: bigint): DesktopMonitorResult
+  setMonitorGain(generation: bigint, gainDb: number, enabled: boolean): DesktopMonitorResult
+  monitorStatus(): DesktopMonitorStatus
+  endMonitor(generation: bigint): DesktopMonitorResult
   /** Compiled-in identity — which Electron and which source tree built this binary. */
   buildInfo: { electronVersion: string; sourceStamp: string }
 }
@@ -290,6 +302,14 @@ export function validateCaptureBindingIdentity(
       `singz-capture.node reports source ${builtSource}, but its published source stamp is ${publishedSourceStamp}`
     )
   }
+  for (const name of [
+    'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
+    'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor'
+  ] as const) {
+    if (typeof binding?.[name] !== 'function') {
+      throw new Error(`singz-capture.node does not export ${name}`)
+    }
+  }
   return binding as NativeCaptureBinding
 }
 
@@ -468,6 +488,185 @@ function failedStart(error: string, inputChannel: number, deviceUid = ''): Captu
   }
 }
 
+const EMPTY_MONITOR_FORMAT: DesktopMonitorFormat = {
+  sampleRate: 0,
+  maximumFrames: 0,
+  nominalBufferFrames: 0,
+  inputChannels: 0,
+  outputChannels: 0,
+  sampleFormat: 'float32-planar',
+  outputClockMaster: true,
+  accessMode: 'shared'
+}
+
+const EMPTY_MONITOR_LATENCY: DesktopMonitorLatency = {
+  inputDeviceFrames: 0,
+  outputDeviceFrames: 0,
+  bufferFrames: 0,
+  externalRouteFrames: 0
+}
+
+function failedMonitor(
+  error: string,
+  errorCode: Exclude<DesktopMonitorResult['errorCode'], 'none'> = 'host-failure',
+  ownershipGeneration = '0'
+): DesktopMonitorResult {
+  return {
+    ok: false,
+    errorCode,
+    error: error || 'Native headphone monitoring failed.',
+    ownershipGeneration: /^(0|[1-9]\d{0,19})$/.test(ownershipGeneration)
+      ? ownershipGeneration
+      : '0',
+    state: 'error',
+    format: { ...EMPTY_MONITOR_FORMAT },
+    latency: { ...EMPTY_MONITOR_LATENCY }
+  }
+}
+
+function unsupportedMonitorStatus(error: string): DesktopMonitorStatus {
+  return {
+    active: false,
+    enabled: false,
+    deviceLost: false,
+    ownershipGeneration: '0',
+    gainDb: 0,
+    state: 'unsupported',
+    error,
+    pre: { peak: 0, rms: 0, frames: '0' },
+    post: { peak: 0, rms: 0, frames: '0' },
+    format: { ...EMPTY_MONITOR_FORMAT },
+    latency: { ...EMPTY_MONITOR_LATENCY },
+    routeGeneration: '0',
+    streamGeneration: '0',
+    callbacks: '0',
+    renderedFrames: '0',
+    xruns: '0',
+    deadlineMisses: '0',
+    renderFailures: '0',
+    adapterRenderFailures: 0,
+    terminalRenderFailures: 0,
+    adapterLastStatusCode: 0,
+    parameterOverflows: 0,
+    nonFiniteSamples: 0,
+    rejectedBlocks: 0
+  }
+}
+
+const exactUnsigned = (value: unknown): boolean =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0
+const exactCounter = (value: unknown): boolean =>
+  typeof value === 'string' && /^(0|[1-9]\d{0,19})$/.test(value) &&
+  BigInt(value) <= 0xffffffffffffffffn
+const finite = (value: unknown): boolean => typeof value === 'number' && Number.isFinite(value)
+const HOST_STATES = new Set([
+  'closed', 'open', 'running', 'stopped', 'device-lost', 'error', 'unsupported'
+])
+const MONITOR_ERRORS = new Set([
+  'none', 'invalid-generation', 'already-running', 'invalid-configuration',
+  'platform-not-ready', 'unsupported-route', 'native-audio-busy', 'graph-failure',
+  'host-failure', 'queue-full'
+])
+const HOST_TRANSPORTS = new Set([
+  'unknown', 'built-in', 'aggregate', 'virtual', 'pci', 'usb', 'firewire',
+  'bluetooth', 'bluetooth-le', 'hdmi', 'display-port', 'airplay', 'avb',
+  'thunderbolt', 'continuity-wired', 'continuity-wireless', 'vehicle'
+])
+
+function validMonitorFormat(value: unknown): value is DesktopMonitorFormat {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  return finite(row.sampleRate) &&
+    exactUnsigned(row.maximumFrames) && exactUnsigned(row.nominalBufferFrames) &&
+    exactUnsigned(row.inputChannels) && exactUnsigned(row.outputChannels) &&
+    row.sampleFormat === 'float32-planar' && typeof row.outputClockMaster === 'boolean' &&
+    (row.accessMode === 'shared' || row.accessMode === 'exclusive')
+}
+
+function validMonitorLatency(value: unknown): value is DesktopMonitorLatency {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  return exactUnsigned(row.inputDeviceFrames) && exactUnsigned(row.outputDeviceFrames) &&
+    exactUnsigned(row.bufferFrames) && exactUnsigned(row.externalRouteFrames)
+}
+
+type MonitorOperation = 'begin' | 'gain' | 'end'
+
+function validMonitorResult(
+  value: unknown,
+  operation: MonitorOperation,
+  expectedGeneration: string
+): value is DesktopMonitorResult {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  if (
+    typeof row.ok !== 'boolean' || typeof row.errorCode !== 'string' ||
+    typeof row.error !== 'string' || !MONITOR_ERRORS.has(String(row.errorCode)) ||
+    !exactCounter(row.ownershipGeneration) || row.ownershipGeneration !== expectedGeneration ||
+    expectedGeneration === '0' || !HOST_STATES.has(String(row.state)) ||
+    !validMonitorFormat(row.format) || !validMonitorLatency(row.latency)
+  ) return false
+  if (row.ok) {
+    if (row.errorCode !== 'none' || row.error !== '') return false
+    if (operation === 'begin' || operation === 'gain') return row.state === 'running'
+    // AudioMonitorSession::end() is the authoritative synchronous teardown
+    // boundary. The macOS host can still report `error` after the graph and
+    // output have stopped when restoring the device's prior buffer size
+    // fails. Retaining the generation in that cleanup-only case creates a
+    // ghost owner that can never be ended again.
+    return row.state === 'stopped' || row.state === 'closed' || row.state === 'error'
+  }
+  return row.errorCode !== 'none' && row.error.length > 0
+}
+
+function validMonitorStatus(value: unknown): value is DesktopMonitorStatus {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  const meter = (meterValue: unknown): boolean => {
+    if (!meterValue || typeof meterValue !== 'object') return false
+    const meterRow = meterValue as Record<string, unknown>
+    return finite(meterRow.peak) && finite(meterRow.rms) && exactCounter(meterRow.frames)
+  }
+  if (typeof row.active !== 'boolean' || typeof row.enabled !== 'boolean') return false
+  if (row.enabled && !row.active) return false
+  if (row.enabled && row.state !== 'running') return false
+  if (row.active && row.ownershipGeneration === '0') return false
+  return typeof row.deviceLost === 'boolean' && exactCounter(row.ownershipGeneration) &&
+    finite(row.gainDb) && HOST_STATES.has(String(row.state)) && typeof row.error === 'string' &&
+    meter(row.pre) && meter(row.post) && validMonitorFormat(row.format) &&
+    validMonitorLatency(row.latency) && exactCounter(row.routeGeneration) &&
+    exactCounter(row.streamGeneration) && exactCounter(row.callbacks) &&
+    exactCounter(row.renderedFrames) && exactCounter(row.xruns) &&
+    exactCounter(row.deadlineMisses) && exactCounter(row.renderFailures) &&
+    exactUnsigned(row.adapterRenderFailures) && exactUnsigned(row.terminalRenderFailures) &&
+    exactUnsigned(row.adapterLastStatusCode) && exactUnsigned(row.parameterOverflows) &&
+    exactUnsigned(row.nonFiniteSamples) && exactUnsigned(row.rejectedBlocks)
+}
+
+function validHostDevice(value: unknown): value is DesktopAudioHostDevice {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  const buffers = row.bufferFrames as Record<string, unknown> | undefined
+  return typeof row.uid === 'string' && row.uid.length > 0 && row.uid.length <= 4096 &&
+    typeof row.label === 'string' && row.label.length <= 4096 &&
+    typeof row.defaultInput === 'boolean' && typeof row.defaultOutput === 'boolean' &&
+    exactUnsigned(row.inputChannels) && exactUnsigned(row.outputChannels) &&
+    finite(row.nominalSampleRate) &&
+    (row.direction === 'duplex' || row.direction === 'input' || row.direction === 'output') &&
+    (row.accessMode === 'shared' || row.accessMode === 'exclusive') &&
+    HOST_TRANSPORTS.has(String(row.transport)) &&
+    (row.monitoringSuitability === 'unknown' || row.monitoringSuitability === 'low-latency' ||
+      row.monitoringSuitability === 'high-latency' || row.monitoringSuitability === 'unsupported') &&
+    Array.isArray(row.sampleRateRanges) && row.sampleRateRanges.length <= 256 &&
+    row.sampleRateRanges.every((range) => {
+      if (!range || typeof range !== 'object') return false
+      const values = range as Record<string, unknown>
+      return finite(values.minimumHz) && finite(values.maximumHz)
+    }) && Boolean(buffers) && exactUnsigned(buffers?.minimumFrames) &&
+    exactUnsigned(buffers?.maximumFrames) && exactUnsigned(buffers?.preferredFrames) &&
+    exactUnsigned(buffers?.fundamentalFrames)
+}
+
 function validStartResult(value: unknown): value is CaptureStartResult {
   if (!value || typeof value !== 'object') return false
   const row = value as Record<string, unknown>
@@ -494,6 +693,9 @@ export class CaptureOwner {
   private loadRetryable = true
   private generation = ''
   private rendererId: number | null = null
+  private monitorGeneration = ''
+  private monitorRendererId: number | null = null
+  private monitorHighWater = 0n
   private cleanupRenderers = new Set<number>()
 
   constructor(
@@ -525,6 +727,206 @@ export class CaptureOwner {
     const binding = this.native()
     if (!binding) return { ok: false, devices: [], error: this.loadError ?? 'Native capture unavailable' }
     return binding.inputDevices()
+  }
+
+  hostDevices(platform: NodeJS.Platform = process.platform): DesktopAudioHostInventoryResult {
+    const exposedPlatform = platform === 'darwin' || platform === 'win32' || platform === 'linux'
+      ? platform
+      : 'other'
+    const binding = this.native()
+    if (!binding) {
+      return {
+        ok: false,
+        platform: exposedPlatform,
+        defaultInputUid: '',
+        defaultOutputUid: '',
+        devices: [],
+        error: this.loadError ?? 'Native audio host unavailable'
+      }
+    }
+    try {
+      const raw = binding.audioHostDevices() as {
+        ok?: unknown
+        defaultInputUid?: unknown
+        defaultOutputUid?: unknown
+        devices?: unknown
+        error?: unknown
+      }
+      if (
+        raw.ok !== true || typeof raw.defaultInputUid !== 'string' ||
+        typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
+        !raw.devices.every(validHostDevice)
+      ) {
+        return {
+          ok: false,
+          platform: exposedPlatform,
+          defaultInputUid: '',
+          defaultOutputUid: '',
+          devices: [],
+          error: typeof raw.error === 'string'
+            ? raw.error
+            : 'Native audio host returned an invalid device inventory.'
+        }
+      }
+      return {
+        ok: true,
+        platform: exposedPlatform,
+        defaultInputUid: raw.defaultInputUid,
+        defaultOutputUid: raw.defaultOutputUid,
+        devices: raw.devices
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        platform: exposedPlatform,
+        defaultInputUid: '',
+        defaultOutputUid: '',
+        devices: [],
+        error: `Native audio host inventory failed: ${String(error)}`
+      }
+    }
+  }
+
+  beginMonitor(rendererId: number, config: DesktopMonitorConfig): DesktopMonitorResult {
+    if (this.monitorGeneration) {
+      return failedMonitor(
+        'End the active headphone monitor before starting another.',
+        'already-running',
+        this.monitorGeneration
+      )
+    }
+    if (this.monitorHighWater >= 0xffffffffffffffffn) {
+      return failedMonitor('The native monitor generation range is exhausted.', 'invalid-generation')
+    }
+    const binding = this.native()
+    if (!binding) {
+      return failedMonitor(this.loadError ?? 'Native audio host unavailable', 'host-failure')
+    }
+    const generation = ++this.monitorHighWater
+    const rawGeneration = generation.toString()
+    let rawResult: unknown
+    try {
+      rawResult = binding.beginMonitor(config, generation)
+    } catch (error) {
+      if (!this.monitorRollbackSucceeded(binding, generation)) {
+        this.retainMonitor(rendererId, rawGeneration)
+      }
+      return failedMonitor(`Native headphone monitoring failed to start: ${String(error)}`, 'host-failure', rawGeneration)
+    }
+    if (!validMonitorResult(rawResult, 'begin', rawGeneration)) {
+      if (!this.monitorRollbackSucceeded(binding, generation)) {
+        this.retainMonitor(rendererId, rawGeneration)
+      }
+      return failedMonitor('Native headphone monitoring returned an invalid response.', 'host-failure', rawGeneration)
+    }
+    const result = rawResult
+    if (result.ok) {
+      this.retainMonitor(rendererId, rawGeneration)
+      return result
+    }
+    let rollbackRequired = false
+    try {
+      const status = binding.monitorStatus()
+      if (validMonitorStatus(status)) {
+        rollbackRequired = status.active
+      } else rollbackRequired = true
+    } catch {
+      rollbackRequired = true
+    }
+    if (rollbackRequired && !this.monitorRollbackSucceeded(binding, generation)) {
+      this.retainMonitor(rendererId, rawGeneration)
+    }
+    return result
+  }
+
+  private retainMonitor(rendererId: number, generation: string): void {
+    this.monitorGeneration = generation
+    this.monitorRendererId = rendererId
+  }
+
+  private monitorRollbackSucceeded(binding: NativeCaptureBinding, generation: bigint): boolean {
+    const rawGeneration = generation.toString()
+    try {
+      const ended = binding.endMonitor(generation)
+      return validMonitorResult(ended, 'end', rawGeneration) && ended.ok
+    } catch {
+      return false
+    }
+  }
+
+  private uncertainMonitorStatus(error: string): DesktopMonitorStatus {
+    const fallback = unsupportedMonitorStatus(error)
+    if (!this.monitorGeneration) return fallback
+    return {
+      ...fallback,
+      active: true,
+      ownershipGeneration: this.monitorGeneration,
+      state: 'error'
+    }
+  }
+
+  setMonitorGain(
+    rendererId: number,
+    rawGeneration: string,
+    gainDb: number,
+    enabled: boolean
+  ): DesktopMonitorResult {
+    const generation = parseGeneration(rawGeneration)
+    if (
+      !generation || this.monitorRendererId !== rendererId ||
+      this.monitorGeneration !== rawGeneration
+    ) return failedMonitor('The headphone monitor generation is no longer active.', 'invalid-generation', rawGeneration)
+    const binding = this.native()
+    if (!binding) return failedMonitor(this.loadError ?? 'Native audio host unavailable', 'host-failure', rawGeneration)
+    try {
+      const result = binding.setMonitorGain(generation, gainDb, enabled)
+      return validMonitorResult(result, 'gain', rawGeneration)
+        ? result
+        : failedMonitor('Native headphone gain returned an invalid response.', 'host-failure', rawGeneration)
+    } catch (error) {
+      return failedMonitor(`Native headphone gain failed: ${String(error)}`, 'host-failure', rawGeneration)
+    }
+  }
+
+  monitorStatus(): DesktopMonitorStatus {
+    const binding = this.native()
+    if (!binding) return this.uncertainMonitorStatus(this.loadError ?? 'Native audio host unavailable')
+    try {
+      const status = binding.monitorStatus()
+      if (!validMonitorStatus(status)) {
+        return this.uncertainMonitorStatus('Native headphone monitoring returned invalid status.')
+      }
+      if (
+        this.monitorGeneration &&
+        (!status.active || status.ownershipGeneration !== this.monitorGeneration)
+      ) return this.uncertainMonitorStatus('Native headphone monitoring ownership is uncertain.')
+      return status
+    } catch (error) {
+      return this.uncertainMonitorStatus(`Native headphone monitoring status failed: ${String(error)}`)
+    }
+  }
+
+  endMonitor(rendererId: number, rawGeneration: string): DesktopMonitorResult {
+    const generation = parseGeneration(rawGeneration)
+    if (
+      !generation || this.monitorRendererId !== rendererId ||
+      this.monitorGeneration !== rawGeneration
+    ) return failedMonitor('The headphone monitor generation is no longer active.', 'invalid-generation', rawGeneration)
+    const binding = this.native()
+    if (!binding) return failedMonitor(this.loadError ?? 'Native audio host unavailable', 'host-failure', rawGeneration)
+    try {
+      const result = binding.endMonitor(generation)
+      if (!validMonitorResult(result, 'end', rawGeneration)) {
+        return failedMonitor('Native headphone monitoring returned an invalid stop response.', 'host-failure', rawGeneration)
+      }
+      if (result.ok) {
+        this.monitorGeneration = ''
+        this.monitorRendererId = null
+      }
+      return result
+    } catch (error) {
+      return failedMonitor(`Native headphone monitoring failed to stop: ${String(error)}`, 'host-failure', rawGeneration)
+    }
   }
 
   begin(
@@ -631,7 +1033,7 @@ export class CaptureOwner {
   }
 
   rendererGone(rendererId: number): void {
-    if (rendererId === this.rendererId) this.stop()
+    if (rendererId === this.rendererId || rendererId === this.monitorRendererId) this.stop()
   }
 
   /** True once per webContents lifetime, so restarts/reloads add no listeners. */
@@ -642,10 +1044,22 @@ export class CaptureOwner {
   }
 
   stop(): void {
-    if (!this.generation || !this.binding) return
-    this.binding.cancelCapture(BigInt(this.generation))
-    this.generation = ''
-    this.rendererId = null
+    if (this.monitorGeneration && this.binding) {
+      try {
+        const result = this.binding.endMonitor(BigInt(this.monitorGeneration))
+        if (validMonitorResult(result, 'end', this.monitorGeneration) && result.ok) {
+          this.monitorGeneration = ''
+          this.monitorRendererId = null
+        }
+      } catch { /* addon environment cleanup is the final fail-closed owner */ }
+    }
+    if (this.generation && this.binding) {
+      try {
+        this.binding.cancelCapture(BigInt(this.generation))
+        this.generation = ''
+        this.rendererId = null
+      } catch { /* process teardown cannot safely retry a thrown bridge */ }
+    }
   }
 
   state(): { state: CaptureStateName; ownershipGeneration: string; error: string } {

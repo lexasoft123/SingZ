@@ -128,6 +128,14 @@ const api: SingzApi = {
     return () => ipcRenderer.removeListener('capture:window', listener)
   },
 
+  audioHostDevices: () => ipcRenderer.invoke('audio-host:devices'),
+  beginMonitor: (config) => ipcRenderer.invoke('audio-host:monitor-begin', config),
+  setMonitorGain: (ownershipGeneration, gainDb, enabled) =>
+    ipcRenderer.invoke('audio-host:monitor-gain', ownershipGeneration, gainDb, enabled),
+  monitorStatus: () => ipcRenderer.invoke('audio-host:monitor-status'),
+  endMonitor: (ownershipGeneration) =>
+    ipcRenderer.invoke('audio-host:monitor-end', ownershipGeneration),
+
   listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
   startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
   stopDesktopAudioInput: (token) => ipcRenderer.invoke('audio-input:stop', token),

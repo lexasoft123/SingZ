@@ -1,8 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type WebContents } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import type { LyricsProgress, SeparationProgress } from '../shared/types'
+import type { DesktopMonitorConfig, LyricsProgress, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
 import { preciseCapable } from './align-mms'
 import { Transcriber } from './lyrics'
@@ -437,6 +437,18 @@ function registerIpc(): void {
       return { ok: false, devices: [], error: String(error) }
     }
   })
+  const bindNativeAudioCleanup = (sender: WebContents): void => {
+    if (!captureOwner.bindRendererCleanup(sender.id)) return
+    const rendererId = sender.id
+    const gone = (): void => captureOwner.rendererGone(rendererId)
+    sender.once('destroyed', gone)
+    // A crashed or reloaded renderer can keep the same webContents. These
+    // listeners retire native output before a replacement document inherits it.
+    sender.on('render-process-gone', gone)
+    sender.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+      if (isMainFrame) gone()
+    })
+  }
   ipcMain.handle(
     'capture:begin',
     (e, config: { deviceUid?: string; inputChannel: number; ringBlocks?: number }, generation: string) => {
@@ -444,18 +456,7 @@ function registerIpc(): void {
         const result = captureOwner.begin(e.sender.id, config, String(generation), (window) => {
           if (!e.sender.isDestroyed()) e.sender.send('capture:window', window)
         })
-        if (result.ok && captureOwner.bindRendererCleanup(e.sender.id)) {
-          const rendererId = e.sender.id
-          const gone = (): void => captureOwner.rendererGone(rendererId)
-          e.sender.once('destroyed', gone)
-          // A crashed or reloaded renderer can keep the same webContents.
-          // These listeners are bound once for that lifetime and retire any
-          // native owner before a replacement document can inherit it.
-          e.sender.on('render-process-gone', gone)
-          e.sender.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-            if (isMainFrame) gone()
-          })
-        }
+        if (result.ok) bindNativeAudioCleanup(e.sender)
         return result
       } catch (error) {
         return {
@@ -499,6 +500,29 @@ function registerIpc(): void {
       }
     }
   })
+
+  ipcMain.handle('audio-host:devices', () => captureOwner.hostDevices())
+  ipcMain.handle('audio-host:monitor-begin', (event, raw: unknown) => {
+    const result = captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
+    // A failed native begin may intentionally retain a quarantined generation
+    // for teardown retry. Binding cleanup is harmless when nothing was retained.
+    bindNativeAudioCleanup(event.sender)
+    return result
+  })
+  ipcMain.handle(
+    'audio-host:monitor-gain',
+    (event, generation: unknown, gainDb: unknown, enabled: unknown) => {
+      if (
+        typeof generation !== 'string' || typeof gainDb !== 'number' ||
+        typeof enabled !== 'boolean'
+      ) return captureOwner.setMonitorGain(event.sender.id, '', Number.NaN, false)
+      return captureOwner.setMonitorGain(event.sender.id, generation, gainDb, enabled)
+    }
+  )
+  ipcMain.handle('audio-host:monitor-status', () => captureOwner.monitorStatus())
+  ipcMain.handle('audio-host:monitor-end', (event, generation: unknown) =>
+    captureOwner.endMonitor(event.sender.id, typeof generation === 'string' ? generation : '')
+  )
 
   ipcMain.handle('stems:reveal', (_e, raw: string) => {
     const full = resolve(String(raw))

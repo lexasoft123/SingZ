@@ -84,6 +84,13 @@ export interface AudioPrefs {
   nativeInputUid?: string
   /** Zero-based hardware input channel. Absent and 0 both mean channel 1. */
   inputChannel?: number
+  /** Opaque OS-HAL output uid for the experimental native monitor. It is not
+   * and must never be compared with Chromium outputId. */
+  nativeMonitorOutputUid?: string
+  /** Zero-based physical output channels for the monitor's ChannelMap. */
+  nativeMonitorOutputChannels?: number[]
+  /** Native monitor gain only; enabled/headphone confirmation never persist. */
+  monitorGainDb?: number
   /** Master output level 0..1 — belongs to the machine, not to a project. */
   master?: number
   /** Reference-tone gain shared by every exercise, stored with app audio prefs. */
@@ -115,11 +122,24 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     r.inputChannel < 32
       ? r.inputChannel
       : undefined
+  const nativeMonitorOutputChannels = Array.isArray(r.nativeMonitorOutputChannels) &&
+    r.nativeMonitorOutputChannels.length > 0 && r.nativeMonitorOutputChannels.length <= 64 &&
+    r.nativeMonitorOutputChannels.every((channel) =>
+      typeof channel === 'number' && Number.isInteger(channel) && channel >= 0 && channel < 64
+    ) && new Set(r.nativeMonitorOutputChannels).size === r.nativeMonitorOutputChannels.length
+      ? [...r.nativeMonitorOutputChannels] as number[]
+      : undefined
+  const monitorGainDb = typeof r.monitorGainDb === 'number' && Number.isFinite(r.monitorGainDb)
+    ? Math.max(-60, Math.min(0, r.monitorGainDb))
+    : undefined
   return {
     outputId: id(r.outputId),
     inputId: id(r.inputId),
     nativeInputUid: id(r.nativeInputUid),
     inputChannel,
+    nativeMonitorOutputUid: id(r.nativeMonitorOutputUid),
+    nativeMonitorOutputChannels,
+    monitorGainDb,
     master,
     referenceVolume
   }

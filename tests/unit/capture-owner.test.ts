@@ -22,7 +22,12 @@ import {
   stageArtifactForLoad,
   type NativeCaptureBinding
 } from '../../src/main/capture'
-import type { CaptureAnalysisWindow, CaptureStartResult } from '../../src/shared/types'
+import type {
+  CaptureAnalysisWindow,
+  CaptureStartResult,
+  DesktopMonitorResult,
+  DesktopMonitorStatus
+} from '../../src/shared/types'
 
 const startResult: CaptureStartResult = {
   ok: true,
@@ -57,12 +62,54 @@ const analysisWindow = (generation: string): CaptureAnalysisWindow => ({
   peak: 0.5, rms: 0.25, dbfs: -12
 })
 
+const monitorResult = (generation = '1', ok = true): DesktopMonitorResult => {
+  const common = {
+    ownershipGeneration: generation,
+    state: ok ? 'running' as const : 'error' as const,
+    format: {
+    sampleRate: 48000, maximumFrames: 512, nominalBufferFrames: 128,
+    inputChannels: 1, outputChannels: 2, sampleFormat: 'float32-planar',
+    outputClockMaster: true, accessMode: 'shared'
+    } as const,
+    latency: { inputDeviceFrames: 32, outputDeviceFrames: 48, bufferFrames: 128, externalRouteFrames: 0 }
+  }
+  return ok
+    ? { ...common, ok: true, errorCode: 'none', error: '' }
+    : { ...common, ok: false, errorCode: 'host-failure', error: 'fixture failure' }
+}
+
+const monitorEndResult = (generation = '1'): DesktopMonitorResult => ({
+  ...monitorResult(generation),
+  state: 'stopped'
+})
+
+const monitorStatus = (generation = '0', active = false): DesktopMonitorStatus => ({
+  active,
+  enabled: active,
+  deviceLost: false,
+  ownershipGeneration: generation,
+  gainDb: -12,
+  state: active ? 'running' : 'closed',
+  error: '',
+  pre: { peak: 0, rms: 0, frames: '0' },
+  post: { peak: 0, rms: 0, frames: '0' },
+  format: monitorResult(generation).format,
+  latency: monitorResult(generation).latency,
+  routeGeneration: '0', streamGeneration: '0', callbacks: '0', renderedFrames: '0',
+  xruns: '0', deadlineMisses: '0', renderFailures: '0', adapterRenderFailures: 0,
+  terminalRenderFailures: 0, adapterLastStatusCode: 0, parameterOverflows: 0,
+  nonFiniteSamples: 0, rejectedBlocks: 0
+})
+
 function fakeBinding(): NativeCaptureBinding & {
   sink?: (window: CaptureAnalysisWindow) => void
   cancelled: bigint[]
+  endedMonitors: bigint[]
+  activeMonitorGeneration?: string
 } {
   return {
     cancelled: [],
+    endedMonitors: [],
     buildInfo: { electronVersion: 'test', sourceStamp: 'test' },
     inputDevices: () => ({
       ok: true,
@@ -84,7 +131,35 @@ function fakeBinding(): NativeCaptureBinding & {
     captureStats: () => ({
       deliveredBlocks: '1', deliveredFrames: '128', overruns: '0',
       deliveryWakeups: '1', droppedEvents: '0', overwrittenWindows: '0'
-    })
+    }),
+    audioHostDevices: () => ({
+      ok: true,
+      defaultInputUid: 'fixture:24',
+      defaultOutputUid: 'fixture:24',
+      devices: [{
+        uid: 'fixture:24', label: 'Fixture interface', defaultInput: true,
+        defaultOutput: true, inputChannels: 24, outputChannels: 2,
+        nominalSampleRate: 48000, direction: 'duplex', accessMode: 'shared',
+        transport: 'usb', monitoringSuitability: 'low-latency',
+        sampleRateRanges: [{ minimumHz: 48000, maximumHz: 48000 }],
+        bufferFrames: { minimumFrames: 32, maximumFrames: 512, preferredFrames: 128, fundamentalFrames: 1 }
+      }]
+    }),
+    beginMonitor(_config, generation) {
+      this.activeMonitorGeneration = generation.toString()
+      return monitorResult(generation.toString())
+    },
+    setMonitorGain(generation) {
+      return monitorResult(generation.toString())
+    },
+    monitorStatus() {
+      return monitorStatus(this.activeMonitorGeneration ?? '0', Boolean(this.activeMonitorGeneration))
+    },
+    endMonitor(generation) {
+      this.endedMonitors.push(generation)
+      this.activeMonitorGeneration = undefined
+      return monitorEndResult(generation.toString())
+    }
   }
 }
 
@@ -436,5 +511,163 @@ describe('CaptureOwner', () => {
     })
     expect(malformed.cancelled).toEqual([52n])
     expect(malformedOwner.cancel(5, '52')).toEqual({ ok: true, cancelled: false })
+  })
+
+  it('exposes exact HAL inventory and mints monotonic monitor generations in main', () => {
+    const binding = fakeBinding()
+    const owner = new CaptureOwner(binding)
+    expect(owner.hostDevices('darwin')).toMatchObject({
+      ok: true,
+      platform: 'darwin',
+      defaultInputUid: 'fixture:24',
+      devices: [{ uid: 'fixture:24', inputChannels: 24, outputChannels: 2 }]
+    })
+    const config = {
+      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+      inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
+      bufferFrames: 128, maximumFrames: 512, exclusive: false
+    }
+    const first = owner.beginMonitor(31, config)
+    expect(first).toMatchObject({ ok: true, ownershipGeneration: '1' })
+    expect(owner.endMonitor(99, '1')).toMatchObject({ ok: false, errorCode: 'invalid-generation' })
+    expect(binding.endedMonitors).toEqual([])
+    expect(owner.endMonitor(31, '1')).toMatchObject({ ok: true })
+    const second = owner.beginMonitor(31, config)
+    expect(second).toMatchObject({ ok: true, ownershipGeneration: '2' })
+  })
+
+  it('clears ownership after authoritative end when host cleanup leaves an error state', () => {
+    const binding = fakeBinding()
+    binding.endMonitor = ((generation) => ({
+      ...monitorEndResult(generation.toString()),
+      state: 'error'
+    }))
+    const owner = new CaptureOwner(binding)
+    const config = {
+      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+      inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
+      bufferFrames: 128, maximumFrames: 512, exclusive: false
+    }
+
+    expect(owner.beginMonitor(32, config)).toMatchObject({ ok: true, ownershipGeneration: '1' })
+    expect(owner.endMonitor(32, '1')).toMatchObject({ ok: true, state: 'error' })
+    expect(owner.beginMonitor(32, config)).toMatchObject({ ok: true, ownershipGeneration: '2' })
+  })
+
+  it('stops an owned native monitor when its renderer disappears', () => {
+    const binding = fakeBinding()
+    const owner = new CaptureOwner(binding)
+    owner.beginMonitor(44, {
+      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
+      bufferFrames: 128, maximumFrames: 512, exclusive: false
+    })
+    owner.rendererGone(44)
+    expect(binding.endedMonitors).toEqual([1n])
+  })
+
+  it.each(['throwing', 'malformed'] as const)(
+    'retains an uncertain %s begin generation until same-generation end succeeds',
+    (mode) => {
+      const binding = fakeBinding()
+      binding.beginMonitor = mode === 'throwing'
+        ? (() => { throw new Error('bridge uncertain') })
+        : (() => ({ ok: true }) as DesktopMonitorResult)
+      let ends = 0
+      binding.endMonitor = ((generation: bigint) => {
+        binding.endedMonitors.push(generation)
+        ends++
+        return ends === 1 ? monitorResult(generation.toString(), false) : monitorEndResult(generation.toString())
+      })
+      const owner = new CaptureOwner(binding)
+      const begun = owner.beginMonitor(72, {
+        inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+        inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
+        bufferFrames: 128, maximumFrames: 512, exclusive: false
+      })
+      expect(begun).toMatchObject({ ok: false, ownershipGeneration: '1' })
+      expect(owner.beginMonitor(72, {
+        inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+        inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
+        bufferFrames: 128, maximumFrames: 512, exclusive: false
+      })).toMatchObject({ ok: false, errorCode: 'already-running' })
+      expect(owner.endMonitor(72, '1')).toMatchObject({ ok: true, state: 'stopped' })
+      expect(binding.endedMonitors).toEqual([1n, 1n])
+    }
+  )
+
+  it('retains a failed begin when status is uncertain and rollback is not confirmed', () => {
+    const binding = fakeBinding()
+    binding.beginMonitor = ((_config, generation) => monitorResult(generation.toString(), false))
+    binding.monitorStatus = () => { throw new Error('status bridge down') }
+    let ends = 0
+    binding.endMonitor = ((generation) => {
+      binding.endedMonitors.push(generation)
+      ends++
+      return ends === 1
+        ? ({ ok: true } as unknown as DesktopMonitorResult)
+        : monitorEndResult(generation.toString())
+    })
+    const owner = new CaptureOwner(binding)
+    expect(owner.beginMonitor(75, {
+      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
+      bufferFrames: 128, maximumFrames: 512, exclusive: false
+    })).toMatchObject({ ok: false, ownershipGeneration: '1' })
+    expect(owner.monitorStatus()).toMatchObject({
+      active: true,
+      ownershipGeneration: '1',
+      state: 'error'
+    })
+    expect(owner.endMonitor(75, '1')).toMatchObject({ ok: true, state: 'stopped' })
+    expect(binding.endedMonitors).toEqual([1n, 1n])
+  })
+
+  it('rejects contradictory monitor records by operation and status invariants', () => {
+    const binding = fakeBinding()
+    binding.beginMonitor = ((_config, generation) => ({
+      ...monitorResult(generation.toString()),
+      errorCode: 'host-failure'
+    }) as unknown as DesktopMonitorResult)
+    const owner = new CaptureOwner(binding)
+    expect(owner.beginMonitor(73, {
+      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
+      bufferFrames: 128, maximumFrames: 512, exclusive: false
+    })).toMatchObject({ ok: false, error: 'Native headphone monitoring returned an invalid response.' })
+
+    const active = fakeBinding()
+    const activeOwner = new CaptureOwner(active)
+    expect(activeOwner.beginMonitor(74, {
+      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
+      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
+      bufferFrames: 128, maximumFrames: 512, exclusive: false
+    }).ok).toBe(true)
+    active.setMonitorGain = ((generation) => ({
+      ...monitorResult(generation.toString()), ownershipGeneration: '999'
+    }))
+    expect(activeOwner.setMonitorGain(74, '1', -12, true)).toMatchObject({
+      ok: false,
+      error: 'Native headphone gain returned an invalid response.'
+    })
+    active.monitorStatus = () => ({ ...monitorStatus('0', false), enabled: true })
+    expect(activeOwner.monitorStatus()).toMatchObject({
+      active: true,
+      enabled: false,
+      ownershipGeneration: '1',
+      state: 'error'
+    })
+    active.monitorStatus = () => ({ ...monitorStatus('1', true), state: 'stopped' })
+    expect(activeOwner.monitorStatus()).toMatchObject({
+      active: true,
+      enabled: false,
+      ownershipGeneration: '1',
+      state: 'error'
+    })
+    active.endMonitor = ((generation) => monitorResult(generation.toString()))
+    expect(activeOwner.endMonitor(74, '1')).toMatchObject({
+      ok: false,
+      error: 'Native headphone monitoring returned an invalid stop response.'
+    })
   })
 })

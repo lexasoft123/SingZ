@@ -1,6 +1,6 @@
 # ADR 0010: Guarded desktop monitoring preview
 
-Status: accepted for Phase 4A implementation
+Status: implemented and product-wired; hardware listening verification pending
 Date: 2026-08-28
 
 ## Decision
@@ -83,6 +83,11 @@ automated silent test.
   hardware or producing sound.
 - Release CTest, addon build/verification, ASan/TSan and platform compile gates
   pass before product UI wiring begins.
+- Product tests prove the exact UID/channel handoff, fresh wired-headphone gate,
+  off-by-default and non-persistent enablement, Web Audio release/restore order,
+  failure and lifecycle cleanup, truthful named host telemetry, and blocked
+  Windows/unsuitable-route copy. Electron E2E probes the silent Web Audio sink
+  release but never calls the audible native begin operation.
 
 ## Consequences
 

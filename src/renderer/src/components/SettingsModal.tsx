@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   chromiumInputIdForNative,
   getAudioDevices,
@@ -6,20 +6,43 @@ import {
   type AudioDevices
 } from '../audio/devices'
 import { MicrophonePreview, micPreviewErrorCopy, micPreviewErrorKind } from '../audio/mic-preview'
+import {
+  DesktopMonitorCoordinator,
+  linearToDbfs,
+  type MonitorCoordinatorSnapshot,
+  type MonitorStopOutcome
+} from '../audio/monitoring'
 import type { MicDevice } from '../audio/mic'
 import type { AudioPrefs } from '../model'
-import type { DesktopAudioInputDevice } from '../../../shared/types'
+import type {
+  DesktopAudioHostDevice,
+  DesktopAudioHostInventoryResult,
+  DesktopAudioInputDevice,
+  DesktopMonitorConfig
+} from '../../../shared/types'
 import { Modal } from '@singz/ui'
 
-interface Props {
+export interface SettingsModalProps {
   audio: AudioPrefs
   onChangeOutput: (id: string | undefined) => void
   onChangeInput: (nativeUid: string | undefined, chromiumId: string | undefined) => void
   onMigrateNativeInput: (nativeUid: string) => void
   onChangeInputChannel: (channelIndex: number) => void
+  onChangeNativeMonitorOutput: (uid: string | undefined) => void
+  onChangeNativeMonitorOutputChannels: (channels: number[]) => void
+  onChangeMonitorGain: (gainDb: number) => void
+  onPauseSong: () => void
+  onReleaseLegacyOutput: () => Promise<void>
+  onRestoreLegacyOutput: () => Promise<void>
   outputStatus: string | null
   micDevice: MicDevice | null
   onClose: () => void
+  /** Route-boundary safety handle. It deliberately stays above this lazy
+   * component if a descendant throws after native monitoring has started. */
+  registerEmergencyStop?: (controller: {
+    stop: () => Promise<MonitorStopOutcome>
+    hasNativeOwnership: () => boolean
+  }) => void
 }
 
 type PreviewState =
@@ -28,9 +51,116 @@ type PreviewState =
   | { status: 'error'; device: null; dbfs: -72; peak: -72; message: string }
 
 const INITIAL_PREVIEW: PreviewState = { status: 'starting', device: null, dbfs: -72, peak: -72 }
+const INITIAL_MONITOR: MonitorCoordinatorSnapshot = {
+  phase: 'idle',
+  message: 'Monitoring is off.',
+  result: null,
+  status: null
+}
+
+export const MONITOR_DIAGNOSTIC_LABELS = [
+  'Input device',
+  'Buffer',
+  'Output device',
+  'External route',
+  'Xruns',
+  'Deadline misses',
+  'Render failures'
+] as const
 
 export function inputChannelOptions(channelCount: number): number[] {
   return channelCount > 1 ? Array.from({ length: channelCount }, (_, index) => index) : []
+}
+
+export function defaultMonitorOutputChannels(device: DesktopAudioHostDevice | undefined): number[] {
+  if (!device || device.outputChannels < 1) return []
+  return device.outputChannels > 1 ? [0, 1] : [0]
+}
+
+export function monitorRouteCopy(
+  inventory: DesktopAudioHostInventoryResult | null,
+  input: DesktopAudioHostDevice | undefined,
+  output: DesktopAudioHostDevice | undefined
+): { ready: boolean; copy: string } {
+  if (!inventory) return { ready: false, copy: 'Inspecting native audio routes…' }
+  if (!inventory.ok) return { ready: false, copy: inventory.error }
+  if (inventory.platform === 'win32') {
+    return {
+      ready: false,
+      copy: 'Headphone monitoring is not available on Windows yet. WASAPI inventory is shown, but native output stays off in this version.'
+    }
+  }
+  if (inventory.platform !== 'darwin') {
+    return { ready: false, copy: 'Headphone monitoring is not available on this desktop platform yet.' }
+  }
+  if (!input) {
+    return {
+      ready: false,
+      copy: 'Choose a native monitoring input. SingZ will not guess from a device name.'
+    }
+  }
+  if (!output) return { ready: false, copy: 'Choose the physical headphone output.' }
+  if (input.uid !== output.uid || input.direction !== 'duplex' || output.direction !== 'duplex') {
+    return {
+      ready: false,
+      copy: 'macOS monitoring needs the microphone and headphones on the same duplex audio device.'
+    }
+  }
+  if (output.monitoringSuitability === 'high-latency') {
+    return {
+      ready: false,
+      copy: 'This is a delayed wireless or vehicle-style route. Choose wired headphones on a low-latency device.'
+    }
+  }
+  if (output.monitoringSuitability !== 'low-latency') {
+    return {
+      ready: false,
+      copy: 'This route is not approved for low-latency monitoring. Choose a provider-confirmed wired device.'
+    }
+  }
+  return { ready: true, copy: `${output.label} is approved for low-latency duplex monitoring.` }
+}
+
+export function monitorConfig(
+  input: DesktopAudioHostDevice,
+  output: DesktopAudioHostDevice,
+  inputChannel: number,
+  outputChannels: number[]
+): DesktopMonitorConfig | null {
+  const bufferFrames = output.bufferFrames.preferredFrames
+  const maximumFrames = Math.min(8192, Math.max(bufferFrames, output.bufferFrames.maximumFrames))
+  const sampleRate = Math.round(output.nominalSampleRate)
+  if (
+    inputChannel < 0 || inputChannel >= input.inputChannels ||
+    outputChannels.length < 1 || new Set(outputChannels).size !== outputChannels.length ||
+    outputChannels.some((channel) => channel < 0 || channel >= output.outputChannels) ||
+    sampleRate < 8000 || bufferFrames < 1 || maximumFrames < bufferFrames
+  ) return null
+  return {
+    inputDeviceUid: input.uid,
+    outputDeviceUid: output.uid,
+    inputChannels: [inputChannel],
+    outputChannels,
+    sampleRate,
+    bufferFrames,
+    maximumFrames,
+    exclusive: false
+  }
+}
+
+export function monitorStartReady(options: {
+  routeReady: boolean
+  previewConfirmed: boolean
+  previewCaptureActive: boolean
+  nativeConfigAvailable: boolean
+  headphonesConfirmed: boolean
+  monitorBusy: boolean
+  monitorActive: boolean
+  hasNativeOwnership: boolean
+}): boolean {
+  return options.routeReady && options.previewConfirmed && options.previewCaptureActive &&
+    options.nativeConfigAvailable && options.headphonesConfirmed && !options.monitorBusy &&
+    !options.monitorActive && !options.hasNativeOwnership
 }
 
 export default function SettingsModal({
@@ -39,28 +169,109 @@ export default function SettingsModal({
   onChangeInput,
   onMigrateNativeInput,
   onChangeInputChannel,
+  onChangeNativeMonitorOutput,
+  onChangeNativeMonitorOutputChannels,
+  onChangeMonitorGain,
+  onPauseSong,
+  onReleaseLegacyOutput,
+  onRestoreLegacyOutput,
   outputStatus,
   micDevice,
-  onClose
-}: Props): React.JSX.Element {
+  onClose,
+  registerEmergencyStop
+}: SettingsModalProps): React.JSX.Element {
   const [devices, setDevices] = useState<AudioDevices | null>(null)
   /** null means the native core is unavailable and the UI is in Web Audio fallback mode. */
   const [nativeInputs, setNativeInputs] = useState<DesktopAudioInputDevice[] | null>(null)
+  const [hostInventory, setHostInventory] = useState<DesktopAudioHostInventoryResult | null>(null)
   const [previewEpoch, setPreviewEpoch] = useState(0)
   const [preview, setPreview] = useState<PreviewState>(INITIAL_PREVIEW)
+  const [monitor, setMonitor] = useState<MonitorCoordinatorSnapshot>(INITIAL_MONITOR)
+  const [headphonesConfirmed, setHeadphonesConfirmed] = useState(false)
+  const previewCapture = useRef<MicrophonePreview | null>(null)
+  const monitorCoordinator = useRef<DesktopMonitorCoordinator | null>(null)
 
   const refreshDevices = useCallback(() => {
     void getAudioDevices({ requestAccess: false }).then(setDevices).catch(() => setDevices(null))
     void window.singz.listDesktopAudioInputs()
       .then((result) => setNativeInputs(result.ok ? result.devices : null))
       .catch(() => setNativeInputs(null))
+    void window.singz.audioHostDevices()
+      .then(setHostInventory)
+      .catch((error) => setHostInventory({
+        ok: false,
+        platform: 'other',
+        defaultInputUid: '',
+        defaultOutputUid: '',
+        devices: [],
+        error: error instanceof Error ? error.message : String(error)
+      }))
   }, [])
+
+  useEffect(() => {
+    let live = true
+    const coordinator = new DesktopMonitorCoordinator({
+      api: window.singz,
+      stopPreview: async () => {
+        await previewCapture.current?.stopAndWait()
+      },
+      pauseSong: onPauseSong,
+      releaseLegacyOutput: onReleaseLegacyOutput,
+      restoreLegacyOutput: onRestoreLegacyOutput,
+      onTerminalStop: (outcome) => {
+        if (!live) return
+        setHeadphonesConfirmed(false)
+        // The capture was stopped before native output began. Its last meter
+        // frame must not remain eligible while a safe preview is reopening.
+        setPreview(INITIAL_PREVIEW)
+        if (
+          outcome.safeToRestartPreview && !document.hidden &&
+          !coordinator.hasNativeOwnership
+        ) setPreviewEpoch((value) => value + 1)
+      }
+    })
+    monitorCoordinator.current = coordinator
+    registerEmergencyStop?.({
+      stop: () => coordinator.stop(),
+      hasNativeOwnership: () => coordinator.hasNativeOwnership
+    })
+    const unsubscribe = coordinator.subscribe(setMonitor)
+    return () => {
+      live = false
+      unsubscribe()
+      monitorCoordinator.current = null
+      void coordinator.stop()
+    }
+  }, [onPauseSong, onReleaseLegacyOutput, onRestoreLegacyOutput, registerEmergencyStop])
+
+  useEffect(() => {
+    if (monitor.phase !== 'active') return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const poll = async (): Promise<void> => {
+      await monitorCoordinator.current?.refreshStatus()
+      if (!cancelled && monitorCoordinator.current?.snapshot.phase === 'active') {
+        timer = setTimeout(() => void poll(), 120)
+      }
+    }
+    timer = setTimeout(() => void poll(), 120)
+    return () => {
+      cancelled = true
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [monitor.phase])
 
   useEffect(() => {
     refreshDevices()
     const refresh = (): void => {
-      refreshDevices()
-      setPreviewEpoch((value) => value + 1)
+      setHeadphonesConfirmed(false)
+      void (async () => {
+        const outcome = await monitorCoordinator.current?.stop()
+        refreshDevices()
+        if (outcome?.safeToRestartPreview && !monitorCoordinator.current?.hasNativeOwnership) {
+          setPreviewEpoch((value) => value + 1)
+        }
+      })()
     }
     navigator.mediaDevices.addEventListener('devicechange', refresh)
     return () => navigator.mediaDevices.removeEventListener('devicechange', refresh)
@@ -79,11 +290,12 @@ export default function SettingsModal({
     let heldPeak = -72
     let lastPeakAt = performance.now()
     const capture = new MicrophonePreview()
+    previewCapture.current = capture
 
     const stop = (): void => {
       if (frame !== null) cancelAnimationFrame(frame)
       frame = null
-      capture.stop()
+      void capture.stop()
     }
     const tick = (now: number): void => {
       if (!live || document.hidden) return
@@ -129,28 +341,66 @@ export default function SettingsModal({
       }
     }
     const visibility = (): void => {
-      if (document.hidden) stop()
-      else void start()
+      if (document.hidden) {
+        stop()
+        setHeadphonesConfirmed(false)
+        void monitorCoordinator.current?.stop()
+      } else {
+        void (async () => {
+          const outcome = await monitorCoordinator.current?.stop()
+          if (
+            outcome?.safeToRestartPreview &&
+            !monitorCoordinator.current?.hasNativeOwnership && !document.hidden
+          ) await start()
+        })()
+      }
     }
     document.addEventListener('visibilitychange', visibility)
     void start()
     return () => {
       live = false
       document.removeEventListener('visibilitychange', visibility)
-      stop()
+      if (frame !== null) cancelAnimationFrame(frame)
+      frame = null
+      // Error-boundary teardown retains this exact owner until native stop is
+      // positively confirmed. The coordinator's emergency stop can therefore
+      // join/retry the same token instead of treating a cleared ref as safety.
+      void capture.stopAndWait().then(() => {
+        if (previewCapture.current === capture) previewCapture.current = null
+      }).catch(() => {
+        // Keep the ref: the boundary must remain locked and may retry stop.
+      })
     }
   }, [audio.inputChannel, audio.inputId, audio.nativeInputUid, previewEpoch, refreshDevices])
+
+  const stopMonitoring = useCallback(async (restartPreview = true): Promise<MonitorStopOutcome> => {
+    const outcome = await (monitorCoordinator.current?.stop() ?? Promise.resolve({
+      ok: true as const,
+      safeToRestartPreview: true as const
+    }))
+    setHeadphonesConfirmed(false)
+    if (
+      outcome.safeToRestartPreview && restartPreview && !document.hidden &&
+      !monitorCoordinator.current?.hasNativeOwnership
+    ) setPreviewEpoch((value) => value + 1)
+    return outcome
+  }, [])
+
+  const closeSettings = useCallback(async (): Promise<void> => {
+    const outcome = await stopMonitoring(false)
+    if (outcome.safeToRestartPreview) onClose()
+  }, [onClose, stopMonitoring])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.code === 'Escape') {
         event.stopPropagation()
-        onClose()
+        void closeSettings()
       }
     }
     window.addEventListener('keydown', onKey, { capture: true })
     return () => window.removeEventListener('keydown', onKey, { capture: true })
-  }, [onClose])
+  }, [closeSettings])
 
   const savedGone = (id: string | undefined, rows: { id: string }[] | undefined): boolean =>
     Boolean(id && rows && !rows.some((device) => device.id === id))
@@ -182,27 +432,144 @@ export default function SettingsModal({
       ? `Listening through ${preview.device.label || 'the microphone'} · channel ${previewChannelIndex + 1} of ${previewChannelCount}`
       : 'Microphone preview is opening.'
 
-  const changeInput = (value: string): void => {
-    if (!nativeInventoryAvailable) {
-      onChangeInput(undefined, value || undefined)
+  const hostDevices = hostInventory?.ok ? hostInventory.devices : []
+  const hostInputs = hostDevices.filter((device) => device.inputChannels > 0)
+  const hostOutputs = hostDevices.filter((device) => device.outputChannels > 0)
+  // Exact opaque UID only. There is deliberately no friendly-label bridge at
+  // this native full-duplex boundary.
+  const exactPreviewInputUid = preview.device && !preview.device.fallback
+    ? preview.device.id
+    : undefined
+  const monitorInput = hostInputs.find((device) =>
+    device.uid === (audio.nativeInputUid ?? exactPreviewInputUid)
+  )
+  const effectiveMonitorOutputUid = audio.nativeMonitorOutputUid ??
+    (monitorInput?.outputChannels ? monitorInput.uid : undefined)
+  const monitorOutput = hostOutputs.find((device) => device.uid === effectiveMonitorOutputUid)
+  const selectedOutputChannels = audio.nativeMonitorOutputChannels ??
+    defaultMonitorOutputChannels(monitorOutput)
+  const monitorGainDb = audio.monitorGainDb ?? -12
+  const routeVerdict = monitorRouteCopy(hostInventory, monitorInput, monitorOutput)
+  const previewOwnsExactInput = (preview.status === 'live' || preview.status === 'no-signal') &&
+    preview.device?.id === monitorInput?.uid && preview.device.channelIndex === requestedChannel &&
+    !preview.device.fallback && !preview.device.channelFallback
+  const nativeConfig = monitorInput && monitorOutput
+    ? monitorConfig(monitorInput, monitorOutput, requestedChannel, selectedOutputChannels)
+    : null
+  const monitorBusy = monitor.phase === 'preparing' || monitor.phase === 'starting' ||
+    monitor.phase === 'stopping'
+  const monitorActive = monitor.phase === 'active'
+  const previewCaptureActive = previewCapture.current?.active === true
+  const canStartMonitor = monitorStartReady({
+    routeReady: routeVerdict.ready,
+    previewConfirmed: previewOwnsExactInput,
+    previewCaptureActive,
+    nativeConfigAvailable: Boolean(nativeConfig),
+    headphonesConfirmed,
+    monitorBusy,
+    monitorActive,
+    hasNativeOwnership: monitorCoordinator.current?.hasNativeOwnership ?? false
+  })
+  const monitorRouteStatus = !routeVerdict.ready
+    ? routeVerdict.copy
+    : !nativeConfig
+      ? 'Choose physical input and output channels that are available on this device.'
+      : !previewOwnsExactInput
+        ? 'The microphone preview must confirm this exact native device and channel before monitoring can start.'
+        : routeVerdict.copy
+  const nativePreDb = linearToDbfs(monitor.status?.pre.rms ?? 0)
+  const nativePostDb = linearToDbfs(monitor.status?.post.rms ?? 0)
+  const nativePrePct = ((nativePreDb + 72) / 72) * 100
+  const nativePostPct = ((nativePostDb + 72) / 72) * 100
+
+  const afterMonitorStops = (apply: () => void): void => {
+    if (!monitorCoordinator.current?.hasNativeOwnership) {
+      apply()
       return
     }
-    const nativeUid = value || undefined
-    const nativeDevice = nativeInputs?.find((device) => device.uid === nativeUid)
-    const chromiumId = nativeDevice && devices
-      ? chromiumInputIdForNative(nativeDevice, devices.inputs)
-      : undefined
-    onChangeInput(nativeUid, chromiumId)
+    void stopMonitoring().then((outcome) => {
+      if (outcome.safeToRestartPreview) apply()
+    })
+  }
+
+  const afterPhysicalRouteChange = (apply: () => void): void => {
+    setHeadphonesConfirmed(false)
+    afterMonitorStops(apply)
+  }
+
+  const afterInputRouteChange = (apply: () => void): void => {
+    setHeadphonesConfirmed(false)
+    // Keep the old preview object reachable until its native child positively
+    // confirms stop. Only then may the controlled route change unmount that
+    // preview and create a replacement on the newly selected input/channel.
+    void stopMonitoring(false).then((outcome) => {
+      if (
+        !outcome.safeToRestartPreview ||
+        monitorCoordinator.current?.hasNativeOwnership
+      ) return
+      setPreview(INITIAL_PREVIEW)
+      apply()
+      setPreviewEpoch((value) => value + 1)
+    })
+  }
+
+  const changeInput = (value: string): void => {
+    afterInputRouteChange(() => {
+      if (!nativeInventoryAvailable) {
+        onChangeInput(undefined, value || undefined)
+        return
+      }
+      const nativeUid = value || undefined
+      const nativeDevice = nativeInputs?.find((device) => device.uid === nativeUid)
+      const chromiumId = nativeDevice && devices
+        ? chromiumInputIdForNative(nativeDevice, devices.inputs)
+        : undefined
+      onChangeInput(nativeUid, chromiumId)
+    })
+  }
+
+  const changeMonitorInput = (value: string): void => {
+    afterInputRouteChange(() => {
+      // Do not infer or carry a Chromium id by label. The normal preview chooses
+      // Web Audio fallback only if the exact native core is unavailable.
+      onChangeInput(value || undefined, undefined)
+    })
+  }
+
+  const changeInputLane = (value: number): void => {
+    afterInputRouteChange(() => onChangeInputChannel(value))
+  }
+
+  const changeMonitorOutput = (value: string): void => {
+    afterPhysicalRouteChange(() => onChangeNativeMonitorOutput(value || undefined))
+  }
+
+  const changeOutputChannel = (slot: number, value: number): void => {
+    const next = [...selectedOutputChannels]
+    next[slot] = value
+    if (new Set(next).size !== next.length) return
+    afterPhysicalRouteChange(() => onChangeNativeMonitorOutputChannels(next))
+  }
+
+  const updateMonitorGain = (value: number): void => {
+    const gainDb = Math.max(-60, Math.min(0, value))
+    onChangeMonitorGain(gainDb)
+    if (monitorActive) void monitorCoordinator.current?.setGain(gainDb)
+  }
+
+  const startMonitoring = async (): Promise<void> => {
+    if (!canStartMonitor || !nativeConfig) return
+    await monitorCoordinator.current?.start(nativeConfig, monitorGainDb)
   }
 
   return (
-    <Modal onClose={onClose} cardClassName="settings-card">
+    <Modal onClose={() => void closeSettings()} cardClassName="settings-card">
       <h2>Settings</h2>
       <div className="settings-body">
         <nav className="settings-nav"><button type="button" className="settings-tab active">Audio</button></nav>
         <div className="settings-page">
           <label className="settings-label" htmlFor="settings-output">Playback device</label>
-          <select id="settings-output" className="settings-select" value={audio.outputId ?? ''} onChange={(event) => onChangeOutput(event.target.value || undefined)}>
+          <select id="settings-output" className="settings-select" value={audio.outputId ?? ''} onChange={(event) => afterMonitorStops(() => onChangeOutput(event.target.value || undefined))}>
             <option value="">System default</option>
             {devices?.outputs.map((device) => <option key={device.id} value={device.id}>{device.label}</option>)}
             {savedGone(audio.outputId, devices?.outputs) && <option value={audio.outputId}>Saved device (not connected)</option>}
@@ -214,7 +581,7 @@ export default function SettingsModal({
               <label className="settings-label" id="mic-input-heading" htmlFor="settings-input">Microphone</label>
               {(selectedNativeInput || inputDevice || requestedChannel > 0) && <span className="mic-route">IN {channelIndex + 1}/{channelCount}</span>}
             </div>
-            <select id="settings-input" className="settings-select" value={nativeInventoryAvailable ? audio.nativeInputUid ?? '' : audio.inputId ?? ''} onChange={(event) => changeInput(event.target.value)}>
+            <select id="settings-input" className="settings-select" value={nativeInventoryAvailable ? audio.nativeInputUid ?? '' : audio.inputId ?? ''} onChange={(event) => void changeInput(event.target.value)}>
               <option value="">System default</option>
               {nativeInventoryAvailable
                 ? nativeInputs.map((device) => <option key={device.uid} value={device.uid}>{device.label} · {device.channels} ch</option>)
@@ -227,7 +594,7 @@ export default function SettingsModal({
             <div className="mic-channel-row">
               {channelCount > 1 ? <>
                 <label htmlFor="settings-input-channel">Input channel</label>
-                <select id="settings-input-channel" className="settings-select channel-select" value={channelIndex} onChange={(event) => onChangeInputChannel(Number(event.target.value))}>
+                <select id="settings-input-channel" className="settings-select channel-select" value={channelIndex} onChange={(event) => void changeInputLane(Number(event.target.value))}>
                   {inputChannelOptions(channelCount).map((index) => <option key={index} value={index}>Channel {index + 1}</option>)}
                 </select>
               </> : <span className="mic-mono-state">Mono input · channel 1</span>}
@@ -244,12 +611,197 @@ export default function SettingsModal({
             {preview.device?.channelFallback && <p className="settings-hint warn">That lane is unavailable — previewing channel {previewChannelIndex + 1}.</p>}
           </section>
 
+          <section className="monitor-strip" aria-labelledby="monitor-heading">
+            <div className="monitor-heading">
+              <div>
+                <h3 id="monitor-heading">Headphone monitoring</h3>
+                <span>Hear this mic through the native DSP graph</span>
+              </div>
+              <span className="monitor-experimental">Experimental</span>
+            </div>
+
+            {!monitorInput && hostInputs.length > 0 && (
+              <div className="monitor-field">
+                <label className="settings-label" htmlFor="monitor-input">Native monitoring input</label>
+                <select
+                  id="monitor-input"
+                  className="settings-select"
+                  value={audio.nativeInputUid ?? ''}
+                  onChange={(event) => void changeMonitorInput(event.target.value)}
+                  disabled={monitorBusy || monitorActive}
+                >
+                  <option value="">Choose an exact native device…</option>
+                  {hostInputs.map((device) => (
+                    <option key={device.uid} value={device.uid}>
+                      {device.label} · {device.inputChannels} in
+                    </option>
+                  ))}
+                  {audio.nativeInputUid && !hostInputs.some((device) => device.uid === audio.nativeInputUid) && (
+                    <option value={audio.nativeInputUid}>Saved native input (not connected)</option>
+                  )}
+                </select>
+                <p className="settings-hint">This is an OS audio UID. SingZ never matches it from a Chromium device name.</p>
+              </div>
+            )}
+
+            <div className="monitor-field">
+              <label className="settings-label" htmlFor="monitor-output">Physical headphone output</label>
+              <select
+                id="monitor-output"
+                className="settings-select"
+                value={effectiveMonitorOutputUid ?? ''}
+                onChange={(event) => void changeMonitorOutput(event.target.value)}
+                disabled={monitorBusy || monitorActive}
+              >
+                <option value="">Choose native output…</option>
+                {hostOutputs.map((device) => (
+                  <option key={device.uid} value={device.uid}>
+                    {device.label} · {device.outputChannels} out · {device.transport}
+                  </option>
+                ))}
+                {audio.nativeMonitorOutputUid && !hostOutputs.some((device) => device.uid === audio.nativeMonitorOutputUid) && (
+                  <option value={audio.nativeMonitorOutputUid}>Saved native output (not connected)</option>
+                )}
+              </select>
+            </div>
+
+            {monitorInput && (
+              <div className="monitor-route-grid">
+                <div>
+                  <span>Mic channel</span>
+                  <strong>IN {requestedChannel + 1}</strong>
+                </div>
+                {monitorOutput && selectedOutputChannels.map((selected, slot) => (
+                  <label key={slot} htmlFor={`monitor-output-${slot}`}>
+                    <span>{selectedOutputChannels.length > 1 ? (slot === 0 ? 'Headphones L' : 'Headphones R') : 'Headphones'}</span>
+                    <select
+                      id={`monitor-output-${slot}`}
+                      className="settings-select channel-select"
+                      value={selected}
+                      onChange={(event) => void changeOutputChannel(slot, Number(event.target.value))}
+                      disabled={monitorBusy || monitorActive}
+                    >
+                      {Array.from({ length: monitorOutput.outputChannels }, (_, index) => (
+                        <option
+                          key={index}
+                          value={index}
+                          disabled={selectedOutputChannels.some((channel, other) => other !== slot && channel === index)}
+                        >
+                          OUT {index + 1}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <div className={`monitor-signal-path${monitorActive ? ' live' : ''}`} aria-label="Native monitoring signal path">
+              <div className="monitor-path-node mic-node">
+                <span>Mic</span>
+                <strong>{monitorInput ? `IN ${requestedChannel + 1}` : '—'}</strong>
+              </div>
+              <div
+                className="monitor-path-meter"
+                role="meter"
+                aria-label="Native DSP pre-gain level"
+                aria-valuemin={-72}
+                aria-valuemax={0}
+                aria-valuenow={Math.round(nativePreDb)}
+                aria-valuetext={`${Math.round(nativePreDb)} dBFS before gain`}
+              >
+                <span style={{ width: `${nativePrePct}%` }} />
+              </div>
+              <div className="monitor-path-node dsp-node">
+                <span>DSP</span>
+                <strong>{monitorGainDb} dB</strong>
+                <em>Limiter −1 dBFS</em>
+              </div>
+              <div
+                className="monitor-path-meter post"
+                role="meter"
+                aria-label="Native DSP post-limiter level"
+                aria-valuemin={-72}
+                aria-valuemax={0}
+                aria-valuenow={Math.round(nativePostDb)}
+                aria-valuetext={`${Math.round(nativePostDb)} dBFS after limiter`}
+              >
+                <span style={{ width: `${nativePostPct}%` }} />
+              </div>
+              <div className="monitor-path-node phones-node">
+                <span>Headphones</span>
+                <strong>{monitorOutput ? selectedOutputChannels.map((channel) => channel + 1).join(' · ') : '—'}</strong>
+              </div>
+            </div>
+
+            <label className="monitor-gain" htmlFor="monitor-gain">
+              <span>Monitor gain</span>
+              <input
+                id="monitor-gain"
+                type="range"
+                min={-60}
+                max={0}
+                step={1}
+                value={monitorGainDb}
+                onChange={(event) => updateMonitorGain(Number(event.target.value))}
+                disabled={monitorBusy}
+              />
+              <output>{monitorGainDb} dB</output>
+            </label>
+
+            <p id="monitor-route-status" className={`monitor-route-status${routeVerdict.ready ? '' : ' warn'}`}>{monitorRouteStatus}</p>
+            <label className="monitor-headphones-check">
+              <input
+                type="checkbox"
+                checked={headphonesConfirmed}
+                onChange={(event) => setHeadphonesConfirmed(event.target.checked)}
+                disabled={monitorBusy || monitorActive || !routeVerdict.ready}
+              />
+              <span>Wired headphones are connected</span>
+            </label>
+
+            <div className="monitor-actions">
+              {monitorActive ? (
+                <button type="button" className="pill ghost" onClick={() => void stopMonitoring()}>
+                  Stop monitoring
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="pill primary"
+                  disabled={!canStartMonitor}
+                  aria-describedby="monitor-route-status"
+                  onClick={() => void startMonitoring()}
+                >
+                  {monitorBusy ? 'Preparing…' : 'Start monitoring'}
+                </button>
+              )}
+              <p className={`monitor-state ${monitor.phase}`} aria-live="polite">{monitor.message}</p>
+            </div>
+
+            {monitor.status && (
+              <div className="monitor-diagnostics" aria-label="Native host diagnostics">
+                <div className="monitor-diagnostic-row latency">
+                  <span>{MONITOR_DIAGNOSTIC_LABELS[0]} <strong>{monitor.status.latency.inputDeviceFrames > 0 ? `${monitor.status.latency.inputDeviceFrames} frames` : 'Not reported'}</strong></span>
+                  <span>{MONITOR_DIAGNOSTIC_LABELS[1]} <strong>{monitor.status.latency.bufferFrames > 0 ? `${monitor.status.latency.bufferFrames} frames` : 'Not reported'}</strong></span>
+                  <span>{MONITOR_DIAGNOSTIC_LABELS[2]} <strong>{monitor.status.latency.outputDeviceFrames > 0 ? `${monitor.status.latency.outputDeviceFrames} frames` : 'Not reported'}</strong></span>
+                  <span>{MONITOR_DIAGNOSTIC_LABELS[3]} <strong>{monitor.status.latency.externalRouteFrames > 0 ? `${monitor.status.latency.externalRouteFrames} frames · provider-reported` : 'Unknown · not measured'}</strong></span>
+                </div>
+                <div className="monitor-diagnostic-row health">
+                  <span>{MONITOR_DIAGNOSTIC_LABELS[4]} <strong>{monitor.status.xruns}</strong></span>
+                  <span>{MONITOR_DIAGNOSTIC_LABELS[5]} <strong>{monitor.status.deadlineMisses}</strong></span>
+                  <span>{MONITOR_DIAGNOSTIC_LABELS[6]} <strong>{monitor.status.renderFailures}</strong></span>
+                </div>
+              </div>
+            )}
+          </section>
+
           {!devices && <p className="settings-hint">Looking for audio devices…</p>}
           {devices?.inputLabelsHidden && <p className="settings-hint">Allow microphone access in System Settings to see device names.</p>}
           {audio.outputId && <p className="settings-hint">Tip: on a non-default speaker, sing with headphones — echo cancellation only tracks the system default output.</p>}
         </div>
       </div>
-      <div className="modal-actions"><button type="button" className="pill ghost" onClick={onClose}>Close</button></div>
+      <div className="modal-actions"><button type="button" className="pill ghost" onClick={() => void closeSettings()}>Close</button></div>
     </Modal>
   )
 }

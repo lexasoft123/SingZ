@@ -68,6 +68,16 @@ class SequencedDeferredMicSource extends FakeMicSource {
   }
 }
 
+class RetryStopMicSource extends FakeMicSource {
+  stopAttempts = 0
+  async stop(): Promise<void> {
+    this.stopAttempts++
+    if (this.stopAttempts === 1) throw new Error('stop not confirmed')
+    this.stops++
+    this.active = false
+  }
+}
+
 const context = (currentTime = 1): AudioContext => ({ currentTime }) as AudioContext
 
 describe('desktop training microphone capture', () => {
@@ -103,8 +113,24 @@ describe('desktop training microphone capture', () => {
     expect(source.stops).toBe(1)
     capture.dispose()
     capture.dispose()
-    expect(source.stops).toBe(2)
+    expect(source.stops).toBe(1)
     await expect(capture.start({} as AudioContext)).rejects.toThrow('disposed')
+  })
+
+  it('retains failed teardown for wrapper retry and start awaits confirmation', async () => {
+    const source = new RetryStopMicSource()
+    const capture = new DesktopTrainingMicCapture({ source })
+    const audioContext = context(1)
+    await capture.start(audioContext)
+
+    await expect(capture.stopAndWait()).rejects.toThrow('stop not confirmed')
+    expect(source.active).toBe(true)
+    await expect(capture.start(audioContext)).resolves.toBeUndefined()
+    expect(source.stopAttempts).toBe(2)
+    expect(source.starts).toBe(2)
+    expect(capture.active).toBe(true)
+    capture.stop()
+    await flushMicrotasks()
   })
 
   it('stays disposed when a pending permission request resolves later', async () => {
@@ -117,6 +143,26 @@ describe('desktop training microphone capture', () => {
     expect(source.active).toBe(false)
     expect(source.stops).toBe(2)
     expect(capture.read().timestampMs).toBe(0)
+  })
+
+  it('does not confirm stop until a pending start and its late owner are drained', async () => {
+    const source = new DeferredMicSource()
+    const capture = new DesktopTrainingMicCapture({ source })
+    const starting = capture.start(context(2))
+    const startingResult = expect(starting).rejects.toThrow('cancelled')
+    let stopConfirmed = false
+    const stopping = capture.stopAndWait().then(() => { stopConfirmed = true })
+
+    await flushMicrotasks()
+    expect(stopConfirmed).toBe(false)
+    expect(source.stops).toBe(1)
+    source.resolve()
+
+    await startingResult
+    await stopping
+    expect(stopConfirmed).toBe(true)
+    expect(source.active).toBe(false)
+    expect(source.stops).toBeGreaterThanOrEqual(2)
   })
 
   it('single-flights one context and rejects a different context while starting', async () => {
@@ -254,8 +300,41 @@ describe('desktop native training microphone source', () => {
       deviceUid: 'auhal:studio',
       channel: 2
     })
-    source.stop()
+    await source.stop()
     expect(stopDesktopAudioInput).toHaveBeenCalledWith('capture-1')
+  })
+
+  it('retains the native token for retry when stop is not confirmed', async () => {
+    const stopDesktopAudioInput = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: 'still running' })
+      .mockResolvedValueOnce({ ok: true })
+    vi.stubGlobal('window', {
+      singz: {
+        onDesktopAudioInputEvent: () => vi.fn(),
+        startDesktopAudioInput: vi.fn(async () => ({
+          ok: true,
+          token: 'capture-retry',
+          device: {
+            uid: 'auhal:studio',
+            label: 'Studio interface',
+            isDefault: true,
+            sampleRate: 48_000,
+            channels: 4,
+            channelLabels: ['1', '2', '3', '4']
+          },
+          channel: 2
+        })),
+        stopDesktopAudioInput
+      }
+    })
+    const source = new NativeTrainingMicSource(new FakeMicSource())
+    await source.start(context(), { nativeDeviceUid: 'auhal:studio', channelIndex: 2 })
+
+    await expect(source.stop()).rejects.toThrow('still running')
+    expect(source.active).toBe(true)
+    await expect(source.stop()).resolves.toBeUndefined()
+    expect(source.active).toBe(false)
+    expect(stopDesktopAudioInput).toHaveBeenCalledTimes(2)
   })
 
   it('falls back to Web Audio only when the bundled core predates AudioInput', async () => {
@@ -277,6 +356,36 @@ describe('desktop native training microphone source', () => {
     expect(source.active).toBe(true)
     source.stop()
     expect(fallback.stops).toBe(1)
+  })
+
+  it('retains asynchronous fallback ownership until stop is confirmed', async () => {
+    let stopAttempts = 0
+    const fallback = new FakeMicSource()
+    fallback.stop = async (): Promise<void> => {
+      stopAttempts++
+      if (stopAttempts === 1) throw new Error('fallback stop not confirmed')
+      fallback.stops++
+      fallback.active = false
+    }
+    vi.stubGlobal('window', {
+      singz: {
+        onDesktopAudioInputEvent: () => vi.fn(),
+        startDesktopAudioInput: async () => ({
+          ok: false,
+          kind: 'unavailable-core',
+          error: 'unknown command input-devices'
+        }),
+        stopDesktopAudioInput: vi.fn()
+      }
+    })
+    const source = new NativeTrainingMicSource(fallback)
+    await source.start(context())
+
+    await expect(source.stop()).rejects.toThrow('fallback stop not confirmed')
+    expect(source.active).toBe(true)
+    await expect(source.stop()).resolves.toBeUndefined()
+    expect(source.active).toBe(false)
+    expect(stopAttempts).toBe(2)
   })
 
   it('preserves a legacy Chromium selection until it has a migrated native uid', async () => {

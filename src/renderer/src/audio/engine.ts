@@ -56,6 +56,11 @@ const SEC_COUNT_PERIOD = 1
  */
 export class MultitrackEngine {
   private ctx = new AudioContext({ latencyHint: 'interactive' })
+  private desiredOutputId = ''
+  private confirmedOutputId = ''
+  private outputRouteVersion = 0
+  private outputRouteApplyPending: Promise<void> | null = null
+  private nativeMonitorLease = false
   private master = this.ctx.createGain()
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
@@ -141,7 +146,7 @@ export class MultitrackEngine {
 
   /** Current output device id ('' = system default). */
   get outputDeviceId(): string {
-    return this.ctx.sinkId
+    return this.desiredOutputId
   }
 
   /**
@@ -151,8 +156,87 @@ export class MultitrackEngine {
    */
   async setOutput(deviceId: string): Promise<void> {
     if (!('setSinkId' in this.ctx)) throw new Error('Changing outputs is not supported here.')
-    if (this.ctx.sinkId === deviceId) return
-    await this.ctx.setSinkId(deviceId)
+    this.desiredOutputId = deviceId
+    this.outputRouteVersion++
+    // A native monitor owns the physical output. Remember route changes for
+    // restoration, but never let Chromium reacquire a device underneath it.
+    if (this.nativeMonitorLease) return
+    await this.applyDesiredOutputRoute()
+  }
+
+  /** Applies the newest desired Chromium route. A slower stale setSinkId can
+   * never finish after a newer request and silently become the physical sink. */
+  private async applyDesiredOutputRoute(): Promise<void> {
+    if (this.outputRouteApplyPending) return this.outputRouteApplyPending
+    const operation = (async (): Promise<void> => {
+      while (true) {
+        const version = this.outputRouteVersion
+        const target = this.desiredOutputId
+        try {
+          if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
+        } catch (error) {
+          if (version !== this.outputRouteVersion) continue
+          this.desiredOutputId = this.confirmedOutputId
+          this.outputRouteVersion++
+          const fallbackVersion = this.outputRouteVersion
+          if (this.ctx.sinkId !== this.confirmedOutputId) {
+            await this.ctx.setSinkId(this.confirmedOutputId)
+          }
+          if (fallbackVersion !== this.outputRouteVersion) continue
+          throw error
+        }
+        if (version !== this.outputRouteVersion) continue
+        this.confirmedOutputId = target
+        return
+      }
+    })()
+    this.outputRouteApplyPending = operation
+    try {
+      await operation
+    } finally {
+      if (this.outputRouteApplyPending === operation) this.outputRouteApplyPending = null
+    }
+  }
+
+  /** Pause/suspend and detach Chromium's destination before the native host
+   * opens it. The silent sink is an explicit device release, not a mute. */
+  async releaseOutputForNativeMonitor(): Promise<void> {
+    if (this.nativeMonitorLease) return
+    this.nativeMonitorLease = true
+    try {
+      // Drain a route switch already inside setSinkId, then make the silent
+      // sink the last physical operation before native begin.
+      if (this.outputRouteApplyPending) await this.outputRouteApplyPending
+      if (this.ctx.state === 'running') await this.ctx.suspend()
+      // Chromium accepts the standards-track silent sink object; the DOM lib
+      // bundled with this TypeScript release still declares only the older
+      // string overload.
+      await (this.ctx.setSinkId as unknown as (
+        sink: string | { type: 'none' }
+      ) => Promise<void>)({ type: 'none' })
+    } catch (error) {
+      this.nativeMonitorLease = false
+      try { await this.ctx.resume() } catch { /* preserve the release failure */ }
+      throw error
+    }
+  }
+
+  /** Reattach the saved Chromium route and make the context ready. Sources
+   * remain paused; ending monitoring never resumes song playback. */
+  async restoreOutputAfterNativeMonitor(): Promise<void> {
+    if (!this.nativeMonitorLease) return
+    while (true) {
+      await this.applyDesiredOutputRoute()
+      const restoredVersion = this.outputRouteVersion
+      if (this.ctx.state !== 'running') await this.ctx.resume()
+      if (restoredVersion !== this.outputRouteVersion) continue
+      this.nativeMonitorLease = false
+      return
+    }
+  }
+
+  get nativeMonitorOwnsOutput(): boolean {
+    return this.nativeMonitorLease
   }
 
   get position(): number {
@@ -239,6 +323,7 @@ export class MultitrackEngine {
 
   /** One immediate click — popover feedback (volume preview, tap confirmation). */
   previewClick(accent = false): void {
+    if (this.nativeMonitorLease) return
     if (this.ctx.state === 'suspended') void this.ctx.resume()
     this.scheduleClick(this.ctx.currentTime, accent)
   }
@@ -650,7 +735,7 @@ export class MultitrackEngine {
   }
 
   async play(opts: { countIn?: boolean } = {}): Promise<void> {
-    if (this._playing || this.tracks.length === 0) return
+    if (this.nativeMonitorLease || this._playing || this.tracks.length === 0) return
     this.trainingCues?.cancel()
     const requestGeneration = ++this.generation
     if (this.ctx.state === 'suspended') await this.ctx.resume()

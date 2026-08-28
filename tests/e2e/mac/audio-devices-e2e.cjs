@@ -235,6 +235,46 @@ const coreProvenance = async (win) => {
     null,
     { timeout: 20000 }
   )
+  // Phase 4A controls are inspected only. SINGZ_MUTE mutes Chromium, not the
+  // native host, so this driver must never confirm headphones or click Start.
+  await win.waitForSelector('.monitor-strip')
+  const monitorUi = await win.evaluate(async () => {
+    const start = document.querySelector('.monitor-actions button')
+    const style = start ? getComputedStyle(start) : null
+    return {
+      heading: document.querySelector('#monitor-heading')?.textContent,
+      confirmation: document.querySelector('.monitor-headphones-check input')?.checked,
+      startDisabled: start?.disabled,
+      startBackgroundImage: style?.backgroundImage,
+      startOpacity: style?.opacity,
+      routeHelp: start?.getAttribute('aria-describedby'),
+      active: (await window.singz.monitorStatus()).active,
+      state: document.querySelector('.monitor-state')?.textContent
+    }
+  })
+  if (monitorUi.heading !== 'Headphone monitoring') throw new Error('native monitor controls missing')
+  if (monitorUi.confirmation !== false) throw new Error('headphone confirmation was not fresh/off')
+  if (monitorUi.startDisabled !== true) throw new Error('native Start was enabled without headphone confirmation')
+  if (monitorUi.startBackgroundImage !== 'none' || monitorUi.startOpacity !== '1')
+    throw new Error(`disabled native Start still looked active: ${JSON.stringify(monitorUi)}`)
+  if (monitorUi.routeHelp !== 'monitor-route-status') throw new Error('disabled Start does not expose route help')
+  if (monitorUi.active !== false) throw new Error('audio-devices E2E unexpectedly started native output')
+  if (!monitorUi.state?.includes('Monitoring is off')) throw new Error(`monitor did not start off: ${monitorUi.state}`)
+  // Exercise only the Chromium release/restore half against this Electron.
+  // This proves the silent-sink overload exists without ever calling beginMonitor.
+  const sinkHandoff = await win.evaluate(async () => {
+    await window.__engine.releaseOutputForNativeMonitor()
+    const released = window.__engine.nativeMonitorOwnsOutput
+    await window.__engine.restoreOutputAfterNativeMonitor()
+    return {
+      released,
+      restored: !window.__engine.nativeMonitorOwnsOutput,
+      playing: window.__engine.playing,
+      nativeActive: (await window.singz.monitorStatus()).active
+    }
+  })
+  if (!sinkHandoff.released || !sinkHandoff.restored || sinkHandoff.playing || sinkHandoff.nativeActive)
+    throw new Error(`Chromium sink handoff probe failed: ${JSON.stringify(sinkHandoff)}`)
   const nativeInventory = await win.evaluate(() => window.singz.listDesktopAudioInputs())
   const nativeMode = nativeInventory.ok
   const inputPrefKey = nativeMode ? 'nativeInputUid' : 'inputId'
@@ -334,6 +374,9 @@ const coreProvenance = async (win) => {
     }
   }
   await win.screenshot({ path: join(OUT, 'settings-audio.png') })
+  await win.$eval('.monitor-strip', (section) => section.scrollIntoView({ block: 'start' }))
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  await win.screenshot({ path: join(OUT, 'settings-monitoring.png') })
 
   await win.selectOption('#settings-input', ins[0].v)
   const stored = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
@@ -444,14 +487,27 @@ const coreProvenance = async (win) => {
 
   // ---- settings owns a live analyser preview; flipping restarts runtime + preview ----
   await win.click('.pill.gear')
-  await win.waitForFunction(
-    () => {
-      const text = document.querySelector('.mic-meter-head output')?.textContent ?? ''
-      return text.includes('dBFS') || text.includes('No signal')
-    },
-    null,
-    { timeout: 15000 }
-  )
+  try {
+    await win.waitForFunction(
+      () => {
+        const text = document.querySelector('.mic-meter-head output')?.textContent ?? ''
+        return text.includes('dBFS') || text.includes('No signal')
+      },
+      null,
+      { timeout: 15000 }
+    )
+  } catch (error) {
+    const diagnostic = await win.evaluate(async () => ({
+      meter: document.querySelector('.mic-meter-head output')?.textContent ?? null,
+      preview: document.querySelector('.mic-preview-status')?.textContent ?? null,
+      alert: document.querySelector('[role="alert"]')?.textContent ?? null,
+      chromiumCapture: window.__singzE2eMic,
+      nativeState: await window.singz.captureState(),
+      nativeStats: await window.singz.captureStats(),
+      logs: (await window.singz.getLog()).slice(-20)
+    }))
+    throw new Error(`Settings microphone preview did not become readable: ${JSON.stringify(diagnostic)}\n${error instanceof Error ? error.message : String(error)}`)
+  }
   if (ins.length >= 2) {
     await win.selectOption('#settings-input', ins[1].v)
     if (nativeMode) {
@@ -553,10 +609,15 @@ const coreProvenance = async (win) => {
   }
   await app.close()
 
-  console.log('SCREENSHOTS:', join(OUT, 'settings-audio.png'), join(OUT, 'pitch-resized.png'))
+  console.log(
+    'SCREENSHOTS:',
+    join(OUT, 'settings-audio.png'),
+    join(OUT, 'settings-monitoring.png'),
+    join(OUT, 'pitch-resized.png')
+  )
   console.log('PASS')
   process.exit(0)
 })().catch((e) => {
-  console.error('FAIL', e.message)
+  console.error('FAIL', e.stack ?? e.message)
   process.exit(1)
 })

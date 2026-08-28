@@ -50,13 +50,14 @@ import LibraryImport from './components/LibraryImport'
 import ProjectPicker from './components/ProjectPicker'
 import SetupWizard from './components/SetupWizard'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
-import SettingsModal from './components/SettingsModal'
 import SetupModal from './components/SetupModal'
+import SettingsModal from './components/SettingsRoute'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
 import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
+import { blocksSongTransportShortcut } from './keyboard'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
   restoreDesktopTrainingPracticeSettings
@@ -894,6 +895,38 @@ export default function App(): React.JSX.Element {
     setAudioPrefs((p) => ({ ...p, inputChannel }))
   }, [])
 
+  const changeNativeMonitorOutput = useCallback((nativeMonitorOutputUid: string | undefined) => {
+    setAudioPrefs((p) => sanitizeAudioPrefs({
+      ...p,
+      nativeMonitorOutputUid,
+      nativeMonitorOutputChannels: undefined
+    }))
+  }, [])
+
+  const changeNativeMonitorOutputChannels = useCallback((nativeMonitorOutputChannels: number[]) => {
+    setAudioPrefs((p) => sanitizeAudioPrefs({ ...p, nativeMonitorOutputChannels }))
+  }, [])
+
+  const changeMonitorGain = useCallback((monitorGainDb: number) => {
+    setAudioPrefs((p) => sanitizeAudioPrefs({ ...p, monitorGainDb }))
+  }, [])
+
+  const pauseForNativeMonitor = useCallback(() => {
+    engine.pause()
+    trainingCues.cancel()
+    trainingMic.stop()
+    setMicDevice(null)
+  }, [engine, trainingCues, trainingMic])
+
+  const releaseLegacyOutputForMonitor = useCallback(
+    () => engine.releaseOutputForNativeMonitor(),
+    [engine]
+  )
+  const restoreLegacyOutputAfterMonitor = useCallback(
+    () => engine.restoreOutputAfterNativeMonitor(),
+    [engine]
+  )
+
   useEffect(() => {
     engine.setBeats(beatInfo)
   }, [engine, beatInfo])
@@ -980,10 +1013,9 @@ export default function App(): React.JSX.Element {
         return
       }
       const tgt = e.target as HTMLElement
-      const inText =
-        (tgt instanceof HTMLInputElement && tgt.type !== 'range') ||
-        tgt instanceof HTMLTextAreaElement
-      if (inText) return
+      const modalOpen = document.body.classList.contains('modal-open') ||
+        Boolean(document.querySelector('[role="dialog"]'))
+      if (blocksSongTransportShortcut(e.target, modalOpen)) return
       // Song transport shortcuts never leak into the training section. The
       // exercise owns Space/arrow semantics while it is visible.
       if (appSectionRef.current !== 'songs') return
@@ -3045,6 +3077,12 @@ export default function App(): React.JSX.Element {
           onChangeInput={changeInput}
           onMigrateNativeInput={migrateNativeInput}
           onChangeInputChannel={changeInputChannel}
+          onChangeNativeMonitorOutput={changeNativeMonitorOutput}
+          onChangeNativeMonitorOutputChannels={changeNativeMonitorOutputChannels}
+          onChangeMonitorGain={changeMonitorGain}
+          onPauseSong={pauseForNativeMonitor}
+          onReleaseLegacyOutput={releaseLegacyOutputForMonitor}
+          onRestoreLegacyOutput={restoreLegacyOutputAfterMonitor}
           outputStatus={outputStatus}
           micDevice={micDevice}
           onClose={() => setShowSettings(false)}
