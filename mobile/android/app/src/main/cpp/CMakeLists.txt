@@ -29,6 +29,11 @@ if(NOT EXISTS ${ORT_SDK_DIR}/headers/onnxruntime_cxx_api.h)
     message(FATAL_ERROR "ORT_SDK_DIR (${ORT_SDK_DIR}) has no ORT headers — the extractOrtSdk gradle task should have run first")
 endif()
 
+# Oboe comes in as a prefab package (com.google.oboe:oboe in app/build.gradle).
+# The Android capture backend builds on it rather than on raw AAudio, for its
+# QuirksManager device database and its format/channel conversion.
+find_package(oboe REQUIRED CONFIG)
+
 add_library(onnxruntime SHARED IMPORTED)
 set_target_properties(onnxruntime PROPERTIES
     IMPORTED_LOCATION ${ORT_SDK_DIR}/jni/${ANDROID_ABI}/libonnxruntime.so)
@@ -81,4 +86,6 @@ target_compile_options(singzcore PRIVATE -fexceptions -frtti)
 # overflow plain fseek/ftell; the engine uses fseeko/ftello throughout.
 target_compile_definitions(singzcore PRIVATE _FILE_OFFSET_BITS=64)
 target_include_directories(singzcore PRIVATE ${CORE_DIR} ${ORT_SDK_DIR}/headers ${FLAC_DIR}/include)
-target_link_libraries(singzcore singzflac onnxruntime aaudio android dl log)
+# No `aaudio` here any more: capture goes through Oboe, and nothing else in
+# the core touches the AAudio C API. Oboe links it itself.
+target_link_libraries(singzcore singzflac onnxruntime oboe::oboe android dl log)
