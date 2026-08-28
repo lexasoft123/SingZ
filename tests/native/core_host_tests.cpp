@@ -321,7 +321,7 @@ static void audioInputAnalysisAdapterTests() {
     CHECK("live adapter: the reported level stays the one the hardware gave",
           quiet.analysis.dbfs < -36.0 && quiet.analysis.dbfs > -42.0);
 
-    // A Xiaomi 23049PCD8G at −14 dBFS: already loud enough, so it must take
+    // Already loud enough (−9 dBFS rms) that no lift applies, so it must take
     // the untouched path and report exactly what it always did.
     singz::LiveInputAnalysisWindow loud;
     const float loudGain = runOne(0.5f, loud);
@@ -359,21 +359,31 @@ static void audioInputAnalysisAdapterTests() {
     CHECK("live adapter: the quiet phone's room stays unpitched",
           realmeRoom.analysis.frequency == 0.0);
 
-    // The floor needs pinning from ABOVE too, or it could be raised until it
-    // silences the soft singer this whole change exists for. −46 dBFS rms is
-    // soft singing on that phone — 11 dB over its measured room, and 7 dB
-    // under the voice its log actually recorded.
+    // The edge needs pinning from ABOVE too, or it could be raised until it
+    // silences the singer this whole change exists for. This is not a guessed
+    // level: −50.1 dBFS rms is the exact peak of the one logged session that
+    // came back dead, whose `lift up to 1.0x` showed the gate never opened.
+    // Raising kVoicingOpenRms back over that value fails here.
     singz::LiveInputAnalysisWindow softVoice;
-    runOne(0.0071f, softVoice);
-    CHECK("live adapter: a soft singer on a quiet phone is still heard",
+    runOne(0.0044f, softVoice);
+    CHECK("live adapter: the peak window of the dead session is heard",
           softVoice.analysis.frequency > 183.0 && softVoice.analysis.frequency < 192.0);
 
+    // The band this change opened up, pinned as the COST it is rather than left
+    // silent. A tonal room above the open edge is pitched, from a cold adapter,
+    // and never releases — release is keyed on the open edge, so it never
+    // counts. That is the accepted trade for hearing a −50 dBFS singer, and
+    // this check exists so that retuning either edge moves it loudly.
+    singz::LiveInputAnalysisWindow tonalRoom;
+    runOne(0.00328f, tonalRoom);  // −52.7 dBFS rms: the measured tonal room
+    CHECK("live adapter: a tonal room over the open edge IS pitched (known cost)",
+          tonalRoom.analysis.frequency > 183.0 && tonalRoom.analysis.frequency < 192.0);
+
     // Hysteresis: a room between the two edges must not open the gate — only a
-    // level reaching OPEN may. 0.0037 amplitude is −51.6 dBFS rms, a genuine
-    // midpoint (the earlier 0.0026 sat 0.2 dB off the close threshold and so
-    // would have passed for the wrong reason).
+    // level reaching OPEN may. A genuine midpoint, not a value sitting on an
+    // edge, or it would pass for the wrong reason.
     singz::LiveInputAnalysisWindow betweenEdges;
-    runOne(0.0037f, betweenEdges);
+    runOne(0.0021f, betweenEdges);  // −56.6 dBFS rms: over close, under open
     CHECK("live adapter: a room between the two edges never opens the gate",
           betweenEdges.analysis.frequency == 0.0);
 
@@ -384,7 +394,7 @@ static void audioInputAnalysisAdapterTests() {
     {
       std::vector<float> note, room;
       tone(0.0155f, note);   // −39 dBFS rms: a sung note, opens the gate
-      tone(0.0037f, room);   // −51.6 dBFS rms: between the edges
+      tone(0.0021f, room);   // −56.6 dBFS rms: between the edges
       singz::LiveInputAnalysisAdapter latch;
       singz::AudioInputBlockView block;
       block.sampleHostTimeNs = startNs;
@@ -416,9 +426,9 @@ static void audioInputAnalysisAdapterTests() {
           if (w.analysis.frequency > 0) ++roomPitched;
         });
       }
-      CHECK("live adapter: the room after a note is released, not latched open",
-            roomWindows >= 100 && roomPitched < 45);
       CHECK("live adapter: the release tail is short enough to never lock",
+            roomWindows >= 100 && roomPitched < 45);
+      CHECK("live adapter: a room between the edges is not cut off at once",
             roomPitched >= 1);
 
       // A level under the CLOSE edge shuts the gate at once rather than
@@ -433,7 +443,7 @@ static void audioInputAnalysisAdapterTests() {
         latch.push(block, [](const auto&) {});
       }
       std::vector<float> hush;
-      tone(0.0014f, hush);  // −60 dBFS rms: under close
+      tone(0.0008f, hush);  // −64.9 dBFS rms: under close
       int hushPitched = 0;
       for (int i = 0; i < 20; ++i) {
         block.sequence = sequence++;
@@ -447,13 +457,68 @@ static void audioInputAnalysisAdapterTests() {
             hushPitched <= 4);
     }
 
+    // The release timer exists so a held note that dips briefly rides through,
+    // and that direction was unpinned: kVoicingReleaseWindows = 1, and closing
+    // the band by raising close to the open edge, each chop the note into 3
+    // dropouts while passing every other check here.
+    {
+      // One continuous 187.5 Hz carrier whose amplitude swings smoothly at
+      // 5 Hz — a held note with vibrato. Alternating the level window-by-window
+      // instead would build a ~94 Hz square envelope, which is not a held note
+      // and which the detector declines to pitch for reasons of its own.
+      //
+      // The gate compares the 2048-frame WINDOW rms, and a 42.7 ms window
+      // against a 200 ms envelope smooths the trough considerably: the quantity
+      // that matters straddles the −55 dBFS open edge. The depth is chosen so
+      // THREE windows land between the edges rather than one — at a shallower
+      // swing a half-decibel retune of kVoicingOpenRms leaves no window dipping
+      // at all, and this check silently stops testing anything.
+      constexpr size_t kHeld = 2048 + 18 * 512;
+      std::vector<float> held_samples(kHeld);
+      for (size_t i = 0; i < kHeld; ++i) {
+        const double t = static_cast<double>(i) / 48000.0;
+        const double envelope = 0.0042 * (1.0 + 0.55 * std::sin(2.0 * 3.14159265358979 * 5.0 * t));
+        held_samples[i] = static_cast<float>(
+            envelope * std::sin(2.0 * 3.14159265358979 * 187.5 * t));
+      }
+      singz::LiveInputAnalysisAdapter held;
+      singz::AudioInputBlockView block;
+      block.sampleHostTimeNs = startNs;
+      block.callbackHostTimeNs = startNs;
+      block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+      block.sampleRate = rate;
+      uint64_t sequence = 0;
+      block.sequence = sequence++;
+      block.frames = 2048;
+      block.mono = held_samples.data();
+      held.push(block, [](const auto&) {});
+      size_t offset = 2048;
+      int windows = 0, dropouts = 0, latched = 0, dipped = 0;
+      for (int i = 0; i < 18; ++i, offset += 512) {
+        block.sequence = sequence++;
+        block.frames = 512;
+        block.mono = held_samples.data() + offset;
+        held.push(block, [&](const auto& w) {
+          // The first three windows are the latch arming (the 2048-frame push
+          // emits one of its own before this loop); judge the note after it.
+          if (++latched <= 2) return;
+          ++windows;
+          if (w.analysis.rms < singz::LiveInputAnalysisAdapter::kVoicingOpenRms) ++dipped;
+          if (w.analysis.frequency == 0.0) ++dropouts;
+        });
+      }
+      // `dipped` is the guard on the guard: without it a future retune of the
+      // open edge empties this check instead of failing it.
+      CHECK("live adapter: a held note dipping under the open edge never chops",
+            windows >= 14 && dipped >= 3 && dropouts == 0);
+    }
+
     // The onset latch's LENGTH was unpinned: every other fixture pushes a
     // steady level for many windows, so kVoicingOnsetWindows = 1 passed them
     // all while the header sells it as "a single loud sample cannot open".
     {
-      std::vector<float> note, quiet;
+      std::vector<float> note;
       tone(0.0155f, note);
-      tone(0.0f, quiet);
       // Every window here is FULLY loud: the first 2048-frame push fills the
       // buffer with tone, so each later 512-frame hop keeps it all tone. A
       // fixture that ramps in from silence instead makes early windows mostly
@@ -485,7 +550,6 @@ static void audioInputAnalysisAdapterTests() {
       }
       CHECK("live adapter: the gate opens on the third window, not the first",
             pitched == 1);
-      (void)quiet;
     }
 
     // A loud transient must not leave a plainly-present voice unheard while

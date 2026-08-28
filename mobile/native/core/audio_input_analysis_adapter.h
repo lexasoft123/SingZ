@@ -85,11 +85,40 @@ class LiveInputAnalysisAdapter {
   // room stays on the right side of — a fan starting, or the phone set down
   // on a table instead of held, walks straight across it.
   //
-  // The two edges come from the field log of the quietest phone we have seen
-  // (a realme RMX5051): its room peaked at −57.5 dBFS rms over three seconds
-  // of ambient, and its voice reached −39.2. Opening at −50 sits 7.5 dB above
-  // that room and 11 dB below that voice. Latching takes kVoicingOnsetWindows
-  // in a row, so a single loud sample cannot open the gate on its own.
+  // The edges are set from what that phone's SINGER actually produces, which
+  // took two field builds to learn and is much lower than the first sample
+  // suggested. Across eight logged sessions on a realme RMX5051, the peak
+  // window of a session where the singer was heard ran −43.0 to −48.4 dBFS
+  // rms; one session peaked at −50.1 and was silent, and its `lift up to 1.0x`
+  // proves why — the gate never opened, because the edge was at −49.9. An edge
+  // inside the range of a real voice is not a threshold, it is a coin toss,
+  // and that is precisely what "works but not stable" felt like from the phone.
+  //
+  // So opening moves to −55, under every voice observed. The earlier sample
+  // that put this phone's ambient at −57.5 dBFS was a PEAK over three seconds,
+  // and the margin above it is now ~2.5 dB rather than 7.5.
+  //
+  // State the cost plainly rather than pointing at guards that do not hold.
+  // Release is keyed on the OPEN edge, so lowering open lowers the band in
+  // which a room latches the gate open with it: a tonal room ABOVE −55 dBFS
+  // now opens the gate from cold and never releases, because rawRms never
+  // falls under close and releaseWindows_ resets every window. Measured on the
+  // 118 Hz room recorded above at −52.7 dBFS: 299 of 301 windows pitched at
+  // clarity 1.000, indefinitely. Neither of the downstream checks helps —
+  // clarity measures periodicity, which is exactly what a steady tone has (see
+  // the note above), and the tracker's 1.5 s hold is the thing such a tone
+  // defeats rather than the thing that stops it.
+  //
+  // That is accepted on the evidence available: being deaf to the singer is
+  // the failure that was actually reported, twice, from a real phone, and a
+  // tonal room loud enough to sit in this band has not been. It is a known
+  // gap, not a covered one. The fix when it is reported is an onset/stability
+  // test at the tracker — a note that was already sounding before the prompt
+  // began is not a sung answer — not a higher edge here, which is what put a
+  // threshold inside a singer's voice in the first place.
+  //
+  // Latching takes kVoicingOnsetWindows in a row, so a single loud sample
+  // cannot open the gate on its own.
   //
   // RELEASE is the half that actually protects a session, and getting it wrong
   // wasted a review round. Closing only below kVoicingCloseRms means the gate
@@ -102,8 +131,8 @@ class LiveInputAnalysisAdapter {
   // has been under kVoicingOpenRms for kVoicingReleaseWindows in a row, it
   // shuts. That leaves a ~270 ms tail, far under the tracker's 1.5 s hold,
   // and still lets a note that dips briefly ride through.
-  static constexpr double kVoicingOpenRms = 0.0032;   // −50 dBFS
-  static constexpr double kVoicingCloseRms = 0.0018;  // −55 dBFS
+  static constexpr double kVoicingOpenRms = 0.0018;   // −55 dBFS
+  static constexpr double kVoicingCloseRms = 0.0010;  // −60 dBFS
   static constexpr int kVoicingOnsetWindows = 3;      // ~32 ms at a 512 hop
   static constexpr int kVoicingReleaseWindows = 30;   // ~320 ms at a 512 hop
   // The detector keeps its own 0.01 rms gate, and it runs on the SCALED
