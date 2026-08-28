@@ -4,7 +4,7 @@
 # desktop's way into the core (spawned by main like whisper-cli) as the
 # cutover lands. Prints the binary's path on stdout and NOTHING ELSE — the
 # gates capture stdout as the path.
-#   scripts/build-analyze-host.sh [out-path]     default: $TMPDIR/singz-analyze
+#   scripts/build-analyze-host.sh [out-path]  default: $TMPDIR/singz-analyze-<checkout>
 #
 # A thin wrapper over mobile/native/core/CMakeLists.txt — the ONE definition
 # of the host build, shared with run-core-host-tests.sh, the vendor step and
@@ -15,8 +15,17 @@
 # script-built binary before the switch).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT="${1:-${TMPDIR:-/tmp}/singz-analyze}"
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build}"
+# Scratch paths are keyed on THIS CHECKOUT, not on $TMPDIR alone. Every
+# worktree on a machine shared one build dir and one output binary, which is
+# the same defect as the shared vendor/ slot: CMake catches its half loudly
+# ("does not match the source used to generate cache" — it blocked the gates
+# in a worktree the day this was written), and the shared OUTPUT binary
+# catches nothing at all, since two trees' gates would simply overwrite each
+# other's oracle.
+checkout_key() { printf '%s' "$1" | git hash-object --stdin | cut -c1-8; }
+KEY=$(checkout_key "$ROOT")
+OUT="${1:-${TMPDIR:-/tmp}/singz-analyze-$KEY}"
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build-$KEY}"
 
 # Compiler cache when the machine has one — same launchers, base_dir and
 # hash_dir story as vendor-whisper.sh (a sibling worktree hits only with

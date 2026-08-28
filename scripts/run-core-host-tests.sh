@@ -12,7 +12,16 @@
 # their full PASS listing stays in the canary's log, the way it always has.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build-tests}"
+# Scratch paths are keyed on THIS CHECKOUT, not on $TMPDIR alone. Every
+# worktree on a machine shared one build dir and one output binary, which is
+# the same defect as the shared vendor/ slot: CMake catches its half loudly
+# ("does not match the source used to generate cache" — it blocked the gates
+# in a worktree the day this was written), and the shared OUTPUT binary
+# catches nothing at all, since two trees' gates would simply overwrite each
+# other's oracle.
+checkout_key() { printf '%s' "$1" | git hash-object --stdin | cut -c1-8; }
+KEY=$(checkout_key "$ROOT")
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build-tests-$KEY}"
 
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
