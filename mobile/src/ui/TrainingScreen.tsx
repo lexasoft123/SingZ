@@ -111,6 +111,11 @@ const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 type TrainingStackParamList = { Home: undefined; Exercise: undefined; Progress: undefined }
 const TrainingStack = createNativeStackNavigator<TrainingStackParamList>()
+/** Polls (80 ms each) a fresh capture gets before the screen is allowed to
+ * report what it is hearing — about a second, which is long enough for both
+ * capture paths to have delivered blocks and short enough to still answer the
+ * singer standing there wondering. */
+const MIC_DIAGNOSIS_POLLS = 12
 
 export default function TrainingScreen({
   active,
@@ -138,6 +143,8 @@ export default function TrainingScreen({
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   const recorded = useRef(new Set<string>())
   const [liveMidi, setLiveMidi] = useState<number | null>(null)
+  const [micHearing, setMicHearing] = useState<MicHearing>('starting')
+  const micReports = useRef(true)
   const [activeTarget, setActiveTarget] = useState(0)
   const [singleNoteLock, setSingleNoteLock] = useState<SingleNoteLockState>(EMPTY_SINGLE_NOTE_LOCK)
   const [singleNoteCountdown, setSingleNoteCountdown] = useState<number | null>(null)
@@ -398,6 +405,7 @@ export default function TrainingScreen({
     setSingleNoteLock(EMPTY_SINGLE_NOTE_LOCK)
     setSingleNoteCountdown(null)
     setLiveMidi(null)
+    setMicHearing('starting')
     dispatch({ type: 'error', error: null })
     engine.pause()
     engine.cancelTrainingCues()
@@ -405,6 +413,9 @@ export default function TrainingScreen({
 
     if (prompt.taskMode !== 'identify') {
       const fake = __DEV__ && TEST?.trainingFakeMic === true
+      // The fake mic never opens capture, so it has no signal to report on.
+      // Without this the screen would tell a driver "No sound from the mic".
+      micReports.current = !fake
       if (!fake) {
         if (!activeRef.current) return
         const result = await mic.start(() => engine.trainingCurrentTime * 1000, (error) => {
@@ -494,8 +505,22 @@ export default function TrainingScreen({
 
   useEffect(() => {
     if (!active || state.phase !== 'respond' || state.session?.config.taskMode === 'identify') return
+    // Capture needs a moment to deliver its first blocks; diagnosing before
+    // then would flash "no sound from the mic" at every healthy start.
+    let polls = 0
     const timer = setInterval(() => {
       const reading = mic.live
+      const signal = mic.signal
+      polls++
+      setMicHearing(
+        polls < MIC_DIAGNOSIS_POLLS || !micReports.current
+          ? 'starting'
+          : signal.windows === 0
+            ? 'no-audio'
+            : signal.voiced === 0
+              ? 'too-quiet'
+              : 'hearing'
+      )
       const run = vocalRun.current
       if (!run) {
         setLiveMidi(reading.confidence >= SINGLE_NOTE_MIN_CONFIDENCE ? reading.midi : null)
@@ -619,7 +644,7 @@ export default function TrainingScreen({
             if (state.route === 'summary' && state.session) {
               return <TrainingSummary session={state.session} onHome={close} onBackToSong={backToSong} />
             }
-            return <TrainingSessionView state={state} liveMidi={liveMidi} singleNoteLock={singleNoteLock} singleNoteCountdown={singleNoteCountdown} pitchWindowCents={pitchWindowCents} activeTarget={activeTarget} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} onBackToSong={backToSong} />
+            return <TrainingSessionView state={state} liveMidi={liveMidi} micHearing={micHearing} singleNoteLock={singleNoteLock} singleNoteCountdown={singleNoteCountdown} pitchWindowCents={pitchWindowCents} activeTarget={activeTarget} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} onBackToSong={backToSong} />
           }}
         </TrainingStack.Screen>
         <TrainingStack.Screen
@@ -929,7 +954,7 @@ function CompactSetupRow({ label, value, expanded, onPress }: { label: string; v
   return <SettingsRow label={label} value={value} expanded={expanded} onPress={onPress} />
 }
 
-export function TrainingSessionView({ state, liveMidi, singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
+export function TrainingSessionView({ state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
   const session = state.session
   const attempt = mobileTrainingAttemptView(state)
   if (!session || !attempt) return <View />
@@ -949,6 +974,7 @@ export function TrainingSessionView({ state, liveMidi, singleNoteLock = EMPTY_SI
           prompt={prompt}
           result={result}
           liveMidi={liveMidi}
+          micHearing={micHearing}
           lock={singleNoteLock}
           countdown={singleNoteCountdown}
           pitchWindowCents={pitchWindowCents}
@@ -975,11 +1001,12 @@ export function TrainingSessionView({ state, liveMidi, singleNoteLock = EMPTY_SI
   )
 }
 
-function SingleNoteSessionBody({ phase, prompt, result, liveMidi, lock, countdown, pitchWindowCents, activeTarget, error, onBegin, onSkip }: {
+function SingleNoteSessionBody({ phase, prompt, result, liveMidi, micHearing, lock, countdown, pitchWindowCents, activeTarget, error, onBegin, onSkip }: {
   phase: ReturnType<typeof initialTrainingState>['phase']
   prompt: TrainingPrompt
   result: TrainingAttemptResult | null
   liveMidi: number | null
+  micHearing: MicHearing
   lock: SingleNoteLockState
   countdown: number | null
   pitchWindowCents: number
@@ -1015,7 +1042,7 @@ function SingleNoteSessionBody({ phase, prompt, result, liveMidi, lock, countdow
         {phase === 'cue' && (
           <Countdown value={countdown ?? 1} hint="Listen to the reference note" />
         )}
-        {phase === 'respond' && <SingleNotePitchMeter prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} lock={lock} pitchWindowCents={pitchWindowCents} />}
+        {phase === 'respond' && <SingleNotePitchMeter prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} />}
         {phase === 'feedback' && result && (
           <View style={styles.singleAction}>
             <Text accessibilityLiveRegion="assertive" style={styles.feedback}>{trainingFeedback(result)}</Text>
@@ -1094,12 +1121,31 @@ function SingleNoteTransport({ phase, onBegin, onSkip }: {
   />
 }
 
-function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, lock, pitchWindowCents }: { prompt: TrainingPrompt; activeTarget: number; liveMidi: number | null; lock: SingleNoteLockState; pitchWindowCents: number }): React.JSX.Element {
+/** What the microphone is doing, in the only three states a singer can act
+ * on differently. "Waiting for your voice" used to cover all of them, so a
+ * phone delivering silence and a phone hearing a singer it cannot pitch drew
+ * the same screen — which is how a broken microphone looks exactly like one
+ * that is merely patient. */
+export type MicHearing = 'starting' | 'no-audio' | 'too-quiet' | 'hearing'
+
+const SILENT_COPY = {
+  // Permission refusal has its own error path, so reaching here means capture
+  // started and then delivered nothing — measured on an Android phone whose
+  // AAudio stream reported STARTED and never called back. Restarting capture
+  // is what clears it, and Replay is the button that does exactly that.
+  'no-audio': { reading: 'No sound from the mic', instruction: 'Tap Replay to restart the microphone' },
+  'too-quiet': { reading: 'Too quiet to hear', instruction: 'Sing a little louder, or move closer' },
+  starting: { reading: 'Waiting for your voice', instruction: 'Sing the note' },
+  hearing: { reading: 'Waiting for your voice', instruction: 'Sing the note' }
+} as const
+
+function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock, pitchWindowCents }: { prompt: TrainingPrompt; activeTarget: number; liveMidi: number | null; micHearing: MicHearing; lock: SingleNoteLockState; pitchWindowCents: number }): React.JSX.Element {
   const target = prompt.targets[Math.min(activeTarget, prompt.targets.length - 1)]
   const cents = liveMidi === null ? null : lock.medianCents ?? (liveMidi - target.midi) * 100
   const detected = liveMidi === null ? null : midiNoteName(Math.round(liveMidi), prompt.key)
+  const silent = SILENT_COPY[micHearing]
   const centsReading = cents === null
-    ? 'Waiting for your voice'
+    ? silent.reading
     : Math.abs(cents) < 1
       ? 'Centered'
       : `${Math.round(Math.abs(cents))}¢ ${cents < 0 ? 'flat' : 'sharp'}`
@@ -1108,14 +1154,14 @@ function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, lock, pitchWindo
     : lock.status === 'holding'
       ? 'Hold it…'
       : cents === null
-        ? 'Sing the note'
+        ? silent.instruction
         : cents < -pitchWindowCents
           ? 'A little higher'
           : cents > pitchWindowCents
             ? 'A little lower'
             : 'Steady the note'
   const reading = detected === null
-    ? `${instruction}. Waiting for a detected note.`
+    ? `${instruction}. ${silent.reading}.`
     : `You are singing ${detected}. ${centsReading}. Hold progress ${Math.round(lock.progress * 100)} percent.`
   return <PitchMeter
     cents={cents}

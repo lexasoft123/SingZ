@@ -54,10 +54,18 @@ class AudioInputPolicyTest {
   }
 
   @Test
-  fun `app fallback prefers external inputs without claiming an OS default`() {
+  fun `app fallback prefers wired inputs without claiming an OS default`() {
     assertTrue(AudioInputPolicy.inputPreference(11) > AudioInputPolicy.inputPreference(3))
-    assertTrue(AudioInputPolicy.inputPreference(3) > AudioInputPolicy.inputPreference(7))
-    assertTrue(AudioInputPolicy.inputPreference(7) > AudioInputPolicy.inputPreference(15))
+    assertTrue(AudioInputPolicy.inputPreference(3) > AudioInputPolicy.inputPreference(15))
+  }
+
+  @Test
+  fun `bluetooth never outranks the built-in microphone`() {
+    // The module establishes no SCO/communication route, so a Bluetooth
+    // capture endpoint carries nothing. Connected earbuds must not take the
+    // capture away from the microphone that is always live.
+    for (bluetooth in intArrayOf(7, 8, 23, 26, 27, 30))
+      assertTrue(AudioInputPolicy.inputPreference(15) > AudioInputPolicy.inputPreference(bluetooth))
   }
 
   @Test

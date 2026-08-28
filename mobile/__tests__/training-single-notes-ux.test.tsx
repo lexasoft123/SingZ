@@ -3,7 +3,7 @@ import ReactTestRenderer from 'react-test-renderer'
 import { StyleSheet, View } from 'react-native'
 import { defaultTrainingPreferences } from '../src/gen/training-lib'
 import { initialTrainingState, mobileTrainingReducer } from '../src/training/state'
-import { SingleNoteSetup, TrainingSessionView, TrainingSetup, trainingSwipeDirection } from '../src/ui/TrainingScreen'
+import { SingleNoteSetup, TrainingSessionView, TrainingSetup, trainingSwipeDirection, type MicHearing } from '../src/ui/TrainingScreen'
 
 function nodeText(node: ReactTestRenderer.ReactTestInstance): string {
   return node.children.map((child) => typeof child === 'string' ? child : nodeText(child)).join('')
@@ -218,4 +218,37 @@ test('single-note swipe deck maps deliberate horizontal gestures to player actio
   expect(replay).toHaveBeenCalledTimes(1)
   await ReactTestRenderer.act(() => tree.root.findByProps({ accessibilityLabel: 'Skip' }).props.onPress())
   expect(skip).toHaveBeenCalledTimes(1)
+})
+
+test('the meter names which way the microphone is failing instead of waiting forever', async () => {
+  let state = initialTrainingState(defaultTrainingPreferences())
+  state = mobileTrainingReducer(state, { type: 'change-setup', patch: { exercise: 'note', taskMode: 'imitate', length: 2 } })
+  state = mobileTrainingReducer(state, { type: 'start', seed: 'quiet-room' })
+  state = mobileTrainingReducer(state, { type: 'activate' })
+  state = mobileTrainingReducer(state, { type: 'cue-complete' })
+  const listening = async (micHearing: MicHearing): Promise<string> => {
+    let tree!: ReactTestRenderer.ReactTestRenderer
+    await ReactTestRenderer.act(() => {
+      tree = ReactTestRenderer.create(
+        <TrainingSessionView state={state} liveMidi={null} micHearing={micHearing} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+      )
+    })
+    return nodeText(tree.root)
+  }
+
+  // A capture that has simply not delivered its first block yet, and one that
+  // is delivering a healthy signal, both stay patient.
+  expect(await listening('starting')).toContain('Waiting for your voice')
+  expect(await listening('hearing')).toContain('Waiting for your voice')
+
+  // The two that a singer can act on must say so instead.
+  const noAudio = await listening('no-audio')
+  expect(noAudio).toContain('No sound from the mic')
+  expect(noAudio).toContain('Tap Replay to restart the microphone')
+  expect(noAudio).not.toContain('Waiting for your voice')
+
+  const tooQuiet = await listening('too-quiet')
+  expect(tooQuiet).toContain('Too quiet to hear')
+  expect(tooQuiet).toContain('Sing a little louder')
+  expect(tooQuiet).not.toContain('Waiting for your voice')
 })

@@ -68,6 +68,17 @@ export interface AndroidAudioInputNative {
     timestampSource?: string
   }>
   stop(owner: string, generation: number): Promise<boolean>
+  /** Optional: diagnostics only, and absent on a native module older than it. */
+  stats?(): Promise<AndroidAudioInputStats | null>
+}
+
+/** Counters from the core's own transport, so "the microphone delivered
+ * nothing" can be told apart from "the hardware callback never fired". */
+export interface AndroidAudioInputStats {
+  deliveredBlocks: number
+  deliveredFrames: number
+  overruns: number
+  wakeups: number
 }
 
 export interface AndroidMicrophonePermission {
@@ -260,6 +271,12 @@ export const listAndroidAudioInputs = (): Promise<AndroidAudioInputDevice[]> =>
 export const acquireAndroidAudioInputSession = (
   options?: AcquireAndroidAudioInputOptions
 ): Promise<AndroidAudioInputLease> => coordinator().acquire(options)
+
+export const androidAudioInputStats = async (): Promise<AndroidAudioInputStats | null> => {
+  const native = NativeModules.AudioInput as AndroidAudioInputNative | undefined
+  if (!native?.stats) return null
+  return native.stats().catch(() => null)
+}
 
 export const subscribeAndroidAudioInputFrames = (
   callback: (frame: AndroidAudioInputFrame) => void

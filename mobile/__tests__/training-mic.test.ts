@@ -1,5 +1,24 @@
 import type { AudioBuffer, AudioRecorder } from 'react-native-audio-api'
-import { TrainingMicrophone, type TrainingMicDependencies } from '../src/training/mic'
+import { describeTrainingMicSignal, TrainingMicrophone, type TrainingMicDependencies } from '../src/training/mic'
+import { log } from '../src/log'
+
+// The real log module persists through the Prefs native stub, which leaves a
+// worker alive after the suite. These tests care about what was WRITTEN, not
+// where it went, so the module is mocked outright.
+jest.mock('../src/log', () => ({ log: jest.fn() }))
+
+function micLines(): { lines: string[]; stop: () => void } {
+  const mocked = log as jest.MockedFunction<typeof log>
+  mocked.mockClear()
+  return {
+    get lines(): string[] {
+      return mocked.mock.calls
+        .filter(([source]) => source === 'mic')
+        .map(([, line, level]) => `${level ?? 'info'}: ${line}`)
+    },
+    stop: () => mocked.mockClear()
+  }
+}
 
 class FakeRecorder {
   callback: ((event: { buffer: AudioBuffer; numFrames: number; when: number }) => void) | null = null
@@ -114,6 +133,109 @@ describe('TrainingMicrophone', () => {
     expect(released).toHaveBeenCalledTimes(520)
     await mic.stop()
     expect(d.sessions).toEqual([true, false])
+  })
+
+  test('separates a silent microphone from one too quiet to pitch', async () => {
+    const d = deps()
+    const mic = new TrainingMicrophone(d.value)
+    expect(await mic.start(() => 1_000, jest.fn())).toEqual({ ok: true })
+    // Nothing delivered yet: the screen must not claim to have heard silence.
+    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null })
+    expect(describeTrainingMicSignal(mic.signal)).toBe('no audio arrived from the microphone')
+
+    const tone = (amplitude: number): AudioBuffer => {
+      const samples = new Float32Array(1_024)
+      for (let i = 0; i < samples.length; i++)
+        samples[i] = Math.sin((2 * Math.PI * 220 * i) / 16_000) * amplitude
+      return { getChannelData: () => samples, buffer: { release: () => undefined } } as unknown as AudioBuffer
+    }
+
+    // A real voice, three decibels under the detector's 0.01 RMS gate: the
+    // old screen and this one both draw no note, but only one of them can say
+    // that something was audible.
+    d.recorder.callback?.({ buffer: tone(0.01), numFrames: 1_024, when: 2 })
+    expect(mic.signal.windows).toBe(1)
+    expect(mic.signal.voiced).toBe(0)
+    expect(mic.signal.peakDbfs).toBeLessThan(-40)
+    expect(mic.signal.peakDbfs).toBeGreaterThan(-60)
+    expect(mic.snapshot()[0].midi).toBeNull()
+
+    d.recorder.callback?.({ buffer: tone(0.5), numFrames: 1_024, when: 2.064 })
+    expect(mic.signal.voiced).toBe(1)
+    expect(mic.signal.peakDbfs).toBeGreaterThan(-12)
+    expect(describeTrainingMicSignal(mic.signal)).toMatch(/^2 blocks · peak -\d/)
+
+    // resetObservations runs while the capture is still LIVE — the screen
+    // calls it on Replay and on every next prompt — so it must not take the
+    // running capture's evidence with it, or the end-of-capture line reports a
+    // healthy capture as one that heard nothing.
+    mic.resetObservations()
+    expect(mic.signal.windows).toBe(2)
+    expect(mic.signal.voiced).toBe(1)
+    expect(describeTrainingMicSignal(mic.signal)).toMatch(/^2 blocks · peak -\d/)
+
+    // A fresh listen does start from nothing.
+    await mic.stop()
+    expect(await mic.start(() => 0, jest.fn())).toEqual({ ok: true })
+    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null })
+    await mic.stop()
+  })
+
+  test('a capture that delivers nothing writes itself down', async () => {
+    // The fault this build exists to catch: capture opens, reports running,
+    // and never calls back. Every other report here is driven by a block
+    // ARRIVING, so without a timer the whole session leaves no line at all —
+    // which is exactly what a field log showed.
+    jest.useFakeTimers()
+    const captured = micLines()
+    try {
+      const d = deps()
+      const mic = new TrainingMicrophone(d.value)
+      expect(await mic.start(() => 0, jest.fn())).toEqual({ ok: true })
+      expect(captured.lines.some((line) => /^info: listening ·/.test(line))).toBe(true)
+
+      jest.advanceTimersByTime(1_000)
+      expect(captured.lines.some((line) => /no audio after/.test(line))).toBe(false)
+
+      jest.advanceTimersByTime(3_000)
+      const reported = captured.lines.filter((line) => /^warn: no audio after/.test(line))
+      expect(reported).toHaveLength(1)
+      expect(reported[0]).toMatch(/capture is open and delivering nothing/)
+
+      // Once said, it is not repeated every tick for the rest of the session.
+      jest.advanceTimersByTime(10_000)
+      expect(captured.lines.filter((line) => /^warn: no audio after/.test(line))).toHaveLength(1)
+      await mic.stop()
+    } finally {
+      captured.stop()
+      jest.useRealTimers()
+    }
+  })
+
+  test('a healthy capture times its first audio and leaves no alarm', async () => {
+    jest.useFakeTimers()
+    const captured = micLines()
+    try {
+      const d = deps()
+      const mic = new TrainingMicrophone(d.value)
+      expect(await mic.start(() => 0, jest.fn())).toEqual({ ok: true })
+      jest.advanceTimersByTime(120)
+      const samples = new Float32Array(1_024)
+      for (let i = 0; i < samples.length; i++)
+        samples[i] = Math.sin((2 * Math.PI * 220 * i) / 16_000) * 0.4
+      const buffer = { getChannelData: () => samples, buffer: { release: () => undefined } } as unknown as AudioBuffer
+      d.recorder.callback?.({ buffer, numFrames: 1_024, when: 0 })
+
+      expect(captured.lines.some((line) => /^info: first audio after 120 ms · -\d/.test(line))).toBe(true)
+      jest.advanceTimersByTime(4_000)
+      expect(captured.lines.some((line) => /no audio after/.test(line))).toBe(false)
+      // Blocks stopped arriving, and that is a different fault worth naming.
+      expect(captured.lines.some((line) => /^warn: audio stopped arriving/.test(line))).toBe(true)
+      await mic.stop()
+    } finally {
+      captured.stop()
+      jest.useRealTimers()
+    }
   })
 
   test('uses Android core evidence without creating a JS PCM recorder', async () => {
@@ -331,6 +453,9 @@ describe('TrainingMicrophone', () => {
     d.recorder.callback?.({ buffer, numFrames: 1_024, when: 2 })
     expect(mic.snapshot()[0].timestampMs).toBe(7_032)
     expect(released).toHaveBeenCalledTimes(1)
+    // A started capture owns a recorder and a watchdog timer; leaving one
+    // running outlives the test and holds the jest worker open.
+    await mic.stop()
   })
 
   test('serializes a slow old stop before a new recording session', async () => {
