@@ -42,7 +42,8 @@ add_library(zcore_device_callback STATIC
   src/audio/audio_input_transport_callback.cpp
   src/device/audio_input_callback.cpp
   src/device/audio_input_callback_gate.cpp
-  src/device/audio_host_callback.cpp)
+  src/device/audio_host_callback.cpp
+  src/device/audio_host_fifo_hot.cpp)
 add_library(SingZ::zcore_device_callback ALIAS zcore_device_callback)
 singz_zcore_target(zcore_device_callback)
 target_link_libraries(zcore_device_callback PUBLIC SingZ::zcore_base)
@@ -99,6 +100,7 @@ set(ZCORE_DEVICE_SOURCES
   src/device/audio_input.cpp
   src/device/audio_input_wake.cpp
   src/device/audio_host.cpp
+  src/device/audio_host_fifo.cpp
   src/device/audio_host_unsupported.cpp
   platform/android/audio_input_android_policy.cpp)
 if(ANDROID)
@@ -125,6 +127,8 @@ elseif(APPLE)
 elseif(WIN32)
   list(APPEND ZCORE_DEVICE_SOURCES
     platform/windows/audio_host_windows.cpp
+    platform/windows/audio_host_windows_helpers.cpp
+    platform/windows/audio_input_windows_helpers.cpp
     platform/ios/audio_input_ios_session.cpp
     platform/windows/audio_input_windows.cpp
     platform/windows/audio_input_wake_windows.cpp)

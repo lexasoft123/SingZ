@@ -15,6 +15,7 @@
 
 #include "tools/native/audio_host_cli.h"
 #include "tools/native/json_string.h"
+#include "zcore/src/device/audio_host_fifo.h"
 #include "zcore/platform/macos/audio_host_macos_helpers.h"
 
 #define CHECK(expression)                                                      \
@@ -120,10 +121,14 @@ void testFakeLifecycle() {
   CHECK(inventory.devices[0].inputChannels == 8);
   CHECK(inventory.devices[0].sampleRateRanges.size() == 3);
   CHECK(inventory.devices[0].sampleRateRanges[1].minimumHz == 48000.0);
+  CHECK(inventory.devices[0].bufferFrames.fundamentalFrames == 1);
+  CHECK(inventory.devices[0].direction ==
+        singz::AudioHostEndpointDirection::Duplex);
   CHECK(host.status().state == singz::AudioHostState::Closed);
   Observation observation;
   const auto opened = host.open(config(), observe, &observation);
   CHECK(opened.ok);
+  CHECK(opened.format.accessMode == singz::AudioHostAccessMode::Shared);
   CHECK(opened.latency.inputDeviceFrames == 128);
   CHECK(opened.latency.outputDeviceFrames == 128);
   CHECK(opened.latency.bufferFrames == 128);
@@ -155,6 +160,29 @@ void testFakeLifecycle() {
   CHECK(host.open(config(), observe, &observation).ok);
   CHECK(host.status().routeGeneration == route + 1);
   CHECK(host.status().streamGeneration == stream + 1);
+}
+
+void testExclusiveProviderContract() {
+  singz::AudioHost fake(singz::createFakeAudioHostBackend({1, false, 0, 0}));
+  auto exclusive = config();
+  exclusive.exclusive = true;
+  Observation observation;
+  const auto emulated = fake.open(exclusive, observe, &observation);
+  CHECK(emulated.ok);
+  CHECK(emulated.format.accessMode == singz::AudioHostAccessMode::Exclusive);
+  CHECK(fake.status().format.accessMode ==
+        singz::AudioHostAccessMode::Exclusive);
+  fake.stop();
+#if defined(__APPLE__)
+  singz::AudioHost platform;
+  exclusive.inputDeviceUid = "singz:test-exclusive";
+  exclusive.outputDeviceUid = exclusive.inputDeviceUid;
+  const auto rejected = platform.open(exclusive, observe, &observation);
+  CHECK(!rejected.ok);
+  CHECK(rejected.error == singz::AudioHostError::Unsupported);
+  CHECK(rejected.state == singz::AudioHostState::Unsupported);
+  CHECK(platform.status().state == rejected.state);
+#endif
 }
 
 void testMoveAssignmentStopsDestination() {
@@ -220,6 +248,24 @@ void testBoundaryHelpers() {
   terminal.renderFailures = 1;
   CHECK(singz::tools::audioHostRunExitCode(terminal) != 0);
   terminal.renderFailures = 0;
+  terminal.xruns = 1;
+  CHECK(singz::tools::audioHostRunExitCode(terminal) != 0);
+  terminal.xruns = 0;
+  terminal.deadlineMisses = 1;
+  CHECK(singz::tools::audioHostRunExitCode(terminal) != 0);
+  terminal.deadlineMisses = 0;
+  terminal.invalidCallbacks = 1;
+  CHECK(singz::tools::audioHostRunExitCode(terminal) != 0);
+  terminal.invalidCallbacks = 0;
+  terminal.diagnostics.fifoUnderflows = 1;
+  CHECK(singz::tools::audioHostRunExitCode(terminal) != 0);
+  terminal.diagnostics.fifoUnderflows = 0;
+  terminal.diagnostics.fifoOverflows = 1;
+  CHECK(singz::tools::audioHostRunExitCode(terminal) != 0);
+  terminal.diagnostics.fifoOverflows = 0;
+  terminal.diagnostics.startupInputZeroFrames = 1;
+  CHECK(singz::tools::audioHostRunExitCode(terminal) != 0);
+  terminal.diagnostics.startupInputZeroFrames = 0;
   const singz::AudioHostState failures[] = {
       singz::AudioHostState::Closed,     singz::AudioHostState::Open,
       singz::AudioHostState::Running,    singz::AudioHostState::DeviceLost,
@@ -247,6 +293,20 @@ void testBoundaryHelpers() {
       "999999999999999999999999999999999999", 0, &parsed));
   CHECK(!singz::tools::parseAudioHostUint32("", 0, &parsed));
   CHECK(!singz::tools::parseAudioHostUint32("1", 0, nullptr));
+  std::vector<uint32_t> parsedChannels;
+  CHECK(singz::tools::parseAudioHostChannelList("0,3,4294967295",
+                                                &parsedChannels));
+  CHECK(parsedChannels ==
+        std::vector<uint32_t>({0, 3, std::numeric_limits<uint32_t>::max()}));
+  CHECK(!singz::tools::parseAudioHostChannelList(" 0", &parsedChannels));
+  CHECK(!singz::tools::parseAudioHostChannelList("0, 1", &parsedChannels));
+  CHECK(!singz::tools::parseAudioHostChannelList("-1", &parsedChannels));
+  CHECK(!singz::tools::parseAudioHostChannelList("4294967296",
+                                                 &parsedChannels));
+  CHECK(!singz::tools::parseAudioHostChannelList("0,", &parsedChannels));
+  CHECK(!singz::tools::parseAudioHostChannelList(",0", &parsedChannels));
+  CHECK(!singz::tools::parseAudioHostChannelList("", &parsedChannels));
+  CHECK(!singz::tools::parseAudioHostChannelList("0", nullptr));
 
   CHECK(singz::detail::saturatedAudioHostLatency(100, 28) == 128);
   CHECK(singz::detail::saturatedAudioHostLatency(
@@ -262,13 +322,19 @@ void testRejectedConfig() {
   Observation observation;
   auto invalid = config();
   invalid.inputChannels = {8};
-  CHECK(!host.open(invalid, observe, &observation).ok);
+  auto rejected = host.open(invalid, observe, &observation);
+  CHECK(!rejected.ok);
+  CHECK(host.status().state == rejected.state);
   invalid = config();
   invalid.inputDeviceUid = "another";
-  CHECK(!host.open(invalid, observe, &observation).ok);
+  rejected = host.open(invalid, observe, &observation);
+  CHECK(!rejected.ok);
+  CHECK(host.status().state == rejected.state);
   invalid = config();
   invalid.maximumFrames = 64;
-  CHECK(!host.open(invalid, observe, &observation).ok);
+  rejected = host.open(invalid, observe, &observation);
+  CHECK(!rejected.ok);
+  CHECK(host.status().state == rejected.state);
 }
 
 void testQuiescentStop() {
@@ -334,14 +400,173 @@ void testCallbackContainmentAndPolicy() {
   CHECK(endpoint.xruns.load() == std::numeric_limits<uint32_t>::max());
 }
 
+void testPreparedCaptureFifo() {
+  singz::detail::AudioHostPlanarFifo fifo;
+  CHECK(!fifo.prepare(0, 8));
+  CHECK(fifo.prepare(2, 8));
+  const uint32_t map[] = {2, 0};
+  const float interleaved[] = {
+      10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52};
+  singz::detail::AudioHostCaptureSpan span;
+  span.sourceFrame = 100;
+  span.sampleHostTimeNs = 1000000;
+  span.timestampValid = true;
+  span.timestampHardware = true;
+  span.discontinuity = singz::AudioHostDiscontinuityStart;
+  allocations.store(0);
+  trackAllocations.store(true);
+  CHECK(fifo.writeInterleavedFloat(interleaved, 3, map, 5, span, false));
+  float first0[3]{}, first1[3]{};
+  float* first[] = {first0, first1};
+  auto read = fifo.read(first, 3, 48000.0);
+  trackAllocations.store(false);
+  CHECK(allocations.load() == 0);
+  CHECK(read.framesRead == 3);
+  CHECK(read.sourceFrame == 100);
+  CHECK(read.sampleHostTimeNs == 1000000);
+  CHECK(read.timestampHardware);
+  CHECK(read.discontinuity == singz::AudioHostDiscontinuityStart);
+  CHECK(first0[0] == 12 && first0[1] == 22 && first0[2] == 32);
+  CHECK(first1[0] == 10 && first1[1] == 20 && first1[2] == 30);
+
+  float second0[4]{9, 9, 9, 9}, second1[4]{9, 9, 9, 9};
+  float* second[] = {second0, second1};
+  read = fifo.read(second, 4, 48000.0);
+  CHECK(read.framesRead == 2);
+  CHECK(read.sourceFrame == 103);
+  CHECK(read.sampleHostTimeNs == 1062500);
+  CHECK((read.discontinuity & singz::AudioHostDiscontinuityXRun) != 0);
+  CHECK(second0[0] == 42 && second0[1] == 52 && second0[2] == 0);
+  CHECK(second1[0] == 40 && second1[1] == 50 && second1[3] == 0);
+  CHECK(fifo.underflows() == 1);
+  CHECK(fifo.currentFrames() == 0);
+  CHECK(fifo.maximumFrames() == 5);
+
+  float priming0[2]{9, 9}, priming1[2]{9, 9};
+  float* priming[] = {priming0, priming1};
+  read = fifo.read(priming, 2, 48000.0, false);
+  CHECK(read.framesRead == 0);
+  CHECK(read.discontinuity == singz::AudioHostDiscontinuityNone);
+  CHECK(fifo.underflows() == 1);
+  CHECK(priming0[0] == 0 && priming0[1] == 0);
+  CHECK(priming1[0] == 0 && priming1[1] == 0);
+
+  CHECK(fifo.writeInterleavedFloat(interleaved, 3, map, 5, span, true));
+  CHECK(!fifo.writeInterleavedFloat(interleaved, 3, map, 5, span, false));
+  CHECK(fifo.overflows() == 1);
+  float silent0[5]{1, 1, 1, 1, 1}, silent1[5]{1, 1, 1, 1, 1};
+  float* silent[] = {silent0, silent1};
+  read = fifo.read(silent, 5, 48000.0);
+  CHECK(read.framesRead == 5);
+  for (float sample : silent0) CHECK(sample == 0);
+  for (float sample : silent1) CHECK(sample == 0);
+  CHECK(fifo.writeInterleavedFloat(interleaved, 3, map, 1, span, false));
+  float final0[1]{}, final1[1]{};
+  float* final[] = {final0, final1};
+  read = fifo.read(final, 1, 48000.0);
+  CHECK((read.discontinuity & singz::AudioHostDiscontinuityXRun) != 0);
+
+  fifo.reset();
+  CHECK(fifo.writeInterleavedFloat(interleaved, 3, map, 5, span, false));
+  float split0[2]{}, split1[2]{};
+  float* split[] = {split0, split1};
+  read = fifo.read(split, 2, 48000.0);
+  CHECK(read.framesRead == 2);
+  CHECK(read.discontinuity == singz::AudioHostDiscontinuityStart);
+  read = fifo.read(split, 2, 48000.0);
+  CHECK(read.framesRead == 2);
+  CHECK(read.discontinuity == singz::AudioHostDiscontinuityNone);
+
+  singz::detail::AudioHostPlanarFifo rollover;
+  CHECK(rollover.prepare(1, 7));
+  CHECK(rollover.capacityFrames() == 8);
+  rollover.seedEmptyCursorsForTest(UINT32_MAX - 2, UINT32_MAX);
+  const uint32_t monoMap[] = {0};
+  const float mono[] = {1, 2, 3, 4, 5};
+  singz::detail::AudioHostCaptureSpan rolloverSpan;
+  rolloverSpan.sourceFrame = 900;
+  CHECK(rollover.writeInterleavedFloat(mono, 1, monoMap, 5,
+                                       rolloverSpan, false));
+  CHECK(rollover.currentFrames() == 5);
+  float rolloverFirst[3]{}, rolloverSecond[3]{};
+  float* rolloverFirstOut[] = {rolloverFirst};
+  float* rolloverSecondOut[] = {rolloverSecond};
+  read = rollover.read(rolloverFirstOut, 3, 48000.0, false);
+  CHECK(read.framesRead == 3);
+  CHECK(read.sourceFrame == 900);
+  CHECK(rolloverFirst[0] == 1 && rolloverFirst[2] == 3);
+  read = rollover.read(rolloverSecondOut, 3, 48000.0, false);
+  CHECK(read.framesRead == 2);
+  CHECK(read.sourceFrame == 903);
+  CHECK(rolloverSecond[0] == 4 && rolloverSecond[1] == 5 &&
+        rolloverSecond[2] == 0);
+  CHECK(rollover.currentFrames() == 0);
+}
+
+void testCaptureFifoSpscStress() {
+  singz::detail::AudioHostPlanarFifo fifo;
+  CHECK(fifo.prepare(1, 1024));
+  constexpr uint32_t packetFrames = 16;
+  constexpr uint32_t packets = 2000;
+  const uint32_t map[] = {0};
+  std::atomic<bool> producerDone{false};
+  std::atomic<bool> samplesValid{true};
+  std::atomic<bool> snapshotValid{true};
+  std::thread producer([&] {
+    float packet[packetFrames];
+    for (uint32_t index = 0; index < packets; ++index) {
+      for (float& sample : packet) sample = static_cast<float>(index);
+      singz::detail::AudioHostCaptureSpan span;
+      span.sourceFrame = static_cast<uint64_t>(index) * packetFrames;
+      while (!fifo.writeInterleavedFloat(packet, 1, map, packetFrames, span,
+                                         false)) {
+        if (fifo.currentFrames() > fifo.capacityFrames())
+          snapshotValid.store(false, std::memory_order_relaxed);
+        std::this_thread::yield();
+      }
+      if (fifo.currentFrames() > fifo.capacityFrames())
+        snapshotValid.store(false, std::memory_order_relaxed);
+    }
+    producerDone.store(true, std::memory_order_release);
+  });
+  std::thread consumer([&] {
+    uint32_t consumedPackets = 0;
+    while (consumedPackets < packets) {
+      float packet[packetFrames]{};
+      float* output[] = {packet};
+      const auto read = fifo.read(output, packetFrames, 48000.0, false);
+      if (fifo.currentFrames() > fifo.capacityFrames())
+        snapshotValid.store(false, std::memory_order_relaxed);
+      if (read.framesRead != packetFrames) {
+        std::this_thread::yield();
+        continue;
+      }
+      for (float sample : packet) {
+        if (sample != static_cast<float>(consumedPackets))
+          samplesValid.store(false, std::memory_order_relaxed);
+      }
+      ++consumedPackets;
+    }
+  });
+  producer.join();
+  consumer.join();
+  CHECK(producerDone.load(std::memory_order_acquire));
+  CHECK(samplesValid.load(std::memory_order_relaxed));
+  CHECK(snapshotValid.load(std::memory_order_relaxed));
+  CHECK(fifo.currentFrames() == 0);
+}
+
 }  // namespace
 
 int main() {
   testFakeLifecycle();
+  testExclusiveProviderContract();
   testRejectedConfig();
   testQuiescentStop();
   testCallbackContainmentAndPolicy();
   testMoveAssignmentStopsDestination();
   testBoundaryHelpers();
+  testPreparedCaptureFifo();
+  testCaptureFifoSpscStress();
   return 0;
 }

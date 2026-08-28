@@ -47,7 +47,7 @@ class FakeAudioHostBackend final : public AudioHostBackend {
     device.nominalSampleRate = 48000.0;
     device.sampleRateRanges = {{44100.0, 44100.0}, {48000.0, 48000.0},
                                {96000.0, 96000.0}};
-    device.bufferFrames = {1, 1024, 128};
+    device.bufferFrames = {1, 1024, 128, 1};
     return {{std::move(device)}, kFakeUid, kFakeUid};
   }
 
@@ -58,8 +58,8 @@ class FakeAudioHostBackend final : public AudioHostBackend {
                      "Stop the fake host before opening it again");
     }
     if (config.inputDeviceUid != kFakeUid || config.outputDeviceUid != kFakeUid) {
-      return failure(AudioHostError::DeviceNotFound, AudioHostState::Error,
-                     "The fake duplex device UID is singz:fake-duplex");
+      return reject(AudioHostError::DeviceNotFound, AudioHostState::Error,
+                    "The fake duplex device UID is singz:fake-duplex");
     }
     const double rate = config.requestedSampleRate == 0.0
                             ? 48000.0
@@ -72,13 +72,15 @@ class FakeAudioHostBackend final : public AudioHostBackend {
         config.maximumFrames > kAudioHostMaxFrames ||
         !uniqueChannels(config.inputChannels, 8) ||
         !uniqueChannels(config.outputChannels, 8) || render == nullptr) {
-      return failure(AudioHostError::InvalidConfiguration, AudioHostState::Error,
-                     "Unsupported fake host rate, buffer, channel map, or render thunk");
+      return reject(AudioHostError::InvalidConfiguration, AudioHostState::Error,
+                    "Unsupported fake host rate, buffer, channel map, or render thunk");
     }
     stop();
     format_ = {rate, config.maximumFrames, frames,
                static_cast<uint32_t>(config.inputChannels.size()),
-               static_cast<uint32_t>(config.outputChannels.size()), true, true};
+               static_cast<uint32_t>(config.outputChannels.size()), true, true,
+               config.exclusive ? AudioHostAccessMode::Exclusive
+                                : AudioHostAccessMode::Shared};
     latency_ = {frames, frames, frames, 0};
     inputSamples_.assign(static_cast<size_t>(format_.inputChannels) *
                              format_.maximumFrames,
@@ -149,6 +151,12 @@ class FakeAudioHostBackend final : public AudioHostBackend {
   }
 
  private:
+  AudioHostResult reject(AudioHostError error, AudioHostState state,
+                         const char* message) noexcept {
+    state_.store(state, std::memory_order_release);
+    return failure(error, state, message);
+  }
+
   void resetCounters() noexcept {
     endpoint_.callbacks.store(0, std::memory_order_relaxed);
     endpoint_.renderedFrames.store(0, std::memory_order_relaxed);

@@ -25,8 +25,13 @@ real-time scheduling, zero-copy and acceleration research is recorded in
 C++ language profile, component targets, dependencies and scalable repository
 layout are in [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
 
-Phase 3A adds a standalone native conformance path only:
+Phases 3A and 3B add a standalone native conformance path only:
 `zcore_device` AudioHost/provider → `zdsp_host_adapter` → `zdsp_runtime`.
+Phase 3A introduced the portable contract, fake provider and macOS AUHAL host;
+Phase 3B adds the standalone Windows provider: one event-driven STA/MMCSS owner for two WASAPI endpoint clients
+bridged by a bounded planar SPSC FIFO; only that owner's render action enters
+the graph.
+It is not yet wired to product playback (see `docs/WINDOWS-AUDIO.md`).
 Its headless muted CLI and fake/macOS AUHAL providers are not wired to the
 Electron renderer or either mobile app. Web Audio below and RNAudioAPI on
 mobile remain the only product playback/session owners until Phase 4.

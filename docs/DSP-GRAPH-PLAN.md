@@ -1050,14 +1050,48 @@ Phase 3A standalone slice implemented 2026-08-27 (not a product cutover):
   `singz-audio-host` tool are the portable conformance harness. Hardware runs
   are muted; for the Zen input wired to physical channel 3 use zero-based
   `--input-channels 2` and an explicit same-device UID/output map.
-- macOS has a same-device AUHAL provider in its own OS source. Windows, iOS,
-  Android and other builds select explicit compiling unsupported providers;
-  this phase does not claim their native output implementation.
+- macOS has a same-device AUHAL provider in its own OS source. At the Phase 3A
+  checkpoint Windows, iOS, Android and other builds selected explicit
+  compiling unsupported providers; Phase 3B below supersedes that statement
+  for the standalone Windows build only.
+
+Phase 3B standalone Windows slice implemented 2026-08-28:
+
+- WASAPI exposes capture and render as distinct opaque endpoint IDs. SingZ
+  requires matching device container IDs and equal negotiated rates; channel
+  maps are checked against each exact initialized format.
+- Shared event-driven `IAudioClient3` low-period mode is the default. Explicit
+  exclusive mode never silently falls back and currently accepts exact float32
+  formats only; complete integer exclusive conversion remains a later slice.
+- One long-lived STA/MMCSS owner owns both capture and render clients/services,
+  arbitrates both endpoint events, and bridges capture to its render action
+  through a prepared planar SPSC FIFO with timestamp-span metadata. Only the
+  render action invokes the graph and owns its clock. Underflow zero-fills;
+  overflow drops newest; both remain
+  visible in diagnostics alongside FIFO extrema and exact accepted-capture
+  minus rendered-frame balance. That balance is not mislabeled as drift.
+- Capture is primed to one negotiated render period before render starts. The
+  deliberate pre-Start silent endpoint buffer creates a bounded endpoint-
+  priming window, accounted separately from runtime FIFO xruns; all later
+  shortages remain visible as underflows.
+- A render-only wake remains one pending action when capture is not ready.
+  Shared mode spends only already-queued endpoint padding; exclusive mode
+  spends at most one exact frame period. Capture/stop/loss wins before the graph,
+  and a late capture fails the session instead of being hidden. Buffer-error
+  recovery applies only to acquisition; any failed release after FIFO/graph
+  advancement is terminal and cannot replay state.
+- `GetStreamLatency` remains separately named stream-level diagnostics rather
+  than being relabeled hardware latency. Device notifications fail closed and
+  require reopen. Notifications are armed before pairing/profile revalidation;
+  generation and lifecycle publication prevents a concurrent loss/error from
+  being overwritten by Open or Running. See `docs/WINDOWS-AUDIO.md` for the
+  exact contract and muted hardware harness.
 
 The AUHAL slice deliberately rejects different input/output UIDs. A bounded
 cross-device FIFO, drift estimator/resampler and aggregate-device policy are
-deferred, as are WASAPI, RemoteIO, Oboe and the separately licensed ASIO
-provider. Web Audio/RNAudioAPI remains the sole product output/session owner;
+deferred, as are RemoteIO, Oboe and the separately licensed ASIO provider.
+WASAPI is the implemented Phase 3B standalone provider described above. Web
+Audio/RNAudioAPI remains the sole product output/session owner;
 no renderer, Electron playback, mobile playback or UI path links this host.
 
 The review invocation is intentionally explicit and bounded:
@@ -1072,7 +1106,7 @@ Implement one provider at a time behind `AudioHost`:
 
 1. macOS duplex AUHAL;
 2. Windows WASAPI render/full-duplex, shared mode first and user-selected
-   exclusive mode where supported;
+   exact-float exclusive mode where supported (implemented as Phase 3B);
 3. iOS duplex RemoteIO under the existing AVAudioSession coordinator;
 4. Android duplex Oboe over AAudio where supported, retaining direct AAudio
    only if Phase 0B measurements show it is the lower-risk SingZ host;
@@ -1089,7 +1123,8 @@ native output mutually exclusive; enumeration alone never acquires a session.
 
 Platform details:
 
-- WASAPI “full duplex” is two coordinated event-driven clients:
+- WASAPI “full duplex” is two event-driven clients coordinated by one
+  STA/MMCSS owner, which drains shared capture before every render action:
   `IAudioCaptureClient` and `IAudioRenderClient`, with `IAudioClock` positions
   mapped to the output master. Use `IAudioClient3` shared-engine period APIs
   when available; shared/exclusive negotiation and fallback stay explicit.

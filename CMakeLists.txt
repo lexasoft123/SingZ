@@ -185,6 +185,17 @@ if(SINGZ_CORE_TESTS)
     SingZ::zcore_device_fake Threads::Threads)
   add_test(NAME audio_host_tests COMMAND audio_host_tests)
 
+  if(WIN32)
+    add_executable(audio_host_windows_tests
+      ${SINGZ_REPO_ROOT}/tests/native/audio_host_windows_tests.cpp)
+    target_compile_features(audio_host_windows_tests PRIVATE cxx_std_20)
+    target_include_directories(audio_host_windows_tests PRIVATE
+      "${SINGZ_REPO_ROOT}")
+    target_link_libraries(audio_host_windows_tests PRIVATE
+      SingZ::zcore_device)
+    add_test(NAME audio_host_windows_tests COMMAND audio_host_windows_tests)
+  endif()
+
   add_executable(audio_host_graph_adapter_tests
     ${SINGZ_REPO_ROOT}/zdsp/tests/audio_host_graph_adapter_tests.cpp)
   target_compile_features(audio_host_graph_adapter_tests PRIVATE cxx_std_20)
@@ -196,7 +207,11 @@ if(SINGZ_CORE_TESTS)
     COMMAND singz-audio-host --fake --blocks 6 --maximum-frames 1024)
   set_tests_properties(audio_host_fake_cli PROPERTIES
     PASS_REGULAR_EXPRESSION
-      "\"callbacks\":6.*\"xruns\":1.*\"deadlineMisses\":1.*\"varying\":1.*\"maximumSeen\":1024.*\"state\":\"stopped\"")
+      "\"callbacks\":6.*\"xruns\":0.*\"deadlineMisses\":0.*\"invalidCallbacks\":0.*\"varying\":1.*\"maximumSeen\":1024.*\"cyclesCompleted\":1.*\"state\":\"stopped\"")
+  add_test(NAME audio_host_fake_cli_rejects_faults
+    COMMAND ${CMAKE_COMMAND}
+      -DAUDIO_HOST_CLI=$<TARGET_FILE:singz-audio-host>
+      -P ${SINGZ_REPO_ROOT}/tests/native/audio_host_cli_fault_test.cmake)
 
   add_executable(zdsp_contract_tests
     ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_contract_tests.cpp)

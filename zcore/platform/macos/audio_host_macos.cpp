@@ -243,7 +243,12 @@ class MacAudioHostBackend final : public AudioHostBackend {
       uint32_t maximumFrames = 0;
       detail::checkedAudioHostBufferRange(range.mMinimum, range.mMaximum,
                                           &minimumFrames, &maximumFrames);
-      info.bufferFrames = {minimumFrames, maximumFrames, frames};
+      info.bufferFrames = {minimumFrames, maximumFrames, frames, 0};
+      info.direction = info.inputChannels != 0 && info.outputChannels != 0
+                           ? AudioHostEndpointDirection::Duplex
+                           : (info.inputChannels != 0
+                                  ? AudioHostEndpointDirection::Input
+                                  : AudioHostEndpointDirection::Output);
       if (info.defaultInput) inventory.defaultInputUid = info.uid;
       if (info.defaultOutput) inventory.defaultOutputUid = info.uid;
       inventory.devices.push_back(std::move(info));
@@ -254,14 +259,20 @@ class MacAudioHostBackend final : public AudioHostBackend {
   AudioHostResult open(const AudioHostConfig& config, AudioHostRender render,
                        void* renderContext) override {
     stop();
+    if (config.exclusive) {
+      return reject(AudioHostError::Unsupported,
+                    "CoreAudio exclusive mode is not implemented by this AudioHost provider",
+                    AudioHostState::Unsupported);
+    }
     if (config.inputDeviceUid.empty() || config.outputDeviceUid.empty() ||
         config.inputDeviceUid != config.outputDeviceUid) {
-      return failure(AudioHostError::DifferentDevicesUnsupported,
-                     "Phase 3A requires one physical CoreAudio device for input and output");
+      return reject(AudioHostError::DifferentDevicesUnsupported,
+                    "AudioHost requires one physical CoreAudio device for input and output");
     }
     selectedDevice_ = findDevice(config.inputDeviceUid);
     if (selectedDevice_ == kAudioObjectUnknown) {
-      return failure(AudioHostError::DeviceNotFound, "The selected CoreAudio device disappeared");
+      return reject(AudioHostError::DeviceNotFound,
+                    "The selected CoreAudio device disappeared");
     }
     UInt32 alive = 0;
     Float64 rate = 0.0;
@@ -462,7 +473,9 @@ class MacAudioHostBackend final : public AudioHostBackend {
 
   AudioHostResult start() override {
     if (!initialized_ || state_.load(std::memory_order_acquire) != AudioHostState::Open) {
-      return failure(AudioHostError::InvalidState, "Open AUHAL before starting it");
+      return failure(AudioHostError::InvalidState,
+                     "Open AUHAL before starting it",
+                     state_.load(std::memory_order_acquire));
     }
     activateAudioHostCallback(&endpoint_);
     if (AudioOutputUnitStart(unit_) != noErr) {
@@ -706,6 +719,13 @@ class MacAudioHostBackend final : public AudioHostBackend {
     stop();
     state_.store(AudioHostState::Error, std::memory_order_release);
     return failure(error, message);
+  }
+
+  AudioHostResult reject(
+      AudioHostError error, const std::string& message,
+      AudioHostState state = AudioHostState::Error) noexcept {
+    state_.store(state, std::memory_order_release);
+    return failure(error, message, state);
   }
 
   AudioUnit unit_{nullptr};

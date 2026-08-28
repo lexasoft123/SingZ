@@ -54,6 +54,7 @@ set(_required
   "/src/device/audio_input_callback.cpp"
   "/src/device/audio_input_callback_gate.cpp"
   "/src/device/audio_input_callback.h"
+  "/src/device/audio_host_fifo_hot.cpp"
   "/include/zcore/audio/audio_input_convert.h"
   "/include/zcore/audio/audio_input_producer.h"
   "/include/zcore/audio/audio_input_timestamp.h"

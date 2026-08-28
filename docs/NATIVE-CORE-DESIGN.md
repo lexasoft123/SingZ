@@ -1,8 +1,8 @@
 # `zcore` and `zdsp` native design
 
-Status: active implementation standard (Phase 3A standalone host present)
+Status: active implementation standard (Phase 3A/3B standalone hosts present)
 
-Last reviewed: 2026-08-27
+Last reviewed: 2026-08-28
 
 This document defines the language profile, component boundaries, design
 patterns, target layout and dependency policy for the native SingZ audio
@@ -95,7 +95,17 @@ Rules:
   framework or device lifecycle policy.
 - `zcore_device` contains `AudioHost`, inventory/session contracts and the
   selected platform backend targets. It does not know about `zdsp`; the product
-  coordinator installs a render function plus opaque context.
+  coordinator installs a render function plus opaque context. Its prepared
+  planar SPSC FIFO is a device-domain transport: on Windows one long-lived
+  STA/MMCSS owner owns both endpoint clients and services. Its capture action
+  publishes timestamp spans, and its render action alone consumes them and
+  invokes the graph. Its prepared owning storage stays in `zcore_device`, while the
+  allocation-free hot FIFO methods compile in `zcore_device_callback` and are
+  covered by the callback-source policy scan. WASAPI interfaces never cross
+  their owner apartments. CMake requires the FIFO hot implementation to remain
+  in that scanned target, preventing a source-list edit from silently dropping
+  coverage. The owning FIFO header deliberately stays outside the forbidden-
+  token scan because it contains off-RT prepared vectors.
 - `zcore_media` contains WAV/FLAC and later streaming decode. It never appears
   in the live graph's transitive link interface.
 - `zdsp_api` contains the foundational DSP-facing clock, bus, process,
@@ -132,6 +142,23 @@ During Phase 2 the allocating fixed-ratio resampler and YIN remain under
 the `zcore_legacy` facade and `zdsp_analysis`. They remain ordinary-thread-only
 and must eventually move behind a neutral analysis implementation without
 weakening the strict `zcore_device_callback` leaf.
+
+The unified Windows capture/render event loop still lives in the large provider
+translation unit. Its hot body obeys the same no-allocation/no-lock/no-I/O
+contract, but Microsoft SDK/COM ownership code prevents that whole file from
+joining the portable callback compile-policy target. Extracting the event-loop
+hot bodies behind prepared POD views is explicit pre-product-cutover debt; the
+current required-membership scan covers the portable graph callback and FIFO
+hot methods, not the entire Windows provider file.
+
+The current Windows owner entry point is `noexcept`, and all expected control-
+path allocation is completed or caught before audio starts. A truly fail-closed
+catch for an unexpected construction/allocation exception after either client
+has started still needs an owner-thread scope guard that checks `Stop` on both
+clients before same-apartment COM unwind and publishes a nonallocating terminal
+status. Adding only a broad catch would risk releasing an active client without
+that checked stop, so this remains explicit pre-product-cutover debt rather
+than a false terminate-safety claim.
 
 ## Repository layout
 

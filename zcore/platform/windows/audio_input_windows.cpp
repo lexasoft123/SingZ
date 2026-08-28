@@ -29,6 +29,8 @@
 #include <zcore/audio/audio_input_convert.h>
 #include <zcore/audio/audio_input_timestamp.h>
 
+#include "audio_input_windows_helpers.h"
+
 namespace singz {
 namespace {
 
@@ -50,6 +52,10 @@ class ComPtr {
   }
   T* operator->() const { return value_; }
   explicit operator bool() const { return value_ != nullptr; }
+  void attach(T* value) {
+    reset();
+    value_ = value;
+  }
   void reset() {
     if (value_) value_->Release();
     value_ = nullptr;
@@ -136,15 +142,32 @@ std::string friendlyName(IMMDevice* device) {
   return name;
 }
 
+const char* captureSetupOperation(
+    detail::WasapiCaptureSetupFailure failure) noexcept {
+  switch (failure) {
+    case detail::WasapiCaptureSetupFailure::None:
+      return "WASAPI capture configuration";
+    case detail::WasapiCaptureSetupFailure::Activate:
+      return "WASAPI capture activation";
+    case detail::WasapiCaptureSetupFailure::SetProperties:
+      return "WASAPI capture client properties";
+    case detail::WasapiCaptureSetupFailure::GetMixFormat:
+      return "WASAPI capture mix format";
+  }
+  return "WASAPI capture configuration";
+}
+
 bool mixFormat(IMMDevice* device, double& sampleRate, uint32_t& channels) {
   ComPtr<IAudioClient> client;
-  if (!device || FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
-                                         nullptr,
-                                         reinterpret_cast<void**>(client.put()))))
-    return false;
-  WAVEFORMATEX* raw = nullptr;
-  if (FAILED(client->GetMixFormat(&raw)) || !raw) return false;
-  WaveFormatPtr format(raw);
+  IAudioClient* rawClient = nullptr;
+  WAVEFORMATEX* rawFormat = nullptr;
+  detail::WasapiCaptureSetupFailure failure{};
+  const HRESULT result = detail::setupWasapiCaptureClient(
+      device, reinterpret_cast<void**>(&rawClient),
+      reinterpret_cast<void**>(&rawFormat), &failure);
+  if (FAILED(result) || !rawClient || !rawFormat) return false;
+  client.attach(rawClient);
+  WaveFormatPtr format(rawFormat);
   if (format->nChannels == 0 || format->nChannels > kMaximumChannels ||
       format->nSamplesPerSec == 0)
     return false;
@@ -203,29 +226,24 @@ HRESULT createEnumerator(ComPtr<IMMDeviceEnumerator>& enumerator) {
                           reinterpret_cast<void**>(enumerator.put()));
 }
 
-HRESULT activateClient(IMMDevice* device, ComPtr<IAudioClient>& client,
-                       WaveFormatPtr& format) {
+HRESULT activateConfiguredCaptureClient(IMMDevice* device,
+                                         ComPtr<IAudioClient>& client,
+                                         WaveFormatPtr& format,
+                                         const char** failedOperation) {
   client.reset();
   format.reset();
-  HRESULT result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                    reinterpret_cast<void**>(client.put()));
-  if (FAILED(result)) return result;
-  WAVEFORMATEX* raw = nullptr;
-  result = client->GetMixFormat(&raw);
-  if (SUCCEEDED(result)) format.reset(raw);
+  IAudioClient* rawClient = nullptr;
+  WAVEFORMATEX* rawFormat = nullptr;
+  detail::WasapiCaptureSetupFailure failure{};
+  const HRESULT result = detail::setupWasapiCaptureClient(
+      device, reinterpret_cast<void**>(&rawClient),
+      reinterpret_cast<void**>(&rawFormat), &failure);
+  if (failedOperation) *failedOperation = captureSetupOperation(failure);
+  if (SUCCEEDED(result)) {
+    client.attach(rawClient);
+    format.reset(rawFormat);
+  }
   return result;
-}
-
-void setMediaClientProperties(IAudioClient* client) {
-  if (!client) return;
-  ComPtr<IAudioClient2> client2;
-  if (FAILED(client->QueryInterface(__uuidof(IAudioClient2),
-                                    reinterpret_cast<void**>(client2.put()))))
-    return;
-  AudioClientProperties properties{};
-  properties.cbSize = sizeof(properties);
-  properties.eCategory = AudioCategory_Media;
-  (void)client2->SetClientProperties(&properties);
 }
 
 uint64_t qpcNowNs(uint64_t frequency) {
@@ -371,13 +389,13 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
 
   bool initializeShared(IMMDevice* device, ComPtr<IAudioClient>& client,
                         WaveFormatPtr& format, std::string& error) {
-    HRESULT result = activateClient(device, client, format);
+    const char* failedOperation = "WASAPI capture configuration";
+    HRESULT result = activateConfiguredCaptureClient(
+        device, client, format, &failedOperation);
     if (FAILED(result) || !format) {
-      error = hresultMessage("WASAPI mix format", result);
+      error = hresultMessage(failedOperation, result);
       return false;
     }
-    setMediaClientProperties(client.get());
-
     HRESULT lowLatencyResult = E_NOINTERFACE;
     ComPtr<IAudioClient3> client3;
     if (SUCCEEDED(client->QueryInterface(__uuidof(IAudioClient3),
@@ -396,12 +414,12 @@ class WasapiAudioInputBackend final : public AudioInputBackend {
 
     // A failed Initialize leaves the client unsuitable for reuse. Reactivate
     // before the broadly supported shared/event fallback.
-    result = activateClient(device, client, format);
+    result = activateConfiguredCaptureClient(
+        device, client, format, &failedOperation);
     if (FAILED(result) || !format) {
-      error = hresultMessage("WASAPI fallback activation", result);
+      error = hresultMessage(failedOperation, result);
       return false;
     }
-    setMediaClientProperties(client.get());
     result = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                 0, 0, format.get(), nullptr);

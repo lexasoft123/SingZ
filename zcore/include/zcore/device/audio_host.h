@@ -29,10 +29,24 @@ enum class AudioHostError : uint32_t {
   ProviderFailure,
 };
 
+enum class AudioHostEndpointDirection : uint32_t {
+  Duplex,
+  Input,
+  Output,
+};
+
+enum class AudioHostAccessMode : uint32_t {
+  Shared,
+  Exclusive,
+};
+
 struct AudioHostBufferRange {
   uint32_t minimumFrames{0};
   uint32_t maximumFrames{0};
   uint32_t preferredFrames{0};
+  // Legal periods advance in this many frames. Zero means the provider does
+  // not expose a discrete granularity.
+  uint32_t fundamentalFrames{0};
 };
 
 struct AudioHostRateRange {
@@ -52,6 +66,13 @@ struct AudioHostDeviceInfo {
   // supported rate is represented by minimumHz == maximumHz.
   std::vector<AudioHostRateRange> sampleRateRanges;
   AudioHostBufferRange bufferFrames;
+  // A platform may expose input and output as distinct endpoints. The UID is
+  // always the platform's opaque endpoint identifier; callers must not parse
+  // it or derive pairing from the friendly label.
+  AudioHostEndpointDirection direction{AudioHostEndpointDirection::Duplex};
+  // Inventory describes the currently active shared profile. Exclusive
+  // formats are exact-probed at open time and are never inferred from it.
+  AudioHostAccessMode accessMode{AudioHostAccessMode::Shared};
 };
 
 struct AudioHostInventory {
@@ -69,6 +90,9 @@ struct AudioHostConfig {
   double requestedSampleRate{0.0};
   uint32_t requestedBufferFrames{0};
   uint32_t maximumFrames{kAudioHostMaxFrames};
+  // Never falls back silently: an exclusive request either opens exclusive
+  // streams with the exact format or fails.
+  bool exclusive{false};
 };
 
 struct AudioHostFormat {
@@ -79,6 +103,7 @@ struct AudioHostFormat {
   uint32_t outputChannels{0};
   bool float32Planar{true};
   bool outputClockMaster{true};
+  AudioHostAccessMode accessMode{AudioHostAccessMode::Shared};
 };
 
 struct AudioHostLatency {
@@ -88,6 +113,31 @@ struct AudioHostLatency {
   uint32_t outputDeviceFrames{0};
   uint32_t bufferFrames{0};
   uint32_t externalRouteFrames{0};
+};
+
+struct AudioHostDiagnostics {
+  // WASAPI and future split-clock providers report their stream-level values
+  // here instead of mislabeling GetStreamLatency as pure hardware latency.
+  uint64_t inputStreamLatency100ns{0};
+  uint64_t outputStreamLatency100ns{0};
+  uint32_t inputPeriodFrames{0};
+  uint32_t outputPeriodFrames{0};
+  uint32_t inputBufferFrames{0};
+  uint32_t outputBufferFrames{0};
+  uint32_t fifoCapacityFrames{0};
+  uint32_t fifoCurrentFrames{0};
+  uint32_t fifoMinimumFrames{0};
+  uint32_t fifoMaximumFrames{0};
+  uint64_t fifoUnderflows{0};
+  uint64_t fifoOverflows{0};
+  // Capture frames absent from the bounded endpoint-priming window and
+  // supplied as zero input. This is not general silence detection. Windows
+  // accumulates this and the flow balance exactly in lock-free uint64 counters
+  // (saturating only at UINT64_MAX).
+  uint64_t startupInputZeroFrames{0};
+  // Frames accepted into the capture FIFO minus frames requested by render
+  // callbacks. This is a queue-flow balance, not a clock-drift estimate.
+  int64_t acceptedCaptureMinusRenderedFrames{0};
 };
 
 struct AudioHostResult {
@@ -112,6 +162,7 @@ struct AudioHostStatus {
   uint64_t discontinuities{0};
   uint64_t invalidCallbacks{0};
   uint64_t renderFailures{0};
+  AudioHostDiagnostics diagnostics{};
 };
 
 class AudioHostBackend {
