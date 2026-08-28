@@ -374,10 +374,41 @@ static void audioInputAnalysisAdapterTests() {
     // and never releases — release is keyed on the open edge, so it never
     // counts. That is the accepted trade for hearing a −50 dBFS singer, and
     // this check exists so that retuning either edge moves it loudly.
-    singz::LiveInputAnalysisWindow tonalRoom;
-    runOne(0.00328f, tonalRoom);  // −52.7 dBFS rms: the measured tonal room
-    CHECK("live adapter: a tonal room over the open edge IS pitched (known cost)",
-          tonalRoom.analysis.frequency > 183.0 && tonalRoom.analysis.frequency < 192.0);
+    // Run it PAST the release counter rather than through runOne, which emits
+    // only 9 windows — a check that stops at 9 cannot see the "never releases"
+    // half at all, and would keep passing once a stability close is added,
+    // exactly when the header's claim stops being true.
+    {
+      std::vector<float> room;
+      tone(0.00328f, room);  // −52.7 dBFS rms: the measured tonal room
+      singz::LiveInputAnalysisAdapter cost;
+      singz::AudioInputBlockView block;
+      block.sampleHostTimeNs = startNs;
+      block.callbackHostTimeNs = startNs;
+      block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+      block.sampleRate = rate;
+      uint64_t sequence = 0;
+      block.sequence = sequence++;
+      block.frames = 2048;
+      block.mono = room.data();
+      cost.push(block, [](const auto&) {});
+      int windows = 0, pitched = 0;
+      double lastFrequency = 0;
+      for (int i = 0; i < 40; ++i) {  // well past kVoicingReleaseWindows
+        block.sequence = sequence++;
+        block.frames = 512;
+        block.mono = room.data();
+        cost.push(block, [&](const auto& w) {
+          ++windows;
+          if (w.analysis.frequency > 0) ++pitched;
+          lastFrequency = w.analysis.frequency;
+        });
+      }
+      CHECK("live adapter: a tonal room over the open edge IS pitched (known cost)",
+            windows >= 35 && pitched >= 30);
+      CHECK("live adapter: and it never releases — the cost, still running at 40 hops",
+            lastFrequency > 183.0 && lastFrequency < 192.0);
+    }
 
     // Hysteresis: a room between the two edges must not open the gate — only a
     // level reaching OPEN may. A genuine midpoint, not a value sitting on an

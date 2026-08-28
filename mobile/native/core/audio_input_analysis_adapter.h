@@ -103,7 +103,7 @@ class LiveInputAnalysisAdapter {
   // which a room latches the gate open with it: a tonal room ABOVE −55 dBFS
   // now opens the gate from cold and never releases, because rawRms never
   // falls under close and releaseWindows_ resets every window. Measured on the
-  // 118 Hz room recorded above at −52.7 dBFS: 299 of 301 windows pitched at
+  // 118 Hz room recorded below at −52.7 dBFS: 299 of 301 windows pitched at
   // clarity 1.000, indefinitely. Neither of the downstream checks helps —
   // clarity measures periodicity, which is exactly what a steady tone has (see
   // the note above), and the tracker's 1.5 s hold is the thing such a tone

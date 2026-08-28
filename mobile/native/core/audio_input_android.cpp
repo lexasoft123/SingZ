@@ -139,7 +139,33 @@ class AAudioInputBackend final : public AudioInputBackend {
       return failure("Android audio input channel is out of range", config.channel);
 
     requestedDeviceId_ = requestedDevice;
-    requestedChannels_ = static_cast<int32_t>(found->channels);
+    // Ask for MONO whenever the caller wants the first lane, which on Android
+    // is always — nothing in the app offers a lane picker. Previously this
+    // asked for the maximum channel count AudioManager advertised (2 on a
+    // phone) and deinterleaved lane 0.
+    //
+    // Two documented reasons, not a hunch about any one phone:
+    //
+    //  - The platform does not define which channel index is which microphone.
+    //    AOSP's microphone-input guidance says only how to SELECT indices, via
+    //    a channel index mask; the one API that maps a microphone to a channel
+    //    (MicrophoneInfo.getChannelMapping, through
+    //    AudioRecord.getActiveMicrophones) has no AAudio equivalent. So "lane 0
+    //    of a built-in 2-channel capture" is not a thing the platform promises
+    //    anything about. Measured on a Xiaomi 23049PCD8G, the two lanes are 4.4
+    //    dB apart (−10.1 vs −14.5) on the same source, so WHICH lane you take
+    //    changes the level you get. What that measurement does not establish
+    //    is which physical microphone either lane is — the platform does not
+    //    say, and a spaced pair would also differ by decibels off-axis.
+    //
+    //  - Oboe's FAQ lists "requesting a channel count not natively supported"
+    //    among the reasons a stream does not get PerformanceMode::LowLatency,
+    //    and its own input examples configure mono. Both phones report
+    //    performanceMode `none` in every session despite asking for
+    //    LOW_LATENCY. Mono alone did NOT restore it on the Xiaomi, so this is
+    //    a documented candidate for that, not a confirmed cause.
+    requestedChannels_ =
+        config.channel == 0 ? 1 : static_cast<int32_t>(found->channels);
     selectedChannel_ = config.channel;
     push_ = push;
     context_ = context;
