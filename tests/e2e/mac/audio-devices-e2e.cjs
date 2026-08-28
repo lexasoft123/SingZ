@@ -376,9 +376,28 @@ const coreProvenance = async (win) => {
   await win.screenshot({ path: join(OUT, 'settings-audio.png') })
   await win.$eval('.monitor-strip', (section) => section.scrollIntoView({ block: 'start' }))
   await new Promise((resolve) => setTimeout(resolve, 200))
+  const graphLayout = await win.$eval('.dsp-graph-viewport', (viewport) => ({
+    clientWidth: viewport.clientWidth,
+    scrollWidth: viewport.scrollWidth,
+    modules: viewport.querySelectorAll('.dsp-graph-node').length,
+    labels: [...viewport.querySelectorAll('.dsp-graph-node')].map((node) =>
+      (node.getAttribute('aria-label') ?? '').split(':')[0]
+    )
+  }))
+  if (graphLayout.modules !== 7) throw new Error(`DSP graph rendered ${graphLayout.modules} modules, expected 7`)
+  if (graphLayout.scrollWidth > graphLayout.clientWidth + 1)
+    throw new Error(`DSP graph clips at Settings width (${graphLayout.scrollWidth}px > ${graphLayout.clientWidth}px)`)
+  if (graphLayout.labels.join('|') !== 'Input|Pre meter|Gain|Channel map|Limiter|Post meter|Output')
+    throw new Error(`DSP graph order is wrong: ${graphLayout.labels.join(' → ')}`)
+  console.log(`DSP graph: ${graphLayout.modules} modules fit ${graphLayout.clientWidth}px`)
   await win.screenshot({ path: join(OUT, 'settings-monitoring.png') })
 
   await win.selectOption('#settings-input', ins[0].v)
+  await win.waitForFunction(
+    ({ key, value }) => JSON.parse(localStorage.getItem('singz.audio') ?? '{}')[key] === value,
+    { key: inputPrefKey, value: ins[0].v },
+    { timeout: 20000 }
+  )
   const stored = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
   if (stored[inputPrefKey] !== ins[0].v) throw new Error(`${inputPrefKey} pick not persisted`)
   // ---- output pick (guarded — machine hardware) ----

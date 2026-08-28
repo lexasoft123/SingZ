@@ -21,6 +21,7 @@ import type {
   DesktopMonitorConfig
 } from '../../../shared/types'
 import { Modal } from '@singz/ui'
+import DspGraphVisualization from './DspGraphVisualization'
 
 export interface SettingsModalProps {
   audio: AudioPrefs
@@ -479,8 +480,6 @@ export default function SettingsModal({
         : routeVerdict.copy
   const nativePreDb = linearToDbfs(monitor.status?.pre.rms ?? 0)
   const nativePostDb = linearToDbfs(monitor.status?.post.rms ?? 0)
-  const nativePrePct = ((nativePreDb + 72) / 72) * 100
-  const nativePostPct = ((nativePostDb + 72) / 72) * 100
 
   const afterMonitorStops = (apply: () => void): void => {
     if (!monitorCoordinator.current?.hasNativeOwnership) {
@@ -696,43 +695,20 @@ export default function SettingsModal({
               </div>
             )}
 
-            <div className={`monitor-signal-path${monitorActive ? ' live' : ''}`} aria-label="Native monitoring signal path">
-              <div className="monitor-path-node mic-node">
-                <span>Mic</span>
-                <strong>{monitorInput ? `IN ${requestedChannel + 1}` : '—'}</strong>
-              </div>
-              <div
-                className="monitor-path-meter"
-                role="meter"
-                aria-label="Native DSP pre-gain level"
-                aria-valuemin={-72}
-                aria-valuemax={0}
-                aria-valuenow={Math.round(nativePreDb)}
-                aria-valuetext={`${Math.round(nativePreDb)} dBFS before gain`}
-              >
-                <span style={{ width: `${nativePrePct}%` }} />
-              </div>
-              <div className="monitor-path-node dsp-node">
-                <span>DSP</span>
-                <strong>{monitorGainDb} dB</strong>
-                <em>Limiter −1 dBFS</em>
-              </div>
-              <div
-                className="monitor-path-meter post"
-                role="meter"
-                aria-label="Native DSP post-limiter level"
-                aria-valuemin={-72}
-                aria-valuemax={0}
-                aria-valuenow={Math.round(nativePostDb)}
-                aria-valuetext={`${Math.round(nativePostDb)} dBFS after limiter`}
-              >
-                <span style={{ width: `${nativePostPct}%` }} />
-              </div>
-              <div className="monitor-path-node phones-node">
-                <span>Headphones</span>
-                <strong>{monitorOutput ? selectedOutputChannels.map((channel) => channel + 1).join(' · ') : '—'}</strong>
-              </div>
-            </div>
+            <DspGraphVisualization
+              phase={monitor.phase}
+              routeReady={routeVerdict.ready && Boolean(nativeConfig)}
+              inputLabel={monitorInput?.label}
+              inputChannel={monitorInput ? requestedChannel : undefined}
+              outputLabel={monitorOutput?.label}
+              outputChannels={monitorOutput ? selectedOutputChannels : []}
+              gainDb={monitorGainDb}
+              preDb={nativePreDb}
+              postDb={nativePostDb}
+              plannedSampleRate={nativeConfig?.sampleRate}
+              plannedBufferFrames={nativeConfig?.bufferFrames}
+              status={monitor.status}
+            />
 
             <label className="monitor-gain" htmlFor="monitor-gain">
               <span>Monitor gain</span>

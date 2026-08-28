@@ -73,6 +73,8 @@ describe('settings microphone input strip', () => {
   it('renders monitoring off with a fresh non-persisted headphone gate', () => {
     const html = renderToStaticMarkup(createElement(SettingsModal, settingsProps()))
     expect(html).toContain('Headphone monitoring')
+    expect(html).toContain('Native monitor chain')
+    expect(html).toContain('Runtime graph')
     expect(html).toContain('Monitoring is off.')
     expect(html).toContain('Wired headphones are connected')
     expect(html).not.toContain('checked=""')
@@ -125,6 +127,11 @@ describe('settings microphone input strip', () => {
     expect(monitorStartReady(ready)).toBe(true)
     expect(monitorStartReady({ ...ready, previewCaptureActive: false })).toBe(false)
     expect(monitorStartReady({ ...ready, hasNativeOwnership: true })).toBe(false)
+  })
+
+  it('requires a valid native config before the graph can report a ready route', () => {
+    const source = readFileSync('src/renderer/src/components/SettingsModal.tsx', 'utf8')
+    expect(source).toContain('routeReady={routeVerdict.ready && Boolean(nativeConfig)}')
   })
 
   it('invalidates preview and confirmation after coordinator-driven terminal teardown', () => {
