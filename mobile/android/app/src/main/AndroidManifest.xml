@@ -33,7 +33,7 @@
       <!-- Split jobs run in their own process: the ORT session alone is
            ~1.3 GB RSS, and a memory kill there must never take the player.
            Type ladder at runtime: mediaProcessing on 35+, dataSync 29..34,
-           typeless below (minSdk 26). -->
+           typeless below. -->
       <service
         android:name=".split.SplitService"
         android:process=":split"

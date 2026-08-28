@@ -426,8 +426,16 @@ jobs:
   # The very first bundle for a package cannot come through here — the Play
   # Developer API cannot create an app entry and refuses a package it has never
   # seen. That upload is done by hand, once. See docs/ANDROID-RELEASE.md.
+  # Hyphenated tags are prereleases (CLAUDE.md § Releasing) and must never
+  # reach Play. Until now the only thing stopping them was that a -micN notes
+  # file carries no store text, so sync_changelog died on a missing file —
+  # an accident, not a refusal: writing those blocks would have uploaded a
+  # prerelease to real testers. The convention is enforced here instead, the
+  # same way the artifacts job already decides --prerelease.
   publish:
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: >-
+      (startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-'))
+      || github.event_name == 'workflow_dispatch'
     needs: artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 20
