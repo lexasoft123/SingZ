@@ -139,6 +139,8 @@ function fakeBinding(): NativeCaptureBinding & {
       devices: [{
         uid: 'fixture:24', label: 'Fixture interface', defaultInput: true,
         defaultOutput: true, inputChannels: 24, outputChannels: 2,
+        inputChannelLabels: Array.from({ length: 24 }, (_, i) => `Input ${i + 1}`),
+        outputChannelLabels: ['Phones L', 'Phones R'],
         nominalSampleRate: 48000, direction: 'duplex', accessMode: 'shared',
         transport: 'usb', monitoringSuitability: 'low-latency',
         sampleRateRanges: [{ minimumHz: 48000, maximumHz: 48000 }],

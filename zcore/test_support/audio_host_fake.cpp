@@ -44,6 +44,10 @@ class FakeAudioHostBackend final : public AudioHostBackend {
     device.defaultOutput = true;
     device.inputChannels = 8;
     device.outputChannels = 8;
+    for (uint32_t channel = 0; channel < 8; ++channel) {
+      device.inputChannelLabels.push_back("Input " + std::to_string(channel + 1));
+      device.outputChannelLabels.push_back("Output " + std::to_string(channel + 1));
+    }
     device.nominalSampleRate = 48000.0;
     device.sampleRateRanges = {{44100.0, 44100.0}, {48000.0, 48000.0},
                                {96000.0, 96000.0}};

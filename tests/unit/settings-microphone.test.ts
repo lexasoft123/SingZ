@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import SettingsModal, {
   MONITOR_DIAGNOSTIC_LABELS,
+  audioChannelLabel,
   defaultMonitorOutputChannels,
   inputChannelOptions,
   monitorConfig,
@@ -36,6 +37,8 @@ const hostDevice = (overrides: Partial<DesktopAudioHostDevice> = {}): DesktopAud
   defaultOutput: true,
   inputChannels: 4,
   outputChannels: 4,
+  inputChannelLabels: ['Mic 1', 'Mic 2', 'Mic 3', 'Mic 4'],
+  outputChannelLabels: ['Phones L', 'Phones R', 'Line 3', 'Line 4'],
   nominalSampleRate: 48000,
   direction: 'duplex',
   accessMode: 'shared',
@@ -55,6 +58,13 @@ const inventory = (platform: DesktopAudioHostInventoryResult['platform'], device
 })
 
 describe('settings microphone input strip', () => {
+  it('keeps physical channel numbers while exposing provider channel names', () => {
+    expect(audioChannelLabel(['Mic', 'Talkback'], 1, 'input')).toBe('IN 2 · Talkback')
+    expect(audioChannelLabel(['Output 1'], 0, 'output')).toBe('OUT 1')
+    expect(audioChannelLabel(['1'], 0, 'output')).toBe('OUT 1')
+    expect(audioChannelLabel(undefined, 2, 'output')).toBe('OUT 3')
+  })
+
   it('only offers channel choices for a multichannel capture', () => {
     expect(inputChannelOptions(1)).toEqual([])
     expect(inputChannelOptions(2)).toEqual([0, 1])

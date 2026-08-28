@@ -107,6 +107,34 @@ uint32_t channelCount(AudioDeviceID device, AudioObjectPropertyScope scope) {
   return channels <= kAudioHostMaxChannels ? static_cast<uint32_t>(channels) : 0;
 }
 
+std::vector<std::string> channelLabels(AudioDeviceID device,
+                                       AudioObjectPropertyScope scope,
+                                       uint32_t count,
+                                       const char* fallbackPrefix) {
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (uint32_t channel = 0; channel < count; ++channel) {
+    const auto element = static_cast<AudioObjectPropertyElement>(channel + 1);
+    std::string label = readString(
+        device, property(kAudioObjectPropertyElementName, scope, element));
+    if (label.empty()) {
+      const std::string category = readString(
+          device, property(kAudioObjectPropertyElementCategoryName, scope, element));
+      const std::string number = readString(
+          device, property(kAudioObjectPropertyElementNumberName, scope, element));
+      if (!category.empty())
+        label = category + (number.empty() ? " " + std::to_string(channel + 1)
+                                           : " " + number);
+      else
+        label = number;
+    }
+    if (label.empty()) label = std::string(fallbackPrefix) + " " +
+                               std::to_string(channel + 1);
+    result.push_back(std::move(label));
+  }
+  return result;
+}
+
 std::vector<AudioDeviceID> devices() {
   auto address = property(kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal);
   UInt32 size = 0;
@@ -197,6 +225,10 @@ class MacAudioHostBackend final : public AudioHostBackend {
       info.inputChannels = channelCount(device, kAudioDevicePropertyScopeInput);
       info.outputChannels = channelCount(device, kAudioDevicePropertyScopeOutput);
       if (info.uid.empty() || (info.inputChannels == 0 && info.outputChannels == 0)) continue;
+      info.inputChannelLabels = channelLabels(
+          device, kAudioDevicePropertyScopeInput, info.inputChannels, "Input");
+      info.outputChannelLabels = channelLabels(
+          device, kAudioDevicePropertyScopeOutput, info.outputChannels, "Output");
       info.defaultInput = device == defaultInput;
       info.defaultOutput = device == defaultOutput;
       UInt32 transport = kAudioDeviceTransportTypeUnknown;

@@ -647,10 +647,16 @@ function validHostDevice(value: unknown): value is DesktopAudioHostDevice {
   if (!value || typeof value !== 'object') return false
   const row = value as Record<string, unknown>
   const buffers = row.bufferFrames as Record<string, unknown> | undefined
+  const validChannelLabels = (labels: unknown, count: unknown): boolean =>
+    Array.isArray(labels) && typeof count === 'number' && exactUnsigned(count) && count <= 64 &&
+    labels.length === count && labels.every((label) =>
+      typeof label === 'string' && label.length > 0 && label.length <= 4096)
   return typeof row.uid === 'string' && row.uid.length > 0 && row.uid.length <= 4096 &&
     typeof row.label === 'string' && row.label.length <= 4096 &&
     typeof row.defaultInput === 'boolean' && typeof row.defaultOutput === 'boolean' &&
     exactUnsigned(row.inputChannels) && exactUnsigned(row.outputChannels) &&
+    validChannelLabels(row.inputChannelLabels, row.inputChannels) &&
+    validChannelLabels(row.outputChannelLabels, row.outputChannels) &&
     finite(row.nominalSampleRate) &&
     (row.direction === 'duplex' || row.direction === 'input' || row.direction === 'output') &&
     (row.accessMode === 'shared' || row.accessMode === 'exclusive') &&

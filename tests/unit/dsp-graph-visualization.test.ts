@@ -10,8 +10,10 @@ const renderGraph = (overrides: Record<string, unknown> = {}): string => renderT
     routeReady: true,
     inputLabel: 'Studio USB',
     inputChannel: 2,
+    inputChannelLabel: 'IN 3 · Mic 3',
     outputLabel: 'Studio USB',
     outputChannels: [0, 1],
+    outputChannelLabels: ['OUT 1 · Phones L', 'OUT 2 · Phones R'],
     gainDb: -12,
     preDb: -24,
     postDb: -18,
@@ -35,6 +37,9 @@ describe('DSP graph visualization', () => {
     expect(html).toContain('Runtime graph')
     expect(html).toContain('IN 3')
     expect(html).toContain('OUT 1·2')
+    expect(html).toContain('Mic 3')
+    expect(html).toContain('Phones L')
+    expect(html).toContain('Phones R')
     expect(html).toContain('−1 dB')
   })
 

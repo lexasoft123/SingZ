@@ -90,6 +90,11 @@ struct AudioHostDeviceInfo {
   bool defaultOutput{false};
   uint32_t inputChannels{0};
   uint32_t outputChannels{0};
+  // Provider-published element names in the same zero-based order used by
+  // AudioHostConfig channel maps. A provider may leave either vector empty
+  // when its driver API exposes only a channel count.
+  std::vector<std::string> inputChannelLabels;
+  std::vector<std::string> outputChannelLabels;
   double nominalSampleRate{0.0};
   // CoreAudio and other providers may expose continuous ranges. A discrete
   // supported rate is represented by minimumHz == maximumHz.

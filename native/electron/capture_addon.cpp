@@ -111,6 +111,23 @@ void setU64(napi_env env, napi_value object, const char* name, uint64_t value) {
   set(env, object, name, stringValue(env, std::to_string(value)));
 }
 
+napi_value channelLabelsValue(napi_env env,
+                              const std::vector<std::string>& source,
+                              uint32_t count,
+                              const char* fallbackPrefix) {
+  napi_value labels;
+  napi_create_array_with_length(env, count, &labels);
+  for (uint32_t channel = 0; channel < count; ++channel) {
+    const std::string fallback =
+        std::string(fallbackPrefix) + " " + std::to_string(channel + 1);
+    const std::string& label = channel < source.size() && !source[channel].empty()
+                                   ? source[channel]
+                                   : fallback;
+    napi_set_element(env, labels, channel, stringValue(env, label));
+  }
+  return labels;
+}
+
 const char* qualityName(zdsp::CaptureTimestampQuality quality) {
   switch (quality) {
     case zdsp::CaptureTimestampQuality::Hardware: return "hardware";
@@ -690,6 +707,12 @@ napi_value audioHostDevices(napi_env env, napi_callback_info) {
     set(env, device, "defaultOutput", boolValue(env, source.defaultOutput));
     set(env, device, "inputChannels", uintValue(env, source.inputChannels));
     set(env, device, "outputChannels", uintValue(env, source.outputChannels));
+    set(env, device, "inputChannelLabels",
+        channelLabelsValue(env, source.inputChannelLabels,
+                           source.inputChannels, "Input"));
+    set(env, device, "outputChannelLabels",
+        channelLabelsValue(env, source.outputChannelLabels,
+                           source.outputChannels, "Output"));
     set(env, device, "nominalSampleRate",
         numberValue(env, source.nominalSampleRate));
     set(env, device, "direction",

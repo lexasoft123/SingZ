@@ -61,6 +61,8 @@ class ManualAudioHostBackend final : public singz::AudioHostBackend {
     device.defaultOutput = true;
     device.inputChannels = 4;
     device.outputChannels = 4;
+    device.inputChannelLabels = {"Mic 1", "Mic 2", "Mic 3", "Mic 4"};
+    device.outputChannelLabels = {"Phones L", "Phones R", "Line 3", "Line 4"};
     device.nominalSampleRate = 48000.0;
     device.sampleRateRanges = {{48000.0, 48000.0}};
     device.bufferFrames = {1, 256, 128, 1};
@@ -200,6 +202,8 @@ void monitorCompositionAndLifecycle() {
     CHECK(inventory.devices[0].transport == singz::AudioHostTransport::Usb &&
           inventory.devices[0].monitoringSuitability ==
               singz::AudioHostMonitoringSuitability::LowLatency);
+    CHECK(inventory.devices[0].inputChannelLabels[2] == "Mic 3" &&
+          inventory.devices[0].outputChannelLabels[1] == "Phones R");
 
     singz::AudioMonitorConfig config;
     config.inputDeviceUid = "manual:duplex";

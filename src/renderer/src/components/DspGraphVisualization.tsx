@@ -7,8 +7,10 @@ interface DspGraphVisualizationProps {
   routeReady: boolean
   inputLabel?: string
   inputChannel?: number
+  inputChannelLabel?: string
   outputLabel?: string
   outputChannels: number[]
+  outputChannelLabels: string[]
   gainDb: number
   preDb: number
   postDb: number
@@ -89,8 +91,10 @@ export default function DspGraphVisualization({
   routeReady,
   inputLabel,
   inputChannel,
+  inputChannelLabel,
   outputLabel,
   outputChannels,
+  outputChannelLabels,
   gainDb,
   preDb,
   postDb,
@@ -134,7 +138,7 @@ export default function DspGraphVisualization({
             kind="Device"
             name="Input"
             value={inputValue}
-            detail={inputLabel ?? 'Choose an input'}
+            detail={inputChannelLabel ?? inputLabel ?? 'Choose an input'}
             configured={Boolean(inputLabel)}
             live={live}
           />
@@ -161,7 +165,7 @@ export default function DspGraphVisualization({
             name="Channel map"
             faceName="Map"
             value={mapValue}
-            detail={`${inputValue} to ${outputValue}`}
+            detail={`${inputChannelLabel ?? inputValue} to ${outputChannelLabels.join(' · ') || outputValue}`}
             configured={configured}
             live={live}
           />
@@ -188,7 +192,7 @@ export default function DspGraphVisualization({
             kind="Device"
             name="Output"
             value={outputValue}
-            detail={outputLabel ?? 'Choose an output'}
+            detail={outputChannelLabels.join(' · ') || outputLabel || 'Choose an output'}
             configured={Boolean(outputLabel)}
             live={live}
           />

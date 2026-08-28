@@ -526,6 +526,8 @@ export interface DesktopAudioHostDevice {
   defaultOutput: boolean
   inputChannels: number
   outputChannels: number
+  inputChannelLabels: string[]
+  outputChannelLabels: string[]
   nominalSampleRate: number
   direction: AudioHostDirection
   accessMode: AudioHostAccessMode

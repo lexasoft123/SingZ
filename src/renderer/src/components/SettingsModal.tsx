@@ -73,6 +73,19 @@ export function inputChannelOptions(channelCount: number): number[] {
   return channelCount > 1 ? Array.from({ length: channelCount }, (_, index) => index) : []
 }
 
+export function audioChannelLabel(
+  labels: readonly string[] | undefined,
+  index: number,
+  direction: 'input' | 'output'
+): string {
+  const prefix = direction === 'input' ? 'IN' : 'OUT'
+  const fallback = `${prefix} ${index + 1}`
+  const nativeLabel = labels?.[index]?.trim()
+  if (!nativeLabel) return fallback
+  const generic = new RegExp(`^(?:(?:channel|input|output|${prefix})\\s*)?${index + 1}$`, 'i')
+  return generic.test(nativeLabel) ? fallback : `${fallback} · ${nativeLabel}`
+}
+
 export function defaultMonitorOutputChannels(device: DesktopAudioHostDevice | undefined): number[] {
   if (!device || device.outputChannels < 1) return []
   return device.outputChannels > 1 ? [0, 1] : [0]
@@ -594,7 +607,11 @@ export default function SettingsModal({
               {channelCount > 1 ? <>
                 <label htmlFor="settings-input-channel">Input channel</label>
                 <select id="settings-input-channel" className="settings-select channel-select" value={channelIndex} onChange={(event) => void changeInputLane(Number(event.target.value))}>
-                  {inputChannelOptions(channelCount).map((index) => <option key={index} value={index}>Channel {index + 1}</option>)}
+                  {inputChannelOptions(channelCount).map((index) => (
+                    <option key={index} value={index}>
+                      {audioChannelLabel(selectedNativeInput?.channelLabels, index, 'input')}
+                    </option>
+                  ))}
                 </select>
               </> : <span className="mic-mono-state">Mono input · channel 1</span>}
             </div>
@@ -668,7 +685,7 @@ export default function SettingsModal({
               <div className="monitor-route-grid">
                 <div>
                   <span>Mic channel</span>
-                  <strong>IN {requestedChannel + 1}</strong>
+                  <strong>{audioChannelLabel(monitorInput.inputChannelLabels, requestedChannel, 'input')}</strong>
                 </div>
                 {monitorOutput && selectedOutputChannels.map((selected, slot) => (
                   <label key={slot} htmlFor={`monitor-output-${slot}`}>
@@ -686,7 +703,7 @@ export default function SettingsModal({
                           value={index}
                           disabled={selectedOutputChannels.some((channel, other) => other !== slot && channel === index)}
                         >
-                          OUT {index + 1}
+                          {audioChannelLabel(monitorOutput.outputChannelLabels, index, 'output')}
                         </option>
                       ))}
                     </select>
@@ -700,8 +717,15 @@ export default function SettingsModal({
               routeReady={routeVerdict.ready && Boolean(nativeConfig)}
               inputLabel={monitorInput?.label}
               inputChannel={monitorInput ? requestedChannel : undefined}
+              inputChannelLabel={monitorInput
+                ? audioChannelLabel(monitorInput.inputChannelLabels, requestedChannel, 'input')
+                : undefined}
               outputLabel={monitorOutput?.label}
               outputChannels={monitorOutput ? selectedOutputChannels : []}
+              outputChannelLabels={monitorOutput
+                ? selectedOutputChannels.map((channel) =>
+                    audioChannelLabel(monitorOutput.outputChannelLabels, channel, 'output'))
+                : []}
               gainDb={monitorGainDb}
               preDb={nativePreDb}
               postDb={nativePostDb}

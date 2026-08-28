@@ -486,10 +486,23 @@ std::vector<AudioInputDevice> enumeratePlatformAudioInputDevices(std::string* er
     if (item.label.empty()) item.label = "Audio input";
     item.channelLabels.reserve(channels);
     for (uint32_t channel = 0; channel < channels; ++channel) {
+      const auto element = static_cast<AudioObjectPropertyElement>(channel + 1);
       std::string label = stringProperty(
           device, address(kAudioObjectPropertyElementName,
-                          kAudioDevicePropertyScopeInput,
-                          static_cast<AudioObjectPropertyElement>(channel + 1)));
+                          kAudioDevicePropertyScopeInput, element));
+      if (label.empty()) {
+        const std::string category = stringProperty(
+            device, address(kAudioObjectPropertyElementCategoryName,
+                            kAudioDevicePropertyScopeInput, element));
+        const std::string number = stringProperty(
+            device, address(kAudioObjectPropertyElementNumberName,
+                            kAudioDevicePropertyScopeInput, element));
+        if (!category.empty())
+          label = category + (number.empty() ? " " + std::to_string(channel + 1)
+                                             : " " + number);
+        else
+          label = number;
+      }
       if (label.empty()) label = "Channel " + std::to_string(channel + 1);
       item.channelLabels.push_back(std::move(label));
     }

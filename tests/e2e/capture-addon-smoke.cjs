@@ -7,6 +7,9 @@ const {
 } = require('../../scripts/capture-artifact.cjs')
 const { sourceFingerprint } = require('../../scripts/build-capture-addon.cjs')
 
+process.env.SINGZ_MUTE = '1'
+app.commandLine.appendSwitch('mute-audio')
+
 app.whenReady().then(() => {
   const target = `${process.platform}-${process.arch}`
   const requested = process.argv.slice(2).find((arg) => !arg.startsWith('--'))
@@ -41,7 +44,6 @@ app.whenReady().then(() => {
   const devices = addon.inputDevices()
   assert.equal(typeof devices.ok, 'boolean')
   assert.ok(Array.isArray(devices.devices))
-  if (process.argv.includes('--inventory')) console.log(JSON.stringify(devices))
   const state = addon.captureState()
   assert.equal(typeof state.state, 'string')
   assert.equal(typeof state.ownershipGeneration, 'string')
@@ -58,10 +60,17 @@ app.whenReady().then(() => {
     assert.equal(typeof device.uid, 'string')
     assert.equal(typeof device.inputChannels, 'number')
     assert.equal(typeof device.outputChannels, 'number')
+    assert.equal(device.inputChannelLabels.length, device.inputChannels)
+    assert.equal(device.outputChannelLabels.length, device.outputChannels)
+    assert.ok(device.inputChannelLabels.every((label) => typeof label === 'string' && label.length > 0))
+    assert.ok(device.outputChannelLabels.every((label) => typeof label === 'string' && label.length > 0))
     assert.equal(typeof device.transport, 'string')
     assert.equal(typeof device.monitoringSuitability, 'string')
     assert.ok(Array.isArray(device.sampleRateRanges))
     assert.equal(typeof device.bufferFrames.maximumFrames, 'number')
+  }
+  if (process.argv.includes('--inventory')) {
+    console.log(JSON.stringify({ input: devices, host: hostDevices }))
   }
   const monitor = addon.monitorStatus()
   assert.equal(monitor.active, false)
