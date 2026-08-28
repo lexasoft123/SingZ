@@ -18,7 +18,16 @@
  * when it is native. Written after a machine whose default input is a
  * 24-channel aggregate failed both halves while the app was working.
  *
- * Prereqs: `npm run build` done; the dev Electron binary has mac microphone
+ * Because that fork is decided by whichever binary sits in the vendor slot,
+ * the run reads the app's own provenance verdict for it, prints the line, and
+ * stops unless it POSITIVELY identifies this tree's core — a foreign one
+ * (error), one that cannot say what built it (warn), and one whose expected
+ * hash could not be computed here all fail the run, because none of them lets
+ * it claim it verified this tree. No core at all is reported and allowed:
+ * the Web Audio half is then the honest fork.
+ *
+ * Prereqs: `npm run build` done; `scripts/vendor-analyze.sh` run so the
+ * vendored core matches this tree; the dev Electron binary has mac microphone
  * permission (TCC) so getUserMedia can open.
  *
  * Env: E2E_OUT (screenshot + profile dir, default os.tmpdir()). Set
@@ -127,6 +136,79 @@ const launch = async () => {
   return app
 }
 
+/**
+ * WHICH singz-analyze is this run actually exercising?
+ *
+ * This driver forks on the core: with one that supports native capture the
+ * meter and training go through AudioInput, and with an older one they take
+ * the Web Audio fixture. So the binary in the vendor slot decides which half
+ * of this file runs — which makes its provenance a testing question, not just
+ * a correctness one. During the v0.19.0 cut a sibling worktree's core sat in
+ * the shared slot for hours and THIS driver exercised the live-input path
+ * that branch had changed; a green run said nothing about this tree.
+ *
+ * The app answers it itself now (src/main/analyze-provenance.ts) with one
+ * `analyze` line at its first resolveAnalyze(). That check is fired and not
+ * awaited, so this polls rather than reading once.
+ *
+ * A build with NO core at all is a legitimate configuration — the Web Audio
+ * half is exactly what it should run — so absence is reported, not failed.
+ * `melodyNativeAvailable()` is the authoritative answer to "is there one",
+ * and asking it also guarantees the resolve that emits the line.
+ */
+const coreProvenance = async (win) => {
+  const available = await win.evaluate(async () => {
+    const r = await window.singz.melodyNativeAvailable()
+    return r.ok && r.available
+  })
+  if (!available) {
+    console.log('core provenance: no singz-analyze in this build — Web Audio half by necessity')
+    return null
+  }
+  // The poll is a NODE loop, not waitForFunction: with an ASYNC page function
+  // waitForFunction does not poll at all — it calls it once and resolves with
+  // whatever that call returned, so `polling` and `timeout` are inert and a
+  // line that has not landed yet arrives here as null. Measured: the async
+  // predicate ran once and settled in 23 ms; the same predicate written
+  // synchronously ran nine times over 3.2 s. Plain `evaluate` DOES await an
+  // async page function, so the loop below is the shape that works. It
+  // matters because the line is not instant — the check spawns build-info and
+  // scripts/analyze-source-hash.sh, both racing the device inventory this
+  // driver is already waiting on.
+  //
+  // getLog() (IPC log:all) returns the LogEntry array itself. Do NOT reach for
+  // `.entries` on it — that is Array.prototype.entries, a function.
+  const readHits = () =>
+    win.evaluate(async () => {
+      const log = await window.singz.getLog()
+      return log.filter((e) => e.source === 'analyze' && /core singz-analyze/.test(e.line))
+    })
+  const deadline = Date.now() + 20000
+  let hits = await readHits()
+  while (hits.length === 0) {
+    if (Date.now() > deadline) {
+      throw new Error('no core-provenance line in the app log after 20s — the check that should emit it never ran')
+    }
+    await new Promise((r) => setTimeout(r, 400))
+    hits = await readHits()
+  }
+  if (hits.length !== 1) {
+    throw new Error(`expected one core-provenance line, got ${hits.length}: ${JSON.stringify(hits.map((h) => h.line))}`)
+  }
+  const [entry] = hits
+  console.log(`core provenance [${entry.level}]: ${entry.line}`)
+  // Only a POSITIVE identification passes. `error` is the foreign core; `warn`
+  // is a binary that cannot say what built it (a host-built one hand-copied
+  // into the slot); an `info` that says "no source tree to check it against"
+  // means the hash could not be computed here. None of those three let this
+  // run claim it verified THIS tree, which is the only thing the assertion is
+  // for — so all three stop it, and the line itself is the diagnosis.
+  if (!(entry.level === 'info' && /built from this tree/.test(entry.line))) {
+    throw new Error(`this run would not be verifying this tree's core: ${entry.line}`)
+  }
+  return entry
+}
+
 ;(async () => {
   const wav = join(OUT, 'e2e-tone.wav')
   makeWav(wav)
@@ -157,6 +239,9 @@ const launch = async () => {
   const nativeMode = nativeInventory.ok
   const inputPrefKey = nativeMode ? 'nativeInputUid' : 'inputId'
   console.log('microphone mode:', nativeMode ? 'native AudioInput' : 'Web Audio fallback')
+  // Which core chose that fork, and was it built from this tree — printed
+  // beside the mode so the run is self-documenting either way.
+  await coreProvenance(win)
   const inOpts = await win.$$eval('#settings-input option', (os) =>
     os.map((o) => ({ v: o.value, t: o.textContent ?? '' }))
   )
