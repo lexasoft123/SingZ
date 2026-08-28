@@ -24,7 +24,8 @@ constexpr uint64_t kGainNode = 3;
 constexpr uint64_t kChannelMapNode = 4;
 constexpr uint64_t kLimiterNode = 5;
 constexpr uint64_t kPostMeterNode = 6;
-constexpr uint64_t kOutputNode = 7;
+constexpr uint64_t kTeardownProbeNode = 7;
+constexpr uint64_t kOutputNode = 8;
 constexpr size_t kArenaBaseBytes = 2u * 1024u * 1024u;
 
 AudioMonitorResult failure(AudioMonitorError error, uint64_t generation,
@@ -102,12 +103,99 @@ struct PreparedMonitorTelemetry {
   uint32_t rejectedBlocks{0};
 };
 
+bool consumeTestFailure(uint32_t* remaining) noexcept {
+  if (remaining == nullptr || *remaining == 0) return false;
+  if (*remaining != std::numeric_limits<uint32_t>::max()) --*remaining;
+  return true;
+}
+
+// Test-only processor used to exercise deactivateCompiledGraph's real
+// non-transactional behavior. It is absent from production graphs. Its render
+// path is a bounded in-place-safe copy with no allocation, locking, or I/O.
+struct TeardownProbeState {
+  AudioMonitorTestHooks* hooks{nullptr};
+  uint32_t channels{0};
+  bool prepared{false};
+  bool active{false};
+  bool injectFailure{false};
+};
+
+zdsp::Status prepareTeardownProbe(void* opaque, const zdsp::PrepareSpec* spec,
+                                  const zdsp::PreparedStorage*) noexcept {
+  auto* state = static_cast<TeardownProbeState*>(opaque);
+  if (state == nullptr || spec == nullptr || state->prepared ||
+      !zdsp::succeeded(zdsp::validatePrepareSpec(*spec)) ||
+      spec->inputBusCount != 1 || spec->outputBusCount != 1 ||
+      spec->inputBuses[0].channelCount != state->channels ||
+      spec->outputBuses[0].channelCount != state->channels)
+    return {zdsp::StatusCode::InvalidArgument, 1};
+  state->prepared = true;
+  state->active = true;
+  return zdsp::okStatus();
+}
+
+void resetTeardownProbe(void*, zdsp::Discontinuity) noexcept {}
+
+void processTeardownProbe(void*, const zdsp::ProcessContext*,
+                          const zdsp::ConstAudioBusView* inputs,
+                          uint32_t inputCount,
+                          const zdsp::MutableAudioBusView* outputs,
+                          uint32_t outputCount) noexcept {
+  if (inputs == nullptr || outputs == nullptr || inputCount != 1 ||
+      outputCount != 1)
+    return;
+  const zdsp::ConstAudioBusView& input = inputs[0];
+  const zdsp::MutableAudioBusView& output = outputs[0];
+  if (input.channelCount != output.channelCount ||
+      input.frames.value != output.frames.value)
+    return;
+  for (uint32_t channel = 0; channel < output.channelCount; ++channel) {
+    if (input.channels[channel] == output.channels[channel]) continue;
+    for (uint32_t frame = 0; frame < output.frames.value; ++frame)
+      output.channels[channel][frame] = input.channels[channel][frame];
+  }
+}
+
+zdsp::LatencyFrames teardownProbeLatency(const void*) noexcept { return {0}; }
+zdsp::TailInfo teardownProbeTail(const void*) noexcept {
+  return {zdsp::TailKind::None, {0}};
+}
+
+zdsp::Status deactivateTeardownProbe(void* opaque) noexcept {
+  auto* state = static_cast<TeardownProbeState*>(opaque);
+  if (state == nullptr || !state->active)
+    return {zdsp::StatusCode::InvalidArgument, 1};
+  if (state->injectFailure && state->hooks != nullptr &&
+      consumeTestFailure(&state->hooks->partialGraphDeactivateFailures))
+    return {zdsp::StatusCode::Busy, 1};
+  state->active = false;
+  return zdsp::okStatus();
+}
+
+zdsp::Status destroyTeardownProbe(void* opaque) noexcept {
+  auto* state = static_cast<TeardownProbeState*>(opaque);
+  if (state == nullptr || state->active || !state->prepared)
+    return {zdsp::StatusCode::InvalidArgument, 1};
+  state->prepared = false;
+  return zdsp::okStatus();
+}
+
+uint32_t consumeTeardownProbeNonFinite(void*) noexcept { return 0; }
+
+constexpr zdsp::ProcessorVTable kTeardownProbeFunctions{
+    zdsp::kProcessorInterfaceVersion, zdsp::kProcessorVTableV2RequiredSize,
+    prepareTeardownProbe, resetTeardownProbe, processTeardownProbe,
+    teardownProbeLatency, teardownProbeTail, deactivateTeardownProbe,
+    destroyTeardownProbe, consumeTeardownProbeNonFinite};
+
 struct PreparedMonitorGraph {
   explicit PreparedMonitorGraph(const AudioMonitorConfig& config,
                                 AudioMonitorTestHooks* testHooks)
       : inputChannels(static_cast<uint32_t>(config.inputChannels.size())),
         outputChannels(static_cast<uint32_t>(config.outputChannels.size())),
-        maximumFrames(config.maximumFrames), testHooks(testHooks) {
+        maximumFrames(config.maximumFrames),
+        teardownProbe{testHooks, outputChannels, false, false, false},
+        testHooks(testHooks) {
     const uint64_t samples =
         static_cast<uint64_t>(inputChannels + outputChannels) * maximumFrames;
     const uint64_t variable = samples * sizeof(float) * 4u;
@@ -133,6 +221,7 @@ struct PreparedMonitorGraph {
   uint32_t inputChannels{0};
   uint32_t outputChannels{0};
   uint32_t maximumFrames{0};
+  TeardownProbeState teardownProbe{};
   bool runnerInitialized{false};
   bool telemetryLive{true};
   PreparedMonitorTelemetry frozenTelemetry{};
@@ -141,12 +230,6 @@ struct PreparedMonitorGraph {
   void observe(AudioMonitorLifecycleEvent event) noexcept {
     if (testHooks != nullptr && testHooks->observe != nullptr)
       testHooks->observe(testHooks->context, event);
-  }
-
-  static bool consumeFailure(uint32_t* remaining) noexcept {
-    if (remaining == nullptr || *remaining == 0) return false;
-    if (*remaining != std::numeric_limits<uint32_t>::max()) --*remaining;
-    return true;
   }
 
   zdsp::ProcessorHandle makeBuiltin(const zdsp::BuiltinNodeConfig& config,
@@ -226,7 +309,9 @@ struct PreparedMonitorGraph {
     gain = processors[1];
     postMeter = processors[4];
 
-    std::array<zdsp::GraphNodeDescription, 7> nodes{};
+    const bool includeTeardownProbe =
+        testHooks != nullptr && testHooks->partialGraphDeactivateFailures != 0;
+    std::array<zdsp::GraphNodeDescription, 8> nodes{};
     nodes[0] = {{kInputNode}, {0, kInputNode}, 1,
                 zdsp::GraphNodeRole::Input, zdsp::GraphNodeFlagNone,
                 0, 1, nullptr, &inputBus, {}, {}};
@@ -243,21 +328,34 @@ struct PreparedMonitorGraph {
           processorInputs[index], processorOutputs[index], processors[index],
           {durable[index], durableBytes[index], alignof(float)}};
     }
-    nodes[6] = {{kOutputNode}, {0, kOutputNode}, 1,
-                zdsp::GraphNodeRole::Output, zdsp::GraphNodeFlagNone,
-                1, 0, &outputBus, nullptr, {}, {}};
-    const std::array<zdsp::GraphConnection, 6> connections{{
-        {{kInputNode}, 0, {kPreMeterNode}, 0},
-        {{kPreMeterNode}, 0, {kGainNode}, 0},
-        {{kGainNode}, 0, {kChannelMapNode}, 0},
-        {{kChannelMapNode}, 0, {kLimiterNode}, 0},
-        {{kLimiterNode}, 0, {kPostMeterNode}, 0},
-        {{kPostMeterNode}, 0, {kOutputNode}, 0},
-    }};
+    const uint32_t outputIndex = includeTeardownProbe ? 7 : 6;
+    if (includeTeardownProbe) {
+      nodes[6] = {{kTeardownProbeNode}, {2, kTeardownProbeNode}, 1,
+                  zdsp::GraphNodeRole::Processor,
+                  zdsp::GraphNodeFlagMayProcessInPlace, 1, 1,
+                  &outputBus, &outputBus,
+                  {&teardownProbe, &kTeardownProbeFunctions},
+                  {nullptr, 0, 1}};
+    }
+    nodes[outputIndex] = {{kOutputNode}, {0, kOutputNode}, 1,
+                          zdsp::GraphNodeRole::Output,
+                          zdsp::GraphNodeFlagNone,
+                          1, 0, &outputBus, nullptr, {}, {}};
+    std::array<zdsp::GraphConnection, 7> connections{};
+    connections[0] = {{kInputNode}, 0, {kPreMeterNode}, 0};
+    connections[1] = {{kPreMeterNode}, 0, {kGainNode}, 0};
+    connections[2] = {{kGainNode}, 0, {kChannelMapNode}, 0};
+    connections[3] = {{kChannelMapNode}, 0, {kLimiterNode}, 0};
+    connections[4] = {{kLimiterNode}, 0, {kPostMeterNode}, 0};
+    connections[5] = {{kPostMeterNode}, 0,
+                      {includeTeardownProbe ? kTeardownProbeNode : kOutputNode},
+                      0};
+    if (includeTeardownProbe)
+      connections[6] = {{kTeardownProbeNode}, 0, {kOutputNode}, 0};
     const zdsp::GraphDescription description{
         zdsp::kGraphFormatVersion, {config.sampleRate}, {maximumFrames},
-        nodes.data(), static_cast<uint32_t>(nodes.size()), connections.data(),
-        static_cast<uint32_t>(connections.size())};
+        nodes.data(), includeTeardownProbe ? 8u : 7u, connections.data(),
+        includeTeardownProbe ? 7u : 6u};
     zdsp::GraphCompileResult compiled{};
     const zdsp::Status compiledStatus =
         zdsp::compileGraph(description, &arena, &compiled, compileError);
@@ -341,13 +439,12 @@ struct PreparedMonitorGraph {
     observe(AudioMonitorLifecycleEvent::MeterTelemetryFrozen);
   }
 
-  bool shutdown() noexcept {
-    const zdsp::ProcessorHandle partialFailureMeter = postMeter;
+  bool shutdown(bool ignoreTestFailures = false) noexcept {
     freezeTelemetry();
     if (runnerInitialized) {
       observe(AudioMonitorLifecycleEvent::RunnerShutdownAttempt);
-      if (testHooks != nullptr &&
-          consumeFailure(&testHooks->runnerShutdownFailures))
+      if (!ignoreTestFailures && testHooks != nullptr &&
+          consumeTestFailure(&testHooks->runnerShutdownFailures))
         return false;
       zdsp::PublishedGraphSnapshot* snapshots[2]{};
       uint32_t count = 0;
@@ -360,17 +457,10 @@ struct PreparedMonitorGraph {
     }
     if (graph != nullptr) {
       observe(AudioMonitorLifecycleEvent::GraphDeactivateAttempt);
-      if (testHooks != nullptr &&
-          consumeFailure(&testHooks->graphDeactivateFailures))
+      if (!ignoreTestFailures && testHooks != nullptr &&
+          consumeTestFailure(&testHooks->graphDeactivateFailures))
         return false;
-      if (testHooks != nullptr && partialFailureMeter.state != nullptr &&
-          consumeFailure(&testHooks->partialGraphDeactivateFailures)) {
-        // Test-only fault that makes the following graph walk genuinely
-        // partial: this meter's graph-owned handle still says Active, while
-        // its state is already deactivated. The walk fails on this node but
-        // continues destroying the remaining processors.
-        (void)zdsp::deactivateProcessor(partialFailureMeter);
-      }
+      teardownProbe.injectFailure = !ignoreTestFailures;
       const zdsp::Status deactivated = zdsp::deactivateCompiledGraph(graph);
       if (!zdsp::succeeded(deactivated)) return false;
       graph = nullptr;
@@ -406,10 +496,12 @@ struct AudioMonitorSession::Impl {
   ~Impl() {
     if (!teardown() && prepared != nullptr) {
       prepared->observe(AudioMonitorLifecycleEvent::PreparedQuarantined);
-      // The graph still owns processor state in this arena. Leaking this bounded
-      // session object at process teardown is safer than releasing live DSP
-      // storage; normal end() retains it and permits an explicit retry.
-      (void)prepared.release();
+      // Product construction has no fault hooks. Tests may deliberately hold
+      // retryable failures forever, so terminal destruction performs one final
+      // retry with injection disabled. If a genuine runner/graph failure still
+      // refuses shutdown, retain this one bounded graph for process lifetime:
+      // abnormal shutdown would be worse, and freeing its arena would be a UAF.
+      if (!teardown(true) && prepared != nullptr) (void)prepared.release();
     }
   }
 
@@ -426,7 +518,7 @@ struct AudioMonitorSession::Impl {
   bool usesPlatformBackend{false};
   AudioMonitorTestHooks* testHooks{nullptr};
 
-  bool teardown() noexcept {
+  bool teardown(bool ignoreTestFailures = false) noexcept {
     if (prepared != nullptr)
       prepared->observe(AudioMonitorLifecycleEvent::HostStopBegin);
     host.stop();
@@ -434,7 +526,7 @@ struct AudioMonitorSession::Impl {
       prepared->observe(AudioMonitorLifecycleEvent::HostStopComplete);
     lastHost = host.status();
     if (prepared != nullptr) {
-      const bool shutDown = prepared->shutdown();
+      const bool shutDown = prepared->shutdown(ignoreTestFailures);
       lastTelemetry = prepared->frozenTelemetry;
       if (!shutDown) {
         enabled = false;

@@ -89,9 +89,9 @@ enum class AudioMonitorLifecycleEvent : uint32_t {
 struct AudioMonitorTestHooks {
   uint32_t runnerShutdownFailures{0};
   uint32_t graphDeactivateFailures{0};
-  // Produces a real non-transactional graph teardown: one processor is
-  // deactivated before deactivateCompiledGraph walks the graph, so that walk
-  // fails for that node after destroying other processors.
+  // Produces a real, retryable non-transactional graph teardown: a test-only
+  // pass-through processor fails deactivation while the graph walk destroys
+  // other processors, then succeeds on a later retry.
   uint32_t partialGraphDeactivateFailures{0};
   void (*observe)(void*, AudioMonitorLifecycleEvent) noexcept{nullptr};
   void* context{nullptr};

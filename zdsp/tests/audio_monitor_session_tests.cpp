@@ -443,8 +443,11 @@ void retryableTeardownAndFallbackOrder() {
   auto quarantined = std::find(
       lifetime.events.begin(), lifetime.events.begin() + lifetime.eventCount,
       singz::AudioMonitorLifecycleEvent::PreparedQuarantined);
-  CHECK(stopped < quarantined && quarantined !=
-        lifetime.events.begin() + lifetime.eventCount);
+  auto terminalReleased = std::find(
+      lifetime.events.begin(), lifetime.events.begin() + lifetime.eventCount,
+      singz::AudioMonitorLifecycleEvent::PreparedReleased);
+  CHECK(stopped < quarantined && quarantined < terminalReleased &&
+        terminalReleased != lifetime.events.begin() + lifetime.eventCount);
   CHECK(lifetime.destroys == 1 && lifetime.callbacksDuringStop == 1);
 }
 
@@ -508,7 +511,48 @@ void partialDeactivationFreezesTelemetry() {
   const auto quarantined = std::find(
       lifetime.events.begin(), lifetime.events.begin() + lifetime.eventCount,
       singz::AudioMonitorLifecycleEvent::PreparedQuarantined);
-  CHECK(quarantined != lifetime.events.begin() + lifetime.eventCount);
+  const auto released = std::find(
+      lifetime.events.begin(), lifetime.events.begin() + lifetime.eventCount,
+      singz::AudioMonitorLifecycleEvent::PreparedReleased);
+  CHECK(quarantined == lifetime.events.begin() + lifetime.eventCount &&
+        released != lifetime.events.begin() + lifetime.eventCount);
+  CHECK(lifetime.destroys == 1);
+}
+
+void terminalPartialDeactivationRecovery() {
+  LifetimeTrace lifetime;
+  singz::AudioMonitorTestHooks hooks;
+  hooks.partialGraphDeactivateFailures =
+      std::numeric_limits<uint32_t>::max();
+  hooks.observe = recordLifecycle;
+  hooks.context = &lifetime;
+  {
+    auto backend = std::make_unique<ManualAudioHostBackend>(&lifetime);
+    singz::AudioMonitorSession session(std::move(backend), &hooks);
+    singz::AudioMonitorConfig config;
+    config.inputDeviceUid = "manual:duplex";
+    config.outputDeviceUid = "manual:duplex";
+    config.inputChannels = {2};
+    config.outputChannels = {0, 1};
+    config.sampleRate = 48000.0;
+    config.bufferFrames = 128;
+    config.maximumFrames = 256;
+    CHECK(session.begin(config, 91).ok);
+    // The explicit end and the destructor's ordinary retry both leave the
+    // test probe active after the graph walk has destroyed the other nodes.
+    CHECK(session.end(91).error == singz::AudioMonitorError::GraphFailure);
+  }
+  const auto quarantined = std::find(
+      lifetime.events.begin(), lifetime.events.begin() + lifetime.eventCount,
+      singz::AudioMonitorLifecycleEvent::PreparedQuarantined);
+  const auto released = std::find(
+      lifetime.events.begin(), lifetime.events.begin() + lifetime.eventCount,
+      singz::AudioMonitorLifecycleEvent::PreparedReleased);
+  // Terminal teardown disables only synthetic injection, completes the live
+  // probe lifecycle, and releases the arena before the safe production
+  // process-lifetime fallback could be needed.
+  CHECK(quarantined < released &&
+        released != lifetime.events.begin() + lifetime.eventCount);
   CHECK(lifetime.destroys == 1);
 }
 
@@ -563,6 +607,7 @@ int main() {
   rejectsProviderTypedHighLatencyRoutes();
   retryableTeardownAndFallbackOrder();
   partialDeactivationFreezesTelemetry();
+  terminalPartialDeactivationRecovery();
   retainedFailedBeginKeepsGlobalLease();
   return 0;
 }
