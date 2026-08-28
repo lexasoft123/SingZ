@@ -62,9 +62,11 @@ UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
 the E2E Windows workflow, which also runs `npm test`) and the mac drivers
-in `tests/e2e/mac/` (nine of them: align, wizard/consent, audio settings,
-bar editing, and the analysis-rule drivers — the two stem-rate ones, the two
-song-switch races, and stamp-upgrade; the `e2e-verifier` agent in
+in `tests/e2e/mac/` (ten of them: align, wizard/consent, audio settings,
+bar editing — TWO of those, because dragging a line and pressing Re-detect
+are different code paths and only the drag was covered — and the
+analysis-rule drivers: the two stem-rate ones, the two song-switch races,
+and stamp-upgrade; the `e2e-verifier` agent in
 `.claude/agents/` holds the roster of record, and a new driver is not
 finished until it is listed there — launch one instance per platform in
 parallel for cross-platform verification) — vitest unit tests in
@@ -155,11 +157,15 @@ directions. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
-`offline-cache.cjs`, `custom-track.cjs`, `beats-native-ios.cjs`,
-`song-sheet-beat.cjs`): CDP over
+`ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
+`beats-native-ios.cjs`, `song-sheet-beat.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
-after engine or loading changes. `song-sheet-beat.cjs` is the one that watches
+after engine or loading changes. `loop-region` and `ab-repeat` are a PAIR
+and the split is the lesson: the first drives `engine.setRegion`, which was
+never the part in doubt, and the second drives the button's own
+handler — the three-state cycle and the marks the scrub band is drawn from shipped with their test
+hooks exported and nothing referencing either. `song-sheet-beat.cjs` is the one that watches
 a SCREEN rather than the engine: it seeds two phone-library projects (a
 hand-made grid, and a song with nothing detected), opens the Song sheet and
 reads the Beat row through somebody else's analysis — the rule in
@@ -434,6 +440,27 @@ was driven; the gotchas that follow from it are below.
   install`. Adding a `test_spec` to the FolderAccess podspec is what triggered
   it here — and it generates no test target anyway, which is why the Swift
   conformance runner is plain swiftc.
+- **Nothing machine-specific may reach `mobile/ios/Podfile.lock`, and one
+  thing kept doing it** — a pod's SPEC CHECKSUM is the SHA1 of the evaluated
+  podspec CocoaPods writes to `Pods/Local Podspecs/<name>.podspec.json`, and
+  hermes-engine's carries `HERMES_CLI_PATH`, an ABSOLUTE path to hermesc
+  under this checkout's `node_modules`. It was the only one of ~85 sandbox
+  podspecs containing a path at all, so an unchanged hermes fingerprinted
+  differently in every worktree and the line was committed and reverted over
+  and over (49f57ed). The Podfile's `singz_relativize_hermes_cli_path`
+  rewrites it to `$(PODS_ROOT)/../../node_modules/…`. Three things about it
+  are load-bearing: the podspec JSON is edited by TEXT substitution, never
+  re-serialized (the checksum is over bytes, so CocoaPods' own formatting has
+  to survive); the memoized `@checksum` on the spec objects is cleared,
+  because `Specification#checksum` is `@checksum ||=` and the lockfile is
+  generated from `analysis_result.specifications` afterwards; and the hook
+  runs AFTER `react_native_post_install`, measured — RN's hook regenerates
+  the aggregate xcconfigs from the in-memory spec, so running first left the
+  app target compiling against the absolute path again. `HERMES_CLI_PATH` is
+  a `user_target_xcconfig`, so it is the APP target's setting and Xcode
+  expands `$(PODS_ROOT)` before the bundling script reads it. **A Debug
+  simulator build proves nothing here** — react-native-xcode.sh exits before
+  hermesc is touched; validate with `FORCE_BUNDLING=1` or a Release build.
 - **Android app C++ (new-arch)**: setting `externalNativeBuild` REPLACES the
   RN gradle plugin's default CMake — `include(${REACT_ANDROID_DIR}/cmake-utils/
   ReactNative-application.cmake)` first or `libappmodules.so` silently vanishes
