@@ -1688,8 +1688,8 @@ button.chip-status:hover {
 /* ---------- settings ---------- */
 
 .modal-card.settings-card {
-  width: min(680px, calc(100vw - 60px));
-  max-height: calc(100vh - 120px);
+  width: min(960px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
 }
@@ -1986,6 +1986,17 @@ button.chip-status:hover {
   font-size: 10px;
 }
 
+.monitor-routing-help {
+  margin: 10px 0 0 !important;
+  padding: 8px 10px;
+  color: var(--dim) !important;
+  background: color-mix(in srgb, var(--accent-soft) 52%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 64%, var(--line));
+  border-radius: 0 5px 5px 0;
+  font-size: 10px !important;
+  line-height: 1.45 !important;
+}
+
 /* The graph is a studio patch-bay, not a generic flowchart: real modules,
    physical lane labels, and scalar native telemetry in signal order. */
 .dsp-graph {
@@ -2082,7 +2093,7 @@ button.chip-status:hover {
 
 .dsp-graph-viewport {
   overflow-x: auto;
-  padding: 10px;
+  padding: 12px;
   scrollbar-color: var(--line-strong) transparent;
   scrollbar-width: thin;
 }
@@ -2094,10 +2105,10 @@ button.chip-status:hover {
 
 .dsp-graph-flow {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(84px, 1fr));
   align-items: stretch;
-  gap: 12px;
-  min-width: 0;
+  gap: 10px;
+  min-width: 648px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -2107,9 +2118,9 @@ button.chip-status:hover {
   position: relative;
   display: flex;
   min-width: 0;
-  min-height: 94px;
+  min-height: 108px;
   flex-direction: column;
-  padding: 8px 7px 7px;
+  padding: 10px 8px 9px;
   overflow: visible;
   background: color-mix(in srgb, var(--panel) 86%, transparent);
   border: 1px solid var(--line);
@@ -2123,7 +2134,7 @@ button.chip-status:hover {
   z-index: 0;
   top: 50%;
   left: calc(100% + 1px);
-  width: 12px;
+  width: 10px;
   height: 1px;
   background: var(--line-strong);
   box-shadow: 7px 0 0 -5px var(--faint);
@@ -2145,7 +2156,7 @@ button.chip-status:hover {
 
 .dsp-graph-node-kind {
   color: var(--faint);
-  font: 6px/1 var(--font-mono);
+  font: 7px/1 var(--font-mono);
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -2154,8 +2165,8 @@ button.chip-status:hover {
   margin-top: 5px;
   overflow: hidden;
   color: var(--dim);
-  font-size: 9px;
-  line-height: 1.1;
+  font-size: 10px;
+  line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2169,7 +2180,7 @@ button.chip-status:hover {
   margin-top: 5px;
   overflow: hidden;
   color: var(--text);
-  font: 700 9px/1.1 var(--font-mono);
+  font: 700 10px/1.15 var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2180,9 +2191,10 @@ button.chip-status:hover {
   padding-top: 7px;
   overflow: hidden;
   color: var(--faint);
-  font: 6px/1.3 var(--font-mono);
+  font: 7px/1.3 var(--font-mono);
+  overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
 }
 
 .dsp-graph-node-meter {
@@ -2208,7 +2220,7 @@ button.chip-status:hover {
   top: 7px;
   left: 0;
   color: var(--faint);
-  font: 6px/1 var(--font-mono);
+  font: 7px/1 var(--font-mono);
   white-space: nowrap;
 }
 
@@ -2331,7 +2343,7 @@ button.chip-status:hover {
 
 @media (max-width: 700px) {
   .dsp-graph-flow {
-    min-width: 610px;
+    min-width: 648px;
   }
 }
 

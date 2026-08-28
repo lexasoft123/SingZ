@@ -91,6 +91,53 @@ export function defaultMonitorOutputChannels(device: DesktopAudioHostDevice | un
   return device.outputChannels > 1 ? [0, 1] : [0]
 }
 
+const joinedChannelNumbers = (channels: readonly number[]): string => {
+  const numbers = channels.map((channel) => channel + 1)
+  if (numbers.length < 2) return String(numbers[0] ?? '')
+  return `${numbers.slice(0, -1).join(', ')} and ${numbers.at(-1)}`
+}
+
+/** CoreAudio exposes playback lanes. A multichannel interface may route those
+ * lanes to physical sockets in its own mixer, which the OS cannot describe. */
+export function monitorPlaybackRouteHelp(
+  output: DesktopAudioHostDevice | undefined,
+  channels: readonly number[]
+): string | null {
+  if (!output || output.outputChannels <= 2 || channels.length === 0) return null
+  const channelNumbers = joinedChannelNumbers(channels)
+  if (/zen\s+quadro/i.test(output.label)) {
+    return `Zen Quadro: in Antelope Control Panel → Monitors & Headphones, assign USB 1 PLAY ${channelNumbers} to the Monitor/HP1 or Headphones 2 mixer you use.`
+  }
+  return `These are playback lanes, not physical jack names. In your interface mixer, route OUT ${channelNumbers} to the headphone bus you use.`
+}
+
+export function monitorSignalCopy(
+  active: boolean,
+  preDb: number,
+  postDb: number,
+  inputChannel: string,
+  outputChannels: readonly string[]
+): { copy: string; warn: boolean } | null {
+  if (!active) return null
+  const db = (value: number): string => value <= -72 ? '−∞' : String(Math.round(value))
+  if (preDb <= -66) {
+    return {
+      copy: `Monitoring is running, but ${inputChannel} is near silence (${db(preDb)} dBFS). Check the input channel and interface preamp, then sing into the microphone.`,
+      warn: true
+    }
+  }
+  if (postDb <= -66) {
+    return {
+      copy: `The microphone reaches the DSP graph, but its output is near silence (${db(postDb)} dBFS). Raise Monitor gain.`,
+      warn: true
+    }
+  }
+  return {
+    copy: `DSP audio is live at ${db(postDb)} dBFS on ${outputChannels.join(' and ')}. If the headphones are silent, route those playback lanes to their headphone bus in the interface mixer.`,
+    warn: false
+  }
+}
+
 export function monitorRouteCopy(
   inventory: DesktopAudioHostInventoryResult | null,
   input: DesktopAudioHostDevice | undefined,
@@ -113,7 +160,7 @@ export function monitorRouteCopy(
       copy: 'Choose a native monitoring input. SingZ will not guess from a device name.'
     }
   }
-  if (!output) return { ready: false, copy: 'Choose the physical headphone output.' }
+  if (!output) return { ready: false, copy: 'Choose a native playback device.' }
   if (input.uid !== output.uid || input.direction !== 'duplex' || output.direction !== 'duplex') {
     return {
       ready: false,
@@ -462,7 +509,9 @@ export default function SettingsModal({
   const monitorOutput = hostOutputs.find((device) => device.uid === effectiveMonitorOutputUid)
   const selectedOutputChannels = audio.nativeMonitorOutputChannels ??
     defaultMonitorOutputChannels(monitorOutput)
-  const monitorGainDb = audio.monitorGainDb ?? -12
+  // First-run monitoring stays below unity, but -12 dB was quiet enough to be
+  // mistaken for a broken route on real headphones.
+  const monitorGainDb = audio.monitorGainDb ?? -6
   const routeVerdict = monitorRouteCopy(hostInventory, monitorInput, monitorOutput)
   const previewOwnsExactInput = (preview.status === 'live' || preview.status === 'no-signal') &&
     preview.device?.id === monitorInput?.uid && preview.device.channelIndex === requestedChannel &&
@@ -470,6 +519,11 @@ export default function SettingsModal({
   const nativeConfig = monitorInput && monitorOutput
     ? monitorConfig(monitorInput, monitorOutput, requestedChannel, selectedOutputChannels)
     : null
+  const selectedOutputChannelLabels = monitorOutput
+    ? selectedOutputChannels.map((channel) =>
+        audioChannelLabel(monitorOutput.outputChannelLabels, channel, 'output'))
+    : []
+  const playbackRouteHelp = monitorPlaybackRouteHelp(monitorOutput, selectedOutputChannels)
   const monitorBusy = monitor.phase === 'preparing' || monitor.phase === 'starting' ||
     monitor.phase === 'stopping'
   const monitorActive = monitor.phase === 'active'
@@ -484,15 +538,25 @@ export default function SettingsModal({
     monitorActive,
     hasNativeOwnership: monitorCoordinator.current?.hasNativeOwnership ?? false
   })
+  const nativePreDb = linearToDbfs(monitor.status?.pre.rms ?? 0)
+  const nativePostDb = linearToDbfs(monitor.status?.post.rms ?? 0)
+  const signalVerdict = monitorSignalCopy(
+    monitorActive,
+    nativePreDb,
+    nativePostDb,
+    monitorInput
+      ? audioChannelLabel(monitorInput.inputChannelLabels, requestedChannel, 'input')
+      : `IN ${requestedChannel + 1}`,
+    selectedOutputChannelLabels
+  )
   const monitorRouteStatus = !routeVerdict.ready
     ? routeVerdict.copy
     : !nativeConfig
       ? 'Choose physical input and output channels that are available on this device.'
       : !previewOwnsExactInput
         ? 'The microphone preview must confirm this exact native device and channel before monitoring can start.'
-        : routeVerdict.copy
-  const nativePreDb = linearToDbfs(monitor.status?.pre.rms ?? 0)
-  const nativePostDb = linearToDbfs(monitor.status?.post.rms ?? 0)
+        : signalVerdict?.copy ?? routeVerdict.copy
+  const monitorRouteWarn = !routeVerdict.ready || signalVerdict?.warn === true
 
   const afterMonitorStops = (apply: () => void): void => {
     if (!monitorCoordinator.current?.hasNativeOwnership) {
@@ -661,7 +725,7 @@ export default function SettingsModal({
             )}
 
             <div className="monitor-field">
-              <label className="settings-label" htmlFor="monitor-output">Physical headphone output</label>
+              <label className="settings-label" htmlFor="monitor-output">Audio interface playback</label>
               <select
                 id="monitor-output"
                 className="settings-select"
@@ -669,7 +733,7 @@ export default function SettingsModal({
                 onChange={(event) => void changeMonitorOutput(event.target.value)}
                 disabled={monitorBusy || monitorActive}
               >
-                <option value="">Choose native output…</option>
+                <option value="">Choose playback device…</option>
                 {hostOutputs.map((device) => (
                   <option key={device.uid} value={device.uid}>
                     {device.label} · {device.outputChannels} out · {device.transport}
@@ -689,7 +753,7 @@ export default function SettingsModal({
                 </div>
                 {monitorOutput && selectedOutputChannels.map((selected, slot) => (
                   <label key={slot} htmlFor={`monitor-output-${slot}`}>
-                    <span>{selectedOutputChannels.length > 1 ? (slot === 0 ? 'Headphones L' : 'Headphones R') : 'Headphones'}</span>
+                    <span>{selectedOutputChannels.length > 1 ? (slot === 0 ? 'Playback L' : 'Playback R') : 'Playback'}</span>
                     <select
                       id={`monitor-output-${slot}`}
                       className="settings-select channel-select"
@@ -712,6 +776,8 @@ export default function SettingsModal({
               </div>
             )}
 
+            {playbackRouteHelp && <p className="monitor-routing-help">{playbackRouteHelp}</p>}
+
             <DspGraphVisualization
               phase={monitor.phase}
               routeReady={routeVerdict.ready && Boolean(nativeConfig)}
@@ -722,10 +788,7 @@ export default function SettingsModal({
                 : undefined}
               outputLabel={monitorOutput?.label}
               outputChannels={monitorOutput ? selectedOutputChannels : []}
-              outputChannelLabels={monitorOutput
-                ? selectedOutputChannels.map((channel) =>
-                    audioChannelLabel(monitorOutput.outputChannelLabels, channel, 'output'))
-                : []}
+              outputChannelLabels={selectedOutputChannelLabels}
               gainDb={monitorGainDb}
               preDb={nativePreDb}
               postDb={nativePostDb}
@@ -749,7 +812,7 @@ export default function SettingsModal({
               <output>{monitorGainDb} dB</output>
             </label>
 
-            <p id="monitor-route-status" className={`monitor-route-status${routeVerdict.ready ? '' : ' warn'}`}>{monitorRouteStatus}</p>
+            <p id="monitor-route-status" className={`monitor-route-status${monitorRouteWarn ? ' warn' : ''}`}>{monitorRouteStatus}</p>
             <label className="monitor-headphones-check">
               <input
                 type="checkbox"
@@ -757,7 +820,7 @@ export default function SettingsModal({
                 onChange={(event) => setHeadphonesConfirmed(event.target.checked)}
                 disabled={monitorBusy || monitorActive || !routeVerdict.ready}
               />
-              <span>Wired headphones are connected</span>
+              <span>Wired headphones are connected to this device</span>
             </label>
 
             <div className="monitor-actions">

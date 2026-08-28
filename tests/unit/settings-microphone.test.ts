@@ -8,7 +8,9 @@ import SettingsModal, {
   defaultMonitorOutputChannels,
   inputChannelOptions,
   monitorConfig,
+  monitorPlaybackRouteHelp,
   monitorRouteCopy,
+  monitorSignalCopy,
   monitorStartReady
 } from '../../src/renderer/src/components/SettingsModal'
 import type { DesktopAudioHostDevice, DesktopAudioHostInventoryResult } from '../../src/shared/types'
@@ -86,7 +88,8 @@ describe('settings microphone input strip', () => {
     expect(html).toContain('Native monitor chain')
     expect(html).toContain('Runtime graph')
     expect(html).toContain('Monitoring is off.')
-    expect(html).toContain('Wired headphones are connected')
+    expect(html).toContain('Wired headphones are connected to this device')
+    expect(html).toContain('value="-6"')
     expect(html).not.toContain('checked=""')
     expect(html).toContain('disabled=""')
   })
@@ -201,6 +204,31 @@ describe('native monitoring route policy', () => {
     })
     expect(monitorConfig(device, device, 4, [0, 1])).toBeNull()
     expect(monitorConfig(device, device, 2, [1, 1])).toBeNull()
+  })
+
+  it('explains the interface-owned playback-to-headphone route', () => {
+    expect(monitorPlaybackRouteHelp(hostDevice({ outputChannels: 2 }), [0, 1])).toBeNull()
+    expect(monitorPlaybackRouteHelp(hostDevice(), [0, 1])).toContain('playback lanes, not physical jack names')
+    expect(monitorPlaybackRouteHelp(
+      hostDevice({ label: 'Zen Quadro SC Playback', outputChannels: 16 }),
+      [0, 1]
+    )).toBe('Zen Quadro: in Antelope Control Panel → Monitors & Headphones, assign USB 1 PLAY 1 and 2 to the Monitor/HP1 or Headphones 2 mixer you use.')
+  })
+
+  it('distinguishes silent input, muted processing and live DSP output', () => {
+    expect(monitorSignalCopy(false, -72, -72, 'IN 3', ['OUT 1', 'OUT 2'])).toBeNull()
+    expect(monitorSignalCopy(true, -72, -72, 'IN 3', ['OUT 1', 'OUT 2'])).toMatchObject({
+      warn: true,
+      copy: expect.stringContaining('IN 3 is near silence')
+    })
+    expect(monitorSignalCopy(true, -24, -72, 'IN 3', ['OUT 1', 'OUT 2'])).toMatchObject({
+      warn: true,
+      copy: expect.stringContaining('output is near silence')
+    })
+    expect(monitorSignalCopy(true, -24, -36, 'IN 3', ['OUT 1', 'OUT 2'])).toEqual({
+      warn: false,
+      copy: 'DSP audio is live at -36 dBFS on OUT 1 and OUT 2. If the headphones are silent, route those playback lanes to their headphone bus in the interface mixer.'
+    })
   })
 
   it('names independent latency components and host health without claiming round trip', () => {
