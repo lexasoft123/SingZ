@@ -1971,7 +1971,7 @@ Mixed WAV/FLAC folders are legal on both sides and always were — the desktop's
 `Record<string, 'flac' | 'wav'>` — so an interrupted upgrade is a state the
 readers already handle rather than a corruption to guard against.
 
-### Numbers: three measured on 2026-08-21, two still owed
+### Numbers: four measured on 2026-08-21, two still owed
 
 Measured, on the POCO's own Panzerkampf stems (5.3-minute song):
 
@@ -1983,11 +1983,67 @@ Measured, on the POCO's own Panzerkampf stems (5.3-minute song):
 - **The vendored decoder at 1.28 s for all six stems on the M2** — the number
   that bounds slice 2's benefit from below on the phone only after scaling,
   so treat it as evidence the decode is cheap, not as a phone figure.
+- **What a WHOLE analysis costs, now that the Song sheet quotes it at the
+  singer.** The record held only the BEAT leg (25.8 s WAV / 28.7 s FLAC), and
+  the in-app hint had been reading that leg as the total — which is how it
+  came to promise the singer half a minute. The missing two stages were
+  measured through the same core, on the same song, with the phone's own aux:
+  `scripts/build-analyze-host.sh`, then `singz-analyze melody|key|beats` over
+  Panzerkampf's own FLAC stems on the M2, `beats` carrying the 65 line starts
+  and 353 word windows out of that project's lyrics.json, five passes each,
+  **taking the MINIMUM of each row** because this Mac is never idle (load
+  average 6-19 throughout) and contention only ever adds:
 
-Still owed, before any copy quotes a number at the singer:
+  | | melody | key | beats (+ aux) |
+  |---|---|---|---|
+  | M2, min of 5 | **1.03 s** | **1.85 s** | **3.48 s** |
+  | spread | 1.03-1.09 | 1.85-1.91 | 3.48-3.67 |
+
+  Read no phone figure off those — the phone's leg was measured on a DEBUG
+  app through JS, these are bare C++. The RATIO is what was missing, and it
+  is the thing worth writing down: **the key plus the melody come to 80-85%
+  of the beat's own time again**, not a rounding error on it. So the POCO's
+  whole run is its measured leg times ~1.8: **~47 s on WAV, ~53 s on FLAC**
+  for this song. A first analysis is the WAV one — a phone-split song is born
+  WAV and compacts only after the detectors have run.
+  Cross-check from other hardware: the user's real iPhone measured its native
+  key at 9.5 s and its melody at 2.7 s for a 5:02 song (above), 12.2 s of a
+  run whose beat leg on that hardware is unmeasured but far below the POCO's,
+  so the fleet's fast end is roughly half the POCO's.
+  **State it to the singer as a RATE, never as a bound.** Every stage is
+  frame work, so the cost is linear in song length, and "under a minute" —
+  which is what this entry first concluded — is a bound calibrated on one
+  5.3-minute song: it crosses sixty seconds at ~6.1 minutes on FLAC and ~6.7
+  on WAV, and this library has several songs past that. Per minute of song
+  the POCO is **~8.9 s/min WAV, ~9.9 s/min FLAC**, and the lattice adds
+  **6.2 s/min** — so the sheet says about ten seconds a minute, about fifteen
+  with the lattice, which stays true at any length and errs slow for the
+  iPhone end of the fleet, the safe direction for a wait.
+  An earlier pass of this measurement got 5.47 s for the beat row and put the
+  ratio at 45-85%; that row was a cold first run under load, and review's own
+  idle re-measurement (3.40-3.51 s bare, 3.94 s with aux) is what caught it.
+  Two lessons, both already in this file and both re-learned anyway: take the
+  minimum, not the spread, when the denominator can only be inflated; and
+  **do not pair 28.7 s with 33.1 s** as though they were one run — the FLAC
+  leg is Phase 5's harness and the lattice figure is the WAV end-to-end run
+  whose own leg was 26.3 s, exactly the trap recorded above at "two
+  measurements from different harnesses look like a pair". The lattice's cost
+  is therefore carried to the singer as its own rate (ten seconds a minute
+  becoming fifteen) rather than compounded into a single figure that would
+  rest on one estimate stacked on another.
+  Note what all this makes of v0.17.0's release notes: "about half a minute"
+  is the beat leg quoted as the total, the same slip the hint had. It is
+  published, so it belongs in the next release's notes as a correction rather
+  than as an edit to history.
+
+Still owed — no longer gating copy, which the entry above has now measured
+end to end, but owed to the SLICE, whose benefit is still stated in a ratio
+nobody has taken on the target:
 
 - **The in-core decode time ON THE PHONE** (slice 2's actual deliverable
-  number; the M2 figure x some unknown factor).
+  number; the M2 figure x some unknown factor). The whole-run entry above
+  does not need it — it measures the stages, decode included, rather than
+  decomposing them.
 - ~~What FLAC adds to a plain song OPEN for playback~~ — asked and answered,
   though not the way it was planned, and the episode is worth its space
   because it burned half a day and produced two new driving traps.

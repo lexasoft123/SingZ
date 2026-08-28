@@ -1,3 +1,103 @@
+require 'json'
+require 'pathname'
+
+# The one absolute path in the whole sandbox, and why the lockfile used to
+# churn in every checkout.
+#
+# `hermes-engine`'s podspec resolves hermesc through node and bakes the
+# result into a `user_target_xcconfig`, so the evaluated podspec CocoaPods
+# writes to `Pods/Local Podspecs/hermes-engine.podspec.json` carries
+# "/Users/<you>/<checkout>/mobile/node_modules/hermes-compiler/…". That file
+# IS the spec checksum — `Specification#checksum` is the SHA1 of the file the
+# spec was defined in — so an unchanged hermes version fingerprints
+# differently on every machine and in every worktree, and the hermes-engine
+# line in Podfile.lock has been committed and reverted over and over (see
+# 49f57ed). Of ~85 podspec JSONs in the sandbox it is the only one containing
+# a path at all.
+#
+# Rewriting it to a `$(PODS_ROOT)`-relative form makes the file identical
+# everywhere. Three things have to happen together, and the ordering inside
+# CocoaPods 1.17 is what makes a post_install hook the place to do it:
+#
+#   1. the sandbox JSON itself, by TEXT substitution rather than by
+#      re-serializing — the checksum is over bytes, so CocoaPods' own
+#      formatting must survive untouched
+#   2. the memoized `@checksum` on the spec objects the lockfile is generated
+#      from. `Specification#checksum` is `@checksum ||=`, and rewriting the
+#      file after something has already asked for it would change nothing
+#   3. the generated xcconfigs. `HERMES_CLI_PATH` is a *user*_target_xcconfig,
+#      so it lands in the APP target's build settings, and those are written
+#      by `generator.generate!` — and then AGAIN by react_native_post_install,
+#      which is why this runs last in the hook rather than first. Leaving them
+#      alone would leave the build using the absolute path while the committed
+#      lockfile described the relative one: the relative form would never be
+#      exercised and could rot unnoticed. Xcode expands `$(PODS_ROOT)` before
+#      the bundling script sees the variable, so what reaches hermesc is an
+#      ordinary absolute path either way.
+#
+# Debug simulator builds never reach that script (react-native-xcode.sh exits
+# early), so validating this needs a Release build or FORCE_BUNDLING=1.
+def singz_relativize_hermes_cli_path(installer)
+  sandbox = installer.sandbox
+  pods_root = Pathname.new(sandbox.root.to_s)
+  relativize = lambda do |abs|
+    "$(PODS_ROOT)/#{Pathname.new(abs).relative_path_from(pods_root)}"
+  end
+
+  # 1. the sandbox podspec — the bytes the lockfile checksum is taken over.
+  #
+  # Every way of finding nothing here SAYS so. The failure this guards against
+  # is not a crash, it is silence: an RN bump that renames the key, or moves
+  # the path out of `user_target_xcconfig`, would leave the hook quietly doing
+  # nothing and the per-checkout lockfile churn back with no announcement. The
+  # one silent case is the path already being relative, which is simply a
+  # second `pod install`.
+  json_path = sandbox.specification_path('hermes-engine')
+  if json_path.nil? || !File.exist?(json_path)
+    Pod::UI.warn 'HERMES_CLI_PATH: no hermes-engine podspec in the sandbox — skipping (Podfile.lock may churn per checkout)'
+  else
+    text = File.read(json_path)
+    cfg = (JSON.parse(text)['user_target_xcconfig'] rescue nil)
+    abs = cfg && cfg['HERMES_CLI_PATH']
+    if abs.nil?
+      Pod::UI.warn "HERMES_CLI_PATH: not in #{File.basename(json_path)}'s user_target_xcconfig any more — this Podfile hook needs updating for the new React Native"
+    elsif abs.start_with?('/')
+      rel = relativize.call(abs)
+      updated = text.sub(abs.to_json, rel.to_json)
+      if updated == text
+        Pod::UI.warn "HERMES_CLI_PATH: could not rewrite #{json_path} — the lockfile will carry this machine's path"
+      else
+        File.write(json_path, updated)
+        # `Specification#checksum` is `@checksum ||=` over the file, so a spec
+        # that has already been asked would answer from before the rewrite.
+        # The lockfile is generated from analysis_result.specifications; the
+        # pod targets hold their own spec objects. Clear both, by name.
+        specs = installer.analysis_result.specifications.to_a
+        specs += installer.pod_targets.flat_map(&:specs) if installer.respond_to?(:pod_targets)
+        specs.each do |spec|
+          next unless spec.name.to_s.split('/').first == 'hermes-engine'
+          [spec, spec.root].compact.uniq.each { |x| x.instance_variable_set(:@checksum, nil) }
+        end
+        Pod::UI.puts "HERMES_CLI_PATH -> #{rel} (podspec)".green
+      end
+    end
+  end
+
+  # 2. the generated xcconfigs, judged on their own contents rather than on
+  #    what step 1 found. An incremental `pod install` can regenerate one and
+  #    not the other, and each has to be able to heal itself.
+  patched = 0
+  Dir.glob(File.join(sandbox.target_support_files_root.to_s, '**', '*.xcconfig')).each do |xc|
+    body = File.read(xc)
+    # to end of line, not \S* — a checkout path may contain spaces.
+    fixed = body.gsub(/^(HERMES_CLI_PATH = )(\/.*?)[ \t]*$/) { "#{$1}#{relativize.call($2)}" }
+    next if fixed == body
+    File.write(xc, fixed)
+    patched += 1
+  end
+  Pod::UI.puts "HERMES_CLI_PATH relativized in #{patched} xcconfig#{patched == 1 ? '' : 's'}".green if patched > 0
+end
+
 # Resolve react_native_pods.rb with node to allow for hoisting
 require Pod::Executable.execute_command('node', ['-p',
   'require.resolve(
@@ -41,5 +141,9 @@ target 'SingZPlayer' do
       # keep building plain clang.
       :ccache_enabled => system('command -v ccache >/dev/null 2>&1')
     )
+    # AFTER react_native_post_install, and measured that way round: RN's hook
+    # regenerates the aggregate xcconfigs from the in-memory spec, so running
+    # first left the app target compiling against the absolute path again.
+    singz_relativize_hermes_cli_path(installer)
   end
 end

@@ -676,11 +676,12 @@ export default function PlayerScreen({
    * button, rather than offering a button that quietly does nothing. */
   const beatManual = settings?.beat?.source === 'manual'
   /* Can the LATTICE run on this song at all? The models being installed is a
-   * fact about the phone; this is a fact about the project. The core cannot
-   * read FLAC, so a copied desktop project can never have a phone-ml grid —
-   * and offering the 87 MB download beside "detect again to use it on this
-   * one" would be a promise the pipeline refuses to keep (planAnalysis's
-   * `mlNow` makes the same all-WAV test and would answer false forever). */
+   * fact about the phone; this is a fact about the project — can the core
+   * read these stems? WAV always; FLAC since the reader shipped, probed on
+   * the INSTALLED binary, so newer JS over an older native still answers
+   * false. The same test planAnalysis's `mlNow` makes, which is why offering
+   * the 87 MB download beside "detect again to use it on this one" is a
+   * promise the pipeline keeps. */
   const mlPossible =
     Object.keys(stemFiles).length > 0 &&
     Object.values(stemFiles).every((ext) => ext === 'wav' || (ext === 'flac' && nativeFlacAvailable()))
@@ -1674,7 +1675,7 @@ export default function PlayerScreen({
                           // stepAt('beat') to be null, so the stage is 'start', 'key' or
                           // 'melody' — and on the two paths that actually reach it the
                           // beat is NOT being asked: a drumless song whose verdict was
-                          // just stored mid-run (the melody still has a minute to go),
+                          // just stored mid-run (the melody still to come, the key already read),
                           // and any later unforced run, where a bound verdict makes
                           // plan.beat false outright. Only drop the invitation, which is
                           // all that was wrong: the chip beside this already says
@@ -1700,10 +1701,34 @@ export default function PlayerScreen({
                 </Text>
                 {canAnalyse && !busyHere && (
                   <Text style={b.hint}>
+                    {/* A RATE, not a total, and both halves of that are scars. Quote the
+                        whole run and never the beat leg — reading the leg as the total is
+                        how this line first came to promise half a minute — and quote it
+                        PER MINUTE OF SONG, because every stage is frame work: a bound
+                        calibrated on the 5.3-minute reference song goes false somewhere
+                        past six minutes, which this library is full of.
+                        Numbers, all per minute of song on the POCO X6 Pro (the slow end
+                        of the fleet; a recent iPhone is about half): its measured beat leg
+                        is 4.9 s/min WAV and 5.4 s/min FLAC, and the key and the melody
+                        come to 80-85% of the beat's own time again (measured through the
+                        same core, docs/PHONE-STANDALONE.md § Numbers) — so ~8.9 s/min WAV,
+                        ~9.9 s/min FLAC. The lattice adds 6.2 s/min, from a DIFFERENT run
+                        and harness than the FLAC leg: never read those two as one pair,
+                        the trap the doc records as "two measurements from different
+                        harnesses look like a pair". Hence about ten seconds a minute, and
+                        about fifteen with the lattice.
+                        The fallback below is the one state the core cannot read these
+                        stems in: FLAC under a native predating the reader, which no
+                        shipping build is (JS and native ship together) — the Metro
+                        pairing deps.ts keeps its worklet path for, measured at 178.1 s. */}
                     {mlPossible
-                      ? 'Reading the stems takes a few seconds; the melody takes about a minute.'
+                      ? 'The beat, the key and the melody together take about ten seconds ' +
+                        'for every minute of song' +
+                        (nativeMlGridAvailable()
+                          ? ' — about fifteen with the better-beats model listening.'
+                          : '.')
                       : 'This song\'s stems are FLAC and this build reads them in JavaScript — ' +
-                        'about a minute for the beat and another for the melody.'}
+                        'minutes rather than seconds.'}
                   </Text>
                 )}
                 {canAnalyse && (
@@ -1792,7 +1817,8 @@ export default function PlayerScreen({
                   </Text>
                 )}
                 <Text style={b.hint}>
-                  The sung line under the lyrics, and what the pitch strip draws.
+                  The sung line, saved with the song. The phone does not draw it — the
+                  computer's pitch strip does.
                 </Text>
               </View>
               <View style={b.sec}>

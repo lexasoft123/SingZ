@@ -3170,6 +3170,16 @@ body.modal-open .lyr-line::before {
 .tp-gridver-val.newer {
   color: #7adc96;
 }
+/* Hand-set bar count, in the green the canvas draws those lines in — the
+   same #7adc96 the `hand` grid version uses, within a unit of BeatGrid's
+   own rgba(120, 220, 150, …), so the number and the lines on the waveform
+   read as one thing. Nothing is owed here either — it is a record
+   of the singer's own work, which re-detection keeps. */
+.tp-gridver-bars {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #7adc96;
+}
 
 /* ——————————————————————————— first-class vocal training ————— */
 

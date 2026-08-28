@@ -223,12 +223,19 @@ registers its link names in the shared `.git/info/exclude` (covers every
 worktree, any checkout vintage) and aborts if a provisioned path is not
 ignored.
 
-One trap the script cannot fix: `pod install` in a worktree rewrites the
-tracked `mobile/ios/Podfile.lock` (hermes checksum). Leave that rewrite
-uncommitted — but do NOT `git restore` it either: that desyncs it from
-`Pods/Manifest.lock` and the next Xcode build fails at "[CP] Check Pods
-Manifest.lock". If it was restored, re-sync with
-`cp Pods/Manifest.lock Podfile.lock`.
+`pod install` in a worktree used to rewrite the tracked
+`mobile/ios/Podfile.lock` every time — hermes-engine's evaluated podspec
+bakes an absolute `HERMES_CLI_PATH` into the file the spec checksum is taken
+over, so every checkout fingerprinted an unchanged hermes differently. The
+Podfile's `singz_relativize_hermes_cli_path` rewrites it to a
+`$(PODS_ROOT)`-relative form, and two checkouts now produce a byte-identical
+podspec and the same checksum. **A lockfile that still comes back modified
+is news** — read the diff rather than reverting it, and never `git restore`
+one that Xcode has a `Pods/Manifest.lock` for: that desyncs the pair and the
+next build fails at "[CP] Check Pods Manifest.lock" (re-sync with
+`cp Pods/Manifest.lock Podfile.lock`). Note that a Debug simulator build
+never exercises `HERMES_CLI_PATH` — react-native-xcode.sh exits before it —
+so validating a change to that path needs `FORCE_BUNDLING=1` or Release.
 
 ## Which core am I running?
 

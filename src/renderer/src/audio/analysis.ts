@@ -1,6 +1,7 @@
 /** Song analysis for the info card: key (Krumhansl-Schmuckler) and the beat track. */
 
-import type { KeyInfo } from '../../../shared/types'
+import type { BeatInfo, KeyInfo } from '../../../shared/types'
+import { applyUserBars } from './beat'
 import { applyCourts, buildCourtEvidence, changePoints, type CourtGrid } from './courts'
 
 const MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
@@ -386,6 +387,46 @@ export interface DetectedBeats {
    * here, a badge is not what fixes it — the grid being editable is.
    */
   suspectAt?: number[]
+}
+
+/**
+ * The stored grid a fresh detection becomes — the ONE place that conversion
+ * happens, for every re-derivation on the desktop.
+ *
+ * There are two of those and they used to build this object separately, by
+ * hand: the automatic pass that re-derives an out-of-date stamp on open, and
+ * the Metronome popover's Re-detect. The copies drifted, silently and in the
+ * direction that costs the singer work — the button's forgot `userBars`, so
+ * pressing it threw away every bar line they had moved and auto-saved the
+ * loss to the project, to Drive and on to the phones before they could react.
+ * It had lost `suspectAt` and `autoDownbeats` on the way too. One caller
+ * cannot forget a field the other remembers.
+ *
+ * `prev` is the grid being replaced. Hand-placed bar lines are carried across
+ * and re-folded onto the new beat array — that is the whole reason they are
+ * stored as TIMES (see `applyUserBars`), and it is what lets a song the
+ * singer corrected go on receiving detector work instead of having to choose
+ * between the two. Re-detect is a fresh reading of the drums, not a rejection
+ * of what the singer heard in them. The phone folds them on both of its own
+ * paths (mobile/src/analysis/pipeline.ts) and one button may not mean two
+ * things on two platforms.
+ *
+ * `source` stays `'auto'`: this IS the detector's grid, and marking it manual
+ * would opt the song out of the auto-heal gate for good.
+ */
+export function gridFromDetection(det: DetectedBeats, prev?: BeatInfo | null): BeatInfo {
+  const auto = det.downbeats ?? undefined
+  return applyUserBars({
+    beats: det.beats,
+    bpm: det.bpm,
+    beatsPerBar: det.beatsPerBar,
+    downbeat: det.downbeat,
+    ...(auto ? { downbeats: auto, autoDownbeats: auto } : {}),
+    ...(det.suspectAt ? { suspectAt: det.suspectAt } : {}),
+    ...(prev?.userBars?.length ? { userBars: prev.userBars } : {}),
+    source: 'auto',
+    detVersion: BEAT_DETECT_VERSION
+  })
 }
 
 /** Beat This! output for this song (from the splitter pack runner): beat and
