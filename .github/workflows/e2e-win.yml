@@ -43,7 +43,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       # Mirror build.yml's key EXACTLY (this step is restore-only — build.yml
       # is the sole saver, so a drifted string here becomes an orphan key that

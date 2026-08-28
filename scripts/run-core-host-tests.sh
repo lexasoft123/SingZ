@@ -12,11 +12,14 @@
 # their full PASS listing stays in the canary's log, the way it always has.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-# Keep the post-relocation default distinct from caches configured against the
-# former mobile/native/core source tree. Explicit overrides remain authoritative.
-# Keyed on the checkout — see build-analyze-host.sh: a fixed $TMPDIR name is
-# one CMake cache shared across worktrees, and CMake refuses a cache whose
-# source dir was a different checkout.
+# Scratch paths are keyed on THIS CHECKOUT, not on $TMPDIR alone. Every
+# worktree on a machine shared one build dir and one output binary, which is
+# the same defect as the shared vendor/ slot: CMake catches its half loudly
+# ("does not match the source used to generate cache" — it blocked the gates
+# in a worktree the day this was written), and the shared OUTPUT binary
+# catches nothing at all, since two trees' gates would simply overwrite each
+# other's oracle. Keep this default distinct from pre-relocation caches that
+# were configured against mobile/native/core.
 CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
 BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests-$CHECKOUT_KEY}"
 

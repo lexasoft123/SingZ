@@ -3,6 +3,7 @@
 // 4c) and the parity harness's oracle (tests compare its output with the TS
 // detectors' on the same samples). One implementation, every platform.
 //
+//   singz-analyze build-info
 //   singz-analyze input-devices
 //   singz-analyze live-input --device-uid <uid> --channel <zero-based>
 //                            [--frames <analysis-window>] [--latency]
@@ -53,6 +54,7 @@
 #include <windows.h>
 #endif
 
+#include <zcore/base/build_stamp.h>
 #include <zcore/device/audio_input.h>
 #include <zdsp/analysis/live_input_analysis.h>
 #include <zcore/legacy/resample.h>
@@ -1276,14 +1278,32 @@ static int liveInputCommand(int argc, char** argv) {
   return runtimeError.empty() && !writer.stopRequested() ? 0 : 1;
 }
 
+// Provenance, in one line, for a caller that has to decide whether this
+// binary is the one it meant to run. Deliberately NOT behind
+// SINGZ_CORE_TESTS: the shipping desktop calls it, and a vendored binary is
+// exactly the case where the answer matters. Reads nothing, opens no device,
+// touches no audio — safe to spawn at launch.
+static int buildInfoCommand() {
+  const char* hash = singz::buildSourceHash();
+  std::printf(
+      "{\"version\":1,\"sourceHash\":%s%s%s,\"pitchDetectVersion\":%d,"
+      "\"keyDetectVersion\":%d,\"beatDetectVersion\":%d}\n",
+      hash[0] == '\0' ? "" : "\"", hash[0] == '\0' ? "null" : hash,
+      hash[0] == '\0' ? "" : "\"", singz::kPitchDetectVersion, singz::kKeyDetectVersion,
+      singz::kBeatDetectVersion);
+  return 0;
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     printLiveInputUsage(stderr);
     std::fprintf(stderr,
-                 "       singz-analyze melody --f32 <path> --sr <rate> [--raw]\n");
+                 "       singz-analyze melody --f32 <path> --sr <rate> [--raw]\n"
+                 "       singz-analyze build-info\n");
     return 2;
   }
   const std::string cmd = argv[1];
+  if (cmd == "build-info" && argc == 2) return buildInfoCommand();
   if (cmd == "input-devices") return inputDevicesCommand(argc);
 #if defined(SINGZ_CORE_TESTS)
   if (cmd == "input-devices-fixture") return inputDevicesFixtureCommand(argc);

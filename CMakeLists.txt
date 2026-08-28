@@ -126,7 +126,19 @@ if(NOT SINGZ_BUILD_HOST_TOOLS)
 endif()
 
 # ---- the CLI ----------------------------------------------------------------
-add_executable(singz-analyze tools/native/singz-analyze.cpp)
+# A vendored CLI carries the exact shared-core fingerprint that built it.
+# Other host/test builds leave this empty and truthfully report an unknown
+# source in `build-info`. Generate into the build tree so the fingerprint does
+# not recursively include itself.
+set(SINGZ_SOURCE_HASH "" CACHE STRING
+    "Shared native source fingerprint; empty = unrecorded")
+configure_file(
+  zcore/src/base/build_stamp.cpp.in
+  ${CMAKE_CURRENT_BINARY_DIR}/singz_build_stamp.cpp
+  @ONLY)
+add_executable(singz-analyze
+  tools/native/singz-analyze.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/singz_build_stamp.cpp)
 target_compile_features(singz-analyze PRIVATE cxx_std_20)
 add_dependencies(singz-analyze singz_check_zcore_boundaries)
 target_link_libraries(singz-analyze PRIVATE
@@ -288,6 +300,13 @@ if(SINGZ_CORE_TESTS)
            COMMAND singz-analyze live-input --device-uid test --channel 0 --frames 64)
   set_tests_properties(live_input_parser_bounds PROPERTIES
     WILL_FAIL TRUE)
+  # Provenance is a shipping command. Ordinary host-test builds intentionally
+  # carry no source hash, so they must report a well-formed null rather than
+  # inventing an identity.
+  add_test(NAME build_info_schema COMMAND singz-analyze build-info)
+  set_tests_properties(build_info_schema PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "\\{\"version\":1,\"sourceHash\":null,\"pitchDetectVersion\":[0-9]+,\"keyDetectVersion\":[0-9]+,\"beatDetectVersion\":[0-9]+\\}")
   add_test(NAME input_devices_schema
            COMMAND singz-analyze input-devices-fixture)
   set_tests_properties(input_devices_schema PROPERTIES
