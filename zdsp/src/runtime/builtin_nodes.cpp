@@ -190,7 +190,14 @@ Status prepare(void* opaque, const PrepareSpec* spec,
 void reset(void* opaque, Discontinuity) noexcept {
   BuiltinState* state = static_cast<BuiltinState*>(opaque);
   state->phase = 0.0;
-  state->rampTarget = state->currentValue;
+  // A discontinuity is an exact control boundary. Gain must adopt the last
+  // requested target instead of freezing wherever an interrupted ramp happened
+  // to be, matching the prototype processor contract. In particular, a mute
+  // request can never remain half-audible after a route/device reset.
+  if (state->config.kind == BuiltinNodeKind::Gain)
+    state->currentValue = state->rampTarget;
+  else
+    state->rampTarget = state->currentValue;
   state->rampRemaining = 0;
   state->rampStep = 0.0f;
   state->delayIndex = 0;

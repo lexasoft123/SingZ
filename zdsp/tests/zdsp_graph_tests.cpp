@@ -633,6 +633,26 @@ void automationAcrossPartitions() {
   gain.functions->process(gain.state, &context, &input, 1, &out, 1);
   near(output[0], 0.2f, 0.000001f,
        "zero-frame offset-zero event updates the next audio block");
+
+  ParameterEvent mute{{50}, kGainParameter, {0}, 0.0f,
+                      ParameterCurve::Linear, {128}};
+  context.frames = {64}; input.frames = {64}; out.frames = {64};
+  float longOnes[128]; float interrupted[128]{};
+  std::fill_n(longOnes, 128, 1.0f);
+  input.capacityFrames = {128}; out.capacityFrames = {128};
+  inputChannels[0] = longOnes; outputChannels[0] = interrupted;
+  context.parameters = &mute; context.parameterCount = 1;
+  gain.functions->process(gain.state, &context, &input, 1, &out, 1);
+  expect(interrupted[0] == 0.2f && interrupted[63] > 0.0f,
+         "64-frame first block interrupts an in-flight 128-frame mute ramp");
+  gain.functions->reset(gain.state,
+      {DiscontinuityReason::DeviceLost, DiscontinuityFlagResetState});
+  inputChannels[0] = longOnes + 64; outputChannels[0] = interrupted + 64;
+  context.parameters = nullptr; context.parameterCount = 0;
+  gain.functions->process(gain.state, &context, &input, 1, &out, 1);
+  for (uint32_t frame = 64; frame < 128; ++frame)
+    expect(interrupted[frame] == 0.0f,
+           "discontinuity adopts an interrupted Gain target exactly");
   expect(succeeded(deactivateProcessor(gain)) &&
          succeeded(destroyProcessor(&gain)), "automation gain lifecycle");
 

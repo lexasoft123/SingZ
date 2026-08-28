@@ -124,6 +124,9 @@ void testFakeLifecycle() {
   CHECK(inventory.devices[0].bufferFrames.fundamentalFrames == 1);
   CHECK(inventory.devices[0].direction ==
         singz::AudioHostEndpointDirection::Duplex);
+  CHECK(inventory.devices[0].transport == singz::AudioHostTransport::Usb);
+  CHECK(inventory.devices[0].monitoringSuitability ==
+        singz::AudioHostMonitoringSuitability::LowLatency);
   CHECK(host.status().state == singz::AudioHostState::Closed);
   Observation observation;
   const auto opened = host.open(config(), observe, &observation);
@@ -315,6 +318,24 @@ void testBoundaryHelpers() {
   CHECK(singz::detail::saturatedAudioHostLatency(
             std::numeric_limits<uint32_t>::max() - 4, 4) ==
         std::numeric_limits<uint32_t>::max());
+  const auto usb = singz::detail::classifyMacAudioHostTransport(
+      singz::detail::audioHostFourCc('u', 's', 'b', ' '));
+  CHECK(usb.transport == singz::AudioHostTransport::Usb &&
+        usb.monitoringSuitability ==
+            singz::AudioHostMonitoringSuitability::LowLatency);
+  const auto bluetooth = singz::detail::classifyMacAudioHostTransport(
+      singz::detail::audioHostFourCc('b', 'l', 'u', 'e'));
+  CHECK(bluetooth.transport == singz::AudioHostTransport::Bluetooth &&
+        bluetooth.monitoringSuitability ==
+            singz::AudioHostMonitoringSuitability::HighLatency);
+  const auto airPlay = singz::detail::classifyMacAudioHostTransport(
+      singz::detail::audioHostFourCc('a', 'i', 'r', 'p'));
+  CHECK(airPlay.transport == singz::AudioHostTransport::AirPlay &&
+        airPlay.monitoringSuitability ==
+            singz::AudioHostMonitoringSuitability::HighLatency);
+  CHECK(singz::detail::classifyMacAudioHostTransport(0)
+            .monitoringSuitability ==
+        singz::AudioHostMonitoringSuitability::Unknown);
 }
 
 void testRejectedConfig() {

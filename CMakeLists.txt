@@ -69,12 +69,74 @@ add_subdirectory(zdsp)
 get_property(SINGZ_ZCORE_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZCORE_RT_MANIFEST)
 get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 
+# Phase 4A monitor callback leaf. The actual host thunk, silence containment,
+# and terminal counters compile independently from the control-domain session
+# owner and are scanned from the target's authoritative source list.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SingZRealtimeTarget.cmake")
+add_library(singz_monitor_callback STATIC
+  native/electron/audio_monitor_callback.cpp
+  native/electron/audio_monitor_callback.h)
+add_library(SingZ::monitor_callback ALIAS singz_monitor_callback)
+target_compile_features(singz_monitor_callback PUBLIC cxx_std_20)
+target_include_directories(singz_monitor_callback PUBLIC
+  "${SINGZ_REPO_ROOT}/native/electron")
+target_link_libraries(singz_monitor_callback PUBLIC
+  SingZ::native_build_options
+  SingZ::zdsp_host_adapter)
+set_target_properties(singz_monitor_callback PROPERTIES
+  POSITION_INDEPENDENT_CODE YES
+  CXX_EXTENSIONS OFF
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES)
+singz_configure_realtime_target(singz_monitor_callback)
+
+set(SINGZ_MONITOR_RT_MANIFEST
+  "${CMAKE_CURRENT_BINARY_DIR}/monitor-realtime-sources.cmake")
+get_target_property(_monitor_callback_source_dir singz_monitor_callback SOURCE_DIR)
+get_target_property(_monitor_callback_sources singz_monitor_callback SOURCES)
+file(WRITE "${SINGZ_MONITOR_RT_MANIFEST}"
+  "set(SINGZ_ZDSP_RT_FILES\n")
+foreach(_source IN LISTS _monitor_callback_sources)
+  if(IS_ABSOLUTE "${_source}")
+    set(_absolute_source "${_source}")
+  else()
+    get_filename_component(_absolute_source "${_source}" ABSOLUTE
+      BASE_DIR "${_monitor_callback_source_dir}")
+  endif()
+  file(TO_CMAKE_PATH "${_absolute_source}" _absolute_source)
+  file(APPEND "${SINGZ_MONITOR_RT_MANIFEST}"
+    "  [==[${_absolute_source}]==]\n")
+endforeach()
+file(APPEND "${SINGZ_MONITOR_RT_MANIFEST}" ")\n")
+add_custom_target(singz_check_monitor_realtime ALL
+  COMMAND "${CMAKE_COMMAND}"
+    "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_MONITOR_RT_MANIFEST}"
+    -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake"
+  VERBATIM
+  COMMENT "Checking monitor callback source policy")
+add_dependencies(singz_monitor_callback singz_check_monitor_realtime)
+
+add_library(singz_native_audio_ownership STATIC
+  native/electron/native_audio_ownership.cpp
+  native/electron/native_audio_ownership.h)
+target_compile_features(singz_native_audio_ownership PUBLIC cxx_std_20)
+target_include_directories(singz_native_audio_ownership PUBLIC
+  "${SINGZ_REPO_ROOT}")
+target_link_libraries(singz_native_audio_ownership PUBLIC
+  SingZ::native_build_options)
+set_target_properties(singz_native_audio_ownership PROPERTIES
+  POSITION_INDEPENDENT_CODE YES CXX_EXTENSIONS OFF)
+
 if(SINGZ_BUILD_ELECTRON_CAPTURE)
   if(NOT EXISTS "${SINGZ_NODE_INCLUDE_DIR}/node_api.h")
     message(FATAL_ERROR
       "SINGZ_BUILD_ELECTRON_CAPTURE requires SINGZ_NODE_INCLUDE_DIR to contain node_api.h")
   endif()
-  add_library(singz_capture MODULE native/electron/capture_addon.cpp)
+  add_library(singz_capture MODULE
+    native/electron/capture_addon.cpp
+    native/electron/audio_monitor_session.cpp
+    native/electron/audio_monitor_session.h
+    native/electron/native_audio_ownership.h)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
   target_include_directories(singz_capture PRIVATE "${SINGZ_NODE_INCLUDE_DIR}")
   # Build identity, compiled in and exported: the loader refuses an addon
@@ -91,7 +153,10 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
   target_link_libraries(singz_capture PRIVATE
     SingZ::native_build_options
     SingZ::zcore_device
-    SingZ::zdsp_analysis)
+    SingZ::zdsp_analysis
+    SingZ::zdsp_host_adapter
+    SingZ::monitor_callback
+    singz_native_audio_ownership)
   set_target_properties(singz_capture PROPERTIES
     PREFIX ""
     SUFFIX ".node"
@@ -180,6 +245,10 @@ if(SINGZ_CORE_TESTS)
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_ZDSP_RT_MANIFEST}"
       -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
+  add_test(NAME monitor_realtime_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_MONITOR_RT_MANIFEST}"
+      -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
   add_executable(core_host_tests ${SINGZ_REPO_ROOT}/tests/native/core_host_tests.cpp)
   add_dependencies(core_host_tests singz_check_zcore_boundaries)
   target_compile_features(core_host_tests PRIVATE cxx_std_20)
@@ -214,6 +283,32 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(audio_host_graph_adapter_tests PRIVATE
     SingZ::zdsp_host_adapter)
   add_test(NAME audio_host_graph_adapter_tests COMMAND audio_host_graph_adapter_tests)
+
+  add_executable(audio_monitor_session_tests
+    ${SINGZ_REPO_ROOT}/native/electron/audio_monitor_session.cpp
+    ${SINGZ_REPO_ROOT}/native/electron/audio_monitor_session.h
+    ${SINGZ_REPO_ROOT}/zdsp/tests/audio_monitor_session_tests.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
+  target_compile_features(audio_monitor_session_tests PRIVATE cxx_std_20)
+  target_include_directories(audio_monitor_session_tests PRIVATE
+    "${SINGZ_REPO_ROOT}"
+    "${SINGZ_REPO_ROOT}/zdsp/tests")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      COMPILE_OPTIONS "-Wno-mismatched-new-delete")
+  endif()
+  target_link_libraries(audio_monitor_session_tests PRIVATE
+    SingZ::monitor_callback singz_native_audio_ownership Threads::Threads)
+  add_test(NAME audio_monitor_session_tests COMMAND audio_monitor_session_tests)
+
+  add_executable(native_audio_ownership_tests
+    ${SINGZ_REPO_ROOT}/zdsp/tests/native_audio_ownership_tests.cpp)
+  target_compile_features(native_audio_ownership_tests PRIVATE cxx_std_20)
+  target_link_libraries(native_audio_ownership_tests PRIVATE
+    singz_native_audio_ownership Threads::Threads)
+  add_test(NAME native_audio_ownership_tests COMMAND native_audio_ownership_tests)
 
   add_test(NAME audio_host_fake_cli
     COMMAND singz-audio-host --fake --blocks 6 --maximum-frames 1024)

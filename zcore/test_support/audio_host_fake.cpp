@@ -48,6 +48,9 @@ class FakeAudioHostBackend final : public AudioHostBackend {
     device.sampleRateRanges = {{44100.0, 44100.0}, {48000.0, 48000.0},
                                {96000.0, 96000.0}};
     device.bufferFrames = {1, 1024, 128, 1};
+    device.transport = AudioHostTransport::Usb;
+    device.monitoringSuitability =
+        AudioHostMonitoringSuitability::LowLatency;
     return {{std::move(device)}, kFakeUid, kFakeUid};
   }
 

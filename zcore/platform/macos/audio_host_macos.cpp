@@ -199,6 +199,16 @@ class MacAudioHostBackend final : public AudioHostBackend {
       if (info.uid.empty() || (info.inputChannels == 0 && info.outputChannels == 0)) continue;
       info.defaultInput = device == defaultInput;
       info.defaultOutput = device == defaultOutput;
+      UInt32 transport = kAudioDeviceTransportTypeUnknown;
+      if (readProperty(device,
+                       property(kAudioDevicePropertyTransportType,
+                                kAudioObjectPropertyScopeGlobal),
+                       &transport)) {
+        const detail::MacAudioHostTransportCapability capability =
+            detail::classifyMacAudioHostTransport(transport);
+        info.transport = capability.transport;
+        info.monitoringSuitability = capability.monitoringSuitability;
+      }
       Float64 rate = 0.0;
       if (readProperty(device, property(kAudioDevicePropertyNominalSampleRate,
                                         kAudioObjectPropertyScopeGlobal),
@@ -249,6 +259,9 @@ class MacAudioHostBackend final : public AudioHostBackend {
                            : (info.inputChannels != 0
                                   ? AudioHostEndpointDirection::Input
                                   : AudioHostEndpointDirection::Output);
+      if (info.direction != AudioHostEndpointDirection::Duplex)
+        info.monitoringSuitability =
+            AudioHostMonitoringSuitability::Unsupported;
       if (info.defaultInput) inventory.defaultInputUid = info.uid;
       if (info.defaultOutput) inventory.defaultOutputUid = info.uid;
       inventory.devices.push_back(std::move(info));

@@ -1,7 +1,7 @@
 # Future DSP graph architecture
 
-Status: roadmap; Phase 0A and the Phase 0B contract/prototype slice are implemented
-Last reviewed: 2026-08-26
+Status: roadmap; Phase 4A native monitoring preview is in progress
+Last reviewed: 2026-08-28
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
 
 Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
@@ -1167,6 +1167,65 @@ Avoid:
 - Combining WASAPI and ASIO logic in one backend class.
 
 ### Phase 4 — Per-platform playback/session cutover
+
+#### Phase 4A — guarded desktop monitoring preview
+
+Phase 4A is the first product-composition proof, not the song-engine cutover.
+The already packaged `singz-capture` addon owns an ephemeral native session
+whose fixed graph is:
+
+```text
+selected capture channels -> pre Peak/RMS -> ramped Gain (initially 0)
+  -> explicit ChannelMap -> SafetyLimiter (-1 dBFS) -> post Peak/RMS
+  -> selected physical output channels
+```
+
+The addon exposes bounded scalar control/status only: full-duplex device
+inventory, begin/end by ownership generation, an explicitly enabled gain
+target and pre/post meter/host diagnostics. Raw PCM, native pointers and graph
+documents never cross Node-API. The session owns its arena, processors,
+compiled graph, publisher, runner, host adapter and `AudioHost` in that order;
+stop joins the host callback before graph shutdown and storage release.
+If runner shutdown is busy or processor deactivation fails, the generation and
+prepared storage remain quarantined and `endMonitor` may retry; storage is
+released only after both steps succeed. The callback thunk, silence path and
+terminal counters are an independent strict realtime target, not an unscanned
+method in the control-domain owner.
+
+Starting the preview requires the product session coordinator to prove that
+legacy Web Audio output has stopped and released its device. The native owner
+does not infer that product-level precondition and never runs beside the song
+engine. Inside the addon, capture analysis and monitoring share a fail-closed
+serialized microphone owner, so neither call order can open both native paths.
+Accepted monitor generations increase monotonically across teardown. On
+macOS input and output must name the same duplex device. The Phase 4A product
+preview is enabled only on macOS. Windows inventory remains available but
+`beginMonitor` fails with typed `platform-not-ready` until the WASAPI hot body
+is extracted into the enforced real-time policy target. Once enabled, Windows
+may use its paired capture/render endpoints only when `AudioHost` negotiates
+the exact requested rate on both; there is no resampling or drift fallback.
+Monitoring is muted until the user explicitly enables it, gain changes ramp,
+and a discontinuity adopts the requested target so an interrupted mute cannot
+freeze partially open. The final fixed limiter is always present. CoreAudio
+publishes typed transport/suitability; only provider-confirmed low-latency
+duplex routes pass. Bluetooth/BLE, AirPlay and wireless Continuity are typed
+high-latency, while unknown/aggregate/virtual/AVB routes remain unapproved;
+`beginMonitor` rejects them without label matching. Device loss or graph
+failure emits silence and remains visible in separate adapter/terminal status
+counters.
+
+Phase 4A intentionally does not move song playback, persist a graph, mix Web
+Audio with the native output, add recording, add ASIO, support cross-device
+macOS monitoring, or claim Bluetooth/vehicle routes are low latency. See
+[ADR 0010](adr/0010-desktop-monitoring-preview.md).
+
+Acceptance evidence is a silent deterministic fake-host suite proving initial
+mute, enabled/ramped gain, mono-to-stereo mapping, the -1 dBFS ceiling,
+pre/post meters, stale-generation rejection, device-loss silence, teardown and
+zero callback allocations; addon-owner call-order/race tests; a real Electron
+addon smoke proving exact integer, lossless BigInt and boolean schemas; Release
+and sanitizer/realtime policy gates that include the monitor targets; and separate headphone
+listening on macOS and Windows only after the product lease is wired.
 
 Implement:
 

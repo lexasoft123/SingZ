@@ -40,6 +40,35 @@ enum class AudioHostAccessMode : uint32_t {
   Exclusive,
 };
 
+// Provider-reported physical transport. Product policy consumes this typed
+// capability and never guesses from a friendly device label or UID.
+enum class AudioHostTransport : uint32_t {
+  Unknown,
+  BuiltIn,
+  Aggregate,
+  Virtual,
+  Pci,
+  Usb,
+  FireWire,
+  Bluetooth,
+  BluetoothLowEnergy,
+  Hdmi,
+  DisplayPort,
+  AirPlay,
+  Avb,
+  Thunderbolt,
+  ContinuityWired,
+  ContinuityWireless,
+  Vehicle,
+};
+
+enum class AudioHostMonitoringSuitability : uint32_t {
+  Unknown,
+  LowLatency,
+  HighLatency,
+  Unsupported,
+};
+
 struct AudioHostBufferRange {
   uint32_t minimumFrames{0};
   uint32_t maximumFrames{0};
@@ -73,6 +102,9 @@ struct AudioHostDeviceInfo {
   // Inventory describes the currently active shared profile. Exclusive
   // formats are exact-probed at open time and are never inferred from it.
   AudioHostAccessMode accessMode{AudioHostAccessMode::Shared};
+  AudioHostTransport transport{AudioHostTransport::Unknown};
+  AudioHostMonitoringSuitability monitoringSuitability{
+      AudioHostMonitoringSuitability::Unknown};
 };
 
 struct AudioHostInventory {
