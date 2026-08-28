@@ -1,0 +1,11 @@
+// GENERATED from build_stamp.cpp.in by CMake — do not edit, and note that it
+// is generated into the BUILD tree on purpose: a stamp file under
+// mobile/native/core would be hashed by the very script that computes the
+// hash it carries.
+#include "build_stamp.h"
+
+namespace singz {
+
+const char* buildSourceHash() { return "@SINGZ_SOURCE_HASH@"; }
+
+}  // namespace singz

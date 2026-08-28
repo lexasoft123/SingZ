@@ -728,6 +728,30 @@ was driven; the gotchas that follow from it are below.
   `SINGZ_SKIP_REVIEW=1 git commit …` (leading env assignment, not merely
   quoted in the message) is the deliberate way past, and it shows up in the
   transcript as one.
+- **A vendored binary must say which sources it came from, and `vendor/` is
+  mirrored per worktree** — `resolveAnalyze` returns whatever file sits in the
+  slot, and the only currency check in the running app (the CLI's
+  `kPitchDetectVersion` against the renderer's `PITCH_DETECT_VERSION`) catches
+  a binary from before a stamp bump but NOT a same-version binary built from
+  different code. During the v0.19.0 cut a sibling worktree ran
+  `vendor-analyze.sh`, which wrote THROUGH the shared `vendor` symlink into the
+  main checkout's slot, and the desktop spawned that branch's core — live-input
+  adapter included, with `audio-devices-e2e.cjs` driving the very path it had
+  changed — for hours; it was found by hand because the other session mentioned
+  the rebuild. Nine worktrees on this machine held nine states of
+  `mobile/native/core` behind one binary matching none of them. Two changes,
+  and they answer different halves: `scripts/worktree-setup.sh` now MIRRORS
+  `vendor/` (third-party engines stay symlinks to main; `singz-analyze` and
+  `singz-capture.node` get per-worktree slots, and the setup script builds the
+  one that has a producer on this tree — an empty slot degrades to the TS
+  detectors, where a link runs another branch's engine), and
+  `scripts/analyze-source-hash.sh` is the ONE definition of the fingerprint —
+  written to the `.source-hash` sidecar, compiled into the binary
+  (`singz-analyze build-info`), and recomputed at the first `resolveAnalyze()`
+  by `src/main/analyze-provenance.ts`, which LOGS and never refuses. Packaged
+  builds have no tree to compare against and only record what ran — the log is
+  the only evidence a user machine will have. Details:
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Which core am I running?
 - **Parallel feature work happens in git worktrees** (one per feature, e.g.
   under `.claude/worktrees/<feature>`), never as concurrent edits to the same
   checkout — two sessions on one tree fight over builds, caches and

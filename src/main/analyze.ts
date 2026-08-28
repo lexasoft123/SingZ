@@ -2,6 +2,7 @@ import { BrowserWindow, ipcMain } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { join } from 'node:path'
+import { checkAnalyzeProvenance } from './analyze-provenance'
 import { onChildSettled } from './child-exit'
 import { log, logChunk } from './log'
 import { isAllowed } from './media'
@@ -19,6 +20,12 @@ import { isAllowed } from './media'
  * otherwise write old-framing lines under whatever stamp it carries, which is
  * the melody bug's shape all over again. Main does not import renderer code,
  * so the constant cannot be checked here.
+ *
+ * What that check CANNOT see is a same-version binary built from different
+ * code — a sibling worktree's core in the shared vendor slot, which happened
+ * during the v0.19.0 cut and went unnoticed for hours. analyze-provenance.ts
+ * asks the binary which sources it came from and compares that with the tree;
+ * it only ever logs.
  */
 
 const EXE = process.platform === 'win32' ? 'singz-analyze.exe' : 'singz-analyze'
@@ -46,8 +53,22 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /** Bundled-first resolution — the same ladder as whisper-cli's resolveEngine:
- *  packaged resources → dev vendor dir → env override. */
+ *  packaged resources → dev vendor dir → env override.
+ *
+ *  Every spawn of the core comes through here — this module's, audio-input's
+ *  and beats-ml's alike — which is why the provenance check hangs off it
+ *  rather than off any one call site: the incident it exists for landed on
+ *  the LIVE-INPUT path, not on melody. It is fired and not awaited, on
+ *  purpose. analyzeAll's entry has to stay synchronous up to its spawn gate
+ *  (see the Analyze class comment), and a check that delayed a spawn to say
+ *  something about it would be paying for a diagnostic with a race. */
 export async function resolveAnalyze(): Promise<string | null> {
+  const found = await resolvePath()
+  if (found !== null) void checkAnalyzeProvenance(found)
+  return found
+}
+
+async function resolvePath(): Promise<string | null> {
   if (process.env.SINGZ_ANALYZE) return process.env.SINGZ_ANALYZE
   const target = `${process.platform}-${process.arch}`
   const candidates = [

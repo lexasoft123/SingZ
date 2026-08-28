@@ -65,10 +65,10 @@ scripts/worktree-setup.sh                 # desktop + mobile (pods on a Mac)
 scripts/worktree-setup.sh --desktop-only  # skip mobile deps + pods
 ```
 
-It symlinks what must be shared from the main checkout (`vendor/` with
-whisper-cli, `mobile/gdrive.config.json` so the baked gdrive-config modules
-come out filled instead of EMPTY, `mobile/android/local.properties`), runs
-`npm ci` in both roots (postinstall bakes configs, patches audio-api,
+It provisions what must be shared from the main checkout
+(`mobile/gdrive.config.json` so the baked gdrive-config modules come out
+filled instead of EMPTY, `mobile/android/local.properties`, and `vendor/` —
+see below), runs `npm ci` in both roots (postinstall bakes configs, patches audio-api,
 synthesizes the sample song), restores the electron binary when npm's cache
 skipped its postinstall (the "Electron failed to install correctly" launch
 error), and pod-installs iOS with a UTF-8 `LANG` — CocoaPods crashes in
@@ -77,10 +77,39 @@ cross-worktree settings ride with each build (see above). Build products
 (`out/`, `Pods/`, `.gradle/`) stay per-worktree; the global npm / CocoaPods /
 ccache caches are what make the second worktree fast (pods ~30 s warm).
 
-The links are files (symlinks), and a committed `vendor` symlink once merged
-into main and clobbered the real `vendor/` on checkout — `.gitignore`'s old
-`vendor/` pattern only matched the directory form, and worktrees branched
-before that fix still carry the old pattern. The script therefore also
+`vendor/` is **mirrored, not linked**, and the distinction is the whole
+point. Third-party engine builds (whisper-cli, demucs-cli, the splitter
+packs) come from `.engines-src/` and downloads, cost minutes, and no branch
+of ours changes them — those stay symlinks to main's copies. Our own engine
+builds (`singz-analyze`, and `singz-capture.node` once the dsp-graph branch
+brings its build script) come from `mobile/native/core`, which is exactly
+what a feature branch edits — so the worktree gets an empty slot instead of a
+link. `worktree-setup.sh` fills the one it can build, `singz-analyze` (~10 s
+with a warm ccache); a slot with no producer on this tree stays empty, which
+is still the right answer, because empty degrades to the TS detectors whereas
+a link would have run another branch's engine.
+
+It used to link the whole directory, and that is how a sibling worktree's
+core reached the main checkout during the v0.19.0 cut: `vendor-analyze.sh`
+run in a worktree wrote *through* the symlink into main's slot, and the
+desktop spawned that branch's binary — live-input adapter included — for
+hours, with `audio-devices-e2e.cjs` exercising the very path it had changed.
+Nothing shipped wrong; it was found by hand, days later, because the other
+session mentioned the rebuild in passing. When this was written, nine
+worktrees on the machine held nine different states of `mobile/native/core`
+behind one shared binary that matched none of them.
+
+The safety net for what the mirror cannot reach — a packaged app, an
+`$SINGZ_ANALYZE` override, a hand-copied file — is
+[Which core am I running?](#which-core-am-i-running) below.
+
+What the mirror leaves behind — the per-artifact links inside `vendor/`, and
+the two config links — are still files (symlinks), and a committed `vendor`
+symlink once merged into main and clobbered the real `vendor/` on checkout —
+`.gitignore`'s old `vendor/` pattern only matched the directory form, and
+worktrees branched before that fix still carry the old pattern. (A mirrored
+`vendor/` is matched by both spellings, so it is if anything safer than the
+link it replaced.) The script therefore also
 registers its link names in the shared `.git/info/exclude` (covers every
 worktree, any checkout vintage) and aborts if a provisioned path is not
 ignored.
@@ -91,6 +120,55 @@ uncommitted — but do NOT `git restore` it either: that desyncs it from
 `Pods/Manifest.lock` and the next Xcode build fails at "[CP] Check Pods
 Manifest.lock". If it was restored, re-sync with
 `cp Pods/Manifest.lock Podfile.lock`.
+
+## Which core am I running?
+
+`scripts/analyze-source-hash.sh` is the one definition of "which sources a
+`singz-analyze` was built from": a fingerprint over every file under
+`mobile/native/core` plus `vendor-analyze.sh` and the hash script itself.
+`vendor-analyze.sh` writes it to a `.source-hash` sidecar **and compiles it
+into the binary** (`-DSINGZ_SOURCE_HASH`, a generated TU in the build tree),
+so the executable answers for itself:
+
+```bash
+vendor/darwin-arm64/singz-analyze build-info
+```
+```json
+{"version":1,"sourceHash":"c4dccf49…","pitchDetectVersion":2,"keyDetectVersion":2,"beatDetectVersion":23}
+```
+
+At the first `resolveAnalyze()` of a session, `src/main/analyze-provenance.ts`
+asks the binary that question, recomputes the tree's own answer, and logs the
+comparison. **It only ever logs — it never refuses to run.** A dev machine
+legitimately runs a binary built moments ago, and a splitter that stopped
+working because a stamp file was missing would be a worse bug than the one
+being caught.
+
+| what it finds | level |
+|---|---|
+| binary's sources == this tree | info — one line naming the hash and the three detector stamps |
+| binary's sources != this tree | **error** — names both hashes and says to run `vendor-analyze.sh` |
+| binary and its `.source-hash` disagree | **error** — one of the two files is lying about the other |
+| nothing states a source | warn — an unstamped build; rebuild to make it answerable |
+| no source tree to compare against | info — records what ran, warns about nothing |
+
+That last row is the **packaged app**, and it is deliberate. There is no
+checkout in an installed SingZ to hash, and the binary and the app came out
+of one CI checkout anyway, so there is nothing that could disagree. What the
+packaged app owes is the *record*: on a user's machine the log is the only
+evidence there will ever be of which core ran, which is the same reason
+`sync-log.jsonl` is replayed at launch. The sidecar ships with the binary
+(electron-builder's `singz-analyze*` filter already matches it), so even a
+build predating `build-info` names itself in the log.
+
+This exists because the detector stamps cannot cover it. `kPitchDetectVersion`
+against the renderer's `PITCH_DETECT_VERSION` catches a binary from before a
+stamp bump; it cannot catch a **same-version binary built from different
+code**, which is precisely what a parallel worktree produces. Note also that
+`.claude/agents/e2e-verifier.md` item 9 has `audio-devices-e2e.cjs` forking
+on whether the vendored binary supports native capture — so which binary is
+present decides which half of that driver runs, and provenance is a testing
+question, not only a correctness one.
 
 ## Test suites
 

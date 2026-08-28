@@ -133,8 +133,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     "-framework CoreFoundation")
 endif()
 
+# ---- build provenance -------------------------------------------------------
+# scripts/vendor-analyze.sh passes the same fingerprint it writes to the
+# .source-hash sidecar, so `singz-analyze build-info` can say which sources
+# this executable came from. Every other build of this file (the host
+# scripts, both phones) leaves it empty and the CLI reports "unknown" — the
+# desktop then falls back to the sidecar and still never refuses to run.
+#
+# Generated into the BINARY dir, never into mobile/native/core: a stamp file
+# beside the sources would be hashed by the script that computes the hash,
+# and no fingerprint can contain itself.
+set(SINGZ_SOURCE_HASH "" CACHE STRING
+    "Source fingerprint from scripts/vendor-analyze.sh; empty = unrecorded")
+configure_file(build_stamp.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/singz_build_stamp.cpp @ONLY)
+
 # ---- the CLI ----------------------------------------------------------------
-add_executable(singz-analyze tools/singz-analyze.cpp)
+add_executable(singz-analyze tools/singz-analyze.cpp
+                             ${CMAKE_CURRENT_BINARY_DIR}/singz_build_stamp.cpp)
 target_link_libraries(singz-analyze PRIVATE singz_core)
 
 # ---- the host test suite (tests/native at the repo root) --------------------
@@ -163,6 +178,14 @@ if(SINGZ_CORE_TESTS)
            COMMAND singz-analyze live-input --device-uid test --channel 0 --frames 64)
   set_tests_properties(live_input_parser_bounds PROPERTIES
     WILL_FAIL TRUE)
+  # Provenance is a SHIPPING command (the desktop spawns it at launch), so it
+  # is smoke-tested like the others. This build passes no SINGZ_SOURCE_HASH,
+  # so the right answer here is a well-formed null — an unstamped build must
+  # say "unknown" rather than invent one.
+  add_test(NAME build_info_schema COMMAND singz-analyze build-info)
+  set_tests_properties(build_info_schema PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "\\{\"version\":1,\"sourceHash\":null,\"pitchDetectVersion\":[0-9]+,\"keyDetectVersion\":[0-9]+,\"beatDetectVersion\":[0-9]+\\}")
   add_test(NAME input_devices_schema
            COMMAND singz-analyze input-devices-fixture)
   set_tests_properties(input_devices_schema PROPERTIES
