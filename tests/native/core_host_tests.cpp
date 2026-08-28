@@ -269,6 +269,310 @@ static void audioInputAnalysisAdapterTests() {
         windows.size() == 1 && windows[0].sampleHostTimeStartNs == 9000000000ull &&
             windows[0].sampleHostTimeEndNs == timestamp(9000000000ull, 2048));
 
+  // A phone chooses the level it hands us, and the detector gates on an
+  // absolute rms. Measured across two phones on one voice: 43 dB apart. The
+  // adapter normalizes so the quiet one is heard, and leaves the loud one
+  // byte-for-byte alone.
+  {
+    // 187.5 Hz is 48000/256, so its period divides the 512-frame hop exactly:
+    // re-pushing the same buffer is phase-continuous. At 220 Hz it is not, and
+    // the seam every 512 samples is itself periodic — the detector then reads
+    // 93.75 Hz (48000/512), which is the fixture talking, not the code.
+    auto tone = [](float amplitude, std::vector<float>& out) {
+      out.resize(2048);
+      for (size_t i = 0; i < out.size(); ++i)
+        out[i] = amplitude * std::sin(2.0 * 3.14159265358979 * 187.5 *
+                                      static_cast<double>(i) / 48000.0);
+    };
+    // Voicing latches over kVoicingOnsetWindows, so a fixture that pushes one
+    // window can never open the gate — feed a steady level and read the
+    // settled answer, which is also what a real capture delivers.
+    auto runOne = [&](float amplitude, singz::LiveInputAnalysisWindow& got) {
+      std::vector<float> samples;
+      tone(amplitude, samples);
+      singz::LiveInputAnalysisAdapter gainAdapter;
+      singz::AudioInputBlockView block;
+      block.sampleHostTimeNs = startNs;
+      block.callbackHostTimeNs = startNs;
+      block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+      block.sampleRate = rate;
+      block.mono = samples.data();
+      bool seen = false;
+      block.sequence = 0;
+      block.frames = 2048;
+      gainAdapter.push(block, [&](const auto& window) { got = window; seen = true; });
+      for (uint64_t sequence = 1; sequence <= 8; ++sequence) {
+        block.sequence = sequence;
+        block.frames = 512;
+        gainAdapter.push(block, [&](const auto& window) { got = window; seen = true; });
+      }
+      return seen ? gainAdapter.appliedGain() : -1.0f;
+    };
+
+    // A realme RMX5051's singing voice at −39 dBFS rms: under the detector's
+    // own 0.01 gate, so silent before this change, and the reason the report
+    // said the microphone did nothing.
+    singz::LiveInputAnalysisWindow quiet;
+    const float quietGain = runOne(0.0155f, quiet);
+    CHECK("live adapter: a quiet phone is lifted to the detector's level",
+          quietGain > 10.0f);
+    CHECK("live adapter: a quiet phone's pitch is found after lifting",
+          quiet.analysis.frequency > 183.0 && quiet.analysis.frequency < 192.0);
+    CHECK("live adapter: the reported level stays the one the hardware gave",
+          quiet.analysis.dbfs < -36.0 && quiet.analysis.dbfs > -42.0);
+
+    // A Xiaomi 23049PCD8G at −14 dBFS: already loud enough, so it must take
+    // the untouched path and report exactly what it always did.
+    singz::LiveInputAnalysisWindow loud;
+    const float loudGain = runOne(0.5f, loud);
+    CHECK("live adapter: an already-loud phone is never rescaled",
+          loudGain == 1.0f);
+    std::vector<float> loudSamples;
+    tone(0.5f, loudSamples);
+    const singz::LiveInputFrame direct =
+        singz::analyzeLiveInput(loudSamples.data(), 2048, 48000);
+    CHECK("live adapter: the untouched path is bit-identical to the detector",
+          loud.analysis.frequency == direct.frequency &&
+              loud.analysis.clarity == direct.clarity &&
+              loud.analysis.rms == direct.rms);
+
+    // Digital silence must not be lifted into noise the detector then reads.
+    singz::LiveInputAnalysisWindow silent;
+    CHECK("live adapter: digital silence is left alone",
+          runOne(0.0f, silent) == 1.0f && silent.analysis.frequency == 0.0);
+
+    // The lift is for the detector's calibration, never for deciding whether
+    // there is anything to detect. A steady tone under the voicing floor is
+    // room noise — a fan, coil whine, mains hum — and lifting it would hand
+    // the single-note tracker a confident pitch nobody sang.
+    singz::LiveInputAnalysisWindow roomTone;
+    runOne(0.0004f, roomTone);  // −71 dBFS rms, comfortably under the floor
+    CHECK("live adapter: a tone under the voicing floor is never pitched",
+          roomTone.analysis.frequency == 0.0 && roomTone.analysis.clarity == 0.0);
+    CHECK("live adapter: an unpitched window still reports its true level",
+          roomTone.analysis.dbfs < -68.0 && roomTone.analysis.dbfs > -74.0);
+
+    // The realme's own numbers: its room floor must stay out, its voice must
+    // get in. This is the pair the whole change is judged on.
+    singz::LiveInputAnalysisWindow realmeRoom;
+    runOne(0.0019f, realmeRoom);  // −57.4 dBFS rms: that phone's measured ambient
+    CHECK("live adapter: the quiet phone's room stays unpitched",
+          realmeRoom.analysis.frequency == 0.0);
+
+    // The floor needs pinning from ABOVE too, or it could be raised until it
+    // silences the soft singer this whole change exists for. −46 dBFS rms is
+    // soft singing on that phone — 11 dB over its measured room, and 7 dB
+    // under the voice its log actually recorded.
+    singz::LiveInputAnalysisWindow softVoice;
+    runOne(0.0071f, softVoice);
+    CHECK("live adapter: a soft singer on a quiet phone is still heard",
+          softVoice.analysis.frequency > 183.0 && softVoice.analysis.frequency < 192.0);
+
+    // Hysteresis: a room between the two edges must not open the gate — only a
+    // level reaching OPEN may. 0.0037 amplitude is −51.6 dBFS rms, a genuine
+    // midpoint (the earlier 0.0026 sat 0.2 dB off the close threshold and so
+    // would have passed for the wrong reason).
+    singz::LiveInputAnalysisWindow betweenEdges;
+    runOne(0.0037f, betweenEdges);
+    CHECK("live adapter: a room between the two edges never opens the gate",
+          betweenEdges.analysis.frequency == 0.0);
+
+    // And the half that actually protects a session: every prompt OPENS the
+    // gate the moment the singer sings, so a gate that only closes below the
+    // close level latches open and pitches the room for the rest of the take.
+    // Measured on exactly that mistake: 273/273 confident false pitches.
+    {
+      std::vector<float> note, room;
+      tone(0.0155f, note);   // −39 dBFS rms: a sung note, opens the gate
+      tone(0.0037f, room);   // −51.6 dBFS rms: between the edges
+      singz::LiveInputAnalysisAdapter latch;
+      singz::AudioInputBlockView block;
+      block.sampleHostTimeNs = startNs;
+      block.callbackHostTimeNs = startNs;
+      block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+      block.sampleRate = rate;
+      uint64_t sequence = 0;
+      block.sequence = sequence++;
+      block.frames = 2048;
+      block.mono = note.data();
+      latch.push(block, [](const auto&) {});
+      int sungPitched = 0;
+      for (int i = 0; i < 8; ++i) {
+        block.sequence = sequence++;
+        block.frames = 512;
+        block.mono = note.data();
+        latch.push(block, [&](const auto& w) {
+          if (w.analysis.frequency > 0) ++sungPitched;
+        });
+      }
+      CHECK("live adapter: a sung note opens the gate", sungPitched >= 6);
+      int roomPitched = 0, roomWindows = 0;
+      for (int i = 0; i < 120; ++i) {
+        block.sequence = sequence++;
+        block.frames = 512;
+        block.mono = room.data();
+        latch.push(block, [&](const auto& w) {
+          ++roomWindows;
+          if (w.analysis.frequency > 0) ++roomPitched;
+        });
+      }
+      CHECK("live adapter: the room after a note is released, not latched open",
+            roomWindows >= 100 && roomPitched < 45);
+      CHECK("live adapter: the release tail is short enough to never lock",
+            roomPitched >= 1);
+
+      // A level under the CLOSE edge shuts the gate at once rather than
+      // waiting out the release counter — otherwise that constant does
+      // nothing the release rule would not already do. The gate must be
+      // RE-OPENED first: the room loop above has already released it, and a
+      // shut gate would make this check pass whatever close is set to.
+      for (int i = 0; i < 4; ++i) {
+        block.sequence = sequence++;
+        block.frames = 512;
+        block.mono = note.data();
+        latch.push(block, [](const auto&) {});
+      }
+      std::vector<float> hush;
+      tone(0.0014f, hush);  // −60 dBFS rms: under close
+      int hushPitched = 0;
+      for (int i = 0; i < 20; ++i) {
+        block.sequence = sequence++;
+        block.frames = 512;
+        block.mono = hush.data();
+        latch.push(block, [&](const auto& w) {
+          if (w.analysis.frequency > 0) ++hushPitched;
+        });
+      }
+      CHECK("live adapter: a level under the close edge shuts the gate at once",
+            hushPitched <= 4);
+    }
+
+    // The onset latch's LENGTH was unpinned: every other fixture pushes a
+    // steady level for many windows, so kVoicingOnsetWindows = 1 passed them
+    // all while the header sells it as "a single loud sample cannot open".
+    {
+      std::vector<float> note, quiet;
+      tone(0.0155f, note);
+      tone(0.0f, quiet);
+      // Every window here is FULLY loud: the first 2048-frame push fills the
+      // buffer with tone, so each later 512-frame hop keeps it all tone. A
+      // fixture that ramps in from silence instead makes early windows mostly
+      // quiet, which the detector declines to pitch for its own reasons — and
+      // then the latch length is untested however the assertion is written.
+      int pitched = 0;
+      {
+        singz::LiveInputAnalysisAdapter onset;
+        singz::AudioInputBlockView block;
+        block.sampleHostTimeNs = startNs;
+        block.callbackHostTimeNs = startNs;
+        block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+        block.sampleRate = rate;
+        uint64_t sequence = 0;
+        block.sequence = sequence++;
+        block.frames = 2048;
+        block.mono = note.data();
+        onset.push(block, [&](const auto& w) {
+          if (w.analysis.frequency > 0) ++pitched;
+        });
+        for (int i = 0; i < 2; ++i) {
+          block.sequence = sequence++;
+          block.frames = 512;
+          block.mono = note.data();
+          onset.push(block, [&](const auto& w) {
+            if (w.analysis.frequency > 0) ++pitched;
+          });
+        }
+      }
+      CHECK("live adapter: the gate opens on the third window, not the first",
+            pitched == 1);
+      (void)quiet;
+    }
+
+    // A loud transient must not leave a plainly-present voice unheard while
+    // the peak follower unwinds: measured at 2.74 s before the gain floor.
+    {
+      std::vector<float> bump, voice;
+      tone(0.5f, bump);
+      tone(0.0079f, voice);  // −45 dBFS rms
+      singz::LiveInputAnalysisAdapter recovery;
+      singz::AudioInputBlockView block;
+      block.sampleHostTimeNs = startNs;
+      block.callbackHostTimeNs = startNs;
+      block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+      block.sampleRate = rate;
+      block.sequence = 0;
+      block.frames = 2048;
+      block.mono = bump.data();
+      recovery.push(block, [](const auto&) {});
+      int pitched = 0;
+      for (uint64_t sequence = 1; sequence <= 12; ++sequence) {
+        block.sequence = sequence;
+        block.frames = 512;
+        block.mono = voice.data();
+        recovery.push(block, [&](const auto& window) {
+          if (window.analysis.frequency > 0) ++pitched;
+        });
+      }
+      CHECK("live adapter: a voice after a loud transient is heard immediately",
+            pitched >= 8);
+    }
+
+    // Broadband hiss lifted 40 dB must not become a pitch either.
+    {
+      std::vector<float> hiss(2048);
+      uint32_t seed = 12345;
+      for (size_t i = 0; i < hiss.size(); ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        hiss[i] = (static_cast<float>(seed >> 8) / 8388608.0f - 1.0f) * 0.004f;
+      }
+      singz::LiveInputAnalysisAdapter noiseAdapter;
+      singz::AudioInputBlockView block;
+      block.sequence = 0;
+      block.sampleHostTimeNs = startNs;
+      block.callbackHostTimeNs = startNs;
+      block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+      block.sampleRate = rate;
+      block.mono = hiss.data();
+      block.frames = 2048;
+      singz::LiveInputAnalysisWindow noiseWindow;
+      noiseAdapter.push(block, [&](const auto& w) { noiseWindow = w; });
+      CHECK("live adapter: lifted broadband noise yields no pitch",
+            noiseWindow.analysis.clarity < 0.5);
+    }
+
+    // kPeakDecay had no coverage while every case ran one window on a fresh
+    // adapter, where the follower's history cannot matter: 0.0 and 1.0 both
+    // passed. Drive loud, then silence, and watch the follower release.
+    {
+      std::vector<float> loudTone, quietTone;
+      tone(0.5f, loudTone);
+      tone(0.0f, quietTone);
+      singz::LiveInputAnalysisAdapter decayAdapter;
+      singz::AudioInputBlockView block;
+      block.sampleHostTimeNs = startNs;
+      block.callbackHostTimeNs = startNs;
+      block.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+      block.sampleRate = rate;
+      block.frames = 2048;
+      block.sequence = 0;
+      block.mono = loudTone.data();
+      decayAdapter.push(block, [](const auto&) {});
+      const float afterLoud = decayAdapter.capturePeak();
+      CHECK("live adapter: the follower takes the loud peak immediately",
+            afterLoud > 0.49f && afterLoud <= 0.5f);
+      // 512-frame hops of silence: the follower must decay, not hold or drop.
+      for (uint64_t sequence = 1; sequence <= 100; ++sequence) {
+        block.sequence = sequence;
+        block.mono = quietTone.data();
+        block.frames = 512;
+        decayAdapter.push(block, [](const auto&) {});
+      }
+      const float afterSilence = decayAdapter.capturePeak();
+      CHECK("live adapter: the follower releases on the documented constant",
+            afterSilence < afterLoud * 0.7f && afterSilence > afterLoud * 0.4f);
+    }
+  }
+
   // AAudio starts before its non-RT timestamp sampler has a hardware anchor.
   // Partial estimate-domain audio must not leak into the first hardware
   // analysis window; the inverse transition on a stale anchor is isolated too.

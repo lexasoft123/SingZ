@@ -25,12 +25,17 @@ import { log } from '../log'
 const SAMPLE_RATE = 16_000
 const BUFFER_LENGTH = 1_024
 const MAX_OBSERVATIONS = 512
-/** yinPitchInfo's own gate, mirrored here so the screen and the log can say
- * WHY there is no note. Below it the detector reports frequency 0 and clarity
- * 0, which is exactly what a dead microphone reports — the two are
- * indistinguishable to a singer unless somebody publishes the level. */
-const PITCH_GATE_RMS = 0.01
-const PITCH_GATE_DBFS = -40
+/** Essentially digital silence — far below any room, let alone any voice. A
+ * capture sitting here is delivering empty blocks, which is what a muted
+ * microphone looks like with permission granted and the stream running.
+ * Deliberately NOT a restatement of the core's own floors: those are the
+ * core's to decide, in the core's units, and two constants pretending to be
+ * one rule is how they drift apart. */
+export const SILENT_CAPTURE_DBFS = -90
+/** yinPitchInfo's gate, which the JS recorder path still runs unnormalized.
+ * Only the Android core lifts capture to the detector's level; on the
+ * recorder path a quiet phone really is too quiet, and can be told so. */
+const RECORDER_PITCH_GATE_DBFS = -40
 /** How long a capture may deliver nothing loud enough before it is written
  * down. A release APK has no inspector, so this line is the only evidence
  * that the microphone was open and heard nothing. */
@@ -50,12 +55,18 @@ const WATCHDOG_TICK_MS = 500
 export interface TrainingMicSignal {
   /** Analysis blocks consumed since the last start. */
   readonly windows: number
-  /** Of those, how many cleared the detector's RMS gate. */
+  /** Of those, how many the detector actually found a pitch in. The core
+   * normalizes live capture before analysing it, so this is no longer the
+   * same question as "how many were loud enough". */
   readonly voiced: number
   /** Loudest block so far, dBFS; null before the first one arrives. */
   readonly peakDbfs: number | null
   /** The most recent block's level, dBFS; null before the first one. */
   readonly dbfs: number | null
+  /** True when the core lifted this capture to the detector's calibration.
+   * Only the Android native path does; the JS recorder path is judged at the
+   * level the device happened to give, so a quiet phone there IS too quiet. */
+  readonly normalized: boolean
 }
 
 const dbfsFromRms = (rms: number): number =>
@@ -66,7 +77,7 @@ export function describeTrainingMicSignal(signal: TrainingMicSignal): string {
   if (signal.windows === 0 || signal.peakDbfs === null)
     return 'no audio arrived from the microphone'
   return `${signal.windows} blocks · peak ${signal.peakDbfs.toFixed(1)} dBFS · ` +
-    `${signal.voiced} above the ${PITCH_GATE_DBFS} dBFS pitch gate`
+    `${signal.voiced} with a pitch`
 }
 
 export type TrainingMicErrorKind = 'permission-denied' | 'unavailable' | 'interrupted'
@@ -174,8 +185,22 @@ export class TrainingMicrophone {
       windows: this.windows,
       voiced: this.voiced,
       peakDbfs: this.peakDbfs,
-      dbfs: this.lastDbfs
+      dbfs: this.lastDbfs,
+      normalized: Boolean(this.deps.androidCore)
     }
+  }
+
+  /** True when the level itself is the reason nothing is being detected —
+   * which only an unnormalized capture can be judged on. */
+  get tooQuiet(): boolean {
+    const signal = this.signal
+    return (
+      !signal.normalized &&
+      signal.windows > 0 &&
+      signal.voiced === 0 &&
+      signal.peakDbfs !== null &&
+      signal.peakDbfs < RECORDER_PITCH_GATE_DBFS
+    )
   }
 
   snapshot(): readonly TrainingPitchObservation[] {
@@ -250,7 +275,7 @@ export class TrainingMicrophone {
 
   /** Every consumed block passes through here, so the level is recorded once
    * for both capture paths. */
-  private recordLevel(rms: number): void {
+  private recordLevel(rms: number, pitched: boolean): void {
     const dbfs = dbfsFromRms(rms)
     const now = Date.now()
     this.windows++
@@ -269,11 +294,11 @@ export class TrainingMicrophone {
     }
     this.lastBlockMs = now
     if (this.peakDbfs === null || dbfs > this.peakDbfs) this.peakDbfs = dbfs
-    if (rms >= PITCH_GATE_RMS) this.voiced++
+    if (pitched) this.voiced++
     if (this.silenceReported || this.voiced > 0 || this.captureStartedMs === null) return
     if (Date.now() - this.captureStartedMs < SILENCE_REPORT_MS) return
     this.silenceReported = true
-    log('mic', `nothing loud enough to read · ${describeTrainingMicSignal(this.signal)}`, 'warn')
+    log('mic', `no pitch found yet · ${describeTrainingMicSignal(this.signal)}`, 'warn')
   }
 
   isRequestingPermission(): boolean {
@@ -512,7 +537,7 @@ export class TrainingMicrophone {
     // whatever it had buffered — so a high flip rate is a way for a healthy
     // stream to starve the detector. The tally is how a field log shows it.
     if (frame.timestampQuality in this.quality) this.quality[frame.timestampQuality]++
-    this.recordLevel(frame.rms)
+    this.recordLevel(frame.rms, frequencyHz > 0)
     const observation: TrainingPitchObservation = {
       timestampMs,
       frequencyHz,
@@ -534,7 +559,7 @@ export class TrainingMicrophone {
       const frame = yinPitchInfo(buffer.getChannelData(0), SAMPLE_RATE)
       const frequencyHz = frame.f0 > 0 ? frame.f0 : 0
       const midi = frequencyToFractionalMidi(frequencyHz)
-      this.recordLevel(frame.rms)
+      this.recordLevel(frame.rms, frequencyHz > 0)
       const observation: TrainingPitchObservation = {
         timestampMs: clockEpochMs + when * 1000 + (numFrames / SAMPLE_RATE) * 500,
         frequencyHz,
@@ -612,11 +637,16 @@ export class TrainingMicrophone {
       ? ` · transport ${stats.deliveredBlocks} callbacks/${stats.deliveredFrames} frames, ` +
         `${stats.overruns} overruns, ${stats.wakeups} wakeups`
       : ''
+    // Says the normalization is in this binary AND what it did. Without it a
+    // .cpp change that never reached the APK reads exactly like one that did.
+    const lift = stats?.peakGain
+      ? ` · lift up to ${stats.peakGain.toFixed(1)}x`
+      : ''
     const q = this.quality
     const timestamps = q.hardware + q['callback-estimate'] + q.unknown > 0
       ? ` · timestamps ${q.hardware} hardware/${q['callback-estimate']} estimate/${q.unknown} unknown`
       : ''
-    log('mic', `stopped · ${describeTrainingMicSignal(this.signal)}${transport}${timestamps}`)
+    log('mic', `stopped · ${describeTrainingMicSignal(this.signal)}${transport}${lift}${timestamps}`)
   }
 
   /** One lane owns recorder and audio-session transitions. In particular, a

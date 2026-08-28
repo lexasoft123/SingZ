@@ -135,12 +135,12 @@ describe('TrainingMicrophone', () => {
     expect(d.sessions).toEqual([true, false])
   })
 
-  test('separates a silent microphone from one too quiet to pitch', async () => {
+  test('reports the level the hardware gave and the pitches actually found', async () => {
     const d = deps()
     const mic = new TrainingMicrophone(d.value)
     expect(await mic.start(() => 1_000, jest.fn())).toEqual({ ok: true })
     // Nothing delivered yet: the screen must not claim to have heard silence.
-    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null })
+    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null, normalized: false })
     expect(describeTrainingMicSignal(mic.signal)).toBe('no audio arrived from the microphone')
 
     const tone = (amplitude: number): AudioBuffer => {
@@ -150,20 +150,26 @@ describe('TrainingMicrophone', () => {
       return { getChannelData: () => samples, buffer: { release: () => undefined } } as unknown as AudioBuffer
     }
 
-    // A real voice, three decibels under the detector's 0.01 RMS gate: the
-    // old screen and this one both draw no note, but only one of them can say
-    // that something was audible.
+    // Under the JS recorder's own 0.01 gate (this path is not normalized —
+    // only the native core's live capture is), so no pitch is found, and the
+    // level is still reported honestly.
     d.recorder.callback?.({ buffer: tone(0.01), numFrames: 1_024, when: 2 })
     expect(mic.signal.windows).toBe(1)
     expect(mic.signal.voiced).toBe(0)
+    expect(mic.tooQuiet).toBe(true)
     expect(mic.signal.peakDbfs).toBeLessThan(-40)
     expect(mic.signal.peakDbfs).toBeGreaterThan(-60)
     expect(mic.snapshot()[0].midi).toBeNull()
 
     d.recorder.callback?.({ buffer: tone(0.5), numFrames: 1_024, when: 2.064 })
     expect(mic.signal.voiced).toBe(1)
+    expect(mic.tooQuiet).toBe(false)
     expect(mic.signal.peakDbfs).toBeGreaterThan(-12)
-    expect(describeTrainingMicSignal(mic.signal)).toMatch(/^2 blocks · peak -\d/)
+    expect(describeTrainingMicSignal(mic.signal)).toMatch(/^2 blocks · peak -\d.* · 1 with a pitch$/)
+
+    // The recorder path is judged at the level the device gave, so "too
+    // quiet" is a true answer here — and the signal says it was not lifted.
+    expect(mic.signal.normalized).toBe(false)
 
     // resetObservations runs while the capture is still LIVE — the screen
     // calls it on Replay and on every next prompt — so it must not take the
@@ -177,7 +183,7 @@ describe('TrainingMicrophone', () => {
     // A fresh listen does start from nothing.
     await mic.stop()
     expect(await mic.start(() => 0, jest.fn())).toEqual({ ok: true })
-    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null })
+    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null, normalized: false })
     await mic.stop()
   })
 

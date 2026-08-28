@@ -334,6 +334,8 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
         map.putDouble("deliveredFrames", values.getOrElse(1) { 0 }.toDouble())
         map.putDouble("overruns", values.getOrElse(2) { 0 }.toDouble())
         map.putDouble("wakeups", values.getOrElse(3) { 0 }.toDouble())
+        // ×100 from the core, so a 12.5x lift arrives as 1250.
+        map.putDouble("peakGain", values.getOrElse(4) { 0 }.toDouble() / 100.0)
         settlement.resolve(map)
       } catch (_: Throwable) {
         settlement.resolve(null)

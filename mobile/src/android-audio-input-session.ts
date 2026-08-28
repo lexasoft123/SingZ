@@ -79,6 +79,10 @@ export interface AndroidAudioInputStats {
   deliveredFrames: number
   overruns: number
   wakeups: number
+  /** Largest lift the core applied to reach the detector's calibration; 1
+   * means the capture was already loud enough and went through untouched.
+   * Absent from a core built before normalization existed. */
+  peakGain?: number
 }
 
 export interface AndroidMicrophonePermission {

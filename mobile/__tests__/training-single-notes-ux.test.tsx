@@ -247,6 +247,12 @@ test('the meter names which way the microphone is failing instead of waiting for
   expect(noAudio).toContain('Tap Replay to restart the microphone')
   expect(noAudio).not.toContain('Waiting for your voice')
 
+  const silent = await listening('silent')
+  expect(silent).toContain('The mic is delivering silence')
+  expect(silent).toContain('Check microphone access in Settings')
+  expect(silent).not.toContain('Waiting for your voice')
+
+  // Still true on the unnormalized recorder path, and only there.
   const tooQuiet = await listening('too-quiet')
   expect(tooQuiet).toContain('Too quiet to hear')
   expect(tooQuiet).toContain('Sing a little louder')

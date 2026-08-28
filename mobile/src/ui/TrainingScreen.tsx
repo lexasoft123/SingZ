@@ -50,7 +50,7 @@ import {
   mobileTrainingReducer,
   type MobileTrainingSetup
 } from '../training/state'
-import { TrainingMicrophone } from '../training/mic'
+import { SILENT_CAPTURE_DBFS, TrainingMicrophone } from '../training/mic'
 import {
   DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS,
   EMPTY_SINGLE_NOTE_LOCK,
@@ -517,9 +517,11 @@ export default function TrainingScreen({
           ? 'starting'
           : signal.windows === 0
             ? 'no-audio'
-            : signal.voiced === 0
-              ? 'too-quiet'
-              : 'hearing'
+            : signal.peakDbfs !== null && signal.peakDbfs < SILENT_CAPTURE_DBFS
+              ? 'silent'
+              : mic.tooQuiet
+                ? 'too-quiet'
+                : 'hearing'
       )
       const run = vocalRun.current
       if (!run) {
@@ -1121,19 +1123,28 @@ function SingleNoteTransport({ phase, onBegin, onSkip }: {
   />
 }
 
-/** What the microphone is doing, in the only three states a singer can act
- * on differently. "Waiting for your voice" used to cover all of them, so a
- * phone delivering silence and a phone hearing a singer it cannot pitch drew
- * the same screen — which is how a broken microphone looks exactly like one
- * that is merely patient. */
-export type MicHearing = 'starting' | 'no-audio' | 'too-quiet' | 'hearing'
+/** What the microphone is doing, in the states a singer can act on
+ * differently. "Waiting for your voice" used to cover all of them, so a phone
+ * delivering nothing and a phone waiting patiently drew the same screen —
+ * which is how a broken microphone looks exactly like a working one.
+ *
+ * "Too quiet" survives only where it is still TRUE. The Android core lifts
+ * live capture to the level the detector expects, so a quiet Android phone is
+ * no longer a failure and "sing louder" would be advice that cannot help; the
+ * JS recorder path (iOS) is judged at whatever level the device gave, where
+ * the level really can be the whole problem. The microphone knows which of
+ * the two it is running, so the screen asks it rather than guessing. */
+export type MicHearing = 'starting' | 'no-audio' | 'silent' | 'too-quiet' | 'hearing'
 
 const SILENT_COPY = {
   // Permission refusal has its own error path, so reaching here means capture
-  // started and then delivered nothing — measured on an Android phone whose
-  // AAudio stream reported STARTED and never called back. Restarting capture
-  // is what clears it, and Replay is the button that does exactly that.
+  // started and then delivered nothing — an AAudio stream that reported
+  // STARTED and never called back. Restarting capture is what clears it, and
+  // Replay is the button that does exactly that.
   'no-audio': { reading: 'No sound from the mic', instruction: 'Tap Replay to restart the microphone' },
+  // Blocks are arriving and they are empty: the stream is running on a
+  // microphone something else has muted.
+  silent: { reading: 'The mic is delivering silence', instruction: 'Check microphone access in Settings' },
   'too-quiet': { reading: 'Too quiet to hear', instruction: 'Sing a little louder, or move closer' },
   starting: { reading: 'Waiting for your voice', instruction: 'Sing the note' },
   hearing: { reading: 'Waiting for your voice', instruction: 'Sing the note' }
