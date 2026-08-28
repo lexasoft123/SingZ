@@ -1,8 +1,8 @@
 # Future DSP graph architecture
 
-Status: roadmap; Phase 4A native monitoring preview is product-wired, with
-hardware listening verification still pending
-Last reviewed: 2026-08-28
+Status: roadmap; Phase 4A native monitoring preview is product-wired and
+hardware-verified on macOS with the Zen Quadro SC
+Last reviewed: 2026-08-29
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
 
 Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
@@ -1228,10 +1228,14 @@ addon smoke proving exact integer, lossless BigInt and boolean schemas; Release
 and sanitizer/realtime policy gates that include the monitor targets; and the
 desktop product coordinator and Settings controls now prove, without starting
 native output in automation, that Web Audio releases its physical sink before a
-generation-bound begin, failed/closed/hidden sessions stop before restoration,
+generation-bound begin, failed/closed sessions stop before restoration,
+explicit monitoring survives renderer occlusion while Settings remains open,
 monitoring and its wired-headphone confirmation default off, and unsupported
-platforms/routes remain blocked. Separate human headphone listening on macOS
-remains pending; Windows stays visibly platform-not-ready in this phase.
+platforms/routes remain blocked. Human listening on 2026-08-29 verified Zen
+Quadro SC input 3 through the native graph to USB playback outputs 1/2, including
+switching to another macOS app without interruption. Closing Settings
+intentionally stops the preview and restores song output. Windows stays visibly
+platform-not-ready in this phase.
 
 Implement:
 

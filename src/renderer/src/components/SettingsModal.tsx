@@ -224,6 +224,27 @@ export function monitorStartReady(options: {
     !options.monitorActive && !options.hasNativeOwnership
 }
 
+export type MonitorLifecycleEvent =
+  | 'document-hidden'
+  | 'document-visible'
+  | 'media-device-change'
+
+export type MonitorLifecycleAction =
+  | 'preserve-monitor'
+  | 'stop-preview'
+  | 'restart-preview'
+
+/** Native monitoring is an explicitly enabled audio session, not renderer
+ * animation work. On macOS a fully occluded window becomes document.hidden;
+ * that must not turn switching to an interface mixer into an audio stop. */
+export function monitorLifecycleAction(
+  event: MonitorLifecycleEvent,
+  hasNativeOwnership: boolean
+): MonitorLifecycleAction {
+  if (hasNativeOwnership) return 'preserve-monitor'
+  return event === 'document-hidden' ? 'stop-preview' : 'restart-preview'
+}
+
 export default function SettingsModal({
   audio,
   onChangeOutput,
@@ -282,6 +303,7 @@ export default function SettingsModal({
       onTerminalStop: (outcome) => {
         if (!live) return
         setHeadphonesConfirmed(false)
+        refreshDevices()
         // The capture was stopped before native output began. Its last meter
         // frame must not remain eligible while a safe preview is reopening.
         setPreview(INITIAL_PREVIEW)
@@ -303,7 +325,7 @@ export default function SettingsModal({
       monitorCoordinator.current = null
       void coordinator.stop()
     }
-  }, [onPauseSong, onReleaseLegacyOutput, onRestoreLegacyOutput, registerEmergencyStop])
+  }, [onPauseSong, onReleaseLegacyOutput, onRestoreLegacyOutput, refreshDevices, registerEmergencyStop])
 
   useEffect(() => {
     if (monitor.phase !== 'active') return
@@ -325,11 +347,16 @@ export default function SettingsModal({
   useEffect(() => {
     refreshDevices()
     const refresh = (): void => {
+      const coordinator = monitorCoordinator.current
+      refreshDevices()
+      if (monitorLifecycleAction(
+        'media-device-change',
+        coordinator?.hasNativeOwnership ?? false
+      ) === 'preserve-monitor') return
       setHeadphonesConfirmed(false)
       void (async () => {
-        const outcome = await monitorCoordinator.current?.stop()
-        refreshDevices()
-        if (outcome?.safeToRestartPreview && !monitorCoordinator.current?.hasNativeOwnership) {
+        const outcome = await coordinator?.stop()
+        if (outcome?.safeToRestartPreview && !coordinator?.hasNativeOwnership) {
           setPreviewEpoch((value) => value + 1)
         }
       })()
@@ -402,19 +429,18 @@ export default function SettingsModal({
       }
     }
     const visibility = (): void => {
-      if (document.hidden) {
+      const coordinator = monitorCoordinator.current
+      const action = monitorLifecycleAction(
+        document.hidden ? 'document-hidden' : 'document-visible',
+        coordinator?.hasNativeOwnership ?? false
+      )
+      if (action === 'preserve-monitor') return
+      if (action === 'stop-preview') {
         stop()
         setHeadphonesConfirmed(false)
-        void monitorCoordinator.current?.stop()
-      } else {
-        void (async () => {
-          const outcome = await monitorCoordinator.current?.stop()
-          if (
-            outcome?.safeToRestartPreview &&
-            !monitorCoordinator.current?.hasNativeOwnership && !document.hidden
-          ) await start()
-        })()
+        return
       }
+      void start()
     }
     document.addEventListener('visibilitychange', visibility)
     void start()
@@ -864,7 +890,11 @@ export default function SettingsModal({
           {audio.outputId && <p className="settings-hint">Tip: on a non-default speaker, sing with headphones — echo cancellation only tracks the system default output.</p>}
         </div>
       </div>
-      <div className="modal-actions"><button type="button" className="pill ghost" onClick={() => void closeSettings()}>Close</button></div>
+      <div className="modal-actions">
+        <button type="button" className="pill ghost" onClick={() => void closeSettings()}>
+          {monitorActive || monitorBusy ? 'Stop monitoring and close' : 'Close'}
+        </button>
+      </div>
     </Modal>
   )
 }

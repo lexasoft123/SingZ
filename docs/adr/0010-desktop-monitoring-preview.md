@@ -1,7 +1,7 @@
 # ADR 0010: Guarded desktop monitoring preview
 
-Status: implemented and product-wired; hardware listening verification pending
-Date: 2026-08-28
+Status: implemented, product-wired and hardware-verified on macOS
+Date: 2026-08-29
 
 ## Decision
 
@@ -36,6 +36,12 @@ shuts down the runner and deactivates/destroys the graph before releasing its
 arena. A busy runner shutdown or failed graph deactivation retains the prepared
 graph and arena for an explicit same-generation retry. Object destruction stops
 the host first and quarantines still-live graph storage instead of freeing it.
+Renderer occlusion and ordinary device-inventory notifications do not end an
+explicitly enabled monitor: Electron reports a fully covered macOS window as
+`document.hidden`, but this audio session is not renderer animation work. The
+native loss/status path remains authoritative. Explicit Stop, closing Settings,
+editing a physical route, a terminal native failure or renderer teardown still
+ends the generation before Web Audio output is restored.
 
 macOS accepts only one same-UID duplex device and is the only enabled Phase 4A
 product preview. Windows inventory remains visible, but its platform-backed
@@ -88,6 +94,10 @@ automated silent test.
   failure and lifecycle cleanup, truthful named host telemetry, and blocked
   Windows/unsuitable-route copy. Electron E2E probes the silent Web Audio sink
   release but never calls the audible native begin operation.
+- Human listening on 2026-08-29 verified Zen Quadro SC input 3 through the
+  native graph to USB playback outputs 1/2. Monitoring remained audible while
+  switching to another macOS app; closing Settings stopped it and restored the
+  legacy song-output owner as designed.
 
 ## Consequences
 

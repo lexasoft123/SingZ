@@ -8,6 +8,7 @@ import SettingsModal, {
   defaultMonitorOutputChannels,
   inputChannelOptions,
   monitorConfig,
+  monitorLifecycleAction,
   monitorPlaybackRouteHelp,
   monitorRouteCopy,
   monitorSignalCopy,
@@ -94,12 +95,22 @@ describe('settings microphone input strip', () => {
     expect(html).toContain('disabled=""')
   })
 
-  it('binds modal, hidden-document and renderer-side unmount cleanup', () => {
+  it('keeps explicit monitoring alive across occlusion and device inventory churn', () => {
+    expect(monitorLifecycleAction('document-hidden', true)).toBe('preserve-monitor')
+    expect(monitorLifecycleAction('document-visible', true)).toBe('preserve-monitor')
+    expect(monitorLifecycleAction('media-device-change', true)).toBe('preserve-monitor')
+    expect(monitorLifecycleAction('document-hidden', false)).toBe('stop-preview')
+    expect(monitorLifecycleAction('document-visible', false)).toBe('restart-preview')
+    expect(monitorLifecycleAction('media-device-change', false)).toBe('restart-preview')
+  })
+
+  it('binds explicit close, terminal failure and renderer-side unmount cleanup', () => {
     const source = readFileSync('src/renderer/src/components/SettingsModal.tsx', 'utf8')
     expect(source).toContain('if (document.hidden)')
-    expect(source).toContain('void monitorCoordinator.current?.stop()')
+    expect(source).toContain("document.hidden ? 'document-hidden' : 'document-visible'")
     expect(source).toContain('void coordinator.stop()')
     expect(source).toContain('const outcome = await stopMonitoring(false)')
+    expect(source).toContain("monitorActive || monitorBusy ? 'Stop monitoring and close' : 'Close'")
     expect(source).toContain('outcome.safeToRestartPreview')
     expect(source).not.toContain('setInterval(')
     expect(source).toContain("timer = setTimeout(() => void poll(), 120)")
