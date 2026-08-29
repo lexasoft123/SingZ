@@ -126,6 +126,7 @@ const captureSession: OwnedSessionOptions = {
 
 const lowLatencyBufferDuration = 0.005
 const routeSettleTimeoutMilliseconds = 1500
+const captureRouteRetryLimit = 2
 
 const rawDeviceUid = (uid: string | undefined): string | undefined =>
   uid?.startsWith('ios:') ? uid.slice(4) : uid
@@ -134,6 +135,9 @@ const portableDeviceUid = (uid: string): string => `ios:${uid}`
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
+
+const isTransientCaptureRouteChange = (error: unknown): boolean =>
+  errorMessage(error).startsWith('iOS audio route changed')
 
 const acquisitionAndRestorationError = (
   acquisitionError: unknown,
@@ -263,16 +267,13 @@ export class IosAudioInputSessionCoordinator {
         if (!prepared.ok)
           throw new Error(prepared.error ?? 'Could not prepare iOS capture preferences')
         await this.native.verifyCaptureSession(portableUid, minimumChannels)
-        context.leaseToken = await this.native.acquireLease(portableUid, minimumChannels)
         context.captureGeneration = this.nextCaptureGeneration++
-        const started = await this.native.startCapture(
-          context.leaseToken,
+        await this.startCaptureWithRouteRetry(
+          context,
           portableUid,
           channel,
-          context.captureGeneration
+          minimumChannels
         )
-        if (!started.ok)
-          throw new Error(started.error ?? 'Could not start iOS audio input')
         context.captureStopped = false
         this.state = { kind: 'active', context }
       } catch (acquisitionError) {
@@ -332,6 +333,52 @@ export class IosAudioInputSessionCoordinator {
         throw error
       }
     })
+  }
+
+  private async startCaptureWithRouteRetry(
+    context: SessionContext,
+    portableUid: string,
+    channel: number,
+    minimumChannels: number
+  ): Promise<void> {
+    for (let retry = 0; ; ++retry) {
+      try {
+        context.leaseToken = await this.native.acquireLease(
+          portableUid,
+          minimumChannels
+        )
+        context.leaseReleased = false
+        const started = await this.native.startCapture(
+          context.leaseToken,
+          portableUid,
+          channel,
+          context.captureGeneration ?? 0
+        )
+        if (!started.ok)
+          throw new Error(started.error ?? 'Could not start iOS audio input')
+        return
+      } catch (error) {
+        if (
+          !isTransientCaptureRouteChange(error) ||
+          retry >= captureRouteRetryLimit
+        )
+          throw error
+
+        // AVAudioSession may post the category/route notification slightly
+        // after the selected route is already usable. The native generation
+        // guard correctly rejects that stale lease. Retire only that lease,
+        // confirm the exact device/channel again, then mint a fresh one. A
+        // real unplug or reroute fails verification and follows normal full
+        // restoration; playback/category ownership never cycles for this
+        // transient retry.
+        if (context.leaseToken && !context.leaseReleased) {
+          await this.native.releaseLease(context.leaseToken)
+          context.leaseReleased = true
+          context.leaseToken = undefined
+        }
+        await this.waitForCaptureReadiness(portableUid, minimumChannels)
+      }
+    }
   }
 
   private async restore(context: SessionContext): Promise<void> {
@@ -499,15 +546,18 @@ export class IosAudioInputSessionCoordinator {
     // native safe-abandon can conclusively classify the saved route as gone.
     const verificationInput = selectedIsPresent ? selectedInput : currentInput
     if (verificationInput)
-      await this.waitForCleanupCaptureReadiness(verificationInput)
+      await this.waitForCaptureReadiness(portableDeviceUid(verificationInput), 1)
   }
 
-  private async waitForCleanupCaptureReadiness(deviceUid: string): Promise<void> {
+  private async waitForCaptureReadiness(
+    portableUid: string,
+    minimumChannels: number
+  ): Promise<void> {
     const deadline = Date.now() + routeSettleTimeoutMilliseconds
     let lastError: unknown
     do {
       try {
-        await this.native.verifyCaptureSession(portableDeviceUid(deviceUid), 1)
+        await this.native.verifyCaptureSession(portableUid, minimumChannels)
         return
       } catch (error) {
         lastError = error
@@ -515,7 +565,7 @@ export class IosAudioInputSessionCoordinator {
       await new Promise<void>((resolve) => setTimeout(resolve, 10))
     } while (Date.now() <= deadline)
     throw new Error(
-      `timed out waiting for the cleanup capture route: ${errorMessage(lastError)}`
+      `timed out waiting for the capture route: ${errorMessage(lastError)}`
     )
   }
 

@@ -131,6 +131,80 @@ describe('iOS audio input session lease', () => {
     )
   })
 
+  test('retries a delayed iOS route notification without cycling the owned session', async () => {
+    const h = harness()
+    let leaseNumber = 7
+    let starts = 0
+    h.native.acquireLease = async (uid, channels) => {
+      const token = String(leaseNumber++)
+      h.calls.push(`lease:acquire:${token}:${uid}:${channels}`)
+      return token
+    }
+    h.native.startCapture = async (token, uid, channel, generation) => {
+      h.calls.push(`capture:start:${token}:${uid}:${channel}:${generation}`)
+      if (++starts === 1)
+        throw new Error('iOS audio route changed after the input session was prepared')
+      return { ok: true, sampleRate: 48000 }
+    }
+    h.native.stopCapture = async (generation) => {
+      h.calls.push(`capture:stop:${generation}`)
+    }
+
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+    const lease = await coordinator.acquire({ deviceUid: 'ios:usb', channel: 2 })
+
+    expect(lease.generation).toBe(1)
+    expect(h.calls).toContain('lease:release:7')
+    expect(h.calls).toContain('verify:capture:ios:usb:3')
+    expect(h.calls.at(-1)).toBe('capture:start:8:ios:usb:2:1')
+    expect(h.calls.filter((call) => call === 'options:playAndRecord')).toHaveLength(1)
+    expect(h.calls).not.toContain('options:playback')
+
+    await lease.release()
+    expect(h.calls.indexOf('capture:stop:1')).toBeLessThan(
+      h.calls.indexOf('lease:release:8')
+    )
+  })
+
+  test('restores playback when a route retry confirms that the selected input is gone', async () => {
+    const h = harness()
+    let verifications = 0
+    h.native.startCapture = async () => {
+      throw new Error('iOS audio route changed while opening RemoteIO')
+    }
+    h.native.verifyCaptureSession = async (uid, channels) => {
+      h.calls.push(`verify:capture:${uid}:${channels}`)
+      if (++verifications > 1) throw new Error('selected input is no longer active')
+    }
+
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+    await expect(
+      coordinator.acquire({ deviceUid: 'ios:usb', channel: 2 })
+    ).rejects.toThrow('selected input is no longer active')
+    expect(h.calls).toContain('lease:release:7')
+    expect(h.calls.slice(-4)).toEqual([
+      'active:false',
+      'options:playback',
+      'active:true',
+      'verify:playback'
+    ])
+  })
+
+  test('does not retry an unrelated native capture failure', async () => {
+    const h = harness()
+    h.native.startCapture = async () => {
+      throw new Error('RemoteIO render callback failed')
+    }
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+
+    await expect(coordinator.acquire()).rejects.toThrow(
+      'RemoteIO render callback failed'
+    )
+    expect(
+      h.calls.filter((call) => call.startsWith('lease:acquire:'))
+    ).toHaveLength(1)
+  })
+
   test('held native stop completion blocks lease, route, and playback cleanup', async () => {
     const h = harness()
     let completeStop!: () => void
