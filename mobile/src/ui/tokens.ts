@@ -1,20 +1,13 @@
 /*
- * GENERATED FROM @singz/ui — do not hand-edit.
- *
- * A vendored copy, not a dependency, on purpose: mobile has its own lockfile
- * and Metro does not honour the package "exports" field by default, so
- * adding a React-DOM package to the phone's dependency graph to read a
- * colour table would be a resolution failure waiting to happen.
- *
- * Instead the kit is the source of record and tests/unit/kit-tokens.test.ts
- * fails if this file drifts from it — the same shape as
- * tests/shared/currency-cases.json, one table read by three runners.
- *
- * Regenerate native kit artifacts: npm run sync:kit-native
+ * Mobile has its own lockfile — a separate dependency graph from the
+ * desktop app — but both now resolve the same `@singz/ui` package from its
+ * own `package.json` "exports", pinned to the same GitHub tag. There is no
+ * vendored copy to drift: tests/unit/kit-tokens.test.ts still checks that
+ * the two lockfiles agree on which tag that is.
  */
 
-import { CUSTOM_COLORS as KIT_CUSTOM_COLORS, STEM_META } from './uikit/tokens/stems.js'
-import { tokens } from './uikit/tokens/tokens.js'
+import { CUSTOM_COLORS as KIT_CUSTOM_COLORS, STEM_META } from '@singz/ui/stems'
+import { tokens } from '@singz/ui/tokens'
 
 /** Chrome palette. Values resolve directly from the vendored kit artifact. */
 export const KIT = {
