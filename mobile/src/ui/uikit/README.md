@@ -1,6 +1,6 @@
 # Vendored @singz/ui native entry
 
-Generated from @singz/ui 1.1.0. Do not edit these artifacts by hand.
+Generated from @singz/ui 1.3.0. Do not edit these artifacts by hand.
 
 Regenerate after building the kit:
 
