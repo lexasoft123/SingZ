@@ -15,10 +15,12 @@ does not analyze, resample, log or invoke a product bridge.
 `zdsp_analysis` is the explicit higher layer linking both packages. It maps
 every zcore field into `zdsp::CaptureTime`, then runs level analysis and the
 existing 2,048/512 live pitch contract on the ordinary delivery thread.
-`zcore_live_analysis_compat` is the temporary neutral compatibility target
-containing the one legacy resampler/YIN implementation; both the old adapter
-and `zdsp_analysis` call it, so parity is structural rather than a comparison
-between two algorithms. It is not part of `zcore_base` or callback reachability.
+`zcore_resample` is the neutral ordinary-thread converter target shared by
+media preparation and analysis. `zcore_live_analysis_compat` is the temporary
+YIN compatibility target and composes that converter; both the old adapter and
+`zdsp_analysis` call it, so parity is structural rather than a comparison
+between two algorithms. Neither target is part of `zcore_base` or callback
+reachability.
 A
 generation, rate, quality, sequence, source-frame, clock or typed boundary
 clears incomplete windows before accepting the new block. App boundaries

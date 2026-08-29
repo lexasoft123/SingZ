@@ -293,6 +293,23 @@ if(SINGZ_CORE_TESTS)
     SingZ::zdsp_host_adapter)
   add_test(NAME audio_host_graph_adapter_tests COMMAND audio_host_graph_adapter_tests)
 
+  add_executable(prepared_audio_tests
+    ${SINGZ_REPO_ROOT}/tests/native/prepared_audio_tests.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
+  target_compile_features(prepared_audio_tests PRIVATE cxx_std_20)
+  target_include_directories(prepared_audio_tests PRIVATE
+    "${SINGZ_REPO_ROOT}/zdsp/tests")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      COMPILE_OPTIONS "-Wno-mismatched-new-delete")
+  endif()
+  target_link_libraries(prepared_audio_tests PRIVATE
+    SingZ::zcore_media
+    SingZ::zdsp_runtime)
+  add_test(NAME prepared_audio_tests COMMAND prepared_audio_tests)
+
   add_executable(audio_monitor_session_tests
     ${SINGZ_REPO_ROOT}/native/electron/audio_monitor_session.cpp
     ${SINGZ_REPO_ROOT}/native/electron/audio_monitor_session.h

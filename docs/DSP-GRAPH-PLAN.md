@@ -987,8 +987,10 @@ Implement:
 - Native RMS/peak and the existing `LiveInputAnalysisAdapter` as the first
   production analysis consumers.
 - Keep one ordinary-thread compatibility implementation while migration is in
-  progress: `zcore_live_analysis_compat` holds the legacy resampler/YIN used by
-  both wrappers, outside `zcore_base` and every callback-reachable target.
+  progress: neutral `zcore_resample` owns the converter shared by media and
+  analysis, while `zcore_live_analysis_compat` owns YIN and composes the
+  converter for both analysis wrappers. Both stay outside `zcore_base` and
+  every callback-reachable target.
 - Desktop long-lived main/preload ownership for native capture, with typed
   scalar telemetry and cancellation; replace renderer `getUserMedia` pitch
   only after device/channel/meter behavior reaches parity.
@@ -1312,6 +1314,18 @@ channels with its input element disabled, and `AudioHostGraphAdapter` can feed
 a source-only graph with zero external host input buses. The existing duplex
 monitor graph remains unchanged. Source decoding, transport ownership and the
 atomic product playback lease remain later work in this phase.
+
+The next foundation slice now prepares WAV/FLAC from a consumed authorized
+descriptor into immutable planar storage in `zcore_media`, including bounded
+cancellation and optional common multichannel resampling. A zero-input
+`zdsp_runtime` source borrows that storage, starts at frame zero, stays
+sample-locked across variable blocks and emits silence after each lane ends.
+Generic graph resets preserve its cursor because this slice has no positioned
+seek contract; transport seek/loop remains later work. No path, codec,
+allocation or shared-owner operation reaches its render function. The playback
+session/bridge must provide the lifetime owner, latest-load generation,
+transport and exclusive legacy-engine handoff before this source may drive a
+real device.
 
 Implement:
 

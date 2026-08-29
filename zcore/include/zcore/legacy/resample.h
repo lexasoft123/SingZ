@@ -2,11 +2,10 @@
 #include <cstdint>
 #include <vector>
 
-// Rational polyphase windowed-sinc resampler (L/M from the rate pair). Two
-// consumers: the split engine, bringing a decoded mix to the graph's 44.1 kHz
-// (48k->44.1k and other near-unity ratios), and beat_this's sumStemsTo22k,
-// decimating 44.1k stems 2:1 to the beat model's 22.05 kHz. Streaming: feed
-// blocks, drain output; flush() pushes the tail through. The tap count
+// Rational polyphase windowed-sinc resampler (L/M from the rate pair). Shared
+// ordinary-thread consumers include prepared media, live analysis, the split
+// engine's decoded-mix conversion, and beat_this's 44.1->22.05 kHz stem sum.
+// Streaming: feed blocks, drain output; flush() pushes the tail through. The tap count
 // scales with net decimation (resample.cpp says why — a 24-tap prototype
 // that is fine near 1:1 is a bad lowpass at 2:1).
 // Quality is CI-measured on every mobile push (tests/native/

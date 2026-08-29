@@ -15,15 +15,23 @@ target_compile_features(zcore_base INTERFACE cxx_std_20)
 target_include_directories(zcore_base INTERFACE "${ZCORE_INCLUDE_ROOT}")
 target_link_libraries(zcore_base INTERFACE SingZ::native_build_options)
 
+# The reusable off-RT rate converter has media-preparation and legacy analysis
+# consumers. Compile it once so their filter/latency behavior cannot drift.
+add_library(zcore_resample STATIC src/legacy/resample.cpp)
+add_library(SingZ::zcore_resample ALIAS zcore_resample)
+singz_zcore_target(zcore_resample)
+target_link_libraries(zcore_resample PUBLIC SingZ::zcore_base)
+
 # Narrow ordinary-delivery-thread compatibility implementation shared by the
-# legacy facade and zdsp_analysis. Keeping one compiled YIN/resampler source
-# prevents algorithm drift without making any zcore target depend on zdsp.
+# legacy facade and zdsp_analysis. It remains above the callback leaf and has
+# no zdsp dependency.
 add_library(zcore_live_analysis_compat STATIC
-  src/legacy/live_input_analysis.cpp
-  src/legacy/resample.cpp)
+  src/legacy/live_input_analysis.cpp)
 add_library(SingZ::zcore_live_analysis_compat ALIAS zcore_live_analysis_compat)
 singz_zcore_target(zcore_live_analysis_compat)
-target_link_libraries(zcore_live_analysis_compat PUBLIC SingZ::zcore_base)
+target_link_libraries(zcore_live_analysis_compat PUBLIC
+  SingZ::zcore_base
+  SingZ::zcore_resample)
 
 add_library(zcore_audio STATIC
   src/audio/audio_input_transport.cpp)
@@ -211,20 +219,23 @@ if(NOT _zcore_audio_links MATCHES
 endif()
 
 add_library(zcore_media STATIC
+  src/media/decoded_audio.cpp
   src/media/flac_io.cpp
   src/media/wav.cpp)
 add_library(SingZ::zcore_media ALIAS zcore_media)
 singz_zcore_target(zcore_media)
 target_link_libraries(zcore_media
   PUBLIC SingZ::zcore_base
-  PRIVATE SingZ::native_flac)
+  PRIVATE
+    SingZ::zcore_resample
+    SingZ::native_flac)
 if(ANDROID)
   target_compile_definitions(zcore_media PRIVATE _FILE_OFFSET_BITS=64)
 endif()
 
-# Remaining legacy facade during Phase 2. Shared live YIN/resampling sources
-# compile only in zcore_live_analysis_compat above. This target deliberately
-# excludes ONNX Runtime.
+# Remaining legacy facade during Phase 2. Shared live YIN and rate-conversion
+# implementations compile only in their narrow targets above. This target
+# deliberately excludes ONNX Runtime.
 add_library(zcore_legacy STATIC
   src/legacy/audio_input_analysis_adapter.cpp
   src/legacy/analysis.cpp

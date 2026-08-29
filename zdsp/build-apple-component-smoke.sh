@@ -9,6 +9,7 @@ sources=(
   "$repo_root/zdsp/src/api/contracts.cpp"
   "$repo_root/zdsp/src/runtime/realtime_arena.cpp"
   "$repo_root/zdsp/src/runtime/builtin_nodes.cpp"
+  "$repo_root/zdsp/src/runtime/decoded_buffer_source.cpp"
   "$repo_root/zdsp/src/runtime/graph_compiler.cpp"
   "$repo_root/zdsp/src/runtime/graph_runner.cpp"
   "$repo_root/zdsp/src/offline/offline_renderer.cpp"

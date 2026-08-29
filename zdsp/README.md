@@ -12,11 +12,15 @@ ownership of app playback:
   capture analysis. It maps typed provenance, owns bounded peak/RMS and live
   pitch windows, and emits copied scalar evidence; it is not callback
   reachable, an output host or a product bridge. During migration it links the
-  narrow `zcore_live_analysis_compat` target so legacy and new delivery paths
-  share one resampler/YIN implementation instead of drifting;
+  narrow `zcore_live_analysis_compat` YIN target, which composes the neutral
+  `zcore_resample` converter, so legacy and new delivery paths cannot drift;
 - `SingZ::zdsp_runtime` contains contract validation, the fixed-capacity graph
   compiler, arena-backed buffer/latency plan, built-in processors, serial
-  runner, immutable publication and epoch retirement. Its callback-reachable
+  runner, decoded-buffer source, immutable publication and epoch retirement.
+  The source copies only borrowed planar pointers into fixed state; its
+  control-domain owner must outlive graph teardown. The callback-reachable
+  source starts at frame zero and preserves its cursor on generic resets;
+  positioned seek/loop requires the future transport contract. The runtime
   target is compiled without exceptions/RTTI and scanned from actual target
   membership for forbidden RT facilities;
 - `SingZ::zdsp_offline` renders the same compiled graph deterministically and
@@ -104,13 +108,14 @@ Callback diagnostics use an always-lock-free
 pass; control code widens sampled deltas.
 
 Android links this runtime through the existing inert `zdsp_runtime` product
-dependency. The transitional iOS pod still intentionally copies the Phase 0B
-contracts-only allowlist; adding the runtime there belongs to the separately
-owned native packaging/XCFramework cutover. Neither platform routes app audio
-through the graph yet. `zdsp_apple_component_smoke` is the checked-in inert
-packaging gate: it builds strict hidden-symbol device arm64 and simulator x86_64
-static archives and rejects product/platform dependencies without touching the
-pod or audio session.
+dependency. The transitional iOS pod now includes capture analysis and the
+decoded-buffer source foundation alongside the Phase 0B contracts; the full
+graph runtime and product routing remain part of the separately owned native
+packaging/XCFramework cutover. Neither platform routes app audio through the
+graph yet. `zdsp_apple_component_smoke` is the checked-in inert packaging gate:
+it builds strict hidden-symbol device arm64 and simulator x86_64 static archives
+and rejects product/platform dependencies without touching the pod or audio
+session.
 
 Product UI, Electron/React Native marshalling, platform framework types and
 codec/ML/plugin dependencies do not belong in `zdsp_api` or its callback path.

@@ -138,10 +138,12 @@ device layer. It remains disconnected from Electron and React Native output,
 whose Web Audio/RNAudioAPI engines retain sole ownership. The broad generated iOS pod is the documented
 Phase 0A packaging exception, not an acceptable graph-runtime dependency.
 During Phase 2 the allocating fixed-ratio resampler and YIN remain under
-`zcore/legacy` but compile once in `zcore_live_analysis_compat`, linked by both
-the `zcore_legacy` facade and `zdsp_analysis`. They remain ordinary-thread-only
-and must eventually move behind a neutral analysis implementation without
-weakening the strict `zcore_device_callback` leaf.
+`zcore/legacy`, but ownership is split: the neutral `zcore_resample` target is
+shared by media preparation and analysis, while `zcore_live_analysis_compat`
+contains YIN and composes that neutral converter. The compatibility target is
+linked by both the `zcore_legacy` facade and `zdsp_analysis`. Both remain
+ordinary-thread-only and must eventually move behind neutral public locations
+without weakening the strict `zcore_device_callback` leaf.
 
 The unified Windows capture/render event loop still lives in the large provider
 translation unit. Its hot body obeys the same no-allocation/no-lock/no-I/O
@@ -515,10 +517,12 @@ multiply compile time/code size across every node without measured benefit.
    contracts without changing application playback. Keep device transport in
    `zcore_audio`; adapt between the two only in a host/product layer that links
    both targets.
-5. Isolate the current YIN/resampler once in
-   `zcore_live_analysis_compat`; link it from both the legacy facade and
-   `zdsp_analysis` while preserving outputs and tolerances. ONNX/stem work
-   remains separately owned; DSP adapters may depend on `zdsp_api`.
+5. Isolate the current rate converter once in neutral `zcore_resample`; use it
+   from media preparation and from `zcore_live_analysis_compat`, which owns the
+   current YIN implementation. Link the compatibility target from both the
+   legacy facade and `zdsp_analysis` while preserving outputs and tolerances.
+   ONNX/stem work remains separately owned; DSP adapters may depend on
+   `zdsp_api`.
 6. Make Android link the root targets rather than repeat source lists. Keep the
    iOS copy generated until a dedicated pod/XCFramework integration passes
    clean and stale-binary tests.
