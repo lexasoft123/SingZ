@@ -166,6 +166,83 @@ body::after {
   gap: 10px;
 }
 
+.persistent-monitor {
+  display: inline-flex;
+  align-items: stretch;
+  min-height: 28px;
+  border: 1px solid rgba(255, 160, 40, 0.5);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 160, 40, 0.1);
+  box-shadow: 0 0 18px rgba(255, 160, 40, 0.08);
+}
+
+.persistent-monitor button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.persistent-monitor button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.persistent-monitor-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px 4px 10px;
+}
+
+.persistent-monitor-status:hover,
+.persistent-monitor-stop:hover:not(:disabled) {
+  background: rgba(255, 160, 40, 0.12);
+}
+
+.persistent-monitor-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 160, 40, 0.13);
+}
+
+.persistent-monitor.active .persistent-monitor-dot {
+  animation: monitor-live-pulse 1.8s ease-in-out infinite;
+}
+
+.persistent-monitor.error,
+.persistent-monitor.route-unconfirmed {
+  border-color: rgba(239, 105, 90, 0.65);
+}
+
+.persistent-monitor.error .persistent-monitor-dot,
+.persistent-monitor.route-unconfirmed .persistent-monitor-dot {
+  background: #ef695a;
+}
+
+.persistent-monitor .persistent-monitor-stop {
+  padding: 4px 10px 4px 9px;
+  border-left: 1px solid rgba(255, 160, 40, 0.28);
+  color: var(--accent);
+}
+
+.persistent-monitor .persistent-monitor-stop:disabled {
+  cursor: wait;
+  color: var(--faint);
+}
+
+@keyframes monitor-live-pulse {
+  50% { opacity: 0.55; box-shadow: 0 0 0 5px rgba(255, 160, 40, 0.06); }
+}
+
 .chip-status {
   display: inline-flex;
   align-items: center;
@@ -1787,6 +1864,31 @@ button.chip-status:hover {
   color: var(--danger);
 }
 
+.output-route-recovery {
+  margin-top: 9px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger) 52%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 7%, var(--panel-deep));
+}
+
+.output-route-recovery .settings-hint {
+  margin: 0;
+}
+
+.output-route-recovery-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.output-route-recovery-action span {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .mic-input-strip {
   margin-top: 14px;
   padding: 12px;
@@ -2334,6 +2436,10 @@ button.chip-status:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .persistent-monitor.active .persistent-monitor-dot {
+    animation: none;
+  }
+
   .mic-meter-fill,
   .mic-meter-peak,
   .dsp-graph-node-meter > span {
@@ -2838,7 +2944,8 @@ body.win .lyr-line.count-sec::before {
 body.modal-open .dot.warn,
 body.modal-open .sep-pill,
 body.modal-open .eq span,
-body.modal-open .lyr-line::before {
+body.modal-open .lyr-line::before,
+body.modal-open .persistent-monitor.active .persistent-monitor-dot {
   animation-play-state: paused;
 }
 
@@ -3508,6 +3615,17 @@ body.modal-open .lyr-line::before {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
+.vt-audio-lease {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
 .vt-range-label {
   display: flex;
   align-items: baseline;
@@ -3747,6 +3865,39 @@ body.modal-open .lyr-line::before {
 
 .vt-empty p {
   color: var(--dim);
+}
+
+.vt-cleanup-gate {
+  position: absolute;
+  z-index: 80;
+  inset: 48px 0 0;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+/* A full-screen blur re-rasters every damaged pixel on weak Windows iGPUs.
+   The cleanup gate is safety UI, so use an opaque, equally legible scrim. */
+body.win .vt-cleanup-gate {
+  background: var(--bg);
+  backdrop-filter: none;
+}
+
+.vt-cleanup-card {
+  width: min(560px, 100%);
+  padding: 28px;
+  text-align: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
+}
+
+.vt-cleanup-card p:not(.vt-eyebrow) {
+  color: var(--dim);
+  line-height: 1.55;
 }
 
 @media (max-width: 900px) {

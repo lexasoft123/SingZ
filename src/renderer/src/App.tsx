@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type ComponentProps
+} from 'react'
 import type {
   CustomTrack,
   EngineStatus,
@@ -38,20 +46,47 @@ import {
   type MetronomeConfig
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
+import {
+  canRetrySettingsAfterPlaybackRouteFailure,
+  PLAYBACK_OUTPUT_UNCONFIRMED_COPY,
+  PlaybackOutputArbiter,
+  PlaybackOutputRouteSafety,
+  PlaybackOutputSelectionError
+} from './audio/output-routing'
+import {
+  DesktopMonitorCoordinator,
+  runSongTransportToggle,
+  SONG_TRANSPORT_AUDIO_LEASE_COPY,
+  SettingsRouteApplicationQueue,
+  type MonitorShellSnapshot
+} from './audio/monitoring'
 import { DesktopTrainingMicCapture } from './audio/training-mic'
+import {
+  awaitTrainingCleanupExit,
+  confirmTrainingAudioStopped,
+  TRAINING_CLEANUP_AUDIO_BLOCKED_COPY,
+  TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY,
+  TRAINING_CLEANUP_SONG_BLOCKED_COPY,
+  queueTrainingSectionExit,
+  TrainingCleanupCoordinator,
+  type TrainingCleanupPhase
+} from './audio/training-cleanup'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
 import { computePeaks } from './audio/peaks'
 import { stemSampleRate } from './audio/stem-rate'
-import DropScreen from './components/DropScreen'
-import LogPanel from './components/LogPanel'
+import gdriveIcon from './assets/gdrive.png'
+import DropScreen from './components/DropScreenRoute'
+import type LibraryImportComponent from './components/LibraryImport'
+import type LogPanelComponent from './components/LogPanel'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
-import LibraryImport from './components/LibraryImport'
-import ProjectPicker from './components/ProjectPicker'
-import SetupWizard from './components/SetupWizard'
+import { createLazyDialogRoute } from './components/LazyDialogRoute'
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
-import SetupModal from './components/SetupModal'
+import PersistentMonitorControl from './components/PersistentMonitorControl'
+import type ProjectPickerComponent from './components/ProjectPicker'
 import SettingsModal from './components/SettingsRoute'
+import type SetupModalComponent from './components/SetupModal'
+import SetupWizard from './components/SetupWizard'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
@@ -94,6 +129,63 @@ import {
   type LoadedSongIdentity
 } from './training-ui-state'
 
+// These dialogs are opened on demand and have no app-lifetime audio owner.
+// Each generic dialog gets two distinct Rollup module identities because a
+// rejected ES-module URL cannot be retried in Chromium. SetupWizard stays
+// eager below: its persistent surface owns model-download progress/cancel
+// semantics and must never be replaced by generic loading or recovery UI.
+const RecoverableLibraryImport = createLazyDialogRoute<
+  ComponentProps<typeof LibraryImportComponent>
+>(
+  [
+    // @ts-expect-error Vite/Rollup treats the query as a distinct module id.
+    () => import('./components/LibraryImport?dialog-route=primary'),
+    // @ts-expect-error See the primary attempt above.
+    () => import('./components/LibraryImport?dialog-route=recovery')
+  ],
+  {
+    name: 'Add to your library',
+    opening: 'Opening library options…',
+    failureTitle: 'Library options didn’t open',
+    failureMessage: 'The library options could not be loaded. The project stays where it is.'
+  },
+  (props) => !props.busy
+)
+const RecoverableLogPanel = createLazyDialogRoute<ComponentProps<typeof LogPanelComponent>>([
+  // @ts-expect-error Vite/Rollup treats the query as a distinct module id.
+  () => import('./components/LogPanel?dialog-route=primary'),
+  // @ts-expect-error See the primary attempt above.
+  () => import('./components/LogPanel?dialog-route=recovery')
+], {
+  name: 'Log',
+  opening: 'Opening the log…',
+  failureTitle: 'Log didn’t open',
+  failureMessage: 'The log viewer could not be loaded. SingZ is still running.'
+})
+const RecoverableProjectPicker = createLazyDialogRoute<
+  ComponentProps<typeof ProjectPickerComponent>
+>([
+  // @ts-expect-error Vite/Rollup treats the query as a distinct module id.
+  () => import('./components/ProjectPicker?dialog-route=primary'),
+  // @ts-expect-error See the primary attempt above.
+  () => import('./components/ProjectPicker?dialog-route=recovery')
+], {
+  name: 'Projects',
+  opening: 'Opening your projects…',
+  failureTitle: 'Projects didn’t open',
+  failureMessage: 'Your project library could not be loaded. No projects were changed.'
+})
+const RecoverableSetupModal = createLazyDialogRoute<ComponentProps<typeof SetupModalComponent>>([
+  // @ts-expect-error Vite/Rollup treats the query as a distinct module id.
+  () => import('./components/SetupModal?dialog-route=primary'),
+  // @ts-expect-error See the primary attempt above.
+  () => import('./components/SetupModal?dialog-route=recovery')
+], {
+  name: 'Stem splitting setup',
+  opening: 'Opening stem splitting setup…',
+  failureTitle: 'Setup didn’t open',
+  failureMessage: 'Stem splitting setup could not be loaded. The player is still available.'
+})
 type Phase = 'empty' | 'loading' | 'ready'
 
 const ACCEPT = '.mp3,.wav,.flac,.m4a,.aac,.ogg,.oga,.opus,.aif,.aiff,audio/*'
@@ -536,8 +628,43 @@ export default function App(): React.JSX.Element {
   }, [])
   /** App-level verdict on the saved output ("not connected", "not allowed"). */
   const [outputStatus, setOutputStatus] = useState<string | null>(null)
+  const [outputRouteUnconfirmed, setOutputRouteUnconfirmed] = useState(false)
+  const monitorCoordinatorRef = useRef<DesktopMonitorCoordinator | null>(null)
+  const [outputRouteSafety] = useState(() => new PlaybackOutputRouteSafety(
+    () => {
+      const coordinator = monitorCoordinatorRef.current
+      if (coordinator === null) throw new Error('Audio route safety owner is not ready')
+      return coordinator.acquireRouteTransitionLease()
+    },
+    setOutputRouteUnconfirmed
+  ))
+  const [outputArbiter] = useState(() => new PlaybackOutputArbiter(
+    audioPrefs.outputId,
+    {
+      setOutput: (sinkId) => engine.setOutput(sinkId),
+      enumerateOutputs: () => navigator.mediaDevices.enumerateDevices(),
+      commit: (outputId) => setAudioPrefs((current) => ({ ...current, outputId }))
+    }
+  ))
   /** What the mic is actually listening through, when it's on. */
   const [micDevice, setMicDevice] = useState<MicDevice | null>(null)
+  const [trainingCleanupCoordinator] = useState(() => new TrainingCleanupCoordinator(
+    (stillOwned) => confirmTrainingAudioStopped({
+      pauseSong: () => engine.pause(),
+      cancelCues: () => trainingCues.cancel(),
+      stopMicrophone: () => trainingMic.stopAndWait(),
+      clearMicrophoneDevice: () => setMicDevice(null),
+      interruptTraining: () => dispatchDesktopTraining({ type: 'interrupt-runtime' }),
+      stillOwned
+    })
+  ))
+  const [trainingCleanupPhase, setTrainingCleanupPhase] = useState<TrainingCleanupPhase>(
+    () => trainingCleanupCoordinator.phase
+  )
+  useEffect(
+    () => trainingCleanupCoordinator.subscribe(setTrainingCleanupPhase),
+    [trainingCleanupCoordinator]
+  )
   const [notice, setNotice] = useState<string | null>(null)
   const [ver, setVer] = useState('')
   const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
@@ -805,80 +932,100 @@ export default function App(): React.JSX.Element {
   // and renderer teardown releases the microphone plus every scheduled node.
   useEffect(
     () => () => {
+      trainingCleanupCoordinator.dispose()
       trainingMic.dispose()
       trainingCues.dispose()
     },
-    [trainingCues, trainingMic]
+    [trainingCleanupCoordinator, trainingCues, trainingMic]
   )
 
   const changeMasterVol = useCallback((v: number) => {
     setAudioPrefs((p) => ({ ...p, master: Math.max(0, Math.min(1, v)) }))
   }, [])
 
-  // Keep the context's sink pointed at the saved output. Single-flight,
-  // last-wins: BT headsets fire devicechange in bursts. The saved id is
-  // never cleared here — plugging the device back in restores it.
-  const outputSeq = useRef(0)
-  const reconcileOutput = useCallback(
-    async (wantId: string | undefined) => {
-      const seq = ++outputSeq.current
-      try {
-        if (wantId) {
-          const devs = await navigator.mediaDevices.enumerateDevices()
-          if (seq !== outputSeq.current) return
-          if (!devs.some((d) => d.kind === 'audiooutput' && d.deviceId === wantId)) {
-            await engine.setOutput('')
-            if (seq === outputSeq.current) {
-              setOutputStatus('Saved playback device not connected — using the system default')
-            }
-            return
-          }
-        }
-        await engine.setOutput(wantId ?? '')
-        if (seq === outputSeq.current) setOutputStatus(null)
-      } catch (err) {
-        if (seq !== outputSeq.current) return
-        const name = err instanceof DOMException ? err.name : ''
-        setOutputStatus(
-          name === 'NotAllowedError'
-            ? "SingZ wasn't allowed to switch playback devices"
-            : 'Could not switch to the saved playback device — using the system default'
-        )
-      }
-    },
-    [engine]
-  )
+  // Boot repair, device churn and direct Settings picks share one serialized,
+  // versioned intent owner. A devicechange raised during setSinkId therefore
+  // repairs the pending choice, never a render-captured old preference.
+  // No argument is the explicit Settings retry and rejects unless this exact
+  // request confirms the current sink; null is background reconciliation.
+  const reconcileOutput = useCallback(async (
+    failure?: PlaybackOutputSelectionError | null
+  ) => {
+    const retry = failure === undefined
+    let result
+    try {
+      result = failure
+        ? await outputArbiter.repairSelectionFailure(failure)
+        : await outputArbiter.reconcile()
+    } catch (err) {
+      // The arbiter only surfaces reconcile/repair errors that were current at
+      // their physical handoff boundary. A sibling confirmation may have
+      // released an older retained lease while this operation was still in
+      // flight, so failure must re-establish fail-closed ownership here.
+      outputRouteSafety.retainUnconfirmed()
+      setOutputStatus(
+        err instanceof DOMException && err.name === 'NotAllowedError'
+          ? "SingZ wasn't allowed to confirm the playback route — choose an output or retry"
+          : PLAYBACK_OUTPUT_UNCONFIRMED_COPY
+      )
+      if (retry) throw err
+      return { kind: 'unconfirmed', error: err } as const
+    }
+    if (result.kind === 'stale') {
+      if (retry) throw new Error()
+      return
+    }
+    outputRouteSafety.confirmCurrentRoute()
+    setOutputStatus(result.kind === 'missing'
+      ? 'Saved playback device not connected — using the system default'
+      : null)
+    return result
+  }, [outputArbiter, outputRouteSafety])
 
   useEffect(() => {
-    void reconcileOutput(audioPrefs.outputId)
-    const onChange = (): void => void reconcileOutput(audioPrefs.outputId)
+    void reconcileOutput(null)
+    const onChange = (): void => void reconcileOutput(null)
     navigator.mediaDevices.addEventListener('devicechange', onChange)
     return () => navigator.mediaDevices.removeEventListener('devicechange', onChange)
-  }, [audioPrefs.outputId, reconcileOutput])
+  }, [reconcileOutput])
 
   // Apply-then-commit: a pick that fails never lands in the prefs, so the
   // dropdown (valued from them) snaps back by itself.
   const changeOutput = useCallback(
     async (id: string | undefined) => {
-      if (!id) {
-        setAudioPrefs((p) => ({ ...p, outputId: undefined }))
-        setOutputStatus(null)
-        return
-      }
       try {
-        await engine.setOutput(id)
-        setAudioPrefs((p) => ({ ...p, outputId: id }))
-        setOutputStatus(null)
+        if (await outputArbiter.select(id)) {
+          outputRouteSafety.confirmCurrentRoute()
+          setOutputStatus(null)
+        }
       } catch (err) {
-        const name = err instanceof DOMException ? err.name : ''
-        setOutputStatus(
-          name === 'NotAllowedError'
-            ? "SingZ wasn't allowed to switch playback devices"
-            : 'Could not switch to that device — still on the previous one'
-        )
+        if (err instanceof PlaybackOutputSelectionError && !err.current) return
+        const cause = err instanceof PlaybackOutputSelectionError ? err.causeValue : err
+        const name = cause instanceof DOMException ? cause.name : ''
+        // A current failed selection whose rollback succeeded positively
+        // confirmed the committed physical route. It is therefore as
+        // authoritative as a successful direct pick and may release one
+        // retained unconfirmed-route owner. A stale failure never can.
+        if (err instanceof PlaybackOutputSelectionError && !err.repairRequired) {
+          outputRouteSafety.confirmCurrentRoute()
+          setOutputStatus(name === 'NotAllowedError'
+            ? "SingZ wasn't allowed to switch playback devices — still on the previous one"
+            : 'Could not switch to that device — still on the previous one')
+          return
+        }
+        // Keep the Settings route lease until the double-failure repair has
+        // fully settled. The arbiter deliberately does not fire-and-forget
+        // this sink write: a late repair after lease release could race the
+        // preview or a newer user route.
+        if (err instanceof PlaybackOutputSelectionError && err.repairRequired) {
+          outputRouteSafety.retainUnconfirmed()
+          setOutputStatus(PLAYBACK_OUTPUT_UNCONFIRMED_COPY)
+          const repair = await reconcileOutput(err)
+          if (repair?.kind === 'unconfirmed') throw repair.error
+        }
       }
     },
-    [engine]
+    [outputArbiter, outputRouteSafety, reconcileOutput]
   )
 
   const changeInput = useCallback((nativeInputUid: string | undefined, inputId: string | undefined) => {
@@ -926,6 +1073,57 @@ export default function App(): React.JSX.Element {
     () => engine.restoreOutputAfterNativeMonitor(),
     [engine]
   )
+
+  // The native monitor lease belongs to the app shell, not to the Settings
+  // route. Settings contributes its temporary preview stopper, then may close
+  // while this exact coordinator generation remains audible and observable.
+  const [monitorCoordinator] = useState(() => new DesktopMonitorCoordinator({
+    api: window.singz,
+    stopPreview: async () => undefined,
+    pauseSong: pauseForNativeMonitor,
+    releaseLegacyOutput: releaseLegacyOutputForMonitor,
+    restoreLegacyOutput: restoreLegacyOutputAfterMonitor,
+    // Nothing scheduled against the silent sink may become audible merely
+    // because the native/preview leases finally released.
+    beforeRestoreLegacyOutput: pauseForNativeMonitor
+  }))
+  monitorCoordinatorRef.current = monitorCoordinator
+  const [settingsRouteApplicationQueue] = useState(
+    () => new SettingsRouteApplicationQueue()
+  )
+  const [monitorShell, setMonitorShell] = useState<MonitorShellSnapshot>(
+    () => monitorCoordinator.shellSnapshot
+  )
+
+  useEffect(() => monitorCoordinator.subscribeShell((snapshot) => {
+    setMonitorShell(snapshot)
+    if (snapshot.phase === 'error' && !snapshot.hasAudioSafetyLease) {
+      setNotice(`Headphone monitoring stopped: ${snapshot.message}`)
+    }
+  }), [monitorCoordinator])
+
+  useEffect(() => {
+    if (monitorShell.phase !== 'active') return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const poll = async (): Promise<void> => {
+      await monitorCoordinator.refreshStatus()
+      if (!cancelled && monitorCoordinator.snapshot.phase === 'active') {
+        timer = setTimeout(() => void poll(), 120)
+      }
+    }
+    timer = setTimeout(() => void poll(), 120)
+    return () => {
+      cancelled = true
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [monitorCoordinator, monitorShell.phase])
+
+  // Renderer teardown is the final app-shell boundary. Native ownership is
+  // never persisted across app restart.
+  useEffect(() => () => {
+    void monitorCoordinator.stop()
+  }, [monitorCoordinator])
 
   useEffect(() => {
     engine.setBeats(beatInfo)
@@ -1005,11 +1203,22 @@ export default function App(): React.JSX.Element {
     return () => clearTimeout(t)
   }, [notice])
 
+  const openAudioSettings = useCallback((): boolean => {
+    if (trainingCleanupCoordinator.blocksAudio) {
+      setNotice(TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY)
+      return false
+    }
+    setShowSettings(true)
+    return true
+  }, [trainingCleanupCoordinator])
+  const openAudioSettingsRef = useRef(openAudioSettings)
+  openAudioSettingsRef.current = openAudioSettings
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.code === 'Comma' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
-        setShowSettings(true)
+        openAudioSettingsRef.current()
         return
       }
       const tgt = e.target as HTMLElement
@@ -1047,7 +1256,7 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [engine])
 
-  const loadPath = useCallback(
+  const loadPath: (path: string) => Promise<void> = useCallback(
     async (path: string) => {
       const request=songLoadRequests.current.begin()
       // Validate/register first: an invalid drop must not tear down a live
@@ -1057,6 +1266,22 @@ export default function App(): React.JSX.Element {
       if(!songLoadRequests.current.isLatest(request))return
       if(!reg.ok){continueAfterSourceRegistration(reg,()=>{},setError);return}
       if(!songLoadRequests.current.acceptIfLatest(request))return
+      if (appSectionRef.current === 'training') {
+        // Registration proves the source is valid before foreground cleanup.
+        // Continue this invocation with its original request token after the
+        // app-shell lease confirms release. A newer valid load replaces this
+        // pending intent without an older continuation minting a fresh token.
+        if(!songLoadRequests.current.isAccepted(request))return
+        const confirmed = await awaitTrainingCleanupExit(
+          trainingCleanupCoordinator,
+          () => songLoadRequests.current.isAccepted(request),
+          () => {
+            appSectionRef.current = 'songs'
+            setAppSection('songs')
+          }
+        )
+        if(!confirmed||!songLoadRequests.current.isAccepted(request))return
+      }
       continueAfterSourceRegistration(reg,()=>stopTrainingForSongLoad({
         pauseSong: () => engine.pause(),
         cancelCues: () => trainingCues.cancel(),
@@ -1316,7 +1541,7 @@ export default function App(): React.JSX.Element {
         setError('Could not decode that audio file.')
       }
     },
-    [engine, trainingCues, trainingMic]
+    [engine, trainingCleanupCoordinator, trainingCues, trainingMic]
   )
 
   const loadFile = useCallback(
@@ -2296,15 +2521,25 @@ export default function App(): React.JSX.Element {
 
   /** Space / play button: starting with a selection armed targets the selection. */
   const togglePlay = useCallback(() => {
-    if (!engine.playing) {
-      const sel = selectionRef.current
-      if (sel) {
-        const pos = engine.position
-        if (pos < sel.s - 0.05 || pos >= sel.e - 0.05) engine.seek(sel.s)
+    const trainingCleanupBlocked = trainingCleanupCoordinator.blocksAudio
+    void runSongTransportToggle(
+      engine.playing,
+      monitorCoordinator.hasAudioSafetyLease || trainingCleanupBlocked,
+      () => setNotice(trainingCleanupBlocked
+        ? TRAINING_CLEANUP_SONG_BLOCKED_COPY
+        : SONG_TRANSPORT_AUDIO_LEASE_COPY),
+      () => {
+        if (!engine.playing) {
+          const sel = selectionRef.current
+          if (sel) {
+            const pos = engine.position
+            if (pos < sel.s - 0.05 || pos >= sel.e - 0.05) engine.seek(sel.s)
+          }
+        }
+        engine.toggle()
       }
-    }
-    engine.toggle()
-  }, [engine])
+    )
+  }, [engine, monitorCoordinator, trainingCleanupCoordinator])
   const togglePlayRef = useRef(togglePlay)
   togglePlayRef.current = togglePlay
 
@@ -2672,20 +2907,37 @@ export default function App(): React.JSX.Element {
 
   const switchSection = useCallback(
     (section: AppSection) => {
-      if (section === appSectionRef.current) return
+      if (queueTrainingSectionExit(
+        appSectionRef.current,
+        section,
+        'training',
+        trainingCleanupCoordinator,
+        (next) => {
+          appSectionRef.current = next
+          setAppSection(next)
+        },
+        () => songLoadRequests.current.invalidate()
+      )) return
       // One audible world at a time. The loaded song, playhead and exercise
       // reducer remain untouched; only active sound/capture is stopped.
       engine.pause()
       trainingCues.cancel()
       trainingMic.stop()
       setMicDevice(null)
-      if (appSectionRef.current === 'training') {
-        dispatchDesktopTraining({ type: 'interrupt-runtime' })
-      }
+      appSectionRef.current = section
       setAppSection(section)
     },
-    [engine, trainingCues, trainingMic]
+    [engine, trainingCleanupCoordinator, trainingCues, trainingMic]
   )
+
+  // A loaded training runtime fault has already run the app-owned cleanup.
+  // Its terminal boundary cannot restart exercise audio, so leaving that safe
+  // boundary must not start a duplicate microphone-stop operation.
+  const leaveTrainingAfterConfirmedCleanup = useCallback(() => {
+    if (trainingCleanupCoordinator.blocksAudio || appSectionRef.current !== 'training') return
+    appSectionRef.current = 'songs'
+    setAppSection('songs')
+  }, [trainingCleanupCoordinator])
 
   const backToSong = useCallback((sourceSongId: string) => {
     if (!songPreparationMatches({ sourceSongId }, song?.preparationSourceId ?? null)) {
@@ -2801,6 +3053,12 @@ export default function App(): React.JSX.Element {
           </div>
         )}
         <div className="header-right no-drag">
+          <PersistentMonitorControl
+            snapshot={monitorShell}
+            routeUnconfirmed={outputRouteUnconfirmed}
+            onOpenSettings={openAudioSettings}
+            onStop={() => monitorCoordinator.stop()}
+          />
           {appSection === 'songs' && phase === 'ready' && (
             <button
               type="button"
@@ -2864,7 +3122,7 @@ export default function App(): React.JSX.Element {
             className="pill ghost small gear"
             title="Settings"
             aria-label="Settings"
-            onClick={() => setShowSettings(true)}
+            onClick={openAudioSettings}
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
               <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z" />
@@ -2905,6 +3163,12 @@ export default function App(): React.JSX.Element {
           inputChannel={audioPrefs.inputChannel}
           onMicDevice={setMicDevice}
           settingsOwnsMic={showSettings}
+          audioLeaseBlocked={
+            monitorShell.hasAudioSafetyLease || trainingCleanupPhase !== 'idle'
+          }
+          audioLeaseCopy={trainingCleanupPhase !== 'idle'
+            ? TRAINING_CLEANUP_AUDIO_BLOCKED_COPY
+            : undefined}
           onSetupChange={changeDesktopTrainingSetup}
           referenceVolume={audioPrefs.referenceVolume ?? DEFAULT_TRAINING_REFERENCE_VOLUME}
           onReferenceVolumeChange={changeTrainingReferenceVolume}
@@ -2921,6 +3185,10 @@ export default function App(): React.JSX.Element {
           }
           onBackToSong={backToSong}
           onBackToSongs={() => switchSection('songs')}
+          onBackAfterCleanup={leaveTrainingAfterConfirmedCleanup}
+          cleanupPhase={trainingCleanupPhase}
+          onRequestCleanup={() => trainingCleanupCoordinator.requestCleanup()}
+          onRetryCleanup={() => trainingCleanupCoordinator.retry()}
         />
       ) : phase === 'ready' && !showCatalog ? (
         <>
@@ -2965,6 +3233,12 @@ export default function App(): React.JSX.Element {
                   inputChannel={audioPrefs.inputChannel}
                   onMicDevice={setMicDevice}
                   settingsOwnsMic={showSettings}
+                  audioLeaseBlocked={
+                    monitorShell.hasAudioSafetyLease || trainingCleanupPhase !== 'idle'
+                  }
+                  audioLeaseCopy={trainingCleanupPhase !== 'idle'
+                    ? TRAINING_CLEANUP_AUDIO_BLOCKED_COPY
+                    : undefined}
                 />
               )}
             </div>
@@ -3029,6 +3303,7 @@ export default function App(): React.JSX.Element {
         </>
       ) : (
         <DropScreen
+          gdriveIcon={gdriveIcon}
           loading={phase === 'loading'}
           songName={song?.name}
           openName={showCatalog ? song?.name : undefined}
@@ -3062,7 +3337,7 @@ export default function App(): React.JSX.Element {
       )}
 
       {showSetup && (
-        <SetupModal
+        <RecoverableSetupModal
           status={engineStatus}
           onClose={() => setShowSetup(false)}
           onStatus={setEngineStatus}
@@ -3073,21 +3348,34 @@ export default function App(): React.JSX.Element {
         <SetupWizard models={wizard.models} origin={wizard.origin} onClose={closeWizard} />
       )}
 
-      {showLog && <LogPanel onClose={() => setShowLog(false)} />}
+      {showLog && (
+        <RecoverableLogPanel onClose={() => setShowLog(false)} />
+      )}
 
       {showSettings && (
         <SettingsModal
           audio={audioPrefs}
-          onChangeOutput={(id) => void changeOutput(id)}
+          onChangeOutput={changeOutput}
           onChangeInput={changeInput}
           onMigrateNativeInput={migrateNativeInput}
           onChangeInputChannel={changeInputChannel}
           onChangeNativeMonitorOutput={changeNativeMonitorOutput}
           onChangeNativeMonitorOutputChannels={changeNativeMonitorOutputChannels}
           onChangeMonitorGain={changeMonitorGain}
-          onPauseSong={pauseForNativeMonitor}
-          onReleaseLegacyOutput={releaseLegacyOutputForMonitor}
-          onRestoreLegacyOutput={restoreLegacyOutputAfterMonitor}
+          monitorCoordinator={monitorCoordinator}
+          externalAudioLeaseBlocked={trainingCleanupPhase !== 'idle'}
+          externalAudioLeaseCopy={TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY}
+          routeApplicationQueue={settingsRouteApplicationQueue}
+          emergencyStopMonitoring={() => monitorCoordinator.stop()}
+          hasMonitorSafetyLease={() => monitorCoordinator.hasAudioSafetyLease}
+          canRetrySettingsAfterUnsafeStop={() =>
+            canRetrySettingsAfterPlaybackRouteFailure(
+              outputRouteSafety.unconfirmed,
+              monitorCoordinator.hasRouteOnlySafetyLease
+            )
+          }
+          outputRouteUnconfirmed={outputRouteUnconfirmed}
+          onRetryOutputRoute={reconcileOutput}
           outputStatus={outputStatus}
           micDevice={micDevice}
           onClose={() => setShowSettings(false)}
@@ -3095,7 +3383,8 @@ export default function App(): React.JSX.Element {
       )}
 
       {showProjects && (
-        <ProjectPicker
+        <RecoverableProjectPicker
+          gdriveIcon={gdriveIcon}
           onOpen={(p) => void loadPath(p)}
           onBrowse={() => {
             setShowProjects(false)
@@ -3106,7 +3395,7 @@ export default function App(): React.JSX.Element {
       )}
 
       {showImport && projectDir && (
-        <LibraryImport
+        <RecoverableLibraryImport
           dir={projectDir}
           busy={importing}
           onImport={(mode) => void handleImport(mode)}

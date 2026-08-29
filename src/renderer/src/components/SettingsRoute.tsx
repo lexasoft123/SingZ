@@ -1,119 +1,241 @@
-import React, {
-  Component,
-  Suspense,
-  lazy,
-  type ComponentType,
-  type LazyExoticComponent
-} from 'react'
+import React, { Component, type ComponentType } from 'react'
 import { Modal } from '@singz/ui'
+import {
+  audioSafetyLeaseKind,
+  type AudioSafetyLeaseKind
+} from '../audio/monitoring'
 import type { SettingsModalProps } from './SettingsModal'
-import type { MonitorStopOutcome } from '../audio/monitoring'
+import type { ModuleLoader } from './RecoverableModule'
 
-export type SettingsModuleLoader = () => Promise<{
-  default: ComponentType<SettingsModalProps>
-}>
+export type SettingsModuleLoader = ModuleLoader<SettingsModalProps>
+
+interface SettingsImportRouteProps {
+  readonly load: SettingsModuleLoader
+  readonly settingsProps: SettingsModalProps
+}
+
+interface SettingsImportRouteState {
+  readonly phase: 'loading' | 'loaded' | 'failed'
+  readonly Loaded: ComponentType<SettingsModalProps> | null
+}
+
+/** Settings deliberately has one import identity. Its graph visualization is
+ * a shared child chunk, so pretending the same transitive graph is a fresh
+ * recovery copy would replay Chromium's poisoned dependency. */
+export class SettingsImportRoute extends Component<
+  SettingsImportRouteProps,
+  SettingsImportRouteState
+> {
+  state: SettingsImportRouteState = { phase: 'loading', Loaded: null }
+  private mounted = false
+
+  componentDidMount(): void {
+    this.mounted = true
+    void this.props.load().then(({ default: Loaded }) => {
+      if (this.mounted) this.setState({ phase: 'loaded', Loaded })
+    }).catch(() => {
+      if (this.mounted) this.setState({ phase: 'failed', Loaded: null })
+    })
+  }
+
+  componentWillUnmount(): void {
+    this.mounted = false
+  }
+
+  render(): React.JSX.Element {
+    const { settingsProps } = this.props
+    if (this.state.phase === 'failed') {
+      return (
+        <SettingsRouteFailure
+          onClose={settingsProps.onClose}
+          safetyKind={audioSafetyLeaseKind(settingsProps.monitorCoordinator.shellSnapshot)}
+        />
+      )
+    }
+    if (this.state.phase === 'loaded' && this.state.Loaded) {
+      return (
+        <SettingsRouteErrorBoundary
+          Loaded={this.state.Loaded}
+          settingsProps={settingsProps}
+        />
+      )
+    }
+    return <SettingsRouteFallback onClose={settingsProps.onClose} />
+  }
+}
 
 interface SettingsRouteBoundaryProps {
-  readonly load: SettingsModuleLoader
+  readonly Loaded: ComponentType<SettingsModalProps>
   readonly settingsProps: SettingsModalProps
 }
 
 interface SettingsRouteBoundaryState {
   readonly failed: boolean
-  readonly shutdown: 'not-needed' | 'stopping' | 'safe' | 'unsafe'
+  readonly shutdown:
+    | 'not-needed'
+    | 'stopping'
+    | 'safe'
+    | 'unsafe'
+    | 'route-pending'
+    | 'route-unconfirmed'
+  readonly renderKey: number
 }
 
-export interface SettingsEmergencyStopController {
-  stop: () => Promise<MonitorStopOutcome>
-  hasNativeOwnership: () => boolean
+type SettingsRouteShutdown = SettingsRouteBoundaryState['shutdown']
+type ActiveSettingsRouteShutdown = Exclude<SettingsRouteShutdown, 'not-needed'>
+
+function settingsRuntimeLeaseKind(props: SettingsModalProps): AudioSafetyLeaseKind {
+  const kind = audioSafetyLeaseKind(props.monitorCoordinator.shellSnapshot)
+  // Keep the eager callback as a conservative fallback for a native owner
+  // that appeared between the coordinator snapshot and this boundary pass.
+  return kind === 'none' && props.hasMonitorSafetyLease() ? 'unknown' : kind
 }
 
+function routeShutdown(props: SettingsModalProps):
+  | 'route-pending'
+  | 'route-unconfirmed' {
+  return props.canRetrySettingsAfterUnsafeStop()
+    ? 'route-unconfirmed'
+    : 'route-pending'
+}
+
+export function effectiveSettingsRouteShutdown(
+  shutdown: ActiveSettingsRouteShutdown,
+  props: SettingsModalProps
+): ActiveSettingsRouteShutdown {
+  if (shutdown === 'stopping' || shutdown === 'safe') return shutdown
+  const kind = settingsRuntimeLeaseKind(props)
+  if (kind === 'none') return 'safe'
+  if (kind === 'route-only') return routeShutdown(props)
+  return 'unsafe'
+}
+
+/**
+ * Runtime-only Settings boundary. The module has already loaded before this
+ * class is mounted, so its fail-closed cleanup can never turn an import error
+ * into a misleading descendant retry.
+ */
 export class SettingsRouteErrorBoundary extends Component<
   SettingsRouteBoundaryProps,
   SettingsRouteBoundaryState
 > {
-  state: SettingsRouteBoundaryState = { failed: false, shutdown: 'not-needed' }
-  private LazySettings: LazyExoticComponent<ComponentType<SettingsModalProps>>
-  private emergencyStop: SettingsEmergencyStopController | null = null
-
-  constructor(props: SettingsRouteBoundaryProps) {
-    super(props)
-    this.LazySettings = lazy(props.load)
+  state: SettingsRouteBoundaryState = {
+    failed: false,
+    shutdown: 'not-needed',
+    renderKey: 0
   }
+  private mounted = false
 
-  static getDerivedStateFromError(_error: unknown): SettingsRouteBoundaryState {
+  static getDerivedStateFromError(
+    _error: unknown
+  ): Pick<SettingsRouteBoundaryState, 'failed' | 'shutdown'> {
     return { failed: true, shutdown: 'not-needed' }
   }
 
+  componentDidMount(): void {
+    this.mounted = true
+  }
+
+  componentWillUnmount(): void {
+    this.mounted = false
+  }
+
   private readonly retry = (): void => {
-    if (this.emergencyStop && this.state.shutdown !== 'safe') return
-    // React.lazy caches rejection. Recreate the wrapper so Retry performs a
-    // new chunk request instead of replaying the rejected promise.
-    this.LazySettings = lazy(this.props.load)
-    this.emergencyStop = null
-    this.setState({ failed: false, shutdown: 'not-needed' })
+    const shutdown = effectiveSettingsRouteShutdown(
+      this.state.shutdown === 'not-needed' ? 'unsafe' : this.state.shutdown,
+      this.props.settingsProps
+    )
+    if (shutdown !== 'safe' && shutdown !== 'route-unconfirmed') return
+    this.setState((state) => ({
+      failed: false,
+      shutdown: 'not-needed',
+      renderKey: state.renderKey + 1
+    }))
   }
 
   private readonly close = (): void => {
-    if (this.emergencyStop && this.state.shutdown !== 'safe') return
+    const shutdown = effectiveSettingsRouteShutdown(
+      this.state.shutdown === 'not-needed' ? 'unsafe' : this.state.shutdown,
+      this.props.settingsProps
+    )
+    if (shutdown !== 'safe' && shutdown !== 'route-pending') return
     this.props.settingsProps.onClose()
   }
 
-  /** Called only by the mounted Settings implementation. A present handle is
-   * therefore also the boundary between a harmless chunk-load rejection and
-   * a post-mount crash that may have native output ownership. */
-  readonly registerEmergencyStop = (controller: SettingsEmergencyStopController): void => {
-    this.emergencyStop = controller
+  private readonly shutdownAudio = (): void => {
+    const kind = settingsRuntimeLeaseKind(this.props.settingsProps)
+    if (kind === 'none') {
+      this.setState({ shutdown: 'safe' })
+      return
+    }
+    // A route queue lease owns no cancellable native/preview operation.
+    // Stopping it would be ineffective and could interrupt unrelated audio.
+    if (kind === 'route-only') {
+      this.setState({ shutdown: routeShutdown(this.props.settingsProps) })
+      return
+    }
+    this.setState({ shutdown: 'stopping' })
+    void this.props.settingsProps.emergencyStopMonitoring().then((outcome) => {
+      if (!this.mounted) return
+      const remainingKind = settingsRuntimeLeaseKind(this.props.settingsProps)
+      const shutdown = remainingKind === 'none' && outcome.safeToRestartPreview
+        ? 'safe'
+        : remainingKind === 'route-only'
+          ? routeShutdown(this.props.settingsProps)
+          : 'unsafe'
+      this.setState({ shutdown })
+    }).catch(() => {
+      if (!this.mounted) return
+      const remainingKind = settingsRuntimeLeaseKind(this.props.settingsProps)
+      this.setState({
+        shutdown: remainingKind === 'none'
+          ? 'safe'
+          : remainingKind === 'route-only'
+            ? routeShutdown(this.props.settingsProps)
+            : 'unsafe'
+      })
+    })
   }
 
   componentDidCatch(_error: unknown): void {
-    const controller = this.emergencyStop
-    if (!controller) return
-    this.setState({ shutdown: 'stopping' })
-    void controller.stop().then((outcome) => {
-      const safe = outcome.safeToRestartPreview && !controller.hasNativeOwnership()
-      this.setState({ shutdown: safe ? 'safe' : 'unsafe' })
-    }).catch(() => {
-      // A rejected bridge leaves ownership uncertain. Keep every action
-      // locked and make quitting the app the only safe recovery instruction.
-      this.setState({ shutdown: 'unsafe' })
-    })
+    // Runtime Settings faults may leave a preview/native route half-owned.
+    // The app-shell exact-owner stop is available before this child mounts.
+    this.shutdownAudio()
   }
 
   render(): React.JSX.Element {
     if (this.state.failed) {
-      if (this.emergencyStop) {
-        return (
-          <SettingsRuntimeFailure
-            shutdown={this.state.shutdown === 'not-needed' ? 'stopping' : this.state.shutdown}
-            onRetry={this.retry}
-            onClose={this.close}
-          />
-        )
-      }
+      const storedShutdown = this.state.shutdown
+      const shutdown = storedShutdown === 'not-needed'
+        ? (() => {
+            const kind = settingsRuntimeLeaseKind(this.props.settingsProps)
+            return kind === 'none'
+              ? 'safe'
+              : kind === 'route-only'
+                ? routeShutdown(this.props.settingsProps)
+                : 'stopping'
+          })()
+        : effectiveSettingsRouteShutdown(storedShutdown, this.props.settingsProps)
       return (
-        <SettingsRouteFailure
+        <SettingsRuntimeFailure
+          shutdown={shutdown}
           onRetry={this.retry}
+          onRetryStop={this.shutdownAudio}
           onClose={this.close}
         />
       )
     }
 
-    const LazySettings = this.LazySettings
-    return (
-      <Suspense fallback={<SettingsRouteFallback onClose={this.close} />}>
-        <LazySettings
-          {...this.props.settingsProps}
-          registerEmergencyStop={this.registerEmergencyStop}
-        />
-      </Suspense>
-    )
+    const Loaded = this.props.Loaded
+    return <Loaded key={this.state.renderKey} {...this.props.settingsProps} />
   }
 }
 
-export function createSettingsRoute(load: SettingsModuleLoader): ComponentType<SettingsModalProps> {
+export function createSettingsRoute(
+  load: SettingsModuleLoader
+): ComponentType<SettingsModalProps> {
   return function SettingsRoute(settingsProps: SettingsModalProps): React.JSX.Element {
-    return <SettingsRouteErrorBoundary load={load} settingsProps={settingsProps} />
+    return <SettingsImportRoute load={load} settingsProps={settingsProps} />
   }
 }
 
@@ -130,44 +252,76 @@ export function SettingsRouteFallback({ onClose }: { readonly onClose: () => voi
 }
 
 export function SettingsRouteFailure({
-  onRetry,
-  onClose
+  onClose,
+  safetyKind = 'none'
 }: {
-  readonly onRetry: () => void
   readonly onClose: () => void
+  readonly safetyKind?: AudioSafetyLeaseKind
 }): React.JSX.Element {
+  const safetyCopy = settingsLoadFailureSafetyCopy(safetyKind)
   return (
     <Modal onClose={onClose} cardClassName="settings-card settings-route-state">
       <h2>Settings didn’t open</h2>
-      <p role="alert">Audio settings could not be loaded. Microphone monitoring stayed off.</p>
+      <p role="alert">{safetyCopy}</p>
       <div className="modal-actions">
-        <button type="button" className="pill primary" onClick={onRetry}>Retry</button>
+        <p className="fine warn" role="status">
+          Restart SingZ before trying to open Settings again.
+        </p>
         <button type="button" className="pill ghost" onClick={onClose}>Close</button>
       </div>
     </Modal>
   )
 }
 
+export function settingsLoadFailureSafetyCopy(safetyKind: AudioSafetyLeaseKind): string {
+  switch (safetyKind) {
+    case 'none':
+      return 'Audio settings could not be loaded. No Settings preview was started.'
+    case 'app-shell-stop':
+      return 'Audio settings could not be loaded. Microphone or headphone audio is still owned; use the top-bar Stop control to release it.'
+    case 'route-only':
+      return 'Audio settings could not be loaded. The output route still needs attention; after restarting SingZ, open Settings to finish or retry the route before starting audio.'
+    case 'settings-preview':
+      return 'Audio settings could not be loaded. A Settings microphone preview still owns the device; restart SingZ before reopening Settings.'
+    case 'unknown':
+      return 'Audio settings could not be loaded while another audio owner is unresolved. Restart SingZ before reopening Settings.'
+  }
+}
+
 export function SettingsRuntimeFailure({
   shutdown,
   onRetry,
+  onRetryStop,
   onClose
 }: {
-  readonly shutdown: 'stopping' | 'safe' | 'unsafe'
+  readonly shutdown: ActiveSettingsRouteShutdown
   readonly onRetry: () => void
+  readonly onRetryStop: () => void
   readonly onClose: () => void
 }): React.JSX.Element {
   const safe = shutdown === 'safe'
+  const routePending = shutdown === 'route-pending'
+  const routeUnconfirmed = shutdown === 'route-unconfirmed'
+  const retrySettingsEnabled = safe || routeUnconfirmed
+  const closeEnabled = safe || routePending
   return (
-    <Modal onClose={safe ? onClose : () => undefined} cardClassName="settings-card settings-route-state">
-      <h2>Audio settings stopped</h2>
+    <Modal onClose={closeEnabled ? onClose : () => undefined} cardClassName="settings-card settings-route-state">
+      <h2>{routePending || routeUnconfirmed ? 'Audio settings unavailable' : 'Audio settings stopped'}</h2>
       {shutdown === 'stopping' ? (
         <p role="status" aria-live="assertive" aria-busy="true">
           Confirming that native headphone monitoring has stopped…
         </p>
       ) : shutdown === 'unsafe' ? (
         <p role="alert">
-          Headphone monitoring may still be active. Quit SingZ before disconnecting audio devices, then reopen it.
+          Microphone or native monitoring cleanup is still unconfirmed. Retry audio stop to release its exact owner. If cleanup still cannot be confirmed, quit SingZ before disconnecting devices.
+        </p>
+      ) : routePending ? (
+        <p role="status" aria-live="polite">
+          An audio route change is still in progress. It cannot be cancelled safely here; wait for it to finish before reopening Settings.
+        </p>
+      ) : routeUnconfirmed ? (
+        <p role="alert">
+          The physical playback route is still unconfirmed. Retry settings to choose or confirm the output. Audio starts stay blocked until that route is repaired.
         </p>
       ) : (
         <p role="status" aria-live="polite">
@@ -175,8 +329,13 @@ export function SettingsRuntimeFailure({
         </p>
       )}
       <div className="modal-actions">
-        <button type="button" className="pill primary" onClick={onRetry} disabled={!safe}>Retry</button>
-        <button type="button" className="pill ghost" onClick={onClose} disabled={!safe}>Close</button>
+        {shutdown === 'unsafe' && (
+          <button type="button" className="pill primary" onClick={onRetryStop}>Retry audio stop</button>
+        )}
+        {!routePending && (
+          <button type="button" className="pill primary" onClick={onRetry} disabled={!retrySettingsEnabled}>Retry settings</button>
+        )}
+        <button type="button" className="pill ghost" onClick={onClose} disabled={!closeEnabled}>Close</button>
       </div>
     </Modal>
   )

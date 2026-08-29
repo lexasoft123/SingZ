@@ -260,6 +260,9 @@ const coreProvenance = async (win) => {
   if (monitorUi.routeHelp !== 'monitor-route-status') throw new Error('disabled Start does not expose route help')
   if (monitorUi.active !== false) throw new Error('audio-devices E2E unexpectedly started native output')
   if (!monitorUi.state?.includes('Monitoring is off')) throw new Error(`monitor did not start off: ${monitorUi.state}`)
+  if (await win.$('.persistent-monitor')) throw new Error('persistent monitor control appeared while monitoring was off')
+  const settingsCloseCopy = await win.$eval('.settings-card .modal-actions .pill', (button) => button.textContent?.trim())
+  if (settingsCloseCopy !== 'Close') throw new Error(`Settings close still implies monitor teardown: ${settingsCloseCopy}`)
   // Exercise only the Chromium release/restore half against this Electron.
   // This proves the silent-sink overload exists without ever calling beginMonitor.
   const sinkHandoff = await win.evaluate(async () => {
@@ -406,9 +409,23 @@ const coreProvenance = async (win) => {
   if (realOuts.length > 0) {
     pickedOut = realOuts[0].v
     await win.selectOption('#settings-output', pickedOut)
-    await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
-      timeout: 10000
-    })
+    try {
+      await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
+        timeout: 10000
+      })
+    } catch (error) {
+      const diagnosis = await win.evaluate(() => ({
+        sinkId: window.__engine.context.sinkId,
+        desiredOutputId: window.__engine.outputDeviceId,
+        storedOutputId: JSON.parse(localStorage.getItem('singz.audio') ?? '{}').outputId,
+        selectedOutputId: document.querySelector('#settings-output')?.value ?? '',
+        warnings: [...document.querySelectorAll('.settings-hint.warn')].map((node) => node.textContent),
+        monitorState: document.querySelector('.monitor-state')?.textContent ?? '',
+        monitorStateClass: document.querySelector('.monitor-state')?.className ?? '',
+        previewStatus: document.querySelector('.mic-preview-status')?.textContent ?? ''
+      }))
+      throw new Error(`playback sink did not switch: ${JSON.stringify(diagnosis)}; ${error.message}`)
+    }
     console.log('output moved to:', realOuts[0].t)
   } else {
     console.log('skip output pick (no outputs listed)')

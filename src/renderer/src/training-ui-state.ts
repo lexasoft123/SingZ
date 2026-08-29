@@ -66,6 +66,9 @@ export class SongLoadRequestEpoch{
   private latest:SongLoadRequestToken|null=null
   private accepted:SongLoadRequestToken|null=null
   begin():SongLoadRequestToken{const token={identity:Symbol('song-load-request')};this.latest=token;return token}
+  /** Explicit user cancellation revokes registrations in flight as well as an
+   * accepted continuation waiting behind foreground-audio cleanup. */
+  invalidate():void{this.latest=null;this.accepted=null}
   isLatest(token:SongLoadRequestToken):boolean{return this.latest===token}
   acceptIfLatest(token:SongLoadRequestToken):boolean{
     if(this.latest!==token)return false

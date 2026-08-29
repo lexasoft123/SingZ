@@ -227,6 +227,100 @@ describe('DesktopMonitorCoordinator', () => {
     expect(coordinator.snapshot.message).toContain('queue is busy')
   })
 
+  it.each(['success', 'refusal', 'rejection'] as const)(
+    'ignores a delayed gain %s after explicit Stop has completed',
+    async (settlement) => {
+      let settleGain!: () => void
+      const pendingGain = new Promise<DesktopMonitorResult>((resolve, reject) => {
+        settleGain = () => {
+          if (settlement === 'rejection') reject(new Error('late control rejection'))
+          else resolve(settlement === 'success' ? result() : result(false, 'queue-full'))
+        }
+      })
+      const statuses = [status(false), status(true, '2')]
+      const endMonitor = vi.fn(async () => ({ ...result(), state: 'stopped' as const }))
+      const terminal = vi.fn()
+      const coordinator = new DesktopMonitorCoordinator({
+        api: {
+          beginMonitor: async () => result(),
+          setMonitorGain: async (_generation, gain) => gain === -9 ? pendingGain : result(),
+          monitorStatus: async () => statuses.shift() ?? status(true, '3'),
+          endMonitor
+        },
+        stopPreview: async () => undefined,
+        pauseSong: () => undefined,
+        releaseLegacyOutput: async () => undefined,
+        restoreLegacyOutput: async () => undefined,
+        onTerminalStop: terminal,
+        sleep: async () => undefined,
+        callbackTimeoutMs: 10,
+        pollMs: 1
+      })
+
+      expect(await coordinator.start(config, -12)).toBe(true)
+      const gain = coordinator.setGain(-9)
+      await Promise.resolve()
+      expect(await coordinator.stop()).toEqual({ ok: true, safeToRestartPreview: true })
+      settleGain()
+
+      await expect(gain).resolves.toBe(false)
+      expect(coordinator.snapshot).toMatchObject({ phase: 'idle', message: 'Monitoring is off.' })
+      expect(endMonitor).toHaveBeenCalledOnce()
+      expect(terminal).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not let an old gain refusal stop a newer active generation', async () => {
+    let settleOldGain!: () => void
+    const oldGain = new Promise<DesktopMonitorResult>((resolve) => {
+      settleOldGain = () => resolve({
+        ...result(false, 'queue-full'),
+        ownershipGeneration: '41'
+      })
+    })
+    let generation = '41'
+    let statusCall = 0
+    const currentResult = (): DesktopMonitorResult => ({
+      ...result(),
+      ownershipGeneration: generation
+    })
+    const currentStatus = (): DesktopMonitorStatus => ({
+      ...status(statusCall % 2 === 1, String(statusCall + 1)),
+      ownershipGeneration: generation
+    })
+    const endMonitor = vi.fn(async () => ({ ...currentResult(), state: 'stopped' as const }))
+    const coordinator = new DesktopMonitorCoordinator({
+      api: {
+        beginMonitor: async () => { statusCall = 0; return currentResult() },
+        setMonitorGain: async (requestedGeneration, gain) =>
+          requestedGeneration === '41' && gain === -9 ? oldGain : currentResult(),
+        monitorStatus: async () => { const value = currentStatus(); statusCall += 1; return value },
+        endMonitor
+      },
+      stopPreview: async () => undefined,
+      pauseSong: () => undefined,
+      releaseLegacyOutput: async () => undefined,
+      restoreLegacyOutput: async () => undefined,
+      sleep: async () => undefined,
+      callbackTimeoutMs: 10,
+      pollMs: 1
+    })
+
+    expect(await coordinator.start(config, -12)).toBe(true)
+    const staleGain = coordinator.setGain(-9)
+    await Promise.resolve()
+    expect(await coordinator.stop()).toMatchObject({ ok: true })
+    generation = '42'
+    expect(await coordinator.start(config, -6)).toBe(true)
+    settleOldGain()
+
+    await expect(staleGain).resolves.toBe(false)
+    expect(coordinator.snapshot).toMatchObject({ phase: 'active' })
+    expect(coordinator.snapshot.result?.ownershipGeneration).toBe('42')
+    expect(endMonitor).toHaveBeenCalledOnce()
+    await coordinator.stop()
+  })
+
   it.each([
     ['telemetry', true],
     ['telemetry', false],
@@ -401,6 +495,47 @@ describe('DesktopMonitorCoordinator', () => {
     releaseStatus(status(true, '3'))
     await Promise.all([first, second])
     expect(monitorStatus).toHaveBeenCalledTimes(3)
+  })
+
+  it('ignores a delayed telemetry rejection after explicit Stop takes ownership', async () => {
+    let rejectRefresh!: (error: Error) => void
+    const statuses = [status(false), status(true, '2')]
+    const monitorStatus = vi.fn(async () => {
+      if (statuses.length > 0) return statuses.shift()!
+      return new Promise<DesktopMonitorStatus>((_resolve, reject) => {
+        rejectRefresh = reject
+      })
+    })
+    const terminal = vi.fn()
+    const coordinator = new DesktopMonitorCoordinator({
+      api: {
+        beginMonitor: async () => result(),
+        setMonitorGain: async () => result(),
+        monitorStatus,
+        endMonitor: async () => ({ ...result(), state: 'stopped' as const })
+      },
+      stopPreview: async () => undefined,
+      pauseSong: () => undefined,
+      releaseLegacyOutput: async () => undefined,
+      restoreLegacyOutput: async () => undefined,
+      onTerminalStop: terminal,
+      sleep: async () => undefined,
+      callbackTimeoutMs: 10,
+      pollMs: 1
+    })
+    expect(await coordinator.start(config, -12)).toBe(true)
+
+    const refresh = coordinator.refreshStatus()
+    await vi.waitFor(() => expect(monitorStatus).toHaveBeenCalledTimes(3))
+    await expect(coordinator.stop()).resolves.toEqual({ ok: true, safeToRestartPreview: true })
+    rejectRefresh(new Error('late status bridge rejection'))
+    await refresh
+
+    expect(terminal).not.toHaveBeenCalled()
+    expect(coordinator.snapshot).toMatchObject({
+      phase: 'idle',
+      message: 'Monitoring is off.'
+    })
   })
 })
 

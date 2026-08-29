@@ -1,6 +1,7 @@
 # ADR 0010: Guarded desktop monitoring preview
 
-Status: implemented, product-wired and hardware-verified on macOS
+Status: implemented; native path hardware-verified on macOS, app-shell
+persistence awaiting human listening verification
 Date: 2026-08-29
 
 ## Decision
@@ -25,7 +26,7 @@ device/format/latency diagnostics and pre/post scalar meter readings. It never
 transports PCM, a graph description or a native pointer. There is no graph
 persistence in this preview.
 
-The product `AudioSessionCoordinator` must first stop and release Web Audio
+The product `DesktopMonitorCoordinator` must first stop and release Web Audio
 output, then hand the same ownership generation to `beginMonitor`. Enumeration
 alone does not acquire audio. `beginMonitor` does not start when another native
 capture or monitor generation owns the addon microphone. Arbitration is
@@ -39,9 +40,82 @@ the host first and quarantines still-live graph storage instead of freeing it.
 Renderer occlusion and ordinary device-inventory notifications do not end an
 explicitly enabled monitor: Electron reports a fully covered macOS window as
 `document.hidden`, but this audio session is not renderer animation work. The
-native loss/status path remains authoritative. Explicit Stop, closing Settings,
-editing a physical route, a terminal native failure or renderer teardown still
-ends the generation before Web Audio output is restored.
+native loss/status path remains authoritative.
+
+Phase 4A.1 makes `DesktopMonitorCoordinator` a long-lived app-shell owner.
+Settings registers its temporary preview stopper and subscribes to the shared
+snapshot, but normal Settings close only unmounts that view and releases the
+meter preview. An active native generation remains visible in the top bar with
+separate Open Settings and Stop buttons. Reopening Settings reads the same live
+snapshot instead of constructing a second coordinator. While native ownership
+is retained, song output stays released to Chromium's silent sink, song play is
+refused, and song/training microphone capture remains blocked. Explicit Stop,
+editing a physical route, a terminal native failure, a Settings runtime error
+or renderer teardown still ends the exact generation before Web Audio output
+is restored. App restart never restores the enable decision.
+
+The Chromium preview has its own truthful safety lease. A healthy registered
+preview blocks song/training starts and remains reachable by the app-shell
+coordinator, but it is not unresolved cleanup and does not show the top-bar
+control. A
+Settings unmount marks that lease unresolved before awaiting `stopAndWait` and
+does not discard it until the capture child confirms it stopped; pending or
+failed cleanup keeps the top-bar Stop/retry control visible. A later Stop
+retries the same preview owner, and Web Audio is restored only after both
+preview cleanup and native generation shutdown are confirmed. Song, training
+cues and training capture are cancelled once more immediately before
+restoration, so work queued against the silent sink cannot become audible. A
+Settings chunk-import rejection preserves whatever preview/native/route owner
+the app shell already records; loading UI does not invent an owner or run
+cleanup. After the Settings module has loaded, its runtime-only boundary has
+eager app-shell emergency-stop handles and uses them for first-render or later
+descendant faults. Import recovery and loaded-view runtime recovery are thus
+separate paths.
+
+Vocal Training cleanup is intentionally owned by a different app-lifetime
+coordinator. Any Training-to-other-section transition is retained until cues,
+song playback and the exact training microphone have confirmed release; a
+failure leaves the Training route and its Retry surface mounted. That lease
+blocks song, Settings and training-audio entry, but its UI never claims native
+headphone monitoring, an output-route transition, or availability of the
+monitoring Stop control.
+That cleanup UI sits outside Training's recoverable module boundary, and thus
+survives loading or either chunk-import failure. App teardown disposes the
+coordinator before the training microphone and cue owners; late stop settlement
+is generation-invalidated and cannot navigate or update renderer state.
+
+Physical-route edits use one app-lifetime, invocation-ordered queue across
+playback output, input device/lane, native monitor output and playback lanes.
+The queue is constructed beside the monitor coordinator, not inside Settings,
+so an immediate close/reopen cannot create a concurrent drain. Scheduling an
+edit immediately acquires a coordinator-visible transition lease; the lease
+survives Settings close and releases only after that edit's browser/native
+apply promise has settled. The browser handoff is awaited fail-closed: if the
+OS stalls, the lease and “Changing audio route…” top-bar indicator remain until
+settlement or app quit. There is no Stop button for this non-cancellable apply,
+because releasing the lease while a late sink write can still arrive would be
+unsafe; Open Settings remains available. A reopened Settings preview stays
+dormant under the shared route/unresolved-cleanup lease and starts
+automatically when the change-gated shell snapshot clears it.
+
+The queue stops preview/native ownership once per batch, applies every captured
+selection serially, and can restart a mounted, visible preview only after the
+final edit. Boot/device-change Web Audio reconciliation and direct playback
+selection also share one app-lifetime latest-intent arbiter. Direct selection
+publishes its desired output/version synchronously, stale inventory results are
+discarded before sink writes, and preferences commit only after the current
+handoff succeeds. A failed current handoff restores the last committed intent
+before queued repair. The final cancellation barrier runs only when Web Audio
+was physically released and is about to be restored; preview-only cleanup does
+not pause a song or cancel cues.
+
+The app shell subscribes only to change-gated phase/ownership/safety state,
+including route-transition and pending-stop leases. A stop lease clears only
+after all teardown/restoration callbacks settle. Delayed telemetry responses
+recheck both ownership generation and active phase, so an explicit Stop cannot
+be overwritten by an old terminal rejection.
+Settings owns the detailed 120 ms telemetry subscription; meter and callback
+counter changes therefore do not rerender the full player or training tree.
 
 macOS accepts only one same-UID duplex device and is the only enabled Phase 4A
 product preview. Windows inventory remains visible, but its platform-backed
@@ -91,13 +165,15 @@ automated silent test.
   pass before product UI wiring begins.
 - Product tests prove the exact UID/channel handoff, fresh wired-headphone gate,
   off-by-default and non-persistent enablement, Web Audio release/restore order,
-  failure and lifecycle cleanup, truthful named host telemetry, and blocked
+  app-shell persistence across Settings close/reopen, global Stop single-flight,
+  route-edit and failure cleanup, truthful named host telemetry, and blocked
   Windows/unsuitable-route copy. Electron E2E probes the silent Web Audio sink
   release but never calls the audible native begin operation.
 - Human listening on 2026-08-29 verified Zen Quadro SC input 3 through the
   native graph to USB playback outputs 1/2. Monitoring remained audible while
-  switching to another macOS app; closing Settings stopped it and restored the
-  legacy song-output owner as designed.
+  switching to another macOS app. That evidence predates app-shell persistence;
+  listening after normal Settings close plus restoration through the top-bar
+  Stop action remains pending.
 
 ## Consequences
 
