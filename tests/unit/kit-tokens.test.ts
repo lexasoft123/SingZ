@@ -132,3 +132,59 @@ describe('kit tokens reach the phone unchanged', () => {
     expect(phone.integrity, 'phone pins different @singz/ui BYTES').toBe(desktop.integrity)
   })
 })
+
+/*
+ * The app icon is drawn, not imported, so it is the one place the stem
+ * colours are written down again — a canvas in build/icon/forge.html, cut
+ * into .icns/.ico by `npm run icons`. Nothing on the build path reads it,
+ * which is exactly why it can rot: the drawing it replaced had the kit's
+ * AMBER (#ffa028) where Guitar is #f98424, and no test could see it.
+ *
+ * This does NOT claim the committed .icns is current — only a re-run of
+ * `npm run icons` makes that true. It claims the forge and the kit still
+ * agree about what colour a lane is, which is the half a machine can check.
+ * If a lane colour is meant to change, change it in the kit and re-cut here.
+ */
+describe('the app icon speaks the kit\'s colours', () => {
+  const forge = readFileSync(fileURLToPath(new URL('../../build/icon/forge.html', import.meta.url)), 'utf8')
+
+  it('the lanes are the stem tokens, in the drawn order', () => {
+    const block = forge.match(/const LANES = \[([\s\S]*?)\n\]/)
+    expect(block, 'no LANES array in the forge — did it get restructured?').toBeTruthy()
+    const drawn = [...block![1].matchAll(/color: '(#[0-9a-f]{6})'/g)].map((m) => m[1])
+    expect(drawn).toEqual([
+      STEM_META.vocals.color,
+      STEM_META.drums.color,
+      STEM_META.guitar.color,
+      STEM_META.bass.color,
+      STEM_META.other.color,
+    ])
+  })
+
+  // The recipe offers two ways in: copy glass.js into the app, or import the
+  // packaged one. A copy is a second definition of the tile, the light and
+  // the glass, and it would drift from the kit the moment either moved — so
+  // the forge takes the tarball's own file and this says so out loud.
+  it('draws with the kit itself, not a copy of it', () => {
+    expect(forge).toMatch(/import \{[^}]*\} from '[^']*node_modules\/@singz\/ui\/recipes\/app-icon\/glass\.js'/)
+  })
+
+  /*
+   * The phones and the desktop are cut from the same forge, but two of the
+   * outputs may not carry an ALPHA CHANNEL at all — an App Store icon with
+   * one is rejected, and the Play listing icon is specified the same way
+   * (docs/PLAY-LISTING.md). A canvas PNG is always RGBA, so cut-mobile.cjs
+   * re-encodes those two as colour type 2; this is what notices if a file
+   * ever arrives from somewhere else. It reads the IHDR directly rather than
+   * decoding: byte 25 of a PNG is the colour type, and 2 is truecolour with
+   * no alpha.
+   */
+  it.each([
+    ['iOS AppIcon', 'mobile/ios/SingZPlayer/Images.xcassets/AppIcon.appiconset/AppIcon.png'],
+    ['Play listing icon', 'docs/play-assets/icon-512.png'],
+  ])('%s carries no alpha channel', (_name, rel) => {
+    const png = readFileSync(fileURLToPath(new URL(`../../${rel}`, import.meta.url)))
+    expect(png.subarray(1, 4).toString('ascii'), 'not a PNG').toBe('PNG')
+    expect(png[25], 'PNG colour type (2 = RGB, 6 = RGBA)').toBe(2)
+  })
+})

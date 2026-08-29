@@ -72,7 +72,31 @@ see below), runs `npm ci` in both roots (postinstall bakes configs, patches audi
 synthesizes the sample song), restores the electron binary when npm's cache
 skipped its postinstall (the "Electron failed to install correctly" launch
 error), and pod-installs iOS with a UTF-8 `LANG` — CocoaPods crashes in
-non-interactive shells without one. It touches no ccache config: the
+non-interactive shells without one.
+
+Three of its steps exist for RE-RUNS rather than fresh worktrees, which is
+the case that matters: re-running is how a worktree catches up after a
+rebase, and each of these is a way its build state can lag its source.
+
+- It **re-downloads react-native-audio-api's prebuilt binaries**, which
+  `npm ci` deletes and nothing else restores — they are not in the npm
+  tarball, and the podspec's `prepare_command` fetches them only when
+  CocoaPods integrates the pod for the FIRST time. This runs BEFORE
+  `pod install`, because CocoaPods records only the vendored frameworks
+  present at install time and the other order dies in `ld` with undefined
+  `_av_*` symbols. It **asserts the files arrived**: the vendor's downloader
+  `continue`s past a failed curl and still exits 0, so its status proves
+  nothing.
+- It **fails if `mobile/ios/SingzCore/core` does not match
+  `mobile/native/core`** byte for byte. That mirror is a gitignored copy
+  (CocoaPods drops globs reaching above the podspec and skips directory
+  symlinks), synced by mobile's postinstall; a worktree that skipped one
+  keeps building the stale copy and the failure names a missing header.
+- It **fails if the Pods sandbox still disagrees with `Podfile.lock`** after
+  installing — the "sandbox is not in sync" archive error, seen from here
+  instead of from xcodebuild ten minutes later.
+
+It touches no ccache config: the
 cross-worktree settings ride with each build (see above). Build products
 (`out/`, `Pods/`, `.gradle/`) stay per-worktree; the global npm / CocoaPods /
 ccache caches are what make the second worktree fast (pods ~30 s warm).

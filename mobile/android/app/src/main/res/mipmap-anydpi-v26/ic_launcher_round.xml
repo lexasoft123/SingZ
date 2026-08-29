@@ -1,6 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The background is the tile and the glass, the foreground is the mark, and
+  the split is deliberate: the launcher parallaxes the two layers against
+  each other, so the field has to be able to move under the lanes. It costs
+  the glass over the mark — foreground draws above background and the recipe
+  wants glass on top — which at this size is a specular wash nobody can see.
+
+  Both layers are FULL-BLEED 108dp. Only the middle 72dp is guaranteed to
+  survive the launcher's mask, so the mark is scaled against that, not the
+  canvas; build/icon/forge.html does it.
+
+  monochrome is its own bitmap, not the foreground: the system keeps only the
+  alpha and tints it, so the coloured layer's bloom would arrive as a grey
+  smear around every lane. It is drawn flat instead.
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background" />
+    <background android:drawable="@mipmap/ic_launcher_background" />
     <foreground android:drawable="@mipmap/ic_launcher_foreground" />
-    <monochrome android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_monochrome" />
 </adaptive-icon>
