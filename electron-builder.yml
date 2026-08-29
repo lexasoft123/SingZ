@@ -61,8 +61,9 @@ mac:
   # keychain, and — per this pinned version's own docs on `identity` —
   # "signing is skipped for all architectures" when none is found, with NO
   # automatic ad-hoc fallback of its own. On a machine with no such identity
-  # (this dev Mac included — only an iOS development identity is set up
-  # here, a different credential entirely) that is what leaves the signing
+  # — a fork's CI, or a checkout on a Mac that has never had a Developer ID
+  # certificate installed; this dev Mac stopped being an example once one
+  # was — that is what leaves the signing
   # step for afterPack.cjs's own ad-hoc fallback to run, unchanged: it
   # already checks CSC_LINK/CSC_NAME/CSC_KEY_PASSWORD and skips itself the
   # moment real signing is configured, which is the mechanism this relies on.

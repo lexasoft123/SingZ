@@ -295,11 +295,40 @@ pack that cannot split on a machine without homebrew or network.
 
 ### Signing status
 
-Builds ship ad-hoc signed (mac) / unsigned (win). To sign for real: remove
-`identity: null` from electron-builder.yml, add `CSC_LINK`/`CSC_KEY_PASSWORD`
-(+ `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` for notarization)
-as CI secrets — the afterPack hook steps aside automatically. Windows options:
-Azure Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
+**mac is Developer ID-signed and notarized in CI** — that is done, not a
+to-do, and [docs/MACOS-SIGNING.md](MACOS-SIGNING.md) is the whole story:
+what each secret is, how it is verified, and the two traps that bit.
+
+Note the difference between the pipeline and what has shipped: the secrets
+landed on 2026-08-29, after v0.19.0 was tagged, and the run that proved this
+was a `workflow_dispatch` — whose artifacts are not attached to any release
+(that step is gated on a tag ref). So **no published release carries a signed
+dmg yet**; the first one will be the next `v*` tag. README.md's install notes
+are scoped that way deliberately, and should be re-scoped once that tag
+lands rather than left promising the old dialog forever.
+
+A local build with no Apple secrets set still runs the afterPack ad-hoc sign,
+because that hook keys on `CSC_LINK`/`CSC_NAME`/`CSC_KEY_PASSWORD` being in
+the environment — **not** on what is in your keychain. So on a Mac that has a
+Developer ID certificate installed, the hook ad-hoc signs and then
+electron-builder's auto-discovery finds the real identity and re-signs over
+it (the ordering saves us: `emitAfterPack` runs before `doSignAfterPack`).
+The wasted pass is harmless, and the result is a Developer ID-signed but
+**un-notarized** app — notarization needs the API-key secrets.
+
+**Do NOT follow the old advice this section used to give.** It said to remove
+an `identity: null` from electron-builder.yml (there is no such key any more)
+and to set `CSC_LINK`/`CSC_KEY_PASSWORD` — and setting `CSC_LINK` is
+specifically the thing that breaks: electron-builder 26.15.3 hands the `.p12`
+password to `security set-key-partition-list -k`, which wants the *keychain*
+password, and the macOS leg dies as a bare `security process failed 1`. CI
+imports the certificate itself and passes `CSC_KEYCHAIN`/`CSC_NAME` instead.
+Notarization here is App Store Connect **API-key** auth
+(`APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER` + `APPLE_TEAM_ID`),
+not the `APPLE_ID`/app-specific-password trio.
+
+**Windows is still genuinely unsigned.** Options if that changes: Azure
+Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
 
 ## Renderer performance rules
 

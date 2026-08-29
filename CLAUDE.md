@@ -972,13 +972,19 @@ this one.
 present, ad-hoc signed exactly as before when they are not** — `notarize:
 true` in `electron-builder.yml` skips itself with a warning rather than
 failing when unset, which is what keeps every trigger of `build.yml` (tag,
-dispatch, the weekly cache warmer) building on this dev Mac and on a fresh
-checkout with no Apple secrets at all. `build.yml`'s signing step only
-*writes* `CSC_LINK`/`CSC_KEY_PASSWORD`/`APPLE_API_KEY*` when each secret is
-actually non-empty, and only on the macOS leg of that job's matrix —
-`CSC_LINK` is read for a **Windows** Authenticode cert too on the Windows
-leg of the same matrix, so folding it into a shared step would hand the
-Windows build an Apple `.p12` on every run. Notarization reuses the iOS
+dispatch, the weekly cache warmer) building in a fork, or on any machine with
+no Developer ID certificate, with no Apple secrets at all. `build.yml`'s
+signing step imports the certificate into a keychain it creates itself and
+writes **`CSC_KEYCHAIN`/`CSC_NAME`** (plus `APPLE_API_KEY`, `APPLE_TEAM_ID`,
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), each only when its secret is
+non-empty. It deliberately writes **neither `CSC_LINK` nor
+`CSC_KEY_PASSWORD`** — an earlier revision of this paragraph said it wrote
+exactly those two, and setting `CSC_LINK` is the one thing that breaks this,
+because electron-builder 26.15.3 then hands the `.p12` password to
+`security set-key-partition-list -k`, which wants the keychain password. The
+step stays on the macOS leg of that job's matrix regardless: `CSC_*` is read
+for a **Windows** Authenticode cert on the other leg, so a shared step would
+aim Apple credentials at `signtool`. Notarization reuses the iOS
 pipeline's App Store Connect API key rather than minting a second one — see
 [docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md), including why the
 entitlements file carries only the two Hardened Runtime flags Electron
@@ -990,11 +996,20 @@ are flat `mac:` siblings, not nested under a `sign:` key — this repo pins
 electron-builder ^26.15.3, where `mac.sign` is a custom-sign-*function* slot
 (a later major's docs describe the nested object; the two schemas are not
 interchangeable within one version). A misconfigured nested `sign:` object
-doesn't fail on this dev Mac or on any run with no Apple secrets — `sign()`
-returns before touching it when no identity is found — it only throws
+doesn't fail on any run with no identity available — a fork, or a secret
+rotated away; `sign()` returns before touching it when none is found, and
+this dev Mac stopped being an example of that once the Developer ID
+certificate was installed on it — it only throws
 (`customSign is not a function`) the moment a real Developer ID identity
 shows up, i.e. exactly when someone finally wires up the secrets this was
-all for; caught in review before it ever ran for real. Nothing has actually
-notarized a build yet — there is no
-Developer ID certificate on this machine — so treat the first real run as
-unverified, not proven.
+all for; caught in review before it ever ran for real. **This has since run
+for real, and both halves of the sentence that used to close this paragraph
+("nothing has actually notarized a build yet", "there is no Developer ID
+certificate on this machine") are now false** — a local `--mac --arm64`
+build signed, notarized and stapled, verified by `spctl` accepting the app
+inside a quarantined, mounted dmg; and CI run 33243835099 logged
+`notarization successful` for both architectures. The evidence, the
+verification commands and the two traps that bit on the way (electron-
+builder's `CSC_LINK` keychain-password bug, and worktree `vendor/` symlinks
+that `codesign --strict` rejects) are in
+[docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md).

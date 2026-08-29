@@ -1,11 +1,18 @@
 # Signing and notarizing the macOS desktop build
 
-Until now the mac `.dmg` shipped **ad-hoc signed** (`scripts/afterPack.cjs`):
-enough to turn the unrecoverable "app is damaged" quarantine dialog into the
-ordinary "unidentified developer" right-click-to-open flow, but every
-download still needed that workaround. A **Developer ID Application**
-certificate plus Apple notarization removes it entirely — Gatekeeper checks
-the notarization ticket instead of complaining.
+Every **published** mac `.dmg` is still **ad-hoc signed**
+(`scripts/afterPack.cjs`): enough to turn the unrecoverable "app is damaged"
+quarantine dialog into the ordinary "unidentified developer"
+right-click-to-open flow, but every download still needs that workaround. A
+**Developer ID Application** certificate plus Apple notarization removes it
+entirely — Gatekeeper checks the notarization ticket instead of complaining.
+
+CI does that now and is verified (see below), but the secrets landed after
+v0.19.0 was tagged and the proving run was a `workflow_dispatch`, whose
+artifacts attach to no release — so **the first signed, notarized release
+will be the next `v*` tag**. Until it lands, README's install notes and
+`src/main/updater.ts`'s "unsigned builds can't self-install" comment both
+still describe reality; re-scope them when it does.
 
 This is a *third* Apple certificate type, distinct from the two the iOS
 pipeline uses (see [IOS-RELEASE.md](IOS-RELEASE.md)):
@@ -174,15 +181,41 @@ deliberately does *not* carry, and why adding them by reflex would be wrong:
   splitter packs), never a dylib loaded into the Electron process itself, so
   there is nothing Hardened Runtime's library validation would block.
 
-## The first real run is unverified
+## This has now actually run — twice, and the vendored binaries were fine
 
-Nothing here has actually notarized a build — there is no Developer ID
-certificate on this machine to test with. The one specific risk worth
-watching on the first real `build.yml` run once the secrets exist:
-`electron-builder` deep-signs the whole `.app` bundle, including the vendored
-`whisper-cli`/`singz-analyze` binaries under `extraResources` — ordinarily
-routine, but if notarization comes back rejecting one of those nested
-binaries ("not signed with a valid Developer ID certificate" / "missing a
-secure timestamp" pointing at `engines/whisper-cli` or `engines/singz-analyze`
-rather than the app itself), that is the first place to look; electron-builder
-logs notarization output to the job log either way.
+Superseding the "first real run is unverified" note that stood here: it is
+verified, on both a local build and on CI.
+
+**Locally** (2026-08-29): a `--mac --arm64` build signed, notarized and
+stapled. Verified the way a downloader experiences it rather than by trusting
+the log — `codesign --verify --deep --strict` passes, `xcrun stapler validate`
+passes, and `spctl -a -t exec -vv` reports `accepted` /
+`source=Notarized Developer ID` both on the app and on the app inside a
+quarantined, mounted dmg.
+
+**On CI**, run 33243835099: `1 identity imported`, then
+`notarization successful` twice — once per architecture — producing signed,
+notarized `SingZ-<version>-mac-x64.dmg` and `-mac-arm64.dmg`.
+
+The risk this section used to flag did **not** materialize. `electron-builder`
+deep-signs the whole bundle including the vendored `whisper-cli` and
+`singz-analyze` under `extraResources`, and Apple's notary service accepted
+them without complaint on every run. If that ever changes, the symptom would
+be a rejection naming `engines/whisper-cli` or `engines/singz-analyze` rather
+than the app ("not signed with a valid Developer ID certificate" / "missing a
+secure timestamp"), and electron-builder logs notary output to the job log
+either way — so that remains the first place to look, just not an expected
+one.
+
+What DID bite on the way there is recorded above: the `CSC_LINK` keychain-
+password bug, and a dangling absolute symlink in the bundle when packaging
+from a git worktree (`vendor/darwin-<arch>/whisper-cli` is a link to the main
+checkout, and `codesign --strict` rejects it — see the note in `CLAUDE.md`).
+
+The dmg itself is neither signed nor stapled, and that is expected:
+electron-builder notarizes and staples the `.app`, then builds the dmg around
+it. `spctl` on the dmg says `rejected / source=no usable signature` while the
+app inside is `accepted` — which is what a downloader's Gatekeeper actually
+evaluates, confirmed by the quarantined-mount test above. `dmg.sign` is
+`false` by default for a reason electron-builder states outright: signing it
+"will lead to unwanted errors in combination with notarization requirements".

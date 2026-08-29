@@ -117,19 +117,27 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           # Only WRITE a var when it has a real value — an empty CSC_LINK is
-          # not the same thing to electron-builder as no CSC_LINK at all, and
-          # this repo's own secrets will genuinely be absent (every trigger
-          # of this workflow — tag, dispatch, the weekly cron) until the
-          # one-time Apple setup in docs/MACOS-SIGNING.md is done. Setting
-          # them to "" would turn "sign later" into a hard failure today.
+          # not the same thing to electron-builder as no CSC_LINK at all.
+          # The Apple secrets ARE set on this repo now, and run 33243835099
+          # signed and notarized both architectures for real ("1 identity
+          # imported", then "notarization successful" twice). An earlier
+          # revision of this comment said they "will genuinely be absent"
+          # until the one-time setup in docs/MACOS-SIGNING.md was done; that
+          # setup has happened, so do not reason from their absence.
+          #
+          # The tolerance still matters, and not only for history: a FORK
+          # gets none of this repo's secrets, and a secret later rotated or
+          # cleared leaves the value empty. Both must degrade to an ad-hoc
+          # signed dmg (afterPack.cjs's fallback) rather than fail the leg.
+          # (A fresh clone is NOT one of these — secrets live in the
+          # repository's GitHub settings, never in the checkout.)
           #
           # `if/then`, NOT `[ -n "$2" ] && echo …`: GitHub runs this step as
           # `bash -e {0}`, and while the AND-list is exempt from errexit
           # inside the function body, the FUNCTION then returns 1 when the
           # value is empty — and the call site is a plain simple command, so
-          # errexit kills the step there. With no secrets set (today's state,
-          # which this step exists to tolerate) the whole macOS leg would die
-          # here, after the engine builds and before Package.
+          # errexit kills the step there. That would take the whole macOS leg
+          # down here, after the engine builds and before Package.
           set_if_present() {
             if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi
           }
