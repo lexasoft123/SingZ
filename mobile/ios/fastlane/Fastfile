@@ -223,12 +223,21 @@ platform :ios do
   lane :validate do
     verify_marketing_version
     key = api_key
-    UI.user_error!("MATCH_PASSWORD is not set") if ENV["MATCH_PASSWORD"].to_s.empty?
     # Actually FETCH rather than merely checking that secrets are non-empty:
     # a wrong MATCH_PASSWORD, an unreachable certs repo, an expired
     # certificate and a profile that never got created all look identical to
     # a presence check, and all four fail the same way mid-archive later.
-    match(type: "appstore", readonly: true, api_key: key)
+    #
+    # Through install_signing, NOT a bare match(), so this rehearses the same
+    # path beta/release/adhoc take — the dedicated CI keychain included. The
+    # first CI run of this lane called match directly and it installed into
+    # the runner's LOGIN keychain, warning about a password it cannot have
+    # ("Could not configure imported keychain item ... to prevent UI
+    # permission popup"): green, but not the arrangement any real build uses,
+    # so a keychain fault in install_signing would have sailed past the lane
+    # whose whole job is to catch signing faults early. install_signing
+    # carries the MATCH_PASSWORD check too, so this keeps that.
+    install_signing(api_key: key)
     UI.success("API key, certs repo and profile all resolve; MARKETING_VERSION matches package.json.")
   end
 
@@ -468,8 +477,36 @@ private_lane :install_signing do |options|
   # runner, where a stale identity from a previous job would otherwise make
   # xcodebuild's "which identity?" ambiguous. match installs into whatever
   # keychain is current, so this has to come first.
-  if ENV["CI"]
+  # GITHUB_ACTIONS, not the generic CI. `default_keychain: true` runs
+  # `security default-keychain -s`, and NOTHING here puts it back — fastlane
+  # stashes the old value in lane_context but only delete_keychain restores
+  # it. On a throwaway hosted runner that is inert; in a developer's shell
+  # that happens to export CI (plenty do, to make tooling non-interactive) it
+  # would silently repoint their default keychain — and `validate` is exactly
+  # the lane someone runs locally when signing is already misbehaving.
+  #
+  # The `certs` lane above deliberately keeps the BROAD ENV["CI"], and the
+  # asymmetry is the point: that guard REFUSES to act, so a false positive
+  # costs someone one unset variable while a false negative can burn one of
+  # Apple's capped Distribution certificates. This branch ACTS on the
+  # machine, so it wants the narrowest trigger that is still always true
+  # where we need it.
+  if ENV["GITHUB_ACTIONS"]
     keychain_password = SecureRandom.hex(16)
+    # Idempotent on a runner that persists between jobs (self-hosted): the
+    # keychain would already exist, create_keychain skips creation but still
+    # unlocks with the fresh password below, and that mismatch fails naming
+    # nothing about the cause.
+    #
+    # It does NOT put the previous default keychain back: delete_keychain
+    # restores from lane_context[ORIGINAL_DEFAULT_KEYCHAIN], which only
+    # create_keychain writes, later in this same process — at the top of a
+    # fresh run that is nil and the restore is skipped. So a persistent
+    # runner still ends each job pointed at singz-ci.keychain-db. Harmless on
+    # a throwaway hosted runner, which is the only kind this repo uses; if a
+    # self-hosted one ever appears, that is the loose end to tie.
+    keychain_file = File.expand_path("~/Library/Keychains/singz-ci.keychain-db")
+    delete_keychain(name: "singz-ci.keychain-db") if File.exist?(keychain_file)
     create_keychain(
       name: "singz-ci.keychain-db",
       password: keychain_password,

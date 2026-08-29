@@ -83,9 +83,15 @@ jobs:
         run: command -v ffmpeg >/dev/null || brew install ffmpeg
 
       # Real submissions carry the Google OAuth client (drive.file scope) —
-      # the repo never does. Missing it on a tag ships an App Store build
-      # with sync silently absent, which the listing promises; a dispatch
-      # build (rehearsing the pipeline, or a metadata-only push) just warns.
+      # the repo never does. Missing it ships an App Store build with sync
+      # silently absent, which the listing promises.
+      #
+      # The test below is on the REF SHAPE, not the event: anything running
+      # against refs/tags/* is treated as a real release and fails hard,
+      # including a dispatch aimed at a tag (re-running a failed tag build is
+      # exactly that). Only a run on a branch ref — rehearsing the pipeline,
+      # or a metadata-only push — degrades to a warning. Same ref-shape rule
+      # `Resolve lane` uses, and android.yml before it.
       - name: Inject Google Drive OAuth client
         env:
           GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
