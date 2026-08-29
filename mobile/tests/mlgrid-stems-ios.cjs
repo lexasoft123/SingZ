@@ -62,7 +62,7 @@ const stemsDir = process.argv[3]
 
 const die = (m) => { console.error(m); process.exit(1) }
 if (!rec || !stemsDir) die('usage: node mobile/tests/mlgrid-stems-ios.cjs <recording-dir> <stems-dir>')
-const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'com.lexasoft.singz', 'data'],
+const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'io.s-dev.singz', 'data'],
   { encoding: 'utf8' }).trim()
 const DIR = path.join(container, 'Documents', 'mlt')
 if (!fs.existsSync(path.join(DIR, 'beat_this.onnx'))) die(`no beat models in ${DIR} — reseed the container (it moves on every install)`)

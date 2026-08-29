@@ -116,7 +116,7 @@ static SingzVitals SampleVitals(void) {
 // The continued-processing identifier — EXACT, never a wildcard (the
 // scheduler's wildcard matching is broken for continued tasks), and listed
 // in Info.plist's BGTaskSchedulerPermittedIdentifiers.
-static NSString *const kBgTaskId = @"com.lexasoft.singz.split";
+static NSString *const kBgTaskId = @"io.s-dev.singz.split";
 
 #pragma mark - job.json (the Android JobStore contract, mirrored)
 

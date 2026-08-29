@@ -8,6 +8,20 @@ vendor
 *.log
 .DS_Store
 
+# fastlane's iOS build output (mobile/ios/fastlane's gym output_directory) —
+# a signed .ipa and its .app.dSYM, hundreds of MB, rebuilt per run
+build-ios/
+
+# Apple credentials kept beside the checkout for convenience — the App Store
+# Connect API key (.p8), signing certificates, provisioning profiles. This
+# repo is PUBLIC and the .p8 downloads exactly once from Apple, so a leak is
+# both immediate and unrecoverable. Belt and braces: the directory, and the
+# extensions wherever they land.
+.keys/
+*.p8
+*.p12
+*.mobileprovision
+
 # session worktrees are never repo content
 .claude/worktrees/
 

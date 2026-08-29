@@ -1,13 +1,23 @@
 /**
  * electron-builder afterPack hook: verify the copied native capture artifact,
- * then ad-hoc sign final macOS bundles.
+ * then ad-hoc sign final macOS bundles before electron-builder's later real
+ * signing pass, when one is configured.
  *
- * With identity:null electron-builder leaves the repacked app unsigned. A
- * broken/stale bundle signature + quarantine makes macOS say "app is damaged"
- * with no right-click escape; a valid ad-hoc signature downgrades that to the
- * standard "unidentified developer" flow. Deep signing also rewrites the
- * nested capture Mach-O's signature bytes, so packaged verification validates
- * that signature instead of pretending its pre-sign raw SHA still matches.
+ * When no Developer ID identity is available, electron-builder skips signing
+ * entirely and leaves the prebuilt Electron binary's original signature —
+ * which our repacked resources invalidate. A *broken* signature + quarantine
+ * makes macOS say "app is damaged" with no right-click escape; a valid
+ * ad-hoc signature downgrades that to the standard "unidentified developer"
+ * flow.
+ *
+ * (There is no `identity: null` in electron-builder.yml any more, whatever
+ * older comments say — the key is absent entirely, which is what enables
+ * auto-discovery. CI now signs and notarizes for real; the later signing pass
+ * replaces this valid fallback. See docs/MACOS-SIGNING.md.)
+ *
+ * Deep signing also rewrites the nested capture Mach-O's signature bytes, so
+ * packaged verification validates that signature instead of pretending its
+ * pre-sign raw SHA still matches.
  */
 const { execFileSync } = require('node:child_process')
 const path = require('node:path')

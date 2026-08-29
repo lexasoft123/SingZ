@@ -23,7 +23,7 @@ const http = require('http');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');
 
-const BUNDLE = 'com.lexasoft.singz';
+const BUNDLE = 'io.s-dev.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
 const DEVICE_NAME = process.env.SIM_DEVICE_NAME || 'iPhone 16 Pro';
 /* Another worktree's Metro on 8081 would hand us ITS app: keep them apart with

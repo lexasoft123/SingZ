@@ -48,7 +48,7 @@ Environment traps (do not re-learn):
 - Metro runs from mobile/ on 8081 (`packager-status:running` at /status); keep an existing one.
 - Metro /json mixes ALL clients and keeps stale targets: filter deviceName (gphone=emulator, iPhone=sim) AND probe candidates with a 1+1 eval.
 - Hermes CDP can segfault the app under eval churn — a "fresh app state" failure may be this; relaunch + rerun once.
-- iOS sim UDID C624B667-6F58-4F85-B64F-63B75545DDE2, bundle com.lexasoft.singz.
+- iOS sim UDID C624B667-6F58-4F85-B64F-63B75545DDE2, bundle io.s-dev.singz.
 - Android: JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home", SDK ~/Library/Android/sdk, AVD "SingZ_API36", always `adb -s <serial>`; debug builds load JS from Metro at 10.0.2.2:8081.
 
 iOS:

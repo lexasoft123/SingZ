@@ -522,7 +522,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     self-heals to one adoption — asserted on job.json transitions, never
     on the card's phase). Ran green twice: on the P3a build and on the
     BG-task build. The iOS 26 `BGContinuedProcessingTask` integration:
-    EXACT identifier (`com.lexasoft.singz.split` — the scheduler's wildcard
+    EXACT identifier (`io.s-dev.singz.split` — the scheduler's wildcard
     matching is broken for continued tasks), lazy registration in the
     runner's init (continued tasks are exempt from the register-before-
     launch rule), submitted at every job start, chunk callbacks feed

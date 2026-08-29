@@ -18,10 +18,18 @@ files:
   - '!native/*'
   - '!cmake/*'
   - '!{CMakeLists.txt,CMakePresets.json}'
-  # Pre-existing instances of the same trap (the phone app's whole source
-  # tree — plus its node_modules on any machine that ran mobile npm ci —
-  # the test suites, and the agent config all shipped inside the asar).
+  # The React Native app is a separate product that happens to live in this
+  # repo — none of it belongs in the desktop asar. Leaving it in is not
+  # merely ~11 MB of wasted RN sources: `mobile/ios` holds Pods and
+  # DerivedData once anyone has built the iOS app in their checkout, and a
+  # local arm64 dmg cut from such a tree measured 1.35 GB against the 122 MB
+  # CI ships. CI only escapes because its desktop job never pod-installs, so
+  # this was a landmine rather than a current break.
   - '!mobile/*'
+  # Output of the iOS pipeline (fastlane's export dir): .ipa plus a ~38 MB
+  # dSYM zip, for the same reason.
+  - '!build-ios/*'
+  # Tests and agent/development configuration are not runtime assets.
   - '!tests/*'
   - '!.claude/*'
   - '!{CLAUDE.md,vitest.config.ts,tsconfig.tests.json}'
@@ -36,6 +44,22 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
   - '!{.env,.env.*,.npmrc,package-lock.json}'
 asar: true
+# Electron ships every Chromium UI translation: on macOS that is 220 .lproj
+# bundles totalling 47 MB (Electron 43 added FEMININE/MASCULINE/NEUTER
+# variants, so it is 55 locales x 4), against 2.2 MB for the ones below.
+# These are Chromium's own strings — context menus, form validation — not
+# SingZ's, whose UI is English; the store listing is English + Russian, so
+# those are what a singer could actually be shown.
+#
+# The names must be EXACT, and cannot be shortened to just 'en'. The matcher
+# in ElectronFramework.js is inverted relative to its own comment — it tests
+# `wantedLanguage.startsWith(language + "-")`, i.e. the WANTED string against
+# the FILE's, so asking for 'en' deletes 'en-US' rather than keeping it. The
+# list therefore spells out both spellings: macOS uses en.lproj/en_GB.lproj,
+# Windows uses locales/en-US.pak. The loop walks the FILES on disk and tests
+# each against this list, so a name that matches nothing on a given platform
+# simply never fires — the cross-platform union is the safe form.
+electronLanguages: ['en', 'en-US', 'en_GB', 'ru']
 npmRebuild: false
 afterPack: scripts/afterPack.cjs
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
@@ -46,10 +70,35 @@ publish:
   owner: lexasoft123
   repo: SingZ
 mac:
-  # No Developer ID is wired up yet; afterPack applies an ad-hoc fallback.
-  # To sign for release: remove `identity`, add CSC_LINK/CSC_KEY_PASSWORD; the
-  # later electron-builder signing pass replaces the fallback signature.
-  identity: null
+  # No `identity` set — electron-builder auto-discovers a "Developer ID
+  # Application" identity from CI's CSC_NAME/CSC_KEYCHAIN configuration or
+  # the local keychain, and — per this pinned version's own docs on `identity` —
+  # "signing is skipped for all architectures" when none is found, with NO
+  # automatic ad-hoc fallback of its own. On a machine with no such identity
+  # — a fork's CI, or a checkout on a Mac that has never had a Developer ID
+  # certificate installed; this dev Mac stopped being an example once one
+  # was — electron-builder's signing step does nothing and afterPack.cjs's
+  # ad-hoc signature remains final. When a real identity is available,
+  # electron-builder's later signing pass replaces that fallback.
+  #
+  # hardenedRuntime/entitlements/entitlementsInherit are flat `mac:`
+  # siblings, NOT nested under a `sign:` key — that field is this pinned
+  # v26's slot for a custom sign *function* (`CustomMacSign | string |
+  # null`), not a config object; the v27+ docs describe a different shape.
+  # A nested object here would pass through electron-builder's
+  # resolveFunction() unchanged and then get CALLED as that function the
+  # first time a real identity is actually found, crashing every signed
+  # build with "customSign is not a function" — invisible today only
+  # because no identity is present yet to reach that code path. Confirmed
+  # against the actual installed 26.15.3 typings, not just the online docs.
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  # Skips itself with a warning (not an error) when no notarization
+  # credentials are present — safe to leave on unconditionally for local,
+  # unsigned dev builds. See docs/MACOS-SIGNING.md for the APPLE_API_KEY*
+  # env vars this reads.
+  notarize: true
   category: public.app-category.music
   darkModeSupport: true
   # Universal packaging receives the same already-lipo'd capture addon in

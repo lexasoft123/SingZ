@@ -584,7 +584,7 @@ describe('Electron capture addon build', () => {
     expect(hook.indexOf('verifyCopiedCapture(context)')).toBeLessThan(
       hook.indexOf('layout.universalIntermediate')
     )
-    expect(hook).not.toContain('CSC_LINK')
+    expect(hook).not.toContain('process.env.CSC_')
   })
 
   it('verifies the artifact electron-builder actually copied before afterPack returns', () => {

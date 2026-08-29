@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Hardened Runtime, not App Sandbox — this is the `dmg` target (direct
+	distribution + notarization), not `mas` (Mac App Store), so the App
+	Sandbox entitlement set (com.apple.security.app-sandbox and its
+	per-resource exceptions) does not apply here and must not be added by
+	analogy with an App Sandbox guide. Under Hardened Runtime alone, network
+	access and microphone access (NSMicrophoneUsageDescription is already in
+	electron-builder.yml's mac.extendInfo) keep working through the normal
+	TCC prompt with no extra entitlement — these two are what V8/Node
+	themselves need to keep running under Hardened Runtime.
+	-->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>
