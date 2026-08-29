@@ -1,18 +1,21 @@
 # Signing and notarizing the macOS desktop build
 
-Every **published** mac `.dmg` is still **ad-hoc signed**
-(`scripts/afterPack.cjs`): enough to turn the unrecoverable "app is damaged"
-quarantine dialog into the ordinary "unidentified developer"
-right-click-to-open flow, but every download still needs that workaround. A
+Up to and including **v0.19.0**, every published mac `.dmg` was **ad-hoc
+signed** (`scripts/afterPack.cjs`): enough to turn the unrecoverable "app is
+damaged" quarantine dialog into the ordinary "unidentified developer"
+right-click-to-open flow, but every download needed that workaround. A
 **Developer ID Application** certificate plus Apple notarization removes it
 entirely — Gatekeeper checks the notarization ticket instead of complaining.
 
-CI does that now and is verified (see below), but the secrets landed after
-v0.19.0 was tagged and the proving run was a `workflow_dispatch`, whose
-artifacts attach to no release — so **the first signed, notarized release
-will be the next `v*` tag**. Until it lands, README's install notes and
-`src/main/updater.ts`'s "unsigned builds can't self-install" comment both
-still describe reality; re-scope them when it does.
+CI does that now and is verified (see below). **v0.19.1 is the first signed,
+notarized release**; the ad-hoc path in `afterPack.cjs` survives for forks
+and for machines with no certificate, and stands aside on its own when a real
+identity is configured.
+
+One thing about that first tag is worth watching rather than assuming: the
+proving runs were `workflow_dispatch`es, and `build.yml`'s attach step is
+gated on a tag ref — so no signed dmg has ever actually been *attached* to a
+release. Check that the v0.19.1 tag build attaches one.
 
 This is a *third* Apple certificate type, distinct from the two the iOS
 pipeline uses (see [IOS-RELEASE.md](IOS-RELEASE.md)):

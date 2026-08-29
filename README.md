@@ -59,8 +59,9 @@ built-in setup and keeps it updated automatically.
   is four requests and your media never re-uploads. The companion app in
   [mobile/](mobile) (React Native, iOS + Android) plays the synced library
   with the same karaoke lyrics, melody line and beat grid — songs cache on
-  the phone and keep playing offline. The Android APK is attached to every
-  release.
+  the phone and keep playing offline. **iPhone:** join the open beta at
+  [testflight.apple.com/join/q6vVdkwt](https://testflight.apple.com/join/q6vVdkwt).
+  **Android:** the APK is attached to every release.
 - **Log window** — the **Log** button shows what the app is doing under the
   hood (engines, downloads, lyrics search) and saves to a file for bug
   reports.
@@ -126,18 +127,11 @@ git tag v0.2.0 && git push origin v0.2.0
 The in-app pack downloads point at the latest release assets, so releases
 must be publicly reachable (or set `SINGZ_GPU_PACK_URL`).
 
-**macOS builds are Developer ID-signed and notarized from the next release
-onwards** — the pipeline does it, but no published release carries it yet, so
-the steps below still apply to everything you can download today.
-
-Until then, **macOS** (Sequoia and later) blocks the first launch with
-*"Apple could not verify…"* — open **System Settings → Privacy & Security**,
-scroll to *"SingZ" was blocked*, click **Open Anyway**, then launch again
-(one time per version). Or in Terminal:
-
-```bash
-xattr -d com.apple.quarantine /Applications/SingZ.app
-```
+**macOS builds are Developer ID-signed and notarized by Apple.** Download the
+dmg, drag SingZ across, open it — no *"Apple could not verify…"* dialog, and
+nothing to approve in System Settings. (v0.19.1 is the first signed release;
+on an earlier download macOS still shows that dialog — approve it once under
+**System Settings → Privacy & Security**.)
 
 **Windows is still unsigned** and shows a SmartScreen prompt — *More info →
 Run anyway*. The packs bundle their own MSVC runtime, so nothing else needs
