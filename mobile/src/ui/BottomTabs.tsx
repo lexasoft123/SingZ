@@ -2,7 +2,7 @@ import React from 'react'
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs'
 import { StyleSheet, View } from 'react-native'
 import { C, MicGlyph } from './bits'
-import { GlassTab, GlassTabBar } from './uikit/native/index.js'
+import { GlassTab, GlassTabBar } from '@singz/ui/native'
 
 export type RootTab = 'songs' | 'training'
 export type RootTabParamList = {

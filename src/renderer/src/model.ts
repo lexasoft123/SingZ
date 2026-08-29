@@ -176,7 +176,7 @@ export function trainingWindows(
  * Lane labels and colours — the kit's table, because the phone draws the same
  * project and Bass has to be the same blue in both. They had drifted by a
  * digit before this was shared. `tests/unit/kit-tokens.test.ts` fails if the
- * phone's vendored copy stops matching.
+ * apps' published `@singz/ui` dependency specs or locked artifacts diverge.
  */
 export const TRACK_META: Record<string, { label: string; color: string }> = STEM_META
 

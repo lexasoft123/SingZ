@@ -1,20 +1,55 @@
 /*
  * One table, three ends — the same shape as tests/shared/currency-cases.json.
  *
- * The kit owns the stem colours; the desktop imports them; the phone carries
- * a VENDORED copy because Metro does not honour the "exports" field and
- * adding a React-DOM package to the phone's dependency graph to read a
- * colour table would be a resolution failure waiting to happen.
- *
- * A vendored copy is only safe if something notices when it rots. This is
- * that something. It is why vocals is not #ff5c65 on the desktop and
- * #ff5d66 on the phone any more.
+ * The kit owns the stem colours; both apps import them straight from
+ * `@singz/ui`, each resolved from its own lockfile. There is no vendored
+ * copy left to rot, but the two lockfiles can still end up pinned to
+ * different tags — this is what notices when they do. It is why vocals is
+ * not #ff5c65 on the desktop and #ff5d66 on the phone any more.
  */
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { STEM_META, CUSTOM_COLORS } from '@singz/ui/stems'
 import { tokens } from '@singz/ui/tokens'
 import { KIT, STEM_COLORS, CUSTOM_COLORS as PHONE_CUSTOM } from '../../mobile/src/ui/tokens'
-import { tokens as nativeTokens } from '../../mobile/src/ui/uikit/tokens/tokens.js'
+
+type PackageManifest = {
+  dependencies?: Record<string, unknown>
+  devDependencies?: Record<string, unknown>
+}
+
+type PackageLock = {
+  packages?: Record<string, Record<string, unknown>>
+}
+
+function readJson<T>(relativePath: string): T {
+  return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), 'utf8')) as T
+}
+
+function dependencySpec(manifest: PackageManifest, label: string): string {
+  const spec = manifest.dependencies?.['@singz/ui'] ?? manifest.devDependencies?.['@singz/ui']
+  if (typeof spec !== 'string' || spec.length === 0) {
+    throw new Error(`${label} is missing an @singz/ui dependency spec`)
+  }
+  return spec
+}
+
+function lockedKitMetadata(lock: PackageLock, label: string) {
+  const entry = lock.packages?.['node_modules/@singz/ui']
+  if (!entry) {
+    throw new Error(`${label} is missing packages["node_modules/@singz/ui"]`)
+  }
+
+  const metadata = {} as { version: string; resolved: string; integrity: string }
+  for (const field of ['version', 'resolved', 'integrity'] as const) {
+    const value = entry[field]
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`${label} @singz/ui entry is missing ${field}`)
+    }
+    metadata[field] = value
+  }
+  return metadata
+}
 
 describe('kit tokens reach the phone unchanged', () => {
   it('every stem colour matches', () => {
@@ -43,20 +78,38 @@ describe('kit tokens reach the phone unchanged', () => {
     expect(KIT.surfaceRaised).toBe(tokens['surface-raised'])
   })
 
+  it('both apps request the exact same package', () => {
+    const rootManifest = readJson<PackageManifest>('../../package.json')
+    const mobileManifest = readJson<PackageManifest>('../../mobile/package.json')
+
+    expect(dependencySpec(rootManifest, 'package.json')).toBe(
+      dependencySpec(mobileManifest, 'mobile/package.json')
+    )
+  })
+
+  it('both lockfiles pin the exact same package artifact', () => {
+    const rootLock = readJson<PackageLock>('../../package-lock.json')
+    const mobileLock = readJson<PackageLock>('../../mobile/package-lock.json')
+
+    expect(lockedKitMetadata(rootLock, 'package-lock.json')).toEqual(
+      lockedKitMetadata(mobileLock, 'mobile/package-lock.json')
+    )
+  })
+
   it('the accent is the desktop one — the phone had its own', () => {
     // Guards the specific drift this work existed to end.
     expect(KIT.accent).toBe('#ffa028')
     expect(STEM_COLORS.vocals).toBe('#ff5c65')
   })
 
-  it('native glass materials come from the vendored kit tokens', () => {
-    expect(KIT.glassFill).toBe(nativeTokens['glass-fill'])
-    expect(KIT.glassLine).toBe(nativeTokens['glass-line'])
-    expect(KIT.glassRim).toBe(nativeTokens['glass-rim'])
-    expect(KIT.controlFill).toBe(nativeTokens['control-fill'])
-    expect(KIT.controlLine).toBe(nativeTokens['control-line'])
-    expect(KIT.controlRim).toBe(nativeTokens['control-rim'])
-    expect(KIT.footerFill).toBe(nativeTokens['footer-fill'])
-    expect(KIT.shadow).toBe(nativeTokens.shadow)
+  it('native glass materials match the installed package', () => {
+    expect(KIT.glassFill).toBe(tokens['glass-fill'])
+    expect(KIT.glassLine).toBe(tokens['glass-line'])
+    expect(KIT.glassRim).toBe(tokens['glass-rim'])
+    expect(KIT.controlFill).toBe(tokens['control-fill'])
+    expect(KIT.controlLine).toBe(tokens['control-line'])
+    expect(KIT.controlRim).toBe(tokens['control-rim'])
+    expect(KIT.footerFill).toBe(tokens['footer-fill'])
+    expect(KIT.shadow).toBe(tokens.shadow)
   })
 })
