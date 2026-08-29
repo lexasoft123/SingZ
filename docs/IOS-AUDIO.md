@@ -108,3 +108,101 @@ delivery thread.
 The simulator can prove compilation and lifecycle wiring, but not microphone
 route enumeration, channel mapping, Bluetooth/CarPlay behavior, or latency.
 Those require a physical iPhone or iPad and the intended accessories.
+
+## Standalone RemoteIO output host (Phase 3C)
+
+`AudioHost` now has an iOS RemoteIO provider, but no SingZ product playback
+path calls it yet. `react-native-audio-api` remains the sole song/metronome
+output owner until the atomic Phase 4 handoff in ADR 0008. Merely enumerating
+the host reads the active route and never opens an AudioUnit or mutates the
+session.
+
+The provider accepts output-only configuration (empty input UID and map), or
+duplex configuration using the active input and output routes from the same
+already-prepared `AVAudioSession`. iOS input and output ports have distinct
+opaque UIDs. Duplex does not require their strings to match; instead it
+requires the existing capture lease's UID, route generation and minimum
+channel count to cover the input selection. The one RemoteIO instance and
+session provide the common clock, and only its output render callback invokes
+the graph.
+
+The render callback's hardware timestamp is retained as the output/master
+anchor. `AudioUnitRender` does not return a separate input-buffer host anchor
+in this topology, so duplex capture publishes a callback-entry estimate for
+its first sample and explicitly marks it non-hardware. Sharing the RemoteIO
+clock domain is not permission to relabel output presentation time as raw
+capture time.
+
+The session owner must configure and activate the intended route before
+`open()`. The provider validates and snapshots category, mode, options, route
+generation, opaque port UIDs, exact negotiated rate/channel counts,
+`IOBufferDuration`, input/output latency and the capture lease. It rejects a
+requested rate or buffer that differs from those negotiated facts. It never
+calls any `setCategory`, `setMode`, `setActive`, `setPreferredInput`, sample
+rate, channel-count or buffer-duration API.
+
+Physical output maps are destination-sized: unselected hardware lanes are
+`-1`, while each selected destination points to its planar graph source.
+Input maps contain the selected zero-based physical input lane for each planar
+graph destination. RemoteIO performs its own device-format conversion; the
+graph boundary itself is always non-interleaved float32. Duplex input storage
+and its `AudioBufferList` are fully allocated during `open()`, while output is
+rendered directly into RemoteIO's planar buffers.
+
+The latency result deliberately keeps four values separate:
+
+- `inputDeviceFrames`: `inputLatency` converted at the actual session rate;
+- `outputDeviceFrames`: local/wired/USB/HDMI `outputLatency`;
+- `bufferFrames`: actual `IOBufferDuration` at the session rate;
+- `externalRouteFrames`: Bluetooth/AirPlay/CarPlay `outputLatency`.
+
+This split prevents a transport delay from being presented as low-latency
+hardware. Product audible projection still follows the route-latency snapshot
+rule (`outputLatency + IOBufferDuration`) and must not add either component
+twice.
+
+Observers are installed before the opening snapshot. A route change,
+interruption, media-services loss or reset advances the generation, causes the
+render callback to output silence, and exposes a terminal status requiring an
+explicit stop/open. No default device or format is substituted. The callback
+contains only host-clock reads, layout bounds checks, optional
+`AudioUnitRender`, planar buffer writes, atomics and the graph thunk; it makes
+no allocation, lock, Objective-C/session call or log.
+
+Callback admission closes before stop. Its accepting bit and admitted count
+share one lock-free 32-bit state, so close either observes a previously
+admitted callback or prevents its admission; teardown cannot observe a false
+zero across two atomics. After a successful `AudioOutputUnitStop`, the control
+owner waits for the provider gate, graph endpoint and outer callback-entry
+counter before uninitializing or disposing RemoteIO. If stop fails, it does
+not uninitialize or dispose through uncertain callback activity: the live unit
+and closed callback context enter the bounded fail-stop quarantine after every
+previously admitted callback has returned. Callback layout failures are sticky:
+every later callback remains silent until an explicit stop/open. A duplex
+input pull uses its own action-flags word, so an input `PostRenderError` zeros
+the input block and records an xrun without corrupting the outer output flags;
+the outer `OutputIsSilence` bit always describes the final graph result.
+Because `AVAudioSession` is process-global, the standalone provider admits one
+RemoteIO host owner at a time. If stop or component disposal fails, a bounded
+one-slot fail-stop quarantine retains the unit and closed callback context and
+poisons further opens for that process; it never grows with retries or
+releases state that CoreAudio might still reference.
+
+The output timeline remembers timestamp validity and the next expected
+`mSampleTime`. Validity transitions and non-contiguous sample positions emit
+typed reset boundaries before the affected graph block, as required by ADR
+0003; missing timestamp fields are never silently treated as a continuous
+hardware anchor.
+
+Deterministic policy tests run without an iOS device. The isolated Apple build
+compiles and link-checks arm64 iPhone and arm64/x86_64 simulator slices, and
+checks that the provider imports RemoteIO but no AVAudioSession mutation
+selector, including preferred channel counts, port override, multichannel,
+session and route-child data-source/polar-pattern setters, aggregate-I/O and
+intended-spatial-experience setters, legacy hardware-rate/delegate setters,
+input/output muting, both record-permission request APIs and microphone-
+injection permission. This is compile/ownership evidence only. A physical
+iPhone must still provide loopback
+latency, callback distribution, multichannel USB, sustained xrun/deadline,
+interruption and Bluetooth/CarPlay route-change evidence before product
+playback can cut over.

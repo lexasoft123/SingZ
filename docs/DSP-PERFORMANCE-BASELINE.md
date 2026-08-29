@@ -48,7 +48,7 @@ normalized batch means and retain scheduler effects visible at batch scale.
 | --- | --- | --- | --- | --- | --- | --- |
 | Dell Windows laptop, MSVC/WASAPI | Phase 0A physical run, carried forward from the implementation session; not rerun in Phase 0B | Capture produced 603 delivered samples; negotiated rate/block were not preserved in the available transcript | p50 0.0207 ms, p95 0.0351 ms, maximum 0.1739 ms; p99 not preserved | zero transport overruns; device xruns not separately recorded | not recorded | not measured |
 | Mac + Zen Quadro, microphone channel 3 | No numeric log is present in the worktree and the device was not freshly rerun | not recorded | not recorded | not recorded | not recorded | not measured |
-| iPhone/iPad hardware | No fresh physical Phase 0B measurement; simulator compilation is build evidence only | not measured | not measured | not measured | not measured | not measured |
+| iPhone/iPad hardware | Phase 3C RemoteIO host compiles for arm64 iPhone and arm64/x86_64 simulators; no fresh physical measurement, and compilation is build evidence only | not measured | not measured | not measured | provider exposes separate `inputLatency`, local/external `outputLatency`, and actual buffer frames, but no physical values recorded | not measured |
 | Android hardware | No fresh physical Phase 0B measurement; ABI builds/emulator tests are build evidence only | not measured | not measured | not measured | not measured | not measured |
 
 ## Required next measurements

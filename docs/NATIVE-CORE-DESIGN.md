@@ -1,8 +1,8 @@
 # `zcore` and `zdsp` native design
 
-Status: active implementation standard (Phase 3A/3B standalone hosts present)
+Status: active implementation standard (Phase 3A/3B/3C standalone hosts present)
 
-Last reviewed: 2026-08-28
+Last reviewed: 2026-08-29
 
 This document defines the language profile, component boundaries, design
 patterns, target layout and dependency policy for the native SingZ audio
@@ -106,6 +106,21 @@ Rules:
   in that scanned target, preventing a source-list edit from silently dropping
   coverage. The owning FIFO header deliberately stays outside the forbidden-
   token scan because it contains off-RT prepared vectors.
+  On iOS, one RemoteIO output render callback is the graph clock and can pull
+  preallocated input from the same unit for prepared duplex sessions. Its
+  callback is an explicit C++ RT leaf with a whole-source, manifest-derived
+  policy scan that follows transitive quoted and approved-project angle
+  includes while allowlisting only the system/framework headers the leaf uses;
+  macro-expanded, continued and otherwise nonliteral include directives fail
+  closed rather than delegating unseen resolution to the preprocessor, and the
+  continuation check covers LF, CRLF and bare-CR source encodings; the
+  `%:` alternative token for `#` and Apple `#import` directives are forbidden
+  throughout the closure, and comments may not obscure directive names;
+  the surrounding Objective-C++ translation unit contains only
+  non-real-time route inventory, session validation and notification-observer
+  ownership. Negative gates prove that omitted helper membership, hidden
+  quoted/angle allocation helpers and comment-only marker names cannot bypass
+  the scan.
 - `zcore_media` contains WAV/FLAC and later streaming decode. It never appears
   in the live graph's transitive link interface.
 - `zdsp_api` contains the foundational DSP-facing clock, bus, process,

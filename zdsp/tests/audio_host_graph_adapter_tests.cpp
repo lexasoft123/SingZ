@@ -243,6 +243,12 @@ int main() {
                zdsp::DiscontinuityReason::RouteGenerationChanged);
   expectReason(block, singz::AudioHostDiscontinuityDeviceLost,
                zdsp::DiscontinuityReason::DeviceLost);
+  expectReason(block, singz::AudioHostDiscontinuityTimestampQualityChanged,
+               zdsp::DiscontinuityReason::TimestampQualityChanged);
+  expectReason(block, singz::AudioHostDiscontinuityClockReanchored,
+               zdsp::DiscontinuityReason::ClockReanchored);
+  expectReason(block, singz::AudioHostDiscontinuitySequenceGap,
+               zdsp::DiscontinuityReason::SequenceGap);
   for (float& sample : outputSamples) sample = 1.0F;
   zdsp::AudioHostGraphAdapter adapter;
   CHECK(!zdsp::renderAudioHostGraph(&adapter, block));

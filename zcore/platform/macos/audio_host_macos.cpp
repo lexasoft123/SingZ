@@ -34,7 +34,7 @@ constexpr uint32_t kFormatChanged = 1u << 1;
 struct HostDeviceListenerContext {
   std::atomic<uint32_t> pendingChanges{0};
   std::atomic<uint64_t> routeGeneration{1};
-  std::atomic<bool> routeChanged{false};
+  std::atomic<uint32_t> routeChanged{0};
 };
 
 struct RetiredHostDeviceListener {
@@ -483,10 +483,11 @@ class MacAudioHostBackend final : public AudioHostBackend {
         std::memory_order_relaxed);
     streamGeneration_.fetch_add(1, std::memory_order_relaxed);
     fallbackOutputFrame_ = 0;
+    outputTimeline_ = {};
     callbackSequence_ = 0;
     inputSourceFrame_ = 0;
-    deviceLost_.store(false, std::memory_order_relaxed);
-    formatChanged_.store(false, std::memory_order_relaxed);
+    deviceLost_.store(0, std::memory_order_relaxed);
+    formatChanged_.store(0, std::memory_order_relaxed);
     endpoint_.callbacks.store(0, std::memory_order_relaxed);
     endpoint_.renderedFrames.store(0, std::memory_order_relaxed);
     endpoint_.xruns.store(0, std::memory_order_relaxed);
@@ -520,7 +521,7 @@ class MacAudioHostBackend final : public AudioHostBackend {
       if (changes != 0) {
         listener->pendingChanges.fetch_or(changes, std::memory_order_release);
         listener->routeGeneration.fetch_add(1, std::memory_order_relaxed);
-        listener->routeChanged.store(true, std::memory_order_release);
+        listener->routeChanged.store(1, std::memory_order_release);
       }
     });
     if (listenerBlock_ == nullptr) {
@@ -547,7 +548,7 @@ class MacAudioHostBackend final : public AudioHostBackend {
       }
       watched_.push_back(address);
     }
-    firstCallback_.store(true, std::memory_order_relaxed);
+    firstCallback_.store(1, std::memory_order_relaxed);
     state_.store(AudioHostState::Open, std::memory_order_release);
     return {true, AudioHostError::None, AudioHostState::Open, format_, latency_, {}};
   }
@@ -647,16 +648,16 @@ class MacAudioHostBackend final : public AudioHostBackend {
                                  kAudioObjectPropertyScopeGlobal),
                         &alive) ||
           alive == 0) {
-        deviceLost_.store(true, std::memory_order_release);
+        deviceLost_.store(1, std::memory_order_release);
       }
     }
     if ((changes & kFormatChanged) != 0) {
-      formatChanged_.store(true, std::memory_order_release);
+      formatChanged_.store(1, std::memory_order_release);
     }
     AudioHostStatus result;
-    result.state = deviceLost_.load(std::memory_order_acquire)
+    result.state = deviceLost_.load(std::memory_order_acquire) != 0
                        ? AudioHostState::DeviceLost
-                       : (formatChanged_.load(std::memory_order_acquire)
+                       : (formatChanged_.load(std::memory_order_acquire) != 0
                               ? AudioHostState::Error
                               : state_.load(std::memory_order_acquire));
     result.format = format_;
@@ -706,19 +707,28 @@ class MacAudioHostBackend final : public AudioHostBackend {
       }
       invalid.output = self->outputPointers_.data();
       invokeAudioHostCallback(&self->endpoint_, invalid);
+      if (flags != nullptr) {
+        *flags = static_cast<AudioUnitRenderActionFlags>(
+            audioHostFinalActionFlags(*flags,
+                                      kAudioUnitRenderAction_OutputIsSilence,
+                                      true));
+      }
       return noErr;
     }
     OSStatus inputStatus = noErr;
+    AudioUnitRenderActionFlags inputFlags = 0;
     if (detail::shouldPullMacAudioHostInput(self->format_.inputChannels)) {
       for (uint32_t channel = 0; channel < self->format_.inputChannels;
            ++channel) {
         self->inputList_->mBuffers[channel].mDataByteSize =
             frames * sizeof(float);
       }
-      inputStatus = AudioUnitRender(self->unit_, flags, timestamp, 1, frames,
+      inputStatus = AudioUnitRender(self->unit_, &inputFlags, timestamp, 1, frames,
                                     self->inputList_);
     }
-    if (inputStatus != noErr) {
+    const bool inputFailed = audioHostInputPullFailed(
+        inputStatus, inputFlags, kAudioUnitRenderAction_PostRenderError);
+    if (inputFailed) {
       recordAudioHostXRun(&self->endpoint_);
       for (uint32_t channel = 0; channel < self->format_.inputChannels; ++channel) {
         std::fill_n(const_cast<float*>(self->inputPointers_[channel]), frames, 0.0F);
@@ -728,25 +738,27 @@ class MacAudioHostBackend final : public AudioHostBackend {
       self->outputPointers_[channel] = static_cast<float*>(output->mBuffers[channel].mData);
     }
     uint32_t discontinuity = AudioHostDiscontinuityNone;
-    if (self->firstCallback_.exchange(false, std::memory_order_relaxed)) {
+    if (self->firstCallback_.exchange(0, std::memory_order_relaxed) != 0) {
       discontinuity |= AudioHostDiscontinuityStart;
     }
     if (self->listenerContext_ != nullptr &&
-        self->listenerContext_->routeChanged.exchange(false,
-                                                       std::memory_order_acq_rel)) {
+        self->listenerContext_->routeChanged.exchange(
+            0, std::memory_order_acq_rel) != 0) {
       discontinuity |= AudioHostDiscontinuityRouteChanged;
     }
-    if (self->deviceLost_.load(std::memory_order_acquire)) {
+    if (self->deviceLost_.load(std::memory_order_acquire) != 0) {
       discontinuity |= AudioHostDiscontinuityDeviceLost;
     }
-    if (inputStatus != noErr ||
-        (flags != nullptr && (*flags & kAudioUnitRenderAction_PostRenderError) != 0)) {
+    if (inputFailed) {
       discontinuity |= AudioHostDiscontinuityXRun;
     }
     const uint64_t callbackNs = static_cast<uint64_t>(
         static_cast<long double>(callbackTicks) * self->nanosecondsPerTick_);
-    const uint64_t outputNs = timestamp != nullptr &&
-                                      (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
+    const bool outputHostTimeValid = timestamp != nullptr &&
+                                     (timestamp->mFlags &
+                                      kAudioTimeStampHostTimeValid) != 0 &&
+                                     timestamp->mHostTime != 0;
+    const uint64_t outputNs = outputHostTimeValid
                                   ? static_cast<uint64_t>(
                                         static_cast<long double>(timestamp->mHostTime) *
                                         self->nanosecondsPerTick_)
@@ -778,9 +790,12 @@ class MacAudioHostBackend final : public AudioHostBackend {
                                    kAudioTimeStampSampleTimeValid) != 0 &&
                                   validAudioHostSampleFrame(
                                       timestamp->mSampleTime, frames);
-    const uint64_t outputFrame = outputFrameValid
-                                     ? static_cast<uint64_t>(timestamp->mSampleTime)
-                                     : self->fallbackOutputFrame_;
+    const auto timeline = resolveAudioHostOutputTimeline(
+        &self->outputTimeline_, outputFrameValid,
+        outputFrameValid ? static_cast<uint64_t>(timestamp->mSampleTime) : 0,
+        outputHostTimeValid, frames, self->fallbackOutputFrame_);
+    const uint64_t outputFrame = timeline.outputFrame;
+    discontinuity |= timeline.discontinuity;
     self->fallbackOutputFrame_ = advanceAudioHostFrame(outputFrame, frames);
     const uint64_t callbackSequence = self->callbackSequence_;
     self->callbackSequence_ = advanceAudioHostFrame(self->callbackSequence_, 1);
@@ -803,7 +818,13 @@ class MacAudioHostBackend final : public AudioHostBackend {
             inputProjection.usedHardwareAnchor),
         outputFrame, outputNs, callbackNs,
         discontinuity, true};
-    invokeAudioHostCallback(&self->endpoint_, block);
+    const bool rendered = invokeAudioHostCallback(&self->endpoint_, block);
+    if (flags != nullptr) {
+      *flags = static_cast<AudioUnitRenderActionFlags>(
+          audioHostFinalActionFlags(*flags,
+                                    kAudioUnitRenderAction_OutputIsSilence,
+                                    !rendered));
+    }
     const uint64_t elapsedTicks = mach_absolute_time() - callbackTicks;
     const long double elapsedNs = static_cast<long double>(elapsedTicks) *
                                   self->nanosecondsPerTick_;
@@ -839,10 +860,11 @@ class MacAudioHostBackend final : public AudioHostBackend {
   std::atomic<uint64_t> lastRouteGeneration_{0};
   std::atomic<uint64_t> streamGeneration_{0};
   uint64_t fallbackOutputFrame_{0};
+  AudioHostOutputTimeline outputTimeline_{};
   uint64_t callbackSequence_{0};
-  std::atomic<bool> firstCallback_{false};
-  mutable std::atomic<bool> deviceLost_{false};
-  mutable std::atomic<bool> formatChanged_{false};
+  std::atomic<uint32_t> firstCallback_{0};
+  mutable std::atomic<uint32_t> deviceLost_{0};
+  mutable std::atomic<uint32_t> formatChanged_{0};
   uint64_t inputSourceFrame_{0};
   double nanosecondsPerTick_{0.0};
   std::vector<float> inputSamples_;

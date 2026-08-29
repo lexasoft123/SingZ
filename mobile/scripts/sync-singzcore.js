@@ -57,7 +57,7 @@ copyTree(join(src, 'include'), join(dst, 'include'), name => /\.(h|hpp)$/.test(n
 // units; they are not exported by the pod but quoted includes must resolve.
 copyTree(join(src, 'src'), join(dst, 'src'), name => /\.(cpp|mm|h|hpp)$/.test(name))
 copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
-  name => /\.(cpp|mm)$/.test(name))
+  name => /\.(cpp|mm|h|hpp)$/.test(name))
 
 // Phase 2 capture analysis plus the Phase 4 decoded-source foundation. This is
 // an explicit allowlist: other DSP nodes, the fixture codec and fake host must

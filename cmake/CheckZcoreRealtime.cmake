@@ -44,6 +44,10 @@ foreach(_source IN LISTS _rt_sources)
      _contents MATCHES "(^|[^A-Za-z0-9_])(new|delete)\\[")
     message(FATAL_ERROR "Dynamic allocation token in zcore callback source: ${_source}")
   endif()
+  if(_contents MATCHES
+     "for[ \t\r\n]*\\([ \t\r\n]*;[ \t\r\n]*;[ \t\r\n]*\\)")
+    message(FATAL_ERROR "Unbounded loop in zcore callback source: ${_source}")
+  endif()
 endforeach()
 
 set(_required
@@ -54,11 +58,15 @@ set(_required
   "/src/device/audio_input_callback.cpp"
   "/src/device/audio_input_callback_gate.cpp"
   "/src/device/audio_input_callback.h"
+  "/src/device/audio_host_callback.cpp"
   "/src/device/audio_host_fifo_hot.cpp"
   "/include/zcore/audio/audio_input_convert.h"
   "/include/zcore/audio/audio_input_producer.h"
   "/include/zcore/audio/audio_input_timestamp.h"
   "/include/zcore/device/audio_input_callback_gate.h")
+list(APPEND _required
+  "/include/zcore/device/audio_host_callback.h"
+  "/include/zcore/device/audio_host_render.h")
 foreach(_suffix IN LISTS _required)
   set(_found FALSE)
   foreach(_source IN LISTS _rt_sources)

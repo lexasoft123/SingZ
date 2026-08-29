@@ -104,13 +104,39 @@ add_custom_target(singz_check_zcore_realtime ALL
   COMMENT "Checking zcore callback source policy")
 add_dependencies(zcore_device_callback singz_check_zcore_realtime)
 
+set(SINGZ_IOS_AUDIO_HOST_RT_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/audio_host_ios_callback.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/audio_host_ios_callback.h")
+set(_ios_audio_host_rt_manifest
+  "${CMAKE_CURRENT_BINARY_DIR}/ios-audio-host-realtime-sources.cmake")
+file(WRITE "${_ios_audio_host_rt_manifest}"
+  "set(SINGZ_IOS_AUDIO_HOST_RT_FILES\n")
+foreach(_source IN LISTS SINGZ_IOS_AUDIO_HOST_RT_SOURCES)
+  file(APPEND "${_ios_audio_host_rt_manifest}"
+    "  [==[${_source}]==]\n")
+endforeach()
+file(APPEND "${_ios_audio_host_rt_manifest}" ")\n")
+file(APPEND "${_ios_audio_host_rt_manifest}"
+  "set(SINGZ_IOS_AUDIO_HOST_RT_PROJECT_INCLUDE_ROOTS\n"
+  "  [==[${CMAKE_CURRENT_SOURCE_DIR}/include]==]\n"
+  ")\n")
+set_property(GLOBAL PROPERTY SINGZ_IOS_AUDIO_HOST_RT_MANIFEST
+  "${_ios_audio_host_rt_manifest}")
+add_custom_target(singz_check_ios_audio_host_realtime ALL
+  COMMAND "${CMAKE_COMMAND}"
+    "-DSINGZ_IOS_AUDIO_HOST_RT_MANIFEST=${_ios_audio_host_rt_manifest}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/CheckIosAudioHostRealtime.cmake"
+  VERBATIM
+  COMMENT "Checking iOS AudioHost callback source policy")
+
 set(ZCORE_DEVICE_SOURCES
   src/device/audio_input.cpp
   src/device/audio_input_wake.cpp
   src/device/audio_host.cpp
   src/device/audio_host_fifo.cpp
   src/device/audio_host_unsupported.cpp
-  platform/android/audio_input_android_policy.cpp)
+  platform/android/audio_input_android_policy.cpp
+  platform/ios/audio_host_ios_helpers.cpp)
 if(ANDROID)
   list(APPEND ZCORE_DEVICE_SOURCES
     platform/android/audio_host_android.cpp
@@ -120,7 +146,8 @@ if(ANDROID)
 elseif(APPLE)
   if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND ZCORE_DEVICE_SOURCES
-      platform/ios/audio_host_ios.cpp
+      ${SINGZ_IOS_AUDIO_HOST_RT_SOURCES}
+      platform/ios/audio_host_ios.mm
       platform/ios/audio_input_ios.mm
       platform/ios/audio_input_ios_session.cpp
       platform/ios/audio_input_ios_session.mm
@@ -149,6 +176,7 @@ endif()
 add_library(zcore_device STATIC ${ZCORE_DEVICE_SOURCES})
 add_library(SingZ::zcore_device ALIAS zcore_device)
 singz_zcore_target(zcore_device)
+add_dependencies(zcore_device singz_check_ios_audio_host_realtime)
 target_link_libraries(zcore_device PUBLIC
   SingZ::zcore_audio
   Threads::Threads)
@@ -171,6 +199,13 @@ elseif(APPLE)
     "-framework CoreFoundation")
   if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     target_link_libraries(zcore_device PUBLIC "-framework AVFoundation")
+    set_source_files_properties(
+      platform/ios/audio_host_ios.mm
+      platform/ios/audio_input_ios.mm
+      platform/ios/audio_input_ios_session.mm
+      PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_source_files_properties(platform/ios/audio_host_ios_callback.cpp
+      APPEND PROPERTY COMPILE_OPTIONS "-fno-exceptions;-fno-rtti")
   else()
     set_source_files_properties(
       platform/macos/audio_input_macos.cpp

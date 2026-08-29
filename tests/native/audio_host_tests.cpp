@@ -491,6 +491,41 @@ void testQuiescentStop() {
 }
 
 void testCallbackContainmentAndPolicy() {
+  CHECK(singz::audioHostFinalActionFlags(0, 4, true) == 4);
+  CHECK(singz::audioHostFinalActionFlags(7, 4, false) == 3);
+  CHECK(!singz::audioHostInputPullFailed(0, 0, 8));
+  CHECK(singz::audioHostInputPullFailed(-1, 0, 8));
+  CHECK(singz::audioHostInputPullFailed(0, 8, 8));
+
+  singz::AudioHostOutputTimeline timeline;
+  auto resolved = singz::resolveAudioHostOutputTimeline(
+      &timeline, true, 100, true, 16, 0);
+  CHECK(resolved.outputFrame == 100);
+  CHECK(resolved.discontinuity == singz::AudioHostDiscontinuityNone);
+  resolved = singz::resolveAudioHostOutputTimeline(
+      &timeline, true, 116, true, 16, 0);
+  CHECK(resolved.discontinuity == singz::AudioHostDiscontinuityNone);
+  resolved = singz::resolveAudioHostOutputTimeline(
+      &timeline, false, 0, false, 16, 132);
+  CHECK(resolved.outputFrame == 132);
+  CHECK((resolved.discontinuity &
+         singz::AudioHostDiscontinuityTimestampQualityChanged) != 0);
+  resolved = singz::resolveAudioHostOutputTimeline(
+      &timeline, false, 0, false, 16, 148);
+  CHECK(resolved.discontinuity == singz::AudioHostDiscontinuityNone);
+  resolved = singz::resolveAudioHostOutputTimeline(
+      &timeline, true, 164, false, 16, 0);
+  CHECK((resolved.discontinuity &
+         singz::AudioHostDiscontinuityTimestampQualityChanged) != 0);
+  resolved = singz::resolveAudioHostOutputTimeline(
+      &timeline, true, 180, true, 16, 0);
+  CHECK((resolved.discontinuity &
+         singz::AudioHostDiscontinuityTimestampQualityChanged) != 0);
+  resolved = singz::resolveAudioHostOutputTimeline(
+      &timeline, true, 212, true, 16, 0);
+  CHECK((resolved.discontinuity &
+         singz::AudioHostDiscontinuitySequenceGap) != 0);
+
   CHECK(singz::advanceAudioHostFrame(UINT64_MAX - 2, 8) == UINT64_MAX);
   CHECK(singz::advanceAudioHostFrame(10, 8) == 18);
   CHECK(!singz::validAudioHostSampleFrame(

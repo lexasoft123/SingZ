@@ -63,3 +63,23 @@ if(_forbidden_result EQUAL 0 OR
     "zcore RT scanner did not reject a forbidden facility:\n"
     "${_forbidden_out}${_forbidden_err}")
 endif()
+
+set(_unbounded_header "${SINGZ_ZCORE_RT_TEST_DIR}/unbounded_callback.h")
+file(WRITE "${_unbounded_header}" "inline void spin_forever() { for (;;) {} }\n")
+set(_unbounded_files ${_valid_files} "${_unbounded_header}")
+set(_unbounded_path "${SINGZ_ZCORE_RT_TEST_DIR}/unbounded-loop.cmake")
+_write_manifest("${_unbounded_path}" ${_unbounded_files})
+execute_process(
+  COMMAND "${CMAKE_COMMAND}"
+    "-DSINGZ_ZCORE_RT_MANIFEST=${_unbounded_path}"
+    -P "${SINGZ_ZCORE_RT_CHECKER}"
+  RESULT_VARIABLE _unbounded_result
+  OUTPUT_VARIABLE _unbounded_out
+  ERROR_VARIABLE _unbounded_err)
+if(_unbounded_result EQUAL 0 OR
+   NOT "${_unbounded_out}${_unbounded_err}" MATCHES
+       "Unbounded loop in zcore callback source")
+  message(FATAL_ERROR
+    "zcore RT scanner did not reject an unbounded loop:\n"
+    "${_unbounded_out}${_unbounded_err}")
+endif()

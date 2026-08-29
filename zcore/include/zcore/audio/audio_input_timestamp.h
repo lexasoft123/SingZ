@@ -28,30 +28,47 @@ SINGZ_ZCORE_CALLBACK_LOCAL AudioInputTimestampProjection resolveAudioInputTimest
 
 class SINGZ_ZCORE_CALLBACK_LOCAL AudioInputTimestampQueryGate {
  public:
-  void open() noexcept { accepting_.store(true, std::memory_order_release); }
+  void open() noexcept {
+    uint32_t expected = 0;
+    state_.compare_exchange_strong(expected, kAccepting,
+                                   std::memory_order_release,
+                                   std::memory_order_relaxed);
+  }
   void beginClose() noexcept {
-    accepting_.store(false, std::memory_order_release);
+    state_.fetch_and(kCountMask, std::memory_order_acq_rel);
   }
   bool enter() noexcept {
-    if (!accepting_.load(std::memory_order_acquire)) return false;
-    inFlight_.fetch_add(1, std::memory_order_acq_rel);
-    if (accepting_.load(std::memory_order_acquire)) return true;
-    inFlight_.fetch_sub(1, std::memory_order_release);
+    uint32_t observed = state_.load(std::memory_order_acquire);
+    constexpr uint32_t kAttempts = 8;
+    for (uint32_t attempt = 0; attempt < kAttempts; ++attempt) {
+      if ((observed & kAccepting) == 0 ||
+          (observed & kCountMask) == kCountMask) {
+        return false;
+      }
+      if (state_.compare_exchange_weak(observed, observed + 1,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_acquire)) {
+        return true;
+      }
+    }
     return false;
   }
   void leave() noexcept {
-    inFlight_.fetch_sub(1, std::memory_order_release);
+    state_.fetch_sub(1, std::memory_order_acq_rel);
   }
   uint32_t inFlight() const noexcept {
-    return inFlight_.load(std::memory_order_acquire);
+    return state_.load(std::memory_order_acquire) & kCountMask;
   }
   bool accepting() const noexcept {
-    return accepting_.load(std::memory_order_acquire);
+    return (state_.load(std::memory_order_acquire) & kAccepting) != 0;
   }
 
  private:
-  std::atomic<bool> accepting_{false};
-  std::atomic<uint32_t> inFlight_{0};
+  static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                "timestamp query gate requires lock-free 32-bit atomics");
+  static constexpr uint32_t kAccepting = uint32_t{1} << 31;
+  static constexpr uint32_t kCountMask = kAccepting - 1;
+  std::atomic<uint32_t> state_{0};
 };
 
 class SINGZ_ZCORE_CALLBACK_LOCAL AudioInputTimestampQueryScope {

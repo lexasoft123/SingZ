@@ -761,9 +761,16 @@ static void audioInputCallbackGateTests() {
   gate.beginClose();
   CHECK("audio callback gate: teardown rejects a late callback", !gate.enter());
   CHECK("audio callback gate: rejected callback leaves count unchanged", gate.inFlight() == 1);
+  gate.open();
+  CHECK("audio callback gate: closed epoch cannot reopen before quiescence",
+        !gate.accepting() && !gate.enter() && gate.inFlight() == 1);
   gate.leave();
   CHECK("audio callback gate: admitted callback quiesces before destruction",
         gate.inFlight() == 0 && !gate.accepting());
+  gate.open();
+  CHECK("audio callback gate: quiescent epoch can reopen", gate.enter());
+  gate.leave();
+  gate.beginClose();
 }
 
 struct CallbackOwnerProbe {
@@ -1181,9 +1188,16 @@ static void audioInputTimestampTests() {
   gate.beginClose();
   CHECK("audio timestamp query gate: teardown rejects a late timestamp query",
         !gate.enter());
+  gate.open();
+  CHECK("audio timestamp query gate: closed epoch cannot reopen before quiescence",
+        !gate.accepting() && !gate.enter() && gate.inFlight() == 1);
   gate.leave();
   CHECK("audio timestamp query gate: admitted query quiesces before stream close",
         gate.inFlight() == 0 && !gate.accepting());
+  gate.open();
+  CHECK("audio timestamp query gate: quiescent epoch can reopen", gate.enter());
+  gate.leave();
+  gate.beginClose();
 
   // macOS/iOS AudioUnit and Windows WASAPI all use the policy above. Replay
   // each backend shape through the production adapter to hold the essential

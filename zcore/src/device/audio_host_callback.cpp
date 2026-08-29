@@ -12,8 +12,9 @@ static_assert(std::atomic<void*>::is_always_lock_free);
 
 void saturatingAdd(std::atomic<uint32_t>& value, uint32_t amount) noexcept {
   uint32_t old = value.load(std::memory_order_relaxed);
-  for (;;) {
+  for (uint32_t attempt = 0; attempt < 4; ++attempt) {
     const uint32_t maximum = std::numeric_limits<uint32_t>::max();
+    if (old == maximum) return;
     const uint32_t replacement = amount > maximum - old ? maximum : old + amount;
     if (value.compare_exchange_weak(old, replacement, std::memory_order_relaxed,
                                     std::memory_order_relaxed)) {
@@ -53,6 +54,31 @@ bool valid(const AudioHostRenderBlock& block) noexcept {
 }
 
 }  // namespace
+
+AudioHostOutputTimelineResult resolveAudioHostOutputTimeline(
+    AudioHostOutputTimeline* timeline, bool sampleTimeValid,
+    uint64_t sampleFrame, bool hostTimeValid, uint32_t frames,
+    uint64_t fallbackFrame) noexcept {
+  AudioHostOutputTimelineResult result;
+  result.outputFrame = sampleTimeValid ? sampleFrame : fallbackFrame;
+  if (timeline == nullptr) return result;
+  const uint32_t sampleValid = sampleTimeValid ? 1u : 0u;
+  const uint32_t hostValid = hostTimeValid ? 1u : 0u;
+  if (timeline->initialized != 0) {
+    if (sampleValid != timeline->sampleTimeValid ||
+        hostValid != timeline->hostTimeValid) {
+      result.discontinuity |=
+          AudioHostDiscontinuityTimestampQualityChanged;
+    } else if (sampleTimeValid && sampleFrame != timeline->expectedFrame) {
+      result.discontinuity |= AudioHostDiscontinuitySequenceGap;
+    }
+  }
+  timeline->initialized = 1;
+  timeline->sampleTimeValid = sampleValid;
+  timeline->hostTimeValid = hostValid;
+  timeline->expectedFrame = advanceAudioHostFrame(result.outputFrame, frames);
+  return result;
+}
 
 void prepareAudioHostCallback(AudioHostCallbackEndpoint* endpoint,
                               AudioHostRender render, void* context) noexcept {

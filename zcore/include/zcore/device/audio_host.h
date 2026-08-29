@@ -35,11 +35,6 @@ enum class AudioHostEndpointDirection : uint32_t {
   Output,
 };
 
-enum class AudioHostAccessMode : uint32_t {
-  Shared,
-  Exclusive,
-};
-
 // Provider-reported physical transport. Product policy consumes this typed
 // capability and never guesses from a friendly device label or UID.
 enum class AudioHostTransport : uint32_t {
@@ -136,17 +131,6 @@ struct AudioHostConfig {
   // Never falls back silently: an exclusive request either opens exclusive
   // streams with the exact format or fails.
   bool exclusive{false};
-};
-
-struct AudioHostFormat {
-  double sampleRate{0.0};
-  uint32_t maximumFrames{0};
-  uint32_t nominalBufferFrames{0};
-  uint32_t inputChannels{0};
-  uint32_t outputChannels{0};
-  bool float32Planar{true};
-  bool outputClockMaster{true};
-  AudioHostAccessMode accessMode{AudioHostAccessMode::Shared};
 };
 
 struct AudioHostLatency {

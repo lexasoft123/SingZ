@@ -26,8 +26,9 @@ class SINGZ_ZCORE_CALLBACK_LOCAL AudioInputCallbackGate {
  private:
   static_assert(std::atomic<uint32_t>::is_always_lock_free,
                 "audio callback gate requires lock-free 32-bit atomics");
-  std::atomic<bool> accepting_{false};
-  std::atomic<uint32_t> inFlight_{0};
+  static constexpr uint32_t kAccepting = uint32_t{1} << 31;
+  static constexpr uint32_t kCountMask = kAccepting - 1;
+  std::atomic<uint32_t> state_{0};
 };
 
 class SINGZ_ZCORE_CALLBACK_LOCAL AudioInputCallbackScope {

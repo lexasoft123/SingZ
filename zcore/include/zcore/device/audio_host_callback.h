@@ -26,6 +26,38 @@ struct AudioHostCallbackEndpoint {
   std::atomic<uint32_t> renderFailures{0};
 };
 
+// Callback-owned output-clock continuity state. The provider resets this only
+// while callback admission is closed. Hardware timestamp validity transitions
+// and non-contiguous sample positions are explicit graph reset boundaries.
+struct AudioHostOutputTimeline {
+  uint64_t expectedFrame{0};
+  uint32_t initialized{0};
+  uint32_t sampleTimeValid{0};
+  uint32_t hostTimeValid{0};
+};
+
+struct AudioHostOutputTimelineResult {
+  uint64_t outputFrame{0};
+  uint32_t discontinuity{AudioHostDiscontinuityNone};
+};
+
+constexpr uint32_t audioHostFinalActionFlags(uint32_t flags,
+                                             uint32_t outputSilenceMask,
+                                             bool outputIsSilent) noexcept {
+  return outputIsSilent ? flags | outputSilenceMask
+                        : flags & ~outputSilenceMask;
+}
+
+constexpr bool audioHostInputPullFailed(int32_t status, uint32_t inputFlags,
+                                        uint32_t postRenderErrorMask) noexcept {
+  return status != 0 || (inputFlags & postRenderErrorMask) != 0;
+}
+
+AudioHostOutputTimelineResult resolveAudioHostOutputTimeline(
+    AudioHostOutputTimeline* timeline, bool sampleTimeValid,
+    uint64_t sampleFrame, bool hostTimeValid, uint32_t frames,
+    uint64_t fallbackFrame) noexcept;
+
 void prepareAudioHostCallback(AudioHostCallbackEndpoint* endpoint,
                               AudioHostRender render, void* context) noexcept;
 void activateAudioHostCallback(AudioHostCallbackEndpoint* endpoint) noexcept;

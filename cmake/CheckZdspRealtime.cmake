@@ -19,4 +19,30 @@ foreach(_source IN LISTS _rt_sources)
      _contents MATCHES "(^|[^A-Za-z0-9_])(new|delete)\\[")
     message(FATAL_ERROR "Dynamic allocation token in ${_source}")
   endif()
+  if(_source MATCHES "/src/runtime/audio_host_graph_adapter\\.cpp$" AND
+     _contents MATCHES
+     "for[ \t\r\n]*\\([ \t\r\n]*;[ \t\r\n]*;[ \t\r\n]*\\)")
+    message(FATAL_ERROR "Unbounded loop in ${_source}")
+  endif()
 endforeach()
+
+if(NOT DEFINED SINGZ_ZDSP_RT_PROFILE OR
+   SINGZ_ZDSP_RT_PROFILE STREQUAL "full")
+  foreach(_suffix IN ITEMS
+      "/src/runtime/audio_host_graph_adapter.cpp"
+      "/include/zdsp/audio_host_graph_adapter.h")
+    set(_found FALSE)
+    foreach(_source IN LISTS _rt_sources)
+      if(_source MATCHES "${_suffix}$")
+        set(_found TRUE)
+        break()
+      endif()
+    endforeach()
+    if(NOT _found)
+      message(FATAL_ERROR
+        "zdsp RT target is missing required source membership: ${_suffix}")
+    endif()
+  endforeach()
+elseif(NOT SINGZ_ZDSP_RT_PROFILE STREQUAL "monitor")
+  message(FATAL_ERROR "Unknown zdsp RT profile: ${SINGZ_ZDSP_RT_PROFILE}")
+endif()

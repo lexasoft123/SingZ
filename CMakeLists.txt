@@ -67,6 +67,8 @@ add_subdirectory(third_party/native)
 add_subdirectory(zcore)
 add_subdirectory(zdsp)
 get_property(SINGZ_ZCORE_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZCORE_RT_MANIFEST)
+get_property(SINGZ_IOS_AUDIO_HOST_RT_MANIFEST GLOBAL PROPERTY
+  SINGZ_IOS_AUDIO_HOST_RT_MANIFEST)
 get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 
 # Phase 4A monitor callback leaf. The actual host thunk, silence containment,
@@ -111,6 +113,7 @@ file(APPEND "${SINGZ_MONITOR_RT_MANIFEST}" ")\n")
 add_custom_target(singz_check_monitor_realtime ALL
   COMMAND "${CMAKE_COMMAND}"
     "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_MONITOR_RT_MANIFEST}"
+    "-DSINGZ_ZDSP_RT_PROFILE=monitor"
     -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake"
   VERBATIM
   COMMENT "Checking monitor callback source policy")
@@ -241,6 +244,18 @@ if(SINGZ_CORE_TESTS)
       "-DSINGZ_ZCORE_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckZcoreRealtime.cmake"
       "-DSINGZ_ZCORE_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/zcore-rt-negative"
       -P "${SINGZ_REPO_ROOT}/cmake/TestZcoreRealtimePolicy.cmake")
+  add_test(NAME ios_audio_host_realtime_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_IOS_AUDIO_HOST_RT_MANIFEST=${SINGZ_IOS_AUDIO_HOST_RT_MANIFEST}"
+      -P "${SINGZ_REPO_ROOT}/cmake/CheckIosAudioHostRealtime.cmake")
+  add_test(NAME ios_audio_host_realtime_policy_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_IOS_AUDIO_HOST_RT_MANIFEST=${SINGZ_IOS_AUDIO_HOST_RT_MANIFEST}"
+      "-DSINGZ_IOS_AUDIO_HOST_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckIosAudioHostRealtime.cmake"
+      "-DSINGZ_IOS_AUDIO_HOST_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/ios-audio-host-rt-negative"
+      "-DSINGZ_IOS_AUDIO_HOST_RT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+      "-DSINGZ_IOS_AUDIO_HOST_RT_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
+      -P "${SINGZ_REPO_ROOT}/cmake/TestIosAudioHostRealtimePolicy.cmake")
   add_test(NAME zdsp_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_ZDSP_RT_MANIFEST}"
@@ -248,6 +263,7 @@ if(SINGZ_CORE_TESTS)
   add_test(NAME monitor_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_MONITOR_RT_MANIFEST}"
+      "-DSINGZ_ZDSP_RT_PROFILE=monitor"
       -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
   add_executable(core_host_tests ${SINGZ_REPO_ROOT}/tests/native/core_host_tests.cpp)
   add_dependencies(core_host_tests singz_check_zcore_boundaries)
@@ -265,6 +281,15 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(audio_host_tests PRIVATE
     SingZ::zcore_device_fake Threads::Threads)
   add_test(NAME audio_host_tests COMMAND audio_host_tests)
+
+  add_executable(audio_host_ios_policy_tests
+    ${SINGZ_REPO_ROOT}/tests/native/audio_host_ios_policy_tests.cpp)
+  target_compile_features(audio_host_ios_policy_tests PRIVATE cxx_std_20)
+  target_include_directories(audio_host_ios_policy_tests PRIVATE
+    "${SINGZ_REPO_ROOT}")
+  target_link_libraries(audio_host_ios_policy_tests PRIVATE
+    SingZ::zcore_device)
+  add_test(NAME audio_host_ios_policy_tests COMMAND audio_host_ios_policy_tests)
 
   if(WIN32)
     add_executable(audio_host_windows_tests

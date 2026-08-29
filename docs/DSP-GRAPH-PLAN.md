@@ -1056,8 +1056,9 @@ Phase 3A standalone slice implemented 2026-08-27 (not a product cutover):
   `--input-channels 2` and an explicit same-device UID/output map.
 - macOS has a same-device AUHAL provider in its own OS source. At the Phase 3A
   checkpoint Windows, iOS, Android and other builds selected explicit
-  compiling unsupported providers; Phase 3B below supersedes that statement
-  for the standalone Windows build only.
+  compiling unsupported providers; Phases 3B and 3C below supersede that
+  statement for standalone Windows and iOS builds respectively. Android
+  remains unsupported. Neither phase changes product playback routing.
 
 Phase 3B standalone Windows slice implemented 2026-08-28:
 
@@ -1091,10 +1092,81 @@ Phase 3B standalone Windows slice implemented 2026-08-28:
   being overwritten by Open or Running. See `docs/WINDOWS-AUDIO.md` for the
   exact contract and muted hardware harness.
 
+Phase 3C standalone iOS slice implemented 2026-08-29 (not a product cutover):
+
+- The iOS `AudioHost` provider is a RemoteIO output-clock owner with an
+  output-only mode and prepared same-session duplex mode. It enumerates only
+  the currently negotiated route, validates the exact opaque input/output
+  UIDs and physical channel maps, and exposes planar float32 graph buses.
+- `AVAudioSession` remains owned by the serialized app coordinator. The
+  provider never changes category, mode, options, activation, preferred
+  route, sample rate, channel preference or buffer duration. It arms route,
+  interruption and media-service observers before taking the first immutable
+  session snapshot, then revalidates that snapshot after RemoteIO setup and
+  start. Duplex additionally requires the existing generation-bound capture
+  lease to cover every selected physical input lane.
+- RemoteIO's output render callback is the sole graph/master-clock action.
+  Same-session input is pulled into preallocated planar storage from that
+  callback; output renders directly into the AudioUnit-provided planar buses.
+  The callback timestamp remains the hardware output anchor; because that
+  input pull returns no independent input host timestamp, capture publishes a
+  callback estimate rather than falsely claiming the output time as hardware.
+  No FIFO or drift correction is inserted because both directions belong to
+  the one RemoteIO instance/session clock. Any future separate-device path
+  must use the independently clocked FIFO/resampler contract instead.
+- The callback performs no allocation, locking, Objective-C messaging,
+  session query or logging. Route/interruption/media-service generation
+  changes immediately produce silence and a terminal status that requires an
+  explicit stop/open; the provider never selects a fallback route. Render
+  errors, invalid callback layouts, xruns, deadline misses and generations
+  remain bounded atomic diagnostics. Callback admission uses one packed
+  lock-free accepting/count state and closes before stop. A successful stop is
+  followed by graph, admitted-callback and outer-entry quiescence before
+  uninitialize/dispose. A failed stop never tears down through uncertain Core
+  Audio activity: it retains the live unit and closed callback context in the
+  bounded fail-stop quarantine. Uninitialize/dispose failures remain terminal.
+  Callback failures are sticky until reopen. Output timestamp-validity
+  transitions and non-contiguous `mSampleTime` values emit ADR-0003 reset
+  boundaries rather than stitching incompatible clock anchors. The
+  process-global session admits one standalone host; a stop or disposal
+  failure uses one bounded retained unit/callback slot and permanently refuses
+  another open in that process instead of risking use-after-free or
+  accumulating quarantines.
+- `inputLatency`, `outputLatency`, the actual `IOBufferDuration`, and external
+  route delay remain separate frame fields. For Bluetooth, AirPlay and
+  CarPlay, iOS's output-route latency is reported as external rather than
+  mislabeled hardware latency; the transport remains unsuitable for
+  low-latency monitoring.
+- Pure C++ policy tests cover output-only and leased duplex validation,
+  sparse physical maps, exact rate/buffer rejection, session identity and
+  external-route classification. AppleClang compiles and link-checks the
+  provider for arm64 iPhone plus arm64/x86_64 simulators, while an
+  archive-symbol gate rejects product/DSP dependencies and the known
+  AVAudioSession mutator/session-side-effect selector set, including output
+  muting, intended spatial experience, route-child data-source/polar-pattern
+  setters, legacy hardware-rate/delegate setters and both record-permission
+  request APIs, plus input muting and microphone-injection permission. The
+  callback gate scans explicit whole C++ leaf membership
+  plus transitive quoted and approved-project angle includes; every remaining
+  angle include must be on the narrow system/framework allowlist. Macro-
+  expanded, continued and otherwise nonliteral include directives fail closed;
+  continuation rejection covers LF, CRLF and bare-CR source encodings;
+  the `%:` alternative preprocessing token is forbidden across the closure;
+  Apple `#import` directives are forbidden even with local diagnostic
+  suppression, and comments may not obscure preprocessing directive names;
+  negative fixtures reject those shapes, helper omissions, hidden quoted/angle
+  allocation, forbidden helper sources and comment-only operation names.
+
+Physical-device evidence is still required before Phase 4: wired and USB
+loopback latency, callback-size distribution, sustained duplex xruns/deadline
+misses, channel maps above stereo, interruption/media-service recovery, and
+Bluetooth/CarPlay route changes. Simulator compilation proves no hardware
+behavior.
+
 The AUHAL slice deliberately rejects different input/output UIDs. A bounded
 cross-device FIFO, drift estimator/resampler and aggregate-device policy are
-deferred, as are RemoteIO, Oboe and the separately licensed ASIO provider.
-WASAPI is the implemented Phase 3B standalone provider described above. Web
+deferred, as are Oboe and the separately licensed ASIO provider. WASAPI and
+RemoteIO are the implemented Phase 3B/3C standalone providers described above. Web
 Audio/RNAudioAPI remains the sole product output/session owner;
 no renderer, Electron playback, mobile playback or UI path links this host.
 
@@ -1111,7 +1183,8 @@ Implement one provider at a time behind `AudioHost`:
 1. macOS duplex AUHAL;
 2. Windows WASAPI render/full-duplex, shared mode first and user-selected
    exact-float exclusive mode where supported (implemented as Phase 3B);
-3. iOS duplex RemoteIO under the existing AVAudioSession coordinator;
+3. iOS duplex RemoteIO under the existing AVAudioSession coordinator
+   (implemented as Phase 3C; physical-device evidence pending);
 4. Android duplex Oboe over AAudio where supported, retaining direct AAudio
    only if Phase 0B measurements show it is the lower-risk SingZ host;
 5. ASIO as a distinct `audio_host_asio_windows.cpp` only after the legal gate.

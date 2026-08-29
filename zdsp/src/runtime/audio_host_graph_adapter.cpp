@@ -20,9 +20,12 @@ void silence(const singz::AudioHostRenderBlock& block) noexcept {
 
 void saturate(std::atomic<uint32_t>& value) noexcept {
   uint32_t old = value.load(std::memory_order_relaxed);
-  while (old != std::numeric_limits<uint32_t>::max() &&
-         !value.compare_exchange_weak(old, old + 1, std::memory_order_relaxed,
-                                      std::memory_order_relaxed)) {
+  for (uint32_t attempt = 0; attempt < 4; ++attempt) {
+    if (old == std::numeric_limits<uint32_t>::max() ||
+        value.compare_exchange_weak(old, old + 1, std::memory_order_relaxed,
+                                    std::memory_order_relaxed)) {
+      return;
+    }
   }
 }
 
@@ -35,6 +38,18 @@ Discontinuity mapDiscontinuity(uint32_t value) noexcept {
             DiscontinuityFlagResetState | DiscontinuityFlagTimeValid};
   }
   if ((value & singz::AudioHostDiscontinuityXRun) != 0) {
+    return {DiscontinuityReason::SequenceGap,
+            DiscontinuityFlagResetState | DiscontinuityFlagTimeValid};
+  }
+  if ((value & singz::AudioHostDiscontinuityTimestampQualityChanged) != 0) {
+    return {DiscontinuityReason::TimestampQualityChanged,
+            DiscontinuityFlagResetState | DiscontinuityFlagTimeValid};
+  }
+  if ((value & singz::AudioHostDiscontinuityClockReanchored) != 0) {
+    return {DiscontinuityReason::ClockReanchored,
+            DiscontinuityFlagResetState | DiscontinuityFlagTimeValid};
+  }
+  if ((value & singz::AudioHostDiscontinuitySequenceGap) != 0) {
     return {DiscontinuityReason::SequenceGap,
             DiscontinuityFlagResetState | DiscontinuityFlagTimeValid};
   }
