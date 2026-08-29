@@ -29,14 +29,23 @@ on:
         default: validate
         options: [validate, beta, release, metadata]
   push:
-    tags: ['v*']
+    # Both patterns live under `tags`, and that is not a style choice:
+    # GitHub refuses to parse a workflow that defines `tags` AND
+    # `tags-ignore` for one event ("you may only define one of `tags` and
+    # `tags-ignore` for a single event"), and it rejects the WHOLE file — so
+    # the earlier split form left this workflow completely inert, dispatch
+    # included. Negative patterns belong in the same list, later entries
+    # winning.
+    #
     # Hyphenated prerelease tags (v0.20.0-test1, the "hand one tester a build"
     # flow in CLAUDE.md) can NEVER succeed here: verify_marketing_version
     # compares package.json against MARKETING_VERSION, and Apple's
     # CFBundleShortVersionString is at most three integers, so the suffix
     # cannot be carried. Better to not start than to fail after checkout,
     # npm ci and pod install.
-    tags-ignore: ['v*-*']
+    tags:
+      - 'v*'
+      - '!v*-*'
 
 permissions:
   contents: read
