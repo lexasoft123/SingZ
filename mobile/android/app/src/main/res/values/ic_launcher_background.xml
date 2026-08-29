@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- The artwork's own edge colour, so the inset foreground meets the
-         background with no visible seam under any launcher mask. -->
-    <color name="ic_launcher_background">#1a150e</color>
-</resources>
