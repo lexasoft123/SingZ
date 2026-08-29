@@ -1,0 +1,13 @@
+git_url("https://github.com/lexasoft123/singz-ios-certs.git")
+storage_mode("git")
+type("appstore")
+app_identifier("io.s-dev.singz")
+
+# Local bootstrap authenticates over HTTPS via `gh`'s own git credential
+# helper (`gh auth setup-git`, one-time) — the same account already used to
+# push this repo, so no separate local PAT. CI has no such login and
+# authenticates via MATCH_GIT_BASIC_AUTHORIZATION instead (a base64
+# username:token pair, set as a repo secret) — see docs/IOS-RELEASE.md.
+# Deliberately HTTPS, not `git@github.com:…` — that's the form
+# git_basic_authorization actually authenticates against; mixing schemes
+# between local and CI would mean testing a path CI never uses.

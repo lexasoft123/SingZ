@@ -43,7 +43,7 @@
  * Preconditions: Debug app installed in a booted sim, Metro running (the
  * sim's RCT_jsLocation pref pointing at it), and the split model ALREADY in
  * the app container (this suite never touches the network):
- *   C=$(xcrun simctl get_app_container <udid> com.lexasoft.singz data)
+ *   C=$(xcrun simctl get_app_container <udid> io.s-dev.singz data)
  *   mkdir -p "$C/Library/Application Support/models"
  *   cp <htdemucs_6s_fp16weights.onnx> "$C/Library/Application Support/models/"
  * Reinstalling the app MOVES the container — reseed after every install.
@@ -58,7 +58,7 @@ const WebSocket = require('ws')
 
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2'
 const PORT = process.env.METRO_PORT || '8081'
-const BUNDLE = 'com.lexasoft.singz'
+const BUNDLE = 'io.s-dev.singz'
 const STEMS = ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano']
 const P = { one: 'Split iOS test A', two: 'Split iOS test B', three: 'Split iOS test C', four: 'Split iOS test D' }
 

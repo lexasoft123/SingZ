@@ -37,7 +37,7 @@ const die = (m) => { console.error(m); process.exit(1) }
 if (!stemsDir || !modelsDir) die('usage: node mobile/tests/ml-aux-ios.cjs <stems-dir> <models-dir>')
 for (const f of ['beat_this.onnx', 'logmel.onnx']) if (!fs.existsSync(path.join(modelsDir, f))) die(`${modelsDir} lacks ${f}`)
 
-const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'com.lexasoft.singz', 'data'], { encoding: 'utf8' }).trim()
+const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'io.s-dev.singz', 'data'], { encoding: 'utf8' }).trim()
 const NAME = 'ML aux test'
 const proj = path.join(container, 'Documents', NAME)
 const appModels = path.join(container, 'Library', 'Application Support', 'models')

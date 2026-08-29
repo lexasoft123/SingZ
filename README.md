@@ -59,8 +59,9 @@ built-in setup and keeps it updated automatically.
   is four requests and your media never re-uploads. The companion app in
   [mobile/](mobile) (React Native, iOS + Android) plays the synced library
   with the same karaoke lyrics, melody line and beat grid — songs cache on
-  the phone and keep playing offline. The Android APK is attached to every
-  release.
+  the phone and keep playing offline. **iPhone:** join the open beta at
+  [testflight.apple.com/join/q6vVdkwt](https://testflight.apple.com/join/q6vVdkwt).
+  **Android:** the APK is attached to every release.
 - **Log window** — the **Log** button shows what the app is doing under the
   hood (engines, downloads, lyrics search) and saves to a file for bug
   reports.
@@ -126,20 +127,17 @@ git tag v0.2.0 && git push origin v0.2.0
 The in-app pack downloads point at the latest release assets, so releases
 must be publicly reachable (or set `SINGZ_GPU_PACK_URL`).
 
-Builds are unsigned for now. **macOS** (Sequoia and later) blocks the first
-launch with *"Apple could not verify…"* — open **System Settings → Privacy &
-Security**, scroll to *"SingZ" was blocked*, click **Open Anyway**, then launch
-again (one time per version). Or in Terminal:
+**macOS builds are Developer ID-signed and notarized by Apple.** Download the
+dmg, drag SingZ across, open it — no *"Apple could not verify…"* dialog, and
+nothing to approve in System Settings. (v0.19.1 is the first signed release;
+on an earlier download macOS still shows that dialog — approve it once under
+**System Settings → Privacy & Security**.)
 
-```bash
-xattr -d com.apple.quarantine /Applications/SingZ.app
-```
-
-**Windows** shows a SmartScreen prompt ("More info → Run anyway"); the packs
-bundle their own MSVC runtime, so nothing needs installing. The only clean
-fix for the prompts is real signing/notarization: remove
-`identity: null` from [electron-builder.yml](electron-builder.yml) and add
-certificate secrets in CI (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
+**Windows is still unsigned** and shows a SmartScreen prompt — *More info →
+Run anyway*. The packs bundle their own MSVC runtime, so nothing else needs
+installing. Clearing that prompt needs an Authenticode certificate; the
+options are Azure Trusted Signing or SignPath's OSS tier (see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
 Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [CLAUDE.md](CLAUDE.md)

@@ -31,7 +31,17 @@ function newer(tag: string, base: string): boolean {
   return false
 }
 
-/** macOS/Linux: unsigned builds can't self-install — offer the download instead. */
+/**
+ * macOS/Linux: check GitHub and offer the download rather than self-installing.
+ *
+ * The reason has changed; the routing has not. It used to be that unsigned
+ * builds cannot self-install, which stopped being true on macOS at v0.19.1 —
+ * the dmg is Developer ID-signed and notarized now. What still blocks it is
+ * infrastructure rather than signing: Squirrel.Mac wants a `zip` target and a
+ * feed, `electron-builder.yml` builds `dmg` only, and `installUpdate()` is
+ * Windows-gated. Giving mac an in-place update is its own piece of work, not
+ * a flag to flip here.
+ */
 async function checkViaGithub(): Promise<void> {
   set({ state: 'checking' })
   try {

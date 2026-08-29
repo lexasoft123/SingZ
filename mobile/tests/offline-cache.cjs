@@ -25,7 +25,7 @@ const { join } = require('node:path');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');
 
-const BUNDLE = 'com.lexasoft.singz';
+const BUNDLE = 'io.s-dev.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
 const REPO = join(__dirname, '..');
 const PORT = process.env.METRO_PORT || '8081';

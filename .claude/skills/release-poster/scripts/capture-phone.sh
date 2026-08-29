@@ -26,7 +26,7 @@ case "$PLATFORM" in
     [ -n "$DEV" ] || { echo "no booted simulator; boot one first" >&2; exit 1; }
     # Confirm the app is actually installed, so a blank shot is never mistaken
     # for a UI problem.
-    xcrun simctl get_app_container "$DEV" com.lexasoft.singz >/dev/null
+    xcrun simctl get_app_container "$DEV" io.s-dev.singz >/dev/null
     xcrun simctl io "$DEV" screenshot "$OUT/phone-ios-$STAMP.png" >/dev/null 2>&1
     echo "$OUT/phone-ios-$STAMP.png"
     ;;

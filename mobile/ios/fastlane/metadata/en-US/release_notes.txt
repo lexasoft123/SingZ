@@ -1,0 +1,1 @@
+Bar lines you corrected on the computer now survive its Re-detect button. It used to drop them and sync the loss down here, so a song you had already fixed came back wrong on the phone. The phone's own Detect again has always kept them; now both do. Nothing else on the phone changes in this one.

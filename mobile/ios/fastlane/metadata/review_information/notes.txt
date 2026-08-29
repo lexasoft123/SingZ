@@ -1,0 +1,46 @@
+SingZ is a rehearsal player for singers. A song is six separate instrument
+tracks rather than one recording, so any part can be muted and sung or played
+live instead.
+
+NOTHING IS NEEDED TO START REVIEWING
+
+SingZ ships with one complete sample song — an original composition, not
+licensed material — already in the library the moment the app opens. The six
+faders, the synced lyrics, the pitch guide, transposing, slowing down, looping
+and the vocal training mode can all be exercised on that sample alone, with no
+account, no download and no second device.
+
+WHERE ELSE SONGS COME FROM
+
+Two further routes, neither required for review:
+
+1. On the phone. "Add a song" opens the system file picker; the chosen audio is
+   separated into six tracks on the device itself. Nothing is uploaded — there
+   is no SingZ server. The first such song downloads the separation model
+   (htdemucs_6s, ~136 MB) from the app's public GitHub release; this is model
+   weights, i.e. data, not executable code. Separation is memory-hungry, so on
+   a device with too little RAM the app declines with an explanation rather
+   than attempting it.
+
+2. From a computer. The free, open-source SingZ desktop app for Mac and Windows
+   can prepare songs, and the phone reads them over Google Drive or from a
+   copied folder.
+
+NO ACCOUNT IS REQUIRED
+
+There is no SingZ account and nothing to sign in to. Google Drive sign-in is
+optional and only adds a second source of songs; it requests access solely to
+files the app itself created (drive.file scope), never the rest of a user's
+Drive. No feature is behind it.
+
+MICROPHONE
+
+The pitch guide and the vocal training mode listen to the microphone to show
+whether a sung note is on pitch. Audio is analysed live and never recorded,
+never stored, and never leaves the device. iOS will ask for permission the
+first time a listening feature is opened.
+
+DATA COLLECTION
+
+None. There is no SingZ server, no analytics, and no tracking. Songs stay on
+the device.
