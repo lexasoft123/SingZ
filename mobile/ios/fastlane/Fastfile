@@ -1,0 +1,564 @@
+# App Store Connect uploads.
+#
+# The app record itself CANNOT come through here — Apple's API is explicit
+# about it ("Don't use this API to create new apps; instead, create new apps
+# on the App Store Connect website"), the same wall Android's Fastfile notes
+# for the first Play bundle. That one page is a by-hand, once-per-app setup —
+# see docs/IOS-RELEASE.md. Everything after that — the certificate and
+# profile (fastlane match), builds, TestFlight, submitting for review, the
+# store listing text — lands here.
+#
+# Code signing is `match`: the Apple Distribution certificate and the App
+# Store provisioning profile live encrypted in a private repo
+# (lexasoft123/singz-ios-certs, see the Matchfile) and are fetched per run.
+# CI is READONLY — it may never mint a certificate. Apple caps Distribution
+# certificates at 3 per team (2 in some memberships), and a CI job quietly
+# creating one on every red build is the documented way teams hit that cap
+# and then cannot ship at all until somebody revokes one by hand. Creating
+# them is a deliberate local act: `bundle exec fastlane ios certs`.
+#
+# Store listing text and graphics are NOT pushed by the binary lanes. A
+# release should ship a binary, not silently rewrite the shopfront — run the
+# `metadata` lane deliberately when the listing is what changed.
+
+default_platform(:ios)
+
+IOS_DIR    = File.expand_path("..", __dir__)
+REPO_ROOT  = File.expand_path("../../..", __dir__)
+BUNDLE_ID  = "io.s-dev.singz"
+SCHEME     = "SingZPlayer"
+WORKSPACE  = File.join(IOS_DIR, "SingZPlayer.xcworkspace")
+
+# TestFlight's Beta App Description — what a tester reads before installing.
+# Shorter and more direct than the store description: they have already
+# decided to try it, so this says what to do first and what to look at.
+BETA_DESCRIPTION = <<~TEXT.strip
+  SingZ turns a song into six separate tracks — lead vocal, backing vocals,
+  drums, bass, guitar and piano — so you can mute any part and sing or play it
+  yourself.
+
+  A sample song is already in the library when you open the app, so there is
+  nothing to set up. Try muting the lead vocal, following the lyrics as they
+  light up, and looping a passage you want to repeat. The Train tab plays you
+  a note and listens to whether you land it.
+
+  You can add your own songs too: pick any audio file and the phone separates
+  it on device. The first one downloads the separation model (~136 MB, once).
+
+  Worth reporting: anything that sounds wrong, lyrics that drift out of time,
+  and how long a song of your own takes to split.
+TEXT
+
+# MARKETING_VERSION is the one place besides package.json a version is
+# written by hand (docs/DEVELOPMENT.md, CLAUDE.md) — bumped before archiving,
+# same as the sis-motors.ru sideload build. CI does not bump it for you: a
+# forgotten bump here is a build App Store Connect will accept and then
+# nobody outside TestFlight sees at all, because a repeat submission of an
+# unchanged MARKETING_VERSION just adds a build under the version already
+# live. Fail loud instead of shipping that quietly.
+def verify_marketing_version
+  pkg = JSON.parse(File.read(File.join(REPO_ROOT, "package.json")))
+  pbxproj = File.read(File.join(IOS_DIR, "SingZPlayer.xcodeproj/project.pbxproj"))
+  found = pbxproj.scan(/MARKETING_VERSION = ([\d.]+);/).flatten.uniq
+  UI.user_error!("project.pbxproj has no MARKETING_VERSION") if found.empty?
+  UI.user_error!(
+    "project.pbxproj carries multiple MARKETING_VERSIONs (#{found.join(', ')}) " \
+    "— every build configuration must agree"
+  ) if found.length > 1
+  UI.user_error!(
+    "MARKETING_VERSION is #{found.first} but package.json is #{pkg['version']}. " \
+    "Bump mobile/ios/SingZPlayer.xcodeproj/project.pbxproj (every occurrence) before archiving."
+  ) unless found.first == pkg["version"]
+  pkg["version"]
+end
+
+# The build number (CURRENT_PROJECT_VERSION) is a different question from the
+# marketing version: Apple only requires it to increase within one
+# MARKETING_VERSION, but there is no harm in an always-increasing one, and it
+# retires the "forgot to bump the build number" trap entirely for the CI
+# path. The workflow passes GitHub's run_number, which never repeats and
+# never goes backwards across the whole repo's Action history. Local runs
+# have no such counter and are not this pipeline's job — see
+# scripts/ship-ios-ipa (the sis-motors.ru sideload) for the hand-bumped path.
+def ci_build_number
+  n = ENV["SINGZ_IOS_BUILD_NUMBER"]
+  UI.user_error!(
+    "SINGZ_IOS_BUILD_NUMBER is not set. This lane is meant to run in CI, " \
+    "which sets it to the workflow run number. For a one-off local archive, " \
+    "export SINGZ_IOS_BUILD_NUMBER=<something higher than the last upload>."
+  ) if n.nil? || n.strip.empty?
+  n
+end
+
+# The App Review contact block, from the environment rather than from
+# metadata/review_information/ — see the note at its use site. notes.txt is
+# still read from disk by deliver as normal; only the personal fields move.
+def review_contact
+  fields = {
+    first_name: ENV["SINGZ_REVIEW_FIRST_NAME"],
+    last_name: ENV["SINGZ_REVIEW_LAST_NAME"],
+    phone_number: ENV["SINGZ_REVIEW_PHONE"],
+    email_address: ENV["SINGZ_REVIEW_EMAIL"]
+  }
+  missing = fields.select { |_, v| v.to_s.empty? }.keys
+  UI.user_error!(
+    "App Review contact is incomplete (missing #{missing.join(', ')}). Apple requires it to " \
+    "submit. Run through scripts/with-apple-secrets.sh, which reads them from the SOPS store."
+  ) unless missing.empty?
+  fields.merge(demo_user: "", demo_password: "", notes: nil)
+end
+
+# TestFlight's "what to test" note. Reuses the store text already generated
+# from the release notes rather than inventing a third place to describe a
+# release — same reasoning as sync_release_notes.
+def external_changelog(version)
+  path = File.join(__dir__, "metadata/en-US/release_notes.txt")
+  return File.read(path).strip if File.exist?(path) && !File.read(path).strip.empty?
+  "SingZ #{version}"
+end
+
+# Beta App Review contact — the same four fields the App Store submission
+# uses, in pilot's own key names.
+def beta_review_info
+  # review_contact does the completeness check. Reuse it rather than reading
+  # the four vars again: the attributes hash below is sent WHOLE, so a nil
+  # from a store missing one field would PATCH that field to empty at Apple
+  # and quietly break the precondition External Testing depends on.
+  c = review_contact
+  {
+    contact_first_name: c[:first_name],
+    contact_last_name: c[:last_name],
+    contact_phone: c[:phone_number],
+    contact_email: c[:email_address],
+    notes: File.read(File.join(__dir__, "metadata/review_information/notes.txt")).strip
+  }
+end
+
+# CI passes the key as base64 in a secret; a local run can instead point at
+# the .p8 on disk (SINGZ_ASC_KEY_PATH, or the conventional
+# <repo>/.keys/AuthKey_<KeyID>.p8 — gitignored, and also in .git/info/exclude
+# so every worktree is covered). Apple hands out the .p8 exactly once and
+# this repo is public, so it must never be pasted into a tracked file.
+def api_key
+  key_id = ENV.fetch("APP_STORE_CONNECT_API_KEY_ID") { UI.user_error!("APP_STORE_CONNECT_API_KEY_ID is not set") }
+  issuer_id = ENV.fetch("APP_STORE_CONNECT_API_ISSUER_ID") { UI.user_error!("APP_STORE_CONNECT_API_ISSUER_ID is not set") }
+
+  base64 = ENV["APP_STORE_CONNECT_API_KEY_BASE64"].to_s
+  return app_store_connect_api_key(
+    key_id: key_id, issuer_id: issuer_id,
+    key_content: base64, is_key_content_base64: true, in_house: false
+  ) unless base64.empty?
+
+  # Feature work here happens in worktrees (CLAUDE.md), and a worktree's root
+  # is NOT where the key lives — it is kept once beside the main checkout and
+  # shared, exactly like vendor/ and gdrive.config.json. So look in this
+  # checkout, then in the main one (the common git dir's parent), before
+  # giving up.
+  candidates = [ENV["SINGZ_ASC_KEY_PATH"].to_s]
+  candidates << File.join(REPO_ROOT, ".keys", "AuthKey_#{key_id}.p8")
+  begin
+    common = Dir.chdir(REPO_ROOT) { `git rev-parse --git-common-dir 2>/dev/null`.strip }
+    unless common.empty?
+      common = File.expand_path(common, REPO_ROOT) # it may come back relative
+      candidates << File.join(File.dirname(common), ".keys", "AuthKey_#{key_id}.p8")
+    end
+  rescue StandardError # not a git checkout, or no git — the other candidates still stand
+  end
+  path = candidates.reject(&:empty?).find { |c| File.exist?(c) }
+  UI.user_error!(
+    "No App Store Connect key for key id #{key_id}. Set " \
+    "APP_STORE_CONNECT_API_KEY_BASE64 (CI), or put the .p8 at " \
+    "<checkout>/.keys/AuthKey_#{key_id}.p8 / point SINGZ_ASC_KEY_PATH at it (local)."
+  ) if path.nil?
+
+  app_store_connect_api_key(
+    key_id: key_id, issuer_id: issuer_id, key_filepath: path, in_house: false
+  )
+end
+
+platform :ios do
+  # The one lane that is ALLOWED to create signing assets, and it is never
+  # run by CI — see the readonly note at the top of this file. Run it once
+  # locally to populate the certs repo, and again only when a certificate
+  # actually expires (yearly) or a new one is genuinely needed.
+  desc "Create/renew the signing certificate and profile in the certs repo (LOCAL ONLY — never CI)"
+  lane :certs do
+    UI.user_error!(
+      "Refusing to run on CI. This lane can MINT an Apple Distribution certificate, " \
+      "and Apple caps those per team — a CI job creating one per run is how a team " \
+      "runs out and cannot ship. Run this locally: bundle exec fastlane ios certs"
+    ) if ENV["CI"]
+    key = api_key
+    # Both profile types share ONE Apple Distribution certificate — match
+    # reuses it rather than minting a second, which matters because Apple
+    # caps them. Ad-hoc is what the sis-motors.ru install page serves.
+    match(type: "appstore", readonly: false, api_key: key)
+    match(type: "adhoc", readonly: false, api_key: key, force_for_new_devices: true)
+    UI.success("Certificates and profiles are in the certs repo. CI can now fetch them readonly.")
+  end
+
+  # Ad-hoc profiles only install on UDIDs registered with the team, so a new
+  # phone means running this and then `certs` again to fold it into the
+  # profile (force_for_new_devices above is what makes the re-run actually
+  # regenerate rather than hand back the stale one).
+  desc "Register a device for ad-hoc builds: fastlane ios add_device udid:<UDID> name:<name>"
+  lane :add_device do |options|
+    udid = options[:udid] or UI.user_error!("pass udid:<UDID> (Finder ▸ the phone ▸ click the details line, or Xcode ▸ Devices)")
+    name = options[:name] || "SingZ device #{udid[0, 6]}"
+    register_devices(devices: { name => udid }, api_key: api_key)
+    UI.success("Registered #{name}. Now re-run `fastlane ios certs` to add it to the ad-hoc profile.")
+  end
+
+  desc "Build an ad-hoc IPA for the sis-motors.ru install page (no upload)"
+  lane :adhoc do
+    version = verify_marketing_version
+    build_number = ci_build_number
+    install_signing(api_key: api_key, type: "adhoc")
+    ipa = archive(build_number: build_number, type: "adhoc")
+    UI.success("Ad-hoc IPA for #{version} (#{build_number}) at #{ipa}")
+    ipa
+  end
+
+  desc "Check the API key and signing setup without building or uploading anything"
+  lane :validate do
+    verify_marketing_version
+    key = api_key
+    UI.user_error!("MATCH_PASSWORD is not set") if ENV["MATCH_PASSWORD"].to_s.empty?
+    # Actually FETCH rather than merely checking that secrets are non-empty:
+    # a wrong MATCH_PASSWORD, an unreachable certs repo, an expired
+    # certificate and a profile that never got created all look identical to
+    # a presence check, and all four fail the same way mid-archive later.
+    match(type: "appstore", readonly: true, api_key: key)
+    UI.success("API key, certs repo and profile all resolve; MARKETING_VERSION matches package.json.")
+  end
+
+  # Named `beta`/`release` rather than `testflight`/`appstore` because those
+  # two ARE fastlane action names — a lane shadowing an action makes fastlane
+  # print "Name of the lane 'x' is already taken by the action named 'x'" and
+  # leaves which one a bare `x` resolves to up to context.
+  # External TestFlight, as its own lane rather than a flag on `beta`.
+  #
+  # The two are genuinely different acts. Internal testers (your own team,
+  # up to 100) see a build the moment processing finishes, with no review.
+  # EXTERNAL testers are strangers to Apple, so the first build of a version
+  # goes through Beta App Review — a real human queue, usually a day — and
+  # Apple requires beta review information and a "what to test" note before
+  # it will even queue. Wiring that onto `beta` would put a v* tag into a
+  # review queue by accident, which is the same reason the App Store lane is
+  # dispatch-only.
+  #
+  # SINGZ_TESTFLIGHT_GROUPS names the external group(s), comma-separated;
+  # they must already exist in App Store Connect (the API cannot create a
+  # group and then hand it strangers).
+  # TestFlight's "Test Information" is PER-APP, not per-build, so it only
+  # needs pushing when the text changes — and External Testing stays greyed
+  # out in App Store Connect until it exists. Deliberately its own lane: the
+  # tag-driven `beta` and `release` lanes must never rewrite it behind your
+  # back, the same rule that keeps the store listing out of the binary lanes.
+  desc "Push TestFlight Test Information (beta description, feedback email, review contact)"
+  lane :beta_info do
+    verify_marketing_version
+    email = ENV.fetch("SINGZ_REVIEW_EMAIL") {
+      UI.user_error!("SINGZ_REVIEW_EMAIL is not set — run through scripts/with-apple-secrets.sh")
+    }
+    # Straight at the API rather than through pilot. `upload_to_testflight`
+    # with distribute_only and nothing to distribute is a NO-OP that still
+    # reports success — measured: it left the app with zero beta app
+    # localizations while printing "finished successfully". And the first
+    # time round the localization has to be CREATED; fastlane has no action
+    # that does that.
+    # Through the api_key helper, NOT a hand-rolled Token.create: that would
+    # read SINGZ_ASC_KEY_PATH only, which is unset on CI (base64 secret) and
+    # unset on any machine using the documented .keys/AuthKey_<id>.p8 layout —
+    # Spaceship then does File.binread(nil) and dies with a TypeError that
+    # names no credential. app_store_connect_api_key sets the token itself.
+    api_key
+    api = Spaceship::ConnectAPI
+    app = api::App.find(BUNDLE_ID)
+
+    existing = api.get_beta_app_localizations(filter: { app: app.id }).to_a
+    if existing.empty?
+      api.post_beta_app_localizations(app_id: app.id, attributes: {
+        locale: "en-US", description: BETA_DESCRIPTION, feedbackEmail: email
+      })
+      UI.message("created the en-US beta app localization")
+    else
+      existing.each do |l|
+        api.patch_beta_app_localizations(localization_id: l.id, attributes: {
+          description: BETA_DESCRIPTION, feedbackEmail: email
+        })
+        UI.message("updated #{l.locale}")
+      end
+    end
+
+    c = beta_review_info
+    api.patch_beta_app_review_detail(app_id: app.id, attributes: {
+      contactFirstName: c[:contact_first_name], contactLastName: c[:contact_last_name],
+      contactPhone: c[:contact_phone], contactEmail: c[:contact_email], notes: c[:notes]
+    })
+    UI.success("Test Information pushed. External Testing can now be enabled.")
+  end
+
+  desc "Distribute an already-uploaded build to EXTERNAL TestFlight testers (Beta App Review)"
+  lane :beta_external do |options|
+    version = verify_marketing_version
+    build_number = options[:build] || ci_build_number
+    groups = (ENV["SINGZ_TESTFLIGHT_GROUPS"] || options[:groups]).to_s
+    UI.user_error!(
+      "No external group named. Set SINGZ_TESTFLIGHT_GROUPS (comma-separated) or pass " \
+      "groups:\"My Testers\" — the group must already exist in App Store Connect."
+    ) if groups.empty?
+
+    upload_to_testflight(
+      api_key: api_key,
+      app_identifier: BUNDLE_ID,
+      # Required whenever there is no ipa to infer it from: without it pilot
+      # PROMPTS for the platform, which on a non-interactive runner is a
+      # crash ("Could not retrieve response as fastlane runs in
+      # non-interactive mode") rather than a legible error.
+      app_platform: "ios",
+      # No ipa: this distributes a build ALREADY uploaded by `beta`/`release`,
+      # so a build that testers have been on can be widened without rebuilding
+      # (and without a second binary against the same build number).
+      # `distribute_only` is pilot's name for it — `skip_binary_upload` is
+      # deliver's, and passing it here is rejected outright.
+      distribute_only: true,
+      app_version: version,
+      build_number: build_number.to_s,
+      distribute_external: true,
+      groups: groups.split(",").map(&:strip),
+      # TestFlight's "Test Information" page. External testing stays greyed
+      # out in App Store Connect until the Beta App Description and a
+      # feedback email exist — they are per-app, not per-build, and Apple
+      # will not queue Beta App Review without them.
+      beta_app_description: BETA_DESCRIPTION,
+      beta_app_feedback_email: ENV["SINGZ_REVIEW_EMAIL"],
+      # Apple demands this for external distribution; without it the upload
+      # is accepted and the distribution silently is not.
+      changelog: external_changelog(version),
+      beta_app_review_info: beta_review_info
+    )
+    UI.success("SingZ #{version} (#{build_number}) sent to Beta App Review for: #{groups}")
+  end
+
+  desc "Build, then upload to TestFlight"
+  lane :beta do
+    version = verify_marketing_version
+    build_number = ci_build_number
+    key = api_key
+    install_signing(api_key: key)
+    ipa = archive(build_number: build_number)
+
+    upload_to_testflight(
+      api_key: key,
+      ipa: ipa,
+      # Apple's own processing can run 15-60 min with nothing this job can
+      # do about it. Waiting here just burns a CI runner slot for that whole
+      # window; the build shows up in App Store Connect (and to testers,
+      # once a group is assigned) on its own once processing finishes.
+      skip_waiting_for_build_processing: true,
+      # No group assignment: which testers see a given build is a judgement
+      # call for the console, the same reason Android's tag path lands in a
+      # closed track rather than picking testers for you.
+      distribute_external: false
+    )
+    UI.success("SingZ #{version} (#{build_number}) uploaded to TestFlight.")
+  end
+
+  desc "Build, then submit to the App Store for review — GOES LIVE BY ITSELF on approval"
+  lane :release do
+    version = verify_marketing_version
+    build_number = ci_build_number
+    # Up here on purpose. Evaluated at the upload_to_app_store call site it
+    # would only fail AFTER the archive and after pilot has blocked on
+    # Apple's processing — an hour and a half in, with a binary already at
+    # Apple, nothing submitted, and a re-run drawing a fresh run_number so
+    # the next upload lands under a different build number. Same principle
+    # as tags-ignore in ios.yml: better not to start.
+    contact = review_contact
+    key = api_key
+    install_signing(api_key: key)
+    ipa = archive(build_number: build_number)
+
+    # TWO tools, on purpose. Apple will not attach a build that is still
+    # processing, and processing runs for minutes after the upload call
+    # returns — but `deliver` has no wait option at all (its option list has
+    # `build_number` and `version_check_wait_retry_limit`, nothing that
+    # blocks on processing). `pilot` does. So the binary goes up through
+    # pilot, which waits, and deliver then submits an already-processed
+    # build by number. Handing the ipa straight to deliver instead fails at
+    # the last step with the binary already sent.
+    upload_to_testflight(
+      api_key: key,
+      ipa: ipa,
+      skip_waiting_for_build_processing: false,
+      distribute_external: false
+    )
+
+    sync_release_notes(version: version)
+    upload_to_app_store(
+      api_key: key,
+      skip_binary_upload: true,
+      build_number: build_number.to_s,
+      submit_for_review: true,
+      # Goes live BY ITSELF the moment Apple approves — no second visit to
+      # the console. The trade is that there is no pause between "approved"
+      # and "on the store": if a release should be held for a date or a
+      # channel post, set this false for that run.
+      automatic_release: true,
+      # The binary lane must not rewrite the shopfront's screenshots/graphics
+      # by accident — that is the `metadata` lane's job, run on purpose. Text
+      # (name/subtitle/description/keywords/release notes) still goes up:
+      # App Store review reads the "What's New" text as part of the submission.
+      skip_screenshots: true,
+      skip_app_version_update: false,
+      force: true, # do not open an interactive diff prompt on a headless runner
+      precheck_include_in_app_purchases: false,
+      # The three declarations Apple demands with every submission. They are
+      # answered in the console too, but deliver sends them itself and fails
+      # ("You must provide export compliance information") when they are
+      # absent. Third-party content is TRUE and deliberate: the app displays
+      # lyrics fetched from a third-party service and plays audio the user
+      # supplies — the rights question was answered in the console.
+      submission_information: {
+        export_compliance_uses_encryption: false,
+        content_rights_contains_third_party_content: true,
+        add_id_info_uses_idfa: false
+      },
+      # A real person's name, phone and email. They are NOT in
+      # metadata/review_information/ — this repo is public and a phone number
+      # in a public history is permanent. They come from the SOPS store via
+      # scripts/with-apple-secrets.sh; only notes.txt is tracked.
+      app_review_information: contact
+    )
+    UI.success("SingZ #{version} (#{build_number}) submitted for App Store review — it will go LIVE automatically once approved.")
+  end
+
+  desc "Push store listing TEXT only — screenshots go via scripts/push-ios-screenshots.rb"
+  lane :metadata do
+    version = verify_marketing_version
+    sync_release_notes(version: version)
+    upload_to_app_store(
+      api_key: api_key,
+      skip_binary_upload: true,
+      # TEXT ONLY. deliver uploads every staged file into EVERY locale, so a
+      # set of 5 lands as 10 per locale — measured twice, and
+      # `overwrite_screenshots: true` does not prevent it. Screenshots go up
+      # through scripts/push-ios-screenshots.rb instead, which deletes the
+      # sets and re-uploads in filename order, deterministically.
+      skip_screenshots: true,
+      # precheck cannot read in-app purchases under API-key auth and fails
+      # the whole lane at the end, after the upload has already happened.
+      precheck_include_in_app_purchases: false,
+      force: true
+    )
+    UI.success("Listing text pushed. Screenshots: scripts/push-ios-screenshots.rb")
+  end
+end
+
+# --- helpers ---------------------------------------------------------------
+
+private_lane :install_signing do |options|
+  UI.user_error!(
+    "MATCH_PASSWORD is not set — it decrypts the certs repo. See docs/IOS-RELEASE.md."
+  ) if ENV["MATCH_PASSWORD"].to_s.empty?
+
+  # A dedicated keychain rather than the runner's default. On a GitHub-hosted
+  # runner the machine is fresh per job, so this mostly guards a self-hosted
+  # runner, where a stale identity from a previous job would otherwise make
+  # xcodebuild's "which identity?" ambiguous. match installs into whatever
+  # keychain is current, so this has to come first.
+  if ENV["CI"]
+    keychain_password = SecureRandom.hex(16)
+    create_keychain(
+      name: "singz-ci.keychain-db",
+      password: keychain_password,
+      default_keychain: true,
+      unlock: true,
+      timeout: 1800
+    )
+    ENV["MATCH_KEYCHAIN_NAME"] = "singz-ci.keychain-db"
+    ENV["MATCH_KEYCHAIN_PASSWORD"] = keychain_password
+  end
+
+  # readonly on purpose, everywhere this runs — see the top of this file.
+  # git_url/app_identifier come from the Matchfile so local and CI cannot
+  # drift apart; only the auth differs, and that is environment.
+  match(type: options[:type] || "appstore", readonly: true, api_key: options[:api_key])
+end
+
+private_lane :archive do |options|
+  type = options[:type] || "appstore"
+  # Apple's export_method spelling is not match's type spelling.
+  export_method = { "appstore" => "app-store", "adhoc" => "ad-hoc" }.fetch(type)
+
+  # match exports the profile it just installed under this key, so the
+  # profile NAME is never written down anywhere — not in a secret, not in a
+  # repo variable, not here. Renaming or regenerating the profile therefore
+  # cannot desynchronize CI from the portal, which is the failure the
+  # hand-managed version had to guard against with its own error message.
+  profile_name = ENV["sigh_#{BUNDLE_ID}_#{type}_profile-name"]
+  UI.user_error!(
+    "match did not export a #{type} profile name for #{BUNDLE_ID} — install_signing must run first."
+  ) if profile_name.to_s.empty?
+  team_id = ENV["sigh_#{BUNDLE_ID}_#{type}_team-id"] || ENV["FASTLANE_TEAM_ID"]
+
+  # Signing is overridden on the xcodebuild COMMAND LINE rather than written
+  # into project.pbxproj. The project stays on automatic signing with a
+  # development identity, which is what Xcode and the sis-motors.ru sideload
+  # build (the ship-ios-ipa skill) both want; these lanes need manual signing
+  # against a match profile, and the two would otherwise fight over the same
+  # file. Overriding here means neither has to win.
+  #
+  # Without this the archive fails with "No profiles for 'io.s-dev.singz'
+  # were found … Automatic signing is disabled and unable to generate a
+  # profile" — note it says *App Development* profiles: the project's own
+  # CODE_SIGN_IDENTITY[sdk=iphoneos*] is "iPhone Developer", so a
+  # distribution profile sitting right there does not match what it asks for.
+  signing_args = [
+    "CURRENT_PROJECT_VERSION=#{options[:build_number]}",
+    "CODE_SIGN_STYLE=Manual",
+    %(PROVISIONING_PROFILE_SPECIFIER="#{profile_name}"),
+    %(CODE_SIGN_IDENTITY="Apple Distribution")
+    # NOT the conditional form: xcodebuild's command-line setting overrides
+    # do not support `SETTING[sdk=...]=value` — it splits on the first `=`,
+    # so the name becomes `CODE_SIGN_IDENTITY[sdk` and the value
+    # `iphoneos*]=Apple Distribution`, which surfaces as "No certificate for
+    # team … matching 'iphoneos*]=Apple Distribution' found".
+  ]
+  signing_args << "DEVELOPMENT_TEAM=#{team_id}" unless team_id.to_s.empty?
+
+  build_app(
+    workspace: WORKSPACE,
+    scheme: SCHEME,
+    configuration: "Release",
+    export_method: export_method,
+    # The build number rides along in the same setting overrides. It is NOT a
+    # build_app option (there is no such option — the alternative is
+    # `increment_build_number`, which rewrites project.pbxproj); overriding it
+    # keeps CI's working tree clean, so nothing is left half-written into the
+    # project by a failed job. Info.plist's CFBundleVersion is already
+    # $(CURRENT_PROJECT_VERSION), so this flows straight into the built app.
+    xcargs: signing_args.join(" "),
+    export_options: {
+      signingStyle: "manual",
+      provisioningProfiles: { BUNDLE_ID => profile_name }
+    },
+    output_directory: File.join(REPO_ROOT, "build-ios"),
+    output_name: "SingZ.ipa"
+  )
+end
+
+
+# supply (App Store Connect's uploader, driven here via upload_to_app_store)
+# reads release_notes.txt per locale the same way Android's supply reads its
+# changelogs — sourced from the same <!-- store:LOCALE --> blocks in the
+# release notes, via scripts/store-notes.cjs, so the two stores say the same
+# thing without a second place to write it. Apple's locale codes are not
+# always Android's (ru vs ru-RU) — store-notes.cjs owns that mapping.
+private_lane :sync_release_notes do |options|
+  script = File.join(REPO_ROOT, "scripts/store-notes.cjs")
+  UI.user_error!("scripts/store-notes.cjs is missing") unless File.exist?(script)
+  Dir.chdir(REPO_ROOT) { sh("node", "scripts/store-notes.cjs") }
+  UI.success("Store notes for v#{options[:version]} are current")
+end

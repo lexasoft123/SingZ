@@ -1,0 +1,190 @@
+name: iOS
+
+# A v* tag ships to TestFlight automatically — same reasoning as Android's
+# closed track: that is the point of tagging, and testers should not wait on
+# someone remembering to press a button. Submitting for App Store review is
+# never automatic — it is a bigger one-way action than a testing build (once
+# Apple starts reviewing, pulling it back is a support-contact affair, not an
+# API call) and "git tag" is too easy to type. Reaching the App Store means
+# dispatching this workflow and choosing it, mirroring Android's `publish`
+# job, where only workflow_dispatch may pick `production`.
+#
+# And `release` sets automatic_release: TRUE — an approved build goes LIVE on
+# the store by itself, with no second confirmation from anyone. That is the
+# deliberate setting, but it means the dispatch IS the decision to publish.
+#
+# The very first build for this app cannot come through here at all — the app
+# record is one-time, by-hand setup in App Store Connect, and the signing
+# certificate/profile are minted once locally by `fastlane ios certs`. That
+# lane is deliberately NOT in the choices below: CI runs match readonly and
+# may never create a certificate, because Apple caps Distribution certs per
+# team and a job that mints one per run is how a team runs out. See
+# docs/IOS-RELEASE.md.
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: 'fastlane lane — "validate" checks credentials and ships nothing; "beta" = TestFlight, "release" = submit for App Store review'
+        type: choice
+        default: validate
+        options: [validate, beta, release, metadata]
+  push:
+    tags: ['v*']
+    # Hyphenated prerelease tags (v0.20.0-test1, the "hand one tester a build"
+    # flow in CLAUDE.md) can NEVER succeed here: verify_marketing_version
+    # compares package.json against MARKETING_VERSION, and Apple's
+    # CFBundleShortVersionString is at most three integers, so the suffix
+    # cannot be carried. Better to not start than to fail after checkout,
+    # npm ci and pod install.
+    tags-ignore: ['v*-*']
+
+permissions:
+  contents: read
+
+# The event is part of the group, as in android.yml: without it, dispatching
+# `release` on a tag whose `beta` run is still uploading cancels that run
+# mid-upload, leaving a partial binary at Apple.
+concurrency:
+  group: ios-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    # 60 was not enough for the release path: it archives, uploads, and then
+    # BLOCKS on Apple's own processing, which the docs put at 15-60 min on
+    # top of the build. A timeout there cancels with the binary already at
+    # Apple and nothing submitted, and the re-run gets a fresh run_number —
+    # so a second binary lands under a different build number.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      # make-sample.js and the analysis-bundle build (both postinstall) shell
+      # out to ffmpeg. The macOS runner image usually carries it already;
+      # this is a cheap no-op when it does and a real install when it doesn't,
+      # rather than a silent postinstall failure three steps from now.
+      - name: Ensure ffmpeg
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
+
+      # Real submissions carry the Google OAuth client (drive.file scope) —
+      # the repo never does. Missing it on a tag ships an App Store build
+      # with sync silently absent, which the listing promises; a dispatch
+      # build (rehearsing the pipeline, or a metadata-only push) just warns.
+      - name: Inject Google Drive OAuth client
+        env:
+          GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
+        run: |
+          if [ -n "$GDRIVE_CONFIG" ]; then
+            printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
+            echo "Drive OAuth client injected."
+          elif [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            echo "::error::GDRIVE_CONFIG is not set — a release tag would ship with"\
+                 "Google Drive sync silently missing."
+            exit 1
+          else
+            echo "::warning::No GDRIVE_CONFIG — Drive sync is hidden in this build."
+          fi
+
+      # postinstall: patches audio-api, builds the analysis + training JS
+      # bundles, materializes SingzCore's copy of the shared C++ core (the
+      # Xcode project reads that copy, not mobile/native/core directly —
+      # CocoaPods cannot glob outside the pod dir), synthesizes the bundled
+      # sample song, and writes the ccache Xcode xconfig.
+      - run: npm ci
+        working-directory: mobile
+
+      # The runner image's own CocoaPods, NOT `bundle exec pod` — same as
+      # scripts/worktree-setup.sh, which is this repo's one definition of how
+      # pods get installed. `bundle exec` here is actively wrong: bundler
+      # resolves the nearest Gemfile, which from mobile/ios is the
+      # fastlane-only one added for this pipeline, and the run dies with
+      # "can't find executable pod for gem cocoapods" — measured, not
+      # theorised. mobile/Gemfile does carry cocoapods, but reaching it from
+      # here would mean a BUNDLE_GEMFILE override that the local path
+      # (worktree-setup.sh) does not use, so CI would be exercising a
+      # different install path than every developer machine.
+      #
+      # LANG: CocoaPods crashes in non-interactive shells with "Unicode
+      # Normalization not appropriate for ASCII-8BIT" otherwise — the same
+      # requirement worktree-setup.sh carries.
+      - name: pod install
+        working-directory: mobile/ios
+        env:
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: pod install
+
+      # Only now set up bundler, for mobile/ios/Gemfile — fastlane alone.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: mobile/ios
+
+      - name: Resolve lane
+        id: lane
+        run: |
+          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            echo "lane=beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "lane=${{ inputs.lane }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Every required secret is checked inside the Fastfile itself
+      # (verify_marketing_version, api_key, install_signing) with a message
+      # naming exactly which one is missing — one source of truth for "is
+      # this configured", not a second copy of the same check here that could
+      # say something different.
+      - name: fastlane ios ${{ steps.lane.outputs.lane }}
+        working-directory: mobile/ios
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          # Signing is fastlane match: the certificate and profile are pulled
+          # from the private certs repo, decrypted with MATCH_PASSWORD, and
+          # never exist as secrets of their own. MATCH_GIT_BASIC_AUTHORIZATION
+          # is base64 "<user>:<PAT>" — the runner has no gh login to borrow.
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          # App Review contact. Apple requires it to submit, and it is NOT in
+          # metadata/review_information/ — that is a real person's name, phone
+          # and email, and this repo is public (see mobile/.gitignore). Locally
+          # these come from the SOPS store via scripts/with-apple-secrets.sh;
+          # CI has no store, so they are secrets. Without them the `release`
+          # lane refuses rather than submitting a blank contact.
+          SINGZ_REVIEW_FIRST_NAME: ${{ secrets.SINGZ_REVIEW_FIRST_NAME }}
+          SINGZ_REVIEW_LAST_NAME: ${{ secrets.SINGZ_REVIEW_LAST_NAME }}
+          SINGZ_REVIEW_PHONE: ${{ secrets.SINGZ_REVIEW_PHONE }}
+          SINGZ_REVIEW_EMAIL: ${{ secrets.SINGZ_REVIEW_EMAIL }}
+          SINGZ_IOS_BUILD_NUMBER: ${{ github.run_number }}
+          # fastlane refuses to run under a non-UTF-8 locale — same line the
+          # Android publish job carries. The store metadata is bilingual
+          # (en-US + ru), so this is not merely a warning to silence: a
+          # non-UTF-8 locale is how Cyrillic release notes get mangled.
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: bundle exec fastlane ios ${{ steps.lane.outputs.lane }}
+
+      # Kept for a postmortem on a failed or rejected submission — the built
+      # .ipa is otherwise gone the moment the runner is reclaimed, and
+      # "what did we actually send Apple" is exactly the question a rejection
+      # email leaves open.
+      # always(): the whole point of keeping the .ipa is the postmortem on a
+      # run that FAILED or was rejected, and without this the step is skipped
+      # in exactly that case — a failed fastlane step fails the job, and a
+      # plain `if:` inherits an implicit success() that never fires.
+      - uses: actions/upload-artifact@v4
+        if: always() && (steps.lane.outputs.lane == 'beta' || steps.lane.outputs.lane == 'release')
+        with:
+          name: SingZ-ios
+          path: build-ios/SingZ.ipa
+          retention-days: 14
+          if-no-files-found: ignore

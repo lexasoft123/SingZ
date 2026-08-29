@@ -29,9 +29,35 @@ publish:
   owner: lexasoft123
   repo: SingZ
 mac:
-  # No signing certificate wired up yet — ships unsigned (right-click → Open).
-  # To sign later: remove `identity`, add CSC_LINK/CSC_KEY_PASSWORD secrets in CI.
-  identity: null
+  # No `identity` set — electron-builder auto-discovers a "Developer ID
+  # Application" identity from CSC_LINK/CSC_KEY_PASSWORD (CI) or the local
+  # keychain, and — per this pinned version's own docs on `identity` —
+  # "signing is skipped for all architectures" when none is found, with NO
+  # automatic ad-hoc fallback of its own. On a machine with no such identity
+  # (this dev Mac included — only an iOS development identity is set up
+  # here, a different credential entirely) that is what leaves the signing
+  # step for afterPack.cjs's own ad-hoc fallback to run, unchanged: it
+  # already checks CSC_LINK/CSC_NAME/CSC_KEY_PASSWORD and skips itself the
+  # moment real signing is configured, which is the mechanism this relies on.
+  #
+  # hardenedRuntime/entitlements/entitlementsInherit are flat `mac:`
+  # siblings, NOT nested under a `sign:` key — that field is this pinned
+  # v26's slot for a custom sign *function* (`CustomMacSign | string |
+  # null`), not a config object; the v27+ docs describe a different shape.
+  # A nested object here would pass through electron-builder's
+  # resolveFunction() unchanged and then get CALLED as that function the
+  # first time a real identity is actually found, crashing every signed
+  # build with "customSign is not a function" — invisible today only
+  # because no identity is present yet to reach that code path. Confirmed
+  # against the actual installed 26.15.3 typings, not just the online docs.
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  # Skips itself with a warning (not an error) when no notarization
+  # credentials are present — safe to leave on unconditionally for local,
+  # unsigned dev builds. See docs/MACOS-SIGNING.md for the APPLE_API_KEY*
+  # env vars this reads.
+  notarize: true
   category: public.app-category.music
   darkModeSupport: true
   extendInfo:

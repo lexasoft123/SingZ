@@ -105,6 +105,69 @@ jobs:
           bash scripts/vendor-analyze.sh win32-x64
           bash scripts/build-onnx-pack.sh win32-x64
 
+      # Mac-only, and deliberately not folded into the Package step's own env
+      # block: electron-builder reads CSC_LINK/CSC_KEY_PASSWORD for a WINDOWS
+      # Authenticode certificate too, on the Windows leg of this same matrix.
+      # Setting them unconditionally across both legs would hand the Windows
+      # build an Apple .p12 as if it were a code-signing cert for signtool —
+      # wrong format, and a confusing failure with nothing "Apple" in it.
+      # See docs/MACOS-SIGNING.md for what each secret is and why the
+      # notarization key is the same one iOS's App Store Connect key is.
+      - name: macOS signing + notarization secrets
+        if: runner.os == 'macOS'
+        run: |
+          # Only WRITE a var when it has a real value — an empty CSC_LINK is
+          # not the same thing to electron-builder as no CSC_LINK at all, and
+          # this repo's own secrets will genuinely be absent (every trigger
+          # of this workflow — tag, dispatch, the weekly cron) until the
+          # one-time Apple setup in docs/MACOS-SIGNING.md is done. Setting
+          # them to "" would turn "sign later" into a hard failure today.
+          #
+          # `if/then`, NOT `[ -n "$2" ] && echo …`: GitHub runs this step as
+          # `bash -e {0}`, and while the AND-list is exempt from errexit
+          # inside the function body, the FUNCTION then returns 1 when the
+          # value is empty — and the call site is a plain simple command, so
+          # errexit kills the step there. With no secrets set (today's state,
+          # which this step exists to tolerate) the whole macOS leg would die
+          # here, after the engine builds and before Package.
+          set_if_present() {
+            if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi
+          }
+          set_if_present CSC_LINK "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64"
+          set_if_present CSC_KEY_PASSWORD "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD"
+
+          # APPLE_API_KEY is a FILESYSTEM PATH to the .p8, not the key's
+          # contents. app-builder-lib passes it through untouched to
+          # @electron/notarize, whose typings say "File system path to the
+          # `.p8` private key" and which splices it into
+          # `xcrun notarytool --key <value>`. Handing it base64 would make
+          # notarytool look for a file whose name is a 250-character blob.
+          # (Some electron-builder docs show a base64 body here — for this
+          # pinned version, believe the code.) RUNNER_TEMP dies with the job.
+          if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
+            printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+            chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+            echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+          fi
+          set_if_present APPLE_API_KEY_ID "$APP_STORE_CONNECT_API_KEY_ID"
+          set_if_present APPLE_API_ISSUER "$APP_STORE_CONNECT_API_ISSUER_ID"
+
+          if [ -n "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" ]; then
+            # The ACTIVE paid membership's team. The old 9384M82Y8P belonged
+            # to a different Apple ID whose membership has expired — it is not
+            # a fallback, it is dead, and notarization under it is refused.
+            echo "APPLE_TEAM_ID=USJ7H3X44X" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 — this dmg ships"\
+                 "ad-hoc signed only (afterPack.cjs's fallback), same as before this was wired up."
+          fi
+        env:
+          APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never
 

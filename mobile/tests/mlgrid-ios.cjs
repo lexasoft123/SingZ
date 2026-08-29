@@ -40,7 +40,7 @@
  * Preconditions: Debug app installed in a booted sim, Metro running (the sim's
  * RCT_jsLocation pref pointing at it), and BOTH beat models plus the wav
  * already in the app container (this suite never touches the network):
- *   C=$(xcrun simctl get_app_container <udid> com.lexasoft.singz data)
+ *   C=$(xcrun simctl get_app_container <udid> io.s-dev.singz data)
  *   mkdir -p "$C/Documents/mlt"
  *   cp logmel.onnx beat_this.onnx in.wav "$C/Documents/mlt/"
  * Reinstalling the app MOVES the container — reseed after every install.
@@ -69,7 +69,7 @@ for (const k of ['beats', 'downbeats', 'beat_prob', 'downbeat_prob']) {
   }
 }
 
-const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'com.lexasoft.singz', 'data'],
+const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'io.s-dev.singz', 'data'],
   { encoding: 'utf8' }).trim()
 const DIR = path.join(container, 'Documents', 'mlt')
 if (!fs.existsSync(path.join(DIR, 'in.wav'))) {

@@ -33,8 +33,15 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
+	<!-- The app implements NO encryption. CommonCrypto/CryptoKit appear only
+	     for SHA-256 and MD5 HASHING (audio-route identity, cache currency),
+	     which is integrity checking rather than encryption, and every network
+	     call goes over the OS's own HTTPS. Declaring it here is what stops
+	     App Store Connect asking the export-compliance question on every
+	     single upload — and answering it through the API mid-submission makes
+	     Apple REPROCESS the build, which is what broke the first release run. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SingZ listens while you practise so it can show whether each note is on pitch.</string>
 	<key>RCTNewArchEnabled</key>
@@ -49,7 +56,7 @@
 	     continued tasks (FB in the wild; docs/PHONE-STANDALONE.md). -->
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.lexasoft.singz.split</string>
+		<string>io.s-dev.singz.split</string>
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>

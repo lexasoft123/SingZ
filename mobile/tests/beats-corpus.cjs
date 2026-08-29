@@ -92,7 +92,7 @@ const digestOf = (g) =>
   let deviceRoot
   if (platform === 'ios') {
     if (!UDID) die('--udid (or SIM_UDID) is required for ios')
-    const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'com.lexasoft.singz', 'data'],
+    const container = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, 'io.s-dev.singz', 'data'],
       { encoding: 'utf8' }).trim()
     deviceRoot = path.join(container, 'Documents')
   } else {

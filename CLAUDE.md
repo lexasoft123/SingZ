@@ -187,7 +187,7 @@ native module).
 serve ITS bundle to your app, so a parallel run needs its own simulator *and* its
 own port — boot a second device, build with `RCT_METRO_PORT=8082`, and then set
 the runtime bundle host too:
-`xcrun simctl spawn <udid> defaults write com.lexasoft.singz RCT_jsLocation -string localhost:8082`
+`xcrun simctl spawn <udid> defaults write io.s-dev.singz RCT_jsLocation -string localhost:8082`
 (the build-time port alone does NOT move the Debug app off 8081 — it silently
 attached to the neighbour's Metro). Pass `SIM_UDID`/`METRO_PORT` to the tests.
 And never `pgrep` for the app: with two simulators up there are two SingZPlayer
@@ -848,4 +848,103 @@ falls back to the bare create (fix it with `gh release edit`). Notes are
 user-facing and genuinely funny — singer's-eye view, not commit prose: what
 they can do now, what stopped being annoying, sizes/time costs where they
 matter. Group by platform when it helps. Writing them is part of cutting
-the release, not optional polish.
+the release, not optional polish. The `<!-- store:LOCALE -->` blocks inside
+that same file feed BOTH stores now (`scripts/store-notes.cjs` writes Play's
+per-versionCode changelog and, for whichever locales
+`mobile/ios/fastlane/metadata` has a directory for, App Store's unversioned
+`release_notes.txt` — Apple's locale codes are not always Android's, `ru` vs
+`ru-RU`) — write those blocks assuming either audience reads them; wording
+true only on one OS (a v0.19.0 draft named "Android's own low-latency
+capture" before this was noticed and generalized) is wrong on the other
+platform's listing.
+
+**iOS ships through `.github/workflows/ios.yml`** — a `v*` tag uploads to
+TestFlight automatically; submitting for App Store review
+is manual-dispatch-only, and it carries `automatic_release: true` — an
+approved build goes LIVE on the store by itself, so dispatching that lane IS
+the decision to publish, same "tagging is not enough to reach
+production" shape as Android's `publish` job. The app record itself cannot
+be created by the API at all (Apple's docs say so outright) — that and the
+App Store Connect API key are one-time by-hand setup, see
+[docs/IOS-RELEASE.md](docs/IOS-RELEASE.md). **Signing is `fastlane match`**:
+the Apple Distribution certificate and App Store profile live encrypted in a
+private repo (`lexasoft123/singz-ios-certs`) and are fetched per run, so the
+profile NAME is never written into a secret or variable — match exports it
+as `sigh_<bundle>_appstore_profile-name` and the archive lane reads that,
+which is why regenerating the profile cannot desynchronize CI from the
+portal. **CI runs match READONLY and must never mint a certificate** —
+Apple caps Distribution certs per team and a job creating one per run is how
+a team runs out and cannot ship; `fastlane ios certs` is the only lane that
+may create them, it refuses to run when `$CI` is set, and it is deliberately
+absent from the workflow's lane choices. The iOS bundle id is
+`io.s-dev.singz` and the team is `USJ7H3X44X`, NOT the `com.lexasoft.singz`
+Android and the desktop still use, and NOT the old team `9384M82Y8P` — that
+bundle id was already registered under a different Apple ID whose membership
+has since expired (bundle ids are unique across all Apple accounts, not per
+team), and that team is dead rather than a fallback. **Signing is overridden
+on the xcodebuild command line, never written into `project.pbxproj`**
+(`xcargs`: `CODE_SIGN_STYLE=Manual`, the match profile specifier, and
+`CODE_SIGN_IDENTITY` in its BARE form only — the `[sdk=iphoneos*]`
+conditional form is impossible on a command line, because xcodebuild splits
+an override on the first `=` and reads the name as `CODE_SIGN_IDENTITY[sdk`
+and the value as `iphoneos*]=Apple Distribution`, which surfaces as "No
+certificate for team … matching 'iphoneos*]=Apple Distribution' found". The
+bare override does displace the project's sdk-qualified `iPhone Developer`;
+what makes an archive fail with "No profiles … were found" while naming *App
+Development* profiles is a missing `CODE_SIGN_STYLE=Manual`, not a missing
+conditional identity). The project therefore stays on automatic development signing,
+which is what Xcode and the sis-motors.ru sideload build both want, and the
+two never fight over the same file. `pod install` runs as the **system**
+CocoaPods, never `bundle exec pod` — from `mobile/ios` bundler resolves the
+fastlane-only Gemfile added for this pipeline and dies with "can't find
+executable pod for gem cocoapods"; `scripts/worktree-setup.sh` is the one
+definition of how pods get installed and it uses the bare command.
+**Ad-hoc is now available too** (`fastlane ios adhoc`) — the same one
+certificate carries an AdHoc profile beside the App Store one, so the
+sis-motors.ru install page no longer needs a development-signed export. It
+installs only on registered UDIDs: `fastlane ios add_device` then
+`fastlane ios certs` again, because registering a device does NOT
+retroactively change an existing profile, and a profile covering zero
+devices looks exactly like a healthy one until an install fails on the
+phone. Every lane checks
+`MARKETING_VERSION` against `package.json` and refuses a mismatch, but does
+**not** bump it for you — still hand-bumped per the paragraph above. The
+**build number** is the one version CI does own end to end: it passes
+`github.run_number`, never repeating and never going backwards across the
+whole repo's Action history, so there is no "forgot to bump the build
+number" trap on this path the way there still is for
+[ship-ios-ipa](.claude/skills/ship-ios-ipa/SKILL.md)'s hand-bumped sideload
+build — a different pipeline, a different certificate type
+(development-signed, not App Store-signed), and not interchangeable with
+this one.
+
+**The mac `.dmg` is Developer ID-signed and notarized when the secrets are
+present, ad-hoc signed exactly as before when they are not** — `notarize:
+true` in `electron-builder.yml` skips itself with a warning rather than
+failing when unset, which is what keeps every trigger of `build.yml` (tag,
+dispatch, the weekly cache warmer) building on this dev Mac and on a fresh
+checkout with no Apple secrets at all. `build.yml`'s signing step only
+*writes* `CSC_LINK`/`CSC_KEY_PASSWORD`/`APPLE_API_KEY*` when each secret is
+actually non-empty, and only on the macOS leg of that job's matrix —
+`CSC_LINK` is read for a **Windows** Authenticode cert too on the Windows
+leg of the same matrix, so folding it into a shared step would hand the
+Windows build an Apple `.p12` on every run. Notarization reuses the iOS
+pipeline's App Store Connect API key rather than minting a second one — see
+[docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md), including why the
+entitlements file carries only the two Hardened Runtime flags Electron
+itself needs (no App Sandbox entitlements — this is the `dmg` target, not
+`mas` — and no microphone entitlement: that one's an App Sandbox thing, mic
+access keeps working through the ordinary `NSMicrophoneUsageDescription` TCC
+prompt without it). `hardenedRuntime`/`entitlements`/`entitlementsInherit`
+are flat `mac:` siblings, not nested under a `sign:` key — this repo pins
+electron-builder ^26.15.3, where `mac.sign` is a custom-sign-*function* slot
+(a later major's docs describe the nested object; the two schemas are not
+interchangeable within one version). A misconfigured nested `sign:` object
+doesn't fail on this dev Mac or on any run with no Apple secrets — `sign()`
+returns before touching it when no identity is found — it only throws
+(`customSign is not a function`) the moment a real Developer ID identity
+shows up, i.e. exactly when someone finally wires up the secrets this was
+all for; caught in review before it ever ran for real. Nothing has actually
+notarized a build yet — there is no
+Developer ID certificate on this machine — so treat the first real run as
+unverified, not proven.

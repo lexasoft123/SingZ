@@ -1,0 +1,7 @@
+source 'https://rubygems.org'
+
+# iOS publishing only. The CocoaPods Gemfile one level up (mobile/Gemfile) is
+# a separate bundle on purpose, the same reason mobile/android/Gemfile is
+# separate from it — the TestFlight/App Store upload job has no business
+# resolving a native CocoaPods extension to talk to App Store Connect.
+gem 'fastlane'

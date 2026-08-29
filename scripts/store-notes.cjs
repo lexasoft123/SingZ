@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Play Store changelogs, generated from the release notes.
+ * Play Store and App Store changelogs, generated from the release notes.
  *
  * The GitHub release notes and the store changelog say the same thing at very
- * different lengths — one is a page, the other is 500 characters per language.
- * Written separately they drift, and the drift is invisible until someone
- * reads the store page in a language they do not speak.
+ * different lengths — one is a page, the other is 500 (Play) or 4000 (App
+ * Store) characters per language. Written separately they drift, and the
+ * drift is invisible until someone reads the store page in a language they
+ * do not speak.
  *
  * So the release-notes file carries both. Anything between
  *
@@ -15,7 +16,9 @@
  *
  * is the store text for that language; everything else is the long form that
  * becomes the GitHub Release body. This writes each block to the changelog
- * file Play expects, named by versionCode.
+ * file Play expects (named by versionCode) and, for whichever locales
+ * mobile/ios/fastlane/metadata already has a directory for, to that store's
+ * unversioned release_notes.txt.
  *
  * It does NOT summarise. The old fallback truncated the long notes at 500
  * characters, which put half a sentence on the storefront — a store blurb is
@@ -30,9 +33,19 @@ const path = require('path')
 
 const ROOT = path.resolve(__dirname, '..')
 const META = path.join(ROOT, 'mobile/android/fastlane/metadata/android')
+const IOS_META = path.join(ROOT, 'mobile/ios/fastlane/metadata')
 // Play's cap is per language, counted in characters — Cyrillic costs the same
 // as Latin, so count code points rather than bytes.
 const LIMIT = 500
+// App Store's "What's New" field is 4000 characters — the same block that
+// fits Play's 500 always fits here too, so there is no second length to
+// police, only a second destination to write it to.
+const IOS_LIMIT = 4000
+// Android's locale directories are not always Apple's — ru-RU vs ru is the
+// live case (App Store Connect has no "ru-RU", only "ru"). Adding a locale
+// on one side is a directory; this map is the one place a mismatch has to be
+// spelled out by hand.
+const IOS_LOCALE = { 'ru-RU': 'ru' }
 const check = process.argv.includes('--check')
 
 const fail = (msg) => {
@@ -110,6 +123,32 @@ for (const locale of locales) {
     fs.writeFileSync(target, next)
   }
   wrote.push(`  ${locale.padEnd(6)} ${String(len).padStart(3)} / ${LIMIT}  changelogs/${code}.txt`)
+
+  // App Store's release_notes.txt is unversioned — it names "what's new in
+  // the version currently being submitted", not a per-build history the way
+  // Play's changelog directory is, so this overwrites the same file every
+  // release rather than adding a new one per code.
+  const iosLocale = IOS_LOCALE[locale] || locale
+  const iosDir = path.join(IOS_META, iosLocale)
+  if (!fs.existsSync(iosDir)) continue // that locale has no iOS listing yet
+  if (len > IOS_LIMIT) {
+    problems.push(`${iosLocale} (iOS): ${len} characters, ${len - IOS_LIMIT} over App Store's ${IOS_LIMIT}`)
+    continue
+  }
+  const iosTarget = path.join(iosDir, 'release_notes.txt')
+  const iosCurrent = fs.existsSync(iosTarget) ? fs.readFileSync(iosTarget, 'utf8') : null
+  if (check) {
+    if (iosCurrent !== next) {
+      problems.push(
+        `${iosLocale} (iOS): release_notes.txt is ${iosCurrent === null ? 'missing' : 'stale'} ` +
+          '— run `node scripts/store-notes.cjs`'
+      )
+      continue
+    }
+  } else if (iosCurrent !== next) {
+    fs.writeFileSync(iosTarget, next)
+  }
+  wrote.push(`  ${iosLocale.padEnd(6)} ${String(len).padStart(3)} / ${IOS_LIMIT}  ios/…/${iosLocale}/release_notes.txt`)
 }
 
 if (problems.length) {
