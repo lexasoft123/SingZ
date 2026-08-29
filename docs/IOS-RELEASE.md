@@ -383,6 +383,19 @@ changelog — one block, both stores, so write it assuming either audience
 reads it (a wording that's only true on one platform, e.g. naming an
 OS-specific capture path, is wrong on the other one's listing).
 
+When a release is genuinely not the same release on both phones, add
+`<!-- store:LOCALE:ios -->`, which REPLACES the shared block for the App
+Store and TestFlight and changes nothing on Play. Reach for it only then:
+the shared block is the default precisely so one claim cannot drift into two
+wordings. 0.19.1 is the case that forced it — an Android capture rewrite and
+a minSdk raised to Android 9, neither true of iPhone, and the shared text was
+on its way into `upload_to_app_store(submit_for_review: true)` saying "SingZ
+needs Android 9 now". Naming another mobile platform is review guideline
+2.3.10, and that was the iPhone app's first submission. `external_changelog`
+feeds TestFlight's "what to test" from the same file, so the override covers
+both. The `:ios` blocks are stripped from the GitHub Release body by the
+workflows; only the shared ones appear there.
+
 `name.txt`, `subtitle.txt`, `description.txt`, `keywords.txt`,
 `privacy_url.txt` and `support_url.txt` are static-ish and edited by hand —
 run the `metadata` lane after changing any of them.

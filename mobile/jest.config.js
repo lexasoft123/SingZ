@@ -14,8 +14,13 @@ module.exports = {
   // `export *` it meets.
   transformIgnorePatterns: [
     'node_modules/(?!(?:@react-native|react-native|react-native-audio-api' +
-      '|@react-navigation' +
+      '|@react-navigation|@singz/ui' +
       '|react-native-reanimated|react-native-worklets|react-native-gesture-handler' +
       '|react-native-safe-area-context|react-native-screens)/)',
   ],
+  // @singz/ui ships ESM-only subpath exports and jest resolves as CommonJS;
+  // jest.resolver.js explains why that needs a resolver rather than a
+  // condition or a path mapper. The transformIgnorePatterns entry above is the
+  // other half — once found, the ESM still has to be transformed.
+  resolver: '<rootDir>/jest.resolver.js',
 };

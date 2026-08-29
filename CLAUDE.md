@@ -177,12 +177,30 @@ project whose stems ALL carry audio — a silent stem discriminates nothing, and
 a fallback mutated to drop one passed until the mutation was moved to a stem
 with music in it — and both report whether the LATTICE and the aligned WORDS
 actually crossed, because a bare comparison sends neither and those are the
-two arguments the real pipeline always fills. Pure-JS mobile logic that no device can show
+two arguments the real pipeline always fills. `mic-android.cjs` is the one
+that cannot run on a simulator AT ALL: it drives vocal-training CAPTURE
+through the `__test.audioInput` seam, so it wants a real phone with a real
+microphone — an AVD booted `-no-audio` has no input, and the driver then
+correctly and uselessly reports a capture that delivers nothing. It needs the
+side-by-side debug build (`-PdebugAppIdSuffix=.debug`) and asserts the
+TRANSPORT contract only — the input inventory, that Bluetooth never outranks
+the built-in microphone, the negotiated device/lane/format/rate, that the
+preset was READ BACK rather than merely asked for, that audio arrives with the
+hardware callback firing and no overruns, and that the lease releases cleanly
+enough for a second capture to succeed. Pitch and level are deliberately NOT
+asserted there: they need a controlled room, and the host suite's
+mutation-checked fixtures pin them without one. Pure-JS mobile logic that no device can show
 (the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
 — needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
 our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
-and `jest.setup.js` to stub audio-api + the pods (they throw on import with no
-native module).
+`jest.setup.js` to stub audio-api + the pods (they throw on import with no
+native module), and a `resolver` for `@singz/ui`, whose subpath exports are
+ESM-only. That last one is scoped to that package on purpose: the one-line
+`customExportConditions: ['import']` fix is global, and switching every other
+dependency onto its ESM build takes all 33 suites down with it (measured). A
+suite that stops being RUN is the failure mode here — nine of them went dark
+when the phone stopped carrying its own copy of the kit, and jest reported
+240 passing tests and no failures throughout.
 **Two sessions, one Mac**: another worktree's Metro already on 8081 will happily
 serve ITS bundle to your app, so a parallel run needs its own simulator *and* its
 own port — boot a second device, build with `RCT_METRO_PORT=8082`, and then set
@@ -895,7 +913,16 @@ per-versionCode changelog and, for whichever locales
 `ru-RU`) — write those blocks assuming either audience reads them; wording
 true only on one OS (a v0.19.0 draft named "Android's own low-latency
 capture" before this was noticed and generalized) is wrong on the other
-platform's listing.
+platform's listing. When a release genuinely IS a different release on the
+two phones, `<!-- store:LOCALE:ios -->` REPLACES the shared block for Apple
+alone (0.19.1 is the case that forced it: an Android capture rewrite and an
+Android 9 floor, neither of which happened on iPhone, heading for an App
+Store submission that names another mobile platform — guideline 2.3.10, on a
+first review with no history to survive it). It is an override and not an
+addition: with none, both stores get the shared block exactly as before, and
+two copies of one claim drift, which is what this file exists to prevent.
+The workflows strip `:ios` blocks from the GitHub Release body, so the
+release page keeps opening with the same two blurbs it always has.
 
 **iOS ships through `.github/workflows/ios.yml`** — a `v*` tag uploads to
 TestFlight automatically; submitting for App Store review

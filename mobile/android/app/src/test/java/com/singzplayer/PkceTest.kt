@@ -13,7 +13,7 @@ import org.junit.Test
  * fails at Google's token endpoint, as "invalid_grant", days later.
  *
  * There is no longer a test comparing our base64url against the JDK's — since
- * minSdk 26 we use the JDK's, so such a test would only assert that
+ * our minSdk gives us the JDK's, so such a test would only assert that
  * java.util.Base64 agrees with itself. The RFC worked example below still
  * exercises the encoder, and does so against a value neither side chose.
  */
