@@ -133,8 +133,87 @@ jobs:
           set_if_present() {
             if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi
           }
-          set_if_present CSC_LINK "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64"
-          set_if_present CSC_KEY_PASSWORD "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD"
+
+          # We import the certificate OURSELVES and hand electron-builder a
+          # ready keychain, rather than setting CSC_LINK and letting it do the
+          # import. That is not a preference — CSC_LINK is BROKEN in the
+          # version this repo pins (26.15.3). app-builder-lib's createKeychain
+          # makes the keychain with `randomBytes(32)` as its password, and
+          # then importCerts runs
+          #
+          #   security set-key-partition-list -S apple-tool:,apple: -s \
+          #     -k <THE .p12 PASSWORD> <keychain>
+          #
+          # where -k is the KEYCHAIN password. The two agree only by accident.
+          # Measured here with a throwaway self-signed cert, so this is the
+          # mechanism and not one bad certificate: -k <p12 password> fails
+          # with "SecKeychainUnlock: The user name or passphrase you entered
+          # is not correct", -k <keychain password> succeeds. The step dies as
+          # a bare "security process failed 1" AFTER the engine builds.
+          #
+          # CSC_KEYCHAIN is only consulted when CSC_LINK is unset —
+          # macPackager.js calls createKeychain solely when getCscLink() is
+          # non-null — so setting CSC_LINK at all is what re-enters the bug.
+          # Leaving it unset takes the find-an-identity path instead, which is
+          # the one rehearsed locally end to end before this was written.
+          if [ -n "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" ]; then
+            kc="$RUNNER_TEMP/singz-signing.keychain-db"
+            # Not the .p12 password: this one is ours, lives for the job, and
+            # is what set-key-partition-list actually wants.
+            kcpw=$(openssl rand -base64 24)
+            # 600 before the bytes land, and removed even if `security
+            # import` fails under errexit — the private key should not
+            # outlive this block on any path.
+            ( umask 077; printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" \
+                | base64 -d > "$RUNNER_TEMP/cert.p12" )
+            trap 'rm -f "$RUNNER_TEMP/cert.p12"' EXIT
+
+            security create-keychain -p "$kcpw" "$kc"
+            # Default settings re-lock the keychain after 300s of idle; a
+            # long Package step would then hit a locked keychain mid-sign.
+            security set-keychain-settings "$kc"
+            security unlock-keychain -p "$kcpw" "$kc"
+            security import "$RUNNER_TEMP/cert.p12" -k "$kc" \
+              -T /usr/bin/codesign -T /usr/bin/productbuild \
+              -P "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD"
+            # Without this, codesign on a headless runner cannot reach the
+            # private key and fails with errSecInternalComponent — there is
+            # no one there to click "Allow".
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" >/dev/null
+            # find-identity and codesign look at the user search list, not
+            # just at --keychain. Appending rather than replacing keeps the
+            # runner's login keychain reachable.
+            security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+            rm -f "$RUNNER_TEMP/cert.p12"
+
+            # Read the identity's name off the cert rather than hardcoding a
+            # person's name here: renewing the certificate should not mean
+            # editing this workflow. Exactly one identity is in this fresh
+            # keychain, so there is nothing to disambiguate.
+            #
+            # ANCHORED on the type, not just on any quoted identity: a .p12
+            # holding an Apple Development or Apple Distribution cert (the
+            # easy wrong-secret, since the iOS pipeline deals in exactly
+            # those) would otherwise satisfy the guard below, leave the
+            # prefix strip a no-op, and put a non-Developer-ID name in
+            # CSC_NAME. That is worse than failing: afterPack.cjs keys its
+            # ad-hoc fallback on CSC_NAME being set, so it would skip itself,
+            # and electron-builder only log.warns when it cannot find the
+            # identity — shipping a dmg with the repacked-Electron broken
+            # signature that the ad-hoc hook exists to prevent.
+            name=$(security find-identity -v -p codesigning "$kc" \
+              | sed -n 's/.*"\(Developer ID Application: .*\)".*/\1/p' | head -1)
+            if [ -z "$name" ]; then
+              echo "::error::Certificate imported but no codesigning identity found —"\
+                   "is APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 a Developer ID Application .p12?"
+              exit 1
+            fi
+            # CSC_NAME wants the identity BARE, without the leading
+            # "Developer ID Application: " type prefix, which is what
+            # find-identity prints and what this strips.
+            echo "CSC_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+            echo "CSC_NAME=${name#Developer ID Application: }" >> "$GITHUB_ENV"
+          fi
 
           # APPLE_API_KEY is a FILESYSTEM PATH to the .p8, not the key's
           # contents. app-builder-lib passes it through untouched to

@@ -413,10 +413,49 @@ was driven; the gotchas that follow from it are below.
   the pack; without it a broken pack silently re-downloads 166 MB mid-split.
 - **electron-builder**: `files` must exclude `vendor/`, `.engines-src/` etc. or
   they land in the asar (was 241 MB); `${os}` macro is `mac`/`win`, NOT node's
-  `darwin`/`win32` — extraResources are declared per-platform.
+  `darwin`/`win32` — extraResources are declared per-platform. **`mobile/` and
+  `build-ios/` are on that list too, and were missed for a long time**: the
+  RN app is a separate product that happens to share the repo, and once
+  anyone has pod-installed or built iOS in their checkout, `mobile/ios`
+  carries Pods and DerivedData. A local arm64 dmg cut from such a tree
+  measured 1.35 GB (asar 2.7 GB, of which `mobile/ios` was 2.6 GB) against
+  the 122 MB CI ships — CI escaped only because its desktop job never
+  pod-installs, so this was a landmine rather than a live break. Check the
+  asar's size, not just the dmg's, when a build looks fat.
+- **`electronLanguages` names must be EXACT — the matcher is inverted** —
+  Electron ships every Chromium translation (Electron 43: 220 `.lproj` on
+  macOS, 47 MB, because each of 55 locales now has FEMININE/MASCULINE/NEUTER
+  variants); trimming to `['en', 'en-US', 'en_GB', 'ru']` leaves 2.2 MB and
+  takes ~46 MB off the bundle. But `removeUnusedLanguagesIfNeeded` in
+  `ElectronFramework.js` tests `wantedLanguage.startsWith(language + "-")` —
+  the WANTED string against the FILE's, the opposite of what its own comment
+  ("`en` matches `en-US`") claims. So `en` DELETES `en-US` instead of keeping
+  it, and the list has to spell out every form: macOS uses
+  `en.lproj`/`en_GB.lproj`, Windows uses `locales/en-US.pak`. The loop walks
+  the FILES on disk and tests each against the list, so a name that matches
+  nothing on a platform simply never fires — the cross-platform union is the
+  safe shape. These are Chromium's own strings — context menus, form
+  validation — never SingZ's copy.
 - **macOS ad-hoc signing is mandatory** (scripts/afterPack.cjs): repacked
   Electron has a broken signature and quarantined downloads show the
   unrecoverable "app is damaged" dialog. Hook skips itself when CSC_* is set.
+- **Packaging from a WORKTREE embeds absolute symlinks into the bundle** —
+  `scripts/worktree-setup.sh` deliberately links the third-party engines to
+  the main checkout rather than rebuilding whisper per worktree, so
+  `vendor/darwin-<arch>/whisper-cli` is a symlink; electron-builder copies
+  extraResources links verbatim and the .app ends up with
+  `Contents/Resources/engines/whisper-cli ->
+  /Users/…/SingZ/vendor/darwin-arm64/whisper-cli`. Nothing noticed this until
+  a REAL signing identity existed: `identity: null` runs no codesign at all,
+  and even ad-hoc signing does not verify, so the dangling link rode along
+  silently. With a Developer ID present, `@electron/osx-sign`'s strictVerify
+  (default true) runs `codesign --verify --deep --strict` and stops the build
+  with `invalid destination for symbolic link in bundle`. This is a real
+  packaging defect that signing merely surfaced — such a dmg would ship a
+  link to a path no user has. Releases are unaffected (CI and the main
+  checkout hold real files); to package from a worktree, replace the links
+  with copies first. `vendor/darwin-x64/whisper-cli` is the same trap on the
+  x64 leg.
 - **One log per platform, and it outlives the process** — everything goes
   through `log(source, line, level)`: `src/main/log.ts` on the desktop (shown
   in the existing Log dialog) and `mobile/src/log.ts` on the phone (the same

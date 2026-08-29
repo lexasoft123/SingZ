@@ -48,6 +48,44 @@ The notarization credentials are the **same three secrets**
 `APP_STORE_CONNECT_API_ISSUER_ID`, `APP_STORE_CONNECT_API_KEY_BASE64`. Set
 them once; both pipelines read them.
 
+## Why CI imports the certificate itself instead of setting `CSC_LINK`
+
+`CSC_LINK` is the documented way to hand electron-builder a `.p12`, and it is
+**broken in the version this repo pins** (26.15.3). Do not "simplify"
+`build.yml` back to it.
+
+`app-builder-lib`'s `createKeychain` builds the temp keychain with
+`randomBytes(32).toString("base64")` as its password, and then `importCerts`
+runs, for each certificate:
+
+```
+security import <cert> -k <keychain> -T /usr/bin/codesign -P <p12 password>
+security set-key-partition-list -S apple-tool:,apple: -s -k <p12 password> <keychain>
+```
+
+The `import -P` is right. The `set-key-partition-list -k` is not: that flag
+takes the **keychain** password, and it is being given the `.p12` one. The
+two agree only if you happen to have used the same string for both.
+
+Measured here with a *throwaway self-signed cert*, so it is the mechanism and
+not one bad certificate — `-k <p12 password>` fails with `SecKeychainUnlock:
+The user name or passphrase you entered is not correct`, `-k <keychain
+password>` succeeds. What you see is the build dying as a bare `security
+process failed 1`, after the engine builds and before anything is packaged,
+with nothing pointing at a password mix-up. Worse, electron-builder echoes
+the failing command — **including the `.p12` password** — into the log.
+
+`CSC_KEYCHAIN` is only consulted when `CSC_LINK` is unset: `macPackager.js`
+calls `createKeychain` solely when `getCscLink()` is non-null. So the
+workaround is not to set `CSC_LINK` at all, and instead create the keychain,
+import into it, and set the partition list with the keychain's *own*
+password — which is what `build.yml`'s signing step does.
+
+Locally the same shape applies: build with `CSC_KEYCHAIN` pointing at a
+keychain you prepared, `CSC_NAME` set to the identity **bare** (no
+`Developer ID Application: ` prefix — that form is rejected), and `CSC_LINK`
+unset.
+
 ## What actually signs and notarizes it
 
 `electron-builder.yml`'s `mac` block carries `hardenedRuntime: true`,

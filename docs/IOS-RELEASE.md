@@ -280,7 +280,7 @@ Two things about it that are deliberate:
 Local runs need no secrets — the Fastfile reads `.keys/AuthKey_<KeyID>.p8`
 directly, and git auth comes from your existing `gh` login (run
 `gh auth setup-git` once if a `git push` to the certs repo ever prompts).
-CI has neither, so it gets four secrets:
+CI has neither, so it gets five secrets:
 
 ```bash
 gh secret set APP_STORE_CONNECT_API_KEY_ID --body "<KeyID>"
@@ -306,7 +306,7 @@ gh secret set SINGZ_REVIEW_PHONE      --body "<phone>"
 gh secret set SINGZ_REVIEW_EMAIL      --body "<email>"
 ```
 
-That is eight secrets instead of the seven the hand-managed approach needed,
+That is nine secrets instead of the seven the hand-managed approach needed,
 and — the reason this matters more than the count — **the profile name is
 never written down anywhere**. `match` exports it into
 `sigh_io.s-dev.singz_appstore_profile-name`, which the `archive` lane reads,
@@ -329,8 +329,11 @@ touch the others.
   the build to a group once it finishes processing (Apple's own processing
   step, 15–60 min, that nothing in CI can shorten — the job does not wait
   for it).
-- **Manual dispatch** lets you choose `validate` (checks every secret, the
-  version match, and actually fetches the certs — ships nothing), `beta`
+- **Manual dispatch** lets you choose `validate` (checks the App Store
+  Connect key and the two `match` secrets, the version match, and actually
+  fetches the certs — ships nothing. It does **not** touch the four
+  `SINGZ_REVIEW_*` secrets: only `release` reads those, so a green `validate`
+  does not prove a submission will not stop on a missing contact), `beta`
   (TestFlight), `release` (builds and submits for review with
   `automatic_release: true`, so an approved build goes **live on the store by
   itself** — there is no second confirmation, and dispatching the lane is
