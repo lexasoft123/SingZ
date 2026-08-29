@@ -78,7 +78,7 @@ import SkiaLyrics, {
 } from './SkiaLyrics'
 import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
-import { nativeGlassStyle, nightStudioNativeTheme } from './uikit/native/index.js'
+import { nativeGlassStyle, nightStudioNativeTheme } from '@singz/ui/native'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')

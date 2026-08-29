@@ -1,20 +1,17 @@
 /*
  * One table, three ends — the same shape as tests/shared/currency-cases.json.
  *
- * The kit owns the stem colours; the desktop imports them; the phone carries
- * a VENDORED copy because Metro does not honour the "exports" field and
- * adding a React-DOM package to the phone's dependency graph to read a
- * colour table would be a resolution failure waiting to happen.
- *
- * A vendored copy is only safe if something notices when it rots. This is
- * that something. It is why vocals is not #ff5c65 on the desktop and
- * #ff5d66 on the phone any more.
+ * The kit owns the stem colours; both apps import them straight from
+ * `@singz/ui`, each resolved from its own lockfile. There is no vendored
+ * copy left to rot, but the two lockfiles can still end up pinned to
+ * different tags — this is what notices when they do. It is why vocals is
+ * not #ff5c65 on the desktop and #ff5d66 on the phone any more.
  */
 import { describe, expect, it } from 'vitest'
 import { STEM_META, CUSTOM_COLORS } from '@singz/ui/stems'
 import { tokens } from '@singz/ui/tokens'
 import { KIT, STEM_COLORS, CUSTOM_COLORS as PHONE_CUSTOM } from '../../mobile/src/ui/tokens'
-import { tokens as nativeTokens } from '../../mobile/src/ui/uikit/tokens/tokens.js'
+import { tokens as nativeTokens } from '../../mobile/node_modules/@singz/ui/dist/tokens/tokens.js'
 
 describe('kit tokens reach the phone unchanged', () => {
   it('every stem colour matches', () => {
@@ -49,7 +46,7 @@ describe('kit tokens reach the phone unchanged', () => {
     expect(STEM_COLORS.vocals).toBe('#ff5c65')
   })
 
-  it('native glass materials come from the vendored kit tokens', () => {
+  it('native glass materials match between the two lockfiles', () => {
     expect(KIT.glassFill).toBe(nativeTokens['glass-fill'])
     expect(KIT.glassLine).toBe(nativeTokens['glass-line'])
     expect(KIT.glassRim).toBe(nativeTokens['glass-rim'])
