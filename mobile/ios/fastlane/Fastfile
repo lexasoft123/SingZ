@@ -74,12 +74,27 @@ end
 
 # The build number (CURRENT_PROJECT_VERSION) is a different question from the
 # marketing version: Apple only requires it to increase within one
-# MARKETING_VERSION, but there is no harm in an always-increasing one, and it
-# retires the "forgot to bump the build number" trap entirely for the CI
-# path. The workflow passes GitHub's run_number, which never repeats and
-# never goes backwards across the whole repo's Action history. Local runs
-# have no such counter and are not this pipeline's job — see
-# scripts/ship-ios-ipa (the sis-motors.ru sideload) for the hand-bumped path.
+# MARKETING_VERSION. The workflow passes GitHub's run_number, which never
+# repeats and never goes backwards FOR THAT WORKFLOW — it is a per-workflow
+# counter, NOT a repo-wide one. An earlier version of this comment claimed
+# the latter and it is simply false: ios.yml's runs were numbered 1, 2, 3
+# while this repo had hundreds of Action runs across the other five
+# workflows.
+#
+# So the counter starts at 1 for any newly added workflow, and that is fine
+# for a MARKETING_VERSION whose builds this workflow alone produced — and
+# exactly wrong for one already carrying HIGHER builds from somewhere else.
+# 0.19.0 reached build 33 through hand-driven local uploads, so the first CI
+# `beta` against it would have offered build 4 and Apple would have refused
+# it. Bump MARKETING_VERSION before letting CI upload to a version that was
+# ever hand-uploaded; a fresh train accepts a low build number happily.
+#
+# Local runs have no such counter and are not this pipeline's job. The
+# hand-bumped path is the sis-motors.ru sideload, driven by the ship-ios-ipa
+# skill — which lives in the user's global ~/.claude/skills/, NOT in this
+# repo; there is no scripts/ship-ios-ipa, whatever earlier comments said. Its
+# builder reads CURRENT_PROJECT_VERSION straight out of project.pbxproj,
+# which is the only thing that field still governs now CI overrides it.
 def ci_build_number
   n = ENV["SINGZ_IOS_BUILD_NUMBER"]
   UI.user_error!(

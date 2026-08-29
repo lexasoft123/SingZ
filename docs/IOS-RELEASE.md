@@ -351,11 +351,25 @@ Every lane starts by checking `MARKETING_VERSION` in
 `mobile/ios/SingZPlayer.xcodeproj/project.pbxproj` against the root
 `package.json` version and refuses to build on a mismatch — that field is
 still hand-bumped (see the root `CLAUDE.md`), CI only refuses to ship a
-stale one. The **build number** (`CURRENT_PROJECT_VERSION`) is *not*
-hand-bumped for this path — the workflow passes `github.run_number`, which
-never repeats and never goes backwards across the whole repo's Action
-history, so there's no version of the "forgot to bump the build number"
-trap here.
+stale one.
+
+The **build number** (`CURRENT_PROJECT_VERSION`) is *not* hand-bumped for
+this path — the workflow passes `github.run_number`. That counter is
+**per-workflow, not repo-wide**: it starts at 1 for any newly added
+workflow, and ios.yml's first runs were numbered 1, 2, 3 while this repo had
+hundreds of Action runs across the other five workflows. (Earlier revisions
+of this page, of `CLAUDE.md` and of the Fastfile all claimed it never went
+backwards "across the whole repo's Action history". It was wrong in all
+three.)
+
+**So bumping `MARKETING_VERSION` is not optional before the first CI upload
+of a version that was ever hand-uploaded.** Apple scopes build-number
+ordering to one `CFBundleShortVersionString`, and 0.19.0 reached build 33
+through hand-driven local uploads — so the first CI `beta` against 0.19.0
+would have offered build 4 and Apple would have refused it. A fresh version
+train accepts a low build number happily, which is why the fix is a version
+bump rather than a build-number override. Past that one seam no build number
+is typed by hand here.
 
 ## Store listing text
 

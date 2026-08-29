@@ -949,11 +949,22 @@ phone. Every lane checks
 `MARKETING_VERSION` against `package.json` and refuses a mismatch, but does
 **not** bump it for you — still hand-bumped per the paragraph above. The
 **build number** is the one version CI does own end to end: it passes
-`github.run_number`, never repeating and never going backwards across the
-whole repo's Action history, so there is no "forgot to bump the build
-number" trap on this path the way there still is for
-[ship-ios-ipa](.claude/skills/ship-ios-ipa/SKILL.md)'s hand-bumped sideload
-build — a different pipeline, a different certificate type
+`github.run_number`, which never repeats and never goes backwards **for this
+workflow** — it is a PER-WORKFLOW counter, not a repo-wide one, and an
+earlier version of this paragraph claimed otherwise. ios.yml's runs are
+numbered 1, 2, 3 while the repo has had hundreds of Action runs, so the
+counter starts at 1 for any newly added workflow. That is fine for every
+version whose builds this workflow alone produced, and it is exactly wrong
+for a version that already carries HIGHER builds from somewhere else: 0.19.0
+reached build 33 through hand-driven local uploads, so a `beta` run against
+0.19.0 offers build 4 and Apple refuses it — a build number cannot go
+backwards within a version train. Bump `MARKETING_VERSION` before letting CI
+upload, or the first CI build of a hand-uploaded version is rejected. Past
+that one seam, no build number is ever typed by hand on this path — which is
+still a real improvement on the trap there is for the `ship-ios-ipa` skill's
+hand-bumped sideload build (that skill is user-global, in `~/.claude/skills/`
+— it is not in this repo, and the link that used to point inside the tree was
+dead) — a different pipeline, a different certificate type
 (development-signed, not App Store-signed), and not interchangeable with
 this one.
 
