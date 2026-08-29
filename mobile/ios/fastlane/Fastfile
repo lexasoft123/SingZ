@@ -132,6 +132,15 @@ def external_changelog(version)
   "SingZ #{version}"
 end
 
+# The external TestFlight groups, or [] when none is configured. CI passes the
+# TESTFLIGHT_GROUPS repo VARIABLE (a group name is not a secret); locally it is
+# SINGZ_TESTFLIGHT_GROUPS. Empty is a legitimate answer and means "internal
+# only" — only `beta_external`, whose entire job is widening, treats it as an
+# error.
+def testflight_groups
+  ENV["SINGZ_TESTFLIGHT_GROUPS"].to_s.split(",").map(&:strip).reject(&:empty?)
+end
+
 # Beta App Review contact — the same four fields the App Store submission
 # uses, in pilot's own key names.
 def beta_review_info
@@ -327,7 +336,8 @@ platform :ios do
   lane :beta_external do |options|
     version = verify_marketing_version
     build_number = options[:build] || ci_build_number
-    groups = (ENV["SINGZ_TESTFLIGHT_GROUPS"] || options[:groups]).to_s
+    groups = testflight_groups
+    groups = options[:groups].to_s.split(",").map(&:strip).reject(&:empty?) if groups.empty?
     UI.user_error!(
       "No external group named. Set SINGZ_TESTFLIGHT_GROUPS (comma-separated) or pass " \
       "groups:\"My Testers\" — the group must already exist in App Store Connect."
@@ -350,7 +360,7 @@ platform :ios do
       app_version: version,
       build_number: build_number.to_s,
       distribute_external: true,
-      groups: groups.split(",").map(&:strip),
+      groups: groups,
       # TestFlight's "Test Information" page. External testing stays greyed
       # out in App Store Connect until the Beta App Description and a
       # feedback email exist — they are per-app, not per-build, and Apple
@@ -362,31 +372,86 @@ platform :ios do
       changelog: external_changelog(version),
       beta_app_review_info: beta_review_info
     )
-    UI.success("SingZ #{version} (#{build_number}) sent to Beta App Review for: #{groups}")
+    UI.success("SingZ #{version} (#{build_number}) sent to Beta App Review for: #{groups.join(", ")}")
   end
 
-  desc "Build, then upload to TestFlight"
+  desc "Build and upload to TestFlight — widens to external testers (Beta App Review) when a group is configured"
   lane :beta do
     version = verify_marketing_version
     build_number = ci_build_number
     key = api_key
+    groups = testflight_groups
+    # Fetched BEFORE the archive, like `release`'s contact and for the same
+    # reason: an incomplete review contact is the difference between "widened"
+    # and "uploaded and not widened", and discovering it after the archive and
+    # after Apple's processing means an hour lost with the binary already
+    # sent — and a re-run draws a fresh run_number, so the retry lands under a
+    # different build number.
+    review = groups.empty? ? nil : beta_review_info
     install_signing(api_key: key)
     ipa = archive(build_number: build_number)
 
-    upload_to_testflight(
-      api_key: key,
-      ipa: ipa,
-      # Apple's own processing can run 15-60 min with nothing this job can
-      # do about it. Waiting here just burns a CI runner slot for that whole
-      # window; the build shows up in App Store Connect (and to testers,
-      # once a group is assigned) on its own once processing finishes.
-      skip_waiting_for_build_processing: true,
-      # No group assignment: which testers see a given build is a judgement
-      # call for the console, the same reason Android's tag path lands in a
-      # closed track rather than picking testers for you.
-      distribute_external: false
-    )
-    UI.success("SingZ #{version} (#{build_number}) uploaded to TestFlight.")
+    if groups.empty?
+      # No group configured: upload and stop, which is what this lane always
+      # did. Nobody on the public TestFlight link sees this build.
+      UI.important(
+        "No external group configured (TESTFLIGHT_GROUPS repo variable / " \
+        "SINGZ_TESTFLIGHT_GROUPS) — uploading for INTERNAL testers only. " \
+        "Widen it later with: fastlane ios beta_external build:#{build_number}"
+      )
+      upload_to_testflight(
+        api_key: key,
+        ipa: ipa,
+        # Apple's own processing can run 15-60 min with nothing this job can
+        # do about it. With nothing to distribute afterwards, waiting here
+        # would just burn a runner slot for that whole window.
+        skip_waiting_for_build_processing: true,
+        distribute_external: false
+      )
+      UI.success("SingZ #{version} (#{build_number}) uploaded to TestFlight (internal only).")
+    else
+      # ONE call that uploads, waits and distributes, rather than `beta`
+      # followed by `beta_external`: one wait, and the group named in one
+      # place. NOT because chaining would race Apple — it would not. The
+      # `upload_to_testflight` ACTION waits on the distribute-only path too
+      # (upload_to_testflight.rb:31 in the pinned 2.238.0 calls
+      # wait_for_build_processing_to_be_complete unless
+      # skip_waiting_for_build_processing is set), even though
+      # Pilot::BuildManager#distribute, which it wraps, does not wait itself.
+      # That distinction is worth keeping straight: the early return at
+      # build_manager.rb:202 that abandons distribution without failing is
+      # guarded by the same option, so it can only bite a caller that sets
+      # skip_waiting_for_build_processing AND expects a widen.
+      sync_release_notes(version: version)
+      upload_to_testflight(
+        api_key: key,
+        ipa: ipa,
+        # MUST stay false here. Apple cannot distribute a build that is
+        # still processing, and setting this true is exactly what turns the
+        # widen into a silent no-op (see above). It is why this lane can now
+        # run for the better part of an hour — the job timeout accounts for it.
+        skip_waiting_for_build_processing: false,
+        distribute_external: true,
+        groups: groups,
+        # TestFlight's "Test Information": External Testing stays greyed out
+        # in App Store Connect until a Beta App Description and a feedback
+        # email exist. They are per-app rather than per-build. Sending them
+        # here does NOT seed an app that has none — pilot's
+        # update_localized_app_review only walks localizations that already
+        # exist, so on a bare app it iterates nothing, creates nothing, and
+        # still reports success (the same trap `beta_info` documents). That
+        # lane, run once by hand, is what actually creates them.
+        beta_app_description: BETA_DESCRIPTION,
+        beta_app_feedback_email: ENV["SINGZ_REVIEW_EMAIL"],
+        # Apple demands a changelog for external distribution; without one
+        # the upload is accepted and the distribution silently is not. This
+        # is the singer-facing "What to Test", taken from the release notes
+        # sync_release_notes just regenerated.
+        changelog: external_changelog(version),
+        beta_app_review_info: review
+      )
+      UI.success("SingZ #{version} (#{build_number}) sent to Beta App Review for: #{groups.join(", ")}")
+    end
   end
 
   desc "Build, then submit to the App Store for review — GOES LIVE BY ITSELF on approval"
@@ -419,43 +484,25 @@ platform :ios do
       distribute_external: false
     )
 
-    sync_release_notes(version: version)
-    upload_to_app_store(
-      api_key: key,
-      skip_binary_upload: true,
-      build_number: build_number.to_s,
-      submit_for_review: true,
-      # Goes live BY ITSELF the moment Apple approves — no second visit to
-      # the console. The trade is that there is no pause between "approved"
-      # and "on the store": if a release should be held for a date or a
-      # channel post, set this false for that run.
-      automatic_release: true,
-      # The binary lane must not rewrite the shopfront's screenshots/graphics
-      # by accident — that is the `metadata` lane's job, run on purpose. Text
-      # (name/subtitle/description/keywords/release notes) still goes up:
-      # App Store review reads the "What's New" text as part of the submission.
-      skip_screenshots: true,
-      skip_app_version_update: false,
-      force: true, # do not open an interactive diff prompt on a headless runner
-      precheck_include_in_app_purchases: false,
-      # The three declarations Apple demands with every submission. They are
-      # answered in the console too, but deliver sends them itself and fails
-      # ("You must provide export compliance information") when they are
-      # absent. Third-party content is TRUE and deliberate: the app displays
-      # lyrics fetched from a third-party service and plays audio the user
-      # supplies — the rights question was answered in the console.
-      submission_information: {
-        export_compliance_uses_encryption: false,
-        content_rights_contains_third_party_content: true,
-        add_id_info_uses_idfa: false
-      },
-      # A real person's name, phone and email. They are NOT in
-      # metadata/review_information/ — this repo is public and a phone number
-      # in a public history is permanent. They come from the SOPS store via
-      # scripts/with-apple-secrets.sh; only notes.txt is tracked.
-      app_review_information: contact
-    )
-    UI.success("SingZ #{version} (#{build_number}) submitted for App Store review — it will go LIVE automatically once approved.")
+    submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
+  end
+
+  desc "Submit an ALREADY-UPLOADED build for App Store review — no rebuild. GOES LIVE BY ITSELF on approval"
+  # The manual counterpart to a tag: the tag's own run built and uploaded the
+  # binary, and this sends THAT build to review without producing a second
+  # one. `release` archives afresh, which on a dispatch aimed at an existing
+  # tag means a new run_number, a new build number, and two binaries at Apple
+  # for one version — so prefer this lane whenever the build already exists.
+  #
+  # The build number is not guessable from here: a dispatch draws its own
+  # run_number, which is NOT the one the tag's run used. Pass it —
+  # `build:5`, or the workflow's `build` input, which lands in
+  # SINGZ_IOS_BUILD_NUMBER.
+  lane :submit do |options|
+    version = verify_marketing_version
+    build_number = options[:build] || ci_build_number
+    contact = review_contact
+    submit_build(version: version, build_number: build_number, api_key: api_key, contact: contact)
   end
 
   desc "Push store listing TEXT only — screenshots go via scripts/push-ios-screenshots.rb"
@@ -613,4 +660,49 @@ private_lane :sync_release_notes do |options|
   UI.user_error!("scripts/store-notes.cjs is missing") unless File.exist?(script)
   Dir.chdir(REPO_ROOT) { sh("node", "scripts/store-notes.cjs") }
   UI.success("Store notes for v#{options[:version]} are current")
+end
+
+# The App Store submission itself, shared by `release` (which archives a new
+# binary first) and `submit` (which sends one already uploaded). One copy on
+# purpose: it carries Apple's three mandatory declarations and a real person's
+# contact details, and two copies of that drift silently — the failure shows
+# up as a rejection email weeks later.
+private_lane :submit_build do |options|
+  sync_release_notes(version: options[:version])
+  upload_to_app_store(
+    api_key: options[:api_key],
+    skip_binary_upload: true,
+    build_number: options[:build_number].to_s,
+    submit_for_review: true,
+    # Goes live BY ITSELF the moment Apple approves — no second visit to
+    # the console. The trade is that there is no pause between "approved"
+    # and "on the store": if a release should be held for a date or a
+    # channel post, set this false for that run.
+    automatic_release: true,
+    # The binary lane must not rewrite the shopfront's screenshots/graphics
+    # by accident — that is the `metadata` lane's job, run on purpose. Text
+    # (name/subtitle/description/keywords/release notes) still goes up:
+    # App Store review reads the "What's New" text as part of the submission.
+    skip_screenshots: true,
+    skip_app_version_update: false,
+    force: true, # do not open an interactive diff prompt on a headless runner
+    precheck_include_in_app_purchases: false,
+    # The three declarations Apple demands with every submission. They are
+    # answered in the console too, but deliver sends them itself and fails
+    # ("You must provide export compliance information") when they are
+    # absent. Third-party content is TRUE and deliberate: the app displays
+    # lyrics fetched from a third-party service and plays audio the user
+    # supplies — the rights question was answered in the console.
+    submission_information: {
+      export_compliance_uses_encryption: false,
+      content_rights_contains_third_party_content: true,
+      add_id_info_uses_idfa: false
+    },
+    # A real person's name, phone and email. They are NOT in
+    # metadata/review_information/ — this repo is public and a phone number
+    # in a public history is permanent. They come from the SOPS store via
+    # scripts/with-apple-secrets.sh; only notes.txt is tracked.
+    app_review_information: options[:contact]
+  )
+  UI.success("SingZ #{options[:version]} (#{options[:build_number]}) submitted for App Store review — it will go LIVE automatically once approved.")
 end

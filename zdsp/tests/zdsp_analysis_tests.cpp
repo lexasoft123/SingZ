@@ -180,6 +180,350 @@ int main() {
             contained.rms == containedLegacy.rms &&
             contained.dbfs == containedLegacy.dbfs);
 
+  // Exercise quiet-device normalization through the production zdsp adapter,
+  // not the retained legacy facade. The 187.5 Hz carrier has an exact
+  // 256-frame period at 48 kHz, so every 512-frame delivery remains phase
+  // continuous and cannot introduce a fixture-frequency seam.
+  {
+    constexpr double kPi = 3.14159265358979323846;
+    auto voicedTone = [&](float amplitude, size_t frames,
+                          uint64_t sourceFrame = 0) {
+      std::vector<float> samples(frames);
+      for (size_t index = 0; index < frames; ++index) {
+        samples[index] = static_cast<float>(
+            amplitude *
+            std::sin(2.0 * kPi * 187.5 *
+                     static_cast<double>(sourceFrame + index) / 48000.0));
+      }
+      return samples;
+    };
+    auto settled = [&](float amplitude,
+                       zdsp::analysis::AnalysisWindow& result) {
+      zdsp::analysis::LiveInputAnalysisAdapter gainAdapter(811);
+      uint64_t sourceFrame = 0;
+      bool seen = false;
+      auto initial = voicedTone(amplitude, 2048, sourceFrame);
+      gainAdapter.push(block(initial, 0, sourceFrame), [&](const auto& window) {
+        result = window;
+        seen = true;
+      });
+      sourceFrame += initial.size();
+      for (uint64_t sequence = 1; sequence <= 8; ++sequence) {
+        auto hop = voicedTone(amplitude, 512, sourceFrame);
+        gainAdapter.push(block(hop, sequence, sourceFrame),
+                         [&](const auto& window) {
+                           result = window;
+                           seen = true;
+                         });
+        sourceFrame += hop.size();
+      }
+      return seen ? gainAdapter.appliedGain() : -1.0f;
+    };
+
+    zdsp::analysis::AnalysisWindow quiet;
+    const float quietGain = settled(0.0155f, quiet);
+    CHECK("zdsp adapter lifts a quiet phone to the detector level",
+          quietGain > 10.0f);
+    CHECK("zdsp adapter finds pitch after lifting a quiet phone",
+          quiet.analysis.frequency > 183.0 &&
+              quiet.analysis.frequency < 192.0);
+    CHECK("zdsp adapter reports the raw hardware level after lifting",
+          quiet.analysis.dbfs < -36.0 && quiet.analysis.dbfs > -42.0);
+
+    zdsp::analysis::AnalysisWindow loud;
+    const float loudGain = settled(0.5f, loud);
+    const auto loudSamples = voicedTone(0.5f, 2048);
+    const auto loudDirect = zdsp::analysis::analyzeLiveInput(
+        loudSamples.data(), loudSamples.size(), 48000);
+    CHECK("zdsp adapter leaves an already-loud phone unscaled",
+          loudGain == 1.0f);
+    CHECK("zdsp adapter loud path is bit-identical to the detector",
+          loud.analysis.frequency == loudDirect.frequency &&
+              loud.analysis.clarity == loudDirect.clarity &&
+              loud.analysis.rms == loudDirect.rms);
+
+    zdsp::analysis::AnalysisWindow silence;
+    CHECK("zdsp adapter does not lift digital silence",
+          settled(0.0f, silence) == 1.0f &&
+              silence.analysis.frequency == 0.0);
+
+    zdsp::analysis::AnalysisWindow lowRoom;
+    settled(0.0004f, lowRoom);
+    CHECK("zdsp adapter rejects a tonal room below the voicing floor",
+          lowRoom.analysis.frequency == 0.0 &&
+              lowRoom.analysis.clarity == 0.0);
+    CHECK("zdsp adapter reports a rejected room's true level",
+          lowRoom.analysis.dbfs < -68.0 && lowRoom.analysis.dbfs > -74.0);
+
+    zdsp::analysis::AnalysisWindow measuredRoom;
+    settled(0.0019f, measuredRoom);
+    CHECK("zdsp adapter rejects the measured quiet-phone room",
+          measuredRoom.analysis.frequency == 0.0);
+
+    zdsp::analysis::AnalysisWindow softVoice;
+    settled(0.0044f, softVoice);
+    CHECK("zdsp adapter hears the measured soft-voice peak",
+          softVoice.analysis.frequency > 183.0 &&
+              softVoice.analysis.frequency < 192.0);
+
+    zdsp::analysis::AnalysisWindow betweenEdges;
+    settled(0.0021f, betweenEdges);
+    CHECK("zdsp adapter hysteresis does not open between its edges",
+          betweenEdges.analysis.frequency == 0.0);
+
+    // The accepted threshold trade-off is explicit: a tonal room above the
+    // open edge is pitchable and remains so while it stays above that edge.
+    {
+      zdsp::analysis::LiveInputAnalysisAdapter cost(812);
+      uint64_t sequence = 0;
+      uint64_t sourceFrame = 0;
+      auto initial = voicedTone(0.00328f, 2048, sourceFrame);
+      cost.push(block(initial, sequence++, sourceFrame), [](const auto&) {});
+      sourceFrame += initial.size();
+      int windows = 0;
+      int pitched = 0;
+      double lastFrequency = 0.0;
+      for (int index = 0; index < 40; ++index) {
+        auto hop = voicedTone(0.00328f, 512, sourceFrame);
+        cost.push(block(hop, sequence++, sourceFrame), [&](const auto& window) {
+          ++windows;
+          if (window.analysis.frequency > 0.0) ++pitched;
+          lastFrequency = window.analysis.frequency;
+        });
+        sourceFrame += hop.size();
+      }
+      CHECK("zdsp adapter documents the tonal-room-above-open cost",
+            windows >= 35 && pitched >= 30 && lastFrequency > 183.0 &&
+                lastFrequency < 192.0);
+    }
+
+    // Once a note opens the gate, sustained input below the open edge must
+    // release before the training tracker's 1.5-second note hold can lock it.
+    {
+      zdsp::analysis::LiveInputAnalysisAdapter latch(813);
+      uint64_t sequence = 0;
+      uint64_t sourceFrame = 0;
+      auto initial = voicedTone(0.0155f, 2048, sourceFrame);
+      latch.push(block(initial, sequence++, sourceFrame), [](const auto&) {});
+      sourceFrame += initial.size();
+      int sungPitched = 0;
+      for (int index = 0; index < 8; ++index) {
+        auto hop = voicedTone(0.0155f, 512, sourceFrame);
+        latch.push(block(hop, sequence++, sourceFrame), [&](const auto& window) {
+          if (window.analysis.frequency > 0.0) ++sungPitched;
+        });
+        sourceFrame += hop.size();
+      }
+      int roomWindows = 0;
+      int roomPitched = 0;
+      for (int index = 0; index < 120; ++index) {
+        auto hop = voicedTone(0.0021f, 512, sourceFrame);
+        latch.push(block(hop, sequence++, sourceFrame), [&](const auto& window) {
+          ++roomWindows;
+          if (window.analysis.frequency > 0.0) ++roomPitched;
+        });
+        sourceFrame += hop.size();
+      }
+      CHECK("zdsp adapter opens for a sung note", sungPitched >= 6);
+      CHECK("zdsp adapter release tail cannot lock a quieter room",
+            roomWindows >= 100 && roomPitched >= 1 && roomPitched < 45);
+
+      // Re-open, then cross the lower edge: this path closes immediately and
+      // does not wait for the release counter.
+      for (int index = 0; index < 4; ++index) {
+        auto hop = voicedTone(0.0155f, 512, sourceFrame);
+        latch.push(block(hop, sequence++, sourceFrame), [](const auto&) {});
+        sourceFrame += hop.size();
+      }
+      int hushPitched = 0;
+      for (int index = 0; index < 20; ++index) {
+        auto hop = voicedTone(0.0008f, 512, sourceFrame);
+        latch.push(block(hop, sequence++, sourceFrame), [&](const auto& window) {
+          if (window.analysis.frequency > 0.0) ++hushPitched;
+        });
+        sourceFrame += hop.size();
+      }
+      CHECK("zdsp adapter closes immediately below the lower edge",
+            hushPitched <= 4);
+    }
+
+    // A held note whose analysis-window RMS briefly dips under the open edge
+    // must ride through the release hysteresis without pitch dropouts.
+    {
+      constexpr size_t kHeldFrames = 2048 + 18 * 512;
+      std::vector<float> heldSamples(kHeldFrames);
+      for (size_t index = 0; index < heldSamples.size(); ++index) {
+        const double time = static_cast<double>(index) / 48000.0;
+        const double envelope =
+            0.0042 * (1.0 + 0.55 * std::sin(2.0 * kPi * 5.0 * time));
+        heldSamples[index] = static_cast<float>(
+            envelope * std::sin(2.0 * kPi * 187.5 * time));
+      }
+      zdsp::analysis::LiveInputAnalysisAdapter held(814);
+      uint64_t sequence = 0;
+      uint64_t sourceFrame = 0;
+      std::vector<float> initial(heldSamples.begin(),
+                                 heldSamples.begin() + 2048);
+      held.push(block(initial, sequence++, sourceFrame), [](const auto&) {});
+      sourceFrame += initial.size();
+      int windows = 0;
+      int dropouts = 0;
+      int latched = 0;
+      int dipped = 0;
+      for (int index = 0; index < 18; ++index) {
+        const auto begin = heldSamples.begin() +
+                           static_cast<std::ptrdiff_t>(sourceFrame);
+        std::vector<float> hop(begin, begin + 512);
+        held.push(block(hop, sequence++, sourceFrame), [&](const auto& window) {
+          if (++latched <= 2) return;
+          ++windows;
+          if (window.analysis.rms <
+              zdsp::analysis::LiveInputAnalysisAdapter::kVoicingOpenRms)
+            ++dipped;
+          if (window.analysis.frequency == 0.0) ++dropouts;
+        });
+        sourceFrame += hop.size();
+      }
+      CHECK("zdsp adapter does not chop a held note during brief dips",
+            windows >= 14 && dipped >= 3 && dropouts == 0);
+    }
+
+    // Pin the onset duration: one loud window cannot open the gate; the third
+    // consecutive voiced window can.
+    {
+      zdsp::analysis::LiveInputAnalysisAdapter onset(815);
+      uint64_t sequence = 0;
+      uint64_t sourceFrame = 0;
+      int pitched = 0;
+      auto initial = voicedTone(0.0155f, 2048, sourceFrame);
+      onset.push(block(initial, sequence++, sourceFrame), [&](const auto& window) {
+        if (window.analysis.frequency > 0.0) ++pitched;
+      });
+      sourceFrame += initial.size();
+      for (int index = 0; index < 2; ++index) {
+        auto hop = voicedTone(0.0155f, 512, sourceFrame);
+        onset.push(block(hop, sequence++, sourceFrame), [&](const auto& window) {
+          if (window.analysis.frequency > 0.0) ++pitched;
+        });
+        sourceFrame += hop.size();
+      }
+      CHECK("zdsp adapter opens on the third voiced window", pitched == 1);
+    }
+
+    // A peak follower that saw a transient must not hold detector gain below
+    // the absolute RMS gate for a plainly present voice.
+    {
+      zdsp::analysis::LiveInputAnalysisAdapter recovery(816);
+      uint64_t sequence = 0;
+      uint64_t sourceFrame = 0;
+      auto bump = voicedTone(0.5f, 2048, sourceFrame);
+      recovery.push(block(bump, sequence++, sourceFrame), [](const auto&) {});
+      sourceFrame += bump.size();
+      int pitched = 0;
+      for (int index = 0; index < 12; ++index) {
+        auto voice = voicedTone(0.0079f, 512, sourceFrame);
+        recovery.push(block(voice, sequence++, sourceFrame),
+                      [&](const auto& window) {
+                        if (window.analysis.frequency > 0.0) ++pitched;
+                      });
+        sourceFrame += voice.size();
+      }
+      CHECK("zdsp adapter hears a voice immediately after a loud transient",
+            pitched >= 8);
+    }
+
+    // Prove broadband input really reaches the normalized path and still does
+    // not become a confident pitch.
+    {
+      std::vector<float> hiss(3072);
+      uint32_t seed = 12345;
+      for (float& sample : hiss) {
+        seed = seed * 1664525u + 1013904223u;
+        sample =
+            (static_cast<float>(seed >> 8) / 8388608.0f - 1.0f) * 0.004f;
+      }
+      zdsp::analysis::LiveInputAnalysisAdapter noise(817);
+      zdsp::analysis::AnalysisWindow noiseWindow;
+      std::vector<float> initial(hiss.begin(), hiss.begin() + 2048);
+      noise.push(block(initial, 0, 0), [&](const auto& window) {
+        noiseWindow = window;
+      });
+      for (uint64_t sequence = 1; sequence <= 2; ++sequence) {
+        const auto begin = hiss.begin() + 2048 +
+                           static_cast<std::ptrdiff_t>((sequence - 1) * 512);
+        std::vector<float> hop(begin, begin + 512);
+        noise.push(block(hop, sequence, 2048 + (sequence - 1) * 512),
+                   [&](const auto& window) { noiseWindow = window; });
+      }
+      CHECK("zdsp adapter normalizes broadband noise without pitching it",
+            noise.appliedGain() > 1.0f && noiseWindow.analysis.clarity < 0.5);
+    }
+
+    // Reset and continuity reconfiguration both own normalization state.
+    {
+      zdsp::analysis::LiveInputAnalysisAdapter state(818);
+      uint64_t sourceFrame = 0;
+      zdsp::analysis::AnalysisWindow ignored;
+      auto initial = voicedTone(0.0155f, 2048, sourceFrame);
+      state.push(block(initial, 0, sourceFrame), [&](const auto& window) {
+        ignored = window;
+      });
+      sourceFrame += initial.size();
+      for (uint64_t sequence = 1; sequence <= 4; ++sequence) {
+        auto hop = voicedTone(0.0155f, 512, sourceFrame);
+        state.push(block(hop, sequence, sourceFrame), [&](const auto& window) {
+          ignored = window;
+        });
+        sourceFrame += hop.size();
+      }
+      CHECK("zdsp adapter state fixture applies gain",
+            state.appliedGain() > 10.0f && state.capturePeak() > 0.01f);
+      state.reset();
+      CHECK("zdsp adapter reset clears gain and follower",
+            state.appliedGain() == 1.0f && state.capturePeak() == 0.0f);
+
+      zdsp::analysis::LiveInputAnalysisAdapter reanchor(819);
+      sourceFrame = 0;
+      reanchor.push(block(initial, 0, sourceFrame), [](const auto&) {});
+      sourceFrame += initial.size();
+      for (uint64_t sequence = 1; sequence <= 4; ++sequence) {
+        auto hop = voicedTone(0.0155f, 512, sourceFrame);
+        reanchor.push(block(hop, sequence, sourceFrame), [](const auto&) {});
+        sourceFrame += hop.size();
+      }
+      // Keep backing storage alive across push; AudioInputBlockView is a view.
+      std::vector<float> zeroes(2048, 0.0f);
+      auto quietBlock = block(zeroes, 99, 90000);
+      quietBlock.capture.discontinuity =
+          singz::AudioInputDiscontinuityReason::SequenceGap;
+      quietBlock.capture.flags |= singz::AudioInputDiscontinuous;
+      reanchor.push(quietBlock, [](const auto&) {});
+      CHECK("zdsp adapter reconfigure clears old-run gain and follower",
+            reanchor.appliedGain() == 1.0f &&
+                reanchor.capturePeak() == 0.0f && reanchor.resets() == 1);
+    }
+
+    // Pin the peak follower's release rate with a history-bearing adapter.
+    {
+      zdsp::analysis::LiveInputAnalysisAdapter decay(820);
+      auto loudTone = voicedTone(0.5f, 2048);
+      decay.push(block(loudTone, 0, 0), [](const auto&) {});
+      const float afterLoud = decay.capturePeak();
+      uint64_t sourceFrame = loudTone.size();
+      std::vector<float> zeroes(512, 0.0f);
+      for (uint64_t sequence = 1; sequence <= 100; ++sequence) {
+        decay.push(block(zeroes, sequence, sourceFrame), [](const auto&) {});
+        sourceFrame += zeroes.size();
+      }
+      const float afterSilence = decay.capturePeak();
+      CHECK("zdsp adapter peak follower takes a loud peak immediately",
+            afterLoud > 0.49f && afterLoud <= 0.5f);
+      CHECK("zdsp adapter peak follower releases at the documented rate",
+            afterSilence < afterLoud * 0.7f &&
+                afterSilence > afterLoud * 0.4f);
+    }
+  }
+
   zdsp::analysis::LiveInputAnalysisAdapter adapter(99);
   std::vector<zdsp::analysis::AnalysisWindow> windows;
   CHECK("first analyzer block accepted",
@@ -349,8 +693,10 @@ int main() {
         emitted.front().start.sourceFrame.value == 0 &&
         emitted.front().end.sourceFrame.value == expectedEndSource &&
         emitted.front().start.sampleHostTime.value == 1000000000ull &&
-        emitted.front().end.sampleHostTime.value == expectedEndHost &&
-        std::fabs(emitted.front().analysis.frequency - 440.0) < 2.0;
+        emitted.front().end.sampleHostTime.value == expectedEndHost;
+    // A first window is intentionally still inside the three-window voicing
+    // onset latch. Pitch behavior is pinned by the settled normalization
+    // fixtures above; this fixture owns resampling provenance only.
     const bool overlapAligned = emitted.size() < 2 ||
         (emitted[1].start.sourceFrame.value ==
              static_cast<uint64_t>(512.0L * rate / analysisRate) &&

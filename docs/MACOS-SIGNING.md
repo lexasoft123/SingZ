@@ -96,6 +96,18 @@ keychain you prepared, `CSC_NAME` set to the identity **bare** (no
 `Developer ID Application: ` prefix — that form is rejected), and `CSC_LINK`
 unset.
 
+The `.p12` export password that `security import` wants is kept in the SOPS
+store as `mac_p12_password`, and `scripts/with-apple-secrets.sh` exports it as
+**`SINGZ_MAC_P12_PASSWORD`**. Nothing consumes it automatically — you hand it
+to `security import` yourself; every iOS lane runs fine without it.
+
+It is deliberately **not** called `CSC_KEY_PASSWORD`, even though that is the
+name electron-builder would recognise. `scripts/afterPack.cjs` reads
+`CSC_LINK || CSC_NAME || CSC_KEY_PASSWORD` as "real signing is configured"
+and skips its ad-hoc fallback — so exporting the password under that name on
+a machine with no importable identity would produce a build that is neither
+Developer ID-signed nor ad-hoc signed, i.e. one macOS refuses to open at all.
+
 ## What actually signs and notarizes it
 
 `electron-builder.yml`'s `mac` block carries `hardenedRuntime: true`,
@@ -116,19 +128,26 @@ since the flat and nested shapes are not interchangeable within one version.
 None of this does anything without credentials in the environment —
 `notarize: true` specifically logs a warning and skips rather than failing
 when unset, which is what keeps `npm run dist` on a machine with no Apple
-secrets (forks and CI runs without repository secrets) building an ad-hoc
-signed dmg exactly as before.
+secrets (a fork, a fresh checkout on a Mac with no Developer ID certificate,
+CI before the one-time setup above) building an ad-hoc signed dmg exactly as
+before.
 
 `.github/workflows/build.yml`'s "macOS signing + notarization secrets" step
-base64-decodes the certificate, imports it into a temporary keychain, rejects
-anything that is not a Developer ID Application identity, then exports
-`CSC_KEYCHAIN` and the bare `CSC_NAME`. It deliberately exports neither
-`CSC_LINK` nor `CSC_KEY_PASSWORD`; using those would re-enter the keychain bug
-above. The same step maps notarization onto `APPLE_API_KEY`,
-`APPLE_API_KEY_ID`, `APPLE_API_ISSUER` and `APPLE_TEAM_ID`, writing each
-optional value only when its secret is non-empty. Missing repository secrets
-therefore leave afterPack's valid ad-hoc signature in place instead of turning
-a fork or weekly build into a credentials error.
+imports the certificate into a keychain it creates itself, then exports
+`CSC_KEYCHAIN` and `CSC_NAME` — plus `APPLE_API_KEY`, `APPLE_API_KEY_ID`,
+`APPLE_API_ISSUER` and `APPLE_TEAM_ID` for notarization. It writes
+**`CSC_LINK` and `CSC_KEY_PASSWORD` nowhere at all**, for the reason the
+section above gives; if you find a description of this step that says
+otherwise, that description is stale, not the step.
+
+Each write is guarded on the value it needs being present (`APPLE_TEAM_ID` is
+a literal rather than a secret, guarded on the certificate). The guard is
+**not** about empty-versus-unset — every reader of these falsy-tests them, so
+for this set the two are the same thing. It is about never leaving a
+**half-set** environment, which app-builder-lib turns into an
+`InvalidConfigurationError` when one of `APPLE_API_KEY`/`_ID`/`_ISSUER` is
+present and another is not. A fork, or a rotated-away secret, therefore lands
+on the ad-hoc fallback rather than a failed leg.
 
 Two details of that step are load-bearing, and both were got wrong first:
 
@@ -144,17 +163,23 @@ Two details of that step are load-bearing, and both were got wrong first:
   GitHub runs the step as `bash -e`. The AND-list is exempt from errexit
   inside a function body, but the *function* then returns 1 for an empty
   value, and the call site is a plain simple command — so errexit kills the
-  step. Measured: with no secrets set (today's state, the very case the step
-  exists to tolerate) the `&&` form exits 1 immediately, taking the whole
-  macOS leg down after the engine builds and before packaging, and never
+  step. Measured with no secrets set — the case the step exists to tolerate,
+  a fork or a secret rotated away — the `&&` form exits 1 immediately, taking
+  the whole macOS leg down after the engine builds and before packaging, never
   printing the warning it was supposed to print.
 
-`CSC_KEYCHAIN`/`CSC_NAME` are scoped by a step that only *runs* when
-`runner.os == 'macOS'`; they are not placed on the matrix job or its shared
-"Package" step. Keep that boundary. Electron-builder's CSC signing variables
-also drive the **Windows** Authenticode path, so leaking Apple signing
-configuration across the matrix can turn into a Windows signing failure with
-nothing "Apple" in its message to explain why.
+The step is scoped to the macOS leg by an `if: runner.os == 'macOS'` on the
+step itself, not by an `if:` on an env block, and that scoping is worth
+keeping for two reasons. The literal one: it runs `security` commands that
+exist only on macOS. The one that outlives this implementation: `CSC_*` is a
+**shared namespace**, and electron-builder reads `CSC_LINK`/`CSC_KEY_PASSWORD`
+for a **Windows** Authenticode certificate on the same matrix's other leg.
+The variables this step writes today (`CSC_KEYCHAIN`, `CSC_NAME`) are read
+only on macOS — by app-builder-lib's mac packager and signer, and `CSC_NAME`
+also by `afterPack.cjs`'s darwin-gated hook — so nothing it writes could
+reach `signtool`, and its body is bash, which that leg does not default to.
+But anyone who later reaches for a `CSC_` variable in a shared step is one
+keystroke from handing the Windows build an Apple `.p12`.
 
 ## The entitlements file
 

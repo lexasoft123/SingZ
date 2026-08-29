@@ -248,16 +248,22 @@ metadata tree covers the copyright string, which is otherwise a
 
 `.keys/secrets.enc.yaml`, encrypted with [SOPS](https://github.com/getsops/sops)
 to the age key at `~/.config/sops/age/keys.txt`. It holds the API key id, the
-issuer id, the `.p8` body and the match passphrase. Rules are in `.sops.yaml`
+issuer id, the `.p8` body, the match passphrase, the App Review contact
+(`review_*`) and the Developer ID `.p12` export password
+(`mac_p12_password`, for a local signed macOS build — nothing reads it
+automatically; CI signs from its own repo secret. See
+[MACOS-SIGNING.md](MACOS-SIGNING.md)). Rules are in `.sops.yaml`
 at the repo root; only values are encrypted, so `git diff` and a glance still
 show the structure.
 
 `scripts/with-apple-secrets.sh <command>` decrypts it, exports
 `APP_STORE_CONNECT_API_KEY_ID`, `APP_STORE_CONNECT_API_ISSUER_ID` and
-`MATCH_PASSWORD`, writes the `.p8` to a mode-600 temp file pointed at by
-`SINGZ_ASC_KEY_PATH`, runs the command, and deletes the temp file on the way
-out — so no secret reaches a shell history, a process argument list, or a
-file that outlives the command.
+`MATCH_PASSWORD` — plus `SINGZ_REVIEW_*` and `SINGZ_MAC_P12_PASSWORD` when
+the store carries them — writes the `.p8` to a mode-600 temp file pointed at
+by `SINGZ_ASC_KEY_PATH`, runs the command, and deletes the temp file on the
+way out, so no secret reaches a shell history, a process argument list, or a
+file that outlives the command. The script's own header is the list of
+record; keep it and this sentence in step.
 
 Read a value by hand with `sops -d .keys/secrets.enc.yaml`. Edit or rotate
 one with `sops .keys/secrets.enc.yaml`. Add a second machine or person by
@@ -294,7 +300,11 @@ gh secret set MATCH_PASSWORD --body '<your match passphrase>'
 echo -n "lexasoft123:<PAT>" | base64 | gh secret set MATCH_GIT_BASIC_AUTHORIZATION
 ```
 
-The `release` lane additionally needs the App Review contact, which is a real
+The `release` and `submit` lanes need the App Review contact — and so, once
+`TESTFLIGHT_GROUPS` is set, does **every `v*` tag**, because the widened
+`beta` path sends Apple a Beta App Review contact too. That check runs before
+the archive, so a missing or rotated `SINGZ_REVIEW_*` secret fails the tag
+run at the top rather than an hour in. The contact is a real
 person's name, phone and email and so is NOT in the tracked metadata tree —
 locally it comes from the SOPS store via `scripts/with-apple-secrets.sh`, and
 CI gets it as four more secrets:
@@ -323,22 +333,48 @@ touch the others.
 
 `.github/workflows/ios.yml`:
 
-- **A `v*` tag** builds and uploads to **TestFlight** automatically — the
-  same "tagging is the ship decision" reasoning as Android's closed track.
-  No tester group is assigned by this job; open App Store Connect and add
-  the build to a group once it finishes processing (Apple's own processing
-  step, 15–60 min, that nothing in CI can shorten — the job does not wait
-  for it).
-- **Manual dispatch** lets you choose `validate` (checks the App Store
-  Connect key and the two `match` secrets, the version match, and actually
-  fetches the certs — ships nothing. It does **not** touch the four
-  `SINGZ_REVIEW_*` secrets: only `release` reads those, so a green `validate`
-  does not prove a submission will not stop on a missing contact), `beta`
-  (TestFlight), `release` (builds and submits for review with
-  `automatic_release: true`, so an approved build goes **live on the store by
-  itself** — there is no second confirmation, and dispatching the lane is
-  therefore the decision to publish), or `metadata` (pushes the store listing text
-  only, no binary).
+- **A `v*` tag** builds, uploads to **TestFlight**, and — when the
+  `TESTFLIGHT_GROUPS` repo variable names a group — sends the build to
+  **Beta App Review** for that group, so the people on the public TestFlight
+  link actually receive what the release notes just promised them. Same
+  "tagging is the ship decision" reasoning as Android's closed track.
+
+  `TESTFLIGHT_GROUPS` is a **variable, not a secret** (a group name is not
+  sensitive, and an unset secret is indistinguishable from an empty one at
+  the point of use). It is comma-separated, and each name must already exist
+  in App Store Connect — today it is `External Testers`, the group whose
+  public link is the one README.md hands out. With it unset the job uploads
+  for internal testers only and says so in the log; widen that build later
+  with the `beta_external` lane rather than re-tagging.
+
+  The cost of widening is that the job now **waits for Apple's processing**
+  (15–60 min, nothing in CI can shorten it). It has to: Apple cannot
+  distribute a build that is still processing. Before this the tag job
+  finished in ~8 min and left the widening to somebody remembering.
+
+- **Manual dispatch** lets you choose:
+  - `validate` — checks the App Store Connect key and the two `match`
+    secrets, the version match, and actually fetches the certs. Ships
+    nothing. It does **not** touch the four `SINGZ_REVIEW_*` secrets: only
+    the submitting lanes read those, so a green `validate` does not prove a
+    submission will not stop on a missing contact.
+  - `beta` — what the tag runs.
+  - `beta_external` — widen an **already-uploaded** build to the external
+    group without rebuilding. Pass its number in the `build` input.
+  - `submit` — send an **already-uploaded** build to App Store review. This
+    is the one to use after a tag has built the binary: it produces no
+    second binary. Pass the tag build's number in the `build` input — a
+    dispatch draws its own `run_number`, which is *not* the tag run's.
+  - `release` — archives a fresh binary **and** submits it. Against a tag
+    that has already been built this leaves two build numbers for one
+    version; prefer `submit` there.
+  - `metadata` — pushes the store listing text only, no binary.
+
+  `submit` and `release` both submit with `automatic_release: true`, so an
+  approved build goes **live on the store by itself** — there is no second
+  confirmation, and dispatching either is therefore the decision to publish.
+  Beta App Review, which the tag path now triggers, is *not* this: it gates a
+  testing build, and a rejection costs a resubmission rather than a release.
 
   The lanes are `beta`/`release` rather than the more obvious
   `testflight`/`appstore` because those two are the names of fastlane
@@ -382,6 +418,19 @@ finds a directory for, from the same `<!-- store:LOCALE -->` blocks in
 changelog — one block, both stores, so write it assuming either audience
 reads it (a wording that's only true on one platform, e.g. naming an
 OS-specific capture path, is wrong on the other one's listing).
+
+When a release is genuinely not the same release on both phones, add
+`<!-- store:LOCALE:ios -->`, which REPLACES the shared block for the App
+Store and TestFlight and changes nothing on Play. Reach for it only then:
+the shared block is the default precisely so one claim cannot drift into two
+wordings. 0.19.1 is the case that forced it — an Android capture rewrite and
+a minSdk raised to Android 9, neither true of iPhone, and the shared text was
+on its way into `upload_to_app_store(submit_for_review: true)` saying "SingZ
+needs Android 9 now". Naming another mobile platform is review guideline
+2.3.10, and that was the iPhone app's first submission. `external_changelog`
+feeds TestFlight's "what to test" from the same file, so the override covers
+both. The `:ios` blocks are stripped from the GitHub Release body by the
+workflows; only the shared ones appear there.
 
 `name.txt`, `subtitle.txt`, `description.txt`, `keywords.txt`,
 `privacy_url.txt` and `support_url.txt` are static-ish and edited by hand —

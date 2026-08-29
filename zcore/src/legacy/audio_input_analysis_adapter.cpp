@@ -33,10 +33,25 @@ void LiveInputAnalysisAdapter::reset() {
   latencyToDrop_ = 0;
   resampler_.reset();
   converted_.clear();
+  peakFollower_ = 0.0f;
+  appliedGain_ = 1.0f;
+  voicing_ = false;
+  onsetWindows_ = 0;
+  releaseWindows_ = 0;
   ++resets_;
 }
 
 void LiveInputAnalysisAdapter::configure(const AudioInputBlockView& block) {
+  // Gate and follower state belongs to a run of audio, not to the object. This
+  // is the re-anchor path that actually runs in the field (a sequence gap, or
+  // an AAudio timestamp-domain flip); reset() is reached only by the converted
+  // -overflow path, so clearing there alone left the gate open across a
+  // re-anchor.
+  voicing_ = false;
+  onsetWindows_ = 0;
+  releaseWindows_ = 0;
+  peakFollower_ = 0.0f;
+  appliedGain_ = 1.0f;
   read_ = 0;
   size_ = 0;
   firstOutputFrame_ = 0;
@@ -96,7 +111,7 @@ void LiveInputAnalysisAdapter::append(float sample, uint64_t sequence,
     window.callbackHostTimeNs = callbackTimes_[(read_ + kCapacity - 1) % kCapacity];
     window.timestampQuality = timestampQuality_;
     window.sampleRate = analysisRate_;
-    window.analysis = analyzeLiveInput(contiguous_.data(), kCapacity, analysisRate_);
+    window.analysis = analyzeWindow();
     sink(window);
     ++emitted_;
 
@@ -104,6 +119,81 @@ void LiveInputAnalysisAdapter::append(float sample, uint64_t sequence,
     size_ -= hopFrames();
     firstOutputFrame_ += hopFrames();
   }
+}
+
+/**
+ * Normalize this window to the level the shared detector expects, then report
+ * the level the HARDWARE actually delivered.
+ *
+ * Both halves matter. Analysing the scaled copy is what lets a quiet phone be
+ * heard at all; reporting the unscaled rms is what keeps the log honest about
+ * that phone, so "the mic is quiet" stays visible instead of being papered
+ * over by the very gain that fixed it.
+ */
+LiveInputFrame LiveInputAnalysisAdapter::analyzeWindow() {
+  float peak = 0.0f;
+  double sumSquares = 0;
+  for (size_t i = 0; i < kCapacity; ++i) {
+    const float sample = contiguous_[i];
+    peak = std::max(peak, std::fabs(sample));
+    sumSquares += static_cast<double>(sample) * sample;
+  }
+  const double rawRms = std::sqrt(sumSquares / static_cast<double>(kCapacity));
+  peakFollower_ = std::max(peak, peakFollower_ * kPeakDecay);
+
+  // Voicing is decided here, on the level the microphone actually delivered,
+  // BEFORE any lift, and with hysteresis so a room cannot cross in one step.
+  if (voicing_) {
+    // Two ways out. Straight under the close level shuts it at once; so does
+    // simply failing to reach the OPEN level for long enough, which is what
+    // stops the gate latching open for the rest of a session after the first
+    // note — a room between the two edges would otherwise stay pitched.
+    releaseWindows_ = rawRms >= kVoicingOpenRms ? 0 : releaseWindows_ + 1;
+    if (rawRms < kVoicingCloseRms || releaseWindows_ >= kVoicingReleaseWindows) {
+      voicing_ = false;
+      onsetWindows_ = 0;
+      releaseWindows_ = 0;
+    }
+  } else if (rawRms >= kVoicingOpenRms) {
+    if (++onsetWindows_ >= kVoicingOnsetWindows) {
+      voicing_ = true;
+      releaseWindows_ = 0;
+    }
+  } else {
+    onsetWindows_ = 0;
+  }
+  if (!voicing_) {
+    appliedGain_ = 1.0f;
+    LiveInputFrame frame;
+    frame.rms = rawRms;
+    frame.dbfs = rawRms > 0 ? std::max(-120.0, 20.0 * std::log10(rawRms)) : -120.0;
+    return frame;
+  }
+
+  // Reached only while voicing_, which guarantees peakFollower_ >= rawRms >=
+  // kVoicingCloseRms — so there is no silence left to guard against here.
+  appliedGain_ =
+      std::min(kMaximumGain, std::max(1.0f, kTargetPeak / peakFollower_));
+  // The peak-derived gain answers "how far under the target is the loudest
+  // thing recently"; it does not answer "will this window clear the detector's
+  // own gate". After a loud transient the follower can hold the gain far too
+  // low for a voice that is plainly present, so floor it at what passes.
+  if (rawRms > 0) {
+    appliedGain_ = std::min(
+        kMaximumGain,
+        std::max(appliedGain_, static_cast<float>(kDetectorGateRms / rawRms)));
+  }
+  if (appliedGain_ == 1.0f)
+    return analyzeLiveInput(contiguous_.data(), kCapacity, analysisRate_);
+
+  for (size_t i = 0; i < kCapacity; ++i) scaled_[i] = contiguous_[i] * appliedGain_;
+  LiveInputFrame frame = analyzeLiveInput(scaled_.data(), kCapacity, analysisRate_);
+  // frequency and clarity come from the scaled window (YIN is scale-invariant,
+  // so they are the same answer the detector would give at any level); rms and
+  // dbfs are restored to what the microphone handed us.
+  frame.rms /= appliedGain_;
+  frame.dbfs = frame.rms > 0 ? std::max(-120.0, 20.0 * std::log10(frame.rms)) : -120.0;
+  return frame;
 }
 
 bool LiveInputAnalysisAdapter::push(const AudioInputBlockView& block, const Sink& sink) {

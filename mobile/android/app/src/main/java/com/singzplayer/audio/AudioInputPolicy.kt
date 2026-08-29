@@ -64,12 +64,24 @@ object AudioInputPolicy {
 
   /** App fallback preference only; Android exposes no public active/default
    * capture endpoint. Prefer an attached physical interface without claiming
-   * the OS routed capture there. Ties stay deterministic by device ID. */
+   * the OS routed capture there. Ties stay deterministic by device ID.
+   *
+   * Bluetooth ranks BELOW the built-in microphone, and that ordering is the
+   * point of this function rather than a detail of it. AudioInputModule
+   * deliberately owns no route: it never sets MODE_IN_COMMUNICATION, a
+   * communication device, or audio focus, because react-native-audio-api owns
+   * the playback session. A Bluetooth capture endpoint only carries audio once
+   * Android has been asked to route capture there — so ranking one first aims
+   * SingZ at an endpoint it will not activate, on the say-so of earbuds the
+   * singer connected for LISTENING. Nothing in the app offers a picker to
+   * escape that choice, so the fallback has to be the microphone that is
+   * always live. USB and wired inputs stay above it: those are physical routes
+   * that carry audio as soon as they are plugged in. */
   fun inputPreference(type: Int): Int = when (type) {
     11, 12, 22 -> 4 // USB device/accessory/headset
     3, 4, 5, 6 -> 3 // wired headset/headphones/analog/digital line
-    7, 8, 23, 26, 27, 30 -> 2 // Bluetooth families
-    15 -> 1 // built-in microphone
+    15 -> 2 // built-in microphone
+    7, 8, 23, 26, 27, 30 -> 1 // Bluetooth families — no route of ours reaches them
     else -> 0
   }
 }

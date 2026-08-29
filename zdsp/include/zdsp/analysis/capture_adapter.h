@@ -57,12 +57,35 @@ class LiveInputAnalysisAdapter {
   uint64_t resets() const noexcept { return resets_; }
   uint64_t emittedWindows() const noexcept { return emitted_; }
   uint64_t ownershipGeneration() const noexcept { return ownershipGeneration_; }
+  /** Decaying peak of the raw capture, before detector-only normalization. */
+  float capturePeak() const noexcept { return peakFollower_; }
+  /** Gain applied to the most recent window; 1 means it was untouched. */
+  float appliedGain() const noexcept { return appliedGain_; }
+
+  // Live capture level is device-selected while the legacy YIN detector has
+  // an absolute RMS gate. Normalize only a voiced window's analysis copy so a
+  // quiet phone reaches that detector, while reporting the unscaled hardware
+  // level. Gain is boost-only and bounded; an already-hot input stays on the
+  // bit-identical direct path.
+  static constexpr float kTargetPeak = 0.25f;    // −12 dBFS
+  static constexpr float kMaximumGain = 100.0f;  // +40 dB
+  static constexpr float kPeakDecay = 0.995f;    // ~2.1 s at 512/48 kHz
+
+  // Decide voicing before gain. The onset latch rejects one-window impulses;
+  // hysteretic release lets a sung note ride brief dips without leaving the
+  // gate open on a quieter tonal room for the rest of the exercise.
+  static constexpr double kVoicingOpenRms = 0.0018;   // −55 dBFS
+  static constexpr double kVoicingCloseRms = 0.0010;  // −60 dBFS
+  static constexpr int kVoicingOnsetWindows = 3;
+  static constexpr int kVoicingReleaseWindows = 30;
+  static constexpr double kDetectorGateRms = 0.012;
 
   static constexpr size_t analysisFrames() noexcept { return 2048; }
   static constexpr size_t hopFrames() noexcept { return 512; }
 
  private:
   bool configure(const CaptureTime& capture, double sourceRate);
+  LiveInputFrame analyzeWindow();
   void append(float sample, const CaptureTime& capture,
               uint64_t callbackHostTimeNs, const Sink& sink);
   uint64_t hostTimeForOutputFrame(uint64_t frame) const noexcept;
@@ -97,6 +120,11 @@ class LiveInputAnalysisAdapter {
   uint64_t resets_ = 0;
   uint64_t emitted_ = 0;
   DiscontinuityReason lastResetReason_ = DiscontinuityReason::None;
+  float peakFollower_ = 0.0f;
+  float appliedGain_ = 1.0f;
+  bool voicing_ = false;
+  int onsetWindows_ = 0;
+  int releaseWindows_ = 0;
 };
 
 struct VocalTrainingCapturePreset {

@@ -16,6 +16,7 @@ struct LiveInputAnalysisAdapter::Storage {
   std::array<CaptureTime, kCapacity> captures{};
   std::array<uint64_t, kCapacity> callbackTimes{};
   std::array<float, kCapacity> contiguous{};
+  std::array<float, kCapacity> scaled{};
 };
 
 namespace {
@@ -162,12 +163,24 @@ void LiveInputAnalysisAdapter::reset(DiscontinuityReason reason) {
   latencyToDrop_ = 0;
   resampler_.reset();
   converted_.clear();
+  peakFollower_ = 0.0f;
+  appliedGain_ = 1.0f;
+  voicing_ = false;
+  onsetWindows_ = 0;
+  releaseWindows_ = 0;
   lastResetReason_ = reason;
   ++resets_;
 }
 
 bool LiveInputAnalysisAdapter::configure(const CaptureTime& capture,
                                          double sourceRate) {
+  // A continuity re-anchor configures in place without necessarily calling
+  // reset(). Detector normalization state belongs to the old audio run too.
+  peakFollower_ = 0.0f;
+  appliedGain_ = 1.0f;
+  voicing_ = false;
+  onsetWindows_ = 0;
+  releaseWindows_ = 0;
   read_ = 0;
   size_ = 0;
   firstOutputFrame_ = 0;
@@ -261,6 +274,73 @@ uint64_t LiveInputAnalysisAdapter::sourceFrameForOutputFrame(
   return streamSourceFrame_ + wholeFrames + fractionalFrames;
 }
 
+LiveInputFrame LiveInputAnalysisAdapter::analyzeWindow() {
+  float peak = 0.0f;
+  double sumSquares = 0.0;
+  for (const float sample : storage_->contiguous) {
+    peak = std::max(peak, std::fabs(sample));
+    sumSquares += static_cast<double>(sample) * sample;
+  }
+  const double rawRms =
+      std::sqrt(sumSquares / static_cast<double>(kCapacity));
+  peakFollower_ = std::max(peak, peakFollower_ * kPeakDecay);
+
+  if (voicing_) {
+    releaseWindows_ =
+        rawRms >= kVoicingOpenRms ? 0 : releaseWindows_ + 1;
+    if (rawRms < kVoicingCloseRms ||
+        releaseWindows_ >= kVoicingReleaseWindows) {
+      voicing_ = false;
+      onsetWindows_ = 0;
+      releaseWindows_ = 0;
+    }
+  } else if (rawRms >= kVoicingOpenRms) {
+    if (++onsetWindows_ >= kVoicingOnsetWindows) {
+      voicing_ = true;
+      releaseWindows_ = 0;
+    }
+  } else {
+    onsetWindows_ = 0;
+  }
+
+  if (!voicing_) {
+    appliedGain_ = 1.0f;
+    LiveInputFrame frame;
+    frame.rms = rawRms;
+    frame.dbfs = rawRms > 0.0
+                     ? std::max(-120.0, 20.0 * std::log10(rawRms))
+                     : -120.0;
+    return frame;
+  }
+
+  // A recent loud transient can keep the peak-derived gain too low for the
+  // detector's absolute gate. Floor it at the gain that makes this voiced
+  // window analyzable, still bounded by kMaximumGain.
+  appliedGain_ =
+      std::min(kMaximumGain, std::max(1.0f, kTargetPeak / peakFollower_));
+  if (rawRms > 0.0) {
+    appliedGain_ = std::min(
+        kMaximumGain,
+        std::max(appliedGain_,
+                 static_cast<float>(kDetectorGateRms / rawRms)));
+  }
+  if (appliedGain_ == 1.0f) {
+    return analyzeLiveInput(storage_->contiguous.data(), kCapacity,
+                            analysisRate_);
+  }
+
+  for (size_t index = 0; index < kCapacity; ++index) {
+    storage_->scaled[index] = storage_->contiguous[index] * appliedGain_;
+  }
+  LiveInputFrame frame =
+      analyzeLiveInput(storage_->scaled.data(), kCapacity, analysisRate_);
+  frame.rms /= appliedGain_;
+  frame.dbfs = frame.rms > 0.0
+                   ? std::max(-120.0, 20.0 * std::log10(frame.rms))
+                   : -120.0;
+  return frame;
+}
+
 void LiveInputAnalysisAdapter::append(float sample, const CaptureTime& capture,
                                       uint64_t callbackHostTimeNs,
                                       const Sink& sink) {
@@ -290,8 +370,7 @@ void LiveInputAnalysisAdapter::append(float sample, const CaptureTime& capture,
     window.ownershipGeneration = ownershipGeneration_;
     window.resetCount = resets_;
     window.resetReason = lastResetReason_;
-    window.analysis = analyzeLiveInput(storage_->contiguous.data(), kCapacity,
-                                       analysisRate_);
+    window.analysis = analyzeWindow();
     if (!cancelled_.load(std::memory_order_acquire)) sink(window);
     ++emitted_;
     read_ = (read_ + hopFrames()) % kCapacity;

@@ -154,6 +154,12 @@ android {
             version "3.22.1"
         }
     }
+    // Oboe ships its headers and .so as a prefab package, which is how the
+    // core links it. liboboe.so is already in the APK — react-native-audio-api
+    // depends on the same artifact for playback — so this adds no download.
+    buildFeatures {
+        prefab true
+    }
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -218,6 +224,13 @@ dependencies {
     // table TypeScript and Swift run (tests/shared/currency-cases.json)
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    // Oboe: Google's AAudio wrapper, used by the core's Android capture
+    // backend. The version is pinned to the one react-native-audio-api already
+    // pulls in, so the APK carries exactly one liboboe.so. Its value here is
+    // QuirksManager — the device database that knows, for instance, that some
+    // Exynos 9810 builds record SILENCE on the MMAP + non-VoiceCommunication
+    // combination our hand-rolled AAudio ladder used to try first.
+    implementation("com.google.oboe:oboe:1.9.3")
     // ONNX Runtime for the C++ core (same version the desktop packs pin)
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
     ortAar("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")

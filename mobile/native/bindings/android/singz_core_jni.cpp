@@ -79,6 +79,10 @@ struct AudioInputListenerBridge {
       : analysisAdapter(generation) {}
 
   zdsp::analysis::LiveInputAnalysisAdapter analysisAdapter;
+  // Largest lift the adapter has applied, ×100. Reported through stats so a
+  // field log can prove the normalization is IN this binary and doing work —
+  // a .cpp change that never made it into the APK otherwise reads as green.
+  std::atomic<uint32_t> peakGainX100{0};
 
   ~AudioInputListenerBridge() {
     active.store(false, std::memory_order_release);
@@ -134,6 +138,19 @@ struct AudioInputListenerBridge {
                           static_cast<jdouble>(window.analysis.dbfs));
       if (env->ExceptionCheck()) env->ExceptionClear();
       if (attached) vm->DetachCurrentThread();
+      // Per WINDOW, not once per push: one maximum-size callback emits 29
+      // windows, and sampling after push() returns reports only the last —
+      // measured reporting 1.00x for a callback that lifted 16.13x, which
+      // reads as "normalization did nothing", the exact wrong conclusion for
+      // the one line meant to be trustworthy evidence from a phone nobody can
+      // attach a debugger to.
+      const auto gain =
+          static_cast<uint32_t>(analysisAdapter.appliedGain() * 100.0f + 0.5f);
+      uint32_t seen = peakGainX100.load(std::memory_order_relaxed);
+      while (gain > seen &&
+             !peakGainX100.compare_exchange_weak(seen, gain,
+                                                 std::memory_order_relaxed)) {
+      }
     });
   }
 };
@@ -291,12 +308,17 @@ Java_com_singzplayer_split_SingzCore_audioInputStats(JNIEnv* env, jobject /*thiz
   std::lock_guard<std::mutex> lock(gAudioInputMutex);
   const singz::AudioInputStats stats = gAudioInput ? gAudioInput->stats()
                                                    : singz::AudioInputStats{};
-  const jlong values[] = {static_cast<jlong>(stats.deliveredBlocks),
-                          static_cast<jlong>(stats.deliveredFrames),
-                          static_cast<jlong>(stats.overruns),
-                          static_cast<jlong>(stats.deliveryWakeups)};
-  jlongArray result = env->NewLongArray(4);
-  if (result) env->SetLongArrayRegion(result, 0, 4, values);
+  const jlong values[] = {
+      static_cast<jlong>(stats.deliveredBlocks),
+      static_cast<jlong>(stats.deliveredFrames),
+      static_cast<jlong>(stats.overruns),
+      static_cast<jlong>(stats.deliveryWakeups),
+      static_cast<jlong>(gAudioInputListener
+                             ? gAudioInputListener->peakGainX100.load(
+                                   std::memory_order_relaxed)
+                             : 0)};
+  jlongArray result = env->NewLongArray(5);
+  if (result) env->SetLongArrayRegion(result, 0, 5, values);
   return result;
 }
 

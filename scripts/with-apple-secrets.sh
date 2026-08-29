@@ -17,6 +17,17 @@
 # SINGZ_ASC_KEY_PATH — which is exactly what the Fastfile's api_key helper
 # looks for. CI does not use this: it has the same values as repo secrets.
 #
+# Also exports, when the store carries them (older stores do not):
+#   SINGZ_REVIEW_{FIRST_NAME,LAST_NAME,PHONE,EMAIL} — the App Review contact.
+#     NOT optional to the lanes that need it: `release` refuses to submit
+#     without a complete contact, and `beta_info` fetches the email or fails.
+#   SINGZ_MAC_P12_PASSWORD — the Developer ID .p12 export password, for a
+#     LOCAL signed macOS build; every iOS lane runs without it. Nothing
+#     consumes it automatically; it is what
+#     `security import` needs to put the certificate into a keychain, after
+#     which CSC_KEYCHAIN/CSC_NAME do the rest. See the note at its export
+#     below for why it is not called CSC_KEY_PASSWORD.
+#
 # Store layout and rationale: .sops.yaml at the repo root, ciphertext at
 # .keys/secrets.enc.yaml. See docs/IOS-RELEASE.md.
 set -euo pipefail
@@ -84,6 +95,12 @@ eval "$(
       for (const k of ["review_first_name", "review_last_name", "review_phone", "review_email"]) {
         if (s[k]) console.log(`SINGZ_${k.toUpperCase()}=${q(s[k])}`)
       }
+      // The Developer ID .p12 export password, for a LOCAL signed macOS
+      // build. Optional for the same reason: stores that predate the macOS
+      // signing work do not carry it, and every iOS lane runs without it.
+      if (s.mac_p12_password) {
+        console.log(`SINGZ_MAC_P12_PASSWORD=${q(s.mac_p12_password)}`)
+      }
       console.log(`SINGZ_ASC_P8=${q(s.asc_key_p8)}`)
     })
   '
@@ -104,6 +121,40 @@ unset SINGZ_ASC_KEY_ID SINGZ_ASC_ISSUER_ID SINGZ_MATCH_PASSWORD
 for v in SINGZ_REVIEW_FIRST_NAME SINGZ_REVIEW_LAST_NAME SINGZ_REVIEW_PHONE SINGZ_REVIEW_EMAIL; do
   [ -n "${!v:-}" ] && export "$v"
 done
+
+# The Developer ID .p12 export password, when the store carries it. Nothing
+# consumes this automatically: it is what `security import` needs to put the
+# certificate into a keychain for a LOCAL signed build, after which
+# CSC_KEYCHAIN/CSC_NAME do the rest.
+#
+# Deliberately NOT exported as CSC_KEY_PASSWORD, the name electron-builder
+# and afterPack.cjs would both read. Two separate things go wrong under that
+# name, and only the second needs CSC_LINK:
+#
+#   - afterPack.cjs skips its ad-hoc signature on
+#     `CSC_LINK || CSC_NAME || CSC_KEY_PASSWORD`. So on a machine with NO
+#     Developer ID — a fork, a fresh Mac — `npm run dist` through this
+#     wrapper would find no identity, sign nothing, AND skip the fallback:
+#     a dmg carrying the repacked-Electron broken signature, which is the
+#     "app is damaged" dialog that hook exists to prevent.
+#   - With CSC_LINK also set it re-enters the 26.15.3 keychain-password bug,
+#     which hands this very password to `security set-key-partition-list -k`
+#     (that flag wants the KEYCHAIN password) and dies as a bare "security
+#     process failed 1" — after echoing the failing command, password
+#     included, into the log.
+#
+# See docs/MACOS-SIGNING.md.
+#
+# `if/then` rather than the `&&` the loop above uses: it matches build.yml's
+# `set_if_present` helper, and it is immune to where it sits. (The `&&` form
+# would be safe HERE — the left operand of an AND-list is exempt from
+# errexit, and `export LANG`, `set +e` and the script's own `rc=$?` all
+# follow. What actually bites, and what build.yml documents, is an `&&`
+# inside a FUNCTION body, whose return value then reaches errexit at a plain
+# call site.)
+if [ -n "${SINGZ_MAC_P12_PASSWORD:-}" ]; then
+  export SINGZ_MAC_P12_PASSWORD
+fi
 
 # fastlane refuses to run under a non-UTF-8 locale, and the store metadata is
 # bilingual — a non-UTF-8 locale is how Cyrillic release notes get mangled.

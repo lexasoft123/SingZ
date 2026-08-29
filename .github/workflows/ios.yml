@@ -2,12 +2,35 @@ name: iOS
 
 # A v* tag ships to TestFlight automatically — same reasoning as Android's
 # closed track: that is the point of tagging, and testers should not wait on
-# someone remembering to press a button. Submitting for App Store review is
-# never automatic — it is a bigger one-way action than a testing build (once
-# Apple starts reviewing, pulling it back is a support-contact affair, not an
-# API call) and "git tag" is too easy to type. Reaching the App Store means
-# dispatching this workflow and choosing it, mirroring Android's `publish`
-# job, where only workflow_dispatch may pick `production`.
+# someone remembering to press a button. That now includes EXTERNAL testers:
+# with the TESTFLIGHT_GROUPS repo variable set, the tag's build is sent to
+# Beta App Review for that group, so the people on the public TestFlight link
+# get the build the release notes just promised them. Before this, a tag
+# uploaded internally only and the public link kept serving the previous
+# build until somebody widened it by hand.
+#
+# It is one `upload_to_testflight` call rather than `beta` followed by
+# `beta_external` because one call means one wait and one place the group is
+# named — NOT because a chained widen would race Apple. It would not:
+# fastlane's upload_to_testflight action waits for processing on the
+# distribute-only path too (upload_to_testflight.rb:31 in the pinned 2.238.0).
+#
+# Beta App Review is Apple review, but it is not App Store review: it gates a
+# testing build, and a rejection costs a resubmission rather than a release.
+# Submitting for APP STORE review stays manual — it is a bigger one-way
+# action (once Apple starts reviewing, pulling it back is a support-contact
+# affair, not an API call) and "git tag" is too easy to type. Reaching the
+# App Store means dispatching this workflow and choosing it, mirroring
+# Android's `publish` job, where only workflow_dispatch may pick
+# `production`.
+#
+# Two lanes reach the store, and the difference matters when aiming at a tag
+# that has already been built:
+#   submit  — sends an ALREADY-UPLOADED build (pass its number in `build`).
+#             This is the one to use after a tag run; no second binary.
+#   release — archives a fresh binary and submits that. A dispatch draws its
+#             own run_number, so against an existing tag this produces a
+#             SECOND build number for the same version.
 #
 # And `release` sets automatic_release: TRUE — an approved build goes LIVE on
 # the store by itself, with no second confirmation from anyone. That is the
@@ -24,10 +47,14 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'fastlane lane — "validate" checks credentials and ships nothing; "beta" = TestFlight, "release" = submit for App Store review'
+        description: 'fastlane lane — "validate" ships nothing; "beta" = TestFlight; "submit" = send an already-uploaded build to App Store review; "release" = build AND submit'
         type: choice
         default: validate
-        options: [validate, beta, release, metadata]
+        options: [validate, beta, beta_external, submit, release, metadata]
+      build:
+        description: 'Build number to act on (submit / beta_external). Blank = this run number, which is NOT the tag run''s — pass the tag build''s number explicitly.'
+        type: string
+        required: false
   push:
     # Both patterns live under `tags`, and that is not a style choice:
     # GitHub refuses to parse a workflow that defines `tags` AND
@@ -65,6 +92,11 @@ jobs:
     # top of the build. A timeout there cancels with the binary already at
     # Apple and nothing submitted, and the re-run gets a fresh run_number —
     # so a second binary lands under a different build number.
+    #
+    # `beta` waits the same way now whenever a group is configured: Apple
+    # cannot distribute a build that is still processing, so widening to
+    # external testers means blocking until processing finishes. The tag
+    # path therefore runs as long as the release path, not the old ~8 min.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +123,10 @@ jobs:
       # including a dispatch aimed at a tag (re-running a failed tag build is
       # exactly that). Only a run on a branch ref — rehearsing the pipeline,
       # or a metadata-only push — degrades to a warning. Same ref-shape rule
-      # `Resolve lane` uses, and android.yml before it.
+      # android.yml uses. NOT the same rule as `Resolve lane` below, which
+      # tests the EVENT: "is this a real release build" and "which lane did
+      # the operator ask for" are different questions, and conflating them is
+      # what silently rewrote a tag-aimed `submit` dispatch into `beta`.
       - name: Inject Google Drive OAuth client
         env:
           GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
@@ -143,10 +178,20 @@ jobs:
           bundler-cache: true
           working-directory: mobile/ios
 
+      # On the EVENT, not the ref shape. A dispatch aimed at a tag is the
+      # normal way to use `submit`/`beta_external` — they act on the build
+      # that tag's own run uploaded — and a ref-shape test silently rewrote
+      # exactly that to `beta`: the archive ran again, and with `build` blank
+      # it uploaded a SECOND binary for the version and pushed it to real
+      # external testers, which is precisely what `submit` exists to avoid.
+      # `push` is the only event that reaches this workflow besides
+      # workflow_dispatch (see `on:`), so testing it is exact rather than a
+      # proxy. The GDRIVE_CONFIG step's ref-shape test is a different
+      # question — "is this a real release build" — and stays as it is.
       - name: Resolve lane
         id: lane
         run: |
-          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             echo "lane=beta" >> "$GITHUB_OUTPUT"
           else
             echo "lane=${{ inputs.lane }}" >> "$GITHUB_OUTPUT"
@@ -179,7 +224,17 @@ jobs:
           SINGZ_REVIEW_LAST_NAME: ${{ secrets.SINGZ_REVIEW_LAST_NAME }}
           SINGZ_REVIEW_PHONE: ${{ secrets.SINGZ_REVIEW_PHONE }}
           SINGZ_REVIEW_EMAIL: ${{ secrets.SINGZ_REVIEW_EMAIL }}
-          SINGZ_IOS_BUILD_NUMBER: ${{ github.run_number }}
+          # `submit` and `beta_external` act on a build somebody else
+          # uploaded, and this run's number is not that build's — every
+          # workflow_dispatch draws a fresh one. The `build` input overrides
+          # it; blank falls through to the run number, which is right for
+          # `beta`/`release`, the lanes that archive their own binary.
+          SINGZ_IOS_BUILD_NUMBER: ${{ inputs.build || github.run_number }}
+          # The external TestFlight group(s), comma-separated — a VARIABLE,
+          # not a secret: a group name is not sensitive, and a missing secret
+          # and an empty one are indistinguishable at the point of use. Unset
+          # means `beta` uploads for internal testers only and says so.
+          SINGZ_TESTFLIGHT_GROUPS: ${{ vars.TESTFLIGHT_GROUPS }}
           # fastlane refuses to run under a non-UTF-8 locale — same line the
           # Android publish job carries. The store metadata is bilingual
           # (en-US + ru), so this is not merely a warning to silence: a

@@ -2,13 +2,12 @@
 
 #if defined(__ANDROID__)
 
-#if !defined(__ANDROID_API__) || __ANDROID_API__ < 26
-#error "SingZ's AAudio input backend requires Android API 26 or newer"
+#if !defined(__ANDROID_API__) || __ANDROID_API__ < 28
+#error "SingZ's Android input backend requires Android API 28 or newer"
 #endif
 
-#include <aaudio/AAudio.h>
-#include <android/api-level.h>
-#include <dlfcn.h>
+#include <oboe/Oboe.h>
+#include <android/log.h>
 #include <time.h>
 
 #include <algorithm>
@@ -28,12 +27,28 @@
 #include <zcore/device/audio_input_callback_gate.h>
 #include <zcore/audio/audio_input_timestamp.h>
 
+// Capture goes through Oboe rather than raw AAudio, and the reason is
+// QuirksManager — Google's device database, maintained from fleet-wide
+// reports, which we cannot reproduce one phone at a time. It knows, among
+// other things, that certain Exynos 9810 builds RECORD SILENCE on MMAP
+// without the VoiceCommunication preset — the exact combination the ladder
+// here used to try FIRST, and which opens successfully, so no open-failure
+// fallback would ever have caught it. It also knows that Exynos 9810/850 run
+// a mono request in stereo and need the first channel extracted, that Exynos
+// 990 and Qualcomm SM8150 have broken low-latency capture, and that float
+// capture has no fast path before Android P.
+//
+// What Oboe does NOT do, and what this file therefore still does, is verify
+// that Android actually routed capture to the device we asked for. SingZ lets
+// a singer pick an input, so quietly getting a different one is a failure
+// here even though it is fine for Oboe's usual callers.
 namespace singz {
 namespace {
 
 constexpr char kUidPrefix[] = "android:";
 constexpr int32_t kMaximumChannels = 256;
 constexpr int32_t kMaximumCallbackFrames = 16384;
+constexpr uint64_t kCallbackDrainTimeoutNs = 2000000000ull;
 
 bool deviceIdFromUid(const std::string& uid, int32_t& deviceId) {
   if (uid.rfind(kUidPrefix, 0) != 0) return false;
@@ -57,57 +72,26 @@ uint64_t monotonicNowNs() {
              : 0;
 }
 
-const char* formatName(aaudio_format_t format) {
+const char* formatName(oboe::AudioFormat format) {
   switch (format) {
-    case AAUDIO_FORMAT_PCM_FLOAT: return "float32";
-    case AAUDIO_FORMAT_PCM_I16: return "pcm16";
+    case oboe::AudioFormat::Float: return "float32";
+    case oboe::AudioFormat::I16: return "pcm16";
+    case oboe::AudioFormat::I24: return "pcm24";
+    case oboe::AudioFormat::I32: return "pcm32";
     default: return "unsupported";
   }
 }
 
-const char* sharingName(aaudio_sharing_mode_t mode) {
-  return mode == AAUDIO_SHARING_MODE_EXCLUSIVE ? "exclusive" : "shared";
+const char* sharingName(oboe::SharingMode mode) {
+  return mode == oboe::SharingMode::Exclusive ? "exclusive" : "shared";
 }
 
-const char* performanceName(aaudio_performance_mode_t mode) {
+const char* performanceName(oboe::PerformanceMode mode) {
   switch (mode) {
-    case AAUDIO_PERFORMANCE_MODE_LOW_LATENCY: return "low-latency";
-    case AAUDIO_PERFORMANCE_MODE_POWER_SAVING: return "power-saving";
+    case oboe::PerformanceMode::LowLatency: return "low-latency";
+    case oboe::PerformanceMode::PowerSaving: return "power-saving";
     default: return "none";
   }
-}
-
-using SetInputPreset = void (*)(AAudioStreamBuilder*, aaudio_input_preset_t);
-using GetInputPreset = aaudio_input_preset_t (*)(AAudioStream*);
-
-SetInputPreset setInputPresetFunction() {
-  return reinterpret_cast<SetInputPreset>(
-      dlsym(RTLD_DEFAULT, "AAudioStreamBuilder_setInputPreset"));
-}
-
-GetInputPreset getInputPresetFunction() {
-  if (android_get_device_api_level() < 28) return nullptr;
-  return reinterpret_cast<GetInputPreset>(
-      dlsym(RTLD_DEFAULT, "AAudioStream_getInputPreset"));
-}
-
-struct PresetChoice {
-  aaudio_input_preset_t value = AAUDIO_INPUT_PRESET_VOICE_RECOGNITION;
-  bool apply = false;
-};
-
-std::vector<PresetChoice> presetChoices() {
-  const int api = android_get_device_api_level();
-  if (api >= 29)
-    return {{AAUDIO_INPUT_PRESET_VOICE_PERFORMANCE, true},
-            {AAUDIO_INPUT_PRESET_UNPROCESSED, true},
-            {AAUDIO_INPUT_PRESET_VOICE_RECOGNITION, true}};
-  if (api >= 28)
-    return {{AAUDIO_INPUT_PRESET_UNPROCESSED, true},
-            {AAUDIO_INPUT_PRESET_VOICE_RECOGNITION, true}};
-  // setInputPreset was introduced in API 28. API 26-27 already default to
-  // VOICE_RECOGNITION, which AAudio documents as the low-latency safe path.
-  return {{AAUDIO_INPUT_PRESET_VOICE_RECOGNITION, false}};
 }
 
 enum class RuntimeFailure : int32_t {
@@ -118,9 +102,33 @@ enum class RuntimeFailure : int32_t {
   StreamError = 4,
 };
 
-class AAudioInputBackend final : public AudioInputBackend {
+class OboeInputBackend;
+
+/**
+ * Oboe retains its callbacks for the stream's life and dispatches errors from
+ * its own thread — `oboe_aaudio_error_thread_proc_common` calls
+ * onErrorBeforeClose, then close(), then onErrorAfterClose, holding a
+ * shared_ptr to the STREAM only. Handing it a raw `this` is deprecated in
+ * Oboe for that reason: a disconnect landing inside teardown would call a
+ * virtual on freed memory, and the callback gate cannot help because
+ * onErrorAfterClose runs after Oboe's own close().
+ *
+ * So the callbacks live on a separately owned object that Oboe keeps alive,
+ * carrying a back-pointer the backend clears before it goes. Late callbacks
+ * then find null and do nothing. Same shape as the JNI listener bridge.
+ */
+struct OboeCallbackBridge final : oboe::AudioStreamDataCallback,
+                                  oboe::AudioStreamErrorCallback {
+  AudioInputCallbackOwnerGate<OboeInputBackend> owner;
+
+  oboe::DataCallbackResult onAudioReady(oboe::AudioStream* stream, void* audioData,
+                                        int32_t frames) override;
+  void onErrorBeforeClose(oboe::AudioStream* stream, oboe::Result error) override;
+};
+
+class OboeInputBackend final : public AudioInputBackend {
  public:
-  ~AAudioInputBackend() override { stop(); }
+  ~OboeInputBackend() override { stop(); }
 
   AudioInputResult open(const AudioInputConfig& config, AudioInputPush push,
                         void* context) override {
@@ -139,75 +147,93 @@ class AAudioInputBackend final : public AudioInputBackend {
       return failure("Android audio input channel is out of range", config.channel);
 
     requestedDeviceId_ = requestedDevice;
-    requestedChannels_ = static_cast<int32_t>(found->channels);
+    // Ask for MONO whenever the caller wants the first lane, which on Android
+    // is always — nothing in the app offers a lane picker. Asking instead for
+    // the maximum count AudioManager advertised (2 on a phone) and taking lane
+    // 0 rests on something the platform never defines: AOSP documents how to
+    // SELECT a channel by index and nowhere says which microphone an index is,
+    // and the one API that maps the two (MicrophoneInfo.getChannelMapping) has
+    // no equivalent on this capture path. Measured on a Xiaomi 23049PCD8G, the
+    // two lanes sit 4.4 dB apart on the same sound, so the choice changes what
+    // you hear — while saying nothing about which lane is which.
+    requestedChannels_ =
+        config.channel == 0 ? 1 : static_cast<int32_t>(found->channels);
     selectedChannel_ = config.channel;
     push_ = push;
     context_ = context;
     runtimeFailure_.store(RuntimeFailure::None, std::memory_order_relaxed);
     stopRequested_.store(false, std::memory_order_release);
     mono_.resize(kMaximumCallbackFrames);
+    callbacks_->owner.open(this);
 
-    std::string lastError = "AAudio could not open the requested input";
-    const SetInputPreset setPreset = setInputPresetFunction();
-    const GetInputPreset getPreset = getInputPresetFunction();
-    for (const aaudio_sharing_mode_t sharing :
-         {AAUDIO_SHARING_MODE_EXCLUSIVE, AAUDIO_SHARING_MODE_SHARED}) {
-      for (const PresetChoice& preset : presetChoices()) {
-        // API 28+ should expose the symbol. If a vendor image does not, use
-        // AAudio's documented voice-recognition default exactly once.
-        PresetChoice attempt = preset;
-        if (attempt.apply && !setPreset) {
-          attempt = {AAUDIO_INPUT_PRESET_VOICE_RECOGNITION, false};
-        }
-        const aaudio_result_t opened = openStream(sharing, attempt, setPreset);
-        if (opened != AAUDIO_OK) {
-          lastError = std::string("AAudio could not open the input: ") +
-                      AAudio_convertResultToText(opened);
-          closeStream();
-          if (!setPreset && preset.apply) break;
-          continue;
-        }
-        lastError = verifyOpenedStream(getPreset);
-        if (lastError.empty()) return negotiatedResult(AudioInputState::Starting);
-        // Validation failures are retried too. Some devices expose a reduced
-        // lane map or a different format only in exclusive mode.
-        closeStream();
-        if (!setPreset && preset.apply) break;
-      }
+    oboe::AudioStreamBuilder builder;
+    builder.setDirection(oboe::Direction::Input)
+        ->setDeviceId(requestedDeviceId_)
+        ->setChannelCount(requestedChannels_)
+        ->setFormat(oboe::AudioFormat::Float)
+        // Convert rather than fail when a device cannot serve float or the
+        // requested lane count natively — including the pre-P quirk where
+        // float capture has no fast path at all.
+        ->setFormatConversionAllowed(true)
+        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
+        ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+        // Sharing mode is left at Oboe's default on purpose. The old code
+        // tried EXCLUSIVE (MMAP) first and fell back only on an open FAILURE,
+        // which is exactly wrong for the devices whose MMAP capture opens fine
+        // and then delivers silence. QuirksManager gates MMAP per device.
+        ->setInputPreset(oboe::InputPreset::VoicePerformance)
+        ->setDataCallback(callbacks_)
+        ->setErrorCallback(callbacks_);
+    // Audio API is left to Oboe. It recommends AAudio from API 27 and minSdk
+    // is 28, so OpenSL ES — which does not support device IDs and reports 0
+    // for every stream, which would fail the routing check below for every
+    // microphone a singer picks — is out of reach on any device that can
+    // install this app.
+
+    const oboe::Result opened = builder.openStream(stream_);
+    if (opened != oboe::Result::OK || !stream_) {
+      closeStream();
+      return failure(std::string("Oboe could not open the input: ") +
+                         oboe::convertToText(opened),
+                     selectedChannel_);
     }
-    return failure(std::move(lastError), selectedChannel_);
+    std::string invalid = verifyOpenedStream();
+    if (!invalid.empty()) {
+      closeStream();
+      return failure(std::move(invalid), selectedChannel_);
+    }
+    return negotiatedResult(AudioInputState::Starting);
   }
 
   AudioInputResult start() override {
-    if (!stream_)
-      return failure("AAudio input is not prepared", selectedChannel_);
+    if (!stream_) return failure("Oboe input is not prepared", selectedChannel_);
     callbackGate_.open();
     callbackFrameCursor_ = 0;
     timestampProjector_.reset();
-    const aaudio_result_t requested = AAudioStream_requestStart(stream_);
-    if (requested != AAUDIO_OK) {
+    const oboe::Result requested = stream_->requestStart();
+    if (requested != oboe::Result::OK) {
       callbackGate_.beginClose();
-      return failure(std::string("AAudio input could not start: ") +
-                         AAudio_convertResultToText(requested),
+      return failure(std::string("Oboe input could not start: ") +
+                         oboe::convertToText(requested),
                      selectedChannel_);
     }
 
-    aaudio_stream_state_t current = AAudioStream_getState(stream_);
+    oboe::StreamState current = stream_->getState();
     const int64_t deadline = static_cast<int64_t>(monotonicNowNs()) + 2000000000ll;
-    while (current != AAUDIO_STREAM_STATE_STARTED &&
-           current != AAUDIO_STREAM_STATE_DISCONNECTED &&
+    while (current != oboe::StreamState::Started &&
+           current != oboe::StreamState::Disconnected &&
            static_cast<int64_t>(monotonicNowNs()) < deadline) {
-      aaudio_stream_state_t next = current;
-      const aaudio_result_t waited =
-          AAudioStream_waitForStateChange(stream_, current, &next, 100000000ll);
-      if (waited != AAUDIO_OK && waited != AAUDIO_ERROR_TIMEOUT)
-        return failure(std::string("AAudio start state failed: ") +
-                           AAudio_convertResultToText(waited),
+      oboe::StreamState next = current;
+      const oboe::Result waited =
+          stream_->waitForStateChange(current, &next, 100000000ll);
+      if (waited != oboe::Result::OK && waited != oboe::Result::ErrorTimeout)
+        return failure(std::string("Oboe start state failed: ") +
+                           oboe::convertToText(waited),
                        selectedChannel_);
       current = next;
     }
-    if (current != AAUDIO_STREAM_STATE_STARTED)
-      return failure(current == AAUDIO_STREAM_STATE_DISCONNECTED
+    if (current != oboe::StreamState::Started)
+      return failure(current == oboe::StreamState::Disconnected
                          ? "Android audio input disconnected while starting"
                          : "Android audio input did not start in time",
                      selectedChannel_);
@@ -234,16 +260,75 @@ class AAudioInputBackend final : public AudioInputBackend {
         error = "Android audio input was disconnected or rerouted";
         return true;
       case RuntimeFailure::CallbackTooLarge:
-        error = "AAudio input callback exceeded the core frame limit";
+        error = "Oboe input callback exceeded the core frame limit";
         return true;
       case RuntimeFailure::InvalidBuffer:
-        error = "AAudio delivered an invalid input buffer";
+        error = "Oboe delivered an invalid input buffer";
         return true;
       case RuntimeFailure::StreamError:
-        error = "AAudio input stream failed";
+        error = "Oboe input stream failed";
         return true;
     }
     return false;
+  }
+
+  // ---- driven by OboeCallbackBridge ----------------------------------------
+  oboe::DataCallbackResult onAudioReady(void* audioData, int32_t frames) {
+    const uint64_t callbackTime = monotonicNowNs();
+    AudioInputCallbackScope callback(callbackGate_);
+    // Continue, not Stop, on the teardown paths. Below API 31 Oboe turns a
+    // Stop return into a DETACHED thread that calls requestStop() on a raw
+    // AudioStream*, and closeStream() is already dropping that stream — the
+    // thread can reach its lock after the object is gone. Nothing needs
+    // stopping here anyway: the close is under way. Genuine errors below still
+    // return Stop, where the close arrives a JS round-trip later.
+    if (!callback || stopRequested_.load(std::memory_order_acquire))
+      return oboe::DataCallbackResult::Continue;
+    if (!audioData || frames <= 0 || channels_ <= 0) {
+      runtimeFailure_.store(RuntimeFailure::InvalidBuffer, std::memory_order_release);
+      return oboe::DataCallbackResult::Stop;
+    }
+    if (frames > kMaximumCallbackFrames) {
+      runtimeFailure_.store(RuntimeFailure::CallbackTooLarge, std::memory_order_release);
+      return oboe::DataCallbackResult::Stop;
+    }
+    // setFormatConversionAllowed means Oboe hands us the format we asked for
+    // even when the device serves another, so this is always float.
+    float* mono = mono_.data();
+    const auto* source = static_cast<const float*>(audioData);
+    const int32_t channels = channels_;
+    const uint32_t selected = selectedChannel_;
+    for (int32_t frame = 0; frame < frames; ++frame)
+      mono[static_cast<size_t>(frame)] =
+          source[static_cast<size_t>(frame) * static_cast<size_t>(channels) +
+                 static_cast<size_t>(selected)];
+
+    const int64_t blockStartFrame = callbackFrameCursor_;
+    if (blockStartFrame > std::numeric_limits<int64_t>::max() - frames) {
+      runtimeFailure_.store(RuntimeFailure::InvalidBuffer, std::memory_order_release);
+      return oboe::DataCallbackResult::Stop;
+    }
+    callbackFrameCursor_ += frames;
+    const AudioInputTimestampProjection projected = timestampProjector_.project(
+        blockStartFrame, static_cast<uint32_t>(frames), sampleRate_, callbackTime);
+    if (push_)
+      (void)push_(context_, mono, static_cast<uint32_t>(frames),
+                  projected.sampleHostTimeNs, callbackTime,
+                  projected.usedHardwareAnchor
+                      ? AudioInputTimestampQuality::Hardware
+                      : AudioInputTimestampQuality::CallbackEstimate);
+    return oboe::DataCallbackResult::Continue;
+  }
+
+  void onErrorBeforeClose(oboe::Result error) {
+    // Enter the gate here too: teardown's inFlight() wait is what stops the
+    // backend being destroyed underneath a callback still running.
+    AudioInputCallbackScope callback(callbackGate_);
+    if (!callback || stopRequested_.load(std::memory_order_acquire)) return;
+    runtimeFailure_.store(error == oboe::Result::ErrorDisconnected
+                              ? RuntimeFailure::Disconnected
+                              : RuntimeFailure::StreamError,
+                          std::memory_order_release);
   }
 
  private:
@@ -260,82 +345,78 @@ class AAudioInputBackend final : public AudioInputBackend {
     result.sharingMode = sharingName(sharingMode_);
     result.performanceMode = performanceName(performanceMode_);
     result.inputPreset = inputPresetName_;
-    result.timestampSource =
-        "aaudio-hardware-monotonic-anchor-with-callback-fallback";
+    result.timestampSource = "oboe-hardware-monotonic-anchor-with-callback-fallback";
     return result;
   }
 
-  std::string verifyOpenedStream(GetInputPreset getPreset) {
-    deviceId_ = AAudioStream_getDeviceId(stream_);
-    channels_ = AAudioStream_getChannelCount(stream_);
-    sampleRate_ = AAudioStream_getSampleRate(stream_);
-    format_ = AAudioStream_getFormat(stream_);
-    sharingMode_ = AAudioStream_getSharingMode(stream_);
-    performanceMode_ = AAudioStream_getPerformanceMode(stream_);
-    if (getPreset) {
-      inputPresetName_ = androidAudioInputPresetMetadata(
-          static_cast<int32_t>(getPreset(stream_)), true, false);
-    }
+  std::string verifyOpenedStream() {
+    deviceId_ = stream_->getDeviceId();
+    channels_ = stream_->getChannelCount();
+    sampleRate_ = stream_->getSampleRate();
+    format_ = stream_->getFormat();
+    sharingMode_ = stream_->getSharingMode();
+    performanceMode_ = stream_->getPerformanceMode();
+    // A genuine read-back: AAudioStream_getInputPreset exists from API 28, and
+    // minSdk is 28, so this is the preset the stream actually carries rather
+    // than a restatement of what we asked for.
+    inputPresetName_ = androidAudioInputPresetMetadata(
+        static_cast<int32_t>(stream_->getInputPreset()), true, true);
+    // Oboe does not check this, and for its usual callers it need not: they
+    // want a microphone, not a NAMED microphone. SingZ offers a device choice,
+    // so capture arriving from somewhere else is a failure, not a fallback.
     if (deviceId_ != requestedDeviceId_)
       return "Android routed capture to a different input device";
     if (channels_ <= 0 || channels_ > kMaximumChannels ||
         selectedChannel_ >= static_cast<uint32_t>(channels_))
-      return "AAudio exposed fewer channels than AudioManager advertised";
-    if (sampleRate_ <= 0 ||
-        (format_ != AAUDIO_FORMAT_PCM_FLOAT && format_ != AAUDIO_FORMAT_PCM_I16))
-      return "AAudio returned an unsupported input format";
+      return "Oboe exposed fewer channels than AudioManager advertised";
+    if (sampleRate_ <= 0 || format_ != oboe::AudioFormat::Float)
+      return "Oboe returned an unsupported input format";
     return {};
   }
 
-  aaudio_result_t openStream(aaudio_sharing_mode_t sharingMode,
-                             const PresetChoice& preset,
-                             SetInputPreset setPreset) {
-    AAudioStreamBuilder* builder = nullptr;
-    aaudio_result_t result = AAudio_createStreamBuilder(&builder);
-    if (result != AAUDIO_OK || !builder) return result;
-    AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT);
-    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
-    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    AAudioStreamBuilder_setSharingMode(builder, sharingMode);
-    AAudioStreamBuilder_setDeviceId(builder, requestedDeviceId_);
-    AAudioStreamBuilder_setChannelCount(builder, requestedChannels_);
-    if (preset.apply && setPreset) setPreset(builder, preset.value);
-    AAudioStreamBuilder_setDataCallback(builder, dataCallback, this);
-    AAudioStreamBuilder_setErrorCallback(builder, errorCallback, this);
-    result = AAudioStreamBuilder_openStream(builder, &stream_);
-    AAudioStreamBuilder_delete(builder);
-    inputPresetName_ = androidAudioInputPresetMetadata(
-        static_cast<int32_t>(preset.value), false, preset.apply && setPreset);
-    return result;
-  }
-
   void closeStream() {
-    AAudioStream* stream = stream_;
-    // The sampler is the only non-RT caller of AAudioStream_getTimestamp.
-    // Stop and join it while the stream remains open, before either callback
-    // admission closes or AAudioStream_close can invalidate the handle.
+    // This outer bridge gate is the backend lifetime barrier. Its counter is
+    // incremented before owner is read, unlike the backend gate below. Once
+    // admission is closed, a callback racing after a zero observation cannot
+    // load the owner and therefore cannot enter the backend at all.
+    callbacks_->owner.beginClose();
+    // The sampler is the only non-RT caller of getTimestamp. Stop and join it
+    // while the stream is still open, before close() can invalidate the
+    // handle. Already-entered bridge callbacks remain pinned by the outer
+    // counter and drain below.
     stopTimestampSampler();
     callbackGate_.beginClose();
-    if (!stream) return;
-    if (started_) {
-      (void)AAudioStream_requestStop(stream);
-      aaudio_stream_state_t current = AAudioStream_getState(stream);
-      const uint64_t deadline = monotonicNowNs() + 500000000ull;
-      while (current != AAUDIO_STREAM_STATE_STOPPED &&
-             current != AAUDIO_STREAM_STATE_DISCONNECTED &&
-             monotonicNowNs() < deadline) {
-        aaudio_stream_state_t next = current;
-        (void)AAudioStream_waitForStateChange(stream, current, &next, 50000000ll);
-        current = next;
-      }
-    }
-    // Our callback contains no blocking operation. Closing the admission gate
-    // first therefore makes this wait finite and ensures buffers/self are not
-    // destroyed while either AAudio callback is still touching them.
-    while (callbackGate_.inFlight() != 0)
+    auto stream = stream_;
+    if (stream && started_) (void)stream->requestStop();
+
+    // Both callback bodies are bounded and non-blocking. Cap the control-side
+    // wait anyway: hanging forever during teardown is not a recovery policy.
+    // If the invariant is ever broken, fail closed with an Android tombstone
+    // instead of clearing a pointer that another thread still owns.
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::nanoseconds(kCallbackDrainTimeoutNs);
+    while ((callbacks_->owner.inFlight() != 0 || callbackGate_.inFlight() != 0) &&
+           std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    (void)AAudioStream_close(stream);
-    stream_ = nullptr;
+    }
+    if (callbacks_->owner.inFlight() != 0 || callbackGate_.inFlight() != 0) {
+      __android_log_assert("callback-drain-timeout", "SingZ",
+                           "Oboe callbacks did not quiesce within 2 seconds");
+    }
+    if (!callbacks_->owner.clearOwnerIfQuiescent()) {
+      __android_log_assert("callback-owner-still-live", "SingZ",
+                           "Oboe callback owner cleared before quiescence");
+    }
+    if (!stream) {
+      started_ = false;
+      timestampProjector_.reset();
+      return;
+    }
+    // Oboe's error thread calls close() and then onErrorAfterClose; with the
+    // bridge gate closed and its owner cleared above, neither has anything of
+    // ours to reach.
+    (void)stream->close();
+    stream_.reset();
     started_ = false;
     timestampProjector_.reset();
   }
@@ -349,14 +430,13 @@ class AAudioInputBackend final : public AudioInputBackend {
           {
             AudioInputTimestampQueryScope query(timestampQueryGate_);
             if (!query) break;
-            int64_t framePosition = 0;
-            int64_t frameTimeNs = 0;
-            const aaudio_result_t result = AAudioStream_getTimestamp(
-                stream_, CLOCK_MONOTONIC, &framePosition, &frameTimeNs);
+            auto stream = stream_;
+            if (!stream) break;
+            const auto stamp = stream->getTimestamp(CLOCK_MONOTONIC);
             const uint64_t sampledAtNs = monotonicNowNs();
-            if (result == AAUDIO_OK)
-              (void)timestampProjector_.publish(
-                  framePosition, frameTimeNs, sampledAtNs);
+            if (stamp)
+              (void)timestampProjector_.publish(stamp.value().position,
+                                                stamp.value().timestamp, sampledAtNs);
           }
           // A short bounded cadence keeps anchors fresh without polling from
           // the real-time callback. Split the wait so teardown joins quickly.
@@ -382,80 +462,11 @@ class AAudioInputBackend final : public AudioInputBackend {
       timestampSampler_.join();
     }
     // join is the lifecycle barrier: no getTimestamp call can remain admitted
-    // when closeStream continues to AAudioStream_close.
+    // when closeStream continues to close().
   }
 
-  static aaudio_data_callback_result_t dataCallback(AAudioStream*, void* user,
-                                                    void* audioData, int32_t frames) {
-    const uint64_t callbackTime = monotonicNowNs();
-    auto* self = static_cast<AAudioInputBackend*>(user);
-    if (!self) return AAUDIO_CALLBACK_RESULT_STOP;
-    AudioInputCallbackScope callback(self->callbackGate_);
-    if (!callback || self->stopRequested_.load(std::memory_order_acquire))
-      return AAUDIO_CALLBACK_RESULT_STOP;
-    if (!audioData || frames <= 0 || self->channels_ <= 0) {
-      self->runtimeFailure_.store(RuntimeFailure::InvalidBuffer, std::memory_order_release);
-      return AAUDIO_CALLBACK_RESULT_STOP;
-    }
-    if (frames > kMaximumCallbackFrames) {
-      self->runtimeFailure_.store(RuntimeFailure::CallbackTooLarge,
-                                  std::memory_order_release);
-      return AAUDIO_CALLBACK_RESULT_STOP;
-    }
-    float* mono = self->mono_.data();
-    const int32_t channels = self->channels_;
-    const uint32_t selected = self->selectedChannel_;
-    if (self->format_ == AAUDIO_FORMAT_PCM_FLOAT) {
-      const auto* source = static_cast<const float*>(audioData);
-      for (int32_t frame = 0; frame < frames; ++frame)
-        mono[static_cast<size_t>(frame)] =
-            source[static_cast<size_t>(frame) * static_cast<size_t>(channels) +
-                   static_cast<size_t>(selected)];
-    } else {
-      const auto* source = static_cast<const int16_t*>(audioData);
-      constexpr float scale = 1.0f / 32768.0f;
-      for (int32_t frame = 0; frame < frames; ++frame)
-        mono[static_cast<size_t>(frame)] =
-            source[static_cast<size_t>(frame) * static_cast<size_t>(channels) +
-                   static_cast<size_t>(selected)] * scale;
-    }
-    const int64_t blockStartFrame = self->callbackFrameCursor_;
-    if (blockStartFrame > std::numeric_limits<int64_t>::max() - frames) {
-      self->runtimeFailure_.store(RuntimeFailure::InvalidBuffer,
-                                  std::memory_order_release);
-      return AAUDIO_CALLBACK_RESULT_STOP;
-    }
-    self->callbackFrameCursor_ += frames;
-    // The hardware CLOCK_MONOTONIC anchor is sampled only by the joined
-    // non-RT sampler. This RT projection uses bounded lock-free 32-bit atomic
-    // reads; until a fresh sane anchor exists it falls back to callback entry
-    // minus exactly this block's duration. Playback latency is never applied.
-    const AudioInputTimestampProjection projected =
-        self->timestampProjector_.project(
-            blockStartFrame, static_cast<uint32_t>(frames), self->sampleRate_,
-            callbackTime);
-    if (self->push_)
-      (void)self->push_(self->context_, mono, static_cast<uint32_t>(frames),
-                        projected.sampleHostTimeNs,
-                        callbackTime,
-                        projected.usedHardwareAnchor
-                            ? AudioInputTimestampQuality::Hardware
-                            : AudioInputTimestampQuality::CallbackEstimate);
-    return AAUDIO_CALLBACK_RESULT_CONTINUE;
-  }
-
-  static void errorCallback(AAudioStream*, void* user, aaudio_result_t error) {
-    auto* self = static_cast<AAudioInputBackend*>(user);
-    if (!self) return;
-    AudioInputCallbackScope callback(self->callbackGate_);
-    if (!callback || self->stopRequested_.load(std::memory_order_acquire)) return;
-    self->runtimeFailure_.store(error == AAUDIO_ERROR_DISCONNECTED
-                                    ? RuntimeFailure::Disconnected
-                                    : RuntimeFailure::StreamError,
-                                std::memory_order_release);
-  }
-
-  AAudioStream* stream_ = nullptr;
+  std::shared_ptr<oboe::AudioStream> stream_;
+  std::shared_ptr<OboeCallbackBridge> callbacks_ = std::make_shared<OboeCallbackBridge>();
   AudioInputPush push_ = nullptr;
   void* context_ = nullptr;
   std::vector<float> mono_;
@@ -472,18 +483,31 @@ class AAudioInputBackend final : public AudioInputBackend {
   int32_t requestedChannels_ = 0;
   int32_t channels_ = 0;
   int32_t sampleRate_ = 0;
-  aaudio_format_t format_ = AAUDIO_FORMAT_UNSPECIFIED;
-  aaudio_sharing_mode_t sharingMode_ = AAUDIO_SHARING_MODE_SHARED;
-  aaudio_performance_mode_t performanceMode_ = AAUDIO_PERFORMANCE_MODE_NONE;
-  std::string inputPresetName_ = "voice-recognition-default-unverified";
+  oboe::AudioFormat format_ = oboe::AudioFormat::Invalid;
+  oboe::SharingMode sharingMode_ = oboe::SharingMode::Shared;
+  oboe::PerformanceMode performanceMode_ = oboe::PerformanceMode::None;
+  std::string inputPresetName_ = "voice-performance-requested-unverified";
   uint32_t selectedChannel_ = 0;
   bool started_ = false;
 };
 
+oboe::DataCallbackResult OboeCallbackBridge::onAudioReady(oboe::AudioStream* /*stream*/,
+                                                          void* audioData, int32_t frames) {
+  AudioInputCallbackOwnerScope<OboeInputBackend> backend(owner);
+  return backend ? backend->onAudioReady(audioData, frames)
+                 : oboe::DataCallbackResult::Continue;
+}
+
+void OboeCallbackBridge::onErrorBeforeClose(oboe::AudioStream* /*stream*/,
+                                            oboe::Result error) {
+  AudioInputCallbackOwnerScope<OboeInputBackend> backend(owner);
+  if (backend) backend->onErrorBeforeClose(error);
+}
+
 }  // namespace
 
 std::unique_ptr<AudioInputBackend> createPlatformAudioInputBackend() {
-  return std::make_unique<AAudioInputBackend>();
+  return std::make_unique<OboeInputBackend>();
 }
 
 std::vector<AudioInputDevice> enumeratePlatformAudioInputDevices(std::string* error) {

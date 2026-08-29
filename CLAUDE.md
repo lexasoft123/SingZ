@@ -180,12 +180,30 @@ project whose stems ALL carry audio — a silent stem discriminates nothing, and
 a fallback mutated to drop one passed until the mutation was moved to a stem
 with music in it — and both report whether the LATTICE and the aligned WORDS
 actually crossed, because a bare comparison sends neither and those are the
-two arguments the real pipeline always fills. Pure-JS mobile logic that no device can show
+two arguments the real pipeline always fills. `mic-android.cjs` is the one
+that cannot run on a simulator AT ALL: it drives vocal-training CAPTURE
+through the `__test.audioInput` seam, so it wants a real phone with a real
+microphone — an AVD booted `-no-audio` has no input, and the driver then
+correctly and uselessly reports a capture that delivers nothing. It needs the
+side-by-side debug build (`-PdebugAppIdSuffix=.debug`) and asserts the
+TRANSPORT contract only — the input inventory, that Bluetooth never outranks
+the built-in microphone, the negotiated device/lane/format/rate, that the
+preset was READ BACK rather than merely asked for, that audio arrives with the
+hardware callback firing and no overruns, and that the lease releases cleanly
+enough for a second capture to succeed. Pitch and level are deliberately NOT
+asserted there: they need a controlled room, and the host suite's
+mutation-checked fixtures pin them without one. Pure-JS mobile logic that no device can show
 (the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
 — needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
 our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
-and `jest.setup.js` to stub audio-api + the pods (they throw on import with no
-native module).
+`jest.setup.js` to stub audio-api + the pods (they throw on import with no
+native module), and a `resolver` for `@singz/ui`, whose subpath exports are
+ESM-only. That last one is scoped to that package on purpose: the one-line
+`customExportConditions: ['import']` fix is global, and switching every other
+dependency onto its ESM build takes all 33 suites down with it (measured). A
+suite that stops being RUN is the failure mode here — nine of them went dark
+when the phone stopped carrying its own copy of the kit, and jest reported
+240 passing tests and no failures throughout.
 **Two sessions, one Mac**: another worktree's Metro already on 8081 will happily
 serve ITS bundle to your app, so a parallel run needs its own simulator *and* its
 own port — boot a second device, build with `RCT_METRO_PORT=8082`, and then set
@@ -902,14 +920,44 @@ per-versionCode changelog and, for whichever locales
 `ru-RU`) — write those blocks assuming either audience reads them; wording
 true only on one OS (a v0.19.0 draft named "Android's own low-latency
 capture" before this was noticed and generalized) is wrong on the other
-platform's listing.
+platform's listing. When a release genuinely IS a different release on the
+two phones, `<!-- store:LOCALE:ios -->` REPLACES the shared block for Apple
+alone (0.19.1 is the case that forced it: an Android capture rewrite and an
+Android 9 floor, neither of which happened on iPhone, heading for an App
+Store submission that names another mobile platform — guideline 2.3.10, on a
+first review with no history to survive it). It is an override and not an
+addition: with none, both stores get the shared block exactly as before, and
+two copies of one claim drift, which is what this file exists to prevent.
+The workflows strip `:ios` blocks from the GitHub Release body, so the
+release page keeps opening with the same two blurbs it always has.
 
 **iOS ships through `.github/workflows/ios.yml`** — a `v*` tag uploads to
-TestFlight automatically; submitting for App Store review
-is manual-dispatch-only, and it carries `automatic_release: true` — an
+TestFlight automatically AND, when the `TESTFLIGHT_GROUPS` repo variable
+names a group (`External Testers` today — the one behind the public link
+README.md hands out), sends that build to **Beta App Review** so external
+testers actually get it. Unset variable = internal-only upload, said out
+loud in the log. The tag job therefore now BLOCKS on Apple's processing
+(15-60 min): a build that is still processing cannot be distributed. It is
+deliberately ONE `upload_to_testflight` call rather than `beta` followed by
+`beta_external` — one wait, and the group named in one place — and NOT
+because chaining would race Apple, which it would not: the
+`upload_to_testflight` ACTION waits on the distribute-only path too
+(upload_to_testflight.rb:31 in the pinned 2.238.0), even though the
+`Pilot::BuildManager#distribute` it wraps does not wait itself. What IS
+sharp: `skip_waiting_for_build_processing: true` alongside a widen makes
+pilot abandon the distribution and still exit GREEN (build_manager.rb:202),
+so that flag and an external group must never be set together.
+Submitting for App Store review stays manual-dispatch-only, and it carries
+`automatic_release: true` — an
 approved build goes LIVE on the store by itself, so dispatching that lane IS
 the decision to publish, same "tagging is not enough to reach
-production" shape as Android's `publish` job. The app record itself cannot
+production" shape as Android's `publish` job. Two lanes reach the store and
+the difference bites when aiming at an already-built tag: `submit` sends an
+ALREADY-UPLOADED build (pass its number in the workflow's `build` input,
+which lands in `SINGZ_IOS_BUILD_NUMBER` — a dispatch's own `run_number` is
+NOT the tag run's), while `release` archives a fresh binary and so leaves a
+second build number for one version. The deliver call itself lives in one
+place, `private_lane :submit_build`, shared by both. The app record itself cannot
 be created by the API at all (Apple's docs say so outright) — that and the
 App Store Connect API key are one-time by-hand setup, see
 [docs/IOS-RELEASE.md](docs/IOS-RELEASE.md). **Signing is `fastlane match`**:
@@ -983,15 +1031,18 @@ dispatch, the weekly cache warmer) building in a fork, or on any machine with
 no Developer ID certificate, with no Apple secrets at all. `build.yml`'s
 signing step imports the certificate into a keychain it creates itself and
 writes **`CSC_KEYCHAIN`/`CSC_NAME`** (plus `APPLE_API_KEY`, `APPLE_TEAM_ID`,
-`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), each only when its secret is
-non-empty. It deliberately writes **neither `CSC_LINK` nor
-`CSC_KEY_PASSWORD`** — an earlier revision of this paragraph said it wrote
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), each only when the value it needs is
+present — `APPLE_TEAM_ID` is a literal, guarded on the certificate secret. It
+deliberately writes **neither `CSC_LINK` nor `CSC_KEY_PASSWORD`** — an
+earlier revision of this paragraph said it wrote
 exactly those two, and setting `CSC_LINK` is the one thing that breaks this,
 because electron-builder 26.15.3 then hands the `.p12` password to
 `security set-key-partition-list -k`, which wants the keychain password. The
-step stays on the macOS leg of that job's matrix regardless: `CSC_*` is read
-for a **Windows** Authenticode cert on the other leg, so a shared step would
-aim Apple credentials at `signtool`. Notarization reuses the iOS
+step stays on the macOS leg of that job's matrix regardless, for two reasons:
+it runs `security`, which is macOS-only, and `CSC_*` is a shared namespace
+whose `CSC_LINK`/`CSC_KEY_PASSWORD` the Windows leg reads for Authenticode —
+not because what it writes today could reach `signtool` (nothing on Windows
+reads `CSC_KEYCHAIN` or `CSC_NAME`). Notarization reuses the iOS
 pipeline's App Store Connect API key rather than minting a second one — see
 [docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md), including why the
 entitlements file carries only the two Hardened Runtime flags Electron

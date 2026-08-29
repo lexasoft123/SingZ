@@ -15,6 +15,7 @@
     "dist": "node scripts/dist.cjs",
     "test": "vitest run",
     "gates": "scripts/run-parity-gates.sh",
+    "icons": "electron node_modules/@singz/ui/recipes/app-icon/cut-icons.cjs build/icon/forge.html build && electron build/icon/cut-mobile.cjs build/icon/forge.html .",
     "store-notes": "node scripts/store-notes.cjs",
     "store-notes:check": "node scripts/store-notes.cjs --check",
     "capture:addon": "node scripts/build-capture-addon.cjs",

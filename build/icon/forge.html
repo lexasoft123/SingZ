@@ -1,0 +1,295 @@
+<meta charset="utf-8" /><title>SingZ icon forge</title>
+<body style="margin:0;background:#0d0c0a;color:#8b8378;font:12px/1.5 ui-monospace,monospace">
+<script type="module">
+/*
+ * The SingZ app icon — one drawing, three platforms.
+ *
+ *   npm run icons     # desktop: build/icon.{icns,ico,png}
+ *                     # phones:  iOS AppIcon, Android adaptive + legacy, Play 512
+ *
+ * The three layers come from @singz/ui straight out of node_modules — the
+ * recipe ships inside the pinned tarball, so there is no copy of the drawing
+ * kit in this repo to drift from it. Bumping the kit changes the tile, the
+ * glass and the light; only the mark below is ours.
+ *
+ * The mark is the app's own mixer: lit lanes in an arch, in the stem colours
+ * the rest of SingZ already speaks. Those hues are a contract
+ * (@singz/ui/stems — Bass is the same blue on the phone and the desktop or
+ * the colour stops meaning anything), and the drawing this replaced did not
+ * keep it: its tall lane sampled as #ffa028, the kit's own AMBER, where
+ * Guitar is #f98424. The values below are the tokens.
+ *
+ * Geometry is lifted from that previous desktop icon to the pixel — lane
+ * width, gaps and the five heights were measured off its shipped 1024 png.
+ * People find an app by its shape in the dock, so the silhouette is
+ * deliberately unchanged; what changed is the light on it.
+ *
+ * The phones used to carry a DIFFERENT drawing entirely — six horizontal
+ * flat lanes, no glow, no glass — so an app that is one app looked like two.
+ * They now render the same mark through the framings each platform needs
+ * (see FRAMES).
+ */
+import { paint } from '../../node_modules/@singz/ui/recipes/app-icon/glass.js'
+
+/* Five lanes, not six: piano's violet lands between vocals' red and bass'
+   blue and the arch stops reading as one object. The icon is not a legend. */
+const LANES = [
+  { color: '#ff5c65', h: 0.1972 }, // vocals
+  { color: '#ffc53d', h: 0.3584 }, // drums
+  { color: '#f98424', h: 0.5773 }, // guitar  — the tall one, and the warm centre
+  { color: '#527dff', h: 0.4281 }, // bass
+  { color: '#27e7bb', h: 0.2646 }  // other
+]
+
+/* Fractions of the TILE, so the mark scales with it rather than the canvas.
+   Measured off the shipped 1024 png and then multiplied by 1.0776, because
+   the recipe's tile is inset further than the old icon's (0.094 of the canvas
+   against 0.0625 — the recipe is the one on Apple's grid). Scaling by the
+   ratio of the two tiles leaves the mark the same size ON THE CANVAS, which
+   is the only size anybody sees, so the dock silhouette does not move. */
+const FULL = { w: 0.0890, gap: 0.0625, bloom: 0.010, bloomW: 1.08, bloomA: 0.46, sheen: 0.14 }
+/* Below 32 px five lanes are five smears. Three keep the arch, the colours
+   and the silhouette idea — the same app in the Finder sidebar.
+   They must stay LANE-SHAPED: the first try was fatter and shorter and the
+   outer two read as dots either side of a bar. */
+const SMALL = { w: 0.124, gap: 0.145, pick: [0, 2, 4], h: [0.388, 0.776, 0.474], bloom: 0.0040, bloomW: 1.08, bloomA: 0.46, sheen: 0 }
+
+const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
+const mix = (a, b, t) => {
+  const [x, y] = [hex(a), hex(b)]
+  return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(',')})`
+}
+
+/*
+ * THE BLOOM IS NOT lit()'s, AND WIDENING IT BACK IS THE MISTAKE TO AVOID.
+ *
+ * lit() blooms at 1.75x the stroke width blurred by 0.030 of the tile, which
+ * is sized for a THIN mark — the recipe's own is 0.052 of the tile, so 1.75x
+ * of it is still slender. A lane here is 0.089 of the tile, and the same
+ * multiplier put the halo 0.061 of the tile past each lane edge against a
+ * gap of 0.0625: two neighbouring blooms met in the middle of every gap, at
+ * 0.55 alpha each, and the mark went foggy. Measured on the icon's centre
+ * row, the gaps floored at 45% of peak luminance where the drawing this
+ * replaced sat at 35%; at the values above they floor at 14%.
+ *
+ * So the bloom is a halo that must STOP SHORT of the gap, not a multiple of
+ * a stroke: (bloomW - 1) * w / 2 + blur has to stay well under 0.0625 of the
+ * tile. At 1.08 and 0.010 it reaches about 0.014 and the gaps read as black.
+ * Anything that widens a lane, closes a gap or fattens the bloom has to
+ * re-check that sum.
+ */
+
+/**
+ * One lane, drawn as light. The three passes are lit()'s, in lit()'s order —
+ * a blurred bloom, the solid top-lit form, a sheen offset toward the light —
+ * but every colour is derived from the lane's own hue.
+ *
+ * The kit's lit() is not called directly because its bloom is a hard-coded
+ * amber: correct for a one-accent mark, and a dirty orange halo around a
+ * blue Bass lane. The mark is the per-app layer, so the divergence lives
+ * here rather than in the kit.
+ *
+ * `top`/`bot` are the LIGHT's extent, not the lane's — one ramp for the whole
+ * mark, the way lit() anchors its gradient to the tile. Anchoring it per lane
+ * instead gives every bar its own pale top and the five of them go milky.
+ */
+function lane(ctx, z, x, y0, y1, w, color, top, bot, cfg) {
+  const hot = mix(color, '#ffffff', 0.42)
+  const deep = mix(color, '#000000', 0.45)
+  const [r, g, b] = hex(color)
+  const run = () => {
+    ctx.beginPath()
+    ctx.moveTo(x, y0 + w / 2)
+    ctx.lineTo(x, y1 - w / 2)
+    ctx.stroke()
+  }
+
+  ctx.save()
+  ctx.lineCap = 'round'
+
+  if (cfg.flat) {
+    // The Android monochrome layer: the system throws away every colour and
+    // tints what is left by ALPHA, so a bloom is not a glow there, it is a
+    // grey smear around the lane. Solid shape only.
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = w
+    run()
+    ctx.restore()
+    return
+  }
+
+  ctx.filter = `blur(${z * cfg.bloom}px)`
+  ctx.strokeStyle = `rgba(${r},${g},${b},${cfg.bloomA})`
+  ctx.lineWidth = w * cfg.bloomW
+  run()
+
+  ctx.filter = 'none'
+  const grad = ctx.createLinearGradient(0, top, 0, bot)
+  grad.addColorStop(0, hot)
+  grad.addColorStop(0.34, color)
+  grad.addColorStop(1, deep)
+  ctx.strokeStyle = grad
+  ctx.lineWidth = w
+  run()
+
+  // Pass 3 is skipped at small sizes: a highlight 0.26 of a 1.5 px lane is
+  // not a sheen, it is the lane going pale.
+  if (cfg.sheen) {
+    ctx.filter = `blur(${w * 0.17}px)`
+    ctx.strokeStyle = `rgba(255,250,244,${cfg.sheen})`
+    ctx.lineWidth = w * 0.26
+    ctx.translate(-w * 0.11, -w * 0.12)
+    run()
+  }
+  ctx.restore()
+}
+
+function mixer(ctx, pad, size, cfg) {
+  const lanes = cfg.pick ? cfg.pick.map((i, n) => ({ ...LANES[i], h: cfg.h[n] })) : LANES
+  const w = cfg.w * size
+  const gap = cfg.gap * size
+  const span = lanes.length * w + (lanes.length - 1) * gap
+  const x0 = pad + (size - span) / 2 + w / 2
+  const cy = pad + size / 2
+  // One light over the whole mark, spanning the tallest lane.
+  const tall = Math.max(...lanes.map((l) => l.h)) * size
+  const [top, bot] = [cy - tall / 2, cy + tall / 2]
+  lanes.forEach((l, i) => {
+    const h = l.h * size
+    lane(ctx, size, x0 + i * (w + gap), cy - h / 2, cy + h / 2, w, l.color, top, bot, cfg)
+  })
+}
+
+const MARKS = {
+  full: (ctx, pad, size) => mixer(ctx, pad, size, FULL),
+  small: (ctx, pad, size) => mixer(ctx, pad, size, SMALL),
+  mono: (ctx, pad, size) => mixer(ctx, pad, size, { ...FULL, flat: true })
+}
+
+/*
+ * FRAMINGS. The mark and the light are the same everywhere; what changes is
+ * who draws the edge.
+ *
+ * The desktop draws its own squircle, because macOS does not mask an .icns.
+ * Both phones mask for you, so there the tile and the glass have to run PAST
+ * the canvas edge or the OS crops a rounded rectangle out of a rounded
+ * rectangle and you get a visible double edge. A superellipse at n = 5
+ * contains the square when its side is 1 / 0.5^(1/5) = 1.1487x it, so that
+ * is what gets drawn, centred, and the canvas crops it. The glass's own edge
+ * work — the wet top highlight, the inner shadow, the fresnel rim — falls
+ * outside that crop on purpose: the phone supplies its own.
+ *
+ * The 6% on top is not slack. At exactly 1.1487 the superellipse passes
+ * THROUGH the four canvas corners, so the fresnel rim — a thin bright line
+ * ON that curve — lands on them: sampling luminance out along the diagonal,
+ * the last 0.3% jumped 90 levels at the top-left corner and 29 at the
+ * bottom-right, which is visible as a lit arc in an icon that is supposed to
+ * be a flat dark field there. Anything from 4% clears it (the same rise
+ * measures ~1, the noise floor of the gradient itself); 6% is that with
+ * headroom, and no more, because every extra percent crops away more of the
+ * field and flattens the light across the icon.
+ */
+const BLEED = (1 / Math.pow(0.5, 1 / 5)) * 1.06
+
+/* Android hands the launcher a 108dp canvas and guarantees only the middle
+   72dp is shown (the mask can be a circle, a squircle, a teardrop). So the
+   mark is scaled against that 72, not against the canvas. */
+const ANDROID_VISIBLE = 72 / 108
+
+/**
+ * Full-bleed tile + glass, with the mark scaled to the square the platform
+ * will actually SHOW — `visible` as a fraction of the canvas. Passing a null
+ * mark gives the field alone, which is the Android background layer.
+ */
+function bleed(ctx, S, mark, visible) {
+  const Z = S * BLEED
+  ctx.save()
+  ctx.translate((S - Z) / 2, (S - Z) / 2)
+  // 0.812 is the desktop tile as a fraction of its canvas, so a mark scaled
+  // by `visible * 0.812` comes out the same size on every platform.
+  const markSize = S * visible * 0.812
+  const markPad = (Z - markSize) / 2
+  paint(ctx, Z, (c) => { if (mark) MARKS[mark](c, markPad, markSize) }, { pad: 0 })
+  ctx.restore()
+}
+
+/** The mark alone on transparency — Android's foreground and monochrome. */
+function markOnly(ctx, S, mark, visible) {
+  const markSize = S * visible * 0.812
+  MARKS[mark](ctx, (S - markSize) / 2, markSize)
+}
+
+const FRAMES = {
+  // desktop — the recipe's own squircle, transparent corners
+  full: (ctx, S) => paint(ctx, S, MARKS.full),
+  small: (ctx, S) => paint(ctx, S, MARKS.small),
+  // iOS AppIcon and the Play listing — opaque, edge-to-edge, OS masks it
+  bleed: (ctx, S) => bleed(ctx, S, 'full', 1),
+  // Android adaptive: the field parallaxes under the mark, so they split
+  back: (ctx, S) => bleed(ctx, S, null, 1),
+  fore: (ctx, S) => markOnly(ctx, S, 'full', ANDROID_VISIBLE),
+  mono: (ctx, S) => markOnly(ctx, S, 'mono', ANDROID_VISIBLE),
+  // Android legacy bitmaps (dead at minSdk 26, regenerated so none go stale)
+  round: (ctx, S) => {
+    ctx.save()
+    ctx.beginPath(); ctx.arc(S / 2, S / 2, S / 2, 0, 7); ctx.clip()
+    bleed(ctx, S, 'full', 1)
+    ctx.restore()
+  }
+}
+
+function render(S, variant = 'full') {
+  const c = document.createElement('canvas')
+  c.width = c.height = S
+  FRAMES[variant](c.getContext('2d'), S)
+  return c
+}
+
+/** The contract cut-icons.cjs calls. */
+window.drawIcon = (S, variant) => render(S, variant).toDataURL('image/png')
+
+/*
+ * Raw pixels, for the outputs that may not carry an alpha channel at all —
+ * the iOS AppIcon and the Play listing icon are colour type 2 today and the
+ * App Store rejects an icon that has one. A canvas PNG is always RGBA, so
+ * those two are re-encoded in node instead; this hands over the bytes.
+ */
+window.drawRaw = (S, variant) => {
+  const d = render(S, variant).getContext('2d').getImageData(0, 0, S, S).data
+  let s = ''
+  for (let i = 0; i < d.length; i += 0x8000) s += String.fromCharCode.apply(null, d.subarray(i, i + 0x8000))
+  return { size: S, data: btoa(s) }
+}
+
+/* Contact sheet. Every tile is rendered AT ITS OWN SIZE, the way cut-icons
+   does — the recipe's example downscales one 1024 render, which is a kinder
+   picture than the one that ships. The second row is the same canvases blown
+   up, because the 16 is the one that fails and it is too small to judge at
+   16. The third is what the phones get. */
+const sizes = [256, 128, 64, 48, 32, 16]
+const made = sizes.map((S) => render(S, S <= 32 ? 'small' : 'full'))
+for (const [scale, label] of [[1, 'true size'], [6, '6x — look here']]) {
+  const row = document.createElement('div')
+  row.style.cssText = 'display:flex;gap:22px;align-items:flex-end;padding:16px 40px'
+  row.textContent = label
+  made.forEach((src, i) => {
+    const S = sizes[i]
+    const c = document.createElement('canvas')
+    c.width = c.height = S * scale
+    const x = c.getContext('2d')
+    x.imageSmoothingEnabled = false
+    x.drawImage(src, 0, 0, S * scale, S * scale)
+    row.appendChild(c)
+  })
+  document.body.appendChild(row)
+}
+const phones = document.createElement('div')
+phones.style.cssText = 'display:flex;gap:22px;align-items:flex-end;padding:16px 40px'
+phones.textContent = 'phones'
+for (const v of ['bleed', 'back', 'fore', 'mono', 'round']) {
+  const c = render(192, v)
+  c.title = v
+  phones.appendChild(c)
+}
+document.body.appendChild(phones)
+</script>

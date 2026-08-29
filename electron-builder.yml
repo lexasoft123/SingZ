@@ -71,15 +71,17 @@ publish:
   repo: SingZ
 mac:
   # No `identity` set — electron-builder auto-discovers a "Developer ID
-  # Application" identity from CI's CSC_NAME/CSC_KEYCHAIN configuration or
-  # the local keychain, and — per this pinned version's own docs on `identity` —
+  # Application" identity from CSC_KEYCHAIN/CSC_NAME (CI — see
+  # docs/MACOS-SIGNING.md for why NOT CSC_LINK) or the local
+  # keychain, and — per this pinned version's own docs on `identity` —
   # "signing is skipped for all architectures" when none is found, with NO
   # automatic ad-hoc fallback of its own. On a machine with no such identity
   # — a fork's CI, or a checkout on a Mac that has never had a Developer ID
-  # certificate installed; this dev Mac stopped being an example once one
-  # was — electron-builder's signing step does nothing and afterPack.cjs's
-  # ad-hoc signature remains final. When a real identity is available,
-  # electron-builder's later signing pass replaces that fallback.
+  # certificate installed; this dev Mac stopped being an example once one was
+  # — that is what leaves the signing step for afterPack.cjs's own ad-hoc
+  # fallback to run, unchanged: it already checks
+  # CSC_LINK/CSC_NAME/CSC_KEY_PASSWORD and skips itself the moment real
+  # signing is configured, which is the mechanism this relies on.
   #
   # hardenedRuntime/entitlements/entitlementsInherit are flat `mac:`
   # siblings, NOT nested under a `sign:` key — that field is this pinned
@@ -88,9 +90,11 @@ mac:
   # A nested object here would pass through electron-builder's
   # resolveFunction() unchanged and then get CALLED as that function the
   # first time a real identity is actually found, crashing every signed
-  # build with "customSign is not a function" — invisible today only
-  # because no identity is present yet to reach that code path. Confirmed
-  # against the actual installed 26.15.3 typings, not just the online docs.
+  # build with "customSign is not a function". That WAS invisible while no
+  # identity existed anywhere; it is not any more — CI signs for real, so a
+  # nested `sign:` here would now break every signed build rather than
+  # lurking. Confirmed against the installed 26.15.3 typings, not the
+  # online docs.
   hardenedRuntime: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist

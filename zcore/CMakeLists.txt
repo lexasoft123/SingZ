@@ -160,7 +160,10 @@ if(WIN32)
     WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
   target_link_libraries(zcore_device PUBLIC avrt ole32 uuid)
 elseif(ANDROID)
-  target_link_libraries(zcore_device PUBLIC aaudio android dl log)
+  # The capture provider uses Oboe's conversion and device-quirk layer. Its
+  # prefab target carries the raw AAudio dependency transitively.
+  find_package(oboe REQUIRED CONFIG)
+  target_link_libraries(zcore_device PUBLIC oboe::oboe android dl log)
 elseif(APPLE)
   target_link_libraries(zcore_device PUBLIC
     "-framework AudioToolbox"
@@ -200,7 +203,7 @@ endif()
 
 get_target_property(_zcore_callback_links zcore_device_callback LINK_LIBRARIES)
 if(_zcore_callback_links MATCHES
-   "Threads|avrt|ole32|uuid|aaudio|android|dl|log|framework|zdsp")
+   "Threads|avrt|ole32|uuid|aaudio|oboe|android|dl|log|framework|zdsp")
   message(FATAL_ERROR
     "zcore_device_callback acquired provider/control/platform ownership: "
     "${_zcore_callback_links}")

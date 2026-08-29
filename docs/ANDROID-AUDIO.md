@@ -1,7 +1,7 @@
 # Android audio input
 
 SingZ captures vocal-training input through the shared native core. On Android
-the backend is AAudio (API 26+); `AudioInputModule` supplies the endpoint
+the backend is Oboe (minSdk 28); `AudioInputModule` supplies the endpoint
 inventory from `AudioManager`, while `audio_input_android.cpp` owns the stream.
 No microphone PCM crosses React Native. The core emits only pitch, confidence,
 and level evidence from its ordinary delivery thread.
@@ -32,28 +32,44 @@ label that heuristic as an OS default.
 
 Channel count comes from `AudioDeviceInfo.channelCounts`, channel masks, and
 channel-index masks. The policy/forwarding path preserves all 16 lanes when a
-USB driver advertises 16, and AAudio requests that count before selecting the
+USB driver advertises 16, and the stream requests that count before selecting the
 requested interleaved lane. This is not a physical-device proof: the Zen and
 other multichannel interfaces remain on the hardware matrix. Some vendor
 drivers publish no channel metadata. SingZ reports those as mono rather than
-inventing inaccessible lanes. The opened AAudio device ID, channel count,
+inventing inaccessible lanes. The opened device ID, channel count,
 selected lane, sample rate, sample format, sharing mode, performance mode and
 input-preset status are returned from native negotiation and exposed to JS;
 inventory guesses are never repeated as actual values.
 
-AAudio requests low-latency performance and tries exclusive sharing before a
-shared fallback. An exclusive stream that opens but fails device/channel/format
-verification is closed and retried shared too. These are requests, not
-guarantees. On API 29+ SingZ tries the karaoke-oriented voice-performance
-preset, then unprocessed, then voice-recognition. API 28 tries unprocessed then
-voice-recognition; API 26–27 uses AAudio's documented low-latency
-voice-recognition default. On API 28+ SingZ dynamically resolves
-`AAudioStream_getInputPreset` and labels the opened value `*-verified`. If a
-vendor exposes the setter but not the getter, metadata says
-`*-requested-unverified`; API 26–27, where the getter is unavailable, says
-`voice-recognition-default-unverified`. Unprocessed input avoids AGC/effects
-but can be much quieter; every fallback is reported honestly in negotiated
-metadata. Bluetooth SCO, LE Audio,
+SingZ opens ONE stream: low-latency performance requested, the
+karaoke-oriented voice-performance preset requested, and sharing mode left at
+Oboe's default. These are requests, not guarantees, and the negotiated
+metadata reports what was actually granted.
+
+There is deliberately no sharing/preset ladder any more. The old one tried
+exclusive (MMAP) sharing with voice-performance FIRST, and fell back only when
+an open failed or its negotiated values failed verification — neither of which
+silence trips, since it passes both. Exactly wrong for the devices in Oboe's
+`QuirksManager` whose MMAP capture opens successfully and then delivers
+silence (certain Exynos 9810 builds, without the voice-communication preset).
+Letting Oboe gate MMAP per device is the whole reason the backend is Oboe
+rather than raw AAudio: that database also covers Exynos 9810/850 running a
+mono request in stereo, broken low-latency capture on Exynos 990 and Qualcomm
+SM8150. (Its pre-Android-P float-capture workaround is below our floor and
+can no longer fire.)
+Format and sample-rate conversion are delegated to Oboe for the same reason.
+
+`AAudioStream_getInputPreset` exists from API 28 and minSdk is 28, so the
+opened preset is always a read-back and is labelled `*-verified`. Note Oboe
+substitutes voice-recognition for voice-performance at or below API 28, so an
+Android 9 device honestly reports `voice-recognition-verified`. Unprocessed
+and performance presets avoid AGC/effects but can be much quieter — which is
+why the analysis adapter normalizes capture before the detector sees it.
+
+One thing Oboe does not do and this backend still does: verify that Android
+routed capture to the device that was asked for. Oboe's callers want a
+microphone; SingZ lets a singer pick a named one, so a mismatch is a failure
+rather than a fallback. Bluetooth SCO, LE Audio,
 and hearing-aid inputs are OS-routed and can carry substantial latency or voice
 processing; the UI must describe them as high-latency and must not promise
 studio-grade timing. SingZ does not force SCO by switching the global audio
@@ -61,15 +77,15 @@ mode, because doing so would disturb song playback.
 
 ## Timing and routing
 
-The AAudio callback records `CLOCK_MONOTONIC` immediately on entry and advances
+Oboe's data callback records `CLOCK_MONOTONIC` immediately on entry and advances
 its callback-owned stream-frame position. A separate ordinary-priority sampler
-calls `AAudioStream_getTimestamp` while the stream is open and publishes the
+calls Oboe's `getTimestamp` while the stream is open and publishes the
 hardware frame-position/`CLOCK_MONOTONIC` anchor through bounded lock-free
 32-bit atomic reads (including on armeabi-v7a). The callback extrapolates its
-first sample in AAudio's shared stream-frame domain. Until a fresh, sane anchor
+first sample in the stream's own frame domain. Until a fresh, sane anchor
 exists it falls back to callback entry minus exactly that callback's duration;
 `timestampSource` therefore says
-`aaudio-hardware-monotonic-anchor-with-callback-fallback`. The sampler stops and
+`oboe-hardware-monotonic-anchor-with-callback-fallback`. The sampler stops and
 joins before stream close, so a timestamp query cannot race handle destruction.
 Every raw ring block additionally carries `Hardware` or `CallbackEstimate`
 provenance. The bounded 2048/512 native adapter tracks sample positions from

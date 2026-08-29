@@ -49,7 +49,11 @@ Environment traps (do not re-learn):
 - Metro /json mixes ALL clients and keeps stale targets: filter deviceName (gphone=emulator, iPhone=sim) AND probe candidates with a 1+1 eval.
 - Hermes CDP can segfault the app under eval churn — a "fresh app state" failure may be this; relaunch + rerun once.
 - iOS sim UDID C624B667-6F58-4F85-B64F-63B75545DDE2, bundle io.s-dev.singz.
-- Android: JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home", SDK ~/Library/Android/sdk, AVD "SingZ_API36", always `adb -s <serial>`; debug builds load JS from Metro at 10.0.2.2:8081.
+- Android: JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home (NOT the
+  Android Studio JBR, which is JDK 25 now: AGP treats the restricted-native-access warning from
+  its `prefab` subprocess as a build error, and this app has prefab consumers — reanimated,
+  worklets, and Oboe. Never derive it from `java_home -v 21`, which exits 0 handing back a JDK 8
+  on this Mac), SDK ~/Library/Android/sdk, AVD "SingZ_API36", always `adb -s <serial>`; debug builds load JS from Metro at 10.0.2.2:8081.
 
 iOS:
 1. `node scripts/patch-audio-api.js` (idempotent — all patches must report applied/present).
@@ -68,3 +72,23 @@ Android:
 3. `adb -s <serial> shell am start -n com.lexasoft.singz/com.singzplayer.MainActivity` (the code
    package differs from the applicationId — `/.MainActivity` does not resolve), wait ~10s.
 4. Drive over CDP (pattern: read mobile/tests/loop-region.cjs for the ws/eval plumbing, but launch via adb, filter gphone): `__test.openSample()` → poll player+duration → `play()` → 3s → `position > 2` → `pause()` → `__test.back()` → poll catalog → `openSample()` again and confirm it loads (release-on-close path).
+5. Capture needs the SIDE-BY-SIDE debug app, which steps 2-4 do not install: build and install
+   it first — `cd mobile/android && ./gradlew assembleDebug -PdebugAppIdSuffix=.debug > /tmp/mic.log 2>&1; echo EXIT=$?`
+   (redirect, never pipe: a piped gradle reports TAIL's status and a build that died reads as
+   exit 0, after which step 2's unsuffixed APK is what gets installed and the driver blames a
+   missing package), then
+   `adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk`, launch
+   `com.lexasoft.singz.debug/com.singzplayer.MainActivity`, and `adb reverse tcp:<METRO_PORT>
+   tcp:<METRO_PORT>`. Then `ANDROID_PKG=com.lexasoft.singz.debug node mobile/tests/mic-android.cjs` — vocal-training
+   CAPTURE, which nothing else here covers. It asserts the transport contract, not pitch: the
+   input inventory and that Bluetooth never outranks the built-in microphone, the negotiated
+   device/lane/format/rate, that the preset was READ BACK rather than merely requested, that
+   audio actually arrives and the hardware callback fired with no overruns, and that the lease
+   releases cleanly enough for a second capture to succeed. Level and pitch thresholds are
+   deliberately NOT asserted — that needs a controlled acoustic environment and is pinned
+   instead by the host suite's mutation-checked fixtures (tests/native/core_host_tests.cpp).
+   It drives `__test.audioInput` directly, never the training screen, because tapping fixed
+   coordinates tests a layout and every fault this covers was in the transport.
+   NEEDS REAL AUDIO INPUT: an emulator booted `-no-audio` has none and the driver will
+   correctly, uselessly, report a capture that delivers nothing — prefer an attached phone, and
+   note this is the one step here that cannot run on a silent AVD.

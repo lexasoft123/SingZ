@@ -178,11 +178,109 @@ fi
 if [ "$MODE" != "--desktop-only" ]; then
   echo "Mobile deps:"
   (cd "$WT/mobile" && npm ci)
+
+  # npm ci DELETES react-native-audio-api's prebuilt static libs and nothing
+  # puts them back on its own. They are not in the npm tarball: the podspec's
+  # prepare_command fetches them, and CocoaPods runs that only when it
+  # integrates the pod for the FIRST time. So a brand-new worktree is fine and
+  # a RE-RUN of this script is not — which is exactly the case that matters,
+  # because re-running is how a worktree catches up after a rebase. The
+  # archive then fails with "Build input files cannot be found:
+  # .../external/iphoneos/libogg.a" and five siblings, naming neither npm nor
+  # the cause.
+  #
+  # THE ORDER BELOW IS LOAD-BEARING, and getting it wrong fails at the LINKER
+  # rather than here. The same tarball carries the ffmpeg xcframeworks, which
+  # the podspec declares as vendored_frameworks — and CocoaPods records only
+  # the ones that exist AT POD-INSTALL TIME. A pod install that ran while
+  # ffmpeg_ios/ was absent produces a Pods project that never links them,
+  # compiles cleanly all the way through, and dies in ld with a wall of
+  # undefined _av_* symbols that reads like a broken audio-api release.
+  # Download first, pod install second.
+  AUDIO_API="$WT/mobile/node_modules/react-native-audio-api"
+  EXTERNAL="$AUDIO_API/common/cpp/audioapi/external"
+  # Gate on ALL THREE, not just ffmpeg_ios. The downloader fetches
+  # ffmpeg_ios.zip, iphoneos.zip and iphonesimulator.zip in that order and
+  # `continue`s past a failed one, so a network drop mid-run leaves the first
+  # present and a later one absent. Gating on ffmpeg_ios alone then skips the
+  # whole block on the very re-run that is supposed to repair it — this
+  # script's own documented remedy — and setup ends "Worktree ready" with the
+  # archive still doomed. iphonesimulator is not optional either: the podspec
+  # resolves -force_load against $(PLATFORM_NAME), so without it every
+  # simulator build fails, which is all of mobile/tests/. Re-invoking costs
+  # nothing when the directories are there: the vendor loop is per-directory
+  # idempotent and skips what it already has.
+  if [ -d "$AUDIO_API" ] && { [ ! -d "$EXTERNAL/ffmpeg_ios" ] || [ ! -d "$EXTERNAL/iphoneos" ] || [ ! -d "$EXTERNAL/iphonesimulator" ]; }; then
+    echo "  restoring react-native-audio-api prebuilt binaries (npm ci removes them)"
+    (cd "$AUDIO_API" && ./scripts/download-prebuilt-binaries.sh ios)
+    # THE DOWNLOADER CANNOT FAIL, so its exit status proves nothing: on a bad
+    # curl it prints one line, `continue`s past that archive, and still ends
+    # on status 0 — it carries no `set -e`, so the `set -euo pipefail` up top
+    # never sees it either. Offline, rate-limited or missing unzip therefore
+    # walks straight into the pod install this ordering exists to protect,
+    # and that failure surfaces much later as undefined _av_* symbols in ld.
+    # Assert the outcome rather than the exit code.
+    for d in ffmpeg_ios iphoneos iphonesimulator; do
+      [ -d "$EXTERNAL/$d" ] || {
+        echo "FATAL: react-native-audio-api prebuilts are still missing ($d)." >&2
+        echo "       Its downloader reports success even when the fetch failed." >&2
+        echo "       Re-run with a working network:" >&2
+        echo "         (cd mobile/node_modules/react-native-audio-api && ./scripts/download-prebuilt-binaries.sh ios)" >&2
+        exit 1
+      }
+    done
+  fi
+  # npm ci resets the patched sources too. Idempotent — says "already applied"
+  # when there is nothing to do.
+  (cd "$WT/mobile" && node scripts/patch-audio-api.js)
+
+  # mobile's postinstall (run by the npm ci above) materializes
+  # ios/SingzCore/core as a COPY of native/core, because CocoaPods drops
+  # source_files globs that reach above the podspec dir AND skips directory
+  # symlinks. Assert it landed BEFORE pod install globs it: a worktree whose
+  # tree moved without a re-install keeps building the stale mirror, and the
+  # failure names a missing header rather than a stale copy.
+  # Compares CONTENT, not just presence: a file that exists but is a version
+  # behind is the case that actually ships a stale core, and it is invisible
+  # to a name check. Extensions track sync-singzcore.js's own filter — it
+  # copies .h/.hpp/.cpp/.mm, and an earlier version of this check omitted
+  # .hpp, so a header could go out of date without anything asking.
+  stale=$(cd "$WT" && node -e '
+    const fs = require("fs")
+    const src = "mobile/native/core", dst = "mobile/ios/SingzCore/core"
+    if (!fs.existsSync(dst)) { console.log("it does not exist"); process.exit(0) }
+    const want = fs.readdirSync(src).filter((f) => /\.(h|hpp|cpp|mm)$/.test(f))
+    const bad = want.filter((f) => {
+      const to = dst + "/" + f
+      if (!fs.existsSync(to)) return true
+      return !fs.readFileSync(src + "/" + f).equals(fs.readFileSync(to))
+    })
+    if (bad.length) console.log(bad.slice(0, 3).join(", ") + (bad.length > 3 ? ` +${bad.length - 3} more` : ""))
+  ')
+  if [ -n "$stale" ]; then
+    echo "FATAL: mobile/ios/SingzCore/core does not match mobile/native/core ($stale)." >&2
+    echo "       Expected mobile's postinstall to sync it. Run:" >&2
+    echo "         (cd mobile && npm run postinstall)" >&2
+    exit 1
+  fi
+
   if [ "$(uname)" = "Darwin" ] && command -v pod >/dev/null 2>&1; then
     echo "iOS pods (CocoaPods global cache + ccache make repeats quick):"
     # LANG: CocoaPods crashes in non-interactive shells (agent sessions)
-    # with "Unicode Normalization not appropriate for ASCII-8BIT" otherwise
+    # with "Unicode Normalization not appropriate for ASCII-8BIT" otherwise.
+    # Bare `pod`, never `bundle exec pod`: from mobile/ios bundler resolves
+    # the fastlane-only Gemfile and dies with "can't find executable pod for
+    # gem cocoapods".
     (cd "$WT/mobile/ios" && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install)
+
+    # The sandbox and the lockfile have to agree, or the next archive stops
+    # with "The sandbox is not in sync with the Podfile.lock" — which is what
+    # a worktree whose tree moved under its Pods looks like from xcodebuild.
+    if ! diff -q "$WT/mobile/ios/Podfile.lock" "$WT/mobile/ios/Pods/Manifest.lock" >/dev/null 2>&1; then
+      echo "FATAL: Pods sandbox is still out of sync with Podfile.lock after pod install." >&2
+      exit 1
+    fi
+    echo "  pods integrated and in sync with Podfile.lock"
   fi
 fi
 

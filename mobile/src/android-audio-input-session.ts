@@ -101,6 +101,21 @@ export interface AndroidAudioInputNative {
     timestampSource?: string
   }>
   stop(owner: string, generation: number): Promise<boolean>
+  /** Optional: diagnostics only, and absent on a native module older than it. */
+  stats?(): Promise<AndroidAudioInputStats | null>
+}
+
+/** Counters from the core's own transport, so "the microphone delivered
+ * nothing" can be told apart from "the hardware callback never fired". */
+export interface AndroidAudioInputStats {
+  deliveredBlocks: number
+  deliveredFrames: number
+  overruns: number
+  wakeups: number
+  /** Largest lift the core applied to reach the detector's calibration; 1
+   * means the capture was already loud enough and went through untouched.
+   * Absent from a core built before normalization existed. */
+  peakGain?: number
 }
 
 export interface AndroidMicrophonePermission {
@@ -294,6 +309,12 @@ export const acquireAndroidAudioInputSession = (
   options?: AcquireAndroidAudioInputOptions
 ): Promise<AndroidAudioInputLease> => coordinator().acquire(options)
 
+export const androidAudioInputStats = async (): Promise<AndroidAudioInputStats | null> => {
+  const native = NativeModules.AudioInput as AndroidAudioInputNative | undefined
+  if (!native?.stats) return null
+  return native.stats().catch(() => null)
+}
+
 export const subscribeAndroidAudioInputFrames = (
   callback: (frame: AndroidAudioInputFrame) => void
 ): (() => void) => {
@@ -310,3 +331,102 @@ export const subscribeAndroidAudioInputFrames = (
 export const subscribeAndroidAudioInputState = (
   callback: (state: AndroidAudioInputState) => void
 ): (() => void) => subscribeState(callback)
+
+/**
+ * Driver seam for mobile/tests/mic-android.cjs — dev builds only.
+ *
+ * It exists because the transport is what keeps regressing (the lane count,
+ * the negotiated contract, blocks arriving at all, the lease releasing), and
+ * driving that through the training SCREEN means tapping hardcoded
+ * coordinates that break when a layout moves and that test the UI rather than
+ * the thing under test. A driver calls this instead and never opens a screen.
+ *
+ * KICK OFF SYNCHRONOUSLY, POLL FOR THE RESULT. Every entry point here returns
+ * at once and parks its answer on `result`. Two reasons, both learned the hard
+ * way on a real phone:
+ *
+ *  - Hermes' promises are not native, so CDP's `awaitPromise` cannot resolve
+ *    them; an eval that returns a promise comes back as the promise's internal
+ *    shape, which JSON.stringify renders as `{}` — indistinguishable from an
+ *    empty device list.
+ *  - Worse, an eval that leaves work in flight kills the app. Measured twice:
+ *    the driver gave up on the unresolvable eval and closed the socket, the
+ *    `setTimeout` inside this capture then fired into a runtime the inspector
+ *    disconnect had already begun tearing down, and the app took a SIGSEGV at
+ *    0x0 in TimerCallback::invoke. CLAUDE.md's rule for decodes — connect
+ *    before, disconnect after, never hang up mid-operation — is the general
+ *    case, and this seam has to make obeying it possible.
+ */
+if (__DEV__ && Platform.OS === 'android') {
+  const bag = ((globalThis as unknown as Record<string, Record<string, unknown>>).__test ??= {})
+  const seam: Record<string, unknown> = { pending: false, result: null }
+  const kick = (work: () => Promise<unknown>): boolean => {
+    // Overlapping calls would publish the loser's answer under the winner's
+    // pending=false. This driver is strictly sequential, but the seam is a
+    // global and the next caller may not be.
+    if (seam.pending === true) return false
+    seam.pending = true
+    seam.result = null
+    work().then(
+      (value) => { seam.result = value },
+      (error) => { seam.result = { error: error instanceof Error ? error.message : String(error) } }
+    ).then(() => { seam.pending = false })
+    return true
+  }
+
+  seam.listInputs = (): boolean => kick(async () => listAndroidAudioInputs())
+
+  /**
+   * Acquire, collect for `ms`, then release. The release is attempted twice:
+   * a lease whose first release fails deliberately keeps the ownership latch
+   * — capture may still be running natively and every later acquire throws —
+   * and retryRelease is the documented way out. If both fail the mic stays
+   * hot until the app restarts, which the driver reports rather than hides.
+   */
+  seam.run = (ms = 2000): boolean =>
+    kick(async () => {
+      const lease = await acquireAndroidAudioInputSession({
+        owner: 'mic-driver',
+        // A driver must never be able to raise Android's prompt: permission is
+        // the operator's job (adb pm grant), and a hung dialog would read as a
+        // capture failure.
+        requestPermission: false
+      })
+      let frames = 0
+      let peakDbfs = -Infinity
+      let pitched = 0
+      const quality: Record<string, number> = {}
+      const stop = subscribeAndroidAudioInputFrames((frame) => {
+        if (frame.generation !== lease.generation) return
+        frames++
+        if (frame.dbfs > peakDbfs) peakDbfs = frame.dbfs
+        if (frame.frequency > 0) pitched++
+        quality[frame.timestampQuality] = (quality[frame.timestampQuality] ?? 0) + 1
+      })
+      let stats: AndroidAudioInputStats | null = null
+      try {
+        await new Promise((resolve) => setTimeout(resolve, ms))
+        // Read the counters BEFORE releasing: the core drops them with the
+        // stream, so a stats call after release reports nothing and would look
+        // exactly like a capture that never ran.
+        stats = await androidAudioInputStats()
+      } finally {
+        stop()
+        await lease.release().catch(async () => {
+          await lease.retryRelease()
+        })
+      }
+      return {
+        negotiated: lease.negotiated,
+        device: { uid: lease.device.uid, transport: lease.device.transport },
+        channel: lease.channel,
+        frames,
+        pitched,
+        peakDbfs: Number.isFinite(peakDbfs) ? peakDbfs : null,
+        quality,
+        stats
+      }
+    })
+
+  bag.audioInput = seam
+}
