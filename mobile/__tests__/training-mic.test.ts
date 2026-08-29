@@ -1,10 +1,16 @@
-import type { AudioBuffer, AudioRecorder } from 'react-native-audio-api'
-import { describeTrainingMicSignal, TrainingMicrophone, type TrainingMicDependencies } from '../src/training/mic'
+import {
+  describeTrainingMicSignal,
+  TrainingMicrophone,
+  type TrainingMicDependencies
+} from '../src/training/mic'
+import type {
+  IosAudioInputFrame,
+  IosAudioInputLease
+} from '../src/ios-audio-input-session'
 import { log } from '../src/log'
 
 // The real log module persists through the Prefs native stub, which leaves a
-// worker alive after the suite. These tests care about what was WRITTEN, not
-// where it went, so the module is mocked outright.
+// worker alive after the suite. These tests care about what was written.
 jest.mock('../src/log', () => ({ log: jest.fn() }))
 
 function micLines(): { lines: string[]; stop: () => void } {
@@ -20,195 +26,176 @@ function micLines(): { lines: string[]; stop: () => void } {
   }
 }
 
-class FakeRecorder {
-  callback: ((event: { buffer: AudioBuffer; numFrames: number; when: number }) => void) | null = null
-  recording = false
-  startGate: Promise<{ status: 'success' } | { status: 'error'; message: string }> | null = null
-  stopGate: Promise<{ status: 'success' }> | null = null
-  onAudioReady(_options: unknown, callback: FakeRecorder['callback']) { this.callback = callback; return { status: 'success' as const } }
-  onError() {}
-  clearOnAudioReady() { this.callback = null }
-  clearOnError() {}
-  disconnect() {}
-  isRecording() { return this.recording }
-  async start() { this.recording = true; return this.startGate ?? { status: 'success' as const } }
-  async stop() {
-    const result = await (this.stopGate ?? Promise.resolve({ status: 'success' as const }))
-    this.recording = false
-    return result
-  }
+const iosFrame = (
+  overrides: Partial<IosAudioInputFrame> = {}
+): IosAudioInputFrame => ({
+  generation: 7,
+  clockDomainId: '1',
+  streamGeneration: '1',
+  startSequence: '1',
+  endSequence: '2',
+  startSourceFrame: '0',
+  endSourceFrame: '2048',
+  sampleHostTimeStartNs: '1000000000',
+  sampleHostTimeEndNs: '1040000000',
+  callbackHostTimeNs: '1041000000',
+  startFlags: 0,
+  endFlags: 0,
+  timestampQuality: 'hardware',
+  discontinuityReason: 'none',
+  resetCount: '0',
+  sampleRate: 48_000,
+  frequency: 440,
+  clarity: 0.92,
+  peak: 0.5,
+  rms: 0.25,
+  dbfs: -12,
+  ...overrides
+})
+
+type NativeState = {
+  generation: number
+  state: 'running' | 'stopped' | 'error'
+  error?: string
 }
 
-function deps(overrides: Partial<TrainingMicDependencies> = {}): { value: TrainingMicDependencies; recorder: FakeRecorder; sessions: boolean[] } {
-  const recorder = new FakeRecorder()
-  const sessions: boolean[] = []
-  return {
-    recorder,
-    sessions,
-    value: {
-      permission: async () => 'Granted',
-      requestPermission: async () => 'Granted',
-      setSession: async (recording) => { sessions.push(recording) },
-      createRecorder: () => recorder as unknown as AudioRecorder,
-      ...overrides
-    }
-  }
+class FakeIosCore {
+  frameListener: ((frame: IosAudioInputFrame) => void) | null = null
+  stateListener: ((state: NativeState) => void) | null = null
+  release = jest.fn<Promise<void>, []>(async () => undefined)
+  acquire = jest.fn<Promise<IosAudioInputLease>, []>(async () => ({
+    generation: 7,
+    release: this.release
+  }))
+  subscribeFrames = jest.fn((callback: (frame: IosAudioInputFrame) => void) => {
+    this.frameListener = callback
+    return () => { this.frameListener = null }
+  })
+  subscribeState = jest.fn((callback: (state: NativeState) => void) => {
+    this.stateListener = callback
+    return () => { this.stateListener = null }
+  })
+}
+
+function iosDeps(core = new FakeIosCore()): {
+  value: TrainingMicDependencies
+  core: FakeIosCore
+} {
+  return { value: { iosCore: core }, core }
 }
 
 async function flushMicrotasks(count = 6): Promise<void> {
   for (let index = 0; index < count; index++) await Promise.resolve()
 }
 
-describe('TrainingMicrophone', () => {
-  test('permission denial gives useful copy and never creates a recorder', async () => {
-    const createRecorder = jest.fn()
-    const d = deps({ permission: async () => 'Denied', createRecorder })
+describe('TrainingMicrophone native capture', () => {
+  test('fails closed when no native core is available', async () => {
+    const mic = new TrainingMicrophone({})
+    await expect(mic.start(() => 0, jest.fn())).resolves.toEqual({
+      ok: false,
+      kind: 'unavailable',
+      error: 'Native audio input is unavailable on this device.'
+    })
+  })
+
+  test('maps native permission denial to useful copy', async () => {
+    const d = iosDeps()
+    d.core.acquire.mockRejectedValueOnce(new Error('Microphone permission is denied'))
     const mic = new TrainingMicrophone(d.value)
     await expect(mic.start(() => 0, jest.fn())).resolves.toMatchObject({
       ok: false,
       kind: 'permission-denied',
       error: expect.stringMatching(/Settings.*Start/)
     })
-    expect(createRecorder).not.toHaveBeenCalled()
+    expect(d.core.subscribeFrames).toHaveBeenCalledTimes(1)
+    expect(d.core.frameListener).toBeNull()
+    expect(d.core.stateListener).toBeNull()
   })
 
-  test('stop before start does not mutate the shared audio session', async () => {
-    const d = deps()
+  test('stop before start does not touch native ownership', async () => {
+    const d = iosDeps()
     const mic = new TrainingMicrophone(d.value)
     await mic.stop()
     await mic.stop()
-    expect(d.sessions).toEqual([])
+    expect(d.core.acquire).not.toHaveBeenCalled()
+    expect(d.core.release).not.toHaveBeenCalled()
   })
 
-  test('failed recorder start restores an acquired session exactly once', async () => {
-    const d = deps()
-    d.recorder.startGate = Promise.resolve({ status: 'error', message: 'Recorder unavailable.' })
+  test('uses iOS zcore/zdsp frames as the exercise observations', async () => {
+    const d = iosDeps()
+    let clock = 1_500
     const mic = new TrainingMicrophone(d.value)
-    await expect(mic.start(() => 1_000, jest.fn())).resolves.toMatchObject({ ok: false, kind: 'unavailable' })
-    expect(d.sessions).toEqual([true, false])
+    await expect(mic.start(() => clock, jest.fn())).resolves.toEqual({ ok: true })
+    expect(d.core.acquire).toHaveBeenCalledTimes(1)
+    expect(d.core.subscribeFrames).toHaveBeenCalledTimes(1)
+    expect(mic.signal.normalized).toBe(true)
+
+    d.core.frameListener?.(iosFrame({ generation: 8 }))
+    expect(mic.snapshot()).toEqual([])
+
+    d.core.frameListener?.(iosFrame())
+    clock = 9_000
+    d.core.frameListener?.(iosFrame({
+      startSequence: '2',
+      endSequence: '3',
+      startSourceFrame: '2048',
+      endSourceFrame: '4096',
+      sampleHostTimeStartNs: '1050000000',
+      sampleHostTimeEndNs: '1090000000',
+      frequency: 466.1637615,
+      clarity: 0.9,
+      rms: 0.125
+    }))
+
+    expect(mic.snapshot()).toHaveLength(2)
+    expect(mic.snapshot()[0]).toMatchObject({ timestampMs: 1_500, frequencyHz: 440 })
+    expect(mic.snapshot()[1].timestampMs).toBe(1_550)
+    expect(mic.snapshot()[1].midi).toBeCloseTo(70)
+    expect(mic.signal).toMatchObject({ windows: 2, voiced: 2, normalized: true })
+    expect(mic.signal.peakDbfs).toBeCloseTo(-12.04, 1)
+
     await mic.stop()
-    expect(d.sessions).toEqual([true, false])
+    expect(d.core.release).toHaveBeenCalledTimes(1)
+    expect(d.core.frameListener).toBeNull()
+    expect(d.core.stateListener).toBeNull()
   })
 
-  test('rejected session activation restores a partially acquired category exactly once', async () => {
-    const sessions: boolean[] = []
-    const d = deps({
-      setSession: async (recording) => {
-        sessions.push(recording)
-        if (recording) throw new Error('Activation failed after applying options.')
-      }
-    })
+  test('bounds native observations and preserves signal evidence across prompt resets', async () => {
+    const d = iosDeps()
     const mic = new TrainingMicrophone(d.value)
-    await expect(mic.start(() => 1_000, jest.fn())).resolves.toMatchObject({ ok: false, kind: 'unavailable' })
-    expect(sessions).toEqual([true, false])
-    await mic.stop()
-    expect(sessions).toEqual([true, false])
-  })
-
-  test('double stop restores a successfully owned session only once', async () => {
-    const d = deps()
-    const mic = new TrainingMicrophone(d.value)
-    await expect(mic.start(() => 1_000, jest.fn())).resolves.toEqual({ ok: true })
-    await mic.stop()
-    await mic.stop()
-    expect(d.sessions).toEqual([true, false])
-  })
-
-  test('centres timestamps, retains fractional MIDI, bounds capture, and releases callback PCM', async () => {
-    const d = deps()
-    const mic = new TrainingMicrophone(d.value)
-    expect(await mic.start(() => 1_000, jest.fn())).toEqual({ ok: true })
-    const released = jest.fn()
-    const samples = new Float32Array(1_024)
-    for (let i = 0; i < samples.length; i++) samples[i] = Math.sin((2 * Math.PI * 220 * i) / 16_000) * 0.5
-    const buffer = { getChannelData: () => samples, buffer: { release: released } } as unknown as AudioBuffer
-    d.recorder.callback?.({ buffer, numFrames: 1_024, when: 2 })
-    expect(released).toHaveBeenCalledTimes(1)
-    expect(mic.snapshot()[0].timestampMs).toBe(3_032)
-    expect(mic.snapshot()[0].midi).toBeGreaterThan(56.9)
-    expect(mic.snapshot()[0].midi).toBeLessThan(57.1)
-    for (let index = 1; index < 520; index++)
-      d.recorder.callback?.({ buffer, numFrames: 1_024, when: 2 + index * 0.064 })
-    expect(mic.snapshot()).toHaveLength(512)
-    expect(released).toHaveBeenCalledTimes(520)
-    await mic.stop()
-    expect(d.sessions).toEqual([true, false])
-  })
-
-  test('reports the level the hardware gave and the pitches actually found', async () => {
-    const d = deps()
-    const mic = new TrainingMicrophone(d.value)
-    expect(await mic.start(() => 1_000, jest.fn())).toEqual({ ok: true })
-    // Nothing delivered yet: the screen must not claim to have heard silence.
-    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null, normalized: false })
-    expect(describeTrainingMicSignal(mic.signal)).toBe('no audio arrived from the microphone')
-
-    const tone = (amplitude: number): AudioBuffer => {
-      const samples = new Float32Array(1_024)
-      for (let i = 0; i < samples.length; i++)
-        samples[i] = Math.sin((2 * Math.PI * 220 * i) / 16_000) * amplitude
-      return { getChannelData: () => samples, buffer: { release: () => undefined } } as unknown as AudioBuffer
+    await mic.start(() => 0, jest.fn())
+    for (let index = 0; index < 520; index++) {
+      const start = 1_000_000_000 + index * 10_000_000
+      d.core.frameListener?.(iosFrame({
+        startSequence: String(index + 1),
+        endSequence: String(index + 2),
+        startSourceFrame: String(index * 512),
+        endSourceFrame: String(index * 512 + 2048),
+        sampleHostTimeStartNs: String(start),
+        sampleHostTimeEndNs: String(start + 5_000_000)
+      }))
     }
-
-    // Under the JS recorder's own 0.01 gate (this path is not normalized —
-    // only the native core's live capture is), so no pitch is found, and the
-    // level is still reported honestly.
-    d.recorder.callback?.({ buffer: tone(0.01), numFrames: 1_024, when: 2 })
-    expect(mic.signal.windows).toBe(1)
-    expect(mic.signal.voiced).toBe(0)
-    expect(mic.tooQuiet).toBe(true)
-    expect(mic.signal.peakDbfs).toBeLessThan(-40)
-    expect(mic.signal.peakDbfs).toBeGreaterThan(-60)
-    expect(mic.snapshot()[0].midi).toBeNull()
-
-    d.recorder.callback?.({ buffer: tone(0.5), numFrames: 1_024, when: 2.064 })
-    expect(mic.signal.voiced).toBe(1)
-    expect(mic.tooQuiet).toBe(false)
-    expect(mic.signal.peakDbfs).toBeGreaterThan(-12)
-    expect(describeTrainingMicSignal(mic.signal)).toMatch(/^2 blocks · peak -\d.* · 1 with a pitch$/)
-
-    // The recorder path is judged at the level the device gave, so "too
-    // quiet" is a true answer here — and the signal says it was not lifted.
-    expect(mic.signal.normalized).toBe(false)
-
-    // resetObservations runs while the capture is still LIVE — the screen
-    // calls it on Replay and on every next prompt — so it must not take the
-    // running capture's evidence with it, or the end-of-capture line reports a
-    // healthy capture as one that heard nothing.
+    expect(mic.snapshot()).toHaveLength(512)
+    expect(mic.signal.windows).toBe(520)
     mic.resetObservations()
-    expect(mic.signal.windows).toBe(2)
-    expect(mic.signal.voiced).toBe(1)
-    expect(describeTrainingMicSignal(mic.signal)).toMatch(/^2 blocks · peak -\d/)
-
-    // A fresh listen does start from nothing.
-    await mic.stop()
-    expect(await mic.start(() => 0, jest.fn())).toEqual({ ok: true })
-    expect(mic.signal).toEqual({ windows: 0, voiced: 0, peakDbfs: null, dbfs: null, normalized: false })
+    expect(mic.snapshot()).toEqual([])
+    expect(mic.signal.windows).toBe(520)
+    expect(describeTrainingMicSignal(mic.signal)).toMatch(/^520 blocks/)
     await mic.stop()
   })
 
   test('a capture that delivers nothing writes itself down', async () => {
-    // The fault this build exists to catch: capture opens, reports running,
-    // and never calls back. Every other report here is driven by a block
-    // ARRIVING, so without a timer the whole session leaves no line at all —
-    // which is exactly what a field log showed.
     jest.useFakeTimers()
     const captured = micLines()
     try {
-      const d = deps()
+      const d = iosDeps()
       const mic = new TrainingMicrophone(d.value)
       expect(await mic.start(() => 0, jest.fn())).toEqual({ ok: true })
-      expect(captured.lines.some((line) => /^info: listening ·/.test(line))).toBe(true)
-
-      jest.advanceTimersByTime(1_000)
-      expect(captured.lines.some((line) => /no audio after/.test(line))).toBe(false)
-
-      jest.advanceTimersByTime(3_000)
-      const reported = captured.lines.filter((line) => /^warn: no audio after/.test(line))
-      expect(reported).toHaveLength(1)
-      expect(reported[0]).toMatch(/capture is open and delivering nothing/)
-
-      // Once said, it is not repeated every tick for the rest of the session.
+      expect(captured.lines).toContain(
+        'info: listening · iOS native core · zcore capture → zdsp analysis'
+      )
+      jest.advanceTimersByTime(4_000)
+      expect(captured.lines.filter((line) => /^warn: no audio after/.test(line))).toHaveLength(1)
       jest.advanceTimersByTime(10_000)
       expect(captured.lines.filter((line) => /^warn: no audio after/.test(line))).toHaveLength(1)
       await mic.stop()
@@ -218,124 +205,34 @@ describe('TrainingMicrophone', () => {
     }
   })
 
-  test('a healthy capture times its first audio and leaves no alarm', async () => {
-    jest.useFakeTimers()
-    const captured = micLines()
-    try {
-      const d = deps()
-      const mic = new TrainingMicrophone(d.value)
-      expect(await mic.start(() => 0, jest.fn())).toEqual({ ok: true })
-      jest.advanceTimersByTime(120)
-      const samples = new Float32Array(1_024)
-      for (let i = 0; i < samples.length; i++)
-        samples[i] = Math.sin((2 * Math.PI * 220 * i) / 16_000) * 0.4
-      const buffer = { getChannelData: () => samples, buffer: { release: () => undefined } } as unknown as AudioBuffer
-      d.recorder.callback?.({ buffer, numFrames: 1_024, when: 0 })
-
-      expect(captured.lines.some((line) => /^info: first audio after 120 ms · -\d/.test(line))).toBe(true)
-      jest.advanceTimersByTime(4_000)
-      expect(captured.lines.some((line) => /no audio after/.test(line))).toBe(false)
-      // Blocks stopped arriving, and that is a different fault worth naming.
-      expect(captured.lines.some((line) => /^warn: audio stopped arriving/.test(line))).toBe(true)
-      await mic.stop()
-    } finally {
-      captured.stop()
-      jest.useRealTimers()
-    }
-  })
-
-  test('uses Android core evidence without creating a JS PCM recorder', async () => {
-    let onFrame: ((frame: any) => void) | null = null
-    let onState: ((state: any) => void) | null = null
-    const release = jest.fn(async () => undefined)
-    const createRecorder = jest.fn()
-    const d = deps({
-      createRecorder,
-      androidCore: {
-        acquire: async () => ({
-          generation: 7,
-          device: { uid: 'android:1' },
-          channel: 0,
-          negotiated: {},
-          release,
-          retryRelease: release
-        }) as any,
-        subscribeFrames: (callback) => {
-          onFrame = callback
-          return () => { onFrame = null }
-        },
-        subscribeState: (callback) => {
-          onState = callback
-          return () => { onState = null }
-        }
-      }
-    })
-    let clock = 1_000
+  test('native state errors stop the active capture', async () => {
+    const d = iosDeps()
+    const onError = jest.fn()
     const mic = new TrainingMicrophone(d.value)
-    await expect(mic.start(() => clock, jest.fn())).resolves.toEqual({ ok: true })
-    expect(createRecorder).not.toHaveBeenCalled()
-    expect(d.sessions).toEqual([])
-
-    clock = 1_500
-    ;(onFrame as ((frame: any) => void) | null)?.({
-      generation: 7,
-      sampleHostTimeStartNs: '1000000000',
-      sampleHostTimeEndNs: '1040000000',
-      frequency: 440,
-      clarity: 0.92
-    } as any)
-    ;(onFrame as ((frame: any) => void) | null)?.({
-      generation: 7,
-      sampleHostTimeStartNs: '1050000000',
-      sampleHostTimeEndNs: '1090000000',
-      frequency: 466.1637615,
-      clarity: 0.9
-    } as any)
-    expect(mic.snapshot()).toHaveLength(2)
-    expect(mic.snapshot()[0]).toMatchObject({ timestampMs: 1_500, frequencyHz: 440 })
-    expect(mic.snapshot()[1].timestampMs).toBe(1_550)
-    expect(mic.snapshot()[1].midi).toBeCloseTo(70)
-
-    await mic.stop()
-    expect(release).toHaveBeenCalledTimes(1)
-    expect(onFrame).toBeNull()
-    expect(onState).toBeNull()
+    await mic.start(() => 0, onError)
+    d.core.stateListener?.({ generation: 6, state: 'error', error: 'stale' })
+    expect(onError).not.toHaveBeenCalled()
+    d.core.stateListener?.({ generation: 7, state: 'error', error: 'route changed' })
+    await flushMicrotasks()
+    expect(onError).toHaveBeenCalledWith('route changed')
+    expect(d.core.release).toHaveBeenCalledTimes(1)
   })
 
-  test('uses the iOS foundation lease as the sole recording-session owner', async () => {
-    const release = jest.fn(async () => undefined)
-    const acquireIosLease = jest.fn(async () => ({ release }))
-    const d = deps({ acquireIosLease })
+  test('double stop releases a native iOS lease exactly once', async () => {
+    const d = iosDeps()
     const mic = new TrainingMicrophone(d.value)
-
-    await expect(mic.start(() => 1_000, jest.fn())).resolves.toEqual({ ok: true })
-    expect(acquireIosLease).toHaveBeenCalledTimes(1)
-    expect(d.sessions).toEqual([])
+    await mic.start(() => 0, jest.fn())
     await mic.stop()
-    expect(release).toHaveBeenCalledTimes(1)
-    expect(d.sessions).toEqual([])
+    await mic.stop()
+    expect(d.core.release).toHaveBeenCalledTimes(1)
   })
 
-  test('keeps a failed native release latched and reports it on the next Start', async () => {
-    const release = jest
-      .fn<Promise<void>, []>()
+  test('retains and retries a failed iOS release before starting again', async () => {
+    const d = iosDeps()
+    d.core.release
       .mockRejectedValueOnce(new Error('route restoration failed'))
       .mockRejectedValueOnce(new Error('route restoration still failed'))
       .mockResolvedValue(undefined)
-    const d = deps({
-      androidCore: {
-        acquire: async () => ({
-          generation: 9,
-          device: { uid: 'android:1' },
-          channel: 0,
-          negotiated: {},
-          release,
-          retryRelease: release
-        }) as any,
-        subscribeFrames: () => () => undefined,
-        subscribeState: () => () => undefined
-      }
-    })
     const mic = new TrainingMicrophone(d.value)
     await expect(mic.start(() => 0, jest.fn())).resolves.toEqual({ ok: true })
 
@@ -345,141 +242,128 @@ describe('TrainingMicrophone', () => {
       kind: 'unavailable',
       error: expect.stringMatching(/could not close cleanly.*restoration still failed.*retry/i)
     })
-    expect(d.value.androidCore?.acquire).toBeDefined()
-    expect(release).toHaveBeenCalledTimes(2)
+    expect(d.core.acquire).toHaveBeenCalledTimes(1)
 
     await expect(mic.start(() => 20, jest.fn())).resolves.toEqual({ ok: true })
-    expect(release).toHaveBeenCalledTimes(3)
-  })
-
-  test('returns a combined iOS startup/restoration failure instead of rejecting Start', async () => {
-    const release = jest
-      .fn<Promise<void>, []>()
-      .mockRejectedValueOnce(new Error('playback route restore failed'))
-      .mockResolvedValue(undefined)
-    const d = deps({ acquireIosLease: async () => ({ release }) })
-    d.recorder.startGate = Promise.resolve({ status: 'error', message: 'Recorder unavailable.' })
-    const mic = new TrainingMicrophone(d.value)
-
-    await expect(mic.start(() => 1_000, jest.fn())).resolves.toMatchObject({
-      ok: false,
-      kind: 'unavailable',
-      error: expect.stringMatching(/Recorder unavailable.*could not close cleanly.*restore failed/i)
-    })
-    await expect(mic.stop()).resolves.toBeUndefined()
-    expect(release).toHaveBeenCalledTimes(2)
-  })
-
-  test('retains and retries a cancelled Android acquisition whose first release fails', async () => {
-    let resolveAcquire!: (lease: any) => void
-    const acquired = new Promise<any>((resolve) => { resolveAcquire = resolve })
-    const release = jest
-      .fn<Promise<void>, []>()
-      .mockRejectedValueOnce(new Error('native stop not confirmed'))
-      .mockResolvedValue(undefined)
-    const acquire = jest
-      .fn()
-      .mockImplementationOnce(() => acquired)
-      .mockResolvedValue({
-        generation: 12,
-        device: { uid: 'android:1' },
-        channel: 0,
-        negotiated: {},
-        release: async () => undefined,
-        retryRelease: async () => undefined
-      })
-    const d = deps({
-      androidCore: {
-        acquire,
-        subscribeFrames: () => () => undefined,
-        subscribeState: () => () => undefined
-      }
-    })
-    const mic = new TrainingMicrophone(d.value)
-    const starting = mic.start(() => 0, jest.fn())
-    await flushMicrotasks()
-    const stopping = mic.stop()
-    resolveAcquire({
-      generation: 11,
-      device: { uid: 'android:1' },
-      channel: 0,
-      negotiated: {},
-      release,
-      retryRelease: release
-    })
-
-    await expect(starting).resolves.toMatchObject({ ok: false, kind: 'interrupted' })
-    await expect(stopping).resolves.toBeUndefined()
-    expect(release).toHaveBeenCalledTimes(2)
-    await expect(mic.start(() => 20, jest.fn())).resolves.toEqual({ ok: true })
-    expect(acquire).toHaveBeenCalledTimes(2)
-  })
-
-  test('a stop invalidates an unresolved async permission generation', async () => {
-    let resolve!: (value: 'Granted') => void
-    const permission = new Promise<'Granted'>((done) => { resolve = done })
-    const d = deps({ permission: () => permission })
-    const mic = new TrainingMicrophone(d.value)
-    const starting = mic.start(() => 0, jest.fn())
-    await flushMicrotasks()
-    const stopping = mic.stop()
-    resolve('Granted')
-    await expect(starting).resolves.toMatchObject({ ok: false, kind: 'interrupted' })
-    await stopping
-    expect(d.recorder.recording).toBe(false)
-  })
-
-  test('anchors timestamps after delayed permission and recorder start', async () => {
-    let resolvePermission!: (value: 'Granted') => void
-    let resolveStart!: (value: { status: 'success' }) => void
-    const permission = new Promise<'Granted'>((done) => { resolvePermission = done })
-    const started = new Promise<{ status: 'success' }>((done) => { resolveStart = done })
-    const d = deps({ permission: async () => 'Undetermined', requestPermission: () => permission })
-    d.recorder.startGate = started
-    let clock = 1_000
-    const mic = new TrainingMicrophone(d.value)
-    const starting = mic.start(() => clock, jest.fn())
-    await flushMicrotasks()
-    expect(mic.isRequestingPermission()).toBe(true)
-    resolvePermission('Granted')
-    await flushMicrotasks()
-
-    const releasedEarly = jest.fn()
-    const samples = new Float32Array(1_024)
-    const early = { getChannelData: () => samples, buffer: { release: releasedEarly } } as unknown as AudioBuffer
-    d.recorder.callback?.({ buffer: early, numFrames: 1_024, when: 0.2 })
-    expect(mic.snapshot()).toEqual([])
-    expect(releasedEarly).toHaveBeenCalledTimes(1)
-
-    clock = 5_000
-    resolveStart({ status: 'success' })
-    await expect(starting).resolves.toEqual({ ok: true })
-    const released = jest.fn()
-    const buffer = { getChannelData: () => samples, buffer: { release: released } } as unknown as AudioBuffer
-    d.recorder.callback?.({ buffer, numFrames: 1_024, when: 2 })
-    expect(mic.snapshot()[0].timestampMs).toBe(7_032)
-    expect(released).toHaveBeenCalledTimes(1)
-    // A started capture owns a recorder and a watchdog timer; leaving one
-    // running outlives the test and holds the jest worker open.
+    expect(d.core.release).toHaveBeenCalledTimes(3)
+    expect(d.core.acquire).toHaveBeenCalledTimes(2)
     await mic.stop()
   })
 
-  test('serializes a slow old stop before a new recording session', async () => {
-    let resolveStop!: (value: { status: 'success' }) => void
-    const stopped = new Promise<{ status: 'success' }>((done) => { resolveStop = done })
-    const d = deps()
+  test('a stop invalidates an unresolved native iOS acquisition', async () => {
+    let resolveAcquire!: (lease: IosAudioInputLease) => void
+    const acquired = new Promise<IosAudioInputLease>((resolve) => { resolveAcquire = resolve })
+    const d = iosDeps()
+    d.core.acquire.mockImplementationOnce(() => acquired)
     const mic = new TrainingMicrophone(d.value)
-    await mic.start(() => 1_000, jest.fn())
-    d.recorder.stopGate = stopped
+    const starting = mic.start(() => 0, jest.fn())
+    await flushMicrotasks()
+    expect(mic.isRequestingPermission()).toBe(true)
     const stopping = mic.stop()
-    const restarting = mic.start(() => 2_000, jest.fn())
-    await Promise.resolve()
-    expect(d.sessions).toEqual([true])
-    resolveStop({ status: 'success' })
+    resolveAcquire({ generation: 7, release: d.core.release })
+    await expect(starting).resolves.toMatchObject({ ok: false, kind: 'interrupted' })
+    await stopping
+    expect(d.core.release).toHaveBeenCalledTimes(1)
+  })
+
+  test('a stop suppresses an acquisition error from the cancelled iOS start', async () => {
+    let rejectAcquire!: (error: Error) => void
+    const acquired = new Promise<IosAudioInputLease>((_resolve, reject) => {
+      rejectAcquire = reject
+    })
+    const d = iosDeps()
+    d.core.acquire.mockImplementationOnce(() => acquired)
+    const onError = jest.fn()
+    const mic = new TrainingMicrophone(d.value)
+    const starting = mic.start(() => 0, onError)
+    await flushMicrotasks()
+    const stopping = mic.stop()
+    rejectAcquire(new Error('Microphone permission is denied'))
+    await expect(starting).resolves.toMatchObject({ ok: false, kind: 'interrupted' })
+    await stopping
+    expect(onError).not.toHaveBeenCalled()
+    expect(d.core.frameListener).toBeNull()
+    expect(d.core.stateListener).toBeNull()
+  })
+
+  test('observes an iOS capture error emitted before acquire returns', async () => {
+    const d = iosDeps()
+    d.core.acquire.mockImplementationOnce(async () => {
+      d.core.stateListener?.({ generation: 7, state: 'error', error: 'input died at start' })
+      return { generation: 7, release: d.core.release }
+    })
+    const onError = jest.fn()
+    const mic = new TrainingMicrophone(d.value)
+    await expect(mic.start(() => 0, onError)).resolves.toMatchObject({
+      ok: false,
+      kind: 'interrupted'
+    })
+    await flushMicrotasks()
+    expect(onError).toHaveBeenCalledWith('input died at start')
+    expect(d.core.release).toHaveBeenCalledTimes(1)
+  })
+
+  test('serializes a slow native stop before a new acquisition', async () => {
+    let resolveRelease!: () => void
+    const released = new Promise<void>((resolve) => { resolveRelease = resolve })
+    const d = iosDeps()
+    d.core.release.mockImplementationOnce(() => released)
+    const mic = new TrainingMicrophone(d.value)
+    await mic.start(() => 0, jest.fn())
+    const stopping = mic.stop()
+    const restarting = mic.start(() => 10, jest.fn())
+    await flushMicrotasks()
+    expect(d.core.acquire).toHaveBeenCalledTimes(1)
+    resolveRelease()
     await stopping
     await expect(restarting).resolves.toEqual({ ok: true })
-    expect(d.sessions).toEqual([true, false, true])
-    await Promise.resolve()
-    expect(d.sessions.at(-1)).toBe(true)
+    expect(d.core.acquire).toHaveBeenCalledTimes(2)
+    await mic.stop()
+  })
+
+  test('uses Android core evidence through the same native observation path', async () => {
+    let onFrame: ((frame: any) => void) | null = null
+    let onState: ((state: any) => void) | null = null
+    const release = jest.fn(async () => undefined)
+    const dependencies: TrainingMicDependencies = {
+      androidCore: {
+        acquire: async () => ({
+          generation: 11,
+          device: {
+            uid: 'android:1', label: 'Built-in mic', channels: 1,
+            channelLabels: ['IN 1'], sampleRate: 48_000, isPreferred: true,
+            transport: 'built-in', highLatency: false
+          },
+          channel: 0,
+          negotiated: {
+            deviceUid: 'android:1', sampleRate: 48_000, deviceChannels: 1,
+            selectedChannel: 0, sampleFormat: 'float', sharingMode: 'exclusive',
+            performanceMode: 'low-latency', inputPreset: 'voice-recognition-verified',
+            timestampSource: 'hardware'
+          },
+          release,
+          retryRelease: release
+        }),
+        subscribeFrames: (callback) => {
+          onFrame = callback
+          return () => { onFrame = null }
+        },
+        subscribeState: (callback) => {
+          onState = callback
+          return () => { onState = null }
+        }
+      }
+    }
+    const mic = new TrainingMicrophone(dependencies)
+    await expect(mic.start(() => 2_000, jest.fn())).resolves.toEqual({ ok: true })
+    ;(onFrame as ((frame: any) => void) | null)?.({
+      ...iosFrame(), generation: 11, frequency: 220, clarity: 0.88
+    })
+    expect(mic.snapshot()[0]).toMatchObject({ frequencyHz: 220, timestampMs: 2_000 })
+    expect(mic.signal.normalized).toBe(true)
+    await mic.stop()
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(onFrame).toBeNull()
+    expect(onState).toBeNull()
   })
 })

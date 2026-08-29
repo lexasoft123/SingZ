@@ -48,7 +48,8 @@ export interface IosAudioInputLeaseNative {
 }
 
 export interface IosAudioInputLease {
-  readonly generation?: number
+  /** Ownership generation stamped onto every zcore/zdsp frame. */
+  readonly generation: number
   release(): Promise<void>
 }
 
