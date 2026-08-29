@@ -1,0 +1,3 @@
+It hears you now, and Re-detect keeps your bar lines.
+
+Vocal training could sit on "Waiting for your voice" while you sang. SingZ judged what it heard against one fixed loudness, and how loud a phone records is the phone's own business — so it worked on one phone and not the next. It measures your voice against itself now, and says what it can hear. Bar lines you fixed on the computer also survive its Re-detect button, which used to drop them and sync the loss here. SingZ needs Android 9 now.

@@ -404,7 +404,20 @@ jobs:
           # same prerelease rule as build.yml: hyphenated tags never go "latest"
           PRE=(); case "$TAG" in *-*) PRE=(--prerelease);; esac
           if [ -f "$NOTES" ]; then
-            tail -n +2 "$NOTES" > /tmp/relnotes-body.md
+            # The shared store blocks stay: they have opened every release page
+            # since v0.14.6 and read as the short version, in both languages.
+            # The `:ios` overrides are store-only text — publishing them here
+            # would summarise the same release twice per language. The markers
+            # are HTML comments, so they hide themselves and never the text
+            # between them.
+            # Both addresses are anchored to whole lines and single-spaced —
+            # canonical marker form, which store-notes.cjs REJECTS anything but,
+            # so the two parsers cannot drift apart. That check is what makes
+            # this safe; the anchors alone are not. Unanchored, a hand-written
+            # one-line `:ios` block would be invisible to the generator (which
+            # wants a newline after the opener) while this range ran on to the
+            # NEXT `/store` and silently ate a shared block.
+            tail -n +2 "$NOTES" | sed '/^<!-- store:[^ ]*:ios -->$/,/^<!-- \/store -->$/d' > /tmp/relnotes-body.md
             gh release create "$TAG" "${PRE[@]}" --title "$(head -n 1 "$NOTES")" --notes-file /tmp/relnotes-body.md 2>/dev/null || true
           else
             gh release create "$TAG" "${PRE[@]}" --title "$TAG" --notes "" 2>/dev/null || true

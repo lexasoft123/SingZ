@@ -1,6 +1,6 @@
 {
   "name": "singz",
-  "version": "0.19.1-mic5",
+  "version": "0.19.1",
   "description": "Practice app for singers — drop a song, split it into stems, toggle tracks while you sing.",
   "author": "lexasoft <lexasoft@gmail.com>",
   "type": "module",
@@ -16,13 +16,12 @@
     "test": "vitest run",
     "gates": "scripts/run-parity-gates.sh",
     "store-notes": "node scripts/store-notes.cjs",
-    "store-notes:check": "node scripts/store-notes.cjs --check",
-    "sync:kit-native": "node scripts/sync-kit-native.mjs"
+    "store-notes:check": "node scripts/store-notes.cjs --check"
   },
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
     "@fontsource-variable/martian-mono": "^5.3.0",
-    "@singz/ui": "https://github.com/lexasoft123/singz-ui/archive/refs/tags/v1.0.1.tar.gz",
+    "@singz/ui": "https://github.com/lexasoft123/singz-ui/archive/refs/tags/v1.3.0.tar.gz",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

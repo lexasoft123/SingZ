@@ -62,9 +62,11 @@ UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
 the E2E Windows workflow, which also runs `npm test`) and the mac drivers
-in `tests/e2e/mac/` (nine of them: align, wizard/consent, audio settings,
-bar editing, and the analysis-rule drivers — the two stem-rate ones, the two
-song-switch races, and stamp-upgrade; the `e2e-verifier` agent in
+in `tests/e2e/mac/` (ten of them: align, wizard/consent, audio settings,
+bar editing — TWO of those, because dragging a line and pressing Re-detect
+are different code paths and only the drag was covered — and the
+analysis-rule drivers: the two stem-rate ones, the two song-switch races,
+and stamp-upgrade; the `e2e-verifier` agent in
 `.claude/agents/` holds the roster of record, and a new driver is not
 finished until it is listed there — launch one instance per platform in
 parallel for cross-platform verification) — vitest unit tests in
@@ -155,11 +157,15 @@ directions. Details + env hooks:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
-`offline-cache.cjs`, `custom-track.cjs`, `beats-native-ios.cjs`,
-`song-sheet-beat.cjs`): CDP over
+`ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
+`beats-native-ios.cjs`, `song-sheet-beat.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
-after engine or loading changes. `song-sheet-beat.cjs` is the one that watches
+after engine or loading changes. `loop-region` and `ab-repeat` are a PAIR
+and the split is the lesson: the first drives `engine.setRegion`, which was
+never the part in doubt, and the second drives the button's own
+handler — the three-state cycle and the marks the scrub band is drawn from shipped with their test
+hooks exported and nothing referencing either. `song-sheet-beat.cjs` is the one that watches
 a SCREEN rather than the engine: it seeds two phone-library projects (a
 hand-made grid, and a song with nothing detected), opens the Song sheet and
 reads the Beat row through somebody else's analysis — the rule in
@@ -171,17 +177,35 @@ project whose stems ALL carry audio — a silent stem discriminates nothing, and
 a fallback mutated to drop one passed until the mutation was moved to a stem
 with music in it — and both report whether the LATTICE and the aligned WORDS
 actually crossed, because a bare comparison sends neither and those are the
-two arguments the real pipeline always fills. Pure-JS mobile logic that no device can show
+two arguments the real pipeline always fills. `mic-android.cjs` is the one
+that cannot run on a simulator AT ALL: it drives vocal-training CAPTURE
+through the `__test.audioInput` seam, so it wants a real phone with a real
+microphone — an AVD booted `-no-audio` has no input, and the driver then
+correctly and uselessly reports a capture that delivers nothing. It needs the
+side-by-side debug build (`-PdebugAppIdSuffix=.debug`) and asserts the
+TRANSPORT contract only — the input inventory, that Bluetooth never outranks
+the built-in microphone, the negotiated device/lane/format/rate, that the
+preset was READ BACK rather than merely asked for, that audio arrives with the
+hardware callback firing and no overruns, and that the lease releases cleanly
+enough for a second capture to succeed. Pitch and level are deliberately NOT
+asserted there: they need a controlled room, and the host suite's
+mutation-checked fixtures pin them without one. Pure-JS mobile logic that no device can show
 (the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
 — needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
 our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
-and `jest.setup.js` to stub audio-api + the pods (they throw on import with no
-native module).
+`jest.setup.js` to stub audio-api + the pods (they throw on import with no
+native module), and a `resolver` for `@singz/ui`, whose subpath exports are
+ESM-only. That last one is scoped to that package on purpose: the one-line
+`customExportConditions: ['import']` fix is global, and switching every other
+dependency onto its ESM build takes all 33 suites down with it (measured). A
+suite that stops being RUN is the failure mode here — nine of them went dark
+when the phone stopped carrying its own copy of the kit, and jest reported
+240 passing tests and no failures throughout.
 **Two sessions, one Mac**: another worktree's Metro already on 8081 will happily
 serve ITS bundle to your app, so a parallel run needs its own simulator *and* its
 own port — boot a second device, build with `RCT_METRO_PORT=8082`, and then set
 the runtime bundle host too:
-`xcrun simctl spawn <udid> defaults write com.lexasoft.singz RCT_jsLocation -string localhost:8082`
+`xcrun simctl spawn <udid> defaults write io.s-dev.singz RCT_jsLocation -string localhost:8082`
 (the build-time port alone does NOT move the Debug app off 8081 — it silently
 attached to the neighbour's Metro). Pass `SIM_UDID`/`METRO_PORT` to the tests.
 And never `pgrep` for the app: with two simulators up there are two SingZPlayer
@@ -407,10 +431,49 @@ was driven; the gotchas that follow from it are below.
   the pack; without it a broken pack silently re-downloads 166 MB mid-split.
 - **electron-builder**: `files` must exclude `vendor/`, `.engines-src/` etc. or
   they land in the asar (was 241 MB); `${os}` macro is `mac`/`win`, NOT node's
-  `darwin`/`win32` — extraResources are declared per-platform.
+  `darwin`/`win32` — extraResources are declared per-platform. **`mobile/` and
+  `build-ios/` are on that list too, and were missed for a long time**: the
+  RN app is a separate product that happens to share the repo, and once
+  anyone has pod-installed or built iOS in their checkout, `mobile/ios`
+  carries Pods and DerivedData. A local arm64 dmg cut from such a tree
+  measured 1.35 GB (asar 2.7 GB, of which `mobile/ios` was 2.6 GB) against
+  the 122 MB CI ships — CI escaped only because its desktop job never
+  pod-installs, so this was a landmine rather than a live break. Check the
+  asar's size, not just the dmg's, when a build looks fat.
+- **`electronLanguages` names must be EXACT — the matcher is inverted** —
+  Electron ships every Chromium translation (Electron 43: 220 `.lproj` on
+  macOS, 47 MB, because each of 55 locales now has FEMININE/MASCULINE/NEUTER
+  variants); trimming to `['en', 'en-US', 'en_GB', 'ru']` leaves 2.2 MB and
+  takes ~46 MB off the bundle. But `removeUnusedLanguagesIfNeeded` in
+  `ElectronFramework.js` tests `wantedLanguage.startsWith(language + "-")` —
+  the WANTED string against the FILE's, the opposite of what its own comment
+  ("`en` matches `en-US`") claims. So `en` DELETES `en-US` instead of keeping
+  it, and the list has to spell out every form: macOS uses
+  `en.lproj`/`en_GB.lproj`, Windows uses `locales/en-US.pak`. The loop walks
+  the FILES on disk and tests each against the list, so a name that matches
+  nothing on a platform simply never fires — the cross-platform union is the
+  safe shape. These are Chromium's own strings — context menus, form
+  validation — never SingZ's copy.
 - **macOS ad-hoc signing is mandatory** (scripts/afterPack.cjs): repacked
   Electron has a broken signature and quarantined downloads show the
   unrecoverable "app is damaged" dialog. Hook skips itself when CSC_* is set.
+- **Packaging from a WORKTREE embeds absolute symlinks into the bundle** —
+  `scripts/worktree-setup.sh` deliberately links the third-party engines to
+  the main checkout rather than rebuilding whisper per worktree, so
+  `vendor/darwin-<arch>/whisper-cli` is a symlink; electron-builder copies
+  extraResources links verbatim and the .app ends up with
+  `Contents/Resources/engines/whisper-cli ->
+  /Users/…/SingZ/vendor/darwin-arm64/whisper-cli`. Nothing noticed this until
+  a REAL signing identity existed: `identity: null` runs no codesign at all,
+  and even ad-hoc signing does not verify, so the dangling link rode along
+  silently. With a Developer ID present, `@electron/osx-sign`'s strictVerify
+  (default true) runs `codesign --verify --deep --strict` and stops the build
+  with `invalid destination for symbolic link in bundle`. This is a real
+  packaging defect that signing merely surfaced — such a dmg would ship a
+  link to a path no user has. Releases are unaffected (CI and the main
+  checkout hold real files); to package from a worktree, replace the links
+  with copies first. `vendor/darwin-x64/whisper-cli` is the same trap on the
+  x64 leg.
 - **One log per platform, and it outlives the process** — everything goes
   through `log(source, line, level)`: `src/main/log.ts` on the desktop (shown
   in the existing Log dialog) and `mobile/src/log.ts` on the phone (the same
@@ -434,6 +497,27 @@ was driven; the gotchas that follow from it are below.
   install`. Adding a `test_spec` to the FolderAccess podspec is what triggered
   it here — and it generates no test target anyway, which is why the Swift
   conformance runner is plain swiftc.
+- **Nothing machine-specific may reach `mobile/ios/Podfile.lock`, and one
+  thing kept doing it** — a pod's SPEC CHECKSUM is the SHA1 of the evaluated
+  podspec CocoaPods writes to `Pods/Local Podspecs/<name>.podspec.json`, and
+  hermes-engine's carries `HERMES_CLI_PATH`, an ABSOLUTE path to hermesc
+  under this checkout's `node_modules`. It was the only one of ~85 sandbox
+  podspecs containing a path at all, so an unchanged hermes fingerprinted
+  differently in every worktree and the line was committed and reverted over
+  and over (49f57ed). The Podfile's `singz_relativize_hermes_cli_path`
+  rewrites it to `$(PODS_ROOT)/../../node_modules/…`. Three things about it
+  are load-bearing: the podspec JSON is edited by TEXT substitution, never
+  re-serialized (the checksum is over bytes, so CocoaPods' own formatting has
+  to survive); the memoized `@checksum` on the spec objects is cleared,
+  because `Specification#checksum` is `@checksum ||=` and the lockfile is
+  generated from `analysis_result.specifications` afterwards; and the hook
+  runs AFTER `react_native_post_install`, measured — RN's hook regenerates
+  the aggregate xcconfigs from the in-memory spec, so running first left the
+  app target compiling against the absolute path again. `HERMES_CLI_PATH` is
+  a `user_target_xcconfig`, so it is the APP target's setting and Xcode
+  expands `$(PODS_ROOT)` before the bundling script reads it. **A Debug
+  simulator build proves nothing here** — react-native-xcode.sh exits before
+  hermesc is touched; validate with `FORCE_BUNDLING=1` or a Release build.
 - **Android app C++ (new-arch)**: setting `externalNativeBuild` REPLACES the
   RN gradle plugin's default CMake — `include(${REACT_ANDROID_DIR}/cmake-utils/
   ReactNative-application.cmake)` first or `libappmodules.so` silently vanishes
@@ -821,4 +905,138 @@ falls back to the bare create (fix it with `gh release edit`). Notes are
 user-facing and genuinely funny — singer's-eye view, not commit prose: what
 they can do now, what stopped being annoying, sizes/time costs where they
 matter. Group by platform when it helps. Writing them is part of cutting
-the release, not optional polish.
+the release, not optional polish. The `<!-- store:LOCALE -->` blocks inside
+that same file feed BOTH stores now (`scripts/store-notes.cjs` writes Play's
+per-versionCode changelog and, for whichever locales
+`mobile/ios/fastlane/metadata` has a directory for, App Store's unversioned
+`release_notes.txt` — Apple's locale codes are not always Android's, `ru` vs
+`ru-RU`) — write those blocks assuming either audience reads them; wording
+true only on one OS (a v0.19.0 draft named "Android's own low-latency
+capture" before this was noticed and generalized) is wrong on the other
+platform's listing. When a release genuinely IS a different release on the
+two phones, `<!-- store:LOCALE:ios -->` REPLACES the shared block for Apple
+alone (0.19.1 is the case that forced it: an Android capture rewrite and an
+Android 9 floor, neither of which happened on iPhone, heading for an App
+Store submission that names another mobile platform — guideline 2.3.10, on a
+first review with no history to survive it). It is an override and not an
+addition: with none, both stores get the shared block exactly as before, and
+two copies of one claim drift, which is what this file exists to prevent.
+The workflows strip `:ios` blocks from the GitHub Release body, so the
+release page keeps opening with the same two blurbs it always has.
+
+**iOS ships through `.github/workflows/ios.yml`** — a `v*` tag uploads to
+TestFlight automatically; submitting for App Store review
+is manual-dispatch-only, and it carries `automatic_release: true` — an
+approved build goes LIVE on the store by itself, so dispatching that lane IS
+the decision to publish, same "tagging is not enough to reach
+production" shape as Android's `publish` job. The app record itself cannot
+be created by the API at all (Apple's docs say so outright) — that and the
+App Store Connect API key are one-time by-hand setup, see
+[docs/IOS-RELEASE.md](docs/IOS-RELEASE.md). **Signing is `fastlane match`**:
+the Apple Distribution certificate and App Store profile live encrypted in a
+private repo (`lexasoft123/singz-ios-certs`) and are fetched per run, so the
+profile NAME is never written into a secret or variable — match exports it
+as `sigh_<bundle>_appstore_profile-name` and the archive lane reads that,
+which is why regenerating the profile cannot desynchronize CI from the
+portal. **CI runs match READONLY and must never mint a certificate** —
+Apple caps Distribution certs per team and a job creating one per run is how
+a team runs out and cannot ship; `fastlane ios certs` is the only lane that
+may create them, it refuses to run when `$CI` is set, and it is deliberately
+absent from the workflow's lane choices. The iOS bundle id is
+`io.s-dev.singz` and the team is `USJ7H3X44X`, NOT the `com.lexasoft.singz`
+Android and the desktop still use, and NOT the old team `9384M82Y8P` — that
+bundle id was already registered under a different Apple ID whose membership
+has since expired (bundle ids are unique across all Apple accounts, not per
+team), and that team is dead rather than a fallback. **Signing is overridden
+on the xcodebuild command line, never written into `project.pbxproj`**
+(`xcargs`: `CODE_SIGN_STYLE=Manual`, the match profile specifier, and
+`CODE_SIGN_IDENTITY` in its BARE form only — the `[sdk=iphoneos*]`
+conditional form is impossible on a command line, because xcodebuild splits
+an override on the first `=` and reads the name as `CODE_SIGN_IDENTITY[sdk`
+and the value as `iphoneos*]=Apple Distribution`, which surfaces as "No
+certificate for team … matching 'iphoneos*]=Apple Distribution' found". The
+bare override does displace the project's sdk-qualified `iPhone Developer`;
+what makes an archive fail with "No profiles … were found" while naming *App
+Development* profiles is a missing `CODE_SIGN_STYLE=Manual`, not a missing
+conditional identity). The project therefore stays on automatic development signing,
+which is what Xcode and the sis-motors.ru sideload build both want, and the
+two never fight over the same file. `pod install` runs as the **system**
+CocoaPods, never `bundle exec pod` — from `mobile/ios` bundler resolves the
+fastlane-only Gemfile added for this pipeline and dies with "can't find
+executable pod for gem cocoapods"; `scripts/worktree-setup.sh` is the one
+definition of how pods get installed and it uses the bare command.
+**Ad-hoc is now available too** (`fastlane ios adhoc`) — the same one
+certificate carries an AdHoc profile beside the App Store one, so the
+sis-motors.ru install page no longer needs a development-signed export. It
+installs only on registered UDIDs: `fastlane ios add_device` then
+`fastlane ios certs` again, because registering a device does NOT
+retroactively change an existing profile, and a profile covering zero
+devices looks exactly like a healthy one until an install fails on the
+phone. Every lane checks
+`MARKETING_VERSION` against `package.json` and refuses a mismatch, but does
+**not** bump it for you — still hand-bumped per the paragraph above. The
+**build number** is the one version CI does own end to end: it passes
+`github.run_number`, which never repeats and never goes backwards **for this
+workflow** — it is a PER-WORKFLOW counter, not a repo-wide one, and an
+earlier version of this paragraph claimed otherwise. ios.yml's runs are
+numbered 1, 2, 3 while the repo has had hundreds of Action runs, so the
+counter starts at 1 for any newly added workflow. That is fine for every
+version whose builds this workflow alone produced, and it is exactly wrong
+for a version that already carries HIGHER builds from somewhere else: 0.19.0
+reached build 33 through hand-driven local uploads, so a `beta` run against
+0.19.0 offers build 4 and Apple refuses it — a build number cannot go
+backwards within a version train. Bump `MARKETING_VERSION` before letting CI
+upload, or the first CI build of a hand-uploaded version is rejected. Past
+that one seam, no build number is ever typed by hand on this path — which is
+still a real improvement on the trap there is for the `ship-ios-ipa` skill's
+hand-bumped sideload build (that skill is user-global, in `~/.claude/skills/`
+— it is not in this repo, and the link that used to point inside the tree was
+dead) — a different pipeline, a different certificate type
+(development-signed, not App Store-signed), and not interchangeable with
+this one.
+
+**The mac `.dmg` is Developer ID-signed and notarized when the secrets are
+present, ad-hoc signed exactly as before when they are not** — `notarize:
+true` in `electron-builder.yml` skips itself with a warning rather than
+failing when unset, which is what keeps every trigger of `build.yml` (tag,
+dispatch, the weekly cache warmer) building in a fork, or on any machine with
+no Developer ID certificate, with no Apple secrets at all. `build.yml`'s
+signing step imports the certificate into a keychain it creates itself and
+writes **`CSC_KEYCHAIN`/`CSC_NAME`** (plus `APPLE_API_KEY`, `APPLE_TEAM_ID`,
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), each only when its secret is
+non-empty. It deliberately writes **neither `CSC_LINK` nor
+`CSC_KEY_PASSWORD`** — an earlier revision of this paragraph said it wrote
+exactly those two, and setting `CSC_LINK` is the one thing that breaks this,
+because electron-builder 26.15.3 then hands the `.p12` password to
+`security set-key-partition-list -k`, which wants the keychain password. The
+step stays on the macOS leg of that job's matrix regardless: `CSC_*` is read
+for a **Windows** Authenticode cert on the other leg, so a shared step would
+aim Apple credentials at `signtool`. Notarization reuses the iOS
+pipeline's App Store Connect API key rather than minting a second one — see
+[docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md), including why the
+entitlements file carries only the two Hardened Runtime flags Electron
+itself needs (no App Sandbox entitlements — this is the `dmg` target, not
+`mas` — and no microphone entitlement: that one's an App Sandbox thing, mic
+access keeps working through the ordinary `NSMicrophoneUsageDescription` TCC
+prompt without it). `hardenedRuntime`/`entitlements`/`entitlementsInherit`
+are flat `mac:` siblings, not nested under a `sign:` key — this repo pins
+electron-builder ^26.15.3, where `mac.sign` is a custom-sign-*function* slot
+(a later major's docs describe the nested object; the two schemas are not
+interchangeable within one version). A misconfigured nested `sign:` object
+doesn't fail on any run with no identity available — a fork, or a secret
+rotated away; `sign()` returns before touching it when none is found, and
+this dev Mac stopped being an example of that once the Developer ID
+certificate was installed on it — it only throws
+(`customSign is not a function`) the moment a real Developer ID identity
+shows up, i.e. exactly when someone finally wires up the secrets this was
+all for; caught in review before it ever ran for real. **This has since run
+for real, and both halves of the sentence that used to close this paragraph
+("nothing has actually notarized a build yet", "there is no Developer ID
+certificate on this machine") are now false** — a local `--mac --arm64`
+build signed, notarized and stapled, verified by `spctl` accepting the app
+inside a quarantined, mounted dmg; and CI run 33243835099 logged
+`notarization successful` for both architectures. The evidence, the
+verification commands and the two traps that bit on the way (electron-
+builder's `CSC_LINK` keychain-password bug, and worktree `vendor/` symlinks
+that `codesign --strict` rejects) are in
+[docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md).

@@ -1,0 +1,25 @@
+# SOPS rules for this repo's local secret store.
+#
+# What is encrypted: the Apple credentials the iOS pipeline needs — the App
+# Store Connect API key (.p8 body, key id, issuer id) and the fastlane match
+# passphrase. See docs/IOS-RELEASE.md.
+#
+# Recipient is the age key already on this machine
+# (~/.config/sops/age/keys.txt, which SOPS finds by default). Adding a
+# second machine or person means adding their age public key here and
+# running `sops updatekeys .keys/secrets.enc.yaml` — no re-entry of the
+# secrets themselves.
+#
+# The encrypted file lives under .keys/, which is gitignored AND in
+# .git/info/exclude. That is deliberate belt-and-braces: SOPS output is safe
+# to commit in principle, but this repo is PUBLIC, and an Apple .p8 that
+# Apple hands out exactly once is not the thing to be casual about. Encrypted
+# *and* untracked.
+creation_rules:
+  - path_regex: \.keys/.*\.enc\.ya?ml$
+    age: age1hh0celqcdf8mfv9drzcex7g7f0jxqz7qgrldkk6vx68vgr64kfxq3f5g8c
+    # No encrypted_regex ON PURPOSE: every VALUE is encrypted. Keys stay
+    # readable either way, so the file's shape is still greppable. A named
+    # allow-list looked tidier and was a trap — a key added later that the
+    # pattern did not anticipate (a token, say) would be written in the
+    # CLEAR, silently, in a file whose whole job is to hold secrets.

@@ -114,12 +114,19 @@ registers its link names in the shared `.git/info/exclude` (covers every
 worktree, any checkout vintage) and aborts if a provisioned path is not
 ignored.
 
-One trap the script cannot fix: `pod install` in a worktree rewrites the
-tracked `mobile/ios/Podfile.lock` (hermes checksum). Leave that rewrite
-uncommitted — but do NOT `git restore` it either: that desyncs it from
-`Pods/Manifest.lock` and the next Xcode build fails at "[CP] Check Pods
-Manifest.lock". If it was restored, re-sync with
-`cp Pods/Manifest.lock Podfile.lock`.
+`pod install` in a worktree used to rewrite the tracked
+`mobile/ios/Podfile.lock` every time — hermes-engine's evaluated podspec
+bakes an absolute `HERMES_CLI_PATH` into the file the spec checksum is taken
+over, so every checkout fingerprinted an unchanged hermes differently. The
+Podfile's `singz_relativize_hermes_cli_path` rewrites it to a
+`$(PODS_ROOT)`-relative form, and two checkouts now produce a byte-identical
+podspec and the same checksum. **A lockfile that still comes back modified
+is news** — read the diff rather than reverting it, and never `git restore`
+one that Xcode has a `Pods/Manifest.lock` for: that desyncs the pair and the
+next build fails at "[CP] Check Pods Manifest.lock" (re-sync with
+`cp Pods/Manifest.lock Podfile.lock`). Note that a Debug simulator build
+never exercises `HERMES_CLI_PATH` — react-native-xcode.sh exits before it —
+so validating a change to that path needs `FORCE_BUNDLING=1` or Release.
 
 ## Which core am I running?
 
@@ -261,9 +268,11 @@ produce six stems (guitar/piano lanes hide on songs without them).
 1. Bump `package.json` version (artifact names use it).
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. CI (`.github/workflows/build.yml`) builds mac arm64+x64 dmg, win x64 NSIS,
-   compiles whisper-cli and all three splitter packs, ad-hoc signs mac bundles
-   (`scripts/afterPack.cjs`), and attaches everything to the GitHub Release
-   via `gh` (nullglob per-platform file lists; create/update race-safe).
+   compiles whisper-cli and all three splitter packs, Developer ID-signs and
+   notarizes the mac bundles (falling back to `scripts/afterPack.cjs`'s ad-hoc
+   signature only where the Apple secrets are absent, as in a fork), and
+   attaches everything to the GitHub Release via `gh` (nullglob per-platform
+   file lists; create/update race-safe).
 
 Engine builds are cached on the vendor scripts' content hash (editing a script
 forces a clean rebuild); source trees have their own cache. Keep releases
@@ -288,11 +297,42 @@ pack that cannot split on a machine without homebrew or network.
 
 ### Signing status
 
-Builds ship ad-hoc signed (mac) / unsigned (win). To sign for real: remove
-`identity: null` from electron-builder.yml, add `CSC_LINK`/`CSC_KEY_PASSWORD`
-(+ `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` for notarization)
-as CI secrets — the afterPack hook steps aside automatically. Windows options:
-Azure Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
+**mac is Developer ID-signed and notarized in CI** — that is done, not a
+to-do, and [docs/MACOS-SIGNING.md](MACOS-SIGNING.md) is the whole story:
+what each secret is, how it is verified, and the two traps that bit.
+
+**v0.19.1 is the first signed, notarized release** — everything up to and
+including v0.19.0 shipped ad-hoc signed, which is why README tells anyone on
+an older download to approve it once in System Settings. The secrets landed
+on 2026-08-29, after v0.19.0 was tagged.
+
+Worth watching on that first tag rather than assuming: every run that has
+proved signing so far was a `workflow_dispatch`, and the attach step is gated
+on a tag ref — so a signed dmg has been *built* many times and never yet
+*attached* to a release.
+
+A local build with no Apple secrets set still runs the afterPack ad-hoc sign,
+because that hook keys on `CSC_LINK`/`CSC_NAME`/`CSC_KEY_PASSWORD` being in
+the environment — **not** on what is in your keychain. So on a Mac that has a
+Developer ID certificate installed, the hook ad-hoc signs and then
+electron-builder's auto-discovery finds the real identity and re-signs over
+it (the ordering saves us: `emitAfterPack` runs before `doSignAfterPack`).
+The wasted pass is harmless, and the result is a Developer ID-signed but
+**un-notarized** app — notarization needs the API-key secrets.
+
+**Do NOT follow the old advice this section used to give.** It said to remove
+an `identity: null` from electron-builder.yml (there is no such key any more)
+and to set `CSC_LINK`/`CSC_KEY_PASSWORD` — and setting `CSC_LINK` is
+specifically the thing that breaks: electron-builder 26.15.3 hands the `.p12`
+password to `security set-key-partition-list -k`, which wants the *keychain*
+password, and the macOS leg dies as a bare `security process failed 1`. CI
+imports the certificate itself and passes `CSC_KEYCHAIN`/`CSC_NAME` instead.
+Notarization here is App Store Connect **API-key** auth
+(`APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER` + `APPLE_TEAM_ID`),
+not the `APPLE_ID`/app-specific-password trio.
+
+**Windows is still genuinely unsigned.** Options if that changes: Azure
+Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
 
 ## Renderer performance rules
 

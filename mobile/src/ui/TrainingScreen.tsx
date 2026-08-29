@@ -84,7 +84,7 @@ import {
   nativeGlassStyle,
   nightStudioNativeTheme,
   type PitchTargetItem
-} from './uikit/native/index.js'
+} from '@singz/ui/native'
 
 export interface MobileSongTrainingFacts {
   readonly sourceSongId: string

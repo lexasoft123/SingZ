@@ -1,0 +1,3 @@
+The training meter says what it can hear.
+
+When vocal training could not hear you it sat on "Waiting for your voice", whether the microphone was blocked, delivering nothing, or simply too quiet to read. It now says which of those it is, so there is something to fix rather than something to guess at. Bar lines you corrected on the computer also survive its Re-detect button, which used to drop them and sync the loss down here — a song you had already put right came back wrong.

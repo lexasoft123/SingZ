@@ -30,10 +30,21 @@ or `e2e-verifier` should cover before release.
 ## SingZ invariants — each of these has already cost a field bug
 
 **Never-commit files — check these first, before anything else.** A diff containing
-`src/main/gdrive-config.ts`, `mobile/src/gdrive-config.ts`, `mobile/gdrive.config.json`
-(generated, secret-bearing, gitignored) or the hermes-checksum churn in
-`mobile/ios/Podfile.lock` is a BLOCKER regardless of how good the rest is. Report the
-file, not its contents — never quote or echo what is inside them.
+`src/main/gdrive-config.ts`, `mobile/src/gdrive-config.ts` or
+`mobile/gdrive.config.json` (generated, secret-bearing, gitignored) is a BLOCKER
+regardless of how good the rest is. Report the file, not its contents — never quote or
+echo what is inside them.
+
+`mobile/ios/Podfile.lock` used to belong on that list, because hermes-engine's
+checksum was the SHA1 of a podspec carrying THIS checkout's absolute
+`HERMES_CLI_PATH` and so churned per machine. The Podfile's
+`singz_relativize_hermes_cli_path` rewrites that to a `$(PODS_ROOT)`-relative
+form, so the file is now identical across checkouts and a changed line in it is
+a real change, not noise — read it rather than blocking on it. When that line
+DOES move, that is the cue to check the hook is still firing (an RN bump
+renaming the key is how it stops): `grep -l /Users "mobile/ios/Pods/Local
+Podspecs/"*.json` must find nothing. The sandbox is gitignored, so this can
+only ever be checked against the working tree, never from the diff alone.
 
 **Stored analyses must re-derive.** Beat grid and melody line live in project.json
 because the phones have neither detector. Touching `detectBeats` or the beat pipeline

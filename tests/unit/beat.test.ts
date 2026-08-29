@@ -15,7 +15,12 @@ import {
   tapBpm,
   type BeatInfo
 } from '../../src/renderer/src/audio/beat'
-import { detectBeats } from '../../src/renderer/src/audio/analysis'
+import {
+  BEAT_DETECT_VERSION,
+  detectBeats,
+  gridFromDetection,
+  type DetectedBeats
+} from '../../src/renderer/src/audio/analysis'
 
 describe('beat track math', () => {
   const info: BeatInfo = constantBeats(120, 0.4, 10, 4) // beats 0.4, 0.9, …
@@ -1302,5 +1307,73 @@ describe('applyUserBars — a moved line re-phases what follows', () => {
   it('never emits a bar line off the end of the beat array', () => {
     const g = applyUserBars(track([62], uniform))
     expect(g.downbeats!.every((i) => i >= 0 && i < 64)).toBe(true)
+  })
+})
+
+describe('gridFromDetection — what a re-detection becomes', () => {
+  /** A detector result: 60 bpm, uniform fours, one flagged bar. */
+  const det: DetectedBeats = {
+    beats: Array.from({ length: 64 }, (_, i) => i),
+    bpm: 60,
+    beatsPerBar: 4,
+    downbeat: 0,
+    downbeats: Array.from({ length: 16 }, (_, k) => k * 4),
+    suspectAt: [32]
+  }
+  /** What the singer had before pressing the button: a bar moved to 21. */
+  const corrected: BeatInfo = applyUserBars({
+    beats: Array.from({ length: 64 }, (_, i) => i),
+    bpm: 60,
+    beatsPerBar: 4,
+    downbeat: 0,
+    autoDownbeats: Array.from({ length: 16 }, (_, k) => k * 4),
+    userBars: [21],
+    source: 'auto'
+  })
+
+  // The bug this function exists to make impossible: Re-detect built its own
+  // copy of this object, forgot `userBars`, and auto-saved the loss to the
+  // project, to Drive and on to the phones.
+  it('carries hand-placed bar lines across and re-folds them', () => {
+    const g = gridFromDetection(det, corrected)
+    expect(g.userBars).toEqual([21])
+    expect(g.downbeats!.slice(0, 7)).toEqual([0, 4, 8, 12, 16, 21, 25])
+    // the detector's own lines are kept apart from the folded result, or the
+    // next fold would stack on top of an already-folded grid
+    expect(g.autoDownbeats).toEqual(det.downbeats)
+  })
+
+  it('keeps the advisory badges and the stamp', () => {
+    const g = gridFromDetection(det, corrected)
+    expect(g.suspectAt).toEqual([32])
+    expect(g.detVersion).toBe(BEAT_DETECT_VERSION)
+    // never 'manual': that flag opts the song out of the auto-heal gate, and
+    // this grid is the detector's.
+    expect(g.source).toBe('auto')
+  })
+
+  it('produces the plain detector grid when nothing was ever moved', () => {
+    const g = gridFromDetection(det, { ...corrected, userBars: [] })
+    expect(g.userBars).toBeUndefined()
+    expect(g.downbeats).toEqual(det.downbeats)
+    expect(gridFromDetection(det, null).downbeats).toEqual(det.downbeats)
+    expect(gridFromDetection(det).downbeats).toEqual(det.downbeats)
+  })
+
+  it('folds onto the FRESH beat array, not the old one', () => {
+    // The same song re-detected, this time without the two count-in beats:
+    // every index shifts by two while the music stays where it was. A bar
+    // line stored as an INDEX would now sit two beats late (23.2 s); stored
+    // as a TIME it re-snaps to the beat nearest 21 s, which is what the
+    // singer marked. This is the whole reason userBars are seconds.
+    const recut: DetectedBeats = {
+      ...det,
+      beats: Array.from({ length: 62 }, (_, i) => i + 2.2),
+      downbeats: Array.from({ length: 15 }, (_, k) => k * 4)
+    }
+    const g = gridFromDetection(recut, corrected)
+    const marked = g.downbeats!.map((i) => g.beats[i])
+    expect(marked).toContain(21.2)
+    expect(marked).not.toContain(23.2)
   })
 })

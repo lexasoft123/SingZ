@@ -49,6 +49,26 @@ android/fastlane/metadata/android/en-US/images/
 android/fastlane/report.xml
 android/fastlane/Preview.html
 
+# The App Review contact block is a REAL PERSON's name, phone and email.
+# This repo is public, and a phone number in a public history is permanent —
+# removing it later takes a history rewrite. The values live in the SOPS
+# store (.keys/secrets.enc.yaml) and are passed to deliver at run time.
+# notes.txt stays tracked: it is app prose with nothing personal in it.
+ios/fastlane/metadata/review_information/first_name.txt
+ios/fastlane/metadata/review_information/last_name.txt
+ios/fastlane/metadata/review_information/phone_number.txt
+ios/fastlane/metadata/review_information/email_address.txt
+
+# App Store publishing. The distribution cert, the provisioning profile and
+# the App Store Connect API key all grant upload/release rights — same rule
+# as the Play service account: a password manager and a CI secret, never here.
+*.p12
+*.p8
+*.mobileprovision
+ios/fastlane/app-store-connect-api-key.json
+ios/fastlane/report.xml
+ios/fastlane/Preview.html
+
 # node.js
 #
 node_modules/

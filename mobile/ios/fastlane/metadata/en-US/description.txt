@@ -1,0 +1,52 @@
+SingZ turns a song you already own into a rehearsal room.
+
+Instead of one flat recording, a SingZ song is six separate tracks — lead vocal,
+backing vocals, drums, bass, guitar and piano. Mute the lead vocal and the band
+plays on without you. Keep it in and sing along. Drop the drums to hear whether
+you are actually holding time. It is your song, taken apart, with every part on
+its own fader.
+
+HOW SONGS GET HERE
+
+Add one right on the phone. Pick an audio file from Files — your own recording,
+something you bought, anything on the device — and SingZ takes it apart into
+six tracks here, on the iPhone, with no server and nothing uploaded anywhere.
+The first song you add downloads the separation model (about 136 MB, once), and
+splitting needs a reasonably recent iPhone with enough memory; if yours cannot
+manage it, SingZ says so rather than trying.
+
+You can also prepare songs on a computer with the free, open-source SingZ
+desktop app for Mac and Windows and read them here — over Google Drive, or from
+a folder you copy across. Either way the result is the same six tracks.
+
+If you have not added anything yet, the app ships with one complete song so you
+can try everything straight away.
+
+WHAT YOU CAN DO WHILE SINGING
+
+• Six faders, one per instrument. Silence what you want to replace.
+• Lyrics that light up word by word as the song plays — tap any line to jump
+  there.
+• A pitch guide that draws the melody and shows where your voice actually sits
+  against it.
+• Transpose to a key that suits your voice, without the song turning to chipmunk.
+• Slow a passage down without changing its pitch, until your mouth catches up.
+• Loop the eight bars you keep fumbling, with a count-in and a click if you
+  want one.
+
+PRACTICE THAT PUSHES BACK
+
+Training mode drops the tracks you lean on, on a schedule — every few bars, or
+at the start of each lyric line. The backing vocal disappears and you find out
+whether you knew the harmony or were following it. Turn it up as you improve.
+
+OFFLINE, AND YOURS
+
+Songs you open are kept on the phone, so the train, the car park and the green
+room all work with no signal. iCloud/Google Drive sign-in is optional: SingZ
+asks only for access to files it created itself, never the rest of your
+storage, and there is no SingZ account to make. No ads, no analytics, no
+tracking — the code is public if you would like to check.
+
+Bring your own music. SingZ has no catalogue and no store; it works on the
+recordings you already have.

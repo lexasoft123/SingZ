@@ -1,0 +1,9 @@
+app_identifier("io.s-dev.singz")
+team_id("USJ7H3X44X")
+
+# No apple_id() here on purpose. Every lane authenticates with an App Store
+# Connect API key (see docs/IOS-RELEASE.md) — that is a different credential
+# from an Apple ID, needs no 2FA prompt in CI, and never expires. Wiring an
+# apple_id in would invite fastlane to fall back to interactive Apple ID auth
+# the moment the API key is missing, which fails confusingly on a headless
+# runner instead of with the clear error the Fastfile gives.

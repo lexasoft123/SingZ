@@ -105,6 +105,156 @@ jobs:
           bash scripts/vendor-analyze.sh win32-x64
           bash scripts/build-onnx-pack.sh win32-x64
 
+      # Mac-only, and deliberately not folded into the Package step's own env
+      # block: electron-builder reads CSC_LINK/CSC_KEY_PASSWORD for a WINDOWS
+      # Authenticode certificate too, on the Windows leg of this same matrix.
+      # Setting them unconditionally across both legs would hand the Windows
+      # build an Apple .p12 as if it were a code-signing cert for signtool —
+      # wrong format, and a confusing failure with nothing "Apple" in it.
+      # See docs/MACOS-SIGNING.md for what each secret is and why the
+      # notarization key is the same one iOS's App Store Connect key is.
+      - name: macOS signing + notarization secrets
+        if: runner.os == 'macOS'
+        run: |
+          # Only WRITE a var when it has a real value — an empty CSC_LINK is
+          # not the same thing to electron-builder as no CSC_LINK at all.
+          # The Apple secrets ARE set on this repo now, and run 33243835099
+          # signed and notarized both architectures for real ("1 identity
+          # imported", then "notarization successful" twice). An earlier
+          # revision of this comment said they "will genuinely be absent"
+          # until the one-time setup in docs/MACOS-SIGNING.md was done; that
+          # setup has happened, so do not reason from their absence.
+          #
+          # The tolerance still matters, and not only for history: a FORK
+          # gets none of this repo's secrets, and a secret later rotated or
+          # cleared leaves the value empty. Both must degrade to an ad-hoc
+          # signed dmg (afterPack.cjs's fallback) rather than fail the leg.
+          # (A fresh clone is NOT one of these — secrets live in the
+          # repository's GitHub settings, never in the checkout.)
+          #
+          # `if/then`, NOT `[ -n "$2" ] && echo …`: GitHub runs this step as
+          # `bash -e {0}`, and while the AND-list is exempt from errexit
+          # inside the function body, the FUNCTION then returns 1 when the
+          # value is empty — and the call site is a plain simple command, so
+          # errexit kills the step there. That would take the whole macOS leg
+          # down here, after the engine builds and before Package.
+          set_if_present() {
+            if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi
+          }
+
+          # We import the certificate OURSELVES and hand electron-builder a
+          # ready keychain, rather than setting CSC_LINK and letting it do the
+          # import. That is not a preference — CSC_LINK is BROKEN in the
+          # version this repo pins (26.15.3). app-builder-lib's createKeychain
+          # makes the keychain with `randomBytes(32)` as its password, and
+          # then importCerts runs
+          #
+          #   security set-key-partition-list -S apple-tool:,apple: -s \
+          #     -k <THE .p12 PASSWORD> <keychain>
+          #
+          # where -k is the KEYCHAIN password. The two agree only by accident.
+          # Measured here with a throwaway self-signed cert, so this is the
+          # mechanism and not one bad certificate: -k <p12 password> fails
+          # with "SecKeychainUnlock: The user name or passphrase you entered
+          # is not correct", -k <keychain password> succeeds. The step dies as
+          # a bare "security process failed 1" AFTER the engine builds.
+          #
+          # CSC_KEYCHAIN is only consulted when CSC_LINK is unset —
+          # macPackager.js calls createKeychain solely when getCscLink() is
+          # non-null — so setting CSC_LINK at all is what re-enters the bug.
+          # Leaving it unset takes the find-an-identity path instead, which is
+          # the one rehearsed locally end to end before this was written.
+          if [ -n "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" ]; then
+            kc="$RUNNER_TEMP/singz-signing.keychain-db"
+            # Not the .p12 password: this one is ours, lives for the job, and
+            # is what set-key-partition-list actually wants.
+            kcpw=$(openssl rand -base64 24)
+            # 600 before the bytes land, and removed even if `security
+            # import` fails under errexit — the private key should not
+            # outlive this block on any path.
+            ( umask 077; printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" \
+                | base64 -d > "$RUNNER_TEMP/cert.p12" )
+            trap 'rm -f "$RUNNER_TEMP/cert.p12"' EXIT
+
+            security create-keychain -p "$kcpw" "$kc"
+            # Default settings re-lock the keychain after 300s of idle; a
+            # long Package step would then hit a locked keychain mid-sign.
+            security set-keychain-settings "$kc"
+            security unlock-keychain -p "$kcpw" "$kc"
+            security import "$RUNNER_TEMP/cert.p12" -k "$kc" \
+              -T /usr/bin/codesign -T /usr/bin/productbuild \
+              -P "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD"
+            # Without this, codesign on a headless runner cannot reach the
+            # private key and fails with errSecInternalComponent — there is
+            # no one there to click "Allow".
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" >/dev/null
+            # find-identity and codesign look at the user search list, not
+            # just at --keychain. Appending rather than replacing keeps the
+            # runner's login keychain reachable.
+            security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+            rm -f "$RUNNER_TEMP/cert.p12"
+
+            # Read the identity's name off the cert rather than hardcoding a
+            # person's name here: renewing the certificate should not mean
+            # editing this workflow. Exactly one identity is in this fresh
+            # keychain, so there is nothing to disambiguate.
+            #
+            # ANCHORED on the type, not just on any quoted identity: a .p12
+            # holding an Apple Development or Apple Distribution cert (the
+            # easy wrong-secret, since the iOS pipeline deals in exactly
+            # those) would otherwise satisfy the guard below, leave the
+            # prefix strip a no-op, and put a non-Developer-ID name in
+            # CSC_NAME. That is worse than failing: afterPack.cjs keys its
+            # ad-hoc fallback on CSC_NAME being set, so it would skip itself,
+            # and electron-builder only log.warns when it cannot find the
+            # identity — shipping a dmg with the repacked-Electron broken
+            # signature that the ad-hoc hook exists to prevent.
+            name=$(security find-identity -v -p codesigning "$kc" \
+              | sed -n 's/.*"\(Developer ID Application: .*\)".*/\1/p' | head -1)
+            if [ -z "$name" ]; then
+              echo "::error::Certificate imported but no codesigning identity found —"\
+                   "is APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 a Developer ID Application .p12?"
+              exit 1
+            fi
+            # CSC_NAME wants the identity BARE, without the leading
+            # "Developer ID Application: " type prefix, which is what
+            # find-identity prints and what this strips.
+            echo "CSC_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+            echo "CSC_NAME=${name#Developer ID Application: }" >> "$GITHUB_ENV"
+          fi
+
+          # APPLE_API_KEY is a FILESYSTEM PATH to the .p8, not the key's
+          # contents. app-builder-lib passes it through untouched to
+          # @electron/notarize, whose typings say "File system path to the
+          # `.p8` private key" and which splices it into
+          # `xcrun notarytool --key <value>`. Handing it base64 would make
+          # notarytool look for a file whose name is a 250-character blob.
+          # (Some electron-builder docs show a base64 body here — for this
+          # pinned version, believe the code.) RUNNER_TEMP dies with the job.
+          if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
+            printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+            chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+            echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+          fi
+          set_if_present APPLE_API_KEY_ID "$APP_STORE_CONNECT_API_KEY_ID"
+          set_if_present APPLE_API_ISSUER "$APP_STORE_CONNECT_API_ISSUER_ID"
+
+          if [ -n "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" ]; then
+            # The ACTIVE paid membership's team. The old 9384M82Y8P belonged
+            # to a different Apple ID whose membership has expired — it is not
+            # a fallback, it is dead, and notarization under it is refused.
+            echo "APPLE_TEAM_ID=USJ7H3X44X" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 — this dmg ships"\
+                 "ad-hoc signed only (afterPack.cjs's fallback), same as before this was wired up."
+          fi
+        env:
+          APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never
 
@@ -136,7 +286,20 @@ jobs:
           # only the person handed the link installs one.
           PRE=(); case "$TAG" in *-*) PRE=(--prerelease);; esac
           if [ -f "$NOTES" ]; then
-            tail -n +2 "$NOTES" > /tmp/relnotes-body.md
+            # The shared store blocks stay: they have opened every release page
+            # since v0.14.6 and read as the short version, in both languages.
+            # The `:ios` overrides are store-only text — publishing them here
+            # would summarise the same release twice per language. The markers
+            # are HTML comments, so they hide themselves and never the text
+            # between them.
+            # Both addresses are anchored to whole lines and single-spaced —
+            # canonical marker form, which store-notes.cjs REJECTS anything but,
+            # so the two parsers cannot drift apart. That check is what makes
+            # this safe; the anchors alone are not. Unanchored, a hand-written
+            # one-line `:ios` block would be invisible to the generator (which
+            # wants a newline after the opener) while this range ran on to the
+            # NEXT `/store` and silently ate a shared block.
+            tail -n +2 "$NOTES" | sed '/^<!-- store:[^ ]*:ios -->$/,/^<!-- \/store -->$/d' > /tmp/relnotes-body.md
             gh release create "$TAG" "${PRE[@]}" --title "$(head -n 1 "$NOTES")" --notes-file /tmp/relnotes-body.md 2>/dev/null || true
           else
             gh release create "$TAG" "${PRE[@]}" --title "$TAG" --notes "" 2>/dev/null || true

@@ -535,6 +535,18 @@ function MetPopover({
                   ? `v${grid.detVersion} — current`
                   : `v${grid.detVersion} — newer than this build`}
           </span>
+          {/* The singer's own bar lines, counted where the provenance is —
+              the phone's Song sheet says exactly this beside the detector
+              version. They survive every re-detection, and a count is how
+              anyone knows that without having to test it on their own work. */}
+          {grid.userBars && grid.userBars.length > 0 ? (
+            <span
+              className="tp-gridver-bars"
+              title="Bar lines you moved by hand. Re-detection re-folds them onto the new grid — they are not lost."
+            >
+              {`· ${grid.userBars.length} hand-set bar${grid.userBars.length > 1 ? 's' : ''}`}
+            </span>
+          ) : null}
         </div>
       ) : null}
       <div className="tp-row">
@@ -688,7 +700,16 @@ function MetPopover({
           <button
             type="button"
             className="pill ghost small"
-            title="Read the tempo and beat from the drums again"
+            // What it keeps is worth saying on the button. Bar lines the
+            // singer moved are re-folded onto the fresh grid rather than
+            // discarded (see gridFromDetection) — but a promise nobody can
+            // read is the same as no promise, and this button used to break
+            // it without a word.
+            title={
+              (grid?.userBars?.length ?? 0) > 0
+                ? 'Read the tempo and beat from the drums again — your hand-placed bar lines are kept'
+                : 'Read the tempo and beat from the drums again'
+            }
             onClick={onRedetect}
           >
             Re-detect
