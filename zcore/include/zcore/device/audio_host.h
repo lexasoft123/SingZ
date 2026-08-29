@@ -119,6 +119,12 @@ struct AudioHostInventory {
 };
 
 struct AudioHostConfig {
+  // An empty input UID together with an empty input channel map requests an
+  // output-only stream. Providers that implement output-only operation must
+  // publish zero input channels and a null input bus to the render callback.
+  // Supplying only one of these fields is invalid. Non-empty input remains
+  // the existing duplex/capture contract and may retain platform pairing
+  // restrictions.
   std::string inputDeviceUid;
   std::string outputDeviceUid;
   // Zero-based physical device channel indices in client channel order.

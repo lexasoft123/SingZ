@@ -1,7 +1,7 @@
 # ADR 0010: Guarded desktop monitoring preview
 
-Status: implemented; native path hardware-verified on macOS, app-shell
-persistence awaiting human listening verification
+Status: implemented; native path and app-shell persistence hardware-verified
+on macOS
 Date: 2026-08-29
 
 ## Decision
@@ -171,9 +171,8 @@ automated silent test.
   release but never calls the audible native begin operation.
 - Human listening on 2026-08-29 verified Zen Quadro SC input 3 through the
   native graph to USB playback outputs 1/2. Monitoring remained audible while
-  switching to another macOS app. That evidence predates app-shell persistence;
-  listening after normal Settings close plus restoration through the top-bar
-  Stop action remains pending.
+  switching to another macOS app and after normal Settings close; the persistent
+  top-bar Stop action ended monitoring and restored product output.
 
 ## Consequences
 

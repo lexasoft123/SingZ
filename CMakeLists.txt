@@ -278,8 +278,17 @@ if(SINGZ_CORE_TESTS)
   endif()
 
   add_executable(audio_host_graph_adapter_tests
-    ${SINGZ_REPO_ROOT}/zdsp/tests/audio_host_graph_adapter_tests.cpp)
+    ${SINGZ_REPO_ROOT}/zdsp/tests/audio_host_graph_adapter_tests.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
   target_compile_features(audio_host_graph_adapter_tests PRIVATE cxx_std_20)
+  target_include_directories(audio_host_graph_adapter_tests PRIVATE
+    "${SINGZ_REPO_ROOT}/zdsp/tests")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      COMPILE_OPTIONS "-Wno-mismatched-new-delete")
+  endif()
   target_link_libraries(audio_host_graph_adapter_tests PRIVATE
     SingZ::zdsp_host_adapter)
   add_test(NAME audio_host_graph_adapter_tests COMMAND audio_host_graph_adapter_tests)

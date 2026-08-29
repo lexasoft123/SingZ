@@ -1,12 +1,62 @@
 #pragma once
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <utility>
+#include <vector>
 
 #include <zcore/device/audio_host.h>
 
 namespace singz::detail {
+
+// The AUHAL render callback uses this exact predicate before its only
+// AudioUnitRender call. Keeping it trivial and testable makes the output-only
+// no-input-pull invariant explicit without introducing a callback indirection.
+constexpr bool shouldPullMacAudioHostInput(uint32_t inputChannels) noexcept {
+  return inputChannels != 0;
+}
+
+constexpr bool macAudioHostInputTimestampValid(
+    uint32_t inputChannels) noexcept {
+  return shouldPullMacAudioHostInput(inputChannels);
+}
+
+constexpr bool macAudioHostInputTimestampHardware(
+    uint32_t inputChannels, bool hardwareAnchorUsed) noexcept {
+  return shouldPullMacAudioHostInput(inputChannels) && hardwareAnchorUsed;
+}
+
+// AudioUnitProperties.h defines kAudioOutputUnitProperty_ChannelMap as one
+// source-channel index per destination channel, with -1 meaning silence. AUHAL
+// output's destination is the physical device, so the map is device-sized and
+// each selected physical lane points back to its client/source lane.
+inline bool buildMacAudioHostOutputChannelMap(
+    const std::vector<uint32_t>& selectedPhysicalChannels,
+    uint32_t physicalDestinationChannels,
+    std::vector<int32_t>* destinationMap) {
+  if (destinationMap == nullptr) return false;
+  destinationMap->clear();
+  if (physicalDestinationChannels == 0 ||
+      physicalDestinationChannels > kAudioHostMaxChannels ||
+      selectedPhysicalChannels.empty() ||
+      selectedPhysicalChannels.size() > kAudioHostMaxChannels) {
+    return false;
+  }
+  std::vector<int32_t> candidate(physicalDestinationChannels, -1);
+  for (std::size_t source = 0; source < selectedPhysicalChannels.size();
+       ++source) {
+    const uint32_t destination = selectedPhysicalChannels[source];
+    if (destination >= physicalDestinationChannels ||
+        candidate[destination] != -1) {
+      return false;
+    }
+    candidate[destination] = static_cast<int32_t>(source);
+  }
+  *destinationMap = std::move(candidate);
+  return true;
+}
 
 constexpr uint32_t audioHostFourCc(char a, char b, char c, char d) noexcept {
   return (static_cast<uint32_t>(static_cast<uint8_t>(a)) << 24u) |

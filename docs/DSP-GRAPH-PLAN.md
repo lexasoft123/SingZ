@@ -1,8 +1,8 @@
 # Future DSP graph architecture
 
-Status: roadmap; Phase 4A native monitoring is product-wired and
-hardware-verified on macOS with the Zen Quadro SC; Phase 4A.1 app-shell
-persistence is implemented and awaits human listening verification
+Status: roadmap; Phase 4A native monitoring and Phase 4A.1 app-shell
+persistence are product-wired and hardware-verified on macOS with the Zen
+Quadro SC
 Last reviewed: 2026-08-29
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
 
@@ -1301,10 +1301,17 @@ explicit monitoring survives renderer occlusion and normal Settings close,
 monitoring and its wired-headphone confirmation default off, and unsupported
 platforms/routes remain blocked. Human listening on 2026-08-29 verified Zen
 Quadro SC input 3 through the native graph to USB playback outputs 1/2, including
-switching to another macOS app without interruption. That run predates Phase
-4A.1: human verification that monitoring remains audible after Settings closes,
-and that the persistent Stop control restores song output, is still pending.
-Windows stays visibly platform-not-ready in this phase.
+switching to another macOS app without interruption. A subsequent Phase 4A.1
+listening run verified that monitoring remains audible after Settings closes
+and that the persistent top-bar Stop control ends monitoring and restores
+product output. Windows stays visibly platform-not-ready in this phase.
+
+The playback cutover begins with a macOS output-only/source foundation before
+any product song engine moves: AUHAL can render to explicit physical output
+channels with its input element disabled, and `AudioHostGraphAdapter` can feed
+a source-only graph with zero external host input buses. The existing duplex
+monitor graph remains unchanged. Source decoding, transport ownership and the
+atomic product playback lease remain later work in this phase.
 
 Implement:
 

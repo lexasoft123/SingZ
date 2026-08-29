@@ -4,6 +4,8 @@
 #include <zdsp/graph_runner.h>
 #include <zdsp/realtime_arena.h>
 
+#include "allocation_trap.h"
+
 #include <cstdlib>
 #include <cstdio>
 #include <vector>
@@ -115,10 +117,102 @@ void successPathInvokesGraph() {
   CHECK(retiredCount == 1 && retired[0] == &snapshot);
   CHECK(zdsp::succeeded(zdsp::deactivateCompiledGraph(compiled.graph)));
 }
+
+void sourceOnlyPathInvokesGraph() {
+  std::vector<uint8_t> storageBytes(1024 * 1024);
+  zdsp::RealtimeArena arena{};
+  CHECK(zdsp::succeeded(zdsp::initializeArena(
+      &arena, {storageBytes.data(),
+               static_cast<uint32_t>(storageBytes.size())})));
+  zdsp::AudioBusDescriptor mono{1, zdsp::SampleFormat::Float32Planar,
+                                zdsp::AudioChannelLayout::Mono, nullptr};
+  zdsp::BuiltinNodeConfig oscillatorConfig{
+      zdsp::BuiltinNodeKind::Oscillator, {11}, 0, 1, 0, 12000.0F, 0.25F, 0,
+      zdsp::OscillatorWaveform::Saw, nullptr, 0};
+  const size_t stateSize = zdsp::builtinStateBytes(oscillatorConfig);
+  auto* state = static_cast<uint8_t*>(
+      zdsp::arenaAllocate(&arena, stateSize, 64));
+  CHECK(state != nullptr);
+  const zdsp::ProcessorHandle oscillator = zdsp::createBuiltinProcessor(
+      oscillatorConfig, {state, static_cast<uint32_t>(stateSize)});
+  CHECK(oscillator.state != nullptr);
+  zdsp::GraphNodeDescription nodes[] = {
+      {{11}, {1, 2}, 1, zdsp::GraphNodeRole::Processor,
+       zdsp::GraphNodeFlagNone, 0, 1, nullptr, &mono, oscillator, {}},
+      {{12}, {0, 3}, 1, zdsp::GraphNodeRole::Output,
+       zdsp::GraphNodeFlagNone, 1, 0, &mono, nullptr, {}, {}}};
+  zdsp::GraphConnection connections[] = {{{11}, 0, {12}, 0}};
+  zdsp::GraphDescription description{zdsp::kGraphFormatVersion, {48000.0},
+                                     {64}, nodes, 2, connections, 1};
+  zdsp::GraphCompileResult compiled{};
+  zdsp::GraphCompileError compileError{};
+  CHECK(zdsp::succeeded(
+      zdsp::compileGraph(description, &arena, &compiled, &compileError)));
+
+  zdsp::RuntimeDiagnostics diagnostics{};
+  zdsp::RetirementSlot slot[1]{};
+  zdsp::SnapshotPublisher publisher{};
+  zdsp::initializePublisher(&publisher, slot, 1, &diagnostics);
+  zdsp::TransitionPlan hardCut{
+      zdsp::TransitionKind::HardCut, {0}, {0}, {0},
+      zdsp::InfiniteTailPolicy::Cut, {zdsp::TailKind::None, {0}}, {0},
+      0, 100, 1000, 0};
+  zdsp::PublishedGraphSnapshot snapshot{compiled.graph, 1, hardCut, 0};
+  CHECK(zdsp::succeeded(zdsp::submitSnapshot(&publisher, &snapshot).status));
+  zdsp::GraphRunner runner{};
+  zdsp::initializeGraphRunner(&runner, &publisher, {}, nullptr, nullptr,
+                              &diagnostics);
+  zdsp::AudioHostGraphAdapter adapter{&runner};
+  float outputSamples[4]{};
+  float* output[] = {outputSamples};
+  singz::AudioHostRenderBlock block{
+      nullptr, output, 0, 1, 4, 64, 48000.0, 77, 5, 3, 19, 0,
+      0, false, false, 2000, 1000000, 950000,
+      singz::AudioHostDiscontinuityNone, true};
+  zdsp::test::resetAllocationTrap();
+  zdsp::test::setAllocationTrapEnabled(true);
+  const bool rendered = zdsp::renderAudioHostGraph(&adapter, block);
+  zdsp::test::setAllocationTrapEnabled(false);
+  CHECK(rendered);
+  CHECK(zdsp::test::trappedAllocationCount() == 0);
+  CHECK(outputSamples[0] == -0.25F && outputSamples[1] == -0.125F &&
+        outputSamples[2] == 0.0F && outputSamples[3] == 0.125F);
+  CHECK(adapter.renderFailures.load() == 0);
+  CHECK(diagnostics.rejectedBlocks.load() == 0);
+  zdsp::ProcessContext mapped{};
+  zdsp::CaptureTime capture{};
+  zdsp::mapAudioHostProcessContext(block, &mapped, &capture);
+  CHECK(mapped.transport == nullptr);
+  CHECK(capture.sourceFrame.value == 0);
+  CHECK(capture.sampleHostTime.value == 0);
+  CHECK(capture.quality == zdsp::CaptureTimestampQuality::Unknown);
+  CHECK(capture.flags == zdsp::CaptureTimeCallbackHostValid);
+
+  const float* unexpectedInput[] = {outputSamples};
+  block.input = unexpectedInput;
+  for (float& sample : outputSamples) sample = 1.0F;
+  CHECK(!zdsp::renderAudioHostGraph(&adapter, block));
+  for (float sample : outputSamples) CHECK(sample == 0.0F);
+  block.inputChannels = 1;
+  for (float& sample : outputSamples) sample = 1.0F;
+  CHECK(!zdsp::renderAudioHostGraph(&adapter, block));
+  for (float sample : outputSamples) CHECK(sample == 0.0F);
+  block.input = nullptr;
+  CHECK(!zdsp::renderAudioHostGraph(&adapter, block));
+  CHECK(adapter.renderFailures.load() == 3);
+
+  zdsp::PublishedGraphSnapshot* retired[1]{};
+  uint32_t retiredCount = 0;
+  CHECK(zdsp::succeeded(zdsp::shutdownGraphRunner(
+      &runner, retired, 1, &retiredCount)));
+  CHECK(retiredCount == 1 && retired[0] == &snapshot);
+  CHECK(zdsp::succeeded(zdsp::deactivateCompiledGraph(compiled.graph)));
+}
 }  // namespace
 
 int main() {
   successPathInvokesGraph();
+  sourceOnlyPathInvokesGraph();
   float inputSamples[17]{};
   float outputSamples[17];
   const float* input[] = {inputSamples};

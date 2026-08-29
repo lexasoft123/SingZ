@@ -172,6 +172,14 @@ bool validMap(const std::vector<uint32_t>& channels, uint32_t available) {
   return true;
 }
 
+bool outputOnly(const AudioHostConfig& config) noexcept {
+  return config.inputDeviceUid.empty() && config.inputChannels.empty();
+}
+
+bool validInputSelection(const AudioHostConfig& config) noexcept {
+  return config.inputDeviceUid.empty() == config.inputChannels.empty();
+}
+
 AudioHostResult failure(AudioHostError error, const std::string& message,
                         AudioHostState state = AudioHostState::Error) {
   return {false, error, state, {}, {}, message};
@@ -309,12 +317,20 @@ class MacAudioHostBackend final : public AudioHostBackend {
                     "CoreAudio exclusive mode is not implemented by this AudioHost provider",
                     AudioHostState::Unsupported);
     }
-    if (config.inputDeviceUid.empty() || config.outputDeviceUid.empty() ||
-        config.inputDeviceUid != config.outputDeviceUid) {
+    const bool hasInput = !outputOnly(config);
+    if (config.outputDeviceUid.empty()) {
+      return reject(AudioHostError::InvalidConfiguration,
+                    "AudioHost output device UID must not be empty");
+    }
+    if (!validInputSelection(config)) {
+      return reject(AudioHostError::InvalidConfiguration,
+                    "AudioHost input device UID and channel map must both be empty or both be non-empty");
+    }
+    if (hasInput && config.inputDeviceUid != config.outputDeviceUid) {
       return reject(AudioHostError::DifferentDevicesUnsupported,
                     "AudioHost requires one physical CoreAudio device for input and output");
     }
-    selectedDevice_ = findDevice(config.inputDeviceUid);
+    selectedDevice_ = findDevice(config.outputDeviceUid);
     if (selectedDevice_ == kAudioObjectUnknown) {
       return reject(AudioHostError::DeviceNotFound,
                     "The selected CoreAudio device disappeared");
@@ -337,8 +353,11 @@ class MacAudioHostBackend final : public AudioHostBackend {
     }
     const uint32_t deviceInputs = channelCount(selectedDevice_, kAudioDevicePropertyScopeInput);
     const uint32_t deviceOutputs = channelCount(selectedDevice_, kAudioDevicePropertyScopeOutput);
-    if (!validMap(config.inputChannels, deviceInputs) ||
-        !validMap(config.outputChannels, deviceOutputs) || render == nullptr ||
+    std::vector<int32_t> outputMap;
+    if ((hasInput && !validMap(config.inputChannels, deviceInputs)) ||
+        !detail::buildMacAudioHostOutputChannelMap(
+            config.outputChannels, deviceOutputs, &outputMap) ||
+        render == nullptr ||
         config.maximumFrames == 0 || config.maximumFrames > kAudioHostMaxFrames) {
       return fail(AudioHostError::InvalidConfiguration,
                   "Invalid physical channel map, frame bound, or render thunk");
@@ -380,42 +399,47 @@ class MacAudioHostBackend final : public AudioHostBackend {
     if (component == nullptr || AudioComponentInstanceNew(component, &unit_) != noErr) {
       return fail(AudioHostError::ProviderFailure, "CoreAudio AUHAL is unavailable");
     }
-    UInt32 enabled = 1;
+    UInt32 inputEnabled = hasInput ? 1u : 0u;
+    UInt32 outputEnabled = 1;
     if (AudioUnitSetProperty(unit_, kAudioOutputUnitProperty_EnableIO,
-                             kAudioUnitScope_Input, 1, &enabled, sizeof(enabled)) != noErr ||
+                             kAudioUnitScope_Input, 1, &inputEnabled,
+                             sizeof(inputEnabled)) != noErr ||
         AudioUnitSetProperty(unit_, kAudioOutputUnitProperty_EnableIO,
-                             kAudioUnitScope_Output, 0, &enabled, sizeof(enabled)) != noErr ||
+                             kAudioUnitScope_Output, 0, &outputEnabled,
+                             sizeof(outputEnabled)) != noErr ||
         AudioUnitSetProperty(unit_, kAudioOutputUnitProperty_CurrentDevice,
                              kAudioUnitScope_Global, 0, &selectedDevice_,
                              sizeof(selectedDevice_)) != noErr) {
-      return fail(AudioHostError::ProviderFailure, "Could not configure AUHAL duplex I/O");
+      return fail(AudioHostError::ProviderFailure,
+                  hasInput ? "Could not configure AUHAL duplex I/O"
+                           : "Could not configure AUHAL output-only I/O (singz-auhal-output-only-v1)");
     }
     const uint32_t inputChannels = static_cast<uint32_t>(config.inputChannels.size());
     const uint32_t outputChannels = static_cast<uint32_t>(config.outputChannels.size());
     AudioStreamBasicDescription inputFormat = planarFormat(rate, inputChannels);
     AudioStreamBasicDescription outputFormat = planarFormat(rate, outputChannels);
-    if (AudioUnitSetProperty(unit_, kAudioUnitProperty_StreamFormat,
-                             kAudioUnitScope_Output, 1, &inputFormat,
-                             sizeof(inputFormat)) != noErr ||
+    if ((hasInput &&
+         AudioUnitSetProperty(unit_, kAudioUnitProperty_StreamFormat,
+                              kAudioUnitScope_Output, 1, &inputFormat,
+                              sizeof(inputFormat)) != noErr) ||
         AudioUnitSetProperty(unit_, kAudioUnitProperty_StreamFormat,
                              kAudioUnitScope_Input, 0, &outputFormat,
                              sizeof(outputFormat)) != noErr) {
       return fail(AudioHostError::ProviderFailure, "Could not set AUHAL float32 planar formats");
     }
     std::vector<SInt32> inputMap(inputChannels);
-    std::vector<SInt32> outputMap(outputChannels);
     for (uint32_t index = 0; index < inputChannels; ++index) {
       inputMap[index] = static_cast<SInt32>(config.inputChannels[index]);
     }
-    for (uint32_t index = 0; index < outputChannels; ++index) {
-      outputMap[index] = static_cast<SInt32>(config.outputChannels[index]);
-    }
-    if (AudioUnitSetProperty(unit_, kAudioOutputUnitProperty_ChannelMap,
-                             kAudioUnitScope_Output, 1, inputMap.data(),
-                             static_cast<UInt32>(inputMap.size() * sizeof(SInt32))) != noErr ||
+    if ((hasInput &&
+         AudioUnitSetProperty(unit_, kAudioOutputUnitProperty_ChannelMap,
+                              kAudioUnitScope_Output, 1, inputMap.data(),
+                              static_cast<UInt32>(inputMap.size() *
+                                                  sizeof(SInt32))) != noErr) ||
         AudioUnitSetProperty(unit_, kAudioOutputUnitProperty_ChannelMap,
                              kAudioUnitScope_Input, 0, outputMap.data(),
-                             static_cast<UInt32>(outputMap.size() * sizeof(SInt32))) != noErr) {
+                             static_cast<UInt32>(outputMap.size() *
+                                                 sizeof(outputMap[0]))) != noErr) {
       return fail(AudioHostError::InvalidConfiguration,
                   "CoreAudio rejected the explicit physical channel maps");
     }
@@ -425,19 +449,22 @@ class MacAudioHostBackend final : public AudioHostBackend {
                              sizeof(maximumFrames)) != noErr) {
       return fail(AudioHostError::ProviderFailure, "Could not set AUHAL callback frame bound");
     }
-    inputSamples_.resize(static_cast<size_t>(inputChannels) * maximumFrames);
-    const size_t inputListBytes = offsetof(AudioBufferList, mBuffers) +
-                                  sizeof(AudioBuffer) * inputChannels;
-    inputListStorage_.resize((inputListBytes + sizeof(std::max_align_t) - 1) /
-                             sizeof(std::max_align_t));
-    inputList_ = reinterpret_cast<AudioBufferList*>(inputListStorage_.data());
-    inputList_->mNumberBuffers = inputChannels;
-    for (uint32_t channel = 0; channel < inputChannels; ++channel) {
-      inputPointers_[channel] = inputSamples_.data() +
-                                static_cast<size_t>(channel) * maximumFrames;
-      inputList_->mBuffers[channel].mNumberChannels = 1;
-      inputList_->mBuffers[channel].mDataByteSize = maximumFrames * sizeof(float);
-      inputList_->mBuffers[channel].mData = const_cast<float*>(inputPointers_[channel]);
+    if (hasInput) {
+      inputSamples_.resize(static_cast<size_t>(inputChannels) * maximumFrames);
+      const size_t inputListBytes = offsetof(AudioBufferList, mBuffers) +
+                                    sizeof(AudioBuffer) * inputChannels;
+      inputListStorage_.resize((inputListBytes + sizeof(std::max_align_t) - 1) /
+                               sizeof(std::max_align_t));
+      inputList_ = reinterpret_cast<AudioBufferList*>(inputListStorage_.data());
+      inputList_->mNumberBuffers = inputChannels;
+      for (uint32_t channel = 0; channel < inputChannels; ++channel) {
+        inputPointers_[channel] = inputSamples_.data() +
+                                  static_cast<size_t>(channel) * maximumFrames;
+        inputList_->mBuffers[channel].mNumberChannels = 1;
+        inputList_->mBuffers[channel].mDataByteSize = maximumFrames * sizeof(float);
+        inputList_->mBuffers[channel].mData =
+            const_cast<float*>(inputPointers_[channel]);
+      }
     }
     mach_timebase_info_data_t timebase{};
     if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0) {
@@ -445,7 +472,9 @@ class MacAudioHostBackend final : public AudioHostBackend {
     }
     nanosecondsPerTick_ = static_cast<double>(timebase.numer) / timebase.denom;
     format_ = {rate, maximumFrames, nominalFrames, inputChannels, outputChannels, true, true};
-    latency_ = {latency(selectedDevice_, kAudioDevicePropertyScopeInput),
+    latency_ = {hasInput
+                    ? latency(selectedDevice_, kAudioDevicePropertyScopeInput)
+                    : 0u,
                 latency(selectedDevice_, kAudioDevicePropertyScopeOutput),
                 nominalFrames, 0};
     listenerContext_ = std::make_shared<HostDeviceListenerContext>();
@@ -498,12 +527,19 @@ class MacAudioHostBackend final : public AudioHostBackend {
       return fail(AudioHostError::ProviderFailure,
                   "Could not allocate the CoreAudio route listener block");
     }
-    const AudioObjectPropertyAddress watched[] = {
-        property(kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal),
-        property(kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal),
-        property(kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyScopeInput),
-        property(kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyScopeOutput)};
-    for (const auto& address : watched) {
+    std::vector<AudioObjectPropertyAddress> desiredWatched = {
+        property(kAudioDevicePropertyDeviceIsAlive,
+                 kAudioObjectPropertyScopeGlobal),
+        property(kAudioDevicePropertyNominalSampleRate,
+                 kAudioObjectPropertyScopeGlobal),
+        property(kAudioDevicePropertyStreamConfiguration,
+                 kAudioDevicePropertyScopeOutput)};
+    if (hasInput) {
+      desiredWatched.push_back(
+          property(kAudioDevicePropertyStreamConfiguration,
+                   kAudioDevicePropertyScopeInput));
+    }
+    for (const auto& address : desiredWatched) {
       if (AudioObjectAddPropertyListenerBlock(selectedDevice_, &address,
                                               listenerQueue_,
                                               listenerBlock_) != noErr) {
@@ -672,11 +708,16 @@ class MacAudioHostBackend final : public AudioHostBackend {
       invokeAudioHostCallback(&self->endpoint_, invalid);
       return noErr;
     }
-    for (uint32_t channel = 0; channel < self->format_.inputChannels; ++channel) {
-      self->inputList_->mBuffers[channel].mDataByteSize = frames * sizeof(float);
+    OSStatus inputStatus = noErr;
+    if (detail::shouldPullMacAudioHostInput(self->format_.inputChannels)) {
+      for (uint32_t channel = 0; channel < self->format_.inputChannels;
+           ++channel) {
+        self->inputList_->mBuffers[channel].mDataByteSize =
+            frames * sizeof(float);
+      }
+      inputStatus = AudioUnitRender(self->unit_, flags, timestamp, 1, frames,
+                                    self->inputList_);
     }
-    const OSStatus inputStatus = AudioUnitRender(self->unit_, flags, timestamp, 1,
-                                                 frames, self->inputList_);
     if (inputStatus != noErr) {
       recordAudioHostXRun(&self->endpoint_);
       for (uint32_t channel = 0; channel < self->format_.inputChannels; ++channel) {
@@ -710,7 +751,9 @@ class MacAudioHostBackend final : public AudioHostBackend {
                                         static_cast<long double>(timestamp->mHostTime) *
                                         self->nanosecondsPerTick_)
                                   : callbackNs;
-    const bool inputHardwareValid = timestamp != nullptr &&
+    const bool hasInput = detail::shouldPullMacAudioHostInput(
+        self->format_.inputChannels);
+    const bool inputHardwareValid = hasInput && timestamp != nullptr &&
                                     (timestamp->mFlags &
                                      kAudioTimeStampHostTimeValid) != 0 &&
                                     timestamp->mHostTime != 0;
@@ -720,12 +763,16 @@ class MacAudioHostBackend final : public AudioHostBackend {
                                                    timestamp->mHostTime) *
                                                self->nanosecondsPerTick_)
                                          : 0;
-    const AudioInputTimestampProjection inputProjection =
-        resolveAudioInputTimestamp(inputHardwareValid, inputHardwareNs,
-                                   callbackNs, frames,
-                                   self->format_.sampleRate);
-    const uint64_t inputSourceFrame = self->inputSourceFrame_;
-    self->inputSourceFrame_ = advanceAudioHostFrame(self->inputSourceFrame_, frames);
+    const AudioInputTimestampProjection inputProjection = hasInput
+        ? resolveAudioInputTimestamp(inputHardwareValid, inputHardwareNs,
+                                     callbackNs, frames,
+                                     self->format_.sampleRate)
+        : AudioInputTimestampProjection{};
+    const uint64_t inputSourceFrame = hasInput ? self->inputSourceFrame_ : 0;
+    if (hasInput) {
+      self->inputSourceFrame_ =
+          advanceAudioHostFrame(self->inputSourceFrame_, frames);
+    }
     const bool outputFrameValid = timestamp != nullptr &&
                                   (timestamp->mFlags &
                                    kAudioTimeStampSampleTimeValid) != 0 &&
@@ -738,7 +785,8 @@ class MacAudioHostBackend final : public AudioHostBackend {
     const uint64_t callbackSequence = self->callbackSequence_;
     self->callbackSequence_ = advanceAudioHostFrame(self->callbackSequence_, 1);
     AudioHostRenderBlock block{
-        self->inputPointers_.data(), self->outputPointers_.data(),
+        hasInput ? self->inputPointers_.data() : nullptr,
+        self->outputPointers_.data(),
         self->format_.inputChannels, self->format_.outputChannels, frames,
         self->format_.maximumFrames, self->format_.sampleRate, 1,
         self->listenerContext_ != nullptr
@@ -747,8 +795,13 @@ class MacAudioHostBackend final : public AudioHostBackend {
             : self->lastRouteGeneration_.load(std::memory_order_relaxed),
         self->streamGeneration_.load(std::memory_order_relaxed),
         callbackSequence,
-        inputSourceFrame, inputProjection.sampleHostTimeNs, true,
-        inputProjection.usedHardwareAnchor, outputFrame, outputNs, callbackNs,
+        inputSourceFrame, inputProjection.sampleHostTimeNs,
+        detail::macAudioHostInputTimestampValid(
+            self->format_.inputChannels),
+        detail::macAudioHostInputTimestampHardware(
+            self->format_.inputChannels,
+            inputProjection.usedHardwareAnchor),
+        outputFrame, outputNs, callbackNs,
         discontinuity, true};
     invokeAudioHostCallback(&self->endpoint_, block);
     const uint64_t elapsedTicks = mach_absolute_time() - callbackTicks;

@@ -52,6 +52,8 @@ struct Observation {
   uint64_t sequences[16]{};
   uint64_t sourceFrames[16]{};
   uint64_t expectedSource{0};
+  bool expectInput{true};
+  bool producedOutput{false};
   bool valid{true};
   bool fail{false};
 };
@@ -85,15 +87,25 @@ bool observe(void* context, const singz::AudioHostRenderBlock& block) noexcept {
   value->valid = value->valid && block.outputClockMaster && block.clockDomain != 0 &&
                  block.routeGeneration != 0 && block.streamGeneration != 0 &&
                  block.outputHostTimeNs == block.callbackHostTimeNs &&
-                 block.inputTimestampValid && !block.inputTimestampHardware &&
-                 block.inputSourceFrame == value->expectedSource;
-  value->expectedSource += block.frames;
+                 (value->expectInput
+                      ? (block.input != nullptr && block.inputChannels != 0 &&
+                         block.inputTimestampValid &&
+                         !block.inputTimestampHardware &&
+                         block.inputSourceFrame == value->expectedSource)
+                      : (block.input == nullptr && block.inputChannels == 0 &&
+                         !block.inputTimestampValid &&
+                         !block.inputTimestampHardware &&
+                         block.inputSourceFrame == 0));
+  if (value->expectInput) value->expectedSource += block.frames;
   for (uint32_t channel = 0; channel < block.outputChannels; ++channel) {
     for (uint32_t frame = 0; frame < block.frames; ++frame) {
-      const float sample = channel < block.inputChannels
-                               ? block.input[channel][frame]
-                               : 0.0F;
+      const float sample = value->expectInput
+                               ? (channel < block.inputChannels
+                                      ? block.input[channel][frame]
+                                      : 0.0F)
+                               : static_cast<float>((channel + 1) * 100 + frame);
       block.output[channel][frame] = sample;
+      value->producedOutput = value->producedOutput || sample != 0.0F;
       value->valid = value->valid && block.output[channel][frame] == sample;
     }
   }
@@ -165,6 +177,58 @@ void testFakeLifecycle() {
   CHECK(host.status().streamGeneration == stream + 1);
 }
 
+void testFakeOutputOnlyLifecycle() {
+  singz::AudioHost host(singz::createFakeAudioHostBackend({4, false, 0, 0}));
+  Observation observation;
+  observation.expectInput = false;
+  auto outputOnly = config();
+  outputOnly.inputDeviceUid.clear();
+  outputOnly.inputChannels.clear();
+  // The fake proves the provider/callback contract, not CoreAudio's
+  // destination-sized channel-map semantics. The macOS helper is tested with
+  // both sequential and non-sequential physical selections below.
+  outputOnly.outputChannels = {0, 1};
+  const auto opened = host.open(outputOnly, observe, &observation);
+  CHECK(opened.ok);
+  CHECK(opened.format.inputChannels == 0);
+  CHECK(opened.format.outputChannels == 2);
+  CHECK(opened.format.float32Planar);
+  CHECK(opened.format.outputClockMaster);
+  CHECK(opened.latency.inputDeviceFrames == 0);
+  CHECK(opened.latency.outputDeviceFrames == 128);
+  CHECK(opened.latency.bufferFrames == 128);
+  CHECK(opened.latency.externalRouteFrames == 0);
+  const auto openedStatus = host.status();
+  CHECK(openedStatus.routeGeneration != 0);
+  CHECK(openedStatus.streamGeneration != 0);
+  CHECK(host.start().ok);
+  waitForStop(host);
+  host.stop();
+  CHECK(host.status().callbacks == 4);
+  CHECK(host.status().renderedFrames == 512);
+  CHECK(observation.calls.load() == 4);
+  CHECK(observation.valid);
+  CHECK(observation.producedOutput);
+  CHECK(!singz::detail::shouldPullMacAudioHostInput(
+      opened.format.inputChannels));
+  CHECK(singz::detail::shouldPullMacAudioHostInput(1));
+  CHECK(!singz::detail::macAudioHostInputTimestampValid(0));
+  CHECK(!singz::detail::macAudioHostInputTimestampHardware(0, true));
+  CHECK(singz::detail::macAudioHostInputTimestampValid(1));
+  CHECK(!singz::detail::macAudioHostInputTimestampHardware(1, false));
+  CHECK(singz::detail::macAudioHostInputTimestampHardware(1, true));
+
+  auto inconsistent = outputOnly;
+  inconsistent.inputChannels = {0};
+  CHECK(!host.open(inconsistent, observe, &observation).ok);
+  inconsistent = outputOnly;
+  inconsistent.inputDeviceUid = "singz:fake-duplex";
+  CHECK(!host.open(inconsistent, observe, &observation).ok);
+  inconsistent = outputOnly;
+  inconsistent.outputChannels = {1, 1};
+  CHECK(!host.open(inconsistent, observe, &observation).ok);
+}
+
 void testExclusiveProviderContract() {
   singz::AudioHost fake(singz::createFakeAudioHostBackend({1, false, 0, 0}));
   auto exclusive = config();
@@ -185,6 +249,28 @@ void testExclusiveProviderContract() {
   CHECK(rejected.error == singz::AudioHostError::Unsupported);
   CHECK(rejected.state == singz::AudioHostState::Unsupported);
   CHECK(platform.status().state == rejected.state);
+#endif
+}
+
+void testMacOutputOnlyDiagnostics() {
+#if defined(__APPLE__)
+  Observation observation;
+  singz::AudioHost platform;
+  auto missingOutput = config();
+  missingOutput.outputDeviceUid.clear();
+  const auto missing = platform.open(missingOutput, observe, &observation);
+  CHECK(!missing.ok);
+  CHECK(missing.error == singz::AudioHostError::InvalidConfiguration);
+  CHECK(missing.message == "AudioHost output device UID must not be empty");
+
+  auto inconsistentInput = config();
+  inconsistentInput.inputDeviceUid.clear();
+  const auto inconsistent =
+      platform.open(inconsistentInput, observe, &observation);
+  CHECK(!inconsistent.ok);
+  CHECK(inconsistent.error == singz::AudioHostError::InvalidConfiguration);
+  CHECK(inconsistent.message ==
+        "AudioHost input device UID and channel map must both be empty or both be non-empty");
 #endif
 }
 
@@ -336,6 +422,30 @@ void testBoundaryHelpers() {
   CHECK(singz::detail::classifyMacAudioHostTransport(0)
             .monitoringSuitability ==
         singz::AudioHostMonitoringSuitability::Unknown);
+
+  std::vector<int32_t> outputMap;
+  CHECK(singz::detail::buildMacAudioHostOutputChannelMap(
+      {0, 1}, 4, &outputMap));
+  CHECK(outputMap == std::vector<int32_t>({0, 1, -1, -1}));
+  CHECK(singz::detail::buildMacAudioHostOutputChannelMap(
+      {7, 1}, 8, &outputMap));
+  CHECK(outputMap ==
+        std::vector<int32_t>({-1, 1, -1, -1, -1, -1, -1, 0}));
+  CHECK(!singz::detail::buildMacAudioHostOutputChannelMap(
+      {}, 8, &outputMap));
+  CHECK(outputMap.empty());
+  CHECK(!singz::detail::buildMacAudioHostOutputChannelMap(
+      {1, 1}, 8, &outputMap));
+  CHECK(outputMap.empty());
+  CHECK(!singz::detail::buildMacAudioHostOutputChannelMap(
+      {8}, 8, &outputMap));
+  CHECK(outputMap.empty());
+  CHECK(!singz::detail::buildMacAudioHostOutputChannelMap(
+      {0}, 0, &outputMap));
+  CHECK(!singz::detail::buildMacAudioHostOutputChannelMap(
+      {0}, singz::kAudioHostMaxChannels + 1, &outputMap));
+  CHECK(!singz::detail::buildMacAudioHostOutputChannelMap(
+      {0}, 1, nullptr));
 }
 
 void testRejectedConfig() {
@@ -581,7 +691,9 @@ void testCaptureFifoSpscStress() {
 
 int main() {
   testFakeLifecycle();
+  testFakeOutputOnlyLifecycle();
   testExclusiveProviderContract();
+  testMacOutputOnlyDiagnostics();
   testRejectedConfig();
   testQuiescentStop();
   testCallbackContainmentAndPolicy();

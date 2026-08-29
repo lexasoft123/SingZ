@@ -31,6 +31,19 @@ bool uniqueChannels(const std::vector<uint32_t>& channels,
   return true;
 }
 
+bool outputOnly(const AudioHostConfig& config) noexcept {
+  return config.inputDeviceUid.empty() && config.inputChannels.empty();
+}
+
+bool validInputSelection(const AudioHostConfig& config,
+                         uint32_t deviceChannels) {
+  const bool uidEmpty = config.inputDeviceUid.empty();
+  const bool channelsEmpty = config.inputChannels.empty();
+  return uidEmpty == channelsEmpty &&
+         (uidEmpty || (config.inputDeviceUid == kFakeUid &&
+                       uniqueChannels(config.inputChannels, deviceChannels)));
+}
+
 class FakeAudioHostBackend final : public AudioHostBackend {
  public:
   explicit FakeAudioHostBackend(FakeAudioHostOptions options) : options_(options) {}
@@ -64,9 +77,10 @@ class FakeAudioHostBackend final : public AudioHostBackend {
       return failure(AudioHostError::InvalidState, AudioHostState::Running,
                      "Stop the fake host before opening it again");
     }
-    if (config.inputDeviceUid != kFakeUid || config.outputDeviceUid != kFakeUid) {
+    if (config.outputDeviceUid != kFakeUid ||
+        (!config.inputDeviceUid.empty() && config.inputDeviceUid != kFakeUid)) {
       return reject(AudioHostError::DeviceNotFound, AudioHostState::Error,
-                    "The fake duplex device UID is singz:fake-duplex");
+                    "The fake output device UID is singz:fake-duplex");
     }
     const double rate = config.requestedSampleRate == 0.0
                             ? 48000.0
@@ -77,7 +91,7 @@ class FakeAudioHostBackend final : public AudioHostBackend {
     if ((rate != 44100.0 && rate != 48000.0 && rate != 96000.0) || frames == 0 ||
         frames > 1024 || config.maximumFrames < frames ||
         config.maximumFrames > kAudioHostMaxFrames ||
-        !uniqueChannels(config.inputChannels, 8) ||
+        !validInputSelection(config, 8) ||
         !uniqueChannels(config.outputChannels, 8) || render == nullptr) {
       return reject(AudioHostError::InvalidConfiguration, AudioHostState::Error,
                     "Unsupported fake host rate, buffer, channel map, or render thunk");
@@ -88,7 +102,7 @@ class FakeAudioHostBackend final : public AudioHostBackend {
                static_cast<uint32_t>(config.outputChannels.size()), true, true,
                config.exclusive ? AudioHostAccessMode::Exclusive
                                 : AudioHostAccessMode::Shared};
-    latency_ = {frames, frames, frames, 0};
+    latency_ = {outputOnly(config) ? 0u : frames, frames, frames, 0};
     inputSamples_.assign(static_cast<size_t>(format_.inputChannels) *
                              format_.maximumFrames,
                          0.0F);
@@ -210,14 +224,17 @@ class FakeAudioHostBackend final : public AudioHostBackend {
           index + 1 == options_.injectDeadlineMissAt) {
         recordAudioHostDeadlineMiss(&endpoint_);
       }
+      const bool hasInput = format_.inputChannels != 0;
       AudioHostRenderBlock block{
-          inputPointers_.data(), outputPointers_.data(), format_.inputChannels,
-          format_.outputChannels, frames, format_.maximumFrames, format_.sampleRate,
-          1, routeGeneration_.load(std::memory_order_relaxed),
-          streamGeneration_.load(std::memory_order_relaxed), index, outputFrame,
-          hostNs, true, false, outputFrame, hostNs, hostNs, discontinuity, true};
+          hasInput ? inputPointers_.data() : nullptr, outputPointers_.data(),
+          format_.inputChannels, format_.outputChannels, frames,
+          format_.maximumFrames, format_.sampleRate, 1,
+          routeGeneration_.load(std::memory_order_relaxed),
+          streamGeneration_.load(std::memory_order_relaxed), index,
+          hasInput ? outputFrame : 0, hasInput ? hostNs : 0, hasInput, false,
+          outputFrame, hostNs, hostNs, discontinuity, true};
       invokeAudioHostCallback(&endpoint_, block);
-      outputFrame += frames;
+      outputFrame = advanceAudioHostFrame(outputFrame, frames);
     }
     if (!stopRequested_.load(std::memory_order_acquire)) {
       state_.store(AudioHostState::Stopped, std::memory_order_release);

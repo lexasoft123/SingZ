@@ -50,8 +50,11 @@ Discontinuity mapDiscontinuity(uint32_t value) noexcept {
 bool renderAudioHostGraph(void* context,
                           const singz::AudioHostRenderBlock& block) noexcept {
   auto* adapter = static_cast<AudioHostGraphAdapter*>(context);
+  const bool hasInput = block.inputChannels != 0;
   if (adapter == nullptr || adapter->runner == nullptr ||
-      block.input == nullptr || block.output == nullptr || block.frames == 0) {
+      block.output == nullptr || block.outputChannels == 0 || block.frames == 0 ||
+      (hasInput && block.input == nullptr) ||
+      (!hasInput && block.input != nullptr)) {
     silence(block);
     if (adapter != nullptr) saturate(adapter->renderFailures);
     return false;
@@ -63,7 +66,9 @@ bool renderAudioHostGraph(void* context,
                           {block.maximumFrames}, &capture};
   MutableAudioBusView output{block.output, block.outputChannels, {block.frames},
                              {block.maximumFrames}};
-  const Status status = renderGraphBlock(adapter->runner, process, &input, 1, &output, 1);
+  const Status status = renderGraphBlock(adapter->runner, process,
+                                         hasInput ? &input : nullptr,
+                                         hasInput ? 1u : 0u, &output, 1);
   adapter->lastStatusCode.store(static_cast<uint32_t>(status.code),
                                 std::memory_order_relaxed);
   if (!succeeded(status)) {
