@@ -1003,15 +1003,18 @@ dispatch, the weekly cache warmer) building in a fork, or on any machine with
 no Developer ID certificate, with no Apple secrets at all. `build.yml`'s
 signing step imports the certificate into a keychain it creates itself and
 writes **`CSC_KEYCHAIN`/`CSC_NAME`** (plus `APPLE_API_KEY`, `APPLE_TEAM_ID`,
-`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), each only when its secret is
-non-empty. It deliberately writes **neither `CSC_LINK` nor
-`CSC_KEY_PASSWORD`** — an earlier revision of this paragraph said it wrote
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), each only when the value it needs is
+present — `APPLE_TEAM_ID` is a literal, guarded on the certificate secret. It
+deliberately writes **neither `CSC_LINK` nor `CSC_KEY_PASSWORD`** — an
+earlier revision of this paragraph said it wrote
 exactly those two, and setting `CSC_LINK` is the one thing that breaks this,
 because electron-builder 26.15.3 then hands the `.p12` password to
 `security set-key-partition-list -k`, which wants the keychain password. The
-step stays on the macOS leg of that job's matrix regardless: `CSC_*` is read
-for a **Windows** Authenticode cert on the other leg, so a shared step would
-aim Apple credentials at `signtool`. Notarization reuses the iOS
+step stays on the macOS leg of that job's matrix regardless, for two reasons:
+it runs `security`, which is macOS-only, and `CSC_*` is a shared namespace
+whose `CSC_LINK`/`CSC_KEY_PASSWORD` the Windows leg reads for Authenticode —
+not because what it writes today could reach `signtool` (nothing on Windows
+reads `CSC_KEYCHAIN` or `CSC_NAME`). Notarization reuses the iOS
 pipeline's App Store Connect API key rather than minting a second one — see
 [docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md), including why the
 entitlements file carries only the two Hardened Runtime flags Electron
