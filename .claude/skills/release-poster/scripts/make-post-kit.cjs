@@ -27,7 +27,7 @@
  * a 404 posted to a channel. Omit the flag and the section is simply absent.
  */
 const { readFileSync, writeFileSync, existsSync } = require('node:fs');
-const { basename, resolve } = require('node:path');
+const { basename, resolve, relative } = require('node:path');
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback = null) => {
@@ -51,6 +51,19 @@ for (const [flag, v] of [['--poster', POSTER], ['--en', EN], ['--ru', RU]]) {
     process.exit(1);
   }
 }
+
+// How the poster is named ON THE PAGE, and it must never be an absolute path.
+// Two reasons, and either alone is enough. The kit is committed beside the
+// poster now, in a public repo, and an absolute path here is a home directory
+// and a username — the class of thing that stays out of GitHub-visible text.
+// And a committed artifact has to be reproducible: an absolute path makes the
+// file differ per machine and per worktree, so two people regenerating the same
+// kit would produce two different files and a diff nobody meant.
+const posterShown = (p) => {
+  const abs = resolve(p);
+  const rel = relative(REPO, abs);
+  return rel && !rel.startsWith('..') ? rel : basename(abs);
+};
 
 const b64 = (p) => readFileSync(p).toString('base64');
 const posterURI = `data:image/png;base64,${b64(POSTER)}`;
@@ -76,6 +89,18 @@ if (DOWNLOADS) {
     if (!/^https?:\/\//i.test(d.url ?? '')) {
       console.error(`--downloads: refusing a non-http url for ${d.label ?? '?'}: ${d.url}`);
       process.exit(1);
+    }
+    // label/file are escaped, so they cannot inject markup — but escaping does
+    // not stop a local path from being PUBLISHED, and this page is committed
+    // now. `gh release view --json assets` yields bare asset names, so a
+    // separator here means the JSON was edited by hand and something local came
+    // with it. Refuse rather than rely on the scan catching it afterwards.
+    for (const k of ['label', 'file']) {
+      if (d[k] != null && /[\\/]|^~/.test(String(d[k]))) {
+        console.error(`--downloads: ${k} looks like a path, not a name: ${d[k]}`);
+        console.error('  rows carry the asset NAME; the address belongs in url.');
+        process.exit(1);
+      }
     }
   }
 }
@@ -210,12 +235,12 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
     </div>
     <div class="row">
       <button class="primary" data-img>Copy image</button>
-      <a class="dl" href="${posterURI}" download="singz-${VERSION_SAFE}-poster.png"><button>Save PNG</button></a>
+      <a class="dl" id="savepng" download="singz-${VERSION_SAFE}-poster.png"><button>Save PNG</button></a>
     </div>
     <p class="phonehint"><b>Copy image</b> is the one button a browser can refuse:
       putting a PNG on the clipboard goes through the permission-gated Clipboard API, which is
       withheld on plenty of local pages. When it says <i>Blocked</i>, use <b>Save PNG</b> and drag
-      the file in — or drag <code>${esc(POSTER)}</code> straight from disk, which is the same
+      the file in — or drag <code>${esc(posterShown(POSTER))}</code> straight from the repo, which is the same
       bytes and skips the clipboard entirely. The caption buttons need no clipboard permission,
       so they are not the ones to worry about here.
       <b>On a phone:</b> press and hold the poster, then Save to Photos — and press and hold a
@@ -260,7 +285,7 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
   <p class="note">
     Telegram allows ${LIMIT} characters on a photo caption and recompresses photos past
     ~1280&nbsp;px on the long side — this poster is 1280 on its long side, so sending it as a
-    photo costs nothing. Poster file: <code>${esc(basename(resolve(POSTER)))}</code>
+    photo costs nothing. Poster file: <code>${esc(posterShown(POSTER))}</code>
   </p>
 </div>
 
@@ -352,6 +377,23 @@ for (const btn of document.querySelectorAll('[data-copy]')) {
     }
   });
 }
+
+// Save PNG takes its href from the <img> at load rather than carrying a second
+// copy of the poster in the markup. The kit is committed now, and the poster was
+// inlined TWICE — 1.7 MB of a 3.76 MB file, 45% of it, for a link to bytes the
+// page already holds. Setting it here costs nothing a reader can see and keeps
+// the page self-contained, which is strictly better than the alternative of not
+// inlining at all. The anchor has no href until this runs: without JS it is
+// inert rather than broken, and every other control on this page needs JS too.
+const save = document.getElementById('savepng');
+const posterImg = document.getElementById('poster');
+// BOTH lookups guarded, not one. Guarding save and dereferencing poster in
+// the same expression throws "Cannot read properties of null" mid-script — and
+// this script's remaining statements are the two counters and the image button,
+// so the page would render perfectly with empty counters and a dead Copy image.
+// That is precisely the failure the parse guard was written for, and the parse
+// guard cannot see a RUNTIME throw.
+if (save && posterImg) save.href = posterImg.src;
 
 // The image has no execCommand route. Selecting the <img> and copying was
 // measured putting «class HTML» on the clipboard — 1.6 MB of the data: URI as

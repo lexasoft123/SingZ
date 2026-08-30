@@ -360,8 +360,12 @@ node .claude/skills/release-poster/scripts/make-post-kit.cjs \
   --preview <out>/v<version>-poster-phone-preview.png \
   --en <out>/caption-en.txt --ru <out>/caption-ru.txt \
   --downloads <out>/dl.json \
-  --version v<version> --out <out>/post-kit.html
+  --version v<version> --out docs/release-notes/v<version>-post-kit.html
 ```
+
+`--out` goes straight into the repo because the kit is committed; `--poster`
+stays repo-relative so the page names it that way. Everything else may live in
+the scratchpad — only their CONTENT is inlined, never their paths.
 
 It embeds the poster and the display face, so the page is self-contained and
 survives being moved or emailed, and each caption shows its length against the
@@ -446,17 +450,123 @@ and give the kit as a path to open in a browser rather than as a preview, for th
 reason above. Then LOOK at the preview those files produced before saying they
 arrived — that the plain forms come through whole is the assumption this
 instruction rests on, and it is the assumption the kit already broke once. Add the two clipboard
-one-liners in `bash` fences so there is a route that needs no page at all. Don't
-commit the kit — it carries a base64 copy of the poster and is regenerated in
-seconds.
+one-liners in `bash` fences so there is a route that needs no page at all. The
+kit is committed too, beside the poster — see What goes in the repo.
 
 ## What goes in the repo
 
-Only the poster, next to the notes it belongs to, so each release keeps its own:
+The poster AND the kit, next to the notes they belong to, so each release keeps
+its own:
 
 ```
 docs/release-notes/v<version>-poster.png
+docs/release-notes/v<version>-post-kit.html
 ```
 
-Commit it with the notes. Posting to the channel is the user's call — say the
-image is send-as-photo safe at 1280.
+Commit both with the notes. The kit is committed by the user's decision, against
+the older rule that it is derived and regenerable — it is how the post is
+actually made, it is the only place the captions and the poster sit together as
+one thing, and the version that went out is worth keeping.
+
+Know the weight, because it is nearly all image: the kit is ~2.0 MB, of which
+1.70 MB is the poster as base64, 285 KB the chat preview, 55 KB the font and
+only 19 KB the markup, CSS and script anyone will ever read. Git stores it whole
+each time, because a base64 blob does not delta. It was 3.76 MB until the poster
+stopped being inlined TWICE — once for the `<img>`, once for Save PNG's `href` —
+and Save PNG now takes its href from `#poster.src` at load instead, which costs
+nothing visible and keeps the page self-contained. If the weight ever becomes a
+real problem the next lever is to stop inlining the poster at all and point the
+`<img>` at the PNG beside it: tens of KB, deltas like text, but the kit stops
+surviving being moved or emailed, which is the property inlining is for. Do not
+make that swap silently — it changes what the artifact IS.
+
+Three properties are load-bearing, and all three are the generator's job rather
+than the author's memory:
+
+- **No absolute path may reach the page.** `posterShown()` emits the path
+  relative to the repo, falling back to the basename for a poster from outside
+  it. An absolute path here is a home directory and a username in a public
+  repo — the same rule that keeps machine names out of release notes and PR
+  bodies — and one went in before this was noticed. It was harmless for four
+  versions while the kit lived in a scratchpad, and became a leak the moment the
+  file was asked into git.
+- **`--downloads` rows carry names, not paths.** `url` was validated from the
+  start; `label` and `file` are escaped but escaping does not stop a local path
+  from being PUBLISHED. `gh release view --json assets` yields bare asset names,
+  so a separator in either field means the JSON was hand-edited and something
+  local came with it. The generator refuses rather than leaving it to the scan.
+- **The output must be reproducible.** Same inputs, same bytes, or two people
+  regenerating one kit produce a diff neither meant. Verified: `--poster` given
+  relative and absolute yield the identical sha256.
+
+**Scan the artifact before staging**, every time — the thing to re-check is the
+OUTPUT, not the generator that was fine yesterday:
+
+```bash
+python3 .claude/skills/release-poster/scripts/scan-kit.py docs/release-notes/v<version>-post-kit.html
+```
+
+Exit 0 is clean, 1 is do-not-commit. It strips the base64 first (a random b64
+substring matches whatever you grep for), then scans the ~19 KB of real markup
+on nine patterns and checks every embedded PNG STRUCTURALLY for
+`tEXt`/`zTXt`/`iTXt`/`eXIf`/`tIME` metadata — a path inside an image is
+invisible to any text search. Then READ the host list it prints: it must name
+only what the captions and download rows link to, and no rule can decide that
+for you.
+
+The nine are two questions, not one. **Paths**: rooted, Windows, UNC, `~/` and
+`~user/`. **Identity that is not a path**, because CLAUDE.md's rule is machine
+names and IPs as much as lab paths, and a path-shaped scanner is blind to the
+first: IPv4, non-web URL schemes (`smb://`, `afp://`, `ssh://`…), `.local` /
+`.lan` / `.internal` hostnames, and `user@host`. Plus one that is neither —
+`.claude/worktrees/<codename>`, which is RELATIVE and therefore invisible to
+every rooted check, and which `posterShown()` will emit if `SINGZ_REPO` points
+at the parent checkout while you run from a worktree.
+
+It is a file rather than a one-liner in this document because a one-liner had to
+survive a markdown fence, a shell string and a Python string at once, and this
+skill already shipped one escaping bug of exactly that shape.
+
+Two things it deliberately does NOT do. It does not run the path regexes over
+decoded blobs: compressed image data contains `~/` and `D:/` by chance,
+constantly, and the first version of this scanner drowned in those false
+positives. And its root list is what is CHECKED — a 0 claims no more than that.
+The list exists because the first version checked `/Users/` and `/home/` only,
+which prints a comfortable zero for the path an ordinary Mac actually produces:
+tmpdir is `/var/folders/<per-user-hash>/T`, and that hash identifies a user as
+surely as a name. It read green here only because this sandbox happens to use
+`/private/tmp`.
+
+**The scan has teeth, and that was established rather than assumed** — a check
+that can only ever print zeros is the vacuous green this repo keeps relearning
+about. Eighteen vectors, each injected into a copy of the real kit, all caught:
+macOS tmpdir, `/Users/`, `/Volumes/`,
+`C:/` forward-slash, lowercase `c:\`, `/opt/`, `/usr/local/`, `/Applications/`,
+`/Network/Servers/`, `~/`, `~user/`, a UNC share, `smb://nas.local/…`,
+`user@Machine.local`, an IPv4, `.claude/worktrees/<codename>`, a path smuggled
+through a download row's `file` field, and a `tEXt` chunk carrying a path inside
+the poster itself. The last five are there because a review found each of them
+passing a version of this scanner that printed four zeros. Re-run the whole
+control after touching it — the failure mode of a leak check is that it keeps
+returning clean.
+
+**The other failure mode is crying wolf, and it needs its own control.** "It did
+not fire on the real kit" is nearly worthless evidence: this kit's captions
+happen to contain no tilde, no email, no `.internal`. The check that matters is
+adversarial PROSE, not a passing artifact. `home-relative` shipped for one round
+as `~[\w.-]*/`, which reads "Zeit is in ~3/4 time" and "splitting takes ~1/2 as
+long" as home directories — in a music app whose captions this very document
+asks to carry approximations and time signatures. A username must now start with
+a letter or underscore, and the negative control is those five phrases plus
+`~2/3 of a song`, `about ~1/4 quieter` and `~1280/2 px`, all of which must pass
+while `~/Desktop/p.png`, `~maxplanck/…`, `~bob/x` and `~_svc/x/y` are still
+caught.
+
+**Two of the nine are judgement, not leaks.** `user@host` matches any email and
+`host name` matches any dotted `.local`/`.lan`/`.internal` token, so a support
+address you meant to publish will stop the commit. That is the intended
+behaviour — publishing an address is a decision worth pausing on — but it is a
+question for a human, not a bug to fix by deleting the check.
+
+Posting to the channel is the user's call — say the image is send-as-photo safe
+at 1280.
