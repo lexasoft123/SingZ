@@ -106,18 +106,28 @@ jobs:
           bash scripts/build-onnx-pack.sh win32-x64
 
       # Mac-only, and deliberately not folded into the Package step's own env
-      # block: electron-builder reads CSC_LINK/CSC_KEY_PASSWORD for a WINDOWS
-      # Authenticode certificate too, on the Windows leg of this same matrix.
-      # Setting them unconditionally across both legs would hand the Windows
-      # build an Apple .p12 as if it were a code-signing cert for signtool —
+      # block. The literal reason is that this runs `security`, which exists
+      # only on macOS. The reason that outlives this implementation is that
+      # CSC_* is a SHARED namespace: electron-builder reads
+      # CSC_LINK/CSC_KEY_PASSWORD for a WINDOWS Authenticode certificate on
+      # the other leg of this same matrix. What this step writes today
+      # (CSC_KEYCHAIN, CSC_NAME) only the mac packager reads — but anyone
+      # later reaching for a CSC_ variable in a shared step is one keystroke
+      # from handing the Windows build an Apple .p12 as a signtool cert:
       # wrong format, and a confusing failure with nothing "Apple" in it.
       # See docs/MACOS-SIGNING.md for what each secret is and why the
       # notarization key is the same one iOS's App Store Connect key is.
       - name: macOS signing + notarization secrets
         if: runner.os == 'macOS'
         run: |
-          # Only WRITE a var when it has a real value — an empty CSC_LINK is
-          # not the same thing to electron-builder as no CSC_LINK at all.
+          # Only WRITE a var when it has a real value, because a HALF-SET
+          # environment is how "not configured" turns into a hard failure:
+          # app-builder-lib throws InvalidConfigurationError when one of
+          # APPLE_API_KEY/_ID/_ISSUER is present and another is not.
+          # NOT because empty differs from unset — every reader of what this
+          # step writes falsy-tests it, so for these vars the two are the
+          # same thing. (That distinction is real for CSC_LINK, which is
+          # exactly why this step does not write it.)
           # The Apple secrets ARE set on this repo now, and run 33243835099
           # signed and notarized both architectures for real ("1 identity
           # imported", then "notarization successful" twice). An earlier

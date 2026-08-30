@@ -116,18 +116,26 @@ since the flat and nested shapes are not interchangeable within one version.
 None of this does anything without credentials in the environment —
 `notarize: true` specifically logs a warning and skips rather than failing
 when unset, which is what keeps `npm run dist` on a machine with no Apple
-secrets (this dev Mac, forks, CI runs before the one-time setup above)
-building an ad-hoc signed dmg exactly as before.
+secrets (a fork, a fresh checkout on a Mac with no Developer ID certificate,
+CI before the one-time setup above) building an ad-hoc signed dmg exactly as
+before.
 
 `.github/workflows/build.yml`'s "macOS signing + notarization secrets" step
-maps the repo secrets onto the env vars electron-builder actually reads
-(`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`, `APPLE_API_KEY_ID`,
-`APPLE_API_ISSUER`, `APPLE_TEAM_ID`) — and **only when each secret is
-non-empty**. Writing an empty `CSC_LINK` would not be the same as no
-`CSC_LINK` at all to electron-builder; it would turn "not set up yet" into a
-build failure on every trigger of this workflow (tag, dispatch, the weekly
-warmer) the moment this landed, instead of the graceful ad-hoc fallback that
-was already there.
+imports the certificate into a keychain it creates itself, then exports
+`CSC_KEYCHAIN` and `CSC_NAME` — plus `APPLE_API_KEY`, `APPLE_API_KEY_ID`,
+`APPLE_API_ISSUER` and `APPLE_TEAM_ID` for notarization. It writes
+**`CSC_LINK` and `CSC_KEY_PASSWORD` nowhere at all**, for the reason the
+section above gives; if you find a description of this step that says
+otherwise, that description is stale, not the step.
+
+Each write is guarded on the value it needs being present (`APPLE_TEAM_ID` is
+a literal rather than a secret, guarded on the certificate). The guard is
+**not** about empty-versus-unset — every reader of these falsy-tests them, so
+for this set the two are the same thing. It is about never leaving a
+**half-set** environment, which app-builder-lib turns into an
+`InvalidConfigurationError` when one of `APPLE_API_KEY`/`_ID`/`_ISSUER` is
+present and another is not. A fork, or a rotated-away secret, therefore lands
+on the ad-hoc fallback rather than a failed leg.
 
 Two details of that step are load-bearing, and both were got wrong first:
 
@@ -143,20 +151,23 @@ Two details of that step are load-bearing, and both were got wrong first:
   GitHub runs the step as `bash -e`. The AND-list is exempt from errexit
   inside a function body, but the *function* then returns 1 for an empty
   value, and the call site is a plain simple command — so errexit kills the
-  step. Measured: with no secrets set (today's state, the very case the step
-  exists to tolerate) the `&&` form exits 1 immediately, taking the whole
-  macOS leg down after the engine builds and before packaging, and never
+  step. Measured with no secrets set — the case the step exists to tolerate,
+  a fork or a secret rotated away — the `&&` form exits 1 immediately, taking
+  the whole macOS leg down after the engine builds and before packaging, never
   printing the warning it was supposed to print.
 
-`CSC_LINK`/`CSC_KEY_PASSWORD` are **not** scoped to the macOS leg of
-`build.yml`'s job by an `if:` on the env block — they are written by a step
-that only *runs* `if: runner.os == 'macOS'`. That distinction matters:
-electron-builder reads the identically-named `CSC_LINK` for a **Windows**
-Authenticode certificate too, on the same matrix's Windows leg. Folding
-these into the shared "Package" step's env (rather than a mac-only step)
-would hand the Windows build an Apple `.p12` as a Windows signing cert on
-every run — wrong format, and a failure with nothing "Apple" in its message
-to explain why.
+The step is scoped to the macOS leg by an `if: runner.os == 'macOS'` on the
+step itself, not by an `if:` on an env block, and that scoping is worth
+keeping for two reasons. The literal one: it runs `security` commands that
+exist only on macOS. The one that outlives this implementation: `CSC_*` is a
+**shared namespace**, and electron-builder reads `CSC_LINK`/`CSC_KEY_PASSWORD`
+for a **Windows** Authenticode certificate on the same matrix's other leg.
+The variables this step writes today (`CSC_KEYCHAIN`, `CSC_NAME`) are read
+only on macOS — by app-builder-lib's mac packager and signer, and `CSC_NAME`
+also by `afterPack.cjs`'s darwin-gated hook — so nothing it writes could
+reach `signtool`, and its body is bash, which that leg does not default to.
+But anyone who later reaches for a `CSC_` variable in a shared step is one
+keystroke from handing the Windows build an Apple `.p12`.
 
 ## The entitlements file
 
