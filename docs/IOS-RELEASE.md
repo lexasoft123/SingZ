@@ -248,16 +248,22 @@ metadata tree covers the copyright string, which is otherwise a
 
 `.keys/secrets.enc.yaml`, encrypted with [SOPS](https://github.com/getsops/sops)
 to the age key at `~/.config/sops/age/keys.txt`. It holds the API key id, the
-issuer id, the `.p8` body and the match passphrase. Rules are in `.sops.yaml`
+issuer id, the `.p8` body, the match passphrase, the App Review contact
+(`review_*`) and the Developer ID `.p12` export password
+(`mac_p12_password`, for a local signed macOS build — nothing reads it
+automatically; CI signs from its own repo secret. See
+[MACOS-SIGNING.md](MACOS-SIGNING.md)). Rules are in `.sops.yaml`
 at the repo root; only values are encrypted, so `git diff` and a glance still
 show the structure.
 
 `scripts/with-apple-secrets.sh <command>` decrypts it, exports
 `APP_STORE_CONNECT_API_KEY_ID`, `APP_STORE_CONNECT_API_ISSUER_ID` and
-`MATCH_PASSWORD`, writes the `.p8` to a mode-600 temp file pointed at by
-`SINGZ_ASC_KEY_PATH`, runs the command, and deletes the temp file on the way
-out — so no secret reaches a shell history, a process argument list, or a
-file that outlives the command.
+`MATCH_PASSWORD` — plus `SINGZ_REVIEW_*` and `SINGZ_MAC_P12_PASSWORD` when
+the store carries them — writes the `.p8` to a mode-600 temp file pointed at
+by `SINGZ_ASC_KEY_PATH`, runs the command, and deletes the temp file on the
+way out, so no secret reaches a shell history, a process argument list, or a
+file that outlives the command. The script's own header is the list of
+record; keep it and this sentence in step.
 
 Read a value by hand with `sops -d .keys/secrets.enc.yaml`. Edit or rotate
 one with `sops .keys/secrets.enc.yaml`. Add a second machine or person by
