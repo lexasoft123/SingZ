@@ -925,11 +925,32 @@ The workflows strip `:ios` blocks from the GitHub Release body, so the
 release page keeps opening with the same two blurbs it always has.
 
 **iOS ships through `.github/workflows/ios.yml`** — a `v*` tag uploads to
-TestFlight automatically; submitting for App Store review
-is manual-dispatch-only, and it carries `automatic_release: true` — an
+TestFlight automatically AND, when the `TESTFLIGHT_GROUPS` repo variable
+names a group (`External Testers` today — the one behind the public link
+README.md hands out), sends that build to **Beta App Review** so external
+testers actually get it. Unset variable = internal-only upload, said out
+loud in the log. The tag job therefore now BLOCKS on Apple's processing
+(15-60 min): a build that is still processing cannot be distributed. It is
+deliberately ONE `upload_to_testflight` call rather than `beta` followed by
+`beta_external` — one wait, and the group named in one place — and NOT
+because chaining would race Apple, which it would not: the
+`upload_to_testflight` ACTION waits on the distribute-only path too
+(upload_to_testflight.rb:31 in the pinned 2.238.0), even though the
+`Pilot::BuildManager#distribute` it wraps does not wait itself. What IS
+sharp: `skip_waiting_for_build_processing: true` alongside a widen makes
+pilot abandon the distribution and still exit GREEN (build_manager.rb:202),
+so that flag and an external group must never be set together.
+Submitting for App Store review stays manual-dispatch-only, and it carries
+`automatic_release: true` — an
 approved build goes LIVE on the store by itself, so dispatching that lane IS
 the decision to publish, same "tagging is not enough to reach
-production" shape as Android's `publish` job. The app record itself cannot
+production" shape as Android's `publish` job. Two lanes reach the store and
+the difference bites when aiming at an already-built tag: `submit` sends an
+ALREADY-UPLOADED build (pass its number in the workflow's `build` input,
+which lands in `SINGZ_IOS_BUILD_NUMBER` — a dispatch's own `run_number` is
+NOT the tag run's), while `release` archives a fresh binary and so leaves a
+second build number for one version. The deliver call itself lives in one
+place, `private_lane :submit_build`, shared by both. The app record itself cannot
 be created by the API at all (Apple's docs say so outright) — that and the
 App Store Connect API key are one-time by-hand setup, see
 [docs/IOS-RELEASE.md](docs/IOS-RELEASE.md). **Signing is `fastlane match`**:
