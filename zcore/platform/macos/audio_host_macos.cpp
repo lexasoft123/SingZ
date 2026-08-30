@@ -816,7 +816,7 @@ class MacAudioHostBackend final : public AudioHostBackend {
         detail::macAudioHostInputTimestampHardware(
             self->format_.inputChannels,
             inputProjection.usedHardwareAnchor),
-        outputFrame, outputNs, callbackNs,
+        outputFrame, outputNs, outputNs != 0, outputHostTimeValid, callbackNs,
         discontinuity, true};
     const bool rendered = invokeAudioHostCallback(&self->endpoint_, block);
     if (flags != nullptr) {

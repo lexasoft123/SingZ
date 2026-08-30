@@ -1,8 +1,8 @@
 # `zcore` and `zdsp` native design
 
-Status: active implementation standard (Phase 3A/3B/3C standalone hosts present)
+Status: active implementation standard (Phase 3A/3B/3C/3D standalone hosts present)
 
-Last reviewed: 2026-08-29
+Last reviewed: 2026-08-30
 
 This document defines the language profile, component boundaries, design
 patterns, target layout and dependency policy for the native SingZ audio
@@ -121,6 +121,16 @@ Rules:
   ownership. Negative gates prove that omitted helper membership, hidden
   quoted/angle allocation helpers and comment-only marker names cannot bypass
   the scan.
+  On Android, Java owns endpoint/route inventory while a dormant Oboe provider
+  owns an explicit output-first paired-stream lifetime. Its output data
+  callback is the graph clock and performs bounded nonblocking input reads,
+  exact sparse map conversion and silence containment in preallocated storage.
+  It deliberately does not use Oboe's `FullDuplexStream`; input scratch is
+  sized from the physical input extent, startup drain/cushion/discard is
+  bounded, and packed admission plus an outer-entry count protect teardown.
+  The Android callback leaf has its own manifest/closure source scanner and
+  `-fno-exceptions -fno-rtti` source flags. The provider remains outside
+  product playback/focus until the Phase 4 cutover.
 - `zcore_media` contains WAV/FLAC and later streaming decode. It never appears
   in the live graph's transitive link interface.
 - `zdsp_api` contains the foundational DSP-facing clock, bus, process,

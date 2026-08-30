@@ -38,7 +38,9 @@ bool valid(const AudioHostRenderBlock& block) noexcept {
       block.frames == 0 || block.frames > block.maximumFrames ||
       block.maximumFrames > kAudioHostMaxFrames || block.output == nullptr ||
       block.outputChannels == 0 || block.outputChannels > kAudioHostMaxChannels ||
-      block.inputChannels > kAudioHostMaxChannels) {
+      block.inputChannels > kAudioHostMaxChannels ||
+      (block.outputTimestampValid && block.outputHostTimeNs == 0) ||
+      (block.outputTimestampHardware && !block.outputTimestampValid)) {
     return false;
   }
   for (uint32_t channel = 0; channel < block.outputChannels; ++channel) {
@@ -69,6 +71,9 @@ AudioHostOutputTimelineResult resolveAudioHostOutputTimeline(
         hostValid != timeline->hostTimeValid) {
       result.discontinuity |=
           AudioHostDiscontinuityTimestampQualityChanged;
+      if (hostValid != 0 && timeline->hostTimeValid == 0) {
+        result.discontinuity |= AudioHostDiscontinuityClockReanchored;
+      }
     } else if (sampleTimeValid && sampleFrame != timeline->expectedFrame) {
       result.discontinuity |= AudioHostDiscontinuitySequenceGap;
     }

@@ -71,6 +71,21 @@ object SingzCore {
     channels: IntArray
   )
 
+  /** Java AudioManager remains the authoritative dormant AudioHost inventory. */
+  external fun replaceAudioHostDevices(
+    uids: Array<String>,
+    labels: Array<String>,
+    sampleRates: Array<IntArray>,
+    channels: IntArray,
+    inputs: BooleanArray,
+    outputs: BooleanArray,
+    transports: Array<String>,
+    monitoringSuitability: Array<String>
+  )
+
+  /** Packaging probe only; it never opens a device or acquires audio focus. */
+  external fun hasAndroidAudioHostProvider(): Boolean
+
   /**
    * [error, actualDeviceUid, sampleRate, deviceChannels, selectedChannel,
    * sampleFormat, sharingMode, performanceMode, inputPreset, timestampSource].

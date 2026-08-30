@@ -151,7 +151,7 @@ class ManualAudioHostBackend final : public singz::AudioHostBackend {
         inputs, outputs, 1, 2, frames, 256, sampleRate, 11,
         status_.routeGeneration, status_.streamGeneration, sequence_,
         renderedFrames_, 1000000 + renderedFrames_, true, true,
-        renderedFrames_, 2000000 + renderedFrames_,
+        renderedFrames_, 2000000 + renderedFrames_, true, true,
         1500000 + renderedFrames_, discontinuity, true};
     if ((discontinuity & singz::AudioHostDiscontinuityDeviceLost) != 0) {
       state_ = singz::AudioHostState::DeviceLost;

@@ -47,12 +47,15 @@ Status validateTransport(const TransportContext& transport) noexcept {
 
 Status validateDiscontinuity(const ProcessContext& context) noexcept {
   constexpr uint32_t kKnownRenderTimeFlags =
-      RenderTimeHostValid | RenderTimeDiscontinuous;
+      RenderTimeHostValid | RenderTimeDiscontinuous |
+      RenderTimeHostHardware;
   constexpr uint32_t kKnownDiscontinuityFlags =
       DiscontinuityFlagResetState | DiscontinuityFlagTimeValid;
   if ((context.time.flags & ~kKnownRenderTimeFlags) != 0 ||
       (context.discontinuity.flags & ~kKnownDiscontinuityFlags) != 0 ||
-      context.discontinuity.reason > DiscontinuityReason::SourceFrameOverflow)
+      context.discontinuity.reason > DiscontinuityReason::SourceFrameOverflow ||
+      ((context.time.flags & RenderTimeHostHardware) != 0 &&
+       (context.time.flags & RenderTimeHostValid) == 0))
     return {StatusCode::InvalidArgument, 210};
   const bool typed = context.discontinuity.reason != DiscontinuityReason::None;
   const bool marked = (context.time.flags & RenderTimeDiscontinuous) != 0;

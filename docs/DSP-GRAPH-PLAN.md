@@ -1057,8 +1057,8 @@ Phase 3A standalone slice implemented 2026-08-27 (not a product cutover):
 - macOS has a same-device AUHAL provider in its own OS source. At the Phase 3A
   checkpoint Windows, iOS, Android and other builds selected explicit
   compiling unsupported providers; Phases 3B and 3C below supersede that
-  statement for standalone Windows and iOS builds respectively. Android
-  remains unsupported. Neither phase changes product playback routing.
+  statement for standalone Windows and iOS builds respectively, and Phase 3D
+  supersedes it for Android. None changes product playback routing.
 
 Phase 3B standalone Windows slice implemented 2026-08-28:
 
@@ -1157,6 +1157,78 @@ Phase 3C standalone iOS slice implemented 2026-08-29 (not a product cutover):
   negative fixtures reject those shapes, helper omissions, hidden quoted/angle
   allocation, forbidden helper sources and comment-only operation names.
 
+Phase 3D standalone Android slice implemented 2026-08-30 (not a product
+cutover):
+
+- Java `AudioManager` remains the sole endpoint/route/focus authority. Its
+  normalized inventory updates a generation only when facts change;
+  enumeration never opens audio. Every selected UID and generation is checked
+  before and after open/start and in the callback, with no fallback route.
+- SingZ owns paired Oboe streams rather than `FullDuplexStream`. Output opens
+  first at the natural device rate, then input at that exact rate with at least
+  twice the output capacity. Conversion is disabled at Oboe's callback
+  boundary; post-open device ID,
+  sparse physical channel extent, float format, rate, sharing/performance/API,
+  callback, burst and capacity facts are fail-closed. Named endpoints require
+  AAudio and exact exclusive requests never fall back.
+  This does not claim the Android mixer/HAL/device never converts. API 34+
+  hardware getters are recorded separately; older systems report unknown.
+- Input starts before output. The output callback is the only graph/master-
+  clock action and copies Oboe's bounded drain/cushion/discard pairing policy
+  with preallocated input-sized interleaved scratch and planar graph buses.
+  Missing input zero-fills and emits an xrun/discontinuity; permanent
+  starvation is terminal. Status preserves paired-input capacity and
+  current/min/max occupancy plus bounded underflow/overflow evidence.
+- The data callback is allocation-, lock-, JNI-, logging-, timestamp-query- and
+  lifecycle-free. Armeabi-v7a callback atomics are statically lock-free.
+  Errors close admission and make the pair terminal; `onError` reserves the
+  immutable pair epoch and exact failing-stream identity, then returns false so
+  Oboe closes that stream. `onErrorBeforeClose` synchronously drains and joins
+  the independently synchronized sampler before returning;
+  `onErrorAfterClose` queues that exact pair to a serialized non-audio worker,
+  which rejects stale epochs before loading streams and stops/closes only the
+  retained peer after Oboe's close without blocking audio work.
+  The Oboe-retained callback counts entry before loading its owner,
+  and late/rejected data entries zero output and Continue. One retained control
+  block owns pair/callback/workers. Public calls remain serialized; one
+  application-operation mutex owns Oboe lifecycle calls but is never acquired
+  by callbacks; a separate short pair mutex owns epoch/identity/phase changes
+  and is never held across Oboe or join calls. The sampler's own owner gate
+  records stopped-through epochs so before-close cannot race thread publish.
+  Open remains an `Opening` transaction until one final pair-lock commit.
+  The callback failure field is initialized before either Oboe builder can
+  re-enter; current-epoch provisional stream errors bind before identity
+  publication, while stale callback epochs reject. Checkpoints after every
+  open/fact/publish step require exact identities, concrete Oboe Open state and
+  no sticky failure/teardown owner; failures are never reset by later setup.
+  Start likewise has one pair-lock `Starting`→`Running` plus public-state
+  commit after exact identity, concrete Started state, route, admission and
+  sticky-failure validation. RT terminal publication increments a lock-free
+  32-bit generation before closing admission. Start captures its immutable
+  generation with a stable acquire bracket while still Open and before callback
+  admission or `requestStart`; commit never normalizes an in-flight terminal to
+  a later baseline. Double acquire reads around the final health check close the
+  commit-to-return race without taking pairMutex on the callback. No later
+  Running store can overwrite an Oboe error.
+  User stop waits for an error-owned
+  pair and re-reads any uncertainty after callback drain. Uncertain teardown
+  consumes one bounded process fail-stop quarantine rather than freeing live
+  Oboe objects.
+- Input/output `CLOCK_MONOTONIC` anchors are sampled off RT and carry bounded
+  freshness. Callback entry/end are sampled in the data callback; callback
+  time is entry, output presentation is projected only from a fresh anchor;
+  startup/stale anchors use an explicitly non-hardware callback-entry fallback,
+  and deadline/xrun/quality/re-anchor boundaries are typed. Input, output
+  buffer, local presentation and external-route latency remain separate;
+  Bluetooth/BLE/hearing-aid and automotive/bus routes stay high-latency.
+  Built-in/wired/USB are explicit low-latency candidates; HDMI and unknown
+  vendor types remain Unknown. Java supported-rate lists never become a fake
+  active nominal rate.
+- PR CI compiles and packages the provider into `libsingzcore.so` for arm64 and
+  armv7, checks a dormant JNI probe plus provider literal, and runs the
+  manifest/closure RT policy with negative bypass fixtures. Physical Android
+  hardware evidence remains pending and is not inferred from ABI builds.
+
 Physical-device evidence is still required before Phase 4: wired and USB
 loopback latency, callback-size distribution, sustained duplex xruns/deadline
 misses, channel maps above stereo, interruption/media-service recovery, and
@@ -1165,8 +1237,8 @@ behavior.
 
 The AUHAL slice deliberately rejects different input/output UIDs. A bounded
 cross-device FIFO, drift estimator/resampler and aggregate-device policy are
-deferred, as are Oboe and the separately licensed ASIO provider. WASAPI and
-RemoteIO are the implemented Phase 3B/3C standalone providers described above. Web
+deferred, as is the separately licensed ASIO provider. WASAPI, RemoteIO and
+Oboe are the implemented Phase 3B/3C/3D standalone providers described above. Web
 Audio/RNAudioAPI remains the sole product output/session owner;
 no renderer, Electron playback, mobile playback or UI path links this host.
 
@@ -1185,8 +1257,9 @@ Implement one provider at a time behind `AudioHost`:
    exact-float exclusive mode where supported (implemented as Phase 3B);
 3. iOS duplex RemoteIO under the existing AVAudioSession coordinator
    (implemented as Phase 3C; physical-device evidence pending);
-4. Android duplex Oboe over AAudio where supported, retaining direct AAudio
-   only if Phase 0B measurements show it is the lower-risk SingZ host;
+4. Android duplex Oboe over AAudio where supported (implemented as Phase 3D;
+   physical-device evidence pending); retain direct AAudio only if later
+   measurements prove it is the lower-risk SingZ host;
 5. ASIO as a distinct `audio_host_asio_windows.cpp` only after the legal gate.
 
 Add output inventory, negotiated formats, full-duplex start/stop, xrun/status

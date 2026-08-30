@@ -2117,6 +2117,7 @@ void WasapiAudioHostBackend::unifiedWorker() noexcept {
   uint64_t callbackSequence = 0;
   bool firstCallback = true;
   bool pendingRenderDiscontinuity = false;
+  AudioHostOutputTimeline outputTimeline{};
   renderBufferErrors = 0;
   auto snapshotRenderRequest =
       [&](uint64_t observedQpcNs,
@@ -2273,19 +2274,17 @@ void WasapiAudioHostBackend::unifiedWorker() noexcept {
       discontinuity |= AudioHostDiscontinuityStart;
       firstCallback = false;
     }
-    uint64_t outputHostNs = beforeNs;
-    if (clockPositionAction ==
-            detail::WasapiClockPositionAction::UseHardware &&
-        clockFrequency && clockQpc100ns &&
-        clockQpc100ns <= UINT64_MAX / 100ull) {
-      const uint64_t playedFrames = detail::wasapiClockUnitsToFrames(
-          clockPosition, clockFrequency, renderProfile.prepared.sampleRate);
-      const uint64_t pendingFrames =
-          submittedFrames > playedFrames ? submittedFrames - playedFrames : 0;
-      outputHostNs = detail::wasapiAdvanceNsByFrames(
-          clockQpc100ns * 100ull, pendingFrames,
-          renderProfile.prepared.sampleRate);
-    }
+    const detail::WasapiOutputTimestampProjection outputTimestamp =
+        detail::projectWasapiOutputTimestamp(
+            clockPositionAction, clockPosition, clockQpc100ns, clockFrequency,
+            submittedFrames, renderProfile.prepared.sampleRate, beforeNs);
+    const uint64_t outputHostNs = outputTimestamp.hostTimeNs;
+    const bool usedHardwareClock = outputTimestamp.hardware;
+    const AudioHostOutputTimelineResult timeline =
+        resolveAudioHostOutputTimeline(&outputTimeline, true, submittedFrames,
+                                       usedHardwareClock, frames,
+                                       submittedFrames);
+    discontinuity |= timeline.discontinuity;
     AudioHostRenderBlock block{
         inputConstPointers.data(), outputPointers.data(),
         static_cast<uint32_t>(inputMap_.size()),
@@ -2295,7 +2294,10 @@ void WasapiAudioHostBackend::unifiedWorker() noexcept {
         routeContext_->generation(),
         streamGeneration_.load(std::memory_order_relaxed), callbackSequence,
         input.sourceFrame, input.sampleHostTimeNs, input.timestampValid,
-        input.timestampHardware, submittedFrames, outputHostNs, beforeNs,
+        input.timestampHardware, timeline.outputFrame, outputHostNs,
+        outputHostNs != 0,
+        usedHardwareClock,
+        beforeNs,
         discontinuity, true};
     // Route loss and a control stop are rechecked immediately before the
     // graph boundary. A buffer already acquired is returned silent without

@@ -45,12 +45,66 @@ class AudioInputPolicyTest {
   }
 
   @Test
+  fun `host inventory preserves every advertised rate and unknown`() {
+    assertTrue(AudioInputPolicy.hostSampleRates(intArrayOf()).isEmpty())
+    assertEquals(
+      listOf(44_100, 48_000, 96_000),
+      AudioInputPolicy.hostSampleRates(
+        intArrayOf(96_000, -1, 48_000, 44_100, 48_000)
+      ).toList()
+    )
+  }
+
+  @Test
+  fun `dormant host publish failure cannot break capture registry`() {
+    var capture = 0
+    var host = 0
+    AudioInputPolicy.publishCaptureThenBestEffortHost(
+      publishCapture = { capture++ },
+      publishHost = { host++; error("host JNI failed") }
+    )
+    assertEquals(1, capture)
+    assertEquals(1, host)
+  }
+
+  @Test(expected = IllegalStateException::class)
+  fun `capture publish failure does not proceed to dormant host`() {
+    var host = 0
+    try {
+      AudioInputPolicy.publishCaptureThenBestEffortHost(
+        publishCapture = { error("capture failed") },
+        publishHost = { host++ }
+      )
+    } finally {
+      assertEquals(0, host)
+    }
+  }
+
+  @Test
   fun `Bluetooth inputs are honest high-latency routes`() {
     assertTrue(AudioInputPolicy.highLatency(7)) // TYPE_BLUETOOTH_SCO
     assertTrue(AudioInputPolicy.highLatency(26)) // TYPE_BLE_HEADSET
     assertTrue(AudioInputPolicy.highLatency(23)) // TYPE_HEARING_AID
     assertTrue(AudioInputPolicy.highLatency(21)) // TYPE_BUS / automotive
     assertFalse(AudioInputPolicy.highLatency(11)) // TYPE_USB_DEVICE
+  }
+
+  @Test
+  fun `dormant host inventory classifies delayed sinks conservatively`() {
+    assertEquals("bluetooth", AudioInputPolicy.hostTransport(8))
+    assertEquals("bluetooth-low-energy", AudioInputPolicy.hostTransport(23))
+    assertEquals("bluetooth-low-energy", AudioInputPolicy.hostTransport(26))
+    assertEquals("vehicle", AudioInputPolicy.hostTransport(21))
+    assertEquals("usb", AudioInputPolicy.hostTransport(11))
+    assertEquals("hdmi", AudioInputPolicy.hostTransport(29))
+    assertEquals("unknown", AudioInputPolicy.hostTransport(0))
+    assertEquals("low-latency", AudioInputPolicy.hostMonitoringSuitability(2))
+    assertEquals("low-latency", AudioInputPolicy.hostMonitoringSuitability(3))
+    assertEquals("low-latency", AudioInputPolicy.hostMonitoringSuitability(11))
+    assertEquals("high-latency", AudioInputPolicy.hostMonitoringSuitability(8))
+    assertEquals("high-latency", AudioInputPolicy.hostMonitoringSuitability(21))
+    assertEquals("unknown", AudioInputPolicy.hostMonitoringSuitability(29))
+    assertEquals("unknown", AudioInputPolicy.hostMonitoringSuitability(0))
   }
 
   @Test

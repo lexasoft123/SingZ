@@ -131,6 +131,11 @@ enum class WasapiClockPositionAction : uint32_t {
   FailDeviceLost,
 };
 
+struct WasapiOutputTimestampProjection {
+  uint64_t hostTimeNs{0};
+  bool hardware{false};
+};
+
 struct WasapiOwnerArbiterPlan {
   bool stop{false};
   bool recordRenderWake{false};
@@ -369,6 +374,11 @@ uint64_t wasapiClockUnitsToFrames(uint64_t position, uint64_t frequency,
                                   uint32_t sampleRate) noexcept;
 uint64_t wasapiAdvanceNsByFrames(uint64_t hostNs, uint64_t frames,
                                  uint32_t sampleRate) noexcept;
+WasapiOutputTimestampProjection projectWasapiOutputTimestamp(
+    WasapiClockPositionAction action, uint64_t clockPosition,
+    uint64_t clockQpc100ns, uint64_t clockFrequency,
+    uint64_t submittedFrames, uint32_t sampleRate,
+    uint64_t fallbackHostNs) noexcept;
 uint64_t wasapiFramesToReferenceTime(uint32_t frames,
                                      uint32_t sampleRate) noexcept;
 uint32_t wasapiReferenceTimeToFramesCeil(int64_t referenceTime,

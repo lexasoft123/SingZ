@@ -142,6 +142,14 @@ struct AudioHostLatency {
   uint32_t externalRouteFrames{0};
 };
 
+// Stable platform-neutral encoding for physical device facts. `Other` means a
+// format was reported but is not the graph's float32 boundary format.
+enum class AudioHostSampleFormat : uint32_t {
+  Unknown = 0,
+  Float32 = 1,
+  Other = 2,
+};
+
 struct AudioHostDiagnostics {
   // WASAPI and future split-clock providers report their stream-level values
   // here instead of mislabeling GetStreamLatency as pure hardware latency.
@@ -165,6 +173,17 @@ struct AudioHostDiagnostics {
   // Frames accepted into the capture FIFO minus frames requested by render
   // callbacks. This is a queue-flow balance, not a clock-drift estimate.
   int64_t acceptedCaptureMinusRenderedFrames{0};
+  // Android API 34+ public hardware getters. Zero means the platform cannot
+  // report the physical fact (not that the hardware uses zero); callback
+  // format/rate/channel facts remain in AudioHostFormat.
+  uint32_t inputHardwareSampleRate{0};
+  uint32_t outputHardwareSampleRate{0};
+  uint32_t inputHardwareChannels{0};
+  uint32_t outputHardwareChannels{0};
+  AudioHostSampleFormat inputHardwareSampleFormat{
+      AudioHostSampleFormat::Unknown};
+  AudioHostSampleFormat outputHardwareSampleFormat{
+      AudioHostSampleFormat::Unknown};
 };
 
 struct AudioHostResult {

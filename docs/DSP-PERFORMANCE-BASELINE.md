@@ -49,7 +49,7 @@ normalized batch means and retain scheduler effects visible at batch scale.
 | Dell Windows laptop, MSVC/WASAPI | Phase 0A physical run, carried forward from the implementation session; not rerun in Phase 0B | Capture produced 603 delivered samples; negotiated rate/block were not preserved in the available transcript | p50 0.0207 ms, p95 0.0351 ms, maximum 0.1739 ms; p99 not preserved | zero transport overruns; device xruns not separately recorded | not recorded | not measured |
 | Mac + Zen Quadro, microphone channel 3 | No numeric log is present in the worktree and the device was not freshly rerun | not recorded | not recorded | not recorded | not recorded | not measured |
 | iPhone/iPad hardware | Phase 3C RemoteIO host compiles for arm64 iPhone and arm64/x86_64 simulators; no fresh physical measurement, and compilation is build evidence only | not measured | not measured | not measured | provider exposes separate `inputLatency`, local/external `outputLatency`, and actual buffer frames, but no physical values recorded | not measured |
-| Android hardware | No fresh physical Phase 0B measurement; ABI builds/emulator tests are build evidence only | not measured | not measured | not measured | not measured | not measured |
+| Android hardware | Phase 3D Oboe host compiles and packages in `libsingzcore.so` for arm64-v8a and armeabi-v7a; no fresh physical measurement, and ABI/emulator evidence proves no hardware behavior | not measured | not measured | not measured | provider keeps input/output buffer/local presentation/external route fields separate, but no physical values recorded | not measured |
 
 ## Required next measurements
 
@@ -60,6 +60,9 @@ normalized batch means and retain scheduler effects visible at batch scale.
   Mac/Zen, Dell/WASAPI shared and exclusive, a real iPhone and a real Android.
 - Repeat route snapshots for Bluetooth and available automotive routes, marked
   presentation-only and high variance.
+- On Android, add USB channel 3+ mapping, unplug/reconnect, sustained paired-
+  stream starvation/xrun and occupancy logs, wired loopback, Bluetooth/BLE/
+  hearing-aid and `TYPE_BUS` vehicle runs on physical hardware.
 - Compare the SingZ kernel with miniaudio only in an isolated benchmark target.
   Compare JUCE only after its commercial-license decision. Neither dependency
   may enter `zdsp_api` or the shipping runtime for the comparison.

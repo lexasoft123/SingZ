@@ -66,6 +66,8 @@ struct AudioHostRenderBlock {
   bool inputTimestampHardware{false};
   uint64_t outputFrame{0};
   uint64_t outputHostTimeNs{0};
+  bool outputTimestampValid{false};
+  bool outputTimestampHardware{false};
   uint64_t callbackHostTimeNs{0};
   uint32_t discontinuity{AudioHostDiscontinuityNone};
   bool outputClockMaster{true};

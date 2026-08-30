@@ -521,6 +521,8 @@ void testCallbackContainmentAndPolicy() {
       &timeline, true, 180, true, 16, 0);
   CHECK((resolved.discontinuity &
          singz::AudioHostDiscontinuityTimestampQualityChanged) != 0);
+  CHECK((resolved.discontinuity &
+         singz::AudioHostDiscontinuityClockReanchored) != 0);
   resolved = singz::resolveAudioHostOutputTimeline(
       &timeline, true, 212, true, 16, 0);
   CHECK((resolved.discontinuity &
@@ -542,7 +544,8 @@ void testCallbackContainmentAndPolicy() {
   const float* input[] = {inputSamples};
   singz::AudioHostRenderBlock block{input, output, 1, 1, 8, 8, 48000.0,
                                     1, 1, 1, 0, 0, 0, true, false,
-                                    0, 1, 1, singz::AudioHostDiscontinuityNone, true};
+                                    0, 1, true, false, 1,
+                                    singz::AudioHostDiscontinuityNone, true};
   singz::AudioHostCallbackEndpoint endpoint;
   for (float& sample : outputSamples) sample = 1.0F;
   CHECK(!singz::invokeAudioHostCallback(&endpoint, block));
@@ -550,6 +553,14 @@ void testCallbackContainmentAndPolicy() {
   Observation observation;
   singz::prepareAudioHostCallback(&endpoint, observe, &observation);
   singz::activateAudioHostCallback(&endpoint);
+  block.outputHostTimeNs = 0;
+  CHECK(!singz::invokeAudioHostCallback(&endpoint, block));
+  block.outputHostTimeNs = 1;
+  block.outputTimestampValid = false;
+  block.outputTimestampHardware = true;
+  CHECK(!singz::invokeAudioHostCallback(&endpoint, block));
+  block.outputTimestampValid = true;
+  block.outputTimestampHardware = false;
   block.sampleRate = std::numeric_limits<double>::quiet_NaN();
   CHECK(!singz::invokeAudioHostCallback(&endpoint, block));
   block.sampleRate = 48000.0;

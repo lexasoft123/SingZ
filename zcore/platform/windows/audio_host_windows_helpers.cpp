@@ -550,6 +550,31 @@ uint64_t wasapiAdvanceNsByFrames(uint64_t hostNs, uint64_t frames,
   return hostNs + whole + fraction;
 }
 
+WasapiOutputTimestampProjection projectWasapiOutputTimestamp(
+    WasapiClockPositionAction action, uint64_t clockPosition,
+    uint64_t clockQpc100ns, uint64_t clockFrequency,
+    uint64_t submittedFrames, uint32_t sampleRate,
+    uint64_t fallbackHostNs) noexcept {
+  WasapiOutputTimestampProjection projection{fallbackHostNs, false};
+  if (action != WasapiClockPositionAction::UseHardware ||
+      clockFrequency == 0 || sampleRate == 0 || clockQpc100ns == 0 ||
+      clockQpc100ns > UINT64_MAX / 100ull) {
+    return projection;
+  }
+  const uint64_t playedFrames =
+      wasapiClockUnitsToFrames(clockPosition, clockFrequency, sampleRate);
+  if (playedFrames == UINT64_MAX) return projection;
+  const uint64_t pendingFrames =
+      submittedFrames > playedFrames ? submittedFrames - playedFrames : 0;
+  const uint64_t projectedHostNs = wasapiAdvanceNsByFrames(
+      clockQpc100ns * 100ull, pendingFrames, sampleRate);
+  if (projectedHostNs == 0 || projectedHostNs == UINT64_MAX)
+    return projection;
+  projection.hostTimeNs = projectedHostNs;
+  projection.hardware = true;
+  return projection;
+}
+
 uint64_t wasapiFramesToReferenceTime(uint32_t frames,
                                      uint32_t sampleRate) noexcept {
   if (frames == 0 || sampleRate == 0) return 0;

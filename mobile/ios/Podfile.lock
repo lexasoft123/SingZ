@@ -2278,7 +2278,7 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
-  - SingzCore (0.3.11):
+  - SingzCore (0.3.12):
     - onnxruntime-c (~> 1.23.0)
     - React-Core
   - Yoga (0.0.0)
@@ -2629,7 +2629,7 @@ SPEC CHECKSUMS:
   RNReanimated: 5aa9e73d0f8d3c40d5c9bec396d6a61098db31f0
   RNScreens: de068bbd7d91b820fedac25c597d4b14830de74b
   RNWorklets: 9052122d7f98de547d247e775ea2069839236d38
-  SingzCore: 0c5f7650adb5c645f1e97c1f573c0fe67644a615
+  SingzCore: ba8e518e7c567b22d6ae0ebac811f1de74bbabe4
   Yoga: fe50ab299e578f397fef753cf309c6703a4db29b
 
 PODFILE CHECKSUM: 8b99088491f84cd61ddf12267386592b423939a1

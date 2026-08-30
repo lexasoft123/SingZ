@@ -19,6 +19,8 @@
 #include <zcore/device/audio_input.h>
 #include <zdsp/analysis/capture_adapter.h>
 #include <zcore/device/audio_input_android_registry.h>
+#include <zcore/platform/android/audio_host_android_registry.h>
+#include <zcore/platform/android/audio_host_android_provider.h>
 #include <zcore/legacy/beat_this.h>
 #include <zcore/legacy/beats.h>
 #include <zcore/legacy/melody.h>
@@ -227,6 +229,110 @@ Java_com_singzplayer_split_SingzCore_replaceAudioInputDevices(
     if (jlabel) env->DeleteLocalRef(jlabel);
   }
   singz::replaceAndroidAudioInputDevices(std::move(devices));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_singzplayer_split_SingzCore_replaceAudioHostDevices(
+    JNIEnv* env, jobject /*thiz*/, jobjectArray juids, jobjectArray jlabels,
+    jobjectArray jrates, jintArray jchannels, jbooleanArray jinputs,
+    jbooleanArray joutputs, jobjectArray jtransports,
+    jobjectArray jmonitoringSuitability) {
+  if (!juids || !jlabels || !jrates || !jchannels || !jinputs || !joutputs ||
+      !jtransports || !jmonitoringSuitability) {
+    singz::detail::replaceAndroidAudioHostDevices({});
+    return;
+  }
+  const jsize count = env->GetArrayLength(juids);
+  if (count < 0 || count > 256 || env->GetArrayLength(jlabels) != count ||
+      env->GetArrayLength(jrates) != count ||
+      env->GetArrayLength(jchannels) != count ||
+      env->GetArrayLength(jinputs) != count ||
+      env->GetArrayLength(joutputs) != count ||
+      env->GetArrayLength(jtransports) != count ||
+      env->GetArrayLength(jmonitoringSuitability) != count) {
+    singz::detail::replaceAndroidAudioHostDevices({});
+    return;
+  }
+  std::vector<jint> channels(static_cast<size_t>(count));
+  std::vector<jboolean> inputs(static_cast<size_t>(count));
+  std::vector<jboolean> outputs(static_cast<size_t>(count));
+  if (count != 0) {
+    env->GetIntArrayRegion(jchannels, 0, count, channels.data());
+    env->GetBooleanArrayRegion(jinputs, 0, count, inputs.data());
+    env->GetBooleanArrayRegion(joutputs, 0, count, outputs.data());
+  }
+  std::vector<singz::detail::AndroidAudioHostDevice> devices;
+  devices.reserve(static_cast<size_t>(count));
+  for (jsize index = 0; index < count; ++index) {
+    auto* juid = static_cast<jstring>(
+        env->GetObjectArrayElement(juids, index));
+    auto* jlabel = static_cast<jstring>(
+        env->GetObjectArrayElement(jlabels, index));
+    auto* jtransport = static_cast<jstring>(
+        env->GetObjectArrayElement(jtransports, index));
+    auto* jmonitoring = static_cast<jstring>(
+        env->GetObjectArrayElement(jmonitoringSuitability, index));
+    auto* jdeviceRates = static_cast<jintArray>(
+        env->GetObjectArrayElement(jrates, index));
+    singz::detail::AndroidAudioHostDevice device;
+    device.uid = toStd(env, juid);
+    device.label = toStd(env, jlabel);
+    const std::string transport = toStd(env, jtransport);
+    const std::string monitoring = toStd(env, jmonitoring);
+    const std::string id = device.uid.rfind("android:", 0) == 0
+                               ? device.uid.substr(8)
+                               : std::string();
+    uint64_t parsedId = 0;
+    bool validId = !id.empty();
+    for (char character : id) {
+      validId = validId && character >= '0' && character <= '9';
+      if (!validId) break;
+      parsedId = parsedId * 10 + static_cast<uint64_t>(character - '0');
+      if (parsedId > static_cast<uint64_t>(INT32_MAX)) {
+        validId = false;
+        break;
+      }
+    }
+    device.deviceId = validId ? static_cast<int32_t>(parsedId) : 0;
+    if (jdeviceRates != nullptr) {
+      const jsize rateCount = env->GetArrayLength(jdeviceRates);
+      if (rateCount >= 0 && rateCount <= 64) {
+        std::vector<jint> rates(static_cast<size_t>(rateCount));
+        if (rateCount != 0) {
+          env->GetIntArrayRegion(jdeviceRates, 0, rateCount, rates.data());
+        }
+        device.sampleRates.reserve(static_cast<size_t>(rateCount));
+        for (jint rate : rates) {
+          if (rate >= 8000 && rate <= 384000) {
+            device.sampleRates.push_back(static_cast<double>(rate));
+          }
+        }
+      }
+    }
+    device.channels = channels[static_cast<size_t>(index)] > 0
+                          ? static_cast<uint32_t>(
+                                channels[static_cast<size_t>(index)])
+                          : 0;
+    device.input = inputs[static_cast<size_t>(index)] == JNI_TRUE;
+    device.output = outputs[static_cast<size_t>(index)] == JNI_TRUE;
+    device.transport = singz::detail::androidAudioHostTransport(transport);
+    device.monitoringSuitability =
+        singz::detail::androidAudioHostMonitoringSuitability(monitoring);
+    devices.push_back(std::move(device));
+    if (juid) env->DeleteLocalRef(juid);
+    if (jlabel) env->DeleteLocalRef(jlabel);
+    if (jtransport) env->DeleteLocalRef(jtransport);
+    if (jmonitoring) env->DeleteLocalRef(jmonitoring);
+    if (jdeviceRates) env->DeleteLocalRef(jdeviceRates);
+  }
+  singz::detail::replaceAndroidAudioHostDevices(std::move(devices));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_singzplayer_split_SingzCore_hasAndroidAudioHostProvider(
+    JNIEnv*, jobject /*thiz*/) {
+  const char* marker = singz::detail::androidAudioHostProviderBuildMarker();
+  return marker != nullptr && marker[0] != '\0' ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL

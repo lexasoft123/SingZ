@@ -51,6 +51,7 @@ add_library(singzcore SHARED
     ${SINGZ_NATIVE_ROOT}/mobile/native/bindings/android/zdsp_compile_smoke.cpp)
 add_dependencies(singzcore singz_check_zcore_boundaries)
 target_compile_features(singzcore PRIVATE cxx_std_20)
+target_include_directories(singzcore PRIVATE "${SINGZ_NATIVE_ROOT}")
 set_target_properties(singzcore PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES)

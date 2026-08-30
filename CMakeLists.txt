@@ -69,6 +69,8 @@ add_subdirectory(zdsp)
 get_property(SINGZ_ZCORE_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZCORE_RT_MANIFEST)
 get_property(SINGZ_IOS_AUDIO_HOST_RT_MANIFEST GLOBAL PROPERTY
   SINGZ_IOS_AUDIO_HOST_RT_MANIFEST)
+get_property(SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST GLOBAL PROPERTY
+  SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST)
 get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 
 # Phase 4A monitor callback leaf. The actual host thunk, silence containment,
@@ -256,6 +258,30 @@ if(SINGZ_CORE_TESTS)
       "-DSINGZ_IOS_AUDIO_HOST_RT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
       "-DSINGZ_IOS_AUDIO_HOST_RT_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
       -P "${SINGZ_REPO_ROOT}/cmake/TestIosAudioHostRealtimePolicy.cmake")
+  add_test(NAME android_audio_host_realtime_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST=${SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST}"
+      -P "${SINGZ_REPO_ROOT}/cmake/CheckAndroidAudioHostRealtime.cmake")
+  # #import/raw-byte fixtures are compile-first proofs, so they only exist on
+  # a host whose configured compiler can genuinely accept Clang preprocessing.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(_android_rt_hex_writer_source
+      "${CMAKE_CURRENT_BINARY_DIR}/android-audio-host-rt-hex-writer.cpp")
+    file(WRITE "${_android_rt_hex_writer_source}"
+      "#include <cstdio>\nint nibble(char c){ if(c>='0'&&c<='9') return c-'0'; if(c>='a'&&c<='f') return c-'a'+10; if(c>='A'&&c<='F') return c-'A'+10; return -1; }\nint main(int argc,char** argv){ if(argc!=3) return 2; FILE* out=std::fopen(argv[1],\"wb\"); if(!out) return 3; const char* hex=argv[2]; int result=0; for(int i=0; hex[i]!=0; i+=2){ if(hex[i+1]==0){ result=4; break; } int high=nibble(hex[i]); int low=nibble(hex[i+1]); if(high<0||low<0||std::fputc((high<<4)|low,out)==EOF){ result=5; break; } } if(std::fclose(out)!=0 && result==0) result=6; return result; }\n")
+    add_executable(android_audio_host_rt_hex_writer
+      "${_android_rt_hex_writer_source}")
+    target_compile_features(android_audio_host_rt_hex_writer PRIVATE cxx_std_20)
+    add_test(NAME android_audio_host_realtime_policy_negative
+      COMMAND "${CMAKE_COMMAND}"
+        "-DSINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST=${SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST}"
+        "-DSINGZ_ANDROID_AUDIO_HOST_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckAndroidAudioHostRealtime.cmake"
+        "-DSINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/android-audio-host-rt-negative"
+        "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
+        "-DSINGZ_ANDROID_AUDIO_HOST_RT_HEX_WRITER=$<TARGET_FILE:android_audio_host_rt_hex_writer>"
+        -P "${SINGZ_REPO_ROOT}/cmake/TestAndroidAudioHostRealtimePolicy.cmake")
+  endif()
   add_test(NAME zdsp_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_ZDSP_RT_MANIFEST}"
@@ -290,6 +316,21 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(audio_host_ios_policy_tests PRIVATE
     SingZ::zcore_device)
   add_test(NAME audio_host_ios_policy_tests COMMAND audio_host_ios_policy_tests)
+
+  add_executable(audio_host_android_policy_tests
+    ${SINGZ_REPO_ROOT}/tests/native/audio_host_android_policy_tests.cpp)
+  target_compile_features(audio_host_android_policy_tests PRIVATE cxx_std_20)
+  target_include_directories(audio_host_android_policy_tests PRIVATE
+    "${SINGZ_REPO_ROOT}"
+    "${SINGZ_REPO_ROOT}/zcore/platform/android")
+  target_link_libraries(audio_host_android_policy_tests PRIVATE
+    SingZ::zcore_device)
+  if(TARGET android_audio_host_rt_hex_writer)
+    add_dependencies(audio_host_android_policy_tests
+      android_audio_host_rt_hex_writer)
+  endif()
+  add_test(NAME audio_host_android_policy_tests
+    COMMAND audio_host_android_policy_tests)
 
   if(WIN32)
     add_executable(audio_host_windows_tests

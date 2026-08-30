@@ -118,7 +118,10 @@ void mapAudioHostProcessContext(const singz::AudioHostRenderBlock& block,
   process->structSize = kProcessContextV2RequiredSize;
   process->time = {{block.clockDomain}, {block.streamGeneration}, {block.outputFrame},
                    {block.outputHostTimeNs}, {block.callbackHostTimeNs},
-                   RenderTimeHostValid |
+                   (block.outputTimestampValid ? RenderTimeHostValid : 0u) |
+                       (block.outputTimestampHardware
+                            ? RenderTimeHostHardware
+                            : 0u) |
                        (block.discontinuity != singz::AudioHostDiscontinuityNone
                             ? RenderTimeDiscontinuous
                             : 0u)};

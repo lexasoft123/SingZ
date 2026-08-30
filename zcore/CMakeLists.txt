@@ -129,6 +129,62 @@ add_custom_target(singz_check_ios_audio_host_realtime ALL
   VERBATIM
   COMMENT "Checking iOS AudioHost callback source policy")
 
+set(SINGZ_ANDROID_AUDIO_HOST_RT_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/android/audio_host_android_callback.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/android/audio_host_android_callback_policy.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/android/audio_host_android_callback.h")
+set(_android_audio_host_rt_manifest
+  "${CMAKE_CURRENT_BINARY_DIR}/android-audio-host-realtime-sources.cmake")
+file(WRITE "${_android_audio_host_rt_manifest}"
+  "set(SINGZ_ANDROID_AUDIO_HOST_RT_FILES\n")
+foreach(_source IN LISTS SINGZ_ANDROID_AUDIO_HOST_RT_SOURCES)
+  file(APPEND "${_android_audio_host_rt_manifest}"
+    "  [==[${_source}]==]\n")
+endforeach()
+file(APPEND "${_android_audio_host_rt_manifest}" ")\n")
+file(APPEND "${_android_audio_host_rt_manifest}"
+  "set(SINGZ_ANDROID_AUDIO_HOST_RT_PROJECT_INCLUDE_ROOTS\n"
+  "  [==[${CMAKE_CURRENT_SOURCE_DIR}/include]==]\n"
+  "  [==[${CMAKE_CURRENT_SOURCE_DIR}/platform/android]==]\n"
+  ")\n")
+set_property(GLOBAL PROPERTY SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST
+  "${_android_audio_host_rt_manifest}")
+add_custom_target(singz_check_android_audio_host_realtime ALL
+  COMMAND "${CMAKE_COMMAND}"
+    "-DSINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST=${_android_audio_host_rt_manifest}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/CheckAndroidAudioHostRealtime.cmake"
+  VERBATIM
+  COMMENT "Checking Android AudioHost callback source policy")
+if(ANDROID)
+  string(REGEX REPLACE "^android-" "" _android_api "${ANDROID_PLATFORM}")
+  if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(_android_fixture_target "aarch64-none-linux-android${_android_api}")
+  elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+    set(_android_fixture_target
+      "armv7-none-linux-androideabi${_android_api}")
+  elseif(ANDROID_ABI STREQUAL "x86_64")
+    set(_android_fixture_target "x86_64-none-linux-android${_android_api}")
+  elseif(ANDROID_ABI STREQUAL "x86")
+    set(_android_fixture_target "i686-none-linux-android${_android_api}")
+  else()
+    message(FATAL_ERROR
+      "Android AudioHost RT negative proof has no target for ${ANDROID_ABI}")
+  endif()
+  add_custom_target(singz_check_android_audio_host_realtime_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST=${_android_audio_host_rt_manifest}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CHECKER=${CMAKE_CURRENT_SOURCE_DIR}/../cmake/CheckAndroidAudioHostRealtime.cmake"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/android-audio-host-rt-negative"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_TARGET=${_android_fixture_target}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_SYSROOT=${CMAKE_SYSROOT}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_OBJCOPY=${CMAKE_OBJCOPY}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/TestAndroidAudioHostRealtimePolicy.cmake"
+    VERBATIM
+    COMMENT "Checking Android AudioHost RT negative fixtures with NDK Clang")
+endif()
+
 set(ZCORE_DEVICE_SOURCES
   src/device/audio_input.cpp
   src/device/audio_input_wake.cpp
@@ -136,14 +192,20 @@ set(ZCORE_DEVICE_SOURCES
   src/device/audio_host_fifo.cpp
   src/device/audio_host_unsupported.cpp
   platform/android/audio_input_android_policy.cpp
+  platform/android/audio_host_android_policy.cpp
   platform/ios/audio_host_ios_helpers.cpp)
 if(ANDROID)
   list(APPEND ZCORE_DEVICE_SOURCES
+    ${SINGZ_ANDROID_AUDIO_HOST_RT_SOURCES}
     platform/android/audio_host_android.cpp
+    platform/android/audio_host_android_registry.cpp
     platform/android/audio_input_android.cpp
     platform/android/audio_input_android_registry.cpp
     platform/android/audio_input_wake_android.cpp)
 elseif(APPLE)
+  # Portable callback policy stays available to host-native conformance tests.
+  list(APPEND ZCORE_DEVICE_SOURCES
+    platform/android/audio_host_android_callback_policy.cpp)
   if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND ZCORE_DEVICE_SOURCES
       ${SINGZ_IOS_AUDIO_HOST_RT_SOURCES}
@@ -161,6 +223,7 @@ elseif(APPLE)
   endif()
 elseif(WIN32)
   list(APPEND ZCORE_DEVICE_SOURCES
+    platform/android/audio_host_android_callback_policy.cpp
     platform/windows/audio_host_windows.cpp
     platform/windows/audio_host_windows_helpers.cpp
     platform/windows/audio_input_windows_helpers.cpp
@@ -169,6 +232,7 @@ elseif(WIN32)
     platform/windows/audio_input_wake_windows.cpp)
 else()
   list(APPEND ZCORE_DEVICE_SOURCES
+    platform/android/audio_host_android_callback_policy.cpp
     platform/ios/audio_input_ios_session.cpp
     platform/unsupported/audio_host_unsupported.cpp)
 endif()
@@ -176,7 +240,11 @@ endif()
 add_library(zcore_device STATIC ${ZCORE_DEVICE_SOURCES})
 add_library(SingZ::zcore_device ALIAS zcore_device)
 singz_zcore_target(zcore_device)
-add_dependencies(zcore_device singz_check_ios_audio_host_realtime)
+target_include_directories(zcore_device PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/android")
+add_dependencies(zcore_device
+  singz_check_android_audio_host_realtime
+  singz_check_ios_audio_host_realtime)
 target_link_libraries(zcore_device PUBLIC
   SingZ::zcore_audio
   Threads::Threads)
@@ -192,6 +260,12 @@ elseif(ANDROID)
   # prefab target carries the raw AAudio dependency transitively.
   find_package(oboe REQUIRED CONFIG)
   target_link_libraries(zcore_device PUBLIC oboe::oboe android dl log)
+  set_property(SOURCE ${SINGZ_ANDROID_AUDIO_HOST_RT_SOURCES}
+    APPEND PROPERTY COMPILE_OPTIONS -fno-exceptions -fno-rtti)
+  set_property(SOURCE
+    platform/android/audio_host_android_callback.cpp
+    platform/android/audio_host_android_callback_policy.cpp
+    APPEND PROPERTY COMPILE_DEFINITIONS SINGZ_ANDROID_AUDIO_HOST_RT_COMPILE=1)
 elseif(APPLE)
   target_link_libraries(zcore_device PUBLIC
     "-framework AudioToolbox"

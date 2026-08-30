@@ -90,7 +90,7 @@ void successPathInvokesGraph() {
   float* output[] = {outputSamples};
   singz::AudioHostRenderBlock block{
       input, output, 1, 1, 4, 64, 48000.0, 77, 5, 3, 19, 1000,
-      900000, true, true, 2000, 1000000, 950000,
+      900000, true, true, 2000, 1000000, true, true, 950000,
       singz::AudioHostDiscontinuityNone, true};
   const bool rendered = zdsp::renderAudioHostGraph(&adapter, block);
   if (!rendered) {
@@ -167,7 +167,7 @@ void sourceOnlyPathInvokesGraph() {
   float* output[] = {outputSamples};
   singz::AudioHostRenderBlock block{
       nullptr, output, 0, 1, 4, 64, 48000.0, 77, 5, 3, 19, 0,
-      0, false, false, 2000, 1000000, 950000,
+      0, false, false, 2000, 1000000, true, false, 950000,
       singz::AudioHostDiscontinuityNone, true};
   zdsp::test::resetAllocationTrap();
   zdsp::test::setAllocationTrapEnabled(true);
@@ -219,7 +219,7 @@ int main() {
   float* output[] = {outputSamples};
   singz::AudioHostRenderBlock block{input, output, 1, 1, 17, 64, 96000.0,
                                     41, 7, 9, 12, 4096, 123456, true, true,
-                                    8192, 234567, 200000,
+                                    8192, 234567, true, true, 200000,
                                     singz::AudioHostDiscontinuityRouteChanged, true};
   zdsp::ProcessContext process{};
   zdsp::CaptureTime capture{};
@@ -230,11 +230,37 @@ int main() {
   CHECK(process.time.streamGeneration.value == 9);
   CHECK(process.time.graphFrame.value == 8192);
   CHECK(process.time.renderHostTime.value == 234567);
+  CHECK((process.time.flags & zdsp::RenderTimeHostValid) != 0);
+  CHECK((process.time.flags & zdsp::RenderTimeHostHardware) != 0);
   CHECK(process.discontinuity.reason == zdsp::DiscontinuityReason::RouteGenerationChanged);
   CHECK(capture.sequence == 12);
   CHECK(capture.sourceFrame.value == 4096);
   CHECK(capture.sampleHostTime.value == 123456);
   CHECK(capture.quality == zdsp::CaptureTimestampQuality::Hardware);
+  // Startup without an anchor is explicitly invalid, a fresh hardware anchor
+  // is valid+hardware, and the stale-anchor callback-entry fallback remains
+  // valid but is never mislabeled as hardware.
+  block.outputHostTimeNs = 0;
+  block.outputTimestampValid = false;
+  block.outputTimestampHardware = false;
+  zdsp::mapAudioHostProcessContext(block, &process, &capture);
+  CHECK((process.time.flags & zdsp::RenderTimeHostValid) == 0);
+  CHECK((process.time.flags & zdsp::RenderTimeHostHardware) == 0);
+  block.outputHostTimeNs = 345678;
+  block.outputTimestampValid = true;
+  block.outputTimestampHardware = true;
+  zdsp::mapAudioHostProcessContext(block, &process, &capture);
+  CHECK((process.time.flags & zdsp::RenderTimeHostValid) != 0);
+  CHECK((process.time.flags & zdsp::RenderTimeHostHardware) != 0);
+  block.outputHostTimeNs = block.callbackHostTimeNs;
+  block.outputTimestampHardware = false;
+  block.discontinuity =
+      singz::AudioHostDiscontinuityTimestampQualityChanged;
+  zdsp::mapAudioHostProcessContext(block, &process, &capture);
+  CHECK((process.time.flags & zdsp::RenderTimeHostValid) != 0);
+  CHECK((process.time.flags & zdsp::RenderTimeHostHardware) == 0);
+  CHECK(process.discontinuity.reason ==
+        zdsp::DiscontinuityReason::TimestampQualityChanged);
   expectReason(block, singz::AudioHostDiscontinuityStart,
                zdsp::DiscontinuityReason::StreamGenerationChanged);
   expectReason(block, singz::AudioHostDiscontinuityXRun,

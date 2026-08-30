@@ -39,6 +39,24 @@ on:
       - 'eval/beats/ml-postproc-expected.json'
       - 'scripts/build-analyze-host.sh'
     tags: ['v*']
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'zcore/**'
+      - 'zdsp/**'
+      - 'third_party/native/**'
+      - 'tools/native/**'
+      - '.github/workflows/android.yml'
+      - 'docs/release-notes/**'
+      - 'scripts/store-notes.cjs'
+      - 'tests/native/**'
+      - 'scripts/run-core-host-tests.sh'
+      - 'eval/mlgrid-parity.mjs'
+      - 'eval/beats/ml-fixtures.mjs'
+      - 'eval/beats/ml-postproc-expected.json'
+      - 'scripts/build-analyze-host.sh'
   # Keeps main's ccache warm. Actions caches cannot be shared between tags —
   # a run reads only its own ref and the DEFAULT BRANCH — so a tag build can
   # never inherit from a sibling tag, and the artifacts job otherwise runs on
@@ -72,14 +90,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Every mobile push: the cheap canary only. npm ci runs postinstall, which
+  # Every mobile push/PR: JS/JVM checks plus the dormant AudioHost two-ABI NDK
+  # compile/package proof. npm ci runs postinstall, which
   # applies the audio-api C++ patches (fails loud on upstream drift),
   # synthesizes the bundled sample song, and bakes the Drive config —
-  # everything that can rot does so here, in ~3 min, without an NDK build.
+  # everything that can rot does so here before product audio can be touched.
   canary:
-    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -127,6 +148,77 @@ jobs:
       - name: Cache-currency conformance (Kotlin)
         run: ./gradlew :app:testDebugUnitTest
         working-directory: mobile/android
+
+      # Compile the dormant paired-stream provider for both shipping phone
+      # ABIs on every PR. The probe keeps the provider object in the shared
+      # library without opening product audio, and proves that this is more
+      # than a host-only policy-test build.
+      - name: Android AudioHost NDK conformance
+        run: ./gradlew :app:externalNativeBuildDebug :app:assembleDebug --no-daemon
+        working-directory: mobile/android
+
+      # Negative RT fixtures are intentionally not part of every product
+      # build. Run the explicit target for each shipping ABI here; it fails
+      # closed unless the configured NDK Clang compiles every bypass fixture.
+      - name: Android AudioHost RT negative policy
+        run: |
+          for abi in arm64-v8a armeabi-v7a; do
+            mapfile -t build_files < <(find mobile/android/app/.cxx/Debug -path "*/$abi/build.ninja" -type f -print)
+            test "${#build_files[@]}" -gt 0
+            for build_file in "${build_files[@]}"; do
+              cmake --build "$(dirname "$build_file")" --target singz_check_android_audio_host_realtime_negative
+            done
+          done
+
+      - name: Android AudioHost provider symbols and callback flags
+        run: |
+          for abi in arm64-v8a armeabi-v7a; do
+            lib="mobile/android/app/build/intermediates/cmake/debug/obj/$abi/libsingzcore.so"
+            test -f "$lib"
+            nm_file="$RUNNER_TEMP/singzcore-$abi.nm"
+            strings_file="$RUNNER_TEMP/singzcore-$abi.strings"
+            "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D "$lib" > "$nm_file"
+            strings "$lib" > "$strings_file"
+            grep -F 'Java_com_singzplayer_split_SingzCore_hasAndroidAudioHostProvider' "$nm_file"
+            grep -F 'singz.android.oboe.audio_host.phase3d' "$strings_file"
+
+            valid_compile_dbs=()
+            while IFS= read -r compile_db; do
+              if jq -e '
+                [
+                  .[] |
+                  select(.file | test("/zcore/platform/android/audio_host_android_callback(_policy)?\\.cpp$")) |
+                  {file, command}
+                ] as $entries |
+                ($entries | length) == 2 and
+                ([$entries[].file | select(endswith("/audio_host_android_callback.cpp"))] | length) == 1 and
+                ([$entries[].file | select(endswith("/audio_host_android_callback_policy.cpp"))] | length) == 1 and
+                all($entries[];
+                  (.command | contains("-DSINGZ_ANDROID_AUDIO_HOST_RT_COMPILE=1")) and
+                  (.command | contains("-fno-exceptions")) and
+                  (.command | contains("-fno-rtti"))
+                )
+              ' "$compile_db" > /dev/null; then
+                valid_compile_dbs+=("$compile_db")
+              fi
+            done < <(find mobile/android/app/.cxx/Debug -path "*/$abi/compile_commands.json" -type f -print)
+            test "${#valid_compile_dbs[@]}" -eq 1
+
+            compile_dir="$(dirname "${valid_compile_dbs[0]}")"
+            callback_objects=(
+              "$compile_dir/singz-native/zcore/CMakeFiles/zcore_device.dir/platform/android/audio_host_android_callback.cpp.o"
+              "$compile_dir/singz-native/zcore/CMakeFiles/zcore_device.dir/platform/android/audio_host_android_callback_policy.cpp.o"
+            )
+            test "${#callback_objects[@]}" -eq 2
+            for object in "${callback_objects[@]}"; do
+              test -s "$object"
+            done
+          done
+
+          apk_list="$RUNNER_TEMP/singz-debug-apk.list"
+          unzip -l mobile/android/app/build/outputs/apk/debug/app-debug.apk > "$apk_list"
+          grep -F 'lib/arm64-v8a/libsingzcore.so' "$apk_list"
+          grep -F 'lib/armeabi-v7a/libsingzcore.so' "$apk_list"
 
       # The C++ core's ORT-free pieces, compiled for the host — no NDK, no
       # device: the resampler's quality claim (>90 dB SNR, measured) and the

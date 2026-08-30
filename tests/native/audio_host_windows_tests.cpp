@@ -546,6 +546,68 @@ int main() {
         10001000);
   CHECK(singz::detail::wasapiAdvanceNsByFrames(UINT64_MAX - 1, 480,
                                                 48000) == UINT64_MAX);
+  using OutputTimestamp = singz::detail::WasapiOutputTimestampProjection;
+  const OutputTimestamp projectedOutput =
+      singz::detail::projectWasapiOutputTimestamp(
+          singz::detail::WasapiClockPositionAction::UseHardware,
+          48000, 10000000, 48000, 48480, 48000, 77);
+  CHECK(projectedOutput.hardware);
+  CHECK(projectedOutput.hostTimeNs == 1010000000);
+  const OutputTimestamp fallbackOutput =
+      singz::detail::projectWasapiOutputTimestamp(
+          singz::detail::WasapiClockPositionAction::UseQpcFallback,
+          48000, 10000000, 48000, 48480, 48000, 77);
+  CHECK(!fallbackOutput.hardware);
+  CHECK(fallbackOutput.hostTimeNs == 77);
+  CHECK(!singz::detail::projectWasapiOutputTimestamp(
+             singz::detail::WasapiClockPositionAction::UseHardware,
+             48000, 0, 48000, 48480, 48000, 77).hardware);
+  CHECK(!singz::detail::projectWasapiOutputTimestamp(
+             singz::detail::WasapiClockPositionAction::UseHardware,
+             48000, UINT64_MAX / 100ull + 1, 48000, 48480, 48000, 77)
+             .hardware);
+  CHECK(!singz::detail::projectWasapiOutputTimestamp(
+             singz::detail::WasapiClockPositionAction::UseHardware,
+             UINT64_MAX, 1, 1, UINT64_MAX, UINT32_MAX, 77).hardware);
+  // Exercise the provider's exact S_OK -> E_FAIL -> S_OK clock-quality
+  // sequence. A non-device-loss GetPosition failure keeps rendering from QPC,
+  // but the graph must see both provenance edges and the recovered anchor.
+  const OutputTimestamp clockSequence[] = {
+      singz::detail::projectWasapiOutputTimestamp(
+          singz::detail::classifyWasapiClockPosition(S_OK),
+          48000, 10000000, 48000, 48480, 48000, 77),
+      singz::detail::projectWasapiOutputTimestamp(
+          singz::detail::classifyWasapiClockPosition(E_FAIL),
+          48480, 10100000, 48000, 48960, 48000, 88),
+      singz::detail::projectWasapiOutputTimestamp(
+          singz::detail::classifyWasapiClockPosition(S_OK),
+          48960, 10200000, 48000, 49440, 48000, 99),
+  };
+  CHECK(clockSequence[0].hardware);
+  CHECK(!clockSequence[1].hardware);
+  CHECK(clockSequence[1].hostTimeNs == 88);
+  CHECK(clockSequence[2].hardware);
+  singz::AudioHostOutputTimeline wasapiTimeline;
+  auto timestampTransition = singz::resolveAudioHostOutputTimeline(
+      &wasapiTimeline, true, 0, clockSequence[0].hardware, 480, 0);
+  CHECK(timestampTransition.discontinuity ==
+        singz::AudioHostDiscontinuityNone);
+  timestampTransition = singz::resolveAudioHostOutputTimeline(
+      &wasapiTimeline, true, 480, clockSequence[1].hardware, 480, 480);
+  CHECK((timestampTransition.discontinuity &
+         singz::AudioHostDiscontinuityTimestampQualityChanged) != 0);
+  CHECK((timestampTransition.discontinuity &
+         singz::AudioHostDiscontinuityClockReanchored) == 0);
+  timestampTransition = singz::resolveAudioHostOutputTimeline(
+      &wasapiTimeline, true, 960, clockSequence[2].hardware, 480, 960);
+  CHECK((timestampTransition.discontinuity &
+         singz::AudioHostDiscontinuityTimestampQualityChanged) != 0);
+  CHECK((timestampTransition.discontinuity &
+         singz::AudioHostDiscontinuityClockReanchored) != 0);
+  timestampTransition = singz::resolveAudioHostOutputTimeline(
+      &wasapiTimeline, true, 1440, projectedOutput.hardware, 480, 1440);
+  CHECK(timestampTransition.discontinuity ==
+        singz::AudioHostDiscontinuityNone);
   CHECK(singz::detail::wasapiFramesToReferenceTime(1, 44100) == 227);
   CHECK(singz::detail::wasapiFramesToReferenceTime(64, 44100) == 14512);
   CHECK(singz::detail::wasapiFramesToReferenceTime(441, 44100) == 100000);

@@ -410,11 +410,41 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
         note = AudioInputPolicy.warning(type)
       )
     }
-    SingzCore.replaceAudioInputDevices(
-      devices.map { it.uid }.toTypedArray(),
-      devices.map { it.label }.toTypedArray(),
-      devices.map { it.sampleRate }.toDoubleArray(),
-      devices.map { it.channels }.toIntArray()
+    AudioInputPolicy.publishCaptureThenBestEffortHost(
+      publishCapture = {
+        SingzCore.replaceAudioInputDevices(
+          devices.map { it.uid }.toTypedArray(),
+          devices.map { it.label }.toTypedArray(),
+          devices.map { it.sampleRate }.toDoubleArray(),
+          devices.map { it.channels }.toIntArray()
+        )
+      },
+      publishHost = {
+        // Dormant only: Java owns inventory; this opens no stream, route, or
+        // focus. A host-registry JNI failure must not break working capture.
+        val hostDevices = audioManager.getDevices(AudioManager.GET_DEVICES_ALL)
+          .filter { it.id > 0 && (it.isSource || it.isSink) }
+          .distinctBy { Triple(it.id, it.isSource, it.isSink) }
+          .sortedBy { it.id }
+          .take(256)
+        SingzCore.replaceAudioHostDevices(
+          hostDevices.map { AudioInputPolicy.portableUid(it.id) }.toTypedArray(),
+          hostDevices.map {
+            it.productName?.toString()?.take(256)?.ifBlank { null }
+              ?: "Android audio endpoint ${it.id}"
+          }.toTypedArray(),
+          hostDevices.map { AudioInputPolicy.hostSampleRates(it.sampleRates) }.toTypedArray(),
+          hostDevices.map {
+            AudioInputPolicy.channelCount(it.channelCounts, it.channelMasks, it.channelIndexMasks)
+          }.toIntArray(),
+          hostDevices.map { it.isSource }.toBooleanArray(),
+          hostDevices.map { it.isSink }.toBooleanArray(),
+          hostDevices.map { AudioInputPolicy.hostTransport(it.type) }.toTypedArray(),
+          hostDevices.map {
+            AudioInputPolicy.hostMonitoringSuitability(it.type)
+          }.toTypedArray()
+        )
+      }
     )
     return devices
   }

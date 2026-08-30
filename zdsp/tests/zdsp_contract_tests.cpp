@@ -373,6 +373,10 @@ void discontinuityResetOwnership() {
       {DiscontinuityReason::None, DiscontinuityFlagNone};
   expect(!succeeded(validateProcessContext(untypedRenderMark)),
          "reject render-time discontinuity mark without typed reason");
+  ProcessContext hardwareWithoutValid = marked;
+  hardwareWithoutValid.time.flags |= RenderTimeHostHardware;
+  expect(!succeeded(validateProcessContext(hardwareWithoutValid)),
+         "reject hardware render time without a valid host time");
   fixture.host.processor.functions->process(fixture.host.processor.state, &marked, &input, 1, &output, 1);
   expect(prototypeMeter(fixture.host.processor).resetCount == 0,
          "processor does not self-reset from marked process context");

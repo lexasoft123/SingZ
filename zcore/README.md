@@ -42,6 +42,11 @@ That pod is a temporary Phase 0A compatibility exception: it still combines
 device, media, analysis and ORT. Component pods or a CMake-built XCFramework
 must isolate dependencies and flags before native graph rendering.
 
+Android's Phase 3D `AudioHost` is a dormant paired-stream Oboe provider in
+`platform/android`, with a separately scanned callback leaf and Java-owned
+inventory registry. Its packaging probe has no audio side effects; product
+playback/focus remains owned by RNAudioAPI until Phase 4.
+
 Public lifecycle APIs live under `zcore/device`, callback transport under
 `zcore/audio`, and delivery-thread analysis under `zcore/legacy`. Consumers
 use rooted `<zcore/...>` includes; only `zcore/include` is exported.

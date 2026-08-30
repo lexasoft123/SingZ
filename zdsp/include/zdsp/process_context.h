@@ -8,6 +8,7 @@ enum RenderTimeFlags : uint32_t {
   RenderTimeNone = 0,
   RenderTimeHostValid = 1u << 0,
   RenderTimeDiscontinuous = 1u << 1,
+  RenderTimeHostHardware = 1u << 2,
 };
 struct RenderTime {
   ClockDomainId clockDomain;

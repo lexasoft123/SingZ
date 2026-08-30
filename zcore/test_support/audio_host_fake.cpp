@@ -232,7 +232,7 @@ class FakeAudioHostBackend final : public AudioHostBackend {
           routeGeneration_.load(std::memory_order_relaxed),
           streamGeneration_.load(std::memory_order_relaxed), index,
           hasInput ? outputFrame : 0, hasInput ? hostNs : 0, hasInput, false,
-          outputFrame, hostNs, hostNs, discontinuity, true};
+          outputFrame, hostNs, hostNs != 0, false, hostNs, discontinuity, true};
       invokeAudioHostCallback(&endpoint_, block);
       outputFrame = advanceAudioHostFrame(outputFrame, frames);
     }

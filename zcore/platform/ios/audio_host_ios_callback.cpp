@@ -204,6 +204,8 @@ OSStatus iosAudioHostRenderCallback(void* context,
       false,
       timeline.outputFrame,
       hostTimeValid ? hardwareNs : callbackNs,
+      hostTimeValid ? hardwareNs != 0 : callbackNs != 0,
+      hostTimeValid,
       callbackNs,
       discontinuity,
       true};

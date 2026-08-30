@@ -32,8 +32,18 @@ string(REGEX MATCHALL
   "Java_com_singzplayer_split_SingzCore_[A-Za-z0-9_]+"
   _jni_exports "${_dynamic_symbols}")
 list(LENGTH _jni_exports _jni_export_count)
-if(NOT _jni_export_count EQUAL 16)
+if(NOT _jni_export_count EQUAL 18)
   message(FATAL_ERROR
-    "libsingzcore must preserve exactly 16 JNI product exports; found "
+    "libsingzcore must preserve exactly 18 JNI product exports; found "
     "${_jni_export_count}")
+endif()
+if(NOT _dynamic_symbols MATCHES
+   "Java_com_singzplayer_split_SingzCore_hasAndroidAudioHostProvider")
+  message(FATAL_ERROR
+    "libsingzcore is missing the dormant Android AudioHost provider probe")
+endif()
+if(NOT _dynamic_symbols MATCHES
+   "Java_com_singzplayer_split_SingzCore_replaceAudioHostDevices")
+  message(FATAL_ERROR
+    "libsingzcore is missing the dormant Android AudioHost inventory bridge")
 endif()
