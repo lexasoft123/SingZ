@@ -130,6 +130,16 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
   padding:40px 28px 64px;line-height:1.5}
 .wrap{max-width:1080px;margin:0 auto;display:grid;grid-template-columns:minmax(280px,380px) 1fr;
   gap:34px;align-items:start}
+/* Two explicit columns rather than letting five siblings auto-place. The
+   captions are the thing being read and copied, so they take the WIDE column
+   beside the poster; downloads stack under the poster in the narrow one.
+   Auto-placement put the captions on the row BELOW the poster, in the 380px
+   column, which is how a 1024-character caption came to be read 40 characters
+   at a time. Wrapping each column keeps that fixed without span arithmetic that
+   would change with --downloads present or absent. min-width:0 because a grid
+   item's default min-width:auto lets a long unbroken URL push the column wider
+   than its track. */
+.col{min-width:0;display:flex;flex-direction:column;gap:34px}
 header{grid-column:1/-1;display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
   padding-bottom:20px;border-bottom:1px solid var(--line);margin-bottom:6px}
 h1{font-family:'Bricolage',system-ui,sans-serif;font-size:30px;font-weight:800;letter-spacing:-.02em}
@@ -191,6 +201,7 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
     <span class="hint">Copy a caption, copy the image, paste both into the channel.</span>
   </header>
 
+  <div class="col">
   <section>
     <h2>Poster</h2>
     <div class="poster">
@@ -222,7 +233,9 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
       </a>`).join('\n      ')}
     </div>
   </section>` : ''}
+  </div>
 
+  <div class="col">
   <section>
     <div class="card">
       <div class="card-top">
@@ -242,6 +255,7 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
       <div class="row"><button class="primary" data-copy="ru">Copy Russian</button></div>
     </div>
   </section>
+  </div>
 
   <p class="note">
     Telegram allows ${LIMIT} characters on a photo caption and recompresses photos past
