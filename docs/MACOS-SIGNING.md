@@ -96,6 +96,18 @@ keychain you prepared, `CSC_NAME` set to the identity **bare** (no
 `Developer ID Application: ` prefix — that form is rejected), and `CSC_LINK`
 unset.
 
+The `.p12` export password that `security import` wants is kept in the SOPS
+store as `mac_p12_password`, and `scripts/with-apple-secrets.sh` exports it as
+**`SINGZ_MAC_P12_PASSWORD`**. Nothing consumes it automatically — you hand it
+to `security import` yourself; every iOS lane runs fine without it.
+
+It is deliberately **not** called `CSC_KEY_PASSWORD`, even though that is the
+name electron-builder would recognise. `scripts/afterPack.cjs` reads
+`CSC_LINK || CSC_NAME || CSC_KEY_PASSWORD` as "real signing is configured"
+and skips its ad-hoc fallback — so exporting the password under that name on
+a machine with no importable identity would produce a build that is neither
+Developer ID-signed nor ad-hoc signed, i.e. one macOS refuses to open at all.
+
 ## What actually signs and notarizes it
 
 `electron-builder.yml`'s `mac` block carries `hardenedRuntime: true`,
