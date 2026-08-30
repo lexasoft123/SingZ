@@ -12,7 +12,12 @@
  * re-evaluates) or Xcode keeps building the stale copy.
  */
 const { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } = require('node:fs')
+const { execFileSync } = require('node:child_process')
 const { dirname, join } = require('node:path')
+const {
+  iosAudioHostCallbackFiles,
+  zcoreDeviceCallbackFiles,
+} = require('./native-component-sources')
 
 const mobileRoot = join(__dirname, '..')
 const repoRoot = join(mobileRoot, '..')
@@ -20,6 +25,13 @@ const src = join(repoRoot, 'zcore')
 const dst = join(mobileRoot, 'ios', 'SingzCore', 'core')
 const dspSrc = join(repoRoot, 'zdsp')
 const dspDst = join(mobileRoot, 'ios', 'SingzCore', 'dsp')
+
+// The broad pod's exclusions and the strict pods' inclusions must move as one
+// ownership boundary. Refuse to regenerate either side if CMake and the
+// shared iOS manifest have drifted.
+execFileSync(process.execPath, [
+  join(__dirname, 'check-native-component-sources.js'),
+], { stdio: 'inherit' })
 
 // The previous materialization is intentionally read-only. Some Node/macOS
 // combinations refuse recursive removal of those files even though the parent
@@ -36,12 +48,13 @@ const unlockTree = (dir) => {
 unlockTree(dst)
 rmSync(dst, { recursive: true, force: true })
 let n = 0
-const copyTree = (from, to, accept) => {
+const copyTree = (from, to, accept, relative = '') => {
   mkdirSync(to, { recursive: true })
   for (const e of readdirSync(from, { withFileTypes: true })) {
+    const entryRelative = relative ? `${relative}/${e.name}` : e.name
     if (e.isDirectory()) {
-      copyTree(join(from, e.name), join(to, e.name), accept)
-    } else if (accept(e.name)) {
+      copyTree(join(from, e.name), join(to, e.name), accept, entryRelative)
+    } else if (accept(e.name, entryRelative)) {
       copyFileSync(join(from, e.name), join(to, e.name))
       chmodSync(join(to, e.name), 0o444)
       n++
@@ -52,18 +65,23 @@ const copyTree = (from, to, accept) => {
 // Public headers, portable sources and the iOS provider are the pod's only
 // inputs. Android/macOS/Windows providers and product bindings never enter
 // the Apple artifact.
+const callbackDefinitions = new Set(
+  [...zcoreDeviceCallbackFiles, ...iosAudioHostCallbackFiles]
+    .filter((file) => file.endsWith('.cpp'))
+)
 copyTree(join(src, 'include'), join(dst, 'include'), name => /\.(h|hpp)$/.test(name))
 // Private implementation headers under src/ travel beside their translation
 // units; they are not exported by the pod but quoted includes must resolve.
-copyTree(join(src, 'src'), join(dst, 'src'), name => /\.(cpp|mm|h|hpp)$/.test(name))
+copyTree(join(src, 'src'), join(dst, 'src'), (name, relative) =>
+  /\.(cpp|mm|h|hpp)$/.test(name) &&
+  !callbackDefinitions.has(`src/${relative}`))
 copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
-  name => /\.(cpp|mm|h|hpp)$/.test(name))
+  (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
+    !callbackDefinitions.has(`platform/ios/${relative}`))
 
-// Phase 2 capture analysis plus the Phase 4 decoded-source foundation. This is
-// an explicit allowlist: other DSP nodes, the fixture codec and fake host must
-// not silently enter the product because a recursive pod glob found them.
-// Component pods or a CMake-built XCFramework replace the broad zcore
-// compatibility half before native graph rendering.
+// Phase 2 capture analysis only. The callback-safe runtime and decoded source
+// now belong to the isolated SingzDspRuntime component; this compatibility pod
+// must not compile a second copy of their symbols.
 unlockTree(dspDst)
 rmSync(dspDst, { recursive: true, force: true })
 const dspAllowlist = [
@@ -76,11 +94,8 @@ const dspAllowlist = [
   'include/zdsp/latency.h',
   'include/zdsp/analysis/live_input_analysis.h',
   'include/zdsp/analysis/capture_adapter.h',
-  'include/zdsp/decoded_buffer_source.h',
-  'src/api/contracts.cpp',
   'src/analysis/live_input_analyzer.cpp',
   'src/analysis/capture_adapter.cpp',
-  'src/runtime/decoded_buffer_source.cpp',
 ]
 for (const relative of dspAllowlist) {
   const target = join(dspDst, relative)

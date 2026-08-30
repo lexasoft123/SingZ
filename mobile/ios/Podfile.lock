@@ -1,8 +1,9 @@
 PODS:
   - FBLazyVector (0.86.0)
-  - FolderAccess (1.0.3):
+  - FolderAccess (1.0.4):
     - React-Core
     - SingzCore
+    - SingzDspRuntime
   - hermes-engine (250829098.0.14):
     - hermes-engine/Pre-built (= 250829098.0.14)
   - hermes-engine/Pre-built (250829098.0.14)
@@ -2278,9 +2279,12 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
-  - SingzCore (0.3.12):
+  - SingzCore (0.3.13):
     - onnxruntime-c (~> 1.23.0)
     - React-Core
+    - SingzDeviceCallback
+  - SingzDeviceCallback (0.1.0)
+  - SingzDspRuntime (0.1.0)
   - Yoga (0.0.0)
 
 DEPENDENCIES:
@@ -2368,6 +2372,8 @@ DEPENDENCIES:
   - RNScreens (from `../node_modules/react-native-screens`)
   - RNWorklets (from `../node_modules/react-native-worklets`)
   - SingzCore (from `./SingzCore`)
+  - SingzDeviceCallback (from `./SingzDeviceCallback`)
+  - SingzDspRuntime (from `./SingzDspRuntime`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
 
 SPEC REPOS:
@@ -2542,12 +2548,16 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native-worklets"
   SingzCore:
     :path: "./SingzCore"
+  SingzDeviceCallback:
+    :path: "./SingzDeviceCallback"
+  SingzDspRuntime:
+    :path: "./SingzDspRuntime"
   Yoga:
     :path: "../node_modules/react-native/ReactCommon/yoga"
 
 SPEC CHECKSUMS:
   FBLazyVector: b3e7ad108f0d882e30445c5527d774e3fd432f3d
-  FolderAccess: b140c91d9846b82d86c43bdf76d28e455b9390b5
+  FolderAccess: a88f7670163eba758e79b83fff34f9004849f67d
   hermes-engine: 2df917d6b667bd908500d073862544faffd2ee15
   onnxruntime-c: 3174c63a963d9abbc2bf9627e3d622819c0ed5f7
   RCTDeprecation: 2a74a2c57675e64419bd89078efde81f7c1de90b
@@ -2629,9 +2639,11 @@ SPEC CHECKSUMS:
   RNReanimated: 5aa9e73d0f8d3c40d5c9bec396d6a61098db31f0
   RNScreens: de068bbd7d91b820fedac25c597d4b14830de74b
   RNWorklets: 9052122d7f98de547d247e775ea2069839236d38
-  SingzCore: ba8e518e7c567b22d6ae0ebac811f1de74bbabe4
+  SingzCore: 25de72cd45876eab9dc275142b4f3ac413f9fa6f
+  SingzDeviceCallback: 34dbf61665b0e42edc7880f58f18fd01a7c6cc17
+  SingzDspRuntime: deb0bd2faf01e84869bfa86165d4f53c7d9e0cfc
   Yoga: fe50ab299e578f397fef753cf309c6703a4db29b
 
-PODFILE CHECKSUM: 8b99088491f84cd61ddf12267386592b423939a1
+PODFILE CHECKSUM: bfd5744a4e76fc270a14e71b9d9bcff9943a0d54
 
 COCOAPODS: 1.17.0

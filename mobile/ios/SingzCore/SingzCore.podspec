@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.3.12'
+  s.version      = '0.3.13'
   s.summary      = 'SingZ shared C++ core: audio input, stem split, and beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -20,19 +20,17 @@ Pod::Spec.new do |s|
   # they compile standalone and fail; they ride in preserve_paths with the
   # headers instead. This broad pod remains a Phase 0A packaging compatibility
   # exception: it still combines device, media, analysis and ORT under one
-  # target. Before native graph rendering, component pods or a CMake-built
-  # XCFramework must isolate callback-safe targets and their compile flags.
+  # target. The callback-safe graph runtime has moved to SingzDspRuntime and
+  # the portable/iOS render callback definitions to SingzDeviceCallback. Do
+  # not widen this compatibility source list back over either strict closure.
   s.source_files = '*.{h,mm}', 'core/include/**/*.{h,hpp}',
                    'core/src/**/*.{cpp,mm}',
                    'core/platform/ios/**/*.{cpp,mm}',
                    'dsp/include/zdsp/{types,events,clock,audio_bus,process_context,processor,latency}.h',
                    'dsp/include/zdsp/analysis/live_input_analysis.h',
                    'dsp/include/zdsp/analysis/capture_adapter.h',
-                   'dsp/include/zdsp/decoded_buffer_source.h',
-                   'dsp/src/api/contracts.cpp',
                    'dsp/src/analysis/live_input_analyzer.cpp',
                    'dsp/src/analysis/capture_adapter.cpp',
-                   'dsp/src/runtime/decoded_buffer_source.cpp',
                    'flac/src/*.c'
   s.preserve_paths = 'flac/**/*'
   s.pod_target_xcconfig = {
@@ -52,6 +50,7 @@ Pod::Spec.new do |s|
   }
   s.frameworks   = 'AudioToolbox', 'AVFoundation', 'BackgroundTasks', 'UIKit'
   s.dependency 'React-Core'
+  s.dependency 'SingzDeviceCallback'
   # Same 1.23.x minor the desktop packs and the Android AAR pin (trunk's
   # closest pod to their 1.23.2 is 1.23.0 — a patch-level skew the Phase-2
   # stem-correlation fixture guards; a plain '~> 1.23' would silently

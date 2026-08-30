@@ -8,7 +8,7 @@
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
-    "postinstall": "node scripts/patch-audio-api.js && node scripts/apply-gdrive-config.js && node scripts/build-analysis.mjs && node scripts/build-training.mjs && node scripts/sync-singzcore.js && node scripts/make-sample.js && node scripts/ccache-xcode-conf.js"
+    "postinstall": "node scripts/patch-audio-api.js && node scripts/apply-gdrive-config.js && node scripts/build-analysis.mjs && node scripts/build-training.mjs && node scripts/sync-singzcore.js && node scripts/sync-singz-dsp-runtime.js && node scripts/make-sample.js && node scripts/ccache-xcode-conf.js"
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.86.0",

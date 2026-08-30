@@ -117,3 +117,6 @@ yarn-error.log
 ios/build-device/
 gdrive.config.json
 ios/build-sim/
+/ios/SingzDspRuntime/zdsp/
+/ios/SingzDspRuntime/zcore/
+/ios/SingzDeviceCallback/zcore/

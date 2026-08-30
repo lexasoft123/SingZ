@@ -1229,6 +1229,38 @@ cutover):
   manifest/closure RT policy with negative bypass fixtures. Physical Android
   hardware evidence remains pending and is not inferred from ABI builds.
 
+Phase iOS-A product packaging checkpoint implemented 2026-08-30 (still not a
+product cutover):
+
+- A dedicated `SingzDspRuntime` component pod compiles the exact CMake
+  `zdsp_runtime` plus `zdsp_host_adapter` source set with the same C++20,
+  real-time-leaf, no-exception, no-RTTI and hidden-visibility policy. The pod
+  has no React, codec, ML or Apple audio-session dependency.
+- The generated pod inputs come from the explicit shared manifest in
+  `mobile/scripts/native-component-sources.js`, materialized by
+  `sync-singz-dsp-runtime.js`; top-level `zdsp/` and `zcore/` remain
+  authoritative. `--check` rejects missing, stale or extra generated files.
+  The existing broad `SingzCore` compatibility pod is narrowed so it no
+  longer owns graph contracts, decoded-buffer sources or runtime symbols.
+- The app links an inert `NativeAudioRuntime.status()` capability only. Its
+  retained typed references prove every runtime boundary reached the final
+  binary, while its API has no open/start/session command and reports the
+  owner as `legacy`. RNAudioAPI and the existing AVAudioSession coordinator
+  remain the only product owners.
+- A separate `SingzDeviceCallback` pod owns exact CMake
+  `zcore_device_callback` membership plus the iOS RemoteIO callback pair. Its
+  prefix compile guard proves C++20, both RT compile markers and disabled
+  exceptions/RTTI were applied to the actual target. The broad SingzCore pod
+  no longer compiles those definitions and depends on the strict archive for
+  link access. Both component sets come from one iOS manifest whose checker
+  performs normalized set equality against CMake before every sync.
+- Device arm64 and universal simulator arm64/x86_64 component archives, a
+  final dead-stripped Release app compile, symbol/literal checks, actual flag
+  compile assertions, exception/RTTI ABI rejection, duplicate-owner and
+  forbidden-dependency gates are the packaging evidence. Phase iOS-B must still prepare
+  native sources/transport state and implement ADR-0008's serialized handoff;
+  it may not make this packaging probe an independent session owner.
+
 Physical-device evidence is still required before Phase 4: wired and USB
 loopback latency, callback-size distribution, sustained duplex xruns/deadline
 misses, channel maps above stereo, interruption/media-service recovery, and

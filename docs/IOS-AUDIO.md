@@ -109,6 +109,56 @@ The simulator can prove compilation and lifecycle wiring, but not microphone
 route enumeration, channel mapping, Bluetooth/CarPlay behavior, or latency.
 Those require a physical iPhone or iPad and the intended accessories.
 
+## Product packaging checkpoint (Phase iOS-A)
+
+The iOS application now statically links the callback-safe `zdsp_runtime` and
+`AudioHostGraphAdapter` through the dedicated `SingzDspRuntime` component pod.
+Its source list is the exact CMake runtime/adapter list, compiled privately as
+C++20 with `SINGZ_REALTIME_LEAF=1`, exceptions and RTTI disabled, and hidden
+visibility. It has no React Native, codec, ONNX Runtime or Apple audio-session
+dependency. Top-level `zdsp/` and `zcore/` remain authoritative; postinstall
+materializes a read-only, ignored copy from an explicit allowlist, and CI
+checks that the copy is byte-current.
+
+`SingzCore` still packages the existing capture/media/analysis compatibility
+surface, but no longer compiles the graph contracts or decoded-buffer/runtime
+translation units. This gives every graph symbol one iOS product owner without
+widening the compatibility pod's glob.
+
+The callback path underneath the host is isolated as well. The dedicated
+`SingzDeviceCallback` pod owns the exact CMake `zcore_device_callback` target
+membership plus the iOS RemoteIO callback source/header. `SingzCore` retains
+device inventory, session, lifecycle, worker, media and analysis ownership but
+no longer compiles those callback definitions. The callback pod applies C++20,
+the real-time and iOS callback compile markers, no exceptions/RTTI and hidden
+visibility to every source through a compile-asserting prefix guard. Archive
+gates reject exception personality/C++ ABI support, product/control
+dependencies and exported C++ definitions while allowing the required
+AudioToolbox render import.
+
+`mobile/scripts/native-component-sources.js` is the iOS materialization
+manifest. Before syncing, `check-native-component-sources.js` parses the four
+CMake memberships (`zdsp_runtime`, `zdsp_host_adapter`,
+`zcore_device_callback`, and the iOS AudioHost callback pair) and compares
+normalized sets exactly. Any source added or removed on either side fails;
+recursive pod globs see only that closed generated set.
+
+The application bridge is deliberately inert. `NativeAudioRuntime.status()`
+reports the component build ID, graph and host-adapter capabilities, and
+`ownership: "legacy"`; it exposes no open, start, stop or session command. The
+probe holds typed references to each runtime boundary so a successful final
+app link and binary literal/symbol check prove that the implementation reached
+the app rather than merely leaving an unused archive beside it.
+
+Phase iOS-A changes no audible path: RNAudioAPI still owns song/metronome
+output and the existing coordinator still owns `AVAudioSession`. Phase iOS-B
+must add the transport/source preparation and serialized ADR-0008 handoff
+before any native host may open or start. Physical-device listening and route,
+interruption, buffer and latency evidence remain later gates. The PR canary
+links and inspects the dead-stripped Release iPhone executable, in addition to
+arm64 device and universal arm64/x86_64 simulator archives for both strict
+components.
+
 ## Standalone RemoteIO output host (Phase 3C)
 
 `AudioHost` now has an iOS RemoteIO provider, but no SingZ product playback

@@ -125,6 +125,16 @@ target 'SingZPlayer' do
   # inference over ONNX Runtime (docs/PHONE-STANDALONE.md).
   pod 'SingzCore', :path => './SingzCore'
 
+  # Exact strict callback closure used by SingzCore's iOS providers. It owns
+  # zcore_device_callback plus the RemoteIO render callback definitions; the
+  # broad compatibility pod retains control/session code only.
+  pod 'SingzDeviceCallback', :path => './SingzDeviceCallback'
+
+  # Callback-safe zdsp runtime and AudioHostGraphAdapter. Phase iOS-A links
+  # the component plus an inert capability probe only; RNAudioAPI remains the
+  # sole output/session owner until ADR-0008's atomic cutover.
+  pod 'SingzDspRuntime', :path => './SingzDspRuntime'
+
   use_react_native!(
     :path => config[:reactNativePath],
     # An absolute path to your application root.

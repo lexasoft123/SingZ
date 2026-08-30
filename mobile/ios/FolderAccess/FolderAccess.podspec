@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'FolderAccess'
-  s.version      = '1.0.3'
+  s.version      = '1.0.4'
   s.summary      = 'SingZ project-folder access: document picker, bookmarks, iCloud downloads'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -17,4 +17,5 @@ Pod::Spec.new do |s|
   }
   s.dependency 'React-Core'
   s.dependency 'SingzCore'
+  s.dependency 'SingzDspRuntime'
 end

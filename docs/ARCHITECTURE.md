@@ -25,7 +25,7 @@ real-time scheduling, zero-copy and acceleration research is recorded in
 C++ language profile, component targets, dependencies and scalable repository
 layout are in [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
 
-Phases 3A through 3C add a standalone native conformance path only:
+Phases 3A through 3D add a standalone native conformance path only:
 `zcore_device` AudioHost/provider → `zdsp_host_adapter` → `zdsp_runtime`.
 Phase 3A introduced the portable contract, fake provider and macOS AUHAL host;
 Phase 3B adds the standalone Windows provider: one event-driven STA/MMCSS owner for two WASAPI endpoint clients
@@ -34,7 +34,14 @@ the graph.
 Phase 3C adds an iOS RemoteIO provider whose output render callback is the
 graph clock. It can consume input from that same unit after validating an
 already-prepared app audio session, but never configures or owns
-`AVAudioSession` itself. These hosts are not yet wired to product playback
+`AVAudioSession` itself. Phase 3D provides the equivalent dormant Android
+Oboe/AAudio host. iOS Phase iOS-A now packages the complete callback-safe
+runtime and host adapter into the app as an isolated component pod. A second
+strict component owns the exact portable device-callback target plus the iOS
+RemoteIO render callback; the broad SingzCore pod retains only off-callback
+provider/control definitions. The runtime is exposed only through an inert
+status probe and still cannot open or start audio. These
+hosts are not yet wired to product playback
 (see `docs/WINDOWS-AUDIO.md` and `docs/IOS-AUDIO.md`). The headless muted CLI
 and fake/native providers remain outside the Electron renderer and mobile app;
 Web Audio below and RNAudioAPI on mobile remain the only product
