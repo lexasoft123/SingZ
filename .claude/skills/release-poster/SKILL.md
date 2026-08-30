@@ -292,22 +292,42 @@ Telegram allows **1024 characters on a photo caption**; aim well under. Shape:
 
 <one smaller change worth knowing, one line>
 
-iPhone · Android · Mac · Windows
-⬇ [Windows](<exe url>) · [Mac](<arm64 dmg url>) · [Android](<apk url>) · [all builds](<releases/latest>)
+<where to get it, as a bare URL on its own line>
 ```
 
-**Put the links IN the text.** A caption may carry `[label](https://…)`, which
-becomes a real link in the post — and it costs the LABEL, never the URL, because
-Telegram's link entities sit outside the 1024-character budget. So embedding
-four links is *cheaper* than spelling one URL out. The copy button puts both a
-rich and a plain flavour on the clipboard, so a paste into Telegram Desktop keeps
-the links while anything plain-text-only gets the labels.
+**Spell the URLs out. `[label](url)` does not survive a paste** — measured in
+Telegram by the person posting, twice: the composer converts markdown as you
+TYPE it and does not re-parse the clipboard, and the rich `text/html` flavour
+the kit also puts on the clipboard did not come through either. So a pasted
+`[Windows](https://…)` arrives as literal brackets, or as a label with the
+address gone. A **bare** URL needs no entity and nothing parsed. That is the
+only form this repo has actually watched reach Telegram as a link — which is the
+claim to lean on here, rather than a guess about which clients do what.
 
-Count what Telegram counts: the visible text, in UTF-16 units. The kit does this
-for you: an over-limit caption still WRITES the page — so you can open it and see
-where to cut — but exits non-zero, so a script cannot post it by accident. Note
-this is the opposite rule from `store-notes.cjs`, which counts code points
-because Play counts characters.
+This costs real room and the budget has to absorb it, because a spelled-out URL
+is counted in full. The v0.19.1 EN caption is the worked example, and it is worth
+holding all three readings of ONE text side by side — four GitHub download links
+plus the TestFlight join:
+
+| reading | count | what it is |
+| --- | --- | --- |
+| entity | 788 | a link costing only its label — the budget that never applied |
+| as written, `[label](url)` | 1166 | what the composer actually received, over |
+| rewritten to bare URLs | 1085 | still over, because the URLs are 358 chars |
+
+It fits at **818** only after dropping to two links — the TestFlight join and
+`releases/latest` — and naming the platforms in words. Two links a reader can act
+on beat four near-identical GitHub URLs, so the constraint improved the post;
+reach for that before cutting prose.
+
+Count what the COMPOSER RECEIVES: the raw text, in UTF-16 units. That is what
+the generator counts and what it refuses to exceed — an over-limit caption still
+WRITES the page, so you can open it and see where to cut, but exits non-zero so
+a script cannot post it by accident. The entity reading (a link costing only its
+label) is the one to distrust: it was the rule here for three drafts and it
+describes a caption nobody pastes. Note the UTF-16 unit is also the opposite
+rule from `store-notes.cjs`, which counts code points because Play counts
+characters.
 
 Write from the singer's side: "Add a song right on your phone. Tap Split." —
 not "on-device separation is now supported". Sizes and times earn their place
@@ -344,23 +364,91 @@ node .claude/skills/release-poster/scripts/make-post-kit.cjs \
 ```
 
 It embeds the poster and the display face, so the page is self-contained and
-survives being moved or emailed. **Copy image** puts the PNG on the clipboard —
-paste straight into Telegram — and each caption shows its length against the
-1024 limit. **Save PNG** is a desktop fallback only: it is a `data:` URI
-download, which iOS Safari blocks at top level. On a phone the page says so
-itself and points at press-and-hold, which needs neither clipboard nor
-download. A phone cannot open this file at all (iOS offers to save it to
-Files), so it arrives over `http://` by IP, where there is no clipboard API —
-which the page detects and says. It picks its advice by `(hover: none)`, not by
-the origin: a desktop at that same LAN URL has no clipboard either and is still
-told about ⌘C and Save PNG, both of which work there.
+survives being moved or emailed, and each caption shows its length against the
+1024 limit.
+
+**The captions copy through `execCommand`, and that is not a style choice.**
+The async Clipboard API is permission-gated, and it was refused on the page this
+kit actually produced — measured on a secure origin,
+in a browser with `navigator.clipboard` AND `ClipboardItem` both present and the
+document focused, `write()` and `writeText()` alike rejecting `NotAllowedError:
+Write permission denied`. (One browser at one origin; ordinary Chrome or Safari
+on `file://` may well grant it. The point is that a page cannot know, so it must
+not gate on the guess.) "Is there a clipboard object" is therefore the wrong
+question and the kit no longer asks it: every press was falling through to a
+fallback that merely
+SELECTED the caption and said *press ⌘C*, which is the bug as the user meets
+it. `document.execCommand('copy')` is gated on the user gesture
+alone, works where the permission is refused, and carries both flavours in one
+`copy` event — verified against the macOS clipboard, `«class HTML»` and utf8
+text side by side after a single click. It is deprecated and it is the one that
+works; the async API stays as the second attempt, and select-and-⌘C as the
+third.
+
+**The image has no such escape, so its button is allowed to fail loudly.**
+`execCommand` on a selected `<img>` was measured putting 1.6 MB of `«class
+HTML»` on the clipboard — the `data:` URI as markup — and no PNG at all, which
+pastes into a chat as nothing. When **Copy image** says *Blocked*, the answer is
+a file rather than another clipboard trick: **Save PNG** (a `data:` URI
+download, so desktop only — iOS Safari blocks those at top level), or just drag
+`docs/release-notes/v<version>-poster.png` from the repo, which is the same
+bytes. On a phone, press and hold the poster → Save to Photos, which needs
+neither clipboard nor download. Which gesture the post-failure flash names is
+picked by `(hover: none)` — a question about the DEVICE, not the origin, since a
+desktop at an `http://` LAN address still has a ⌘ key.
+
+**Right-clicking a caption used to do nothing, and that was the page's fault.**
+A context menu offers Copy only when something is already selected, and a `<pre>`
+starts unselected — so the menu came up without the one entry the reader wanted.
+`user-select: all` on the caption makes a single click select the whole block, so
+the native menu, ⌘C and the button all act on the same thing. Partial selection
+goes away, which is right: a caption is posted whole or not at all.
+
+**Do not hand the kit over with `SendUserFile` and expect it to work.** What
+arrives in the inline file preview is not what was sent: a 3.7 MB kit came back
+as 71 KB with
+`<img id="poster" src="data:image/png;base64,iVBORw0KGgo=">` — the poster
+truncated to the 8-byte PNG signature, while the inlined font survived intact.
+So in the preview there is no image to right-click, no image to copy, and Copy
+image fetches 8 bytes. Nothing announces this; the page looks like the poster
+merely failed to load. The mechanism and the threshold were NOT established —
+only that a multi-megabyte inlined image did not survive while an inlined font
+did. Send the **poster PNG and the two caption `.txt` files** as the deliverable
+instead, and treat the kit page as something to open in a real browser from its
+path. Whether a bare PNG survives the same preview is untested and is in the same
+size class as the payload that did not: look at the preview once and say what you
+saw, rather than assuming the plain file is safe because it is plain.
+
+Off the browser entirely, macOS will do both jobs from a shell — worth knowing
+when a page is being awkward:
+
+```bash
+pbcopy < <out>/caption-en.txt
+```
+
+```bash
+osascript -e 'set the clipboard to (read (POSIX file "/abs/path/to/v<version>-poster.png") as «class PNGf»)'
+```
+
+**The generator parses the `<script>` it is about to write, and fails the build
+if it does not.** That block is assembled inside a template literal, so a `\n`
+that needed to be `\\n` reaches the page as a real newline, breaks a regex
+literal, and the browser refuses the whole script — the page then renders
+perfectly with every button inert, which looks exactly like the clipboard being
+refused. That is how the fix above shipped broken on its first pass.
 
 Keep it a **local** file. A published artifact cannot hand the viewer a
 download and is a poor place for clipboard work; this page exists to be
 operated, not shared.
 
-Then hand it over with `SendUserFile`. Don't commit the kit — it carries a
-base64 copy of the poster and is regenerated in seconds.
+Hand over the **poster PNG and both caption `.txt` files** with `SendUserFile`,
+and give the kit as a path to open in a browser rather than as a preview, for the
+reason above. Then LOOK at the preview those files produced before saying they
+arrived — that the plain forms come through whole is the assumption this
+instruction rests on, and it is the assumption the kit already broke once. Add the two clipboard
+one-liners in `bash` fences so there is a route that needs no page at all. Don't
+commit the kit — it carries a base64 copy of the poster and is regenerated in
+seconds.
 
 ## What goes in the repo
 

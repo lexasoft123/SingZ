@@ -5,8 +5,13 @@
  * Why a page and not just files: posting means getting an image and a specific
  * block of text into Telegram. Handing over a PNG path and two .txt files makes
  * the human do the assembly every time, and retyping a caption is how a typo
- * reaches a channel. The image copies to the clipboard, so the whole post is
- * two clicks.
+ * reaches a channel.
+ *
+ * Captions copy through execCommand, NOT the async Clipboard API: the API is
+ * permission-gated and a locally-opened page is exactly where the permission is
+ * refused, so every press used to fall through to "Selected — press ⌘C". The
+ * image has no such escape (see the [data-img] handler) and its button is
+ * allowed to fail loudly.
  *
  * Deliberately a LOCAL file, not a published artifact: a published page cannot
  * hand the viewer a download, and clipboard access is the point here.
@@ -82,13 +87,16 @@ const LIMIT = 1024; // Telegram photo caption
 // --version lands in an attribute (the download filename), where an unescaped quote would
 // break out of it. Escape rather than trusting argv.
 /*
- * Captions may carry [label](https://…). It becomes a REAL <a> inside the
- * <pre>, which is what makes the whole thing work: textContent then yields the
- * label alone — exactly the plain text Telegram counts against its 1024, and
- * exactly what a plain-text paste should be — while innerHTML yields the rich
- * flavour whose links survive a paste into Telegram Desktop. Embedding a link
- * this way is also SHORTER than spelling the URL out, so it buys caption room
- * rather than spending it.
+ * Captions may carry [label](https://…), which becomes a REAL <a> inside the
+ * <pre> so the page can be read and the link followed. What it does NOT do is
+ * reach Telegram as a link: measured by the person posting, a pasted
+ * [label](url) arrives as literal brackets — the composer converts markdown as
+ * you TYPE it and does not re-parse the clipboard — and the rich text/html
+ * flavour did not survive the paste either. An earlier version of this comment
+ * claimed the opposite and the whole caption budget was built on it. A bare URL
+ * is the only form this repo has watched reach Telegram as a link, so that is
+ * what the captions spell out; the markdown form stays supported for copy that
+ * will be typed rather than pasted.
  *
  * http(s) only, same rule as --downloads: a caption is a file someone edits by
  * hand, and a javascript: href here would execute on click.
@@ -135,7 +143,12 @@ h2{font-family:'Bricolage',system-ui,sans-serif;font-size:15px;font-weight:700;
   display:flex;justify-content:space-between;gap:10px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:22px}
 .card-top{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px}
-pre{background:var(--raised);border:1px solid var(--line);border-radius:10px;padding:16px;
+/* A caption is copied whole or not at all, and a right-click menu offers Copy
+   only when something is already selected — which is why right-clicking a
+   caption appeared to do nothing. user-select:all makes one click select the
+   block, so the native menu, ⌘C and the button all have the same target. */
+pre{-webkit-user-select:all;user-select:all;
+  background:var(--raised);border:1px solid var(--line);border-radius:10px;padding:16px;
   white-space:pre-wrap;word-wrap:break-word;font-family:ui-monospace,'SF Mono',monospace;
   font-size:14px;line-height:1.62;color:var(--text);max-height:340px;overflow:auto}
 .count{font-family:ui-monospace,monospace;font-size:12.5px;color:var(--faint);white-space:nowrap}
@@ -155,7 +168,6 @@ a.dl{text-decoration:none}
   border-left:2px solid var(--line);padding-left:12px}
 .phonehint b{color:var(--text)}
 .phonehint code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--accent)}
-.phonehint.live{border-left-color:var(--accent)}
 pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 .dls{display:flex;flex-direction:column;gap:10px}
 .dlrow{display:flex;align-items:center;justify-content:space-between;gap:16px;
@@ -189,11 +201,14 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
       <button class="primary" data-img>Copy image</button>
       <a class="dl" href="${posterURI}" download="singz-${VERSION_SAFE}-poster.png"><button>Save PNG</button></a>
     </div>
-    <p class="phonehint" id="phonehint"><b>On a phone:</b> press and hold the poster above, then
-      Save to Photos — and press and hold a caption to copy it. The buttons need a clipboard, which
-      a browser grants on <code>file://</code>, <code>localhost</code> and HTTPS but not on a plain
-      <code>http://</code> address — and iOS will not open this from a file at all, so a phone
-      arrives by IP and has none.</p>
+    <p class="phonehint"><b>Copy image</b> is the one button a browser can refuse:
+      putting a PNG on the clipboard goes through the permission-gated Clipboard API, which is
+      withheld on plenty of local pages. When it says <i>Blocked</i>, use <b>Save PNG</b> and drag
+      the file in — or drag <code>${esc(POSTER)}</code> straight from disk, which is the same
+      bytes and skips the clipboard entirely. The caption buttons need no clipboard permission,
+      so they are not the ones to worry about here.
+      <b>On a phone:</b> press and hold the poster, then Save to Photos — and press and hold a
+      caption rather than trusting its button — a phone browser is the case least tested here.</p>
     ${previewURI ? `<div style="margin-top:24px"><h2>How it lands in a chat</h2>
       <img src="${previewURI}" alt="poster at phone chat width" style="width:200px;border-radius:8px;border:1px solid var(--line)" /></div>` : ''}
   </section>
@@ -214,7 +229,7 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
         <h2 style="margin:0">English</h2>
         <span class="count" data-count-for="en"></span>
       </div>
-      <pre id="en">${renderCaption(en)}</pre>
+      <pre id="en" data-src="${esc(en)}">${renderCaption(en)}</pre>
       <div class="row"><button class="primary" data-copy="en">Copy English</button></div>
     </div>
 
@@ -223,7 +238,7 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
         <h2 style="margin:0">Russian</h2>
         <span class="count" data-count-for="ru"></span>
       </div>
-      <pre id="ru">${renderCaption(ru)}</pre>
+      <pre id="ru" data-src="${esc(ru)}">${renderCaption(ru)}</pre>
       <div class="row"><button class="primary" data-copy="ru">Copy Russian</button></div>
     </div>
   </section>
@@ -231,7 +246,7 @@ pre a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
   <p class="note">
     Telegram allows ${LIMIT} characters on a photo caption and recompresses photos past
     ~1280&nbsp;px on the long side — this poster is 1280 on its long side, so sending it as a
-    photo costs nothing. Poster file: <code>${basename(resolve(POSTER))}</code>
+    photo costs nothing. Poster file: <code>${esc(basename(resolve(POSTER)))}</code>
   </p>
 </div>
 
@@ -247,42 +262,89 @@ const flash = (btn, label) => {
 // whether ⌘C and a data: download are available to the reader.
 const TOUCH = matchMedia('(hover: none)').matches;
 
+// The async Clipboard API is the half that fails, and it fails where this page
+// actually lives. Measured on a secure origin with navigator.clipboard AND
+// ClipboardItem both present: write() and writeText() alike reject with
+// "Write permission denied" — it is permission-gated, and a page opened from
+// disk or served locally is exactly where the permission is withheld. Every
+// press then landed in the old catch, which merely SELECTED the caption and
+// asked for a manual copy, which is the bug as the user meets it.
+//
+// execCommand('copy') is gated on the user gesture alone. It is deprecated and
+// it is the one that works here, so it goes FIRST, and it carries both flavours
+// in a single copy event (verified against the macOS clipboard: «class HTML»
+// and utf8 text side by side after one press).
+const richCopy = (el) => {
+  // Plain flavour is the caption's OWN source, URLs and all — never textContent,
+  // which is the <a> labels with every address dropped. This is simply what the
+  // composer receives, which is why the counter below measures the same string.
+  const plain = el.dataset.src ?? el.textContent;
+  // The pre's white-space:pre-wrap lives in this page's stylesheet and does NOT
+  // travel with the fragment, so under the default white-space:normal every
+  // blank line collapses to a space and the caption arrives as one run-on
+  // paragraph — links intact, shape gone. br rather than wrapping in pre, which
+  // Telegram reads as a code block.
+  const html = el.innerHTML.replace(/\\n/g, '<br>');
+  const sel = getSelection();
+  if (!sel) return false;
+  const saved = sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+  let fired = false;
+  const onCopy = (e) => {
+    e.clipboardData.setData('text/html', html);
+    e.clipboardData.setData('text/plain', plain);
+    e.preventDefault();
+    fired = true;
+  };
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  sel.removeAllRanges();
+  sel.addRange(r);
+  document.addEventListener('copy', onCopy, true);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  document.removeEventListener('copy', onCopy, true);
+  sel.removeAllRanges();
+  if (saved) sel.addRange(saved);
+  // ok alone is not proof: a browser can return true having copied the raw
+  // selection. The listener firing is what says OUR two flavours went on.
+  return ok && fired;
+};
+
 for (const btn of document.querySelectorAll('[data-copy]')) {
   btn.addEventListener('click', async () => {
     const el = document.getElementById(btn.dataset.copy);
-    const text = el.textContent;
+    if (richCopy(el)) { flash(btn, 'Copied ✓'); return; }
+    // execCommand withheld too (a sandboxed frame can do that) — the async API
+    // is worth one try before handing the job back to the reader.
     try {
-      // Two flavours on one clipboard. Telegram Desktop takes the HTML and
-      // keeps the embedded links; anything that only understands plain text
-      // gets the labels, which is the caption Telegram counts. writeText alone
-      // would silently drop every link, which is the whole point here.
-      if (el.querySelector('a') && window.ClipboardItem) {
+      const plain = el.dataset.src ?? el.textContent;
+      if (window.ClipboardItem) {
         await navigator.clipboard.write([new ClipboardItem({
-          // The pre's white-space:pre-wrap lives in this page's stylesheet and
-          // does NOT travel with the fragment, so under the default
-          // white-space:normal every blank line collapses to a space and the
-          // caption arrives as one run-on paragraph — links intact, shape gone.
-          // br rather than wrapping in pre, which Telegram reads as a code block.
           'text/html': new Blob([el.innerHTML.replace(/\\n/g, '<br>')], { type: 'text/html' }),
-          'text/plain': new Blob([text], { type: 'text/plain' })
+          'text/plain': new Blob([plain], { type: 'text/plain' })
         })]);
       } else {
-        await navigator.clipboard.writeText(text);
+        await navigator.clipboard.writeText(plain);
       }
       flash(btn, 'Copied ✓');
     } catch {
-      // Clipboard refused (rare on file://) — select it so ⌘C still works.
-      // Which gesture to name is a question about the DEVICE, not the origin:
-      // a desktop at the same http:// LAN address has no clipboard either and
-      // still has a ⌘ key.
+      // Nothing programmatic is left. Leave it selected so a manual copy still
+      // works. Which gesture to name is a question about the DEVICE, not the
+      // origin: a desktop at an http:// LAN address still has a ⌘ key.
       const r = document.createRange();
-      r.selectNodeContents(document.getElementById(btn.dataset.copy));
+      r.selectNodeContents(el);
       const s = getSelection(); s.removeAllRanges(); s.addRange(r);
       flash(btn, TOUCH ? 'Tap and hold the text to copy' : 'Selected — press ⌘C');
     }
   });
 }
 
+// The image has no execCommand route. Selecting the <img> and copying was
+// measured putting «class HTML» on the clipboard — 1.6 MB of the data: URI as
+// markup — and no PNG at all, which pastes into a chat as nothing. So the async
+// API is genuinely the only in-browser way, and where it is refused the answer
+// is a file, not another clipboard trick: Save PNG here, or the copy already
+// committed next to the release notes, dragged straight into the channel.
 for (const btn of document.querySelectorAll('[data-img]')) {
   btn.addEventListener('click', async () => {
     try {
@@ -293,47 +355,85 @@ for (const btn of document.querySelectorAll('[data-img]')) {
     } catch (e) {
       // On touch, Save PNG is a second dead end: it is a data: URI download and
       // iOS Safari blocks those at top level. Long-press needs neither the
-      // clipboard nor a download. On a desktop Save PNG works, insecure origin
-      // or not, so that is still where a mouse gets sent.
-      flash(btn, TOUCH ? 'Press and hold the poster' : 'Use Save PNG instead');
+      // clipboard nor a download.
+      flash(btn, TOUCH ? 'Press and hold the poster' : 'Blocked — use Save PNG');
     }
   });
 }
 
-// No clipboard at all (a page reached by IP, or any insecure origin) means the
-// two Copy buttons cannot work however they are pressed. Say so before the press.
-if (!navigator.clipboard) {
-  const h = document.getElementById('phonehint');
-  if (h) h.classList.add('live');
-  for (const b of document.querySelectorAll('[data-copy],[data-img]')) b.title =
-    'This browser gives no clipboard on an insecure origin — press and hold the poster or the caption instead.';
-}
-
 for (const el of document.querySelectorAll('[data-count-for]')) {
-  const n = document.getElementById(el.dataset.countFor).textContent.length;
+  // data-src, not textContent: the raw caption is what the composer receives.
+  // Counting textContent here would report the <a> labels and disagree with the
+  // build over the same caption. (The two agree exactly for LF files; with CRLF
+  // the HTML parser drops CR from the attribute, so the page reads one short per
+  // line BREAK — the shortfall is the CR count. The CLI is then the stricter of
+  // the two, which is the safe direction.)
+  const src = document.getElementById(el.dataset.countFor);
+  const n = (src.dataset.src ?? src.textContent).length;
   el.textContent = n + ' / ${LIMIT}';
   if (n > ${LIMIT}) el.classList.add('over');
 }
 </script>
 `;
 
+// The page's whole job is done by that script, and it is assembled inside a
+// template literal — so a `\n` that needed to be `\\n` lands in the output as a
+// REAL newline, breaks a regex literal, and the browser refuses the entire
+// block. Nothing says so: the page renders perfectly and every button is inert,
+// which is indistinguishable from the clipboard being refused. It happened.
+// Parse what we are about to write, and fail the build instead.
+const scriptBody = html.slice(html.lastIndexOf('<script>') + 8, html.lastIndexOf('</script>'));
+try {
+  // eslint-disable-next-line no-new-func
+  new Function(scriptBody);
+} catch (e) {
+  console.error(`the generated <script> does not parse — the page would render with dead buttons:\n  ${e.message}`);
+  process.exit(1);
+}
+
 writeFileSync(OUT, html);
 console.log(`POST KIT ${OUT}`);
-// Count what Telegram counts: the VISIBLE text. A [label](url) costs the
-// label, never the URL — link entities sit outside the caption's character
-// budget — so measuring the raw source reports a caption of 928 as 1260 and
-// sends someone cutting good copy to fit a limit they were never near.
-const visible = (t) => t.replace(LINK_RE, '$1');
+// Count what the COMPOSER RECEIVES. That is the raw text: see the note below on
+// why the entity-budget reading, which this line used to take, describes a
+// caption nobody pastes.
+// UTF-16 units — String#length already counts those, but naming it says which
+// unit was meant, and the page's own counter must use the same one.
+const uLen = (t) => t.length;
 // UTF-16 units, not code points, and NOT the same rule as store-notes.cjs:
 // Play counts characters, so that script counts code points on purpose, while
 // Telegram addresses message entities by UTF-16 offset and counts the caption
 // the same way. The 🎤 these captions open with is one code point and two
 // units — count code points and the page's own counter disagrees by one, and
 // the disagreement is in the unsafe direction.
-const enN = visible(en).length;
-const ruN = visible(ru).length;
+// MEASURED, in Telegram, by the person posting: a pasted [label](url) does NOT
+// become a link. The composer converts markdown as you TYPE it and does not
+// re-parse what arrives on the clipboard, and the rich text/html flavour did
+// not survive the paste either. So the number that decides whether a caption is
+// accepted is the RAW text — every character the composer receives — and the
+// entity count is the hypothetical one, not the other way round. It was the
+// other way round here for three drafts, which is how captions measuring a
+// comfortable 788 were handed over at 1166.
+const enN = uLen(en);
+const ruN = uLen(ru);
 console.log(`  english ${enN}/${LIMIT}   russian ${ruN}/${LIMIT}`);
 if (enN > LIMIT || ruN > LIMIT) {
   console.error('  a caption is over the limit — it will be refused as a photo caption');
   process.exit(1);
+}
+// Bare URLs are what survived. They need no entity and nothing parsed, and they
+// are the only form this repo has watched reach Telegram as a link, which is why
+// the captions spell them out and pay for them. A [label](url) still renders as an <a> on the page, and
+// is still worth writing where the caption will be TYPED rather than pasted, but
+// it buys no room here: it is counted at full length like any other text.
+// A NON-GLOBAL twin for the test. LINK_RE is /g, and /g + .test() carries
+// lastIndex between calls: filtering two captions with it tests the second from
+// the first one's leftover index, so a caption whose link sits early is passed
+// silently. That fails in the one direction that matters — the author fixes the
+// caption it named, reruns, sees a clean run, and posts the other one.
+const HAS_LINK = new RegExp(LINK_RE.source, LINK_RE.flags.replace('g', ''));
+const linked = [['english', en], ['russian', ru]].filter(([, t]) => HAS_LINK.test(t));
+if (linked.length) {
+  console.log(`  note — [label](url) found in: ${linked.map(([n]) => n).join(', ')}`);
+  console.log('  pasting that into Telegram yields literal brackets, not a link.');
+  console.log('  spell the URL out instead; it is counted in full either way.');
 }
