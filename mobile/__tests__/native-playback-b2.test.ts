@@ -1,5 +1,6 @@
 import { NativeModules } from 'react-native';
 import type { MultitrackEngine } from '../src/engine';
+import { onLogLine } from '../src/log';
 import type { ProjectDoc } from '../src/model';
 import type { LoadedProject, ProjectEntry } from '../src/projects';
 import {
@@ -315,6 +316,48 @@ beforeEach(() => {
 });
 
 describe('iOS B2 backend selection and ownership', () => {
+  it('records explicit DSP initialization, graph, AudioHost and render evidence', async () => {
+    const lines: string[] = [];
+    const unsubscribe = onLogLine(logEntry => {
+      if (logEntry.source === 'dsp') lines.push(logEntry.line);
+    });
+    try {
+      const h = harness();
+      const project = await h.load();
+      h.native.status.mockResolvedValue(capability(1, 'running', 48_000));
+      await project.nativePlayback?.start();
+      await until(() => lines.some(line => line.startsWith('render health')));
+
+      expect(lines).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(
+            /iOS runtime ready.*zdsp graph.*zcore AudioHost adapter/i,
+          ),
+          expect.stringMatching(/building graph.*10 nodes\/9 connections/i),
+          expect.stringMatching(/graph ready.*source→channel map→gain/i),
+          expect.stringMatching(/iOS audio session ready.*48 kHz.*256 frame/i),
+          expect.stringMatching(/zcore AudioHost open.*iPhone Speaker/i),
+          expect.stringMatching(
+            /rendering started.*zdsp graph owns native output/i,
+          ),
+          expect.stringMatching(
+            /first audible callback.*zcore AudioHost → zdsp graph/i,
+          ),
+          expect.stringMatching(/render health.*1\.0 s processed.*xruns 0/i),
+        ]),
+      );
+      await project.nativePlayback?.stop('logging test complete');
+      expect(lines).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/graph released.*callback ownership released/i),
+          expect.stringMatching(/rendering stopped.*logging test complete/i),
+        ]),
+      );
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('selects and prepares native before any legacy decode and owns zero JS song buffers', async () => {
     const h = harness();
     const project = await h.load();

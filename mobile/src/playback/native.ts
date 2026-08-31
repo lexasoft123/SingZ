@@ -1,7 +1,7 @@
 import { NativeModules, Platform } from 'react-native';
 import type { MultitrackEngine } from '../engine';
 import { driveLocalFile, driveReadText } from '../gdrive';
-import { fmtMs, log } from '../log';
+import { fmtBytes, fmtMs, log } from '../log';
 import {
   customTracks,
   STEM_ORDER_ALL,
@@ -321,10 +321,11 @@ export class IosNativePlaybackCoordinator {
     ) {
       try {
         capability = await this.deps.native.status();
+        logDspRuntime(capability);
       } catch (error) {
         log(
-          'native-playback',
-          `capability probe failed · ${message(error)}`,
+          'dsp',
+          `iOS runtime probe failed · ${message(error)} · native graph unavailable`,
           'warn',
         );
       }
@@ -348,8 +349,8 @@ export class IosNativePlaybackCoordinator {
         if (!options.isCurrent()) throw new Error('Song load was superseded.');
         this.allowLegacyIfLeased(options.engine);
         log(
-          'playback',
-          `legacy selected before decode · ${eligibility.reason}`,
+          'dsp',
+          `native graph bypassed · ${eligibility.reason} · legacy RNAudioAPI selected`,
         );
         const loaded = await this.deps.legacyLoad(
           options.entry,
@@ -449,11 +450,9 @@ export class IosNativePlaybackCoordinator {
         throw new Error('Song load was superseded.');
       }
       log(
-        'native-playback',
-        `prepared generation ${handle.generation} · ${handle.lanes.length} lanes · ` +
-          `${fmtMs(
-            this.deps.now() - handle.preparedAt,
-          )} · no RNAudioAPI song buffers`,
+        'dsp',
+        `project attached · generation ${handle.generation} · ${handle.lanes.length} lanes · ` +
+          `${fmtMs(this.deps.now() - handle.preparedAt)} · no RNAudioAPI song buffers`,
       );
       return handle.loadedProject();
     });
@@ -573,11 +572,21 @@ export class IosNativePlaybackCoordinator {
     if (lease !== null) this.fallbackLease = null;
     let result: NativePlaybackResult;
     try {
-      result = await native.prepare(
-        generation,
-        prepareRequest(handle.materialized, output, lease?.token ?? 0),
+      const request = prepareRequest(
+        handle.materialized,
+        output,
+        lease?.token ?? 0,
       );
+      logDspGraphBuild(generation, handle.materialized, output, request);
+      result = await native.prepare(generation, request);
     } catch (error) {
+      log(
+        'dsp',
+        `graph build command failed · generation ${generation} · ${message(
+          error,
+        )}`,
+        'error',
+      );
       const cleanup = await this.cleanupGeneration(handle, generation);
       return cleanup
         ? { ok: false, error: `Native prepare failed: ${message(error)}` }
@@ -590,6 +599,13 @@ export class IosNativePlaybackCoordinator {
         : { ok: false, error: cleanupUncertain('cancelled prepare') };
     }
     if (!result.ok) {
+      log(
+        'dsp',
+        `graph build refused · generation ${generation} · ${
+          result.message || result.error
+        }`,
+        'error',
+      );
       const cleanup = await this.cleanupGeneration(handle, generation);
       return cleanup
         ? {
@@ -633,6 +649,7 @@ export class IosNativePlaybackCoordinator {
           }
         : { ok: false, error: cleanupUncertain('inconsistent prepare status') };
     }
+    logDspGraphPrepared(result, preparedStatus.session, handle.materialized);
     handle.publishPrepared(preparedStatus.session);
     return { ok: true };
   }
@@ -751,6 +768,12 @@ export class IosNativePlaybackCoordinator {
           configured.message || configured.error,
           operation.token,
         );
+      log(
+        'dsp',
+        `iOS audio session ready · generation ${generation} · ` +
+          `${formatSampleRate(configured.sampleRate)} · ${configured.outputChannels} ch · ` +
+          `${configured.nominalBufferFrames} frame nominal buffer`,
+      );
       const opened = await native.openOutput(generation);
       if (!this.startIsCurrent(handle, operation.token))
         return this.cancelStartAfterAwait(
@@ -764,6 +787,12 @@ export class IosNativePlaybackCoordinator {
           opened.message || opened.error,
           operation.token,
         );
+      log(
+        'dsp',
+        `zcore AudioHost open · generation ${generation} · ${handle.output?.label ?? 'iOS output'} · ` +
+          `${formatSampleRate(opened.sampleRate)} · ${opened.outputChannels} ch · ` +
+          `maximum ${opened.maximumFrames} frames`,
+      );
       // A rejected/throwing configure or open command is still a pre-start
       // failure: B1's exact unload proof can authorize lazy legacy fallback.
       // Once start is invoked, callbacks may already have rendered before the
@@ -777,6 +806,13 @@ export class IosNativePlaybackCoordinator {
           'Native start was cancelled.',
         );
       if (!started.ok) {
+        log(
+          'dsp',
+          `render start failed · generation ${generation} · ${
+            started.message || started.error
+          }`,
+          'error',
+        );
         await this.cleanupGeneration(handle, generation);
         const error = `Native start failed: ${
           started.message || started.error
@@ -787,8 +823,9 @@ export class IosNativePlaybackCoordinator {
       handle.update({ phase: 'playing' });
       handle.startPolling();
       log(
-        'native-playback',
-        `started generation ${handle.generation} at frame 0 · output ownership native`,
+        'dsp',
+        `rendering started · generation ${handle.generation} at frame 0 · ` +
+          `zdsp graph owns native output · ${describeDspTopology(handle.lanes.length)}`,
       );
       return { kind: 'started' };
     } catch (error) {
@@ -800,6 +837,13 @@ export class IosNativePlaybackCoordinator {
         );
       if (!handle.startWasIssued(generation))
         return this.openFallback(handle, message(error), operation.token);
+      log(
+        'dsp',
+        `render handoff failed after start · generation ${generation} · ${message(
+          error,
+        )}`,
+        'error',
+      );
       await this.cleanupGeneration(handle, generation);
       const detail = `Native start handoff failed: ${message(error)}`;
       if (this.startIsCurrent(handle, operation.token)) handle.fail(detail);
@@ -818,6 +862,11 @@ export class IosNativePlaybackCoordinator {
       handle.startWasIssued(generation)
     )
       return { kind: 'failed', error: 'Native playback was cancelled.' };
+    log(
+      'dsp',
+      `native output handoff failed before rendering · generation ${generation} · ${reason}`,
+      'warn',
+    );
     const safe = await this.cleanupGeneration(handle, generation);
     if (!safe) {
       const error = cleanupUncertain(reason);
@@ -921,8 +970,8 @@ export class IosNativePlaybackCoordinator {
     if (safe) {
       handle.update({ phase: 'stopped', positionSec: 0, audibleFrames: 0 });
       log(
-        'native-playback',
-        `stopped generation ${generation} · ${reason} · lease ${
+        'dsp',
+        `rendering stopped · generation ${generation} · ${reason} · lease ${
           this.fallbackLease?.token ?? 0
         }` + (stopError ? ' · stop delivery recovered by unload proof' : ''),
       );
@@ -995,8 +1044,10 @@ export class IosNativePlaybackCoordinator {
       handle.publishTelemetry(session);
       if (session.terminalReason !== 'none' || session.state === 'terminal') {
         log(
-          'native-playback',
-          `terminal generation ${handle.generation} · ${session.terminalReason}`,
+          'dsp',
+          `render terminal · generation ${handle.generation} · ${session.terminalReason} · ` +
+            `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
+            `discontinuities ${session.discontinuities}`,
           'error',
         );
         await this.stopHandle(handle, `terminal ${session.terminalReason}`);
@@ -1080,8 +1131,8 @@ export class IosNativePlaybackCoordinator {
       cleanup.processQuarantinePoisoned === false;
     if (!complete) {
       log(
-        'native-playback',
-        `cleanup uncertain for generation ${generation} · safety ${cleanup.safety} · ` +
+        'dsp',
+        `graph cleanup uncertain · generation ${generation} · safety ${cleanup.safety} · ` +
           `error ${cleanup.error} · retained ${cleanup.retainedBytes} · ` +
           `physical ${cleanup.physicalOwnershipRetained}`,
         'error',
@@ -1106,8 +1157,10 @@ export class IosNativePlaybackCoordinator {
     handle.recordCleanup(generation, cleanup.handoffLease);
     handle.options.engine.allowLegacyOutputAfterNativeCleanup();
     log(
-      'native-playback',
-      `cleanup complete · generation ${cleanup.generation} · handoff lease ${cleanup.handoffLease}`,
+      'dsp',
+      `graph released · generation ${cleanup.generation} · retained ${fmtBytes(
+        cleanup.retainedBytes,
+      )} · callback ownership released · handoff lease ${cleanup.handoffLease}`,
     );
     return true;
   }
@@ -1122,6 +1175,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   polling = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private firstAudibleLogged = false;
+  private steadyRenderLogged = false;
   private operationEpoch = 0;
   private startOperation = 0;
   private routeValid = true;
@@ -1237,6 +1291,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.generation = generation;
     this.output = output;
     this.firstAudibleLogged = false;
+    this.steadyRenderLogged = false;
     this.cleanupGeneration = 0;
     this.cleanupLease = 0;
     this.update({
@@ -1277,10 +1332,22 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     if (!this.firstAudibleLogged && session.audibleFrames > 0) {
       this.firstAudibleLogged = true;
       log(
-        'native-playback',
+        'dsp',
         `first audible callback · generation ${this.generation} · ` +
-          `${session.audibleFrames} frames · xruns ${session.xruns} · ` +
-          `deadlines ${session.deadlineMisses} · discontinuities ${session.discontinuities}`,
+          `zcore AudioHost → zdsp graph → iOS output · ${session.audibleFrames} frames · ` +
+          `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
+          `discontinuities ${session.discontinuities}`,
+      );
+    }
+    if (!this.steadyRenderLogged && session.renderedFrames >= sampleRate) {
+      this.steadyRenderLogged = true;
+      log(
+        'dsp',
+        `render health · generation ${this.generation} · ${(
+          session.renderedFrames / sampleRate
+        ).toFixed(1)} s processed · ${session.audibleFrames} audible frames · ` +
+          `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
+          `discontinuities ${session.discontinuities}`,
       );
     }
   }
@@ -1329,6 +1396,86 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
   }
+}
+
+// These lines are emitted from native command receipts and telemetry polls.
+// The real-time AudioHost callback remains allocation- and logging-free.
+function logDspRuntime(capability: NativePlaybackCapability): void {
+  const output = chooseOutput(capability.outputs);
+  const components = [
+    capability.graph ? 'zdsp graph' : 'graph missing',
+    capability.audioHostAdapter
+      ? 'zcore AudioHost adapter'
+      : 'AudioHost missing',
+    capability.playbackSession ? 'playback session' : 'session missing',
+  ].join(' + ');
+  const route = output
+    ? `${output.label} · ${formatSampleRate(output.sampleRate)} · ${
+        output.channels
+      } ch`
+    : 'no output route';
+  log(
+    'dsp',
+    `iOS runtime ${capability.available ? 'ready' : 'unavailable'} · ${
+      capability.playbackBuild
+    } · ${components} · session ${capability.session.state} · ${route}`,
+    capability.available ? 'info' : 'warn',
+  );
+}
+
+function logDspGraphBuild(
+  generation: number,
+  materialized: MaterializedProject,
+  output: NativePlaybackOutput,
+  request: NativePlaybackPrepareRequest,
+): void {
+  const laneIds = materialized.lanes.map(lane => lane.id).join(', ');
+  log(
+    'dsp',
+    `building graph · generation ${generation} · ${describeDspTopology(
+      materialized.lanes.length,
+    )} · lanes [${laneIds}] · ${formatSampleRate(request.sampleRate)} · ` +
+      `${request.outputChannels.length} ch to ${output.label} · maximum ${request.maximumFrames} frames`,
+  );
+}
+
+function logDspGraphPrepared(
+  result: NativePlaybackResult,
+  session: NativePlaybackSessionStatus,
+  materialized: MaterializedProject,
+): void {
+  const totalFrames = Math.max(
+    0,
+    ...session.lanes.map(lane => lane.totalFrames),
+  );
+  const duration =
+    session.sampleRate > 0
+      ? ` · ${(totalFrames / session.sampleRate).toFixed(1)} s`
+      : '';
+  log(
+    'dsp',
+    `graph ready · generation ${session.generation} · ${describeDspTopology(
+      materialized.lanes.length,
+    )} · ${formatSampleRate(session.sampleRate || result.sampleRate)} · ` +
+      `${result.outputChannels} ch · callback ${result.nominalBufferFrames} nominal/${
+        result.maximumFrames
+      } maximum frames · decoded ${fmtBytes(session.retainedBytes)}${duration}`,
+  );
+}
+
+function describeDspTopology(laneCount: number): string {
+  const nodes = laneCount * 3 + 4;
+  const connections = laneCount * 3 + 3;
+  return (
+    `${nodes} nodes/${connections} connections · ` +
+    `source→channel map→gain ×${laneCount}→mix→master gain→safety limiter→output`
+  );
+}
+
+function formatSampleRate(sampleRate: number): string {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) return 'rate unknown';
+  const khz = sampleRate / 1000;
+  return `${Number.isInteger(khz) ? khz.toFixed(0) : khz.toFixed(1)} kHz`;
 }
 
 function chooseOutput(
