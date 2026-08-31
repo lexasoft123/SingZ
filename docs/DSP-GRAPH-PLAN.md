@@ -1242,11 +1242,10 @@ product cutover):
   authoritative. `--check` rejects missing, stale or extra generated files.
   The existing broad `SingzCore` compatibility pod is narrowed so it no
   longer owns graph contracts, decoded-buffer sources or runtime symbols.
-- The app links an inert `NativeAudioRuntime.status()` capability only. Its
-  retained typed references prove every runtime boundary reached the final
-  binary, while its API has no open/start/session command and reports the
-  owner as `legacy`. RNAudioAPI and the existing AVAudioSession coordinator
-  remain the only product owners.
+- Phase iOS-A linked an inert `NativeAudioRuntime.status()` capability first.
+  Its retained typed references still prove every runtime boundary reached the
+  final binary. B1 subsequently added the playback commands, and B2 confines
+  their product use to the typed iPhone facade described below.
 - A separate `SingzDeviceCallback` pod owns exact CMake
   `zcore_device_callback` membership plus the iOS RemoteIO callback pair. Its
   prefix compile guard proves C++20, both RT compile markers and disabled
@@ -1260,8 +1259,8 @@ product cutover):
   forbidden-dependency gates are the packaging evidence. Phase iOS-B must not
   make this packaging probe an independent product session owner.
 
-Phase iOS-B1 native playback preparation implemented 2026-08-30 (still
-dormant and not a product cutover):
+Phase iOS-B1 native playback preparation implemented 2026-08-30 (reusable
+foundation; experimentally activated by B2):
 
 - `NativePlaybackSession` consumes app-authorized `OwnedFileDescriptor`s,
   decodes/resamples WAV or FLAC off RT under cancellation and an aggregate
@@ -1341,11 +1340,12 @@ dormant and not a product cutover):
 - The strict allocation-free playback callback is owned by
   `SingzDspRuntime`; the exact off-callback session target is owned by the new
   `SingzPlaybackSession` pod. Source manifests, device/universal-simulator
-  archives, final Release link/symbol ownership and an inert-no-consumer Jest
+  archives, final Release link/symbol ownership and an exact-consumer Jest
   gate cover the packaging boundary.
-- `NativeAudioRuntime` exposes the dormant generation-bound commands, but
-  reports `ownership: legacy` and `activation: dormant`; no product JS source
-  imports it. The frozen request/result/status schema is documented in
+- `NativeAudioRuntime` reports `ownership: coordinated` and
+  `activation: experimental-b2`. Only `mobile/src/playback/native.ts` may
+  consume its playback surface; packaging tests reject ad-hoc product callers.
+  The frozen request/result/status schema is documented in
   `docs/IOS-AUDIO.md`.
 - Exact bridge strings reject malformed UTF-16 and embedded NUL for route UID,
   lane ID/path and control ID before any C/filesystem conversion. Output
@@ -1356,23 +1356,26 @@ dormant and not a product cutover):
   fallback. The playback RT manifest is derived from target `SOURCES`, with
   omitted-member and unbounded-loop negative fixtures.
 
-Phase iOS-B2 remains the next iPhone phase. Its feature gate selects native or
-legacy **before project decode**. A native-selected load passes materialized
-authorized paths and never constructs RNAudioAPI `AudioBuffer`s for that song;
-an already legacy-loaded project must run `engine.unload()` and
-`releaseProject()` before native preparation. If native preparation fails,
-matching native `unload` must return the complete global cleanup proof before
-the fallback lazily decodes legacy PCM. The proof must contain
-`globallyComplete: true` and a positive `handoffLease`; `NotOwned` alone is
-insufficient. Legacy operates only while that process-global lease is held.
-Native reentry first suspends/releases legacy and then passes the exact lease
-to the next `prepare`, whose synchronous claim consumes it atomically. The
-509–659 MB decoded projects must never exist in
-both backends at once. After prepare, atomically retire RNAudioAPI output,
-establish the intended `AVAudioSession`, call `openOutput`, then `start`, with
-load-sequence plus native-generation guards. Restore ownership in reverse.
-Until that lease exists, B1 may not be called by the app and RNAudioAPI
-remains the sole audible song/metronome owner.
+Phase iOS-B2 is implemented as a default-off Experimental iPhone product cut.
+Its feature gate selects native or legacy **before project decode**. A
+native-selected load passes materialized authorized paths and never constructs
+RNAudioAPI `AudioBuffer`s for that song. Projects with active transpose,
+tempo, metronome/count-in, song-training, custom/original tracks, unsupported
+codecs or no materializable path stay wholly legacy. The dedicated native
+player exposes frame-zero Start and Stop only.
+
+If native preparation or pre-start output open fails, matching native
+`unload` must return `globallyComplete: true`, `fallbackSafe: true` and a
+positive `handoffLease` before the fallback lazily decodes legacy PCM.
+`NotOwned` is insufficient. Legacy operates only while that process-global
+lease is held. Native reentry first suspends legacy and passes the exact lease
+to the next `prepare`, whose synchronous claim consumes it atomically. After
+prepare, the product suspends RNAudioAPI output, establishes and verifies the
+intended `AVAudioSession`, calls `openOutput`, then `start`, with Catalog-load
+plus native-generation guards. A start-command or later terminal failure does
+not auto-fallback. Stop/unload restores ownership in reverse. Train-tab
+activation is itself awaited behind this proof, so mic/reference-audio session
+configuration cannot overlap native output.
 
 Physical-device evidence is still required before Phase 4: wired and USB
 loopback latency, callback-size distribution, sustained duplex xruns/deadline
@@ -1383,9 +1386,13 @@ behavior.
 The AUHAL slice deliberately rejects different input/output UIDs. A bounded
 cross-device FIFO, drift estimator/resampler and aggregate-device policy are
 deferred, as is the separately licensed ASIO provider. WASAPI, RemoteIO and
-Oboe are the implemented Phase 3B/3C/3D standalone providers described above. Web
-Audio/RNAudioAPI remains the sole product output/session owner;
-no renderer, Electron playback, mobile playback or UI path links this host.
+Oboe are the implemented Phase 3B/3C/3D standalone providers described above.
+Desktop, Android and ineligible iPhone projects still use
+Web Audio/RNAudioAPI as their product output/session owner. The opt-in iOS-B2
+frame-zero player described above is the first product path that instead owns
+RemoteIO through zcore + zdsp; the process-global handoff lease makes those
+two owners mutually exclusive. No desktop renderer or Android playback UI
+links the native output host yet.
 
 The review invocation is intentionally explicit and bounded:
 
@@ -1411,10 +1418,12 @@ Add output inventory, negotiated formats, full-duplex start/stop, xrun/status
 events, separate-device FIFO/drift correction, route-change generations and
 feedback-safe monitoring defaults.
 
-This phase is a headless/standalone hardware harness, not app-owned output.
-Web Audio/RNAudioAPI remains the sole app playback/session owner until each
-platform performs the atomic Phase 4 cutover. A feature gate makes legacy and
-native output mutually exclusive; enumeration alone never acquires a session.
+This phase is primarily a headless/standalone hardware harness. Web Audio
+remains the desktop owner, and RNAudioAPI remains the Android/default-iPhone
+owner. The opt-in iOS-B2 slice now exercises the first atomic product cutover
+for eligible frame-zero projects; other platforms remain pending. Its feature
+gate makes legacy and native output mutually exclusive, and enumeration alone
+never acquires a session.
 
 Platform details:
 
@@ -1613,12 +1622,12 @@ cancellation and optional common multichannel resampling. A zero-input
 sample-locked across variable blocks and emits silence after each lane ends.
 Generic graph resets preserve its cursor because this slice has no positioned
 seek contract; transport seek/loop remains later work. No path, codec,
-allocation or shared-owner operation reaches its render function. iOS B1 now
-provides the dormant decoded lifetime owner, generation-bound frame-zero
-transport and output-host composition. Its B2 product coordinator must still
-provide the latest-load guard and exclusive legacy-engine/session handoff
-before the source may drive an audible iPhone path; other platforms require
-their corresponding session slice.
+allocation or shared-owner operation reaches its render function. iOS B1
+provides the decoded lifetime owner, generation-bound frame-zero transport and
+output-host composition. Its B2 product coordinator now supplies the Catalog
+load guard, exact cleanup lease and exclusive legacy-engine/session handoff
+for the Experimental audible iPhone path; other platforms require their
+corresponding session slice.
 
 Implement:
 

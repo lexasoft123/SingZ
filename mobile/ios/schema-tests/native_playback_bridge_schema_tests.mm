@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 #import "NativePlaybackAuthorizedPath.h"
+#import "NativePlaybackAudioSession.h"
 #import "NativePlaybackBridgeBoundary.h"
 #import "NativePlaybackBridgeResult.h"
 #import "NativePlaybackBridgeSchema.h"
@@ -786,6 +787,87 @@ void testUnloadCleanupResultSchema() {
         [cleanup[@"fallbackSafe"] isEqual:@NO]);
 }
 
+void testPlaybackAudioSessionPolicy() {
+  const SingzPlaybackAudioSessionIntent intent{
+      7, "ios-output:fixture", {0, 1}, 48000.0, 512};
+  const SingzPlaybackAudioSessionSnapshot active{
+      "AVAudioSessionCategoryPlayback",
+      "AVAudioSessionModeDefault",
+      0,
+      true,
+      1,
+      "ios-output:fixture",
+      2,
+      48000.0,
+      128,
+  };
+
+  auto result = SingzPlaybackAudioSessionPreflight(
+      7, 7, 0, singz::NativePlaybackState::Prepared, intent);
+  CHECK(result.ok && result.error == SingzPlaybackAudioSessionError::None);
+  result = SingzVerifyPlaybackAudioSession(
+      7, singz::NativePlaybackState::Prepared, intent, active);
+  CHECK(result.ok && result.error == SingzPlaybackAudioSessionError::None &&
+        result.session.active && result.session.outputChannelCount == 2);
+  NSDictionary *dictionary =
+      SingzPlaybackAudioSessionResultDictionary(result);
+  CHECK(dictionary.count == 9 && [dictionary[@"ok"] isEqual:@YES] &&
+        [dictionary[@"error"] isEqual:@"none"] &&
+        [dictionary[@"generation"] isEqual:@7] &&
+        [dictionary[@"state"] isEqual:@"prepared"] &&
+        [dictionary[@"sampleRate"] isEqual:@48000] &&
+        [dictionary[@"maximumFrames"] isEqual:@512] &&
+        [dictionary[@"nominalBufferFrames"] isEqual:@128] &&
+        [dictionary[@"outputChannels"] isEqual:@2] &&
+        [dictionary[@"message"] isEqual:@""]);
+
+  result = SingzPlaybackAudioSessionPreflight(
+      7, 8, 0, singz::NativePlaybackState::Prepared, intent);
+  CHECK(!result.ok &&
+        result.error == SingzPlaybackAudioSessionError::InvalidGeneration);
+  result = SingzPlaybackAudioSessionPreflight(
+      7, 7, 7, singz::NativePlaybackState::Prepared, intent);
+  CHECK(!result.ok &&
+        result.error == SingzPlaybackAudioSessionError::InvalidState);
+  result = SingzPlaybackAudioSessionPreflight(
+      7, 7, 0, singz::NativePlaybackState::OutputOpen, intent);
+  CHECK(!result.ok &&
+        result.error == SingzPlaybackAudioSessionError::InvalidState);
+
+  const auto verifyFailure = [&](SingzPlaybackAudioSessionSnapshot snapshot) {
+    const auto failure = SingzVerifyPlaybackAudioSession(
+        7, singz::NativePlaybackState::Prepared, intent, std::move(snapshot));
+    CHECK(!failure.ok &&
+          failure.error ==
+              SingzPlaybackAudioSessionError::VerificationFailed &&
+          !failure.message.empty());
+  };
+  auto malformed = active;
+  malformed.active = false;
+  verifyFailure(malformed);
+  malformed = active;
+  malformed.category = "AVAudioSessionCategoryPlayAndRecord";
+  verifyFailure(malformed);
+  malformed = active;
+  malformed.mode = "AVAudioSessionModeMeasurement";
+  verifyFailure(malformed);
+  malformed = active;
+  malformed.categoryOptions = 1;
+  verifyFailure(malformed);
+  malformed = active;
+  malformed.outputRouteCount = 2;
+  verifyFailure(malformed);
+  malformed = active;
+  malformed.outputDeviceUid = "ios-output:other";
+  verifyFailure(malformed);
+  malformed = active;
+  malformed.outputChannelCount = 1;
+  verifyFailure(malformed);
+  malformed = active;
+  malformed.sampleRate = 44100.0;
+  verifyFailure(malformed);
+}
+
 int main() {
   @autoreleasepool {
     testActualBlockCopyGuard();
@@ -987,6 +1069,7 @@ int main() {
           }) == SingzPlaybackBridgeBoundaryFailure::ProviderFailure);
     testPrepareOwnershipGuard();
     testUnloadCleanupResultSchema();
+    testPlaybackAudioSessionPolicy();
   }
   std::puts("native playback bridge schema tests: ok");
   return 0;

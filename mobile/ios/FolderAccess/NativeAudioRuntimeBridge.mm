@@ -2,9 +2,9 @@
 
 #import "NativePlaybackBridgeSupport.h"
 
-// Phase iOS-B1 exposes a generation-bound dormant playback surface. No JS
-// product consumer calls it yet, and ownership remains "legacy" until the
-// ADR-0008 coordinator performs an atomic output handoff in B2.
+// Phase iOS-B2 keeps the generation-bound B1 playback surface behind one
+// experimental product coordinator. AVAudioSession activation remains a
+// separate serialized command between legacy suspension and RemoteIO open.
 @interface NativeAudioRuntime : NSObject <RCTBridgeModule>
 @end
 
@@ -31,6 +31,15 @@ RCT_REMAP_METHOD(
         rejecter : (RCTPromiseRejectBlock)reject)
 {
   SingzNativePlaybackPrepare(generation, request, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    configureOutputSession,
+    configureOutputSession : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackConfigureOutputSession(generation, resolve, reject);
 }
 
 RCT_REMAP_METHOD(

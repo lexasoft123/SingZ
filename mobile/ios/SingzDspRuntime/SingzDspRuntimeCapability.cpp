@@ -11,11 +11,11 @@
 
 namespace {
 
-// The capability object is the product's one inert reference into this static
+// The capability object is the product's one reference into this static
 // component. Retaining exact typed references makes the linker pull every
-// missing runtime translation unit into the app even before Phase iOS-B owns
-// playback. This turns a status probe into real packaging evidence instead of
-// a literal that could survive beside an empty archive.
+// missing runtime translation unit into the app. This turns a status probe
+// into real packaging evidence instead of a literal that could survive beside
+// an empty archive.
 // `used` preserves the compiler references; `retain` gives their Mach-O
 // sections S_ATTR_NO_DEAD_STRIP so Release linking cannot reduce this to a
 // capability literal beside an otherwise unused runtime archive.
@@ -36,7 +36,7 @@ constexpr SingzDspRuntimeLinkStatus kStatus{
         SingzDspRuntimeCapabilityPlaybackCallback |
         SingzDspRuntimeCapabilityPlaybackCleanupProof |
         SingzDspRuntimeCapabilityPlaybackHandoffLease,
-    "singz.ios.zdsp_runtime.phase-ios-b1-ready-inert",
+    "singz.ios.zdsp_runtime.phase-ios-b2-experimental",
 };
 
 } // namespace

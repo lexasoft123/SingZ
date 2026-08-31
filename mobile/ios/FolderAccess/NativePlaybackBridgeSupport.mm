@@ -1,4 +1,5 @@
 #import "NativePlaybackBridgeSupport.h"
+#import "NativePlaybackAudioSession.h"
 #import "NativePlaybackAuthorizedPath.h"
 #import "NativePlaybackBridgeBoundary.h"
 #import "NativePlaybackBridgeResult.h"
@@ -25,6 +26,18 @@ struct PlaybackBridgeOwner {
 
   std::unique_ptr<singz::NativePlaybackSession> session;
   dispatch_queue_t queue;
+  std::atomic<uint64_t> latestClaimedGeneration{0};
+  std::atomic<uint64_t> cancelledThrough{0};
+  SingzPlaybackAudioSessionIntent preparedAudioSessionIntent;
+
+  void noteCancellation(uint64_t generation) noexcept {
+    uint64_t previous = cancelledThrough.load(std::memory_order_relaxed);
+    while (previous < generation &&
+           !cancelledThrough.compare_exchange_weak(
+               previous, generation, std::memory_order_release,
+               std::memory_order_relaxed)) {
+    }
+  }
 };
 
 PlaybackBridgeOwner &owner() {
@@ -338,8 +351,8 @@ void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
                  SingzDspRuntimeCapabilityPlaybackHandoffLease) != 0),
           @"playbackBuild" : [NSString
               stringWithUTF8String:singz::nativePlaybackSessionCapabilityTag()],
-          @"ownership" : @"legacy",
-          @"activation" : @"dormant",
+          @"ownership" : @"coordinated",
+          @"activation" : @"experimental-b2",
           @"outputs" : outputInventory(bridge.session->enumerate()),
           @"session" : statusDictionary(*bridge.session),
         });
@@ -375,6 +388,8 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
           resolve(resultDictionary(claim));
           return;
         }
+        bridge.latestClaimedGeneration.store(generation,
+                                             std::memory_order_release);
         const SingzPlaybackPrepareCleanup cleanup{
             bridge.session.get(), &failClaimedPrepare, &unloadMutatedPrepare};
         admissionGuard.activate(cleanup, generation);
@@ -398,6 +413,11 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
               SingzPlaybackBridgeBoundary([&] {
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::LaneVectorConstruction);
+                SingzPlaybackAudioSessionIntent audioSessionIntent{
+                    generation, parsed.config.outputDeviceUid,
+                    parsed.config.outputChannels,
+                    parsed.config.requestedSampleRate,
+                    parsed.config.maximumFrames};
                 std::vector<singz::NativePlaybackLaneSource> lanes;
                 lanes.reserve(parsed.lanes.size());
                 for (const SingzParsedPlaybackLane &lane : parsed.lanes) {
@@ -433,6 +453,11 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
                 const singz::NativePlaybackResult result =
                     bridge.session->prepare(std::move(parsed.config),
                                             std::move(lanes), generation);
+                if (result.ok &&
+                    result.state == singz::NativePlaybackState::Prepared) {
+                  bridge.preparedAudioSessionIntent =
+                      std::move(audioSessionIntent);
+                }
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::PostPreparePreResult);
                 SingzPlaybackInjectPrepareFault(
@@ -457,6 +482,57 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
     rejectBoundaryFailure(reject, failure, outer.cleanup,
                           outer.cleanupRequired);
   }
+}
+
+void SingzNativePlaybackConfigureOutputSession(NSNumber *generationValue,
+                                               RCTPromiseResolveBlock resolve,
+                                               RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK",
+             @"The native playback generation is invalid", nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(reject, [&] {
+        const singz::NativePlaybackStatus before = bridge.session->status();
+        const uint64_t latest = bridge.latestClaimedGeneration.load(
+            std::memory_order_acquire);
+        const uint64_t current =
+            before.generation == latest ? latest : uint64_t{0};
+        const uint64_t cancelled =
+            bridge.cancelledThrough.load(std::memory_order_acquire);
+        SingzPlaybackAudioSessionResult result =
+            SingzConfigurePlaybackAudioSession(
+                generation, current, cancelled, before.state,
+                bridge.preparedAudioSessionIntent);
+
+        // A synchronous newer claim or cancellation can race this queued
+        // platform call. Recheck at the command's publication boundary so a
+        // stale generation never receives a successful activation receipt.
+        if (result.ok) {
+          SingzPlaybackAudioSessionSnapshot configuredSession =
+              std::move(result.session);
+          const singz::NativePlaybackStatus after = bridge.session->status();
+          const uint64_t latestAfter = bridge.latestClaimedGeneration.load(
+              std::memory_order_acquire);
+          result = SingzPlaybackAudioSessionPreflight(
+              generation,
+              after.generation == latestAfter ? latestAfter : uint64_t{0},
+              bridge.cancelledThrough.load(std::memory_order_acquire),
+              after.state, bridge.preparedAudioSessionIntent);
+          if (result.ok) {
+            result = SingzVerifyPlaybackAudioSession(
+                generation, after.state, bridge.preparedAudioSessionIntent,
+                std::move(configuredSession));
+          }
+        }
+        resolve(SingzPlaybackAudioSessionResultDictionary(result));
+      });
+    });
+  });
 }
 
 void SingzNativePlaybackOpenOutput(NSNumber *generationValue,
@@ -562,7 +638,8 @@ void SingzNativePlaybackStop(NSNumber *generationValue,
         bridge = &owner();
         // Cancellation is deliberately synchronous and precedes serialization
         // so a queued stop interrupts an in-flight decode immediately.
-        (void)bridge->session->requestCancellation(generation);
+        if (bridge->session->requestCancellation(generation))
+          bridge->noteCancellation(generation);
         cleanupClaimed = true;
         asyncGuard = std::make_shared<SingzPlaybackGenerationDeliveryGuard>();
         asyncGuard->activate({bridge->session.get(), &abortGenerationDelivery},
@@ -623,7 +700,8 @@ void SingzNativePlaybackUnload(NSNumber *generationValue,
         }
         bridge = &owner();
         // See stop: unload must advance the cancellation epoch before enqueue.
-        (void)bridge->session->requestCancellation(generation);
+        if (bridge->session->requestCancellation(generation))
+          bridge->noteCancellation(generation);
         cleanupClaimed = true;
         asyncGuard = std::make_shared<SingzPlaybackGenerationDeliveryGuard>();
         asyncGuard->activate({bridge->session.get(), &abortGenerationDelivery},

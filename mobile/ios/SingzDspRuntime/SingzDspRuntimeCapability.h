@@ -23,11 +23,11 @@ enum {
   SingzDspRuntimeCapabilityPlaybackHandoffLease = 1u << 4,
 };
 
-// Packaging evidence only. Phase iOS-B1 exposes dormant generation-bound
-// playback commands through the existing React Native bridge, but no product
-// JavaScript consumes them. The runtime never mutates AVAudioSession and takes
-// output ownership only after a future B2 coordinator explicitly calls the
-// prepared session's openOutput command.
+// Packaging evidence plus the capability gate for the one Experimental B2
+// product facade. The runtime itself remains React/AVAudioSession-free; the
+// serialized bridge helper configures the intended session only after the JS
+// coordinator has suspended legacy output, and output ownership begins at the
+// generation-bound openOutput command.
 const SingzDspRuntimeLinkStatus *SingzDspRuntimeGetLinkStatus(void);
 
 #ifdef __cplusplus

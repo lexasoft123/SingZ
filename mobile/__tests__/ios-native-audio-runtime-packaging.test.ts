@@ -3,8 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 const root = join(__dirname, '..')
-const read = (relative: string): string =>
-  readFileSync(join(root, relative), 'utf8')
+const read = (relative: string): string => readFileSync(join(root, relative), 'utf8')
 
 const sourceFiles = (relative: string): string[] =>
   readdirSync(join(root, relative), { withFileTypes: true }).flatMap(entry => {
@@ -23,7 +22,7 @@ describe('iOS native DSP runtime packaging', () => {
       'decoded_buffer_source',
       'graph_compiler',
       'graph_runner',
-      'audio_host_graph_adapter',
+      'audio_host_graph_adapter'
     ]
 
     for (const source of expectedSources) expect(manifest).toContain(source)
@@ -39,9 +38,7 @@ describe('iOS native DSP runtime packaging', () => {
 
   test('isolates the full iOS callback closure under compile assertions', () => {
     const podspec = read('ios/SingzDeviceCallback/SingzDeviceCallback.podspec')
-    const guard = read(
-      'ios/SingzDeviceCallback/SingzDeviceCallbackCompileGuard.h',
-    )
+    const guard = read('ios/SingzDeviceCallback/SingzDeviceCallbackCompileGuard.h')
     const corePodspec = read('ios/SingzCore/SingzCore.podspec')
     const folderPodspec = read('ios/FolderAccess/FolderAccess.podspec')
 
@@ -60,9 +57,7 @@ describe('iOS native DSP runtime packaging', () => {
 
   test('compares every packaged target member exactly with CMake', () => {
     expect(() =>
-      execFileSync(process.execPath, [
-        join(root, 'scripts/check-native-component-sources.js'),
-      ]),
+      execFileSync(process.execPath, [join(root, 'scripts/check-native-component-sources.js')])
     ).not.toThrow()
     const sync = read('scripts/sync-singz-dsp-runtime.js')
     expect(sync).toContain("require('./native-component-sources')")
@@ -83,7 +78,7 @@ describe('iOS native DSP runtime packaging', () => {
       'decoded_buffer_source.cpp',
       'graph_compiler.cpp',
       'graph_runner.cpp',
-      'audio_host_graph_adapter.cpp',
+      'audio_host_graph_adapter.cpp'
     ]) {
       expect(podspec).not.toContain(`'${source}'`)
       expect(sync).not.toContain(`'src/runtime/${source}'`)
@@ -111,48 +106,39 @@ describe('iOS native DSP runtime packaging', () => {
     expect(gitignore).toContain('/ios/SingzPlaybackSession/native/')
   })
 
-  test('packages the dormant generation-bound playback session once', () => {
-    const podspec = read(
-      'ios/SingzPlaybackSession/SingzPlaybackSession.podspec',
-    )
+  test('packages the generation-bound playback session once', () => {
+    const podspec = read('ios/SingzPlaybackSession/SingzPlaybackSession.podspec')
     const folderPodspec = read('ios/FolderAccess/FolderAccess.podspec')
 
     expect(podspec).toContain("s.source_files = 'native/playback/*.{h,cpp}'")
-    expect(podspec).toContain(
-      "s.public_header_files = 'native/playback/native_playback_session.h'",
-    )
+    expect(podspec).toContain("s.public_header_files = 'native/playback/native_playback_session.h'")
     expect(podspec).toContain("s.dependency 'SingzCore'")
     expect(podspec).toContain("s.dependency 'SingzDspRuntime'")
     expect(folderPodspec).toContain("s.dependency 'SingzPlaybackSession'")
   })
 
-  test('exposes a dormant bridge without a product JS consumer', () => {
+  test('exposes experimental B2 through one typed product facade', () => {
     const bridge = read('ios/FolderAccess/NativeAudioRuntimeBridge.mm')
     const support = read('ios/FolderAccess/NativePlaybackBridgeSupport.mm')
-    const authorizedPath = read(
-      'ios/FolderAccess/NativePlaybackAuthorizedPath.mm',
-    )
-    const capability = read(
-      'ios/SingzDspRuntime/SingzDspRuntimeCapability.cpp',
-    )
-    const capabilityHeader = read(
-      'ios/SingzDspRuntime/SingzDspRuntimeCapability.h',
-    )
+    const authorizedPath = read('ios/FolderAccess/NativePlaybackAuthorizedPath.mm')
+    const capability = read('ios/SingzDspRuntime/SingzDspRuntimeCapability.cpp')
+    const capabilityHeader = read('ios/SingzDspRuntime/SingzDspRuntimeCapability.h')
 
     expect(bridge.match(/RCT_EXPORT_METHOD\(/g)).toHaveLength(1)
-    expect(bridge.match(/RCT_REMAP_METHOD\(/g)).toHaveLength(6)
+    expect(bridge.match(/RCT_REMAP_METHOD\(/g)).toHaveLength(7)
     expect(bridge).toContain('RCT_EXPORT_METHOD(status:')
     for (const method of [
       'prepare',
+      'configureOutputSession',
       'openOutput',
       'start',
       'stop',
       'unload',
-      'setControl',
+      'setControl'
     ])
       expect(bridge).toContain(`${method},`)
-    expect(support).toMatch(/@"ownership"\s*:\s*@"legacy"/)
-    expect(support).toMatch(/@"activation"\s*:\s*@"dormant"/)
+    expect(support).toMatch(/@"ownership"\s*:\s*@"coordinated"/)
+    expect(support).toMatch(/@"activation"\s*:\s*@"experimental-b2"/)
     expect(authorizedPath).toContain('OwnedFileDescriptor owner(::open(')
     expect(authorizedPath).toContain('O_NOFOLLOW')
     expect(authorizedPath).toContain('PostDescriptorOpen')
@@ -162,18 +148,12 @@ describe('iOS native DSP runtime packaging', () => {
     expect(support).toContain('session->unloadWithCleanup(generation)')
     expect(support).toContain('@"playbackCleanupProof"')
     expect(support).toContain('@"playbackHandoffLease"')
-    expect(capabilityHeader).toContain(
-      'SingzDspRuntimeCapabilityPlaybackCleanupProof',
-    )
-    expect(capabilityHeader).toContain(
-      'SingzDspRuntimeCapabilityPlaybackHandoffLease',
-    )
+    expect(capabilityHeader).toContain('SingzDspRuntimeCapabilityPlaybackCleanupProof')
+    expect(capabilityHeader).toContain('SingzDspRuntimeCapabilityPlaybackHandoffLease')
     // Public stop/unload claim cancellation synchronously. Exceptional
     // prepare/command cleanup is contained by the session's exact abort APIs.
     expect(support.match(/requestCancellation\(generation\)/g)).toHaveLength(2)
-    expect(capability).toContain(
-      'singz.ios.zdsp_runtime.phase-ios-b1-ready-inert',
-    )
+    expect(capability).toContain('singz.ios.zdsp_runtime.phase-ios-b2-experimental')
     expect(capability.match(/gnu::used, gnu::retain/g)).toHaveLength(7)
     for (const symbol of [
       'initializeArena',
@@ -181,21 +161,22 @@ describe('iOS native DSP runtime packaging', () => {
       'createDecodedBufferSource',
       'compileGraph',
       'renderGraphBlock',
-      'renderAudioHostGraph',
+      'renderAudioHostGraph'
     ]) {
       expect(capability).toContain(`&zdsp::${symbol}`)
     }
     expect(capability).toContain('&singz::nativePlaybackRender')
 
-    const productSources = [
-      ...sourceFiles('src'),
-      'App.tsx',
-      'index.js',
-    ]
-      .filter(file => /\.(?:ts|tsx|js|jsx)$/.test(file))
-      .map(read)
-      .join('\n')
-    expect(productSources).not.toContain('NativeAudioRuntime')
+    const productFiles = [...sourceFiles('src'), 'App.tsx', 'index.js'].filter(file =>
+      /\.(?:ts|tsx|js|jsx)$/.test(file)
+    )
+    const nativeRuntimeConsumers = productFiles.filter(file =>
+      read(file).includes('NativeAudioRuntime')
+    )
+    expect(nativeRuntimeConsumers).toEqual(['src/playback/native.ts'])
+    const facade = read('src/playback/native.ts')
+    expect(facade).toContain('NativeModules.NativeAudioRuntime as NativePlaybackApi')
+    expect(facade).toContain('configureOutputSession(generation: number)')
   })
 
   test('rejects malformed nested playback bridge schemas exactly', () => {
@@ -203,10 +184,10 @@ describe('iOS native DSP runtime packaging', () => {
     const support = read('ios/FolderAccess/NativePlaybackBridgeSupport.mm')
     const boundary = read('ios/FolderAccess/NativePlaybackBridgeBoundary.h')
     const result = read('ios/FolderAccess/NativePlaybackBridgeResult.mm')
+    const audioSession = read('ios/FolderAccess/NativePlaybackAudioSession.mm')
+    const audioSessionPolicy = read('ios/FolderAccess/NativePlaybackAudioSessionPolicy.mm')
     const runner = read('scripts/test-native-playback-bridge-schema.sh')
-    const tests = read(
-      'ios/schema-tests/native_playback_bridge_schema_tests.mm',
-    )
+    const tests = read('ios/schema-tests/native_playback_bridge_schema_tests.mm')
 
     expect(schema).toContain('CFBooleanGetTypeID()')
     expect(schema).toMatch(/bool parseBool\(id value, bool\s*\*result\)/)
@@ -230,7 +211,7 @@ describe('iOS native DSP runtime packaging', () => {
     expect(tests).toContain('@"unexpected"')
     expect(boundary).toContain('catch (const std::bad_alloc&)')
     expect(boundary).toContain('@catch (NSException*)')
-    expect(support.match(/runBridgeBoundary\(reject/g)).toHaveLength(6)
+    expect(support.match(/runBridgeBoundary\(reject/g)).toHaveLength(8)
     expect(support.match(/SingzPlaybackBridgeBoundary\(\[&\]/g)).toHaveLength(9)
     expect(support).toContain('SingzPlaybackPrepareOwnershipGuard admissionGuard')
     expect(support).toContain('SingzPlaybackFinishPrepareOuterBoundary(')
@@ -254,6 +235,26 @@ describe('iOS native DSP runtime packaging', () => {
     expect(tests).toContain('testCommandMutationOwnershipGuard()')
     expect(tests).toContain('testStopUnloadDeliveryGuard()')
     expect(tests).toContain('testUnloadCleanupResultSchema()')
+    expect(tests).toContain('testPlaybackAudioSessionPolicy()')
+    expect(runner).toContain('NativePlaybackAudioSessionPolicy.mm')
+    expect(support).toContain('SingzNativePlaybackConfigureOutputSession(')
+    expect(support.match(/SingzConfigurePlaybackAudioSession\(/g)).toHaveLength(1)
+    expect(support).toContain('before.state')
+    expect(support).toContain('after.state')
+    expect(audioSession).toContain('AVAudioSessionCategoryPlayback')
+    expect(audioSession).toContain('AVAudioSessionModeDefault')
+    expect(audioSession).toContain('options:0')
+    expect(audioSession).toContain('setActive:YES')
+    expect(audioSession).toContain('SingzVerifyPlaybackAudioSession(')
+    expect(audioSessionPolicy).toContain('state != singz::NativePlaybackState::Prepared')
+    expect(audioSessionPolicy).toContain('snapshot.outputDeviceUid != intent.outputDeviceUid')
+    expect(audioSessionPolicy).toContain('snapshot.sampleRate != intent.sampleRate')
+    const prepareOnly = support.slice(
+      support.indexOf('void SingzNativePlaybackPrepare('),
+      support.indexOf('void SingzNativePlaybackConfigureOutputSession(')
+    )
+    expect(prepareOnly).not.toContain('AVAudioSession')
+    expect(prepareOnly).not.toContain('SingzConfigurePlaybackAudioSession')
     expect(tests).toContain('deferredNewer.generation = 2')
     expect(tests).toContain('OpenResultDictionaryConversion')
     expect(tests).toContain('StartPromiseDelivery')
@@ -294,7 +295,7 @@ describe('iOS native DSP runtime packaging', () => {
       'coordinatorOwnerGeneration',
       'handoffLease',
       'globallyComplete',
-      'fallbackSafe',
+      'fallbackSafe'
     ])
       expect(result).toContain(`@"${field}"`)
     expect(result).toContain('SingzNativePlaybackUnloadResultDictionary')
@@ -310,13 +311,16 @@ describe('iOS native DSP runtime packaging', () => {
       "'CMakePresets.json'",
       "'cmake/**'",
       "'mobile/ios/**'",
+      "'mobile/App.tsx'",
+      "'mobile/src/playback/**'",
+      "'mobile/src/ui/NativePlayerScreen.tsx'",
       "'mobile/__tests__/**'",
       "'mobile/scripts/**'",
       "'native/playback/**'",
       "'tests/native/**'",
       "'third_party/native/**'",
       "'zcore/**'",
-      "'zdsp/**'",
+      "'zdsp/**'"
     ])
       expect(workflow).toContain(`- ${path}`)
   })
@@ -334,16 +338,10 @@ describe('iOS native DSP runtime packaging', () => {
       }>
     }
 
-    for (const name of [
-      'zdsp-release-strict',
-      'zdsp-asan-ubsan',
-      'zdsp-tsan',
-    ]) {
+    for (const name of ['zdsp-release-strict', 'zdsp-asan-ubsan', 'zdsp-tsan']) {
       const preset = presets.testPresets.find(candidate => candidate.name === name)
       expect(preset).toBeDefined()
-      expect(preset?.filter?.include?.name).toContain(
-        'provider_dispose_failure',
-      )
+      expect(preset?.filter?.include?.name).toContain('provider_dispose_failure')
     }
   })
 
@@ -351,14 +349,36 @@ describe('iOS native DSP runtime packaging', () => {
     const iosAudio = read('../docs/IOS-AUDIO.md')
     const plan = read('../docs/DSP-GRAPH-PLAN.md')
     const architecture = read('../docs/ARCHITECTURE.md')
+    const facade = read('src/playback/native.ts')
+    const catalog = read('src/ui/CatalogScreen.tsx')
+    const app = read('App.tsx')
+    const rootNavigator = read('src/ui/RootNavigator.tsx')
+    const canary = read('../.github/workflows/ios-native-canary.yml')
 
     for (const document of [iosAudio, plan, architecture]) {
-      expect(document).toMatch(/before project decode|before decoding/)
-      expect(document).toContain('RNAudioAPI `AudioBuffer`s')
-      expect(document).toMatch(/509[–-]659 MB/)
+      expect(document).toMatch(/before[^.\n]{0,30}decod/)
+      expect(document).toMatch(/RNAudioAPI[^.\n]{0,24}`AudioBuffer`s/)
     }
+    expect(iosAudio).toMatch(/509[–-]659 MB/)
     expect(iosAudio).toContain('`engine.unload()`')
     expect(iosAudio).toContain('`releaseProject()`')
     expect(iosAudio).toContain('before lazily decoding a legacy fallback')
+    expect(facade).not.toContain('decodeAudioData(')
+    expect(facade.indexOf('nativePlaybackEligibility(')).toBeLessThan(
+      facade.indexOf('materializeNativeProject(options, doc)')
+    )
+    expect(facade).toContain('cleanup.globallyComplete === true')
+    expect(facade).toContain('cleanup.handoffLease > 0')
+    expect(catalog).toContain('await loaded.nativePlayback?.unload')
+    expect(catalog.indexOf('await loaded.nativePlayback?.unload')).toBeLessThan(
+      catalog.indexOf('releaseProject(loaded)')
+    )
+    expect(app).toContain("unloadActive('app unmounted').catch")
+    expect(rootNavigator).toContain("unload('player route closed').catch")
+    expect(canary).toContain('-b -dump-bytecode')
+    expect(canary).toContain('IosNativePlaybackCoordinator')
+    expect(canary).toContain('singz.playback.ios-native-experimental')
+    expect(canary).toContain('test "$consumers" = \'mobile/src/playback/native.ts\'')
+    expect(canary).not.toContain('NativeAudioRuntime product consumer is no longer dormant')
   })
 })

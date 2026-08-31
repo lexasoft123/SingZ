@@ -18,6 +18,7 @@ xcrun clang++ -std=c++20 -fobjc-arc \
   -I"$mobile_root/ios/FolderAccess" \
   "$repo_root/zcore/src/media/owned_file_descriptor.cpp" \
   "$mobile_root/ios/FolderAccess/NativePlaybackAuthorizedPath.mm" \
+  "$mobile_root/ios/FolderAccess/NativePlaybackAudioSessionPolicy.mm" \
   "$mobile_root/ios/FolderAccess/NativePlaybackBridgeResult.mm" \
   "$mobile_root/ios/FolderAccess/NativePlaybackBridgeSchema.mm" \
   "$mobile_root/ios/schema-tests/native_playback_bridge_schema_tests.mm" \

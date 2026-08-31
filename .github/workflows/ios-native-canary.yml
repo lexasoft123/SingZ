@@ -10,6 +10,14 @@ on:
       - 'mobile/ios/**'
       - 'mobile/package.json'
       - 'mobile/package-lock.json'
+      - 'mobile/App.tsx'
+      - 'mobile/src/engine.ts'
+      - 'mobile/src/projects.ts'
+      - 'mobile/src/playback/**'
+      - 'mobile/src/ui/CatalogScreen.tsx'
+      - 'mobile/src/ui/NativePlayerScreen.tsx'
+      - 'mobile/src/ui/SettingsScreen.tsx'
+      - 'mobile/src/ui/RootNavigator.tsx'
       - 'mobile/__tests__/**'
       - 'mobile/scripts/**'
       - 'native/playback/**'
@@ -191,7 +199,7 @@ jobs:
             exit 1
           fi
           strings "$device" > "$RUNNER_TEMP/singz-dsp-strings.txt"
-          grep -q 'singz.ios.zdsp_runtime.phase-ios-b1-ready-inert' \
+          grep -q 'singz.ios.zdsp_runtime.phase-ios-b2-experimental' \
             "$RUNNER_TEMP/singz-dsp-strings.txt"
 
       - name: Gate callback flags, architecture, symbols and dependencies
@@ -325,18 +333,35 @@ jobs:
           test -f "$binary"
           test -f "$bundle"
           strings "$binary" > "$RUNNER_TEMP/singz-app-strings.txt"
-          strings "$bundle" > "$RUNNER_TEMP/singz-jsbundle-strings.txt"
           xcrun nm -m "$binary" > "$RUNNER_TEMP/singz-app-symbols.txt"
-          grep -q 'singz.ios.zdsp_runtime.phase-ios-b1-ready-inert' \
+          grep -q 'singz.ios.zdsp_runtime.phase-ios-b2-experimental' \
             "$RUNNER_TEMP/singz-app-strings.txt"
           grep -q 'singz.native.playback-session.wav-flac.frame-zero.v1' \
             "$RUNNER_TEMP/singz-app-strings.txt"
           grep -q 'NativeAudioRuntime' "$RUNNER_TEMP/singz-app-strings.txt"
-          if grep -q 'NativeAudioRuntime' \
-            "$RUNNER_TEMP/singz-jsbundle-strings.txt"; then
-            echo 'NativeAudioRuntime product consumer is no longer dormant' >&2
-            exit 1
-          fi
+
+          # Release main.jsbundle is Hermes bytecode, not a text bundle.
+          # Disassemble it and require the active B2 facade, preference and
+          # generation-bound session command as positive product evidence.
+          hermesc=mobile/ios/Pods/hermes-engine/destroot/bin/hermesc
+          test -x "$hermesc"
+          "$hermesc" -b -dump-bytecode "$bundle" \
+            > "$RUNNER_TEMP/singz-jsbundle-bytecode.txt"
+          for literal in IosNativePlaybackCoordinator NativeAudioRuntime \
+            configureOutputSession singz.playback.ios-native-experimental; do
+            grep -q "$literal" "$RUNNER_TEMP/singz-jsbundle-bytecode.txt"
+          done
+
+          # The bridge is intentionally reachable only through one typed
+          # facade. A second product consumer would bypass its ownership and
+          # generation rules even though the Release bundle still links.
+          consumers=$(grep -RIl \
+            --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
+            'NativeModules.NativeAudioRuntime' \
+            mobile/src mobile/App.tsx mobile/index.js | LC_ALL=C sort)
+          test "$consumers" = 'mobile/src/playback/native.ts'
+          grep -q 'NativeModules.NativeAudioRuntime as NativePlaybackApi' \
+            mobile/src/playback/native.ts
           for symbol in initializeArena createBuiltinProcessor \
             createDecodedBufferSource compileGraph renderGraphBlock \
             renderAudioHostGraph nativePlaybackRender \

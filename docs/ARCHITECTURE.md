@@ -32,37 +32,36 @@ Phase 3B adds the standalone Windows provider: one event-driven STA/MMCSS owner 
 bridged by a bounded planar SPSC FIFO; only that owner's render action enters
 the graph.
 Phase 3C adds an iOS RemoteIO provider whose output render callback is the
-graph clock. It can consume input from that same unit after validating an
-already-prepared app audio session, but never configures or owns
-`AVAudioSession` itself. Phase 3D provides the equivalent dormant Android
-Oboe/AAudio host. iOS Phase iOS-A now packages the complete callback-safe
-runtime and host adapter into the app as an isolated component pod. A second
-strict component owns the exact portable device-callback target plus the iOS
-RemoteIO render callback; the broad SingzCore pod retains only off-callback
-provider/control definitions. The runtime is exposed only through an inert
-status probe in Phase iOS-A. Phase iOS-B1 adds a dormant, generation-bound
-WAV/FLAC frame-zero session: authorized descriptor decode/resample, sample-
-locked lane gain/mute/solo mixing, master limiting, output-host composition
-and deterministic ownership/telemetry. Heavy `prepare` is host-free;
-generation-bound `openOutput` is the later route-validation/acquisition step,
-so B2 can prepare while legacy owns output, suspend legacy, then open/start
-native without overlapping owners. B2 must select the backend before decoding
-the target project: native receives materialized paths without creating
-RNAudioAPI `AudioBuffer`s, and any fallback fully unloads native owners before
-legacy PCM is decoded. The process coordinator transfers exact cleanup to a
-positive JS-safe fallback handoff lease; legacy operates only while that lease
-is held, and native reentry consumes it synchronously in the next `prepare`
-after legacy suspension. Existing legacy PCM is unloaded/released before native
-prepare, so a 509–659 MB song never exists in both backends. Immediate claims and stop/unload
-cancellation supersede in-flight decode; terminal callback failure is sticky
-and fail-silent. Its bridge exposes these dormant commands but no product
-JavaScript consumes it, it reports legacy ownership, and it never mutates
-`AVAudioSession`. These hosts are not yet wired
-to product playback
-(see `docs/WINDOWS-AUDIO.md` and `docs/IOS-AUDIO.md`). The headless muted CLI
-and fake/native providers remain outside the Electron renderer and mobile app;
-Web Audio below and RNAudioAPI on mobile remain the only product
-playback/session owners until Phase 4.
+graph clock. It validates an app-prepared audio session; the provider itself
+never configures `AVAudioSession`. Phase 3D provides the equivalent dormant
+Android Oboe/AAudio host. iOS Phase iOS-A packages the callback-safe runtime
+and host adapter as strict component pods, and Phase iOS-B1 adds the reusable,
+generation-bound WAV/FLAC frame-zero session: authorized descriptor decode and
+resample, sample-locked lane gain/mute/solo mixing, master limiting,
+output-host composition and deterministic ownership/telemetry.
+
+Phase iOS-B2 now exposes that session as an **opt-in Experimental iPhone
+backend**. `mobile/src/playback/native.ts` is the only product bridge consumer.
+It selects the backend before stem decode, materializes local WAV/FLAC paths,
+and creates no RNAudioAPI song `AudioBuffer`s on the native path. The limited
+native player supports start from frame zero and stop only; any project using
+seek/parity features, tempo, transpose, metronome, training mode, custom tracks
+or unsupported codecs stays wholly legacy. At start, the coordinator suspends
+and releases legacy output, configures and verifies the intended iOS playback
+session, then opens and starts RemoteIO. The Train tab is not activated until
+matching native stop/unload returns a process-global cleanup lease, so its mic
+session cannot race the native output owner.
+
+Cleanup is a transferable ownership protocol rather than an empty-state
+snapshot. Lazy legacy fallback is allowed only when exact unload returns
+`cleanup.globallyComplete`, `cleanup.fallbackSafe` and a positive
+`handoffLease`; native re-entry first suspends legacy and consumes that same
+lease in `prepare`. Uncertain cleanup blocks fallback. A prepare/open failure
+may fall back after this proof, while a start-command or later terminal failure
+never auto-falls back. Immediate claims and stop/unload cancellation supersede
+in-flight decode; callback failure is sticky and fail-silent. Desktop and
+Android product playback remain on their existing engines (see
+`docs/WINDOWS-AUDIO.md` and `docs/IOS-AUDIO.md`).
 
 ## Audio playback (`renderer/src/audio/engine.ts`)
 

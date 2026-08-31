@@ -7,6 +7,9 @@ void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
 void SingzNativePlaybackPrepare(NSNumber* generation, NSDictionary* request,
                                 RCTPromiseResolveBlock resolve,
                                 RCTPromiseRejectBlock reject);
+void SingzNativePlaybackConfigureOutputSession(NSNumber* generation,
+                                               RCTPromiseResolveBlock resolve,
+                                               RCTPromiseRejectBlock reject);
 void SingzNativePlaybackOpenOutput(NSNumber* generation,
                                    RCTPromiseResolveBlock resolve,
                                    RCTPromiseRejectBlock reject);

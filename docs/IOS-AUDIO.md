@@ -148,19 +148,22 @@ Phase iOS-A initially exposed only `NativeAudioRuntime.status()`. The probe
 still holds typed references to each runtime boundary so a successful final
 app link and binary literal/symbol check prove that the implementation reached
 the app rather than merely leaving an unused archive beside it. Phase iOS-B1
-extends that same legacy-owned bridge with dormant, generation-bound playback
-commands described below; no product JavaScript calls them.
+added the generation-bound playback commands described below.
 
-Neither Phase iOS-A nor B1 changes an audible product path: RNAudioAPI still
-owns song/metronome output and the existing coordinator still owns
-`AVAudioSession`. Phase iOS-B2 must add the serialized ADR-0008 handoff before
-the product may call B1's native host. Physical-device listening and route,
-interruption, buffer and latency evidence remain later gates. The PR canary
-links and inspects the dead-stripped Release iPhone executable, in addition to
-arm64 device and universal arm64/x86_64 simulator archives for both strict
-components.
+Phase iOS-B2 now has one deliberately narrow product consumer:
+`mobile/src/playback/native.ts`. It is default-off behind the Experimental
+iPhone setting and owns only eligible WAV/FLAC, frame-zero, no-parity-feature
+projects. The coordinator selects the backend before decode, creates no
+RNAudioAPI song buffers on the native path, suspends legacy output before
+configuring/opening RemoteIO, and requires an exact process-global cleanup
+lease before any lazy legacy fallback. RNAudioAPI remains the normal/default
+song and metronome backend; Android remains unchanged. Physical-device
+listening and route, interruption, buffer and latency evidence remain release
+gates. The PR canary links and inspects the dead-stripped Release iPhone
+executable, in addition to arm64 device and universal arm64/x86_64 simulator
+archives for both strict components.
 
-## Dormant native playback session (Phase iOS-B1)
+## Native playback session foundation (Phase iOS-B1)
 
 `NativePlaybackSession` is a reusable control-domain owner, packaged in the
 exact-source `SingzPlaybackSession` pod. It consumes only already-authorized,
@@ -236,15 +239,16 @@ control-domain last-good snapshot; they never return an unverified pair.
 
 ### Frozen bridge contract for Phase iOS-B2
 
-The dormant `NativeAudioRuntime` surface is fixed as follows. All generation
+The experimental `NativeAudioRuntime` surface is fixed as follows. All generation
 values are positive exact JavaScript integers. Malformed schemas reject with
 `E_NATIVE_PLAYBACK`; valid operations always resolve a typed result, including
 ordinary session failures.
 
 - `status()` returns `available`, `buildId`, `graph`, `audioHostAdapter`,
-  `playbackSession`, `playbackBuild`, `ownership: "legacy"`,
+  `playbackSession`, `playbackBuild`, `ownership: "coordinated"`,
   `playbackCleanupProof`, `playbackHandoffLease`,
-  `activation: "dormant"`, read-only `outputs`, and `session` telemetry.
+  `activation: "experimental-b2"`, read-only `outputs`, and `session`
+  telemetry.
 - `prepare(generation, request)` accepts one to sixteen
   `lanes: [{id, path, gain?, muted?, solo?}]` plus required exact
   `outputDeviceUid`, zero-based `outputChannels` below the native host channel
@@ -255,6 +259,15 @@ ordinary session failures.
   The bridge parses it before synchronous generation claim. It
   decodes/resamples and compiles the graph only. It performs zero host
   operations and never mutates `AVAudioSession`.
+- `configureOutputSession(generation)` runs on the same serialized native
+  control queue and accepts only the exact, uncancelled `Prepared` generation.
+  It applies `playback` category, `default` mode, zero category options and
+  activates `AVAudioSession`, then re-reads category/mode and the current
+  route. Success requires the prepared output UID, every prepared channel and
+  the exact sample rate still to match. Ordinary configuration or verification
+  failures resolve a typed result; malformed generations and bridge-boundary
+  exceptions reject. It never opens RemoteIO, and `prepare` remains free of
+  platform-session mutation.
 - `openOutput(generation)` re-enumerates the current route, requires the exact
   prepared UID/channel/rate intent, and opens the output-only host. Failure
   leaves decoded media and the prepared graph intact for an explicit retry or
@@ -314,18 +327,19 @@ ordinary session failures.
   `message`. Session status additionally exposes host/session state, terminal
   reason, counters, latency classes, lane cursors/lengths and controls.
 
-B2 must select the feature-gated backend **before project decode**. A
-native-selected load materializes authorized lane paths and calls `prepare`;
-it never creates or retains RNAudioAPI `AudioBuffer`s for that song. If a
-legacy song is already loaded, B2 first runs `engine.unload()` and the existing
-`releaseProject()` path to release all legacy PCM, then prepares native media.
-If native prepare fails, B2 must call matching `unload` and require both
+The B2 product coordinator selects the feature-gated backend **before project
+decode**. A native-selected load materializes authorized lane paths and calls
+`prepare`; it never creates or retains RNAudioAPI `AudioBuffer`s for that
+song. Existing player-route ownership runs `engine.unload()` and
+`releaseProject()` before a different project is admitted, so legacy PCM is
+not retained beside a native song. If native prepare fails, B2 calls matching
+`unload` and requires both
 `cleanup.globallyComplete === true` and a positive `cleanup.handoffLease`
 before lazily decoding a legacy fallback. Legacy owns output/PCM only while
 that process-global lease remains held. This order prevents the observed
 509–659 MB decoded projects from existing twice.
 
-For native reentry, B2 first suspends and releases legacy output/PCM while it
+For native reentry, B2 first suspends and releases legacy output while it
 still holds the fallback lease, then calls the next
 `prepare(generation, {..., handoffLease})`. The synchronous bridge claim
 atomically validates and consumes that exact token into
@@ -335,14 +349,20 @@ lease. A fresh process in `available` may claim without a token; while any
 fallback lease is held every tokenless claim is rejected.
 
 After native preparation, the one serialized product lease suspends/retires
-legacy output ownership, establishes and verifies the intended
-`AVAudioSession`, calls `openOutput`, then calls `start`. It reverses that
-ownership sequence on stop or failure. It must guard every asynchronous result
-by both product load sequence and native generation. It must not add an
-automatic legacy fallback after native start, allow simultaneous output
-owners, or silently retry a terminal route. Seek, loop, metronome, tempo,
-transpose, custom codecs and non-zero starts are intentionally absent from B1
-and must not be inferred from this bridge.
+legacy output ownership, calls `configureOutputSession` to establish and
+verify the intended `AVAudioSession`, calls `openOutput`, then calls `start`.
+It reverses that ownership sequence on stop or failure and guards asynchronous
+results by both the Catalog load token and native generation. Prepare and
+pre-start open failures may fall back only after the exact cleanup proof;
+there is no automatic fallback after `start` is invoked or after a terminal
+route. Seek, pause, loop, metronome, tempo, transpose, custom codecs and
+non-zero starts are intentionally unavailable in the B2 player. Stop obtains
+a lease, and the next Start re-prepares the same song at frame zero.
+
+The Train tab uses the same ownership barrier: its tab press is held until
+native stop/unload proves the fallback lease. The Training scene remains
+inactive, so neither microphone capture nor reference cues may configure an
+audio session while native output ownership is uncertain.
 
 Every bridge dictionary is an exact schema. Unknown keys, `null`, wrong
 nested collection/string types, numeric `CFBoolean` values, and non-Boolean
@@ -400,13 +420,13 @@ unload atomically. Failed retirement consumes that same reservation into the
 bounded process quarantine without republishing the stale graph into newer
 session state.
 
-## Standalone RemoteIO output host (Phase 3C)
+## RemoteIO output host (Phase 3C, activated experimentally in iOS-B2)
 
-`AudioHost` now has an iOS RemoteIO provider, but no SingZ product playback
-path calls it yet. `react-native-audio-api` remains the sole song/metronome
-output owner until the atomic Phase 4 handoff in ADR 0008. Merely enumerating
-the host reads the active route and never opens an AudioUnit or mutates the
-session.
+`AudioHost` has an iOS RemoteIO provider. The default product path remains
+`react-native-audio-api`; the Experimental B2 coordinator is the only product
+caller and may open the host only after its explicit legacy-output suspension
+barrier. Merely enumerating the host reads the active route and never opens an
+AudioUnit or mutates the session.
 
 The provider accepts output-only configuration (empty input UID and map), or
 duplex configuration using the active input and output routes from the same
