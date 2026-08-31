@@ -120,3 +120,5 @@ ios/build-sim/
 /ios/SingzDspRuntime/zdsp/
 /ios/SingzDspRuntime/zcore/
 /ios/SingzDeviceCallback/zcore/
+/ios/SingzDspRuntime/native/
+/ios/SingzPlaybackSession/native/

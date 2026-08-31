@@ -912,6 +912,8 @@ struct SourceHarness {
     expect(zdsp::succeeded(processor.functions->prepare(
                processor.state, &spec, &prepared)),
            "decoded source prepares");
+    expect(zdsp::decodedBufferSourceCursor(processor) == 0,
+           "decoded source cursor starts at frame zero");
   }
 
   ~SourceHarness() {
@@ -943,6 +945,17 @@ struct SourceHarness {
   }
 };
 
+struct CursorInterference {
+  SourceHarness* source{nullptr};
+  std::array<float, 1> output{};
+};
+
+void publishBetweenCursorWords(void* opaque, uint32_t) noexcept {
+  auto* interference = static_cast<CursorInterference*>(opaque);
+  float* channels[]{interference->output.data()};
+  interference->source->render(1, channels);
+}
+
 void sourceTests() {
   const std::array<float, 5> left{1, 2, 3, 4, 5};
   const std::array<float, 5> right{-1, -2, -3, -4, -5};
@@ -968,6 +981,9 @@ void sourceTests() {
     zdsp::test::setAllocationTrapEnabled(false);
     expect(zdsp::test::trappedAllocationCount() == 0,
            "decoded source render allocates nothing");
+    expect(zdsp::decodedBufferSourceCursor(source.processor) ==
+               std::min<uint64_t>(left.size(), renderedLeft.size() + frames),
+           "decoded source cursor publishes a non-torn block boundary");
     renderedLeft.insert(renderedLeft.end(), blockLeft.begin(),
                         blockLeft.begin() + frames);
     renderedRight.insert(renderedRight.end(), blockRight.begin(),
@@ -976,6 +992,26 @@ void sourceTests() {
   expect(renderedLeft == std::vector<float>({1, 2, 3, 4, 5, 0, 0}) &&
              renderedRight == std::vector<float>({-1, -2, -3, -4, -5, 0, 0}),
          "source is block-partition independent and zero-fills its end");
+
+  const std::array<float, 32> cursorSamples{};
+  const float* cursorChannels[]{cursorSamples.data()};
+  SourceHarness cursorSource({10}, cursorChannels, 1, cursorSamples.size());
+  std::array<float, 2> cursorOutput{};
+  float* cursorOutputChannels[]{cursorOutput.data()};
+  cursorSource.render(2, cursorOutputChannels);
+  zdsp::DecodedBufferSourceCursorReader cursorReader;
+  expect(zdsp::decodedBufferSourceCursor(cursorSource.processor,
+                                         &cursorReader) == 2,
+         "cursor reader stores a verified last-good boundary");
+  CursorInterference interference{&cursorSource};
+  const zdsp::DecodedBufferSourceCursorReadHook cursorHook{
+      publishBetweenCursorWords, &interference};
+  expect(zdsp::decodedBufferSourceCursor(cursorSource.processor,
+                                         &cursorReader, &cursorHook) == 2,
+         "bounded retry falls back to the verified cursor, not a torn pair");
+  expect(zdsp::decodedBufferSourceCursor(cursorSource.processor,
+                                         &cursorReader) == 10,
+         "reader advances after a later verified snapshot");
 
   SourceHarness resetSource({11}, channels, 2, left.size());
   std::array<float, 2> resetLeft{};

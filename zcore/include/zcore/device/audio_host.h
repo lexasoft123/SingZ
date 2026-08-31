@@ -197,6 +197,11 @@ struct AudioHostResult {
 
 struct AudioHostStatus {
   AudioHostState state{AudioHostState::Closed};
+  AudioHostTerminalReason terminalReason{AudioHostTerminalReason::None};
+  // Monotonic publication-time stamp for terminalReason. Consumers compare
+  // this with independent callback-domain causes instead of applying a reason
+  // priority after the fact.
+  uint64_t terminalOrdinal{0};
   AudioHostFormat format{};
   AudioHostLatency latency{};
   uint64_t routeGeneration{0};

@@ -69,6 +69,12 @@ void silenceInput(IosAudioHostCallbackContext& context,
 
 void setTerminalFailure(IosAudioHostCallbackContext& context,
                         int32_t failure) noexcept {
+  if (context.callbackFailure.load(std::memory_order_acquire) == 0 &&
+      context.signals != nullptr) {
+    context.signals->firstTerminalCause.publish(
+        AudioHostTerminalReason::ProviderFailure,
+        AudioHostTerminalProducer::HostCallback);
+  }
   int32_t expected = 0;
   context.callbackFailure.compare_exchange_strong(
       expected, failure, std::memory_order_release,
@@ -76,9 +82,9 @@ void setTerminalFailure(IosAudioHostCallbackContext& context,
 }
 
 uint32_t pendingSignals(const IosAudioHostCallbackContext& context) noexcept {
-  return context.signals == nullptr
+  return iosAudioHostCallbackTerminal(context.signals)
              ? UINT32_MAX
-             : context.signals->pending.load(std::memory_order_acquire);
+             : 0;
 }
 
 }  // namespace

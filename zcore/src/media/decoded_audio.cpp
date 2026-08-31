@@ -774,33 +774,6 @@ DecodedAudioStatus resample(WorkingAudio* audio, uint32_t requiredSampleRate,
 
 }  // namespace
 
-OwnedFileDescriptor::OwnedFileDescriptor(int descriptor) noexcept
-    : descriptor_(descriptor) {}
-
-OwnedFileDescriptor::~OwnedFileDescriptor() { reset(); }
-
-OwnedFileDescriptor::OwnedFileDescriptor(OwnedFileDescriptor&& other) noexcept
-    : descriptor_(other.release()) {}
-
-OwnedFileDescriptor& OwnedFileDescriptor::operator=(
-    OwnedFileDescriptor&& other) noexcept {
-  if (this != &other) reset(other.release());
-  return *this;
-}
-
-bool OwnedFileDescriptor::valid() const noexcept { return descriptor_ >= 0; }
-int OwnedFileDescriptor::get() const noexcept { return descriptor_; }
-int OwnedFileDescriptor::release() noexcept {
-  const int result = descriptor_;
-  descriptor_ = -1;
-  return result;
-}
-void OwnedFileDescriptor::reset(int descriptor) noexcept {
-  if (descriptor_ == descriptor) return;
-  closeDescriptor(descriptor_);
-  descriptor_ = descriptor;
-}
-
 DecodedAudio::DecodedAudio(uint32_t sampleRate, uint64_t frameCount,
                            std::vector<std::vector<float>> channels) noexcept
     : sampleRate_(sampleRate), frameCount_(frameCount),

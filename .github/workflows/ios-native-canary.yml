@@ -4,15 +4,17 @@ on:
   pull_request:
     paths:
       - '.github/workflows/ios-native-canary.yml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
       - 'cmake/**'
       - 'mobile/ios/**'
       - 'mobile/package.json'
       - 'mobile/package-lock.json'
-      - 'mobile/__tests__/ios-native-audio-runtime-packaging.test.ts'
-      - 'mobile/scripts/sync-singz-dsp-runtime.js'
-      - 'mobile/scripts/sync-singzcore.js'
-      - 'mobile/scripts/native-component-sources.js'
-      - 'mobile/scripts/check-native-component-sources.js'
+      - 'mobile/__tests__/**'
+      - 'mobile/scripts/**'
+      - 'native/playback/**'
+      - 'tests/native/**'
+      - 'third_party/native/**'
       - 'zcore/**'
       - 'zdsp/**'
 
@@ -45,11 +47,13 @@ jobs:
       - name: Verify authoritative generated inputs
         run: |
           before=$(find ios/SingzDspRuntime/zdsp ios/SingzDspRuntime/zcore \
-            ios/SingzDeviceCallback/zcore \
+            ios/SingzDspRuntime/native ios/SingzDeviceCallback/zcore \
+            ios/SingzPlaybackSession/native \
             -type f -print | LC_ALL=C sort | xargs shasum | shasum)
           node scripts/sync-singz-dsp-runtime.js
           after=$(find ios/SingzDspRuntime/zdsp ios/SingzDspRuntime/zcore \
-            ios/SingzDeviceCallback/zcore \
+            ios/SingzDspRuntime/native ios/SingzDeviceCallback/zcore \
+            ios/SingzPlaybackSession/native \
             -type f -print | LC_ALL=C sort | xargs shasum | shasum)
           test "$before" = "$after"
           node scripts/check-native-component-sources.js
@@ -64,6 +68,9 @@ jobs:
         run: |
           pod install
           git diff --exit-code -- Podfile.lock
+
+      - name: Test native playback bridge schemas
+        run: bash mobile/scripts/test-native-playback-bridge-schema.sh
 
       - name: Compile component for device arm64
         working-directory: mobile/ios
@@ -111,6 +118,29 @@ jobs:
             'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO build
 
+      - name: Compile playback session for device arm64
+        working-directory: mobile/ios
+        run: |
+          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+            -scheme SingzPlaybackSession -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/singz-playback-device-derived" \
+            SYMROOT="$RUNNER_TEMP/singz-playback-device-products" \
+            OBJROOT="$RUNNER_TEMP/singz-playback-device-objects" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build
+
+      - name: Compile playback session for simulator arm64 and x86_64
+        working-directory: mobile/ios
+        run: |
+          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+            -scheme SingzPlaybackSession -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/singz-playback-sim-derived" \
+            SYMROOT="$RUNNER_TEMP/singz-playback-sim-products" \
+            OBJROOT="$RUNNER_TEMP/singz-playback-sim-objects" \
+            'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO build
+
       - name: Gate component architecture, symbols and dependencies
         working-directory: mobile/ios
         run: |
@@ -141,7 +171,8 @@ jobs:
           xcrun nm -m "$device" > "$RUNNER_TEMP/singz-dsp-symbols.txt"
           for symbol in initializeArena createBuiltinProcessor \
             createDecodedBufferSource compileGraph renderGraphBlock \
-            renderAudioHostGraph SingzDspRuntimeGetLinkStatus; do
+            renderAudioHostGraph nativePlaybackRender \
+            SingzDspRuntimeGetLinkStatus; do
             grep -q "$symbol" "$RUNNER_TEMP/singz-dsp-symbols.txt"
           done
           if grep -E 'Java_|RCT|facebook|FLAC|Ort|VST|AudioUnit|AVAudio' \
@@ -160,7 +191,7 @@ jobs:
             exit 1
           fi
           strings "$device" > "$RUNNER_TEMP/singz-dsp-strings.txt"
-          grep -q 'singz.ios.zdsp_runtime.phase-ios-a-linked-inert' \
+          grep -q 'singz.ios.zdsp_runtime.phase-ios-b1-ready-inert' \
             "$RUNNER_TEMP/singz-dsp-strings.txt"
 
       - name: Gate callback flags, architecture, symbols and dependencies
@@ -226,6 +257,40 @@ jobs:
             exit 1
           fi
 
+      - name: Gate playback architecture, symbols and ownership
+        working-directory: mobile/ios
+        run: |
+          set -euo pipefail
+          device=$(find "$RUNNER_TEMP/singz-playback-device-products" \
+            -name libSingzPlaybackSession.a -print -quit)
+          simulator=$(find "$RUNNER_TEMP/singz-playback-sim-products" \
+            -name libSingzPlaybackSession.a -print -quit)
+          test -n "$device" && test -n "$simulator"
+          xcrun lipo -info "$device" | grep -q 'arm64'
+          sim_info=$(xcrun lipo -info "$simulator")
+          case "$sim_info" in
+            *arm64*x86_64*|*x86_64*arm64*) ;;
+            *) echo "playback simulator archive is not universal: $sim_info" >&2; exit 1 ;;
+          esac
+          xcrun ar -t "$device" | \
+            grep -vE '^(__.SYMDEF SORTED|SingzPlaybackSession-dummy.o)$' \
+            > "$RUNNER_TEMP/singz-playback-objects.txt"
+          grep -qx 'native_playback_session.o' \
+            "$RUNNER_TEMP/singz-playback-objects.txt"
+          test "$(wc -l < "$RUNNER_TEMP/singz-playback-objects.txt" | tr -d ' ')" = 1
+          xcrun nm -m "$device" > "$RUNNER_TEMP/singz-playback-symbols.txt"
+          for symbol in NativePlaybackSession nativePlaybackSessionCapabilityTag; do
+            grep -q "$symbol" "$RUNNER_TEMP/singz-playback-symbols.txt"
+          done
+          if grep -E 'Java_|RCT|React|facebook|objc_msgSend|AVAudioSession' \
+            "$RUNNER_TEMP/singz-playback-symbols.txt"; then
+            echo 'product/React/session mutation leaked into playback core' >&2
+            exit 1
+          fi
+          strings "$device" > "$RUNNER_TEMP/singz-playback-strings.txt"
+          grep -q 'singz.native.playback-session.wav-flac.frame-zero.v1' \
+            "$RUNNER_TEMP/singz-playback-strings.txt"
+
       - name: Compile the Release iOS app for device arm64 without signing
         working-directory: mobile/ios
         run: |
@@ -249,19 +314,33 @@ jobs:
           callback=$(find "$RUNNER_TEMP/singz-app-derived" \
             -path '*Release-iphoneos/SingzDeviceCallback/libSingzDeviceCallback.a' \
             -print -quit)
+          playback=$(find "$RUNNER_TEMP/singz-app-derived" \
+            -path '*Release-iphoneos/SingzPlaybackSession/libSingzPlaybackSession.a' \
+            -print -quit)
           test -n "$app" && test -n "$core" && test -n "$runtime" \
-            && test -n "$callback"
+            && test -n "$callback" && test -n "$playback"
 
           binary="$app/SingZPlayer"
+          bundle="$app/main.jsbundle"
           test -f "$binary"
+          test -f "$bundle"
           strings "$binary" > "$RUNNER_TEMP/singz-app-strings.txt"
+          strings "$bundle" > "$RUNNER_TEMP/singz-jsbundle-strings.txt"
           xcrun nm -m "$binary" > "$RUNNER_TEMP/singz-app-symbols.txt"
-          grep -q 'singz.ios.zdsp_runtime.phase-ios-a-linked-inert' \
+          grep -q 'singz.ios.zdsp_runtime.phase-ios-b1-ready-inert' \
+            "$RUNNER_TEMP/singz-app-strings.txt"
+          grep -q 'singz.native.playback-session.wav-flac.frame-zero.v1' \
             "$RUNNER_TEMP/singz-app-strings.txt"
           grep -q 'NativeAudioRuntime' "$RUNNER_TEMP/singz-app-strings.txt"
+          if grep -q 'NativeAudioRuntime' \
+            "$RUNNER_TEMP/singz-jsbundle-strings.txt"; then
+            echo 'NativeAudioRuntime product consumer is no longer dormant' >&2
+            exit 1
+          fi
           for symbol in initializeArena createBuiltinProcessor \
             createDecodedBufferSource compileGraph renderGraphBlock \
-            renderAudioHostGraph; do
+            renderAudioHostGraph nativePlaybackRender \
+            nativePlaybackSessionCapabilityTag; do
             grep -q "$symbol" "$RUNNER_TEMP/singz-app-symbols.txt"
           done
           # The current app activates input capture only. Its callback closure
@@ -282,14 +361,19 @@ jobs:
           fi
 
           # Prove exact single ownership as well as checking the named API
-          # boundaries above. Only defined externally linkable symbols can
-          # collide, so normalize those sets from the three final archives.
+          # boundaries above. Only strong, defined, externally linkable
+          # symbols can collide; weak C++ ODR/template definitions are
+          # intentionally coalesced by the linker. Normalize the strong sets
+          # from the four final archives.
           xcrun nm -m "$runtime" \
             > "$RUNNER_TEMP/singz-release-runtime-symbols.txt"
           xcrun nm -m "$callback" \
             > "$RUNNER_TEMP/singz-release-callback-symbols.txt"
+          xcrun nm -m "$playback" \
+            > "$RUNNER_TEMP/singz-release-playback-symbols.txt"
           defined_symbols() {
-            grep -v '(undefined)' "$1" | grep -E ' (private )?external ' | \
+            grep -v '(undefined)' "$1" | grep -v ' weak ' | \
+              grep -E ' (private )?external ' | \
               sed -E 's/^.* ([^ ]+)$/\1/' | LC_ALL=C sort -u > "$2"
           }
           defined_symbols "$RUNNER_TEMP/singz-core-symbols.txt" \
@@ -298,6 +382,8 @@ jobs:
             "$RUNNER_TEMP/singz-runtime-defined-external.txt"
           defined_symbols "$RUNNER_TEMP/singz-release-callback-symbols.txt" \
             "$RUNNER_TEMP/singz-callback-defined-external.txt"
+          defined_symbols "$RUNNER_TEMP/singz-release-playback-symbols.txt" \
+            "$RUNNER_TEMP/singz-playback-defined-external.txt"
           comm -12 "$RUNNER_TEMP/singz-core-defined-external.txt" \
             "$RUNNER_TEMP/singz-runtime-defined-external.txt" \
             > "$RUNNER_TEMP/singz-core-runtime-overlap.txt"
@@ -307,9 +393,21 @@ jobs:
           comm -12 "$RUNNER_TEMP/singz-runtime-defined-external.txt" \
             "$RUNNER_TEMP/singz-callback-defined-external.txt" \
             > "$RUNNER_TEMP/singz-runtime-callback-overlap.txt"
+          comm -12 "$RUNNER_TEMP/singz-core-defined-external.txt" \
+            "$RUNNER_TEMP/singz-playback-defined-external.txt" \
+            > "$RUNNER_TEMP/singz-core-playback-overlap.txt"
+          comm -12 "$RUNNER_TEMP/singz-runtime-defined-external.txt" \
+            "$RUNNER_TEMP/singz-playback-defined-external.txt" \
+            > "$RUNNER_TEMP/singz-runtime-playback-overlap.txt"
+          comm -12 "$RUNNER_TEMP/singz-callback-defined-external.txt" \
+            "$RUNNER_TEMP/singz-playback-defined-external.txt" \
+            > "$RUNNER_TEMP/singz-callback-playback-overlap.txt"
           if test -s "$RUNNER_TEMP/singz-core-runtime-overlap.txt" || \
             test -s "$RUNNER_TEMP/singz-core-callback-overlap.txt" || \
-            test -s "$RUNNER_TEMP/singz-runtime-callback-overlap.txt"; then
+            test -s "$RUNNER_TEMP/singz-runtime-callback-overlap.txt" || \
+            test -s "$RUNNER_TEMP/singz-core-playback-overlap.txt" || \
+            test -s "$RUNNER_TEMP/singz-runtime-playback-overlap.txt" || \
+            test -s "$RUNNER_TEMP/singz-callback-playback-overlap.txt"; then
             echo 'strict iOS archives have duplicate defined symbols' >&2
             exit 1
           fi

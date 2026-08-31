@@ -5,6 +5,8 @@ const { readFileSync } = require('node:fs')
 const { join } = require('node:path')
 const {
   iosAudioHostCallbackFiles,
+  nativePlaybackCallbackFiles,
+  nativePlaybackSessionFiles,
   zcoreDeviceCallbackFiles,
   zdspHostAdapterFiles,
   zdspRuntimeFiles,
@@ -106,6 +108,7 @@ const compareExact = (label, cmakeEntries, iosEntries) => {
 
 const zdspCmake = readFileSync(join(repoRoot, 'zdsp', 'CMakeLists.txt'), 'utf8')
 const zcoreCmake = readFileSync(join(repoRoot, 'zcore', 'CMakeLists.txt'), 'utf8')
+const rootCmake = readFileSync(join(repoRoot, 'CMakeLists.txt'), 'utf8')
 
 compareExact(
   'zdsp_runtime',
@@ -132,6 +135,18 @@ compareExact(
   'iOS AudioHost callback',
   setMembers(zcoreCmake, 'SINGZ_IOS_AUDIO_HOST_RT_SOURCES'),
   iosAudioHostCallbackFiles
+)
+compareExact(
+  'native playback callback',
+  addLibraryMembers(rootCmake, 'singz_native_playback_callback')
+    .map((entry) => entry.replace(/^native\//, '')),
+  nativePlaybackCallbackFiles
+)
+compareExact(
+  'native playback session',
+  addLibraryMembers(rootCmake, 'singz_native_playback_session')
+    .map((entry) => entry.replace(/^native\//, '')),
+  nativePlaybackSessionFiles
 )
 
 console.log('native-component-sources: CMake and iOS manifests match exactly')

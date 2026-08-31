@@ -95,6 +95,9 @@ class DecodedAudio final {
     return static_cast<uint32_t>(channels_.size());
   }
   [[nodiscard]] uint64_t frameCount() const noexcept { return frameCount_; }
+  [[nodiscard]] size_t retainedBytes() const noexcept {
+    return static_cast<size_t>(frameCount_) * channels_.size() * sizeof(float);
+  }
   [[nodiscard]] const float* channelData(uint32_t channel) const noexcept;
 
  private:

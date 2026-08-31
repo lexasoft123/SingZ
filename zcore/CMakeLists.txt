@@ -106,7 +106,8 @@ add_dependencies(zcore_device_callback singz_check_zcore_realtime)
 
 set(SINGZ_IOS_AUDIO_HOST_RT_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/audio_host_ios_callback.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/audio_host_ios_callback.h")
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/audio_host_ios_callback.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/audio_host_ios_session_signals.h")
 set(_ios_audio_host_rt_manifest
   "${CMAKE_CURRENT_BINARY_DIR}/ios-audio-host-realtime-sources.cmake")
 file(WRITE "${_ios_audio_host_rt_manifest}"
@@ -331,6 +332,7 @@ if(NOT _zcore_audio_links MATCHES
 endif()
 
 add_library(zcore_media STATIC
+  src/media/owned_file_descriptor.cpp
   src/media/decoded_audio.cpp
   src/media/flac_io.cpp
   src/media/wav.cpp)

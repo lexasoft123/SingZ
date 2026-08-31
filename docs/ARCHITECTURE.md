@@ -40,8 +40,25 @@ runtime and host adapter into the app as an isolated component pod. A second
 strict component owns the exact portable device-callback target plus the iOS
 RemoteIO render callback; the broad SingzCore pod retains only off-callback
 provider/control definitions. The runtime is exposed only through an inert
-status probe and still cannot open or start audio. These
-hosts are not yet wired to product playback
+status probe in Phase iOS-A. Phase iOS-B1 adds a dormant, generation-bound
+WAV/FLAC frame-zero session: authorized descriptor decode/resample, sample-
+locked lane gain/mute/solo mixing, master limiting, output-host composition
+and deterministic ownership/telemetry. Heavy `prepare` is host-free;
+generation-bound `openOutput` is the later route-validation/acquisition step,
+so B2 can prepare while legacy owns output, suspend legacy, then open/start
+native without overlapping owners. B2 must select the backend before decoding
+the target project: native receives materialized paths without creating
+RNAudioAPI `AudioBuffer`s, and any fallback fully unloads native owners before
+legacy PCM is decoded. The process coordinator transfers exact cleanup to a
+positive JS-safe fallback handoff lease; legacy operates only while that lease
+is held, and native reentry consumes it synchronously in the next `prepare`
+after legacy suspension. Existing legacy PCM is unloaded/released before native
+prepare, so a 509–659 MB song never exists in both backends. Immediate claims and stop/unload
+cancellation supersede in-flight decode; terminal callback failure is sticky
+and fail-silent. Its bridge exposes these dormant commands but no product
+JavaScript consumes it, it reports legacy ownership, and it never mutates
+`AVAudioSession`. These hosts are not yet wired
+to product playback
 (see `docs/WINDOWS-AUDIO.md` and `docs/IOS-AUDIO.md`). The headless muted CLI
 and fake/native providers remain outside the Electron renderer and mobile app;
 Web Audio below and RNAudioAPI on mobile remain the only product

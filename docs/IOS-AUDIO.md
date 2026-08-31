@@ -139,25 +139,266 @@ AudioToolbox render import.
 `mobile/scripts/native-component-sources.js` is the iOS materialization
 manifest. Before syncing, `check-native-component-sources.js` parses the four
 CMake memberships (`zdsp_runtime`, `zdsp_host_adapter`,
-`zcore_device_callback`, and the iOS AudioHost callback pair) and compares
-normalized sets exactly. Any source added or removed on either side fails;
-recursive pod globs see only that closed generated set.
+`zcore_device_callback`, the iOS AudioHost callback pair and the native
+playback callback/session targets) and compares normalized sets exactly. Any
+source added or removed on either side fails; recursive pod globs see only
+that closed generated set.
 
-The application bridge is deliberately inert. `NativeAudioRuntime.status()`
-reports the component build ID, graph and host-adapter capabilities, and
-`ownership: "legacy"`; it exposes no open, start, stop or session command. The
-probe holds typed references to each runtime boundary so a successful final
+Phase iOS-A initially exposed only `NativeAudioRuntime.status()`. The probe
+still holds typed references to each runtime boundary so a successful final
 app link and binary literal/symbol check prove that the implementation reached
-the app rather than merely leaving an unused archive beside it.
+the app rather than merely leaving an unused archive beside it. Phase iOS-B1
+extends that same legacy-owned bridge with dormant, generation-bound playback
+commands described below; no product JavaScript calls them.
 
-Phase iOS-A changes no audible path: RNAudioAPI still owns song/metronome
-output and the existing coordinator still owns `AVAudioSession`. Phase iOS-B
-must add the transport/source preparation and serialized ADR-0008 handoff
-before any native host may open or start. Physical-device listening and route,
+Neither Phase iOS-A nor B1 changes an audible product path: RNAudioAPI still
+owns song/metronome output and the existing coordinator still owns
+`AVAudioSession`. Phase iOS-B2 must add the serialized ADR-0008 handoff before
+the product may call B1's native host. Physical-device listening and route,
 interruption, buffer and latency evidence remain later gates. The PR canary
 links and inspects the dead-stripped Release iPhone executable, in addition to
 arm64 device and universal arm64/x86_64 simulator archives for both strict
 components.
+
+## Dormant native playback session (Phase iOS-B1)
+
+`NativePlaybackSession` is a reusable control-domain owner, packaged in the
+exact-source `SingzPlaybackSession` pod. It consumes only already-authorized,
+already-opened `OwnedFileDescriptor`s; the React Native bridge opens regular
+files beneath the app's Documents, Application Support or bundle roots with
+`O_NOFOLLOW`, validates the canonical opened path, then transfers descriptor
+ownership. The raw descriptor is wrapped in `OwnedFileDescriptor` immediately
+after `open(2)`, before canonicalization, root checks, error construction or
+any other allocating work. WAV/FLAC decode, optional common-rate resampling,
+cancellation and
+aggregate retained-byte accounting all complete before the graph or output
+host is published. Preparation performs no `AudioHost` enumeration, open,
+configuration or start operation and is safe while RNAudioAPI still owns the
+product output. It captures an exact route intent supplied by B2; only the
+separate `openOutput` command re-enumerates and validates that intent before
+opening RemoteIO.
+
+The prepared graph is sample-locked and starts only at frame zero:
+
+```text
+decoded lane -> channel map -> ramped lane gain --+
+decoded lane -> channel map -> ramped lane gain --+-> mix -> master gain
+                                                      -> -1 dBFS limiter -> output
+```
+
+Mute and solo resolve into each lane's gain processor. Unequal lane ends emit
+silence independently while the remaining lanes continue. Decoded owners stay
+alive until host stop/quiescence, runner retirement and graph deactivation have
+completed, then release deterministically. An uncertain host stop fails closed
+and quarantines the graph instead of freeing callback-visible state. Status
+retains rendered and audible frames, each lane cursor, retained bytes, xruns,
+deadline misses, discontinuities, render diagnostics and a typed terminal
+route/interruption/media-services reason. The callback has a strict
+no-allocation/no-lock policy and is built into `SingzDspRuntime`. A render
+failure pre-silences the block, latches `RenderUnavailable`, increments a
+bounded terminal counter and permanently prevents graph re-entry for that
+session. Every notification, provider and graph-callback cause receives a
+lock-free monotonic ordinal at publication. Each producer retains its exact
+earliest `{ordinal, reason}` in one packed atomic minimum, so a delayed first
+publisher cannot lose its reason after later publishers exceed the former
+journal capacity. Publication has a statically bounded number of atomic
+attempts, never allocates or spins, and the wait-free ordinal allocator keeps
+a conservative 64-publisher in-flight headroom before true exhaustion rather
+than wrapping. Ordinary contention therefore cannot poison future generations
+into saturation; the same bound is enforced by atomic admission on ordinal
+allocation and every retain. Admission uses bounded compare/exchange and
+refuses saturated or corrupt counters without a transient increment/rollback,
+so even `UINT32_MAX` cannot wrap through zero. A rejected retain publishes a
+coherent packed cause into a separate bounded fallback that participates in
+`current()` and `hasCause()` immediately, even while all 64 admitted writers
+are paused before their primary publication. Status compares producer-stamped ordinals so
+the temporal first cause survives even when several domains fail before the
+control thread samples them. Host and callback facts are folded into one
+first-cause locked `Terminal` state used by status and command admission. The
+retained cause is orthogonal to the provider's physical `Stopped` quiescence
+proof, so
+unload can retire owners after a terminal event without erasing why it stopped.
+The session latch resets for a newly prepared generation. The provider latch
+resets at the boundary of each admitted open attempt (after the previous host
+is physically stopped), so an old generation's retained cause cannot be
+attributed to a new attempt even when that new open fails. The
+session pod owns only the off-callback composition and therefore cannot
+duplicate the callback definition.
+
+Generation claims are immediate rather than queue-bound. A newer claim
+cancels an older decode and is linearized with final prepared-graph
+publication. `stop` and `unload` advance the matching cancellation epoch
+before their serialized command is enqueued, so a long decode stops promptly.
+Once a newer generation is claimed, the old generation cannot open output,
+start or change controls, but its exact `stop`/`unload` remains legal for
+cleanup. Split-word source cursors use bounded verified retries and retain a
+control-domain last-good snapshot; they never return an unverified pair.
+
+### Frozen bridge contract for Phase iOS-B2
+
+The dormant `NativeAudioRuntime` surface is fixed as follows. All generation
+values are positive exact JavaScript integers. Malformed schemas reject with
+`E_NATIVE_PLAYBACK`; valid operations always resolve a typed result, including
+ordinary session failures.
+
+- `status()` returns `available`, `buildId`, `graph`, `audioHostAdapter`,
+  `playbackSession`, `playbackBuild`, `ownership: "legacy"`,
+  `playbackCleanupProof`, `playbackHandoffLease`,
+  `activation: "dormant"`, read-only `outputs`, and `session` telemetry.
+- `prepare(generation, request)` accepts one to sixteen
+  `lanes: [{id, path, gain?, muted?, solo?}]` plus required exact
+  `outputDeviceUid`, zero-based `outputChannels` below the native host channel
+  limit and integer `sampleRate`;
+  `maximumFrames`, `bufferFrames`, `masterGain` and
+  `maximumRetainedBytes` are optional. `handoffLease` is an optional positive
+  exact JavaScript integer used only for atomic fallback-to-native reentry.
+  The bridge parses it before synchronous generation claim. It
+  decodes/resamples and compiles the graph only. It performs zero host
+  operations and never mutates `AVAudioSession`.
+- `openOutput(generation)` re-enumerates the current route, requires the exact
+  prepared UID/channel/rate intent, and opens the output-only host. Failure
+  leaves decoded media and the prepared graph intact for an explicit retry or
+  `unload`; it never starts rendering. The provider may safely clamp its
+  actual maximum callback size below the prepared maximum, provided it remains
+  non-zero and no smaller than the negotiated nominal buffer size.
+- Output-open and start host-mutation markers are persistent physical
+  ownership facts, cleared only after provider quiescence is confirmed. They
+  are distinct from one-shot command-delivery tokens. A command receives an
+  exact `{generation, serial, kind}` token only after its preconditions pass
+  and native host mutation is admitted. The bridge acknowledges that token
+  only after promise delivery returns; a conversion/delivery exception aborts
+  only the exact unacknowledged token. Duplicate, stale, wrong-kind and
+  already-acknowledged tokens are inert, so a duplicate same-generation
+  command cannot tear down an already-valid stream. A merely prepared
+  generation has no physical marker: its stop/unload never samples or stops
+  the provider and cannot inherit a prior generation's terminal cause, format
+  or counters.
+- `start(generation)`, `stop(generation)` and `unload(generation)` act only on
+  the matching prepared generation. Start is legal once and only while every
+  lane cursor is zero; there is no restart/seek masquerading as start. Start
+  remains `output-open` while the provider starts, then publishes `running`
+  only if generation, cancellation, callback-terminal and host-health checks
+  still pass. A failed check stops the provider before returning.
+  Stop and unload also keep an exact-generation delivery guard from their
+  synchronous cancellation claim through GCD block transfer, result
+  conversion and promise delivery. An exception retries cleanup for that
+  generation only; a newer generation is never stopped by the retry.
+  Normal `unload` resolves the ordinary playback result plus a nested
+  generation-exact `cleanup` proof: `safety`, `error`, `generation`, `state`,
+  retained bytes, physical ownership, process-quarantine reservation/poison/
+  retained bytes, terminal reason, coordinator state/epoch/owner facts,
+  `handoffLease`, `globallyComplete` and `fallbackSafe`. Local unload success
+  is not ownership proof. `globallyComplete` and `fallbackSafe` are true only
+  while the returned positive `handoffLease` holds the process coordinator in
+  `fallback-leased`; there is no empty-snapshot race window.
+  Results are held in a bounded, allocation-free exact-command receipt
+  journal. If unloading an older graph also completes an already-requested
+  newer-generation unload, the root result remains attributed to the older
+  command while nested `cleanup.generation` identifies the newer owner and
+  carries its lease or uncertainty. Retrying the older command after promise
+  delivery failure returns the identical receipt; asking cleanup proof for
+  the old generation remains `NotOwned`. Journal exhaustion fails closed.
+- Every completed failed `prepare` publishes `unloaded`, generation zero and
+  zero retained bytes, while remembering its failed generation for cleanup.
+  Matching `unload(failedGeneration)` succeeds idempotently and releases the
+  pre-reserved fail-stop slot; B2 must perform that handshake before retrying
+  or entering the lazy legacy fallback.
+- If the bridge has claimed a generation but opening or authorizing any lane
+  descriptor fails, it resolves a typed `decode-failure` through the same
+  failed-prepare admission. Matching `unload(generation)` remains mandatory
+  and idempotent.
+- `setControl(generation, {laneId, gain, muted, solo})` updates one complete
+  lane state; `setControl(generation, {masterGain})` updates the master.
+- Command results contain `ok`, `error`, `generation`, `state`, negotiated
+  `sampleRate`, `maximumFrames`, `nominalBufferFrames`, `outputChannels`, and
+  `message`. Session status additionally exposes host/session state, terminal
+  reason, counters, latency classes, lane cursors/lengths and controls.
+
+B2 must select the feature-gated backend **before project decode**. A
+native-selected load materializes authorized lane paths and calls `prepare`;
+it never creates or retains RNAudioAPI `AudioBuffer`s for that song. If a
+legacy song is already loaded, B2 first runs `engine.unload()` and the existing
+`releaseProject()` path to release all legacy PCM, then prepares native media.
+If native prepare fails, B2 must call matching `unload` and require both
+`cleanup.globallyComplete === true` and a positive `cleanup.handoffLease`
+before lazily decoding a legacy fallback. Legacy owns output/PCM only while
+that process-global lease remains held. This order prevents the observed
+509–659 MB decoded projects from existing twice.
+
+For native reentry, B2 first suspends and releases legacy output/PCM while it
+still holds the fallback lease, then calls the next
+`prepare(generation, {..., handoffLease})`. The synchronous bridge claim
+atomically validates and consumes that exact token into
+`native-owned(session,generation)` before any descriptor work or decode.
+Missing, stale, wrong and replayed tokens reject without changing the held
+lease. A fresh process in `available` may claim without a token; while any
+fallback lease is held every tokenless claim is rejected.
+
+After native preparation, the one serialized product lease suspends/retires
+legacy output ownership, establishes and verifies the intended
+`AVAudioSession`, calls `openOutput`, then calls `start`. It reverses that
+ownership sequence on stop or failure. It must guard every asynchronous result
+by both product load sequence and native generation. It must not add an
+automatic legacy fallback after native start, allow simultaneous output
+owners, or silently retry a terminal route. Seek, loop, metronome, tempo,
+transpose, custom codecs and non-zero starts are intentionally absent from B1
+and must not be inferred from this bridge.
+
+Every bridge dictionary is an exact schema. Unknown keys, `null`, wrong
+nested collection/string types, numeric `CFBoolean` values, and non-Boolean
+NSNumber values in Boolean fields reject with `E_NATIVE_PLAYBACK`. Unpaired
+UTF-16 surrogates and embedded U+0000 are rejected for every UID, lane ID,
+path and control ID, so filesystem authority cannot be validated under one
+string and opened under a silently truncated one. No
+Objective-C coercion or silent default is used. A Foundation-native malformed
+payload matrix runs in the iOS canary.
+Foundation/C++ allocation failures at the bridge resolve no partial result:
+they reject as `E_NATIVE_PLAYBACK_RESOURCE_EXHAUSTED`; every other exception
+is contained and rejects as `E_NATIVE_PLAYBACK_PROVIDER`. Ordinary decoded
+memory limits remain the typed result `limit-exceeded`, distinct from resource
+exhaustion. A prepare ownership guard becomes active immediately after the
+generation claim. The claimed guard and transferred shared-block guard both
+live outside the caught outer boundary, so allocation, capture construction,
+real block-copy or dispatch exceptions cannot destroy the active guard and
+discard its cleanup verdict. Exceptions before session mutation complete
+failed admission and its matching exact unload; exceptions after mutation
+synchronously cancel and unload the exact generation before rejection,
+including result-dictionary and promise-delivery failures. Any `Complete`
+verdict requires every global owner to be absent: no decoded graph, current or
+active session generation, failed-prepare handshake, physical/invocation
+marker, pending command token, or quarantine reservation. `openOutput` and
+`start` use exact one-shot
+delivery tokens separate from persistent physical ownership. Native writes a
+token at the mutation boundary so C++ or Objective-C exceptions after hidden
+provider acquisition remain recoverable; a precondition failure writes none.
+Cleanup is itself a C++/Objective-C nonthrowing boundary and returns a stable
+verdict. `NotOwned` means only that one exact token/generation has no cleanup
+claim; it is never evidence that another generation or output owner is gone.
+Only `Complete` together with global `unloaded`, zero retained bytes, no
+physical host marker and an **Available, empty process-wide quarantine slot**
+is fallback-safe. A slot reserved by another native playback session or a
+Consumed/poisoned graph makes every local cleanup proof non-global; bridge
+error facts expose the reservation, poison state and process-quarantined
+retained bytes. Block-copy, result-conversion,
+pre-resolve and promise-delivery exceptions after `stop` or `unload` use the
+same exact-generation retry and proof. `teardown-uncertain`, `NotOwned`,
+quarantine, retained decoded bytes or an unproven host stop reject as
+`E_NATIVE_PLAYBACK_TEARDOWN_UNCERTAIN` with
+generation/state/retained-byte/terminal/physical-ownership and process-
+quarantine details. B2 must
+not lazily decode legacy PCM or resume another output owner until it receives
+the complete global proof.
+
+A decoded graph that loses the final prepare-publication race remains an
+explicit retiring owner while shutdown runs off the session locks. Its exact
+generation, retained bytes, prepare mutation marker and process reservation
+remain published until runner shutdown, graph deactivation and decoded release
+finish. Concurrent unload records exact-generation intent but its cleanup proof
+is `uncertain` until retirement completes; a newer prepare cannot acquire the
+reservation in that interval. Successful retirement completes a recorded
+unload atomically. Failed retirement consumes that same reservation into the
+bounded process quarantine without republishing the stale graph into newer
+session state.
 
 ## Standalone RemoteIO output host (Phase 3C)
 

@@ -18,6 +18,9 @@ const { dirname, join } = require('node:path')
 const { execFileSync } = require('node:child_process')
 const {
   iosAudioHostCallbackFiles,
+  nativePlaybackCallbackFiles,
+  nativePlaybackSessionFiles,
+  nativePlaybackSessionSupportFiles,
   zcoreDeviceCallbackFiles,
   zcoreDeviceCallbackSupportFiles,
   zdspHostAdapterFiles,
@@ -37,6 +40,13 @@ const zcoreDestinationRoot = join(
 const callbackDestinationRoot = join(
   mobileRoot, 'ios', 'SingzDeviceCallback', 'zcore'
 )
+const nativeSourceRoot = join(repoRoot, 'native')
+const playbackCallbackDestinationRoot = join(
+  mobileRoot, 'ios', 'SingzDspRuntime', 'native'
+)
+const playbackSessionDestinationRoot = join(
+  mobileRoot, 'ios', 'SingzPlaybackSession', 'native'
+)
 
 const files = [...zdspRuntimeFiles, ...zdspHostAdapterFiles]
 const zcoreFiles = zdspSupportZcoreFiles
@@ -45,6 +55,9 @@ const callbackFiles = [
   ...iosAudioHostCallbackFiles,
   ...zcoreDeviceCallbackSupportFiles,
 ]
+const totalFiles = files.length + zcoreFiles.length + callbackFiles.length +
+  nativePlaybackCallbackFiles.length + nativePlaybackSessionFiles.length +
+  nativePlaybackSessionSupportFiles.length
 
 execFileSync(process.execPath, [
   join(__dirname, 'check-native-component-sources.js'),
@@ -99,9 +112,21 @@ if (check) {
     callbackFiles,
     'zcore callback'
   )
+  verify(
+    nativeSourceRoot,
+    playbackCallbackDestinationRoot,
+    nativePlaybackCallbackFiles,
+    'native playback callback'
+  )
+  verify(
+    nativeSourceRoot,
+    playbackSessionDestinationRoot,
+    [...nativePlaybackSessionFiles, ...nativePlaybackSessionSupportFiles],
+    'native playback session'
+  )
   console.log(
     'sync-singz-dsp-runtime: verified ' +
-      `${files.length + zcoreFiles.length + callbackFiles.length} files`
+      `${totalFiles} files`
   )
   process.exit(0)
 }
@@ -119,8 +144,18 @@ const materialize = (from, to, expectedFiles) => {
 materialize(sourceRoot, destinationRoot, files)
 materialize(zcoreSourceRoot, zcoreDestinationRoot, zcoreFiles)
 materialize(zcoreSourceRoot, callbackDestinationRoot, callbackFiles)
+materialize(
+  nativeSourceRoot,
+  playbackCallbackDestinationRoot,
+  nativePlaybackCallbackFiles
+)
+materialize(
+  nativeSourceRoot,
+  playbackSessionDestinationRoot,
+  [...nativePlaybackSessionFiles, ...nativePlaybackSessionSupportFiles]
+)
 console.log(
   'sync-singz-dsp-runtime: ' +
-    `${files.length + zcoreFiles.length + callbackFiles.length} files ` +
-    '→ ios/{SingzDspRuntime,SingzDeviceCallback}/'
+    `${totalFiles} files ` +
+    '→ ios/{SingzDspRuntime,SingzDeviceCallback,SingzPlaybackSession}/'
 )

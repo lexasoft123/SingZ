@@ -2832,6 +2832,27 @@ void boundedAndNonDestructiveQueueDrains() {
 }
 
 void queuesContainmentAndAllocationTrap() {
+  ParameterQueue batchQueue;
+  const ParameterEvent batch[] = {
+      {{1}, {1}, {0}, 1.0f, ParameterCurve::Step, {0}},
+      {{2}, {1}, {0}, 2.0f, ParameterCurve::Step, {0}},
+      {{3}, {1}, {0}, 3.0f, ParameterCurve::Step, {0}},
+  };
+  expect(batchQueue.pushBatch(batch, 3) &&
+         batchQueue.snapshotAvailable() == 3,
+         "parameter batch publishes one complete producer boundary");
+  ParameterEvent batchItem{};
+  expect(batchQueue.pop(&batchItem) && batchItem.node.value == 1 &&
+         batchQueue.pop(&batchItem) && batchItem.node.value == 2 &&
+         batchQueue.pop(&batchItem) && batchItem.node.value == 3,
+         "parameter batch preserves item order");
+  for (uint32_t index = 0; index < kRuntimeEventQueueCapacity - 2; ++index)
+    expect(batchQueue.push(batch[0]), "fill batch rejection fixture");
+  const uint32_t beforeRejectedBatch = batchQueue.snapshotAvailable();
+  expect(!batchQueue.pushBatch(batch, 2) &&
+         batchQueue.snapshotAvailable() == beforeRejectedBatch,
+         "parameter batch rejects without a partial publication");
+
   ParameterQueue queue;
   RuntimeDiagnostics queueDiagnostics{};
   ParameterEvent event{{1}, {1}, {0}, 0.5f, ParameterCurve::Step, {0}};

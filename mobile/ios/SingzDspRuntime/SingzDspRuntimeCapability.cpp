@@ -7,6 +7,8 @@
 #include <zdsp/graph_runner.h>
 #include <zdsp/realtime_arena.h>
 
+#include "native_playback_callback.h"
+
 namespace {
 
 // The capability object is the product's one inert reference into this static
@@ -25,17 +27,20 @@ namespace {
 [[gnu::used, gnu::retain]] auto kRunnerSymbol = &zdsp::renderGraphBlock;
 [[gnu::used, gnu::retain]] auto kHostAdapterSymbol =
     &zdsp::renderAudioHostGraph;
+[[gnu::used, gnu::retain]] auto kPlaybackCallbackSymbol =
+    &singz::nativePlaybackRender;
 
 constexpr SingzDspRuntimeLinkStatus kStatus{
     1,
-    SingzDspRuntimeCapabilityGraph |
-        SingzDspRuntimeCapabilityAudioHostAdapter,
-    "singz.ios.zdsp_runtime.phase-ios-a-linked-inert",
+    SingzDspRuntimeCapabilityGraph | SingzDspRuntimeCapabilityAudioHostAdapter |
+        SingzDspRuntimeCapabilityPlaybackCallback |
+        SingzDspRuntimeCapabilityPlaybackCleanupProof |
+        SingzDspRuntimeCapabilityPlaybackHandoffLease,
+    "singz.ios.zdsp_runtime.phase-ios-b1-ready-inert",
 };
 
-}  // namespace
+} // namespace
 
-extern "C" const SingzDspRuntimeLinkStatus*
-SingzDspRuntimeGetLinkStatus(void) {
+extern "C" const SingzDspRuntimeLinkStatus *SingzDspRuntimeGetLinkStatus(void) {
   return &kStatus;
 }

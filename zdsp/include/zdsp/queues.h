@@ -36,6 +36,26 @@ class SpscQueue {
     return true;
   }
 
+  // Ordinary-thread producer transaction: publish all entries at one queue
+  // boundary or publish none. The callback cannot observe a partially copied
+  // batch because producer_ advances only after every entry is initialized.
+  bool pushBatch(const T* values, uint32_t count) noexcept {
+    if (count == 0) return true;
+    if (values == nullptr || count >= Capacity) return false;
+    uint32_t producer = producer_.load(std::memory_order_relaxed);
+    const uint32_t consumer = consumer_.load(std::memory_order_acquire);
+    const uint32_t available = producer >= consumer
+        ? producer - consumer
+        : Capacity - consumer + producer;
+    if (count > Capacity - 1 - available) return false;
+    for (uint32_t index = 0; index < count; ++index) {
+      entries_[producer] = values[index];
+      producer = increment(producer);
+    }
+    producer_.store(producer, std::memory_order_release);
+    return true;
+  }
+
   bool pop(T* value) noexcept {
     if (value == nullptr) return false;
     const uint32_t consumer = consumer_.load(std::memory_order_relaxed);

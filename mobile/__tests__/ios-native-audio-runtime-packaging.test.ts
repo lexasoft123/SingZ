@@ -1,10 +1,16 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 const root = join(__dirname, '..')
 const read = (relative: string): string =>
   readFileSync(join(root, relative), 'utf8')
+
+const sourceFiles = (relative: string): string[] =>
+  readdirSync(join(root, relative), { withFileTypes: true }).flatMap(entry => {
+    const child = join(relative, entry.name)
+    return entry.isDirectory() ? sourceFiles(child) : [child]
+  })
 
 describe('iOS native DSP runtime packaging', () => {
   test('owns the CMake runtime and host-adapter sources in one strict pod', () => {
@@ -22,6 +28,7 @@ describe('iOS native DSP runtime packaging', () => {
 
     for (const source of expectedSources) expect(manifest).toContain(source)
     expect(podspec).toContain("'zdsp/**/*.{h,cpp}'")
+    expect(podspec).toContain("'native/**/*.{h,cpp}'")
     expect(podspec).toContain("'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20'")
     expect(podspec).toContain('SINGZ_REALTIME_LEAF=1')
     expect(podspec).toContain('-fno-exceptions -fno-rtti')
@@ -48,7 +55,7 @@ describe('iOS native DSP runtime packaging', () => {
     expect(guard).toContain('__has_feature(cxx_exceptions)')
     expect(guard).toContain('__has_feature(cxx_rtti)')
     expect(corePodspec).toContain("s.dependency 'SingzDeviceCallback'")
-    expect(folderPodspec).toContain("s.version      = '1.0.4'")
+    expect(folderPodspec).toContain("s.version      = '1.0.5'")
   })
 
   test('compares every packaged target member exactly with CMake', () => {
@@ -60,6 +67,8 @@ describe('iOS native DSP runtime packaging', () => {
     const sync = read('scripts/sync-singz-dsp-runtime.js')
     expect(sync).toContain("require('./native-component-sources')")
     expect(sync).toContain('callbackDestinationRoot')
+    expect(sync).toContain('playbackCallbackDestinationRoot')
+    expect(sync).toContain('playbackSessionDestinationRoot')
   })
 
   test('keeps the old SingzCore compatibility pod out of runtime ownership', () => {
@@ -91,27 +100,81 @@ describe('iOS native DSP runtime packaging', () => {
     expect(sync).toContain('zdspRuntimeFiles')
     expect(sync).toContain('zdspHostAdapterFiles')
     expect(sync).toContain('zcoreDeviceCallbackFiles')
+    expect(sync).toContain('nativePlaybackCallbackFiles')
+    expect(sync).toContain('nativePlaybackSessionFiles')
     expect(sync).not.toMatch(/copyTree|\.\.\/\*\*|source_files.*\*\*/)
     expect(packageJson).toContain('sync-singz-dsp-runtime.js')
     expect(gitignore).toContain('/ios/SingzDspRuntime/zdsp/')
     expect(gitignore).toContain('/ios/SingzDspRuntime/zcore/')
     expect(gitignore).toContain('/ios/SingzDeviceCallback/zcore/')
+    expect(gitignore).toContain('/ios/SingzDspRuntime/native/')
+    expect(gitignore).toContain('/ios/SingzPlaybackSession/native/')
   })
 
-  test('exposes status only and leaves the legacy session owner untouched', () => {
+  test('packages the dormant generation-bound playback session once', () => {
+    const podspec = read(
+      'ios/SingzPlaybackSession/SingzPlaybackSession.podspec',
+    )
+    const folderPodspec = read('ios/FolderAccess/FolderAccess.podspec')
+
+    expect(podspec).toContain("s.source_files = 'native/playback/*.{h,cpp}'")
+    expect(podspec).toContain(
+      "s.public_header_files = 'native/playback/native_playback_session.h'",
+    )
+    expect(podspec).toContain("s.dependency 'SingzCore'")
+    expect(podspec).toContain("s.dependency 'SingzDspRuntime'")
+    expect(folderPodspec).toContain("s.dependency 'SingzPlaybackSession'")
+  })
+
+  test('exposes a dormant bridge without a product JS consumer', () => {
     const bridge = read('ios/FolderAccess/NativeAudioRuntimeBridge.mm')
+    const support = read('ios/FolderAccess/NativePlaybackBridgeSupport.mm')
+    const authorizedPath = read(
+      'ios/FolderAccess/NativePlaybackAuthorizedPath.mm',
+    )
     const capability = read(
       'ios/SingzDspRuntime/SingzDspRuntimeCapability.cpp',
     )
+    const capabilityHeader = read(
+      'ios/SingzDspRuntime/SingzDspRuntimeCapability.h',
+    )
 
     expect(bridge.match(/RCT_EXPORT_METHOD\(/g)).toHaveLength(1)
+    expect(bridge.match(/RCT_REMAP_METHOD\(/g)).toHaveLength(6)
     expect(bridge).toContain('RCT_EXPORT_METHOD(status:')
-    expect(bridge).toContain('@"ownership": @"legacy"')
-    expect(bridge).not.toMatch(/RCT_EXPORT_METHOD\((?:start|stop|open|close)/)
-    expect(capability).toContain(
-      'singz.ios.zdsp_runtime.phase-ios-a-linked-inert',
+    for (const method of [
+      'prepare',
+      'openOutput',
+      'start',
+      'stop',
+      'unload',
+      'setControl',
+    ])
+      expect(bridge).toContain(`${method},`)
+    expect(support).toMatch(/@"ownership"\s*:\s*@"legacy"/)
+    expect(support).toMatch(/@"activation"\s*:\s*@"dormant"/)
+    expect(authorizedPath).toContain('OwnedFileDescriptor owner(::open(')
+    expect(authorizedPath).toContain('O_NOFOLLOW')
+    expect(authorizedPath).toContain('PostDescriptorOpen')
+    expect(authorizedPath).toContain('owner.get()')
+    expect(support).toContain('bridge.session->claimGeneration(generation,')
+    expect(support).toContain('session->failPrepareAdmission(')
+    expect(support).toContain('session->unloadWithCleanup(generation)')
+    expect(support).toContain('@"playbackCleanupProof"')
+    expect(support).toContain('@"playbackHandoffLease"')
+    expect(capabilityHeader).toContain(
+      'SingzDspRuntimeCapabilityPlaybackCleanupProof',
     )
-    expect(capability.match(/gnu::used, gnu::retain/g)).toHaveLength(6)
+    expect(capabilityHeader).toContain(
+      'SingzDspRuntimeCapabilityPlaybackHandoffLease',
+    )
+    // Public stop/unload claim cancellation synchronously. Exceptional
+    // prepare/command cleanup is contained by the session's exact abort APIs.
+    expect(support.match(/requestCancellation\(generation\)/g)).toHaveLength(2)
+    expect(capability).toContain(
+      'singz.ios.zdsp_runtime.phase-ios-b1-ready-inert',
+    )
+    expect(capability.match(/gnu::used, gnu::retain/g)).toHaveLength(7)
     for (const symbol of [
       'initializeArena',
       'createBuiltinProcessor',
@@ -122,5 +185,180 @@ describe('iOS native DSP runtime packaging', () => {
     ]) {
       expect(capability).toContain(`&zdsp::${symbol}`)
     }
+    expect(capability).toContain('&singz::nativePlaybackRender')
+
+    const productSources = [
+      ...sourceFiles('src'),
+      'App.tsx',
+      'index.js',
+    ]
+      .filter(file => /\.(?:ts|tsx|js|jsx)$/.test(file))
+      .map(read)
+      .join('\n')
+    expect(productSources).not.toContain('NativeAudioRuntime')
+  })
+
+  test('rejects malformed nested playback bridge schemas exactly', () => {
+    const schema = read('ios/FolderAccess/NativePlaybackBridgeSchema.mm')
+    const support = read('ios/FolderAccess/NativePlaybackBridgeSupport.mm')
+    const boundary = read('ios/FolderAccess/NativePlaybackBridgeBoundary.h')
+    const result = read('ios/FolderAccess/NativePlaybackBridgeResult.mm')
+    const runner = read('scripts/test-native-playback-bridge-schema.sh')
+    const tests = read(
+      'ios/schema-tests/native_playback_bridge_schema_tests.mm',
+    )
+
+    expect(schema).toContain('CFBooleanGetTypeID()')
+    expect(schema).toMatch(/bool parseBool\(id value, bool\s*\*result\)/)
+    expect(schema).toMatch(/bool hasOnlyKeys\(NSDictionary\s*\*value,/)
+    expect(schema).toContain('bool SingzParsePlaybackPrepare(')
+    expect(schema).toContain('bool SingzParsePlaybackControl(')
+    expect(schema).toContain('@"handoffLease"')
+    expect(schema).toContain('&candidate.config.handoffLease')
+    expect(schema).toContain('@"sampleRate"')
+    expect(schema).toContain('!parseChannels(outputChannelsValue')
+    expect(schema).toContain('channel >= singz::kAudioHostMaxChannels')
+    expect(schema).toContain('!parseBool(muted, &lane.muted)')
+    expect(schema).toContain('!parseBool(solo, &lane.solo)')
+    expect(schema).toContain('laneSelectorPresent == masterSelectorPresent')
+    expect(schema).not.toContain('[spec[@"muted"] boolValue]')
+    expect(schema).not.toContain('[spec[@"solo"] boolValue]')
+    expect(runner).toContain('native_playback_bridge_schema_tests.mm')
+    expect(runner).toContain('NativePlaybackBridgeResult.mm')
+    expect(tests).toContain('@YES, @"48000", NSNull.null')
+    expect(tests).toContain('replacingLane(@"muted", @1)')
+    expect(tests).toContain('@"unexpected"')
+    expect(boundary).toContain('catch (const std::bad_alloc&)')
+    expect(boundary).toContain('@catch (NSException*)')
+    expect(support.match(/runBridgeBoundary\(reject/g)).toHaveLength(6)
+    expect(support.match(/SingzPlaybackBridgeBoundary\(\[&\]/g)).toHaveLength(9)
+    expect(support).toContain('SingzPlaybackPrepareOwnershipGuard admissionGuard')
+    expect(support).toContain('SingzPlaybackFinishPrepareOuterBoundary(')
+    expect(support).toContain('PrepareGuardAllocation')
+    expect(support).toContain('PrepareBlockCaptureConstruction')
+    expect(support).toContain('PrepareDispatch')
+    expect(support).toContain('asyncGuard->markSessionMutation()')
+    expect(support).toContain('asyncGuard->cleanupNow()')
+    expect(support).toContain('parsed.config.handoffLease')
+    expect(support).toContain('bridge.session->claimGeneration(generation,')
+    expect(boundary).toContain('class SingzPlaybackPrepareOwnershipGuard final')
+    expect(boundary).toContain('class SingzPlaybackCommandDeliveryGuard final')
+    expect(boundary).toContain('class SingzPlaybackGenerationDeliveryGuard final')
+    expect(boundary).toContain('NativePlaybackDeliveryToken* tokenOutput()')
+    expect(boundary).toContain('enum class SingzPlaybackPrepareFaultPoint')
+    expect(boundary).toContain('SingzPlaybackPrepareBlockCopySentinel')
+    expect(tests).toContain('testActualBlockCopyGuard()')
+    expect(tests).toContain('testPrepareOuterBoundaryVerdict()')
+    expect(tests).toContain('testPostOpenDescriptorOwnership()')
+    expect(tests).toContain('testPrepareOwnershipGuard()')
+    expect(tests).toContain('testCommandMutationOwnershipGuard()')
+    expect(tests).toContain('testStopUnloadDeliveryGuard()')
+    expect(tests).toContain('testUnloadCleanupResultSchema()')
+    expect(tests).toContain('deferredNewer.generation = 2')
+    expect(tests).toContain('OpenResultDictionaryConversion')
+    expect(tests).toContain('StartPromiseDelivery')
+    expect(tests).toContain('StopBlockCaptureCopy')
+    expect(tests).toContain('StopResultDictionaryConversion')
+    expect(tests).toContain('StopPrePromiseResolve')
+    expect(tests).toContain('StopPromiseDelivery')
+    expect(tests).toContain('UnloadBlockCaptureCopy')
+    expect(tests).toContain('UnloadResultDictionaryConversion')
+    expect(tests).toContain('UnloadPrePromiseResolve')
+    expect(tests).toContain('UnloadPromiseDelivery')
+    expect(schema).toContain("candidate.find('\\0')")
+    expect(tests).toMatch(/NSString\s*\*embeddedNull\(\)/)
+    expect(tests).toContain('fake.retainedBytes == 0')
+    expect(support).toContain('E_NATIVE_PLAYBACK_RESOURCE_EXHAUSTED')
+    expect(support).toContain('E_NATIVE_PLAYBACK_PROVIDER')
+    expect(support).toContain('E_NATIVE_PLAYBACK_TEARDOWN_UNCERTAIN')
+    expect(support).toContain('cleanup.globallyComplete()')
+    expect(support).toContain('@"physicalOwnershipRetained"')
+    expect(support).toContain('@"processQuarantineRetainedBytes"')
+    expect(support).toContain('@"processQuarantineReserved"')
+    expect(support).toContain('@"processQuarantinePoisoned"')
+    expect(support).toMatch(/@"fallbackSafe"\s*:\s*@NO/)
+    for (const field of [
+      'safety',
+      'error',
+      'generation',
+      'state',
+      'retainedBytes',
+      'physicalOwnershipRetained',
+      'processQuarantineRetainedBytes',
+      'processQuarantineReserved',
+      'processQuarantinePoisoned',
+      'terminalReason',
+      'coordinatorState',
+      'coordinatorEpoch',
+      'coordinatorOwnerSession',
+      'coordinatorOwnerGeneration',
+      'handoffLease',
+      'globallyComplete',
+      'fallbackSafe',
+    ])
+      expect(result).toContain(`@"${field}"`)
+    expect(result).toContain('SingzNativePlaybackUnloadResultDictionary')
+    expect(result).toContain('cleanup.globallyComplete()')
+    expect(tests).toContain('SingzPlaybackBridgeBoundaryFailure::ResourceExhausted')
+    expect(tests).toContain('SingzPlaybackBridgeBoundaryFailure::ProviderFailure')
+  })
+
+  test('triggers the iOS canary for every authoritative native input', () => {
+    const workflow = read('../.github/workflows/ios-native-canary.yml')
+    for (const path of [
+      "'CMakeLists.txt'",
+      "'CMakePresets.json'",
+      "'cmake/**'",
+      "'mobile/ios/**'",
+      "'mobile/__tests__/**'",
+      "'mobile/scripts/**'",
+      "'native/playback/**'",
+      "'tests/native/**'",
+      "'third_party/native/**'",
+      "'zcore/**'",
+      "'zdsp/**'",
+    ])
+      expect(workflow).toContain(`- ${path}`)
+  })
+
+  test('triggers the Windows core build for playback composition changes', () => {
+    const workflow = read('../.github/workflows/core-win.yml')
+    expect(workflow).toContain("- 'native/playback/**'")
+  })
+
+  test('runs provider fail-stop coverage in every prescribed native gate', () => {
+    const presets = JSON.parse(read('../CMakePresets.json')) as {
+      testPresets: Array<{
+        name: string
+        filter?: { include?: { name?: string } }
+      }>
+    }
+
+    for (const name of [
+      'zdsp-release-strict',
+      'zdsp-asan-ubsan',
+      'zdsp-tsan',
+    ]) {
+      const preset = presets.testPresets.find(candidate => candidate.name === name)
+      expect(preset).toBeDefined()
+      expect(preset?.filter?.include?.name).toContain(
+        'provider_dispose_failure',
+      )
+    }
+  })
+
+  test('freezes B2 backend selection before decode without duplicate PCM', () => {
+    const iosAudio = read('../docs/IOS-AUDIO.md')
+    const plan = read('../docs/DSP-GRAPH-PLAN.md')
+    const architecture = read('../docs/ARCHITECTURE.md')
+
+    for (const document of [iosAudio, plan, architecture]) {
+      expect(document).toMatch(/before project decode|before decoding/)
+      expect(document).toContain('RNAudioAPI `AudioBuffer`s')
+      expect(document).toMatch(/509[–-]659 MB/)
+    }
+    expect(iosAudio).toContain('`engine.unload()`')
+    expect(iosAudio).toContain('`releaseProject()`')
+    expect(iosAudio).toContain('before lazily decoding a legacy fallback')
   })
 })

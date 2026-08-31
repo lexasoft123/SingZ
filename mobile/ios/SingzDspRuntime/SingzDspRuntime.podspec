@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'SingzDspRuntime'
-  s.version      = '0.1.0'
+  s.version      = '0.2.0'
   s.summary      = 'SingZ callback-safe native DSP graph runtime'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -17,7 +17,8 @@ Pod::Spec.new do |s|
   # consumption cannot discover a new source behind the checker's back.
   s.source_files = 'SingzDspRuntimeCapability.{h,cpp}',
                    'zdsp/**/*.{h,cpp}',
-                   'zcore/**/*.h'
+                   'zcore/**/*.h',
+                   'native/**/*.{h,cpp}'
   s.public_header_files = 'SingzDspRuntimeCapability.h'
   s.header_mappings_dir = '.'
 
@@ -29,6 +30,6 @@ Pod::Spec.new do |s|
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
     'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) SINGZ_REALTIME_LEAF=1',
     'OTHER_CPLUSPLUSFLAGS' => '$(inherited) -fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden',
-    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/zdsp/include" "$(PODS_TARGET_SRCROOT)/zcore/include"'
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/zdsp/include" "$(PODS_TARGET_SRCROOT)/zcore/include" "$(PODS_TARGET_SRCROOT)/native/playback"'
   }
 end

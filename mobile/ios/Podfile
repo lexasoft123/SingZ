@@ -117,6 +117,10 @@ end
 target 'SingZPlayer' do
   config = use_native_modules!
 
+  # Dormant Phase iOS-B1 composition. It exposes generation-bound commands to
+  # the existing bridge pod but has no JS consumer or automatic activation.
+  pod 'SingzPlaybackSession', :path => './SingzPlaybackSession'
+
   # Project-folder access (document picker, iCloud downloads) — local pod so
   # no pbxproj surgery is needed.
   pod 'FolderAccess', :path => './FolderAccess'

@@ -73,6 +73,82 @@ get_property(SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST GLOBAL PROPERTY
   SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST)
 get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 
+# Phase iOS-B1's reusable frame-zero playback composition. The strict callback
+# leaf remains separate from file decode, graph construction, host ownership
+# and product bridges. Neither target is linked into a product automatically.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SingZRealtimeTarget.cmake")
+add_library(singz_native_playback_callback STATIC EXCLUDE_FROM_ALL
+  native/playback/native_playback_callback.cpp
+  native/playback/native_playback_callback.h)
+add_library(SingZ::native_playback_callback ALIAS
+  singz_native_playback_callback)
+target_compile_features(singz_native_playback_callback PUBLIC cxx_std_20)
+target_include_directories(singz_native_playback_callback PUBLIC
+  "${SINGZ_REPO_ROOT}/native/playback")
+target_link_libraries(singz_native_playback_callback PUBLIC
+  SingZ::native_build_options
+  SingZ::zdsp_host_adapter)
+set_target_properties(singz_native_playback_callback PROPERTIES
+  POSITION_INDEPENDENT_CODE YES CXX_EXTENSIONS OFF
+  CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+singz_configure_realtime_target(singz_native_playback_callback)
+
+set(SINGZ_PLAYBACK_RT_MANIFEST
+  "${CMAKE_CURRENT_BINARY_DIR}/playback-realtime-sources.cmake")
+set(_playback_rt_files)
+foreach(_target IN ITEMS
+    singz_native_playback_callback zdsp_host_adapter zdsp_runtime)
+  get_target_property(_playback_rt_source_dir "${_target}" SOURCE_DIR)
+  get_target_property(_playback_rt_target_sources "${_target}" SOURCES)
+  foreach(_source IN LISTS _playback_rt_target_sources)
+    if(IS_ABSOLUTE "${_source}")
+      set(_absolute_source "${_source}")
+    else()
+      get_filename_component(_absolute_source "${_source}" ABSOLUTE
+        BASE_DIR "${_playback_rt_source_dir}")
+    endif()
+    file(TO_CMAKE_PATH "${_absolute_source}" _absolute_source)
+    list(APPEND _playback_rt_files "${_absolute_source}")
+  endforeach()
+endforeach()
+list(APPEND _playback_rt_files
+  "${SINGZ_REPO_ROOT}/zcore/include/zcore/device/audio_host_render.h")
+list(REMOVE_DUPLICATES _playback_rt_files)
+file(WRITE "${SINGZ_PLAYBACK_RT_MANIFEST}"
+  "set(SINGZ_ZDSP_RT_FILES\n")
+foreach(_source IN LISTS _playback_rt_files)
+  file(APPEND "${SINGZ_PLAYBACK_RT_MANIFEST}"
+    "  [==[${_source}]==]\n")
+endforeach()
+file(APPEND "${SINGZ_PLAYBACK_RT_MANIFEST}" ")\n")
+add_custom_target(singz_check_playback_realtime
+  COMMAND "${CMAKE_COMMAND}"
+    "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_PLAYBACK_RT_MANIFEST}"
+    "-DSINGZ_ZDSP_RT_PROFILE=playback"
+    -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake"
+  VERBATIM
+  COMMENT "Checking native playback callback source policy")
+add_dependencies(singz_native_playback_callback
+  singz_check_playback_realtime)
+
+add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
+  native/playback/native_playback_session.cpp
+  native/playback/native_playback_session.h)
+add_library(SingZ::native_playback_session ALIAS
+  singz_native_playback_session)
+target_compile_features(singz_native_playback_session PUBLIC cxx_std_20)
+target_include_directories(singz_native_playback_session PUBLIC
+  "${SINGZ_REPO_ROOT}/native/playback")
+target_link_libraries(singz_native_playback_session PUBLIC
+  SingZ::native_build_options
+  SingZ::native_playback_callback
+  SingZ::zcore_media
+  SingZ::zcore_device
+  SingZ::zdsp_host_adapter)
+set_target_properties(singz_native_playback_session PROPERTIES
+  POSITION_INDEPENDENT_CODE YES CXX_EXTENSIONS OFF
+  CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+
 # Phase 4A monitor callback leaf. The actual host thunk, silence containment,
 # and terminal counters compile independently from the control-domain session
 # owner and are scanned from the target's authoritative source list.
@@ -291,6 +367,17 @@ if(SINGZ_CORE_TESTS)
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_MONITOR_RT_MANIFEST}"
       "-DSINGZ_ZDSP_RT_PROFILE=monitor"
       -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
+  add_test(NAME playback_realtime_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_PLAYBACK_RT_MANIFEST}"
+      "-DSINGZ_ZDSP_RT_PROFILE=playback"
+      -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
+  add_test(NAME playback_realtime_policy_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_PLAYBACK_RT_MANIFEST=${SINGZ_PLAYBACK_RT_MANIFEST}"
+      "-DSINGZ_PLAYBACK_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake"
+      "-DSINGZ_PLAYBACK_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/playback-rt-negative"
+      -P "${SINGZ_REPO_ROOT}/cmake/TestPlaybackRealtimePolicy.cmake")
   add_executable(core_host_tests ${SINGZ_REPO_ROOT}/tests/native/core_host_tests.cpp)
   add_dependencies(core_host_tests singz_check_zcore_boundaries)
   target_compile_features(core_host_tests PRIVATE cxx_std_20)
@@ -401,6 +488,32 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(native_audio_ownership_tests PRIVATE
     singz_native_audio_ownership Threads::Threads)
   add_test(NAME native_audio_ownership_tests COMMAND native_audio_ownership_tests)
+
+  add_executable(native_playback_session_tests
+    ${SINGZ_REPO_ROOT}/tests/native/native_playback_session_tests.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
+  target_compile_features(native_playback_session_tests PRIVATE cxx_std_20)
+  target_include_directories(native_playback_session_tests PRIVATE
+    "${SINGZ_REPO_ROOT}"
+    "${SINGZ_REPO_ROOT}/zdsp/tests")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      COMPILE_OPTIONS "-Wno-mismatched-new-delete")
+  endif()
+  target_link_libraries(native_playback_session_tests PRIVATE
+    SingZ::native_playback_session)
+  add_test(NAME native_playback_session_tests
+    COMMAND native_playback_session_tests)
+  add_test(NAME native_playback_stale_retirement_failure_tests
+    COMMAND "${CMAKE_COMMAND}" -E env
+      SINGZ_NATIVE_PLAYBACK_STALE_RETIREMENT_FAILURE=1
+      $<TARGET_FILE:native_playback_session_tests>)
+  add_test(NAME native_playback_provider_dispose_failure_tests
+    COMMAND "${CMAKE_COMMAND}" -E env
+      SINGZ_NATIVE_PLAYBACK_PROVIDER_DISPOSE_FAILURE=1
+      $<TARGET_FILE:native_playback_session_tests>)
 
   add_test(NAME audio_host_fake_cli
     COMMAND singz-audio-host --fake --blocks 6 --maximum-frames 1024)

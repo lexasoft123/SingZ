@@ -19,6 +19,7 @@ on:
       - 'cmake/**'
       - 'zcore/**'
       - 'zdsp/**'
+      - 'native/playback/**'
       - 'third_party/native/**'
       - 'tools/native/**'
       - 'tests/native/**'

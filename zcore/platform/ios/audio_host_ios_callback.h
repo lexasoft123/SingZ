@@ -16,13 +16,9 @@
 #include <zcore/device/audio_host_callback.h>
 #include <zcore/device/audio_host_render.h>
 #include <zcore/device/audio_input_callback_gate.h>
+#include "audio_host_ios_session_signals.h"
 
 namespace singz::detail {
-
-struct IosAudioHostSessionSignals {
-  std::atomic<uint32_t> pending{0};
-  std::atomic<uint64_t> routeGeneration{1};
-};
 
 // Entire callback-owned state is prepared while admission is closed and stays
 // immutable except for the explicitly callback-owned cursors and atomics.

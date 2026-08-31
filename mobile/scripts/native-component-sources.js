@@ -36,6 +36,20 @@ const zdspSupportZcoreFiles = [
   'include/zcore/device/audio_host_render.h',
 ]
 
+const nativePlaybackCallbackFiles = [
+  'playback/native_playback_callback.cpp',
+  'playback/native_playback_callback.h',
+]
+
+const nativePlaybackSessionFiles = [
+  'playback/native_playback_session.cpp',
+  'playback/native_playback_session.h',
+]
+
+const nativePlaybackSessionSupportFiles = [
+  'playback/native_playback_callback.h',
+]
+
 const zcoreDeviceCallbackFiles = [
   'src/audio/audio_input_convert.cpp',
   'src/audio/audio_input_timestamp.cpp',
@@ -57,6 +71,7 @@ const zcoreDeviceCallbackFiles = [
 const iosAudioHostCallbackFiles = [
   'platform/ios/audio_host_ios_callback.cpp',
   'platform/ios/audio_host_ios_callback.h',
+  'platform/ios/audio_host_ios_session_signals.h',
 ]
 
 // Required quoted/transitive headers which are not currently target_sources
@@ -69,6 +84,9 @@ const zcoreDeviceCallbackSupportFiles = [
 
 module.exports = {
   iosAudioHostCallbackFiles,
+  nativePlaybackCallbackFiles,
+  nativePlaybackSessionFiles,
+  nativePlaybackSessionSupportFiles,
   zcoreDeviceCallbackFiles,
   zcoreDeviceCallbackSupportFiles,
   zdspHostAdapterFiles,

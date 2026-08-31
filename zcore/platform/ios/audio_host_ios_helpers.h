@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "audio_host_ios_session_signals.h"
 #include <zcore/device/audio_host.h>
 
 namespace singz::detail {
@@ -57,21 +58,33 @@ struct IosAudioHostPreparedRoute {
       AudioHostMonitoringSuitability::Unknown};
 };
 
-bool prepareIosAudioHostRoute(const AudioHostConfig& config,
-                              const IosAudioHostSessionSnapshot& snapshot,
-                              IosAudioHostPreparedRoute* prepared,
-                              std::string& error,
-                              AudioHostError* errorCode = nullptr);
+bool prepareIosAudioHostRoute(const AudioHostConfig &config,
+                              const IosAudioHostSessionSnapshot &snapshot,
+                              IosAudioHostPreparedRoute *prepared,
+                              std::string &error,
+                              AudioHostError *errorCode = nullptr);
 
-bool sameIosAudioHostSession(const IosAudioHostSessionSnapshot& left,
-                             const IosAudioHostSessionSnapshot& right) noexcept;
+bool sameIosAudioHostSession(const IosAudioHostSessionSnapshot &left,
+                             const IosAudioHostSessionSnapshot &right) noexcept;
 
 AudioHostTransport iosAudioHostTransport(IosAudioHostPortKind kind) noexcept;
-AudioHostMonitoringSuitability iosAudioHostMonitoringSuitability(
-    IosAudioHostPortKind kind) noexcept;
+AudioHostMonitoringSuitability
+iosAudioHostMonitoringSuitability(IosAudioHostPortKind kind) noexcept;
 
 bool validIosAudioHostMaximumFrames(uint32_t providerMaximumFrames,
                                     uint32_t nominalBufferFrames,
                                     uint32_t configuredMaximumFrames) noexcept;
 
-}  // namespace singz::detail
+// Terminal cause is durable diagnostic history; physical state is the
+// quiescence proof used by owners. Only a live stream is overlaid terminal.
+AudioHostState
+iosAudioHostReportedState(AudioHostState physical,
+                          AudioHostTerminalReason terminalReason) noexcept;
+
+// AudioOutputUnitStop alone does not prove that an AudioUnit lease was
+// released. A failed AudioComponentInstanceDispose is process-poisoning
+// physical ownership and must remain non-quiescent for session cleanup.
+AudioHostState iosAudioHostStateAfterDispose(AudioHostState previous,
+                                             bool disposed) noexcept;
+
+} // namespace singz::detail

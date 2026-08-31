@@ -1,11 +1,10 @@
 #import <React/RCTBridgeModule.h>
 
-#import <SingzDspRuntime/SingzDspRuntimeCapability.h>
+#import "NativePlaybackBridgeSupport.h"
 
-// Phase iOS-A is intentionally a read-only packaging probe. It proves the
-// callback-safe graph component reached the installed app, but cannot open an
-// AudioUnit, mutate AVAudioSession, or start playback. Phase iOS-B adds product
-// ownership only behind ADR-0008's serialized handoff coordinator.
+// Phase iOS-B1 exposes a generation-bound dormant playback surface. No JS
+// product consumer calls it yet, and ownership remains "legacy" until the
+// ADR-0008 coordinator performs an atomic output handoff in B2.
 @interface NativeAudioRuntime : NSObject <RCTBridgeModule>
 @end
 
@@ -21,28 +20,63 @@ RCT_EXPORT_MODULE(NativeAudioRuntime)
 RCT_EXPORT_METHOD(status:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
-  (void)reject;
-  const SingzDspRuntimeLinkStatus* status = SingzDspRuntimeGetLinkStatus();
-  if (status == nullptr || status->interfaceVersion != 1 ||
-      status->buildId == nullptr) {
-    resolve(@{
-      @"available": @NO,
-      @"buildId": @"",
-      @"graph": @NO,
-      @"audioHostAdapter": @NO,
-      @"ownership": @"legacy",
-    });
-    return;
-  }
-  resolve(@{
-    @"available": @YES,
-    @"buildId": [NSString stringWithUTF8String:status->buildId],
-    @"graph": @((status->capabilityFlags &
-                  SingzDspRuntimeCapabilityGraph) != 0),
-    @"audioHostAdapter": @((status->capabilityFlags &
-                             SingzDspRuntimeCapabilityAudioHostAdapter) != 0),
-    @"ownership": @"legacy",
-  });
+  SingzNativePlaybackStatus(resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    prepare,
+    prepare : (nonnull NSNumber*)generation
+        request : (NSDictionary*)request
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackPrepare(generation, request, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    openOutput,
+    openOutput : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackOpenOutput(generation, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    start,
+    start : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackStart(generation, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    stop,
+    stop : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackStop(generation, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    unload,
+    unload : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackUnload(generation, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    setControl,
+    setControl : (nonnull NSNumber*)generation
+        control : (NSDictionary*)control
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackSetControl(generation, control, resolve, reject);
 }
 
 @end
