@@ -10,6 +10,7 @@ const mockReleaseProject = jest.fn()
 const mockGetRouteLatency = jest.fn()
 const mockGetTrimMs = jest.fn()
 const mockSetTrimMs = jest.fn()
+const mockStopForOwnership = jest.fn()
 
 const shellProps = (): {
   catalog: Record<string, any>
@@ -23,6 +24,11 @@ const shellProps = (): {
 const shellEngine = (): Record<string, jest.Mock> =>
   (globalThis as unknown as { shellEngine: Record<string, jest.Mock> }).shellEngine
 const mockGlobals = (): Record<string, any> => globalThis as unknown as Record<string, any>
+const flushOwnershipHandoff = async (): Promise<void> => {
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+}
 
 jest.mock('../src/engine', () => ({
   MultitrackEngine: class {
@@ -71,7 +77,13 @@ jest.mock('react-native-safe-area-context', () => {
     useSafeAreaFrame: () => ReactModule.useContext(SafeAreaFrameContext)
   }
 })
-jest.mock('../src/log', () => ({ logStartup: jest.fn() }))
+jest.mock('../src/log', () => ({ log: jest.fn(), logStartup: jest.fn() }))
+jest.mock('../src/playback/native', () => ({
+  iosNativePlayback: {
+    stopForOwnership: (...args: unknown[]) => mockStopForOwnership(...args),
+    unloadActive: jest.fn(() => Promise.resolve())
+  }
+}))
 jest.mock('../src/split/service', () => ({ replaySplitTrail: jest.fn() }))
 jest.mock('../src/projects', () => ({ releaseProject: (...args: unknown[]) => mockReleaseProject(...args) }))
 jest.mock('../src/ui/testhooks', () => ({ TEST: null }))
@@ -182,6 +194,57 @@ describe('mobile training app shell', () => {
     mockGetRouteLatency.mockResolvedValue({ autoSec: 0.02, label: 'Speaker', key: 'speaker' })
     mockGetTrimMs.mockResolvedValue(0)
     mockSetTrimMs.mockResolvedValue(undefined)
+    mockStopForOwnership.mockResolvedValue(true)
+  })
+
+  test('does not activate microphone training until native output cleanup is proven', async () => {
+    let releaseOwnership!: (safe: boolean) => void
+    mockStopForOwnership.mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      releaseOwnership = resolve
+    }))
+    let tree!: ReactTestRenderer.ReactTestRenderer
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<App />)
+      await Promise.resolve()
+    })
+    const trainTab = tree.root.findAll((node) =>
+      node.props.accessibilityRole === 'tab' &&
+      node.props.accessibilityLabel === 'Train' &&
+      typeof node.props.onPress === 'function'
+    )[0]
+
+    await ReactTestRenderer.act(() => trainTab.props.onPress())
+    expect(shellProps().training.active).toBe(false)
+    expect(shellProps().catalog.active).toBe(true)
+
+    await ReactTestRenderer.act(async () => {
+      releaseOwnership(true)
+      await flushOwnershipHandoff()
+    })
+    expect(shellProps().training.active).toBe(true)
+    expect(shellProps().catalog.active).toBe(false)
+  })
+
+  test('keeps Train inactive when native output cleanup is uncertain', async () => {
+    mockStopForOwnership.mockResolvedValueOnce(false)
+    let tree!: ReactTestRenderer.ReactTestRenderer
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<App />)
+      await Promise.resolve()
+    })
+    const trainTab = tree.root.findAll((node) =>
+      node.props.accessibilityRole === 'tab' &&
+      node.props.accessibilityLabel === 'Train' &&
+      typeof node.props.onPress === 'function'
+    )[0]
+
+    await ReactTestRenderer.act(async () => {
+      trainTab.props.onPress()
+      await flushOwnershipHandoff()
+    })
+
+    expect(shellProps().training.active).toBe(false)
+    expect(shellProps().catalog.active).toBe(true)
   })
 
   test('retains scenes across tabs and accepts a deferred successful load exactly once', async () => {
@@ -197,7 +260,10 @@ describe('mobile training app shell', () => {
       typeof node.props.onPress === 'function'
     )[0]
 
-    await ReactTestRenderer.act(() => trainTab().props.onPress())
+    await ReactTestRenderer.act(async () => {
+      trainTab().props.onPress()
+      await flushOwnershipHandoff()
+    })
     expect(shellProps().catalog.active).toBe(false)
     expect(shellProps().training.active).toBe(true)
     expect(shellEngine().pause).toHaveBeenCalled()
@@ -220,7 +286,10 @@ describe('mobile training app shell', () => {
     expect(shellProps().training.song.sourceSongId).toBe(sourceSongId)
     expect(shellProps().training.song.transpose).toBe(3)
 
-    await ReactTestRenderer.act(() => trainTab().props.onPress())
+    await ReactTestRenderer.act(async () => {
+      trainTab().props.onPress()
+      await flushOwnershipHandoff()
+    })
     expect(shellProps().training.song.sourceSongId).toBe(sourceSongId)
     expect(shellProps().player.project).toBe(project)
 
@@ -281,7 +350,10 @@ describe('mobile training app shell', () => {
       node.props.accessibilityLabel === 'Train' &&
       typeof node.props.onPress === 'function'
     )[0]
-    await ReactTestRenderer.act(() => trainTab.props.onPress())
+    await ReactTestRenderer.act(async () => {
+      trainTab.props.onPress()
+      await flushOwnershipHandoff()
+    })
     mockGetRouteLatency.mockResolvedValueOnce({ autoSec: 0.25, label: 'Bluetooth', key: 'hfp' })
     mockGetTrimMs.mockResolvedValueOnce(10)
     await ReactTestRenderer.act(async () => {
@@ -338,7 +410,10 @@ describe('mobile training app shell', () => {
     expect(runtime.position).toBe(19.75)
     expect(mockGlobals().playerRenders).toBe(playerRenders)
 
-    await ReactTestRenderer.act(() => tab('Train').props.onPress())
+    await ReactTestRenderer.act(async () => {
+      tab('Train').props.onPress()
+      await flushOwnershipHandoff()
+    })
     expect(shellProps().training.active).toBe(true)
     runtime.pause.mockClear()
     runtime.cancelTrainingCues.mockClear()

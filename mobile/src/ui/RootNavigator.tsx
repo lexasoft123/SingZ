@@ -3,12 +3,15 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import type { MultitrackEngine } from '../engine'
 import type { RouteLatency } from '../latency'
+import { log } from '../log'
 import type { ProjectDoc } from '../model'
 import { releaseProject, type LoadedProject } from '../projects'
 import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
 import CatalogScreen from './CatalogScreen'
 import LogPanel from './LogPanel'
+import NativePlayerScreen from './NativePlayerScreen'
 import PlayerScreen from './PlayerScreen'
+import SettingsScreen from './SettingsScreen'
 import { C, NATIVE_SHEET_FIT_SUPPORTED } from './bits'
 
 type RootStackParamList = {
@@ -16,6 +19,7 @@ type RootStackParamList = {
   Player: undefined
   AddSong: undefined
   Log: undefined
+  Settings: undefined
 }
 
 const Stack = createNativeStackNavigator<RootStackParamList>()
@@ -36,6 +40,7 @@ export function PlayerRoute({
   trimMs = 0,
   onTrim = () => undefined,
   onTrainingFacts,
+  onFallback = () => undefined,
   onBack,
   onClosed
 }: {
@@ -49,10 +54,19 @@ export function PlayerRoute({
     keyInfo: NonNullable<NonNullable<ProjectDoc['settings']>['key']> | null
     transpose: number
   }) => void
+  onFallback?: (project: LoadedProject) => void
   onBack: () => void
   onClosed: (project: LoadedProject) => void
 }): React.JSX.Element {
-  useEffect(() => () => onClosed(project), [onClosed, project])
+  const ownedProject = useRef(project)
+  ownedProject.current = project
+  // The native pre-start fallback replaces the buffer-free project in place.
+  // Route ownership ends only on unmount; cleaning on every prop replacement
+  // would mark the still-visible fallback player closed and release its PCM.
+  useEffect(() => () => onClosed(ownedProject.current), [onClosed])
+  if (project.nativePlayback) {
+    return <NativePlayerScreen active={active} project={project} onBack={onBack} onFallback={onFallback} />
+  }
   return (
     <PlayerScreen
       active={active}
@@ -68,6 +82,10 @@ export function PlayerRoute({
 }
 
 export function closePlayerProject(engine: MultitrackEngine, project: LoadedProject): void {
+  if (project.nativePlayback)
+    void project.nativePlayback.unload('player route closed').catch(error =>
+      log('native-playback', `player route cleanup could not prove native unload · ${String(error)}`, 'error')
+    )
   engine.unload()
   releaseProject(project)
 }
@@ -137,7 +155,7 @@ export default function RootNavigator({
   const closeProject = useCallback(
     (closing: LoadedProject): void => {
       closePlayerProject(engine, closing)
-      setProject((current) => (current === closing ? null : current))
+      setProject(current => (current === closing ? null : current))
       onProjectClosed()
     },
     [engine, onProjectClosed]
@@ -145,7 +163,7 @@ export default function RootNavigator({
 
   const finishAddSong = useCallback((request: AddSongRequest, addedDir: string | null): void => {
     request.onClose(addedDir)
-    setAddSong((current) => (current === request ? null : current))
+    setAddSong(current => (current === request ? null : current))
   }, [])
 
   return (
@@ -161,14 +179,16 @@ export default function RootNavigator({
           {({ navigation }) => (
             <CatalogScreen
               active={active}
+              engine={engine}
               sampleRate={engine.sampleRate}
+              onOpenSettings={() => navigation.navigate('Settings')}
               onOpenLog={() => navigation.navigate('Log')}
-              onOpenAddSong={(request) => {
+              onOpenAddSong={request => {
                 setAddSong(request)
                 navigation.navigate('AddSong')
               }}
               onCloseAddSong={() => navigation.goBack()}
-              onLoaded={(loaded) => {
+              onLoaded={loaded => {
                 setProject(loaded)
                 onProjectLoaded(loaded)
                 navigation.navigate('Player')
@@ -179,7 +199,7 @@ export default function RootNavigator({
         <Stack.Screen
           name="Player"
           options={{
-            gestureEnabled: true,
+            gestureEnabled: project?.nativePlayback == null,
             fullScreenGestureEnabled: false
           }}
         >
@@ -197,6 +217,7 @@ export default function RootNavigator({
                 onTrainingFacts={onTrainingFacts}
                 onBack={() => navigation.goBack()}
                 onClosed={closeProject}
+                onFallback={fallback => setProject(fallback)}
               />
             )
           }
@@ -212,7 +233,7 @@ export default function RootNavigator({
             contentStyle: styles.sheet
           }}
           listeners={{
-            transitionEnd: (event) => {
+            transitionEnd: event => {
               if (!event.data.closing) addSong?.onShown?.()
             }
           }}
@@ -233,6 +254,15 @@ export default function RootNavigator({
           }}
         >
           {({ navigation }) => <LogPanel onClose={() => navigation.goBack()} />}
+        </Stack.Screen>
+        <Stack.Screen
+          name="Settings"
+          options={{
+            presentation: 'fullScreenModal',
+            contentStyle: styles.root
+          }}
+        >
+          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} />}
         </Stack.Screen>
       </Stack.Navigator>
     </View>

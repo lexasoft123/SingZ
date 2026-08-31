@@ -28,6 +28,7 @@ import {
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { fmtBytes, fmtMs, log } from '../log'
+import type { MultitrackEngine } from '../engine'
 import { addedTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
   cacheUsage,
@@ -37,7 +38,6 @@ import {
   isDownloaded,
   decodedBytes,
   listProjects,
-  loadProject,
   pickFolder,
   localProjectFile,
   readProjectText,
@@ -48,9 +48,23 @@ import {
   type ProjectEntry,
   type RootInfo
 } from '../projects'
+import { iosNativePlayback } from '../playback/native'
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
 import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
-import { C, FolderGlyph, LyricsGlyph, PhoneGlyph, RedetectGlyph, SearchGlyph, Seg, splitSongName, StemTile, STEM_TILE_COLORS, TrashGlyph, white } from './bits'
+import {
+  C,
+  FolderGlyph,
+  LyricsGlyph,
+  PhoneGlyph,
+  RedetectGlyph,
+  SearchGlyph,
+  Seg,
+  splitSongName,
+  StemTile,
+  STEM_TILE_COLORS,
+  TrashGlyph,
+  white
+} from './bits'
 import { TEST } from './testhooks'
 import type { AddSongRequest } from './AddSongSheet'
 import { addSongHeadless, findLyrics, readSongFacts } from '../addflow'
@@ -70,10 +84,23 @@ import {
   splitGate,
   startProjectSplit
 } from '../split/flow'
-import { BEAT_MODELS_MB, SPLIT_MODEL, beatModelsStatus, cancelBeatModels, cancelModelDownload, ensureBeatModels } from '../analysis/models'
+import {
+  BEAT_MODELS_MB,
+  SPLIT_MODEL,
+  beatModelsStatus,
+  cancelBeatModels,
+  cancelModelDownload,
+  ensureBeatModels
+} from '../analysis/models'
 import { nativeMlGridAvailable } from '../analysis/native'
 import { planAnalysis } from '../analysis/pipeline'
-import { ANALYSIS_EVENT, startAnalysis, subscribeAnalysis, type AnalysisDone, type AnalysisProgress } from '../analysis/run'
+import {
+  ANALYSIS_EVENT,
+  startAnalysis,
+  subscribeAnalysis,
+  type AnalysisDone,
+  type AnalysisProgress
+} from '../analysis/run'
 import { SPLIT_STEMS } from '../split/adopt'
 
 const BG = require('../../assets/bg/catalog.png')
@@ -134,7 +161,9 @@ function SwipeActions({
   progress: SharedValue<number>
   actions: CardSwipeAction[]
 }): React.JSX.Element {
-  const style = useAnimatedStyle(() => ({ opacity: progress.value > 0.02 ? 1 : 0 }))
+  const style = useAnimatedStyle(() => ({
+    opacity: progress.value > 0.02 ? 1 : 0
+  }))
   return (
     <Reanimated.View style={[style, s.swipeActionsRow]}>
       {actions.map((a, i) => (
@@ -201,15 +230,19 @@ let lastShelf: {
 
 export default function CatalogScreen({
   active = true,
+  engine,
   sampleRate,
   onLoaded,
+  onOpenSettings,
   onOpenLog,
   onOpenAddSong,
   onCloseAddSong
 }: {
   active?: boolean
+  engine: MultitrackEngine
   sampleRate: number
   onLoaded: (p: LoadedProject) => void
+  onOpenSettings: () => void
   onOpenLog: () => void
   onOpenAddSong: (request: AddSongRequest) => void
   onCloseAddSong: () => void
@@ -252,7 +285,7 @@ export default function CatalogScreen({
    *  opened its own picker put two presentations in flight from one commit —
    *  UIKit kept the picker ("waiting for a delayed presention to complete")
    *  and silently refused the sheet, which then ran its whole flow invisibly.
-  *  One presentation at a time makes that unrepresentable. */
+   *  One presentation at a time makes that unrepresentable. */
   const [addOpen, setAddOpen] = useState(false)
   const refreshRef = useRef<(() => Promise<void>) | null>(null)
   const presentAddRef = useRef<(src: PickedFile) => void>(() => {})
@@ -290,24 +323,28 @@ export default function CatalogScreen({
    *  title does not sink to the bottom. */
   const sorted = useMemo(
     () =>
-      (projects ?? [])
-        .slice()
-        .sort(
-          (a, b) =>
-            titleOf(a).localeCompare(titleOf(b), undefined, { numeric: true, sensitivity: 'base' }) ||
-            // 'base' calls "Ballad" and "ballad" EQUAL, and a stable sort then
-            // falls back to whatever order the listing arrived in — which is
-            // the one thing this memo exists to stop. The folder name is
-            // unique, so it makes the order total.
-            a.dir.localeCompare(b.dir)
-        ),
+      (projects ?? []).slice().sort(
+        (a, b) =>
+          titleOf(a).localeCompare(titleOf(b), undefined, {
+            numeric: true,
+            sensitivity: 'base'
+          }) ||
+          // 'base' calls "Ballad" and "ballad" EQUAL, and a stable sort then
+          // falls back to whatever order the listing arrived in — which is
+          // the one thing this memo exists to stop. The folder name is
+          // unique, so it makes the order total.
+          a.dir.localeCompare(b.dir)
+      ),
     [projects]
   )
 
   /** What the list actually renders: the sorted library, narrowed to what the
    *  singer is looking for. */
   const q = query.trim().toLowerCase()
-  const shown = useMemo(() => (q ? sorted.filter((p) => titleOf(p).toLowerCase().includes(q)) : sorted), [sorted, q])
+  const shown = useMemo(
+    () => (q ? sorted.filter(p => titleOf(p).toLowerCase().includes(q)) : sorted),
+    [sorted, q]
+  )
 
   /** The floating search bar rides above the keyboard on iOS (Android's
    *  adjustResize moves the whole window, so the absolute bar rises free).
@@ -315,7 +352,7 @@ export default function CatalogScreen({
   const [kbInset, setKbInset] = useState(0)
   useEffect(() => {
     if (Platform.OS !== 'ios') return
-    const onShow = Keyboard.addListener('keyboardWillChangeFrame', (e) =>
+    const onShow = Keyboard.addListener('keyboardWillChangeFrame', e =>
       setKbInset(Math.max(0, e?.endCoordinates?.height ?? 0))
     )
     const onHide = Keyboard.addListener('keyboardWillHide', () => setKbInset(0))
@@ -335,7 +372,7 @@ export default function CatalogScreen({
    * the ✓ already carry the download fact. */
   const isSplit = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
   const readyShown = shown.filter(isSplit)
-  const pendingShown = shown.filter((p) => !isSplit(p))
+  const pendingShown = shown.filter(p => !isSplit(p))
 
   /** The bundled sample is a song in this list like any other, so it answers
    *  to the search too — left unfiltered it sat under two matches looking
@@ -348,7 +385,7 @@ export default function CatalogScreen({
    *  every other surface said `doc.name` — during the longest wait in the app,
    *  the song stopped being called by its name. */
   const nameOf = useCallback(
-    (dir: string): string => (projects ?? []).find((p) => p.dir === dir)?.doc?.name ?? dir,
+    (dir: string): string => (projects ?? []).find(p => p.dir === dir)?.doc?.name ?? dir,
     [projects]
   )
 
@@ -511,19 +548,25 @@ export default function CatalogScreen({
      network, and the header would claim "no signal" before anything looked. */
   useEffect(() => {
     if (projects != null)
-      lastShelf = { mode: modeOfList.current, items: projects, usage, driveOn, driveEmail }
+      lastShelf = {
+        mode: modeOfList.current,
+        items: projects,
+        usage,
+        driveOn,
+        driveEmail
+      }
   }, [projects, usage, driveOn, driveEmail])
 
   useEffect(() => {
-    void getStoredText('singz.libMode').then((m) => {
+    void getStoredText('singz.libMode').then(m => {
       if (m === 'gdrive' && driveAvailable()) setMode('gdrive')
       else if (m === 'folder') setMode('folder')
       else {
         // no stored choice: land on the folder root if one was picked
-        void getRoot().then((r) => setMode(r.kind === 'picked' ? 'folder' : 'phone'))
+        void getRoot().then(r => setMode(r.kind === 'picked' ? 'folder' : 'phone'))
       }
     })
-    void getCrumb().then((c) => {
+    void getCrumb().then(c => {
       if (c) {
         setCrashNote(c)
         void setCrumb('')
@@ -606,7 +649,11 @@ export default function CatalogScreen({
           'opening it again downloads it back.',
         [
           { text: 'Keep it', style: 'cancel' },
-          { text: 'Remove', style: 'destructive', onPress: () => void forget(entry.dir) }
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => void forget(entry.dir)
+          }
         ]
       )
     },
@@ -621,7 +668,11 @@ export default function CatalogScreen({
           'you can download them again whenever you have signal.',
         [
           { text: 'Keep them', style: 'cancel' },
-          { text: 'Delete', style: 'destructive', onPress: () => void forget('') }
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: () => void forget('')
+          }
         ]
       )
     },
@@ -634,15 +685,18 @@ export default function CatalogScreen({
       setError(null)
       setLoading({ dir: entry.dir, msg: 'Opening…', frac: 0 })
       try {
-        const loaded = await loadProject(
+        const loaded = await iosNativePlayback.load({
           entry,
+          engine,
           sampleRate,
-          (msg, frac) => {
+          onStep: (msg, frac) => {
             if (tok === token.current) setLoading({ dir: entry.dir, msg, frac })
           },
-          setCrumb
-        )
+          crumb: setCrumb,
+          isCurrent: () => tok === token.current
+        })
         if (tok !== token.current) {
+          await loaded.nativePlayback?.unload('catalog load superseded')
           releaseProject(loaded) // superseded by another tap — don't strand its stems
           return
         }
@@ -682,14 +736,14 @@ export default function CatalogScreen({
         }
       }
     },
-    [onLoaded, sampleRate, mode]
+    [engine, onLoaded, sampleRate, mode]
   )
 
   const openSample = useCallback(async () => {
     const tok = ++token.current
     setError(null)
     try {
-      const ids = STEM_ORDER_ALL.filter((s) => s in SAMPLE_STEMS)
+      const ids = STEM_ORDER_ALL.filter(s => s in SAMPLE_STEMS)
       const stems: LoadedProject['stems'] = []
       // The sample decodes from bundled assets, so it never touches
       // loadProject and used to leave no trace at all — which is the worst
@@ -700,9 +754,16 @@ export default function CatalogScreen({
       const spent: string[] = []
       for (let i = 0; i < ids.length; i++) {
         if (tok !== token.current) return releaseStems(stems)
-        setLoading({ dir: SAMPLE_DIR, msg: `Decoding ${ids[i]} · ${i + 1}/${ids.length}`, frac: i / ids.length })
+        setLoading({
+          dir: SAMPLE_DIR,
+          msg: `Decoding ${ids[i]} · ${i + 1}/${ids.length}`,
+          frac: i / ids.length
+        })
         const t0 = Date.now()
-        stems.push({ id: ids[i], buffer: await decodeAudioData(SAMPLE_STEMS[ids[i]], sampleRate) })
+        stems.push({
+          id: ids[i],
+          buffer: await decodeAudioData(SAMPLE_STEMS[ids[i]], sampleRate)
+        })
         spent.push(`${ids[i]} ${fmtMs(Date.now() - t0)}`)
       }
       if (tok !== token.current) return
@@ -712,7 +773,12 @@ export default function CatalogScreen({
         `opened the bundled sample — ${stems.length} lanes in ${fmtMs(Date.now() - openedAt)} · ` +
           `${fmtBytes(decodedBytes(stems))} decoded · decode ${spent.join(', ')}`
       )
-      onLoaded({ name: SAMPLE_PROJECT.name, doc: SAMPLE_PROJECT, lyrics: SAMPLE_LYRICS, stems })
+      onLoaded({
+        name: SAMPLE_PROJECT.name,
+        doc: SAMPLE_PROJECT,
+        lyrics: SAMPLE_LYRICS,
+        stems
+      })
     } catch (e) {
       if (tok === token.current) {
         setLoading(null)
@@ -809,7 +875,7 @@ export default function CatalogScreen({
   /* Beat / key / melody for a phone-library project (Phase 4). One queue
    * app-wide (analysis/run.ts); the card below is a viewer over its progress. */
   const [analysisUi, setAnalysisUi] = useState<AnalysisProgress | null>(null)
-  useEffect(() => active ? subscribeAnalysis(setAnalysisUi) : undefined, [active])
+  useEffect(() => (active ? subscribeAnalysis(setAnalysisUi) : undefined), [active])
   // A landed analysis changed a doc on disk; the listing must say so, or the
   // next open of that song would ask for the same analysis again off a stale
   // entry.doc.
@@ -849,7 +915,10 @@ export default function CatalogScreen({
    * card: songs the detector has not heard yet, and any it found no grid
    * in; a song already holding a current grid keeps it (desktop semantics —
    * there is no re-analyse here either). */
-  type BeatModelsUi = null | { phase: 'offer' } | { phase: 'downloading'; gotMB: number; totalMB: number }
+  type BeatModelsUi =
+    | null
+    | { phase: 'offer' }
+    | { phase: 'downloading'; gotMB: number; totalMB: number }
   const [beatModelsUi, setBeatModelsUi] = useState<BeatModelsUi>(null)
   const BEAT_MODELS_DISMISSED = 'singz.beatModels.dismissed'
   // Keyed on `projects` (a new array every refresh), not on a derived
@@ -861,9 +930,9 @@ export default function CatalogScreen({
   // no reason to look again).
   useEffect(() => {
     if (!active) return
-    const anyStemmed = (projects ?? []).some((p) => Object.keys(p.stems).length > 0)
+    const anyStemmed = (projects ?? []).some(p => Object.keys(p.stems).length > 0)
     if (mode !== 'phone' || !nativeMlGridAvailable() || !anyStemmed) {
-      setBeatModelsUi((cur) => (cur?.phase === 'downloading' ? cur : null))
+      setBeatModelsUi(cur => (cur?.phase === 'downloading' ? cur : null))
       return
     }
     let alive = true
@@ -873,17 +942,27 @@ export default function CatalogScreen({
       if (!alive) return
       // The disk is the truth both ways: present → no offer (and not while
       // a download is in flight, which is its own card state).
-      setBeatModelsUi((cur) => (cur?.phase === 'downloading' ? cur : st.have ? null : { phase: 'offer' }))
+      setBeatModelsUi(cur =>
+        cur?.phase === 'downloading' ? cur : st.have ? null : { phase: 'offer' }
+      )
     })()
     return () => {
       alive = false
     }
   }, [active, mode, projects])
   const fetchBeatModels = useCallback(async () => {
-    setBeatModelsUi({ phase: 'downloading', gotMB: 0, totalMB: BEAT_MODELS_MB })
+    setBeatModelsUi({
+      phase: 'downloading',
+      gotMB: 0,
+      totalMB: BEAT_MODELS_MB
+    })
     try {
       await ensureBeatModels((got, total) =>
-        setBeatModelsUi({ phase: 'downloading', gotMB: Math.round(got / 1e6), totalMB: Math.round(total / 1e6) })
+        setBeatModelsUi({
+          phase: 'downloading',
+          gotMB: Math.round(got / 1e6),
+          totalMB: Math.round(total / 1e6)
+        })
       )
       setBeatModelsUi(null)
       // Songs already declared gridless before the models were here are
@@ -921,7 +1000,6 @@ export default function CatalogScreen({
     void setStoredText(BEAT_MODELS_DISMISSED, '1')
   }, [])
 
-
   const adoptDone = useCallback(
     async (status: SplitJobStatus): Promise<void> => {
       if (adoptingRef.current) return
@@ -935,7 +1013,7 @@ export default function CatalogScreen({
         // the desktop would on its first open. Off the tap's critical path:
         // the card below tracks it, and a song opened meanwhile picks the
         // grid up when it lands.
-        void kickAnalysis(status.projectDir, Object.fromEntries(SPLIT_STEMS.map((id) => [id, 'wav'])))
+        void kickAnalysis(status.projectDir, Object.fromEntries(SPLIT_STEMS.map(id => [id, 'wav'])))
       } catch (e) {
         setSplitUi({
           phase: 'failed',
@@ -966,15 +1044,27 @@ export default function CatalogScreen({
   useEffect(() => {
     if (!active) return
     const unsubscribe = subscribeSplit(
-      (p) => {
-        setSplitUi((cur) => {
+      p => {
+        setSplitUi(cur => {
           if (!cur || (cur.phase !== 'run' && cur.phase !== 'model')) return cur
           const project = cur.project
           if (p.stage === 'decode') {
-            return { phase: 'run', project, text: 'Reading the song…', frac: p.frac * 0.05, started: true }
+            return {
+              phase: 'run',
+              project,
+              text: 'Reading the song…',
+              frac: p.frac * 0.05,
+              started: true
+            }
           }
           if (p.stage === 'resample' || p.stage === 'load-model') {
-            return { phase: 'run', project, text: 'Warming up…', frac: 0.06, started: true }
+            return {
+              phase: 'run',
+              project,
+              text: 'Warming up…',
+              frac: 0.06,
+              started: true
+            }
           }
           if (p.stage === 'chunk' && p.total > 0) {
             return {
@@ -988,9 +1078,9 @@ export default function CatalogScreen({
           return cur
         })
       },
-      (st) => {
+      st => {
         if (st.state === 'done' || st.state === 'failed') {
-          void splitStatus().then((status) => {
+          void splitStatus().then(status => {
             if (!status) return
             if (status.state === 'done') void adoptDone(status)
             else if (status.state === 'failed') void showFailed(status, 'The split failed')
@@ -1011,7 +1101,7 @@ export default function CatalogScreen({
     if (!active) return
     if (splitUi?.phase !== 'run') return
     const timer = setInterval(() => {
-      void splitStatus().then((status) => {
+      void splitStatus().then(status => {
         if (!status) {
           // No job.json at all. A job that was heard from and then left no
           // file cleaned up after itself (a cancel) — the card goes. One
@@ -1024,13 +1114,13 @@ export default function CatalogScreen({
           const cur = splitUiRef.current
           if (cur?.phase !== 'run') return
           if (cur.started || cancelPending) {
-            setSplitUi((c) => (c?.phase === 'run' ? null : c))
+            setSplitUi(c => (c?.phase === 'run' ? null : c))
             return
           }
           // The one verdict no event carries — write it down, or a release
           // build's log ends at "start fresh …" and says nothing more.
           log('split', `never started — no job.json since the kick (${cur.project})`, 'warn')
-          setSplitUi((c) =>
+          setSplitUi(c =>
             c?.phase === 'run'
               ? {
                   phase: 'failed',
@@ -1050,7 +1140,7 @@ export default function CatalogScreen({
           // A live record is the job's existence, whether or not its events
           // reached us — a later vanished file is then a cancel, not a
           // start that never happened.
-          setSplitUi((c) => (c?.phase === 'run' && !c.started ? { ...c, started: true } : c))
+          setSplitUi(c => (c?.phase === 'run' && !c.started ? { ...c, started: true } : c))
         }
       })
     }, 20_000)
@@ -1060,7 +1150,7 @@ export default function CatalogScreen({
   // The durable handoff: a job finished (or died) while the app was away.
   useEffect(() => {
     if (!active) return
-    void splitStatus().then((status) => {
+    void splitStatus().then(status => {
       if (!status) return
       if (status.state === 'done') {
         void adoptDone(status)
@@ -1091,47 +1181,56 @@ export default function CatalogScreen({
     // hidden it owns no polling timer or event subscription.
   }, [active, adoptDone, showFailed])
 
-  const startSplitFor = useCallback(async (
-    dir: string,
-    resume: boolean,
-    watchdogCapMs = 0 // test seam, threaded through to the service
-  ): Promise<void> => {
-    try {
-      const gate = await splitGate()
-      if (!gate.ok) {
-        // Not "needs a bigger phone": the device is not the singer's fault and
-        // they cannot act on it. Say what cannot happen and why.
-        Alert.alert('This song is too big to split here', gate.reason)
-        return
+  const startSplitFor = useCallback(
+    async (
+      dir: string,
+      resume: boolean,
+      watchdogCapMs = 0 // test seam, threaded through to the service
+    ): Promise<void> => {
+      try {
+        const gate = await splitGate()
+        if (!gate.ok) {
+          // Not "needs a bigger phone": the device is not the singer's fault and
+          // they cannot act on it. Say what cannot happen and why.
+          Alert.alert('This song is too big to split here', gate.reason)
+          return
+        }
+        setCancelPending(false)
+        setSplitUi({ phase: 'model', project: dir, gotMB: 0, totalMB: 136 })
+        await startProjectSplit(dir, {
+          resume,
+          watchdogCapMs,
+          onModelProgress: (got, total) =>
+            setSplitUi(cur =>
+              cur?.phase === 'model'
+                ? {
+                    phase: 'model',
+                    project: dir,
+                    gotMB: Math.round(got / 1e6),
+                    totalMB: Math.round(total / 1e6)
+                  }
+                : cur
+            )
+        })
+        // The service has the intent; nothing has come back yet. `started`
+        // flips on the first event or file — see the liveness poll.
+        setSplitUi({
+          phase: 'run',
+          project: dir,
+          text: 'Starting…',
+          frac: 0,
+          started: false
+        })
+      } catch (e) {
+        setSplitUi(null)
+        const msg = String(e instanceof Error ? e.message : e)
+        if (!msg.includes('cancelled')) {
+          Alert.alert('Could not start the split', msg)
+        }
       }
-      setCancelPending(false)
-      setSplitUi({ phase: 'model', project: dir, gotMB: 0, totalMB: 136 })
-      await startProjectSplit(dir, {
-        resume,
-        watchdogCapMs,
-        onModelProgress: (got, total) =>
-          setSplitUi((cur) =>
-            cur?.phase === 'model'
-              ? {
-                  phase: 'model',
-                  project: dir,
-                  gotMB: Math.round(got / 1e6),
-                  totalMB: Math.round(total / 1e6)
-                }
-              : cur
-          )
-      })
-      // The service has the intent; nothing has come back yet. `started`
-      // flips on the first event or file — see the liveness poll.
-      setSplitUi({ phase: 'run', project: dir, text: 'Starting…', frac: 0, started: false })
-    } catch (e) {
-      setSplitUi(null)
-      const msg = String(e instanceof Error ? e.message : e)
-      if (!msg.includes('cancelled')) {
-        Alert.alert('Could not start the split', msg)
-      }
-    }
-  }, [])
+    },
+    []
+  )
 
   /** Can this song be split right now? PHONE LIBRARY ONLY — the adoption
    *  writes through docDirFor, which is the app's own documents root on both
@@ -1213,7 +1312,7 @@ export default function CatalogScreen({
             onPress: () => {
               void deleteProject(p.dir)
                 .then(() => refresh())
-                .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+                .catch(e => setError(String(e instanceof Error ? e.message : e)))
             }
           }
         ],
@@ -1234,7 +1333,7 @@ export default function CatalogScreen({
     TEST.refresh = refresh
     TEST.openSample = openSample
     TEST.openProject = (dir: string) => {
-      const entry = (projects ?? []).find((p) => p.dir === dir)
+      const entry = (projects ?? []).find(p => p.dir === dir)
       return entry ? openEntry(entry) : Promise.reject(new Error(`no project ${dir}`))
     }
     TEST.cancelLoad = cancelLoad
@@ -1243,7 +1342,7 @@ export default function CatalogScreen({
     TEST.libMode = mode
     TEST.setPref = setStoredText
     TEST.getPref = getStoredText
-    TEST.projects = sorted.map((p) => p.dir)
+    TEST.projects = sorted.map(p => p.dir)
     TEST.listError = error
     TEST.busy = loading?.msg ?? null
     TEST.loadingFrac = loading?.frac ?? null
@@ -1262,13 +1361,13 @@ export default function CatalogScreen({
       presentAdd({ path, name, size })
     }
     TEST.addSongFrom = (path: string, name: string) =>
-      addSongHeadless(path, name, sampleRate).then(async (r) => {
+      addSongHeadless(path, name, sampleRate).then(async r => {
         await refresh()
         return r
       })
     TEST.deletePhoneProject = (dir: string) => deleteProject(dir).then(() => refresh())
     TEST.findLyricsFor = (dir: string) => {
-      const p = (projects ?? []).find((x) => x.dir === dir)
+      const p = (projects ?? []).find(x => x.dir === dir)
       return p ? findLyricsFor(p) : Promise.reject(new Error(`no project ${dir}`))
     }
     // Split flow, headless: the same path the card drives. Poll splitUi for
@@ -1282,7 +1381,7 @@ export default function CatalogScreen({
     // Phase 4: run the detectors over a phone-library project by hand (the
     // stems as listed) — the on-open path without an open.
     TEST.analyzeProject = (dir: string) => {
-      const p = (projects ?? []).find((x) => x.dir === dir)
+      const p = (projects ?? []).find(x => x.dir === dir)
       if (!p) return false
       void kickAnalysis(dir, p.stems)
       return true
@@ -1349,9 +1448,9 @@ export default function CatalogScreen({
         /* The swipe's actions, spoken: a screen reader cannot discover a
            swipe-reveal, so every optional action is also a rotor action on
            the card itself. */
-        accessibilityActions={acts.map((a) => ({ name: a.key, label: a.label }))}
-        onAccessibilityAction={(e) => {
-          acts.find((a) => a.key === e.nativeEvent.actionName)?.onPress()
+        accessibilityActions={acts.map(a => ({ name: a.key, label: a.label }))}
+        onAccessibilityAction={e => {
+          acts.find(a => a.key === e.nativeEvent.actionName)?.onPress()
         }}
         style={({ pressed }) => [
           s.card,
@@ -1421,7 +1520,7 @@ export default function CatalogScreen({
     return (
       <Swipeable
         key={opts.key}
-        ref={(m) => {
+        ref={m => {
           swipeRefs.current[opts.key] = m
         }}
         /* A LOADING card must not swipe: the revealed actions landed under
@@ -1440,7 +1539,7 @@ export default function CatalogScreen({
         renderRightActions={(progress, _translation, methods) => (
           <SwipeActions
             progress={progress}
-            actions={acts.map((a) => ({
+            actions={acts.map(a => ({
               ...a,
               onPress: () => {
                 methods.close()
@@ -1463,11 +1562,20 @@ export default function CatalogScreen({
         <View style={s.brandRow}>
           <StemTile hue={0} size={26} />
           <Text style={s.brand}>SingZ</Text>
+          <Pressable
+            hitSlop={10}
+            style={{ marginLeft: 'auto' }}
+            onPress={onOpenSettings}
+            accessibilityRole="button"
+            accessibilityLabel="Open Settings"
+          >
+            <Text style={s.ctxLink}>Settings</Text>
+          </Pressable>
           {/* where the desktop keeps it: in the header, always reachable —
               a log you can only open when things are going well is no use */}
           <Pressable
             hitSlop={10}
-            style={{ marginLeft: 'auto' }}
+            style={{ marginLeft: 18 }}
             onPress={onOpenLog}
             accessibilityRole="button"
             accessibilityLabel="Open the log"
@@ -1482,7 +1590,11 @@ export default function CatalogScreen({
                icons twice (MicGlyph, the ••• gear) for the same reason: an
                emoji in a row of tabs is a colour sticker in a row of icons.
                The Drive mark stays an image: it is a logo, not an emoji. */
-            { key: 'folder', label: 'Folder', glyph: (c: string) => <FolderGlyph color={c} /> },
+            {
+              key: 'folder',
+              label: 'Folder',
+              glyph: (c: string) => <FolderGlyph color={c} />
+            },
             {
               key: 'phone',
               label: Platform.OS === 'ios' ? 'This iPhone' : 'This phone',
@@ -1496,7 +1608,7 @@ export default function CatalogScreen({
           // choice was already persisted by the time it was refused. The
           // signed-out Drive view says "Sign in above" and carries its own
           // Sign in link; that is where signing in belongs.
-          onSelect={(k) => selectMode(k as 'gdrive' | 'folder' | 'phone')}
+          onSelect={k => selectMode(k as 'gdrive' | 'folder' | 'phone')}
         />
         {/* When a source is empty or signed out, the one-line context grows a
             title saying what this source IS — the moment the explanation
@@ -1507,75 +1619,83 @@ export default function CatalogScreen({
             mode === 'gdrive' && !driveOn
               ? 'Your desktop’s library, synced through Drive'
               : mode === 'folder' && root?.kind !== 'picked'
-                ? 'A shared folder this phone can read'
-                : mode === 'phone' && projects !== null && projects.length === 0
-                  ? Platform.OS === 'ios'
-                    ? 'Songs added on this iPhone'
-                    : 'Songs added on this phone'
-                  : null
+              ? 'A shared folder this phone can read'
+              : mode === 'phone' && projects !== null && projects.length === 0
+              ? Platform.OS === 'ios'
+                ? 'Songs added on this iPhone'
+                : 'Songs added on this phone'
+              : null
           const inner = (
             <>
-          {mode === 'gdrive' &&
-            (driveOn ? (
-              <>
-                <Text style={s.ctxWho} numberOfLines={1}>
-                  {offline
-                    ? 'No signal — showing your last sync'
-                    : (driveEmail ?? 'Signed in to Google Drive')}
-                </Text>
-                <Text style={s.ctxDot}>·</Text>
-                <Pressable
-                  accessibilityRole="button"
-                  hitSlop={8}
-                  onPress={() => {
-                    void driveSignOut().then(() => {
-                      setDriveOn(false)
-                      setDriveEmail(null)
-                      void refresh()
-                    })
-                  }}
-                >
-                  <Text style={s.ctxLink}>Sign out</Text>
-                </Pressable>
-              </>
-            ) : (
-              <>
-                <Text style={s.ctxWho} numberOfLines={1}>
-                  {/* The line renders under the srcCard title whenever Drive
+              {mode === 'gdrive' &&
+                (driveOn ? (
+                  <>
+                    <Text style={s.ctxWho} numberOfLines={1}>
+                      {offline
+                        ? 'No signal — showing your last sync'
+                        : driveEmail ?? 'Signed in to Google Drive'}
+                    </Text>
+                    <Text style={s.ctxDot}>·</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      hitSlop={8}
+                      onPress={() => {
+                        void driveSignOut().then(() => {
+                          setDriveOn(false)
+                          setDriveEmail(null)
+                          void refresh()
+                        })
+                      }}
+                    >
+                      <Text style={s.ctxLink}>Sign out</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <>
+                    <Text style={s.ctxWho} numberOfLines={1}>
+                      {/* The line renders under the srcCard title whenever Drive
                       is signed out, so it says the next step, not the title's
                       message again. */}
-                  Sign in to see it
-                </Text>
-                <Text style={s.ctxDot}>·</Text>
-                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void driveSignInFlow()}>
-                  <Text style={s.ctxLink}>Sign in</Text>
-                </Pressable>
-              </>
-            ))}
-          {mode === 'folder' && (
-            <>
-              <Text style={s.ctxWho} numberOfLines={1}>
-                {root?.kind === 'picked' ? root.name : 'No folder picked yet'}
-              </Text>
-              <Text style={s.ctxDot}>·</Text>
-              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void changeFolder()}>
-                <Text style={s.ctxLink}>Change…</Text>
-              </Pressable>
-            </>
-          )}
-          {mode === 'phone' && (
-            <>
-              <Text style={s.ctxWho} numberOfLines={1}>
-                {Platform.OS === 'ios'
-                  ? 'Files you copied onto this iPhone'
-                  : 'Files you copied onto this phone'}
-              </Text>
-              <Text style={s.ctxDot}>·</Text>
-              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
-                <Text style={s.ctxLink}>Add a song</Text>
-              </Pressable>
-            </>
-          )}
+                      Sign in to see it
+                    </Text>
+                    <Text style={s.ctxDot}>·</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      hitSlop={8}
+                      onPress={() => void driveSignInFlow()}
+                    >
+                      <Text style={s.ctxLink}>Sign in</Text>
+                    </Pressable>
+                  </>
+                ))}
+              {mode === 'folder' && (
+                <>
+                  <Text style={s.ctxWho} numberOfLines={1}>
+                    {root?.kind === 'picked' ? root.name : 'No folder picked yet'}
+                  </Text>
+                  <Text style={s.ctxDot}>·</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    hitSlop={8}
+                    onPress={() => void changeFolder()}
+                  >
+                    <Text style={s.ctxLink}>Change…</Text>
+                  </Pressable>
+                </>
+              )}
+              {mode === 'phone' && (
+                <>
+                  <Text style={s.ctxWho} numberOfLines={1}>
+                    {Platform.OS === 'ios'
+                      ? 'Files you copied onto this iPhone'
+                      : 'Files you copied onto this phone'}
+                  </Text>
+                  <Text style={s.ctxDot}>·</Text>
+                  <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
+                    <Text style={s.ctxLink}>Add a song</Text>
+                  </Pressable>
+                </>
+              )}
             </>
           )
           return srcTitle != null ? (
@@ -1596,9 +1716,7 @@ export default function CatalogScreen({
             opens. */}
         {crashNote && (
           <View style={[s.errBox, s.noteBox]}>
-            <Text style={[s.err, { color: C.text }]}>
-              The last open crashed while {crashNote}.
-            </Text>
+            <Text style={[s.err, { color: C.text }]}>The last open crashed while {crashNote}.</Text>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Open the log to report this"
@@ -1699,7 +1817,12 @@ export default function CatalogScreen({
                     <View
                       style={[
                         s.splitBar,
-                        { width: `${Math.min(100, (splitUi.gotMB / Math.max(1, splitUi.totalMB)) * 100)}%` }
+                        {
+                          width: `${Math.min(
+                            100,
+                            (splitUi.gotMB / Math.max(1, splitUi.totalMB)) * 100
+                          )}%`
+                        }
                       ]}
                     />
                   </View>
@@ -1737,7 +1860,11 @@ export default function CatalogScreen({
                 )}
                 {splitUi.phase === 'failed' && (
                   <>
-                    <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void resumeSplit(splitUi.project)}>
+                    <Pressable
+                      accessibilityRole="button"
+                      hitSlop={8}
+                      onPress={() => void resumeSplit(splitUi.project)}
+                    >
                       <Text style={s.ctxLink}>Resume</Text>
                     </Pressable>
                     <Pressable accessibilityRole="button" hitSlop={8} onPress={discardSplit}>
@@ -1774,12 +1901,21 @@ export default function CatalogScreen({
                 <View
                   style={[
                     s.splitBar,
-                    { width: `${Math.min(100, (beatModelsUi.gotMB / Math.max(1, beatModelsUi.totalMB)) * 100)}%` }
+                    {
+                      width: `${Math.min(
+                        100,
+                        (beatModelsUi.gotMB / Math.max(1, beatModelsUi.totalMB)) * 100
+                      )}%`
+                    }
                   ]}
                 />
               </View>
               <View style={s.splitActions}>
-                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void cancelBeatModels()}>
+                <Pressable
+                  accessibilityRole="button"
+                  hitSlop={8}
+                  onPress={() => void cancelBeatModels()}
+                >
                   <Text style={s.ctxLink}>Cancel</Text>
                 </Pressable>
               </View>
@@ -1787,59 +1923,59 @@ export default function CatalogScreen({
           )}
           {((): React.ReactNode => {
             const renderEntry = (p: ProjectEntry): React.JSX.Element => {
-            const downloaded = isDownloaded(p, usage[p.dir])
-            const added = addedTracks(p.doc?.settings).length
-            const split = isSplit(p)
-            const hue = Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3
-            return card({
-              key: p.dir,
-              dir: p.dir,
-              hue,
-              /* A ready song is lit; an unsplit one has no stem colours yet.
+              const downloaded = isDownloaded(p, usage[p.dir])
+              const added = addedTracks(p.doc?.settings).length
+              const split = isSplit(p)
+              const hue = Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3
+              return card({
+                key: p.dir,
+                dir: p.dir,
+                hue,
+                /* A ready song is lit; an unsplit one has no stem colours yet.
                  The tile carrying the state is a colour the meta line does
                  not have to spend words on. */
-              tileNeutral: !split,
-              tileGlow: split ? STEM_TILE_COLORS[hue][0] : undefined,
-              keyLine: split ? keyTempoOf(p.doc) : null,
-              title: splitSongName(p.doc.name ?? p.dir).title,
-              artist: splitSongName(p.doc.name ?? p.dir).artist,
-              meta: (
-                <>
-                  {Object.keys(p.stems).length > 0
-                    ? `${Object.keys(p.stems).length} stems`
-                    : 'not split yet'}
-                  {added > 0 ? ` · ${added} added` : ''}
-                  {p.hasLyrics ? ' · lyrics' : ''}
-                  {/* The badge means "this is an old WAV project the desktop
+                tileNeutral: !split,
+                tileGlow: split ? STEM_TILE_COLORS[hue][0] : undefined,
+                keyLine: split ? keyTempoOf(p.doc) : null,
+                title: splitSongName(p.doc.name ?? p.dir).title,
+                artist: splitSongName(p.doc.name ?? p.dir).artist,
+                meta: (
+                  <>
+                    {Object.keys(p.stems).length > 0
+                      ? `${Object.keys(p.stems).length} stems`
+                      : 'not split yet'}
+                    {added > 0 ? ` · ${added} added` : ''}
+                    {p.hasLyrics ? ' · lyrics' : ''}
+                    {/* The badge means "this is an old WAV project the desktop
                       can shrink". A song this phone split is also WAV — the
                       phone cannot write FLAC yet — and telling the singer to
                       redo it on a computer is the worst possible reward for a
                       five-minute split, so phone-made projects are exempt. */}
-                  {mode !== 'phone' && Object.values(p.stems).some((f) => f === 'wav') ? (
-                    <Text style={{ color: C.amber }}> · update on desktop</Text>
-                  ) : null}
-                </>
-              ),
-              right: (
-                <Text
-                  style={[s.status, downloaded && s.statusHave]}
-                  /* A bare glyph carrying the one fact the singer most needs
+                    {mode !== 'phone' && Object.values(p.stems).some(f => f === 'wav') ? (
+                      <Text style={{ color: C.amber }}> · update on desktop</Text>
+                    ) : null}
+                  </>
+                ),
+                right: (
+                  <Text
+                    style={[s.status, downloaded && s.statusHave]}
+                    /* A bare glyph carrying the one fact the singer most needs
                      offline: is this song actually on the phone. */
-                  accessibilityLabel={
-                    downloaded
-                      ? 'On this phone'
-                      : p.bytes > 0
+                    accessibilityLabel={
+                      downloaded
+                        ? 'On this phone'
+                        : p.bytes > 0
                         ? `Not downloaded, ${fmtSize(p.bytes)}`
                         : 'Not downloaded'
-                  }
-                >
-                  {downloaded ? '✓' : p.bytes > 0 ? `☁ ${fmtSize(p.bytes)}` : '☁'}
-                </Text>
-              ),
-              // The whole point of an added song is splitting it, so the offer
-              // belongs on the card. hitSlop keeps the tap target honest at
-              // this text size, and the press must not also open the song.
-              /* Nothing at all on the card whose split is RUNNING — not a
+                    }
+                  >
+                    {downloaded ? '✓' : p.bytes > 0 ? `☁ ${fmtSize(p.bytes)}` : '☁'}
+                  </Text>
+                ),
+                // The whole point of an added song is splitting it, so the offer
+                // belongs on the card. hitSlop keeps the tap target honest at
+                // this text size, and the press must not also open the song.
+                /* Nothing at all on the card whose split is RUNNING — not a
                  disabled chip, no chip. `!splitUi` used to live inside
                  canSplit and was doing double duty as the busy guard;
                  splitting that out left this card's chip live, and tapping it
@@ -1848,78 +1984,81 @@ export default function CatalogScreen({
                  both natives refuse the second job without telling JS, and a
                  job at 70% ends up reading "Starting…" at zero. The progress
                  card above it is already saying everything there is to say. */
-              action: canSplit(p) && splitUi?.project !== p.dir ? (
-                <Pressable
-                  hitSlop={10}
-                  disabled={splitBusyElsewhere(p.dir)}
-                  onPress={(e) => {
-                    e.stopPropagation()
-                    offerSplit(p)
-                  }}
-                  style={[s.splitChip, splitBusyElsewhere(p.dir) && { opacity: 0.4 }]}
-                  accessibilityRole="button"
-                  accessibilityState={{ disabled: splitBusyElsewhere(p.dir) }}
-                  /* Not "while another song is being split": splitUi also sits
+                action:
+                  canSplit(p) && splitUi?.project !== p.dir ? (
+                    <Pressable
+                      hitSlop={10}
+                      disabled={splitBusyElsewhere(p.dir)}
+                      onPress={e => {
+                        e.stopPropagation()
+                        offerSplit(p)
+                      }}
+                      style={[s.splitChip, splitBusyElsewhere(p.dir) && { opacity: 0.4 }]}
+                      accessibilityRole="button"
+                      accessibilityState={{
+                        disabled: splitBusyElsewhere(p.dir)
+                      }}
+                      /* Not "while another song is being split": splitUi also sits
                      in its failed phase until Resume or Discard, when nothing
                      is running at all. Word it against what has to happen. */
-                  accessibilityLabel={
-                    splitBusyElsewhere(p.dir)
-                      ? 'Split — unavailable until the current split finishes or is discarded'
-                      : `Split ${p.doc.name ?? p.dir} into stems`
-                  }
-                >
-                  <Text style={s.splitChipText}>Split</Text>
-                </Pressable>
-              ) : null,
-              onPress: () => void openEntry(p),
-              /* Nothing to offer, nothing offered. A Drive or folder song with
+                      accessibilityLabel={
+                        splitBusyElsewhere(p.dir)
+                          ? 'Split — unavailable until the current split finishes or is discarded'
+                          : `Split ${p.doc.name ?? p.dir} into stems`
+                      }
+                    >
+                      <Text style={s.splitChipText}>Split</Text>
+                    </Pressable>
+                  ) : null,
+                onPress: () => void openEntry(p),
+                /* Nothing to offer, nothing offered. A Drive or folder song with
                  nothing downloaded used to take a long-press and return at
                  `if (have <= 0) return` — a gesture with no feedback and no
                  result. Now there is no ••• and no long-press on that card. */
-              /* Every OPTIONAL action, in the swipe; a card with none does
+                /* Every OPTIONAL action, in the swipe; a card with none does
                  not swipe at all (a Drive song with nothing downloaded).
                  Order: least destructive nearest the card, the trash at the
                  far edge. The trash still opens the same confirms — the
                  icons are doors, never a second deletion path. */
-              swipeActions: ((): CardSwipeAction[] | null => {
-                const title = p.doc.name ?? p.dir
-                const acts: CardSwipeAction[] = []
-                if (mode === 'phone') {
-                  if (split) {
+                swipeActions: ((): CardSwipeAction[] | null => {
+                  const title = p.doc.name ?? p.dir
+                  const acts: CardSwipeAction[] = []
+                  if (mode === 'phone') {
+                    if (split) {
+                      acts.push({
+                        key: 'redetect',
+                        label: `Detect the beat again for ${title}`,
+                        icon: <RedetectGlyph color={white(0.85)} />,
+                        onPress: () => void kickAnalysis(p.dir, p.stems, true)
+                      })
+                    }
+                    if (!p.hasLyrics) {
+                      acts.push({
+                        key: 'lyrics',
+                        label: `Find lyrics for ${title}`,
+                        icon: <LyricsGlyph color={white(0.85)} />,
+                        onPress: () => void findLyricsFor(p)
+                      })
+                    }
                     acts.push({
-                      key: 'redetect',
-                      label: `Detect the beat again for ${title}`,
-                      icon: <RedetectGlyph color={white(0.85)} />,
-                      onPress: () => void kickAnalysis(p.dir, p.stems, true)
+                      key: 'delete',
+                      label: `Delete ${title} from this phone`,
+                      danger: true,
+                      icon: <TrashGlyph color="#1d0f0d" />,
+                      onPress: () => confirmDelete(p)
+                    })
+                  } else if ((usage[p.dir]?.bytes ?? 0) > 0) {
+                    acts.push({
+                      key: 'forget',
+                      label: `Remove ${title}'s downloaded files`,
+                      danger: true,
+                      icon: <TrashGlyph color="#1d0f0d" />,
+                      onPress: () => confirmForget(p)
                     })
                   }
-                  if (!p.hasLyrics) {
-                    acts.push({
-                      key: 'lyrics',
-                      label: `Find lyrics for ${title}`,
-                      icon: <LyricsGlyph color={white(0.85)} />,
-                      onPress: () => void findLyricsFor(p)
-                    })
-                  }
-                  acts.push({
-                    key: 'delete',
-                    label: `Delete ${title} from this phone`,
-                    danger: true,
-                    icon: <TrashGlyph color="#1d0f0d" />,
-                    onPress: () => confirmDelete(p)
-                  })
-                } else if ((usage[p.dir]?.bytes ?? 0) > 0) {
-                  acts.push({
-                    key: 'forget',
-                    label: `Remove ${title}'s downloaded files`,
-                    danger: true,
-                    icon: <TrashGlyph color="#1d0f0d" />,
-                    onPress: () => confirmForget(p)
-                  })
-                }
-                return acts.length > 0 ? acts : null
-              })()
-            })
+                  return acts.length > 0 ? acts : null
+                })()
+              })
             }
             /* Headers only when both groups exist — a library that is all
                one thing stays the flat list it always was. The sample joins
@@ -1970,16 +2109,16 @@ export default function CatalogScreen({
                   ? 'No songs on this iPhone yet. Add one above — it plays straight away, and can be split into stems here.'
                   : 'No songs on this phone yet. Add one above — it plays straight away, and can be split into stems here.'
                 : mode === 'gdrive'
-                  ? driveOn
-                    ? 'Nothing in your Google Drive library yet. Save a song on your computer and it syncs over.'
-                    : 'Sign in above to see the songs your computer put in Google Drive.'
-                  : Platform.OS === 'ios'
-                    ? 'No projects in this folder. Save one on your computer into the shared folder (iCloud Drive/SingZ), or pick a different folder above.'
-                    : 'No projects in this folder. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
+                ? driveOn
+                  ? 'Nothing in your Google Drive library yet. Save a song on your computer and it syncs over.'
+                  : 'Sign in above to see the songs your computer put in Google Drive.'
+                : Platform.OS === 'ios'
+                ? 'No projects in this folder. Save one on your computer into the shared folder (iCloud Drive/SingZ), or pick a different folder above.'
+                : 'No projects in this folder. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
             </Text>
           )}
           {(() => {
-            const dirs = Object.keys(usage).filter((d) => usage[d].bytes > 0)
+            const dirs = Object.keys(usage).filter(d => usage[d].bytes > 0)
             const total = dirs.reduce((n, d) => n + usage[d].bytes, 0)
             if (total <= 0) return null
             return (
@@ -1988,7 +2127,11 @@ export default function CatalogScreen({
                   {dirs.length} song{dirs.length > 1 ? 's' : ''} on this phone · {fmtSize(total)} —
                   playable without internet
                 </Text>
-                <Pressable accessibilityRole="button" hitSlop={8} onPress={() => confirmForgetAll(total)}>
+                <Pressable
+                  accessibilityRole="button"
+                  hitSlop={8}
+                  onPress={() => confirmForgetAll(total)}
+                >
                   <Text style={s.ctxLink}>Free up space</Text>
                 </Pressable>
               </View>
@@ -2073,7 +2216,12 @@ const s = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: C.hairline
   },
-  splitTitle: { color: C.text, fontSize: 15, fontWeight: '700', marginBottom: 4 },
+  splitTitle: {
+    color: C.text,
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4
+  },
   splitText: { color: C.dim, fontSize: 13, marginBottom: 8 },
   splitBarBed: {
     height: 4,
@@ -2092,14 +2240,38 @@ const s = StyleSheet.create({
   },
   splitChipText: { color: C.amberInk, fontSize: 12, fontWeight: '700' },
   splitActions: { flexDirection: 'row', gap: 18 },
-  logSheet: { flex: 1, backgroundColor: C.bg, paddingHorizontal: 20, paddingTop: 60 },
-  logHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  logSheet: {
+    flex: 1,
+    backgroundColor: C.bg,
+    paddingHorizontal: 20,
+    paddingTop: 60
+  },
+  logHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12
+  },
   logTitle: { color: C.text, fontSize: 20, fontWeight: '700' },
-  logRow: { paddingVertical: 7, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.hairline },
+  logRow: {
+    paddingVertical: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.hairline
+  },
   logWhen: { color: C.dim, fontSize: 11, marginBottom: 2 },
   logMsg: { color: C.text, fontSize: 13 },
-  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 14 },
-  brand: { color: C.amber, fontSize: 20, fontWeight: '800', letterSpacing: -0.3 },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    marginBottom: 14
+  },
+  brand: {
+    color: C.amber,
+    fontSize: 20,
+    fontWeight: '800',
+    letterSpacing: -0.3
+  },
   ctx: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2130,9 +2302,22 @@ const s = StyleSheet.create({
     borderStyle: 'dashed',
     borderColor: white(0.14)
   },
-  cardLoading: { backgroundColor: 'rgba(242,193,78,0.07)', borderColor: 'rgba(242,193,78,0.25)' },
-  cardTitle: { color: C.bright, fontSize: 16.5, fontWeight: '800', letterSpacing: -0.2 },
-  cardArtist: { color: white(0.68), fontSize: 13, fontWeight: '600', marginTop: 1 },
+  cardLoading: {
+    backgroundColor: 'rgba(242,193,78,0.07)',
+    borderColor: 'rgba(242,193,78,0.25)'
+  },
+  cardTitle: {
+    color: C.bright,
+    fontSize: 16.5,
+    fontWeight: '800',
+    letterSpacing: -0.2
+  },
+  cardArtist: {
+    color: white(0.68),
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 1
+  },
   cardMeta: { color: white(0.5), fontSize: 12.5, marginTop: 3 },
   status: { color: C.dim, fontSize: 12, fontWeight: '600' },
   /* The fixed right rail: a state fills the card, it never reshapes it, so
@@ -2183,7 +2368,12 @@ const s = StyleSheet.create({
     marginTop: 9,
     marginBottom: 12
   },
-  srcTitle: { color: C.text, fontSize: 13.5, fontWeight: '700', marginBottom: 6 },
+  srcTitle: {
+    color: C.text,
+    fontSize: 13.5,
+    fontWeight: '700',
+    marginBottom: 6
+  },
   ctxIn: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   searchDock: {
     position: 'absolute',
@@ -2232,7 +2422,12 @@ const s = StyleSheet.create({
     height: 3,
     backgroundColor: white(0.08)
   },
-  progressFill: { height: 3, backgroundColor: C.amber, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
+  progressFill: {
+    height: 3,
+    backgroundColor: C.amber,
+    borderTopRightRadius: 2,
+    borderBottomRightRadius: 2
+  },
   empty: { color: C.dim, fontSize: 14, lineHeight: 20, marginVertical: 12 },
   /* The crash notice reads as information rather than alarm — it is about a
      previous session, and the singer has already lived through it. */

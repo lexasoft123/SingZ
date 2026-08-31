@@ -6,7 +6,7 @@
  * eval/mlgrid-parity.mjs proves the ported LOGIC by replaying recorded logits
  * on a host, which is deliberately everything except the two ONNX calls. This
  * suite is the other half: it runs the real graphs through
- * mobile/native/core/beat_this_ort.cpp — the one file no host gate can reach —
+ * zcore/src/legacy/beat_this_ort.cpp — the one file no host gate can reach —
  * and compares beats, downbeats and every probability against a recording
  * made by scripts/beat_runner_onnx.py.
  *

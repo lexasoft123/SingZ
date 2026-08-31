@@ -142,8 +142,8 @@ android {
         }
     }
 
-    // libsingzcore: the shared C++ engine core (mobile/native/core) — split
-    // engine + Beat This runner + FLAC encode, one source tree with iOS
+    // libsingzcore: the JNI binding over the root zcore component targets —
+    // split engine + Beat This runner + FLAC encode, shared with iOS/desktop
     // (docs/PHONE-STANDALONE.md). The ORT AAR is legacy-layout (headers/ +
     // jni/<abi>/libonnxruntime.so, no prefab), so extractOrtSdk below unpacks
     // it and CMake imports the .so per ABI; the APK's copy still comes from

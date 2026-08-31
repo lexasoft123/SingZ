@@ -62,24 +62,25 @@ link() { # link <relpath> — symlink main's copy when the worktree lacks it
 #     come from .engines-src/ and downloads. No branch of ours changes them,
 #     they cost minutes to rebuild, and every worktree wants the same copy.
 #
-#   our own engine builds (singz-analyze, singz-capture.node) come from
-#     mobile/native/core — which is exactly what a feature branch edits.
+#   our own engine builds (singz-analyze, singz-capture.node) come from the
+#     shared zcore/zdsp tree — which is exactly what a feature branch edits.
 #
 # Linking the whole directory shared the second kind too, and that is not a
 # theoretical hazard: during the v0.19.0 cut a sibling worktree ran
 # vendor-analyze.sh, wrote THROUGH this symlink into the main checkout's slot,
 # and the desktop spawned that branch's core — live-input adapter included —
 # for hours. On the machine where this was written, nine worktrees held nine
-# different states of mobile/native/core and one shared binary matching none
-# of them.
+# different states of the native core and one shared binary matching none of
+# them.
 #
 # So the directory is mirrored instead of linked: third-party artifacts are
 # symlinks to main's copies, ours are absent until this worktree builds its
-# own. Only singz-analyze is built below — singz-capture.node has no producer
-# on this tree yet (it arrives with the dsp-graph branch), so its slot is
-# simply left empty rather than pointing at another branch's addon, which is
-# the whole point. src/main/analyze-provenance.ts is the safety net for what
-# this cannot reach (a packaged app, a hand-copied binary); this is the fix.
+# own. Only singz-analyze is built below; the capture addon has a producer but
+# is Electron/platform-specific and is built explicitly with
+# `npm run capture:addon`. Its slot stays empty until then rather than pointing
+# at another branch's addon, which is the whole point.
+# src/main/analyze-provenance.ts is the safety net for what this cannot reach
+# (a packaged app, a hand-copied binary); this is the fix.
 REPO_BUILT='singz-analyze singz-analyze.exe singz-analyze.source-hash
             singz-analyze.exe.source-hash singz-capture.node
             singz-capture.node.source-hash'
@@ -91,10 +92,6 @@ is_repo_built() {
 }
 
 mirror_vendor() {
-  if [ ! -d "$MAIN/vendor" ]; then
-    echo "  skip  vendor (absent in main checkout too)"
-    return 0
-  fi
   # Migrate the old whole-directory symlink. Only ever a symlink is removed —
   # never a real directory, which in the main checkout is the actual engines.
   if [ -L "$WT/vendor" ]; then
@@ -102,6 +99,14 @@ mirror_vendor() {
     echo "  vendor was a symlink to the shared slot — replacing it with a mirror"
   fi
   mkdir -p "$WT/vendor"
+  # A worktree-local directory is still required when main has no vendor/: the
+  # analyzer built below needs somewhere real to publish. Returning before the
+  # symlink migration left an old dangling whole-vendor link in place, so
+  # vendor-analyze.sh could never create its per-platform output directory.
+  if [ ! -d "$MAIN/vendor" ]; then
+    echo "  skip  vendor mirror (absent in main checkout; local slot is ready)"
+    return 0
+  fi
   local entry name inner iname
   for entry in "$MAIN"/vendor/*; do
     [ -e "$entry" ] || continue
@@ -282,8 +287,8 @@ fi
 # This worktree's OWN singz-analyze — one of the slots mirror_vendor
 # deliberately left empty. Without it the desktop finds no core and silently
 # falls back to the TS detectors, which is a quieter wrong answer than the
-# shared binary was. singz-capture.node is left to whoever adds its build
-# script; an empty slot is the correct state until then.
+# shared binary was. singz-capture.node is built explicitly when the current
+# Electron/platform addon is needed; an empty slot is the correct default.
 # Non-fatal: a machine with no cmake still gets a working checkout, and
 # analyze-provenance.ts says so at launch either way.
 if command -v cmake >/dev/null 2>&1; then

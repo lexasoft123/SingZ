@@ -8,6 +8,13 @@ interface Props {
   onClose: () => void
 }
 
+export function setupWizardCloseAction(
+  origin: Props['origin'],
+  busy: boolean
+): 'leave-running' | 'cancel' {
+  return origin === 'auto' && busy ? 'leave-running' : 'cancel'
+}
+
 /**
  * Model manager / first-run setup. Required items download automatically
  * (auto origin); optional packs have their own Get button. Everything lands
@@ -167,7 +174,9 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
               // finish in the background — a 525 MB pack died twice in the
               // field to an impatient Skip, and the splitter then "couldn't
               // download". Deliberately opened dialogs keep Close = cancel.
-              if (!(origin === 'auto' && busy)) void window.singz.cancelModels()
+              if (setupWizardCloseAction(origin, busy) === 'cancel') {
+                void window.singz.cancelModels()
+              }
               onClose()
             }}
           >

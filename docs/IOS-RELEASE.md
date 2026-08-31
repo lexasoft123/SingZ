@@ -6,8 +6,8 @@ TestFlight and the App Store both take the same `.ipa`, exported with
 **not** the sis-motors.ru sideload build — that one is development-signed and
 installs over `itms-services://`; this one is App Store-signed and is only
 ever valid inside App Store Connect. Two different certificate types, two
-different pipelines; see [ship-ios-ipa](../.claude/skills/ship-ios-ipa/SKILL.md)
-for the other one.
+different pipelines; invoke the user-global `ship-ios-ipa` skill by name for
+the other one.
 
 ## What the API cannot do
 

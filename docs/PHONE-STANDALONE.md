@@ -109,7 +109,7 @@ first (the family fleet, $0 distribution); iOS is in scope with the same engine 
 
 ## Architecture
 
-One shared C++ core (`mobile/native/core/`) does the heavy compute on both platforms:
+One shared top-level C++ package (`zcore/`) does the heavy compute on both platforms:
 
 - `split_engine` — segmentation, mix normalization, ORT session, 25 % triangular
   overlap-add, **streamed** stem output (six `stems/<name>.wav.part` appended after
@@ -128,8 +128,9 @@ Bindings: Android — CMake under `mobile/android/app/src/main/cpp/` + a thin JN
 driver, `externalNativeBuild` in `:app`, ORT from the Maven AAR; the job runs in a
 foreground service in an **isolated `:split` process** (lmkd can kill it without
 taking the UI; `START_NOT_STICKY`). iOS — local pod `mobile/ios/SingzCore/` (podspec
-globs `../native/core`, the FolderAccess/patch-3 local-pod pattern; re-run pod install
-after file drops), ObjC++ wrapper; the job runs in-process under
+consumes a generated read-only copy made from `zcore/` by
+`mobile/scripts/sync-singzcore.js`; re-run the sync and pod install after file
+drops), ObjC++ wrapper; the job runs in-process under
 `BGContinuedProcessingTask` (iOS 26+) or foregrounded pre-26; **split refuses to start
 while a song is loaded** (jetsam headroom). Platform decode stays native-per-OS
 (MediaExtractor/MediaCodec; AVAudioFile/ExtAudioFile), each writing the temp 44.1 k
@@ -650,7 +651,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     Hermes, ~3.3 min behind the player) made the case; the user's answer to
     "port to C++?" was "and make the desktop run the same port" — which
     removes the double-maintenance objection. Plan: port to
-    `mobile/native/core`, phones first (in-process, JNI/ObjC++), then the
+    top-level `zcore`, phones first (in-process, JNI/ObjC++), then the
     desktop through a `singz-analyze` CLI spawned by main like whisper-cli
     (not WASM: main can load native code and the stems are always on disk;
     a CLI is crash-isolated, ABI-free, and the eval harness runs the same
@@ -662,7 +663,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       — em, binHz, the transition weights, dec, rms, cents, f0) and double
       where it kept numbers, sums in the same order, JS Math.round
       semantics (half toward +∞). **Bit-identical** to the TS: host-side,
-      `singz-analyze melody` (the CLI, `mobile/native/core/tools/`) against
+      `singz-analyze melody` (the CLI, `tools/native/`) against
       node's trackMelodyCore on the sample's four stems — f0, raw AND rms
       0 differing (vocals 777 voiced frames, bass 1413); on the iPhone sim
       and the Android emulator, `__test.melodyParity` (native reads the WAV
@@ -1860,15 +1861,16 @@ stated at the check.
    equals the WAV it was encoded from **sample for sample, no tolerance** —
    plus the magic dispatch (the same FLAC bytes under a `.wav` name decode
    identically) and `readWavInfo` parity across the formats.
-   Consumers wired: the host test runner and `build-analyze-host.sh` compile
-   the vendored C once (as C — a C++ compile of C99 is the wrong language)
-   into shared objects; the Android CMakeLists gets a `singzflac` STATIC
-   library linked into `singzcore`; the SingzCore pod compiles `flac/src/*.c`
+   Consumers wired: the root native CMake superbuild compiles the vendored C
+   once (as C — a C++ compile of C99 is the wrong language) into the narrow
+   `SingZ::native_flac` target used by host and Android; the SingzCore pod
+   compiles `flac/src/*.c`
    (synced by `sync-singzcore.js`, structure preserved — the `deduplication/`
    fragments must NOT be in `source_files` or they compile standalone and
    fail). Every one of them passes `-DHAVE_CONFIG_H`, the flag the vendor
-   README warns fails silently at the flag and loudly inside an SDK header. The vendored sources are wired into
-   `mobile/android/app/src/main/cpp/CMakeLists.txt` and the SingzCore podspec
+   README warns fails silently at the flag and loudly inside an SDK header.
+   The vendored sources are wired into `third_party/native/CMakeLists.txt` and
+   the SingzCore podspec
    — **with `-DHAVE_CONFIG_H`**, without which `config.h` is not read at all
    and the build dies inside a platform system header. Then `coreReads`
    widens and the worklet fallback stops mattering for FLAC.

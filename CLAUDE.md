@@ -30,7 +30,7 @@ All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 ## Verification policy
 
 **The C++ core is the source of truth for every detector** (decided 2026-08-22).
-New detector work lands in `mobile/native/core` first; the TypeScript in
+New detector work lands in `zcore/src/legacy` first; the TypeScript in
 `src/renderer/src/audio/` is a port of it, and a divergence means the TypeScript
 has drifted — not the port. What holds the two together is the seven parity gates
 under `eval/`, so they are the contract, not a diagnostic: `npm run gates`
@@ -61,7 +61,10 @@ INPUTS, which is exactly how the melody framing bug survived a year of green.
 UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
-the E2E Windows workflow, which also runs `npm test`) and the mac drivers
+the E2E Windows workflow, which also runs `npm test`), the two capture-addon
+harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
+gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
+it opens the real microphone), and the mac drivers
 in `tests/e2e/mac/` (ten of them: align, wizard/consent, audio settings,
 bar editing — TWO of those, because dragging a line and pressing Re-detect
 are different code paths and only the drag was covered — and the
@@ -456,7 +459,9 @@ was driven; the gotchas that follow from it are below.
   validation — never SingZ's copy.
 - **macOS ad-hoc signing is mandatory** (scripts/afterPack.cjs): repacked
   Electron has a broken signature and quarantined downloads show the
-  unrecoverable "app is damaged" dialog. Hook skips itself when CSC_* is set.
+  unrecoverable "app is damaged" dialog. The hook repairs every final bundle
+  first; electron-builder's later Developer ID pass replaces that fallback
+  when a real identity is available.
 - **Packaging from a WORKTREE embeds absolute symlinks into the bundle** —
   `scripts/worktree-setup.sh` deliberately links the third-party engines to
   the main checkout rather than rebuilding whisper per worktree, so
@@ -523,8 +528,9 @@ was driven; the gotchas that follow from it are below.
   ReactNative-application.cmake)` first or `libappmodules.so` silently vanishes
   and the app dies at boot with "PlatformConstants could not be found". That
   include also GLOBS every `*.cpp` beside the CMakeLists into appmodules —
-  own sources live in `mobile/native/core/` (the shared C++ engine core; JNI
-  shim under `core/android/`), never next to the CMakeLists. The ORT Android
+  own reusable sources live in top-level `zcore/`; the package-specific JNI
+  shim lives under `mobile/native/bindings/android/`, never next to the
+  CMakeLists. The ORT Android
   AAR is legacy-layout (headers/ + jni/<abi>/, no prefab) — the `extractOrtSdk`
   gradle task unzips it and CMake imports the .so via `ORT_SDK_DIR`.
 - **A piped gradle build reports its failure as success** — `./gradlew … |
@@ -823,12 +829,13 @@ was driven; the gotchas that follow from it are below.
   adapter included, with `audio-devices-e2e.cjs` driving the very path it had
   changed — for hours; it was found by hand because the other session mentioned
   the rebuild. Nine worktrees on this machine held nine states of
-  `mobile/native/core` behind one binary matching none of them. Two changes,
+  the native core behind one binary matching none of them. Two changes,
   and they answer different halves: `scripts/worktree-setup.sh` now MIRRORS
   `vendor/` (third-party engines stay symlinks to main; `singz-analyze` and
-  `singz-capture.node` get per-worktree slots, and the setup script builds the
-  one that has a producer on this tree — an empty slot degrades to the TS
-  detectors, where a link runs another branch's engine), and
+  `singz-capture.node` get per-worktree slots, the setup script builds the
+  analyzer, and `npm run capture:addon` builds the addon when needed — an
+  empty slot degrades or reports the missing transport, where a link runs
+  another branch's engine), and
   `scripts/analyze-source-hash.sh` is the ONE definition of the fingerprint —
   written to the `.source-hash` sidecar, compiled into the binary
   (`singz-analyze build-info`), and recomputed at the first `resolveAnalyze()`

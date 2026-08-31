@@ -235,6 +235,49 @@ const coreProvenance = async (win) => {
     null,
     { timeout: 20000 }
   )
+  // Phase 4A controls are inspected only. SINGZ_MUTE mutes Chromium, not the
+  // native host, so this driver must never confirm headphones or click Start.
+  await win.waitForSelector('.monitor-strip')
+  const monitorUi = await win.evaluate(async () => {
+    const start = document.querySelector('.monitor-actions button')
+    const style = start ? getComputedStyle(start) : null
+    return {
+      heading: document.querySelector('#monitor-heading')?.textContent,
+      confirmation: document.querySelector('.monitor-headphones-check input')?.checked,
+      startDisabled: start?.disabled,
+      startBackgroundImage: style?.backgroundImage,
+      startOpacity: style?.opacity,
+      routeHelp: start?.getAttribute('aria-describedby'),
+      active: (await window.singz.monitorStatus()).active,
+      state: document.querySelector('.monitor-state')?.textContent
+    }
+  })
+  if (monitorUi.heading !== 'Headphone monitoring') throw new Error('native monitor controls missing')
+  if (monitorUi.confirmation !== false) throw new Error('headphone confirmation was not fresh/off')
+  if (monitorUi.startDisabled !== true) throw new Error('native Start was enabled without headphone confirmation')
+  if (monitorUi.startBackgroundImage !== 'none' || monitorUi.startOpacity !== '1')
+    throw new Error(`disabled native Start still looked active: ${JSON.stringify(monitorUi)}`)
+  if (monitorUi.routeHelp !== 'monitor-route-status') throw new Error('disabled Start does not expose route help')
+  if (monitorUi.active !== false) throw new Error('audio-devices E2E unexpectedly started native output')
+  if (!monitorUi.state?.includes('Monitoring is off')) throw new Error(`monitor did not start off: ${monitorUi.state}`)
+  if (await win.$('.persistent-monitor')) throw new Error('persistent monitor control appeared while monitoring was off')
+  const settingsCloseCopy = await win.$eval('.settings-card .modal-actions .pill', (button) => button.textContent?.trim())
+  if (settingsCloseCopy !== 'Close') throw new Error(`Settings close still implies monitor teardown: ${settingsCloseCopy}`)
+  // Exercise only the Chromium release/restore half against this Electron.
+  // This proves the silent-sink overload exists without ever calling beginMonitor.
+  const sinkHandoff = await win.evaluate(async () => {
+    await window.__engine.releaseOutputForNativeMonitor()
+    const released = window.__engine.nativeMonitorOwnsOutput
+    await window.__engine.restoreOutputAfterNativeMonitor()
+    return {
+      released,
+      restored: !window.__engine.nativeMonitorOwnsOutput,
+      playing: window.__engine.playing,
+      nativeActive: (await window.singz.monitorStatus()).active
+    }
+  })
+  if (!sinkHandoff.released || !sinkHandoff.restored || sinkHandoff.playing || sinkHandoff.nativeActive)
+    throw new Error(`Chromium sink handoff probe failed: ${JSON.stringify(sinkHandoff)}`)
   const nativeInventory = await win.evaluate(() => window.singz.listDesktopAudioInputs())
   const nativeMode = nativeInventory.ok
   const inputPrefKey = nativeMode ? 'nativeInputUid' : 'inputId'
@@ -334,8 +377,30 @@ const coreProvenance = async (win) => {
     }
   }
   await win.screenshot({ path: join(OUT, 'settings-audio.png') })
+  await win.$eval('.monitor-strip', (section) => section.scrollIntoView({ block: 'start' }))
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  const graphLayout = await win.$eval('.dsp-graph-viewport', (viewport) => ({
+    clientWidth: viewport.clientWidth,
+    scrollWidth: viewport.scrollWidth,
+    modules: viewport.querySelectorAll('.dsp-graph-node').length,
+    labels: [...viewport.querySelectorAll('.dsp-graph-node')].map((node) =>
+      (node.getAttribute('aria-label') ?? '').split(':')[0]
+    )
+  }))
+  if (graphLayout.modules !== 7) throw new Error(`DSP graph rendered ${graphLayout.modules} modules, expected 7`)
+  if (graphLayout.scrollWidth > graphLayout.clientWidth + 1)
+    throw new Error(`DSP graph clips at Settings width (${graphLayout.scrollWidth}px > ${graphLayout.clientWidth}px)`)
+  if (graphLayout.labels.join('|') !== 'Input|Pre meter|Gain|Channel map|Limiter|Post meter|Output')
+    throw new Error(`DSP graph order is wrong: ${graphLayout.labels.join(' → ')}`)
+  console.log(`DSP graph: ${graphLayout.modules} modules fit ${graphLayout.clientWidth}px`)
+  await win.screenshot({ path: join(OUT, 'settings-monitoring.png') })
 
   await win.selectOption('#settings-input', ins[0].v)
+  await win.waitForFunction(
+    ({ key, value }) => JSON.parse(localStorage.getItem('singz.audio') ?? '{}')[key] === value,
+    { key: inputPrefKey, value: ins[0].v },
+    { timeout: 20000 }
+  )
   const stored = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
   if (stored[inputPrefKey] !== ins[0].v) throw new Error(`${inputPrefKey} pick not persisted`)
   // ---- output pick (guarded — machine hardware) ----
@@ -344,9 +409,23 @@ const coreProvenance = async (win) => {
   if (realOuts.length > 0) {
     pickedOut = realOuts[0].v
     await win.selectOption('#settings-output', pickedOut)
-    await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
-      timeout: 10000
-    })
+    try {
+      await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
+        timeout: 10000
+      })
+    } catch (error) {
+      const diagnosis = await win.evaluate(() => ({
+        sinkId: window.__engine.context.sinkId,
+        desiredOutputId: window.__engine.outputDeviceId,
+        storedOutputId: JSON.parse(localStorage.getItem('singz.audio') ?? '{}').outputId,
+        selectedOutputId: document.querySelector('#settings-output')?.value ?? '',
+        warnings: [...document.querySelectorAll('.settings-hint.warn')].map((node) => node.textContent),
+        monitorState: document.querySelector('.monitor-state')?.textContent ?? '',
+        monitorStateClass: document.querySelector('.monitor-state')?.className ?? '',
+        previewStatus: document.querySelector('.mic-preview-status')?.textContent ?? ''
+      }))
+      throw new Error(`playback sink did not switch: ${JSON.stringify(diagnosis)}; ${error.message}`)
+    }
     console.log('output moved to:', realOuts[0].t)
   } else {
     console.log('skip output pick (no outputs listed)')
@@ -444,14 +523,27 @@ const coreProvenance = async (win) => {
 
   // ---- settings owns a live analyser preview; flipping restarts runtime + preview ----
   await win.click('.pill.gear')
-  await win.waitForFunction(
-    () => {
-      const text = document.querySelector('.mic-meter-head output')?.textContent ?? ''
-      return text.includes('dBFS') || text.includes('No signal')
-    },
-    null,
-    { timeout: 15000 }
-  )
+  try {
+    await win.waitForFunction(
+      () => {
+        const text = document.querySelector('.mic-meter-head output')?.textContent ?? ''
+        return text.includes('dBFS') || text.includes('No signal')
+      },
+      null,
+      { timeout: 15000 }
+    )
+  } catch (error) {
+    const diagnostic = await win.evaluate(async () => ({
+      meter: document.querySelector('.mic-meter-head output')?.textContent ?? null,
+      preview: document.querySelector('.mic-preview-status')?.textContent ?? null,
+      alert: document.querySelector('[role="alert"]')?.textContent ?? null,
+      chromiumCapture: window.__singzE2eMic,
+      nativeState: await window.singz.captureState(),
+      nativeStats: await window.singz.captureStats(),
+      logs: (await window.singz.getLog()).slice(-20)
+    }))
+    throw new Error(`Settings microphone preview did not become readable: ${JSON.stringify(diagnostic)}\n${error instanceof Error ? error.message : String(error)}`)
+  }
   if (ins.length >= 2) {
     await win.selectOption('#settings-input', ins[1].v)
     if (nativeMode) {
@@ -553,10 +645,15 @@ const coreProvenance = async (win) => {
   }
   await app.close()
 
-  console.log('SCREENSHOTS:', join(OUT, 'settings-audio.png'), join(OUT, 'pitch-resized.png'))
+  console.log(
+    'SCREENSHOTS:',
+    join(OUT, 'settings-audio.png'),
+    join(OUT, 'settings-monitoring.png'),
+    join(OUT, 'pitch-resized.png')
+  )
   console.log('PASS')
   process.exit(0)
 })().catch((e) => {
-  console.error('FAIL', e.message)
+  console.error('FAIL', e.stack ?? e.message)
   process.exit(1)
 })

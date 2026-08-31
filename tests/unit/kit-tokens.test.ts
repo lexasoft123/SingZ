@@ -29,6 +29,23 @@ import { STEM_META, CUSTOM_COLORS } from '@singz/ui/stems'
 import { tokens } from '@singz/ui/tokens'
 import { KIT, STEM_COLORS, CUSTOM_COLORS as PHONE_CUSTOM } from '../../mobile/src/ui/tokens'
 
+type PackageManifest = {
+  dependencies?: Record<string, unknown>
+  devDependencies?: Record<string, unknown>
+}
+
+function readJson<T>(relativePath: string): T {
+  return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), 'utf8')) as T
+}
+
+function dependencySpec(manifest: PackageManifest, label: string): string {
+  const spec = manifest.dependencies?.['@singz/ui'] ?? manifest.devDependencies?.['@singz/ui']
+  if (typeof spec !== 'string' || spec.length === 0) {
+    throw new Error(`${label} is missing an @singz/ui dependency spec`)
+  }
+  return spec
+}
+
 function kitPin(lockfile: string): {
   version?: string
   resolved?: string
@@ -64,6 +81,15 @@ describe('kit tokens reach the phone unchanged', () => {
     expect(KIT.danger).toBe(tokens.danger)
     expect(KIT.line).toBe(tokens.line)
     expect(KIT.surfaceRaised).toBe(tokens['surface-raised'])
+  })
+
+  it('both apps request the exact same package', () => {
+    const rootManifest = readJson<PackageManifest>('../../package.json')
+    const mobileManifest = readJson<PackageManifest>('../../mobile/package.json')
+
+    expect(dependencySpec(rootManifest, 'package.json')).toBe(
+      dependencySpec(mobileManifest, 'mobile/package.json')
+    )
   })
 
   it('the accent is the desktop one — the phone had its own', () => {

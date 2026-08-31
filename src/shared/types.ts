@@ -392,6 +392,29 @@ export interface LogEntry {
   line: string
 }
 
+export type CaptureStateName =
+  | 'idle'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'stopped'
+  | 'unsupported'
+  | 'error'
+
+export type CaptureDiscontinuity =
+  | 'none'
+  | 'stream-generation-changed'
+  | 'sequence-gap'
+  | 'sample-rate-changed'
+  | 'route-generation-changed'
+  | 'timestamp-quality-changed'
+  | 'clock-reanchored'
+  | 'source-seek'
+  | 'source-loop'
+  | 'device-lost'
+  | 'source-frame-overflow'
+
+/** Native input inventory. UIDs and channels belong to the OS HAL, not Chromium. */
 export interface DesktopAudioInputDevice {
   uid: string
   label: string
@@ -399,6 +422,236 @@ export interface DesktopAudioInputDevice {
   sampleRate: number
   channels: number
   channelLabels: string[]
+}
+
+/** The capture addon's view of the same inventory — one HAL shape, two transports. */
+export type CaptureInputDevice = DesktopAudioInputDevice
+
+export interface CaptureTimeValue {
+  clockDomainId: string
+  streamGeneration: string
+  sequence: string
+  sourceFrame: string
+  sampleHostTimeNs: string
+  callbackHostTimeNs: string
+  quality: 'unknown' | 'estimated' | 'hardware'
+  discontinuity: CaptureDiscontinuity
+  flags: number
+}
+
+/** Copied scalar evidence only. PCM and native storage never cross IPC. */
+export interface CaptureAnalysisWindow {
+  ownershipGeneration: string
+  resetCount: string
+  resetReason: CaptureDiscontinuity
+  start: CaptureTimeValue
+  end: CaptureTimeValue
+  deliveredAtNs: string
+  bridgeHostTimeNs: string
+  callbackToBridgeMs: number
+  sampleRate: number
+  frequency: number
+  clarity: number
+  peak: number
+  rms: number
+  dbfs: number
+}
+
+export interface CaptureStartResult {
+  ok: boolean
+  state: CaptureStateName
+  error?: string
+  sampleRate: number
+  inputChannel: number
+  deviceUid: string
+  deviceLabel: string
+  deviceChannels: number
+  sampleFormat: string
+  sharingMode: string
+  performanceMode: string
+  timestampSource: string
+}
+
+export interface CaptureStats {
+  deliveredBlocks: string
+  deliveredFrames: string
+  overruns: string
+  deliveryWakeups: string
+  droppedEvents: string
+  /** Scalar analysis windows coalesced before JS consumed the latest one. */
+  overwrittenWindows: string
+}
+
+export type DesktopAudioHostPlatform = 'darwin' | 'win32' | 'linux' | 'other'
+export type AudioHostStateName =
+  | 'closed'
+  | 'open'
+  | 'running'
+  | 'stopped'
+  | 'device-lost'
+  | 'error'
+  | 'unsupported'
+export type AudioHostDirection = 'duplex' | 'input' | 'output'
+export type AudioHostAccessMode = 'shared' | 'exclusive'
+export type AudioHostTransport =
+  | 'unknown'
+  | 'built-in'
+  | 'aggregate'
+  | 'virtual'
+  | 'pci'
+  | 'usb'
+  | 'firewire'
+  | 'bluetooth'
+  | 'bluetooth-le'
+  | 'hdmi'
+  | 'display-port'
+  | 'airplay'
+  | 'avb'
+  | 'thunderbolt'
+  | 'continuity-wired'
+  | 'continuity-wireless'
+  | 'vehicle'
+export type AudioHostMonitoringSuitability =
+  | 'unknown'
+  | 'low-latency'
+  | 'high-latency'
+  | 'unsupported'
+
+/** OS-HAL inventory used only by the native full-duplex monitor. These UIDs
+ * are never Chromium sink ids and must only be compared as exact opaque ids. */
+export interface DesktopAudioHostDevice {
+  uid: string
+  label: string
+  defaultInput: boolean
+  defaultOutput: boolean
+  inputChannels: number
+  outputChannels: number
+  inputChannelLabels: string[]
+  outputChannelLabels: string[]
+  nominalSampleRate: number
+  direction: AudioHostDirection
+  accessMode: AudioHostAccessMode
+  transport: AudioHostTransport
+  monitoringSuitability: AudioHostMonitoringSuitability
+  sampleRateRanges: { minimumHz: number; maximumHz: number }[]
+  bufferFrames: {
+    minimumFrames: number
+    maximumFrames: number
+    preferredFrames: number
+    fundamentalFrames: number
+  }
+}
+
+export type DesktopAudioHostInventoryResult =
+  | {
+      ok: true
+      platform: DesktopAudioHostPlatform
+      defaultInputUid: string
+      defaultOutputUid: string
+      devices: DesktopAudioHostDevice[]
+    }
+  | {
+      ok: false
+      platform: DesktopAudioHostPlatform
+      defaultInputUid: ''
+      defaultOutputUid: ''
+      devices: []
+      error: string
+    }
+
+export interface DesktopMonitorConfig {
+  inputDeviceUid: string
+  outputDeviceUid: string
+  inputChannels: number[]
+  outputChannels: number[]
+  sampleRate: number
+  bufferFrames: number
+  maximumFrames: number
+  exclusive: boolean
+}
+
+export interface DesktopMonitorFormat {
+  sampleRate: number
+  maximumFrames: number
+  nominalBufferFrames: number
+  inputChannels: number
+  outputChannels: number
+  sampleFormat: 'float32-planar'
+  outputClockMaster: boolean
+  accessMode: AudioHostAccessMode
+}
+
+/** Named provider components. This is deliberately not a round-trip total. */
+export interface DesktopMonitorLatency {
+  inputDeviceFrames: number
+  outputDeviceFrames: number
+  bufferFrames: number
+  externalRouteFrames: number
+}
+
+export type DesktopMonitorErrorCode =
+  | 'none'
+  | 'invalid-generation'
+  | 'already-running'
+  | 'invalid-configuration'
+  | 'platform-not-ready'
+  | 'unsupported-route'
+  | 'native-audio-busy'
+  | 'graph-failure'
+  | 'host-failure'
+  | 'queue-full'
+
+interface DesktopMonitorResultBase {
+  ownershipGeneration: string
+  state: AudioHostStateName
+  format: DesktopMonitorFormat
+  latency: DesktopMonitorLatency
+}
+
+export type DesktopMonitorResult =
+  | (DesktopMonitorResultBase & {
+      ok: true
+      errorCode: 'none'
+      error: ''
+    })
+  | (DesktopMonitorResultBase & {
+      ok: false
+      errorCode: Exclude<DesktopMonitorErrorCode, 'none'>
+      error: string
+    })
+
+export interface DesktopMonitorMeter {
+  peak: number
+  rms: number
+  frames: string
+}
+
+/** Scalar telemetry only. PCM and native graph ownership never cross IPC. */
+export interface DesktopMonitorStatus {
+  active: boolean
+  enabled: boolean
+  deviceLost: boolean
+  ownershipGeneration: string
+  gainDb: number
+  state: AudioHostStateName
+  error: string
+  pre: DesktopMonitorMeter
+  post: DesktopMonitorMeter
+  format: DesktopMonitorFormat
+  latency: DesktopMonitorLatency
+  routeGeneration: string
+  streamGeneration: string
+  callbacks: string
+  renderedFrames: string
+  xruns: string
+  deadlineMisses: string
+  renderFailures: string
+  adapterRenderFailures: number
+  terminalRenderFailures: number
+  adapterLastStatusCode: number
+  parameterOverflows: number
+  nonFiniteSamples: number
+  rejectedBlocks: number
 }
 
 export type DesktopAudioInputEvent =
@@ -554,6 +807,34 @@ export interface SingzApi {
   onLyricsProgress(cb: (p: LyricsProgress) => void): () => void
   /** Ask the OS for microphone permission (macOS prompts; other platforms return true). */
   askMicAccess(): Promise<boolean>
+  captureInputDevices(): Promise<
+    { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string }
+  >
+  beginCapture(
+    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
+    ownershipGeneration: string
+  ): Promise<CaptureStartResult>
+  cancelCapture(
+    ownershipGeneration: string
+  ): Promise<{ ok: true; cancelled: boolean } | { ok: false; error: string }>
+  captureState(): Promise<{
+    state: CaptureStateName
+    ownershipGeneration: string
+    error: string
+  }>
+  captureStats(): Promise<CaptureStats>
+  onCaptureWindow(cb: (window: CaptureAnalysisWindow) => void): () => void
+  /** Full-duplex native host inventory. UIDs remain distinct from Chromium ids. */
+  audioHostDevices(): Promise<DesktopAudioHostInventoryResult>
+  /** Starts muted. The main-process owner mints the monotonic native generation. */
+  beginMonitor(config: DesktopMonitorConfig): Promise<DesktopMonitorResult>
+  setMonitorGain(
+    ownershipGeneration: string,
+    gainDb: number,
+    enabled: boolean
+  ): Promise<DesktopMonitorResult>
+  monitorStatus(): Promise<DesktopMonitorStatus>
+  endMonitor(ownershipGeneration: string): Promise<DesktopMonitorResult>
   /** First-run setup: model inventory and the shared download flow. */
   modelsStatus(): Promise<ModelInfo[]>
   downloadModels(

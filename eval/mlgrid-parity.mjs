@@ -1,5 +1,5 @@
 /**
- * Beat This! parity: the C++ port (mobile/native/core/beat_this.cpp) against
+ * Beat This! parity: the C++ port (zcore/src/legacy/beat_this.cpp) against
  * scripts/beat_runner_onnx.py, which is what the desktop packs actually run.
  *
  * The two ONNX calls are NOT made here. They are injected into the port as

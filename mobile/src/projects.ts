@@ -147,6 +147,42 @@ export interface LoadedLane {
   custom?: boolean
 }
 
+export interface NativePlaybackLaneView {
+  readonly id: string
+  readonly label: string
+  readonly color: string
+  readonly totalFrames: number
+}
+
+export interface NativePlaybackViewState {
+  readonly phase: 'prepared' | 'starting' | 'playing' | 'stopping' | 'stopped' | 'error'
+  readonly generation: number
+  readonly positionSec: number
+  readonly durationSec: number
+  readonly audibleFrames: number
+  readonly terminalReason: string
+  readonly error: string | null
+}
+
+export type NativePlaybackStartOutcome =
+  | { readonly kind: 'started' }
+  | { readonly kind: 'fallback'; readonly project: LoadedProject }
+  | { readonly kind: 'failed'; readonly error: string }
+
+/** Narrow frame-zero product contract. It is deliberately not shaped like
+ * MultitrackEngine: unsupported parity operations therefore cannot compile
+ * against the iOS-B2 frame-zero session and cannot be accidentally exposed
+ * in the UI. */
+export interface NativePlaybackHandle {
+  readonly kind: 'ios-native'
+  readonly lanes: readonly NativePlaybackLaneView[]
+  snapshot(): NativePlaybackViewState
+  subscribe(listener: () => void): () => void
+  start(): Promise<NativePlaybackStartOutcome>
+  stop(reason?: string): Promise<void>
+  unload(reason?: string): Promise<void>
+}
+
 export interface LoadedProject {
   name: string
   /** The project folder this was loaded from — absent for the bundled
@@ -162,6 +198,10 @@ export interface LoadedProject {
   lyrics: LyricsDoc | null
   /** Stems first, in display order, then the tracks the singer added. */
   stems: LoadedLane[]
+  /** Present only for the experimental iPhone frame-zero backend. Native
+   * decoded owners live below the bridge; `stems` stays empty so JS cannot
+   * retain a second RNAudioAPI PCM copy. */
+  nativePlayback?: NativePlaybackHandle
 }
 
 /** Decoded size of a stem set — float32 per channel, no compression in RAM. */
@@ -235,7 +275,7 @@ export async function loadProject(
     }
   }
 
-  const ids = STEM_ORDER_ALL.filter((s) => entry.stems[s])
+  const ids = STEM_ORDER_ALL.filter(s => entry.stems[s])
   const added = customTracks(doc?.settings)
   const total = ids.length + added.length
   const stems: LoadedLane[] = []
@@ -247,7 +287,7 @@ export async function loadProject(
   log(
     'song',
     `opening ${doc?.name ?? entry.dir} from ${source} · ${total} lanes` +
-      ` (${ids.map((s) => entry.stems[s]).join(', ')})`
+      ` (${ids.map(s => entry.stems[s]).join(', ')})`
   )
   const openedAt = Date.now()
   const spent: string[] = []
@@ -277,7 +317,10 @@ export async function loadProject(
     // as APK asset names ("Could not read asset bytes"); the scheme routes
     // them to the file decoder and is stripped on every other platform.
     const t0 = Date.now()
-    stems.push({ id, buffer: await decodeAudioData(`file://${path}`, sampleRate) })
+    stems.push({
+      id,
+      buffer: await decodeAudioData(`file://${path}`, sampleRate)
+    })
     spent.push(`${id} ${fmtMs(Date.now() - t0)}`)
     // Stems are all the same length, so one decoded stem projects the whole
     // set. Bail on the projection rather than on the total: refusing after
@@ -321,7 +364,13 @@ export async function loadProject(
       onStep(`Decoding ${t.label} · ${at + 1}/${total}`, (at + 0.5) / total)
       await crumb?.(`decoding ${t.id}`)
       const buffer = await decodeAudioData(`file://${path}`, sampleRate)
-      stems.push({ id: t.id, buffer, label: t.label, color: t.color, custom: true })
+      stems.push({
+        id: t.id,
+        buffer,
+        label: t.label,
+        color: t.color,
+        custom: true
+      })
     } catch (err) {
       log('song', `added track "${t.label}" skipped — ${String(err)}`, 'warn')
       continue

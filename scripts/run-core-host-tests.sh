@@ -5,7 +5,7 @@
 # mobile/** push and by hand after touching the core.
 #   scripts/run-core-host-tests.sh
 #
-# A thin wrapper over mobile/native/core/CMakeLists.txt — the ONE definition
+# A thin wrapper over the root CMakeLists.txt — the ONE definition
 # of the host build, shared with build-analyze-host.sh, the vendor step and
 # the Windows workflow (which runs these same two binaries through ctest on
 # MSVC). The binaries are run directly rather than through ctest here so
@@ -18,17 +18,17 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # ("does not match the source used to generate cache" — it blocked the gates
 # in a worktree the day this was written), and the shared OUTPUT binary
 # catches nothing at all, since two trees' gates would simply overwrite each
-# other's oracle.
-checkout_key() { printf '%s' "$1" | git hash-object --stdin | cut -c1-8; }
-KEY=$(checkout_key "$ROOT")
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build-tests-$KEY}"
+# other's oracle. Keep this default distinct from pre-relocation caches that
+# were configured against mobile/native/core.
+CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests-$CHECKOUT_KEY}"
 
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
   export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
 fi
 
-cmake -S "$ROOT/mobile/native/core" -B "$BUILD"
+cmake -S "$ROOT" -B "$BUILD"
 cmake --build "$BUILD" --target core_host_tests flac_roundtrip -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 "$BUILD/core_host_tests"

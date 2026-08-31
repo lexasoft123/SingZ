@@ -6,7 +6,7 @@
 # gates capture stdout as the path.
 #   scripts/build-analyze-host.sh [out-path]  default: $TMPDIR/singz-analyze-<checkout>
 #
-# A thin wrapper over mobile/native/core/CMakeLists.txt — the ONE definition
+# A thin wrapper over the root CMakeLists.txt — the ONE definition
 # of the host build, shared with run-core-host-tests.sh, the vendor step and
 # the Windows workflow. This script used to carry its own compiler line and
 # object cache; two build definitions of one binary is the same trap as two
@@ -21,11 +21,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # ("does not match the source used to generate cache" — it blocked the gates
 # in a worktree the day this was written), and the shared OUTPUT binary
 # catches nothing at all, since two trees' gates would simply overwrite each
-# other's oracle.
-checkout_key() { printf '%s' "$1" | git hash-object --stdin | cut -c1-8; }
-KEY=$(checkout_key "$ROOT")
-OUT="${1:-${TMPDIR:-/tmp}/singz-analyze-$KEY}"
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-core-build-$KEY}"
+# other's oracle. A basename is not unique (`/a/foo` and `/b/foo`), so use a
+# hash of the absolute checkout path on every supported dev shell.
+CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
+OUT="${1:-${TMPDIR:-/tmp}/singz-analyze-$CHECKOUT_KEY}"
+BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host-$CHECKOUT_KEY}"
 
 # Compiler cache when the machine has one — same launchers, base_dir and
 # hash_dir story as vendor-whisper.sh (a sibling worktree hits only with
@@ -39,7 +39,7 @@ fi
 # -DSINGZ_CORE_TESTS=OFF here: the option would persist in the cmake cache,
 # and run-core-host-tests.sh may share this build dir via SINGZ_CORE_BUILD_DIR
 # — tests default ON and cost nothing when only the tool target is built.
-cmake -S "$ROOT/mobile/native/core" -B "$BUILD" 1>&2
+cmake -S "$ROOT" -B "$BUILD" 1>&2
 cmake --build "$BUILD" --target singz-analyze -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" 1>&2
 
 cp "$BUILD/singz-analyze" "$OUT"

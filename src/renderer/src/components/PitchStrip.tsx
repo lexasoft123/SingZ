@@ -6,6 +6,7 @@ import { PitchStripMicOwner } from '../audio/pitch-strip-mic'
 import { CONTROLS_W, fmtTime, sanitizePitchHeight, type TimeView } from '../model'
 import { modalCoversApp } from '../model'
 import { midiOfHz, segmentMelodyNotes, toNoteSegments } from '../audio/notes'
+import { audioSafetyBlockedCopy } from '../audio/monitoring'
 
 export type MelodyState =
   | { status: 'none' }
@@ -20,6 +21,16 @@ const KEYB_W = 60
 
 const noteName = (midi: number): string =>
   NOTE_NAMES[((midi % 12) + 12) % 12] + String(Math.floor(midi / 12) - 1)
+
+export function pitchMicrophoneUnavailableCopy(
+  settingsOwnsMic: boolean,
+  audioLeaseBlocked: boolean,
+  audioLeaseCopy?: string
+): string | null {
+  if (settingsOwnsMic) return 'Microphone unavailable while Settings is open'
+  if (audioLeaseBlocked) return audioLeaseCopy ?? audioSafetyBlockedCopy('Microphone')
+  return null
+}
 
 interface Trail {
   t: number
@@ -47,6 +58,11 @@ interface Props {
   onMicDevice?: (d: MicDevice | null) => void
   /** Settings owns the physical input exclusively while its meter is open. */
   settingsOwnsMic?: boolean
+  /** Another app-level audio owner (currently native headphone monitoring)
+   * holds the microphone/output safety lease. */
+  audioLeaseBlocked?: boolean
+  /** Provenance-specific guidance for the app-level lease, when known. */
+  audioLeaseCopy?: string
 }
 
 const keyName = (k: KeyGuess, shift: number): string =>
@@ -65,7 +81,9 @@ export default function PitchStrip({
   inputId,
   inputChannel,
   onMicDevice,
-  settingsOwnsMic = false
+  settingsOwnsMic = false,
+  audioLeaseBlocked = false,
+  audioLeaseCopy
 }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nowRef = useRef<HTMLDivElement>(null)
@@ -82,6 +100,11 @@ export default function PitchStrip({
   const [noteBars, setNoteBars] = useState(() => localStorage.getItem('singz.noteBars') !== '0')
   const [stripH, setStripH] = useState(() =>
     sanitizePitchHeight(localStorage.getItem('singz.pitchH'))
+  )
+  const micUnavailableCopy = pitchMicrophoneUnavailableCopy(
+    settingsOwnsMic,
+    audioLeaseBlocked,
+    audioLeaseCopy
   )
 
   useEffect(() => {
@@ -477,8 +500,8 @@ export default function PitchStrip({
   // preview effect requests them, and restores the latest selected route when
   // the modal closes.
   useLayoutEffect(() => {
-    micOwnerRef.current?.setSuspended(settingsOwnsMic)
-  }, [settingsOwnsMic])
+    micOwnerRef.current?.setSuspended(settingsOwnsMic || audioLeaseBlocked)
+  }, [audioLeaseBlocked, settingsOwnsMic])
 
   return (
     <div className="pitch-strip" ref={stripRef} style={{ height: stripH }}>
@@ -571,14 +594,16 @@ export default function PitchStrip({
         <button
           type="button"
           className={`pill ghost small mic-toggle${mic === 'on' ? ' active' : ''}`}
-          disabled={mic === 'starting'}
+          disabled={mic === 'starting' || micUnavailableCopy !== null}
+          title={micUnavailableCopy ?? 'Hear and score your pitch against the song melody'}
+          aria-label={micUnavailableCopy ?? 'Match my singing with the song melody'}
           onClick={() => micOwnerRef.current?.toggle()}
         >
           <svg width="12" height="12" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
             <path d="M7 1a2.6 2.6 0 0 0-2.6 2.6v3a2.6 2.6 0 1 0 5.2 0v-3A2.6 2.6 0 0 0 7 1Z" />
             <path d="M2.7 6.4a.65.65 0 0 1 1.3.13v.07a3 3 0 0 0 6 0v-.07a.65.65 0 0 1 1.3-.13v.2a4.3 4.3 0 0 1-3.65 4.25v1.3h1.7a.65.65 0 1 1 0 1.3H4.65a.65.65 0 1 1 0-1.3h1.7v-1.3A4.3 4.3 0 0 1 2.7 6.6v-.2Z" />
           </svg>
-          {mic === 'on' ? 'Mic on' : mic === 'starting' ? 'Starting…' : mic === 'denied' ? 'Mic blocked — check System Settings' : 'Match my singing'}
+          {micUnavailableCopy ?? (mic === 'on' ? 'Mic on' : mic === 'starting' ? 'Starting…' : mic === 'denied' ? 'Mic blocked — check System Settings' : 'Match my singing')}
         </button>
       </div>
     </div>

@@ -9,7 +9,7 @@
 import { CUSTOM_COLORS as KIT_CUSTOM_COLORS, STEM_META } from '@singz/ui/stems'
 import { tokens } from '@singz/ui/tokens'
 
-/** Chrome palette. Values resolve directly from the vendored kit artifact. */
+/** Chrome palette. Values resolve directly from the installed published package. */
 export const KIT = {
   bg: tokens.bg,
   panel: tokens.panel,

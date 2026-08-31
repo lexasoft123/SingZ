@@ -1,22 +1,37 @@
 #!/usr/bin/env node
 /**
- * Materialize the shared C++ engine core (mobile/native/core, one source tree
- * with Android) into the SingzCore pod as REAL files. CocoaPods silently
+ * Materialize the top-level zcore package into the SingzCore pod as REAL
+ * files. CocoaPods silently
  * drops source_files globs that reach above the podspec dir, and its file
  * lists skip directory symlinks too (both measured: libSingzCore.a shipped
  * without ort_env.o and the app link died on singz::ortProbeJson) — copying
  * is the only shape that works, the same lesson as patch-audio-api.js.
  *
- * Runs from mobile's postinstall. After EDITING files in native/core, rerun
+ * Runs from mobile's postinstall. After EDITING files in ../zcore, rerun
  * this + `pod install` (with a SingzCore.podspec version bump so the glob
  * re-evaluates) or Xcode keeps building the stale copy.
  */
 const { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } = require('node:fs')
-const { join } = require('node:path')
+const { execFileSync } = require('node:child_process')
+const { dirname, join } = require('node:path')
+const {
+  iosAudioHostCallbackFiles,
+  zcoreDeviceCallbackFiles,
+} = require('./native-component-sources')
 
-const root = join(__dirname, '..')
-const src = join(root, 'native', 'core')
-const dst = join(root, 'ios', 'SingzCore', 'core')
+const mobileRoot = join(__dirname, '..')
+const repoRoot = join(mobileRoot, '..')
+const src = join(repoRoot, 'zcore')
+const dst = join(mobileRoot, 'ios', 'SingzCore', 'core')
+const dspSrc = join(repoRoot, 'zdsp')
+const dspDst = join(mobileRoot, 'ios', 'SingzCore', 'dsp')
+
+// The broad pod's exclusions and the strict pods' inclusions must move as one
+// ownership boundary. Refuse to regenerate either side if CMake and the
+// shared iOS manifest have drifted.
+execFileSync(process.execPath, [
+  join(__dirname, 'check-native-component-sources.js'),
+], { stdio: 'inherit' })
 
 // The previous materialization is intentionally read-only. Some Node/macOS
 // combinations refuse recursive removal of those files even though the parent
@@ -32,15 +47,61 @@ const unlockTree = (dir) => {
 }
 unlockTree(dst)
 rmSync(dst, { recursive: true, force: true })
-mkdirSync(dst, { recursive: true })
 let n = 0
-for (const f of readdirSync(src)) {
-  if (!/\.(h|hpp|cpp|mm)$/.test(f)) continue // android/ subdir (JNI shim) stays out
-  copyFileSync(join(src, f), join(dst, f))
-  // Read-only: this copy is what Xcode's navigator opens, and an edit made
-  // there builds fine then vanishes at the next sync — the lock sheet turns
-  // silent loss into a prompt pointing back at native/core.
-  chmodSync(join(dst, f), 0o444)
+const copyTree = (from, to, accept, relative = '') => {
+  mkdirSync(to, { recursive: true })
+  for (const e of readdirSync(from, { withFileTypes: true })) {
+    const entryRelative = relative ? `${relative}/${e.name}` : e.name
+    if (e.isDirectory()) {
+      copyTree(join(from, e.name), join(to, e.name), accept, entryRelative)
+    } else if (accept(e.name, entryRelative)) {
+      copyFileSync(join(from, e.name), join(to, e.name))
+      chmodSync(join(to, e.name), 0o444)
+      n++
+    }
+  }
+}
+
+// Public headers, portable sources and the iOS provider are the pod's only
+// inputs. Android/macOS/Windows providers and product bindings never enter
+// the Apple artifact.
+const callbackDefinitions = new Set(
+  [...zcoreDeviceCallbackFiles, ...iosAudioHostCallbackFiles]
+    .filter((file) => file.endsWith('.cpp'))
+)
+copyTree(join(src, 'include'), join(dst, 'include'), name => /\.(h|hpp)$/.test(name))
+// Private implementation headers under src/ travel beside their translation
+// units; they are not exported by the pod but quoted includes must resolve.
+copyTree(join(src, 'src'), join(dst, 'src'), (name, relative) =>
+  /\.(cpp|mm|h|hpp)$/.test(name) &&
+  !callbackDefinitions.has(`src/${relative}`))
+copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
+  (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
+    !callbackDefinitions.has(`platform/ios/${relative}`))
+
+// Phase 2 capture analysis only. The callback-safe runtime and decoded source
+// now belong to the isolated SingzDspRuntime component; this compatibility pod
+// must not compile a second copy of their symbols.
+unlockTree(dspDst)
+rmSync(dspDst, { recursive: true, force: true })
+const dspAllowlist = [
+  'include/zdsp/types.h',
+  'include/zdsp/events.h',
+  'include/zdsp/clock.h',
+  'include/zdsp/audio_bus.h',
+  'include/zdsp/process_context.h',
+  'include/zdsp/processor.h',
+  'include/zdsp/latency.h',
+  'include/zdsp/analysis/live_input_analysis.h',
+  'include/zdsp/analysis/capture_adapter.h',
+  'src/analysis/live_input_analyzer.cpp',
+  'src/analysis/capture_adapter.cpp',
+]
+for (const relative of dspAllowlist) {
+  const target = join(dspDst, relative)
+  mkdirSync(dirname(target), { recursive: true })
+  copyFileSync(join(dspSrc, relative), target)
+  chmodSync(target, 0o444)
   n++
 }
 
@@ -48,21 +109,9 @@ for (const f of readdirSync(src)) {
 // flac/src/*.c and wav.cpp dispatches to it. Directory structure is
 // preserved — deduplication/ holds #included fragments the podspec must NOT
 // compile, and the include/ tree is what <FLAC/…> resolves against.
-const flacSrc = join(root, 'native', 'third_party', 'flac')
-const flacDst = join(root, 'ios', 'SingzCore', 'flac')
+const flacSrc = join(repoRoot, 'third_party', 'native', 'flac')
+const flacDst = join(mobileRoot, 'ios', 'SingzCore', 'flac')
 unlockTree(flacDst)
 rmSync(flacDst, { recursive: true, force: true })
-const copyTree = (from, to) => {
-  mkdirSync(to, { recursive: true })
-  for (const e of readdirSync(from, { withFileTypes: true })) {
-    if (e.isDirectory()) {
-      copyTree(join(from, e.name), join(to, e.name))
-    } else if (/\.(c|h)$/.test(e.name)) {
-      copyFileSync(join(from, e.name), join(to, e.name))
-      chmodSync(join(to, e.name), 0o444)
-      n++
-    }
-  }
-}
-copyTree(flacSrc, flacDst)
-console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,flac}/`)
+copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
+console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac}/`)

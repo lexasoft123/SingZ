@@ -1,0 +1,1906 @@
+# Future DSP graph architecture
+
+Status: roadmap; Phase 4A native monitoring and Phase 4A.1 app-shell
+persistence are product-wired and hardware-verified on macOS with the Zen
+Quadro SC
+Last reviewed: 2026-08-29
+Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
+
+Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
+
+Native language, target and layout design: [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md)
+
+Phase 0B contracts and decisions: [ADRs](adr/)
+
+Performance evidence: [DSP-PERFORMANCE-BASELINE.md](DSP-PERFORMANCE-BASELINE.md)
+
+This document is the implementation plan for moving SingZ from two fixed
+playback graphs plus a capture pipeline to one reusable, low-latency native DSP
+engine. It is intentionally parked until a feature needs the next phase. Each
+phase is independently shippable and must preserve the current player while it
+is proved on real hardware.
+
+## Product goal
+
+The engine must support:
+
+- song playback and phase-coherent stem mixing;
+- microphone input, channel selection, metering and vocal scoring;
+- generated notes, intervals and chords for Vocal Training;
+- configurable built-in effects and analyzer taps;
+- input monitoring and recording;
+- desktop plug-ins, beginning with VST3;
+- the same processor contracts for real-time and offline rendering;
+- macOS, Windows, iOS and Android, with platform code in separate classes and
+  per-OS files;
+- honest latency across built-in DSP, plug-ins, device buffers and external
+  routes such as Bluetooth, CarPlay and Android Auto.
+
+This is an audio graph, not merely an insert chain. A chain is a useful preset,
+but the engine must also represent buses, parallel branches, sidechains,
+analyzer taps and explicit dry/wet paths.
+
+## Decisions carried forward from the original proposal
+
+The architecture proposal made during the Vocal Training work remains the
+baseline. It specified:
+
+- an immutable execution plan swapped atomically at block boundaries;
+- preallocated planar audio buffers;
+- no allocation, locks, logging, filesystem access or IPC on the real-time
+  thread;
+- configurable routing, parallel paths, dry/wet mixes and sidechains;
+- per-node latency declarations with compensation across parallel paths;
+- sample-accurate parameter events with smoothing;
+- versioned, serializable graph presets;
+- an offline runner using the same nodes;
+- cheap bounded meters inline, with pitch/spectrum/ML analysis on bounded
+  non-blocking taps;
+- VST3 on Windows/macOS, Audio Units on Apple platforms and CLAP as a later
+  adapter;
+- discovery/scanning outside the audio process, with an explicit choice
+  between lowest-latency in-process execution and safer bridged execution;
+- a duplex shared clock where one device owns input and output, and drift
+  correction when input and output use different clocks;
+- monitoring disabled by default, with explicit output, gain and feedback
+  controls.
+
+PR #13 validates the source side of that proposal but adds an important
+boundary: the existing `AudioInput` ring and `AudioInputSink` run through an
+ordinary delivery thread. They remain the correct path for analyzers and
+telemetry. They are **not** the future zero-extra-hop monitoring path. Direct
+monitoring/effects must run from a full-duplex render-side callback/worker that
+invokes the compiled graph in the device's real-time domain.
+
+## Current state and migration constraints
+
+Today SingZ has three separate audio paths:
+
+1. Desktop playback is a fixed Web Audio graph in
+   `src/renderer/src/audio/engine.ts`: lane `AudioBufferSourceNode`s feed lane
+   gains, one master bus and an optional Signalsmith worklet. The metronome
+   bypasses the master bus.
+2. Mobile playback mirrors that shape in `mobile/src/engine.ts` using
+   `react-native-audio-api`, including a patched native stretch node.
+3. PR #13 added a shared float32 capture transport, now located under
+   `zcore/`, with AUHAL, WASAPI, RemoteIO and AAudio
+   providers, physical-channel selection, timestamp provenance, bounded
+   delivery and an off-real-time 2,048/512 analysis adapter.
+
+Phase 0A makes the reusable native source tree top-level `zcore/` and
+establishes the sibling `zdsp/` package. `mobile/`, Electron and native
+command-line tools are consumers of those libraries, not owners of their
+source.
+
+The migration must preserve these proven invariants:
+
+- all song lanes start sample-locked;
+- gain changes remain click-free;
+- transpose stays phase-coherent by processing the summed song bus;
+- metronome and other reference signals do not accidentally pass through song
+  transpose, training ducking or arbitrary effects;
+- the audible/display clock is distinct from the render/control clock. Mobile
+  already enforces this; desktop currently uses its latency-adjusted
+  `position` for training decisions, a divergence Phase 4 must correct using
+  the mobile semantics as authoritative;
+- capture timestamps remain raw and never include output-route latency;
+- native mobile buffers are released deterministically, never left to GC;
+- one owner configures each process-global audio session;
+- raw callback PCM does not cross Electron or React Native IPC;
+- device removal, timestamp-quality changes and discontinuities create an
+  explicit boundary instead of silently joining incompatible audio.
+
+## Target architecture
+
+```mermaid
+flowchart LR
+  CT[Control/UI thread] -->|GraphDescription + parameter commands| GC[Graph compiler]
+  GC -->|prepared immutable snapshot| SW[block-boundary swap]
+
+  subgraph RT[Real-time audio domain]
+    HI[Platform AudioHost input] --> CM[Channel map / input gain]
+    CM --> GR[CompiledGraph runner]
+    SS[Song sources / stem buses] --> GR
+    RS[Reference sources<br/>clicks / cue tones] --> GR
+    GR --> LIM[Safety limiter]
+    LIM --> HO[Platform AudioHost output]
+    GR -. bounded tap .-> TQ[Analyzer queues]
+  end
+
+  SW --> GR
+  TQ --> AW[Analyzer workers]
+  AW -->|scalar timestamped results| UI[Electron / React Native UI]
+  GR -->|atomic counters only| DG[Diagnostics reader]
+
+  PS[Plugin scanner helper] --> PC[Plugin cache]
+  PC --> GC
+```
+
+There are four ownership domains:
+
+1. **Control domain** builds descriptions, validates user changes, prepares
+   nodes and publishes complete snapshots.
+2. **Real-time domain** owns no dynamic allocation and only runs a prepared
+   graph for the current block.
+3. **Analysis domain** consumes bounded taps and may drop work rather than
+   delay sound.
+4. **Plugin-service domain** scans unknown binaries and, in safe mode, hosts
+   processing outside the app process.
+
+## Core contracts
+
+### Audio format and blocks
+
+The graph's canonical sample representation is native-endian IEEE float32.
+This matches the current shared capture core, Web Audio, RNAudioAPI and common
+plug-in processing paths. Integer devices are converted once at the platform
+edge; integer formats never propagate through the graph. The first plug-in
+adapters request float32 support and reject/bypass float64-only instances with
+an explicit capability error. Float64 may be added later without changing the
+baseline graph format.
+
+The canonical buffer layout is non-owning planar audio. Read-only and writable
+views are different types so a processor cannot mutate a fan-out input merely
+because the view object itself is const. Capture timing belongs to each input
+bus; render and transport timing belong to the whole graph block:
+
+```cpp
+struct ConstAudioBusView {
+  const float* const* channels;
+  uint32_t channelCount;
+  uint32_t frames;
+  const CaptureTime* capture;  // null for non-capture/offline sources
+};
+
+struct MutableAudioBusView {
+  float* const* channels;
+  uint32_t channelCount;
+  uint32_t frames;
+};
+
+struct CaptureTime {
+  uint64_t clockDomainId;
+  uint64_t streamGeneration;
+  uint64_t sequence;
+  uint64_t sourceFrame;
+  uint64_t sampleHostTimeNs;
+  uint64_t callbackHostTimeNs;
+  AudioInputTimestampQuality quality;
+  DiscontinuityReason discontinuity;
+  uint32_t flags;  // validity and stale-anchor
+};
+
+struct RenderTime {
+  uint64_t clockDomainId;
+  uint64_t streamGeneration;
+  uint64_t graphFrame;
+  uint64_t renderHostTimeNs;
+  uint64_t callbackHostTimeNs;
+  uint32_t flags;  // validity and discontinuity
+};
+
+struct TransportContext {
+  uint64_t validFields;
+  bool playing;
+  bool recording;
+  bool cycling;
+  int64_t projectTimeSamples;
+  int64_t continuousTimeSamples;
+  double tempo;
+  double projectTimeMusic;
+  double barPositionMusic;
+  double cycleStartMusic;
+  double cycleEndMusic;
+  int32_t timeSignatureNumerator;
+  int32_t timeSignatureDenominator;
+};
+
+struct ProcessContext {
+  RenderTime time;
+  const TransportContext* transport;  // null when unavailable
+  double sampleRate;
+  uint32_t frames;
+  Span<const ParameterEvent> parameters;
+  Span<const MusicalEvent> events;
+  ScratchView scratch;
+};
+```
+
+One compiled graph has one sample rate, a declared maximum block size and
+declared bus layouts. A device callback and `GraphRunner` receive 1 through the
+prepared maximum frames. Processor and plug-in adapters must additionally
+tolerate a zero-frame call used only to flush parameter/events; they must not
+read or write audio buffers in that call. Platform adapters
+deinterleave/interleave and convert only at the boundary. A block-size adapter
+is an explicit node/host utility, never an assumption hidden inside a
+processor.
+
+Before the first block after a generation change, sequence gap, sample-rate
+change, route generation, timestamp-quality transition or hard clock
+re-anchor, `GraphRunner` calls `reset()` on stateful dependent processors and
+marks the block with a typed `DiscontinuityReason`. A captured bus never
+inherits another bus's clock domain or provenance; offline sources leave
+capture metadata absent.
+
+### Processor lifecycle
+
+The first native interface should stay small and format-neutral:
+
+```cpp
+enum class TailKind { None, Finite, Infinite };
+struct TailInfo { TailKind kind; uint64_t frames; };
+
+class AudioProcessor {
+ public:
+  virtual ~AudioProcessor() = default;
+  virtual PrepareResult prepare(const PrepareSpec&, RealtimeArena&) = 0;
+  virtual void reset() noexcept = 0;
+  virtual void process(ProcessContext&, Span<const ConstAudioBusView> inputs,
+                       Span<MutableAudioBusView> outputs) noexcept = 0;
+  virtual uint32_t latencyFrames() const noexcept = 0;
+  virtual TailInfo tail() const noexcept = 0;
+};
+```
+
+Rules:
+
+- `prepare` runs off the real-time thread and receives all durable memory.
+- `process` may not allocate/free, lock, perform an OS/blocking wait, log, call
+  filesystem/network APIs, call JNI/JSI or interact with the
+  Objective-C/Swift runtime, or destroy another node. The only future
+  exception is the explicitly budgeted real-time spin join described below.
+- `reset` clears transitory state without changing parameters.
+- node state serialization is a control-domain adapter, not a `process`
+  method.
+- bypass is defined for every processor. It must preserve declared latency so
+  toggling bypass cannot shift parallel paths.
+- processors report tail length so transport stop, offline render and graph
+  replacement can handle reverbs/delays deliberately.
+- a processor may write an input buffer only when the compiler grants an
+  explicit in-place alias and no other live consumer can observe it.
+- non-finite samples are contained at trust boundaries: device conversion and
+  plug-in outputs replace NaN/Inf with zero, increment an atomic counter and
+  request off-RT bypass after a bounded repeated-failure policy.
+
+### Parallel execution policy
+
+The first graph runner is serial. A later measured optimization may execute
+independent expensive stages on a fixed, pre-created real-time worker pool. It
+may use a spin join only with a precomputed absolute budget ending before the
+device deadline; it never performs an OS wait. Each worker writes a
+slot-private buffer. On a miss, the block uses a prepared emergency dry/silent
+path and the miss is counted. The whole parallel stage/processor generation,
+including its state and arena slots, is then quarantined until every late
+worker acknowledges its epoch. Subsequent blocks use an independently prepared
+fallback snapshot; they never invoke the same stateful processors serially
+while a late worker may still mutate them. Only after acknowledgement may the
+old generation be retired or reused and serial execution of those instances be
+enabled. No worker writes directly to a returned device buffer. Small stages
+and graphs with inadequate measured deadline margin remain serial.
+
+### Graph description and compiler
+
+`GraphDescription` is a versioned control-domain model containing stable node
+IDs, type IDs, port connections, parameters and opaque adapter state. The
+compiler must:
+
+1. resolve node factories and versions;
+2. validate port types, channel layouts, sample rate and maximum block size;
+3. reject cycles in the first release; a later feedback path must contain an
+   explicit delay node and a separately reviewed scheduling rule;
+4. topologically order processors;
+5. calculate buffer lifetimes and allocate/reuse all audio/scratch storage;
+6. query intrinsic and plug-in latency;
+7. insert delay compensation on shorter parallel paths;
+8. prepare every node before publication;
+9. return either a complete `CompiledGraph` or structured validation errors.
+
+A bad description must never partially mutate the live graph.
+
+### Atomic graph changes and retirement
+
+The control thread builds and prepares the next `CompiledGraph`, then publishes
+one pointer/generation. At the next callback boundary, `GraphRunner` swaps the
+whole snapshot. The audio thread places the old generation on a fixed-capacity
+retirement queue; destruction and plug-in deactivation happen off RT after an
+epoch/callback acknowledgement proves no callback can still reference it.
+
+Publication reserves retirement capacity before making a snapshot visible.
+There is at most one pending snapshot: newer control-domain edits supersede and
+destroy older unobserved snapshots off RT. When no retirement slot is
+available, publication is deferred/coalesced on the control thread; RT never
+blocks, allocates, destroys or leaks to make room.
+
+A block boundary alone does not guarantee an inaudible transition. The
+compiler also prepares a `TransitionPlan`:
+
+- parameter-only changes use sample-accurate ramps;
+- topology or latency changes crossfade old and new output over a bounded,
+  preallocated interval with aligned latency;
+- stateful replacements use an explicit state-transfer adapter when supported;
+- finite old tails may render into a bounded tail-spill path; infinite tails
+  require an explicit user/preset cut or fade policy;
+- emergency/device-loss replacement may hard-cut, but records a discontinuity.
+
+The control domain rejects/degrades a transition whose measured combined CPU
+budget cannot safely run both plans; it does not discover that overload inside
+the callback.
+
+Never use `shared_ptr` destruction, arbitrary reference-count finalization or
+node teardown on the audio callback. Reuse the intent of
+`AudioInputCallbackGate`, but add an epoch-based snapshot retirement mechanism
+rather than stopping the device for ordinary graph edits.
+
+### Parameters and events
+
+Parameters enter through fixed-capacity single-producer queues and are copied
+into a preallocated per-block event span:
+
+The render callback captures the available count once for each queue after graph
+and block preflight, then consumes at most that captured count. Producer writes
+published during the drain remain for the next block. A callback with no
+renderable graph, a rejected replacement, or tail-drain context consumes none.
+
+```cpp
+struct ParameterEvent {
+  NodeId node;
+  ParameterId parameter;
+  uint32_t sampleOffset;
+  float value;
+  ParameterCurve curve;
+};
+```
+
+- Values are sample-accurate inside the block.
+- Continuous UI changes are coalesced before they reach the audio thread.
+- Each node declares whether a parameter is stepped or smoothed and its
+  smoothing policy.
+- Queue overflow is counted and reported; audio continues with the latest
+  safely accepted value.
+- Transport, tempo, beat position and note/MIDI-like events use a separate
+  typed event port so they cannot be confused with scalar parameters.
+
+### Latency and clock model
+
+Latency is recorded as separate quantities, never collapsed into one guessed
+number:
+
+- capture device/buffer latency;
+- input conversion/resampling latency;
+- node and plug-in latency in frames;
+- cross-process bridge latency, if selected;
+- render device/buffer latency;
+- external route latency and user trim;
+- analyzer window/hop latency.
+
+External routing is a versioned `RouteLatencySnapshot`, not a loose sum. It
+carries route generation, source/provenance, confidence, the complete automatic
+presentation estimate, optional component estimates and user trim, plus flags
+that say which components are already included. iOS currently defines its
+automatic value as `outputLatency + ioBufferDuration`. Android's measured
+presentation queue is already the complete estimate and must not be summed
+with its buffer fallback again. Route change invalidates the prior snapshot.
+Trim affects audible display and scoring projection only, never capture PCM or
+raw timestamps.
+
+The graph compiler compensates only deterministic in-graph path latency. The
+platform host exposes input and output clocks plus negotiated device latency.
+The application maps graph/render time to the audible display clock using
+output-route latency, while training gain changes remain on render time.
+Analyzer results retain source sample time and provenance.
+
+A duplex host uses the output/render clock as the graph clock. APIs such as
+RemoteIO or ASIO may provide one duplex callback. APIs such as WASAPI or AAudio
+may require coordinated capture and render streams; the host then transfers
+capture through a bounded RT FIFO and maps both device positions to the graph
+clock. Even when both endpoints name one physical device, the common-clock
+assumption must be verified. Separate physical devices are always treated as
+two clock domains: the FIFO measures fill error and an RT-safe variable-ratio
+resampler corrects slow drift. A hard discontinuity resets dependent
+processors and analyzers. The current `Resampler::process` is not
+RT-guaranteed and must not be reused until it has a fixed-capacity RT wrapper
+or replacement.
+
+### Analyzer taps
+
+An analyzer is not automatically a graph processor.
+
+- Peak/RMS, clipping and other tiny fixed-cost meters may run inline.
+- Pitch, spectrum, onset, formant and ML analyzers consume timestamped blocks
+  from preallocated SPSC queues on worker threads.
+- Every tap has an explicit channel policy, window, hop, queue depth and drop
+  policy.
+- If a worker falls behind, it drops/resets analysis continuity; the audio
+  callback never waits.
+- Results crossing app boundaries are timestamped scalar/vector telemetry,
+  never a stream of raw callback PCM.
+
+`LiveInputAnalysisAdapter` remains the first production tap adapter. It resets
+on sequence gaps, rate changes and timestamp-quality transitions. Offline
+whole-buffer analyzers such as pYIN melody tracking and key analysis are not
+silently relabeled as real-time nodes.
+
+### Sources, buses and sinks
+
+Initial built-in node families:
+
+- sources: captured input bus, decoded song/stem reader, oscillator, noise,
+  metronome/cue and offline buffer;
+- routing: channel map, split, merge, bus send/return, dry/wet and tap;
+- dynamics/tone: gain, mute, polarity, gate, parametric EQ, compressor and
+  safety limiter;
+- time/pitch: the existing phase-coherent Signalsmith processor behind a
+  native node contract;
+- analysis: peak/RMS inline plus bounded pitch and spectrum taps;
+- sinks: device output, recorder and offline buffer writer.
+
+Song, microphone and reference buses stay distinct until the preset explicitly
+mixes them. This keeps a metronome or pitch reference from being transposed,
+ducked or recorded by accident.
+
+## Platform host boundary
+
+The graph owns DSP; an `AudioHost` owns devices, callbacks, negotiation and
+session lifecycle:
+
+```cpp
+class AudioHost {
+ public:
+  virtual HostInventory enumerate() = 0;
+  virtual HostOpenResult open(const HostConfig&, RealtimeRender) = 0;
+  virtual HostStartResult start() = 0;
+  virtual void stop() = 0;
+  virtual HostStatus status() const = 0;
+};
+```
+
+Each provider is a separate class in a separate OS file:
+
+| Platform | Initial host | Later/optional host | Session owner |
+| --- | --- | --- | --- |
+| macOS | duplex AUHAL | Audio Unit plug-in adapter | native host coordinator |
+| Windows | WASAPI shared/exclusive | ASIO after license gate | native host coordinator |
+| iOS | duplex RemoteIO | AUv3 nodes later | one AVAudioSession coordinator |
+| Android | Oboe (AAudio on supported devices) | measured direct-AAudio escape hatch | one serialized engine/session coordinator |
+
+Target repository layout:
+
+```text
+CMakeLists.txt                 # native superbuild, not an application build
+CMakePresets.json
+cmake/                         # target-scoped warnings, RT flags, sanitizers
+third_party/native/            # pinned wrapper targets; no public type leakage
+
+zcore/                         # package, not one monolithic library
+  CMakeLists.txt
+  include/zcore/{base,audio,device,media}/
+  src/{base,audio,device,media}/
+  platform/{macos,windows,ios,android}/
+  tests/
+
+zdsp/                          # package, not one monolithic library
+  CMakeLists.txt
+  include/zdsp/                # processor/graph/event contracts
+  src/{graph,runtime}/         # compiler, arena, runner and retirement
+  nodes/{basic,filters,dynamics,time,analysis}/
+  backends/{scalar,accelerate,highway}/
+  offline/                     # melody, beat and ML adapters
+  plugins/{api,vst3,au,clap,bridge}/
+  tests/
+  benchmarks/
+
+tools/native/                  # singz-analyze and offline graph tools
+
+mobile/native/bindings/android/  # SingZ package-specific JNI only
+mobile/ios/SingzCore/            # CocoaPods/product bridge and generated copy
+src/main/native/                 # Electron/product bridge
+```
+
+`zcore` is the dependency root, but consumers link narrow component targets:
+`SingZ::zcore_base`, `SingZ::zcore_audio`, `SingZ::zcore_device` or
+`SingZ::zcore_media`. `zdsp` similarly produces `SingZ::zdsp_api`,
+`SingZ::zdsp_runtime`, node, analysis, ML and plug-in targets. The real-time
+runner does not transitively link FLAC, ONNX Runtime or plug-in SDKs. `zdsp`
+may depend on public `zcore_base` contracts; Phase 0B intentionally does not
+link `zcore_audio`. `zcore` must never depend on `zdsp`. The app-level host
+coordinator links device and runner targets, maps device/capture timestamps and
+buffers into `zdsp_api` values, then invokes the graph through a plain render
+thunk. Clock/bus/process types live in `zdsp_api` because their validity and
+versioning are DSP-interface semantics; `zcore_audio` retains only device
+transport contracts. This keeps the dependency acyclic without duplicating a
+second graph contract. Detailed ownership, language and build rules are in
+[NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
+
+Neither reusable library belongs under the React Native CMake tree. Product
+bindings stay with their product: package-specific JNI under
+`mobile/native/bindings/android`, Objective-C++ pod wrappers under
+`mobile/ios/SingzCore`, and Electron adapters under `src/main/native`. In
+particular, Android C++ must not be placed next to the app CMakeLists where
+React Native source globs change `appmodules`. These bindings marshal only and
+link the top-level libraries; they do not own reusable audio behavior. The
+Android Gradle/CMake target, the iOS SingzCore pod, desktop host build and CLI
+all consume the top-level libraries.
+`mobile/scripts/sync-singzcore.js` may continue materializing real source files
+for CocoaPods during the migration, but its source becomes `zcore/`; generated
+copies remain gitignored and are never a second authoritative source. Phase 1
+must add an explicit recursive allowlist for `zdsp/` while excluding desktop
+plug-in adapters. Root, host and Android builds share the same CMake target
+definitions. The transitional pod packaging is checked against those component
+manifests; the durable iOS target consumes a CMake-built XCFramework so adding
+a source never requires maintaining a second library definition.
+
+A host-only unit test is not proof of mobile integration: CI must compile iOS,
+Android and host targets and verify `zcore` and, after Phase 1, a `zdsp`
+kernel/version literal exists in each rebuilt mobile binary. Platform
+implementations remain separate OS files rather than one preprocessor-heavy
+class.
+
+`AudioHost::enumerate()` is side-effect free: it never opens a stream, changes
+focus/category/route or activates a session. On Android, Oboe/AAudio do not
+provide complete device inventory or automatic routing; Java `AudioManager`
+and `AudioDeviceInfo` remain the inventory/route control plane, coordinated
+with paired native input/output streams.
+
+On macOS one AUHAL instance binds to one Core Audio device. Same-device duplex
+may use one instance; separate input/output devices use two coordinated
+AudioUnits with the output clock as master plus FIFO/resampling. An aggregate
+device is an explicit user/configuration option, not an invisible requirement.
+
+### Relationship to PR #13
+
+Reuse directly:
+
+- `AudioInputDevice` UID/channel conventions;
+- float32 block representation and per-block timestamp provenance;
+- `audioInputCallbackEntryFallback` and timestamp projection policy;
+- `AudioInputCallbackGate` callback-quiescence pattern;
+- two-stage `open` then `start` publication order;
+- platform backend factory/test-injection style;
+- `LiveInputAnalysisAdapter` and bounded telemetry patterns;
+- mobile capture lease/recovery coordination.
+
+Do not reuse as the real-time render graph:
+
+- `AudioInputSink`, because it is an ordinary delivery-thread callback;
+- `AudioInputRing::peek`, because it sanitizes samples off RT;
+- current vector-growing resampling or offline analyzers;
+- JNI, NDJSON, React events or Electron IPC from a device callback.
+
+During migration the current `AudioInput` remains a supported capture-only
+source for analyzer presets. The new duplex hosts reuse the lower-level
+platform/timestamp/lifecycle lessons. Their render-side RT callback/worker
+calls `GraphRunner` directly; capture arrives in that same callback where the
+API supports it, or through a bounded RT FIFO where it does not. When feature
+parity is proved, the capture-only provider may become a thin preset/adapter
+over the new host; it should not be deleted in the first graph PR.
+
+## Desktop plug-in policy
+
+### Formats
+
+1. **VST3** is the first desktop format for Windows and macOS. Phase 0B pins
+   the upstream commit named `VST SDK 3.8.0`,
+   `9fad9770f2ae8542ab1a548a68c1ad1ac690abe0`, plus its recorded gitlinks.
+   The repository publishes no GitHub release/tag for this point. The root at
+   that commit is MIT-licensed; preserve the root and submodule licenses plus
+   `VST3_Usage_Guidelines.pdf`.
+   VST2 is explicitly out of scope.
+   Marketing use of the VST name/logo has separate trademark/attribution rules
+   and belongs on the release legal checklist.
+2. **AUv3** is a later Apple adapter. It is useful on macOS and is the only
+   general third-party plug-in route proposed for iOS. iOS AUv3 extensions are
+   OS-hosted out of process, so latency, lifecycle and UI behavior require a
+   separate mobile phase.
+   macOS AUv2 hosting is deliberately out of the initial adapter scope and must
+   be a separate compatibility decision, not implied by the words “Audio Unit.”
+3. **CLAP** is a later desktop adapter behind the same `PluginFormat`
+   interface. Its stable C ABI, explicit thread rules and latency/state/params
+   extensions make it a good fit, but supporting formats before the graph
+   contract is stable would multiply test scope.
+
+ASIO is not a plug-in format; it is a Windows device-host provider. Keep the
+existing `SINGZ_ENABLE_ASIO=OFF` fail-loud gate. Do not vendor or compile the
+ASIO SDK into shipping builds until SingZ has either a signed proprietary
+agreement or has deliberately adopted a GPLv3-compatible distribution model.
+
+### Adapter obligations
+
+The internal same-toolchain SingZ processor interface stays smaller than any
+plug-in SDK, but adapters
+must honor each format's lifecycle rather than flatten it incorrectly.
+
+For VST3 the adapter must cover:
+
+```cpp
+initialize(...);
+setBusArrangements(...);
+getBusArrangement(...);
+activateBus(...);
+canProcessSampleSize(...);
+setupProcessing(ProcessSetup&);
+setActive(TBool);
+setProcessing(TBool);
+process(ProcessData&);
+getLatencySamples();
+getTailSamples();
+terminate();
+```
+
+Lifecycle is exact:
+
+```text
+initialize → setupProcessing → setActive(true)
+           → setProcessing(true) → process*
+           → setProcessing(false) → setActive(false) → terminate
+```
+
+Actual `ProcessData::numSamples` may vary from zero to the prepared maximum;
+zero samples is a parameter/event flush and carries no audio-buffer access.
+Query `IProcessContextRequirements` between initialization and activation and
+populate requested fields from SingZ `TransportContext` with validity flags.
+Map `IParameterChanges`, `IEventList` and realtime/prefetch/offline process
+modes explicitly. A
+`kLatencyChanged` restart request triggers off-RT graph recompilation and an
+atomic replacement; it never patches delay lines mid-callback. Preserve the
+processor/controller state ordering, and never assume the controller exists or
+shares an object, thread or process with the processor:
+
+```cpp
+component->getState(componentState);
+if (controller) controller->getState(controllerState);
+
+component->setState(componentState);
+if (controller) {
+  controller->setComponentState(componentState);
+  controller->setState(controllerState);
+}
+```
+
+The controller may not emit host automation callbacks while synchronizing in
+`setComponentState`.
+
+For AUv3, instantiate asynchronously, allocate/deallocate render resources off
+RT, set `maximumFramesToRender`, cache `renderBlock` and parameter scheduling
+blocks before rendering, and map `latency`, `tailTime` and in-place capability
+into the SingZ node. Persist document state with `fullStateForDocument` (and
+the documented `fullState` fallback when appropriate). Do not synchronously
+wait on the main thread for instantiation.
+
+For CLAP, use only released stable headers. Honor
+`init → activate → start_processing → process* → stop_processing → deactivate
+→ destroy`, implement thread-check, state, latency and tail contracts, and
+perform latency changes through host restart negotiation. Tail changes use the
+stable `clap_host_tail.changed()` notification and do not require a restart.
+Handle all stable process statuses (`ERROR`, `CONTINUE`,
+`CONTINUE_IF_NOT_QUIET`, `TAIL`, `SLEEP`) and thread-safe
+`request_restart`/`request_process`/`request_callback`. If `clap.state` is
+absent, do not invent a “serialize every parameter” fallback. Optional
+state-context v2 supplements rather than replaces base state. Do not include
+`all.h` or silently make draft extensions part of SingZ persistence. Pin a
+released stable CLAP tag and preserve its MIT notice.
+
+### Discovery and execution
+
+- Scan plug-ins in a separate helper process with per-plug-in timeout, crash
+  attribution and a fingerprinted cache.
+- Never load an unknown binary merely to populate a settings list in the main
+  Electron process.
+- Store adapter ID, vendor ID, plug-in ID, version, bus layouts and file
+  fingerprint. Missing or changed binaries produce a bypassed placeholder that
+  preserves the graph and user state.
+- For verified VST3/CLAP instances, allow low-latency in-process processing,
+  because it adds no bridge buffer; make the crash-risk tradeoff explicit.
+  This policy does not override AUv3's platform lifecycle: iOS is
+  out-of-process, and macOS is out-of-process by default unless an explicitly
+  supported in-process unit is requested and verified.
+- Offer a bridged safe mode for unknown/unreliable desktop plug-ins. Its shared
+  memory protocol is pipelined and declares at least one added block of
+  latency, which participates in compensation.
+- A late, crashed or protocol-invalid instance is quarantined and replaced at
+  a block boundary; recovery and destruction occur off RT.
+- Plug-in UI runs on its required UI thread and communicates through the
+  control domain. It never owns the audio graph or platform session.
+
+An in-process plug-in cannot be forcibly preempted safely inside a missed
+callback. Record deadline misses/xruns atomically and request a block-boundary
+bypass/restart from the control domain. Only bridged mode can enforce a process
+timeout, and its fallback buffer/latency behavior must be part of the adapter
+contract.
+
+Steinberg's validator/Test Host validates plug-ins, not the correctness of the
+SingZ host. CI uses it for known test plug-ins and behavioral comparison, while
+SingZ owns host-adapter lifecycle fixtures and a known-good/malformed corpus.
+
+Mobile phase 1 supports built-in nodes only. Android has no standard
+application-level user-installed plug-in ABI in the official SDK/NDK;
+framework `AudioEffect` and the vendor effects HAL are not VST/AU/CLAP-style
+hosts. Do not attempt to load desktop binaries there. On iOS, third-party
+hosting means AUv3 app extensions: do not download executable VST/CLAP/native
+code. Inter-App Audio and legacy AudioSession C APIs are deprecated; use AUv3,
+AudioToolbox and AVAudioSession.
+
+## Persistence and compatibility
+
+Use a standalone, versioned graph document rather than adding opaque objects to
+`project.json` before the schema is stable:
+
+```json
+{
+  "format": 1,
+  "engine": "singz-dsp",
+  "nodes": [],
+  "connections": [],
+  "parameters": {},
+  "adapterState": {}
+}
+```
+
+- Presets use stable node/parameter IDs, never display names.
+- Unknown nodes survive round trips as disabled placeholders.
+- Every format bump has a pure migration plus fixtures.
+- Third-party opaque state is size-bounded and checksummed.
+- Project references remain relative/portable; device UIDs and route choices
+  are machine preferences, not project truth.
+- The current fixed playback graph remains the default unless a graph preset
+  explicitly opts into the new engine during migration.
+
+## Implementation phases
+
+### Phase 0A — Extract `zcore` and establish `zdsp`
+
+Implement as a dedicated, behavior-preserving PR before graph work:
+
+- Move the authoritative reusable tree from `mobile/native/core/` to top-level
+  `zcore/` with `git mv`, preserving history. Move native third-party sources
+  from `mobile/native/third_party/` into root `third_party/native/`, where
+  narrow wrapper targets own their licenses and compile requirements; leave
+  genuinely app-specific React Native code under `mobile/`.
+- Split source ownership while moving: portable implementation goes under
+  `zcore/src/`, OS device/session providers under `zcore/platform/`, narrow
+  public contracts under `zcore/include/zcore/`, and CLI entry points under
+  `tools/native/`. Move `singz_core_jni.cpp` and any other package-specific JNI
+  out to `mobile/native/bindings/android/`; retain the product Objective-C++
+  pod wrappers under `mobile/ios/SingzCore/` and Electron adapters under
+  `src/main/native/`. Bindings marshal only; reusable behavior stays in
+  `zcore`/`zdsp`.
+- Make root CMake the authoritative native build with explicit source lists.
+  Split at least `zcore_base`, `zcore_audio`, `zcore_device` and `zcore_media`;
+  a temporary `SingZ::zcore_legacy` may preserve current C/JNI behavior and
+  packaged library names so relocation is not mixed with a product ABI
+  migration. ORT/ML code must not force exceptions, RTTI or link dependencies
+  onto the device/RT targets.
+- Add the top-level `zdsp/` library skeleton and public namespace, but no app
+  playback ownership yet. Its CMake target may link only public `zcore`
+  contracts and approved third-party DSP dependencies. Add a dependency check
+  that fails if `zcore` imports or links `zdsp`.
+- Repoint `scripts/build-analyze-host.sh`, `scripts/run-core-host-tests.sh`,
+  `scripts/vendor-analyze.sh`, parity gates, tests and documentation to
+  `zcore/`. Repoint Android CMake/Gradle and
+  `mobile/scripts/sync-singzcore.js`; keep the iOS materialized pod copy
+  generated and gitignored.
+- Give CMake consumers stable narrow exported targets such as
+  `SingZ::zcore_audio`, `SingZ::zcore_device`, `SingZ::zdsp_api` and
+  `SingZ::zdsp_runtime`. Android and host consumers link those targets instead
+  of compiling overlapping source lists. The generated iOS SingzCore pod is a
+  temporary Phase 0A packaging exception: component pods or a CMake-built
+  XCFramework must isolate device, media and ORT before native graph rendering.
+- Adopt target-scoped C++20 after MSVC, Apple Clang, Android arm64 and armv7
+  gates pass. Genuinely callback/runtime leaf targets compile without
+  exceptions/RTTI. `zcore_device` remains a mixed lifecycle/provider target;
+  its extracted `zcore_device_callback` leaf carries the strict RT policy and
+  actual-target source scan. ORT remains isolated.
+- Add ownership documentation: `zcore` contains reusable native foundations;
+  `zdsp` contains the real-time graph; `mobile/` and `src/main/` contain
+  package/product bindings and UI/process orchestration only.
+- Remove or fail CI on stale source references to `mobile/native/core` after
+  the move. Do not leave forwarding headers, symlinks or a checked-in copied
+  tree that can diverge.
+
+Verification:
+
+- Existing host unit/parity suites pass without fixture or tolerance changes.
+- Root typecheck/tests still pass, and the analyze CLI performs the same smoke
+  analyses from its new source root.
+- Android debug and iOS native artifacts are rebuilt, not reused; binary symbol
+  checks prove the relocated `zcore` implementation is linked into each.
+- macOS and Windows host builds consume the same `zcore` target. The Dell gate
+  covers the Windows configuration, including WASAPI capture enumeration.
+- A repository search finds no authoritative native implementation remaining
+  under `mobile/native/core` and no production include using that old path.
+
+Avoid:
+
+- Combining the move with graph behavior, namespace-wide ABI churn or audio
+  algorithm changes; a pure relocation must be bisectable.
+- Making CocoaPods' generated copy authoritative or editing it by hand.
+- Letting Android or Apple bindings leak JNI, Java, Objective-C or Swift types
+  into public `zcore`/`zdsp` headers.
+- Creating a `zcore` ↔ `zdsp` dependency cycle to connect the render callback.
+
+### Phase 0B — Freeze contracts and measurements
+
+Implementation note (2026-08-26): the accepted ADRs, same-toolchain static C++20 interface,
+gain→meter fake host, contract tests, JSON-emitting benchmark and native
+host/Android/iOS compile wiring are implemented. The checked-in baseline marks
+physical device-loopback numbers and miniaudio/JUCE comparisons as evidence
+gaps; those remain gates and are not inferred. Application playback still owns
+no native graph.
+
+Implement:
+
+- Write ADRs for the processor interface and future C adapter boundary, graph swap/retirement, clock domains,
+  discontinuities, plugin execution modes, graph persistence and serialized
+  legacy↔native engine/session handoff.
+- Write the source-provisioning ADR: allowlisted file/handle ownership, FLAC
+  v2/WAV legacy/custom codec matrix per platform, full decode versus streaming,
+  cancellation/latest-load generation, unequal lane lengths, seek/loop and
+  folder/Drive-local inputs. All I/O/decode remains off RT.
+- Specify `RouteLatencySnapshot` provenance/addition rules and the exact
+  capture-clock → graph-clock → audible-host-time mappings used by UI/scoring.
+- Record baseline callback sizes, xrun counts, CPU and input-to-output latency
+  on the Mac/Zen Quadro, Dell/Windows interface, iPhone and Android hardware.
+- Prototype the same gain→meter graph in a deterministic offline runner and a
+  fake variable-block host before touching app playback.
+- Decide the exact VST3 SDK version and notices; keep ASIO disabled.
+- Benchmark a minimal SingZ-owned kernel against miniaudio as a substrate and
+  against JUCE only as a commercially licensed option. Neither may define the
+  internal node interface; JUCE 8's AGPL/commercial boundary must be resolved before
+  any proprietary integration.
+
+References:
+
+- `zcore/include/zcore/device/audio_input.h`
+- `zcore/include/zcore/device/audio_input_backend.h`
+- `tests/native/core_host_tests.cpp`
+- platform audio documents in `docs/`
+
+Verification:
+
+- A checked-in baseline report identifies rate, block size, device latency,
+  callback-to-runner p50/p95/p99, xruns and test hardware.
+- Fake host covers 1-frame, normal, maximum and changing block sizes.
+- ADR review resolves every open item that changes the internal interface,
+  future C adapter ABI or persistence.
+- Build wiring proves the kernel compiles into host, iOS and Android artifacts;
+  a stale mobile binary cannot satisfy this phase.
+
+Avoid:
+
+- Beginning plug-in or UI work before memory, clock and retirement contracts
+  are fixed.
+- Treating simulator/emulator latency as hardware evidence.
+- Starting a native output host while Web Audio/RNAudioAPI still owns playback.
+
+### Phase 1 — Native graph kernel and offline runner
+
+Status: implemented on the WIP DSP branch; product playback cutover remains a
+later phase. The implementation lives entirely in `zdsp_runtime` and
+`zdsp_offline`, with the Phase 0B prototype/control fixtures still isolated.
+Windows/MSVC and physical-device verification remain deferred to the next
+phase by agreement; no platform latency claim is inferred from the host-only
+runner benchmark.
+
+The Phase 1 review hardening pins real external-copy lifetimes, quarantines
+failed processor teardown, atomically claims publications before inspection,
+validates both transition endpoints, renders bounded tail policy in the runner,
+publishes telemetry without data races, preserves newest parameter state under
+bounded overload, and uses only always-lock-free callback counter widths. The
+replacement review additionally binds every transition to exact graph/generation
+identities, splits crossfade/tail work at an in-callback endpoint, carries capture
+metadata through intrinsic and compensation delay history, and protects copied
+telemetry with generation plus per-slot versions across slot reuse. The
+checked-in `zdsp_apple_component_smoke` target produces isolated device and
+simulator archives; RN pod/product playback integration remains a later phase.
+Final audit hardening reserves generation zero as unpublished, tracks every
+snapshot through atomic pending/claimed/active/fading/retirement ownership,
+provides bounded quiescent shutdown extraction, cancels transitions and clears
+history on typed reset discontinuities, and checks the graph suite continuously
+under strict Release, ASan+UBSan and TSan presets.
+
+Implement:
+
+- `RealtimeArena`, const/mutable bus views, `ProcessContext`, `AudioProcessor`
+  and stable node IDs.
+- `GraphDescription`, compiler, buffer planner, latency propagation and a DAG
+  runner.
+- Atomic snapshot publication, transition plans, latest-wins pending edits,
+  reserved retirement capacity and off-RT epoch retirement.
+- Fixed-capacity parameter/event queues and diagnostics counters.
+- Built-in gain, channel map, mix, delay compensation, peak/RMS, oscillator,
+  tap and safety-limiter nodes.
+- Deterministic offline rendering and golden WAV/hash fixtures.
+
+Documentation references:
+
+- [VST3 processing model](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/API%2BDocumentation/Index.html)
+- [Web Audio control/render thread model](https://www.w3.org/TR/webaudio-1.0/)
+- `audio_input_callback_gate.h` for teardown intent, not snapshot mechanics.
+
+AudioWorklet remains useful for renderer experiments and visualization, but it
+is not the canonical native graph or desktop plug-in host. Do not add new
+`ScriptProcessorNode` code. Worklets use the actual received buffer length and
+never hardcode 128 frames; `renderSizeHint` is only a hint and must be
+feature-tested against SingZ's bundled Electron Chromium.
+
+Verification:
+
+- Unit/property tests for topology validation, buffer aliasing/lifetimes,
+  in-place nodes, fan-in/fan-out, latency compensation and bypass.
+- Fake-host discontinuity tests cover sequence gaps, sample-rate changes,
+  route/stream generations, timestamp-quality transitions, stale anchors and
+  hard re-anchors, including the exact reset-before-next-block rule.
+- Transition tests detect waveform jumps, phase/latency movement, state
+  transfer, finite/infinite tail policy and combined-CPU rejection.
+- Publication tests cover superseded prepared graphs, pending-update
+  coalescing and a saturated retirement queue without RT leaks or blocking.
+- Device/plugin NaN/Inf fixtures prove containment before invalid samples can
+  propagate through EQ/dynamics/limiter nodes.
+- Allocation/lock traps prove zero steady-state RT allocation and no mutex use.
+- TSAN/ASAN/UBSAN exercise graph swaps, queue overflow and retirement.
+- Offline output is invariant across callback block partitions.
+- A failing `prepare` leaves the old graph running unchanged.
+- Direct runner-entry overhead is reported in microseconds and as a percentage
+  of the block deadline; total render time has a measured safety margin and
+  zero deadline misses. This is separate from asynchronous analyzer delivery.
+
+Avoid:
+
+- `shared_ptr` final release or destructors on RT.
+- Hidden resampling, hidden latency or implicit channel conversion in nodes.
+- Feedback cycles in the first scheduler.
+
+### Phase 2 — Capture source and analyzer migration
+
+Portable/mobile slice implemented 2026-08-27: typed zcore ring provenance,
+the explicit `zdsp_analysis` adapter, native level/pitch evidence, continuity
+resets, Android scalar metadata parity and the iOS generation-bound capture
+bridge are present. The Electron capture slice is implemented on the same
+date: one stable Node-API main-process owner, context-isolated scalar IPC,
+native device/channel inventory and the renderer pitch/meter cutover are
+present; physical multichannel/latency verification remains a release gate.
+See ADR 0009.
+
+Implement:
+
+- Common block metadata shared with PR #13.
+- An analyzer-tap adapter around the current `AudioInput` delivery path.
+- Native RMS/peak and the existing `LiveInputAnalysisAdapter` as the first
+  production analysis consumers.
+- Keep one ordinary-thread compatibility implementation while migration is in
+  progress: neutral `zcore_resample` owns the converter shared by media and
+  analysis, while `zcore_live_analysis_compat` owns YIN and composes the
+  converter for both analysis wrappers. Both stay outside `zcore_base` and
+  every callback-reachable target.
+- Desktop long-lived main/preload ownership for native capture, with typed
+  scalar telemetry and cancellation; replace renderer `getUserMedia` pitch
+  only after device/channel/meter behavior reaches parity.
+- Complete the iOS native capture-frame/state bridge; retain Android's scalar
+  event pattern.
+- A capture-only Vocal Training preset:
+  microphone source → level/pitch taps → timestamped scoring evidence. The
+  oscillator/reference node has offline tests here but is not called an
+  audible production preset before a native output host exists. Any temporary
+  product reference remains in the existing Web Audio/RNAudioAPI engine and is
+  scheduled by a timestamped control event, never by copying PCM over IPC.
+
+References:
+
+- `audio_input_analysis_adapter.{h,cpp}`
+- `mobile/src/{ios,android}-audio-input-session.ts`
+- `src/renderer/src/audio/mic.ts`
+- `tools/native/singz-analyze.cpp`
+
+Verification:
+
+- Multichannel device/channel selection and level meter on macOS and Windows.
+- iOS/Android permission, interruption, route change, disconnect and retry.
+- Timestamp-quality and sequence gaps reset scoring windows.
+- Validity transitions and hard forward/backward clock-anchor changes reset
+  before new samples; bounded callback jitter does not. Rejected non-empty
+  callbacks still advance attempted source time, with saturating typed overflow.
+- Callback-to-asynchronous-analyzer delivery keeps its platform baseline: the
+  existing Windows hardware goal is p95 ≤ 3 ms, while the portable fake-host
+  fixture currently allows <10 ms. Graph runner-entry time is a separate
+  microsecond/deadline metric from Phase 1. Analyzer window latency is reported
+  separately from both.
+- No raw PCM appears in IPC logs/events.
+
+Avoid:
+
+- Calling the delivery sink the monitoring graph.
+- Running YIN, resampling, JSON or bridge callbacks on the hardware callback.
+- Applying Bluetooth/CarPlay latency to capture timestamps.
+
+### Phase 3 — Standalone full-duplex host conformance
+
+Phase 3A standalone slice implemented 2026-08-27 (not a product cutover):
+
+- zcore's `singz::AudioHost` now owns the graph-agnostic inventory, two-stage
+  open/start lifecycle, negotiated float32-planar format, physical input and
+  output channel maps, four distinct latency fields, output-master clock
+  metadata, generations and bounded lock-free telemetry. Its lifecycle and
+  status methods are serialized in the control domain; only the callback's
+  lock-free telemetry atomics may update concurrently with a status snapshot.
+- `zcore_device_callback` contains the plain `noexcept` render-thunk leaf. It
+  validates every block, contains failure to silence and uses saturating
+  lock-free 32-bit callback counters so armeabi-v7a cannot acquire a hidden
+  64-bit atomic lock. It is not the capture-only `AudioInput` ring.
+- `SingZ::zdsp_host_adapter` is the intentionally higher target linking
+  `zcore_device` and `zdsp_runtime`; zcore remains independent of zdsp. It
+  keeps input capture provenance distinct from output render time and maps
+  callback sequence, source frame, clock domain, generations, host times and
+  discontinuities into the graph contracts.
+- The deterministic fake full-duplex provider and headless
+  `singz-audio-host` tool are the portable conformance harness. Hardware runs
+  are muted; for the Zen input wired to physical channel 3 use zero-based
+  `--input-channels 2` and an explicit same-device UID/output map.
+- macOS has a same-device AUHAL provider in its own OS source. At the Phase 3A
+  checkpoint Windows, iOS, Android and other builds selected explicit
+  compiling unsupported providers; Phases 3B and 3C below supersede that
+  statement for standalone Windows and iOS builds respectively, and Phase 3D
+  supersedes it for Android. None changes product playback routing.
+
+Phase 3B standalone Windows slice implemented 2026-08-28:
+
+- WASAPI exposes capture and render as distinct opaque endpoint IDs. SingZ
+  requires matching device container IDs and equal negotiated rates; channel
+  maps are checked against each exact initialized format.
+- Shared event-driven `IAudioClient3` low-period mode is the default. Explicit
+  exclusive mode never silently falls back and currently accepts exact float32
+  formats only; complete integer exclusive conversion remains a later slice.
+- One long-lived STA/MMCSS owner owns both capture and render clients/services,
+  arbitrates both endpoint events, and bridges capture to its render action
+  through a prepared planar SPSC FIFO with timestamp-span metadata. Only the
+  render action invokes the graph and owns its clock. Underflow zero-fills;
+  overflow drops newest; both remain
+  visible in diagnostics alongside FIFO extrema and exact accepted-capture
+  minus rendered-frame balance. That balance is not mislabeled as drift.
+- Capture is primed to one negotiated render period before render starts. The
+  deliberate pre-Start silent endpoint buffer creates a bounded endpoint-
+  priming window, accounted separately from runtime FIFO xruns; all later
+  shortages remain visible as underflows.
+- A render-only wake remains one pending action when capture is not ready.
+  Shared mode spends only already-queued endpoint padding; exclusive mode
+  spends at most one exact frame period. Capture/stop/loss wins before the graph,
+  and a late capture fails the session instead of being hidden. Buffer-error
+  recovery applies only to acquisition; any failed release after FIFO/graph
+  advancement is terminal and cannot replay state.
+- `GetStreamLatency` remains separately named stream-level diagnostics rather
+  than being relabeled hardware latency. Device notifications fail closed and
+  require reopen. Notifications are armed before pairing/profile revalidation;
+  generation and lifecycle publication prevents a concurrent loss/error from
+  being overwritten by Open or Running. See `docs/WINDOWS-AUDIO.md` for the
+  exact contract and muted hardware harness.
+
+Phase 3C standalone iOS slice implemented 2026-08-29 (not a product cutover):
+
+- The iOS `AudioHost` provider is a RemoteIO output-clock owner with an
+  output-only mode and prepared same-session duplex mode. It enumerates only
+  the currently negotiated route, validates the exact opaque input/output
+  UIDs and physical channel maps, and exposes planar float32 graph buses.
+- `AVAudioSession` remains owned by the serialized app coordinator. The
+  provider never changes category, mode, options, activation, preferred
+  route, sample rate, channel preference or buffer duration. It arms route,
+  interruption and media-service observers before taking the first immutable
+  session snapshot, then revalidates that snapshot after RemoteIO setup and
+  start. Duplex additionally requires the existing generation-bound capture
+  lease to cover every selected physical input lane.
+- RemoteIO's output render callback is the sole graph/master-clock action.
+  Same-session input is pulled into preallocated planar storage from that
+  callback; output renders directly into the AudioUnit-provided planar buses.
+  The callback timestamp remains the hardware output anchor; because that
+  input pull returns no independent input host timestamp, capture publishes a
+  callback estimate rather than falsely claiming the output time as hardware.
+  No FIFO or drift correction is inserted because both directions belong to
+  the one RemoteIO instance/session clock. Any future separate-device path
+  must use the independently clocked FIFO/resampler contract instead.
+- The callback performs no allocation, locking, Objective-C messaging,
+  session query or logging. Route/interruption/media-service generation
+  changes immediately produce silence and a terminal status that requires an
+  explicit stop/open; the provider never selects a fallback route. Render
+  errors, invalid callback layouts, xruns, deadline misses and generations
+  remain bounded atomic diagnostics. Callback admission uses one packed
+  lock-free accepting/count state and closes before stop. A successful stop is
+  followed by graph, admitted-callback and outer-entry quiescence before
+  uninitialize/dispose. A failed stop never tears down through uncertain Core
+  Audio activity: it retains the live unit and closed callback context in the
+  bounded fail-stop quarantine. Uninitialize/dispose failures remain terminal.
+  Callback failures are sticky until reopen. Output timestamp-validity
+  transitions and non-contiguous `mSampleTime` values emit ADR-0003 reset
+  boundaries rather than stitching incompatible clock anchors. The
+  process-global session admits one standalone host; a stop or disposal
+  failure uses one bounded retained unit/callback slot and permanently refuses
+  another open in that process instead of risking use-after-free or
+  accumulating quarantines.
+- `inputLatency`, `outputLatency`, the actual `IOBufferDuration`, and external
+  route delay remain separate frame fields. For Bluetooth, AirPlay and
+  CarPlay, iOS's output-route latency is reported as external rather than
+  mislabeled hardware latency; the transport remains unsuitable for
+  low-latency monitoring.
+- Pure C++ policy tests cover output-only and leased duplex validation,
+  sparse physical maps, exact rate/buffer rejection, session identity and
+  external-route classification. AppleClang compiles and link-checks the
+  provider for arm64 iPhone plus arm64/x86_64 simulators, while an
+  archive-symbol gate rejects product/DSP dependencies and the known
+  AVAudioSession mutator/session-side-effect selector set, including output
+  muting, intended spatial experience, route-child data-source/polar-pattern
+  setters, legacy hardware-rate/delegate setters and both record-permission
+  request APIs, plus input muting and microphone-injection permission. The
+  callback gate scans explicit whole C++ leaf membership
+  plus transitive quoted and approved-project angle includes; every remaining
+  angle include must be on the narrow system/framework allowlist. Macro-
+  expanded, continued and otherwise nonliteral include directives fail closed;
+  continuation rejection covers LF, CRLF and bare-CR source encodings;
+  the `%:` alternative preprocessing token is forbidden across the closure;
+  Apple `#import` directives are forbidden even with local diagnostic
+  suppression, and comments may not obscure preprocessing directive names;
+  negative fixtures reject those shapes, helper omissions, hidden quoted/angle
+  allocation, forbidden helper sources and comment-only operation names.
+
+Phase 3D standalone Android slice implemented 2026-08-30 (not a product
+cutover):
+
+- Java `AudioManager` remains the sole endpoint/route/focus authority. Its
+  normalized inventory updates a generation only when facts change;
+  enumeration never opens audio. Every selected UID and generation is checked
+  before and after open/start and in the callback, with no fallback route.
+- SingZ owns paired Oboe streams rather than `FullDuplexStream`. Output opens
+  first at the natural device rate, then input at that exact rate with at least
+  twice the output capacity. Conversion is disabled at Oboe's callback
+  boundary; post-open device ID,
+  sparse physical channel extent, float format, rate, sharing/performance/API,
+  callback, burst and capacity facts are fail-closed. Named endpoints require
+  AAudio and exact exclusive requests never fall back.
+  This does not claim the Android mixer/HAL/device never converts. API 34+
+  hardware getters are recorded separately; older systems report unknown.
+- Input starts before output. The output callback is the only graph/master-
+  clock action and copies Oboe's bounded drain/cushion/discard pairing policy
+  with preallocated input-sized interleaved scratch and planar graph buses.
+  Missing input zero-fills and emits an xrun/discontinuity; permanent
+  starvation is terminal. Status preserves paired-input capacity and
+  current/min/max occupancy plus bounded underflow/overflow evidence.
+- The data callback is allocation-, lock-, JNI-, logging-, timestamp-query- and
+  lifecycle-free. Armeabi-v7a callback atomics are statically lock-free.
+  Errors close admission and make the pair terminal; `onError` reserves the
+  immutable pair epoch and exact failing-stream identity, then returns false so
+  Oboe closes that stream. `onErrorBeforeClose` synchronously drains and joins
+  the independently synchronized sampler before returning;
+  `onErrorAfterClose` queues that exact pair to a serialized non-audio worker,
+  which rejects stale epochs before loading streams and stops/closes only the
+  retained peer after Oboe's close without blocking audio work.
+  The Oboe-retained callback counts entry before loading its owner,
+  and late/rejected data entries zero output and Continue. One retained control
+  block owns pair/callback/workers. Public calls remain serialized; one
+  application-operation mutex owns Oboe lifecycle calls but is never acquired
+  by callbacks; a separate short pair mutex owns epoch/identity/phase changes
+  and is never held across Oboe or join calls. The sampler's own owner gate
+  records stopped-through epochs so before-close cannot race thread publish.
+  Open remains an `Opening` transaction until one final pair-lock commit.
+  The callback failure field is initialized before either Oboe builder can
+  re-enter; current-epoch provisional stream errors bind before identity
+  publication, while stale callback epochs reject. Checkpoints after every
+  open/fact/publish step require exact identities, concrete Oboe Open state and
+  no sticky failure/teardown owner; failures are never reset by later setup.
+  Start likewise has one pair-lock `Starting`→`Running` plus public-state
+  commit after exact identity, concrete Started state, route, admission and
+  sticky-failure validation. RT terminal publication increments a lock-free
+  32-bit generation before closing admission. Start captures its immutable
+  generation with a stable acquire bracket while still Open and before callback
+  admission or `requestStart`; commit never normalizes an in-flight terminal to
+  a later baseline. Double acquire reads around the final health check close the
+  commit-to-return race without taking pairMutex on the callback. No later
+  Running store can overwrite an Oboe error.
+  User stop waits for an error-owned
+  pair and re-reads any uncertainty after callback drain. Uncertain teardown
+  consumes one bounded process fail-stop quarantine rather than freeing live
+  Oboe objects.
+- Input/output `CLOCK_MONOTONIC` anchors are sampled off RT and carry bounded
+  freshness. Callback entry/end are sampled in the data callback; callback
+  time is entry, output presentation is projected only from a fresh anchor;
+  startup/stale anchors use an explicitly non-hardware callback-entry fallback,
+  and deadline/xrun/quality/re-anchor boundaries are typed. Input, output
+  buffer, local presentation and external-route latency remain separate;
+  Bluetooth/BLE/hearing-aid and automotive/bus routes stay high-latency.
+  Built-in/wired/USB are explicit low-latency candidates; HDMI and unknown
+  vendor types remain Unknown. Java supported-rate lists never become a fake
+  active nominal rate.
+- PR CI compiles and packages the provider into `libsingzcore.so` for arm64 and
+  armv7, checks a dormant JNI probe plus provider literal, and runs the
+  manifest/closure RT policy with negative bypass fixtures. Physical Android
+  hardware evidence remains pending and is not inferred from ABI builds.
+
+Phase iOS-A product packaging checkpoint implemented 2026-08-30 (still not a
+product cutover):
+
+- A dedicated `SingzDspRuntime` component pod compiles the exact CMake
+  `zdsp_runtime` plus `zdsp_host_adapter` source set with the same C++20,
+  real-time-leaf, no-exception, no-RTTI and hidden-visibility policy. The pod
+  has no React, codec, ML or Apple audio-session dependency.
+- The generated pod inputs come from the explicit shared manifest in
+  `mobile/scripts/native-component-sources.js`, materialized by
+  `sync-singz-dsp-runtime.js`; top-level `zdsp/` and `zcore/` remain
+  authoritative. `--check` rejects missing, stale or extra generated files.
+  The existing broad `SingzCore` compatibility pod is narrowed so it no
+  longer owns graph contracts, decoded-buffer sources or runtime symbols.
+- Phase iOS-A linked an inert `NativeAudioRuntime.status()` capability first.
+  Its retained typed references still prove every runtime boundary reached the
+  final binary. B1 subsequently added the playback commands, and B2 confines
+  their product use to the typed iPhone facade described below.
+- A separate `SingzDeviceCallback` pod owns exact CMake
+  `zcore_device_callback` membership plus the iOS RemoteIO callback pair. Its
+  prefix compile guard proves C++20, both RT compile markers and disabled
+  exceptions/RTTI were applied to the actual target. The broad SingzCore pod
+  no longer compiles those definitions and depends on the strict archive for
+  link access. Both component sets come from one iOS manifest whose checker
+  performs normalized set equality against CMake before every sync.
+- Device arm64 and universal simulator arm64/x86_64 component archives, a
+  final dead-stripped Release app compile, symbol/literal checks, actual flag
+  compile assertions, exception/RTTI ABI rejection, duplicate-owner and
+  forbidden-dependency gates are the packaging evidence. Phase iOS-B must not
+  make this packaging probe an independent product session owner.
+
+Phase iOS-B1 native playback preparation implemented 2026-08-30 (reusable
+foundation; experimentally activated by B2):
+
+- `NativePlaybackSession` consumes app-authorized `OwnedFileDescriptor`s,
+  decodes/resamples WAV or FLAC off RT under cancellation and an aggregate
+  memory limit, and retains every decoded owner through deterministic graph
+  retirement. Heavy preparation performs no `AudioHost` operation; a separate
+  generation-bound `openOutput` validates the captured route intent and opens
+  RemoteIO only after the future B2 legacy-output handoff.
+- Its sample-locked source graph is lane source -> channel map -> ramped
+  gain/mute/solo -> mix -> ramped master -> safety limiter -> output through
+  `AudioHostGraphAdapter`. It supports unequal lane ends and frame-zero start
+  once; seek, loop, metronome, tempo, transpose and custom codecs are not
+  claimed.
+- Generation-bound prepare/open/start/stop/unload/control and status expose lane
+  cursors, rendered/audible frames, retained bytes, xruns/deadlines,
+  discontinuities and typed route/interruption/media-services terminal
+  reasons. Uncertain stop quarantines callback-visible ownership instead of
+  releasing it. Quarantine ownership uses one preallocated process-lifetime
+  slot reserved before preparation; consuming it poisons future prepares, so
+  fail-stop retention cannot allocate or grow without bound. Every completed
+  failed prepare reports unloaded/zero retained bytes and its matching unload
+  succeeds idempotently before releasing the reservation. Immediate generation
+  claims plus pre-enqueue stop/unload cancellation supersede long decodes, and
+  prepared publication is linearized against newer claims. Superseded commands
+  cannot open/start/control; exact old stop/unload cleanup remains legal.
+  Descriptor authorization/open failures after the bridge claim complete the
+  same typed failed-prepare/unload handshake. Terminal reporting latches the
+  first cause while provider state independently proves physical quiescence,
+  allowing terminal unload to release owners without losing diagnostics.
+  Open/start physical-mutation markers survive successful calls until that
+  quiescence proof. Separate one-shot `{generation, serial, kind}` delivery
+  tokens are armed only after command preconditions pass and host mutation is
+  admitted, then acknowledged only after promise delivery. Bridge conversion
+  or delivery exceptions abort the exact unacknowledged token; duplicate,
+  stale, wrong-kind and acknowledged tokens cannot tear down a valid stream.
+  Stop/unload retain a separate exact-generation cleanup guard through GCD
+  block transfer, result conversion and promise delivery; exceptional retry
+  cannot disturb a newer generation. Cleanup returns an allocation-free
+  safety verdict. One fixed process-global coordinator registers synchronous
+  claim, failed admission, prepare/retirement, host mutation and quarantine
+  ownership as one `native-owned(session,generation)` domain. Cross-session
+  claims conflict; a newer generation from the same session supersedes
+  linearly without exposing an empty interval. `NotOwned` is token-local and
+  never fallback-safe. Exact cleanup can report `Complete` only by atomically
+  transferring the fully unloaded native domain to `fallback-leased` and
+  returning its positive, JS-safe, ABA-safe `handoffLease`. A reservation held
+  by another owner and a Consumed/poisoned retained graph are explicitly
+  non-global facts. Normal bridge `unload` returns this nested cleanup proof;
+  B2 requires both `cleanup.globallyComplete` and its positive lease, never the
+  local result's `ok` field. While leased, every tokenless/wrong-token claim is
+  rejected. After legacy is suspended and released, the next
+  `prepare(..., handoffLease)` synchronously validates and consumes the exact
+  token back to native ownership before descriptor work or decode; replay
+  cannot mutate the current owner.
+  Unload receipts live in a bounded allocation-free exact-command journal.
+  When teardown of generation N physically retires its graph and thereby
+  finalizes a deferred unload of newer generation M, the public root result
+  stays attributed to N while nested `cleanup.generation` is M and holds M's
+  exact lease or uncertainty. Promise-delivery retry of N returns the same
+  receipt; direct cleanup proof of N does not borrow M's ownership proof.
+  Receipt exhaustion is non-fallback-safe.
+  A stale prepare graph retiring off-lock remains a published owner
+  (generation, bytes, mutation marker and the same process reservation) until
+  shutdown completes. Cleanup is non-safe and newer prepare cannot reserve in
+  that interval; failure consumes the original reservation into bounded
+  quarantine without overwriting newer session state. Every other
+  verdict produces a typed non-fallback-safe bridge error with
+  state/retained-byte/terminal/physical-ownership details. Prepared
+  generations with no output admission never sample or stop stale provider
+  state. Prepare retains its claimed and transferred guards outside the
+  caught outer bridge boundary, so allocation, capture, real block-copy and
+  dispatch exceptions propagate the exact cleanup verdict instead of losing
+  it during stack destruction. A global `Complete` proof additionally
+  requires no current/active generation, failed-prepare handshake, invocation
+  or delivery marker, or local/process quarantine reservation or retained
+  poisoned graph, and remains true only while the exact coordinator fallback
+  lease is still held.
+- The strict allocation-free playback callback is owned by
+  `SingzDspRuntime`; the exact off-callback session target is owned by the new
+  `SingzPlaybackSession` pod. Source manifests, device/universal-simulator
+  archives, final Release link/symbol ownership and an exact-consumer Jest
+  gate cover the packaging boundary.
+- `NativeAudioRuntime` reports `ownership: coordinated` and
+  `activation: experimental-b2`. Only `mobile/src/playback/native.ts` may
+  consume its playback surface; packaging tests reject ad-hoc product callers.
+  The frozen request/result/status schema is documented in
+  `docs/IOS-AUDIO.md`.
+- Exact bridge strings reject malformed UTF-16 and embedded NUL for route UID,
+  lane ID/path and control ID before any C/filesystem conversion. Output
+  channel indexes at or above the native host limit reject before decode.
+- The render leaf pre-silences, latches callback failure as terminal, uses
+  bounded counter CAS attempts and never re-enters the graph after failure.
+  Cursor telemetry uses verified bounded retry with a last-good control-domain
+  fallback. The playback RT manifest is derived from target `SOURCES`, with
+  omitted-member and unbounded-loop negative fixtures.
+
+Phase iOS-B2 is implemented as a default-off Experimental iPhone product cut.
+Its feature gate selects native or legacy **before project decode**. A
+native-selected load passes materialized authorized paths and never constructs
+RNAudioAPI `AudioBuffer`s for that song. Projects with active transpose,
+tempo, metronome/count-in, song-training, custom/original tracks, unsupported
+codecs or no materializable path stay wholly legacy. The dedicated native
+player exposes frame-zero Start and Stop only.
+
+If native preparation or pre-start output open fails, matching native
+`unload` must return `globallyComplete: true`, `fallbackSafe: true` and a
+positive `handoffLease` before the fallback lazily decodes legacy PCM.
+`NotOwned` is insufficient. Legacy operates only while that process-global
+lease is held. Native reentry first suspends legacy and passes the exact lease
+to the next `prepare`, whose synchronous claim consumes it atomically. After
+prepare, the product suspends RNAudioAPI output, establishes and verifies the
+intended `AVAudioSession`, calls `openOutput`, then `start`, with Catalog-load
+plus native-generation guards. A start-command or later terminal failure does
+not auto-fallback. Stop/unload restores ownership in reverse. Train-tab
+activation is itself awaited behind this proof, so mic/reference-audio session
+configuration cannot overlap native output.
+
+Physical-device evidence is still required before Phase 4: wired and USB
+loopback latency, callback-size distribution, sustained duplex xruns/deadline
+misses, channel maps above stereo, interruption/media-service recovery, and
+Bluetooth/CarPlay route changes. Simulator compilation proves no hardware
+behavior.
+
+The AUHAL slice deliberately rejects different input/output UIDs. A bounded
+cross-device FIFO, drift estimator/resampler and aggregate-device policy are
+deferred, as is the separately licensed ASIO provider. WASAPI, RemoteIO and
+Oboe are the implemented Phase 3B/3C/3D standalone providers described above.
+Desktop, Android and ineligible iPhone projects still use
+Web Audio/RNAudioAPI as their product output/session owner. The opt-in iOS-B2
+frame-zero player described above is the first product path that instead owns
+RemoteIO through zcore + zdsp; the process-global handoff lease makes those
+two owners mutually exclusive. No desktop renderer or Android playback UI
+links the native output host yet.
+
+The review invocation is intentionally explicit and bounded:
+
+```bash
+singz-audio-host --run --device-uid '<CoreAudio UID>' \
+  --input-channels 2 --output-channels 0,1 --rate 48000 \
+  --buffer 64 --maximum-frames 1024 --milliseconds 750
+```
+
+Implement one provider at a time behind `AudioHost`:
+
+1. macOS duplex AUHAL;
+2. Windows WASAPI render/full-duplex, shared mode first and user-selected
+   exact-float exclusive mode where supported (implemented as Phase 3B);
+3. iOS duplex RemoteIO under the existing AVAudioSession coordinator
+   (implemented as Phase 3C; physical-device evidence pending);
+4. Android duplex Oboe over AAudio where supported (implemented as Phase 3D;
+   physical-device evidence pending); retain direct AAudio only if later
+   measurements prove it is the lower-risk SingZ host;
+5. ASIO as a distinct `audio_host_asio_windows.cpp` only after the legal gate.
+
+Add output inventory, negotiated formats, full-duplex start/stop, xrun/status
+events, separate-device FIFO/drift correction, route-change generations and
+feedback-safe monitoring defaults.
+
+This phase is primarily a headless/standalone hardware harness. Web Audio
+remains the desktop owner, and RNAudioAPI remains the Android/default-iPhone
+owner. The opt-in iOS-B2 slice now exercises the first atomic product cutover
+for eligible frame-zero projects; other platforms remain pending. Its feature
+gate makes legacy and native output mutually exclusive, and enumeration alone
+never acquires a session.
+
+Platform details:
+
+- WASAPI “full duplex” is two event-driven clients coordinated by one
+  STA/MMCSS owner, which drains shared capture before every render action:
+  `IAudioCaptureClient` and `IAudioRenderClient`, with `IAudioClock` positions
+  mapped to the output master. Use `IAudioClient3` shared-engine period APIs
+  when available; shared/exclusive negotiation and fallback stay explicit.
+- iOS buffer duration/sample rate are preferences, not facts. Only the
+  serialized AVAudioSession owner may request them while inactive when
+  feasible, following the existing local/wired-versus-external route policy.
+  After activation it queries actual buffer duration, rate, channels and
+  input/output latency, and rebuilds after route change.
+- Android uses paired Oboe streams and preserves Java AudioManager as the
+  device/focus/route control plane. Oboe is Apache-2.0 and uses AAudio on
+  supported modern devices.
+
+Documentation references:
+
+- [Microsoft WASAPI](https://learn.microsoft.com/en-us/windows/win32/coreaudio/wasapi)
+- [WASAPI exclusive streams](https://learn.microsoft.com/en-us/windows/win32/coreaudio/exclusive-mode-streams)
+- [Android low-latency/Oboe guidance](https://developer.android.com/games/sdk/oboe/low-latency-audio)
+- `docs/{WINDOWS,IOS,ANDROID}-AUDIO.md`
+
+Verification:
+
+- Hardware loopback round-trip tests at every supported buffer setting.
+- Sustained playback/capture under CPU, device disconnect and route-change
+  stress with bounded xruns and no deadlock.
+- Same-device duplex demonstrates one stable mapped graph clock (or uses the
+  same correction path honestly); separate devices remain stable for at least
+  30 minutes with drift correction and bounded FIFO occupancy.
+- Bluetooth, CarPlay and Android Auto show route latency separately and never
+  claim low-latency monitoring.
+- Output mute defaults prevent feedback during automated and first-run tests.
+- Harness tests prove no legacy Web Audio/RNAudioAPI output can be active at
+  the same time as a native test host.
+
+Avoid:
+
+- Letting a backend or graph node change a process-global buffer/session
+  preference. Only the serialized session owner may request, verify and later
+  restore one under platform route policy.
+- Silently falling back to a different physical input channel.
+- Combining WASAPI and ASIO logic in one backend class.
+
+### Phase 4 — Per-platform playback/session cutover
+
+#### Phase 4A — guarded desktop monitoring preview
+
+Phase 4A is the first product-composition proof, not the song-engine cutover.
+The already packaged `singz-capture` addon owns an ephemeral native session
+whose fixed graph is:
+
+```text
+selected capture channels -> pre Peak/RMS -> ramped Gain (initially 0)
+  -> explicit ChannelMap -> SafetyLimiter (-1 dBFS) -> post Peak/RMS
+  -> selected physical output channels
+```
+
+The addon exposes bounded scalar control/status only: full-duplex device
+inventory, begin/end by ownership generation, an explicitly enabled gain
+target and pre/post meter/host diagnostics. Raw PCM, native pointers and graph
+documents never cross Node-API. The session owns its arena, processors,
+compiled graph, publisher, runner, host adapter and `AudioHost` in that order;
+stop joins the host callback before graph shutdown and storage release.
+If runner shutdown is busy or processor deactivation fails, the generation and
+prepared storage remain quarantined and `endMonitor` may retry; storage is
+released only after both steps succeed. The callback thunk, silence path and
+terminal counters are an independent strict realtime target, not an unscanned
+method in the control-domain owner.
+
+Starting the preview requires the product session coordinator to prove that
+legacy Web Audio output has stopped and released its device. The native owner
+does not infer that product-level precondition and never runs beside the song
+engine. Inside the addon, capture analysis and monitoring share a fail-closed
+serialized microphone owner, so neither call order can open both native paths.
+Accepted monitor generations increase monotonically across teardown. On
+macOS input and output must name the same duplex device. The Phase 4A product
+preview is enabled only on macOS. Windows inventory remains available but
+`beginMonitor` fails with typed `platform-not-ready` until the WASAPI hot body
+is extracted into the enforced real-time policy target. Once enabled, Windows
+may use its paired capture/render endpoints only when `AudioHost` negotiates
+the exact requested rate on both; there is no resampling or drift fallback.
+Monitoring is muted until the user explicitly enables it, gain changes ramp,
+and a discontinuity adopts the requested target so an interrupted mute cannot
+freeze partially open. The final fixed limiter is always present. CoreAudio
+publishes typed transport/suitability; only provider-confirmed low-latency
+duplex routes pass. Bluetooth/BLE, AirPlay and wireless Continuity are typed
+high-latency, while unknown/aggregate/virtual/AVB routes remain unapproved;
+`beginMonitor` rejects them without label matching. Device loss or graph
+failure emits silence and remains visible in separate adapter/terminal status
+counters.
+
+Phase 4A intentionally does not move song playback, persist a graph, mix Web
+Audio with the native output, add recording, add ASIO, support cross-device
+macOS monitoring, or claim Bluetooth/vehicle routes are low latency. See
+[ADR 0010](adr/0010-desktop-monitoring-preview.md).
+
+Phase 4A.1 moves only the product lease—not audio processing—from the lazy
+Settings route to the long-lived desktop app shell. Closing Settings now
+releases its temporary meter preview but preserves an explicitly started native
+generation. A persistent top-bar indicator opens Settings and exposes a
+keyboard- and screen-reader-accessible Stop action. Reopening Settings
+subscribes to the same coordinator snapshot. While the lease is held, Chromium
+song output remains on its silent sink, song play is refused with user-visible
+copy, and the song/training microphone paths remain blocked. Explicit Stop,
+physical route edits, terminal native failure, Settings runtime failure and
+renderer teardown still stop the exact generation before Web Audio restoration.
+The enable decision is still one-use and is not persisted across app restart.
+
+Every registered Chromium preview is an audio safety lease, so an ordinary
+mounted Settings preview blocks song/training starts and remains reachable by
+the app-shell coordinator. It is not presented as failed cleanup: the app-shell
+control stays absent while that preview is healthy. Unmount marks the lease unresolved
+before awaiting `stopAndWait`; while cleanup is pending or after it fails, the
+persistent control says cleanup is needed and Stop retries that exact owner.
+Web Audio restoration has a final cue/microphone cancellation barrier. A
+Settings chunk-import rejection preserves the app shell's existing
+preview/native/route ownership and never runs emergency cleanup. Once Settings
+has loaded, its runtime-only boundary receives eager app-shell stop handles and
+uses them for first-render or later descendant faults. High-rate native meters
+remain on the small Settings subscription rather than rerendering the app
+shell.
+
+Vocal Training teardown is a separate app-shell lease, not another monitoring
+or output-route state. Leaving Training from the top navigation, a direct
+section switch, or a song-open request first pauses song/cues, interrupts the
+exercise and awaits the exact training microphone's `stopAndWait()`. The route
+stays mounted behind a blocking cleanup surface while that verdict is pending;
+failure remains in Training with Retry, and success releases the lease before
+performing the retained destination once. Song transport, Settings capture and
+all training-audio entry points are closed while this lease is unresolved, with
+Training-specific guidance rather than the monitoring Stop/output-route copy.
+The cleanup surface is owned outside the recoverable Training module, so a
+pending, rejected or terminal Training chunk cannot hide native cleanup Retry.
+Renderer teardown disposes the coordinator before microphone/cue teardown;
+late native settlement may finish releasing hardware but cannot publish a new
+verdict, invoke a retained destination or mutate the dead renderer.
+
+All Settings route selections share one app-lifetime invocation-ordered
+application queue, constructed beside the monitor coordinator rather than per
+dialog mount. Each captured edit holds a fail-closed app-shell transition lease
+from scheduling through apply settlement—even if Settings closes—so
+song/training audio and a reopened preview cannot start inside a sink handoff.
+If the OS/browser route promise stalls, the lease and truthful “Changing audio
+route…” indicator remain until it settles or the app quits; the app must not
+release safety while a late sink write may still occur. The route-only state is
+non-cancellable but keeps Open Settings accessible. Preview/native cleanup runs
+once before the batch; a reopened preview reacts to the change-gated shell
+lease and opens only after the queue drains. Preview-only cleanup skips the
+legacy-output cancellation barrier because no physical output restore is
+performed.
+
+Direct playback selection and boot/device-change reconciliation share a second
+app-lifetime latest-intent arbiter. A direct choice synchronously replaces the
+desired output and invalidates old inventory work; operations serialize, check
+their version after every browser await, and only the current successful choice
+commits preferences. Device changes raised during a direct apply reconcile the
+current desired intent. A failed current choice restores the last committed
+intent before queued repair, so the controlled preference remains truthful.
+Pending Stop is itself a published audio-safety lease through final teardown
+and restoration settlement. Delayed status results must match both the captured
+native generation and the still-active phase before they may trigger terminal
+teardown.
+
+Acceptance evidence includes a silent deterministic fake-host suite proving initial
+mute, enabled/ramped gain, mono-to-stereo mapping, the -1 dBFS ceiling,
+pre/post meters, stale-generation rejection, device-loss silence, teardown and
+zero callback allocations; addon-owner call-order/race tests; a real Electron
+addon smoke proving exact integer, lossless BigInt and boolean schemas; Release
+and sanitizer/realtime policy gates that include the monitor targets; and the
+desktop product coordinator and Settings controls now prove, without starting
+native output in automation, that Web Audio releases its physical sink before a
+generation-bound begin, failed/closed sessions stop before restoration,
+explicit monitoring survives renderer occlusion and normal Settings close,
+monitoring and its wired-headphone confirmation default off, and unsupported
+platforms/routes remain blocked. Human listening on 2026-08-29 verified Zen
+Quadro SC input 3 through the native graph to USB playback outputs 1/2, including
+switching to another macOS app without interruption. A subsequent Phase 4A.1
+listening run verified that monitoring remains audible after Settings closes
+and that the persistent top-bar Stop control ends monitoring and restores
+product output. Windows stays visibly platform-not-ready in this phase.
+
+The playback cutover begins with a macOS output-only/source foundation before
+any product song engine moves: AUHAL can render to explicit physical output
+channels with its input element disabled, and `AudioHostGraphAdapter` can feed
+a source-only graph with zero external host input buses. The existing duplex
+monitor graph remains unchanged. Source decoding, transport ownership and the
+atomic product playback lease remain later work in this phase.
+
+The next foundation slice now prepares WAV/FLAC from a consumed authorized
+descriptor into immutable planar storage in `zcore_media`, including bounded
+cancellation and optional common multichannel resampling. A zero-input
+`zdsp_runtime` source borrows that storage, starts at frame zero, stays
+sample-locked across variable blocks and emits silence after each lane ends.
+Generic graph resets preserve its cursor because this slice has no positioned
+seek contract; transport seek/loop remains later work. No path, codec,
+allocation or shared-owner operation reaches its render function. iOS B1
+provides the decoded lifetime owner, generation-bound frame-zero transport and
+output-host composition. Its B2 product coordinator now supplies the Catalog
+load guard, exact cleanup lease and exclusive legacy-engine/session handoff
+for the Experimental audible iPhone path; other platforms require their
+corresponding session slice.
+
+Implement:
+
+- One serialized engine/session lease. Cutover suspends and retires the legacy
+  Web Audio/RNAudioAPI engine, transfers the public session owner, starts the
+  native host, and reverses the sequence on fallback. The two output engines
+  are never active concurrently.
+- Native song-source provisioning from the Phase 0B ADR: allowlisted
+  desktop handles/paths, folder and Drive-local mobile files, FLAC v2, legacy
+  WAV and the supported custom-track codec matrix. Decode/streaming, seek and
+  cancellation run off RT with latest-load generation guards; unequal lane
+  lengths are first-class.
+- Deterministic decoded-buffer/source ownership and release, preserving the
+  existing mobile unload-before-release contract.
+- Stem lane buses, mute/solo/volume ramps, song master, Signalsmith processor,
+  training ducking, reference/metronome bus, loop/seek/count-in scheduling and
+  output sink.
+- A compatibility facade preserving the public `MultitrackEngine` behavior so
+  UI migration is incremental.
+- Feature flags and A/B diagnostics to compare old and new clocks/output.
+- Before saving the first project graph, resolve its file/location ADR and wire
+  the complete project protocol: desktop/mobile readers and writers, format
+  migration, hashes in `project.json`, Drive upload/catalog enumeration,
+  download currency, import/export, rename, orphan cleanup and offline
+  fallback. No graph file may become local-only hidden project state.
+
+References:
+
+- `src/renderer/src/audio/engine.ts`
+- `mobile/src/engine.ts`
+- `mobile/src/projects.ts`
+- existing loop, metronome, seek, memory and custom-track E2E tests.
+
+Verification:
+
+- Sample-lock and phase-cancellation fixtures across all stems.
+- Audible versus render/control clock tests with injected output latency.
+- Transpose/tempo, loop, count-in, training duck, metronome bypass and custom
+  lane parity on desktop and both mobile platforms.
+- A shared engine-contract suite is first run against the legacy engines, then
+  against the facade: sample-locked starts, ramps, authoritative render versus
+  audible clocks, training boundaries, loop/seek/count-in interactions,
+  reference bypass and repeated load/unload. The mobile clock semantics replace
+  the desktop's current latency-delayed training decision.
+- Mobile repeated open/close RSS returns to the established memory envelope.
+- Old and new engines can be selected without changing project files.
+- A desktop → Drive → phone round trip preserves graph state, opaque adapter
+  state and missing-node placeholders, with currency/orphan fixtures.
+- Each platform cutover rebuilds and reinstalls native apps and proves a new
+  graph literal exists in the binary before real-app E2E.
+
+Avoid:
+
+- Per-stem pitch processors.
+- Allowing reference sources through the song master by default.
+- Releasing buffers before the graph and device callback have retired them.
+
+### Phase 5 — Built-in vocal-processing and recording blocks
+
+Implement:
+
+- Gate, parametric EQ, compressor, de-esser, limiter and monitor mix.
+- Recorder sink with a non-RT disk writer and bounded FIFO.
+- Input/output preset builder UI with safe gain staging, bypass and wet/dry.
+- Vocal Training domain contracts: `ExerciseDefinition`,
+  `ExerciseSessionState` and timestamped `ScoreEvidence`. Exercise kinds cover
+  single notes, melodic/harmonic intervals, chord recognition/singing and
+  individual notes in a chord, with singer range/octave, direction, chord
+  quality/inversion/voicing, difficulty and tolerance.
+- Song-preparation derives the exercise key from detected key plus transpose,
+  with explicit unknown-key/manual-key handling. Standalone training uses the
+  app-level mobile bottom tab and desktop top navigation; “prepare this song”
+  is the project entry into the same engine.
+- Reference generators are scheduled on graph sample time. Permission is
+  requested only from a user gesture. An ADR assigns preferences/progress to
+  user-global versus project/synced storage before persistence.
+- Timestamped scoring keeps raw capture timestamps unchanged. It projects the
+  scheduled reference graph frame through output/device/external-route delay
+  and trim to an expected **audible host time**, then maps microphone evidence
+  from its capture clock domain into host time. Confidence/uncertainty and
+  calibration are explicit; delayed routes do not claim precise live
+  monitoring.
+
+Verification:
+
+- Golden impulse/frequency/dynamics tests per node.
+- Automation click tests and hard limits for unstable parameters.
+- Recorder overflow/failure is visible and never blocks audio.
+- Feedback and clipping warnings, limiter behavior and monitoring-off default.
+- End-to-end note/interval/chord exercises at multiple routes and transposes.
+- Injected independent output delay, input latency, clock drift and user trim
+  prove the audible-target equation; iOS sums its intended components once and
+  Android never double-counts a complete presentation estimate.
+
+Avoid:
+
+- Treating generated exercises as UI timers.
+- Writing files or updating React state from RT.
+
+### Phase 6 — VST3 desktop host
+
+Implement:
+
+- Pinned VST3 SDK, notices and build integration.
+- Scanner helper, cache, quarantine and validator-checked test plug-ins.
+- VST3 bus/parameter/event/state adapters and latency-change handling.
+- Plug-in node UI, missing-plug-in placeholder and state-size limits.
+- In-process low-latency mode and opt-in bridged safe mode with declared bridge
+  latency.
+- Per-instance callback duration/deadline/xrun/invalid-output counters needed
+  by the overload and quarantine policy; these cannot wait for Phase 8.
+
+References:
+
+- [VST3 SDK API](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/API%2BDocumentation/Index.html)
+- [VST3 licensing](https://steinbergmedia.github.io/vst3_dev_portal/pages/VST%2B3%2BLicensing/VST3%2BLicense)
+
+Verification:
+
+- SingZ host-adapter fixtures and a known-good/malformed corpus covering
+  mono/stereo/multibus, in-place, variable blocks, automation, state, latency
+  changes and malformed plug-ins. The official validator checks the test
+  plug-ins/behavioral comparison; it does not certify the SingZ host.
+- Scanner crash/hang never kills or blocks app startup.
+- A bridged crash/hang/protocol failure produces a live block-boundary
+  fallback/bypass. An in-process native crash may terminate SingZ; attribution
+  is persisted so next launch quarantines it or opens the graph in safe mode.
+  Both preserve recoverable project state.
+- Bridge latency is measured and compensated, never hidden.
+
+Avoid:
+
+- VST2.
+- Loading unknown binaries in Electron main/renderer merely to inspect them.
+- Assuming all plug-ins are RT-safe because the ABI permits real-time calls.
+
+### Phase 7 — AUv3 and CLAP adapters
+
+Implement only after VST3 and the format-neutral adapter prove stable:
+
+- macOS/iOS AUv3 discovery, instantiation, view hosting and presets; iOS uses
+  the out-of-process extension lifecycle, while macOS defaults out of process
+  and may use explicitly supported/verified in-process instantiation, checked
+  through `isLoadedInProcess`;
+- CLAP desktop adapter with state, params, audio/note ports, latency and thread
+  contract support;
+- capability-based UI so a preset can degrade honestly per platform.
+
+References:
+
+- [Apple AUAudioUnit](https://developer.apple.com/documentation/audiotoolbox/auaudiounit)
+- [Apple AU host sample](https://developer.apple.com/documentation/audiotoolbox/incorporating-audio-effects-and-instruments)
+- [CLAP specification repository](https://github.com/free-audio/clap)
+
+Verification:
+
+- Apple extension interruption/crash/view lifecycle on macOS and physical iOS.
+- CLAP validator/example corpus and thread-rule assertions.
+- Cross-platform preset opens with explicit unavailable-node placeholders.
+
+Avoid:
+
+- Pretending desktop plug-in binaries are mobile-portable.
+- Blocking the main/UI thread during AU instantiation.
+
+### Phase 8 — Release hardening and default cutover
+
+Implement:
+
+- Per-node and graph CPU telemetry, deadline/xrun counters and overload policy.
+- Denormal handling, silence propagation and bounded tail shutdown.
+- Migration tools, crash recovery, diagnostics export and user-facing safe
+  mode.
+- Gradual default cutover followed by removal of duplicate fixed playback
+  implementations only after the hardware matrix is green.
+
+Verification:
+
+- Native unit/TSAN/ASAN/UBSAN suites; root/mobile unit suites; Windows CI;
+  macOS desktop E2E; iOS and Android rebuilt/reinstalled native E2E.
+- Soak, suspend/resume, hot-plug, permission, route and low-memory tests.
+- Real hardware latency and xrun report attached to every platform release.
+- Automated runs remain silent; human-audible tests are explicit.
+
+Avoid:
+
+- Removing the old engine on unit-test parity alone.
+- Calling a platform complete without a physical-device run.
+
+### Verification rule for every native-affecting phase
+
+Phase 8 is the final matrix, not the first real-app check. Every earlier phase
+that changes native sources, bridges, sessions, hosts or playback must also:
+
+- build before desktop Electron E2E;
+- rebuild and reinstall iOS/Android native apps, then prove a change-specific
+  literal/symbol is present in the installed binary;
+- run simulator/emulator integration and physical-device checks wherever
+  channel, route, interruption or latency behavior is claimed;
+- use SingZ's silent automation procedures, enabling sound only for an
+  explicit human listening test;
+- cover multichannel USB channel 3+, unplug/reconnect, permission,
+  interruption and session-recovery behavior;
+- exercise relevant Bluetooth/CarPlay/Android automotive routes without
+  treating their presentation delay as a low-latency monitoring result.
+
+## Acceptance gates
+
+These are initial gates; Phase 0B replaces assumptions with hardware baselines.
+
+| Gate | Target |
+| --- | --- |
+| Graph overhead | runner entry and empty graph reported in microseconds and percentage of negotiated callback deadline; p50/p95/p99/max, explicit safety margin, zero deadline misses |
+| Analyzer handoff | measured separately from RT render; retain platform baseline/goal (Windows hardware p95 ≤ 3 ms, portable fake host <10 ms until Phase 0B replaces it) |
+| RT safety | zero steady-state allocations/frees, mutex waits, logging or bridge calls |
+| Stability | zero unbounded queue growth; every overflow/xrun counted |
+| Graph update | complete snapshot at a block boundary; no partial graph, RT destruction or device restart |
+| Transition | no unapproved waveform jump, uncompensated latency move or lost finite tail; retirement saturation stays bounded |
+| Parallel sync | sample-exact compensation for all declared deterministic latency |
+| Analysis | analyzer backlog drops/resets analysis, never delays audio |
+| Persistence | unknown/missing node round-trips without losing its state |
+| Mobile memory | deterministic graph/buffer retirement within the existing repeated-open memory envelope |
+| Session ownership | legacy and native output/session owners are mutually exclusive through cutover and fallback |
+| Source/project truth | real FLAC/WAV/custom lanes load on all platforms and graph state survives desktop→Drive→phone round trip |
+| Route truth | capture, DSP, output and external-route latency visible as separate values |
+| Platform evidence | physical macOS, Dell/Windows, iPhone and Android runs before default enablement |
+
+Do not promise one universal millisecond round-trip number. Hardware, buffer
+mode and route dominate it: wired professional interfaces can be suitable for
+monitoring, while Bluetooth and vehicle routes are presentation paths whose
+large/variable delay must be reported and calibrated, not disguised.
+
+## Remaining decisions
+
+Phase 0B resolved the two interface-shaping questions: the first contract is a
+same-toolchain static C++20 interface, not a shared C ABI, and prepare topology
+uses explicit planar-float32 mono/stereo/discrete bus descriptors with channel
+roles, up to 16 buses and 64 channels per bus. A future shared-library/plug-in
+bridge requires its own true C adapter described in ADR 0001.
+
+Phase 0B also freezes ownership of those foundational DSP-facing types:
+`zdsp_api` owns graph clocks, bus views, process context and their strong
+wrappers while depending only on `zcore_base`. `zcore_audio` owns device
+capture/transport and must not import `zdsp`; future hosts adapt explicitly at
+the higher layer that already links both sides.
+
+- The first RT-safe drift resampler and quality/CPU modes.
+- Whether verified plug-ins default to in-process or safe bridged mode.
+- Graph document location and how/when it participates in Drive sync.
+- Whether measured devices justify retaining any direct-AAudio graph host
+  escape hatch beside the default Oboe endpoint.
+- ASIO proprietary agreement versus leaving WASAPI as the only shipping
+  Windows host.
+- Whether AUv3 on iOS is valuable enough to justify its UX and latency scope.
+
+None of these should block Phase 1's offline graph kernel.
+
+## Authoritative references
+
+- [VST3 API documentation](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/API%2BDocumentation/Index.html)
+- [VST3 processor call sequence](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/Workflow%2BDiagrams/Audio%2BProcessor%2BCall%2BSequence.html)
+- [VST3 persistence contract](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Persistence.html)
+- [VST3 license](https://steinbergmedia.github.io/vst3_dev_portal/pages/VST%2B3%2BLicensing/VST3%2BLicense)
+- [VST trademark/usage guidelines](https://steinbergmedia.github.io/vst3_dev_portal/pages/VST%2B3%2BLicensing/Usage%2Bguidelines.html)
+- [Steinberg ASIO SDK licensing page](https://www.steinberg.net/developers/asiosdk-open/)
+- [Steinberg ASIO SDK license](https://github.com/audiosdk/asio/blob/main/LICENSE.txt)
+- [Microsoft WASAPI](https://learn.microsoft.com/en-us/windows/win32/coreaudio/wasapi)
+- [Microsoft WASAPI exclusive mode](https://learn.microsoft.com/en-us/windows/win32/coreaudio/exclusive-mode-streams)
+- [Apple AUAudioUnit](https://developer.apple.com/documentation/audiotoolbox/auaudiounit)
+- [Apple AU host sample](https://developer.apple.com/documentation/audiotoolbox/incorporating-audio-effects-and-instruments)
+- [Android low-latency audio](https://developer.android.com/games/sdk/oboe/low-latency-audio)
+- [Oboe repository and Apache-2.0 license](https://github.com/google/oboe)
+- [CLAP repository and specification](https://github.com/free-audio/clap)
+- [CLAP MIT license](https://github.com/free-audio/clap/blob/main/LICENSE)
+- [Web Audio 1.1 editor specification](https://webaudio.github.io/web-audio-api/)
+- [Web Audio specification repository](https://github.com/WebAudio/web-audio-api)

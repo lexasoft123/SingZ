@@ -16,6 +16,53 @@ LogPanel (diagnostics)                            log.ts       ring-buffer app l
 App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
 
+The current playback and capture paths are intentionally still separate. The
+phased proposal for a shared native input/output graph, built-in processors,
+analyzer taps and desktop plug-in hosting is in
+[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md). Its platform, DAW/effects-engine,
+real-time scheduling, zero-copy and acceleration research is recorded in
+[DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md). The native
+C++ language profile, component targets, dependencies and scalable repository
+layout are in [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
+
+Phases 3A through 3D add a standalone native conformance path only:
+`zcore_device` AudioHost/provider → `zdsp_host_adapter` → `zdsp_runtime`.
+Phase 3A introduced the portable contract, fake provider and macOS AUHAL host;
+Phase 3B adds the standalone Windows provider: one event-driven STA/MMCSS owner for two WASAPI endpoint clients
+bridged by a bounded planar SPSC FIFO; only that owner's render action enters
+the graph.
+Phase 3C adds an iOS RemoteIO provider whose output render callback is the
+graph clock. It validates an app-prepared audio session; the provider itself
+never configures `AVAudioSession`. Phase 3D provides the equivalent dormant
+Android Oboe/AAudio host. iOS Phase iOS-A packages the callback-safe runtime
+and host adapter as strict component pods, and Phase iOS-B1 adds the reusable,
+generation-bound WAV/FLAC frame-zero session: authorized descriptor decode and
+resample, sample-locked lane gain/mute/solo mixing, master limiting,
+output-host composition and deterministic ownership/telemetry.
+
+Phase iOS-B2 now exposes that session as an **opt-in Experimental iPhone
+backend**. `mobile/src/playback/native.ts` is the only product bridge consumer.
+It selects the backend before stem decode, materializes local WAV/FLAC paths,
+and creates no RNAudioAPI song `AudioBuffer`s on the native path. The limited
+native player supports start from frame zero and stop only; any project using
+seek/parity features, tempo, transpose, metronome, training mode, custom tracks
+or unsupported codecs stays wholly legacy. At start, the coordinator suspends
+and releases legacy output, configures and verifies the intended iOS playback
+session, then opens and starts RemoteIO. The Train tab is not activated until
+matching native stop/unload returns a process-global cleanup lease, so its mic
+session cannot race the native output owner.
+
+Cleanup is a transferable ownership protocol rather than an empty-state
+snapshot. Lazy legacy fallback is allowed only when exact unload returns
+`cleanup.globallyComplete`, `cleanup.fallbackSafe` and a positive
+`handoffLease`; native re-entry first suspends legacy and consumes that same
+lease in `prepare`. Uncertain cleanup blocks fallback. A prepare/open failure
+may fall back after this proof, while a start-command or later terminal failure
+never auto-falls back. Immediate claims and stop/unload cancellation supersede
+in-flight decode; callback failure is sticky and fail-silent. Desktop and
+Android product playback remain on their existing engines (see
+`docs/WINDOWS-AUDIO.md` and `docs/IOS-AUDIO.md`).
+
 ## Audio playback (`renderer/src/audio/engine.ts`)
 
 All stems are `AudioBufferSourceNode`s scheduled at the same context time →
@@ -344,7 +391,7 @@ transpose-aware in the pitch strip's info card.
 
 **The detectors are moving into the shared C++ core, one implementation for
 every platform** (docs/PHONE-STANDALONE.md, Phase 4c): the melody tracker
-is there already — `mobile/native/core/melody.cpp` is pyin.ts + pitch.ts +
+is there already — `zcore/src/legacy/melody.cpp` is pyin.ts + pitch.ts +
 pitch-core.ts ported line for line and held bit-identical to this section's
 TS (float where the TS keeps Float32Array, double elsewhere, sums in the
 same order; the corpus gate is `singz-analyze melody` vs node, at the file's

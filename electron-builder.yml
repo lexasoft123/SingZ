@@ -8,6 +8,16 @@ files:
   - '!build/*'
   - '!vendor/*'
   - '!.engines-src/*'
+  # The native source trees ship as compiled engines (extraResources), never
+  # as source in the asar — the negation-only list means everything not
+  # negated here IS packaged.
+  - '!zcore/*'
+  - '!zdsp/*'
+  - '!third_party/*'
+  - '!tools/*'
+  - '!native/*'
+  - '!cmake/*'
+  - '!{CMakeLists.txt,CMakePresets.json}'
   # The React Native app is a separate product that happens to live in this
   # repo — none of it belongs in the desktop asar. Leaving it in is not
   # merely ~11 MB of wasted RN sources: `mobile/ios` holds Pods and
@@ -19,6 +29,10 @@ files:
   # Output of the iOS pipeline (fastlane's export dir): .ipa plus a ~38 MB
   # dSYM zip, for the same reason.
   - '!build-ios/*'
+  # Tests and agent/development configuration are not runtime assets.
+  - '!tests/*'
+  - '!.claude/*'
+  - '!{CLAUDE.md,vitest.config.ts,tsconfig.tests.json}'
   - '!scripts/*'
   - '!docs/*'
   - '!eval/*'
@@ -91,12 +105,18 @@ mac:
   notarize: true
   category: public.app-category.music
   darkModeSupport: true
+  # Universal packaging receives the same already-lipo'd capture addon in
+  # both thin staging apps; do not attempt to merge that binary a second time.
+  x64ArchFiles: '**/engines/singz-capture.node'
   extendInfo:
     NSMicrophoneUsageDescription: SingZ listens to your singing to show how well you match the melody.
   extraResources:
     - from: vendor/darwin-${arch}
       to: engines
       filter: ['whisper-cli*', 'singz-analyze*']
+    - from: build/capture-package/darwin-${arch}
+      to: engines
+      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json']
   target:
     - target: dmg
 dmg:
@@ -106,6 +126,9 @@ win:
     - from: vendor/win32-x64
       to: engines
       filter: ['whisper-cli*', 'singz-analyze*']
+    - from: build/capture-package/win32-x64
+      to: engines
+      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json']
   target:
     - target: nsis
       arch: [x64]

@@ -15,8 +15,13 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'mobile/native/core/**'
-      - 'mobile/native/third_party/flac/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'zcore/**'
+      - 'zdsp/**'
+      - 'native/playback/**'
+      - 'third_party/native/**'
+      - 'tools/native/**'
       - 'tests/native/**'
       - '.github/workflows/core-win.yml'
 
@@ -33,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S mobile/native/core -B build
+        run: cmake -S . -B build
       - name: Build
         run: cmake --build build --config Release
       - name: Host test suite (ctest)

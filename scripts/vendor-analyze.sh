@@ -6,7 +6,7 @@
 # such as input-devices, so existence alone is not proof that it is current.
 #   scripts/vendor-analyze.sh [target]   e.g. darwin-arm64, darwin-x64, win32-x64
 #
-# One build definition: mobile/native/core/CMakeLists.txt, shared with
+# One build definition: the root CMakeLists.txt, shared with
 # build-analyze-host.sh, run-core-host-tests.sh and the Core Windows workflow.
 # One fingerprint definition too: scripts/analyze-source-hash.sh, which the
 # desktop also runs to check the binary it spawns against the tree it has.
@@ -43,7 +43,8 @@ fi
 # singz-analyze now (scripts/worktree-setup.sh no longer shares ours), and one
 # shared build dir would have two roots fighting over a CMakeCache that names
 # a source directory.
-BUILD="${TMPDIR:-/tmp}/singz-analyze-vendor-$TARGET-$(printf '%s' "$ROOT" | git hash-object --stdin | cut -c1-8)"
+CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
+BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET-$CHECKOUT_KEY"
 # The hash goes INTO the binary as well as beside it: `singz-analyze
 # build-info` then answers for itself, which a sidecar cannot do for an
 # $SINGZ_ANALYZE override or a hand-copied file. It lands in a generated TU
@@ -54,7 +55,7 @@ case "$TARGET" in
   darwin-x64) CONFIG_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=x86_64) ;;
 esac
 
-cmake -S "$ROOT/mobile/native/core" -B "$BUILD" "${CONFIG_ARGS[@]}"
+cmake -S "$ROOT" -B "$BUILD" "${CONFIG_ARGS[@]}"
 cmake --build "$BUILD" --target singz-analyze --config Release -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 mkdir -p "$OUT_DIR"

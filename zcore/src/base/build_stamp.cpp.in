@@ -1,0 +1,9 @@
+// GENERATED from build_stamp.cpp.in by CMake. Keep it in the build tree: a
+// generated stamp under zcore would be included in the fingerprint it carries.
+#include <zcore/base/build_stamp.h>
+
+namespace singz {
+
+const char* buildSourceHash() { return "@SINGZ_SOURCE_HASH@"; }
+
+}  // namespace singz

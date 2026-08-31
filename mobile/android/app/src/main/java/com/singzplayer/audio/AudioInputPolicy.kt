@@ -34,6 +34,22 @@ object AudioInputPolicy {
     }
   }
 
+  /** AudioManager is allowed to publish no rate metadata. The dormant host
+   * keeps that as unknown instead of manufacturing a 48 kHz physical claim. */
+  fun hostSampleRates(advertised: IntArray): IntArray = advertised
+    .filter { it in 8_000..384_000 }
+    .distinct()
+    .sorted()
+    .toIntArray()
+
+  inline fun publishCaptureThenBestEffortHost(
+    publishCapture: () -> Unit,
+    publishHost: () -> Unit
+  ) {
+    publishCapture()
+    runCatching(publishHost)
+  }
+
   fun transport(type: Int): String = when (type) {
     7 -> "bluetooth-sco"
     23 -> "hearing-aid"
@@ -45,6 +61,17 @@ object AudioInputPolicy {
     else -> "other"
   }
 
+  /** Typed AudioHost transport; unlike input UI copy this covers sinks too. */
+  fun hostTransport(type: Int): String = when (type) {
+    2, 15 -> "built-in" // speaker / built-in microphone
+    7, 8 -> "bluetooth"
+    23, 26, 27, 30 -> "bluetooth-low-energy"
+    21 -> "vehicle" // TYPE_BUS / automotive HAL
+    11, 12, 22 -> "usb"
+    9, 10, 29 -> "hdmi"
+    else -> "unknown"
+  }
+
   fun highLatency(type: Int): Boolean = when (type) {
     // AudioDeviceInfo's Bluetooth types. Several are normally output-only,
     // but if a vendor publishes one as an input it must still get the honest
@@ -52,6 +79,15 @@ object AudioInputPolicy {
     // label intentionally does not claim that LE Audio is ordinary SCO.
     7, 8, 21, 23, 26, 27, 30 -> true
     else -> false
+  }
+
+  /** Monitoring suitability is intentionally tri-state. Not being on the
+   * delayed-route denylist does not prove a vendor/HDMI endpoint is suitable
+   * for live sidetone. */
+  fun hostMonitoringSuitability(type: Int): String = when (type) {
+    2, 3, 4, 5, 6, 11, 12, 15, 22 -> "low-latency"
+    7, 8, 21, 23, 26, 27, 30 -> "high-latency"
+    else -> "unknown"
   }
 
   fun warning(type: Int): String? = when (type) {

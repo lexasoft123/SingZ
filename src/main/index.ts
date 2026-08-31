@@ -1,8 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type WebContents } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import type { LyricsProgress, SeparationProgress } from '../shared/types'
+import type { DesktopMonitorConfig, LyricsProgress, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
 import { preciseCapable } from './align-mms'
 import { Transcriber } from './lyrics'
@@ -37,6 +37,7 @@ import { Separator } from './separation'
 import { registerAnalyze } from './analyze'
 import { registerDesktopAudioInput } from './audio-input'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
+import { CaptureOwner } from './capture'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -60,6 +61,7 @@ if (process.env.SINGZ_USERDATA_DIR) {
 const separator = new Separator()
 const transcriber = new Transcriber()
 const modelManager = new ModelManager()
+const captureOwner = new CaptureOwner()
 
 /** Every window hears about Drive: progress while a sync runs, and the state
  *  the badges read. One helper, because three copies of this loop drifted. */
@@ -428,6 +430,100 @@ function registerIpc(): void {
     }
   })
 
+  ipcMain.handle('capture:devices', () => {
+    try {
+      return captureOwner.devices()
+    } catch (error) {
+      return { ok: false, devices: [], error: String(error) }
+    }
+  })
+  const bindNativeAudioCleanup = (sender: WebContents): void => {
+    if (!captureOwner.bindRendererCleanup(sender.id)) return
+    const rendererId = sender.id
+    const gone = (): void => captureOwner.rendererGone(rendererId)
+    sender.once('destroyed', gone)
+    // A crashed or reloaded renderer can keep the same webContents. These
+    // listeners retire native output before a replacement document inherits it.
+    sender.on('render-process-gone', gone)
+    sender.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+      if (isMainFrame) gone()
+    })
+  }
+  ipcMain.handle(
+    'capture:begin',
+    (e, config: { deviceUid?: string; inputChannel: number; ringBlocks?: number }, generation: string) => {
+      try {
+        const result = captureOwner.begin(e.sender.id, config, String(generation), (window) => {
+          if (!e.sender.isDestroyed()) e.sender.send('capture:window', window)
+        })
+        if (result.ok) bindNativeAudioCleanup(e.sender)
+        return result
+      } catch (error) {
+        return {
+          ok: false,
+          state: 'error',
+          error: String(error),
+          sampleRate: 0,
+          inputChannel: Number(config?.inputChannel) || 0,
+          deviceUid: String(config?.deviceUid ?? ''),
+          deviceLabel: '',
+          deviceChannels: 0,
+          sampleFormat: '',
+          sharingMode: '',
+          performanceMode: '',
+          timestampSource: ''
+        }
+      }
+    }
+  )
+  ipcMain.handle('capture:cancel', (e, generation: string) => {
+    try {
+      return captureOwner.cancel(e.sender.id, String(generation))
+    } catch (error) {
+      return { ok: false, error: String(error) }
+    }
+  })
+  ipcMain.handle('capture:state', () => {
+    try {
+      return captureOwner.state()
+    } catch (error) {
+      return { state: 'error', ownershipGeneration: '', error: String(error) }
+    }
+  })
+  ipcMain.handle('capture:stats', () => {
+    try {
+      return captureOwner.stats()
+    } catch {
+      return {
+        deliveredBlocks: '0', deliveredFrames: '0', overruns: '0',
+        deliveryWakeups: '0', droppedEvents: '0', overwrittenWindows: '0'
+      }
+    }
+  })
+
+  ipcMain.handle('audio-host:devices', () => captureOwner.hostDevices())
+  ipcMain.handle('audio-host:monitor-begin', (event, raw: unknown) => {
+    const result = captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
+    // A failed native begin may intentionally retain a quarantined generation
+    // for teardown retry. Binding cleanup is harmless when nothing was retained.
+    bindNativeAudioCleanup(event.sender)
+    return result
+  })
+  ipcMain.handle(
+    'audio-host:monitor-gain',
+    (event, generation: unknown, gainDb: unknown, enabled: unknown) => {
+      if (
+        typeof generation !== 'string' || typeof gainDb !== 'number' ||
+        typeof enabled !== 'boolean'
+      ) return captureOwner.setMonitorGain(event.sender.id, '', Number.NaN, false)
+      return captureOwner.setMonitorGain(event.sender.id, generation, gainDb, enabled)
+    }
+  )
+  ipcMain.handle('audio-host:monitor-status', () => captureOwner.monitorStatus())
+  ipcMain.handle('audio-host:monitor-end', (event, generation: unknown) =>
+    captureOwner.endMonitor(event.sender.id, typeof generation === 'string' ? generation : '')
+  )
+
   ipcMain.handle('stems:reveal', (_e, raw: string) => {
     const full = resolve(String(raw))
     if (isAllowed(full)) shell.showItemInFolder(full)
@@ -488,6 +584,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  captureOwner.stop()
   scheduler.stop()
   separator.cancel()
   transcriber.cancel()
@@ -495,6 +592,7 @@ app.on('before-quit', () => {
 })
 
 app.on('window-all-closed', () => {
+  captureOwner.stop()
   separator.cancel()
   transcriber.cancel()
   cancelBeatsMl()

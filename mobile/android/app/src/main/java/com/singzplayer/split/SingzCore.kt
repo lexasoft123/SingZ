@@ -1,7 +1,7 @@
 package com.singzplayer.split
 
 /**
- * The shared C++ engine core (mobile/native/core, docs/PHONE-STANDALONE.md).
+ * The shared top-level C++ zcore package (docs/PHONE-STANDALONE.md).
  * Loading is lazy and failure is a value, not a crash: an ABI the core does
  * not ship for (or a broken .so) must degrade to "splitting unavailable on
  * this phone", never take the player down with it.
@@ -39,15 +39,25 @@ object SingzCore {
   /** Analyzed live-input evidence. Raw microphone PCM never crosses JNI. */
   interface AudioInputListener {
     fun onFrame(
+      ownershipGeneration: Long,
+      clockDomainId: Long,
+      streamGeneration: Long,
       startSequence: Long,
       endSequence: Long,
+      startSourceFrame: Long,
+      endSourceFrame: Long,
       sampleHostTimeStartNs: Long,
       sampleHostTimeEndNs: Long,
       callbackHostTimeNs: Long,
+      startFlags: Int,
+      endFlags: Int,
       timestampQuality: Int,
+      discontinuityReason: Int,
+      resetCount: Long,
       sampleRate: Double,
       frequency: Double,
       clarity: Double,
+      peak: Double,
       rms: Double,
       dbfs: Double
     )
@@ -61,6 +71,21 @@ object SingzCore {
     channels: IntArray
   )
 
+  /** Java AudioManager remains the authoritative dormant AudioHost inventory. */
+  external fun replaceAudioHostDevices(
+    uids: Array<String>,
+    labels: Array<String>,
+    sampleRates: Array<IntArray>,
+    channels: IntArray,
+    inputs: BooleanArray,
+    outputs: BooleanArray,
+    transports: Array<String>,
+    monitoringSuitability: Array<String>
+  )
+
+  /** Packaging probe only; it never opens a device or acquires audio focus. */
+  external fun hasAndroidAudioHostProvider(): Boolean
+
   /**
    * [error, actualDeviceUid, sampleRate, deviceChannels, selectedChannel,
    * sampleFormat, sharingMode, performanceMode, inputPreset, timestampSource].
@@ -68,6 +93,7 @@ object SingzCore {
   external fun startAudioInput(
     deviceUid: String,
     channel: Int,
+    ownershipGeneration: Long,
     listener: AudioInputListener
   ): Array<String>
 

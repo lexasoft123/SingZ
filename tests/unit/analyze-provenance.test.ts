@@ -136,13 +136,19 @@ describe('scripts/analyze-source-hash.sh', () => {
   /** A checkout with only the files the fingerprint claims to cover. */
   function fakeCheckout(): string {
     const root = mkdtempSync(join(tmpdir(), 'singz-hash-'))
-    const core = join(root, 'mobile', 'native', 'core')
-    const third = join(root, 'mobile', 'native', 'third_party', 'flac', 'src')
-    mkdirSync(core, { recursive: true })
-    mkdirSync(third, { recursive: true })
+    const core = join(root, 'zcore')
+    const dsp = join(root, 'zdsp')
+    const third = join(root, 'third_party', 'native', 'flac', 'src')
+    const tools = join(root, 'tools', 'native')
+    const cmake = join(root, 'cmake')
+    for (const dir of [core, dsp, third, tools, cmake]) mkdirSync(dir, { recursive: true })
     mkdirSync(join(root, 'scripts'), { recursive: true })
     writeFileSync(join(core, 'melody.cpp'), '// stand-in\n')
+    writeFileSync(join(dsp, 'graph.cpp'), '// stand-in\n')
     writeFileSync(join(third, 'stream_decoder.c'), '/* stand-in */\n')
+    writeFileSync(join(tools, 'singz-analyze.cpp'), '// stand-in\n')
+    writeFileSync(join(cmake, 'SingZRealtimeTarget.cmake'), '# stand-in\n')
+    writeFileSync(join(root, 'CMakeLists.txt'), '# stand-in\n')
     for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh'])
       copyFileSync(join(ROOT, 'scripts', name), join(root, 'scripts', name))
     return root
@@ -162,7 +168,7 @@ describe('scripts/analyze-source-hash.sh', () => {
     const root = fakeCheckout()
     const before = await hashOf(root)
     expect(before).toMatch(/^[0-9a-f]{40}$/)
-    const flac = join(root, 'mobile', 'native', 'third_party', 'flac', 'src', 'stream_decoder.c')
+    const flac = join(root, 'third_party', 'native', 'flac', 'src', 'stream_decoder.c')
     writeFileSync(flac, '/* stand-in */\n/* patched upstream */\n')
     expect(await hashOf(root)).not.toBe(before)
   })
@@ -171,7 +177,7 @@ describe('scripts/analyze-source-hash.sh', () => {
     const root = fakeCheckout()
     const before = await hashOf(root)
     expect(await hashOf(root)).toBe(before)
-    writeFileSync(join(root, 'mobile', 'native', 'core', 'melody.cpp'), '// edited\n')
+    writeFileSync(join(root, 'zcore', 'melody.cpp'), '// edited\n')
     expect(await hashOf(root)).not.toBe(before)
   })
 
@@ -187,7 +193,7 @@ describe('scripts/analyze-source-hash.sh', () => {
     'FAILS rather than hash a short list when part of the tree cannot be read',
     async () => {
       const root = fakeCheckout()
-      const blocked = join(root, 'mobile', 'native', 'core', 'unreadable')
+      const blocked = join(root, 'zcore', 'unreadable')
       mkdirSync(blocked, { recursive: true })
       writeFileSync(join(blocked, 'hidden.cpp'), '// must not be silently dropped\n')
       expect(await hashOf(root)).toMatch(/^[0-9a-f]{40}$/)

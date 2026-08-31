@@ -38,6 +38,7 @@
  */
 const { execFileSync } = require('node:child_process')
 const { PKG, silenceDevice } = require('./android-lib.cjs')
+const { createPostConnectionBail } = require('./mic-android-lifecycle.cjs')
 
 const SERIAL = process.env.ANDROID_SERIAL || ''
 const ADB = process.env.ADB || `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`
@@ -54,7 +55,9 @@ let inert = 0
 // catch as well as from inside the run.
 let ws = null
 let val = null
+let cleanupVal = null
 let seamBusy = false
+let connected = false
 
 /**
  * The only way out after the inspector is attached. Process death tears the
@@ -63,17 +66,18 @@ let seamBusy = false
  * post-connection exit comes through here, including the outer catch and an
  * eval timeout, which were the two that used to bypass it.
  */
-const bail = async (m) => {
-  try {
-    for (let i = 0; seamBusy && val && i < 60; i++) {
-      if ((await val('__test.audioInput.pending === false', 3000)) === true) break
-      await sleep(250)
-    }
-    ws?.close()
-  } catch {}
-  console.error(m)
-  process.exit(1)
-}
+const bail = createPostConnectionBail({
+  isSeamBusy: () => seamBusy,
+  // This evaluator deliberately gets one last chance after a WebSocket error.
+  // If the socket is still usable, pending=false proves run() reached its
+  // finally and released capture. If it is not, the helper catches the error
+  // and still closes exactly once.
+  evaluateForCleanup: (expr, timeoutMs) => cleanupVal?.(expr, timeoutMs),
+  closeInspector: () => ws?.close(),
+  report: (message) => console.error(message),
+  exit: (code) => process.exit(code),
+  sleep
+})
 const check = (label, ok, detail = '') => {
   if (!ok) failed++
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`)
@@ -116,14 +120,58 @@ const check = (label, ok, detail = '') => {
   ws = new WebSocket(target.webSocketDebuggerUrl, { headers: { Origin: 'http://localhost' } })
   let id = 0
   const pend = new Map()
-  ws.on('message', (m) => { const j = JSON.parse(m.toString()); if (pend.has(j.id)) { pend.get(j.id)(j); pend.delete(j.id) } })
-  ws.on('error', (e) => die(`inspector error: ${e.message}`))
-  await new Promise((r) => ws.on('open', r))
-  val = async (expr, timeoutMs = 30000) => {
+  let inspectorFailure = null
+  let rejectOpen = null
+  const failInspector = (cause) => {
+    const error = cause instanceof Error ? cause : new Error(String(cause))
+    if (inspectorFailure) return
+    inspectorFailure = error
+    for (const pending of pend.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(error)
+    }
+    pend.clear()
+  }
+  ws.on('message', (m) => {
+    try {
+      const j = JSON.parse(m.toString())
+      const pending = pend.get(j.id)
+      if (!pending) return
+      pend.delete(j.id)
+      clearTimeout(pending.timer)
+      pending.resolve(j)
+    } catch (error) {
+      failInspector(new Error(`invalid inspector response: ${error.message}`))
+    }
+  })
+  ws.on('error', (error) => {
+    if (!connected) rejectOpen?.(error)
+    else failInspector(new Error(`inspector error: ${error.message}`))
+  })
+  ws.on('close', (code, reason) => {
+    const suffix = reason?.length ? `: ${reason.toString()}` : ''
+    const error = new Error(`inspector closed (${code})${suffix}`)
+    if (!connected) rejectOpen?.(error)
+    else failInspector(error)
+  })
+  await new Promise((resolve, reject) => {
+    rejectOpen = reject
+    ws.once('open', () => {
+      connected = true
+      rejectOpen = null
+      resolve()
+    })
+  })
+  const evaluate = async (expr, timeoutMs = 30000, cleanup = false) => {
+    if (!cleanup && inspectorFailure) throw inspectorFailure
+    if (ws.readyState !== WebSocket.OPEN) throw new Error('inspector is not open')
     const i = ++id
     const r = await new Promise((res, rej) => {
-      const timer = setTimeout(() => { pend.delete(i); rej(new Error(`eval timed out after ${timeoutMs}ms`)) }, timeoutMs)
-      pend.set(i, (v) => { clearTimeout(timer); res(v) })
+      const timer = setTimeout(() => {
+        pend.delete(i)
+        rej(new Error(`eval timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+      pend.set(i, { resolve: res, reject: rej, timer })
       ws.send(JSON.stringify({
         id: i,
         method: 'Runtime.evaluate',
@@ -132,12 +180,21 @@ const check = (label, ok, detail = '') => {
         // see `await work()` below, which polls instead. An eval that leaves
         // work in flight has been measured killing the app on disconnect.
         params: { expression: expr, returnByValue: true }
-      }))
+      }), (error) => {
+        if (!error || !pend.has(i)) return
+        pend.delete(i)
+        clearTimeout(timer)
+        rej(error)
+      })
     })
-    if (r.result?.exceptionDetails) die(`eval threw: ${JSON.stringify(r.result.exceptionDetails)}`)
+    if (r.result?.exceptionDetails)
+      throw new Error(`eval threw: ${JSON.stringify(r.result.exceptionDetails)}`)
     return r.result?.result?.value
   }
-  if (await val('1+1', 5000) !== 2) await bail('the Metro target does not answer — stale listing?')
+  val = (expr, timeoutMs) => evaluate(expr, timeoutMs, false)
+  cleanupVal = (expr, timeoutMs) => evaluate(expr, timeoutMs, true)
+  if (await val('1+1', 5000) !== 2)
+    throw new Error('the Metro target does not answer — stale listing?')
 
   /**
    * Kick the seam off and poll for its answer. Never returns while work is
@@ -147,20 +204,21 @@ const check = (label, ok, detail = '') => {
    */
   const work = async (expr, budgetMs) => {
     seamBusy = true
-    if ((await val(expr)) !== true) await bail(`seam call did not start (already busy?): ${expr}`)
+    if ((await val(expr)) !== true)
+      throw new Error(`seam call did not start (already busy?): ${expr}`)
     for (let waited = 0; waited <= budgetMs + 15000; waited += 250) {
       await sleep(250)
       if ((await val('__test.audioInput.pending === false && __test.audioInput.result !== null')) === true) {
         seamBusy = false
         const out = JSON.parse(await val('JSON.stringify(__test.audioInput.result)'))
-        if (out && out.error) await bail(`seam reported: ${out.error}`)
+        if (out && out.error) throw new Error(`seam reported: ${out.error}`)
         return out
       }
     }
-    await bail(`seam never settled: ${expr}`)
+    throw new Error(`seam never settled: ${expr}`)
   }
   if (await val("typeof globalThis.__test?.audioInput") !== 'object')
-    await bail('__test.audioInput missing — is this a dev build of THIS tree?')
+    throw new Error('__test.audioInput missing — is this a dev build of THIS tree?')
 
   // ---- 1. inventory -------------------------------------------------------
   const inputs = await work('__test.audioInput.listInputs()', 5000)
@@ -233,8 +291,13 @@ const check = (label, ok, detail = '') => {
     second.negotiated.sampleFormat === n.sampleFormat,
     `${second.negotiated.sampleFormat} ch ${second.negotiated.deviceChannels}`)
 
+  connected = false
   ws.close()
   const caveat = inert ? ` — ${inert} assertion${inert > 1 ? 's' : ''} inert (see notes)` : ''
   console.log(failed === 0 ? `\nMIC ANDROID: PASS${caveat}` : `\nMIC ANDROID: ${failed} FAILED${caveat}`)
   process.exit(failed === 0 ? 0 : 1)
-})().catch((e) => bail(`driver error: ${e.stack || e.message}`))
+})().catch(async (e) => {
+  const message = `driver error: ${e.stack || e.message}`
+  if (connected) await bail(message)
+  else die(message)
+})

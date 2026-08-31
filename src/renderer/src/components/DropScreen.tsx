@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Modal } from '@singz/ui'
 import type { ProjectListItem, SyncStatus } from '../../../shared/types'
-import gdriveIcon from '../assets/gdrive.png'
 import { TRACK_META } from '../model'
 
 const BAR_COLORS = [
@@ -44,6 +43,8 @@ function folderCloud(root: string): string {
 }
 
 interface Props {
+  /** Eager shell asset: recoverable route copies must not share a lazy child. */
+  gdriveIcon: string
   loading: boolean
   songName?: string
   /** Song still open behind this page (Catalog view) — softens the hero copy. */
@@ -59,6 +60,7 @@ interface Props {
 }
 
 export default function DropScreen({
+  gdriveIcon,
   loading,
   songName,
   openName,

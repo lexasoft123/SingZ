@@ -166,6 +166,83 @@ body::after {
   gap: 10px;
 }
 
+.persistent-monitor {
+  display: inline-flex;
+  align-items: stretch;
+  min-height: 28px;
+  border: 1px solid rgba(255, 160, 40, 0.5);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 160, 40, 0.1);
+  box-shadow: 0 0 18px rgba(255, 160, 40, 0.08);
+}
+
+.persistent-monitor button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.persistent-monitor button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.persistent-monitor-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px 4px 10px;
+}
+
+.persistent-monitor-status:hover,
+.persistent-monitor-stop:hover:not(:disabled) {
+  background: rgba(255, 160, 40, 0.12);
+}
+
+.persistent-monitor-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 160, 40, 0.13);
+}
+
+.persistent-monitor.active .persistent-monitor-dot {
+  animation: monitor-live-pulse 1.8s ease-in-out infinite;
+}
+
+.persistent-monitor.error,
+.persistent-monitor.route-unconfirmed {
+  border-color: rgba(239, 105, 90, 0.65);
+}
+
+.persistent-monitor.error .persistent-monitor-dot,
+.persistent-monitor.route-unconfirmed .persistent-monitor-dot {
+  background: #ef695a;
+}
+
+.persistent-monitor .persistent-monitor-stop {
+  padding: 4px 10px 4px 9px;
+  border-left: 1px solid rgba(255, 160, 40, 0.28);
+  color: var(--accent);
+}
+
+.persistent-monitor .persistent-monitor-stop:disabled {
+  cursor: wait;
+  color: var(--faint);
+}
+
+@keyframes monitor-live-pulse {
+  50% { opacity: 0.55; box-shadow: 0 0 0 5px rgba(255, 160, 40, 0.06); }
+}
+
 .chip-status {
   display: inline-flex;
   align-items: center;
@@ -1688,8 +1765,8 @@ button.chip-status:hover {
 /* ---------- settings ---------- */
 
 .modal-card.settings-card {
-  width: min(560px, calc(100vw - 60px));
-  max-height: calc(100vh - 120px);
+  width: min(960px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
 }
@@ -1785,6 +1862,31 @@ button.chip-status:hover {
 
 .settings-hint.warn {
   color: var(--danger);
+}
+
+.output-route-recovery {
+  margin-top: 9px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger) 52%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 7%, var(--panel-deep));
+}
+
+.output-route-recovery .settings-hint {
+  margin: 0;
+}
+
+.output-route-recovery-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.output-route-recovery-action span {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .mic-input-strip {
@@ -1905,10 +2007,449 @@ button.chip-status:hover {
   color: var(--danger) !important;
 }
 
+.monitor-strip {
+  margin-top: 14px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--panel-deep) 88%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+
+.monitor-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.monitor-heading h3 {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.monitor-heading div > span {
+  display: block;
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.monitor-experimental {
+  flex: none;
+  padding: 4px 7px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 999px;
+  font: 700 8px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.monitor-field .settings-label {
+  margin-top: 13px;
+}
+
+.monitor-route-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.monitor-route-grid > div,
+.monitor-route-grid > label {
+  min-width: 0;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.monitor-route-grid span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.monitor-route-grid strong {
+  color: var(--accent);
+  font: 700 11px/28px var(--font-mono);
+}
+
+.monitor-route-grid .settings-select.channel-select {
+  width: 100%;
+  padding-block: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.monitor-routing-help {
+  margin: 10px 0 0 !important;
+  padding: 8px 10px;
+  color: var(--dim) !important;
+  background: color-mix(in srgb, var(--accent-soft) 52%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 64%, var(--line));
+  border-radius: 0 5px 5px 0;
+  font-size: 10px !important;
+  line-height: 1.45 !important;
+}
+
+/* The graph is a studio patch-bay, not a generic flowchart: real modules,
+   physical lane labels, and scalar native telemetry in signal order. */
+.dsp-graph {
+  margin-top: 12px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--panel) 58%, transparent), transparent 52px),
+    color-mix(in srgb, var(--bg) 74%, var(--panel-deep));
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+}
+
+.dsp-graph-header {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.dsp-graph-header > div:first-child > span {
+  display: block;
+  color: var(--faint);
+  font: 7px/1 var(--font-mono);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.dsp-graph-header h4 {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.dsp-graph-format {
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  align-items: center;
+  gap: 4px;
+}
+
+.dsp-graph-format span {
+  padding: 3px 5px;
+  color: var(--faint);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: 7px/1 var(--font-mono);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.dsp-graph-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--faint);
+  font: 8px/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.dsp-graph-state i {
+  width: 6px;
+  height: 6px;
+  background: var(--faint);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--faint) 14%, transparent);
+}
+
+.dsp-graph--ready .dsp-graph-state,
+.dsp-graph--running .dsp-graph-state {
+  color: var(--accent);
+}
+
+.dsp-graph--ready .dsp-graph-state i,
+.dsp-graph--running .dsp-graph-state i {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 17%, transparent);
+}
+
+.dsp-graph--fault .dsp-graph-state {
+  color: var(--danger);
+}
+
+.dsp-graph--fault .dsp-graph-state i {
+  background: var(--danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+.dsp-graph-viewport {
+  overflow-x: auto;
+  padding: 12px;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.dsp-graph-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.dsp-graph-flow {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(84px, 1fr));
+  align-items: stretch;
+  gap: 10px;
+  min-width: 648px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dsp-graph-node {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 108px;
+  flex-direction: column;
+  padding: 10px 8px 9px;
+  overflow: visible;
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.dsp-graph-node:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  left: calc(100% + 1px);
+  width: 10px;
+  height: 1px;
+  background: var(--line-strong);
+  box-shadow: 7px 0 0 -5px var(--faint);
+}
+
+.dsp-graph--ready .dsp-graph-node.configured {
+  border-color: color-mix(in srgb, var(--line-strong) 76%, var(--accent));
+}
+
+.dsp-graph-node.live {
+  background: color-mix(in srgb, var(--panel) 90%, var(--accent-soft));
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+}
+
+.dsp-graph-node.live:not(:last-child)::after {
+  background: var(--accent);
+  box-shadow: 7px 0 0 -5px var(--accent), 0 0 7px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.dsp-graph-node-kind {
+  color: var(--faint);
+  font: 7px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.dsp-graph-node > strong {
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsp-graph-node.live > strong,
+.dsp-graph-node.live .dsp-graph-node-value {
+  color: var(--accent);
+}
+
+.dsp-graph-node-value {
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--text);
+  font: 700 10px/1.15 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsp-graph-node small {
+  display: -webkit-box;
+  margin-top: auto;
+  padding-top: 7px;
+  overflow: hidden;
+  color: var(--faint);
+  font: 7px/1.3 var(--font-mono);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.dsp-graph-node-meter {
+  position: relative;
+  height: 4px;
+  margin-top: auto;
+  background: var(--line-strong);
+  border-radius: 99px;
+}
+
+.dsp-graph-node-meter > span {
+  display: block;
+  height: 100%;
+  max-width: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 38%, transparent);
+  transition: width 80ms linear;
+}
+
+.dsp-graph-node-meter output {
+  position: absolute;
+  top: 7px;
+  left: 0;
+  color: var(--faint);
+  font: 7px/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.monitor-gain {
+  display: grid;
+  grid-template-columns: auto minmax(100px, 1fr) 56px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.monitor-gain input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.monitor-gain output {
+  color: var(--text);
+  font: 10px/1 var(--font-mono);
+  text-align: right;
+}
+
+.monitor-route-status {
+  margin-top: 10px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.monitor-route-status.warn,
+.monitor-state.error {
+  color: var(--danger);
+}
+
+.monitor-headphones-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.monitor-headphones-check input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
+
+.monitor-headphones-check:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+.monitor-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.monitor-actions .pill {
+  flex: none;
+}
+
+.monitor-actions .pill.primary:disabled {
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  color: var(--faint);
+  box-shadow: none;
+  opacity: 1;
+}
+
+.monitor-state {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.monitor-state.active {
+  color: var(--accent);
+}
+
+.monitor-diagnostics {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.monitor-diagnostic-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--faint);
+  font: 8px/1.45 var(--font-mono);
+  text-transform: uppercase;
+}
+
+.monitor-diagnostic-row + .monitor-diagnostic-row {
+  margin-top: 5px;
+}
+
+.monitor-diagnostic-row strong {
+  color: var(--dim);
+  font-weight: 500;
+  text-transform: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .persistent-monitor.active .persistent-monitor-dot {
+    animation: none;
+  }
+
   .mic-meter-fill,
-  .mic-meter-peak {
+  .mic-meter-peak,
+  .dsp-graph-node-meter > span {
     transition: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .dsp-graph-flow {
+    min-width: 648px;
   }
 }
 
@@ -2403,7 +2944,8 @@ body.win .lyr-line.count-sec::before {
 body.modal-open .dot.warn,
 body.modal-open .sep-pill,
 body.modal-open .eq span,
-body.modal-open .lyr-line::before {
+body.modal-open .lyr-line::before,
+body.modal-open .persistent-monitor.active .persistent-monitor-dot {
   animation-play-state: paused;
 }
 
@@ -3073,6 +3615,17 @@ body.modal-open .lyr-line::before {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
+.vt-audio-lease {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
 .vt-range-label {
   display: flex;
   align-items: baseline;
@@ -3312,6 +3865,39 @@ body.modal-open .lyr-line::before {
 
 .vt-empty p {
   color: var(--dim);
+}
+
+.vt-cleanup-gate {
+  position: absolute;
+  z-index: 80;
+  inset: 48px 0 0;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+/* A full-screen blur re-rasters every damaged pixel on weak Windows iGPUs.
+   The cleanup gate is safety UI, so use an opaque, equally legible scrim. */
+body.win .vt-cleanup-gate {
+  background: var(--bg);
+  backdrop-filter: none;
+}
+
+.vt-cleanup-card {
+  width: min(560px, 100%);
+  padding: 28px;
+  text-align: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
+}
+
+.vt-cleanup-card p:not(.vt-eyebrow) {
+  color: var(--dim);
+  line-height: 1.55;
 }
 
 @media (max-width: 900px) {

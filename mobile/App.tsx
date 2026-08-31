@@ -6,7 +6,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { MultitrackEngine } from './src/engine'
-import { logStartup } from './src/log'
+import { log, logStartup } from './src/log'
 import type { LoadedProject } from './src/projects'
 import { replaySplitTrail } from './src/split/service'
 import RootNavigator from './src/ui/RootNavigator'
@@ -17,6 +17,7 @@ import { KEY_DETECT_VERSION } from './src/gen/analysis-lib'
 import { LoadedSongSequence } from './src/training/runtime'
 import { TEST } from './src/ui/testhooks'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from './src/latency'
+import { iosNativePlayback } from './src/playback/native'
 
 const engine = new MultitrackEngine()
 const Tabs = createBottomTabNavigator<RootTabParamList>()
@@ -54,7 +55,7 @@ if (TEST) {
     hooks.probeOut = null
     ;(NativeModules.SingzSplit as { ortProbe(p: string): Promise<string> })
       .ortProbe(path)
-      .then((r) => {
+      .then(r => {
         hooks.probeOut = r
         hooks.probeDone = true
       })
@@ -74,21 +75,17 @@ if (TEST) {
     resumeChunk = 0
   ): Promise<string> => {
     const { DeviceEventEmitter } = require('react-native') as {
-      DeviceEventEmitter: { addListener: (e: string, cb: (v: unknown) => void) => { remove(): void } }
+      DeviceEventEmitter: {
+        addListener: (e: string, cb: (v: unknown) => void) => { remove(): void }
+      }
     }
     hooks.splitProgress = []
-    const sub = DeviceEventEmitter.addListener('singzSplitProgress', (v) => {
+    const sub = DeviceEventEmitter.addListener('singzSplitProgress', v => {
       ;(hooks.splitProgress as unknown[]).push(v)
     })
     return (
       NativeModules.SingzSplit as {
-        runSplitDirect(
-          m: string,
-          x: string,
-          j: string,
-          r: number,
-          c: number
-        ): Promise<string>
+        runSplitDirect(m: string, x: string, j: string, r: number, c: number): Promise<string>
       }
     )
       .runSplitDirect(modelPath, mixPath, jobDir, srcRate, resumeChunk)
@@ -107,7 +104,7 @@ if (TEST) {
     watchdogCapMs = 0
   ): boolean => {
     hooks.splitEvents = []
-    void import('./src/split/service').then((svc) => {
+    void import('./src/split/service').then(svc => {
       // A leftover subscription from the previous kick would double every
       // event into the fresh array.
       ;(hooks.unsubscribeSplit as (() => void) | undefined)?.()
@@ -115,15 +112,21 @@ if (TEST) {
         ;(hooks.splitEvents as unknown[]).push(v)
       }
       hooks.unsubscribeSplit = svc.subscribeSplit(push, push)
-      void svc.startSplit({ srcPath, modelPath, projectDir, resume, watchdogCapMs })
+      void svc.startSplit({
+        srcPath,
+        modelPath,
+        projectDir,
+        resume,
+        watchdogCapMs
+      })
     })
     return true
   }
   hooks.splitServiceStatus = (): boolean => {
     hooks.statusDone = false
     hooks.statusOut = null
-    void import('./src/split/service').then((svc) =>
-      svc.splitStatus().then((s) => {
+    void import('./src/split/service').then(svc =>
+      svc.splitStatus().then(s => {
         hooks.statusOut = s
         hooks.statusDone = true
       })
@@ -131,15 +134,13 @@ if (TEST) {
     return true
   }
   hooks.cancelSplitService = (): boolean => {
-    void import('./src/split/service').then((svc) => svc.cancelSplit())
+    void import('./src/split/service').then(svc => svc.cancelSplit())
     return true
   }
   // Pure module rebind, no new JS listener — drives the service-side
   // register dedupe (a re-mounting UI does exactly this).
   hooks.attachSplitEvents = (): boolean => {
-    void (
-      NativeModules.SingzSplit as { attachSplitEvents(): Promise<boolean> }
-    ).attachSplitEvents()
+    void (NativeModules.SingzSplit as { attachSplitEvents(): Promise<boolean> }).attachSplitEvents()
     return true
   }
   // Model download (P2): url override so the driver can point at a local
@@ -148,13 +149,13 @@ if (TEST) {
     hooks.dlDone = false
     hooks.dlOut = null
     hooks.dlProgress = []
-    void import('./src/analysis/models').then((m) =>
+    void import('./src/analysis/models').then(m =>
       m
         .ensureModel({ file, bytes, sha256, url }, (got, total) => {
           ;(hooks.dlProgress as unknown[]).push([got, total])
         })
         .then(
-          (p) => {
+          p => {
             hooks.dlOut = p
             hooks.dlDone = true
           },
@@ -167,11 +168,11 @@ if (TEST) {
     return true
   }
   hooks.cancelModelDownload = (file: string): boolean => {
-    void import('./src/analysis/models').then((m) => m.cancelModelDownload(file))
+    void import('./src/analysis/models').then(m => m.cancelModelDownload(file))
     return true
   }
   hooks.clearSplitJob = (): boolean => {
-    void import('./src/split/service').then((svc) => svc.clearSplitJob())
+    void import('./src/split/service').then(svc => svc.clearSplitJob())
     return true
   }
   hooks.analysisSpike = (minutes?: number): boolean => {
@@ -179,7 +180,7 @@ if (TEST) {
     hooks.spikeResult = null
     setTimeout(() => {
       void import('./src/analysis/spike')
-        .then((m) => {
+        .then(m => {
           hooks.spikeResult = m.runAnalysisSpike(minutes)
           hooks.spikeDone = true
         })
@@ -197,7 +198,7 @@ if (TEST) {
     hooks.echoDone = false
     hooks.echoResult = null
     void import('./src/analysis/deps')
-      .then(async (m) => {
+      .then(async m => {
         const t0 = Date.now()
         const st = await m.loadMono44k(dir, rel)
         let e = 0
@@ -207,10 +208,22 @@ if (TEST) {
           e += v * v
           if (Math.abs(v) > peak) peak = Math.abs(v)
         }
-        return { len: st.data.length, sr: st.sampleRate, rms: Math.sqrt(e / Math.max(1, st.data.length)), peak, ms: Date.now() - t0 }
+        return {
+          len: st.data.length,
+          sr: st.sampleRate,
+          rms: Math.sqrt(e / Math.max(1, st.data.length)),
+          peak,
+          ms: Date.now() - t0
+        }
       })
-      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
-      .catch((e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true })
+      .then(r => {
+        hooks.echoResult = r
+        hooks.echoDone = true
+      })
+      .catch((e: unknown) => {
+        hooks.echoResult = { error: String(e) }
+        hooks.echoDone = true
+      })
     return true
   }
   // Phase 4c: the core's KEY detector on this device, over a project's own
@@ -222,7 +235,7 @@ if (TEST) {
     hooks.echoResult = null
     void Promise.all([import('./src/analysis/deps'), import('./src/analysis/host'), import('./src/analysis/native')])
       .then(async ([d, h, n]) => {
-        const inst = stems.filter((s) => s !== 'bass').map((s) => `stems/${s}.wav`)
+        const inst = stems.filter(s => s !== 'bass').map(s => `stems/${s}.wav`)
         const bass = stems.includes('bass') ? 'stems/bass.wav' : undefined
         const t0 = Date.now()
         const nat = await n.estimateKeyNative(dir, inst, bass)
@@ -246,8 +259,17 @@ if (TEST) {
           stems: inst.length + (bass ? 1 : 0)
         }
       })
-      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
-      .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
+      .then(r => {
+        hooks.echoResult = r
+        hooks.echoDone = true
+      })
+      .catch((e: unknown) => {
+        hooks.echoResult = {
+          error: String(e),
+          stack: e instanceof Error ? e.stack : undefined
+        }
+        hooks.echoDone = true
+      })
     return true
   }
   // Phase 4d: the core's BEAT detector on this device, over a project's own
@@ -262,12 +284,12 @@ if (TEST) {
   hooks.beatsParity = (dir: string, stems: string[], ext = 'wav', mlFrom = '', useMl = true): boolean => {
     hooks.echoDone = false
     hooks.echoResult = null
-    void import('./src/latency').then((l) => l.setStoredText('singz.beatsParity.done', ''))
+    void import('./src/latency').then(l => l.setStoredText('singz.beatsParity.done', ''))
     void Promise.all([import('./src/analysis/deps'), import('./src/analysis/host'), import('./src/analysis/native')])
       .then(async ([d, h, n]) => {
         const deps = d.realAnalysisDeps()
         const rel = (id: string) => `stems/${id}.${ext}`
-        const inst = stems.filter((x) => x !== 'drums' && x !== 'bass' && x !== 'vocals')
+        const inst = stems.filter(x => x !== 'drums' && x !== 'bass' && x !== 'vocals')
         const args: Parameters<ReturnType<typeof d.realAnalysisHost>['detectBeats']>[1] & {
           lineStarts: number[]
           words: { s: number; e: number }[]
@@ -295,13 +317,16 @@ if (TEST) {
           const raw = JSON.parse(await deps.readText(dir, 'lyrics.json')) as {
             lines?: { start: number; words?: { s: number; e: number }[] }[]
           }
-          lines = (raw.lines ?? []).map((l) => ({ start: l.start, words: l.words ?? [] }))
+          lines = (raw.lines ?? []).map(l => ({
+            start: l.start,
+            words: l.words ?? []
+          }))
         } catch {
           lines = [] // no lyrics for this project — reported, not fatal
         }
         const aux = {
-          lineStarts: lines.map((l) => l.words[0]?.s ?? l.start).filter((t) => Number.isFinite(t)),
-          words: lines.flatMap((l) => l.words.map((w) => ({ s: w.s, e: w.e })))
+          lineStarts: lines.map(l => l.words[0]?.s ?? l.start).filter(t => Number.isFinite(t)),
+          words: lines.flatMap(l => l.words.map(w => ({ s: w.s, e: w.e })))
         }
         // `mlFrom` names the project to compute the lattice FROM, which for a
         // FLAC project is its WAV twin: the core cannot read FLAC, so a flac
@@ -311,8 +336,8 @@ if (TEST) {
         // copied desktop project) is not what this hook is measuring.
         const mlDir = mlFrom || dir
         const mixRels = ['drums', 'bass', 'vocals', 'guitar', 'piano', 'other']
-          .filter((id) => stems.includes(id))
-          .map((id) => `stems/${id}.wav`)
+          .filter(id => stems.includes(id))
+          .map(id => `stems/${id}.wav`)
         const host = d.realAnalysisHost()
         // `useMl` false is for a CORPUS run: the host CLI it is compared against
         // would need the identical lattice to answer the same question, and
@@ -386,25 +411,62 @@ if (TEST) {
           same: ext === 'wav' ? alike(nat, ts) : true,
           viaSame: alike(via, ts),
           ext,
-          grid: via && { beats: via.beats.length, bpm: via.bpm, bpb: via.beatsPerBar, downbeat: via.downbeat, bars: via.downbeats?.length ?? null },
+          grid: via && {
+            beats: via.beats.length,
+            bpm: via.bpm,
+            bpb: via.beatsPerBar,
+            downbeat: via.downbeat,
+            bars: via.downbeats?.length ?? null
+          },
           // The whole grid, so a driver can compare two RUNS of this hook (a
           // wav project against its own lossless FLAC copy) value for value
           // rather than by these counts.
-          digest: via ? `${arr(via.beats)}|${via.bpm}|${via.beatsPerBar}|${via.downbeat}|${arr(via.downbeats)}|${arr(via.suspectAt)}` : null,
+          digest: via
+            ? `${arr(via.beats)}|${via.bpm}|${via.beatsPerBar}|${via.downbeat}|${arr(via.downbeats)}|${arr(
+                via.suspectAt
+              )}`
+            : null,
           // Counts and the first few values: the driver compares `same`, which
           // was computed over EVERY value above — these are for the human
           // reading a failure, not the gate.
-          native: nat && { beats: nat.beats.length, bpm: nat.bpm, bpb: nat.beatsPerBar, downbeat: nat.downbeat, bars: nat.downbeats?.length ?? null, first3: nat.beats.slice(0, 3) },
-          ts: ts && { beats: ts.beats.length, bpm: ts.bpm, bpb: ts.beatsPerBar, downbeat: ts.downbeat, bars: ts.downbeats?.length ?? null, first3: ts.beats.slice(0, 3) },
+          native: nat && {
+            beats: nat.beats.length,
+            bpm: nat.bpm,
+            bpb: nat.beatsPerBar,
+            downbeat: nat.downbeat,
+            bars: nat.downbeats?.length ?? null,
+            first3: nat.beats.slice(0, 3)
+          },
+          ts: ts && {
+            beats: ts.beats.length,
+            bpm: ts.bpm,
+            bpb: ts.beatsPerBar,
+            downbeat: ts.downbeat,
+            bars: ts.downbeats?.length ?? null,
+            first3: ts.beats.slice(0, 3)
+          },
           ms: { native: nativeMs, ts: tsMs, via: viaMs },
           stems: stems.length,
           // What the aux ACTUALLY carried, so a driver can refuse to call a
           // run a pass when the two hardest arguments crossed empty.
-          crossed: { words: args.words.length, lineStarts: args.lineStarts.length, mlBeats: ml ? ml.beats.length : 0 }
+          crossed: {
+            words: args.words.length,
+            lineStarts: args.lineStarts.length,
+            mlBeats: ml ? ml.beats.length : 0
+          }
         }
       })
-      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
-      .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
+      .then(r => {
+        hooks.echoResult = r
+        hooks.echoDone = true
+      })
+      .catch((e: unknown) => {
+        hooks.echoResult = {
+          error: String(e),
+          stack: e instanceof Error ? e.stack : undefined
+        }
+        hooks.echoDone = true
+      })
       // A CRUMB in the prefs, not just the in-memory flag. The Android driver
       // cannot poll this over CDP: the worklet leg decodes six stems, and
       // evaluating JS while a decodeAudioData is in flight segfaults the
@@ -412,7 +474,7 @@ if (TEST) {
       // OOM). It watches this pref with `adb run-as` instead and evaluates
       // exactly once, after the decodes are over.
       .finally(() => {
-        void import('./src/latency').then((l) => l.setStoredText('singz.beatsParity.done', String(Date.now())))
+        void import('./src/latency').then(l => l.setStoredText('singz.beatsParity.done', String(Date.now())))
       })
     return true
   }
@@ -424,13 +486,24 @@ if (TEST) {
     hooks.echoDone = false
     hooks.echoResult = null
     const t0 = Date.now()
-    void (NativeModules.SingzSplit as {
-      mlGridFromStems(a: string[], b: string, c: string): Promise<Record<string, unknown>>
-    })
+    void (
+      NativeModules.SingzSplit as {
+        mlGridFromStems(a: string[], b: string, c: string): Promise<Record<string, unknown>>
+      }
+    )
       .mlGridFromStems(stemPaths, modelsDir, dumpDir)
       .then(
-        (g) => { hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }; hooks.echoDone = true },
-        (e: unknown) => { hooks.echoResult = { ok: false, error: String((e as Error)?.message ?? e) }; hooks.echoDone = true }
+        g => {
+          hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }
+          hooks.echoDone = true
+        },
+        (e: unknown) => {
+          hooks.echoResult = {
+            ok: false,
+            error: String((e as Error)?.message ?? e)
+          }
+          hooks.echoDone = true
+        }
       )
     return true
   }
@@ -440,10 +513,16 @@ if (TEST) {
   hooks.logEntries = (): boolean => {
     hooks.echoDone = false
     hooks.echoResult = null
-    void import('./src/log').then((m) =>
+    void import('./src/log').then(m =>
       m.logEntries().then(
-        (r) => { hooks.echoResult = r; hooks.echoDone = true },
-        (e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true }
+        r => {
+          hooks.echoResult = r
+          hooks.echoDone = true
+        },
+        (e: unknown) => {
+          hooks.echoResult = { error: String(e) }
+          hooks.echoDone = true
+        }
       )
     )
     return true
@@ -453,10 +532,16 @@ if (TEST) {
   hooks.beatModelsStatus = (): boolean => {
     hooks.echoDone = false
     hooks.echoResult = null
-    void import('./src/analysis/models').then((m) =>
+    void import('./src/analysis/models').then(m =>
       m.beatModelsStatus().then(
-        (r) => { hooks.echoResult = r; hooks.echoDone = true },
-        (e: unknown) => { hooks.echoResult = { error: String(e) }; hooks.echoDone = true }
+        r => {
+          hooks.echoResult = r
+          hooks.echoDone = true
+        },
+        (e: unknown) => {
+          hooks.echoResult = { error: String(e) }
+          hooks.echoDone = true
+        }
       )
     )
     return true
@@ -476,13 +561,24 @@ if (TEST) {
     // red-boxing the app before this hook does anything. Android never showed
     // it: the throw sits behind a Platform.OS === 'ios' check.
     const t0 = Date.now()
-    void (NativeModules.SingzSplit as {
-      mlGrid(a: string, b: string, c: string): Promise<Record<string, unknown>>
-    })
+    void (
+      NativeModules.SingzSplit as {
+        mlGrid(a: string, b: string, c: string): Promise<Record<string, unknown>>
+      }
+    )
       .mlGrid(wavPath, modelsDir, dumpDir)
       .then(
-        (g) => { hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }; hooks.echoDone = true },
-        (e: unknown) => { hooks.echoResult = { ok: false, error: String((e as Error)?.message ?? e) }; hooks.echoDone = true }
+        g => {
+          hooks.echoResult = { ok: true, wallMs: Date.now() - t0, grid: g }
+          hooks.echoDone = true
+        },
+        (e: unknown) => {
+          hooks.echoResult = {
+            ok: false,
+            error: String((e as Error)?.message ?? e)
+          }
+          hooks.echoDone = true
+        }
       )
     return true
   }
@@ -521,7 +617,10 @@ if (TEST) {
         }
         return {
           frames: { native: nat.f0.length, ts: ts.f0.length },
-          voiced: { native: Array.from(nat.f0).filter((v) => v > 0).length, ts: Array.from(ts.f0).filter((v) => v > 0).length },
+          voiced: {
+            native: Array.from(nat.f0).filter(v => v > 0).length,
+            ts: Array.from(ts.f0).filter(v => v > 0).length
+          },
           hopSec: { native: nat.hopSec, ts: ts.hopSec },
           detVersion: nat.detVersion,
           differing,
@@ -530,8 +629,17 @@ if (TEST) {
           ms: { native: nativeMs, ts: tsMs }
         }
       })
-      .then((r) => { hooks.echoResult = r; hooks.echoDone = true })
-      .catch((e: unknown) => { hooks.echoResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }; hooks.echoDone = true })
+      .then(r => {
+        hooks.echoResult = r
+        hooks.echoDone = true
+      })
+      .catch((e: unknown) => {
+        hooks.echoResult = {
+          error: String(e),
+          stack: e instanceof Error ? e.stack : undefined
+        }
+        hooks.echoDone = true
+      })
     return true
   }
   // Phase 4: the same spike through the analysis host (the worklet runtime).
@@ -541,13 +649,16 @@ if (TEST) {
     hooks.hostDone = false
     hooks.hostResult = null
     void import('./src/analysis/spike')
-      .then((m) => m.runHostSpike(minutes))
-      .then((r) => {
+      .then(m => m.runHostSpike(minutes))
+      .then(r => {
         hooks.hostResult = r
         hooks.hostDone = true
       })
       .catch((e: unknown) => {
-        hooks.hostResult = { error: String(e), stack: e instanceof Error ? e.stack : undefined }
+        hooks.hostResult = {
+          error: String(e),
+          stack: e instanceof Error ? e.stack : undefined
+        }
         hooks.hostDone = true
       })
     return true
@@ -562,28 +673,40 @@ function SongsTabScene(props: Omit<React.ComponentProps<typeof RootNavigator>, '
   return <RootNavigator {...props} active={useIsFocused()} />
 }
 
-function TrainingTabScene(props: Omit<React.ComponentProps<typeof TrainingScreen>, 'active'>): React.JSX.Element {
-  return <TrainingScreen {...props} active={useIsFocused()} />
+function TrainingTabScene(
+  props: Omit<React.ComponentProps<typeof TrainingScreen>, 'active'> & {
+    ownershipReady: boolean
+  }
+): React.JSX.Element {
+  const { ownershipReady, ...screenProps } = props
+  return <TrainingScreen {...screenProps} active={useIsFocused() && ownershipReady} />
 }
 
 export default function App(): React.JSX.Element {
   const [tab, setTab] = useState<RootTab>('songs')
+  const [trainingOwnershipReady, setTrainingOwnershipReady] = useState(false)
   const tabRef = useRef<RootTab>(tab)
   tabRef.current = tab
   const navigationRef = useNavigationContainerRef<RootTabParamList>()
   const [hasProject, setHasProject] = useState(false)
   const [songFacts, setSongFacts] = useState<MobileSongTrainingFacts | null>(null)
-  const [routeLatency, setRouteLatency] = useState<{ route: RouteLatency; trimMs: number } | null>(null)
+  const [routeLatency, setRouteLatency] = useState<{
+    route: RouteLatency
+    trimMs: number
+  } | null>(null)
   const loadSequence = useRef(new LoadedSongSequence()).current
 
-  const applyRouteTrim = useCallback((ms: number) => {
-    const current = routeLatency
-    if (!current) return
-    const trimMs = Math.max(-2000, Math.min(2000, Math.round(ms)))
-    setRouteLatency({ route: current.route, trimMs })
-    void setTrimMs(current.route.key, trimMs).catch(() => undefined)
-    engine.setDisplayLatency(current.route.autoSec + trimMs / 1000)
-  }, [routeLatency])
+  const applyRouteTrim = useCallback(
+    (ms: number) => {
+      const current = routeLatency
+      if (!current) return
+      const trimMs = Math.max(-2000, Math.min(2000, Math.round(ms)))
+      setRouteLatency({ route: current.route, trimMs })
+      void setTrimMs(current.route.key, trimMs).catch(() => undefined)
+      engine.setDisplayLatency(current.route.autoSec + trimMs / 1000)
+    },
+    [routeLatency]
+  )
 
   useEffect(() => {
     if (TEST) TEST.screen = activeMobileScreen(tab, hasProject)
@@ -595,15 +718,23 @@ export default function App(): React.JSX.Element {
     // If the last split was killed, its native trail outlived the process —
     // put it in the log where the singer (and a bug report) can see it.
     void replaySplitTrail()
-    AudioManager.setAudioSessionOptions({ iosCategory: 'playback', iosMode: 'default' })
+    AudioManager.setAudioSessionOptions({
+      iosCategory: 'playback',
+      iosMode: 'default'
+    })
     AudioManager.observeAudioInterruptions(true)
     void AudioManager.setAudioSessionActivity(true)
-    const appState = AppState.addEventListener('change', (next) => {
-      if (next === 'background') void engine.suspendForBackground()
-      else if (next === 'active') engine.allowForegroundAudio()
+    const appState = AppState.addEventListener('change', next => {
+      if (next === 'background') {
+        void iosNativePlayback.stopForOwnership('app backgrounded')
+        void engine.suspendForBackground()
+      } else if (next === 'active') engine.allowForegroundAudio()
     })
     return () => {
       appState.remove()
+      void iosNativePlayback.unloadActive('app unmounted').catch(error =>
+        log('native-playback', `app teardown could not prove native unload · ${String(error)}`, 'error')
+      )
       engine.unload()
     }
   }, [])
@@ -673,21 +804,57 @@ export default function App(): React.JSX.Element {
       // successful song owns the next screen, so bring its retained stack back
       // without running the transport stop twice.
       tabRef.current = 'songs'
+      setTrainingOwnershipReady(false)
       setTab('songs')
       if (navigationRef.isReady()) navigationRef.navigate('songs')
     },
     [loadSequence, navigationRef]
   )
 
-  const changeTab = useCallback((next: RootTab) => {
-    // Navigation state changes stop the transport once. Re-selecting a tab
-    // produces no state change, so the retained audio scene remains untouched.
-    if (next === tabRef.current) return
-    tabRef.current = next
-    engine.pause()
-    engine.cancelTrainingCues()
-    setTab(next)
-  }, [])
+  const trainingHandoff = useRef<Promise<boolean> | null>(null)
+  const enterTraining = useCallback(async (): Promise<boolean> => {
+    if (tabRef.current === 'training' && trainingOwnershipReady) return true
+    if (trainingHandoff.current) return trainingHandoff.current
+    setTrainingOwnershipReady(false)
+    const pending = (async (): Promise<boolean> => {
+      const safe = await iosNativePlayback.stopForOwnership('vocal training requested audio ownership')
+      if (!safe) {
+        log('native-playback', 'Train tab blocked because native output cleanup is uncertain', 'error')
+        return false
+      }
+      engine.pause()
+      engine.cancelTrainingCues()
+      tabRef.current = 'training'
+      setTrainingOwnershipReady(true)
+      setTab('training')
+      if (navigationRef.isReady()) navigationRef.navigate('training')
+      return true
+    })()
+    trainingHandoff.current = pending
+    try {
+      return await pending
+    } finally {
+      if (trainingHandoff.current === pending) trainingHandoff.current = null
+    }
+  }, [navigationRef, trainingOwnershipReady])
+
+  const changeTab = useCallback(
+    (next: RootTab) => {
+      // Navigation state changes stop the transport once. Re-selecting a tab
+      // produces no state change, so the retained audio scene remains untouched.
+      if (next === tabRef.current) return
+      if (next === 'training') {
+        void enterTraining()
+        return
+      }
+      setTrainingOwnershipReady(false)
+      tabRef.current = next
+      engine.pause()
+      engine.cancelTrainingCues()
+      setTab(next)
+    },
+    [enterTraining]
+  )
 
   const syncTabFromNavigation = useCallback(() => {
     if (!navigationRef.isReady()) return
@@ -700,10 +867,14 @@ export default function App(): React.JSX.Element {
   const navigateToTab = useCallback(
     (next: RootTab) => {
       if (next === tabRef.current) return
+      if (next === 'training') {
+        void enterTraining()
+        return
+      }
       changeTab(next)
       if (navigationRef.isReady()) navigationRef.navigate(next)
     },
-    [changeTab, navigationRef]
+    [changeTab, enterTraining, navigationRef]
   )
 
   // A driver could READ which tab is showing (TEST.screen) and never change
@@ -718,7 +889,7 @@ export default function App(): React.JSX.Element {
 
   const updateTrainingFacts = useCallback(
     (facts: { keyInfo: MobileSongTrainingFacts['keyInfo']; transpose: number }) => {
-      setSongFacts((current) => (current ? { ...current, ...facts } : current))
+      setSongFacts(current => (current ? { ...current, ...facts } : current))
     },
     []
   )
@@ -761,12 +932,23 @@ export default function App(): React.JSX.Element {
                 />
               )}
             </Tabs.Screen>
-            <Tabs.Screen name="training" options={{ title: 'Train', tabBarAccessibilityLabel: 'Train' }}>
+            <Tabs.Screen
+              name="training"
+              options={{ title: 'Train', tabBarAccessibilityLabel: 'Train' }}
+              listeners={{
+                tabPress: event => {
+                  if (tabRef.current === 'training') return
+                  event.preventDefault()
+                  void enterTraining()
+                }
+              }}
+            >
               {() => (
                 <TrainingTabScene
                   engine={engine}
                   song={songFacts}
-                  onBackToSong={(sourceSongId) => {
+                  ownershipReady={trainingOwnershipReady}
+                  onBackToSong={sourceSongId => {
                     if (songFacts?.sourceSongId !== sourceSongId) return
                     navigateToTab('songs')
                   }}

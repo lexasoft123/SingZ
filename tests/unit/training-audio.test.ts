@@ -74,6 +74,8 @@ class FakeAudioContext {
   readonly bufferSources: FakeBufferSource[] = []
   readonly gains: FakeGain[] = []
   resumeCount = 0
+  suspendCount = 0
+  sinkCalls: (string | { type: 'none' })[] = []
   resumeError: Error | null = null
   resumeGate: Promise<void> | null = null
   constructor(state: AudioContextState | AudioContextOptions = 'suspended') {
@@ -100,6 +102,14 @@ class FakeAudioContext {
     if (this.resumeGate) await this.resumeGate
     if (this.resumeError) throw this.resumeError
     this.state = 'running'
+  }
+  async suspend(): Promise<void> {
+    this.suspendCount++
+    this.state = 'suspended'
+  }
+  async setSinkId(sink: string | { type: 'none' }): Promise<void> {
+    this.sinkCalls.push(sink)
+    this.sinkId = typeof sink === 'string' ? sink : 'none'
   }
 }
 
@@ -256,6 +266,81 @@ describe('engine-owned training audio', () => {
 
     expect(engine.playing).toBe(false)
     expect(context.bufferSources).toHaveLength(0)
+  })
+
+  it('releases the physical sink for native monitoring and restores readiness without playback', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    const context = FakeAudioContext.last!
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    await engine.play({ countIn: false })
+    engine.pause()
+
+    await engine.releaseOutputForNativeMonitor()
+    expect(context.suspendCount).toBe(1)
+    expect(context.sinkCalls).toEqual([{ type: 'none' }])
+    expect(engine.nativeMonitorOwnsOutput).toBe(true)
+    await engine.play({ countIn: false })
+    expect(engine.playing).toBe(false)
+
+    await engine.setOutput('chromium-output-2')
+    expect(context.sinkCalls).toEqual([{ type: 'none' }])
+    await engine.restoreOutputAfterNativeMonitor()
+    expect(context.sinkCalls).toEqual([{ type: 'none' }, 'chromium-output-2'])
+    expect(context.resumeCount).toBe(1)
+    expect(engine.nativeMonitorOwnsOutput).toBe(false)
+    expect(engine.playing).toBe(false)
+  })
+
+  it('keeps the last confirmed output route when a switch fails', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    const context = FakeAudioContext.last!
+    await engine.setOutput('confirmed-output')
+    const setSinkId = context.setSinkId.bind(context)
+    context.setSinkId = async (sink) => {
+      if (sink === 'missing-output') throw new DOMException('gone', 'NotFoundError')
+      await setSinkId(sink)
+    }
+
+    await expect(engine.setOutput('missing-output')).rejects.toThrow('gone')
+    expect(engine.outputDeviceId).toBe('confirmed-output')
+  })
+
+  it('finishes native restore on the newest route when selection changes mid-setSinkId', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    const context = FakeAudioContext.last!
+    await engine.setOutput('confirmed-output')
+    await engine.releaseOutputForNativeMonitor()
+    await engine.setOutput('route-a')
+
+    let routeAStarted!: () => void
+    const routeASeen = new Promise<void>((resolve) => { routeAStarted = resolve })
+    let releaseRouteA!: () => void
+    const routeAGate = new Promise<void>((resolve) => { releaseRouteA = resolve })
+    const setSinkId = context.setSinkId.bind(context)
+    context.setSinkId = async (sink) => {
+      if (sink === 'route-a') {
+        routeAStarted()
+        await routeAGate
+      }
+      await setSinkId(sink)
+    }
+
+    const restoring = engine.restoreOutputAfterNativeMonitor()
+    await routeASeen
+    await engine.setOutput('route-b')
+    releaseRouteA()
+    await restoring
+
+    expect(engine.outputDeviceId).toBe('route-b')
+    expect(context.sinkId).toBe('route-b')
+    expect(context.sinkCalls.slice(-2)).toEqual(['route-a', 'route-b'])
+    expect(engine.nativeMonitorOwnsOutput).toBe(false)
   })
 
   it('follows master volume and makes song playback mutually exclusive with cues', async () => {

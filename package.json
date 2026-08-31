@@ -12,12 +12,14 @@
     "build": "node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json",
-    "dist": "npm run build && electron-builder --publish never",
+    "dist": "node scripts/dist.cjs",
     "test": "vitest run",
     "gates": "scripts/run-parity-gates.sh",
     "icons": "electron node_modules/@singz/ui/recipes/app-icon/cut-icons.cjs build/icon/forge.html build && electron build/icon/cut-mobile.cjs build/icon/forge.html .",
     "store-notes": "node scripts/store-notes.cjs",
-    "store-notes:check": "node scripts/store-notes.cjs --check"
+    "store-notes:check": "node scripts/store-notes.cjs --check",
+    "capture:addon": "node scripts/build-capture-addon.cjs",
+    "capture:verify": "electron tests/e2e/capture-addon-smoke.cjs --current-source"
   },
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
