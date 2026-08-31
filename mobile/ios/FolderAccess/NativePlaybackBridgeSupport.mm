@@ -324,12 +324,17 @@ void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
                                RCTPromiseRejectBlock reject) {
   runBridgeBoundary(reject, [&] {
     PlaybackBridgeOwner &bridge = owner();
+    // A dispatch block nested inside this temporary C++ lambda must capture
+    // real local block values. Reaching through the lambda's `[&]` closure
+    // leaves a pointer to its dead stack object once this function returns.
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
     dispatch_async(bridge.queue, ^{
-      runBridgeBoundary(reject, [&] {
+      runBridgeBoundary(asyncReject, [&] {
         const SingzDspRuntimeLinkStatus *link = SingzDspRuntimeGetLinkStatus();
         const bool available = link != nullptr && link->interfaceVersion == 1 &&
                                link->buildId != nullptr;
-        resolve(@{
+        asyncResolve(@{
           @"available" : @(available),
           @"buildId" : available ? [NSString stringWithUTF8String:link->buildId]
                                  : @"",
@@ -407,6 +412,9 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
         SingzPlaybackPrepareBlockCopySentinel blockCopySentinel;
         SingzPlaybackInjectPrepareFault(
             SingzPlaybackPrepareFaultPoint::PrepareDispatch);
+        const auto dispatchedGuard = asyncGuard;
+        RCTPromiseResolveBlock asyncResolve = [resolve copy];
+        RCTPromiseRejectBlock asyncReject = [reject copy];
         dispatch_async(bridge.queue, ^{
           blockCopySentinel.touch();
           const SingzPlaybackBridgeBoundaryFailure failure =
@@ -431,7 +439,7 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
                   singz::OwnedFileDescriptor descriptor =
                       SingzOpenAuthorizedPlaybackPath(path, &pathError);
                   if (!descriptor.valid()) {
-                    asyncGuard->markSessionMutation();
+                    dispatchedGuard->markSessionMutation();
                     const singz::NativePlaybackResult result =
                         bridge.session->failPrepareAdmission(
                             generation,
@@ -442,14 +450,14 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
                     NSDictionary *dictionary = resultDictionary(result);
                     SingzPlaybackInjectPrepareFault(
                         SingzPlaybackPrepareFaultPoint::PrePromiseResolve);
-                    resolve(dictionary);
-                    asyncGuard->markDelivered();
+                    asyncResolve(dictionary);
+                    dispatchedGuard->markDelivered();
                     return;
                   }
                   lanes.push_back({lane.id, std::move(descriptor), lane.gain,
                                    lane.muted, lane.solo});
                 }
-                asyncGuard->markSessionMutation();
+                dispatchedGuard->markSessionMutation();
                 const singz::NativePlaybackResult result =
                     bridge.session->prepare(std::move(parsed.config),
                                             std::move(lanes), generation);
@@ -465,14 +473,14 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
                 NSDictionary *dictionary = resultDictionary(result);
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::PrePromiseResolve);
-                resolve(dictionary);
-                asyncGuard->markDelivered();
+                asyncResolve(dictionary);
+                dispatchedGuard->markDelivered();
               });
           if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
             // Cleanup precedes rejection, so a B2 fallback cannot race decoded
             // owners left behind by an exceptional result/delivery conversion.
-            const auto cleanupResult = asyncGuard->cleanupNow();
-            rejectBoundaryFailure(reject, failure, cleanupResult, true);
+            const auto cleanupResult = dispatchedGuard->cleanupNow();
+            rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
           }
         });
       });
@@ -495,8 +503,10 @@ void SingzNativePlaybackConfigureOutputSession(NSNumber *generationValue,
       return;
     }
     PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
     dispatch_async(bridge.queue, ^{
-      runBridgeBoundary(reject, [&] {
+      runBridgeBoundary(asyncReject, [&] {
         const singz::NativePlaybackStatus before = bridge.session->status();
         const uint64_t latest = bridge.latestClaimedGeneration.load(
             std::memory_order_acquire);
@@ -529,7 +539,7 @@ void SingzNativePlaybackConfigureOutputSession(NSNumber *generationValue,
                 std::move(configuredSession));
           }
         }
-        resolve(SingzPlaybackAudioSessionResultDictionary(result));
+        asyncResolve(SingzPlaybackAudioSessionResultDictionary(result));
       });
     });
   });
@@ -551,6 +561,8 @@ void SingzNativePlaybackOpenOutput(NSNumber *generationValue,
         &abortCommandDelivery};
     auto asyncGuard =
         std::make_shared<SingzPlaybackCommandDeliveryGuard>(cleanup);
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
     dispatch_async(bridge.queue, ^{
       const SingzPlaybackBridgeBoundaryFailure failure =
           SingzPlaybackBridgeBoundary([&] {
@@ -562,7 +574,7 @@ void SingzNativePlaybackOpenOutput(NSNumber *generationValue,
             NSDictionary *dictionary = resultDictionary(result);
             SingzPlaybackInjectPrepareFault(
                 SingzPlaybackPrepareFaultPoint::OpenPromiseDelivery);
-            resolve(dictionary);
+            asyncResolve(dictionary);
             if (asyncGuard->token().valid()) {
               if (!asyncGuard->acknowledge())
                 throw 1;
@@ -572,7 +584,7 @@ void SingzNativePlaybackOpenOutput(NSNumber *generationValue,
           });
       if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
         const auto cleanupResult = asyncGuard->cleanupNow();
-        rejectBoundaryFailure(reject, failure, cleanupResult, true);
+        rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
       }
     });
   });
@@ -594,6 +606,8 @@ void SingzNativePlaybackStart(NSNumber *generationValue,
         &abortCommandDelivery};
     auto asyncGuard =
         std::make_shared<SingzPlaybackCommandDeliveryGuard>(cleanup);
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
     dispatch_async(bridge.queue, ^{
       const SingzPlaybackBridgeBoundaryFailure failure =
           SingzPlaybackBridgeBoundary([&] {
@@ -605,7 +619,7 @@ void SingzNativePlaybackStart(NSNumber *generationValue,
             NSDictionary *dictionary = resultDictionary(result);
             SingzPlaybackInjectPrepareFault(
                 SingzPlaybackPrepareFaultPoint::StartPromiseDelivery);
-            resolve(dictionary);
+            asyncResolve(dictionary);
             if (asyncGuard->token().valid()) {
               if (!asyncGuard->acknowledge())
                 throw 1;
@@ -615,7 +629,7 @@ void SingzNativePlaybackStart(NSNumber *generationValue,
           });
       if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
         const auto cleanupResult = asyncGuard->cleanupNow();
-        rejectBoundaryFailure(reject, failure, cleanupResult, true);
+        rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
       }
     });
   });
@@ -646,12 +660,17 @@ void SingzNativePlaybackStop(NSNumber *generationValue,
                              generation);
         SingzPlaybackPrepareBlockCopySentinel blockCopySentinel(
             SingzPlaybackPrepareFaultPoint::StopBlockCaptureCopy);
-        dispatch_async(bridge->queue, ^{
+        PlaybackBridgeOwner *dispatchedBridge = bridge;
+        const uint64_t dispatchedGeneration = generation;
+        const auto dispatchedGuard = asyncGuard;
+        RCTPromiseResolveBlock asyncResolve = [resolve copy];
+        RCTPromiseRejectBlock asyncReject = [reject copy];
+        dispatch_async(dispatchedBridge->queue, ^{
           blockCopySentinel.touch();
           const SingzPlaybackBridgeBoundaryFailure failure =
               SingzPlaybackBridgeBoundary([&] {
                 const singz::NativePlaybackResult result =
-                    bridge->session->stop(generation);
+                    dispatchedBridge->session->stop(dispatchedGeneration);
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::
                         StopResultDictionaryConversion);
@@ -660,12 +679,12 @@ void SingzNativePlaybackStop(NSNumber *generationValue,
                     SingzPlaybackPrepareFaultPoint::StopPrePromiseResolve);
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::StopPromiseDelivery);
-                resolve(dictionary);
-                asyncGuard->markDelivered();
+                asyncResolve(dictionary);
+                dispatchedGuard->markDelivered();
               });
           if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
-            const auto cleanupResult = asyncGuard->cleanupNow();
-            rejectBoundaryFailure(reject, failure, cleanupResult, true);
+            const auto cleanupResult = dispatchedGuard->cleanupNow();
+            rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
           }
         });
       });
@@ -708,12 +727,18 @@ void SingzNativePlaybackUnload(NSNumber *generationValue,
                              generation);
         SingzPlaybackPrepareBlockCopySentinel blockCopySentinel(
             SingzPlaybackPrepareFaultPoint::UnloadBlockCaptureCopy);
-        dispatch_async(bridge->queue, ^{
+        PlaybackBridgeOwner *dispatchedBridge = bridge;
+        const uint64_t dispatchedGeneration = generation;
+        const auto dispatchedGuard = asyncGuard;
+        RCTPromiseResolveBlock asyncResolve = [resolve copy];
+        RCTPromiseRejectBlock asyncReject = [reject copy];
+        dispatch_async(dispatchedBridge->queue, ^{
           blockCopySentinel.touch();
           const SingzPlaybackBridgeBoundaryFailure failure =
               SingzPlaybackBridgeBoundary([&] {
                 const singz::NativePlaybackUnloadReceipt receipt =
-                    bridge->session->unloadWithCleanup(generation);
+                    dispatchedBridge->session->unloadWithCleanup(
+                        dispatchedGeneration);
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::
                         UnloadResultDictionaryConversion);
@@ -724,12 +749,12 @@ void SingzNativePlaybackUnload(NSNumber *generationValue,
                     SingzPlaybackPrepareFaultPoint::UnloadPrePromiseResolve);
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::UnloadPromiseDelivery);
-                resolve(dictionary);
-                asyncGuard->markDelivered();
+                asyncResolve(dictionary);
+                dispatchedGuard->markDelivered();
               });
           if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
-            const auto cleanupResult = asyncGuard->cleanupNow();
-            rejectBoundaryFailure(reject, failure, cleanupResult, true);
+            const auto cleanupResult = dispatchedGuard->cleanupNow();
+            rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
           }
         });
       });
@@ -762,15 +787,17 @@ void SingzNativePlaybackSetControl(NSNumber *generationValue,
       return;
     }
     PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
     dispatch_async(bridge.queue, ^{
-      runBridgeBoundary(reject, [&] {
+      runBridgeBoundary(asyncReject, [&] {
         if (parsed.lane) {
-          resolve(resultDictionary(bridge.session->setLaneControl(
+          asyncResolve(resultDictionary(bridge.session->setLaneControl(
               generation, parsed.laneId, parsed.gain, parsed.muted,
               parsed.solo)));
           return;
         }
-        resolve(resultDictionary(
+        asyncResolve(resultDictionary(
             bridge.session->setMasterGain(generation, parsed.gain)));
       });
     });
