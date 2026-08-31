@@ -46,6 +46,8 @@ interface Props {
   onRefineTiming: () => void
   /** CTC forced alignment through the splitter pack (null = unavailable here). */
   onPreciseAlign: (() => void) | null
+  /** Open the lyrics editor (fix words, stamp and align timing by hand). */
+  onEdit: () => void
   onResult: (res: LyricsResult) => void
   onCancel: () => void
 }
@@ -99,6 +101,7 @@ export default function LyricsPanel({
   onUseWhisper,
   onRefineTiming,
   onPreciseAlign,
+  onEdit,
   onResult,
   onCancel
 }: Props): React.JSX.Element {
@@ -260,13 +263,21 @@ export default function LyricsPanel({
       {lyrics.status === 'ready' && view === 'lyrics' && (
         <div className="lp-source">
           <span className={`src-badge ${lyrics.source}`}>
-            {lyrics.source === 'lrclib' ? 'Synced' : 'AI transcribed'}
+            {lyrics.source === 'lrclib'
+              ? 'Synced'
+              : lyrics.source === 'edited'
+                ? 'Edited'
+                : 'AI transcribed'}
           </span>
           <span className="src-credit" title={lyrics.credit}>
-            {lyrics.source === 'lrclib' ? (lyrics.credit ?? 'LRCLIB') : 'from the vocals stem'}
+            {lyrics.source === 'lrclib'
+              ? (lyrics.credit ?? 'LRCLIB')
+              : lyrics.source === 'edited'
+                ? (lyrics.credit ?? 'your own words')
+                : 'from the vocals stem'}
             {lyrics.aligned ? ' · AI-aligned' : ''}
           </span>
-          {lyrics.source === 'lrclib' && (
+          {lyrics.source !== 'whisper' && (
             <button
               type="button"
               className="linkish"
@@ -276,7 +287,7 @@ export default function LyricsPanel({
               Check &amp; align
             </button>
           )}
-          {lyrics.source === 'lrclib' && onPreciseAlign && (
+          {lyrics.source !== 'whisper' && onPreciseAlign && (
             <button
               type="button"
               className="linkish"
@@ -286,6 +297,14 @@ export default function LyricsPanel({
               Precise
             </button>
           )}
+          <button
+            type="button"
+            className="linkish"
+            title="Fix the words, stamp line times while the song plays, and re-align — your edits stick"
+            onClick={onEdit}
+          >
+            Edit
+          </button>
           <button
             type="button"
             className="linkish"
@@ -447,6 +466,9 @@ export default function LyricsPanel({
                 >
                   Search the lyrics database manually
                 </button>
+                <button type="button" className="linkish" onClick={onEdit}>
+                  Or write the lyrics yourself
+                </button>
               </div>
             )}
 
@@ -472,7 +494,12 @@ export default function LyricsPanel({
                   </p>
                 ))}
                 {lyrics.status === 'ready' && lyrics.source === 'whisper' && (
-                  <p className="fine lp-note">AI-transcribed from the vocals — not always perfect.</p>
+                  <p className="fine lp-note">
+                    AI-transcribed from the vocals — not always perfect.{' '}
+                    <button type="button" className="linkish" onClick={onEdit}>
+                      Fix the words
+                    </button>
+                  </p>
                 )}
               </div>
             )}

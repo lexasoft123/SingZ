@@ -1309,6 +1309,13 @@ button.chip-status:hover {
   border: 1px solid rgba(69, 214, 181, 0.35);
 }
 
+/* the singer's own hand — accent-warm, unlike the two machine sources */
+.src-badge.edited {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
 .src-credit {
   flex: 1;
   min-width: 0;
@@ -4081,4 +4088,297 @@ body.modal-open .lyr-line::before {
   .vt-listening-orb::before {
     animation: none;
   }
+}
+
+/* ————————————————————————————— lyrics editor · liquid glass ————————————— */
+
+/* One sheet of glass over the studio: the karaoke stays dimly visible
+   through the card, the vocals' own voiceprints run down the left, and the
+   singer's words sit on top. Glass is macOS-only indulgence — body.win gets
+   the same card in solid (weak-iGPU fleet rule: no backdrop blur there). */
+.modal-card.lyed-card {
+  --lyed-print: color-mix(in srgb, var(--accent) 60%, transparent);
+  width: min(880px, calc(100vw - 64px));
+  height: min(680px, calc(100vh - 88px));
+  display: flex;
+  flex-direction: column;
+  padding: 22px 26px 18px;
+  background:
+    linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--panel) 62%, transparent) 0%,
+      color-mix(in srgb, var(--panel-deep) 55%, transparent) 60%,
+      color-mix(in srgb, var(--panel-deep) 62%, transparent) 100%
+    );
+  backdrop-filter: blur(28px) saturate(1.35);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 22px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 16%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--text) 5%, transparent),
+    0 40px 100px rgba(0, 0, 0, 0.65);
+  position: relative;
+  overflow: hidden;
+}
+
+/* the sheen: one soft light source, top-left, baked — never animated */
+.modal-card.lyed-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    120% 60% at 18% -8%,
+    color-mix(in srgb, var(--text) 7%, transparent) 0%,
+    transparent 55%
+  );
+}
+
+body.win .modal-card.lyed-card {
+  backdrop-filter: none;
+  background: color-mix(in srgb, var(--panel) 94%, var(--bg));
+}
+
+.lyed-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.lyed-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.lyed-card h2 {
+  font-size: 19px;
+  letter-spacing: 0.01em;
+}
+
+.lyed-song {
+  color: var(--dim);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lyed-transport {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lyed-play {
+  min-width: 44px;
+}
+
+.lyed-clock {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--dim);
+  min-width: 58px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.lyed-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 10px;
+  flex-wrap: wrap;
+}
+
+/* the kit's .chip is a 26px square icon slot — these are text actions */
+.lyed-tools .chip {
+  width: auto;
+  height: 26px;
+  padding: 0 11px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+  white-space: nowrap;
+  flex: none;
+}
+
+.lyed-tools .chip:disabled {
+  opacity: 0.45;
+}
+
+.lyed-spacer {
+  flex: 1;
+}
+
+.lyed-ghost-chip {
+  color: var(--dim);
+  border-style: dashed;
+}
+
+/* ——— the rows ——— */
+
+.lyed-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -10px;
+  padding: 2px 10px;
+  scrollbar-width: thin;
+}
+
+.lyed-row {
+  display: grid;
+  grid-template-columns: 62px 54px 1fr 26px;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+  padding: 3px 6px;
+  transition: background 0.15s;
+}
+
+.lyed-row:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.lyed-row.current {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* a line claiming time where nobody sings — let it look like what it is */
+.lyed-row.ghost .lyed-stamp,
+.lyed-row.ghost input {
+  color: var(--faint);
+  text-decoration-color: var(--faint);
+}
+
+.lyed-row.ghost input {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.lyed-stamp {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 4px 0;
+  text-align: center;
+  cursor: pointer;
+}
+
+.lyed-stamp:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.lyed-print {
+  width: 54px;
+  height: 20px;
+  opacity: 0.9;
+}
+
+.lyed-row input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 15px;
+  padding: 5px 4px;
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.lyed-row input:focus {
+  background: color-mix(in srgb, var(--panel-deep) 65%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.lyed-x {
+  border: none;
+  background: none;
+  color: var(--faint);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px;
+  opacity: 0;
+}
+
+.lyed-row:hover .lyed-x {
+  opacity: 1;
+}
+
+.lyed-x:hover {
+  color: var(--danger);
+}
+
+/* ——— replace-all view ——— */
+
+.lyed-replace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lyed-replace textarea {
+  flex: 1;
+  resize: none;
+  background: color-mix(in srgb, var(--panel-deep) 65%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 14px;
+  line-height: 1.7;
+  padding: 14px 16px;
+  outline: none;
+}
+
+.lyed-replace textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.lyed-replace-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ——— footer ——— */
+
+.lyed-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  min-height: 30px;
+}
+
+.lyed-hint,
+.lyed-status {
+  font-size: 12px;
+  color: var(--dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lyed-status.warn {
+  color: var(--danger);
+}
+
+.lyed-discard {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }

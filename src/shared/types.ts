@@ -303,7 +303,7 @@ export interface LyricsProgress {
   percent: number
 }
 
-export type LyricsSource = 'lrclib' | 'whisper'
+export type LyricsSource = 'lrclib' | 'whisper' | 'edited'
 
 /** How word timing was produced: whisper transcription match or CTC forced alignment. */
 export type AlignMethod = 'whisper' | 'ctc'
@@ -550,6 +550,20 @@ export interface SingzApi {
   ): Promise<LyricsCandidate[]>
   /** Apply a specific LRCLIB record as this song's lyrics (overwrites cache). */
   applyLyrics(songPath: string, id: number, durationSec: number): Promise<LyricsResult>
+  /** Persist hand-edited lyrics as this song's lyrics (source: 'edited'). */
+  saveLyrics(songPath: string, lines: LyricLine[], credit?: string): Promise<LyricsResult>
+  /**
+   * Time a lyrics draft against the vocals without saving anything:
+   * 'align' matches the text to a whisper transcription (cached when one
+   * exists), 'precise' runs CTC forced alignment through the splitter pack.
+   */
+  alignLyricsDraft(
+    songPath: string,
+    durationSec: number,
+    lines: LyricLine[],
+    tier: 'align' | 'precise',
+    allowDownload?: boolean
+  ): Promise<LyricsResult>
   cancelLyrics(): Promise<void>
   onLyricsProgress(cb: (p: LyricsProgress) => void): () => void
   /** Ask the OS for microphone permission (macOS prompts; other platforms return true). */

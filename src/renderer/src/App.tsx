@@ -45,6 +45,7 @@ import { computePeaks } from './audio/peaks'
 import { stemSampleRate } from './audio/stem-rate'
 import DropScreen from './components/DropScreen'
 import LogPanel from './components/LogPanel'
+import LyricsEditor from './components/LyricsEditor'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
 import LibraryImport from './components/LibraryImport'
 import ProjectPicker from './components/ProjectPicker'
@@ -1592,6 +1593,18 @@ export default function App(): React.JSX.Element {
     void window.singz.alignCaps().then((c) => setPreciseCap(c.precise))
   }, [])
 
+  // The lyrics editor is per-song state — a song switch mid-edit closes it
+  // (its Save and Align target the path it opened with). The seq captured at
+  // open guards the renderer side the same way prepLyrics guards its own
+  // results: a save resolving in the one-flush window where the switch has
+  // committed but the editor's unmount cleanup hasn't run yet must not land
+  // song A's lines in song B's state (linesRef feeds detectBeats' aux).
+  const [editingLyrics, setEditingLyrics] = useState(false)
+  const editorSeqRef = useRef(0)
+  useEffect(() => {
+    setEditingLyrics(false)
+  }, [song?.path])
+
   const preferRef = useRef<'auto' | 'whisper' | 'align' | 'precise'>('auto')
   const prepLyricsRef = useRef<
     ((allowDownload?: boolean, prefer?: 'auto' | 'whisper' | 'align' | 'precise') => Promise<void>) | null
@@ -2950,6 +2963,10 @@ export default function App(): React.JSX.Element {
                 onUseWhisper={() => void prepLyrics(false, 'whisper')}
                 onRefineTiming={() => void prepLyrics(false, 'align')}
                 onPreciseAlign={preciseCap ? () => void prepLyrics(false, 'precise') : null}
+                onEdit={() => {
+                  editorSeqRef.current = loadSeq.current
+                  setEditingLyrics(true)
+                }}
                 onResult={applyLyricsResult}
                 onCancel={() => void window.singz.cancelLyrics()}
               />
@@ -3042,6 +3059,21 @@ export default function App(): React.JSX.Element {
       )}
 
       {showLog && <LogPanel onClose={() => setShowLog(false)} />}
+
+      {editingLyrics && song && (
+        <LyricsEditor
+          engine={engine}
+          songPath={song.path}
+          songName={cleanSongName(song.name)}
+          initialLines={lyrics.status === 'ready' ? lyrics.lines : []}
+          credit={lyrics.status === 'ready' ? lyrics.credit : undefined}
+          preciseCap={preciseCap}
+          onSaved={(res) => {
+            if (editorSeqRef.current === loadSeq.current) applyLyricsResult(res)
+          }}
+          onClose={() => setEditingLyrics(false)}
+        />
+      )}
 
       {showSettings && (
         <SettingsModal
