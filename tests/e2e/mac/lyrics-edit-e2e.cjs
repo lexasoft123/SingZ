@@ -123,6 +123,18 @@ const MARKER = 'edited by the harness tonight';
     console.log('editor align:', verdict);
     await win.screenshot({ path: join(OUT, 'lyrics-edit-aligned.png') });
 
+    // The verdict must be HONEST about the marker line. That line is text no
+    // singer ever sang, so the check cannot hear it and its timing stays
+    // interpolated — the string has to say so. "every line snapped to the
+    // singing" here is the exact overclaim describeCheck exists to prevent,
+    // and it is what the old copy said in this very situation.
+    if (/every line snapped/.test(verdict ?? '')) {
+      throw new Error(`verdict overclaims with an unhearable line present: ${verdict}`);
+    }
+    if (!/couldn't be made out and kept estimated timing|were heard in the vocals/.test(verdict ?? '')) {
+      throw new Error(`verdict does not account for the unhearable line: ${verdict}`);
+    }
+
     // ——— per-word timing: expand a row's voiceprint, drag one word.
     // The word with the widest gap to its successor is picked so the
     // neighbour fence (which clamps drags to ±50ms of a neighbour's start)
