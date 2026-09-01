@@ -1,8 +1,9 @@
 /*
  * Lyrics editor E2E (macOS): opens a real project, edits lyrics through the
- * actual editor UI — text edit, playhead stamp, align-draft, save — and
- * verifies the persisted lyrics.json (source 'edited', the corrected text,
- * monotonic times) plus that a reopen serves the edit back untouched.
+ * actual editor UI — text edit, playhead stamp, align-draft, per-word drag
+ * in the expanded word strip, save — and verifies the persisted lyrics.json
+ * (source 'edited', the corrected text, monotonic times down to the word)
+ * plus that a reopen serves the edit back untouched.
  * Permanent harness used by the e2e-verifier agent.
  *
  * The editor's "Align to the singing" is a DIFFERENT code path from the
@@ -87,6 +88,42 @@ const MARKER = 'edited by the harness tonight';
     const verdict = await win.$eval('.lyed-status', (el) => el.textContent);
     console.log('editor align:', verdict);
     await win.screenshot({ path: join(OUT, 'lyrics-edit-aligned.png') });
+
+    // ——— per-word timing: expand a row's voiceprint, drag one word.
+    // The word with the widest gap to its successor is picked so the
+    // neighbour fence (which clamps drags to ±50ms of a neighbour's start)
+    // can never eat the movement this asserts on.
+    await win.click('.lyed-row:nth-child(1) .lyed-print-btn');
+    await win.waitForSelector('.lyed-wordstrip', { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 400));
+    const geo = await win.$$eval('.lyed-word', (els) => els.map((e) => parseFloat(e.style.left)));
+    if (geo.length < 2) throw new Error(`word strip shows ${geo.length} words`);
+    let pick = 0;
+    let room = -1;
+    for (let i = 0; i < geo.length - 1; i++) {
+      const g = geo[i + 1] - geo[i];
+      if (g > room) {
+        room = g;
+        pick = i;
+      }
+    }
+    const stripBox = await (await win.$('.lyed-wordstrip')).boundingBox();
+    const dx = Math.max(10, Math.min(40, ((room / 100) * stripBox.width) / 2));
+    const chip = (await win.$$('.lyed-word'))[pick];
+    const cb = await chip.boundingBox();
+    await win.mouse.move(cb.x + cb.width / 2, cb.y + cb.height / 2);
+    await win.mouse.down();
+    await win.mouse.move(cb.x + cb.width / 2 + dx, cb.y + cb.height / 2, { steps: 6 });
+    await win.mouse.up();
+    await new Promise((r) => setTimeout(r, 300));
+    const geo2 = await win.$$eval('.lyed-word', (els) => els.map((e) => parseFloat(e.style.left)));
+    console.log(`word drag: word ${pick} ${geo[pick].toFixed(1)}% -> ${geo2[pick].toFixed(1)}% (+${dx.toFixed(0)}px)`);
+    if (geo2[pick] - geo[pick] < 0.3) throw new Error('word drag did not move the word');
+    for (let i = 1; i < geo2.length; i++) {
+      if (geo2[i] <= geo2[i - 1] - 0.01) throw new Error('word drag broke word order');
+    }
+    await win.screenshot({ path: join(OUT, 'lyrics-edit-wordstrip.png') });
+    await win.click('.lyed-row:nth-child(1) .lyed-print-btn'); // collapse again
 
     // ——— save, and the panel must flip to the edited badge
     await win.click('.lyed-foot .pill.primary:has-text("Save lyrics")');

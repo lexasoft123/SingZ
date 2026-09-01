@@ -5,10 +5,13 @@ import {
   computeEnvelope,
   distributeRowWords,
   linesFromRows,
+  moveWordStart,
   replaceAllText,
   rowsFromLines,
   silentRowIds,
   spanLevel,
+  withWords,
+  wordDragBounds,
   wordsMatchText,
   type DraftRow
 } from '../../src/renderer/src/lyrics-edit'
@@ -122,6 +125,69 @@ describe('vocal envelope and silent rows', () => {
 
   it('flags nothing without an envelope', () => {
     expect(silentRowIds([row(6, 'line', 9)], null).size).toBe(0)
+  })
+})
+
+describe('per-word timing (moveWordStart / withWords)', () => {
+  // "one two three" at 10-11 / 11-12 / 12-13
+  const words = distributeRowWords('aaa aaa aaa', 10, 13)
+
+  it('moves a middle word and rides the previous end down to the new start', () => {
+    const out = moveWordStart(words, 1, 10.5, 8, 20)
+    expect(out[1].s).toBeCloseTo(10.5, 5)
+    expect(out[0].e).toBeLessThanOrEqual(out[1].s) // no overlap
+    expect(out[2]).toEqual(words[2]) // untouched neighbour
+  })
+
+  it('never lets a word cross its neighbours', () => {
+    const b = wordDragBounds(words, 1, 8, 20)
+    expect(b.lo).toBeCloseTo(words[0].s + 0.05, 5)
+    expect(b.hi).toBeCloseTo(words[2].s - 0.05, 5)
+    const out = moveWordStart(words, 1, 0, 8, 20) // way past the left bound
+    expect(out[1].s).toBeCloseTo(b.lo, 2)
+  })
+
+  it('keeps duration where the next word allows, and clamps where not', () => {
+    const spread = [
+      { w: 'a', s: 10, e: 10.4 },
+      { w: 'b', s: 14, e: 14.5 }
+    ]
+    // moving 'a' right: its 0.4s duration survives (next start is far)
+    const moved = moveWordStart(spread, 0, 12, 8, 20)
+    expect(moved[0].e).toBeCloseTo(12.4, 5)
+    // moving 'a' almost onto 'b': end clamps to b's start
+    const squeezed = moveWordStart(spread, 0, 13.9, 8, 20)
+    expect(squeezed[0].e).toBeLessThanOrEqual(14)
+  })
+
+  it('outer bounds protect the neighbouring lines', () => {
+    const out = moveWordStart(words, 0, 0, 9.5, 20)
+    expect(out[0].s).toBeCloseTo(9.5, 5) // stopped at the previous row's edge
+  })
+
+  it("the last word's END is fenced too — back-to-back lines stay untouched", () => {
+    // row A ends at 13 and row B starts at 13 (the everyday verse case);
+    // dragging A's last word right must not let its end leak past the fence,
+    // or withWords + the save-time monotonic clamp would MOVE row B.
+    const out = moveWordStart(words, 2, 12.9, 8, 13)
+    expect(out[2].s).toBeLessThanOrEqual(13 - 0.05 + 1e-9) // start fenced short
+    expect(out[2].e).toBeLessThanOrEqual(13 + 1e-9) // end inside the fence
+    const row: DraftRow = { id: 2, start: 10, end: 13, text: 'aaa aaa aaa', words: out }
+    expect(withWords(row, out).end).toBeLessThanOrEqual(13 + 1e-9)
+    // double-click/nudge share the path: aiming far past the fence too
+    const wild = moveWordStart(words, 2, 25, 8, 13)
+    expect(wild[2].e).toBeLessThanOrEqual(13 + 1e-9)
+  })
+
+  it('withWords keeps the line-span invariant', () => {
+    const row: DraftRow = { id: 1, start: 10, end: 13, text: 'aaa aaa aaa', words }
+    const moved = withWords(row, moveWordStart(words, 0, 9.2, 8, 20))
+    expect(moved.start).toBeCloseTo(9.2, 5)
+    expect(moved.end).toBeCloseTo(13, 5)
+    // ...and the moved words survive a save (linesFromRows keeps them verbatim)
+    const lines = linesFromRows([moved], 300)
+    expect(lines[0].words[0].s).toBeCloseTo(9.2, 5)
+    expect(lines[0].start).toBeCloseTo(9.2, 5)
   })
 })
 

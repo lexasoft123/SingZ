@@ -1,17 +1,27 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Modal } from '@singz/ui'
-import type { AlignCheck, LyricLine, LyricsProgress, LyricsResult } from '../../../shared/types'
+import type {
+  AlignCheck,
+  LyricLine,
+  LyricWord,
+  LyricsProgress,
+  LyricsResult
+} from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
 import {
   computeEnvelope,
+  distributeRowWords,
   estimateLineEnd,
   fmtStamp,
   freshRowId,
   linesFromRows,
+  moveWordStart,
   replaceAllText,
   rowsFromLines,
   silentRowIds,
   spanLevel,
+  withWords,
+  wordsMatchText,
   type DraftRow,
   type VocalEnvelope
 } from '../lyrics-edit'
@@ -79,6 +89,163 @@ const RowPrint = memo(function RowPrint({
   return <canvas ref={ref} className="lyed-print" aria-hidden="true" />
 })
 
+/** The frozen time window (and drag fences) of one expanded row. */
+interface StripWindow {
+  id: number
+  t0: number
+  t1: number
+  /** Drag floor/ceiling: the neighbouring timed rows' edges. */
+  lo: number
+  hi: number
+}
+
+/**
+ * One line under a magnifier: the vocals' waveform across the line's span
+ * with every word as a chip at its sung position. Drag a chip to move that
+ * word's start (neighbours fence it in), double-click to set it at the
+ * playhead, arrow keys nudge by 50 ms. Click the background to seek there.
+ */
+function WordStrip({
+  engine,
+  fine,
+  words,
+  win,
+  onCommit
+}: {
+  engine: MultitrackEngine
+  fine: VocalEnvelope | null
+  words: LyricWord[]
+  win: StripWindow
+  onCommit: (words: LyricWord[]) => void
+}): React.JSX.Element {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const headRef = useRef<HTMLDivElement>(null)
+  const grabRef = useRef(0)
+  const [drag, setDrag] = useState<{ i: number; t: number } | null>(null)
+  const span = Math.max(0.001, win.t1 - win.t0)
+  const shown = drag ? moveWordStart(words, drag.i, drag.t, win.lo, win.hi) : words
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const wrap = wrapRef.current
+    if (!canvas || !wrap) return
+    const w = wrap.clientWidth
+    const h = wrap.clientHeight
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    canvas.width = w * dpr
+    canvas.height = h * dpr
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.scale(dpr, dpr)
+    ctx.clearRect(0, 0, w, h)
+    if (!fine) return
+    const styles = getComputedStyle(canvas)
+    ctx.fillStyle = styles.getPropertyValue('--lyed-print').trim() || 'rgba(255, 212, 137, 0.45)'
+    for (let x = 0; x < w; x++) {
+      const a = win.t0 + (span * x) / w
+      const b = win.t0 + (span * (x + 1)) / w
+      const v = Math.min(1, spanLevel(fine, a, b))
+      const bh = Math.max(1, v * (h - 8))
+      ctx.fillRect(x, (h - bh) / 2, 1, bh)
+    }
+  }, [fine, win, span])
+
+  // The playhead hairline — a transform on one node, gated to half-pixels.
+  // This runs inside the open modal, so it is the working rAF, not a leak.
+  useEffect(() => {
+    let raf = 0
+    let lastX = -1
+    const tick = (): void => {
+      const el = headRef.current
+      const wrap = wrapRef.current
+      if (el && wrap) {
+        const pos = engine.position
+        const x = Math.round((((pos - win.t0) / span) * wrap.clientWidth) * 2) / 2
+        if (x !== lastX) {
+          lastX = x
+          el.style.transform = `translateX(${x}px)`
+          el.style.opacity = pos >= win.t0 && pos <= win.t1 ? '1' : '0'
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [engine, win, span])
+
+  const timeAt = (clientX: number): number => {
+    const wrap = wrapRef.current
+    if (!wrap) return win.t0
+    const r = wrap.getBoundingClientRect()
+    return win.t0 + ((clientX - r.left) / Math.max(1, r.width)) * span
+  }
+
+  return (
+    <div
+      className="lyed-wordstrip"
+      ref={wrapRef}
+      onPointerDown={(e) => {
+        if ((e.target as HTMLElement).closest('.lyed-word')) return
+        engine.seek(Math.max(0, timeAt(e.clientX)))
+      }}
+    >
+      <canvas ref={canvasRef} className="lyed-ws-wave" aria-hidden="true" />
+      <div ref={headRef} className="lyed-ws-head" />
+      {shown.map((w, i) => (
+        <button
+          key={i}
+          type="button"
+          className={`lyed-word${drag?.i === i ? ' dragging' : ''}`}
+          style={{
+            left: `${((w.s - win.t0) / span) * 100}%`,
+            width: `${Math.max(1.2, ((w.e - w.s) / span) * 100)}%`
+          }}
+          title="Drag to move this word · double-click sets it at the playhead · ←/→ nudge 50 ms"
+          onPointerDown={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            // preventDefault suppresses the button's own focus — take it
+            // back so the advertised arrow-key nudge works after a click
+            e.currentTarget.focus()
+            e.currentTarget.setPointerCapture(e.pointerId)
+            grabRef.current = timeAt(e.clientX) - words[i].s
+            setDrag({ i, t: words[i].s })
+          }}
+          onPointerMove={(e) => {
+            if (drag?.i !== i) return
+            setDrag({ i, t: timeAt(e.clientX) - grabRef.current })
+          }}
+          onPointerUp={() => {
+            if (drag?.i !== i) return
+            const t = drag.t
+            setDrag(null)
+            // a bare click is not an edit — without this, the 10ms rounding
+            // in moveWordStart turns un-round aligner times into a commit
+            if (Math.abs(t - words[i].s) < 0.005) return
+            const moved = moveWordStart(words, i, t, win.lo, win.hi)
+            if (moved[i].s !== words[i].s) onCommit(moved)
+          }}
+          onDoubleClick={(e) => {
+            e.stopPropagation()
+            onCommit(moveWordStart(words, i, engine.position, win.lo, win.hi))
+          }}
+          onKeyDown={(e) => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+            e.preventDefault()
+            e.stopPropagation()
+            const dt = e.key === 'ArrowLeft' ? -0.05 : 0.05
+            onCommit(moveWordStart(words, i, words[i].s + dt, win.lo, win.hi))
+          }}
+        >
+          {w.w}
+        </button>
+      ))}
+      <span className="lyed-ws-hint">drag a word · double-click sets it at the playhead</span>
+    </div>
+  )
+}
+
 export default function LyricsEditor({
   engine,
   songPath,
@@ -122,11 +289,15 @@ export default function LyricsEditor({
     []
   )
 
-  // The vocals' envelope, computed once — powers the row voiceprints and the
-  // silent-line (hallucination) detector.
-  const envelope = useMemo<VocalEnvelope | null>(() => {
+  // The vocals' envelope, computed once — the coarse one powers the row
+  // voiceprints and the silent-line (hallucination) detector, the fine one
+  // draws the expanded word strip's waveform.
+  const { envelope, fineEnv } = useMemo<{
+    envelope: VocalEnvelope | null
+    fineEnv: VocalEnvelope | null
+  }>(() => {
     const buf = engine.getTrackBuffer('vocals')
-    if (!buf) return null
+    if (!buf) return { envelope: null, fineEnv: null }
     const ch0 = buf.getChannelData(0)
     let mono = ch0
     if (buf.numberOfChannels > 1) {
@@ -134,11 +305,19 @@ export default function LyricsEditor({
       mono = new Float32Array(ch0.length)
       for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2
     }
-    return computeEnvelope(mono, buf.sampleRate)
+    return {
+      envelope: computeEnvelope(mono, buf.sampleRate),
+      fineEnv: computeEnvelope(mono, buf.sampleRate, 0.01)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine])
 
   const silent = useMemo(() => silentRowIds(rows, envelope), [rows, envelope])
+
+  // Per-word timing: at most one row is expanded into its word strip. The
+  // window is frozen at expansion so a committed nudge never shifts the
+  // ground under the pointer; lo/hi fence drags off the neighbouring rows.
+  const [strip, setStrip] = useState<StripWindow | null>(null)
 
   const snapshot = useCallback((): void => {
     undoRef.current.push(rowsRef.current.map((r) => ({ ...r })))
@@ -171,6 +350,48 @@ export default function LyricsEditor({
     setRows(next)
     setDirty(true)
   }, [])
+
+  const toggleStrip = useCallback(
+    (r: DraftRow): void => {
+      if (strip?.id === r.id) {
+        setStrip(null)
+        return
+      }
+      if (r.start === null) return // nothing to magnify until the line is timed
+      const rs = rowsRef.current
+      const idx = rs.findIndex((x) => x.id === r.id)
+      const end = r.end ?? estimateLineEnd(r.text, r.start)
+      let prevEnd = 0
+      for (let k = idx - 1; k >= 0; k--) {
+        const p = rs[k]
+        if (p.start !== null) {
+          prevEnd = p.end ?? estimateLineEnd(p.text, p.start)
+          break
+        }
+      }
+      let nextStart = Infinity
+      for (let k = idx + 1; k < rs.length; k++) {
+        const n = rs[k]
+        if (n.start !== null) {
+          nextStart = n.start
+          break
+        }
+      }
+      const t0 = Math.max(0, r.start - 1.5)
+      const t1 = Math.min(engine.duration > 0 ? engine.duration : end + 1.5, end + 1.5)
+      const lo = Math.max(t0, prevEnd)
+      const hi = Math.max(lo + 0.1, Math.min(t1, nextStart))
+      setStrip({ id: r.id, t0, t1: Math.max(t1, t0 + 0.5), lo, hi })
+    },
+    [engine, strip]
+  )
+
+  const commitWords = useCallback(
+    (id: number, moved: LyricWord[]): void => {
+      apply(rowsRef.current.map((r) => (r.id === id ? withWords(r, moved) : r)))
+    },
+    [apply]
+  )
 
   // Playhead: highlight the sung row and tick the readout. This IS the open
   // modal, so it runs under body.modal-open — kept cheap: state only moves
@@ -528,8 +749,8 @@ export default function LyricsEditor({
       ) : (
         <div className="lyed-list" ref={listRef}>
           {rows.map((r, i) => (
+            <Fragment key={r.id}>
             <div
-              key={r.id}
               className={`lyed-row${i === current ? ' current' : ''}${silent.has(r.id) ? ' ghost' : ''}`}
             >
               <button
@@ -544,11 +765,23 @@ export default function LyricsEditor({
               >
                 {fmtStamp(r.start)}
               </button>
-              <RowPrint
-                envelope={envelope}
-                start={r.start}
-                end={r.end ?? (r.start !== null ? estimateLineEnd(r.text, r.start) : null)}
-              />
+              <button
+                type="button"
+                className={`lyed-print-btn${strip?.id === r.id ? ' open' : ''}`}
+                tabIndex={-1}
+                title={
+                  r.start === null
+                    ? 'Time this line first (stamp it or Align), then fine-tune each word'
+                    : "Fine-tune each word's timing"
+                }
+                onClick={() => toggleStrip(r)}
+              >
+                <RowPrint
+                  envelope={envelope}
+                  start={r.start}
+                  end={r.end ?? (r.start !== null ? estimateLineEnd(r.text, r.start) : null)}
+                />
+              </button>
               <input
                 ref={(el) => {
                   if (el) inputRefs.current.set(r.id, el)
@@ -603,6 +836,24 @@ export default function LyricsEditor({
                 ✕
               </button>
             </div>
+            {strip?.id === r.id && r.start !== null && (
+              <WordStrip
+                engine={engine}
+                fine={fineEnv}
+                words={
+                  wordsMatchText(r) && r.words
+                    ? r.words
+                    : distributeRowWords(
+                        r.text,
+                        r.start,
+                        r.end ?? estimateLineEnd(r.text, r.start)
+                      )
+                }
+                win={strip}
+                onCommit={(w) => commitWords(r.id, w)}
+              />
+            )}
+            </Fragment>
           ))}
         </div>
       )}
@@ -651,7 +902,7 @@ export default function LyricsEditor({
             Enter splits a line · ⌘Enter stamps the playhead time on the line you're typing in
             {untimed > 0
               ? ` · ${untimed} ${untimed === 1 ? 'line has' : 'lines have'} no time yet — Align does them all at once`
-              : ''}
+              : " · a line's voiceprint opens word-by-word timing"}
           </span>
         )}
         <span className="lyed-spacer" />

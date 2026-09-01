@@ -4280,10 +4280,107 @@ body.win .modal-card.lyed-card {
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
+.lyed-print-btn {
+  border: 1px solid transparent;
+  background: none;
+  border-radius: 8px;
+  padding: 1px 0 0;
+  line-height: 0;
+  cursor: pointer;
+}
+
+.lyed-print-btn:hover,
+.lyed-print-btn.open {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
 .lyed-print {
   width: 54px;
   height: 20px;
   opacity: 0.9;
+}
+
+/* ——— the word strip: one line under a magnifier ——— */
+
+.lyed-wordstrip {
+  position: relative;
+  height: 62px;
+  margin: 0 6px 6px 6px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-deep) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  overflow: hidden;
+  flex: none;
+  cursor: pointer;
+}
+
+.lyed-ws-wave {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.lyed-ws-head {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.lyed-word {
+  position: absolute;
+  top: 7px;
+  height: 24px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 4px;
+  /* the left edge IS the word's start; the box grows to keep the label
+     readable, staggered over two rows so short words don't collide */
+  min-width: max-content;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: grab;
+  touch-action: none;
+}
+
+.lyed-word:nth-of-type(even) {
+  top: 32px;
+}
+
+.lyed-word:hover {
+  border-color: var(--accent);
+  z-index: 2;
+}
+
+.lyed-word.dragging {
+  cursor: grabbing;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel));
+  z-index: 3;
+}
+
+.lyed-ws-hint {
+  position: absolute;
+  right: 9px;
+  top: 3px;
+  font-size: 10px;
+  color: var(--faint);
+  pointer-events: none;
 }
 
 .lyed-row input {

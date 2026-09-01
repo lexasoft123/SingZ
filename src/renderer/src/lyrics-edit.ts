@@ -253,6 +253,71 @@ export function silentRowIds(rows: DraftRow[], envelope: VocalEnvelope | null): 
   return out
 }
 
+// ——— per-word timing (the expanded word strip) ————————————————————————————
+
+/** Words this close are touching — the same floor the karaoke sweep uses. */
+export const WORD_MIN_S = 0.05
+
+/**
+ * The interval a word's start may be dragged through: past neighbours'
+ * starts is never allowed (words keep their order), and the row's outer
+ * bounds keep a nudge from silently colliding with the neighbouring lines
+ * at save time.
+ */
+export function wordDragBounds(
+  words: LyricWord[],
+  i: number,
+  lo: number,
+  hi: number
+): { lo: number; hi: number } {
+  const lo2 = Math.max(lo, i > 0 ? words[i - 1].s + WORD_MIN_S : lo)
+  // the last word's start stops a word-length short of the outer fence, so
+  // its end can always fit inside it — the same rule interior words get
+  // from their successor
+  const hiEdge = i + 1 < words.length ? words[i + 1].s - WORD_MIN_S : hi - WORD_MIN_S
+  const hi2 = Math.min(hi, hiEdge)
+  return { lo: lo2, hi: Math.max(lo2, hi2) }
+}
+
+/**
+ * Move one word's start to `t` (clamped to its drag bounds). The word keeps
+ * its duration where the next word allows; the previous word's end never
+ * overlaps the new start. Pure — returns a new array.
+ */
+export function moveWordStart(
+  words: LyricWord[],
+  i: number,
+  t: number,
+  lo: number,
+  hi: number
+): LyricWord[] {
+  if (i < 0 || i >= words.length) return words
+  const b = wordDragBounds(words, i, lo, hi)
+  const s = Math.round(Math.min(b.hi, Math.max(b.lo, t)) * 100) / 100
+  const out = words.map((w) => ({ ...w }))
+  const dur = Math.max(WORD_MIN_S, out[i].e - out[i].s)
+  let e = s + dur
+  if (i + 1 < out.length) e = Math.min(e, out[i + 1].s)
+  // the tail is fenced too: an end past `hi` would push the NEXT ROW's
+  // start at save time — moving a line the singer never touched
+  else e = Math.min(e, Math.max(hi, s + WORD_MIN_S))
+  out[i].s = s
+  out[i].e = Math.max(e, s + WORD_MIN_S)
+  if (i > 0 && out[i - 1].e > s) out[i - 1].e = Math.max(out[i - 1].s + WORD_MIN_S, s)
+  return out
+}
+
+/** A row whose words moved keeps the line-span invariant: start/end = words'. */
+export function withWords(row: DraftRow, words: LyricWord[]): DraftRow {
+  if (words.length === 0) return { ...row, words: null }
+  return {
+    ...row,
+    words,
+    start: words[0].s,
+    end: words[words.length - 1].e
+  }
+}
+
 /** m:ss.d for row time chips ("—" while a row is untimed). */
 export function fmtStamp(sec: number | null): string {
   if (sec === null || !Number.isFinite(sec)) return '—'
