@@ -4228,7 +4228,9 @@ body.win .modal-card.lyed-card {
   gap: 2px;
   margin: 0 -10px;
   padding: 2px 10px;
-  scrollbar-width: thin;
+  /* no scrollbar-width here: setting it disables the app-wide
+     ::-webkit-scrollbar theming in Chromium, which surfaced as a bright
+     white system scrollbar on Windows (measured on the QHD+ field rig) */
 }
 
 .lyed-row {
