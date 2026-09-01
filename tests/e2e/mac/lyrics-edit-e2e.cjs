@@ -65,6 +65,18 @@ const MARKER = 'edited by the harness tonight';
     if (rows < 3) throw new Error(`editor shows ${rows} rows — expected the song`);
     console.log('rows:', rows);
 
+    // ——— the help sheet: opens from "?", and Escape closes IT, not the
+    // editor (requestClose intercepts while help is up)
+    await win.click('.lyed-help-btn');
+    await win.waitForSelector('.lyed-help', { timeout: 5000 });
+    const helpText = await win.$eval('.lyed-help-card', (el) => el.textContent);
+    if (!/stamp the playhead/i.test(helpText ?? '')) throw new Error('help sheet missing content');
+    await win.keyboard.press('Escape');
+    await win.waitForSelector('.lyed-help', { state: 'detached', timeout: 5000 });
+    const stillOpen = await win.$('.lyed-card');
+    if (!stillOpen) throw new Error('Escape on the help sheet closed the whole editor');
+    console.log('help: opens, Escape closes just the sheet');
+
     // ——— text edit: rewrite the second line to carry the marker
     const input2 = '.lyed-row:nth-child(2) input';
     await win.fill(input2, MARKER);

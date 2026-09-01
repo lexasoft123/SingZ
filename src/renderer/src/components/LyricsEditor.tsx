@@ -40,6 +40,56 @@ interface Props {
 
 type Busy = null | { tier: 'align' | 'precise'; progress: LyricsProgress | null }
 
+interface HelpRow {
+  /** Key caps rendered as separate <kbd> chips. */
+  keys?: string[]
+  /** A gesture or control name rendered as one chip. */
+  label?: string
+  d: string
+}
+
+/** The help sheet's content — key labels follow the platform. */
+function helpSections(isWin: boolean): { title: string; rows: HelpRow[] }[] {
+  const mod = isWin ? 'Ctrl' : '⌘'
+  return [
+    {
+      title: 'Lines',
+      rows: [
+        { keys: ['Enter'], d: 'New line — splits the text at the cursor' },
+        { keys: ['Backspace'], d: "At a line's start, merges into the line above" },
+        { keys: ['↑', '↓'], d: 'Move between lines' },
+        { label: 'Paste', d: 'Several lines of text become rows' },
+        { label: '✕', d: 'Hover a line to remove it' }
+      ]
+    },
+    {
+      title: 'Timing',
+      rows: [
+        { keys: [mod, 'Enter'], d: "Stamp the playhead time on the line you're typing in" },
+        { label: 'Time chip', d: 'Play from that line — or stamp it, while it has no time' },
+        { label: '✦ Align', d: 'Time every line and word against the singing at once' }
+      ]
+    },
+    {
+      title: 'Words',
+      rows: [
+        { label: 'Voiceprint', d: "Click a line's voiceprint to open word-by-word timing" },
+        { label: 'Drag', d: 'Move a word — its neighbours fence it in' },
+        { label: 'Double-click', d: 'Set a word exactly at the playhead' },
+        { keys: ['←', '→'], d: 'Nudge a focused word by 50 ms' }
+      ]
+    },
+    {
+      title: 'Everything else',
+      rows: [
+        { keys: [mod, 'Z'], d: `Undo — add Shift to redo` },
+        { label: 'Replace all…', d: 'Paste the whole song; kept lines keep their timing' },
+        { keys: ['Esc'], d: 'Close the editor (asks first about unsaved edits)' }
+      ]
+    }
+  ]
+}
+
 const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
   preparing: 'Warming up',
   searching: 'Searching',
@@ -241,7 +291,7 @@ function WordStrip({
           {w.w}
         </button>
       ))}
-      <span className="lyed-ws-hint">drag a word · double-click sets it at the playhead</span>
+      <span className="lyed-ws-hint">Drag a word · double-click sets it at the playhead</span>
     </div>
   )
 }
@@ -268,6 +318,7 @@ export default function LyricsEditor({
   const [error, setError] = useState<string | null>(null)
   const [consent, setConsent] = useState<{ tier: 'align' | 'precise'; sizeMb: number; what?: string } | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
   const [replaceOpen, setReplaceOpen] = useState(false)
   const [replaceText, setReplaceText] = useState('')
   const [current, setCurrent] = useState(-1)
@@ -607,10 +658,16 @@ export default function LyricsEditor({
   }, [engine, songPath, credit, onSaved, onClose])
 
   const requestClose = useCallback((): void => {
+    // Esc and scrim clicks land here through the Modal — with the help
+    // sheet up they mean "close the help", never "close the editor"
+    if (helpOpen) {
+      setHelpOpen(false)
+      return
+    }
     if (busy) return // an align is running — Cancel it first, deliberately
     if (dirty) setConfirmDiscard(true)
     else onClose()
-  }, [busy, dirty, onClose])
+  }, [helpOpen, busy, dirty, onClose])
 
   // Undo/redo keys, scoped to the editor (capture beats the app's handlers).
   useEffect(() => {
@@ -637,6 +694,8 @@ export default function LyricsEditor({
   }, [undo, redo, stampRow])
 
   const untimed = rows.filter((r) => r.text.trim() !== '' && r.start === null).length
+  const isWin = document.body.classList.contains('win')
+  const modEnter = isWin ? 'Ctrl+Enter' : '⌘Enter'
 
   return (
     <Modal onClose={requestClose} busy={saving} cardClassName="lyed-card" aria-label="Edit lyrics">
@@ -651,6 +710,8 @@ export default function LyricsEditor({
           <button
             type="button"
             className="pill ghost small lyed-play"
+            title={playing ? 'Pause' : 'Play'}
+            aria-label={playing ? 'Pause' : 'Play'}
             onClick={() => (playing ? engine.pause() : void engine.play({ countIn: false }))}
           >
             {playing ? '❚❚' : '▶'}
@@ -658,6 +719,14 @@ export default function LyricsEditor({
           <span className="lyed-clock" ref={timeRef}>
             {fmtStamp(engine.position)}
           </span>
+          <button
+            type="button"
+            className="chip lyed-help-btn"
+            title="How to use the editor"
+            onClick={() => setHelpOpen(true)}
+          >
+            ?
+          </button>
         </div>
       </header>
 
@@ -758,7 +827,7 @@ export default function LyricsEditor({
                 className="lyed-stamp"
                 title={
                   r.start === null
-                    ? 'Not timed yet — press to stamp the playhead time here (⌘Enter while typing)'
+                    ? `Not timed yet — press to stamp the playhead time here (${modEnter} while typing)`
                     : 'Play from this line'
                 }
                 onClick={() => (r.start === null ? stampRow(r.id) : playFromRow(r))}
@@ -899,7 +968,7 @@ export default function LyricsEditor({
           </span>
         ) : (
           <span className="lyed-hint">
-            Enter splits a line · ⌘Enter stamps the playhead time on the line you're typing in
+            Enter splits a line · {modEnter} stamps the playhead time on the line you're typing in
             {untimed > 0
               ? ` · ${untimed} ${untimed === 1 ? 'line has' : 'lines have'} no time yet — Align does them all at once`
               : " · a line's voiceprint opens word-by-word timing"}
@@ -932,6 +1001,46 @@ export default function LyricsEditor({
           </>
         )}
       </footer>
+
+      {helpOpen && (
+        <div className="lyed-help" onClick={() => setHelpOpen(false)} role="presentation">
+          <div
+            className="lyed-help-card"
+            role="dialog"
+            aria-label="How to use the editor"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>How to use the editor</h3>
+            <div className="lyed-help-cols">
+              {helpSections(isWin).map((sec) => (
+                <section key={sec.title}>
+                  <h4>{sec.title}</h4>
+                  {sec.rows.map((row, i) => (
+                    <div className="lyed-help-row" key={i}>
+                      <span className="lyed-help-k">
+                        {row.keys
+                          ? row.keys.map((k, ki) => <kbd key={ki}>{k}</kbd>)
+                          : <span className="lyed-help-g">{row.label}</span>}
+                      </span>
+                      <span className="lyed-help-d">{row.d}</span>
+                    </div>
+                  ))}
+                </section>
+              ))}
+            </div>
+            <div className="lyed-help-foot">
+              <button
+                type="button"
+                className="pill primary small"
+                autoFocus
+                onClick={() => setHelpOpen(false)}
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Modal>
   )
 }

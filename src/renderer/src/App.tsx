@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type {
   CustomTrack,
   EngineStatus,
@@ -45,8 +45,12 @@ import { computePeaks } from './audio/peaks'
 import { stemSampleRate } from './audio/stem-rate'
 import DropScreen from './components/DropScreen'
 import LogPanel from './components/LogPanel'
-import LyricsEditor from './components/LyricsEditor'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+
+// The lyrics editor rides outside the boot bundle like VocalTraining does —
+// it exists only behind an explicit click, and the renderer entry has a
+// size budget (scripts/check-renderer-split.mjs) that keeps it honest.
+const LyricsEditor = lazy(() => import('./components/LyricsEditor'))
 import LibraryImport from './components/LibraryImport'
 import ProjectPicker from './components/ProjectPicker'
 import SetupWizard from './components/SetupWizard'
@@ -3061,18 +3065,20 @@ export default function App(): React.JSX.Element {
       {showLog && <LogPanel onClose={() => setShowLog(false)} />}
 
       {editingLyrics && song && (
-        <LyricsEditor
-          engine={engine}
-          songPath={song.path}
-          songName={cleanSongName(song.name)}
-          initialLines={lyrics.status === 'ready' ? lyrics.lines : []}
-          credit={lyrics.status === 'ready' ? lyrics.credit : undefined}
-          preciseCap={preciseCap}
-          onSaved={(res) => {
-            if (editorSeqRef.current === loadSeq.current) applyLyricsResult(res)
-          }}
-          onClose={() => setEditingLyrics(false)}
-        />
+        <Suspense fallback={null}>
+          <LyricsEditor
+            engine={engine}
+            songPath={song.path}
+            songName={cleanSongName(song.name)}
+            initialLines={lyrics.status === 'ready' ? lyrics.lines : []}
+            credit={lyrics.status === 'ready' ? lyrics.credit : undefined}
+            preciseCap={preciseCap}
+            onSaved={(res) => {
+              if (editorSeqRef.current === loadSeq.current) applyLyricsResult(res)
+            }}
+            onClose={() => setEditingLyrics(false)}
+          />
+        </Suspense>
       )}
 
       {showSettings && (

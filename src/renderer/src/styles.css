@@ -4464,6 +4464,12 @@ body.win .modal-card.lyed-card {
   min-height: 30px;
 }
 
+/* a long hint must squeeze the hint, never wrap "Save lyrics" onto two lines */
+.lyed-foot .pill {
+  white-space: nowrap;
+  flex: none;
+}
+
 .lyed-hint,
 .lyed-status {
   font-size: 12px;
@@ -4480,4 +4486,94 @@ body.win .modal-card.lyed-card {
 .lyed-discard {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+/* ——— the help sheet: everything the hands can do, on one quiet page ——— */
+
+.lyed-help-btn {
+  color: var(--dim);
+  font-weight: 800;
+}
+
+.lyed-help {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  /* near-opaque on purpose: readable on the weak-iGPU fleet with no blur */
+  background: color-mix(in srgb, var(--panel-deep) 88%, var(--bg));
+  animation: fade 0.15s;
+}
+
+.lyed-help-card {
+  width: min(620px, calc(100% - 48px));
+  max-height: calc(100% - 48px);
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+
+.lyed-help-card h3 {
+  font-size: 17px;
+  margin-bottom: 14px;
+}
+
+.lyed-help-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px 28px;
+}
+
+.lyed-help-cols h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.lyed-help-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 7px;
+}
+
+.lyed-help-k {
+  display: inline-flex;
+  gap: 4px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.lyed-help-k kbd,
+.lyed-help-g {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.lyed-help-g {
+  font-family: var(--font-display);
+  font-weight: 600;
+  border-bottom-width: 1px;
+}
+
+.lyed-help-d {
+  font-size: 12.5px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+
+.lyed-help-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
