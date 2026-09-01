@@ -3,6 +3,7 @@ import type { LyricLine } from '../../src/shared/types'
 import { sanitizeLines } from '../../src/main/lyrics'
 import {
   computeEnvelope,
+  describeCheck,
   distributeRowWords,
   linesFromRows,
   moveWordStart,
@@ -188,6 +189,40 @@ describe('per-word timing (moveWordStart / withWords)', () => {
     const lines = linesFromRows([moved], 300)
     expect(lines[0].words[0].s).toBeCloseTo(9.2, 5)
     expect(lines[0].start).toBeCloseTo(9.2, 5)
+  })
+})
+
+describe('describeCheck — verdict strings generated from verdict data', () => {
+  const base = { method: 'whisper' as const, matchedPct: 92, medianShift: 0.1, badLines: [] as number[] }
+
+  it('claims "every line snapped" only when every line actually was', () => {
+    const clean = describeCheck({ ...base, verdict: 'retimed' }, true)
+    expect(clean.text).toContain('every line snapped')
+    expect(clean.warn).toBe(false)
+  })
+
+  it('admits which lines kept estimated timing instead of overclaiming', () => {
+    const said = describeCheck({ ...base, verdict: 'retimed', badLines: [3, 7] }, true)
+    expect(said.text).toContain("2 lines couldn't be made out and kept estimated timing")
+    expect(said.text).not.toContain('every line snapped')
+  })
+
+  it('surfaces a missing verse instead of dropping extraSung on the floor', () => {
+    const said = describeCheck({ ...base, verdict: 'retimed', extraSung: true }, true)
+    expect(said.text).toContain("parts these lyrics don't cover")
+  })
+
+  it('only advises Precise when the button exists', () => {
+    const withBtn = describeCheck({ ...base, verdict: 'mismatch', matchedPct: 12 }, true)
+    const withoutBtn = describeCheck({ ...base, verdict: 'mismatch', matchedPct: 12 }, false)
+    expect(withBtn.warn).toBe(true)
+    expect(withBtn.text).toContain('try Precise')
+    expect(withoutBtn.text).not.toContain('Precise')
+  })
+
+  it('marks the precise method on non-mismatch verdicts', () => {
+    const said = describeCheck({ ...base, method: 'ctc', verdict: 'match' }, true)
+    expect(said.text).toContain('· precise')
   })
 })
 

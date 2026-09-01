@@ -10,6 +10,7 @@ import type {
 import type { MultitrackEngine } from '../audio/engine'
 import {
   computeEnvelope,
+  describeCheck,
   distributeRowWords,
   estimateLineEnd,
   fmtStamp,
@@ -40,6 +41,13 @@ interface Props {
 
 type Busy = null | { tier: 'align' | 'precise'; progress: LyricsProgress | null }
 
+/** Envelopes keyed by the decoded buffer they describe — survives editor
+ *  close/reopen for the same loaded song, dies with the buffer. */
+const envelopeCache = new WeakMap<
+  AudioBuffer,
+  { envelope: VocalEnvelope | null; fineEnv: VocalEnvelope | null }
+>()
+
 interface HelpRow {
   /** Key caps rendered as separate <kbd> chips. */
   keys?: string[]
@@ -57,9 +65,9 @@ function helpSections(isWin: boolean): { title: string; rows: HelpRow[] }[] {
       rows: [
         { keys: ['Enter'], d: 'New line — splits the text at the cursor' },
         { keys: ['Backspace'], d: "At a line's start, merges into the line above" },
+        { keys: [mod, 'Backspace'], d: "Remove the line you're in" },
         { keys: ['↑', '↓'], d: 'Move between lines' },
-        { label: 'Paste', d: 'Several lines of text become rows' },
-        { label: '✕', d: 'Hover a line to remove it' }
+        { label: 'Paste', d: 'Several lines of text become rows' }
       ]
     },
     {
@@ -73,7 +81,10 @@ function helpSections(isWin: boolean): { title: string; rows: HelpRow[] }[] {
     {
       title: 'Words',
       rows: [
-        { label: 'Voiceprint', d: "Click a line's voiceprint to open word-by-word timing" },
+        {
+          label: 'Voiceprint',
+          d: `Click a line's voiceprint (or press ${mod} E in it) for word-by-word timing`
+        },
         { label: 'Drag', d: 'Move a word — its neighbours fence it in' },
         { label: 'Double-click', d: 'Set a word exactly at the playhead' },
         { keys: ['←', '→'], d: 'Nudge a focused word by 50 ms' }
@@ -291,7 +302,6 @@ function WordStrip({
           {w.w}
         </button>
       ))}
-      <span className="lyed-ws-hint">Drag a word · double-click sets it at the playhead</span>
     </div>
   )
 }
@@ -327,7 +337,6 @@ export default function LyricsEditor({
   const rowsRef = useRef(rows)
   rowsRef.current = rows
   const inputRefs = useRef(new Map<number, HTMLInputElement>())
-  const listRef = useRef<HTMLDivElement>(null)
   const timeRef = useRef<HTMLSpanElement>(null)
   const focusedRowRef = useRef<number | null>(null)
   const undoRef = useRef<DraftRow[][]>([])
@@ -340,27 +349,55 @@ export default function LyricsEditor({
     []
   )
 
-  // The vocals' envelope, computed once — the coarse one powers the row
-  // voiceprints and the silent-line (hallucination) detector, the fine one
-  // draws the expanded word strip's waveform.
-  const { envelope, fineEnv } = useMemo<{
+  // Initial focus: the first line's text, so typing and ⌘Enter stamping
+  // work the moment the editor opens (the kit Modal sets no focus itself).
+  useEffect(() => {
+    const first = rowsRef.current[0]
+    if (first) inputRefs.current.get(first.id)?.focus()
+  }, [])
+
+  // The vocals' envelope — the coarse one powers the row voiceprints and
+  // the silent-line (hallucination) detector, the fine one draws the
+  // expanded word strip's waveform. Computed AFTER first paint (a 5-minute
+  // song is three full passes over ~15M samples — done synchronously it
+  // blocked the modal's first frame, the design audit's #9 finding) and
+  // cached per decoded buffer, so reopening the editor is instant.
+  const [envs, setEnvs] = useState<{
     envelope: VocalEnvelope | null
     fineEnv: VocalEnvelope | null
   }>(() => {
     const buf = engine.getTrackBuffer('vocals')
-    if (!buf) return { envelope: null, fineEnv: null }
-    const ch0 = buf.getChannelData(0)
-    let mono = ch0
-    if (buf.numberOfChannels > 1) {
-      const ch1 = buf.getChannelData(1)
-      mono = new Float32Array(ch0.length)
-      for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2
+    return (buf && envelopeCache.get(buf)) || { envelope: null, fineEnv: null }
+  })
+  const { envelope, fineEnv } = envs
+  useEffect(() => {
+    const buf = engine.getTrackBuffer('vocals')
+    if (!buf) return
+    const cached = envelopeCache.get(buf)
+    if (cached) {
+      setEnvs(cached)
+      return
     }
-    return {
-      envelope: computeEnvelope(mono, buf.sampleRate),
-      fineEnv: computeEnvelope(mono, buf.sampleRate, 0.01)
+    let dead = false
+    const t = setTimeout(() => {
+      const ch0 = buf.getChannelData(0)
+      let mono = ch0
+      if (buf.numberOfChannels > 1) {
+        const ch1 = buf.getChannelData(1)
+        mono = new Float32Array(ch0.length)
+        for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2
+      }
+      const computed = {
+        envelope: computeEnvelope(mono, buf.sampleRate),
+        fineEnv: computeEnvelope(mono, buf.sampleRate, 0.01)
+      }
+      envelopeCache.set(buf, computed)
+      if (!dead) setEnvs(computed)
+    }, 0)
+    return () => {
+      dead = true
+      clearTimeout(t)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine])
 
   const silent = useMemo(() => silentRowIds(rows, envelope), [rows, envelope])
@@ -658,20 +695,53 @@ export default function LyricsEditor({
   }, [engine, songPath, credit, onSaved, onClose])
 
   const requestClose = useCallback((): void => {
-    // Esc and scrim clicks land here through the Modal — with the help
-    // sheet up they mean "close the help", never "close the editor"
+    // Esc and scrim clicks land here through the Modal — they close the
+    // topmost thing first: the help sheet, then an open word strip, and
+    // only then the editor itself (through the dirty check).
     if (helpOpen) {
       setHelpOpen(false)
+      return
+    }
+    if (strip) {
+      setStrip(null)
       return
     }
     if (busy) return // an align is running — Cancel it first, deliberately
     if (dirty) setConfirmDiscard(true)
     else onClose()
-  }, [helpOpen, busy, dirty, onClose])
+  }, [helpOpen, strip, busy, dirty, onClose])
 
-  // Undo/redo keys, scoped to the editor (capture beats the app's handlers).
+  // The editor's keyboard layer, scoped via capture (beats the app's own
+  // handlers). Also contains Tab: the kit Modal has no focus trap, so
+  // without this a keyboard user tabs straight out into the app behind the
+  // scrim (the trap belongs in @singz/ui eventually — tracked as a kit
+  // change; this covers the editor until then).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Tab') {
+        const scope = document.querySelector(helpOpen ? '.lyed-help-card' : '.lyed-card')
+        if (!scope) return
+        const focusables = Array.from(
+          scope.querySelectorAll<HTMLElement>(
+            'button:not([tabindex="-1"]):not(:disabled), input, textarea'
+          )
+        ).filter((el) => el.offsetParent !== null)
+        if (focusables.length === 0) return
+        const first = focusables[0]
+        const last = focusables[focusables.length - 1]
+        const active = document.activeElement as HTMLElement | null
+        if (!active || !scope.contains(active)) {
+          e.preventDefault()
+          first.focus()
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault()
+          first.focus()
+        } else if (e.shiftKey && active === first) {
+          e.preventDefault()
+          last.focus()
+        }
+        return
+      }
       if (!(e.metaKey || e.ctrlKey)) return
       if (e.code === 'KeyZ') {
         e.preventDefault()
@@ -688,10 +758,44 @@ export default function LyricsEditor({
           stampRow(id)
         }
       }
+      if (e.code === 'Backspace') {
+        // remove the line you're in — the hover-only ✕ has a key now
+        const id = focusedRowRef.current
+        if (id !== null) {
+          e.preventDefault()
+          e.stopPropagation()
+          const at = rowsRef.current.findIndex((x) => x.id === id)
+          deleteRow(id)
+          requestAnimationFrame(() => {
+            const rs = rowsRef.current
+            const next = rs[Math.min(Math.max(0, at), rs.length - 1)]
+            if (next) inputRefs.current.get(next.id)?.focus()
+          })
+        }
+      }
+      if (e.code === 'KeyE') {
+        // word-by-word timing for the line you're in, without the mouse
+        const id = focusedRowRef.current
+        const r = id !== null ? rowsRef.current.find((x) => x.id === id) : undefined
+        if (r) {
+          e.preventDefault()
+          e.stopPropagation()
+          toggleStrip(r)
+          // land on the first word so ←/→ nudging works immediately — but
+          // only when a strip could actually open for THIS row (an untimed
+          // row early-returns, and focus must not teleport into another
+          // row's open strip)
+          if (r.start !== null) {
+            requestAnimationFrame(() => {
+              document.querySelector<HTMLElement>('.lyed-word')?.focus()
+            })
+          }
+        }
+      }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [undo, redo, stampRow])
+  }, [undo, redo, stampRow, deleteRow, toggleStrip, helpOpen])
 
   const untimed = rows.filter((r) => r.text.trim() !== '' && r.start === null).length
   const isWin = document.body.classList.contains('win')
@@ -702,6 +806,7 @@ export default function LyricsEditor({
       <header className="lyed-head">
         <div className="lyed-title">
           <h2>Edit lyrics</h2>
+          {dirty && <span className="lyed-dirty-dot" title="Unsaved changes" />}
           <span className="lyed-song" title={songName}>
             {songName}
           </span>
@@ -735,7 +840,7 @@ export default function LyricsEditor({
           type="button"
           className="chip"
           disabled={busy !== null || saving}
-          title="Match the words to the recording and snap every line and word to when it is sung (uses the AI transcription, so it's usually instant)"
+          title="Match the words to the recording and snap lines and words to when they are sung — instant when a transcription is already on disk, otherwise the song is listened to first"
           onClick={() => void runAlign('align')}
         >
           ✦ Align to the singing
@@ -745,7 +850,7 @@ export default function LyricsEditor({
             type="button"
             className="chip"
             disabled={busy !== null || saving}
-            title="Word-by-word forced alignment with the multilingual speech model — the sharpest timing there is"
+            title="Pin every word to the exact moment it is sung, with the multilingual word aligner (a one-time model download)"
             onClick={() => void runAlign('precise')}
           >
             Precise
@@ -816,7 +921,7 @@ export default function LyricsEditor({
           </div>
         </div>
       ) : (
-        <div className="lyed-list" ref={listRef}>
+        <div className="lyed-list">
           {rows.map((r, i) => (
             <Fragment key={r.id}>
             <div
@@ -928,57 +1033,73 @@ export default function LyricsEditor({
       )}
 
       <footer className="lyed-foot">
-        {busy ? (
-          <span className="lyed-status">
-            {STAGE_LABEL[busy.progress?.stage ?? 'preparing']}…
-            {busy.progress && busy.progress.stage !== 'searching'
-              ? ` ${Math.round(busy.progress.percent)}%`
-              : ''}
-            <button
-              type="button"
-              className="linkish"
-              onClick={() => void window.singz.cancelLyrics()}
-            >
-              Cancel
-            </button>
-          </span>
-        ) : consent ? (
-          <span className="lyed-status">
-            {consent.what === 'aligner'
-              ? `Precise alignment needs the word-aligner model — a one-time ${consent.sizeMb} MB download.`
-              : `Timing the words needs the speech model — a one-time ${consent.sizeMb} MB download.`}
-            <button
-              type="button"
-              className="pill primary small"
-              onClick={() => void runAlign(consent.tier, true)}
-            >
-              Download &amp; align
-            </button>
-            <button type="button" className="linkish" onClick={() => setConsent(null)}>
-              Not now
-            </button>
-          </span>
-        ) : error ? (
-          <span className="lyed-status warn">{error}</span>
-        ) : check ? (
-          <span className={`lyed-status${check.verdict === 'mismatch' ? ' warn' : ''}`}>
-            {check.verdict === 'mismatch'
-              ? `Only ${check.matchedPct}% of these words were heard in the vocals — check the text, or try Precise.`
-              : `${check.matchedPct}% of words heard · every line snapped to the singing${check.method === 'ctc' ? ' · precise' : ''}`}
-          </span>
-        ) : (
-          <span className="lyed-hint">
-            Enter splits a line · {modEnter} stamps the playhead time on the line you're typing in
-            {untimed > 0
-              ? ` · ${untimed} ${untimed === 1 ? 'line has' : 'lines have'} no time yet — Align does them all at once`
-              : " · a line's voiceprint opens word-by-word timing"}
-          </span>
-        )}
+        {/* one persistent live region — align progress, verdicts and errors
+            get announced instead of silently swapping text */}
+        <div className="lyed-status-slot" role="status" aria-live="polite">
+          {busy ? (
+            <span className="lyed-status busy">
+              {STAGE_LABEL[busy.progress?.stage ?? 'preparing']}…
+              {busy.progress && busy.progress.stage !== 'searching' ? (
+                <span className="lyed-busy-bar" aria-hidden="true">
+                  <span style={{ width: `${Math.round(busy.progress.percent)}%` }} />
+                </span>
+              ) : null}
+              {busy.progress && busy.progress.stage !== 'searching'
+                ? ` ${Math.round(busy.progress.percent)}%`
+                : ''}
+              <button
+                type="button"
+                className="linkish"
+                onClick={() => void window.singz.cancelLyrics()}
+              >
+                Cancel
+              </button>
+            </span>
+          ) : consent ? (
+            <span className="lyed-status">
+              {consent.what === 'aligner'
+                ? `Precise alignment needs the word-aligner model — a one-time ${consent.sizeMb} MB download.`
+                : `Timing the words needs the speech model — a one-time ${consent.sizeMb} MB download.`}
+              <button
+                type="button"
+                className="pill primary small"
+                onClick={() => void runAlign(consent.tier, true)}
+              >
+                Download &amp; align
+              </button>
+              <button type="button" className="linkish" onClick={() => setConsent(null)}>
+                Not now
+              </button>
+            </span>
+          ) : error ? (
+            <span className="lyed-status warn">{error}</span>
+          ) : check ? (
+            (() => {
+              const said = describeCheck(check, preciseCap)
+              return (
+                <span className={`lyed-status${said.warn ? ' warn' : ''}`}>{said.text}</span>
+              )
+            })()
+          ) : (
+            <span className="lyed-hint">
+              Enter splits a line · {modEnter} stamps the playhead time on the line you're typing
+              in
+              {untimed > 0
+                ? ` · ${untimed} ${untimed === 1 ? 'line has' : 'lines have'} no time yet — Align does them all at once`
+                : " · a line's voiceprint opens word-by-word timing"}
+            </span>
+          )}
+        </div>
         <span className="lyed-spacer" />
         {confirmDiscard ? (
           <>
             <span className="lyed-status">Discard your edits?</span>
-            <button type="button" className="pill ghost small" onClick={() => setConfirmDiscard(false)}>
+            <button
+              type="button"
+              className="pill ghost small"
+              autoFocus
+              onClick={() => setConfirmDiscard(false)}
+            >
               Keep editing
             </button>
             <button type="button" className="pill small lyed-discard" onClick={onClose}>
@@ -987,7 +1108,13 @@ export default function LyricsEditor({
           </>
         ) : (
           <>
-            <button type="button" className="pill ghost small" onClick={requestClose}>
+            <button
+              type="button"
+              className="pill ghost small"
+              disabled={busy !== null}
+              title={busy ? 'An alignment is running — cancel it first' : undefined}
+              onClick={requestClose}
+            >
               Cancel
             </button>
             <button

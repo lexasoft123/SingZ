@@ -77,6 +77,28 @@ const MARKER = 'edited by the harness tonight';
     if (!stillOpen) throw new Error('Escape on the help sheet closed the whole editor');
     console.log('help: opens, Escape closes just the sheet');
 
+    const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+    // ——— keyboard route into the word strip: Mod+E on the focused row
+    // opens it; Escape peels the STRIP off, never the editor
+    await win.focus('.lyed-row:nth-child(1) input');
+    await win.keyboard.press(`${MOD}+KeyE`);
+    await win.waitForSelector('.lyed-wordstrip', { timeout: 5000 });
+    const focusAfterE = await win.evaluate(() => document.activeElement?.className ?? '');
+    console.log('strip via keyboard; focus on:', focusAfterE || '(none)');
+    await win.keyboard.press('Escape');
+    await win.waitForSelector('.lyed-wordstrip', { state: 'detached', timeout: 5000 });
+    if (!(await win.$('.lyed-card'))) throw new Error('Escape on the strip closed the editor');
+
+    // ——— keyboard line delete: Mod+Backspace removes the focused row
+    const rowsBefore = await win.$$eval('.lyed-row', (els) => els.length);
+    await win.focus('.lyed-row:nth-child(1) input');
+    await win.keyboard.press(`${MOD}+Backspace`);
+    await new Promise((r) => setTimeout(r, 300));
+    const rowsAfter = await win.$$eval('.lyed-row', (els) => els.length);
+    console.log(`keyboard delete: ${rowsBefore} -> ${rowsAfter} rows`);
+    if (rowsAfter !== rowsBefore - 1) throw new Error('Mod+Backspace did not remove the line');
+
     // ——— text edit: rewrite the second line to carry the marker
     const input2 = '.lyed-row:nth-child(2) input';
     await win.fill(input2, MARKER);

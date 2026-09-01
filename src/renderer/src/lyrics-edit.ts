@@ -1,4 +1,4 @@
-import type { LyricLine, LyricWord } from '../../shared/types'
+import type { AlignCheck, LyricLine, LyricWord } from '../../shared/types'
 
 /**
  * Pure logic behind the lyrics editor: draft rows, their conversion to and
@@ -315,6 +315,47 @@ export function withWords(row: DraftRow, words: LyricWord[]): DraftRow {
     words,
     start: words[0].s,
     end: words[words.length - 1].e
+  }
+}
+
+/**
+ * The align verdict, said honestly. Generated from the verdict data so the
+ * string cannot overclaim: lines the check could not hear were deliberately
+ * NOT snapped (they keep timing interpolated from their neighbours), and the
+ * copy says so instead of announcing "every line snapped" regardless. The
+ * mismatch advice only names Precise when that button actually exists.
+ */
+export function describeCheck(
+  check: AlignCheck,
+  canPrecise: boolean
+): { text: string; warn: boolean } {
+  const precise = check.method === 'ctc' ? ' · precise' : ''
+  if (check.verdict === 'mismatch') {
+    return {
+      warn: true,
+      text:
+        `Only ${check.matchedPct}% of these words were heard in the vocals — ` +
+        (canPrecise ? 'check the text, or try Precise.' : "check the text against what's sung.")
+    }
+  }
+  const bad = check.badLines.length
+  if (bad > 0) {
+    return {
+      warn: false,
+      text:
+        `${check.matchedPct}% of words heard · ${bad} ${bad === 1 ? 'line' : 'lines'} couldn't be ` +
+        `made out and kept estimated timing${precise}`
+    }
+  }
+  if (check.extraSung) {
+    return {
+      warn: false,
+      text: `${check.matchedPct}% of words heard · every line snapped — though the singer has parts these lyrics don't cover${precise}`
+    }
+  }
+  return {
+    warn: false,
+    text: `${check.matchedPct}% of words heard · every line snapped to the singing${precise}`
   }
 }
 
