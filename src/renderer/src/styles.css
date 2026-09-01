@@ -4542,9 +4542,21 @@ body.win .modal-card.lyed-card {
 
 /* ——— the help sheet: everything the hands can do, on one quiet page ——— */
 
+/* the help chip must be FINDABLE — accent ring and glyph, round so it
+   reads as "help" at a glance rather than another tool chip */
 .lyed-help-btn {
-  color: var(--dim);
+  color: var(--accent);
   font-weight: 800;
+  font-size: 13px;
+  border-radius: 50%;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.lyed-help-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .lyed-help {
