@@ -189,6 +189,46 @@ export async function readTrackMeta(
   }
 }
 
+/**
+ * Coerce renderer-supplied lines into a clean, ordered LyricLine[] before
+ * they are aligned or written to a file the phones will read. Empty lines
+ * are dropped; times are clamped finite and kept monotonic per line.
+ */
+export function sanitizeLines(raw: unknown): LyricLine[] {
+  if (!Array.isArray(raw)) return []
+  const lines: LyricLine[] = []
+  for (const l of raw as Partial<LyricLine>[]) {
+    const text = String(l?.text ?? '').trim()
+    if (!text) continue
+    const start = Number.isFinite(l?.start) ? Math.max(0, Number(l!.start)) : 0
+    const end = Number.isFinite(l?.end) ? Math.max(start, Number(l!.end)) : start
+    const words: LyricWord[] = []
+    if (Array.isArray(l?.words)) {
+      for (const w of l!.words as Partial<LyricWord>[]) {
+        const t = String(w?.w ?? '').trim()
+        if (!t) continue
+        const s = Number.isFinite(w?.s) ? Math.max(0, Number(w!.s)) : start
+        const e = Number.isFinite(w?.e) ? Math.max(s, Number(w!.e)) : s
+        words.push({ w: t, s, e })
+      }
+    }
+    if (words.length === 0) {
+      // a text-only line still needs word spans for karaoke — spread by length
+      const parts = text.split(/\s+/).filter(Boolean)
+      const total = parts.reduce((s, p) => s + p.length + 1, 0)
+      let cur = start
+      for (const p of parts) {
+        const dur = total > 0 ? ((end - start) * (p.length + 1)) / total : 0
+        words.push({ w: p, s: cur, e: cur + dur })
+        cur += dur
+      }
+    }
+    lines.push({ start, end, text, words })
+  }
+  lines.sort((a, b) => a.start - b.start)
+  return lines
+}
+
 export class Transcriber {
   private child: ChildProcess | null = null
   private cancelled = false
@@ -270,6 +310,196 @@ export class Transcriber {
     return { ok: true, cached: false, source: 'lrclib', credit: hit.credit, lines: hit.lines }
   }
 
+  /**
+   * Persist hand-edited lyrics — the editor's save. Sticky by design:
+   * 'edited' is never re-asked of LRCLIB (shouldReaskLrclib is whisper-only)
+   * and never superseded by a transcription, so the singer's own words
+   * survive every later open. writeCache marks the project for Drive, so
+   * phones pick the correction up like any other lyrics change.
+   */
+  async saveEdited(songPath: string, lines: LyricLine[], credit?: string): Promise<LyricsResult> {
+    if (lines.length === 0) return { ok: false, error: 'There are no lines to save.' }
+    try {
+      await this.writeCache(await this.lyricsFile(songPath), {
+        source: 'edited',
+        credit,
+        lines
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `Could not save the lyrics: ${msg}` }
+    }
+    return { ok: true, cached: false, source: 'edited', credit, lines }
+  }
+
+  /**
+   * Time a draft's words against the vocals WITHOUT touching lyrics.json —
+   * the editor previews the result and saves explicitly. 'align' matches the
+   * draft text to a whisper transcription (the cached one when present, so a
+   * song that was transcribed aligns instantly); 'precise' runs CTC forced
+   * alignment through the splitter pack. On a mismatch verdict the draft
+   * comes back untouched with the check attached — the editor tells the
+   * singer instead of silently scrambling their timing.
+   */
+  async alignDraft(
+    songPath: string,
+    durationSec: number,
+    draft: LyricLine[],
+    tier: 'align' | 'precise',
+    allowDownload: boolean,
+    onProgress: (p: LyricsProgress) => void
+  ): Promise<LyricsResult> {
+    if (this.busy) return { ok: false, error: 'A lyrics job is already running.' }
+    if (draft.length === 0) return { ok: false, error: 'There are no lines to align.' }
+    onProgress({ stage: 'preparing', percent: 0 })
+    const dir = await this.cacheDir(songPath)
+    const vocals = await this.findVocals(songPath, dir)
+    if (!vocals) {
+      return {
+        ok: false,
+        error: 'Split the song into stems first — alignment listens to the vocals track.'
+      }
+    }
+    const refCount = draft.reduce((s, l) => s + l.words.length, 0)
+    const wordsFile = join(dir, 'whisper-words.json')
+
+    if (tier === 'precise') {
+      // The same ladder as preciseAlign, minus the cache write.
+      if (!(await preciseCapable())) {
+        return {
+          ok: false,
+          error: 'Precise alignment runs through the splitter pack — install it in the model manager first.'
+        }
+      }
+      if (!(await exists(mmsModelPath()))) {
+        if (!allowDownload) {
+          return {
+            ok: false,
+            needsModel: { sizeMb: mmsModelMb(), what: 'aligner' },
+            error: 'Precise alignment needs the multilingual aligner model.'
+          }
+        }
+        this.cancelled = false
+        this.abort = new AbortController()
+        try {
+          await downloadFile(
+            mmsModelUrl(),
+            mmsModelPath(),
+            mmsModelMb() * 1e6,
+            (pct) => onProgress({ stage: 'downloading-model', percent: pct }),
+            this.abort.signal
+          )
+        } catch (err) {
+          if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+          const msg = err instanceof Error ? err.message : String(err)
+          return { ok: false, error: `Could not download the aligner model: ${msg}` }
+        } finally {
+          this.abort = null
+        }
+      }
+      this.cancelled = false
+      onProgress({ stage: 'transcribing', percent: 0 })
+      try {
+        const run = await runMmsAlign(vocals, draft, onProgress)
+        this.child = run.child
+        const ctcWords = await run.done
+        const outcome = ctcOutcome(draft, ctcWords, durationSec)
+        let { check } = outcome
+        // CTC scores cannot tell wrong text from hard vocals on singing —
+        // when a whisper transcription is cached, its text check speaks.
+        try {
+          const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as
+            | { words?: LyricWord[] }
+            | LyricWord[]
+          const words = Array.isArray(raw) ? raw : (raw.words ?? [])
+          if (words.length > 0 && transcriptionUsable(words, refCount) && check.verdict !== 'mismatch') {
+            const textCheck = alignToTranscription(draft, words, durationSec).check
+            check = { ...textCheck, method: 'ctc', medianShift: check.medianShift }
+          }
+        } catch {
+          // no transcription cached — the CTC-relative check stands alone
+        }
+        log(
+          'lyrics',
+          `draft precise align: ${check.verdict} — ${check.matchedPct}% words heard, median shift ${check.medianShift}s`
+        )
+        const aligned = check.verdict !== 'mismatch'
+        return {
+          ok: true,
+          cached: false,
+          source: 'edited',
+          aligned,
+          check,
+          lines: aligned ? outcome.lines : draft
+        }
+      } catch (err) {
+        if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+        const msg = err instanceof Error ? err.message : String(err)
+        return { ok: false, error: `Precise alignment failed: ${msg}` }
+      } finally {
+        this.child = null
+      }
+    }
+
+    // Fast tier: whisper text alignment, reusing the cached transcription.
+    let words: LyricWord[] | null = null
+    try {
+      const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as {
+        model?: string
+        words?: LyricWord[]
+      }
+      const cachedWords = raw.words ?? []
+      const available = await bestAvailableModel()
+      const fresher = available && raw.model && !available.includes(raw.model)
+      if (cachedWords.length > 0 && !fresher && transcriptionUsable(cachedWords, refCount)) {
+        log(
+          'lyrics',
+          `draft align: reusing cached transcription (${cachedWords.length} words, ${raw.model ?? '?'})`
+        )
+        words = cachedWords
+      }
+    } catch {
+      // no cache — listen afresh
+    }
+    if (!words) {
+      const prep = await this.ensureWhisper(allowDownload, onProgress)
+      if (!prep.ok) return prep.res
+      const tr = await this.transcribeVocals(
+        prep.engine,
+        prep.model,
+        vocals,
+        guessLanguage(draft) ?? 'auto',
+        dir,
+        durationSec,
+        refCount,
+        onProgress
+      )
+      if (!tr.ok) return tr.res
+      words = tr.words
+    }
+    if (!transcriptionUsable(words, refCount)) {
+      return {
+        ok: false,
+        error:
+          'Could not make out the vocals well enough to time the words. Precise alignment may still work.'
+      }
+    }
+    const { lines, check } = alignToTranscription(draft, words, durationSec)
+    log(
+      'lyrics',
+      `draft align: ${check.verdict} — ${check.matchedPct}% words heard, median shift ${check.medianShift}s, ${check.badLines.length} off lines`
+    )
+    const aligned = check.verdict !== 'mismatch'
+    return {
+      ok: true,
+      cached: false,
+      source: 'edited',
+      aligned,
+      check,
+      lines: aligned ? lines : draft
+    }
+  }
+
   private async downloadModel(onProgress: (p: LyricsProgress) => void): Promise<void> {
     this.abort = new AbortController()
     try {
@@ -299,11 +529,13 @@ export class Transcriber {
     const lyricsPath = await this.lyricsFile(songPath)
 
     const cached = await this.readCache(lyricsPath)
-    // Alignment refines existing online lyrics (re-running is fine — the
-    // global aligner never reads the current timing); without them, auto.
+    // Alignment refines existing online or hand-edited lyrics (re-running is
+    // fine — the global aligner never reads the current timing); without
+    // them, auto. Whisper's own transcription is the one source with nothing
+    // to align against: the timing IS the transcription.
     let alignBase: LyricsCache | null = null
     if (prefer === 'align' || prefer === 'precise') {
-      if (cached?.source === 'lrclib') alignBase = cached
+      if (cached && cached.source !== 'whisper') alignBase = cached
       else prefer = 'auto'
     }
     if (
@@ -386,24 +618,9 @@ export class Transcriber {
       )
     }
 
-    // 2) Fallback: on-device transcription of the vocals stem (project-local
-    // stems first — v2 projects store FLAC — then the hash cache's WAVs)
-    const isProject = (await projectLyricsPath(songPath)) !== null
-    const vocalsCandidates = [
-      ...(isProject
-        ? [join(dirname(songPath), 'stems', 'vocals.flac'), join(dirname(songPath), 'stems', 'vocals.wav')]
-        : []),
-      join(dir, 'htdemucs', 'vocals.wav'),
-      join(dir, 'htdemucs_6s', 'vocals.wav')
-    ]
-    let vocals = vocalsCandidates[vocalsCandidates.length - 1]
-    for (const c of vocalsCandidates) {
-      if (await exists(c)) {
-        vocals = c
-        break
-      }
-    }
-    if (!(await exists(vocals))) {
+    // 2) Fallback: on-device transcription of the vocals stem
+    const vocals = await this.findVocals(songPath, dir)
+    if (!vocals) {
       return { ok: false, error: 'Split the song into stems first — lyrics are read from the vocals track.' }
     }
 
@@ -446,12 +663,76 @@ export class Transcriber {
       }
     }
 
+    const prep = await this.ensureWhisper(allowDownload, onProgress)
+    if (!prep.ok) return prep.res
+    const { engine, model } = prep
+
+    const tr = await this.transcribeVocals(
+      engine,
+      model,
+      vocals,
+      // whisper's auto-detect reads the first 30s — organ intros make it
+      // hallucinate in a random language; the lyrics know better
+      (alignBase && guessLanguage(alignBase.lines)) ?? 'auto',
+      dir,
+      durationSec,
+      alignBase ? alignBase.lines.reduce((s, l) => s + l.words.length, 0) : 0,
+      onProgress
+    )
+    if (!tr.ok) return tr.res
+    if (alignBase) return this.finishAlign(alignBase, tr.words, lyricsPath, durationSec)
+    const lines = groupWords(tr.words)
+    try {
+      await this.writeCache(lyricsPath, {
+        source: 'whisper',
+        lines,
+        // an outage is not a verdict — true makes a later open ask
+        // LRCLIB again; false records that it really answered "miss"
+        lrclibPending: lrclibDown,
+        // ...and which ladder it answered, so a better one asks again
+        lookup: LRCLIB_LADDER_VERSION
+      })
+    } catch (err) {
+      // a failed cache write is still a failed transcription to the caller —
+      // IPC handlers return { ok: false }, they never throw
+      const msg = err instanceof Error ? err.message : String(err)
+      log('lyrics', `transcription failed: ${msg}`, 'error')
+      return { ok: false, error: `Transcription failed: ${msg}` }
+    }
+    return { ok: true, cached: false, source: 'whisper', lines }
+  }
+
+  /** The vocals stem whisper and the aligners listen to (project-local
+   *  stems first — v2 projects store FLAC — then the hash cache's WAVs). */
+  private async findVocals(songPath: string, dir: string): Promise<string | null> {
+    const isProject = (await projectLyricsPath(songPath)) !== null
+    const candidates = [
+      ...(isProject
+        ? [join(dirname(songPath), 'stems', 'vocals.flac'), join(dirname(songPath), 'stems', 'vocals.wav')]
+        : []),
+      join(dir, 'htdemucs', 'vocals.wav'),
+      join(dir, 'htdemucs_6s', 'vocals.wav')
+    ]
+    for (const c of candidates) {
+      if (await exists(c)) return c
+    }
+    return null
+  }
+
+  /** Resolve the whisper binary and a model, downloading one when allowed. */
+  private async ensureWhisper(
+    allowDownload: boolean,
+    onProgress: (p: LyricsProgress) => void
+  ): Promise<{ ok: true; engine: string[]; model: string } | { ok: false; res: LyricsResult }> {
     const engine = await resolveEngine()
     if (!engine) {
       return {
         ok: false,
-        needsEngine: true,
-        error: 'The transcription engine (whisper-cli) is missing from this build.'
+        res: {
+          ok: false,
+          needsEngine: true,
+          error: 'The transcription engine (whisper-cli) is missing from this build.'
+        }
       }
     }
 
@@ -461,8 +742,11 @@ export class Transcriber {
       if (!allowDownload) {
         return {
           ok: false,
-          needsModel: { sizeMb: whisperModelSizeMb(), what: 'speech' },
-          error: 'No online lyrics found — transcribing needs the speech model.'
+          res: {
+            ok: false,
+            needsModel: { sizeMb: whisperModelSizeMb(), what: 'speech' },
+            error: 'No online lyrics found — transcribing needs the speech model.'
+          }
         }
       }
       this.cancelled = false
@@ -470,147 +754,154 @@ export class Transcriber {
         await this.downloadModel(onProgress)
         modelPath = whisperModelPath()
       } catch (err) {
-        if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+        if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
         const msg = err instanceof Error ? err.message : String(err)
-        return { ok: false, error: `Could not download the speech model: ${msg}` }
+        return { ok: false, res: { ok: false, error: `Could not download the speech model: ${msg}` } }
       }
     }
-    const model = modelPath
+    return { ok: true, engine, model: modelPath }
+  }
 
+  /**
+   * Run whisper-cli over the vocals and parse per-word times. Writes the
+   * reusable transcription cache (whisper-words.json) beside the stems when
+   * the result is usable; the caller decides what the words become.
+   */
+  private transcribeVocals(
+    engine: string[],
+    model: string,
+    vocals: string,
+    lang: string,
+    dir: string,
+    durationSec: number,
+    refWordCount: number,
+    onProgress: (p: LyricsProgress) => void
+  ): Promise<{ ok: true; words: LyricWord[] } | { ok: false; res: LyricsResult }> {
     const outDir = join(dir, 'whisper-out')
-    await mkdir(outDir, { recursive: true })
+    const wordsFile = join(dir, 'whisper-words.json')
     this.cancelled = false
 
-    return new Promise<LyricsResult>((resolve) => {
-      const threads = Math.min(8, Math.max(2, cpus().length - 2))
-      // Cross-attention DTW timestamps are noticeably tighter than the
-      // default segment-split times; the preset must match the model.
-      const dtwPreset = /large-v3-turbo/.test(model)
-        ? 'large.v3.turbo'
-        : /-(tiny|base|small|medium)\.bin$/.exec(model)?.[1]
-      const args = [
-        ...engine.slice(1),
-        '-m',
-        model,
-        '-f',
-        vocals,
-        '-l',
-        // whisper's auto-detect reads the first 30s — organ intros make it
-        // hallucinate in a random language; the lyrics know better
-        (alignBase && guessLanguage(alignBase.lines)) ?? 'auto',
-        '-oj',
-        '-of',
-        join(outDir, 'vocals'),
-        '-ml',
-        '1',
-        // no text context between 30s windows: carried context turns one bad
-        // window into a whole-song hallucination loop on reverb-heavy vocals
-        // (Mr. Crowley's organ intro), and singing has no cross-window
-        // grammar worth keeping. Also makes decodes reproducible in practice.
-        '-mc',
-        '0',
-        '--split-on-word',
-        // DTW token timestamps need flash-attn off (silently disabled
-        // otherwise); the accuracy is worth the ~30% slower decode.
-        ...(dtwPreset ? ['-dtw', dtwPreset, '-nfa', '-ojf'] : []),
-        '-t',
-        String(threads)
-      ]
-      log('lyrics', `run: ${engine[0]} ${args.join(' ')}`)
-      const child = spawn(engine[0], args, { env: spawnEnv() })
-      this.child = child
+    return new Promise((done) => {
+      mkdir(outDir, { recursive: true }).catch((err: Error) => {
+        // a full/read-only disk must fail the job, not hang it forever
+        done({ ok: false, res: { ok: false, error: `Could not prepare the transcription folder: ${err.message}` } })
+        return null
+      }).then((made) => {
+        if (made === null) return
+        const threads = Math.min(8, Math.max(2, cpus().length - 2))
+        // Cross-attention DTW timestamps are noticeably tighter than the
+        // default segment-split times; the preset must match the model.
+        const dtwPreset = /large-v3-turbo/.test(model)
+          ? 'large.v3.turbo'
+          : /-(tiny|base|small|medium)\.bin$/.exec(model)?.[1]
+        const args = [
+          ...engine.slice(1),
+          '-m',
+          model,
+          '-f',
+          vocals,
+          '-l',
+          lang,
+          '-oj',
+          '-of',
+          join(outDir, 'vocals'),
+          '-ml',
+          '1',
+          // no text context between 30s windows: carried context turns one bad
+          // window into a whole-song hallucination loop on reverb-heavy vocals
+          // (Mr. Crowley's organ intro), and singing has no cross-window
+          // grammar worth keeping. Also makes decodes reproducible in practice.
+          '-mc',
+          '0',
+          '--split-on-word',
+          // DTW token timestamps need flash-attn off (silently disabled
+          // otherwise); the accuracy is worth the ~30% slower decode.
+          ...(dtwPreset ? ['-dtw', dtwPreset, '-nfa', '-ojf'] : []),
+          '-t',
+          String(threads)
+        ]
+        log('lyrics', `run: ${engine[0]} ${args.join(' ')}`)
+        const child = spawn(engine[0], args, { env: spawnEnv() })
+        this.child = child
 
-      let tail = ''
-      const consume = (chunk: Buffer): void => {
-        const text = chunk.toString('utf8')
-        tail = (tail + text).slice(-8000)
-        // live lines: "[00:00:07.480 --> 00:00:07.600]  word"
-        const m = [...text.matchAll(/-->\s+(\d+):(\d{2}):(\d{2})[.,]\d{1,3}\]/g)]
-        if (m.length > 0 && durationSec > 0) {
-          const last = m[m.length - 1]
-          const t = parseInt(last[1], 10) * 3600 + parseInt(last[2], 10) * 60 + parseInt(last[3], 10)
-          onProgress({ stage: 'transcribing', percent: Math.min(99, (t / durationSec) * 100) })
-        }
-      }
-      child.stdout?.on('data', consume)
-      child.stderr?.on('data', consume)
-
-      child.on('error', (err) => {
-        this.child = null
-        void rm(outDir, { recursive: true, force: true })
-        resolve({ ok: false, error: `Could not start whisper-cli: ${err.message}` })
-      })
-
-      onChildSettled(child, 'lyrics', (code) => {
-        this.child = null
-        log('lyrics', `whisper-cli exited with code ${code}`)
-        if (this.cancelled) {
-          void rm(outDir, { recursive: true, force: true })
-          resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
-          return
-        }
-        void (async () => {
-          try {
-            if (code !== 0) throw new Error(tail.split('\n').filter(Boolean).slice(-3).join(' — ').slice(0, 400))
-            const raw = JSON.parse(await readFile(join(outDir, 'vocals.json'), 'utf8')) as {
-              transcription?: {
-                offsets?: { from?: number; to?: number }
-                text?: string
-                tokens?: { text?: string; t_dtw?: number }[]
-              }[]
-            }
-            const words: LyricWord[] = []
-            for (const seg of raw.transcription ?? []) {
-              const w = String(seg.text ?? '').trim()
-              if (!w || /^[[(♪]/.test(w)) continue
-              // Segment offsets at segment heads are interpolated guesses
-              // ("But I know So" all stamped alike); DTW token times track
-              // the audio — prefer them when present (t_dtw centiseconds).
-              const dtw = (seg.tokens ?? [])
-                .filter((t) => !String(t.text ?? '').startsWith('[_'))
-                .map((t) => t.t_dtw ?? -1)
-                .filter((t) => t >= 0)
-              // DTW attention peaks mid-vowel — pull starts back ~100ms
-              // toward the true onset (legato songs otherwise trail).
-              const s = dtw.length > 0 ? Math.max(0, dtw[0] / 100 - 0.1) : (seg.offsets?.from ?? 0) / 1000
-              const eOff = (seg.offsets?.to ?? 0) / 1000
-              const e = dtw.length > 0 ? Math.max(dtw[dtw.length - 1] / 100 + 0.05, s + 0.1) : eOff
-              words.push({ w, s, e })
-            }
-            // keep the transcription — re-aligning another variant reuses it
-            // (unless it collapsed into hallucination: never cache those, or
-            // every later check would inherit the garbage instantly)
-            if (transcriptionUsable(words, alignBase ? alignBase.lines.reduce((s, l) => s + l.words.length, 0) : 0)) {
-              await writeFile(
-                wordsFile,
-                JSON.stringify({ model: basename(model, '.bin').replace(/^ggml-/, ''), words }),
-                'utf8'
-              )
-            }
-            if (alignBase) {
-              await rm(outDir, { recursive: true, force: true })
-              resolve(await this.finishAlign(alignBase, words, lyricsPath, durationSec))
-              return
-            }
-            const lines = groupWords(words)
-            await this.writeCache(lyricsPath, {
-              source: 'whisper',
-              lines,
-              // an outage is not a verdict — true makes a later open ask
-              // LRCLIB again; false records that it really answered "miss"
-              lrclibPending: lrclibDown,
-              // ...and which ladder it answered, so a better one asks again
-              lookup: LRCLIB_LADDER_VERSION
-            })
-            await rm(outDir, { recursive: true, force: true })
-            resolve({ ok: true, cached: false, source: 'whisper', lines })
-          } catch (err) {
-            await rm(outDir, { recursive: true, force: true })
-            const msg = err instanceof Error ? err.message : String(err)
-            log('lyrics', `transcription failed: ${msg}`, 'error')
-            resolve({ ok: false, error: `Transcription failed: ${msg || 'unknown error'}` })
+        let tail = ''
+        const consume = (chunk: Buffer): void => {
+          const text = chunk.toString('utf8')
+          tail = (tail + text).slice(-8000)
+          // live lines: "[00:00:07.480 --> 00:00:07.600]  word"
+          const m = [...text.matchAll(/-->\s+(\d+):(\d{2}):(\d{2})[.,]\d{1,3}\]/g)]
+          if (m.length > 0 && durationSec > 0) {
+            const last = m[m.length - 1]
+            const t = parseInt(last[1], 10) * 3600 + parseInt(last[2], 10) * 60 + parseInt(last[3], 10)
+            onProgress({ stage: 'transcribing', percent: Math.min(99, (t / durationSec) * 100) })
           }
-        })()
+        }
+        child.stdout?.on('data', consume)
+        child.stderr?.on('data', consume)
+
+        child.on('error', (err) => {
+          this.child = null
+          void rm(outDir, { recursive: true, force: true })
+          done({ ok: false, res: { ok: false, error: `Could not start whisper-cli: ${err.message}` } })
+        })
+
+        onChildSettled(child, 'lyrics', (code) => {
+          this.child = null
+          log('lyrics', `whisper-cli exited with code ${code}`)
+          if (this.cancelled) {
+            void rm(outDir, { recursive: true, force: true })
+            done({ ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } })
+            return
+          }
+          void (async () => {
+            try {
+              if (code !== 0)
+                throw new Error(tail.split('\n').filter(Boolean).slice(-3).join(' — ').slice(0, 400))
+              const raw = JSON.parse(await readFile(join(outDir, 'vocals.json'), 'utf8')) as {
+                transcription?: {
+                  offsets?: { from?: number; to?: number }
+                  text?: string
+                  tokens?: { text?: string; t_dtw?: number }[]
+                }[]
+              }
+              const words: LyricWord[] = []
+              for (const seg of raw.transcription ?? []) {
+                const w = String(seg.text ?? '').trim()
+                if (!w || /^[[(♪]/.test(w)) continue
+                // Segment offsets at segment heads are interpolated guesses
+                // ("But I know So" all stamped alike); DTW token times track
+                // the audio — prefer them when present (t_dtw centiseconds).
+                const dtw = (seg.tokens ?? [])
+                  .filter((t) => !String(t.text ?? '').startsWith('[_'))
+                  .map((t) => t.t_dtw ?? -1)
+                  .filter((t) => t >= 0)
+                // DTW attention peaks mid-vowel — pull starts back ~100ms
+                // toward the true onset (legato songs otherwise trail).
+                const s = dtw.length > 0 ? Math.max(0, dtw[0] / 100 - 0.1) : (seg.offsets?.from ?? 0) / 1000
+                const eOff = (seg.offsets?.to ?? 0) / 1000
+                const e = dtw.length > 0 ? Math.max(dtw[dtw.length - 1] / 100 + 0.05, s + 0.1) : eOff
+                words.push({ w, s, e })
+              }
+              // keep the transcription — re-aligning another variant reuses it
+              // (unless it collapsed into hallucination: never cache those, or
+              // every later check would inherit the garbage instantly)
+              if (transcriptionUsable(words, refWordCount)) {
+                await writeFile(
+                  wordsFile,
+                  JSON.stringify({ model: basename(model, '.bin').replace(/^ggml-/, ''), words }),
+                  'utf8'
+                )
+              }
+              await rm(outDir, { recursive: true, force: true })
+              done({ ok: true, words })
+            } catch (err) {
+              await rm(outDir, { recursive: true, force: true })
+              const msg = err instanceof Error ? err.message : String(err)
+              log('lyrics', `transcription failed: ${msg}`, 'error')
+              done({ ok: false, res: { ok: false, error: `Transcription failed: ${msg || 'unknown error'}` } })
+            }
+          })()
+        })
       })
     })
   }
@@ -642,7 +933,7 @@ export class Transcriber {
       return {
         ok: true,
         cached: false,
-        source: 'lrclib',
+        source: alignBase.source,
         credit: alignBase.credit,
         aligned: alignBase.aligned,
         check,
@@ -650,14 +941,22 @@ export class Transcriber {
       }
     }
     const cache: LyricsCache = {
-      source: 'lrclib',
+      source: alignBase.source,
       credit: alignBase.credit,
       aligned: true,
       check,
       lines
     }
     await this.writeCache(lyricsPath, cache)
-    return { ok: true, cached: false, source: 'lrclib', credit: alignBase.credit, aligned: true, check, lines }
+    return {
+      ok: true,
+      cached: false,
+      source: alignBase.source,
+      credit: alignBase.credit,
+      aligned: true,
+      check,
+      lines
+    }
   }
 
   /** CTC forced alignment via the torch splitter pack (word-level, scored). */
@@ -735,7 +1034,7 @@ export class Transcriber {
         return {
           ok: true,
           cached: false,
-          source: 'lrclib',
+          source: alignBase.source,
           credit: alignBase.credit,
           aligned: alignBase.aligned,
           check,
@@ -743,14 +1042,22 @@ export class Transcriber {
         }
       }
       const cache: LyricsCache = {
-        source: 'lrclib',
+        source: alignBase.source,
         credit: alignBase.credit,
         aligned: true,
         check,
         lines
       }
       await this.writeCache(lyricsPath, cache)
-      return { ok: true, cached: false, source: 'lrclib', credit: alignBase.credit, aligned: true, check, lines }
+      return {
+        ok: true,
+        cached: false,
+        source: alignBase.source,
+        credit: alignBase.credit,
+        aligned: true,
+        check,
+        lines
+      }
     } catch (err) {
       if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
       const msg = err instanceof Error ? err.message : String(err)

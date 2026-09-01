@@ -627,6 +627,12 @@ export class MultitrackEngine {
     return this.tracks.map(({ id, muted, solo, volume }) => ({ id, muted, solo, volume }))
   }
 
+  /** The decoded buffer of one lane (the lyrics editor reads the vocals'
+   *  envelope from it) — null while that lane isn't loaded. */
+  getTrackBuffer(id: string): AudioBuffer | null {
+    return this.tracks.find((t) => t.id === id)?.buffer ?? null
+  }
+
   load(list: EngineTrackInput[], opts: { position?: number; play?: boolean } = {}): void {
     this.stopSources()
     this.cancelPendingClicks()

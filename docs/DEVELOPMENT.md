@@ -289,14 +289,77 @@ produce six stems (guitar/piano lanes hide on songs without them).
 
 ## Releasing
 
-1. Bump `package.json` version (artifact names use it).
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. CI (`.github/workflows/build.yml`) builds mac arm64+x64 dmg, win x64 NSIS,
+Everything in steps 1-3 is committed and pushed **before** the tag exists. What
+checks them is uneven: step 1 is never checked at all; steps 2 and 3 warn on
+main and are *enforced* only by the Android publish job, which runs after the
+tag — and skipping step 2 does both, degrading the GitHub release silently
+while also redding that job. A missing piece is a red release to clean up, not
+a push that was stopped.
+
+1. Bump the version. `package.json` is the source everything else derives from
+   (artifact names, android/app/build.gradle, the desktop) — except iOS, which
+   is written by hand in
+   `mobile/ios/SingZPlayer.xcodeproj/project.pbxproj`, and takes **two
+   different numbers**:
+   - `MARKETING_VERSION` = the release **semver**: `package.json`'s version for
+     an ordinary release, and its `major.minor.patch` prefix when package.json
+     carries a prerelease string — `v0.19.1-mic1`…`mic5` all shipped `0.19.1`.
+     It becomes `CFBundleShortVersionString`, which Apple documents as up to
+     three period-separated integers, so the hyphenated string never goes here.
+   - `CURRENT_PROJECT_VERSION` = a build counter (CFBundleVersion), bumped by
+     one for **every build handed out**, not once per release — it is committed
+     in batches, so 0.18.0 is on record at 8, 14 and 26; v0.19.0 shipped at 27
+     and the five mic testers at 28-32. Never set it to the semver: that reads
+     far *lower* than the counter already installed.
+
+   Nothing in this repo checks either one. iOS refuses an install it reads as a
+   downgrade, and treats an install of a version it already has as nothing to
+   do — so a forgotten bump ships an `.ipa` that silently will not replace the
+   copy on the phone. Successive builds of *one* release are told apart by the
+   counter alone, which is why it moves per build and not per version.
+2. Write `docs/release-notes/v<version>.md` and commit it with the bump. First
+   line is the release title, the rest (after a blank line) the body — both
+   `build.yml` and `android.yml` read it at release-create time, so whichever
+   wins the race publishes the release already titled and noted. **A missing
+   file does not fail the build**: it falls back to
+   `gh release create "$TAG" "${PRE[@]}" --title "$TAG" --notes ""` — still a
+   prerelease if the tag is hyphenated, but public, untitled and unnoted, to be
+   repaired by hand with `gh release edit`.
+   Notes are user-facing — see CLAUDE.md § Releasing for what belongs in them.
+3. Regenerate the store text and commit it:
+
+   ```bash
+   node scripts/store-notes.cjs
+   ```
+
+   It extracts the `<!-- store:LOCALE -->` blocks from that release-notes file
+   into Play's per-versionCode changelogs
+   (`mobile/android/fastlane/metadata/android/<locale>/changelogs/<code>.txt`,
+   version folded the way gradle folds it: 0.19.0 -> 1900), enforcing Play's
+   500-character cap per language. It summarises nothing — a missing or
+   over-length block is an error naming the file to fix. The android canary
+   only *warns* when these are stale (`--check`) — but the step-2 commit
+   triggers it by itself, since `docs/release-notes/**` and this script are in
+   that workflow's push paths, so the warning lands while there is still time
+   to act on it. On a tag the `publish` job runs `fastlane android closed`,
+   whose `sync_changelog` runs this script for real **before** the upload — so
+   a missing notes file or a missing/over-long block turns that job red and
+   nothing reaches Play.
+4. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   **Hyphenated tags (`v0.14.1-test1`) become prereleases** in both workflows:
+   never "latest", so neither the updater nor the in-app pack URL ever picks
+   one up — only the person handed the link installs it. That is how a single
+   tester gets a build, and the tag may sit on a feature branch (bump
+   `package.json` to the full prerelease string).
+5. CI (`.github/workflows/build.yml`) builds mac arm64+x64 dmg, win x64 NSIS,
    compiles whisper-cli and all three splitter packs, Developer ID-signs and
    notarizes the mac bundles (falling back to `scripts/afterPack.cjs`'s ad-hoc
    signature only where the Apple secrets are absent, as in a fork), and
    attaches everything to the GitHub Release via `gh` (nullglob per-platform
    file lists; create/update race-safe).
+   `.github/workflows/android.yml` builds on the same tag and attaches both
+   `SingZ-<tag>-android.apk` (the family fleet's sideload) and
+   `SingZ-<tag>-android.aab` (the bundle uploaded to the Play Console by hand).
 
 Engine builds are cached on the vendor scripts' content hash (editing a script
 forces a clean rebuild); source trees have their own cache. Keep releases

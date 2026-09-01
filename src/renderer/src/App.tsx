@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type {
   CustomTrack,
   EngineStatus,
@@ -46,6 +46,11 @@ import { stemSampleRate } from './audio/stem-rate'
 import DropScreen from './components/DropScreen'
 import LogPanel from './components/LogPanel'
 import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+
+// The lyrics editor rides outside the boot bundle like VocalTraining does —
+// it exists only behind an explicit click, and the renderer entry has a
+// size budget (scripts/check-renderer-split.mjs) that keeps it honest.
+const LyricsEditor = lazy(() => import('./components/LyricsEditor'))
 import LibraryImport from './components/LibraryImport'
 import ProjectPicker from './components/ProjectPicker'
 import SetupWizard from './components/SetupWizard'
@@ -1592,6 +1597,18 @@ export default function App(): React.JSX.Element {
     void window.singz.alignCaps().then((c) => setPreciseCap(c.precise))
   }, [])
 
+  // The lyrics editor is per-song state — a song switch mid-edit closes it
+  // (its Save and Align target the path it opened with). The seq captured at
+  // open guards the renderer side the same way prepLyrics guards its own
+  // results: a save resolving in the one-flush window where the switch has
+  // committed but the editor's unmount cleanup hasn't run yet must not land
+  // song A's lines in song B's state (linesRef feeds detectBeats' aux).
+  const [editingLyrics, setEditingLyrics] = useState(false)
+  const editorSeqRef = useRef(0)
+  useEffect(() => {
+    setEditingLyrics(false)
+  }, [song?.path])
+
   const preferRef = useRef<'auto' | 'whisper' | 'align' | 'precise'>('auto')
   const prepLyricsRef = useRef<
     ((allowDownload?: boolean, prefer?: 'auto' | 'whisper' | 'align' | 'precise') => Promise<void>) | null
@@ -2950,6 +2967,10 @@ export default function App(): React.JSX.Element {
                 onUseWhisper={() => void prepLyrics(false, 'whisper')}
                 onRefineTiming={() => void prepLyrics(false, 'align')}
                 onPreciseAlign={preciseCap ? () => void prepLyrics(false, 'precise') : null}
+                onEdit={() => {
+                  editorSeqRef.current = loadSeq.current
+                  setEditingLyrics(true)
+                }}
                 onResult={applyLyricsResult}
                 onCancel={() => void window.singz.cancelLyrics()}
               />
@@ -3042,6 +3063,23 @@ export default function App(): React.JSX.Element {
       )}
 
       {showLog && <LogPanel onClose={() => setShowLog(false)} />}
+
+      {editingLyrics && song && (
+        <Suspense fallback={null}>
+          <LyricsEditor
+            engine={engine}
+            songPath={song.path}
+            songName={cleanSongName(song.name)}
+            initialLines={lyrics.status === 'ready' ? lyrics.lines : []}
+            credit={lyrics.status === 'ready' ? lyrics.credit : undefined}
+            preciseCap={preciseCap}
+            onSaved={(res) => {
+              if (editorSeqRef.current === loadSeq.current) applyLyricsResult(res)
+            }}
+            onClose={() => setEditingLyrics(false)}
+          />
+        </Suspense>
+      )}
 
       {showSettings && (
         <SettingsModal

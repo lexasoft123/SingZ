@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import type { LyricsProgress, SeparationProgress } from '../shared/types'
 import { searchCandidates } from './lrclib'
 import { preciseCapable } from './align-mms'
-import { Transcriber } from './lyrics'
+import { sanitizeLines, Transcriber } from './lyrics'
 import { ModelManager } from './models'
 import {
   deleteProject,
@@ -300,6 +300,31 @@ function registerIpc(): void {
     if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
     return transcriber.applyById(full, Number(id), Number(durationSec) || 0)
   })
+
+  ipcMain.handle('lyrics:save-edited', (_e, raw: string, lines: unknown, credit?: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    return transcriber.saveEdited(full, sanitizeLines(lines), credit ? String(credit) : undefined)
+  })
+
+  ipcMain.handle(
+    'lyrics:align-draft',
+    (e, raw: string, durationSec: number, lines: unknown, tier: string, allowDownload: boolean) => {
+      const full = resolve(String(raw))
+      if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+      const send = (p: LyricsProgress): void => {
+        if (!e.sender.isDestroyed()) e.sender.send('lyrics:progress', p)
+      }
+      return transcriber.alignDraft(
+        full,
+        Number(durationSec) || 0,
+        sanitizeLines(lines),
+        tier === 'precise' ? 'precise' : 'align',
+        Boolean(allowDownload),
+        send
+      )
+    }
+  )
 
   ipcMain.handle('lyrics:cancel', () => transcriber.cancel())
 
