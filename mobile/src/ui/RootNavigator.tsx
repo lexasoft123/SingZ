@@ -86,6 +86,24 @@ export function PlayerRoute({
   )
 }
 
+/**
+ * Screen options for the Player route.
+ *
+ * The swipe-back gesture used to be switched off whenever the project carried
+ * a native handle, which made the two playback backends feel like different
+ * apps: the same screen, and the singer's habitual edge-swipe silently did
+ * nothing. Nothing about native playback needs it off — leaving the player is
+ * gated by PlayerRemovalFence for both backends, and closePlayerProject
+ * already sequences the native unload ahead of releasing legacy ownership,
+ * whether the pop came from the button or from a gesture.
+ */
+export function playerScreenOptions(): {
+  gestureEnabled: boolean
+  fullScreenGestureEnabled: boolean
+} {
+  return { gestureEnabled: true, fullScreenGestureEnabled: false }
+}
+
 export function closePlayerProject(engine: MultitrackEngine, project: LoadedProject): void {
   const releaseLegacyOwnership = (): void => {
     engine.unload()
@@ -265,10 +283,7 @@ export default function RootNavigator({
         </Stack.Screen>
         <Stack.Screen
           name="Player"
-          options={{
-            gestureEnabled: project?.nativePlayback == null,
-            fullScreenGestureEnabled: false
-          }}
+          options={playerScreenOptions()}
         >
           {({ navigation }) =>
             project == null ? (

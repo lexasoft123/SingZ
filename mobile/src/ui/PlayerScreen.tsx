@@ -757,11 +757,18 @@ export default function PlayerScreen({
     return engine.subscribe(publish)
   }, [engine, pushPos])
 
+  /* Leaving the Songs tab PAUSES, it does not tear down. Legacy has always
+   * paused here (App's changeTab pauses the engine and keeps its buffers),
+   * and native used to stop — which releases the decoded graph, zeroes the
+   * playhead, and makes coming back a full six-stem decode. Train is the one
+   * caller that genuinely needs the output, and it takes ownership through
+   * its own explicit handoff rather than through this effect. */
   useEffect(() => {
     if (active || engine.kind === 'legacy') return
-    void engine.stop('Songs tab hidden').catch(error =>
-      log('native-playback', `tab handoff stop failed · ${String(error)}`, 'error')
-    )
+    // pause() is void and self-guarding on both backends: a graph that is
+    // merely prepared refuses it in the core and the backend swallows that,
+    // so leaving the tab before pressing Play costs nothing.
+    engine.pause()
   }, [active, engine])
 
   useEffect(() => {
@@ -1068,6 +1075,30 @@ export default function PlayerScreen({
     if (!TEST) return
     TEST.project = project.name
     TEST.beatInfo = beatInfo
+    /* The PlaybackBackend itself — the one object BOTH playback paths share.
+       Every older driver reaches `__test.engine`, which is the legacy
+       MultitrackEngine and therefore the wrong object entirely under native
+       playback: a suite that must run the same scenario against both backends
+       has nothing else to hold. `kind` is what it should branch on. */
+    TEST.backend = engine
+    /* Metronome, pitch/tempo and the count-in through the SCREEN's own
+       handlers, never the backend's: `changeMet` is the path that persists
+       (a save that throws is exactly the bug the singer hit), and the
+       key/speed state is what the effect below pushes into the engine. A
+       driver calling engine.setPitchTempo directly proves neither. */
+    TEST.met = met
+    TEST.changeMet = (patch: Partial<MetronomeConfig>) =>
+      changeMet(current => ({ ...current, ...patch }))
+    TEST.setPitchTempo = (semitones: number, tempoPercent: number) => {
+      setKtPitch(semitones)
+      setKtTempo(tempoPercent)
+    }
+    TEST.keyTempo = { pitch: ktPitch, tempo: ktTempo }
+    /* What the count-in row actually shows: `beatDots` false means the
+       singer sees "2.4s" where the dots belong. */
+    TEST.countIn = countInDisplay === null
+      ? null
+      : { ...countInDisplay, kind: countInSt?.kind ?? null }
     /** PROJECT-WIDE: the line for whatever detector is running, whichever it
      *  is. Never show it, or assert it, against ONE row — doing exactly that
      *  is what put "Listening for the beat" under a hand-tuned grid while the

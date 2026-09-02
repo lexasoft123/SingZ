@@ -213,3 +213,49 @@ test('ordinary PlayerScreen serializes and reconciles the native A-B three-state
     tree.unmount()
   })
 })
+
+/**
+ * Leaving the Songs tab used to stop AND unload the native graph, while the
+ * legacy engine merely paused. Coming back therefore cost a full six-stem
+ * re-decode and the playhead came back at zero — a difference the singer sees
+ * as the two backends behaving like different apps.
+ */
+test('leaving the Songs tab pauses the native graph and keeps it prepared', async () => {
+  const h = nativePlayerHarness()
+  // One stable legacy engine: PlayerScreen memoizes its backend on this
+  // identity, so a fresh object per render would remount the whole player.
+  const legacy = {} as MultitrackEngine
+  const player = (active: boolean): React.JSX.Element => (
+    <View>
+      <PlayerScreen
+        active={active}
+        engine={legacy}
+        project={h.project}
+        route={null}
+        trimMs={0}
+        onTrim={jest.fn()}
+        onBack={jest.fn()}
+      />
+    </View>
+  )
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(player(true))
+    await Promise.resolve()
+  })
+  const handle = h.project.nativePlayback!
+  expect(handle.pause).not.toHaveBeenCalled()
+
+  await ReactTestRenderer.act(async () => {
+    tree.update(player(false))
+    await Promise.resolve()
+  })
+
+  expect(handle.pause).toHaveBeenCalledTimes(1)
+  expect(handle.stop).not.toHaveBeenCalled()
+  expect(handle.unload).not.toHaveBeenCalled()
+
+  await ReactTestRenderer.act(async () => {
+    tree.unmount()
+  })
+})

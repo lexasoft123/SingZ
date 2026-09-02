@@ -9,7 +9,7 @@ import {
 } from 'react-native-audio-api'
 import { accentIndex, barLengthAt, beatIndexAtOrAfter, beatTime } from './beat'
 import { describeOutput } from './latency'
-import { log } from './log'
+import { fmtMs, log } from './log'
 // fmtTime here is the song-position one (M:SS); log.ts exports a same-named
 // wall-clock formatter, which is not what a play/pause line wants.
 import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
@@ -936,6 +936,9 @@ export class MultitrackEngine {
   async play(opts: { countIn?: boolean } = {}): Promise<void> {
     if (this.backgrounded || this.nativeOutputHandoff || this._playing || this.tracks.length === 0)
       return
+    // What Play costs on this side, so the two backends' logs can be read
+    // against each other. Resuming a suspended context is the slow part.
+    const requestedAt = Date.now()
     if (this.ctx.state === 'suspended') await this.ctx.resume()
     if (this.backgrounded || this.nativeOutputHandoff) return
     if (this.startOffset >= this.duration - 0.01) this.startOffset = 0
@@ -1036,9 +1039,12 @@ export class MultitrackEngine {
     // Deliberately not awaited: the route probe can take up to 3 s and play()
     // must not wait on a diagnostic. The line lands a moment after the music.
     const at = fmtTime(this.startOffset)
+    // Measured here, printed later: the route probe below is deliberately not
+    // awaited, so its own delay must not be charged to Play.
+    const started = fmtMs(Math.max(0, Date.now() - requestedAt))
     void describeOutput().then(({ text, silent }) => {
       if (gen !== this.generation) return // a newer play() already reported
-      log('engine', `play from ${at} · ${text}`)
+      log('engine', `play from ${at} · ${text} · started in ${started}`)
       if (silent) {
         log(
           'engine',
@@ -1229,8 +1235,14 @@ export class MultitrackEngine {
     // Leaving a song unloads then releases, and the teardown path can reach
     // here twice; the second call has nothing to free and saying so twice
     // just spends lines of a 400-line log.
-    if (this.tracks.length > 0) log('engine', `unload · ${this.tracks.length} lanes released`)
+    const releasedAt = Date.now()
+    const lanes = this.tracks.length
     this.teardown()
+    if (lanes > 0)
+      log(
+        'engine',
+        `unload · ${lanes} lanes released · ${fmtMs(Math.max(0, Date.now() - releasedAt))}`
+      )
     this.training = null
     this.duration = 0
     this.startOffset = 0

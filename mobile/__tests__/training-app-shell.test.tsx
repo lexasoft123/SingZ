@@ -11,6 +11,7 @@ const mockGetRouteLatency = jest.fn()
 const mockGetTrimMs = jest.fn()
 const mockSetTrimMs = jest.fn()
 const mockStopForOwnership = jest.fn()
+const mockParkForBackground = jest.fn()
 
 const shellProps = (): {
   catalog: Record<string, any>
@@ -81,6 +82,7 @@ jest.mock('../src/log', () => ({ log: jest.fn(), logStartup: jest.fn() }))
 jest.mock('../src/playback/native', () => ({
   iosNativePlayback: {
     stopForOwnership: (...args: unknown[]) => mockStopForOwnership(...args),
+    parkForBackground: (...args: unknown[]) => mockParkForBackground(...args),
     unloadActive: jest.fn(() => Promise.resolve())
   }
 }))
@@ -195,6 +197,7 @@ describe('mobile training app shell', () => {
     mockGetTrimMs.mockResolvedValue(0)
     mockSetTrimMs.mockResolvedValue(undefined)
     mockStopForOwnership.mockResolvedValue(true)
+    mockParkForBackground.mockResolvedValue(undefined)
   })
 
   test('does not activate microphone training until native output cleanup is proven', async () => {
@@ -316,11 +319,22 @@ describe('mobile training app shell', () => {
 
     await ReactTestRenderer.act(() => appStateChange('inactive'))
     expect(shellEngine().suspendForBackground).not.toHaveBeenCalled()
+    expect(mockParkForBackground).not.toHaveBeenCalled()
     await ReactTestRenderer.act(() => appStateChange('background'))
     expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
+    // The native graph is PARKED, never stopped. Stopping released the
+    // decoded lanes and zeroed the playhead, so returning to a song cost a
+    // full six-stem decode and restarted it from the top with a count-in.
+    expect(mockParkForBackground).toHaveBeenCalledTimes(1)
+    expect(mockParkForBackground).toHaveBeenCalledWith('app backgrounded')
+    expect(mockStopForOwnership).not.toHaveBeenCalled()
     await ReactTestRenderer.act(() => appStateChange('active'))
     expect(shellEngine().allowForegroundAudio).toHaveBeenCalledTimes(1)
     expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
+    // Foreground re-arms user actions only; nothing resumes by itself, and
+    // nothing needs re-preparing because the graph was never released.
+    expect(mockParkForBackground).toHaveBeenCalledTimes(1)
+    expect(mockStopForOwnership).not.toHaveBeenCalled()
 
     await ReactTestRenderer.act(() => tree.unmount())
     expect(remove).toHaveBeenCalledTimes(1)

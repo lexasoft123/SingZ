@@ -2198,3 +2198,541 @@ describe('mobile native eligibility', () => {
     },
   );
 });
+
+/**
+ * Two ways a song used to lose its graph. Backgrounding the app and reaching
+ * the last bar both ran a full stop+unload, which released the decoded lanes
+ * and zeroed the playhead: the singer came back to a six-stem re-decode, a
+ * count-in they had not asked for, and the top of the song.
+ */
+describe('iOS Phase 4B parking instead of tearing down', () => {
+  /** Report the transport as the core reports it once a song has run out. */
+  const reportCompleted = (
+    h: ReturnType<typeof harness>,
+    generation: number,
+    options: { loop?: { start: number; end: number } } = {},
+  ): { seek(): void } => {
+    let seekCount = 0;
+    let frame = 96_000;
+    // Wrap the harness's own lifecycle rather than replacing it: generation
+    // and state have to stay truthful, or a later prepare in the same test
+    // is rejected as inconsistent before it reaches what is being asserted.
+    const lifecycle = h.native.status.getMockImplementation()!;
+    h.native.status.mockImplementation(async () => {
+      const base = await lifecycle();
+      if (base.session.generation !== generation) return base;
+      return {
+        ...base,
+        session: {
+          ...base.session,
+          transportState: 'completed',
+          renderedProjectFrame: frame,
+          audibleProjectFrame: frame,
+          durationFrames: 96_000,
+          seekCount,
+          ...(options.loop
+            ? {
+                loopEnabled: true,
+                loopStartFrame: options.loop.start,
+                loopEndFrame: options.loop.end,
+              }
+            : {}),
+        },
+      } as never;
+    });
+    // The core applies a queued seek at its next callback and publishes the
+    // receipt; without that the restart below would resume from the old
+    // frame and the song would end again on the spot.
+    return {
+      seek: () => {
+        seekCount++;
+        frame = options.loop?.start ?? 0;
+      },
+    };
+  };
+
+  /** A started handle polls its status on a real interval; leaving one alive
+   *  keeps jest's event loop open long after the assertions are done. */
+  const open: Array<{ unload(reason: string): Promise<void> }> = [];
+  afterEach(async () => {
+    while (open.length > 0) await open.pop()!.unload('test complete');
+  });
+
+  const started = async (h: ReturnType<typeof harness>) => {
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    await handle.start();
+    h.calls.length = 0;
+    return handle;
+  };
+
+  it('iOS keeps rendering in the background rather than releasing the graph', async () => {
+    const h = harness();
+    const handle = await started(h);
+
+    await h.coordinator.parkForBackground('app backgrounded');
+
+    expect(h.native.stop).not.toHaveBeenCalled();
+    expect(h.native.unload).not.toHaveBeenCalled();
+    // iOS declares the audio background mode, so nothing is even paused.
+    expect(h.calls).toHaveLength(0);
+    expect(handle.snapshot().phase).toBe('playing');
+  });
+
+  it('Android parks paused in place, keeping the decoded graph', async () => {
+    const h = harness({ platform: 'android' });
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    h.calls.length = 0;
+
+    await h.coordinator.parkForBackground('app backgrounded');
+
+    expect(h.calls).toEqual([`native.transport:${generation}:pause`]);
+    expect(h.native.stop).not.toHaveBeenCalled();
+    expect(h.native.unload).not.toHaveBeenCalled();
+  });
+
+  it('the end of a song parks at the end and keeps every decoded lane', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    reportCompleted(h, generation);
+
+    await h.coordinator.pollHandle(handle as never);
+
+    expect(h.calls).toEqual([`native.transport:${generation}:pause`]);
+    expect(h.native.unload).not.toHaveBeenCalled();
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'paused',
+      positionSec: 2,
+    });
+
+    // Every later poll still reports completed; the park is issued once, not
+    // once per 200 ms tick for as long as the song sits on screen — and each
+    // of those polls must keep calling the transport parked. Reporting it as
+    // stopped is what let Play resume straight into the end of the song.
+    await h.coordinator.pollHandle(handle as never);
+    await h.coordinator.pollHandle(handle as never);
+    expect(h.calls).toEqual([`native.transport:${generation}:pause`]);
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'paused',
+      positionSec: 2,
+    });
+  });
+
+  it('Play on a song parked at its end seeks to the top before resuming', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    const core = reportCompleted(h, generation);
+    await h.coordinator.pollHandle(handle as never);
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'seek') core.seek();
+      return result(next, 'running');
+    });
+    h.calls.length = 0;
+
+    await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
+
+    // Seek first, then resume: resume() decides Playing or Completed from the
+    // frame the callback last published, so resuming first ends the song
+    // again immediately. No re-prepare — the graph was never released.
+    expect(h.calls).toEqual([
+      `native.transport:${generation}:seek`,
+      `native.transport:${generation}:resume`,
+    ]);
+    expect(h.native.prepare).toHaveBeenCalledTimes(1);
+    expect(
+      h.native.transport.mock.calls.at(-2)?.[1],
+    ).toMatchObject({ kind: 'seek', projectFrame: 0 });
+  });
+
+  it('an ordinary pause after a restart resumes in place, not from the top', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    const core = reportCompleted(h, generation);
+    await h.coordinator.pollHandle(handle as never);
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'seek') core.seek();
+      return result(next, 'running');
+    });
+    await handle.start();
+
+    // The song is playing again from the top. A pause now is an ordinary
+    // pause; resuming it must continue where the singer stopped, and never
+    // jump back to the start because the song once reached its end.
+    h.native.status.mockImplementation(async () => {
+      const base = capability(generation, 'running', 24_000, 'ios');
+      return {
+        ...base,
+        session: { ...base.session, transportState: 'paused', seekCount: 1 },
+      } as never;
+    });
+    await h.coordinator.pollHandle(handle as never);
+    expect(handle.snapshot().phase).toBe('paused');
+    h.calls.length = 0;
+
+    await handle.start();
+
+    expect(h.calls).toEqual([`native.transport:${generation}:resume`]);
+  });
+
+  it('handing the output to Train remembers the playhead for the next Play', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    // Genuinely mid-song: the fixture runs to 96_000 frames, so a cursor
+    // there would be its END and would prove the opposite of the point.
+    h.native.status.mockImplementation(async () =>
+      capability(generation, 'running', 48_000, 'ios'),
+    );
+    await h.coordinator.pollHandle(handle as never);
+
+    await h.coordinator.stopForOwnership(
+      'vocal training requested audio ownership',
+    );
+    await handle.start();
+
+    // Train genuinely needs the device, so this path does stop. What it must
+    // not do is forget where the singer was: coming back used to restart the
+    // song from its top, with a count-in nobody asked for.
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(h.prepareRequests[1]).toMatchObject({
+      preparedStartProjectFrame: 48_000,
+    });
+  });
+
+  it('Play restarts a song the singer had scrubbed to its very end', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    const core = reportCompleted(h, generation);
+    // Scrubbing to the end parks the core as Completed, not Paused, so it
+    // refuses the end-of-song pause and the later seek resumes it by itself.
+    let advancing = false;
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'pause')
+        return { ...result(next, 'running', false), error: 'invalid-state' as const };
+      if (command.kind === 'seek') {
+        core.seek();
+        advancing = true;
+      }
+      if (command.kind === 'resume' && advancing)
+        return { ...result(next, 'running', false), error: 'invalid-state' as const };
+      return result(next, 'running');
+    });
+    await h.coordinator.pollHandle(handle as never);
+    h.native.status.mockImplementation(async () => {
+      const base = capability(generation, 'running', advancing ? 0 : 96_000, 'ios');
+      return {
+        ...base,
+        session: {
+          ...base.session,
+          transportState: advancing ? 'playing' : 'completed',
+          seekCount: advancing ? 1 : 0,
+        },
+      } as never;
+    });
+    h.calls.length = 0;
+
+    await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
+
+    expect(h.calls).toEqual([`native.transport:${generation}:seek`]);
+  });
+
+  it('scrubbing back after the song ended keeps the singer where they scrubbed', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    const core = reportCompleted(h, generation);
+    await h.coordinator.pollHandle(handle as never);
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'seek') core.seek();
+      return result(next, 'running');
+    });
+
+    // The song ran out, and the singer drags the scrub bar back — or taps a
+    // lyric line, or presses back-5s; all three land here. The fixture song
+    // is two seconds long, so one second is genuinely mid-song.
+    await handle.seek(1);
+    h.calls.length = 0;
+
+    await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
+
+    // Play must continue from where they scrubbed. Restarting the song is
+    // for a transport still sitting at its end, and this one is not.
+    expect(h.calls).toEqual([`native.transport:${generation}:resume`]);
+  });
+
+  it('says so in the log when the core never confirms the restart seek', async () => {
+    const lines: string[] = [];
+    const unsubscribe = onLogLine(entry => {
+      if (entry.source === 'dsp') lines.push(entry.line);
+    });
+    try {
+      const h = harness();
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      // A core that takes the seek but never renders a block: seekCount
+      // never advances, so the receipt this restart waits on never arrives.
+      reportCompleted(h, generation);
+      await h.coordinator.pollHandle(handle as never);
+
+      // Play proceeds anyway, deliberately: the failed resume lands in
+      // Completed, the poll re-parks, and the next tap finds the late
+      // receipt already absorbed — a condition that heals itself is not
+      // worth showing the singer an error for.
+      await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
+
+      // Resuming without the receipt enqueues Completed from the frame the
+      // seek was about to replace — silence. Nothing here can fix that, but
+      // a field log is the only evidence there is, and it must be able to
+      // tell this apart from Play simply being ignored.
+      expect(
+        lines.filter(line => line.startsWith('seek receipt did not arrive')),
+      ).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
+  }, 10_000);
+
+  it('times a rebuilt graph from the rebuild, not from the last Play tap', async () => {
+    const lines: string[] = [];
+    const unsubscribe = onLogLine(entry => {
+      if (entry.source === 'dsp') lines.push(entry.line);
+    });
+    try {
+      const h = harness();
+      const handle = await started(h);
+      // Four minutes of singing before the key slider moves.
+      (handle as unknown as { startRequestedAt: number }).startRequestedAt =
+        Date.now() - 240_000;
+      lines.length = 0;
+      // Keep the harness's own lifecycle (generation and state must stay
+      // truthful through prepare) and only make the callback audible, so the
+      // rebuilt graph reports a first audible callback of its own.
+      const lifecycle = h.native.status.getMockImplementation()!;
+      h.native.status.mockImplementation(async () => {
+        const base = await lifecycle();
+        return {
+          ...base,
+          session: { ...base.session, audibleFrames: 48_000 },
+        };
+      });
+      // Make the rebuild itself cost something measurable. The silence the
+      // singer hears starts when the old graph goes, not when the new one is
+      // ready, so the stamp has to cover the prepare as well.
+      const prepare = h.native.prepare.getMockImplementation()!;
+      h.native.prepare.mockImplementation(async (next, request) => {
+        await new Promise(resolve => setTimeout(resolve, 60));
+        return prepare(next, request);
+      });
+
+      // Grid-less count-in only: a native click would demand a beat grid,
+      // and the meter is not what this test is about.
+      await rebuildNativePlaybackCues(handle, null, {
+        click: false,
+        countInBars: 2,
+        volume: 0.25,
+        accent: false,
+      });
+      await until(() =>
+        lines.some(line => line.startsWith('first audible callback')),
+      );
+
+      const audible = lines.find(line =>
+        line.startsWith('first audible callback'),
+      )!;
+      // The graph became audible moments after the REBUILD. Timing it from
+      // the last Play tap instead would print the four minutes of singing
+      // that preceded it, making every pitch change read as a stall to
+      // whoever opens the log — the one thing these numbers exist to prevent.
+      const stamp = /· ((?:\d+(?:\.\d+)? s)|(?:\d+ ms)) after Play/.exec(
+        audible,
+      );
+      expect(stamp).not.toBeNull();
+      const [value, unit] = stamp![1].split(' ');
+      const seconds = unit === 's' ? Number(value) : Number(value) / 1000;
+      expect(seconds).toBeLessThan(5);
+      // And it covers the rebuild's own cost: stamping at the moment the new
+      // graph starts instead would report a few milliseconds and hide the
+      // gap the singer actually heard.
+      expect(seconds).toBeGreaterThanOrEqual(0.05);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('Play after a pitch change made at the end of a song still restarts it', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    reportCompleted(h, generation);
+    await h.coordinator.pollHandle(handle as never);
+
+    // A rebuild re-prepares AT the parked frame and starts a fresh mark, so
+    // the mark alone cannot see that the playhead is still at the end. A
+    // plain resume there is resolved Completed by the core and is silent,
+    // which reads to the singer as Play doing nothing once.
+    await rebuildNativePlaybackCues(handle, null, {
+      click: false,
+      countInBars: 2,
+      volume: 0.25,
+      accent: false,
+    });
+    const rebuilt = handle.snapshot().generation;
+    let advancing = false;
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'seek') advancing = true;
+      return result(next, 'running');
+    });
+    h.native.status.mockImplementation(async () => {
+      const base = capability(rebuilt, 'running', advancing ? 0 : 96_000, 'ios');
+      return {
+        ...base,
+        session: {
+          ...base.session,
+          transportState: 'paused',
+          seekCount: advancing ? 1 : 0,
+        },
+      } as never;
+    });
+    await h.coordinator.pollHandle(handle as never);
+    h.calls.length = 0;
+
+    await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
+
+    expect(h.calls).toEqual([
+      `native.transport:${rebuilt}:seek`,
+      `native.transport:${rebuilt}:resume`,
+    ]);
+  });
+
+  it('a rebuild taken at the end restores a parked graph, not a dormant one', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    reportCompleted(h, generation);
+    await h.coordinator.pollHandle(handle as never);
+
+    await rebuildNativePlaybackCues(handle, null, {
+      click: false,
+      countInBars: 2,
+      volume: 0.25,
+      accent: false,
+    });
+
+    // Reading 'completed' as 'prepared' left the rebuilt graph with no output
+    // open, sitting at the last frame: the next Play started it there, the
+    // core's first callback flipped it to Completed, and the singer heard
+    // nothing until a second tap. Restore it parked instead, and the
+    // at-the-end rule above turns that Play into a restart.
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(h.prepareRequests[1]).toMatchObject({
+      initialTransport: { state: 'paused' },
+    });
+  });
+
+  it('a handoff at the very end is not remembered as a restart point', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    // The singer reaches the end and opens Train from there.
+    h.native.status.mockImplementation(async () =>
+      capability(generation, 'running', 96_000, 'ios'),
+    );
+    await h.coordinator.pollHandle(handle as never);
+
+    await h.coordinator.stopForOwnership(
+      'vocal training requested audio ownership',
+    );
+    await handle.start();
+
+    // Remembering the end would prepare there and start Playing, and the
+    // first callback would flip straight to Completed — silence. An ordinary
+    // start from the top is the honest answer for a song that had finished.
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(h.prepareRequests[1]).not.toHaveProperty(
+      'preparedStartProjectFrame',
+    );
+  });
+
+  it('a seek the core refuses leaves the song parked at its end', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    reportCompleted(h, generation);
+    await h.coordinator.pollHandle(handle as never);
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'seek')
+        return { ...result(next, 'running', false), error: 'invalid-state' as const };
+      return result(next, 'running');
+    });
+
+    // The scrub never landed, so the playhead never moved off the end and
+    // Play must still restart. This pins the BEHAVIOUR, not the ordering of
+    // the clear: the optimistic position adopt never runs on a throw either,
+    // so the positional rule would answer the same way from the far side.
+    await expect(handle.seek(1)).rejects.toThrow();
+    h.calls.length = 0;
+    await handle.start();
+
+    expect(h.calls[0]).toBe(`native.transport:${generation}:seek`);
+  });
+
+  it('a graph that never rendered is discarded, not "stopped"', async () => {
+    const lines: string[] = [];
+    const unsubscribe = onLogLine(entry => {
+      if (entry.source === 'dsp') lines.push(entry.line);
+    });
+    try {
+      const h = harness();
+      const project = await h.load();
+      const handle = project.nativePlayback!;
+
+      // Prepared and then left, without Play ever being pressed. Saying
+      // "rendering stopped" here describes a callback that never ran, and a
+      // field log is the only evidence there is about what actually played.
+      await handle.stop('player screen closed');
+
+      expect(
+        lines.filter(line => line.startsWith('prepared graph discarded')),
+      ).toHaveLength(1);
+      expect(lines.some(line => line.startsWith('rendering stopped'))).toBe(
+        false,
+      );
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('Play at the end of a looped region restarts at the region, not the top', async () => {
+    const h = harness();
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    const core = reportCompleted(h, generation, {
+      loop: { start: 24_000, end: 96_000 },
+    });
+    await h.coordinator.pollHandle(handle as never);
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'seek') core.seek();
+      return result(next, 'running');
+    });
+    h.calls.length = 0;
+
+    await handle.start();
+
+    expect(
+      h.native.transport.mock.calls.at(-2)?.[1],
+    ).toMatchObject({ kind: 'seek', projectFrame: 24_000 });
+  });
+});

@@ -7,7 +7,7 @@ import {
   type NativePlaybackHandle,
   type NativePlaybackViewState
 } from '../src/projects'
-import { closePlayerProject, PlayerRoute } from '../src/ui/RootNavigator'
+import { closePlayerProject, PlayerRoute, playerScreenOptions } from '../src/ui/RootNavigator'
 
 jest.mock('../src/ui/CatalogScreen', () => () => null)
 const mockPlayerScreen = jest.fn((_props: unknown) => null)
@@ -142,4 +142,15 @@ test('a native project is rendered by the ordinary PlayerScreen route', async ()
     expect.objectContaining({ project: native.project, onFallback })
   )
   await ReactTestRenderer.act(() => renderer.unmount())
+})
+
+test('the back gesture works under native playback, exactly as it does under legacy', () => {
+  // It was off for native only, so a singer's edge-swipe did nothing on the
+  // same screen that accepted it a moment earlier under the other backend.
+  // Leaving is gated by PlayerRemovalFence and sequenced by
+  // closePlayerProject for both, so there is nothing for it to race.
+  expect(playerScreenOptions()).toEqual({
+    gestureEnabled: true,
+    fullScreenGestureEnabled: false
+  })
 })

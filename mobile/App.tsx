@@ -753,7 +753,10 @@ export default function App(): React.JSX.Element {
     void AudioManager.setAudioSessionActivity(true)
     const appState = AppState.addEventListener('change', next => {
       if (next === 'background') {
-        void iosNativePlayback.stopForOwnership('app backgrounded')
+        // Park the native graph; never stop it. Stopping released the
+        // decoded lanes, so returning to a song cost a full six-stem decode
+        // before Play made a sound, and the playhead came back at zero.
+        void iosNativePlayback.parkForBackground('app backgrounded')
         void engine.suspendForBackground()
       } else if (next === 'active') engine.allowForegroundAudio()
     })

@@ -22,8 +22,13 @@ const prefs = NativeModules.AudioRouteInfo as {
  * leaves the compiler and every other suite perfectly green.
  */
 describe('persisted text reads across the native bridge', () => {
+  // Put the shared stub back, rather than resetting whatever the last test
+  // assigned: a reset mock resolves undefined, which this module turns into
+  // null, so a later test that forgot to set one up would pass its
+  // missing-key assertion for entirely the wrong reason.
+  const stub = prefs.getTextPref
   afterEach(() => {
-    prefs.getTextPref.mockReset()
+    prefs.getTextPref = stub
   })
 
   test('an absent key resolves to null even though the bridge says undefined', async () => {
