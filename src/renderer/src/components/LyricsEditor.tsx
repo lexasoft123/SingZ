@@ -64,6 +64,7 @@ function helpSections(isWin: boolean): { title: string; rows: HelpRow[] }[] {
       title: 'Lines',
       rows: [
         { keys: ['Enter'], d: 'New line — splits the text at the cursor' },
+        { label: '+', d: 'Add an empty line after this one — for a whole missing section' },
         { keys: ['Backspace'], d: "At a line's start, merges into the line above" },
         { keys: [mod, 'Backspace'], d: "Remove the line you're in" },
         { keys: ['↑', '↓'], d: 'Move between lines' },
@@ -596,6 +597,24 @@ export default function LyricsEditor({
     [apply]
   )
 
+  // A whole missing section (a chorus nothing transcribed) has no existing
+  // row to split — Enter only breaks text you already have. This inserts a
+  // genuinely empty row after id, no cursor position involved, so it never
+  // depends on where you happened to click.
+  const addRowAfter = useCallback(
+    (id: number): void => {
+      const rs = rowsRef.current
+      const i = rs.findIndex((r) => r.id === id)
+      if (i < 0) return
+      const next = rs.map((r) => ({ ...r }))
+      const fresh: DraftRow = { id: freshRowId(), start: null, end: null, text: '', words: null }
+      next.splice(i + 1, 0, fresh)
+      apply(next)
+      requestAnimationFrame(() => inputRefs.current.get(fresh.id)?.focus())
+    },
+    [apply]
+  )
+
   const dropSilent = useCallback((): void => {
     const rs = rowsRef.current.filter((r) => !silent.has(r.id))
     if (rs.length !== rowsRef.current.length) {
@@ -1000,6 +1019,15 @@ export default function LyricsEditor({
                   }
                 }}
               />
+              <button
+                type="button"
+                className="lyed-add"
+                title="Add a new line after this one"
+                tabIndex={-1}
+                onClick={() => addRowAfter(r.id)}
+              >
+                +
+              </button>
               <button
                 type="button"
                 className="lyed-x"

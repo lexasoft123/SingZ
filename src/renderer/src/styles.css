@@ -4235,7 +4235,7 @@ body.win .modal-card.lyed-card {
 
 .lyed-row {
   display: grid;
-  grid-template-columns: 62px 54px 1fr 26px;
+  grid-template-columns: 62px 54px 1fr 26px 26px;
   align-items: center;
   gap: 10px;
   border-radius: 12px;
@@ -4419,6 +4419,7 @@ body.win .modal-card.lyed-card {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
+.lyed-add,
 .lyed-x {
   border: none;
   background: none;
@@ -4430,9 +4431,15 @@ body.win .modal-card.lyed-card {
   opacity: 0;
 }
 
+.lyed-row:hover .lyed-add,
+.lyed-add:focus-visible,
 .lyed-row:hover .lyed-x,
 .lyed-x:focus-visible {
   opacity: 1;
+}
+
+.lyed-add:hover {
+  color: var(--accent);
 }
 
 .lyed-x:hover {
