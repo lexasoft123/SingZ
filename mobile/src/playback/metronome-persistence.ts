@@ -447,7 +447,11 @@ export class MobileMetronomePersistence {
 
   private async loadPhoneJournal(): Promise<PhoneJournalDocument> {
     const raw = await this.api.getPreference(METRONOME_PHONE_JOURNAL_KEY);
-    return raw === null || raw === '' ? journalDefaults() : restoreJournal(raw);
+    // `== null`, not `=== null`: an absent key reaches JS as `undefined` on
+    // iOS (see `storedText` in ../latency). The boundary normalizes it now,
+    // but the parsers below index the value directly, so a second reader of
+    // this store must never be able to reintroduce the crash.
+    return raw == null || raw === '' ? journalDefaults() : restoreJournal(raw);
   }
 
   private async persistOverride(
@@ -480,7 +484,8 @@ export class MobileMetronomePersistence {
 
   private async loadOverrides(): Promise<DriveOverrideDocument> {
     const raw = await this.api.getPreference(METRONOME_OVERRIDES_KEY);
-    return raw === null || raw === '' ? defaults() : restoreOverrides(raw);
+    // See loadPhoneJournal: `== null` covers the absent-key `undefined`.
+    return raw == null || raw === '' ? defaults() : restoreOverrides(raw);
   }
 }
 

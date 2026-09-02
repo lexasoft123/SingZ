@@ -73,7 +73,15 @@ function memoryApi(doc = project()): {
         current = text;
         return true;
       }),
-      getPreference: jest.fn(async key => preferences.get(key) ?? null),
+      // No `?? null`: a Map miss yields undefined, which is exactly what the
+      // device hands JS for a key that was never written. Normalizing it here
+      // is what kept every test in this file blind to the crash.
+      getPreference: jest.fn(
+        async key =>
+          preferences.get(key) as unknown as Awaited<
+            ReturnType<MetronomePersistenceApi['getPreference']>
+          >,
+      ),
       setPreference: jest.fn(async (key, value) => {
         preferences.set(key, value);
       }),
@@ -604,4 +612,76 @@ describe('mobile metronome persistence', () => {
       expect(memory.preferences.get(METRONOME_PHONE_JOURNAL_KEY)).toBe(raw);
     },
   );
+});
+
+/**
+ * The first metronome touch on a device died with "Cannot read property
+ * 'length' of undefined" and, because the throw happened before the write,
+ * died that way on every touch afterwards — the key it needed was never
+ * created. The cause is not in this module's logic: an absent native
+ * preference resolves to `undefined`, not `null` (an Objective-C `nil`
+ * crosses the New Architecture bridge that way), and every mock in this repo
+ * normalized it to `null`, so no suite could ever reproduce it.
+ */
+describe('an absent native preference reads as undefined', () => {
+  /** The platform's real shape: a Map miss yields undefined, uncast. */
+  function platformApi(doc = project()): {
+    readonly api: MetronomePersistenceApi;
+    readonly preferences: Map<string, string>;
+  } {
+    let current = JSON.stringify(doc);
+    const preferences = new Map<string, string>();
+    return {
+      preferences,
+      api: {
+        readProjectText: async () => current,
+        writeProjectText: async (_project, _file, text) => {
+          current = text;
+          return true;
+        },
+        // No `?? null`. This is what the device hands JS for a key that has
+        // never been written, and the reason the guards below say `== null`.
+        getPreference: (async key =>
+          preferences.get(key)) as MetronomePersistenceApi['getPreference'],
+        setPreference: async (key, value) => {
+          preferences.set(key, value);
+        },
+        delay: async () => undefined,
+      },
+    };
+  }
+
+  test('the very first Drive override save creates the store', async () => {
+    const memory = platformApi();
+    const store = new MobileMetronomePersistence(memory.api);
+    // The exact ref the field log names: a Drive song with no explicit
+    // identity of its own resolves to { source: 'gdrive', dir }.
+    const ref = metronomeRefForEntry({
+      dir: 'Cat Stevens — Father and Son',
+      source: 'gdrive',
+    } as Parameters<typeof metronomeRefForEntry>[0]);
+    expect(ref).toEqual({
+      source: 'gdrive',
+      dir: 'Cat Stevens — Father and Son',
+    });
+
+    await expect(store.save(ref, on)).resolves.toBeUndefined();
+
+    const raw = memory.preferences.get(DRIVE_METRONOME_OVERRIDES_KEY);
+    expect(typeof raw).toBe('string');
+    expect(JSON.parse(raw!).formatVersion).toBe(1);
+  });
+
+  test('the very first phone journal save creates the store', async () => {
+    const memory = platformApi(project(off));
+    const store = new MobileMetronomePersistence(memory.api);
+
+    await expect(
+      store.save({ source: 'phone', dir: 'Song' }, on),
+    ).resolves.toBeUndefined();
+
+    expect(typeof memory.preferences.get(METRONOME_PHONE_JOURNAL_KEY)).toBe(
+      'string',
+    );
+  });
 });
