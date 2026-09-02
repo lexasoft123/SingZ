@@ -692,6 +692,80 @@ uint64_t offsetNanoseconds(uint32_t frames, SampleRateHz rate) noexcept {
       static_cast<double>(frames) * 1000000000.0 / rate.value));
 }
 
+bool advanceSignedSamples(int64_t value, uint32_t offset,
+                          int64_t* advanced) noexcept {
+  if (advanced == nullptr || value > INT64_MAX - static_cast<int64_t>(offset))
+    return false;
+  *advanced = value + static_cast<int64_t>(offset);
+  return true;
+}
+
+void offsetTransport(const TransportContext& source, uint32_t offset,
+                     SampleRateHz rate,
+                     TransportContext* destination) noexcept {
+  if (destination == nullptr) return;
+  *destination = source;
+  if (offset == 0) return;
+  if ((destination->validFields & TransportValidProjectSamples) != 0) {
+    ProjectSamplePositionQ32 position{};
+    if (projectSamplePositionAt(source, offset, &position)) {
+      destination->projectTimeSamples = position.samples;
+      destination->projectTimeFractionQ32 = position.fraction;
+    } else {
+      // A rate is meaningful only together with its authoritative project
+      // position.  Withdrawing both fields prevents a segmented processor
+      // from observing a stale Q32 fraction after arithmetic overflow.
+      destination->validFields &= ~(TransportValidProjectSamples |
+                                    TransportValidProjectRateQ32);
+    }
+  }
+  if ((destination->validFields & TransportValidContinuousSamples) != 0 &&
+      !advanceSignedSamples(source.continuousTimeSamples, offset,
+                            &destination->continuousTimeSamples))
+    destination->validFields &= ~TransportValidContinuousSamples;
+
+  // A segmented block has a fresh musical block origin. Advancing it exactly
+  // requires the block tempo and meter; if either is unavailable, withdraw
+  // the coupled project/bar-position validity instead of publishing a stale
+  // timestamp to the old graph during a transition.
+  constexpr uint64_t kMusicalPrerequisites = TransportValidMusicPosition |
+                                             TransportValidTempo |
+                                             TransportValidTimeSignature;
+  if ((destination->validFields & TransportValidMusicPosition) == 0) return;
+  if ((destination->validFields & kMusicalPrerequisites) !=
+      kMusicalPrerequisites) {
+    destination->validFields &= ~TransportValidMusicPosition;
+    return;
+  }
+  const double projectRate =
+      (source.validFields & TransportValidProjectRateQ32) != 0
+          ? static_cast<double>(source.projectRateQ32) /
+                static_cast<double>(kProjectRateOneQ32)
+          : 1.0;
+  const double musicOffset = static_cast<double>(offset) * projectRate *
+                             source.tempo / (60.0 * rate.value);
+  const double projectMusic = source.projectTimeMusic + musicOffset;
+  const double barLength = static_cast<double>(source.timeSignatureNumerator) *
+                           4.0 /
+                           static_cast<double>(source.timeSignatureDenominator);
+  if (!std::isfinite(musicOffset) || !std::isfinite(projectMusic) ||
+      !std::isfinite(barLength) || barLength <= 0.0) {
+    destination->validFields &= ~TransportValidMusicPosition;
+    return;
+  }
+  destination->projectTimeMusic = projectMusic;
+  const double barsFromKnownStart =
+      std::floor((projectMusic - source.barPositionMusic) / barLength);
+  if (std::isfinite(barsFromKnownStart) && barsFromKnownStart > 0.0) {
+    const double barPosition =
+        source.barPositionMusic + barsFromKnownStart * barLength;
+    if (std::isfinite(barPosition))
+      destination->barPositionMusic = barPosition;
+    else
+      destination->validFields &= ~TransportValidMusicPosition;
+  }
+}
+
 ProcessContext segmentContext(const ProcessContext& source, uint32_t offset,
                               uint32_t frames, bool tailDrain,
                               ParameterEvent* parameters,
@@ -707,6 +781,10 @@ ProcessContext segmentContext(const ProcessContext& source, uint32_t offset,
     segment.discontinuity = {DiscontinuityReason::None,
                              DiscontinuityFlagNone};
   }
+  if (source.transport != nullptr) {
+    offsetTransport(*source.transport, offset, source.sampleRate, transport);
+    segment.transport = transport;
+  }
   if (tailDrain) {
     segment.structSize = kProcessContextV2RequiredSize;
     segment.flags = ProcessContextFlagTailDrain;
@@ -714,12 +792,10 @@ ProcessContext segmentContext(const ProcessContext& source, uint32_t offset,
     segment.parameterCount = 0;
     segment.events = nullptr;
     segment.eventCount = 0;
-    if (source.transport != nullptr) {
-      *transport = *source.transport;
+    if (segment.transport != nullptr) {
       transport->stateFlags &= ~(TransportStatePlaying |
                                  TransportStateRecording |
                                  TransportStateCycling);
-      segment.transport = transport;
     }
     return segment;
   }

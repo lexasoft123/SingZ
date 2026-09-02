@@ -56,7 +56,10 @@ case "$TARGET" in
 esac
 
 cmake -S "$ROOT" -B "$BUILD" "${CONFIG_ARGS[@]}"
-cmake --build "$BUILD" --target singz-analyze --config Release -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+# SINGZ_NATIVE_JOBS caps the compile fan-out the way the other native build
+# scripts do, so a rebuild beside other sessions' builds stays polite.
+cmake --build "$BUILD" --target singz-analyze --config Release \
+  -j "${SINGZ_NATIVE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
 mkdir -p "$OUT_DIR"
 # MSVC's multi-config generator nests the exe under Release/.

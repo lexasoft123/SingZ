@@ -162,7 +162,8 @@ done
 # ccache needs no setup here: every worktree already shares one cache dir
 # (it is per-user, not per-checkout), and what makes a SIBLING worktree
 # actually hit — base_dir + hash_dir, against absolute paths and -g — is
-# passed per build by vendor-whisper.sh, run-with-ccache.js and, for Xcode,
+# passed per build by vendor-whisper.sh, Android's one env-carrying all-project
+# CMake launcher/run-with-ccache.js and, for Xcode,
 # mobile/scripts/ccache-xcode-conf.js at postinstall. Nothing outside the
 # project is written; see docs/DEVELOPMENT.md.
 
@@ -235,7 +236,7 @@ if [ "$MODE" != "--desktop-only" ]; then
   (cd "$WT/mobile" && node scripts/patch-audio-api.js)
 
   # mobile's postinstall (run by the npm ci above) materializes
-  # ios/SingzCore/core as a COPY of native/core, because CocoaPods drops
+  # ios/SingzCore/core as a filtered COPY of top-level zcore, because CocoaPods drops
   # source_files globs that reach above the podspec dir AND skips directory
   # symlinks. Assert it landed BEFORE pod install globs it: a worktree whose
   # tree moved without a re-install keeps building the stale mirror, and the
@@ -247,18 +248,40 @@ if [ "$MODE" != "--desktop-only" ]; then
   # .hpp, so a header could go out of date without anything asking.
   stale=$(cd "$WT" && node -e '
     const fs = require("fs")
-    const src = "mobile/native/core", dst = "mobile/ios/SingzCore/core"
+    const path = require("path")
+    const dst = "mobile/ios/SingzCore/core"
     if (!fs.existsSync(dst)) { console.log("it does not exist"); process.exit(0) }
-    const want = fs.readdirSync(src).filter((f) => /\.(h|hpp|cpp|mm)$/.test(f))
-    const bad = want.filter((f) => {
-      const to = dst + "/" + f
-      if (!fs.existsSync(to)) return true
-      return !fs.readFileSync(src + "/" + f).equals(fs.readFileSync(to))
-    })
-    if (bad.length) console.log(bad.slice(0, 3).join(", ") + (bad.length > 3 ? ` +${bad.length - 3} more` : ""))
+    const { iosAudioHostCallbackFiles, zcoreDeviceCallbackFiles } =
+      require("./mobile/scripts/native-component-sources")
+    const callbackDefinitions = new Set(
+      [...zcoreDeviceCallbackFiles, ...iosAudioHostCallbackFiles]
+        .filter((file) => file.endsWith(".cpp")))
+    const bad = []
+    const compare = (from, to, prefix, accept) => {
+      for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+        const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+        const source = path.join(from, entry.name)
+        const target = path.join(to, entry.name)
+        if (entry.isDirectory()) compare(source, target, relative, accept)
+        else if (accept(entry.name, relative) &&
+                 (!fs.existsSync(target) ||
+                  !fs.readFileSync(source).equals(fs.readFileSync(target))))
+          bad.push(relative)
+      }
+    }
+    const sourceFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
+      !callbackDefinitions.has(relative)
+    const iosFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
+      !callbackDefinitions.has(relative)
+    compare("zcore/include", `${dst}/include`, "include",
+            (name) => /\.(h|hpp)$/.test(name))
+    compare("zcore/src", `${dst}/src`, "src", sourceFile)
+    compare("zcore/platform/ios", `${dst}/platform/ios`, "platform/ios", iosFile)
+    if (bad.length) console.log(bad.slice(0, 3).join(", ") +
+      (bad.length > 3 ? ` +${bad.length - 3} more` : ""))
   ')
   if [ -n "$stale" ]; then
-    echo "FATAL: mobile/ios/SingzCore/core does not match mobile/native/core ($stale)." >&2
+    echo "FATAL: mobile/ios/SingzCore/core does not match top-level zcore ($stale)." >&2
     echo "       Expected mobile's postinstall to sync it. Run:" >&2
     echo "         (cd mobile && npm run postinstall)" >&2
     exit 1

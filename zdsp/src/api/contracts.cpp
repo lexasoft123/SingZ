@@ -12,7 +12,8 @@ Status validateTransport(const TransportContext& transport) noexcept {
   constexpr uint64_t kKnownValidFields =
       TransportValidProjectSamples | TransportValidContinuousSamples |
       TransportValidTempo | TransportValidMusicPosition |
-      TransportValidCycleRange | TransportValidTimeSignature;
+      TransportValidCycleRange | TransportValidTimeSignature |
+      TransportValidProjectRateQ32;
   constexpr uint32_t kKnownStateFlags =
       TransportStatePlaying | TransportStateRecording | TransportStateCycling;
   if ((transport.validFields & ~kKnownValidFields) != 0 ||
@@ -40,6 +41,10 @@ Status validateTransport(const TransportContext& transport) noexcept {
         (denominator & (denominator - 1)) != 0)
       return {StatusCode::InvalidArgument, 205};
   }
+  if ((transport.validFields & TransportValidProjectRateQ32) != 0 &&
+      ((transport.validFields & TransportValidProjectSamples) == 0 ||
+       transport.projectRateQ32 == 0))
+    return {StatusCode::InvalidArgument, 206};
   // Signed sample positions deliberately admit negative pre-roll. Their
   // validity bits replace sentinel values, so every int64_t value is valid.
   return okStatus();

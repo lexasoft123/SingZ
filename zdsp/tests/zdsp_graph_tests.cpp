@@ -1,4 +1,5 @@
 #include "zdsp/offline_renderer.h"
+#include "zdsp/scheduled_gain.h"
 #include "allocation_trap.h"
 
 #include <chrono>
@@ -688,6 +689,254 @@ void automationAcrossPartitions() {
          "automation output is callback-partition invariant");
 }
 
+struct ScheduledGainHarness {
+  alignas(64) std::array<uint8_t, 1024> state{};
+  ProcessorHandle processor{};
+  AudioBusDescriptor mono{1, SampleFormat::Float32Planar,
+                          AudioChannelLayout::Mono, nullptr};
+
+  explicit ScheduledGainHarness(const ScheduledGainConfig& config) {
+    expect(scheduledGainStateBytes() <= state.size(),
+           "scheduled gain state fits direct harness");
+    processor = createScheduledGain(
+        config, {state.data(), static_cast<uint32_t>(state.size())});
+    expect(processor.state != nullptr, "scheduled gain constructs");
+    const PrepareSpec spec{kProcessorInterfaceVersion,
+                           kPrepareSpecV1RequiredSize,
+                           {48000.0},
+                           {128},
+                           1,
+                           1,
+                           &mono,
+                           &mono};
+    const PreparedStorage prepared{nullptr, 0, 1};
+    expect(succeeded(processor.functions->prepare(processor.state, &spec,
+                                                  &prepared)),
+           "scheduled gain prepares");
+  }
+
+  ~ScheduledGainHarness() { shutdown(); }
+
+  void shutdown() {
+    if (processor.state == nullptr) return;
+    expect(succeeded(processor.functions->deactivate(processor.state)),
+           "scheduled gain deactivates");
+    expect(succeeded(destroyProcessor(&processor)),
+           "scheduled gain destroys");
+  }
+
+  void reset(DiscontinuityReason reason) {
+    processor.functions->reset(
+        processor.state, {reason, DiscontinuityFlagResetState});
+  }
+
+  void render(int64_t projectStart, uint32_t frames, float* output,
+              const ParameterEvent* parameters = nullptr,
+              uint32_t parameterCount = 0,
+              uint32_t flags = ProcessContextFlagNone,
+              bool playing = true,
+              uint64_t projectRateQ32 = kProjectRateOneQ32,
+              uint32_t projectFractionQ32 = 0u) {
+    expect(frames <= 128, "scheduled gain direct render stays bounded");
+    std::array<float, 128> ones{};
+    std::fill_n(ones.data(), frames, 1.0F);
+    const float* inputChannels[]{ones.data()};
+    float* outputChannels[]{output};
+    ConstAudioBusView input{inputChannels, 1, {frames}, {128}, nullptr};
+    MutableAudioBusView result{outputChannels, 1, {frames}, {128}};
+    TransportContext transport{};
+    transport.validFields = TransportValidProjectSamples |
+                            TransportValidProjectRateQ32;
+    transport.stateFlags = playing ? TransportStatePlaying : 0;
+    transport.projectTimeSamples = projectStart;
+    transport.projectTimeFractionQ32 = projectFractionQ32;
+    transport.projectRateQ32 = projectRateQ32;
+    ProcessContext context{kProcessContextInterfaceVersion,
+                           kProcessContextV2RequiredSize,
+                           {{1}, {1}, {0}, {0}, {0}, RenderTimeNone},
+                           &transport,
+                           {48000.0},
+                           {frames},
+                           parameters,
+                           parameterCount,
+                           nullptr,
+                           0,
+                           {nullptr, 0},
+                           {DiscontinuityReason::None,
+                            DiscontinuityFlagNone},
+                           flags};
+    processor.functions->process(processor.state, &context, &input, 1,
+                                 &result, 1);
+  }
+};
+
+void scheduledGainFrameDomainContracts() {
+  const ScheduledGainConfig period{{91}, ScheduledGainMode::Period, nullptr, 0,
+                                   4, 0.0F, 1.0F, {2}, true};
+  ScheduledGainHarness shaped(period);
+  std::array<float, 12> shape{};
+  shaped.render(0, shape.size(), shape.data());
+  expect(shape[0] == 1.0F && shape[3] == 1.0F && shape[4] == 1.0F &&
+             shape[5] == 0.5F && shape[6] == 0.0F && shape[7] == 0.0F &&
+             shape[8] == 0.0F && shape[9] == 0.5F && shape[10] == 1.0F,
+         "period schedule ramps at exact mid-block project-frame boundaries");
+
+  const auto renderPartitioned = [&](const ScheduledGainConfig& config,
+                                     const std::vector<uint32_t>& partitions,
+                                     uint64_t rateQ32 = kProjectRateOneQ32) {
+    ScheduledGainHarness harness(config);
+    std::vector<float> rendered;
+    int64_t projectFrame = -2;
+    uint32_t projectFraction = 0;
+    for (uint32_t frames : partitions) {
+      std::array<float, 128> block{};
+      harness.render(projectFrame, frames, block.data(), nullptr, 0,
+                     ProcessContextFlagNone, true, rateQ32,
+                     projectFraction);
+      rendered.insert(rendered.end(), block.begin(), block.begin() + frames);
+      TransportContext transport{};
+      transport.validFields = TransportValidProjectSamples |
+                              TransportValidProjectRateQ32;
+      transport.projectTimeSamples = projectFrame;
+      transport.projectTimeFractionQ32 = projectFraction;
+      transport.projectRateQ32 = rateQ32;
+      ProjectSamplePositionQ32 next{};
+      expect(projectSamplePositionAt(transport, frames, &next),
+             "scheduled gain Q32 fixture advances safely");
+      projectFrame = next.samples;
+      projectFraction = next.fraction;
+    }
+    return rendered;
+  };
+  const std::vector<float> periodWhole = renderPartitioned(period, {24});
+  const std::vector<float> periodSplit =
+      renderPartitioned(period, {1, 3, 5, 2, 7, 6});
+  expect(periodWhole == periodSplit,
+         "period schedule is callback-partition invariant across signed time");
+
+  const std::vector<float> slowWhole =
+      renderPartitioned(period, {24}, kProjectRateOneQ32 / 2u);
+  const std::vector<float> slowSplit =
+      renderPartitioned(period, {1, 3, 5, 2, 7, 6},
+                        kProjectRateOneQ32 / 2u);
+  expect(slowWhole == slowSplit && slowWhole[12] == 1.0F &&
+             slowWhole[13] == 0.5F && slowWhole[14] == 0.0F,
+         "slow Q32 schedule crosses its original-frame boundary once and remains partition invariant");
+
+  std::array<float, 6> fastSchedule{};
+  ScheduledGainHarness fast(period);
+  fast.render(2, fastSchedule.size(), fastSchedule.data(), nullptr, 0,
+              ProcessContextFlagNone, true, kProjectRateOneQ32 * 2u);
+  expect(fastSchedule ==
+             std::array<float, 6>{1.0F, 1.0F, 0.5F, 0.0F, 0.5F, 1.0F},
+         "fast Q32 schedule switches only when output samples reach original-frame boundaries");
+
+  const std::array<ScheduledGainWindow, 3> windows{{{0, 4}, {5, 10}, {12, 18}}};
+  const ScheduledGainConfig windowed{{92}, ScheduledGainMode::Windows,
+                                     windows.data(), windows.size(), 0,
+                                     0.25F, 1.0F, {3}, true};
+  const std::vector<float> windowWhole = renderPartitioned(windowed, {24});
+  const std::vector<float> windowSplit =
+      renderPartitioned(windowed, {2, 1, 4, 3, 5, 9});
+  expect(windowWhole == windowSplit && windowWhole[2] == 1.0F &&
+             windowWhole[3] == 0.75F && windowWhole[4] == 0.5F,
+         "window schedule crosses negative-to-zero time and partitions exactly");
+
+  ScheduledGainConfig disabledConfig = period;
+  disabledConfig.node = {93};
+  disabledConfig.enabled = false;
+  ScheduledGainHarness enabled(disabledConfig);
+  std::array<float, 8> enableOutput{};
+  const ParameterEvent enable{{93}, kScheduledGainEnableParameter, {2}, 1.0F,
+                              ParameterCurve::Step, {0}};
+  enabled.render(4, enableOutput.size(), enableOutput.data(), &enable, 1);
+  expect(enableOutput[0] == 1.0F && enableOutput[1] == 1.0F &&
+             enableOutput[2] == 1.0F && enableOutput[3] == 0.5F &&
+             enableOutput[4] == 0.0F,
+         "enable parameter begins only at its named sample and follows schedule");
+
+  ScheduledGainHarness discontinuous(windowed);
+  std::array<float, 4> first{}, backward{}, looped{}, tail{};
+  discontinuous.render(5, first.size(), first.data());
+  discontinuous.reset(DiscontinuityReason::SourceSeek);
+  discontinuous.render(0, backward.size(), backward.data());
+  discontinuous.reset(DiscontinuityReason::SourceLoop);
+  discontinuous.render(12, looped.size(), looped.data());
+  discontinuous.render(12, tail.size(), tail.data(), nullptr, 0,
+                       ProcessContextFlagTailDrain);
+  expect(first[3] == 0.25F && backward[3] == 0.25F && looped[3] == 0.25F &&
+             tail[3] == 1.0F,
+         "seek, backward loop reanchor, reset and tail drain re-evaluate safely");
+
+  std::array<float, 8> trapped{};
+  zdsp::test::resetAllocationTrap();
+  zdsp::test::setAllocationTrapEnabled(true);
+  discontinuous.reset(DiscontinuityReason::ClockReanchored);
+  discontinuous.render(5, trapped.size(), trapped.data());
+  discontinuous.shutdown();
+  zdsp::test::setAllocationTrapEnabled(false);
+  expect(zdsp::test::trappedAllocationCount() == 0,
+         "scheduled gain render, reset and teardown allocate nothing");
+
+  alignas(64) std::array<uint8_t, 1024> invalidStorage{};
+  const auto rejected = [&](const ScheduledGainConfig& candidate,
+                            const char* message) {
+    expect(createScheduledGain(
+               candidate,
+               {invalidStorage.data(),
+                static_cast<uint32_t>(invalidStorage.size())})
+               .state == nullptr,
+           message);
+  };
+  ScheduledGainConfig invalid = period;
+  invalid.node = {0};
+  rejected(invalid, "scheduled gain rejects zero node identity");
+  invalid = period;
+  invalid.periodFrames = 0;
+  rejected(invalid, "scheduled gain rejects zero period");
+  invalid = period;
+  invalid.rampFrames = {0};
+  rejected(invalid, "scheduled gain rejects zero ramp");
+  invalid = period;
+  invalid.insideGain = std::numeric_limits<float>::quiet_NaN();
+  rejected(invalid, "scheduled gain rejects non-finite gain");
+  const std::array<ScheduledGainWindow, 2> overlapping{{{1, 4}, {3, 5}}};
+  invalid = {{94}, ScheduledGainMode::Windows, overlapping.data(),
+             overlapping.size(), 0, 0.0F, 1.0F, {2}, true};
+  rejected(invalid, "scheduled gain rejects intersecting windows");
+  expect(createScheduledGain(period,
+                             {invalidStorage.data(), 1})
+                 .state == nullptr &&
+             createScheduledGain(
+                 period,
+                 {invalidStorage.data() + 1,
+                  static_cast<uint32_t>(invalidStorage.size() - 1)})
+                 .state == nullptr,
+         "scheduled gain rejects short and misaligned state storage");
+
+  ProcessorHandle format = createScheduledGain(
+      period, {invalidStorage.data(),
+               static_cast<uint32_t>(invalidStorage.size())});
+  expect(format.state != nullptr, "scheduled gain format fixture constructs");
+  const AudioBusDescriptor mono{1, SampleFormat::Float32Planar,
+                                AudioChannelLayout::Mono, nullptr};
+  const AudioBusDescriptor stereo{2, SampleFormat::Float32Planar,
+                                  AudioChannelLayout::Stereo, nullptr};
+  const PrepareSpec invalidPrepare{kProcessorInterfaceVersion,
+                                   kPrepareSpecV1RequiredSize,
+                                   {48000.0},
+                                   {64},
+                                   1,
+                                   1,
+                                   &mono,
+                                   &stereo};
+  const PreparedStorage noStorage{nullptr, 0, 1};
+  expect(format.functions->prepare(format.state, &invalidPrepare, &noStorage)
+                 .code == StatusCode::UnsupportedFormat &&
+             succeeded(destroyProcessor(&format)),
+         "scheduled gain rejects incompatible bus format and destroys unprepared");
+}
+
 struct TelemetryReadBarrier {
   std::atomic<bool> armed{true};
   std::atomic<bool> validated{false};
@@ -1105,6 +1354,8 @@ struct TailProbeState {
   uint32_t tailParameterEvents{0};
   uint32_t tailMusicalEvents{0};
   uint32_t tailTransportStates{0};
+  bool tailTransportCaptured{false};
+  TransportContext firstTailTransport{};
 };
 Status tailProbePrepare(void* opaque, const PrepareSpec*,
                         const PreparedStorage*) noexcept {
@@ -1123,8 +1374,13 @@ void tailProbeProcess(void* opaque, const ProcessContext* context,
     state->tailDrainFrames += context->frames.value;
     state->tailParameterEvents += context->parameterCount;
     state->tailMusicalEvents += context->eventCount;
-    if (context->transport != nullptr)
+    if (context->transport != nullptr) {
       state->tailTransportStates |= context->transport->stateFlags;
+      if (!state->tailTransportCaptured) {
+        state->firstTailTransport = *context->transport;
+        state->tailTransportCaptured = true;
+      }
+    }
   }
   for (uint32_t frame = 0; frame < output[0].frames.value; ++frame) {
     const float incoming = input[0].channels[0][frame];
@@ -1992,7 +2248,21 @@ void exactTransitionBoundaryAndTailContext() {
     ConstAudioBusView input{inputChannels, 1, {1}, {5}, nullptr};
     MutableAudioBusView output{outputChannels, 1, {1}, {5}};
     TransportContext transport{};
+    transport.validFields = TransportValidProjectSamples |
+                            TransportValidContinuousSamples |
+                            TransportValidTempo | TransportValidMusicPosition |
+                            TransportValidTimeSignature |
+                            TransportValidProjectRateQ32;
     transport.stateFlags = TransportStatePlaying | TransportStateRecording;
+    transport.projectTimeSamples = -10;
+    transport.projectTimeFractionQ32 = 0x80000000u;
+    transport.projectRateQ32 = kProjectRateOneQ32 / 2u;
+    transport.continuousTimeSamples = 100;
+    transport.tempo = 120.0;
+    transport.projectTimeMusic = 3.9999;
+    transport.barPositionMusic = 0.0;
+    transport.timeSignatureNumerator = 4;
+    transport.timeSignatureDenominator = 4;
     ProcessContext context{kProcessContextInterfaceVersion,
         kProcessContextV1RequiredSize,
         {{1}, {1}, {0}, {0}, {0}, RenderTimeNone}, &transport, {48000.0}, {1},
@@ -2017,6 +2287,18 @@ void exactTransitionBoundaryAndTailContext() {
       expect(succeeded(renderGraphBlock(&runner, context, &input, 1, &output, 1)),
              "render exact-boundary transition partition");
       rendered->insert(rendered->end(), outputSamples, outputSamples + frames);
+      ProjectSamplePositionQ32 nextProject{};
+      expect(projectSamplePositionAt(transport, frames, &nextProject),
+             "rate-aware transition fixture advances project time");
+      transport.projectTimeSamples = nextProject.samples;
+      transport.projectTimeFractionQ32 = nextProject.fraction;
+      transport.continuousTimeSamples += frames;
+      transport.projectTimeMusic += static_cast<double>(frames) *
+                                    0.5 *
+                                    transport.tempo /
+                                    (60.0 * context.sampleRate.value);
+      if (transport.projectTimeMusic >= 4.0)
+        transport.barPositionMusic = 4.0;
       if (partitionCount == 3 && part == 0) {
         const uint64_t beforeTransition = runner.transitionFrame;
         const uint64_t beforeTail = runner.tailFrame;
@@ -2045,8 +2327,20 @@ void exactTransitionBoundaryAndTailContext() {
       }
     }
     expect(runner.fadingFrom == nullptr && tail.tailParameterEvents == 0 &&
-           tail.tailMusicalEvents == 0 && tail.tailTransportStates == 0,
+           tail.tailMusicalEvents == 0 && tail.tailTransportStates == 0 &&
+           tail.tailTransportCaptured,
            "tail context suppresses events and running transport");
+    expect(tail.firstTailTransport.projectTimeSamples == -8 &&
+           tail.firstTailTransport.projectTimeFractionQ32 == 0 &&
+           tail.firstTailTransport.projectRateQ32 ==
+               kProjectRateOneQ32 / 2u &&
+           tail.firstTailTransport.continuousTimeSamples == 103,
+           "segmented tail advances signed Q32 sample transport fields");
+    expect(std::fabs(tail.firstTailTransport.projectTimeMusic -
+                     (3.9999 + 1.5 / 24000.0)) < 1e-12,
+           "segmented tail advances musical position at the project rate");
+    expect(tail.firstTailTransport.barPositionMusic == 0.0,
+           "segmented tail does not cross a future bar at the wrong rate");
     *drainedFrames = tail.tailDrainFrames;
   };
 
@@ -3690,6 +3984,7 @@ int main() {
   remainingBuiltins();
   duplicateProcessorOwnershipRejectedBeforePrepare();
   automationAcrossPartitions();
+  scheduledGainFrameDomainContracts();
   telemetryConcurrency();
   latencyCompensationAndRendering();
   discontinuitiesAndFailedPrepare();

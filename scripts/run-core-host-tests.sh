@@ -12,6 +12,11 @@
 # their full PASS listing stays in the canary's log, the way it always has.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
+  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
+    --owner core-host-tests -- bash "$ROOT/scripts/run-core-host-tests.sh" "$@"
+fi
+node "$ROOT/scripts/assert-native-build-lock.cjs"
 # Scratch paths are keyed on THIS CHECKOUT, not on $TMPDIR alone. Every
 # worktree on a machine shared one build dir and one output binary, which is
 # the same defect as the shared vendor/ slot: CMake catches its half loudly
@@ -29,7 +34,10 @@ if command -v ccache >/dev/null 2>&1; then
 fi
 
 cmake -S "$ROOT" -B "$BUILD"
-cmake --build "$BUILD" --target core_host_tests flac_roundtrip -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+# Four fixed edges is the measured ceiling for these ordinary CMake targets:
+# never multiply by the machine's logical CPU count. The machine-wide lock
+# prevents a sibling worktree from adding another compiler family beside it.
+cmake --build "$BUILD" --target core_host_tests flac_roundtrip --parallel 4
 
 "$BUILD/core_host_tests"
 # Run somewhere writable: the test writes and deletes two .flac files.

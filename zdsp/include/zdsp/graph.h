@@ -5,7 +5,11 @@
 namespace zdsp {
 
 inline constexpr uint32_t kGraphFormatVersion = 1;
-inline constexpr uint32_t kMaximumGraphNodes = 64;
+// The product default needs 74 nodes at the supported maximum of 16 lanes
+// when every lane has training ducking plus reference cues and time/pitch.
+// Keep bounded headroom for persisted processors without changing the RT
+// callback's fixed-storage contract.
+inline constexpr uint32_t kMaximumGraphNodes = 128;
 inline constexpr uint32_t kMaximumGraphConnections = 256;
 inline constexpr uint32_t kMaximumGraphBuses = 256;
 inline constexpr uint32_t kMaximumGraphBuffers = 256;

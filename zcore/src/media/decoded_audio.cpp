@@ -3,6 +3,8 @@
 #include <zcore/base/file_compat.h>
 #include <zcore/legacy/resample.h>
 
+#include "decoded_audio_internal.h"
+
 #include <FLAC/stream_decoder.h>
 
 #include <algorithm>
@@ -31,7 +33,14 @@ constexpr uint32_t kMaximumSupportedSampleRate = 768000;
 constexpr uint64_t kDecodeChunkFrames = 4096;
 constexpr uint32_t kMaximumReducedRateFactor = 4096;
 constexpr uint64_t kMaximumResampleOperationsPerPoll = 262144;
-constexpr char kCapabilityTag[] = "singz-prepared-audio-fd-wav-flac-v1";
+constexpr char kBaseCapabilityTag[] =
+    "singz-prepared-audio-fd-wav-flac-v1";
+#if defined(SINGZ_ZCORE_FFMPEG)
+constexpr char kPartialFfmpegCapabilityTag[] =
+    "singz-prepared-audio-fd-ffmpeg-partial-runtime-v2";
+constexpr char kProductFfmpegCapabilityTag[] =
+    "singz-prepared-audio-fd-ffmpeg-full-matrix-v3";
+#endif
 constexpr std::array<unsigned char, 16> kExtensiblePcmGuid{
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
     0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
@@ -74,11 +83,47 @@ struct FileOwner {
   }
 };
 
-struct WorkingAudio {
-  uint32_t sampleRate = 0;
-  uint64_t frameCount = 0;
-  std::vector<std::vector<float>> channels;
-};
+using media_internal::WorkingAudio;
+
+bool validSourceFormat(DecodedAudioSourceFormat format) noexcept {
+  return format >= DecodedAudioSourceFormat::Auto &&
+      format <= DecodedAudioSourceFormat::Aiff;
+}
+
+DecodedAudioSourceFormat detectSourceFormat(
+    const unsigned char* bytes, size_t size) noexcept {
+  // Preserve RIFF-family malformed-data classification: decodeWav validates
+  // the WAVE form and must distinguish a corrupt RIFF from an unknown format.
+  if (size >= 4 && std::memcmp(bytes, "RIFF", 4) == 0)
+    return DecodedAudioSourceFormat::Wav;
+  if (size >= 4 && std::memcmp(bytes, "fLaC", 4) == 0)
+    return DecodedAudioSourceFormat::Flac;
+  if (size >= 4 && std::memcmp(bytes, "OggS", 4) == 0)
+    return DecodedAudioSourceFormat::Ogg;
+  if (size >= 12 && std::memcmp(bytes, "FORM", 4) == 0 &&
+      (std::memcmp(bytes + 8, "AIFF", 4) == 0 ||
+       std::memcmp(bytes + 8, "AIFC", 4) == 0))
+    return DecodedAudioSourceFormat::Aiff;
+  if (size >= 12 && std::memcmp(bytes + 4, "ftyp", 4) == 0)
+    return DecodedAudioSourceFormat::M4a;
+  if (size >= 3 && std::memcmp(bytes, "ID3", 3) == 0)
+    return DecodedAudioSourceFormat::Mp3;
+  if (size >= 2 && bytes[0] == 0xff && (bytes[1] & 0xf6u) == 0xf0u)
+    return DecodedAudioSourceFormat::Aac;
+  if (size >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0u) == 0xe0u &&
+      (bytes[1] & 0x06u) != 0)
+    return DecodedAudioSourceFormat::Mp3;
+  return DecodedAudioSourceFormat::Auto;
+}
+
+bool declarationMatches(DecodedAudioSourceFormat declared,
+                        DecodedAudioSourceFormat detected) noexcept {
+  if (declared == DecodedAudioSourceFormat::Auto) return true;
+  if (detected == DecodedAudioSourceFormat::Ogg)
+    return declared == DecodedAudioSourceFormat::Ogg ||
+        declared == DecodedAudioSourceFormat::Opus;
+  return declared == detected;
+}
 
 uint16_t little16(const unsigned char* value) noexcept {
   return static_cast<uint16_t>(value[0]) |
@@ -93,10 +138,11 @@ uint32_t little32(const unsigned char* value) noexcept {
 }
 
 bool validOptions(const DecodedAudioPrepareOptions& options) noexcept {
-  return options.maximumChannels != 0 &&
+  return validSourceFormat(options.sourceFormat) &&
+      options.maximumChannels != 0 &&
       options.maximumChannels <= kMaximumSupportedChannels &&
       options.maximumFrames != 0 && options.maximumDecodedBytes != 0 &&
-      options.maximumWorkingBytes != 0 &&
+      options.maximumWorkingBytes != 0 && options.maximumEncodedBytes != 0 &&
       options.maximumReducedRateFactor != 0 &&
       options.maximumReducedRateFactor <= kMaximumReducedRateFactor &&
       options.maximumResampleOperations != 0 &&
@@ -799,14 +845,29 @@ DecodedAudioResult prepareDecodedAudio(
       return result;
     }
     // Ownership transfer is independent of the descriptor's current offset.
-    // A non-seekable authority is not a supported prepared source.
+    // A non-seekable authority is not a supported prepared source. Resolve
+    // its physical extent before invoking any parser/demuxer so probing and
+    // compressed input consumption are bounded by one caller policy.
+    if (fseeko(owner.file, 0, SEEK_END) != 0) {
+      result.status = DecodedAudioStatus::IoError;
+      return result;
+    }
+    const auto physicalEnd = ftello(owner.file);
+    if (physicalEnd < 0) {
+      result.status = DecodedAudioStatus::IoError;
+      return result;
+    }
+    if (static_cast<uint64_t>(physicalEnd) > options.maximumEncodedBytes) {
+      result.status = DecodedAudioStatus::LimitExceeded;
+      return result;
+    }
     if (fseeko(owner.file, 0, SEEK_SET) != 0) {
       result.status = DecodedAudioStatus::IoError;
       return result;
     }
-    unsigned char magic[4]{};
-    const size_t magicBytes = std::fread(magic, 1, sizeof(magic), owner.file);
-    if (magicBytes != sizeof(magic)) {
+    std::array<unsigned char, 16> magic{};
+    const size_t magicBytes = std::fread(magic.data(), 1, magic.size(), owner.file);
+    if (magicBytes < 4) {
       result.status = std::ferror(owner.file) != 0
           ? DecodedAudioStatus::IoError
           : DecodedAudioStatus::MalformedData;
@@ -816,12 +877,28 @@ DecodedAudioResult prepareDecodedAudio(
       result.status = DecodedAudioStatus::IoError;
       return result;
     }
+    const DecodedAudioSourceFormat detected =
+        detectSourceFormat(magic.data(), magicBytes);
+    if (detected == DecodedAudioSourceFormat::Auto) {
+      result.status = DecodedAudioStatus::UnsupportedFormat;
+      return result;
+    }
+    if (!declarationMatches(options.sourceFormat, detected)) {
+      result.status = DecodedAudioStatus::MalformedData;
+      return result;
+    }
     WorkingAudio decoded;
     DecodedAudioStatus status = DecodedAudioStatus::UnsupportedFormat;
-    if (std::memcmp(magic, "RIFF", 4) == 0)
+    if (detected == DecodedAudioSourceFormat::Wav)
       status = decodeWav(owner.file, options, cancellation, &decoded);
-    else if (std::memcmp(magic, "fLaC", 4) == 0)
+    else if (detected == DecodedAudioSourceFormat::Flac)
       status = decodeFlac(&owner, options, cancellation, &decoded);
+#if defined(SINGZ_ZCORE_FFMPEG)
+    else
+      status = media_internal::decodeFfmpeg(
+          owner.file, detected, options.sourceFormat, options, cancellation,
+          &decoded);
+#endif
     if (status != DecodedAudioStatus::Ok) {
       result.status = status;
       return result;
@@ -851,6 +928,96 @@ DecodedAudioResult prepareDecodedAudio(
   }
 }
 
-const char* decodedAudioCapabilityTag() noexcept { return kCapabilityTag; }
+const char* decodedAudioCapabilityTag() noexcept {
+#if defined(SINGZ_ZCORE_FFMPEG)
+  const uint32_t extended = media_internal::ffmpegCodecCapabilityMask();
+  if ((DecodedAudioCapabilityWav | DecodedAudioCapabilityFlac | extended) ==
+      kDecodedAudioProductFormatMask)
+    return kProductFfmpegCapabilityTag;
+  if (extended != 0) return kPartialFfmpegCapabilityTag;
+#endif
+  return kBaseCapabilityTag;
+}
+
+DecodedAudioSourceFormat decodedAudioFormatForExtension(
+    const char* extension) noexcept {
+  if (extension == nullptr || extension[0] != '.')
+    return DecodedAudioSourceFormat::Auto;
+  std::array<char, 8> lowered{};
+  size_t length = 0;
+  for (const char* cursor = extension; *cursor != '\0'; ++cursor) {
+    const unsigned char value = static_cast<unsigned char>(*cursor);
+    if (value == '/' || value == '\\' || value == ':' || value > 0x7f ||
+        length + 1 >= lowered.size())
+      return DecodedAudioSourceFormat::Auto;
+    lowered[length++] = value >= 'A' && value <= 'Z'
+        ? static_cast<char>(value + ('a' - 'A'))
+        : static_cast<char>(value);
+  }
+  const auto same = [&](const char* value) noexcept {
+    return std::strcmp(lowered.data(), value) == 0;
+  };
+  if (same(".wav")) return DecodedAudioSourceFormat::Wav;
+  if (same(".flac")) return DecodedAudioSourceFormat::Flac;
+  if (same(".mp3")) return DecodedAudioSourceFormat::Mp3;
+  if (same(".m4a")) return DecodedAudioSourceFormat::M4a;
+  if (same(".aac")) return DecodedAudioSourceFormat::Aac;
+  if (same(".ogg") || same(".oga")) return DecodedAudioSourceFormat::Ogg;
+  if (same(".opus")) return DecodedAudioSourceFormat::Opus;
+  if (same(".aif") || same(".aiff")) return DecodedAudioSourceFormat::Aiff;
+  return DecodedAudioSourceFormat::Auto;
+}
+
+bool decodedAudioFormatSupported(DecodedAudioSourceFormat format) noexcept {
+  if (format == DecodedAudioSourceFormat::Auto ||
+      format == DecodedAudioSourceFormat::Wav ||
+      format == DecodedAudioSourceFormat::Flac)
+    return true;
+#if defined(SINGZ_ZCORE_FFMPEG)
+  const uint32_t mask = media_internal::ffmpegCodecCapabilityMask();
+  switch (format) {
+    case DecodedAudioSourceFormat::Mp3:
+      return (mask & DecodedAudioCapabilityMp3) != 0;
+    case DecodedAudioSourceFormat::M4a:
+      return (mask & (DecodedAudioCapabilityM4aAac |
+                      DecodedAudioCapabilityM4aAlac)) ==
+          (DecodedAudioCapabilityM4aAac | DecodedAudioCapabilityM4aAlac);
+    case DecodedAudioSourceFormat::Aac:
+      return (mask & DecodedAudioCapabilityAac) != 0;
+    case DecodedAudioSourceFormat::Ogg:
+      return (mask & (DecodedAudioCapabilityOggVorbis |
+                      DecodedAudioCapabilityOggOpus)) ==
+          (DecodedAudioCapabilityOggVorbis | DecodedAudioCapabilityOggOpus);
+    case DecodedAudioSourceFormat::Opus:
+      return (mask & DecodedAudioCapabilityOggOpus) != 0;
+    case DecodedAudioSourceFormat::Aiff:
+      return (mask & DecodedAudioCapabilityAiff) != 0;
+    default:
+      return false;
+  }
+#else
+  return false;
+#endif
+}
+
+DecodedAudioCodecCapabilities decodedAudioCodecCapabilities() noexcept {
+  DecodedAudioCodecCapabilities capabilities;
+  capabilities.formatMask =
+      DecodedAudioCapabilityWav | DecodedAudioCapabilityFlac;
+#if defined(SINGZ_ZCORE_FFMPEG)
+  const uint32_t extended = media_internal::ffmpegCodecCapabilityMask();
+  capabilities.formatMask |= extended;
+  capabilities.dynamicallyLinkedFfmpeg = extended != 0;
+  capabilities.completeProductMatrix =
+      capabilities.formatMask == kDecodedAudioProductFormatMask;
+  capabilities.runtimeVersion = media_internal::ffmpegRuntimeCompatible()
+      ? media_internal::ffmpegRuntimeVersion()
+      : nullptr;
+  capabilities.runtimeLicense = media_internal::ffmpegRuntimeCompatible()
+      ? media_internal::ffmpegRuntimeLicense()
+      : nullptr;
+#endif
+  return capabilities;
+}
 
 }  // namespace singz

@@ -23,6 +23,7 @@ int main() {
   CHECK(ownership.acquire(Kind::Monitor, 2) == Result::Busy);
   CHECK(ownership.release(Kind::Capture, 1));
   CHECK(ownership.acquire(Kind::Monitor, 2) == Result::Acquired);
+  CHECK(ownership.acquire(Kind::Playback, 4) == Result::Busy);
   CHECK(ownership.acquire(Kind::Capture, 3) == Result::Busy);
   CHECK(!ownership.release(Kind::Monitor, 1));
   CHECK(ownership.snapshot().kind == Kind::Monitor);
@@ -37,13 +38,15 @@ int main() {
   };
   std::thread capture(race, Kind::Capture, 10);
   std::thread monitor(race, Kind::Monitor, 11);
+  std::thread playback(race, Kind::Playback, 12);
   go.store(true, std::memory_order_release);
   capture.join();
   monitor.join();
+  playback.join();
   CHECK(acquired.load(std::memory_order_relaxed) == 1);
   const auto winner = ownership.snapshot();
   CHECK(winner.kind != Kind::None && winner.generation != 0);
-  const Kind loser = winner.kind == Kind::Capture ? Kind::Monitor : Kind::Capture;
+  const Kind loser = winner.kind == Kind::Playback ? Kind::Monitor : Kind::Playback;
   CHECK(ownership.acquire(loser, 12) == Result::Busy);
   CHECK(ownership.release(winner.kind, winner.generation));
   CHECK(ownership.snapshot().kind == Kind::None);

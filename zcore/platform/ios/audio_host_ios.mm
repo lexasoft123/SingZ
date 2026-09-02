@@ -404,18 +404,13 @@ public:
                     osStatusMessage("configure RemoteIO I/O", osStatus));
       }
 
-      AudioStreamBasicDescription hardwareOutput{};
-      UInt32 propertySize = sizeof(hardwareOutput);
-      osStatus = AudioUnitGetProperty(unit_, kAudioUnitProperty_StreamFormat,
-                                      kAudioUnitScope_Output, 0,
-                                      &hardwareOutput, &propertySize);
-      if (osStatus != noErr ||
-          hardwareOutput.mSampleRate != prepared.format.sampleRate ||
-          hardwareOutput.mChannelsPerFrame != before.outputChannels) {
-        return fail(
-            AudioHostError::ProviderFailure,
-            "RemoteIO output hardware format does not match AVAudioSession");
-      }
+      // External routes such as CarPlay may expose a physical RemoteIO output
+      // rate that differs from AVAudioSession's active client rate. RemoteIO
+      // owns that conversion. Requiring the uninitialized unit's physical
+      // format to equal the client format rejects a valid route before the
+      // converter and final maximum slice size have been established. The
+      // client boundary and post-initialize callback bound are verified below.
+      UInt32 propertySize = 0;
       if (hasInput) {
         AudioStreamBasicDescription hardwareInput{};
         propertySize = sizeof(hardwareInput);
@@ -550,6 +545,28 @@ public:
                     "could not initialize RemoteIO rendering");
       }
       initialized_ = true;
+
+      // RemoteIO can enlarge MaximumFramesPerSlice when its output converter
+      // bridges different application and physical rates. Read the finalized
+      // value after initialization and fail before callbacks are admitted if
+      // it exceeds the graph's prepared storage. Duplex input storage was
+      // allocated against the earlier provider bound and may not grow here.
+      UInt32 initializedMaximumFrames = 0;
+      propertySize = sizeof(initializedMaximumFrames);
+      osStatus = AudioUnitGetProperty(
+          unit_, kAudioUnitProperty_MaximumFramesPerSlice,
+          kAudioUnitScope_Global, 0, &initializedMaximumFrames, &propertySize);
+      if (osStatus != noErr ||
+          !detail::validIosAudioHostMaximumFrames(
+              initializedMaximumFrames, format_.nominalBufferFrames,
+              config.maximumFrames) ||
+          (hasInput && initializedMaximumFrames > format_.maximumFrames)) {
+        return fail(
+            AudioHostError::ProviderFailure,
+            "RemoteIO finalized a callback size outside the prepared bounds");
+      }
+      format_.maximumFrames = initializedMaximumFrames;
+      callback_->format = format_;
 
       AudioStreamBasicDescription acceptedOutput{};
       propertySize = sizeof(acceptedOutput);

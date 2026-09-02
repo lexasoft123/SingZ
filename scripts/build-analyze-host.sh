@@ -15,6 +15,11 @@
 # script-built binary before the switch).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
+  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
+    --owner analyze-host -- bash "$ROOT/scripts/build-analyze-host.sh" "$@"
+fi
+node "$ROOT/scripts/assert-native-build-lock.cjs" 1>&2
 # Scratch paths are keyed on THIS CHECKOUT, not on $TMPDIR alone. Every
 # worktree on a machine shared one build dir and one output binary, which is
 # the same defect as the shared vendor/ slot: CMake catches its half loudly
@@ -40,7 +45,7 @@ fi
 # and run-core-host-tests.sh may share this build dir via SINGZ_CORE_BUILD_DIR
 # — tests default ON and cost nothing when only the tool target is built.
 cmake -S "$ROOT" -B "$BUILD" 1>&2
-cmake --build "$BUILD" --target singz-analyze -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" 1>&2
+cmake --build "$BUILD" --target singz-analyze --parallel 4 1>&2
 
 cp "$BUILD/singz-analyze" "$OUT"
 echo "$OUT"

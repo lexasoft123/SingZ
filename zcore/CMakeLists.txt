@@ -227,6 +227,10 @@ elseif(WIN32)
     platform/android/audio_host_android_callback_policy.cpp
     platform/windows/audio_host_windows.cpp
     platform/windows/audio_host_windows_helpers.cpp
+    platform/windows/audio_host_windows_provider.cpp
+    platform/windows/audio_host_windows_provider.h
+    platform/windows/audio_host_asio.cpp
+    platform/windows/audio_host_asio.h
     platform/windows/audio_input_windows_helpers.cpp
     platform/ios/audio_input_ios_session.cpp
     platform/windows/audio_input_windows.cpp
@@ -334,6 +338,7 @@ endif()
 add_library(zcore_media STATIC
   src/media/owned_file_descriptor.cpp
   src/media/decoded_audio.cpp
+  src/media/ffmpeg_decoder.cpp
   src/media/flac_io.cpp
   src/media/wav.cpp)
 add_library(SingZ::zcore_media ALIAS zcore_media)
@@ -345,6 +350,14 @@ target_link_libraries(zcore_media
     SingZ::native_flac)
 if(ANDROID)
   target_compile_definitions(zcore_media PRIVATE _FILE_OFFSET_BITS=64)
+endif()
+if(SINGZ_ENABLE_FFMPEG_CODECS)
+  if(NOT TARGET SingZ::ffmpeg_dynamic)
+    message(FATAL_ERROR
+      "FFmpeg codecs enabled without the validated dynamic runtime target")
+  endif()
+  target_compile_definitions(zcore_media PRIVATE SINGZ_ZCORE_FFMPEG=1)
+  target_link_libraries(zcore_media PRIVATE SingZ::ffmpeg_dynamic)
 endif()
 
 # Remaining legacy facade during Phase 2. Shared live YIN and rate-conversion

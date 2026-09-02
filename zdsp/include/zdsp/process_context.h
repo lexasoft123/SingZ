@@ -25,7 +25,14 @@ enum TransportValidFields : uint64_t {
   TransportValidMusicPosition = 1ull << 3,
   TransportValidCycleRange = 1ull << 4,
   TransportValidTimeSignature = 1ull << 5,
+  // Project samples advance by projectRateQ32 for each rendered output
+  // sample. projectTimeSamples is the signed floor and
+  // projectTimeFractionQ32 is its non-negative fractional remainder. The
+  // append-only representation keeps negative pre-roll unambiguous and does
+  // not require compiler-specific 128-bit integers.
+  TransportValidProjectRateQ32 = 1ull << 6,
 };
+inline constexpr uint64_t kProjectRateOneQ32 = uint64_t{1} << 32;
 enum TransportStateFlags : uint32_t {
   TransportStateNone = 0,
   TransportStatePlaying = 1u << 0,
@@ -48,7 +55,53 @@ struct TransportContext {
   double cycleEndMusic;
   int32_t timeSignatureNumerator;
   int32_t timeSignatureDenominator;
+  uint32_t projectTimeFractionQ32{0};
+  uint64_t projectRateQ32{kProjectRateOneQ32};
 };
+inline constexpr uint32_t kTransportContextV1RequiredSize =
+    static_cast<uint32_t>(offsetof(TransportContext, timeSignatureDenominator) +
+                          sizeof(decltype(TransportContext::timeSignatureDenominator)));
+inline constexpr uint32_t kTransportContextQ32RequiredSize =
+    static_cast<uint32_t>(offsetof(TransportContext, projectRateQ32) +
+                          sizeof(decltype(TransportContext::projectRateQ32)));
+
+struct ProjectSamplePositionQ32 {
+  int64_t samples;
+  uint32_t fraction;
+};
+
+// Callback-safe position arithmetic shared by transport-aware sources and
+// schedules. Rates are bounded by the product prepare contract, while this
+// helper additionally fails closed on any representational overflow.
+[[nodiscard]] constexpr bool projectSamplePositionAt(
+    const TransportContext& transport, uint32_t outputOffset,
+    ProjectSamplePositionQ32* result) noexcept {
+  if (result == nullptr ||
+      (transport.validFields & TransportValidProjectSamples) == 0)
+    return false;
+  const bool rateValid =
+      (transport.validFields & TransportValidProjectRateQ32) != 0;
+  const uint64_t rate = rateValid ? transport.projectRateQ32
+                                  : kProjectRateOneQ32;
+  const uint32_t fraction =
+      rateValid ? transport.projectTimeFractionQ32 : 0u;
+  if (rate == 0 ||
+      (outputOffset != 0 &&
+       rate > UINT64_MAX / static_cast<uint64_t>(outputOffset)))
+    return false;
+  const uint64_t delta = rate * static_cast<uint64_t>(outputOffset);
+  const uint64_t fractional =
+      static_cast<uint64_t>(fraction) + (delta & 0xffffffffu);
+  const uint64_t whole = (delta >> 32) + (fractional >> 32);
+  if (whole > static_cast<uint64_t>(INT64_MAX) ||
+      transport.projectTimeSamples >
+          INT64_MAX - static_cast<int64_t>(whole))
+    return false;
+  result->samples =
+      transport.projectTimeSamples + static_cast<int64_t>(whole);
+  result->fraction = static_cast<uint32_t>(fractional);
+  return true;
+}
 struct ScratchView { uint8_t* data; uint32_t size; };
 enum ProcessContextFlags : uint32_t {
   ProcessContextFlagNone = 0,

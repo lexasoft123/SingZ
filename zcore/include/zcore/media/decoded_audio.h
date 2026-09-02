@@ -35,6 +35,62 @@ class OwnedFileDescriptor {
 
 using DecodeCancelFn = bool (*)(void*) noexcept;
 
+// The product boundary declares the container selected by its extension
+// allowlist. Auto remains available for trusted project stems and performs
+// signature-only detection; no decoder in zcore accepts a path, URL, device
+// name or protocol string.
+enum class DecodedAudioSourceFormat : uint32_t {
+  Auto = 0,
+  Wav,
+  Flac,
+  Mp3,
+  M4a,
+  Aac,
+  Ogg,
+  Opus,
+  Aiff,
+};
+
+enum DecodedAudioFormatCapability : uint32_t {
+  DecodedAudioCapabilityWav = 1u << 0,
+  DecodedAudioCapabilityFlac = 1u << 1,
+  DecodedAudioCapabilityMp3 = 1u << 2,
+  DecodedAudioCapabilityM4aAac = 1u << 3,
+  DecodedAudioCapabilityM4aAlac = 1u << 4,
+  DecodedAudioCapabilityAac = 1u << 5,
+  DecodedAudioCapabilityOggVorbis = 1u << 6,
+  DecodedAudioCapabilityOggOpus = 1u << 7,
+  DecodedAudioCapabilityAiff = 1u << 8,
+};
+
+// One release-gating mask for the product codec promise. Individual bits are
+// still exposed so a development/runtime probe can report an incomplete
+// bundle honestly, but native playback must not claim the Phase 4 custom-track
+// matrix unless every bit below is present.
+inline constexpr uint32_t kDecodedAudioProductFormatMask =
+    DecodedAudioCapabilityWav |
+    DecodedAudioCapabilityFlac |
+    DecodedAudioCapabilityMp3 |
+    DecodedAudioCapabilityM4aAac |
+    DecodedAudioCapabilityM4aAlac |
+    DecodedAudioCapabilityAac |
+    DecodedAudioCapabilityOggVorbis |
+    DecodedAudioCapabilityOggOpus |
+    DecodedAudioCapabilityAiff;
+
+struct DecodedAudioCodecCapabilities {
+  uint32_t abiVersion = 1;
+  uint32_t formatMask = 0;
+  // True only when the extended codecs are backed by separately replaceable
+  // shared FFmpeg libraries. Static FFmpeg linkage is rejected by CMake.
+  bool dynamicallyLinkedFfmpeg = false;
+  // Release eligibility, not merely "some FFmpeg symbol resolved". This is
+  // true only for the complete kDecodedAudioProductFormatMask.
+  bool completeProductMatrix = false;
+  const char* runtimeVersion = nullptr;
+  const char* runtimeLicense = nullptr;
+};
+
 struct DecodeCancellation {
   void* context = nullptr;
   DecodeCancelFn requested = nullptr;
@@ -45,6 +101,7 @@ struct DecodeCancellation {
 };
 
 struct DecodedAudioPrepareOptions {
+  DecodedAudioSourceFormat sourceFormat = DecodedAudioSourceFormat::Auto;
   // Zero keeps the source rate. A non-zero rate resamples before publication;
   // duration maps to the nearest output frame with half frames rounded up.
   uint32_t requiredSampleRate = 0;
@@ -61,6 +118,10 @@ struct DecodedAudioPrepareOptions {
   // allocations are not preemptible; zero-initialization, conversion and
   // resampler work are divided into bounded slices between cancellation polls.
   size_t maximumWorkingBytes = size_t{1} << 31;
+  // Physical bytes readable through the already-authorized descriptor. This
+  // is checked before a demuxer is constructed and bounds probing as well as
+  // the total compressed input consumed by an extended codec.
+  uint64_t maximumEncodedBytes = 2ull << 30;
   // Reduced numerator/denominator and total multiply/filter work limits are
   // checked before the legacy resampler is constructed. The per-poll limit
   // separately caps multiply-accumulate work in every process() invocation,
@@ -131,5 +192,15 @@ struct DecodedAudioResult {
 
 // Durable capability evidence for native artifact inspection.
 [[nodiscard]] const char* decodedAudioCapabilityTag() noexcept;
+
+// Extension mapping is intentionally not a path parser. Only a leading-dot
+// ASCII extension (case-insensitive) is accepted; slash, backslash, colon and
+// protocol/device spellings are rejected.
+[[nodiscard]] DecodedAudioSourceFormat decodedAudioFormatForExtension(
+    const char* extension) noexcept;
+[[nodiscard]] bool decodedAudioFormatSupported(
+    DecodedAudioSourceFormat format) noexcept;
+[[nodiscard]] DecodedAudioCodecCapabilities decodedAudioCodecCapabilities()
+    noexcept;
 
 }  // namespace singz

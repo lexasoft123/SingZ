@@ -256,6 +256,25 @@ void transportValidation() {
   transport.stateFlags |= TransportStateCycling;
   expect(succeeded(validateProcessContext(context)),
          "accept restored coherent cycling transport");
+
+  transport.validFields |= TransportValidProjectRateQ32;
+  transport.projectTimeFractionQ32 = 0x80000000u;
+  transport.projectRateQ32 = kProjectRateOneQ32 / 2u;
+  expect(succeeded(validateProcessContext(context)),
+         "accept append-only fractional project transport");
+  ProjectSamplePositionQ32 position{};
+  expect(projectSamplePositionAt(transport, 3, &position) &&
+             position.samples == -47998 && position.fraction == 0,
+         "Q32 transport advances negative pre-roll without signed ambiguity");
+  transport.projectRateQ32 = 0;
+  expect(!succeeded(validateProcessContext(context)) &&
+             !projectSamplePositionAt(transport, 1, &position),
+         "reject a zero Q32 project rate");
+  transport.projectRateQ32 = kProjectRateOneQ32;
+  transport.validFields &= ~TransportValidProjectSamples;
+  expect(!succeeded(validateProcessContext(context)) &&
+             !projectSamplePositionAt(transport, 0, &position),
+         "Q32 rate cannot exist without an authoritative project position");
 }
 
 void prepareWithScopedTopology(PrototypeFakeHost* host,

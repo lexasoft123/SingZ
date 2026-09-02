@@ -21,6 +21,18 @@ option(SINGZ_CORE_TESTS "Build the host test suite" ON)
 option(SINGZ_BUILD_HOST_TOOLS "Build singz-analyze and native host tests" ON)
 option(SINGZ_BUILD_ML "Build the ONNX-backed mobile analysis/split adapter" OFF)
 option(SINGZ_BUILD_ELECTRON_CAPTURE "Build the stable Node-API capture addon" OFF)
+option(SINGZ_ENABLE_FFMPEG_CODECS
+  "Enable descriptor-only extended codecs through dynamic FFmpeg libraries" OFF)
+set(SINGZ_FFMPEG_INCLUDE_DIR "" CACHE PATH
+  "Pinned FFmpeg headers matching the separately replaceable shared runtime")
+foreach(_singz_ffmpeg_component IN ITEMS AVCODEC AVFORMAT AVUTIL SWRESAMPLE)
+  set(SINGZ_FFMPEG_${_singz_ffmpeg_component}_LIBRARY "" CACHE FILEPATH
+    "Dynamic FFmpeg ${_singz_ffmpeg_component} link library")
+  if(WIN32)
+    set(SINGZ_FFMPEG_${_singz_ffmpeg_component}_RUNTIME "" CACHE FILEPATH
+      "Dynamic FFmpeg ${_singz_ffmpeg_component} DLL")
+  endif()
+endforeach()
 set(SINGZ_NODE_INCLUDE_DIR "" CACHE PATH
     "Electron Node-API include directory (the directory containing node_api.h)")
 set(SINGZ_NODE_LIBRARY "" CACHE FILEPATH
@@ -41,7 +53,7 @@ if(SINGZ_ENABLE_ASIO)
   endif()
   message(FATAL_ERROR
     "The ASIO provider is intentionally gated pending SingZ's signed SDK "
-    "agreement and the separate AsioAudioInputBackend implementation. Keep "
+    "agreement and a separately licensed AsioDriverApi implementation. Keep "
     "SINGZ_ENABLE_ASIO=OFF for shipping builds.")
 endif()
 
@@ -132,6 +144,11 @@ add_dependencies(singz_native_playback_callback
   singz_check_playback_realtime)
 
 add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
+  native/playback/native_playback_graph_document.cpp
+  native/playback/native_playback_graph_document.h
+  native/playback/playback_cue_plan.cpp
+  native/playback/playback_cue_plan.h
+  native/playback/native_playback_projection.h
   native/playback/native_playback_session.cpp
   native/playback/native_playback_session.h)
 add_library(SingZ::native_playback_session ALIAS
@@ -142,6 +159,7 @@ target_include_directories(singz_native_playback_session PUBLIC
 target_link_libraries(singz_native_playback_session PUBLIC
   SingZ::native_build_options
   SingZ::native_playback_callback
+  SingZ::signalsmith_time_pitch
   SingZ::zcore_media
   SingZ::zcore_device
   SingZ::zdsp_host_adapter)
@@ -247,6 +265,13 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     VISIBILITY_INLINES_HIDDEN YES)
   if(APPLE)
     target_link_options(singz_capture PRIVATE "-undefined" "dynamic_lookup")
+    if(SINGZ_ENABLE_FFMPEG_CODECS)
+      # The verified capture snapshot owns its replaceable LGPL runtime under
+      # ffmpeg/. The addon is integrity-staged with that directory intact, so
+      # both development and packaged loads resolve the same relative bytes.
+      set_property(TARGET singz_capture APPEND PROPERTY
+        BUILD_RPATH "@loader_path/ffmpeg")
+    endif()
   elseif(WIN32)
     target_sources(singz_capture PRIVATE
       native/electron/win_delay_load_hook.cc)
@@ -428,6 +453,15 @@ if(SINGZ_CORE_TESTS)
     target_link_libraries(audio_host_windows_tests PRIVATE
       SingZ::zcore_device)
     add_test(NAME audio_host_windows_tests COMMAND audio_host_windows_tests)
+
+    add_executable(audio_host_asio_tests
+      ${SINGZ_REPO_ROOT}/tests/native/audio_host_asio_tests.cpp)
+    target_compile_features(audio_host_asio_tests PRIVATE cxx_std_20)
+    target_include_directories(audio_host_asio_tests PRIVATE
+      "${SINGZ_REPO_ROOT}")
+    target_link_libraries(audio_host_asio_tests PRIVATE
+      SingZ::zcore_device)
+    add_test(NAME audio_host_asio_tests COMMAND audio_host_asio_tests)
   endif()
 
   add_executable(audio_host_graph_adapter_tests
@@ -462,6 +496,12 @@ if(SINGZ_CORE_TESTS)
     SingZ::zcore_media
     SingZ::zdsp_runtime)
   add_test(NAME prepared_audio_tests COMMAND prepared_audio_tests)
+
+  add_executable(codec_provisioning_tests
+    ${SINGZ_REPO_ROOT}/tests/native/codec_provisioning_tests.cpp)
+  target_compile_features(codec_provisioning_tests PRIVATE cxx_std_20)
+  target_link_libraries(codec_provisioning_tests PRIVATE SingZ::zcore_media)
+  add_test(NAME codec_provisioning_tests COMMAND codec_provisioning_tests)
 
   add_executable(audio_monitor_session_tests
     ${SINGZ_REPO_ROOT}/native/electron/audio_monitor_session.cpp
@@ -514,6 +554,28 @@ if(SINGZ_CORE_TESTS)
     COMMAND "${CMAKE_COMMAND}" -E env
       SINGZ_NATIVE_PLAYBACK_PROVIDER_DISPOSE_FAILURE=1
       $<TARGET_FILE:native_playback_session_tests>)
+
+  add_executable(playback_cue_plan_tests
+    ${SINGZ_REPO_ROOT}/tests/native/playback_cue_plan_tests.cpp)
+  target_compile_features(playback_cue_plan_tests PRIVATE cxx_std_20)
+  target_include_directories(playback_cue_plan_tests PRIVATE
+    "${SINGZ_REPO_ROOT}")
+  target_compile_definitions(playback_cue_plan_tests PRIVATE
+    SINGZ_PLAYBACK_CUE_FIXTURE_PATH="${SINGZ_REPO_ROOT}/tests/shared/playback-cue-cases.json")
+  target_link_libraries(playback_cue_plan_tests PRIVATE
+    SingZ::native_playback_session)
+  add_test(NAME playback_cue_plan_tests COMMAND playback_cue_plan_tests)
+
+  add_executable(signalsmith_time_pitch_tests
+    tests/native/signalsmith_time_pitch_tests.cpp
+    zdsp/tests/allocation_trap.cpp)
+  target_compile_features(signalsmith_time_pitch_tests PRIVATE cxx_std_20)
+  target_include_directories(signalsmith_time_pitch_tests PRIVATE
+    "${SINGZ_REPO_ROOT}")
+  target_link_libraries(signalsmith_time_pitch_tests PRIVATE
+    SingZ::signalsmith_time_pitch)
+  add_test(NAME signalsmith_time_pitch_tests
+    COMMAND signalsmith_time_pitch_tests)
 
   add_test(NAME audio_host_fake_cli
     COMMAND singz-audio-host --fake --blocks 6 --maximum-frames 1024)

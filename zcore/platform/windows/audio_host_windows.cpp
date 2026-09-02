@@ -34,6 +34,7 @@
 
 #include "../../src/device/audio_host_fifo.h"
 #include "audio_host_windows_helpers.h"
+#include "audio_host_windows_provider.h"
 
 namespace singz {
 namespace {
@@ -1109,14 +1110,17 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
     state_.store(AudioHostState::Closed, std::memory_order_release);
     inputId_ = wide(config.inputDeviceUid);
     outputId_ = wide(config.outputDeviceUid);
-    if (inputId_.empty() || outputId_.empty())
+    outputOnly_ = inputId_.empty() && config.inputChannels.empty();
+    const bool partialInputSelection =
+        inputId_.empty() != config.inputChannels.empty();
+    if (outputId_.empty() || partialInputSelection)
       return fail(AudioHostError::InvalidConfiguration,
-                  "WASAPI endpoint UIDs must be the opaque IDs returned by inventory");
+                  "WASAPI endpoint UIDs must be the opaque IDs returned by inventory; output-only sessions omit both input UID and input channels");
     if (!render || !config.maximumFrames ||
         config.maximumFrames > kAudioHostMaxFrames ||
         (config.requestedBufferFrames &&
          config.requestedBufferFrames > config.maximumFrames) ||
-        config.inputChannels.empty() || config.outputChannels.empty() ||
+        config.outputChannels.empty() ||
         config.inputChannels.size() > kAudioHostMaxChannels ||
         config.outputChannels.size() > kAudioHostMaxChannels ||
         !std::isfinite(config.requestedSampleRate) ||
@@ -1126,15 +1130,19 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
       return fail(AudioHostError::InvalidConfiguration,
                   "Invalid WASAPI channel map, rate, frame bound, or render thunk");
     }
-    PairingResult pairing;
-    try {
-      std::thread worker([&] { pairing = verifyEndpointPair(inputId_, outputId_); });
-      worker.join();
-    } catch (...) {
-      return fail(AudioHostError::ProviderFailure,
-                  "Could not create the WASAPI pairing helper");
+    if (!outputOnly_) {
+      PairingResult pairing;
+      try {
+        std::thread worker([&] {
+          pairing = verifyEndpointPair(inputId_, outputId_);
+        });
+        worker.join();
+      } catch (...) {
+        return fail(AudioHostError::ProviderFailure,
+                    "Could not create the WASAPI pairing helper");
+      }
+      if (!pairing.ok) return fail(pairing.error, pairing.message);
     }
-    if (!pairing.ok) return fail(pairing.error, pairing.message);
 
     uint64_t nextRouteGeneration = 0;
     if (!detail::nextWasapiRouteGeneration(
@@ -1204,15 +1212,16 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
           AudioHostError::DeviceNotFound,
           "A selected WASAPI endpoint changed while the notification guard was armed");
     }
-    if (capturePrepared_.sampleRate != renderPrepared_.sampleRate) {
+    if (!outputOnly_ &&
+        capturePrepared_.sampleRate != renderPrepared_.sampleRate) {
       return finishOpenFailure(
           AudioHostError::DifferentDevicesUnsupported,
           "Capture and render endpoints negotiated different sample rates; adaptive drift correction is deferred",
           "A selected WASAPI endpoint changed while the rate mismatch was being finalized");
     }
-    if (!detail::validWasapiChannelMap(
-            inputMap_.data(), static_cast<uint32_t>(inputMap_.size()),
-            capturePrepared_.endpointChannels) ||
+    if ((!outputOnly_ && !detail::validWasapiChannelMap(
+             inputMap_.data(), static_cast<uint32_t>(inputMap_.size()),
+             capturePrepared_.endpointChannels)) ||
         !detail::validWasapiChannelMap(
             outputMap_.data(), static_cast<uint32_t>(outputMap_.size()),
             renderPrepared_.endpointChannels)) {
@@ -1220,26 +1229,29 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
           AudioHostError::InvalidConfiguration,
           "A selected channel is absent from the exact initialized WASAPI format");
     }
-    if (capturePrepared_.bufferFrames > config.maximumFrames ||
+    if ((!outputOnly_ &&
+         capturePrepared_.bufferFrames > config.maximumFrames) ||
         renderPrepared_.bufferFrames > config.maximumFrames) {
       return finishOpenFailure(
           AudioHostError::InvalidConfiguration,
           "A negotiated WASAPI buffer exceeds maximumFrames");
     }
-    const uint64_t desiredFifo = std::max<uint64_t>(
-        static_cast<uint64_t>(config.maximumFrames) * 8,
-        static_cast<uint64_t>(capturePrepared_.bufferFrames) +
-            static_cast<uint64_t>(renderPrepared_.bufferFrames) * 8);
-    const uint32_t fifoFrames = static_cast<uint32_t>(
-        std::min<uint64_t>(desiredFifo, kMaximumFifoFrames));
-    if (!fifo_.prepare(static_cast<uint32_t>(inputMap_.size()), fifoFrames)) {
-      return finishOpenFailure(
-          AudioHostError::ProviderFailure,
-          "Could not prepare the bounded WASAPI capture FIFO");
+    if (!outputOnly_) {
+      const uint64_t desiredFifo = std::max<uint64_t>(
+          static_cast<uint64_t>(config.maximumFrames) * 8,
+          static_cast<uint64_t>(capturePrepared_.bufferFrames) +
+              static_cast<uint64_t>(renderPrepared_.bufferFrames) * 8);
+      const uint32_t fifoFrames = static_cast<uint32_t>(
+          std::min<uint64_t>(desiredFifo, kMaximumFifoFrames));
+      if (!fifo_.prepare(static_cast<uint32_t>(inputMap_.size()), fifoFrames)) {
+        return finishOpenFailure(
+            AudioHostError::ProviderFailure,
+            "Could not prepare the bounded WASAPI capture FIFO");
+      }
     }
     format_ = {static_cast<double>(renderPrepared_.sampleRate),
                config.maximumFrames, renderPrepared_.periodFrames,
-               static_cast<uint32_t>(inputMap_.size()),
+               outputOnly_ ? 0u : static_cast<uint32_t>(inputMap_.size()),
                static_cast<uint32_t>(outputMap_.size()), true, true,
                config.exclusive ? AudioHostAccessMode::Exclusive
                                 : AudioHostAccessMode::Shared};
@@ -1264,7 +1276,7 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
                      "Reopen the WASAPI host before starting it",
                      currentState());
     const uint64_t startGeneration = routeContext_->generation();
-    fifo_.reset();
+    if (!outputOnly_) fifo_.reset();
     activateAudioHostCallback(&callback_);
     SetEvent(captureStartEvent_);
     bool captureStartOk = false;
@@ -1328,18 +1340,21 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
     result.invalidCallbacks = callback_.invalidCallbacks.load(std::memory_order_relaxed);
     result.renderFailures = callback_.renderFailures.load(std::memory_order_relaxed);
     auto& diagnostics = result.diagnostics;
-    diagnostics.inputStreamLatency100ns = capturePrepared_.streamLatency100ns;
+    diagnostics.inputStreamLatency100ns =
+        outputOnly_ ? 0 : capturePrepared_.streamLatency100ns;
     diagnostics.outputStreamLatency100ns = renderPrepared_.streamLatency100ns;
-    diagnostics.inputPeriodFrames = capturePrepared_.periodFrames;
+    diagnostics.inputPeriodFrames =
+        outputOnly_ ? 0 : capturePrepared_.periodFrames;
     diagnostics.outputPeriodFrames = renderPrepared_.periodFrames;
-    diagnostics.inputBufferFrames = capturePrepared_.bufferFrames;
+    diagnostics.inputBufferFrames =
+        outputOnly_ ? 0 : capturePrepared_.bufferFrames;
     diagnostics.outputBufferFrames = renderPrepared_.bufferFrames;
-    diagnostics.fifoCapacityFrames = fifo_.capacityFrames();
-    diagnostics.fifoCurrentFrames = fifo_.currentFrames();
-    diagnostics.fifoMinimumFrames = fifo_.minimumFrames();
-    diagnostics.fifoMaximumFrames = fifo_.maximumFrames();
-    diagnostics.fifoUnderflows = fifo_.underflows();
-    diagnostics.fifoOverflows = fifo_.overflows();
+    diagnostics.fifoCapacityFrames = outputOnly_ ? 0 : fifo_.capacityFrames();
+    diagnostics.fifoCurrentFrames = outputOnly_ ? 0 : fifo_.currentFrames();
+    diagnostics.fifoMinimumFrames = outputOnly_ ? 0 : fifo_.minimumFrames();
+    diagnostics.fifoMaximumFrames = outputOnly_ ? 0 : fifo_.maximumFrames();
+    diagnostics.fifoUnderflows = outputOnly_ ? 0 : fifo_.underflows();
+    diagnostics.fifoOverflows = outputOnly_ ? 0 : fifo_.overflows();
     diagnostics.startupInputZeroFrames =
         startupInputZeroFrames_.load(std::memory_order_relaxed);
     diagnostics.acceptedCaptureMinusRenderedFrames =
@@ -1591,6 +1606,7 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
   }
 
   void unifiedWorker() noexcept;
+  void outputOnlyWorker() noexcept;
 
   AudioHostConfig config_{};
   std::wstring inputId_, outputId_;
@@ -1616,12 +1632,356 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
   bool captureStartReady_{false}, renderStartReady_{false};
   bool captureStartOk_{false}, renderStartOk_{false};
   bool sessionOwned_{false};
+  bool outputOnly_{false};
   detail::WasapiStartupFailureState startFailure_{};
   std::string startError_;
   EndpointPrepared capturePrepared_{}, renderPrepared_{};
 };
 
+void WasapiAudioHostBackend::outputOnlyWorker() noexcept {
+  StaApartment apartment;
+  auto publishOpenFailure = [&](const std::string& message,
+                                AudioHostError error =
+                                    AudioHostError::ProviderFailure) {
+    EndpointPrepared failure;
+    failure.error = message;
+    failure.hostError = error;
+    publishOpen(true, failure);
+    publishOpen(false, std::move(failure));
+  };
+  auto publishStartFailure = [&](detail::WasapiStartupStage stage,
+                                 HRESULT result,
+                                 const std::string& message) {
+    detail::applyWasapiStartupFailure(routeContext_.get(), stage, result);
+    publishStart(true, false, stage, result, message);
+    publishStart(false, false, stage, result, message);
+  };
+  auto publishStartSuccess = [&]() {
+    publishStart(true, true, detail::WasapiStartupStage::Control, S_OK);
+    publishStart(false, true, detail::WasapiStartupStage::Control, S_OK);
+  };
+  if (!apartment.ok()) {
+    publishOpenFailure(hresultMessage("WASAPI output owner STA",
+                                      apartment.result()));
+    return;
+  }
+
+  UniqueHandle renderAudioEvent(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+  if (!renderAudioEvent) {
+    publishOpenFailure("WASAPI could not create the render endpoint event");
+    return;
+  }
+  EndpointNotificationRegistration notification(&quarantineStopEvent_);
+  std::string notificationError;
+  if (!notification.arm({}, outputId_, routeContext_, &notificationError)) {
+    publishOpenFailure(notificationError);
+    return;
+  }
+
+  ComPtr<IMMDevice> renderDevice;
+  ComPtr<IAudioClient> renderClient;
+  EndpointProfile renderProfile;
+  if (!prepareWorker(false, renderClient, &renderProfile, renderDevice,
+                     renderAudioEvent.get())) {
+    publishOpenFailure(renderProfile.prepared.error,
+                       renderProfile.prepared.hostError);
+    return;
+  }
+  ComPtr<IAudioRenderClient> renderer;
+  HRESULT result = renderClient->GetService(
+      __uuidof(IAudioRenderClient), reinterpret_cast<void**>(renderer.put()));
+  if (FAILED(result)) {
+    publishOpenFailure(
+        hresultMessage("WASAPI render service", result),
+        detail::classifyWasapiOpenFailure(
+            detail::WasapiOpenStage::Service, false,
+            detail::WasapiOpenOutcome::ApiFailure, result));
+    return;
+  }
+  ComPtr<IAudioClock> clock;
+  result = renderClient->GetService(__uuidof(IAudioClock),
+                                    reinterpret_cast<void**>(clock.put()));
+  if (FAILED(result)) {
+    publishOpenFailure(
+        hresultMessage("WASAPI render clock service", result),
+        detail::classifyWasapiOpenFailure(
+            detail::WasapiOpenStage::Service, false,
+            detail::WasapiOpenOutcome::ApiFailure, result));
+    return;
+  }
+  UINT64 clockFrequency = 0;
+  const HRESULT clockFrequencyResult = clock->GetFrequency(&clockFrequency);
+  const auto clockFrequencyAction = detail::classifyWasapiOptionalOpenResult(
+      detail::WasapiOptionalOpenStage::ClockFrequency, clockFrequencyResult,
+      SUCCEEDED(clockFrequencyResult) && clockFrequency != 0);
+  if (clockFrequencyAction ==
+      detail::WasapiOptionalOpenAction::FailDeviceLost) {
+    publishOpenFailure(
+        hresultMessage("WASAPI render clock frequency", clockFrequencyResult),
+        AudioHostError::DeviceNotFound);
+    return;
+  }
+  if (clockFrequencyAction ==
+      detail::WasapiOptionalOpenAction::UseFallback) {
+    clock.reset();
+    clockFrequency = 0;
+  }
+  LARGE_INTEGER qpcValue{};
+  const uint64_t qpcFrequency =
+      QueryPerformanceFrequency(&qpcValue) && qpcValue.QuadPart > 0
+          ? static_cast<uint64_t>(qpcValue.QuadPart)
+          : 0;
+
+  std::vector<float> outputStorage;
+  try {
+    outputStorage.assign(static_cast<size_t>(outputMap_.size()) *
+                             config_.maximumFrames,
+                         0.0F);
+  } catch (...) {
+    publishOpenFailure(
+        "Could not preallocate WASAPI output conversion buffers");
+    return;
+  }
+  std::array<float*, kAudioHostMaxChannels> outputPointers{};
+  std::array<const float*, kAudioHostMaxChannels> outputConstPointers{};
+  for (size_t channel = 0; channel < outputMap_.size(); ++channel) {
+    outputPointers[channel] =
+        outputStorage.data() + channel * config_.maximumFrames;
+    outputConstPointers[channel] = outputPointers[channel];
+  }
+  if (routeContext_->lost()) {
+    publishOpenFailure(
+        "The selected WASAPI output changed while its notification guard was armed",
+        AudioHostError::DeviceNotFound);
+    return;
+  }
+  EndpointPrepared noCapture;
+  noCapture.ok = true;
+  noCapture.sampleRate = renderProfile.prepared.sampleRate;
+  publishOpen(true, noCapture);
+  publishOpen(false, renderProfile.prepared);
+
+  HANDLE beforeStart[] = {stopEvent_, captureStartEvent_};
+  const DWORD startWait =
+      WaitForMultipleObjects(2, beforeStart, FALSE, INFINITE);
+  if (startWait != WAIT_OBJECT_0 + 1 ||
+      stopRequested_.load(std::memory_order_acquire)) {
+    const HRESULT waitResult = startWait == WAIT_FAILED
+                                   ? HRESULT_FROM_WIN32(GetLastError())
+                                   : E_ABORT;
+    publishStartFailure(detail::WasapiStartupStage::Control, waitResult,
+                        "WASAPI output owner stopped before start");
+    return;
+  }
+  MmcssScope mmcss;
+  if (!mmcss.enter()) {
+    publishStartFailure(detail::WasapiStartupStage::Control, E_FAIL,
+                        "WASAPI output owner could not join MMCSS Pro Audio");
+    return;
+  }
+
+  BYTE* prime = nullptr;
+  detail::WasapiOnceOperation primeOperation;
+  if (!primeOperation.begin()) {
+    publishStartFailure(detail::WasapiStartupStage::PrimeGetBuffer, E_FAIL,
+                        "WASAPI output prime could not begin");
+    return;
+  }
+  HRESULT primeResult =
+      renderer->GetBuffer(renderProfile.prepared.bufferFrames, &prime);
+  if (detail::classifyWasapiPrimeAcquire(primeResult) !=
+          detail::WasapiPrimeAcquireAction::Proceed ||
+      !prime) {
+    primeOperation.fail();
+    const HRESULT failure = primeResult == S_OK ? E_FAIL : primeResult;
+    publishStartFailure(detail::WasapiStartupStage::PrimeGetBuffer, failure,
+                        hresultMessage("WASAPI output prime", failure));
+    return;
+  }
+  if (!primeOperation.markAcquired()) {
+    const HRESULT released = renderer->ReleaseBuffer(
+        renderProfile.prepared.bufferFrames, AUDCLNT_BUFFERFLAGS_SILENT);
+    publishStartFailure(
+        FAILED(released) ? detail::WasapiStartupStage::PrimeReleaseBuffer
+                         : detail::WasapiStartupStage::PrimeGetBuffer,
+        FAILED(released) ? released : E_FAIL,
+        "WASAPI output prime state transition failed");
+    return;
+  }
+  primeResult = renderer->ReleaseBuffer(renderProfile.prepared.bufferFrames,
+                                        AUDCLNT_BUFFERFLAGS_SILENT);
+  if (!primeOperation.finishRelease(primeResult)) {
+    const HRESULT failure = FAILED(primeResult) ? primeResult : E_FAIL;
+    publishStartFailure(detail::WasapiStartupStage::PrimeReleaseBuffer,
+                        failure,
+                        hresultMessage("WASAPI output prime release", failure));
+    return;
+  }
+
+  result = renderClient->Start();
+  if (FAILED(result)) {
+    publishStartFailure(detail::WasapiStartupStage::RenderStart, result,
+                        hresultMessage("WASAPI render start", result));
+    return;
+  }
+  bool renderStarted = true;
+  publishStartSuccess();
+
+  uint64_t submittedFrames = renderProfile.prepared.bufferFrames;
+  uint64_t callbackSequence = 0;
+  bool firstCallback = true;
+  bool pendingRenderDiscontinuity = false;
+  AudioHostOutputTimeline outputTimeline{};
+  uint32_t renderBufferErrors = 0;
+  HANDLE runtimeEvents[] = {stopEvent_, renderAudioEvent.get()};
+  while (!stopKnown()) {
+    const DWORD waited =
+        WaitForMultipleObjects(2, runtimeEvents, FALSE, INFINITE);
+    if (waited != WAIT_OBJECT_0 + 1 || stopKnown()) {
+      if (waited != WAIT_OBJECT_0 && waited != WAIT_OBJECT_0 + 1)
+        markRuntimeFailure(waited == WAIT_FAILED
+                               ? HRESULT_FROM_WIN32(GetLastError())
+                               : E_FAIL);
+      break;
+    }
+    const uint64_t renderWakeNs = qpcNowNs(qpcFrequency);
+    UINT32 padding = 0;
+    if (!config_.exclusive) {
+      const HRESULT paddingResult = renderClient->GetCurrentPadding(&padding);
+      if (FAILED(paddingResult) ||
+          padding > renderProfile.prepared.bufferFrames) {
+        markRuntimeFailure(FAILED(paddingResult) ? paddingResult : E_FAIL);
+        break;
+      }
+    }
+    detail::WasapiRenderRequest request;
+    if (!detail::prepareWasapiRenderRequest(
+            config_.exclusive, renderWakeNs,
+            renderProfile.prepared.bufferFrames, padding,
+            renderProfile.prepared.sampleRate, &request) ||
+        !request.valid || request.framesToWrite > config_.maximumFrames) {
+      markRuntimeFailure(E_FAIL);
+      break;
+    }
+    const UINT32 frames = request.framesToWrite;
+    if (!frames) continue;
+    BYTE* bytes = nullptr;
+    detail::WasapiOnceOperation operation;
+    if (!operation.begin()) {
+      markRuntimeFailure(E_FAIL);
+      break;
+    }
+    const HRESULT acquired = renderer->GetBuffer(frames, &bytes);
+    const uint32_t nextErrors =
+        acquired == AUDCLNT_E_BUFFER_ERROR ? renderBufferErrors + 1 : 0;
+    const auto action = detail::classifyWasapiBufferResult(
+        acquired, request.exclusive, nextErrors);
+    if (action == detail::WasapiBufferAction::Retry) {
+      operation.fail();
+      renderBufferErrors = nextErrors;
+      pendingRenderDiscontinuity = true;
+      recordAudioHostXRun(&callback_);
+      continue;
+    }
+    if (action != detail::WasapiBufferAction::Proceed || !bytes) {
+      operation.fail();
+      markRuntimeFailure(acquired == S_OK ? E_FAIL : acquired);
+      break;
+    }
+    if (!operation.markAcquired()) {
+      const HRESULT released =
+          renderer->ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT);
+      markRuntimeFailure(FAILED(released) ? released : E_FAIL);
+      break;
+    }
+    if (stopKnown()) {
+      const HRESULT released =
+          renderer->ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT);
+      if (!operation.finishRelease(released))
+        markRuntimeFailure(FAILED(released) ? released : E_FAIL);
+      break;
+    }
+    UINT64 clockPosition = 0;
+    UINT64 clockQpc100ns = 0;
+    const HRESULT clockPositionResult =
+        clock ? clock->GetPosition(&clockPosition, &clockQpc100ns) : S_FALSE;
+    const auto clockPositionAction =
+        detail::classifyWasapiClockPosition(clockPositionResult);
+    if (clockPositionAction ==
+        detail::WasapiClockPositionAction::FailDeviceLost) {
+      const HRESULT released =
+          renderer->ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT);
+      (void)operation.finishRelease(released);
+      markRuntimeFailure(clockPositionResult);
+      break;
+    }
+    const uint64_t beforeNs = qpcNowNs(qpcFrequency);
+    uint32_t discontinuity = 0;
+    if (pendingRenderDiscontinuity)
+      discontinuity |= AudioHostDiscontinuityXRun;
+    if (firstCallback) {
+      discontinuity |= AudioHostDiscontinuityStart;
+      firstCallback = false;
+    }
+    const detail::WasapiOutputTimestampProjection outputTimestamp =
+        detail::projectWasapiOutputTimestamp(
+            clockPositionAction, clockPosition, clockQpc100ns, clockFrequency,
+            submittedFrames, renderProfile.prepared.sampleRate, beforeNs);
+    const AudioHostOutputTimelineResult timeline =
+        resolveAudioHostOutputTimeline(
+            &outputTimeline, true, submittedFrames, outputTimestamp.hardware,
+            frames, submittedFrames);
+    discontinuity |= timeline.discontinuity;
+    AudioHostRenderBlock block{
+        nullptr, outputPointers.data(), 0,
+        static_cast<uint32_t>(outputMap_.size()), frames,
+        config_.maximumFrames,
+        static_cast<double>(renderProfile.prepared.sampleRate), 2,
+        routeContext_->generation(),
+        streamGeneration_.load(std::memory_order_relaxed), callbackSequence,
+        0, 0, false, false, timeline.outputFrame,
+        outputTimestamp.hostTimeNs, outputTimestamp.hostTimeNs != 0,
+        outputTimestamp.hardware, beforeNs, discontinuity, true};
+    if (!operation.markAdvanced()) {
+      const HRESULT released =
+          renderer->ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT);
+      markRuntimeFailure(FAILED(released) ? released : E_FAIL);
+      break;
+    }
+    saturatingAdd(&renderRequestedFrames_, frames);
+    invokeAudioHostCallback(&callback_, block);
+    callbackSequence = advanceAudioHostFrame(callbackSequence, 1);
+    detail::planarToInterleavedFloat(
+        outputConstPointers.data(), static_cast<uint32_t>(outputMap_.size()),
+        outputMap_.data(), renderProfile.prepared.endpointChannels, frames,
+        reinterpret_cast<float*>(bytes));
+    const HRESULT released = renderer->ReleaseBuffer(frames, 0);
+    if (!operation.finishRelease(released)) {
+      markRuntimeFailure(FAILED(released) ? released : E_FAIL);
+      break;
+    }
+    renderBufferErrors = 0;
+    pendingRenderDiscontinuity = false;
+    submittedFrames = advanceAudioHostFrame(submittedFrames, frames);
+    if (detail::wasapiRenderRequestExpired(request, qpcNowNs(qpcFrequency))) {
+      recordAudioHostDeadlineMiss(&callback_);
+      recordAudioHostXRun(&callback_);
+      markRuntimeFailure(E_FAIL);
+      break;
+    }
+  }
+  if (renderStarted) {
+    const HRESULT stopped = renderClient->Stop();
+    if (FAILED(stopped)) markRuntimeFailure(stopped);
+    renderStarted = false;
+  }
+}
+
 void WasapiAudioHostBackend::unifiedWorker() noexcept {
+  if (outputOnly_) {
+    outputOnlyWorker();
+    return;
+  }
   StaApartment apartment;
   auto publishOpenFailure = [&](
                                 const std::string& message,
@@ -2434,15 +2794,10 @@ void WasapiAudioHostBackend::unifiedWorker() noexcept {
   // notification unregisters next, then endpoint event handles close last.
 }
 
-
-std::unique_ptr<AudioHostBackend> createWindowsAudioHostBackend() {
-  return std::make_unique<WasapiAudioHostBackend>();
-}
-
 }  // namespace
 
-std::unique_ptr<AudioHostBackend> createPlatformAudioHostBackend() {
-  return createWindowsAudioHostBackend();
+std::unique_ptr<AudioHostBackend> createWasapiAudioHostBackend() {
+  return std::make_unique<WasapiAudioHostBackend>();
 }
 
 }  // namespace singz

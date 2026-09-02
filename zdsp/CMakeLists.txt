@@ -36,6 +36,8 @@ add_library(zdsp_runtime STATIC
   src/runtime/realtime_arena.cpp
   src/runtime/builtin_nodes.cpp
   src/runtime/decoded_buffer_source.cpp
+  src/runtime/scheduled_cue_source.cpp
+  src/runtime/scheduled_gain.cpp
   src/runtime/graph_compiler.cpp
   src/runtime/graph_runner.cpp)
 add_library(SingZ::zdsp_runtime ALIAS zdsp_runtime)
@@ -54,6 +56,8 @@ target_sources(zdsp_runtime PRIVATE
   include/zdsp/queues.h
   include/zdsp/builtin_nodes.h
   include/zdsp/decoded_buffer_source.h
+  include/zdsp/scheduled_cue_source.h
+  include/zdsp/scheduled_gain.h
   include/zdsp/graph.h
   include/zdsp/graph_runner.h
   src/runtime/graph_internal.h)

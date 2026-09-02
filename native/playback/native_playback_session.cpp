@@ -1,9 +1,12 @@
 #include "native_playback_session.h"
 
 #include "native_playback_callback.h"
+#include "native_playback_projection.h"
+#include "signalsmith_time_pitch.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -18,17 +21,48 @@
 #include <zdsp/graph.h>
 #include <zdsp/graph_runner.h>
 #include <zdsp/realtime_arena.h>
+#include <zdsp/scheduled_cue_source.h>
+#include <zdsp/scheduled_gain.h>
 
 namespace singz {
 namespace {
 
+// Retained only by prepareFixedLegacy(), a source-level parity oracle while
+// the document materializer is brought up. Product prepare always synthesizes
+// or consumes a format-1 document and never calls that helper.
 constexpr uint64_t kLaneNodeBase = 100;
-constexpr uint64_t kMixNode = 1000;
-constexpr uint64_t kMasterNode = 1001;
-constexpr uint64_t kLimiterNode = 1002;
-constexpr uint64_t kOutputNode = 1003;
+constexpr uint64_t kTrainingNodeBase = 1300;
+constexpr uint64_t kSongMixNode = 1000;
+constexpr uint64_t kSongGainNode = 1001;
+constexpr uint64_t kTimePitchNode = 1002;
+constexpr uint64_t kCueSourceNode = 1100;
+constexpr uint64_t kCueMapNode = 1101;
+constexpr uint64_t kReferenceGainNode = 1102;
+constexpr uint64_t kOutputMixNode = 1200;
+constexpr uint64_t kOutputGainNode = 1201;
+constexpr uint64_t kLimiterNode = 1202;
+constexpr uint64_t kOutputNode = 1203;
 constexpr size_t kArenaBaseBytes = 4u * 1024u * 1024u;
 constexpr size_t kMaximumArenaBytes = 256u * 1024u * 1024u;
+constexpr double kMinimumNativePlaybackRate = 0.25;
+constexpr double kMaximumNativePlaybackRate = 4.0;
+static_assert(kNativePlaybackMaximumGraphNodes == zdsp::kMaximumGraphNodes);
+static_assert(kNativePlaybackMaximumGraphConnections ==
+              zdsp::kMaximumGraphConnections);
+
+bool rateToQ32(double rate, uint64_t *result) noexcept {
+  if (result == nullptr || !std::isfinite(rate) ||
+      rate < kMinimumNativePlaybackRate || rate > kMaximumNativePlaybackRate)
+    return false;
+  const long double scaled =
+      static_cast<long double>(rate) *
+      static_cast<long double>(zdsp::kProjectRateOneQ32);
+  if (scaled < 1.0L ||
+      scaled > static_cast<long double>(std::numeric_limits<uint64_t>::max()))
+    return false;
+  *result = static_cast<uint64_t>(std::llround(scaled));
+  return *result != 0;
+}
 
 NativePlaybackResult failure(NativePlaybackError error, uint64_t generation,
                              NativePlaybackState state, std::string message) {
@@ -64,6 +98,64 @@ bool validChannels(const std::vector<uint32_t> &channels) noexcept {
   return true;
 }
 
+bool graphDocumentRequestsSignalsmith(
+    const std::optional<NativePlaybackGraphDocument> &document) noexcept {
+  return document.has_value() &&
+         std::any_of(document->nodes.begin(), document->nodes.end(),
+                     [](const NativePlaybackGraphNode &node) {
+                       // A newer persisted schema is materialized through its
+                       // declared unavailable policy, not through the v1
+                       // Signalsmith factory.
+                       return node.typeVersion == 1 &&
+                              nativePlaybackGraphTypeEqual(
+                                  node.type,
+                                  kGraphTypeSignalsmithTimePitch);
+                     });
+}
+
+std::optional<size_t> preparedGraphArenaCapacity(
+    size_t laneCount, size_t trainingLaneCount, bool hasReference,
+    uint32_t outputChannels, uint32_t maximumFrames) noexcept {
+  if (trainingLaneCount > laneCount || outputChannels == 0 ||
+      maximumFrames == 0)
+    return std::nullopt;
+  const uint64_t logicalBuffers =
+      static_cast<uint64_t>(laneCount) * 4u +
+      static_cast<uint64_t>(trainingLaneCount) * 2u +
+      (hasReference ? 16u : 8u);
+  if (logicalBuffers > std::numeric_limits<uint64_t>::max() /
+                           outputChannels ||
+      logicalBuffers * outputChannels >
+          std::numeric_limits<uint64_t>::max() / maximumFrames ||
+      logicalBuffers * outputChannels * maximumFrames >
+          std::numeric_limits<uint64_t>::max() / sizeof(float))
+    return std::nullopt;
+  const uint64_t sampleBytes = logicalBuffers * outputChannels *
+                               maximumFrames * sizeof(float);
+  if (sampleBytes > std::numeric_limits<uint64_t>::max() -
+                        kArenaBaseBytes)
+    return std::nullopt;
+  const uint64_t requested = kArenaBaseBytes + sampleBytes;
+  if (requested > kMaximumArenaBytes ||
+      requested > std::numeric_limits<uint32_t>::max() ||
+      requested > std::numeric_limits<size_t>::max())
+    return std::nullopt;
+  return static_cast<size_t>(requested);
+}
+
+size_t signalsmithExternalRetainedBytes(
+    const SignalsmithTimePitchConfig &config) noexcept {
+  const size_t total = signalsmithTimePitchRetainedBytes(config);
+  const size_t state = signalsmithTimePitchStateBytes();
+  const size_t prepared = signalsmithTimePitchPreparedBytes(config);
+  if (prepared > std::numeric_limits<size_t>::max() - state ||
+      total <= prepared + state)
+    return 0;
+  // State and prepared scratch are placement allocations inside arenaBytes.
+  // Count only the processor's external heap/banks in addition to that arena.
+  return total - prepared - state;
+}
+
 zdsp::AudioBusDescriptor descriptor(
     uint32_t channels,
     std::array<zdsp::AudioChannelRole, zdsp::kMaximumChannelsPerBus> *roles) {
@@ -86,6 +178,53 @@ uint64_t presentationLatencyFrames(const AudioHostLatency &latency) noexcept {
   total += latency.bufferFrames;
   total += latency.externalRouteFrames;
   return total;
+}
+
+int64_t latencyAdjustedProjectFrame(int64_t rendered, uint32_t fractionQ32,
+                                    uint64_t outputLatency,
+                                    uint64_t projectRateQ32) noexcept {
+  if (projectRateQ32 == 0 ||
+      (outputLatency != 0 &&
+       projectRateQ32 > std::numeric_limits<uint64_t>::max() / outputLatency))
+    return std::numeric_limits<int64_t>::min();
+  const uint64_t deltaQ32 = projectRateQ32 * outputLatency;
+  uint64_t whole = deltaQ32 >> 32;
+  if (fractionQ32 < static_cast<uint32_t>(deltaQ32))
+    ++whole;
+  if (whole > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+      rendered < std::numeric_limits<int64_t>::min() +
+                     static_cast<int64_t>(whole))
+    return std::numeric_limits<int64_t>::min();
+  return rendered - static_cast<int64_t>(whole);
+}
+
+NativePlaybackTransportBoundaryReason
+nativeBoundaryReason(zdsp::DiscontinuityReason reason) noexcept {
+  switch (reason) {
+  case zdsp::DiscontinuityReason::None:
+    return NativePlaybackTransportBoundaryReason::None;
+  case zdsp::DiscontinuityReason::StreamGenerationChanged:
+    return NativePlaybackTransportBoundaryReason::StreamGenerationChanged;
+  case zdsp::DiscontinuityReason::SequenceGap:
+    return NativePlaybackTransportBoundaryReason::SequenceGap;
+  case zdsp::DiscontinuityReason::SampleRateChanged:
+    return NativePlaybackTransportBoundaryReason::SampleRateChanged;
+  case zdsp::DiscontinuityReason::RouteGenerationChanged:
+    return NativePlaybackTransportBoundaryReason::RouteGenerationChanged;
+  case zdsp::DiscontinuityReason::TimestampQualityChanged:
+    return NativePlaybackTransportBoundaryReason::TimestampQualityChanged;
+  case zdsp::DiscontinuityReason::ClockReanchored:
+    return NativePlaybackTransportBoundaryReason::ClockReanchored;
+  case zdsp::DiscontinuityReason::SourceSeek:
+    return NativePlaybackTransportBoundaryReason::SourceSeek;
+  case zdsp::DiscontinuityReason::SourceLoop:
+    return NativePlaybackTransportBoundaryReason::SourceLoop;
+  case zdsp::DiscontinuityReason::DeviceLost:
+    return NativePlaybackTransportBoundaryReason::DeviceLost;
+  case zdsp::DiscontinuityReason::SourceFrameOverflow:
+    return NativePlaybackTransportBoundaryReason::SourceFrameOverflow;
+  }
+  return NativePlaybackTransportBoundaryReason::None;
 }
 
 bool safeStoppedState(AudioHostState state) noexcept {
@@ -127,6 +266,20 @@ NativePlaybackError decodeError(DecodedAudioStatus status) noexcept {
   return NativePlaybackError::DecodeFailure;
 }
 
+NativePlaybackError cuePlanError(PlaybackCuePlanError error) noexcept {
+  switch (error) {
+  case PlaybackCuePlanError::None:
+    return NativePlaybackError::None;
+  case PlaybackCuePlanError::InvalidConfiguration:
+    return NativePlaybackError::InvalidConfiguration;
+  case PlaybackCuePlanError::LimitExceeded:
+    return NativePlaybackError::LimitExceeded;
+  case PlaybackCuePlanError::ResourceExhausted:
+    return NativePlaybackError::ResourceExhausted;
+  }
+  return NativePlaybackError::InvalidConfiguration;
+}
+
 void injectFailure(NativePlaybackTestHooks *hooks,
                    NativePlaybackAllocationPoint point) {
   if (hooks == nullptr || hooks->inject == nullptr)
@@ -141,6 +294,1120 @@ void injectFailure(NativePlaybackTestHooks *hooks,
   }
 }
 
+enum class PlaybackTransportCommandKind : uint32_t {
+  Start = 0,
+  Pause,
+  Resume,
+  Seek,
+  SetLoop,
+  ClearLoop,
+  Reanchor,
+  Stop,
+};
+
+struct PlaybackTransportCommand {
+  uint64_t generation{0};
+  PlaybackTransportCommandKind kind{PlaybackTransportCommandKind::Stop};
+  NativePlaybackTransportState state{NativePlaybackTransportState::Stopped};
+  int64_t projectFrame{0};
+  int64_t loopStartFrame{0};
+  int64_t loopEndFrame{0};
+  SignalsmithTimePitchLoopPlan loopPlan{};
+  SignalsmithTimePitchReanchorPlan reanchorPlan{};
+  uint32_t projectFractionQ32{0};
+};
+
+// Prepared with the graph and owned by the session until callback quiescence.
+// The fixed SPSC mailbox is written only by session commands under the control
+// mutex and drained only by the audio callback at hardware-block offset zero.
+// Callback state is never read directly by the control domain; atomics below
+// publish coherent telemetry without putting locks or allocation in render.
+struct PreparedPlaybackTransport {
+  static constexpr uint32_t kCommandCapacity = 32;
+
+  std::array<PlaybackTransportCommand, kCommandCapacity> commands{};
+  std::atomic<uint32_t> commandWrite{0};
+  std::atomic<uint32_t> commandRead{0};
+  uint64_t generation{0};
+  int64_t initialProjectFrame{0};
+  bool initialPaused{false};
+  bool initialLoopEnabled{false};
+  int64_t initialLoopStart{0};
+  int64_t initialLoopEnd{0};
+  int64_t durationFrames{0};
+  const zdsp::ScheduledCueEvent *cueEvents{nullptr};
+  uint32_t cueEventCount{0};
+  double playbackRate{1.0};
+  uint64_t playbackRateQ32{zdsp::kProjectRateOneQ32};
+  zdsp::ProcessorHandle timePitchProcessor{};
+  SignalsmithTimePitchLoopPlan initialTimePitchLoopPlan{};
+  SignalsmithTimePitchReanchorPlan initialTimePitchReanchorPlan{};
+
+  // Control-domain desired state. Session mutex serialization is sufficient.
+  NativePlaybackTransportState desiredState{
+      NativePlaybackTransportState::Stopped};
+  bool desiredLoopEnabled{false};
+  int64_t desiredLoopStart{0};
+  int64_t desiredLoopEnd{0};
+
+  // Callback-domain state.
+  NativePlaybackTransportState callbackState{
+      NativePlaybackTransportState::Stopped};
+  int64_t callbackProjectFrame{0};
+  uint32_t callbackProjectFractionQ32{0};
+  uint64_t callbackContinuousFrame{0};
+  bool callbackLoopEnabled{false};
+  int64_t callbackLoopStart{0};
+  int64_t callbackLoopEnd{0};
+  uint64_t callbackRouteGeneration{0};
+  uint64_t callbackStreamGeneration{0};
+  bool callbackHostIdentityValid{false};
+  zdsp::Discontinuity pendingDiscontinuity{zdsp::DiscontinuityReason::None,
+                                           zdsp::DiscontinuityFlagNone};
+  uint64_t callbackLoopCount{0};
+  uint64_t callbackSeekCount{0};
+  uint64_t callbackDiscontinuities{0};
+  uint64_t callbackProjectionAnchorContinuousFrame{0};
+  zdsp::DiscontinuityReason callbackLastBoundary{
+      zdsp::DiscontinuityReason::None};
+  bool callbackTimePitchBoundaryPrepared{false};
+
+  std::atomic<uint64_t> publishedGeneration{0};
+  std::atomic<uint32_t> publishedSequence{0};
+  std::atomic<uint32_t> publishedState{
+      static_cast<uint32_t>(NativePlaybackTransportState::Stopped)};
+  std::atomic<int64_t> publishedProjectFrame{0};
+  std::atomic<uint32_t> publishedProjectFractionQ32{0};
+  std::atomic<uint64_t> publishedContinuousFrame{0};
+  std::atomic<uint64_t> publishedRemainingPreRoll{0};
+  std::atomic<uint32_t> publishedCueEventsCompleted{0};
+  std::atomic<uint32_t> publishedNextCueEvent{0};
+  std::atomic<uint32_t> publishedLoopEnabled{0};
+  std::atomic<int64_t> publishedLoopStart{0};
+  std::atomic<int64_t> publishedLoopEnd{0};
+  std::atomic<uint64_t> publishedLoopCount{0};
+  std::atomic<uint64_t> publishedSeekCount{0};
+  std::atomic<uint64_t> publishedDiscontinuities{0};
+  std::atomic<uint64_t> publishedProjectionAnchorContinuousFrame{0};
+  std::atomic<uint32_t> publishedLastBoundary{
+      static_cast<uint32_t>(zdsp::DiscontinuityReason::None)};
+
+  struct Telemetry {
+    uint64_t generation{0};
+    NativePlaybackTransportState state{NativePlaybackTransportState::Stopped};
+    int64_t projectFrame{0};
+    uint32_t projectFractionQ32{0};
+    uint64_t continuousFrame{0};
+    uint64_t remainingPreRoll{0};
+    uint32_t cueEventsCompleted{0};
+    uint32_t nextCueEvent{0};
+    bool loopEnabled{false};
+    int64_t loopStart{0};
+    int64_t loopEnd{0};
+    uint64_t loopCount{0};
+    uint64_t seekCount{0};
+    uint64_t discontinuities{0};
+    uint64_t projectionAnchorContinuousFrame{0};
+    zdsp::DiscontinuityReason lastBoundary{zdsp::DiscontinuityReason::None};
+  };
+
+  // Written only during ordinary-thread initialization before publication;
+  // it provides an explicit coherent baseline when the bounded seqlock reader
+  // collides before any last-good status sample exists.
+  Telemetry initialTelemetry{};
+
+  static void increment(uint64_t *value) noexcept {
+    if (*value != std::numeric_limits<uint64_t>::max())
+      ++*value;
+  }
+
+  uint32_t cueIndexAt(int64_t projectFrame,
+                      uint32_t projectFractionQ32) const noexcept {
+    uint32_t first = 0;
+    uint32_t count = cueEventCount;
+    while (count != 0) {
+      const uint32_t step = count / 2u;
+      const uint32_t middle = first + step;
+      if (cueEvents[middle].projectTimeSamples < projectFrame ||
+          (projectFractionQ32 != 0 &&
+           cueEvents[middle].projectTimeSamples == projectFrame)) {
+        first = middle + 1u;
+        count -= step + 1u;
+      } else {
+        count = step;
+      }
+    }
+    return first;
+  }
+
+  Telemetry callbackTelemetry() const noexcept {
+    const uint32_t cueIndex =
+        cueEvents == nullptr
+            ? 0
+            : cueIndexAt(callbackProjectFrame, callbackProjectFractionQ32);
+    Telemetry telemetry;
+    telemetry.generation = generation;
+    telemetry.state = callbackState;
+    telemetry.projectFrame = callbackProjectFrame;
+    telemetry.projectFractionQ32 = callbackProjectFractionQ32;
+    telemetry.continuousFrame = callbackContinuousFrame;
+    telemetry.remainingPreRoll =
+        callbackProjectFrame < 0
+            ? static_cast<uint64_t>(-(callbackProjectFrame + 1)) + 1u
+            : 0u;
+    telemetry.cueEventsCompleted = cueIndex;
+    telemetry.nextCueEvent = cueIndex;
+    telemetry.loopEnabled = callbackLoopEnabled;
+    telemetry.loopStart = callbackLoopStart;
+    telemetry.loopEnd = callbackLoopEnd;
+    telemetry.loopCount = callbackLoopCount;
+    telemetry.seekCount = callbackSeekCount;
+    telemetry.discontinuities = callbackDiscontinuities;
+    telemetry.projectionAnchorContinuousFrame =
+        callbackProjectionAnchorContinuousFrame;
+    telemetry.lastBoundary = callbackLastBoundary;
+    return telemetry;
+  }
+
+  void publishTelemetry() noexcept {
+    const Telemetry telemetry = callbackTelemetry();
+    publishedSequence.fetch_add(1u, std::memory_order_acq_rel);
+    publishedGeneration.store(telemetry.generation, std::memory_order_relaxed);
+    publishedState.store(static_cast<uint32_t>(telemetry.state),
+                         std::memory_order_relaxed);
+    publishedProjectFrame.store(telemetry.projectFrame,
+                                std::memory_order_relaxed);
+    publishedProjectFractionQ32.store(telemetry.projectFractionQ32,
+                                      std::memory_order_relaxed);
+    publishedContinuousFrame.store(telemetry.continuousFrame,
+                                   std::memory_order_relaxed);
+    publishedRemainingPreRoll.store(telemetry.remainingPreRoll,
+                                    std::memory_order_relaxed);
+    publishedCueEventsCompleted.store(telemetry.cueEventsCompleted,
+                                      std::memory_order_relaxed);
+    publishedNextCueEvent.store(telemetry.nextCueEvent,
+                                std::memory_order_relaxed);
+    publishedLoopEnabled.store(telemetry.loopEnabled ? 1u : 0u,
+                               std::memory_order_relaxed);
+    publishedLoopStart.store(telemetry.loopStart, std::memory_order_relaxed);
+    publishedLoopEnd.store(telemetry.loopEnd, std::memory_order_relaxed);
+    publishedLoopCount.store(telemetry.loopCount, std::memory_order_relaxed);
+    publishedSeekCount.store(telemetry.seekCount, std::memory_order_relaxed);
+    publishedDiscontinuities.store(telemetry.discontinuities,
+                                   std::memory_order_relaxed);
+    publishedProjectionAnchorContinuousFrame.store(
+        telemetry.projectionAnchorContinuousFrame,
+        std::memory_order_relaxed);
+    publishedLastBoundary.store(static_cast<uint32_t>(telemetry.lastBoundary),
+                                std::memory_order_relaxed);
+    publishedSequence.fetch_add(1u, std::memory_order_release);
+  }
+
+  bool snapshotTelemetry(Telemetry *result) const noexcept {
+    if (result == nullptr)
+      return false;
+    for (uint32_t attempt = 0; attempt < 8; ++attempt) {
+      const uint32_t before = publishedSequence.load(std::memory_order_acquire);
+      if ((before & 1u) != 0)
+        continue;
+      Telemetry sampled;
+      sampled.generation = publishedGeneration.load(std::memory_order_relaxed);
+      sampled.state = static_cast<NativePlaybackTransportState>(
+          publishedState.load(std::memory_order_relaxed));
+      sampled.projectFrame =
+          publishedProjectFrame.load(std::memory_order_relaxed);
+      sampled.projectFractionQ32 =
+          publishedProjectFractionQ32.load(std::memory_order_relaxed);
+      sampled.continuousFrame =
+          publishedContinuousFrame.load(std::memory_order_relaxed);
+      sampled.remainingPreRoll =
+          publishedRemainingPreRoll.load(std::memory_order_relaxed);
+      sampled.cueEventsCompleted =
+          publishedCueEventsCompleted.load(std::memory_order_relaxed);
+      sampled.nextCueEvent =
+          publishedNextCueEvent.load(std::memory_order_relaxed);
+      sampled.loopEnabled =
+          publishedLoopEnabled.load(std::memory_order_relaxed) != 0;
+      sampled.loopStart = publishedLoopStart.load(std::memory_order_relaxed);
+      sampled.loopEnd = publishedLoopEnd.load(std::memory_order_relaxed);
+      sampled.loopCount = publishedLoopCount.load(std::memory_order_relaxed);
+      sampled.seekCount = publishedSeekCount.load(std::memory_order_relaxed);
+      sampled.discontinuities =
+          publishedDiscontinuities.load(std::memory_order_relaxed);
+      sampled.projectionAnchorContinuousFrame =
+          publishedProjectionAnchorContinuousFrame.load(
+              std::memory_order_relaxed);
+      sampled.lastBoundary = static_cast<zdsp::DiscontinuityReason>(
+          publishedLastBoundary.load(std::memory_order_relaxed));
+      std::atomic_thread_fence(std::memory_order_acquire);
+      if (before == publishedSequence.load(std::memory_order_acquire)) {
+        *result = sampled;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Telemetry initialTelemetrySnapshot() const noexcept {
+    return initialTelemetry;
+  }
+
+  void overlayQueuedPositionIntent(Telemetry *anchor) const noexcept {
+    if (anchor == nullptr)
+      return;
+    const uint32_t read = commandRead.load(std::memory_order_acquire);
+    const uint32_t write = commandWrite.load(std::memory_order_acquire);
+    // The producer is serialized by the session mutex and the callback never
+    // overwrites mailbox entries. Scan the bounded unconsumed suffix so a
+    // reanchor queued behind seeks is primed for the last positional intent,
+    // not for telemetry from before those commands.
+    for (uint32_t cursor = read; cursor != write; ++cursor) {
+      const PlaybackTransportCommand command =
+          commands[cursor % kCommandCapacity];
+      if (command.generation != generation)
+        continue;
+      if (command.kind == PlaybackTransportCommandKind::Start ||
+          command.kind == PlaybackTransportCommandKind::Seek ||
+          command.kind == PlaybackTransportCommandKind::Reanchor) {
+        anchor->projectFrame = command.projectFrame;
+        anchor->projectFractionQ32 = command.projectFractionQ32;
+      }
+    }
+  }
+
+  void initialize(uint64_t transportGeneration, int64_t initialFrame,
+                  const NativePlaybackInitialTransportConfig &initialTransport,
+                  int64_t authoritativeDuration,
+                  const zdsp::ScheduledCueEvent *events, uint32_t eventCount,
+                  double rate,
+                  zdsp::ProcessorHandle preparedTimePitch,
+                  SignalsmithTimePitchLoopPlan preparedLoopPlan,
+                  SignalsmithTimePitchReanchorPlan
+                      preparedInitialReanchorPlan) noexcept {
+    generation = transportGeneration;
+    initialProjectFrame = initialFrame;
+    initialPaused = initialTransport.startPaused;
+    initialLoopEnabled = initialTransport.loop.has_value();
+    initialLoopStart = initialTransport.loop.has_value()
+                           ? initialTransport.loop->startProjectFrame
+                           : 0;
+    initialLoopEnd = initialTransport.loop.has_value()
+                         ? initialTransport.loop->endProjectFrame
+                         : 0;
+    durationFrames = authoritativeDuration;
+    cueEvents = events;
+    cueEventCount = eventCount;
+    playbackRate = rate;
+    timePitchProcessor = preparedTimePitch;
+    initialTimePitchLoopPlan = preparedLoopPlan;
+    initialTimePitchReanchorPlan = preparedInitialReanchorPlan;
+    if (!rateToQ32(rate, &playbackRateQ32))
+      playbackRateQ32 = zdsp::kProjectRateOneQ32;
+    resetForOpen();
+  }
+
+  void resetForOpen() noexcept {
+    commandRead.store(0, std::memory_order_relaxed);
+    commandWrite.store(0, std::memory_order_relaxed);
+    desiredState = NativePlaybackTransportState::Stopped;
+    // Initial/restored transport is published as one prepared contract. The
+    // callback still installs it on Start, but control commands issued before
+    // that first callback must resolve against the same loop rather than a
+    // second, falsely empty control-domain truth.
+    desiredLoopEnabled = initialLoopEnabled;
+    desiredLoopStart = initialLoopEnabled ? initialLoopStart : 0;
+    desiredLoopEnd = initialLoopEnabled ? initialLoopEnd : 0;
+    callbackState = NativePlaybackTransportState::Stopped;
+    callbackProjectFrame = initialProjectFrame;
+    callbackProjectFractionQ32 = 0;
+    callbackContinuousFrame = 0;
+    callbackLoopEnabled = false;
+    callbackLoopStart = 0;
+    callbackLoopEnd = 0;
+    callbackRouteGeneration = 0;
+    callbackStreamGeneration = 0;
+    callbackHostIdentityValid = false;
+    pendingDiscontinuity = {zdsp::DiscontinuityReason::None,
+                            zdsp::DiscontinuityFlagNone};
+    callbackLoopCount = 0;
+    callbackSeekCount = 0;
+    callbackDiscontinuities = 0;
+    callbackProjectionAnchorContinuousFrame = 0;
+    callbackLastBoundary = zdsp::DiscontinuityReason::None;
+    callbackTimePitchBoundaryPrepared = false;
+    initialTelemetry = callbackTelemetry();
+    publishTelemetry();
+  }
+
+  bool enqueue(PlaybackTransportCommand command) noexcept {
+    const uint32_t write = commandWrite.load(std::memory_order_relaxed);
+    const uint32_t read = commandRead.load(std::memory_order_acquire);
+    if (write - read >= kCommandCapacity)
+      return false;
+    commands[write % kCommandCapacity] = command;
+    commandWrite.store(write + 1u, std::memory_order_release);
+    return true;
+  }
+
+  bool hasCommandCapacity() const noexcept {
+    const uint32_t write = commandWrite.load(std::memory_order_relaxed);
+    const uint32_t read = commandRead.load(std::memory_order_acquire);
+    return write - read < kCommandCapacity;
+  }
+
+  int64_t resolvedSeekFrame(int64_t projectFrame) const noexcept {
+    if (!desiredLoopEnabled || projectFrame < desiredLoopEnd)
+      return projectFrame;
+    const uint64_t span = static_cast<uint64_t>(desiredLoopEnd) -
+                          static_cast<uint64_t>(desiredLoopStart);
+    const uint64_t elapsed = static_cast<uint64_t>(projectFrame) -
+                             static_cast<uint64_t>(desiredLoopStart);
+    return desiredLoopStart + static_cast<int64_t>(elapsed % span);
+  }
+
+  bool start() noexcept {
+    const NativePlaybackTransportState state =
+        initialPaused
+            ? NativePlaybackTransportState::Paused
+            : (initialProjectFrame < 0 ? NativePlaybackTransportState::PreRoll
+                                       : NativePlaybackTransportState::Playing);
+    if (!enqueue({generation, PlaybackTransportCommandKind::Start, state,
+                  initialProjectFrame,
+                  initialLoopEnabled ? initialLoopStart : 0,
+                  initialLoopEnabled ? initialLoopEnd : 0,
+                  initialTimePitchLoopPlan}))
+      return false;
+    desiredState = state;
+    return true;
+  }
+
+  bool pause() noexcept {
+    if (desiredState != NativePlaybackTransportState::Playing &&
+        desiredState != NativePlaybackTransportState::PreRoll)
+      return false;
+    if (!enqueue({generation, PlaybackTransportCommandKind::Pause,
+                  NativePlaybackTransportState::Paused, 0, 0, 0}))
+      return false;
+    desiredState = NativePlaybackTransportState::Paused;
+    return true;
+  }
+
+  bool resume() noexcept {
+    if (desiredState != NativePlaybackTransportState::Paused)
+      return false;
+    const int64_t frame = publishedProjectFrame.load(std::memory_order_relaxed);
+    const NativePlaybackTransportState state =
+        frame < 0
+            ? NativePlaybackTransportState::PreRoll
+            : (frame >= durationFrames ? NativePlaybackTransportState::Completed
+                                       : NativePlaybackTransportState::Playing);
+    if (!enqueue(
+            {generation, PlaybackTransportCommandKind::Resume, state, 0, 0, 0}))
+      return false;
+    desiredState = state;
+    return true;
+  }
+
+  bool seek(int64_t projectFrame) noexcept {
+    const NativePlaybackTransportState state =
+        desiredState == NativePlaybackTransportState::Paused
+            ? NativePlaybackTransportState::Paused
+            : (projectFrame >= durationFrames
+                   ? NativePlaybackTransportState::Completed
+                   : NativePlaybackTransportState::Playing);
+    if (!enqueue({generation, PlaybackTransportCommandKind::Seek, state,
+                  projectFrame, 0, 0}))
+      return false;
+    desiredState = state;
+    return true;
+  }
+
+  bool setLoop(int64_t startFrame, int64_t endFrame,
+               SignalsmithTimePitchLoopPlan loopPlan) noexcept {
+    if (!enqueue({generation, PlaybackTransportCommandKind::SetLoop,
+                  desiredState, 0, startFrame, endFrame, loopPlan}))
+      return false;
+    desiredLoopEnabled = true;
+    desiredLoopStart = startFrame;
+    desiredLoopEnd = endFrame;
+    return true;
+  }
+
+  bool clearLoop() noexcept {
+    if (!enqueue({generation, PlaybackTransportCommandKind::ClearLoop,
+                  desiredState, 0, 0, 0}))
+      return false;
+    desiredLoopEnabled = false;
+    desiredLoopStart = 0;
+    desiredLoopEnd = 0;
+    return true;
+  }
+
+  bool reanchor(int64_t projectFrame, uint32_t projectFractionQ32,
+                SignalsmithTimePitchReanchorPlan plan) noexcept {
+    return enqueue({generation, PlaybackTransportCommandKind::Reanchor,
+                    desiredState, projectFrame, 0, 0, {}, plan,
+                    projectFractionQ32});
+  }
+
+  bool stop() noexcept {
+    if (!enqueue({generation, PlaybackTransportCommandKind::Stop,
+                  NativePlaybackTransportState::Stopped, 0, 0, 0}))
+      return false;
+    desiredState = NativePlaybackTransportState::Stopped;
+    return true;
+  }
+
+  void forceStoppedAfterQuiescence() noexcept {
+    callbackState = NativePlaybackTransportState::Stopped;
+    desiredState = NativePlaybackTransportState::Stopped;
+    publishTelemetry();
+  }
+
+  void queueDiscontinuity(zdsp::Discontinuity discontinuity) noexcept {
+    pendingDiscontinuity = zdsp::coalesceAudioHostDiscontinuity(
+        pendingDiscontinuity, discontinuity);
+  }
+
+  zdsp::Discontinuity emitPendingDiscontinuity() noexcept {
+    const zdsp::Discontinuity emitted = pendingDiscontinuity;
+    pendingDiscontinuity = {zdsp::DiscontinuityReason::None,
+                            zdsp::DiscontinuityFlagNone};
+    if (emitted.reason == zdsp::DiscontinuityReason::None)
+      return emitted;
+    increment(&callbackDiscontinuities);
+    callbackLastBoundary = emitted.reason;
+    callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+    // These are counts of emitted typed reset boundaries, not control
+    // commands or physical wraps hidden by a higher-priority host boundary.
+    if (emitted.reason == zdsp::DiscontinuityReason::SourceSeek)
+      increment(&callbackSeekCount);
+    if (emitted.reason == zdsp::DiscontinuityReason::SourceLoop)
+      increment(&callbackLoopCount);
+    return emitted;
+  }
+
+  void applyCommands() noexcept {
+    uint32_t read = commandRead.load(std::memory_order_relaxed);
+    const uint32_t write = commandWrite.load(std::memory_order_acquire);
+    uint32_t finalOneShotCommand = 0;
+    bool hasFinalOneShotCommand = false;
+    for (uint32_t cursor = read; cursor != write; ++cursor) {
+      const PlaybackTransportCommand command =
+          commands[cursor % kCommandCapacity];
+      if (command.generation == generation &&
+          (command.kind == PlaybackTransportCommandKind::Seek ||
+           command.kind == PlaybackTransportCommandKind::Reanchor)) {
+        finalOneShotCommand = cursor;
+        hasFinalOneShotCommand = true;
+      }
+    }
+    while (read != write) {
+      const uint32_t commandIndex = read;
+      const PlaybackTransportCommand command =
+          commands[read % kCommandCapacity];
+      ++read;
+      if (command.generation != generation)
+        continue;
+      switch (command.kind) {
+      case PlaybackTransportCommandKind::Start:
+        callbackProjectFrame = command.projectFrame;
+        callbackProjectFractionQ32 = 0;
+        callbackState = command.state;
+        callbackLoopEnabled = command.loopEndFrame > command.loopStartFrame;
+        callbackLoopStart = callbackLoopEnabled ? command.loopStartFrame : 0;
+        callbackLoopEnd = callbackLoopEnabled ? command.loopEndFrame : 0;
+        if (callbackLoopEnabled && timePitchProcessor.state != nullptr)
+          (void)activateSignalsmithTimePitchLoop(timePitchProcessor,
+                                                 command.loopPlan);
+        // Preview clicks can own and advance this same native callback before
+        // song transport starts. Continuous time is a stream clock, so Start
+        // anchors project projection at the current frame instead of rewinding
+        // it to zero and making telemetry move backwards.
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+        break;
+      case PlaybackTransportCommandKind::Pause:
+        callbackState = NativePlaybackTransportState::Paused;
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+        break;
+      case PlaybackTransportCommandKind::Resume:
+        callbackState = command.state;
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+        break;
+      case PlaybackTransportCommandKind::Seek:
+        callbackProjectFrame = command.projectFrame;
+        callbackProjectFractionQ32 = 0;
+        callbackState = command.state;
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+        if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand &&
+            timePitchProcessor.state != nullptr &&
+            armSignalsmithTimePitchSeek(timePitchProcessor))
+          callbackTimePitchBoundaryPrepared = true;
+        queueDiscontinuity({zdsp::DiscontinuityReason::SourceSeek,
+                            zdsp::DiscontinuityFlagResetState |
+                                zdsp::DiscontinuityFlagTimeValid});
+        break;
+      case PlaybackTransportCommandKind::SetLoop:
+        callbackLoopEnabled = true;
+        callbackLoopStart = command.loopStartFrame;
+        callbackLoopEnd = command.loopEndFrame;
+        if (timePitchProcessor.state != nullptr)
+          (void)activateSignalsmithTimePitchLoop(timePitchProcessor,
+                                                 command.loopPlan);
+        break;
+      case PlaybackTransportCommandKind::ClearLoop:
+        callbackLoopEnabled = false;
+        callbackLoopStart = 0;
+        callbackLoopEnd = 0;
+        deactivateSignalsmithTimePitchLoop(timePitchProcessor);
+        break;
+      case PlaybackTransportCommandKind::Reanchor:
+        if (command.reanchorPlan.valid()) {
+          callbackProjectFrame = command.projectFrame;
+          callbackProjectFractionQ32 = command.projectFractionQ32;
+        }
+        if (timePitchProcessor.state != nullptr) {
+          if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand) {
+            discardSignalsmithTimePitchSeek(timePitchProcessor);
+            callbackTimePitchBoundaryPrepared =
+                armSignalsmithTimePitchReanchor(timePitchProcessor,
+                                                command.reanchorPlan);
+          } else {
+            discardSignalsmithTimePitchReanchor(timePitchProcessor,
+                                                command.reanchorPlan);
+          }
+        }
+        queueDiscontinuity({zdsp::DiscontinuityReason::ClockReanchored,
+                            zdsp::DiscontinuityFlagResetState |
+                                zdsp::DiscontinuityFlagTimeValid});
+        break;
+      case PlaybackTransportCommandKind::Stop:
+        callbackState = NativePlaybackTransportState::Stopped;
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+        break;
+      }
+    }
+    commandRead.store(read, std::memory_order_release);
+  }
+
+  void beginBlock(const AudioHostRenderBlock &block) noexcept {
+    applyCommands();
+    const bool firstHostIdentity = !callbackHostIdentityValid;
+    const bool routeChanged = callbackHostIdentityValid &&
+                              callbackRouteGeneration != block.routeGeneration;
+    const bool streamChanged =
+        callbackHostIdentityValid &&
+        callbackStreamGeneration != block.streamGeneration;
+    if (!callbackHostIdentityValid || routeChanged || streamChanged) {
+      callbackRouteGeneration = block.routeGeneration;
+      callbackStreamGeneration = block.streamGeneration;
+      callbackHostIdentityValid = true;
+    }
+    // Coalesce every same-frame reset fact before emitting one boundary.
+    // Host/identity reset reasons outrank source seek/loop by the shared
+    // adapter priority table, so provider requests cannot erase route truth.
+    queueDiscontinuity(zdsp::mapAudioHostDiscontinuity(block.discontinuity));
+    if (routeChanged)
+      queueDiscontinuity({zdsp::DiscontinuityReason::RouteGenerationChanged,
+                          zdsp::DiscontinuityFlagResetState |
+                              zdsp::DiscontinuityFlagTimeValid});
+    if (streamChanged)
+      queueDiscontinuity({zdsp::DiscontinuityReason::ClockReanchored,
+                          zdsp::DiscontinuityFlagResetState |
+                              zdsp::DiscontinuityFlagTimeValid});
+    if (firstHostIdentity && timePitchProcessor.state != nullptr &&
+        initialTimePitchReanchorPlan.valid()) {
+      const bool genericBoundary =
+          pendingDiscontinuity.reason != zdsp::DiscontinuityReason::None &&
+          pendingDiscontinuity.reason != zdsp::DiscontinuityReason::SourceLoop &&
+          pendingDiscontinuity.reason != zdsp::DiscontinuityReason::SourceSeek;
+      // A seek or explicit reanchor command may already have armed the exact
+      // source anchor for this coalesced boundary. The duplicate initial plan
+      // is only the first-host fallback and must never overwrite it.
+      if (genericBoundary && !callbackTimePitchBoundaryPrepared)
+        callbackTimePitchBoundaryPrepared = armSignalsmithTimePitchReanchor(
+            timePitchProcessor, initialTimePitchReanchorPlan);
+      else
+        discardSignalsmithTimePitchReanchor(timePitchProcessor,
+                                            initialTimePitchReanchorPlan);
+      initialTimePitchReanchorPlan = {};
+    }
+  }
+
+  bool positionAtOffset(uint32_t outputOffset,
+                        zdsp::ProjectSamplePositionQ32 *position) const
+      noexcept {
+    zdsp::TransportContext transport{};
+    transport.validFields = zdsp::TransportValidProjectSamples |
+                            zdsp::TransportValidProjectRateQ32;
+    transport.projectTimeSamples = callbackProjectFrame;
+    transport.projectTimeFractionQ32 = callbackProjectFractionQ32;
+    transport.projectRateQ32 = playbackRateQ32;
+    return zdsp::projectSamplePositionAt(transport, outputOffset, position);
+  }
+
+  bool advancePosition(uint32_t outputFrames) noexcept {
+    zdsp::ProjectSamplePositionQ32 position{};
+    if (!positionAtOffset(outputFrames, &position))
+      return false;
+    callbackProjectFrame = position.samples;
+    callbackProjectFractionQ32 = position.fraction;
+    return true;
+  }
+
+  bool positionReachesBoundary(uint32_t outputOffset,
+                               int64_t boundary) const noexcept {
+    zdsp::ProjectSamplePositionQ32 position{};
+    return positionAtOffset(outputOffset, &position) &&
+           position.samples >= boundary;
+  }
+
+  // Return the first rendered-output offset whose Q32 project position is at
+  // or beyond the integer project boundary. The callback block is tiny and
+  // rate is positive, so a bounded binary search avoids wide multiplication
+  // and remains portable to MSVC without compiler-specific 128-bit integers.
+  uint32_t framesToBoundary(int64_t boundary,
+                            uint32_t maximumFrames) const noexcept {
+    if (maximumFrames == 0 || callbackProjectFrame >= boundary)
+      return 0;
+    if (!positionReachesBoundary(maximumFrames, boundary))
+      return maximumFrames;
+    uint32_t low = 1;
+    uint32_t high = maximumFrames;
+    while (low < high) {
+      const uint32_t middle = low + (high - low) / 2u;
+      if (positionReachesBoundary(middle, boundary))
+        high = middle;
+      else
+        low = middle + 1u;
+    }
+    return low;
+  }
+
+  void wrapAtLoopBoundary() noexcept {
+    const uint64_t span = static_cast<uint64_t>(callbackLoopEnd) -
+                          static_cast<uint64_t>(callbackLoopStart);
+    const uint64_t elapsed = static_cast<uint64_t>(callbackProjectFrame) -
+                             static_cast<uint64_t>(callbackLoopStart);
+    callbackProjectFrame = callbackLoopStart +
+                           static_cast<int64_t>(elapsed % span);
+    callbackState = NativePlaybackTransportState::Playing;
+    callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+    queueDiscontinuity({zdsp::DiscontinuityReason::SourceLoop,
+                        zdsp::DiscontinuityFlagResetState |
+                            zdsp::DiscontinuityFlagTimeValid});
+  }
+
+  bool nextSlice(const AudioHostRenderBlock &block, uint32_t offset,
+                 uint32_t remaining,
+                 zdsp::AudioHostTransportSlice *slice) noexcept {
+    if (slice == nullptr || remaining == 0 || offset > block.frames ||
+        remaining > block.frames - offset)
+      return false;
+    if (offset == 0)
+      beginBlock(block);
+
+    if (timePitchProcessor.state != nullptr &&
+        pendingDiscontinuity.reason != zdsp::DiscontinuityReason::None &&
+        pendingDiscontinuity.reason !=
+            zdsp::DiscontinuityReason::SourceLoop &&
+        !callbackTimePitchBoundaryPrepared) {
+      // Route/stream/sample-rate/clock resets may only reach the graph with an
+      // off-RT prepared Stretch replacement. Failing this callback is bounded
+      // and observable; silently resetting or rendering with mismatched source
+      // and time/pitch state would corrupt the audible project position.
+      noteSignalsmithTimePitchLoopDeadlineMiss(timePitchProcessor);
+      return false;
+    }
+
+    const bool running =
+        callbackState == NativePlaybackTransportState::Playing ||
+        callbackState == NativePlaybackTransportState::PreRoll;
+    if (running && callbackLoopEnabled &&
+        callbackProjectFrame >= callbackLoopEnd) {
+      if (timePitchProcessor.state != nullptr &&
+          !signalsmithTimePitchLoopReplacementReady(timePitchProcessor)) {
+        // Accepted loops begin with two prepared replacements and leave a
+        // deterministic output-period budget for off-RT replenishment. If the
+        // worker nevertheless misses that deadline, fail this render contract
+        // immediately: advancing a stream of silence would hide an unbounded
+        // callback starvation fault behind apparently healthy transport.
+        noteSignalsmithTimePitchLoopDeadlineMiss(timePitchProcessor);
+        return false;
+      }
+      wrapAtLoopBoundary();
+    }
+    if ((callbackState == NativePlaybackTransportState::Playing ||
+         callbackState == NativePlaybackTransportState::PreRoll) &&
+        callbackProjectFrame >= durationFrames) {
+      callbackState = NativePlaybackTransportState::Completed;
+      callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+    }
+    if (callbackContinuousFrame >
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      return false;
+
+    uint32_t frames = remaining;
+    const bool advancesProject =
+        callbackState == NativePlaybackTransportState::Playing ||
+        callbackState == NativePlaybackTransportState::PreRoll;
+    if (advancesProject) {
+      int64_t boundary = durationFrames;
+      if (callbackLoopEnabled && callbackProjectFrame < callbackLoopEnd)
+        boundary = std::min(boundary, callbackLoopEnd);
+      if (callbackProjectFrame < boundary) {
+        frames = framesToBoundary(boundary, frames);
+      }
+    }
+    zdsp::ProjectSamplePositionQ32 advancedPosition{};
+    if (frames == 0 ||
+        callbackContinuousFrame >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) -
+                frames ||
+        (advancesProject && !positionAtOffset(frames, &advancedPosition)))
+      return false;
+
+    *slice = {};
+    slice->transport.validFields = zdsp::TransportValidProjectSamples |
+                                   zdsp::TransportValidContinuousSamples |
+                                   zdsp::TransportValidProjectRateQ32;
+    slice->transport.stateFlags = advancesProject ? zdsp::TransportStatePlaying
+                                                  : zdsp::TransportStateNone;
+    slice->transport.projectTimeSamples = callbackProjectFrame;
+    slice->transport.projectTimeFractionQ32 = callbackProjectFractionQ32;
+    slice->transport.projectRateQ32 = playbackRateQ32;
+    slice->transport.continuousTimeSamples =
+        static_cast<int64_t>(callbackContinuousFrame);
+    slice->frames = {frames};
+    slice->discontinuity = emitPendingDiscontinuity();
+    if (slice->discontinuity.reason != zdsp::DiscontinuityReason::None)
+      callbackTimePitchBoundaryPrepared = false;
+
+    callbackContinuousFrame += frames;
+    if (advancesProject) {
+      if (!advancePosition(frames))
+        return false;
+      callbackState = callbackProjectFrame < 0
+                          ? NativePlaybackTransportState::PreRoll
+                          : NativePlaybackTransportState::Playing;
+      if (!callbackLoopEnabled && callbackProjectFrame >= durationFrames)
+        callbackState = NativePlaybackTransportState::Completed;
+      if (callbackState == NativePlaybackTransportState::Completed)
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+    }
+    // Publish once per hardware callback, not once per transport slice. A
+    // one-frame loop may legally produce 8,192 slices; keeping telemetry at
+    // the final slice preserves the RT bound without thousands of atomics.
+    if (frames == remaining)
+      publishTelemetry();
+    return true;
+  }
+};
+
+static_assert(std::atomic<uint64_t>::is_always_lock_free &&
+                  std::atomic<int64_t>::is_always_lock_free,
+              "Native playback transport telemetry must be lock-free");
+
+bool slicePreparedPlaybackTransport(
+    void *opaque, const AudioHostRenderBlock &block, uint32_t offset,
+    uint32_t remaining, zdsp::AudioHostTransportSlice *slice) noexcept {
+  auto *state = static_cast<PreparedPlaybackTransport *>(opaque);
+  return state != nullptr && state->nextSlice(block, offset, remaining, slice);
+}
+
+size_t cuePlanRetainedBytes(const PlaybackCuePlan &plan) noexcept {
+  size_t total = sizeof(PlaybackCuePlan);
+  total += plan.events.capacity() * sizeof(PlaybackCueEvent);
+  total += plan.ordinaryClickPcm.capacity() * sizeof(float);
+  total += plan.accentClickPcm.capacity() * sizeof(float);
+  total += plan.beatGrid.beats.capacity() * sizeof(double);
+  total += plan.beatGrid.downbeats.capacity() * sizeof(uint32_t);
+  return total;
+}
+
+size_t cueRuntimeRetainedBytes(const PlaybackCuePlan &plan) noexcept {
+  return plan.events.size() * sizeof(zdsp::ScheduledCueEvent);
+}
+
+NativePlaybackGraphNodeRole
+nativeGraphNodeRole(zdsp::GraphNodeRole role) noexcept {
+  switch (role) {
+  case zdsp::GraphNodeRole::Input:
+    return NativePlaybackGraphNodeRole::Input;
+  case zdsp::GraphNodeRole::Processor:
+    return NativePlaybackGraphNodeRole::Processor;
+  case zdsp::GraphNodeRole::Output:
+    return NativePlaybackGraphNodeRole::Output;
+  }
+  return NativePlaybackGraphNodeRole::Processor;
+}
+
+NativePlaybackGraphNodeKind
+nativeGraphNodeKind(const zdsp::GraphNodeDescription &node) noexcept {
+  if (node.role == zdsp::GraphNodeRole::Output)
+    return NativePlaybackGraphNodeKind::PhysicalOutput;
+  const bool knownPortableType =
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeProjectLaneSource) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeChannelMap) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeGain) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeMix) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeTrainingDuck) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeSignalsmithTimePitch) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeCueSource) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypePeakRms) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeTap) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeOscillator) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeSafetyLimiter) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeExternalAdapter);
+  if ((knownPortableType && node.schemaVersion != 1) ||
+      nativePlaybackGraphTypeEqual(node.type, kGraphTypeExternalAdapter))
+    return (node.flags & zdsp::GraphNodeFlagBypassed) != 0
+               ? NativePlaybackGraphNodeKind::UnavailableBypass
+               : NativePlaybackGraphNodeKind::UnavailableSilence;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeChannelMap))
+    return NativePlaybackGraphNodeKind::ChannelMap;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeGain))
+    return NativePlaybackGraphNodeKind::Gain;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeMix))
+    return NativePlaybackGraphNodeKind::Mix;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeSafetyLimiter))
+    return NativePlaybackGraphNodeKind::SafetyLimiter;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeProjectLaneSource))
+    return NativePlaybackGraphNodeKind::DecodedSource;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeCueSource))
+    return NativePlaybackGraphNodeKind::ScheduledCueSource;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeTrainingDuck))
+    return NativePlaybackGraphNodeKind::ScheduledGain;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeSignalsmithTimePitch))
+    return NativePlaybackGraphNodeKind::SignalsmithTimePitch;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypePeakRms))
+    return NativePlaybackGraphNodeKind::PeakRms;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeTap))
+    return NativePlaybackGraphNodeKind::Tap;
+  if (nativePlaybackGraphTypeEqual(node.type, kGraphTypeOscillator))
+    return NativePlaybackGraphNodeKind::Oscillator;
+  if (node.type.high == 1) {
+    switch (static_cast<zdsp::BuiltinNodeKind>(node.type.low)) {
+    case zdsp::BuiltinNodeKind::ChannelMap:
+      return NativePlaybackGraphNodeKind::ChannelMap;
+    case zdsp::BuiltinNodeKind::Gain:
+      return NativePlaybackGraphNodeKind::Gain;
+    case zdsp::BuiltinNodeKind::Mix:
+      return NativePlaybackGraphNodeKind::Mix;
+    case zdsp::BuiltinNodeKind::SafetyLimiter:
+      return NativePlaybackGraphNodeKind::SafetyLimiter;
+    default:
+      return NativePlaybackGraphNodeKind::Unknown;
+    }
+  }
+  if (node.type.high == 3)
+    return NativePlaybackGraphNodeKind::DecodedSource;
+  if (node.type.high == 4)
+    return NativePlaybackGraphNodeKind::ScheduledCueSource;
+  if (node.type.high == 5)
+    return NativePlaybackGraphNodeKind::ScheduledGain;
+  if (node.type.high == 6)
+    return NativePlaybackGraphNodeKind::SignalsmithTimePitch;
+  return (node.flags & zdsp::GraphNodeFlagBypassed) != 0
+             ? NativePlaybackGraphNodeKind::UnavailableBypass
+             : NativePlaybackGraphNodeKind::UnavailableSilence;
+}
+
+// The compiler input and the product diagnostics share this one control-domain
+// composition. Labels describe nodes, but there is deliberately no parallel
+// hand-written chain string: topology is formatted from the exact node/edge
+// records subsequently passed to compileGraph().
+struct PlaybackGraphComposition {
+  struct Label {
+    zdsp::NodeId node{};
+    std::string text;
+  };
+
+  std::vector<zdsp::GraphNodeDescription> nodes;
+  std::vector<zdsp::GraphConnection> connections;
+  std::vector<Label> labels;
+
+  void reserve(size_t nodeCount, size_t connectionCount) {
+    nodes.reserve(nodeCount);
+    labels.reserve(nodeCount);
+    connections.reserve(connectionCount);
+  }
+
+  void add(zdsp::GraphNodeDescription node, std::string label) {
+    labels.push_back({node.id, std::move(label)});
+    nodes.push_back(node);
+  }
+
+  void connect(zdsp::GraphConnection connection) {
+    connections.push_back(connection);
+  }
+
+  const std::string &label(zdsp::NodeId node) const noexcept {
+    for (const Label &entry : labels)
+      if (entry.node.value == node.value)
+        return entry.text;
+    static const std::string unknown{"unknown"};
+    return unknown;
+  }
+
+  std::string summary() const {
+    std::string result = "actual graph · nodes [";
+    for (size_t index = 0; index < labels.size(); ++index) {
+      if (index != 0)
+        result += ", ";
+      result += labels[index].text;
+    }
+    result += "] · edges [";
+    for (size_t index = 0; index < connections.size(); ++index) {
+      if (index != 0)
+        result += ", ";
+      result += label(connections[index].sourceNode);
+      result += "→";
+      result += label(connections[index].destinationNode);
+    }
+    result += "]";
+    return result;
+  }
+
+  std::optional<NativePlaybackGraphSnapshot>
+  snapshot(uint64_t generation, double sampleRate,
+           uint32_t maximumFrames) const {
+    if (nodes.empty() || nodes.size() != labels.size() ||
+        nodes.size() > kNativePlaybackMaximumGraphNodes ||
+        connections.size() > kNativePlaybackMaximumGraphConnections)
+      return std::nullopt;
+    for (size_t index = 0; index < nodes.size(); ++index) {
+      const zdsp::GraphNodeDescription &node = nodes[index];
+      if (labels[index].node.value != node.id.value ||
+          node.inputBusCount > kNativePlaybackMaximumNodeBuses ||
+          node.outputBusCount > kNativePlaybackMaximumNodeBuses ||
+          (node.inputBusCount != 0 && node.inputBuses == nullptr) ||
+          (node.outputBusCount != 0 && node.outputBuses == nullptr))
+        return std::nullopt;
+    }
+
+    const auto nodeIndex = [&](zdsp::NodeId id) noexcept {
+      for (size_t index = 0; index < nodes.size(); ++index)
+        if (nodes[index].id.value == id.value)
+          return index;
+      return nodes.size();
+    };
+    std::array<uint32_t, kNativePlaybackMaximumGraphNodes> arrivals{};
+    std::array<uint32_t, kNativePlaybackMaximumGraphNodes> outputs{};
+    std::array<bool, kNativePlaybackMaximumGraphNodes> complete{};
+    size_t remaining = nodes.size();
+    while (remaining != 0) {
+      bool progressed = false;
+      for (size_t index = 0; index < nodes.size(); ++index) {
+        if (complete[index])
+          continue;
+        const zdsp::GraphNodeDescription &node = nodes[index];
+        uint32_t arrival = 0;
+        bool ready = true;
+        for (const zdsp::GraphConnection &connection : connections) {
+          if (connection.destinationNode.value != node.id.value)
+            continue;
+          const size_t source = nodeIndex(connection.sourceNode);
+          if (source >= nodes.size())
+            return std::nullopt;
+          if (!complete[source]) {
+            ready = false;
+            break;
+          }
+          arrival = std::max(arrival, outputs[source]);
+        }
+        if (!ready)
+          continue;
+        uint32_t intrinsic = 0;
+        if (node.role == zdsp::GraphNodeRole::Processor) {
+          if (node.processor.functions == nullptr ||
+              node.processor.state == nullptr)
+            return std::nullopt;
+          intrinsic =
+              node.processor.functions->latency(node.processor.state).value;
+        }
+        if (intrinsic > UINT32_MAX - arrival)
+          return std::nullopt;
+        arrivals[index] = arrival;
+        outputs[index] = arrival + intrinsic;
+        complete[index] = true;
+        --remaining;
+        progressed = true;
+      }
+      if (!progressed)
+        return std::nullopt;
+    }
+
+    uint32_t maximumOutputLatency = 0;
+    for (size_t index = 0; index < nodes.size(); ++index)
+      if (nodes[index].role == zdsp::GraphNodeRole::Output)
+        maximumOutputLatency =
+            std::max(maximumOutputLatency, arrivals[index]);
+
+    NativePlaybackGraphSnapshot result;
+    result.generation = generation;
+    result.formatVersion = zdsp::kGraphFormatVersion;
+    result.sampleRate = sampleRate;
+    result.maximumFrames = maximumFrames;
+    result.outputLatencyFrames = maximumOutputLatency;
+    result.nodes.reserve(nodes.size());
+    result.connections.reserve(connections.size());
+    for (size_t index = 0; index < nodes.size(); ++index) {
+      const zdsp::GraphNodeDescription &node = nodes[index];
+      NativePlaybackGraphNodeStatus status;
+      status.id = node.id.value;
+      status.label = labels[index].text;
+      status.role = nativeGraphNodeRole(node.role);
+      status.kind = nativeGraphNodeKind(node);
+      status.typeHigh = node.type.high;
+      status.typeLow = node.type.low;
+      status.schemaVersion = node.schemaVersion;
+      status.flags = node.flags;
+      status.inputBusCount = node.inputBusCount;
+      status.outputBusCount = node.outputBusCount;
+      for (uint32_t bus = 0; bus < node.inputBusCount; ++bus)
+        status.inputBusChannels[bus] = node.inputBuses[bus].channelCount;
+      for (uint32_t bus = 0; bus < node.outputBusCount; ++bus)
+        status.outputBusChannels[bus] = node.outputBuses[bus].channelCount;
+      status.intrinsicLatencyFrames = outputs[index] - arrivals[index];
+      status.arrivalLatencyFrames = arrivals[index];
+      status.outputLatencyFrames = outputs[index];
+      result.nodes.push_back(std::move(status));
+    }
+    for (const zdsp::GraphConnection &connection : connections) {
+      const size_t source = nodeIndex(connection.sourceNode);
+      const size_t destination = nodeIndex(connection.destinationNode);
+      if (source >= nodes.size() || destination >= nodes.size() ||
+          connection.sourceBus >= nodes[source].outputBusCount ||
+          connection.destinationBus >= nodes[destination].inputBusCount)
+        return std::nullopt;
+      const uint32_t target =
+          nodes[destination].role == zdsp::GraphNodeRole::Output
+              ? maximumOutputLatency
+              : arrivals[destination];
+      if (target < outputs[source])
+        return std::nullopt;
+      NativePlaybackGraphConnectionStatus status;
+      status.sourceNodeId = connection.sourceNode.value;
+      status.sourceBus = connection.sourceBus;
+      status.sourceChannels =
+          nodes[source].outputBuses[connection.sourceBus].channelCount;
+      status.destinationNodeId = connection.destinationNode.value;
+      status.destinationBus = connection.destinationBus;
+      status.destinationChannels =
+          nodes[destination].inputBuses[connection.destinationBus].channelCount;
+      status.sourceOutputLatencyFrames = outputs[source];
+      status.destinationArrivalLatencyFrames = target;
+      status.compensationFrames = target - outputs[source];
+      status.latencyCompensated = status.compensationFrames != 0;
+      if (status.latencyCompensated)
+        ++result.latencyCompensatedConnectionCount;
+      result.connections.push_back(status);
+    }
+    return result;
+  }
+};
+
 struct PreparedPlaybackGraph {
   struct Lane {
     std::string id;
@@ -150,25 +1417,80 @@ struct PreparedPlaybackGraph {
     zdsp::AudioBusDescriptor sourceBus{};
     zdsp::ProcessorHandle source{};
     zdsp::ProcessorHandle gainProcessor{};
+    zdsp::ProcessorHandle trainingProcessor{};
+    uint64_t sourceNodeId{0};
+    uint64_t gainNodeId{0};
+    uint64_t trainingNodeId{0};
+    float graphGainTrim{1.0F};
     mutable zdsp::DecodedBufferSourceCursorReader cursorReader{};
     float gain{1.0F};
     bool muted{false};
     bool solo{false};
+    bool trainingSelected{false};
   };
 
-  PreparedPlaybackGraph(std::vector<Lane> decoded, double sampleRate,
-                        uint32_t outputChannels, uint32_t maximumFrames,
-                        float initialMaster, NativePlaybackTestHooks *hooks)
+  PreparedPlaybackGraph(std::vector<Lane> decoded,
+                        std::shared_ptr<const PlaybackCuePlan> preparedCuePlan,
+                        std::optional<NativePlaybackTrainingDuckConfig>
+                            preparedTraining,
+                        std::optional<NativePlaybackGraphDocument>
+                            preparedGraphDocument,
+                        double sampleRate, uint32_t outputChannels,
+                        uint32_t maximumFrames, float initialMaster,
+                        double rate, double transpose,
+                        int64_t startProjectFrame,
+                        NativePlaybackInitialTransportConfig initialTransport,
+                        uint64_t generation, NativePlaybackTestHooks *hooks)
       : lanes(std::move(decoded)), sampleRate(sampleRate),
         outputChannels(outputChannels), maximumFrames(maximumFrames),
-        masterGain(initialMaster), testHooks(hooks) {
-    const uint64_t logicalBuffers = lanes.size() * 4u + 8u;
-    const uint64_t sampleBytes =
-        logicalBuffers * outputChannels * maximumFrames * sizeof(float);
-    const uint64_t requested = kArenaBaseBytes + sampleBytes;
-    if (requested <= kMaximumArenaBytes &&
-        requested <= std::numeric_limits<uint32_t>::max())
-      arenaBytes.resize(static_cast<size_t>(requested));
+        masterGain(initialMaster), cuePlan(std::move(preparedCuePlan)),
+        training(std::move(preparedTraining)),
+        graphDocument(std::move(preparedGraphDocument)),
+        transportGeneration(generation), playbackRate(rate),
+        transposeSemitones(transpose),
+        preparedStartProjectFrame(startProjectFrame),
+        initialTransport(std::move(initialTransport)), testHooks(hooks) {
+    (void)rateToQ32(rate, &playbackRateQ32);
+    timePitchCorrectionSemitones = static_cast<float>(
+        transpose - 12.0 * std::log2(rate));
+    // A persisted document is allowed to keep an explicit Signalsmith stage
+    // at unity. Its resource bounds and seek/loop anchor contract must be
+    // active before materialization, just as they are for a non-unity
+    // transport correction.
+    hasTimePitch = std::fabs(timePitchCorrectionSemitones) > 1e-6F ||
+                   graphDocumentRequestsSignalsmith(graphDocument);
+    for (const Lane &lane : lanes)
+      durationFrames = std::max(durationFrames, lane.owner->frameCount());
+    if (cuePlan != nullptr)
+      durationFrames = static_cast<uint64_t>(cuePlan->songDurationFrames);
+    if (training.has_value()) {
+      trainingEnabled = training->enabled;
+      trainingWindows.reserve(training->windows.size());
+      for (const NativePlaybackTrainingWindow &window : training->windows)
+        trainingWindows.push_back(
+            {window.startProjectFrame, window.endProjectFrame});
+      for (Lane &lane : lanes)
+        lane.trainingSelected =
+            std::find(training->laneIds.begin(), training->laneIds.end(),
+                      lane.id) != training->laneIds.end();
+    }
+    // A zero-event cue plan still owns the prepared reference branch used by
+    // previewClick(). Size the arena from composition, not from timeline
+    // event presence.
+    const bool cues = cuePlan != nullptr;
+    const uint64_t trainingLaneCount = static_cast<uint64_t>(std::count_if(
+        lanes.begin(), lanes.end(),
+        [](const Lane &lane) { return lane.trainingSelected; }));
+    const std::optional<size_t> requested = preparedGraphArenaCapacity(
+        lanes.size(), trainingLaneCount, cues, outputChannels, maximumFrames);
+    if (requested.has_value()) {
+      arenaBytes.resize(*requested);
+      // Freeze the admitted live arena capacity as session metadata. Status
+      // must not infer lifecycle accounting from a container implementation
+      // detail after the graph has been compiled and output has started.
+      graphArenaBytes = arenaBytes.capacity();
+      retainedBytes = graphArenaBytes;
+    }
   }
 
   ~PreparedPlaybackGraph() {
@@ -187,15 +1509,53 @@ struct PreparedPlaybackGraph {
   zdsp::PublishedGraphSnapshot snapshot{};
   zdsp::ParameterQueue parameters{};
   zdsp::GraphRunner runner{};
+  PreparedPlaybackTransport transport{};
   zdsp::AudioHostGraphAdapter adapter{};
   NativePlaybackCallbackState callback{};
   double sampleRate{0.0};
   uint32_t outputChannels{0};
   uint32_t maximumFrames{0};
   float masterGain{1.0F};
+  float masterGraphTrim{1.0F};
+  uint64_t masterGainNodeId{0};
+  std::shared_ptr<const PlaybackCuePlan> cuePlan;
+  std::optional<NativePlaybackTrainingDuckConfig> training;
+  std::optional<NativePlaybackGraphDocument> graphDocument;
+  std::vector<zdsp::ScheduledGainWindow> trainingWindows;
+  bool trainingEnabled{false};
+  std::vector<zdsp::ScheduledCueEvent> cueEvents;
+  std::array<zdsp::ScheduledCueSoundView, 2> cueSounds{};
+  zdsp::ProcessorHandle cueSource{};
+  zdsp::ProcessorHandle timePitchProcessor{};
+  void *timePitchPrepared{nullptr};
+  size_t timePitchPreparedBytes{0};
+  std::vector<float> timePitchAnchorSamples;
+  std::array<const float *, kSignalsmithTimePitchMaximumChannels>
+      timePitchAnchorChannels{};
+  uint32_t timePitchAnchorFrames{0};
+  SignalsmithTimePitchLoopPlan initialTimePitchLoopPlan{};
+  SignalsmithTimePitchReanchorPlan initialTimePitchReanchorPlan{};
+  float timePitchCorrectionSemitones{0.0F};
+  bool hasTimePitch{false};
+  float referenceGain{0.0F};
+  uint32_t graphNodeCount{0};
+  uint32_t graphConnectionCount{0};
+  uint32_t latencyCompensatedEdgeCount{0};
+  std::shared_ptr<const NativePlaybackGraphSnapshot> graphSnapshot;
+  std::string topology;
+  std::string graphPreparationError;
   bool runnerInitialized{false};
   bool telemetryLive{true};
+  size_t graphArenaBytes{0};
   size_t retainedBytes{0};
+  uint64_t durationFrames{0};
+  uint64_t transportGeneration{0};
+  double playbackRate{1.0};
+  double transposeSemitones{0.0};
+  uint64_t playbackRateQ32{zdsp::kProjectRateOneQ32};
+  uint64_t graphLatencyFrames{0};
+  int64_t preparedStartProjectFrame{0};
+  NativePlaybackInitialTransportConfig initialTransport{};
   NativePlaybackTestHooks *testHooks{nullptr};
 
   void observe(NativePlaybackLifecycleEvent event) noexcept {
@@ -229,7 +1589,751 @@ struct PreparedPlaybackGraph {
     return processor;
   }
 
+  bool trainingInside(int64_t projectFrame) const noexcept {
+    if (!training.has_value() || !trainingEnabled || projectFrame < 0)
+      return false;
+    if (training->mode == NativePlaybackTrainingMode::Period)
+      return (projectFrame / training->periodFrames) % 2 == 1;
+    for (const NativePlaybackTrainingWindow &window : training->windows) {
+      if (projectFrame < window.startProjectFrame)
+        return false;
+      if (projectFrame < window.endProjectFrame)
+        return true;
+    }
+    return false;
+  }
+
+  bool fillTimePitchAnchor(int64_t targetProjectFrame,
+                           uint32_t targetProjectFractionQ32 = 0) noexcept {
+    if (!hasTimePitch || timePitchAnchorFrames == 0 ||
+        timePitchAnchorSamples.size() !=
+            static_cast<size_t>(timePitchAnchorFrames) * outputChannels)
+      return false;
+    std::fill(timePitchAnchorSamples.begin(), timePitchAnchorSamples.end(),
+              0.0F);
+    const bool anySolo = std::any_of(
+        lanes.begin(), lanes.end(), [](const Lane &lane) { return lane.solo; });
+    const uint64_t sourceStart =
+        cuePlan == nullptr || cuePlan->sourceStartFrame < 0
+            ? 0
+            : static_cast<uint64_t>(cuePlan->sourceStartFrame);
+    float trainingCurrentGain = 1.0F;
+    float trainingTargetGain = 1.0F;
+    float trainingRampStep = 0.0F;
+    uint32_t trainingRampRemaining = 0;
+    bool trainingAnchorStarted = false;
+    for (uint32_t outputFrame = 0; outputFrame < timePitchAnchorFrames;
+         ++outputFrame) {
+      const long double projectPosition =
+          static_cast<long double>(targetProjectFrame) +
+          static_cast<long double>(targetProjectFractionQ32) /
+              static_cast<long double>(uint64_t{1} << 32) -
+          static_cast<long double>(timePitchAnchorFrames - outputFrame) *
+              static_cast<long double>(playbackRate);
+      if (projectPosition < 0.0L ||
+          projectPosition >
+              static_cast<long double>(std::numeric_limits<int64_t>::max()))
+        continue;
+      const int64_t projectFrame =
+          static_cast<int64_t>(std::floor(projectPosition));
+      const double fraction = static_cast<double>(
+          projectPosition - static_cast<long double>(projectFrame));
+      const float scheduledTrainingGain =
+          trainingInside(projectFrame) ? 0.0F : 1.0F;
+      if (!trainingAnchorStarted) {
+        trainingCurrentGain = scheduledTrainingGain;
+        trainingTargetGain = scheduledTrainingGain;
+        trainingAnchorStarted = true;
+      } else if (scheduledTrainingGain != trainingTargetGain) {
+        trainingTargetGain = scheduledTrainingGain;
+        trainingRampRemaining = kNativePlaybackGainRampFrames;
+        trainingRampStep =
+            (trainingTargetGain - trainingCurrentGain) /
+            static_cast<float>(trainingRampRemaining);
+      }
+      const float trainingGain = trainingCurrentGain;
+      for (const Lane &lane : lanes) {
+        const float laneGain =
+            lane.muted || (anySolo && !lane.solo)
+                ? 0.0F
+                : lane.gain *
+                      lane.graphGainTrim *
+                      (lane.trainingSelected ? trainingGain : 1.0F) *
+                      masterGain * masterGraphTrim;
+        if (laneGain == 0.0F)
+          continue;
+        const uint64_t elapsed = static_cast<uint64_t>(projectFrame);
+        if (elapsed > std::numeric_limits<uint64_t>::max() - sourceStart)
+          continue;
+        const uint64_t sourceFrame = sourceStart + elapsed;
+        if (sourceFrame >= lane.owner->frameCount())
+          continue;
+        const uint64_t nextFrame = sourceFrame + 1u;
+        const uint32_t sourceChannels = lane.owner->channelCount();
+        const auto sample = [&](uint32_t channel) {
+          const float first = lane.owner->channelData(channel)[sourceFrame];
+          const float second =
+              nextFrame < lane.owner->frameCount()
+                  ? lane.owner->channelData(channel)[nextFrame]
+                  : 0.0F;
+          return static_cast<float>(
+              static_cast<double>(first) +
+              (static_cast<double>(second) - static_cast<double>(first)) *
+                  fraction);
+        };
+        if (sourceChannels == 1) {
+          const float value = sample(0) * laneGain;
+          for (uint32_t channel = 0; channel < outputChannels; ++channel)
+            timePitchAnchorSamples[static_cast<size_t>(channel) *
+                                           timePitchAnchorFrames +
+                                       outputFrame] += value;
+        } else if (outputChannels == 1) {
+          double sum = 0.0;
+          for (uint32_t channel = 0; channel < sourceChannels; ++channel)
+            sum += sample(channel);
+          timePitchAnchorSamples[outputFrame] +=
+              static_cast<float>(sum / sourceChannels) * laneGain;
+        } else {
+          const uint32_t matching =
+              std::min(sourceChannels, outputChannels);
+          for (uint32_t channel = 0; channel < matching; ++channel)
+            timePitchAnchorSamples[static_cast<size_t>(channel) *
+                                           timePitchAnchorFrames +
+                                       outputFrame] += sample(channel) * laneGain;
+        }
+      }
+      if (trainingRampRemaining != 0) {
+        trainingCurrentGain += trainingRampStep;
+        if (--trainingRampRemaining == 0)
+          trainingCurrentGain = trainingTargetGain;
+      }
+    }
+    for (float &sample : timePitchAnchorSamples)
+      if (!std::isfinite(sample))
+        sample = 0.0F;
+    return true;
+  }
+
+  SignalsmithTimePitchAnchorInput timePitchAnchorInput() const noexcept {
+    return {timePitchAnchorChannels.data(), outputChannels,
+            timePitchAnchorFrames};
+  }
+
+  bool primeTimePitchSeek(int64_t projectFrame) noexcept {
+    return !hasTimePitch ||
+           (fillTimePitchAnchor(projectFrame) &&
+            primeSignalsmithTimePitchSeek(timePitchProcessor,
+                                          timePitchAnchorInput()));
+  }
+
+  SignalsmithTimePitchReanchorPlan primeTimePitchReanchor(
+      int64_t projectFrame, uint32_t projectFractionQ32) noexcept {
+    if (!hasTimePitch)
+      return {};
+    if (!fillTimePitchAnchor(projectFrame, projectFractionQ32))
+      return {};
+    return primeSignalsmithTimePitchReanchor(timePitchProcessor,
+                                             timePitchAnchorInput());
+  }
+
+  SignalsmithTimePitchLoopPrepareResult configureTimePitchLoop(
+      const std::optional<NativePlaybackInitialLoop> &loop) noexcept {
+    if (!hasTimePitch)
+      return {SignalsmithTimePitchLoopPrepareCode::Disabled, {}, 0};
+    if (!loop.has_value())
+      return configureSignalsmithTimePitchLoop(timePitchProcessor, nullptr, 0);
+    if (!fillTimePitchAnchor(loop->startProjectFrame))
+      return {SignalsmithTimePitchLoopPrepareCode::Invalid,
+              {},
+              signalsmithTimePitchMinimumLoopOutputFrames(
+                  timePitchProcessor)};
+    const uint64_t projectFrames =
+        static_cast<uint64_t>(loop->endProjectFrame - loop->startProjectFrame);
+    const long double outputFrames = std::ceil(
+        static_cast<long double>(projectFrames) /
+        static_cast<long double>(playbackRate));
+    if (!std::isfinite(outputFrames) || outputFrames < 1.0L ||
+        outputFrames >
+            static_cast<long double>(std::numeric_limits<uint64_t>::max()))
+      return {SignalsmithTimePitchLoopPrepareCode::Invalid,
+              {},
+              signalsmithTimePitchMinimumLoopOutputFrames(
+                  timePitchProcessor)};
+    const SignalsmithTimePitchAnchorInput input = timePitchAnchorInput();
+    return configureSignalsmithTimePitchLoop(
+        timePitchProcessor, &input, static_cast<uint64_t>(outputFrames));
+  }
+
   zdsp::Status prepare(zdsp::GraphCompileError *compileError) {
+    if (arenaBytes.empty())
+      return {zdsp::StatusCode::InsufficientStorage, 1};
+    const zdsp::Status initialized = zdsp::initializeArena(
+        &arena, {arenaBytes.data(), static_cast<uint32_t>(arenaBytes.size())});
+    if (!zdsp::succeeded(initialized))
+      return initialized;
+
+    NativePlaybackGraphContext graphContext;
+    graphContext.outputChannels = outputChannels;
+    graphContext.hasReference = cuePlan != nullptr;
+    graphContext.hasTraining = training.has_value();
+    graphContext.needsTimePitch = hasTimePitch;
+    graphContext.masterGain = masterGain;
+    graphContext.referenceGain = cuePlan == nullptr ? 0.0F : cuePlan->volume;
+    graphContext.lanes.reserve(lanes.size());
+    for (const Lane &lane : lanes)
+      graphContext.lanes.push_back(
+          {lane.id, lane.owner->channelCount(), lane.trainingSelected});
+    NativePlaybackGraphDocument document =
+        graphDocument.has_value()
+            ? std::move(*graphDocument)
+            : synthesizeNativePlaybackGraphDocument(graphContext);
+    graphDocument.reset();
+    NativePlaybackGraphMaterializeResult materialized =
+        materializeNativePlaybackGraphDocument(std::move(document),
+                                               graphContext);
+    if (!materialized.ok()) {
+      graphPreparationError = materialized.message;
+      if (compileError != nullptr) {
+        compileError->kind = zdsp::GraphErrorKind::InvalidDescription;
+        compileError->node = {materialized.node};
+        compileError->port = materialized.port;
+      }
+      return {zdsp::StatusCode::InvalidArgument,
+              static_cast<uint32_t>(materialized.error)};
+    }
+    masterGainNodeId = materialized.graph.masterGainNode;
+    hasTimePitch = materialized.graph.signalsmithNode != 0;
+
+    struct RuntimeNode {
+      std::vector<std::array<zdsp::AudioChannelRole,
+                             zdsp::kMaximumChannelsPerBus>>
+          inputRoles;
+      std::vector<std::array<zdsp::AudioChannelRole,
+                             zdsp::kMaximumChannelsPerBus>>
+          outputRoles;
+      std::vector<zdsp::AudioBusDescriptor> inputs;
+      std::vector<zdsp::AudioBusDescriptor> outputs;
+      std::array<float, zdsp::kMaximumChannelsPerBus *
+                            zdsp::kMaximumChannelsPerBus>
+          matrix{};
+      zdsp::ProcessorHandle processor{};
+      void *durable{nullptr};
+      size_t durableBytes{0};
+    };
+    std::vector<RuntimeNode> runtime(materialized.graph.nodes.size());
+    PlaybackGraphComposition composition;
+    composition.reserve(materialized.graph.nodes.size(),
+                        materialized.graph.connections.size());
+    const bool anySolo = std::any_of(
+        lanes.begin(), lanes.end(), [](const Lane &lane) { return lane.solo; });
+    const uint64_t sourceStartFrame =
+        cuePlan == nullptr || cuePlan->sourceStartFrame < 0
+            ? 0
+            : static_cast<uint64_t>(cuePlan->sourceStartFrame);
+
+    const auto parameter = [](const NativePlaybackGraphNode &value,
+                              const char *id, double fallback) noexcept {
+      for (const NativePlaybackGraphParameter &entry : value.parameters)
+        if (entry.id == id)
+          return entry.normalizedValue;
+      return fallback;
+    };
+    const auto laneFor = [&](const NativePlaybackGraphNode &value) -> Lane * {
+      if (!value.binding.has_value() ||
+          value.binding->kind != "project-lane")
+        return nullptr;
+      const auto found = std::find_if(
+          lanes.begin(), lanes.end(), [&](const Lane &lane) {
+            return lane.id == value.binding->laneId;
+          });
+      return found == lanes.end() ? nullptr : &*found;
+    };
+    const auto labelFor = [](const NativePlaybackGraphMaterializedNode &value) {
+      const auto lane = [&]() -> const std::string * {
+        return value.document.binding.has_value() &&
+                       value.document.binding->kind == "project-lane"
+                   ? &value.document.binding->laneId
+                   : nullptr;
+      }();
+      std::string label;
+      switch (value.kind) {
+      case NativePlaybackGraphMaterializedKind::ProjectLaneSource:
+        label = lane == nullptr ? "lane source" : "lane source[" + *lane + "]";
+        break;
+      case NativePlaybackGraphMaterializedKind::ChannelMap:
+        label = lane == nullptr ? "channel map" : "channel map[" + *lane + "]";
+        if (value.document.binding.has_value() &&
+            value.document.binding->kind == "reference-map")
+          label = "reference map";
+        break;
+      case NativePlaybackGraphMaterializedKind::Gain:
+        if (lane != nullptr)
+          label = "lane gain[" + *lane + "]";
+        else if (value.document.binding.has_value() &&
+                 value.document.binding->kind == "song-master")
+          label = "song gain";
+        else if (value.document.binding.has_value() &&
+                 value.document.binding->kind == "reference-gain")
+          label = "reference gain";
+        else if (value.document.binding.has_value() &&
+                 value.document.binding->kind == "output-gain")
+          label = "output gain";
+        else
+          label = "gain";
+        break;
+      case NativePlaybackGraphMaterializedKind::Mix:
+        label = std::any_of(
+                    value.document.inputs.begin(), value.document.inputs.end(),
+                    [](const auto &port) { return port.id == "reference"; })
+                    ? "output mix"
+                    : "song mix";
+        break;
+      case NativePlaybackGraphMaterializedKind::TrainingDuck:
+        label = lane == nullptr ? "prepared training duck"
+                                : "prepared training duck[" + *lane + "]";
+        break;
+      case NativePlaybackGraphMaterializedKind::SignalsmithTimePitch:
+        label = "Signalsmith time/pitch";
+        break;
+      case NativePlaybackGraphMaterializedKind::CueSource:
+        label = "prepared cue source";
+        break;
+      case NativePlaybackGraphMaterializedKind::PeakRms:
+        label = "peak/RMS analyzer";
+        break;
+      case NativePlaybackGraphMaterializedKind::Tap:
+        label = "bounded tap";
+        break;
+      case NativePlaybackGraphMaterializedKind::Oscillator:
+        label = "oscillator";
+        break;
+      case NativePlaybackGraphMaterializedKind::SafetyLimiter:
+        label = "safety limiter";
+        break;
+      case NativePlaybackGraphMaterializedKind::PhysicalOutput:
+        label = "physical output";
+        break;
+      case NativePlaybackGraphMaterializedKind::PlaceholderBypass:
+        label = "unavailable bypass placeholder";
+        break;
+      case NativePlaybackGraphMaterializedKind::PlaceholderSilence:
+        label = "unavailable silence placeholder";
+        break;
+      }
+      if (value.document.binding.has_value() && lane == nullptr &&
+          value.document.binding->kind != "song-master" &&
+          value.document.binding->kind != "reference-map" &&
+          value.document.binding->kind != "reference-gain" &&
+          value.document.binding->kind != "reference-cues" &&
+          value.document.binding->kind != "output-gain" &&
+          value.document.binding->kind != "project-output") {
+        label += "[" + value.document.binding->kind;
+        if (!value.document.binding->laneId.empty())
+          label += ":" + value.document.binding->laneId;
+        label += "]";
+      }
+      return label;
+    };
+
+    for (size_t index = 0; index < materialized.graph.nodes.size(); ++index) {
+      NativePlaybackGraphMaterializedNode &resolved =
+          materialized.graph.nodes[index];
+      const NativePlaybackGraphNode &value = resolved.document;
+      RuntimeNode &storage = runtime[index];
+      storage.inputRoles.resize(value.inputs.size());
+      storage.outputRoles.resize(value.outputs.size());
+      storage.inputs.reserve(value.inputs.size());
+      storage.outputs.reserve(value.outputs.size());
+      for (size_t portIndex = 0; portIndex < value.inputs.size(); ++portIndex)
+        storage.inputs.push_back(descriptor(
+            value.inputs[portIndex].channels, &storage.inputRoles[portIndex]));
+      for (size_t portIndex = 0; portIndex < value.outputs.size(); ++portIndex)
+        storage.outputs.push_back(descriptor(
+            value.outputs[portIndex].channels,
+            &storage.outputRoles[portIndex]));
+
+      zdsp::GraphNodeRole role = zdsp::GraphNodeRole::Processor;
+      zdsp::GraphNodeFlags flags = zdsp::GraphNodeFlagNone;
+      switch (resolved.kind) {
+      case NativePlaybackGraphMaterializedKind::ProjectLaneSource: {
+        Lane *lane = laneFor(value);
+        if (lane == nullptr)
+          return {zdsp::StatusCode::InvalidArgument, 20};
+        lane->sourceNodeId = value.id;
+        const uint32_t sourceChannels = lane->owner->channelCount();
+        for (uint32_t channel = 0; channel < sourceChannels; ++channel)
+          lane->channelPointers[channel] = lane->owner->channelData(channel);
+        const size_t stateBytes = zdsp::decodedBufferSourceStateBytes();
+        void *state = zdsp::arenaAllocate(&arena, stateBytes, 64);
+        if (state == nullptr)
+          return {zdsp::StatusCode::InsufficientStorage, 21};
+        lane->source = zdsp::createPositionedDecodedBufferSource(
+            {{value.id},
+             {lane->channelPointers.data(), sourceChannels,
+              lane->owner->frameCount(), {sampleRate}},
+             0,
+             std::min(sourceStartFrame, lane->owner->frameCount())},
+            {static_cast<uint8_t *>(state),
+             static_cast<uint32_t>(stateBytes)});
+        storage.processor = lane->source;
+        if (storage.processor.state == nullptr)
+          return {zdsp::StatusCode::InsufficientStorage, 22};
+        retainedBytes += lane->owner->retainedBytes();
+        break;
+      }
+      case NativePlaybackGraphMaterializedKind::TrainingDuck: {
+        Lane *lane = laneFor(value);
+        if (lane == nullptr || !training.has_value())
+          return {zdsp::StatusCode::InvalidArgument, 23};
+        lane->trainingNodeId = value.id;
+        const size_t stateBytes = zdsp::scheduledGainStateBytes();
+        void *state = zdsp::arenaAllocate(&arena, stateBytes, 64);
+        if (state == nullptr)
+          return {zdsp::StatusCode::InsufficientStorage, 24};
+        const zdsp::ScheduledGainConfig trainingConfig{
+            {value.id},
+            training->mode == NativePlaybackTrainingMode::Period
+                ? zdsp::ScheduledGainMode::Period
+                : zdsp::ScheduledGainMode::Windows,
+            trainingWindows.empty() ? nullptr : trainingWindows.data(),
+            static_cast<uint32_t>(trainingWindows.size()),
+            training->periodFrames,
+            0.0F,
+            1.0F,
+            {kNativePlaybackGainRampFrames},
+            trainingEnabled};
+        lane->trainingProcessor = zdsp::createScheduledGain(
+            trainingConfig,
+            {static_cast<uint8_t *>(state),
+             static_cast<uint32_t>(stateBytes)});
+        storage.processor = lane->trainingProcessor;
+        flags = zdsp::GraphNodeFlagMayProcessInPlace;
+        break;
+      }
+      case NativePlaybackGraphMaterializedKind::SignalsmithTimePitch: {
+        const SignalsmithTimePitchConfig timePitchConfig{
+            {value.id}, {sampleRate}, value.outputs[0].channels, maximumFrames,
+            timePitchCorrectionSemitones};
+        const size_t stateBytes = signalsmithTimePitchStateBytes();
+        void *state = zdsp::arenaAllocate(&arena, stateBytes, 64);
+        timePitchPreparedBytes =
+            signalsmithTimePitchPreparedBytes(timePitchConfig);
+        timePitchPrepared = zdsp::arenaAllocate(
+            &arena, timePitchPreparedBytes, alignof(float));
+        if (state == nullptr || timePitchPrepared == nullptr ||
+            timePitchPreparedBytes == 0)
+          return {zdsp::StatusCode::InsufficientStorage, 25};
+        timePitchProcessor = createSignalsmithTimePitch(
+            timePitchConfig,
+            {static_cast<uint8_t *>(state),
+             static_cast<uint32_t>(stateBytes)});
+        storage.processor = timePitchProcessor;
+        storage.durable = timePitchPrepared;
+        storage.durableBytes = timePitchPreparedBytes;
+        const size_t timePitchRetained =
+            signalsmithExternalRetainedBytes(timePitchConfig);
+        if (timePitchRetained == 0 ||
+            retainedBytes >
+                std::numeric_limits<size_t>::max() - timePitchRetained)
+          return {zdsp::StatusCode::CapacityExceeded, 26};
+        retainedBytes += timePitchRetained;
+        break;
+      }
+      case NativePlaybackGraphMaterializedKind::CueSource: {
+        if (cuePlan == nullptr)
+          return {zdsp::StatusCode::InvalidArgument, 27};
+        cueEvents.reserve(cuePlan->events.size());
+        for (const PlaybackCueEvent &event : cuePlan->events)
+          cueEvents.push_back(
+              {event.projectFrame, static_cast<uint32_t>(event.sound)});
+        cueSounds = {{{cuePlan->ordinaryClickPcm.data(),
+                       static_cast<uint32_t>(cuePlan->ordinaryClickPcm.size())},
+                      {cuePlan->accentClickPcm.data(),
+                       static_cast<uint32_t>(cuePlan->accentClickPcm.size())}}};
+        const size_t stateBytes = zdsp::scheduledCueSourceStateBytes();
+        void *state = zdsp::arenaAllocate(&arena, stateBytes, 64);
+        if (state == nullptr)
+          return {zdsp::StatusCode::InsufficientStorage, 28};
+        cueSource = zdsp::createScheduledCueSource(
+            {{value.id}, cueEvents.data(),
+             static_cast<uint32_t>(cueEvents.size()), cueSounds.data(),
+             static_cast<uint32_t>(cueSounds.size()), {sampleRate},
+             playbackRateQ32},
+            {static_cast<uint8_t *>(state),
+             static_cast<uint32_t>(stateBytes)});
+        storage.processor = cueSource;
+        break;
+      }
+      case NativePlaybackGraphMaterializedKind::PhysicalOutput:
+        role = zdsp::GraphNodeRole::Output;
+        break;
+      default: {
+        zdsp::BuiltinNodeKind kind = zdsp::BuiltinNodeKind::Gain;
+        float value0 = 1.0F;
+        float value1 = 0.0F;
+        uint32_t inputChannels = value.inputs.empty()
+                                     ? 0
+                                     : value.inputs[0].channels;
+        uint32_t outputChannelsForNode = value.outputs[0].channels;
+        uint32_t inputBusCount = static_cast<uint32_t>(value.inputs.size());
+        uint32_t frames = 0;
+        uint32_t tapCapacity = 0;
+        const float *matrix = nullptr;
+        switch (resolved.kind) {
+        case NativePlaybackGraphMaterializedKind::ChannelMap: {
+          kind = zdsp::BuiltinNodeKind::ChannelMap;
+          for (uint32_t out = 0; out < outputChannelsForNode; ++out)
+            for (uint32_t in = 0; in < inputChannels; ++in) {
+              float coefficient = 0.0F;
+              if (inputChannels == 1)
+                coefficient = 1.0F;
+              else if (outputChannelsForNode == 1)
+                coefficient = 1.0F / static_cast<float>(inputChannels);
+              else if (in == out)
+                coefficient = 1.0F;
+              storage.matrix[out * inputChannels + in] = coefficient;
+            }
+          matrix = storage.matrix.data();
+          flags = zdsp::GraphNodeFlagMayProcessInPlace;
+          break;
+        }
+        case NativePlaybackGraphMaterializedKind::Gain: {
+          kind = zdsp::BuiltinNodeKind::Gain;
+          const float trim = static_cast<float>(parameter(value, "gain", 1.0));
+          value0 = trim;
+          if (Lane *lane = laneFor(value)) {
+            lane->gainNodeId = value.id;
+            lane->graphGainTrim = trim;
+            lane->gainProcessor = {};
+            value0 = (lane->muted || (anySolo && !lane->solo) ? 0.0F
+                                                               : lane->gain) *
+                     trim;
+          } else if (value.binding.has_value() &&
+                     value.binding->kind == "song-master") {
+            masterGainNodeId = value.id;
+            masterGraphTrim = trim;
+            value0 = masterGain * trim;
+          } else if (value.binding.has_value() &&
+                     value.binding->kind == "reference-gain") {
+            value0 = (cuePlan == nullptr ? 0.0F : cuePlan->volume) * trim;
+            referenceGain = value0;
+          }
+          flags = zdsp::GraphNodeFlagMayProcessInPlace;
+          break;
+        }
+        case NativePlaybackGraphMaterializedKind::Mix:
+          kind = zdsp::BuiltinNodeKind::Mix;
+          break;
+        case NativePlaybackGraphMaterializedKind::PeakRms:
+          kind = zdsp::BuiltinNodeKind::PeakRms;
+          flags = zdsp::GraphNodeFlagMayProcessInPlace;
+          break;
+        case NativePlaybackGraphMaterializedKind::Tap:
+          kind = zdsp::BuiltinNodeKind::Tap;
+          tapCapacity = std::max(
+              1u, static_cast<uint32_t>(std::llround(
+                      parameter(value, "window", 1.0) * maximumFrames)));
+          flags = zdsp::GraphNodeFlagMayProcessInPlace;
+          break;
+        case NativePlaybackGraphMaterializedKind::Oscillator:
+          kind = zdsp::BuiltinNodeKind::Oscillator;
+          value0 = static_cast<float>(parameter(value, "frequency", 0.0) *
+                                      sampleRate * 0.5);
+          value1 = static_cast<float>(parameter(value, "amplitude", 0.0));
+          break;
+        case NativePlaybackGraphMaterializedKind::SafetyLimiter:
+          kind = zdsp::BuiltinNodeKind::SafetyLimiter;
+          value0 = static_cast<float>(parameter(value, "ceiling", 1.0));
+          flags = zdsp::GraphNodeFlagMayProcessInPlace;
+          break;
+        case NativePlaybackGraphMaterializedKind::PlaceholderBypass:
+          kind = zdsp::BuiltinNodeKind::Gain;
+          value0 = 1.0F;
+          flags = zdsp::GraphNodeFlagBypassed;
+          break;
+        case NativePlaybackGraphMaterializedKind::PlaceholderSilence:
+          kind = value.inputs.empty() ? zdsp::BuiltinNodeKind::Oscillator
+                                      : zdsp::BuiltinNodeKind::Gain;
+          value0 = 0.0F;
+          value1 = 0.0F;
+          flags = value.inputs.empty()
+                      ? zdsp::GraphNodeFlagNone
+                      : zdsp::GraphNodeFlagMayProcessInPlace;
+          break;
+        default:
+          return {zdsp::StatusCode::InvalidArgument, 29};
+        }
+        const zdsp::BuiltinNodeConfig config{
+            kind,
+            {value.id},
+            inputChannels,
+            outputChannelsForNode,
+            inputBusCount,
+            value0,
+            value1,
+            frames,
+            zdsp::OscillatorWaveform::Sine,
+            matrix,
+            tapCapacity};
+        storage.processor =
+            makeBuiltin(config, &storage.durable, &storage.durableBytes);
+        if (storage.processor.state == nullptr)
+          return {zdsp::StatusCode::InsufficientStorage, 30};
+        if (resolved.kind == NativePlaybackGraphMaterializedKind::Gain) {
+          if (Lane *lane = laneFor(value)) {
+            lane->gainProcessor = storage.processor;
+          } else if (value.binding.has_value() &&
+                     value.binding->kind == "song-master") {
+            masterProcessor = storage.processor;
+          }
+        }
+        break;
+      }
+      }
+      if (role == zdsp::GraphNodeRole::Processor &&
+          storage.processor.state == nullptr)
+        return {zdsp::StatusCode::InvalidArgument, 31};
+      composition.add(
+          {{value.id},
+           value.type,
+           value.typeVersion,
+           role,
+           flags,
+           static_cast<uint32_t>(storage.inputs.size()),
+           static_cast<uint32_t>(storage.outputs.size()),
+           storage.inputs.empty() ? nullptr : storage.inputs.data(),
+           storage.outputs.empty() ? nullptr : storage.outputs.data(),
+           storage.processor,
+           {storage.durable, storage.durableBytes,
+            storage.durableBytes == 0 ? size_t{1} : alignof(float)}},
+          labelFor(resolved));
+    }
+    for (const NativePlaybackGraphMaterializedConnection &connection :
+         materialized.graph.connections)
+      composition.connect({connection.sourceNode, connection.sourceBus,
+                           connection.destinationNode,
+                           connection.destinationBus});
+
+    graphNodeCount = static_cast<uint32_t>(composition.nodes.size());
+    graphConnectionCount =
+        static_cast<uint32_t>(composition.connections.size());
+    topology = composition.summary();
+    if (cuePlan != nullptr) {
+      retainedBytes += cuePlanRetainedBytes(*cuePlan);
+      retainedBytes += cueEvents.capacity() * sizeof(zdsp::ScheduledCueEvent);
+    }
+    const zdsp::GraphDescription description{
+        zdsp::kGraphFormatVersion,
+        {sampleRate},
+        {maximumFrames},
+        composition.nodes.data(),
+        static_cast<uint32_t>(composition.nodes.size()),
+        composition.connections.data(),
+        static_cast<uint32_t>(composition.connections.size())};
+    zdsp::GraphCompileResult compiled{};
+    const zdsp::Status compileStatus =
+        zdsp::compileGraph(description, &arena, &compiled, compileError);
+    if (!zdsp::succeeded(compileStatus)) {
+      (void)zdsp::cleanupFailedCompile(&compiled);
+      return compileStatus;
+    }
+    graph = compiled.graph;
+    graphLatencyFrames = zdsp::compiledGraphLatency(*graph).value;
+    latencyCompensatedEdgeCount =
+        zdsp::compiledGraphBufferPlan(*graph).compensatedEdgeCount;
+    std::optional<NativePlaybackGraphSnapshot> structured =
+        composition.snapshot(transportGeneration, sampleRate, maximumFrames);
+    if (!structured.has_value() ||
+        structured->nodes.size() != graphNodeCount ||
+        structured->connections.size() != graphConnectionCount ||
+        zdsp::compiledGraphNodeCount(*graph) != structured->nodes.size() ||
+        structured->outputLatencyFrames != graphLatencyFrames ||
+        structured->latencyCompensatedConnectionCount !=
+            latencyCompensatedEdgeCount)
+      return {zdsp::StatusCode::InvalidArgument, 32};
+    for (uint32_t index = 0; index < zdsp::compiledGraphNodeCount(*graph);
+         ++index) {
+      const uint64_t compiledId =
+          zdsp::compiledGraphNodeId(*graph, index).value;
+      if (std::count_if(structured->nodes.begin(), structured->nodes.end(),
+                        [compiledId](const auto &node) {
+                          return node.id == compiledId;
+                        }) != 1)
+        return {zdsp::StatusCode::InvalidArgument, 33};
+    }
+    graphSnapshot = std::make_shared<const NativePlaybackGraphSnapshot>(
+        std::move(*structured));
+    if (hasTimePitch) {
+      timePitchAnchorFrames =
+          signalsmithTimePitchAnchorFrames(timePitchProcessor);
+      if (timePitchAnchorFrames == 0 ||
+          timePitchAnchorFrames >
+              std::numeric_limits<size_t>::max() / outputChannels)
+        return {zdsp::StatusCode::CapacityExceeded, 34};
+      timePitchAnchorSamples.resize(
+          static_cast<size_t>(timePitchAnchorFrames) * outputChannels);
+      for (uint32_t channel = 0; channel < outputChannels; ++channel)
+        timePitchAnchorChannels[channel] =
+            timePitchAnchorSamples.data() +
+            static_cast<size_t>(channel) * timePitchAnchorFrames;
+      if (timePitchAnchorSamples.capacity() >
+              std::numeric_limits<size_t>::max() / sizeof(float) ||
+          retainedBytes >
+              std::numeric_limits<size_t>::max() -
+                  timePitchAnchorSamples.capacity() * sizeof(float))
+        return {zdsp::StatusCode::CapacityExceeded, 35};
+      retainedBytes += timePitchAnchorSamples.capacity() * sizeof(float);
+      if (!fillTimePitchAnchor(preparedStartProjectFrame) ||
+          !primeSignalsmithTimePitchInitial(timePitchProcessor,
+                                            timePitchAnchorInput()))
+        return {zdsp::StatusCode::InvalidArgument, 36};
+      initialTimePitchReanchorPlan = primeSignalsmithTimePitchReanchor(
+          timePitchProcessor, timePitchAnchorInput());
+      if (!initialTimePitchReanchorPlan.valid())
+        return {zdsp::StatusCode::InvalidArgument, 37};
+      const SignalsmithTimePitchLoopPrepareResult loopPrepared =
+          configureTimePitchLoop(initialTransport.loop);
+      if (!loopPrepared.ok())
+        return {zdsp::StatusCode::InvalidArgument, 37};
+      initialTimePitchLoopPlan = loopPrepared.plan;
+    }
+    zdsp::initializePublisher(&publisher, retirement, 1, &diagnostics);
+    const zdsp::TransitionPlan hardCut{zdsp::TransitionKind::HardCut,
+                                       {0},
+                                       {0},
+                                       {0},
+                                       zdsp::InfiniteTailPolicy::Cut,
+                                       {zdsp::TailKind::None, {0}},
+                                       {0},
+                                       0,
+                                       100,
+                                       1000,
+                                       0};
+    snapshot = {graph, 1, hardCut, 0};
+    const zdsp::PublicationResult published =
+        zdsp::submitSnapshot(&publisher, &snapshot);
+    if (!zdsp::succeeded(published.status)) {
+      (void)zdsp::deactivateCompiledGraph(graph);
+      graph = nullptr;
+      return published.status;
+    }
+    zdsp::initializeGraphRunner(&runner, &publisher, {}, &parameters, nullptr,
+                                &diagnostics);
+    runnerInitialized = true;
+    transport.initialize(transportGeneration, preparedStartProjectFrame,
+                         initialTransport,
+                         static_cast<int64_t>(durationFrames),
+                         cueEvents.empty() ? nullptr : cueEvents.data(),
+                         static_cast<uint32_t>(cueEvents.size()), playbackRate,
+                         timePitchProcessor, initialTimePitchLoopPlan,
+                         initialTimePitchReanchorPlan);
+    adapter.runner = &runner;
+    adapter.transport = {slicePreparedPlaybackTransport, &transport};
+    callback.adapter = &adapter;
+    return zdsp::okStatus();
+  }
+
+  zdsp::Status prepareFixedLegacy(zdsp::GraphCompileError *compileError) {
     if (arenaBytes.empty())
       return {zdsp::StatusCode::InsufficientStorage, 1};
     const zdsp::Status initialized = zdsp::initializeArena(
@@ -243,10 +2347,17 @@ struct PreparedPlaybackGraph {
         descriptor(outputChannels, &outputRoles);
     const bool anySolo = std::any_of(
         lanes.begin(), lanes.end(), [](const Lane &lane) { return lane.solo; });
-
-    std::vector<zdsp::GraphNodeDescription> nodes;
-    std::vector<zdsp::GraphConnection> connections;
-    std::vector<zdsp::AudioBusDescriptor> mixInputs(lanes.size(), outputBus);
+    const bool hasReference = cuePlan != nullptr;
+    const uint32_t trainingLaneCount = static_cast<uint32_t>(std::count_if(
+        lanes.begin(), lanes.end(),
+        [](const Lane &lane) { return lane.trainingSelected; }));
+    const uint64_t sourceStartFrame =
+        cuePlan == nullptr || cuePlan->sourceStartFrame < 0
+            ? 0
+            : static_cast<uint64_t>(cuePlan->sourceStartFrame);
+    PlaybackGraphComposition composition;
+    std::vector<zdsp::AudioBusDescriptor> songMixInputs(lanes.size(),
+                                                        outputBus);
     std::vector<std::array<float, zdsp::kMaximumChannelsPerBus *
                                       zdsp::kMaximumChannelsPerBus>>
         matrices(lanes.size());
@@ -255,12 +2366,16 @@ struct PreparedPlaybackGraph {
     std::vector<size_t> mapDurableBytes(lanes.size());
     std::vector<void *> gainDurable(lanes.size());
     std::vector<size_t> gainDurableBytes(lanes.size());
-    nodes.reserve(lanes.size() * 3u + 4u);
-    connections.reserve(lanes.size() * 3u + 3u);
+    composition.reserve(lanes.size() * 3u + trainingLaneCount +
+                            (hasReference ? 9u : 4u),
+                        lanes.size() * 3u + trainingLaneCount +
+                            (hasReference ? 8u : 3u));
 
     for (size_t index = 0; index < lanes.size(); ++index) {
       Lane &lane = lanes[index];
       const uint32_t sourceChannels = lane.owner->channelCount();
+      const uint64_t laneSourceStartFrame =
+          std::min(sourceStartFrame, lane.owner->frameCount());
       lane.sourceBus = descriptor(sourceChannels, &lane.roles);
       for (uint32_t channel = 0; channel < sourceChannels; ++channel)
         lane.channelPointers[channel] = lane.owner->channelData(channel);
@@ -272,14 +2387,16 @@ struct PreparedPlaybackGraph {
       void *sourceState = zdsp::arenaAllocate(&arena, sourceBytes, 64);
       if (sourceState == nullptr)
         return {zdsp::StatusCode::InsufficientStorage, 2};
-      lane.source =
-          zdsp::createDecodedBufferSource({{sourceNode},
-                                           {lane.channelPointers.data(),
-                                            sourceChannels,
-                                            lane.owner->frameCount(),
-                                            {sampleRate}}},
-                                          {static_cast<uint8_t *>(sourceState),
-                                           static_cast<uint32_t>(sourceBytes)});
+      lane.source = zdsp::createPositionedDecodedBufferSource(
+          {{sourceNode},
+           {lane.channelPointers.data(),
+            sourceChannels,
+            lane.owner->frameCount(),
+            {sampleRate}},
+           0,
+           laneSourceStartFrame},
+          {static_cast<uint8_t *>(sourceState),
+           static_cast<uint32_t>(sourceBytes)});
       if (lane.source.state == nullptr)
         return {zdsp::StatusCode::InsufficientStorage, 3};
 
@@ -328,7 +2445,7 @@ struct PreparedPlaybackGraph {
           lane.gainProcessor.state == nullptr)
         return {zdsp::StatusCode::InsufficientStorage, 4};
 
-      nodes.push_back({{sourceNode},
+      composition.add({{sourceNode},
                        {3, sourceNode},
                        1,
                        zdsp::GraphNodeRole::Processor,
@@ -338,8 +2455,9 @@ struct PreparedPlaybackGraph {
                        nullptr,
                        &lane.sourceBus,
                        lane.source,
-                       {nullptr, 0, 1}});
-      nodes.push_back(
+                       {nullptr, 0, 1}},
+                      "lane source[" + lane.id + "]");
+      composition.add(
           {{mapNode},
            {1, static_cast<uint64_t>(zdsp::BuiltinNodeKind::ChannelMap)},
            1,
@@ -350,8 +2468,9 @@ struct PreparedPlaybackGraph {
            &lane.sourceBus,
            &outputBus,
            mapProcessors[index],
-           {mapDurable[index], mapDurableBytes[index], alignof(float)}});
-      nodes.push_back(
+           {mapDurable[index], mapDurableBytes[index], alignof(float)}},
+          "channel map[" + lane.id + "]");
+      composition.add(
           {{gainNode},
            {1, static_cast<uint64_t>(zdsp::BuiltinNodeKind::Gain)},
            1,
@@ -362,94 +2481,239 @@ struct PreparedPlaybackGraph {
            &outputBus,
            &outputBus,
            lane.gainProcessor,
-           {gainDurable[index], gainDurableBytes[index], alignof(float)}});
-      connections.push_back({{sourceNode}, 0, {mapNode}, 0});
-      connections.push_back({{mapNode}, 0, {gainNode}, 0});
-      connections.push_back(
-          {{gainNode}, 0, {kMixNode}, static_cast<uint32_t>(index)});
+           {gainDurable[index], gainDurableBytes[index], alignof(float)}},
+          "lane gain[" + lane.id + "]");
+      composition.connect({{sourceNode}, 0, {mapNode}, 0});
+      composition.connect({{mapNode}, 0, {gainNode}, 0});
+      if (lane.trainingSelected && training.has_value()) {
+        const uint64_t trainingNode = kTrainingNodeBase + index;
+        const size_t stateBytes = zdsp::scheduledGainStateBytes();
+        void *state = zdsp::arenaAllocate(&arena, stateBytes, 64);
+        if (state == nullptr)
+          return {zdsp::StatusCode::InsufficientStorage, 8};
+        const zdsp::ScheduledGainConfig trainingConfig{
+            {trainingNode},
+            training->mode == NativePlaybackTrainingMode::Period
+                ? zdsp::ScheduledGainMode::Period
+                : zdsp::ScheduledGainMode::Windows,
+            trainingWindows.empty() ? nullptr : trainingWindows.data(),
+            static_cast<uint32_t>(trainingWindows.size()),
+            training->periodFrames,
+            0.0F,
+            1.0F,
+            {kNativePlaybackGainRampFrames},
+            trainingEnabled};
+        lane.trainingProcessor = zdsp::createScheduledGain(
+            trainingConfig,
+            {static_cast<uint8_t *>(state), static_cast<uint32_t>(stateBytes)});
+        if (lane.trainingProcessor.state == nullptr)
+          return {zdsp::StatusCode::InvalidArgument, 9};
+        composition.add(
+            {{trainingNode},
+             {5, trainingNode},
+             1,
+             zdsp::GraphNodeRole::Processor,
+             zdsp::GraphNodeFlagMayProcessInPlace,
+             1,
+             1,
+             &outputBus,
+             &outputBus,
+             lane.trainingProcessor,
+             {nullptr, 0, 1}},
+            "prepared training duck[" + lane.id + "]");
+        composition.connect({{gainNode}, 0, {trainingNode}, 0});
+        composition.connect(
+            {{trainingNode}, 0, {kSongMixNode}, static_cast<uint32_t>(index)});
+      } else {
+        composition.connect(
+            {{gainNode}, 0, {kSongMixNode}, static_cast<uint32_t>(index)});
+      }
       retainedBytes += lane.owner->retainedBytes();
     }
 
-    const zdsp::BuiltinNodeConfig finalConfigs[] = {
-        {zdsp::BuiltinNodeKind::Mix,
-         {kMixNode},
-         outputChannels,
-         outputChannels,
-         static_cast<uint32_t>(lanes.size()),
-         0.0F,
-         0.0F,
-         0,
-         zdsp::OscillatorWaveform::Saw,
-         nullptr,
-         0},
-        {zdsp::BuiltinNodeKind::Gain,
-         {kMasterNode},
-         outputChannels,
-         outputChannels,
-         1,
-         masterGain,
-         0.0F,
-         0,
-         zdsp::OscillatorWaveform::Saw,
-         nullptr,
-         0},
-        {zdsp::BuiltinNodeKind::SafetyLimiter,
-         {kLimiterNode},
-         outputChannels,
-         outputChannels,
-         1,
-         kNativePlaybackLimiterCeiling,
-         0.0F,
-         0,
-         zdsp::OscillatorWaveform::Saw,
-         nullptr,
-         0},
+    const zdsp::AudioBusDescriptor monoBus = descriptor(1, nullptr);
+    std::array<zdsp::AudioBusDescriptor, 2> outputMixInputs{outputBus,
+                                                            outputBus};
+    std::array<float, zdsp::kMaximumChannelsPerBus> cueMatrix{};
+    for (uint32_t channel = 0; channel < outputChannels; ++channel)
+      cueMatrix[channel] = 1.0F;
+    std::array<zdsp::BuiltinNodeConfig, 7> finalConfigs{};
+    size_t finalCount = 0;
+    const auto addConfig = [&](zdsp::BuiltinNodeKind kind, uint64_t node,
+                               uint32_t inputChannels, uint32_t inputBusCount,
+                               float value) {
+      finalConfigs[finalCount++] = {kind,
+                                    {node},
+                                    inputChannels,
+                                    outputChannels,
+                                    inputBusCount,
+                                    value,
+                                    0.0F,
+                                    0,
+                                    zdsp::OscillatorWaveform::Saw,
+                                    nullptr,
+                                    0};
     };
-    std::array<zdsp::ProcessorHandle, 3> finalProcessors{};
-    std::array<void *, 3> finalDurable{};
-    std::array<size_t, 3> finalDurableBytes{};
-    for (size_t index = 0; index < finalProcessors.size(); ++index) {
+    addConfig(zdsp::BuiltinNodeKind::Mix, kSongMixNode, outputChannels,
+              static_cast<uint32_t>(lanes.size()), 0.0F);
+    addConfig(zdsp::BuiltinNodeKind::Gain, kSongGainNode, outputChannels, 1,
+              masterGain);
+    if (hasReference) {
+      addConfig(zdsp::BuiltinNodeKind::ChannelMap, kCueMapNode, 1, 1, 0.0F);
+      finalConfigs[2].channelMatrix = cueMatrix.data();
+      addConfig(zdsp::BuiltinNodeKind::Gain, kReferenceGainNode, outputChannels,
+                1, cuePlan->volume);
+      addConfig(zdsp::BuiltinNodeKind::Mix, kOutputMixNode, outputChannels, 2,
+                0.0F);
+      addConfig(zdsp::BuiltinNodeKind::Gain, kOutputGainNode, outputChannels, 1,
+                1.0F);
+    }
+    addConfig(zdsp::BuiltinNodeKind::SafetyLimiter, kLimiterNode,
+              outputChannels, 1, kNativePlaybackLimiterCeiling);
+
+    std::array<zdsp::ProcessorHandle, 7> finalProcessors{};
+    std::array<void *, 7> finalDurable{};
+    std::array<size_t, 7> finalDurableBytes{};
+    for (size_t index = 0; index < finalCount; ++index) {
       finalProcessors[index] = makeBuiltin(
           finalConfigs[index], &finalDurable[index], &finalDurableBytes[index]);
       if (finalProcessors[index].state == nullptr)
         return {zdsp::StatusCode::InsufficientStorage, 5};
     }
     masterProcessor = finalProcessors[1];
-    nodes.push_back({{kMixNode},
-                     {1, static_cast<uint64_t>(zdsp::BuiltinNodeKind::Mix)},
-                     1,
-                     zdsp::GraphNodeRole::Processor,
-                     zdsp::GraphNodeFlagNone,
-                     static_cast<uint32_t>(lanes.size()),
-                     1,
-                     mixInputs.data(),
-                     &outputBus,
-                     finalProcessors[0],
-                     {finalDurable[0], finalDurableBytes[0], alignof(float)}});
-    nodes.push_back({{kMasterNode},
-                     {1, static_cast<uint64_t>(zdsp::BuiltinNodeKind::Gain)},
-                     1,
-                     zdsp::GraphNodeRole::Processor,
-                     zdsp::GraphNodeFlagMayProcessInPlace,
-                     1,
-                     1,
-                     &outputBus,
-                     &outputBus,
-                     finalProcessors[1],
-                     {finalDurable[1], finalDurableBytes[1], alignof(float)}});
-    nodes.push_back(
-        {{kLimiterNode},
-         {1, static_cast<uint64_t>(zdsp::BuiltinNodeKind::SafetyLimiter)},
-         1,
-         zdsp::GraphNodeRole::Processor,
-         zdsp::GraphNodeFlagMayProcessInPlace,
-         1,
-         1,
-         &outputBus,
-         &outputBus,
-         finalProcessors[2],
-         {finalDurable[2], finalDurableBytes[2], alignof(float)}});
-    nodes.push_back({{kOutputNode},
+    referenceGain = hasReference ? cuePlan->volume : 0.0F;
+    if (hasTimePitch) {
+      const SignalsmithTimePitchConfig timePitchConfig{
+          {kTimePitchNode}, {sampleRate}, outputChannels, maximumFrames,
+          timePitchCorrectionSemitones};
+      const size_t stateBytes = signalsmithTimePitchStateBytes();
+      void *state = zdsp::arenaAllocate(&arena, stateBytes, 64);
+      timePitchPreparedBytes =
+          signalsmithTimePitchPreparedBytes(timePitchConfig);
+      timePitchPrepared = zdsp::arenaAllocate(
+          &arena, timePitchPreparedBytes, alignof(float));
+      if (state == nullptr || timePitchPrepared == nullptr ||
+          timePitchPreparedBytes == 0)
+        return {zdsp::StatusCode::InsufficientStorage, 10};
+      timePitchProcessor = createSignalsmithTimePitch(
+          timePitchConfig,
+          {static_cast<uint8_t *>(state), static_cast<uint32_t>(stateBytes)});
+      if (timePitchProcessor.state == nullptr)
+        return {zdsp::StatusCode::InvalidArgument, 11};
+        const size_t timePitchRetained =
+            signalsmithExternalRetainedBytes(timePitchConfig);
+      if (timePitchRetained == 0 ||
+          retainedBytes > std::numeric_limits<size_t>::max() -
+                              timePitchRetained)
+        return {zdsp::StatusCode::CapacityExceeded, 12};
+      retainedBytes += timePitchRetained;
+    }
+
+    const auto appendBuiltin = [&](size_t index, const char *label,
+                                   const zdsp::AudioBusDescriptor *inputs,
+                                   uint32_t inputBusCount,
+                                   zdsp::GraphNodeFlags flags) {
+      const zdsp::BuiltinNodeConfig &config = finalConfigs[index];
+      composition.add(
+          {config.node,
+           {1, static_cast<uint64_t>(config.kind)},
+           1,
+           zdsp::GraphNodeRole::Processor,
+           flags,
+           inputBusCount,
+           1,
+           inputs,
+           &outputBus,
+           finalProcessors[index],
+           {finalDurable[index], finalDurableBytes[index], alignof(float)}},
+          label);
+    };
+    appendBuiltin(0, "song mix", songMixInputs.data(),
+                  static_cast<uint32_t>(songMixInputs.size()),
+                  zdsp::GraphNodeFlagNone);
+    appendBuiltin(1, "song gain", &outputBus, 1,
+                  zdsp::GraphNodeFlagMayProcessInPlace);
+
+    composition.connect({{kSongMixNode}, 0, {kSongGainNode}, 0});
+    uint64_t processedSongNode = kSongGainNode;
+    if (hasTimePitch) {
+      composition.add({{kTimePitchNode},
+                       {6, kTimePitchNode},
+                       1,
+                       zdsp::GraphNodeRole::Processor,
+                       zdsp::GraphNodeFlagNone,
+                       1,
+                       1,
+                       &outputBus,
+                       &outputBus,
+                       timePitchProcessor,
+                       {timePitchPrepared, timePitchPreparedBytes,
+                        alignof(float)}},
+                      "Signalsmith time/pitch");
+      composition.connect({{kSongGainNode}, 0, {kTimePitchNode}, 0});
+      processedSongNode = kTimePitchNode;
+    }
+    if (hasReference) {
+      cueEvents.reserve(cuePlan->events.size());
+      for (const PlaybackCueEvent &event : cuePlan->events) {
+        cueEvents.push_back(
+            {event.projectFrame, static_cast<uint32_t>(event.sound)});
+      }
+      cueSounds = {{{cuePlan->ordinaryClickPcm.data(),
+                     static_cast<uint32_t>(cuePlan->ordinaryClickPcm.size())},
+                    {cuePlan->accentClickPcm.data(),
+                     static_cast<uint32_t>(cuePlan->accentClickPcm.size())}}};
+      const size_t cueStateBytes = zdsp::scheduledCueSourceStateBytes();
+      void *cueState = zdsp::arenaAllocate(&arena, cueStateBytes, 64);
+      if (cueState == nullptr)
+        return {zdsp::StatusCode::InsufficientStorage, 6};
+      cueSource = zdsp::createScheduledCueSource(
+          {{kCueSourceNode},
+           cueEvents.data(),
+           static_cast<uint32_t>(cueEvents.size()),
+           cueSounds.data(),
+           static_cast<uint32_t>(cueSounds.size()),
+           {sampleRate},
+           playbackRateQ32},
+          {static_cast<uint8_t *>(cueState),
+           static_cast<uint32_t>(cueStateBytes)});
+      if (cueSource.state == nullptr)
+        return {zdsp::StatusCode::InvalidArgument, 7};
+
+      composition.add({{kCueSourceNode},
+                       {4, kCueSourceNode},
+                       1,
+                       zdsp::GraphNodeRole::Processor,
+                       zdsp::GraphNodeFlagNone,
+                       0,
+                       1,
+                       nullptr,
+                       &monoBus,
+                       cueSource,
+                       {nullptr, 0, 1}},
+                      "prepared cue source");
+      appendBuiltin(2, "reference map", &monoBus, 1,
+                    zdsp::GraphNodeFlagMayProcessInPlace);
+      appendBuiltin(3, "reference gain", &outputBus, 1,
+                    zdsp::GraphNodeFlagMayProcessInPlace);
+      appendBuiltin(4, "output mix", outputMixInputs.data(), 2,
+                    zdsp::GraphNodeFlagNone);
+      appendBuiltin(5, "output gain", &outputBus, 1,
+                    zdsp::GraphNodeFlagMayProcessInPlace);
+      appendBuiltin(6, "safety limiter", &outputBus, 1,
+                    zdsp::GraphNodeFlagMayProcessInPlace);
+      composition.connect({{kCueSourceNode}, 0, {kCueMapNode}, 0});
+      composition.connect({{kCueMapNode}, 0, {kReferenceGainNode}, 0});
+      composition.connect({{processedSongNode}, 0, {kOutputMixNode}, 0});
+      composition.connect({{kReferenceGainNode}, 0, {kOutputMixNode}, 1});
+      composition.connect({{kOutputMixNode}, 0, {kOutputGainNode}, 0});
+      composition.connect({{kOutputGainNode}, 0, {kLimiterNode}, 0});
+    } else {
+      appendBuiltin(2, "safety limiter", &outputBus, 1,
+                    zdsp::GraphNodeFlagMayProcessInPlace);
+      composition.connect({{processedSongNode}, 0, {kLimiterNode}, 0});
+    }
+    composition.add({{kOutputNode},
                      {0, kOutputNode},
                      1,
                      zdsp::GraphNodeRole::Output,
@@ -459,19 +2723,27 @@ struct PreparedPlaybackGraph {
                      &outputBus,
                      nullptr,
                      {},
-                     {}});
-    connections.push_back({{kMixNode}, 0, {kMasterNode}, 0});
-    connections.push_back({{kMasterNode}, 0, {kLimiterNode}, 0});
-    connections.push_back({{kLimiterNode}, 0, {kOutputNode}, 0});
+                     {}},
+                    "physical output");
+    composition.connect({{kLimiterNode}, 0, {kOutputNode}, 0});
+
+    graphNodeCount = static_cast<uint32_t>(composition.nodes.size());
+    graphConnectionCount =
+        static_cast<uint32_t>(composition.connections.size());
+    topology = composition.summary();
+    if (cuePlan != nullptr) {
+      retainedBytes += cuePlanRetainedBytes(*cuePlan);
+      retainedBytes += cueEvents.capacity() * sizeof(zdsp::ScheduledCueEvent);
+    }
 
     const zdsp::GraphDescription description{
         zdsp::kGraphFormatVersion,
         {sampleRate},
         {maximumFrames},
-        nodes.data(),
-        static_cast<uint32_t>(nodes.size()),
-        connections.data(),
-        static_cast<uint32_t>(connections.size())};
+        composition.nodes.data(),
+        static_cast<uint32_t>(composition.nodes.size()),
+        composition.connections.data(),
+        static_cast<uint32_t>(composition.connections.size())};
     zdsp::GraphCompileResult compiled{};
     const zdsp::Status compileStatus =
         zdsp::compileGraph(description, &arena, &compiled, compileError);
@@ -480,6 +2752,65 @@ struct PreparedPlaybackGraph {
       return compileStatus;
     }
     graph = compiled.graph;
+    graphLatencyFrames = zdsp::compiledGraphLatency(*graph).value;
+    latencyCompensatedEdgeCount =
+        zdsp::compiledGraphBufferPlan(*graph).compensatedEdgeCount;
+    std::optional<NativePlaybackGraphSnapshot> structured =
+        composition.snapshot(transportGeneration, sampleRate, maximumFrames);
+    if (!structured.has_value() ||
+        structured->nodes.size() != graphNodeCount ||
+        structured->connections.size() != graphConnectionCount ||
+        zdsp::compiledGraphNodeCount(*graph) != structured->nodes.size() ||
+        structured->outputLatencyFrames != graphLatencyFrames ||
+        structured->latencyCompensatedConnectionCount !=
+            latencyCompensatedEdgeCount)
+      return {zdsp::StatusCode::InvalidArgument, 15};
+    for (uint32_t index = 0; index < zdsp::compiledGraphNodeCount(*graph);
+         ++index) {
+      const uint64_t compiledId =
+          zdsp::compiledGraphNodeId(*graph, index).value;
+      if (std::count_if(structured->nodes.begin(), structured->nodes.end(),
+                        [compiledId](const auto &node) {
+                          return node.id == compiledId;
+                        }) != 1)
+        return {zdsp::StatusCode::InvalidArgument, 16};
+    }
+    graphSnapshot = std::make_shared<const NativePlaybackGraphSnapshot>(
+        std::move(*structured));
+    if (hasTimePitch) {
+      timePitchAnchorFrames =
+          signalsmithTimePitchAnchorFrames(timePitchProcessor);
+      if (timePitchAnchorFrames == 0 ||
+          timePitchAnchorFrames >
+              std::numeric_limits<size_t>::max() / outputChannels)
+        return {zdsp::StatusCode::CapacityExceeded, 13};
+      timePitchAnchorSamples.resize(
+          static_cast<size_t>(timePitchAnchorFrames) * outputChannels);
+      for (uint32_t channel = 0; channel < outputChannels; ++channel)
+        timePitchAnchorChannels[channel] =
+            timePitchAnchorSamples.data() +
+            static_cast<size_t>(channel) * timePitchAnchorFrames;
+      if (timePitchAnchorSamples.capacity() >
+              std::numeric_limits<size_t>::max() / sizeof(float) ||
+          retainedBytes >
+              std::numeric_limits<size_t>::max() -
+                  timePitchAnchorSamples.capacity() * sizeof(float))
+        return {zdsp::StatusCode::CapacityExceeded, 14};
+      retainedBytes += timePitchAnchorSamples.capacity() * sizeof(float);
+      if (!fillTimePitchAnchor(preparedStartProjectFrame) ||
+          !primeSignalsmithTimePitchInitial(timePitchProcessor,
+                                            timePitchAnchorInput()))
+        return {zdsp::StatusCode::InvalidArgument, 15};
+      initialTimePitchReanchorPlan = primeSignalsmithTimePitchReanchor(
+          timePitchProcessor, timePitchAnchorInput());
+      if (!initialTimePitchReanchorPlan.valid())
+        return {zdsp::StatusCode::InvalidArgument, 15};
+      const SignalsmithTimePitchLoopPrepareResult loopPrepared =
+          configureTimePitchLoop(initialTransport.loop);
+      if (!loopPrepared.ok())
+        return {zdsp::StatusCode::InvalidArgument, 15};
+      initialTimePitchLoopPlan = loopPrepared.plan;
+    }
     zdsp::initializePublisher(&publisher, retirement, 1, &diagnostics);
     const zdsp::TransitionPlan hardCut{zdsp::TransitionKind::HardCut,
                                        {0},
@@ -503,7 +2834,15 @@ struct PreparedPlaybackGraph {
     zdsp::initializeGraphRunner(&runner, &publisher, {}, &parameters, nullptr,
                                 &diagnostics);
     runnerInitialized = true;
+    transport.initialize(transportGeneration, preparedStartProjectFrame,
+                         initialTransport,
+                         static_cast<int64_t>(durationFrames),
+                         cueEvents.empty() ? nullptr : cueEvents.data(),
+                         static_cast<uint32_t>(cueEvents.size()), playbackRate,
+                         timePitchProcessor, initialTimePitchLoopPlan,
+                         initialTimePitchReanchorPlan);
     adapter.runner = &runner;
+    adapter.transport = {slicePreparedPlaybackTransport, &transport};
     callback.adapter = &adapter;
     return zdsp::okStatus();
   }
@@ -526,8 +2865,12 @@ struct PreparedPlaybackGraph {
     for (size_t index = 0; index < lanes.size(); ++index) {
       const Lane &lane = lanes[index];
       const float effective =
-          lane.muted || (anySolo && !lane.solo) ? 0.0F : lane.gain;
-      events[index] = {{kLaneNodeBase + index * 3u + 2u},
+          lane.muted || (anySolo && !lane.solo)
+              ? 0.0F
+              : lane.gain * lane.graphGainTrim;
+      if (lane.gainNodeId == 0)
+        return false;
+      events[index] = {{lane.gainNodeId},
                        zdsp::kGainParameter,
                        {0},
                        effective,
@@ -542,12 +2885,53 @@ struct PreparedPlaybackGraph {
   }
 
   bool enqueueMaster(float value) noexcept {
-    return enqueueGain({kMasterNode}, value);
+    return masterGainNodeId != 0 &&
+           enqueueGain({masterGainNodeId}, value * masterGraphTrim);
+  }
+
+  bool enqueueTrainingEnabled(bool enabled) noexcept {
+    std::array<zdsp::ParameterEvent, kNativePlaybackMaximumLanes> events{};
+    uint32_t count = 0;
+    for (size_t index = 0; index < lanes.size(); ++index) {
+      if (!lanes[index].trainingSelected)
+        continue;
+      if (lanes[index].trainingNodeId == 0)
+        return false;
+      events[count++] = {{lanes[index].trainingNodeId},
+                         zdsp::kScheduledGainEnableParameter,
+                         {0},
+                         enabled ? 1.0F : 0.0F,
+                         zdsp::ParameterCurve::Step,
+                         {0}};
+    }
+    if (count == 0)
+      return false;
+    if (parameters.pushBatch(events.data(), count)) {
+      trainingEnabled = enabled;
+      return true;
+    }
+    diagnostics.parameterOverflows.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  bool enqueuePreviewClick(NativePlaybackPreviewClickSound sound) noexcept {
+    return cueSource.state != nullptr &&
+           zdsp::enqueueScheduledCueOneShot(
+               cueSource, static_cast<uint32_t>(sound));
+  }
+
+  zdsp::ScheduledCueOneShotStatus previewClickStatus() const noexcept {
+    return zdsp::scheduledCueOneShotStatus(cueSource);
   }
 
   bool allCursorsAtStart() const noexcept {
+    const uint64_t selected =
+        cuePlan == nullptr || cuePlan->sourceStartFrame < 0
+            ? 0
+            : static_cast<uint64_t>(cuePlan->sourceStartFrame);
     for (const Lane &lane : lanes)
-      if (zdsp::decodedBufferSourceCursor(lane.source, &lane.cursorReader) != 0)
+      if (zdsp::decodedBufferSourceCursor(lane.source, &lane.cursorReader) !=
+          std::min(selected, lane.owner->frameCount()))
         return false;
     return true;
   }
@@ -567,6 +2951,7 @@ struct PreparedPlaybackGraph {
         return false;
       runnerInitialized = false;
       adapter.runner = nullptr;
+      adapter.transport = {};
       callback.adapter = nullptr;
     }
     if (graph != nullptr) {
@@ -578,6 +2963,14 @@ struct PreparedPlaybackGraph {
     }
     observe(NativePlaybackLifecycleEvent::DecodedRelease);
     lanes.clear();
+    cueSource = {};
+    cueEvents.clear();
+    cueSounds = {};
+    cuePlan.reset();
+    training.reset();
+    trainingWindows.clear();
+    graphSnapshot.reset();
+    graphArenaBytes = 0;
     retainedBytes = 0;
     return true;
   }
@@ -1069,6 +3462,8 @@ const char *nativePlaybackErrorName(NativePlaybackError error) noexcept {
     return "queue-full";
   case NativePlaybackError::TeardownUncertain:
     return "teardown-uncertain";
+  case NativePlaybackError::UnsupportedPlaybackRate:
+    return "unsupported-playback-rate";
   }
   return "host-failure";
 }
@@ -1138,6 +3533,9 @@ struct NativePlaybackSession::Impl {
   AudioHostTerminalCause lastTerminal{};
   std::string lastError;
   NativePlaybackTestHooks *testHooks{nullptr};
+  mutable PreparedPlaybackTransport::Telemetry lastGoodTransportTelemetry{};
+  mutable uint64_t lastGoodTransportTelemetryGeneration{0};
+  mutable bool hasLastGoodTransportTelemetry{false};
   uint64_t sessionId{0};
   bool quarantineSlotReserved{false};
   std::atomic<uint64_t> pendingClaimGeneration{0};
@@ -1616,6 +4014,8 @@ struct NativePlaybackSession::Impl {
     latchTerminal(effectiveTerminalCause(lastHost, callbackTerminalCause()));
     const bool quiesced = safeStoppedState(lastHost.state);
     if (quiesced) {
+      if (prepared != nullptr)
+        prepared->transport.forceStoppedAfterQuiescence();
       // These admission markers are physical-ownership facts, not transient
       // call-stack flags. Clear them only after provider quiescence is proven.
       openMutationGeneration = 0;
@@ -1669,6 +4069,23 @@ NativePlaybackSession::~NativePlaybackSession() = default;
 AudioHostInventory NativePlaybackSession::enumerate() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->host.enumerate();
+}
+
+bool NativePlaybackSession::replaceAudioHostBackend(
+    std::unique_ptr<AudioHostBackend> backend) {
+  if (!backend) return false;
+  std::scoped_lock lock(impl_->mutex, impl_->generationGate);
+  if (impl_->prepared != nullptr || impl_->generation != 0 ||
+      impl_->state != NativePlaybackState::Unloaded ||
+      impl_->prepareMutationGeneration != 0 ||
+      impl_->retiringPrepareGeneration != 0)
+    return false;
+  impl_->host.stop();
+  impl_->host = AudioHost(std::move(backend));
+  impl_->lastHost = {};
+  impl_->lastTerminal = {};
+  impl_->lastError.clear();
+  return true;
 }
 
 bool NativePlaybackSession::claimGeneration(uint64_t generation) noexcept {
@@ -1863,6 +4280,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
     return failure(error, generation, impl_->state, std::move(message));
   };
 
+  uint64_t preparedPlaybackRateQ32 = 0;
   if (config.outputDeviceUid.empty() || !validChannels(config.outputChannels) ||
       !std::isfinite(config.requestedSampleRate) ||
       config.requestedSampleRate <= 0.0 ||
@@ -1870,11 +4288,39 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
           static_cast<double>(std::numeric_limits<uint32_t>::max()) ||
       std::floor(config.requestedSampleRate) != config.requestedSampleRate ||
       config.maximumFrames == 0 || config.maximumFrames > kAudioHostMaxFrames ||
-      !finiteGain(config.masterGain) || config.maximumRetainedBytes == 0 ||
+      !finiteGain(config.masterGain) ||
+      !rateToQ32(config.playbackRate, &preparedPlaybackRateQ32) ||
+      !std::isfinite(config.transposeSemitones) ||
+      config.transposeSemitones < -24.0 ||
+      config.transposeSemitones > 24.0 ||
+      config.maximumRetainedBytes == 0 ||
       sources.empty() || sources.size() > kNativePlaybackMaximumLanes) {
     return failPreparation(NativePlaybackError::InvalidConfiguration,
                            "Native playback configuration is invalid");
   }
+  const double timePitchCorrection =
+      config.transposeSemitones - 12.0 * std::log2(config.playbackRate);
+  const bool needsTimePitch =
+      std::fabs(timePitchCorrection) > 1e-6 ||
+      graphDocumentRequestsSignalsmith(config.graphDocument);
+  if (needsTimePitch &&
+      (!std::isfinite(timePitchCorrection) || timePitchCorrection < -48.0 ||
+       timePitchCorrection > 48.0 ||
+       config.requestedSampleRate <
+           kSignalsmithTimePitchMinimumSampleRate ||
+       config.requestedSampleRate >
+           kSignalsmithTimePitchMaximumSampleRate ||
+       config.outputChannels.size() >
+           kSignalsmithTimePitchMaximumChannels ||
+       config.maximumFrames > kSignalsmithTimePitchMaximumBlockFrames)) {
+    return failPreparation(
+        NativePlaybackError::InvalidConfiguration,
+        "Native time/pitch configuration exceeds the prepared DSP bounds");
+  }
+  if (config.cuePlan.has_value() &&
+      config.cuePlan->playbackRate != config.playbackRate)
+    return failPreparation(NativePlaybackError::InvalidConfiguration,
+                           "Cue and transport playback rates must match");
   for (size_t index = 0; index < sources.size(); ++index) {
     if (sources[index].id.empty() || !sources[index].descriptor.valid() ||
         !finiteGain(sources[index].gain)) {
@@ -1886,15 +4332,96 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
         return failPreparation(NativePlaybackError::InvalidConfiguration,
                                "Playback lane IDs must be unique");
   }
+  if (config.trainingDuck.has_value()) {
+    const NativePlaybackTrainingDuckConfig &training = *config.trainingDuck;
+    if (training.laneIds.empty() ||
+        training.laneIds.size() > kNativePlaybackMaximumLanes ||
+        (training.mode == NativePlaybackTrainingMode::Period &&
+         (training.periodFrames <= 0 || !training.windows.empty())) ||
+        (training.mode == NativePlaybackTrainingMode::Windows &&
+         (training.windows.empty() ||
+          training.windows.size() > zdsp::kMaximumScheduledGainWindows))) {
+      return failPreparation(NativePlaybackError::InvalidConfiguration,
+                             "The prepared training schedule is invalid");
+    }
+    for (size_t index = 0; index < training.laneIds.size(); ++index) {
+      const std::string &id = training.laneIds[index];
+      const bool known = std::any_of(
+          sources.begin(), sources.end(),
+          [&](const NativePlaybackLaneSource &source) { return source.id == id; });
+      if (!known ||
+          std::find(training.laneIds.begin(),
+                    training.laneIds.begin() + static_cast<ptrdiff_t>(index),
+                    id) != training.laneIds.begin() +
+                               static_cast<ptrdiff_t>(index)) {
+        return failPreparation(NativePlaybackError::InvalidConfiguration,
+                               "A prepared training lane is invalid");
+      }
+    }
+    if (training.mode == NativePlaybackTrainingMode::Windows) {
+      for (size_t index = 0; index < training.windows.size(); ++index) {
+        const NativePlaybackTrainingWindow &window = training.windows[index];
+        if (window.startProjectFrame < 0 ||
+            window.endProjectFrame <= window.startProjectFrame ||
+            (index != 0 && window.startProjectFrame <
+                               training.windows[index - 1].endProjectFrame)) {
+          return failPreparation(NativePlaybackError::InvalidConfiguration,
+                                 "Prepared training windows are invalid");
+        }
+      }
+    }
+  }
+
+  const size_t trainingLaneCount =
+      config.trainingDuck.has_value() ? config.trainingDuck->laneIds.size() : 0;
+  if (!config.graphDocument.has_value()) {
+    NativePlaybackGraphContext synthesizedContext;
+    synthesizedContext.outputChannels =
+        static_cast<uint32_t>(config.outputChannels.size());
+    synthesizedContext.hasReference = config.cuePlan.has_value();
+    synthesizedContext.hasTraining = config.trainingDuck.has_value();
+    synthesizedContext.needsTimePitch = needsTimePitch;
+    synthesizedContext.lanes.reserve(sources.size());
+    for (const NativePlaybackLaneSource &source : sources) {
+      const bool selected = config.trainingDuck.has_value() &&
+          std::find(config.trainingDuck->laneIds.begin(),
+                    config.trainingDuck->laneIds.end(), source.id) !=
+              config.trainingDuck->laneIds.end();
+      // Source channels do not affect synthesis node count and are decoded
+      // later. One is a valid placeholder for this pre-decode admission.
+      synthesizedContext.lanes.push_back({source.id, 1, selected});
+    }
+    if (synthesizedNativePlaybackGraphNodeCount(synthesizedContext) >
+        kNativePlaybackMaximumGraphNodes) {
+      return failPreparation(
+          NativePlaybackError::LimitExceeded,
+          "The synthesized native playback graph exceeds the bounded node cap");
+    }
+  }
+  const std::optional<size_t> graphArenaAdmission =
+      preparedGraphArenaCapacity(
+          sources.size(), trainingLaneCount, config.cuePlan.has_value(),
+          static_cast<uint32_t>(config.outputChannels.size()),
+          config.maximumFrames);
+  if (!graphArenaAdmission.has_value() ||
+      *graphArenaAdmission > config.maximumRetainedBytes) {
+    return failPreparation(
+        NativePlaybackError::LimitExceeded,
+        "The native playback graph arena exceeds the aggregate memory limit");
+  }
 
   PrepareCancellationState cancellationState{&impl_->latestGeneration,
                                              &impl_->cancelledThrough,
                                              generation, cancellation};
   const DecodeCancellation combined{&cancellationState, prepareCancelled};
 
+  // Reserve the graph's exact realtime-arena allocation before decoding. The
+  // prepared graph reports that same owned capacity once; processor durable
+  // storage placed inside it is not charged a second time.
+  size_t retained = *graphArenaAdmission;
   std::vector<PreparedPlaybackGraph::Lane> decoded;
   decoded.reserve(sources.size());
-  size_t retained = 0;
+  uint64_t authoritativeDurationFrames = 0;
   for (NativePlaybackLaneSource &source : sources) {
     if (combined.isRequested())
       return failPreparation(NativePlaybackError::Cancelled,
@@ -1926,6 +4453,8 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
           "Prepared playback lanes exceed the aggregate memory limit");
     }
     retained += bytes;
+    authoritativeDurationFrames =
+        std::max(authoritativeDurationFrames, result.audio->frameCount());
     PreparedPlaybackGraph::Lane lane;
     lane.id = std::move(source.id);
     lane.owner = std::move(result.audio);
@@ -1938,18 +4467,101 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   if (combined.isRequested())
     return failPreparation(NativePlaybackError::Cancelled,
                            "Native playback preparation was superseded");
+  if (authoritativeDurationFrames == 0 ||
+      authoritativeDurationFrames >
+          static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return failPreparation(NativePlaybackError::LimitExceeded,
+                           "Decoded playback duration is out of range");
+  }
+
+  std::shared_ptr<const PlaybackCuePlan> cuePlan;
+  if (config.cuePlan.has_value()) {
+    PlaybackCuePlanRequest request = *config.cuePlan;
+    // Decoded lane frames are the sole duration authority. The maximum keeps
+    // unequal lanes addressable until the longest lane ends; bridge metadata,
+    // beats and lyrics never guess or truncate this boundary.
+    request.sampleRate = config.requestedSampleRate;
+    request.durationSeconds = static_cast<double>(authoritativeDurationFrames) /
+                              config.requestedSampleRate;
+    request.playbackRate = config.playbackRate;
+    PlaybackCuePlanResult planned = preparePlaybackCuePlan(request);
+    if (!planned.ok()) {
+      return failPreparation(cuePlanError(planned.error),
+                             planned.message.empty()
+                                 ? "The playback cue plan is invalid"
+                                 : std::move(planned.message));
+    }
+    cuePlan = std::move(planned.plan);
+    const size_t cueBytes =
+        cuePlanRetainedBytes(*cuePlan) + cueRuntimeRetainedBytes(*cuePlan);
+    if (cueBytes > config.maximumRetainedBytes - retained) {
+      return failPreparation(
+          NativePlaybackError::LimitExceeded,
+          "The playback cue plan exceeds the aggregate memory limit");
+    }
+    retained += cueBytes;
+    // The immutable plan is now the sole schedule authority. Do not retain a
+    // second copy of the request's potentially large beat/downbeat vectors.
+    config.cuePlan.reset();
+  }
+
+  const int64_t earliestStartFrame =
+      cuePlan == nullptr ? 0 : -cuePlan->preRollFrames;
+  const int64_t finalProjectDuration =
+      cuePlan == nullptr ? static_cast<int64_t>(authoritativeDurationFrames)
+                         : cuePlan->songDurationFrames;
+  if (config.trainingDuck.has_value() &&
+      config.trainingDuck->mode == NativePlaybackTrainingMode::Windows &&
+      config.trainingDuck->windows.back().endProjectFrame >
+          finalProjectDuration) {
+    return failPreparation(NativePlaybackError::InvalidConfiguration,
+                           "A prepared training window exceeds the song");
+  }
+  const int64_t preparedStartProjectFrame =
+      config.preparedStartProjectFrame.value_or(earliestStartFrame);
+  if (preparedStartProjectFrame < earliestStartFrame ||
+      preparedStartProjectFrame > finalProjectDuration) {
+    return failPreparation(
+        NativePlaybackError::InvalidConfiguration,
+        "The prepared playback start position is outside the final project "
+        "timeline");
+  }
+  if (config.initialTransport.loop.has_value()) {
+    const NativePlaybackInitialLoop &loop = *config.initialTransport.loop;
+    if (loop.startProjectFrame < 0 ||
+        loop.endProjectFrame <= loop.startProjectFrame ||
+        loop.endProjectFrame > finalProjectDuration) {
+      return failPreparation(
+          NativePlaybackError::InvalidConfiguration,
+          "The prepared initial playback loop is outside the final project "
+          "timeline");
+    }
+  }
 
   auto prepared = std::make_unique<PreparedPlaybackGraph>(
-      std::move(decoded), config.requestedSampleRate,
+      std::move(decoded), std::move(cuePlan), config.trainingDuck,
+      std::move(config.graphDocument),
+      config.requestedSampleRate,
       static_cast<uint32_t>(config.outputChannels.size()), config.maximumFrames,
-      config.masterGain, impl_->testHooks);
+      config.masterGain, config.playbackRate, config.transposeSemitones,
+      preparedStartProjectFrame,
+      config.initialTransport, generation, impl_->testHooks);
   prepared->inject(NativePlaybackAllocationPoint::AfterArena);
   zdsp::GraphCompileError compileError{};
   const zdsp::Status graphStatus = prepared->prepare(&compileError);
   if (!zdsp::succeeded(graphStatus)) {
     (void)prepared->shutdown();
-    return failPreparation(NativePlaybackError::GraphFailure,
-                           "The native playback graph could not be prepared");
+    return failPreparation(
+        NativePlaybackError::GraphFailure,
+        prepared->graphPreparationError.empty()
+            ? "The native playback graph could not be prepared"
+            : prepared->graphPreparationError);
+  }
+  if (prepared->retainedBytes > config.maximumRetainedBytes) {
+    (void)prepared->shutdown();
+    return failPreparation(
+        NativePlaybackError::LimitExceeded,
+        "The prepared playback graph exceeds the aggregate memory limit");
   }
   prepared->inject(NativePlaybackAllocationPoint::AfterGraphCompile);
 
@@ -2122,7 +4734,7 @@ NativePlaybackResult NativePlaybackSession::openOutput(
     injectFailure(impl_->testHooks,
                   NativePlaybackAllocationPoint::OpenPreconditionResult);
     return failure(NativePlaybackError::InvalidState, generation, impl_->state,
-                   "The prepared frame-zero graph cannot open output now");
+                   "The prepared-entry graph cannot open output now");
   }
 
   const NativePlaybackPrepareConfig &config = impl_->preparedConfig;
@@ -2149,6 +4761,7 @@ NativePlaybackResult NativePlaybackSession::openOutput(
   AudioHostConfig hostConfig;
   hostConfig.outputDeviceUid = config.outputDeviceUid;
   hostConfig.outputChannels = config.outputChannels;
+  hostConfig.exclusive = config.exclusive;
   hostConfig.requestedSampleRate = config.requestedSampleRate;
   hostConfig.requestedBufferFrames = config.requestedBufferFrames;
   hostConfig.maximumFrames = config.maximumFrames;
@@ -2159,6 +4772,10 @@ NativePlaybackResult NativePlaybackSession::openOutput(
   }
   impl_->openInvocationGeneration = generation;
   impl_->openMutationGeneration = generation;
+  // openOutput is admitted only while the prior provider is quiescent and all
+  // positioned sources remain at their prepared entry. The next stream owns
+  // a fresh output-frame anchor even if a previous open/start failed.
+  impl_->prepared->transport.resetForOpen();
   const AudioHostResult opened = impl_->host.open(
       hostConfig, &nativePlaybackRender, &impl_->prepared->callback);
   const uint32_t actualMaximumFrames = opened.format.maximumFrames;
@@ -2212,7 +4829,13 @@ NativePlaybackResult NativePlaybackSession::openOutput(
 
 NativePlaybackResult
 NativePlaybackSession::start(uint64_t generation,
-                             NativePlaybackDeliveryToken *deliveryToken) try {
+                             NativePlaybackDeliveryToken *deliveryToken) {
+  return startOutput(generation, true, deliveryToken);
+}
+
+NativePlaybackResult NativePlaybackSession::startOutput(
+    uint64_t generation, bool startTransport,
+    NativePlaybackDeliveryToken *deliveryToken) try {
   if (deliveryToken != nullptr)
     *deliveryToken = {};
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2229,12 +4852,26 @@ NativePlaybackSession::start(uint64_t generation,
     return failure(NativePlaybackError::InvalidState, generation, impl_->state,
                    "Native playback reached a terminal output state");
   }
+  // previewClick may already own a running physical host while intentionally
+  // leaving song transport stopped. The later user Start is a bounded
+  // transport publication, not a second provider start.
+  if (startTransport && impl_->state == NativePlaybackState::Running &&
+      impl_->prepared->transport.desiredState ==
+          NativePlaybackTransportState::Stopped &&
+      impl_->prepared->allCursorsAtStart()) {
+    if (!impl_->prepared->transport.start())
+      return failureWithoutMessage(NativePlaybackError::QueueFull, generation,
+                                   impl_->state);
+    return impl_->success(generation);
+  }
   if (impl_->state != NativePlaybackState::OutputOpen ||
       !impl_->prepared->allCursorsAtStart()) {
     injectFailure(impl_->testHooks,
                   NativePlaybackAllocationPoint::StartPreconditionResult);
     return failure(NativePlaybackError::InvalidState, generation, impl_->state,
-                   "Native playback can start only once from frame zero");
+                   startTransport
+                       ? "Native playback can start only once from frame zero"
+                       : "The prepared click bus cannot start output now");
   }
 
   const AudioHostStatus before = impl_->host.status();
@@ -2262,6 +4899,10 @@ NativePlaybackSession::start(uint64_t generation,
   // The provider may invoke the render callback before start() returns. Keep
   // the public state at OutputOpen until generation, cancellation, callback
   // and host health have all been revalidated after that call.
+  if (startTransport && !impl_->prepared->transport.start()) {
+    return failureWithoutMessage(NativePlaybackError::QueueFull, generation,
+                                 impl_->state);
+  }
   if (!impl_->armDelivery(NativePlaybackDeliveryCommand::Start, generation,
                           deliveryToken)) {
     return failureWithoutMessage(NativePlaybackError::ResourceExhausted,
@@ -2545,6 +5186,161 @@ NativePlaybackSession::cleanupProof(uint64_t generation) const noexcept {
   }
 }
 
+NativePlaybackResult NativePlaybackSession::pause(uint64_t generation) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running ||
+      (impl_->prepared->transport.desiredState !=
+           NativePlaybackTransportState::Playing &&
+       impl_->prepared->transport.desiredState !=
+           NativePlaybackTransportState::PreRoll)) {
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback is not currently advancing");
+  }
+  if (!impl_->prepared->transport.pause())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  return impl_->success(generation);
+}
+
+NativePlaybackResult NativePlaybackSession::resume(uint64_t generation) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running ||
+      impl_->prepared->transport.desiredState !=
+          NativePlaybackTransportState::Paused) {
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback is not paused");
+  }
+  if (!impl_->prepared->transport.resume())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  return impl_->success(generation);
+}
+
+NativePlaybackResult NativePlaybackSession::seek(uint64_t generation,
+                                                 int64_t projectFrame) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running || projectFrame < 0 ||
+      static_cast<uint64_t>(projectFrame) > impl_->prepared->durationFrames) {
+    return failure(NativePlaybackError::InvalidConfiguration, generation,
+                   impl_->state, "The absolute playback seek is invalid");
+  }
+  if (!impl_->prepared->transport.hasCommandCapacity())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  const int64_t resolvedProjectFrame =
+      impl_->prepared->transport.resolvedSeekFrame(projectFrame);
+  if (!impl_->prepared->primeTimePitchSeek(resolvedProjectFrame))
+    return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
+                   "The playback seek anchor could not be prepared off RT");
+  if (!impl_->prepared->transport.seek(resolvedProjectFrame))
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  return impl_->success(generation);
+}
+
+NativePlaybackResult NativePlaybackSession::setLoop(uint64_t generation,
+                                                    int64_t startFrame,
+                                                    int64_t endFrame) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running || startFrame < 0 ||
+      endFrame <= startFrame ||
+      static_cast<uint64_t>(endFrame) > impl_->prepared->durationFrames) {
+    return failure(NativePlaybackError::InvalidConfiguration, generation,
+                   impl_->state, "The playback loop region is invalid");
+  }
+  if (!impl_->prepared->transport.hasCommandCapacity())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  const std::optional<NativePlaybackInitialLoop> loop =
+      NativePlaybackInitialLoop{startFrame, endFrame};
+  const SignalsmithTimePitchLoopPrepareResult loopPrepared =
+      impl_->prepared->configureTimePitchLoop(loop);
+  if (loopPrepared.code == SignalsmithTimePitchLoopPrepareCode::TooShort) {
+    return failure(
+        NativePlaybackError::InvalidConfiguration, generation, impl_->state,
+        "The playback loop is too short for deadline-safe time/pitch priming");
+  }
+  if (!loopPrepared.ok())
+    return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
+                   "The playback loop anchor could not be prepared off RT");
+  if (!impl_->prepared->transport.setLoop(startFrame, endFrame,
+                                          loopPrepared.plan))
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  return impl_->success(generation);
+}
+
+NativePlaybackResult NativePlaybackSession::clearLoop(uint64_t generation) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback output is not running");
+  if (!impl_->prepared->transport.desiredLoopEnabled)
+    return impl_->success(generation);
+  if (!impl_->prepared->transport.hasCommandCapacity())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  if (!impl_->prepared->configureTimePitchLoop(std::nullopt).ok())
+    return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
+                   "The prepared playback loop anchor could not be cleared");
+  if (!impl_->prepared->transport.clearLoop())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  return impl_->success(generation);
+}
+
+NativePlaybackResult
+NativePlaybackSession::reanchorTransport(uint64_t generation) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback output is not running");
+  if (!impl_->prepared->transport.hasCommandCapacity())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  PreparedPlaybackTransport::Telemetry anchor{};
+  if (!impl_->prepared->transport.snapshotTelemetry(&anchor))
+    anchor = impl_->prepared->transport.initialTelemetrySnapshot();
+  impl_->prepared->transport.overlayQueuedPositionIntent(&anchor);
+  SignalsmithTimePitchReanchorPlan timePitchPlan{};
+  if (impl_->prepared->hasTimePitch) {
+    timePitchPlan = impl_->prepared->primeTimePitchReanchor(
+        anchor.projectFrame, anchor.projectFractionQ32);
+    if (!timePitchPlan.valid())
+      return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
+                     "The playback clock reanchor could not be prepared off RT");
+  }
+  if (!impl_->prepared->transport.reanchor(
+          anchor.projectFrame, anchor.projectFractionQ32, timePitchPlan))
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  return impl_->success(generation);
+}
+
 NativePlaybackResult NativePlaybackSession::stop(uint64_t generation) {
   (void)requestCancellation(generation);
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2567,6 +5363,8 @@ NativePlaybackResult NativePlaybackSession::stop(uint64_t generation) {
     return failure(NativePlaybackError::InvalidState, generation, impl_->state,
                    "Native playback is not stoppable in its current state");
   }
+  if (impl_->state == NativePlaybackState::Running)
+    (void)impl_->prepared->transport.stop();
   if (!impl_->stopHost()) {
     impl_->state = NativePlaybackState::Quarantined;
     impl_->lastError = "The native output host did not confirm quiescence";
@@ -2842,6 +5640,105 @@ NativePlaybackResult NativePlaybackSession::setMasterGain(uint64_t generation,
   return impl_->success(generation);
 }
 
+NativePlaybackResult
+NativePlaybackSession::setTrainingEnabled(uint64_t generation, bool enabled) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation)) {
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  }
+  if (impl_->state == NativePlaybackState::Terminal) {
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback reached a terminal output state");
+  }
+  if ((impl_->state != NativePlaybackState::Prepared &&
+       impl_->state != NativePlaybackState::OutputOpen &&
+       impl_->state != NativePlaybackState::Running) ||
+      impl_->prepared->training == std::nullopt) {
+    return failure(NativePlaybackError::InvalidConfiguration, generation,
+                   impl_->state,
+                   "The prepared playback graph has no training schedule");
+  }
+  if (impl_->prepared->trainingEnabled == enabled)
+    return impl_->success(generation);
+  if (!impl_->prepared->enqueueTrainingEnabled(enabled)) {
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded playback parameter queue is full");
+  }
+  return impl_->success(generation);
+}
+
+NativePlaybackResult NativePlaybackSession::previewClick(
+    uint64_t generation, NativePlaybackPreviewClickSound sound) {
+  bool needsOpen = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->refreshTerminalState();
+    if (!impl_->currentForCommand(generation)) {
+      return failure(NativePlaybackError::InvalidGeneration, generation,
+                     impl_->state, "The playback generation is stale");
+    }
+    if (sound != NativePlaybackPreviewClickSound::Ordinary &&
+        sound != NativePlaybackPreviewClickSound::Accent) {
+      return failure(NativePlaybackError::InvalidConfiguration, generation,
+                     impl_->state, "The preview-click sound is invalid");
+    }
+    if (impl_->prepared->cueSource.state == nullptr) {
+      return failure(NativePlaybackError::InvalidConfiguration, generation,
+                     impl_->state,
+                     "The prepared playback graph has no click bus");
+    }
+    if (impl_->state != NativePlaybackState::Prepared &&
+        impl_->state != NativePlaybackState::OutputOpen &&
+        impl_->state != NativePlaybackState::Running) {
+      return failure(NativePlaybackError::InvalidState, generation,
+                     impl_->state,
+                     "The prepared click bus cannot own output now");
+    }
+    needsOpen = impl_->state == NativePlaybackState::Prepared;
+  }
+
+  if (needsOpen) {
+    const NativePlaybackResult opened = openOutput(generation);
+    if (!opened.ok)
+      return opened;
+  }
+
+  bool needsStart = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->refreshTerminalState();
+    if (!impl_->currentForCommand(generation))
+      return failure(NativePlaybackError::InvalidGeneration, generation,
+                     impl_->state, "The playback generation is stale");
+    needsStart = impl_->state == NativePlaybackState::OutputOpen;
+    if (!needsStart && impl_->state != NativePlaybackState::Running)
+      return failure(NativePlaybackError::InvalidState, generation,
+                     impl_->state,
+                     "The prepared click bus could not retain output");
+  }
+  if (needsStart) {
+    const NativePlaybackResult started = startOutput(generation, false);
+    if (!started.ok)
+      return started;
+  }
+
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "The prepared click bus is no longer running");
+  if (!impl_->prepared->enqueuePreviewClick(sound)) {
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded preview-click mailbox is full");
+  }
+  return impl_->success(generation);
+}
+
 NativePlaybackStatus NativePlaybackSession::status() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
@@ -2867,13 +5764,123 @@ NativePlaybackStatus NativePlaybackSession::status() const {
     result.host.format.float32Planar = true;
   }
   result.renderedFrames = result.host.renderedFrames;
-  const uint64_t latency = presentationLatencyFrames(result.host.latency);
+  const uint64_t deviceLatency = presentationLatencyFrames(result.host.latency);
+  const uint64_t graphLatency =
+      impl_->prepared == nullptr ? 0 : impl_->prepared->graphLatencyFrames;
+  const uint64_t latency =
+      graphLatency > std::numeric_limits<uint64_t>::max() - deviceLatency
+          ? std::numeric_limits<uint64_t>::max()
+          : graphLatency + deviceLatency;
   result.audibleFrames =
       result.renderedFrames > latency ? result.renderedFrames - latency : 0;
+  result.presentationLatencyFrames = latency;
+  result.graphLatencyFrames = graphLatency;
+  result.devicePresentationLatencyFrames = deviceLatency;
+  result.totalPresentationLatencyFrames = latency;
   result.error = impl_->lastError;
   if (impl_->prepared != nullptr) {
+    const PreparedPlaybackTransport &transport = impl_->prepared->transport;
+    PreparedPlaybackTransport::Telemetry telemetry{};
+    const bool forcedCollision =
+        impl_->testHooks != nullptr &&
+        impl_->testHooks->forceTransportTelemetryCollision != nullptr &&
+        impl_->testHooks->forceTransportTelemetryCollision(
+            impl_->testHooks->context);
+    const bool sampled =
+        !forcedCollision && transport.snapshotTelemetry(&telemetry) &&
+        telemetry.generation == impl_->prepared->transportGeneration;
+    if (sampled) {
+      impl_->lastGoodTransportTelemetry = telemetry;
+      impl_->lastGoodTransportTelemetryGeneration = telemetry.generation;
+      impl_->hasLastGoodTransportTelemetry = true;
+      result.transportTelemetryQuality =
+          NativePlaybackTransportTelemetryQuality::Current;
+    } else if (impl_->hasLastGoodTransportTelemetry &&
+               impl_->lastGoodTransportTelemetryGeneration ==
+                   impl_->prepared->transportGeneration) {
+      telemetry = impl_->lastGoodTransportTelemetry;
+      result.transportTelemetryQuality =
+          NativePlaybackTransportTelemetryQuality::LastGood;
+    } else {
+      telemetry = transport.initialTelemetrySnapshot();
+      result.transportTelemetryQuality =
+          NativePlaybackTransportTelemetryQuality::Initial;
+    }
+    result.transportGeneration = telemetry.generation;
+    result.transportState = telemetry.state;
+    result.lastTransportBoundary = nativeBoundaryReason(telemetry.lastBoundary);
+    result.renderedProjectFrame = telemetry.projectFrame;
+    result.continuousFrame = telemetry.continuousFrame;
+    const bool projectionMature =
+        result.transportTelemetryQuality ==
+            NativePlaybackTransportTelemetryQuality::Current &&
+        telemetry.continuousFrame >=
+            telemetry.projectionAnchorContinuousFrame &&
+        latency <= telemetry.continuousFrame -
+                       telemetry.projectionAnchorContinuousFrame;
+    if (projectionMature) {
+      int64_t projected = result.renderedProjectFrame;
+      if (telemetry.state == NativePlaybackTransportState::Playing ||
+          telemetry.state == NativePlaybackTransportState::PreRoll) {
+        projected = latencyAdjustedProjectFrame(
+            result.renderedProjectFrame, telemetry.projectFractionQ32,
+            latency, transport.playbackRateQ32);
+        projected = playback_internal::loopAdjustedProjectFrame(
+            projected, telemetry.loopEnabled, telemetry.loopStart,
+            telemetry.loopEnd);
+      }
+      if (projected != std::numeric_limits<int64_t>::min()) {
+        result.audibleProjectFrame = projected;
+        result.audibleProjectionQuality =
+            NativePlaybackAudibleProjectionQuality::Current;
+      }
+    }
+    result.durationFrames = impl_->prepared->durationFrames;
+    result.remainingPreRollFrames = telemetry.remainingPreRoll;
+    result.cueEventsCompleted = telemetry.cueEventsCompleted;
+    result.nextCueEventIndex = telemetry.nextCueEvent;
+    result.loopEnabled = telemetry.loopEnabled;
+    result.loopStartFrame = telemetry.loopStart;
+    result.loopEndFrame = telemetry.loopEnd;
+    result.loopCount = telemetry.loopCount;
+    result.seekCount = telemetry.seekCount;
+    result.transportDiscontinuities = telemetry.discontinuities;
+    result.playbackRate = impl_->prepared->playbackRate;
+    result.transposeSemitones = impl_->prepared->transposeSemitones;
+    const SignalsmithTimePitchAnchorStatus anchors =
+        signalsmithTimePitchAnchorStatus(
+            impl_->prepared->timePitchProcessor);
+    result.timePitchAnchorsPrepared = anchors.prepared;
+    result.timePitchAnchorsPublished = anchors.published;
+    result.timePitchAnchorMisses = anchors.misses;
+    result.timePitchReplacementReady = anchors.replacementReady;
+    result.timePitchLoopPriming = anchors.recurring;
+    result.preparedStartProjectFrame =
+        impl_->prepared->preparedStartProjectFrame;
     result.retainedBytes = impl_->prepared->retainedBytes;
+    result.graphArenaBytes = impl_->prepared->graphArenaBytes;
     result.masterGain = impl_->prepared->masterGain;
+    result.referenceGain = impl_->prepared->referenceGain;
+    result.trainingEnabled = impl_->prepared->trainingEnabled;
+    if (impl_->prepared->training.has_value())
+      result.trainingLanes = impl_->prepared->training->laneIds;
+    result.preRollFrames = impl_->prepared->cuePlan == nullptr
+                               ? 0
+                               : impl_->prepared->cuePlan->preRollFrames;
+    result.cueEventCount =
+        static_cast<uint32_t>(impl_->prepared->cueEvents.size());
+    const zdsp::ScheduledCueOneShotStatus previews =
+        impl_->prepared->previewClickStatus();
+    result.previewClicksEnqueued = previews.enqueued;
+    result.previewClicksStarted = previews.started;
+    result.previewClicksCompleted = previews.completed;
+    result.previewClicksPending = previews.pending;
+    result.graphNodeCount = impl_->prepared->graphNodeCount;
+    result.graphConnectionCount = impl_->prepared->graphConnectionCount;
+    result.latencyCompensatedEdgeCount =
+        impl_->prepared->latencyCompensatedEdgeCount;
+    result.graphSnapshot = impl_->prepared->graphSnapshot;
+    result.topology = impl_->prepared->topology;
     result.adapterRenderFailures =
         impl_->prepared->adapter.renderFailures.load(std::memory_order_relaxed);
     result.terminalRenderFailures =
@@ -2899,7 +5906,7 @@ NativePlaybackStatus NativePlaybackSession::status() const {
 }
 
 const char *nativePlaybackSessionCapabilityTag() noexcept {
-  return "singz.native.playback-session.wav-flac.frame-zero.v1";
+  return "singz.native.playback-session.anchored-preview.v4";
 }
 
 } // namespace singz

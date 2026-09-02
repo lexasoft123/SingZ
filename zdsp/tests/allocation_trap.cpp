@@ -13,10 +13,13 @@ namespace {
 
 std::atomic<bool> trapAllocations{false};
 std::atomic<std::uint64_t> trappedAllocations{0};
+std::atomic<std::uint64_t> trappedBytes{0};
 
-void noteAllocation() noexcept {
+void noteAllocation(std::size_t size) noexcept {
   if (trapAllocations.load(std::memory_order_relaxed)) {
     trappedAllocations.fetch_add(1, std::memory_order_relaxed);
+    trappedBytes.fetch_add(static_cast<std::uint64_t>(size),
+                           std::memory_order_relaxed);
   }
 }
 
@@ -25,18 +28,20 @@ void noteAllocation() noexcept {
 }
 
 [[nodiscard]] void* allocateUnaligned(std::size_t size) noexcept {
-  noteAllocation();
-  return std::malloc(normalizedSize(size));
+  const std::size_t normalized = normalizedSize(size);
+  noteAllocation(normalized);
+  return std::malloc(normalized);
 }
 
 [[nodiscard]] void* allocateAligned(std::size_t size,
                                     std::size_t alignment) noexcept {
-  noteAllocation();
+  const std::size_t normalized = normalizedSize(size);
+  noteAllocation(normalized);
 #if defined(_WIN32)
-  return _aligned_malloc(normalizedSize(size), alignment);
+  return _aligned_malloc(normalized, alignment);
 #else
   void* value = nullptr;
-  if (posix_memalign(&value, alignment, normalizedSize(size)) != 0) {
+  if (posix_memalign(&value, alignment, normalized) != 0) {
     return nullptr;
   }
   return value;
@@ -59,6 +64,7 @@ namespace zdsp::test {
 
 void resetAllocationTrap() noexcept {
   trappedAllocations.store(0, std::memory_order_relaxed);
+  trappedBytes.store(0, std::memory_order_relaxed);
 }
 
 void setAllocationTrapEnabled(bool enabled) noexcept {
@@ -67,6 +73,10 @@ void setAllocationTrapEnabled(bool enabled) noexcept {
 
 std::uint64_t trappedAllocationCount() noexcept {
   return trappedAllocations.load(std::memory_order_acquire);
+}
+
+std::uint64_t trappedAllocationBytes() noexcept {
+  return trappedBytes.load(std::memory_order_acquire);
 }
 
 }  // namespace zdsp::test
