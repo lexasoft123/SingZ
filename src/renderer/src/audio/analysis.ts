@@ -1,85 +1,20 @@
 /** Song analysis for the info card: key (Krumhansl-Schmuckler) and the beat track. */
 
-import type { BeatInfo, KeyInfo } from '../../../shared/types'
-import { applyUserBars } from './beat'
 import { applyCourts, buildCourtEvidence, changePoints, type CourtGrid } from './courts'
-
-const MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
-const MIN = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
-
-export interface KeyGuess {
-  pc: number
-  minor: boolean
-}
-
-function correlate(hist: number[], profile: number[], rot: number): number {
-  const n = 12
-  let mh = 0
-  let mp = 0
-  for (let i = 0; i < n; i++) {
-    mh += hist[i]
-    mp += profile[i]
-  }
-  mh /= n
-  mp /= n
-  let num = 0
-  let dh = 0
-  let dp = 0
-  for (let i = 0; i < n; i++) {
-    const a = hist[(i + rot) % 12] - mh
-    const b = profile[i] - mp
-    num += a * b
-    dh += a * a
-    dp += b * b
-  }
-  return dh > 0 && dp > 0 ? num / Math.sqrt(dh * dp) : 0
-}
-
-/** Key estimate from the vocal melody's pitch-class histogram. */
-export function estimateKey(f0: Float32Array): KeyGuess | null {
-  const hist = new Array(12).fill(0)
-  let voiced = 0
-  for (let i = 0; i < f0.length; i++) {
-    const f = f0[i]
-    if (f <= 0) continue
-    const pc = ((Math.round(69 + 12 * Math.log2(f / 440)) % 12) + 12) % 12
-    hist[pc]++
-    voiced++
-  }
-  if (voiced < 100) return null
-  let best: KeyGuess | null = null
-  let bestScore = -Infinity
-  for (let pc = 0; pc < 12; pc++) {
-    const maj = correlate(hist, MAJ, pc)
-    const min = correlate(hist, MIN, pc)
-    if (maj > bestScore) {
-      bestScore = maj
-      best = { pc, minor: false }
-    }
-    if (min > bestScore) {
-      bestScore = min
-      best = { pc, minor: true }
-    }
-  }
-  return best
-}
-
-/**
- * Bump when the stored key's method changes: a stored key with any other
- * stamp is silently re-estimated on open, same contract as beat and melody.
- * v2: Krumhansl over the harmonic stems' chroma. The melody histogram it
- * replaces read A major off a song whose vocal touches its Gm tonic on 1.3%
- * of voiced frames — a key is carried by the harmony, not the sung line.
- */
-export const KEY_DETECT_VERSION = 2
-
-export function sanitizeKeyInfo(raw: unknown): KeyInfo | null {
-  if (!raw || typeof raw !== 'object') return null
-  const k = raw as Record<string, unknown>
-  if (typeof k.pc !== 'number' || !Number.isInteger(k.pc) || k.pc < 0 || k.pc > 11) return null
-  if (typeof k.minor !== 'boolean' || typeof k.detVersion !== 'number') return null
-  return { pc: k.pc, minor: k.minor, detVersion: k.detVersion }
-}
+import {
+  type DetectedBeats,
+  type KeyGuess
+} from './analysis-contract'
+export {
+  analysisIsStale,
+  BEAT_DETECT_VERSION,
+  estimateKey,
+  gridFromDetection,
+  KEY_DETECT_VERSION,
+  sanitizeKeyInfo,
+  type DetectedBeats,
+  type KeyGuess
+} from './analysis-contract'
 
 /** Key estimate from the harmonic stems, decoded through chords rather than
  *  read off a chroma histogram. Raw chroma + Krumhansl collapses on
@@ -346,88 +281,10 @@ export function estimateKeyFromStems(inst: AudioBuffer[], bass: AudioBuffer | nu
  * itself is value-neutral at equal level. The bump retires grids whose
  * lattice heard the old input.
  */
-export const BEAT_DETECT_VERSION = 23
-
-/**
- * Is a stored analysis older than what this app can produce?
- *
- * The rule is UPGRADE, never downgrade: re-derive only when the stamp is
- * BELOW the app's, so an older build opening a newer project leaves it
- * alone. `!==` used to stand here and it was a real hazard — the v23
- * catalog pass upgraded seventeen songs, and any pre-v23 app opening one of
- * them would have re-derived its own older grid and auto-saved it back,
- * quietly walking the whole library backwards one song at a time (the same
- * trap in reverse for anyone running two app versions, or a phone behind a
- * desktop). A missing stamp is older than anything.
- *
- * The cost of the asymmetry is that a DOWNGRADE of the constant — reverting
- * a detector — no longer re-derives on its own; that is a deliberate act
- * and wants an explicit re-detect, which the transport offers.
- */
-export function analysisIsStale(stamp: number | undefined | null, current: number): boolean {
-  return typeof stamp !== 'number' || !Number.isFinite(stamp) || stamp < current
-}
-
-export interface DetectedBeats {
-  /** Beat times in seconds, ascending. Follows real tempo drift. */
-  beats: number[]
-  /** Median tempo (display + target-rate math). */
-  bpm: number
-  /** Dominant beats per bar: 4, or 6 for compound (6/8) songs. */
-  beatsPerBar: number
-  /** Legacy uniform view for old readers: downbeats[0] % beatsPerBar. */
-  downbeat: number
-  /** Bar starts as beat indices (BeatInfo contract) — phase changes live here. */
-  downbeats?: number[]
-  /**
-   * Times the detector could not vote on and filled by extension instead,
-   * plus bars whose length disagrees with the song's own meter. Advisory
-   * only: the UI badges these so the singer looks there first. Where the
-   * detector is wrong it is usually here, and where it is wrong and NOT
-   * here, a badge is not what fixes it — the grid being editable is.
-   */
-  suspectAt?: number[]
-}
-
-/**
- * The stored grid a fresh detection becomes — the ONE place that conversion
- * happens, for every re-derivation on the desktop.
- *
- * There are two of those and they used to build this object separately, by
- * hand: the automatic pass that re-derives an out-of-date stamp on open, and
- * the Metronome popover's Re-detect. The copies drifted, silently and in the
- * direction that costs the singer work — the button's forgot `userBars`, so
- * pressing it threw away every bar line they had moved and auto-saved the
- * loss to the project, to Drive and on to the phones before they could react.
- * It had lost `suspectAt` and `autoDownbeats` on the way too. One caller
- * cannot forget a field the other remembers.
- *
- * `prev` is the grid being replaced. Hand-placed bar lines are carried across
- * and re-folded onto the new beat array — that is the whole reason they are
- * stored as TIMES (see `applyUserBars`), and it is what lets a song the
- * singer corrected go on receiving detector work instead of having to choose
- * between the two. Re-detect is a fresh reading of the drums, not a rejection
- * of what the singer heard in them. The phone folds them on both of its own
- * paths (mobile/src/analysis/pipeline.ts) and one button may not mean two
- * things on two platforms.
- *
- * `source` stays `'auto'`: this IS the detector's grid, and marking it manual
- * would opt the song out of the auto-heal gate for good.
- */
-export function gridFromDetection(det: DetectedBeats, prev?: BeatInfo | null): BeatInfo {
-  const auto = det.downbeats ?? undefined
-  return applyUserBars({
-    beats: det.beats,
-    bpm: det.bpm,
-    beatsPerBar: det.beatsPerBar,
-    downbeat: det.downbeat,
-    ...(auto ? { downbeats: auto, autoDownbeats: auto } : {}),
-    ...(det.suspectAt ? { suspectAt: det.suspectAt } : {}),
-    ...(prev?.userBars?.length ? { userBars: prev.userBars } : {}),
-    source: 'auto',
-    detVersion: BEAT_DETECT_VERSION
-  })
-}
+// Stored-analysis stamps and result-to-project conversion live in the small
+// analysis-contract module. The detector runtime imports that contract while
+// App and Transport can inspect saved projects without eagerly loading this
+// file's FFT/chroma/beat implementation.
 
 /** Beat This! output for this song (from the splitter pack runner): beat and
  *  downbeat TIMES plus the framewise head probabilities. Full-mix evidence —

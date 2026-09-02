@@ -15,7 +15,7 @@ on:
       - 'mobile/src/projects.ts'
       - 'mobile/src/playback/**'
       - 'mobile/src/ui/CatalogScreen.tsx'
-      - 'mobile/src/ui/NativePlayerScreen.tsx'
+      - 'mobile/src/ui/PlayerScreen.tsx'
       - 'mobile/src/ui/SettingsScreen.tsx'
       - 'mobile/src/ui/RootNavigator.tsx'
       - 'mobile/__tests__/**'
@@ -178,7 +178,8 @@ jobs:
 
           xcrun nm -m "$device" > "$RUNNER_TEMP/singz-dsp-symbols.txt"
           for symbol in initializeArena createBuiltinProcessor \
-            createDecodedBufferSource compileGraph renderGraphBlock \
+            createDecodedBufferSource createPositionedDecodedBufferSource \
+            createScheduledCueSource compileGraph renderGraphBlock \
             renderAudioHostGraph nativePlaybackRender \
             SingzDspRuntimeGetLinkStatus; do
             grep -q "$symbol" "$RUNNER_TEMP/singz-dsp-symbols.txt"
@@ -199,8 +200,13 @@ jobs:
             exit 1
           fi
           strings "$device" > "$RUNNER_TEMP/singz-dsp-strings.txt"
-          grep -q 'singz.ios.zdsp_runtime.phase-ios-b2-experimental' \
+          grep -q 'singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3' \
             "$RUNNER_TEMP/singz-dsp-strings.txt"
+          if grep -q 'singz.ios.zdsp_runtime.phase-ios-b2-experimental' \
+            "$RUNNER_TEMP/singz-dsp-strings.txt"; then
+            echo 'stale Phase B2 runtime capability is still packaged' >&2
+            exit 1
+          fi
 
       - name: Gate callback flags, architecture, symbols and dependencies
         working-directory: mobile/ios
@@ -282,12 +288,15 @@ jobs:
           esac
           xcrun ar -t "$device" | \
             grep -vE '^(__.SYMDEF SORTED|SingzPlaybackSession-dummy.o)$' \
-            > "$RUNNER_TEMP/singz-playback-objects.txt"
-          grep -qx 'native_playback_session.o' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/singz-playback-objects.txt"
+          printf '%s\n' native_playback_session.o playback_cue_plan.o \
+            signalsmith_time_pitch.o | \
+            LC_ALL=C sort > "$RUNNER_TEMP/singz-playback-objects-expected.txt"
+          diff -u "$RUNNER_TEMP/singz-playback-objects-expected.txt" \
             "$RUNNER_TEMP/singz-playback-objects.txt"
-          test "$(wc -l < "$RUNNER_TEMP/singz-playback-objects.txt" | tr -d ' ')" = 1
           xcrun nm -m "$device" > "$RUNNER_TEMP/singz-playback-symbols.txt"
-          for symbol in NativePlaybackSession nativePlaybackSessionCapabilityTag; do
+          for symbol in NativePlaybackSession nativePlaybackSessionCapabilityTag \
+            preparePlaybackCuePlan previewClick; do
             grep -q "$symbol" "$RUNNER_TEMP/singz-playback-symbols.txt"
           done
           if grep -E 'Java_|RCT|React|facebook|objc_msgSend|AVAudioSession' \
@@ -296,8 +305,18 @@ jobs:
             exit 1
           fi
           strings "$device" > "$RUNNER_TEMP/singz-playback-strings.txt"
-          grep -q 'singz.native.playback-session.wav-flac.frame-zero.v1' \
+          grep -q 'singz.native.playback-session.anchored-preview.v4' \
             "$RUNNER_TEMP/singz-playback-strings.txt"
+          if grep -q 'singz.native.playback-session.wav-flac.frame-zero.v1' \
+            "$RUNNER_TEMP/singz-playback-strings.txt"; then
+            echo 'stale frame-zero playback session is still packaged' >&2
+            exit 1
+          fi
+          if grep -q 'singz.native.playback-session.q32-time-pitch.v3' \
+            "$RUNNER_TEMP/singz-playback-strings.txt"; then
+            echo 'stale v3 playback session is still packaged' >&2
+            exit 1
+          fi
 
       - name: Compile the Release iOS app for device arm64 without signing
         working-directory: mobile/ios
@@ -334,21 +353,27 @@ jobs:
           test -f "$bundle"
           strings "$binary" > "$RUNNER_TEMP/singz-app-strings.txt"
           xcrun nm -m "$binary" > "$RUNNER_TEMP/singz-app-symbols.txt"
-          grep -q 'singz.ios.zdsp_runtime.phase-ios-b2-experimental' \
+          grep -q 'singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3' \
             "$RUNNER_TEMP/singz-app-strings.txt"
-          grep -q 'singz.native.playback-session.wav-flac.frame-zero.v1' \
+          grep -q 'singz.native.playback-session.anchored-preview.v4' \
             "$RUNNER_TEMP/singz-app-strings.txt"
+          if grep -Eq 'singz\.ios\.zdsp_runtime\.phase-ios-b2-experimental|singz\.native\.playback-session\.(wav-flac\.frame-zero\.v1|q32-time-pitch\.v3)' \
+            "$RUNNER_TEMP/singz-app-strings.txt"; then
+            echo 'stale native playback capability is present in the app' >&2
+            exit 1
+          fi
           grep -q 'NativeAudioRuntime' "$RUNNER_TEMP/singz-app-strings.txt"
 
           # Release main.jsbundle is Hermes bytecode, not a text bundle.
-          # Disassemble it and require the active B2 facade, preference and
+          # Disassemble it and require the active Phase 4B facade, preference and
           # generation-bound session command as positive product evidence.
           hermesc=mobile/ios/Pods/hermes-engine/destroot/bin/hermesc
           test -x "$hermesc"
           "$hermesc" -b -dump-bytecode "$bundle" \
             > "$RUNNER_TEMP/singz-jsbundle-bytecode.txt"
           for literal in IosNativePlaybackCoordinator NativeAudioRuntime \
-            configureOutputSession singz.playback.ios-native-experimental; do
+            configureOutputSession previewClick \
+            singz.playback.ios-native-experimental; do
             grep -q "$literal" "$RUNNER_TEMP/singz-jsbundle-bytecode.txt"
           done
 
@@ -360,17 +385,30 @@ jobs:
             'NativeModules.NativeAudioRuntime' \
             mobile/src mobile/App.tsx mobile/index.js | LC_ALL=C sort)
           test "$consumers" = 'mobile/src/playback/native.ts'
-          grep -q 'NativeModules.NativeAudioRuntime as NativePlaybackApi' \
+          grep -q 'NativeModules.NativeAudioRuntime as' \
             mobile/src/playback/native.ts
+          grep -q 'NativePlaybackBridgeApi' mobile/src/playback/native.ts
+          grep -Fq 'parseNativePlaybackCapability(await bridge.status(), Platform.OS)' \
+            mobile/src/playback/native.ts
+          grep -Fq 'transport: (generation, command) => bridge.transport(generation, command)' \
+            mobile/src/playback/native.ts
+          grep -Fq 'previewClick: (generation, sound) => bridge.previewClick(generation, sound)' \
+            mobile/src/playback/native.ts
+          if grep -q 'NativeModules.NativeAudioRuntime as NativePlaybackApi' \
+            mobile/src/playback/native.ts; then
+            echo 'stale unparsed native bridge cast is active' >&2
+            exit 1
+          fi
           for symbol in initializeArena createBuiltinProcessor \
-            createDecodedBufferSource compileGraph renderGraphBlock \
+            createDecodedBufferSource createPositionedDecodedBufferSource \
+            createScheduledCueSource compileGraph renderGraphBlock \
             renderAudioHostGraph nativePlaybackRender \
-            nativePlaybackSessionCapabilityTag; do
+            nativePlaybackSessionCapabilityTag preparePlaybackCuePlan \
+            previewClick; do
             grep -q "$symbol" "$RUNNER_TEMP/singz-app-symbols.txt"
           done
-          # The current app activates input capture only. Its callback closure
-          # must come from the strict component; the future duplex/output
-          # callback remains available in that component but is dead-stripped.
+          # The input-capture callback closure must still come from the strict
+          # component alongside the native playback/output symbols above.
           for symbol in AudioInputCallbackEndpoint AudioInputRingProducer \
             resolveAudioInputTimestamp; do
             grep -q "$symbol" "$RUNNER_TEMP/singz-app-symbols.txt"
@@ -379,7 +417,7 @@ jobs:
           xcrun nm -m "$core" > "$RUNNER_TEMP/singz-core-symbols.txt"
           grep -v '(undefined)' "$RUNNER_TEMP/singz-core-symbols.txt" \
             > "$RUNNER_TEMP/singz-core-defined-symbols.txt"
-          if grep -E 'initializeArena|createBuiltinProcessor|createDecodedBufferSource|compileGraph|renderGraphBlock|renderAudioHostGraph|iosAudioHostRenderCallback|invokeAudioHostCallback|AudioInputCallbackEndpoint|AudioInputRingProducer|resolveAudioInputTimestamp' \
+          if grep -E 'initializeArena|createBuiltinProcessor|createDecodedBufferSource|createPositionedDecodedBufferSource|createScheduledCueSource|compileGraph|renderGraphBlock|renderAudioHostGraph|iosAudioHostRenderCallback|invokeAudioHostCallback|AudioInputCallbackEndpoint|AudioInputRingProducer|resolveAudioInputTimestamp' \
             "$RUNNER_TEMP/singz-core-defined-symbols.txt"; then
             echo 'SingzCore still defines a strict-component-owned symbol' >&2
             exit 1

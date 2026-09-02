@@ -166,6 +166,9 @@ export interface ProjectDoc {
   /** The same, for lyrics.json: the doc states every file the project is made
    *  of, so one checksum per project in catalog.json covers the lot. */
   lyricsHash?: { md5: string; size: number; mtimeMs: number }
+  /** Optional portable DSP graph. The member name is fixed as graph.json and
+   * it remains small-text state, never part of the downloaded-audio byte sum. */
+  graphHash?: { format: number; md5: string; size: number; mtimeMs: number }
 }
 
 /** Vocal-training setup (what alternates, how often, which stems the singer carries). */

@@ -6,6 +6,8 @@
 #include <zdsp/graph.h>
 #include <zdsp/graph_runner.h>
 #include <zdsp/realtime_arena.h>
+#include <zdsp/scheduled_cue_source.h>
+#include <zdsp/scheduled_gain.h>
 
 #include "native_playback_callback.h"
 
@@ -23,6 +25,12 @@ namespace {
 [[gnu::used, gnu::retain]] auto kBuiltinSymbol = &zdsp::createBuiltinProcessor;
 [[gnu::used, gnu::retain]] auto kDecodedSourceSymbol =
     &zdsp::createDecodedBufferSource;
+[[gnu::used, gnu::retain]] auto kPositionedDecodedSourceSymbol =
+    &zdsp::createPositionedDecodedBufferSource;
+[[gnu::used, gnu::retain]] auto kScheduledCueSourceSymbol =
+    &zdsp::createScheduledCueSource;
+[[gnu::used, gnu::retain]] auto kScheduledGainSymbol =
+    &zdsp::createScheduledGain;
 [[gnu::used, gnu::retain]] auto kCompilerSymbol = &zdsp::compileGraph;
 [[gnu::used, gnu::retain]] auto kRunnerSymbol = &zdsp::renderGraphBlock;
 [[gnu::used, gnu::retain]] auto kHostAdapterSymbol =
@@ -31,12 +39,16 @@ namespace {
     &singz::nativePlaybackRender;
 
 constexpr SingzDspRuntimeLinkStatus kStatus{
-    1,
+    3,
     SingzDspRuntimeCapabilityGraph | SingzDspRuntimeCapabilityAudioHostAdapter |
         SingzDspRuntimeCapabilityPlaybackCallback |
         SingzDspRuntimeCapabilityPlaybackCleanupProof |
-        SingzDspRuntimeCapabilityPlaybackHandoffLease,
-    "singz.ios.zdsp_runtime.phase-ios-b2-experimental",
+        SingzDspRuntimeCapabilityPlaybackHandoffLease |
+        SingzDspRuntimeCapabilityPlaybackTransport |
+        SingzDspRuntimeCapabilityScheduledCues |
+        SingzDspRuntimeCapabilityTimePitch,
+    2,
+    "singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3",
 };
 
 } // namespace

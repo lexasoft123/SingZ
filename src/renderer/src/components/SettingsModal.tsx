@@ -31,7 +31,10 @@ import type {
   DesktopAudioHostDevice,
   DesktopAudioHostInventoryResult,
   DesktopAudioInputDevice,
-  DesktopMonitorConfig
+  DesktopMonitorConfig,
+  DesktopPlaybackProvider,
+  DesktopPlaybackProviderInfo,
+  DesktopPlaybackStatus
 } from '../../../shared/types'
 import { Modal } from '@singz/ui'
 import DspGraphVisualization from './DspGraphVisualization'
@@ -45,6 +48,13 @@ export interface SettingsModalProps {
   onChangeNativeMonitorOutput: (uid: string | undefined) => void
   onChangeNativeMonitorOutputChannels: (channels: number[]) => void
   onChangeMonitorGain: (gainDb: number) => void
+  onChangeNativePlayback: (enabled: boolean) => void
+  onChangeNativeAudioProvider?: (
+    provider: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
+  ) => void
+  /** Renderer recovery may still own Chromium's released-output lease even
+   * when the main process truthfully reports no native generation. */
+  nativePlaybackLeaseBlocked?: boolean
   monitorCoordinator: DesktopMonitorCoordinator
   /** Independent app-shell training cleanup lease. It blocks new Settings
    * capture/output entry without being presented as monitor/route ownership. */
@@ -73,6 +83,16 @@ type PreviewState =
   | { status: 'starting'; device: null; dbfs: -72; peak: -72 }
   | { status: 'live' | 'no-signal'; device: MicDevice; dbfs: number; peak: number }
   | { status: 'error'; device: null; dbfs: -72; peak: -72; message: string }
+
+/** Provider replacement is a lifecycle mutation, not a running-only guard.
+ * Only exact Unloaded status proves the prepared backend and cleanup owner are
+ * gone; null/stale/transitional status remains fail-closed. */
+export function playbackProviderCanChange(
+  status: DesktopPlaybackStatus | null,
+  rendererLeaseBlocked = false
+): boolean {
+  return !rendererLeaseBlocked && status?.state === 'unloaded'
+}
 
 const INITIAL_PREVIEW: PreviewState = { status: 'starting', device: null, dbfs: -72, peak: -72 }
 export const MONITOR_DIAGNOSTIC_LABELS = [
@@ -600,6 +620,9 @@ export default function SettingsModal({
   onChangeNativeMonitorOutput,
   onChangeNativeMonitorOutputChannels,
   onChangeMonitorGain,
+  onChangeNativePlayback,
+  onChangeNativeAudioProvider,
+  nativePlaybackLeaseBlocked = false,
   monitorCoordinator,
   externalAudioLeaseBlocked = false,
   externalAudioLeaseCopy,
@@ -615,6 +638,8 @@ export default function SettingsModal({
   /** null means the native core is unavailable and the UI is in Web Audio fallback mode. */
   const [nativeInputs, setNativeInputs] = useState<DesktopAudioInputDevice[] | null>(null)
   const [hostInventory, setHostInventory] = useState<DesktopAudioHostInventoryResult | null>(null)
+  const [playbackProviders, setPlaybackProviders] = useState<DesktopPlaybackProviderInfo[]>([])
+  const [playbackStatus, setPlaybackStatus] = useState<DesktopPlaybackStatus | null>(null)
   const [preview, setPreview] = useState<PreviewState>(INITIAL_PREVIEW)
   const [monitor, setMonitor] = useState<MonitorCoordinatorSnapshot>(() => monitorCoordinator.snapshot)
   const monitorStopping = monitor.phase === 'stopping'
@@ -669,6 +694,25 @@ export default function SettingsModal({
   }, [])
 
   useEffect(() => {
+    let live = true
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const refreshPlayback = async (): Promise<void> => {
+      try {
+        const status = await window.singz.desktopPlaybackStatus()
+        if (live) setPlaybackStatus(status)
+      } catch {
+        if (live) setPlaybackStatus(null)
+      }
+      if (live) timer = setTimeout(() => void refreshPlayback(), 250)
+    }
+    void refreshPlayback()
+    return () => {
+      live = false
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [])
+
+  useEffect(() => {
     if (!outputRouteUnconfirmed) setOutputRouteRetryState('idle')
   }, [outputRouteUnconfirmed])
 
@@ -714,11 +758,15 @@ export default function SettingsModal({
       .catch((error) => { if (mounted.current) setHostInventory({
         ok: false,
         platform: 'other',
+        provider: 'coreaudio',
         defaultInputUid: '',
         defaultOutputUid: '',
         devices: [],
         error: error instanceof Error ? error.message : String(error)
       }) })
+    void window.singz.desktopPlaybackProviders()
+      .then((providers) => { if (mounted.current) setPlaybackProviders(providers) })
+      .catch(() => { if (mounted.current) setPlaybackProviders([]) })
   }, [])
 
   useEffect(() => {
@@ -1057,6 +1105,11 @@ export default function SettingsModal({
       : 'Microphone preview is opening.'
 
   const hostDevices = hostInventory?.ok ? hostInventory.devices : []
+  const windowsProvider = audio.nativeAudioProvider ?? 'wasapi'
+  const windowsProviderInfo = playbackProviders.find((row) => row.id === windowsProvider)
+  const asioProviderInfo = playbackProviders.find((row) => row.id === 'asio')
+  const isWindows = playbackProviders.some((row) =>
+    row.id === 'wasapi' && row.errorCode !== 'wrong-platform')
   const hostInputs = hostDevices.filter((device) => device.inputChannels > 0)
   const hostOutputs = hostDevices.filter((device) => device.outputChannels > 0)
   // Exact opaque UID only. There is deliberately no friendly-label bridge at
@@ -1324,6 +1377,44 @@ export default function SettingsModal({
           {!outputRouteUnconfirmed && outputStatus && (
             <p className="settings-hint warn">{outputStatus}</p>
           )}
+          <label className="monitor-headphones-check">
+            <input
+              type="checkbox"
+              checked={audio.nativePlayback === true}
+              onChange={(event) => {
+                if (!nativePlaybackLeaseBlocked) onChangeNativePlayback(event.target.checked)
+              }}
+              disabled={nativePlaybackLeaseBlocked}
+            />
+            Use experimental native DSP playback
+          </label>
+          <p className="settings-hint">
+            Uses the selected native provider when the song's features exactly match the native graph.
+          </p>
+          {isWindows && <>
+            <label className="settings-label" htmlFor="settings-native-provider">Windows audio provider</label>
+            <select
+              id="settings-native-provider"
+              className="settings-select"
+              value={windowsProvider}
+              onChange={(event) => {
+                if (!playbackProviderCanChange(playbackStatus, nativePlaybackLeaseBlocked)) return
+                onChangeNativeAudioProvider?.(
+                  event.target.value === 'asio' ? 'asio' : 'wasapi'
+                )
+              }}
+              disabled={!playbackProviderCanChange(playbackStatus, nativePlaybackLeaseBlocked)}
+            >
+              <option value="wasapi">System audio (WASAPI)</option>
+              <option value="asio" disabled={asioProviderInfo?.available !== true}>ASIO</option>
+            </select>
+            {windowsProviderInfo && <p className={`settings-hint${windowsProviderInfo.available ? '' : ' warn'}`}>
+              {windowsProviderInfo.detail}
+            </p>}
+            {asioProviderInfo && !asioProviderInfo.available && windowsProvider !== 'asio' && (
+              <p className="settings-hint warn">ASIO unavailable: {asioProviderInfo.detail}</p>
+            )}
+          </>}
 
           <section className="mic-input-strip" aria-labelledby="mic-input-heading">
             <div className="mic-input-heading">
@@ -1516,6 +1607,7 @@ export default function SettingsModal({
               plannedSampleRate={nativeConfig?.sampleRate}
               plannedBufferFrames={nativeConfig?.bufferFrames}
               status={monitor.status}
+              playbackStatus={playbackStatus}
             />
 
             <label className="monitor-gain" htmlFor="monitor-gain">

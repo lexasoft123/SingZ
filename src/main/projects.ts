@@ -9,11 +9,20 @@ import {
   type CloudRoot,
   type CustomTrack,
   type ImportResult,
+  type ProjectGraphHash,
+  type ProjectGraphReadResult,
+  type ProjectGraphWriteResult,
   type ProjectInfo,
   type ProjectListItem,
   type ProjectSettings,
   type StemName6
 } from '../shared/types'
+import {
+  GRAPH_DOCUMENT_FORMAT,
+  MAX_GRAPH_DOCUMENT_TEXT_BYTES,
+  parseGraphDocument,
+  serializeGraphDocument
+} from '../shared/graph-document'
 import { wavToFlac } from './flac'
 import { log } from './log'
 import { describeProject } from './project-state'
@@ -189,19 +198,24 @@ function safeName(name: string): string {
   return cleaned || 'Untitled song'
 }
 
-interface ProjectFile {
+type StoredProjectSettings = ProjectSettings & Record<string, unknown>
+
+export interface ProjectFile {
+  [key: string]: unknown
   /** 1 = WAV stems (pre-0.7), 2 = FLAC stems (~4x smaller, cloud-friendly). */
   version: 1 | 2
   name: string
   songFile: string
   savedAt: string
-  settings: ProjectSettings
+  settings: StoredProjectSettings
   /** md5 of every file in stems/ — Drive sync diffs from these instead of
    *  reading stem bytes (hashing an evicted iCloud stem downloads it all). */
   stemHashes?: Record<string, StemHash>
   /** The same for lyrics.json, so this doc states every file the project is
    *  made of and the catalog needs one checksum per project, not three. */
   lyricsHash?: StemHash
+  /** Fixed member graph.json. Its version is independent of project.version. */
+  graphHash?: ProjectGraphHash
 }
 
 export interface StemHash {
@@ -442,7 +456,7 @@ export async function migrateProjectToV2(
       // and project.json describes files that no longer exist (and a phone
       // reading it would ask Drive for them)
       meta.stemHashes = await refreshStemHashes(dir, undefined)
-      await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+      await writeMetaAtomic(dir, meta)
       // every stem is a different file now — Drive is holding the WAVs
       markProjectDirty(dir, 'upgraded to compact stems')
       if (hadWavs) log('app', `project upgraded to compact stems: ${dir}`)
@@ -459,6 +473,161 @@ async function readMeta(dir: string): Promise<ProjectFile | null> {
   } catch {
     return null
   }
+}
+
+async function writeTextAtomic(path: string, text: string): Promise<void> {
+  const part = `${path}.part`
+  try {
+    await writeFile(part, text, 'utf8')
+    await rename(part, path)
+  } catch (error) {
+    await rm(part, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
+async function writeMetaAtomic(dir: string, meta: ProjectFile): Promise<void> {
+  await writeTextAtomic(join(dir, 'project.json'), JSON.stringify(meta, null, 2))
+}
+
+/** One existing-project document transaction shared by saves, explicit graph
+ * edits, and Drive's hash maintenance. Callers may do expensive file checks
+ * inside the callback; no other project writer can replace project.json or
+ * graph.json until it returns. `replace` is crash-safe and intentionally does
+ * not mark the library dirty — the caller owns that policy. */
+export function withProjectDocumentTransaction<T>(
+  dir: string,
+  run: (meta: ProjectFile, replace: (next: ProjectFile) => Promise<void>) => Promise<T>
+): Promise<T> {
+  return withProjectLock(dir, async () => {
+    const meta = await readMeta(dir)
+    if (!meta) throw new Error(`${dir} is not a readable project folder.`)
+    return run(meta, (next) => writeMetaAtomic(dir, next))
+  })
+}
+
+const MD5 = /^[0-9a-f]{32}$/
+
+function validGraphHash(value: unknown): value is ProjectGraphHash {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const hash = value as Partial<ProjectGraphHash>
+  return (
+    Number.isSafeInteger(hash.format) && Number(hash.format) > 0 &&
+    typeof hash.md5 === 'string' && MD5.test(hash.md5) &&
+    Number.isSafeInteger(hash.size) && Number(hash.size) >= 0 &&
+    typeof hash.mtimeMs === 'number' && Number.isFinite(hash.mtimeMs) && Number(hash.mtimeMs) >= 0
+  )
+}
+
+async function readProjectGraphUnlocked(
+  dir: string,
+  meta: ProjectFile
+): Promise<ProjectGraphReadResult> {
+  if (meta.graphHash === undefined) return { ok: true, graph: null }
+  if (!validGraphHash(meta.graphHash)) {
+    return { ok: false, code: 'invalid-reference', error: 'project.json has an invalid graphHash.' }
+  }
+  const expected = meta.graphHash
+  if (expected.format > GRAPH_DOCUMENT_FORMAT) {
+    return {
+      ok: false,
+      code: 'unsupported',
+      error: `This project uses graph format ${expected.format}; this build supports format ${GRAPH_DOCUMENT_FORMAT}.`
+    }
+  }
+  if (expected.format !== GRAPH_DOCUMENT_FORMAT || expected.size > MAX_GRAPH_DOCUMENT_TEXT_BYTES) {
+    return { ok: false, code: 'invalid-reference', error: 'project.json names an invalid graph format or size.' }
+  }
+  let text: string
+  try {
+    text = await readFile(join(dir, 'graph.json'), 'utf8')
+  } catch {
+    return { ok: false, code: 'missing', error: 'graph.json is missing.' }
+  }
+  const bytes = Buffer.from(text)
+  const md5 = createHash('md5').update(bytes).digest('hex')
+  if (bytes.length !== expected.size || md5 !== expected.md5) {
+    return {
+      ok: false,
+      code: 'mismatch',
+      error: 'graph.json does not match the size and md5 recorded by project.json.'
+    }
+  }
+  try {
+    const parsed = parseGraphDocument(text)
+    if (parsed.kind !== 'known' || parsed.format !== expected.format) {
+      return { ok: false, code: 'unsupported', error: 'graph.json uses an unsupported format.' }
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'invalid',
+      error: `graph.json is invalid: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+  return { ok: true, graph: { hash: { ...expected }, text } }
+}
+
+/** Read only a graph whose project.json binding proves the exact bytes. A
+ * stray graph.json is deliberately invisible and is never silently adopted. */
+export async function readProjectGraph(songPath: string): Promise<ProjectGraphReadResult> {
+  const dir = dirname(songPath)
+  return withProjectLock(dir, async () => {
+    const meta = await readMeta(dir)
+    return meta
+      ? readProjectGraphUnlocked(dir, meta)
+      : { ok: false, code: 'not-project', error: 'This is not a saved project.' }
+  })
+}
+
+/** Explicit graph edit transaction. graph.json is atomically installed and
+ * hashed first; project.json publishes that identity last under the same
+ * per-project writer queue and dirty interval as every other project write. */
+export async function writeProjectGraph(
+  songPath: string,
+  source: string
+): Promise<ProjectGraphWriteResult> {
+  const dir = dirname(songPath)
+  return withProjectLock(dir, async () => {
+    const meta = await readMeta(dir)
+    if (!meta) return { ok: false, code: 'not-project', error: 'This is not a saved project.' }
+    let canonical: string
+    try {
+      const parsed = parseGraphDocument(source)
+      if (parsed.kind !== 'known' || parsed.format !== GRAPH_DOCUMENT_FORMAT) {
+        return {
+          ok: false,
+          code: 'unsupported',
+          error: `This build cannot write graph format ${parsed.format}.`
+        }
+      }
+      canonical = serializeGraphDocument(parsed)
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'invalid',
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+    try {
+      return await withDirty(dir, 'graph edit', async () => {
+        const graphPath = join(dir, 'graph.json')
+        await writeTextAtomic(graphPath, canonical)
+        const hash = await refreshFileHash(graphPath, undefined)
+        if (!hash) throw new Error('graph.json disappeared before it could be published.')
+        const graphHash: ProjectGraphHash = { format: GRAPH_DOCUMENT_FORMAT, ...hash }
+        meta.graphHash = graphHash
+        await writeMetaAtomic(dir, meta)
+        return { ok: true as const, graph: { hash: graphHash, text: canonical } }
+      })
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'write-failed',
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+  })
 }
 
 /** The project's own files (song, project.json, lyrics) — stems are counted
@@ -542,6 +711,7 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
       name: meta.name ?? basename(dir),
       formatVersion: meta.version ?? 1,
       settings: { ...settings, custom: await resolveCustom(dir, settings.custom) },
+      graphHash: validGraphHash(meta.graphHash) ? { ...meta.graphHash } : undefined,
       stems: coreThere ? stems : undefined,
       // named here so a truncated stem is reported as itself, rather than as
       // the decoder's "Could not decode that audio file" two layers later
@@ -558,6 +728,40 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
 export async function projectLyricsPath(songPath: string): Promise<string | null> {
   const dir = dirname(songPath)
   return (await exists(join(dir, 'project.json'))) ? join(dir, 'lyrics.json') : null
+}
+
+const STORED_SETTING_KEYS = [
+  'transpose',
+  'tempo',
+  'beat',
+  'melody',
+  'key',
+  'metronome',
+  'view',
+  'selection',
+  'loop',
+  'training',
+  'custom',
+  'tracks'
+] as const
+
+/** Merge the renderer's known settings patch over the exact stored object.
+ * Phone/future fields remain untouched. Known optional fields still keep the
+ * old save semantics: absent clears them, except expensive stored analyses,
+ * whose absence means "not loaded yet" rather than "delete". */
+function mergeStoredSettings(
+  previous: StoredProjectSettings | undefined,
+  incoming: ProjectSettings,
+  custom: CustomTrack[] | undefined
+): StoredProjectSettings {
+  const out: Record<string, unknown> = { ...(previous ?? {}) }
+  for (const key of STORED_SETTING_KEYS) {
+    const next = key === 'custom' ? custom : incoming[key]
+    const keepAnalysis = key === 'beat' || key === 'melody' || key === 'key'
+    if (next !== undefined && next !== null) out[key] = next
+    else if (!(keepAnalysis && previous?.[key] != null)) delete out[key]
+  }
+  return out as StoredProjectSettings
 }
 
 export async function saveProject(
@@ -590,7 +794,7 @@ export async function saveProject(
       // copy into the library. Only a loose song gets a new folder made for it.
       const inPlace = await exists(join(own, 'project.json'))
       const dir = inPlace ? own : join(projectsRoot(), safeName(name))
-      return await withDirty(dir, 'save', async () => {
+      const saveIntoDestination = async () => withDirty(dir, 'save', async () => {
         await mkdir(join(dir, 'stems'), { recursive: true })
 
         // in place, the opened song IS the project's song — keep its filename
@@ -648,20 +852,23 @@ export async function saveProject(
         // belongs here and not in the renderer because this is the one place
         // the file is actually overwritten, so it covers every path that ever
         // reaches it, including ones not written yet.
-        const keep = (k: 'beat' | 'melody' | 'key'): object =>
-          settings[k] == null && prevMeta?.settings?.[k] != null ? { [k]: prevMeta.settings[k] } : {}
+        const storedSettings = mergeStoredSettings(prevMeta?.settings, settings, stored)
         const meta: ProjectFile = {
+          // Unknown top-level fields and future graph references belong to the
+          // project, not this desktop build. A normal save updates only the
+          // fields it owns and carries every other value through verbatim.
+          ...(prevMeta ?? {}),
           version: allFlac ? 2 : 1,
           name: safeName(name),
           songFile,
           savedAt: new Date().toISOString(),
           // project.json keeps custom tracks project-relative so the folder stays
           // portable; the renderer gets absolute paths back below.
-          settings: { ...settings, ...keep('beat'), ...keep('melody'), ...keep('key'), custom: stored },
+          settings: storedSettings,
           stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
           lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
         }
-        await writeFile(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+        await writeMetaAtomic(dir, meta)
         log('app', `project saved: ${dir}`)
         return {
           ok: true as const,
@@ -671,6 +878,14 @@ export async function saveProject(
           custom: await resolveCustom(dir, stored)
         }
       })
+      // Existing projects already hold their actual directory lock (`own`). A
+      // loose song targets a name-derived library directory instead, so claim
+      // that destination too: two different source folders may contain songs
+      // with the same display name, but they must never share project.json.part
+      // or interleave their project members.
+      return inPlace || dir === own
+        ? saveIntoDestination()
+        : withProjectLock(dir, saveIntoDestination)
     })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -714,7 +929,7 @@ export async function renameProject(
       // path, and every stem read after this would be refused
       allowRoot(newDir)
       meta.name = name
-      await writeFile(join(newDir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8')
+      await writeMetaAtomic(newDir, meta)
       const stems: Partial<Record<StemName6, string>> = {}
       for (const s of STEMS_6) {
         const p = await stemFile(newDir, s)

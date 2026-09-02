@@ -103,7 +103,11 @@ class AudioRouteInfo: NSObject {
     reject: @escaping RCTPromiseRejectBlock
   ) {
     UserDefaults.standard.set(value as String, forKey: key as String)
-    UserDefaults.standard.synchronize()
-    resolve(nil)
+    do {
+      try DurablePreferenceWrite.requireFlushed(UserDefaults.standard.synchronize())
+      resolve(nil)
+    } catch {
+      reject("preference_write", error.localizedDescription, error)
+    }
   }
 }

@@ -161,6 +161,7 @@ export interface FakeNativeWriter {
   docsRoot: string
   pickAudioFile(): Promise<{ path: string; name: string; size: number } | null>
   ensureProjectDir(name: string): Promise<{ dir: string; path: string }>
+  readText(project: string, file: string): Promise<string>
   writeText(project: string, file: string, text: string): Promise<boolean>
   moveIntoProject(project: string, relPath: string, srcPath: string): Promise<string>
   copyIntoProject(project: string, relPath: string, srcPath: string): Promise<string>
@@ -229,6 +230,12 @@ export function fakeNativeWriter(docsRoot: string): FakeNativeWriter {
       if (!dir || !relOk(file)) throw new Error('Bad project or file name')
       put(join(dir, file), (tmp) => writeFileSync(tmp, text, 'utf8'))
       return true
+    },
+
+    async readText(project, file) {
+      const dir = docChild(project)
+      if (!dir || !relOk(file)) throw new Error('Bad project or file name')
+      return readFileSync(join(dir, file), 'utf8')
     },
 
     async moveIntoProject(project, relPath, srcPath) {

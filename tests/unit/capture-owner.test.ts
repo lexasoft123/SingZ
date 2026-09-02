@@ -20,13 +20,26 @@ import {
   pruneStaleCaptureLoadDirs,
   resolveCaptureAddonPath,
   stageArtifactForLoad,
+  type CaptureCodecRuntime,
   type NativeCaptureBinding
 } from '../../src/main/capture'
 import type {
   CaptureAnalysisWindow,
   CaptureStartResult,
   DesktopMonitorResult,
-  DesktopMonitorStatus
+  DesktopMonitorStatus,
+  DesktopPlaybackLaneConfig,
+  DesktopPlaybackPrepareConfig,
+  DesktopPlaybackResult,
+  DesktopPlaybackStatus
+} from '../../src/shared/types'
+import {
+  DESKTOP_PLAYBACK_CAPABILITY,
+  DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+  DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+  DESKTOP_PLAYBACK_CODEC_PROFILE,
+  DESKTOP_PLAYBACK_CONTRACT_VERSION
 } from '../../src/shared/types'
 
 const startResult: CaptureStartResult = {
@@ -101,6 +114,128 @@ const monitorStatus = (generation = '0', active = false): DesktopMonitorStatus =
   nonFiniteSamples: 0, rejectedBlocks: 0
 })
 
+const playbackResult = (generation = '1'): DesktopPlaybackResult => ({
+  ok: true,
+  errorCode: 'none',
+  error: '',
+  generation,
+  state: 'prepared',
+  format: {
+    sampleRate: 48000,
+    maximumFrames: 512,
+    nominalBufferFrames: 128,
+    inputChannels: 0,
+    outputChannels: 2
+  },
+  latency: {
+    inputDeviceFrames: 0,
+    outputDeviceFrames: 48,
+    bufferFrames: 128,
+    externalRouteFrames: 0
+  }
+})
+
+const playbackStatus = (): DesktopPlaybackStatus => ({
+  capability: DESKTOP_PLAYBACK_CAPABILITY,
+  generation: '0',
+  state: 'unloaded',
+  hostState: 'closed',
+  terminalReason: '',
+  terminalOrdinal: '0',
+  transportGeneration: '0',
+  transportState: 'stopped',
+  transportTelemetryQuality: 'unavailable',
+  lastTransportBoundary: 'none',
+  renderedProjectFrame: '0',
+  audibleProjectFrame: '0',
+  audibleProjectionQuality: 'unavailable',
+  continuousFrame: '0',
+  durationFrames: '0',
+  remainingPreRollFrames: '0',
+  cueEventsCompleted: 0,
+  nextCueEventIndex: 0,
+  presentationLatencyFrames: '0',
+  graphLatencyFrames: '0',
+  devicePresentationLatencyFrames: '0',
+  totalPresentationLatencyFrames: '0',
+  renderedFrames: '0',
+  audibleFrames: '0',
+  routeGeneration: '0',
+  streamGeneration: '0',
+  callbacks: '0',
+  xruns: '0',
+  deadlineMisses: '0',
+  discontinuities: '0',
+  invalidCallbacks: '0',
+  renderFailures: '0',
+  loopEnabled: false,
+  loopStartFrame: '0',
+  loopEndFrame: '0',
+  loopCount: '0',
+  seekCount: '0',
+  transportDiscontinuities: '0',
+  playbackRate: 1,
+  transposeSemitones: 0,
+  timePitchAnchorsPrepared: '0',
+  timePitchAnchorsPublished: '0',
+  timePitchAnchorMisses: '0',
+  timePitchReplacementReady: false,
+  timePitchLoopPriming: false,
+  preparedStartProjectFrame: '0',
+  retainedBytes: '0',
+  graphArenaBytes: '0',
+  masterGain: 1,
+  referenceGain: 0,
+  trainingEnabled: false,
+  trainingLanes: [],
+  preRollFrames: '0',
+  cueEventCount: 0,
+  previewClicksEnqueued: '0',
+  previewClicksStarted: '0',
+  previewClicksCompleted: '0',
+  previewClicksPending: 0,
+  topology: '',
+  graphNodeCount: 0,
+  graphConnectionCount: 0,
+  latencyCompensatedEdgeCount: 0,
+  graphSnapshot: null,
+  adapterRenderFailures: 0,
+  terminalRenderFailures: 0,
+  parameterOverflows: 0,
+  nonFiniteSamples: 0,
+  rejectedBlocks: 0,
+  error: '',
+  format: playbackResult().format,
+  latency: playbackResult().latency,
+  lanes: []
+})
+
+const playbackConfig = (): DesktopPlaybackPrepareConfig => ({
+  capability: DESKTOP_PLAYBACK_CAPABILITY,
+  provider: 'coreaudio',
+  accessMode: 'shared',
+  outputDeviceUid: 'fixture:24',
+  outputChannels: [0, 1],
+  sampleRate: 48000,
+  bufferFrames: 128,
+  maximumFrames: 512,
+  masterGain: 1,
+  playback: {
+    version: DESKTOP_PLAYBACK_CONTRACT_VERSION,
+    transport: {
+      entrySeconds: 0,
+      durationSeconds: 1,
+      playbackRate: 1,
+      transposeSemitones: 0
+    },
+    cues: { click: false, countInBars: 0, volume: 0.7, accent: true }
+  }
+})
+
+const playbackLanes = (): DesktopPlaybackLaneConfig[] => [{
+  id: 'vocals', path: '/authorized/vocals.flac', gain: 1, muted: false, solo: false
+}]
+
 function fakeBinding(): NativeCaptureBinding & {
   sink?: (window: CaptureAnalysisWindow) => void
   cancelled: bigint[]
@@ -132,8 +267,14 @@ function fakeBinding(): NativeCaptureBinding & {
       deliveredBlocks: '1', deliveredFrames: '128', overruns: '0',
       deliveryWakeups: '1', droppedEvents: '0', overwrittenWindows: '0'
     }),
-    audioHostDevices: () => ({
+    audioHostProviders: () => [
+      { id: 'coreaudio', label: 'CoreAudio', available: true, errorCode: 'none', detail: '' },
+      { id: 'wasapi', label: 'WASAPI', available: true, errorCode: 'none', detail: '' },
+      { id: 'asio', label: 'ASIO', available: false, errorCode: 'not-compiled', detail: 'SDK unavailable' }
+    ],
+    audioHostDevices: (provider) => ({
       ok: true,
+      provider: provider ?? 'coreaudio',
       defaultInputUid: 'fixture:24',
       defaultOutputUid: 'fixture:24',
       devices: [{
@@ -161,11 +302,167 @@ function fakeBinding(): NativeCaptureBinding & {
       this.endedMonitors.push(generation)
       this.activeMonitorGeneration = undefined
       return monitorEndResult(generation.toString())
-    }
+    },
+    preparePlayback(_config, _lanes, generation) {
+      return playbackResult(generation.toString())
+    },
+    openPlaybackOutput: (generation) => playbackResult(generation.toString()),
+    startPlayback: (generation) => playbackResult(generation.toString()),
+    pausePlayback: (generation) => playbackResult(generation.toString()),
+    resumePlayback: (generation) => playbackResult(generation.toString()),
+    stopPlayback: (generation) => playbackResult(generation.toString()),
+    seekPlayback: (generation) => playbackResult(generation.toString()),
+    setPlaybackLoop: (generation) => playbackResult(generation.toString()),
+    clearPlaybackLoop: (generation) => playbackResult(generation.toString()),
+    reanchorPlayback: (generation) => playbackResult(generation.toString()),
+    setPlaybackLane: (generation) => playbackResult(generation.toString()),
+    setPlaybackMasterGain: (generation) => playbackResult(generation.toString()),
+    playbackStatus,
+    unloadPlayback: (generation) => ({
+      ...playbackResult(generation.toString()),
+      state: 'unloaded',
+      cleanupComplete: true
+    })
   }
 }
 
 describe('CaptureOwner', () => {
+  it('reports the full decoder matrix only for the exact proven runtime binding', () => {
+    const codecRuntime: CaptureCodecRuntime = {
+      format: 1,
+      profile: DESKTOP_PLAYBACK_CODEC_PROFILE,
+      target: 'darwin-arm64',
+      capabilityMask: `0x${DESKTOP_PLAYBACK_CODEC_FULL_MASK.toString(16).padStart(8, '0')}`,
+      packManifestSha256: 'a'.repeat(64),
+      libraries: (['avcodec', 'avformat', 'avutil', 'swresample'] as const).map((component) => ({
+        component,
+        path: `ffmpeg/lib${component}.dylib`,
+        bytes: 1,
+        sha256: 'b'.repeat(64),
+        machCanonicalSha256: 'c'.repeat(64)
+      }))
+    }
+    const binding = fakeBinding()
+    const owner = new CaptureOwner(binding, () => binding, codecRuntime)
+    expect(owner.playbackCapability()).toMatchObject({
+      available: true,
+      mediaCodec: {
+        formatMask: DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+        dynamicallyLinkedFfmpeg: true,
+        capabilityTag: DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+        profile: DESKTOP_PLAYBACK_CODEC_PROFILE,
+        extensions: [...DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS]
+      }
+    })
+    expect(owner.preparePlayback(7, playbackConfig(), [{
+      ...playbackLanes()[0], path: '/authorized/reference.m4a'
+    }], 'darwin')).toMatchObject({ ok: true })
+
+    const baseOwner = new CaptureOwner(fakeBinding())
+    expect(baseOwner.playbackCapability()).toMatchObject({
+      available: true,
+      mediaCodec: { formatMask: 0x003, dynamicallyLinkedFfmpeg: false }
+    })
+    expect(baseOwner.preparePlayback(7, playbackConfig(), [{
+      ...playbackLanes()[0], path: '/authorized/reference.m4a'
+    }], 'darwin')).toMatchObject({ ok: false, errorCode: 'invalid-configuration' })
+  })
+
+  it('binds every desktop prepare to the exact v4 addon capability and v2 DTO', () => {
+    const binding = fakeBinding()
+    let prepares = 0
+    let nativeProvider = ''
+    let nativeAccessMode = ''
+    binding.preparePlayback = ((config, _lanes, generation) => {
+      prepares++
+      nativeProvider = config.provider
+      nativeAccessMode = config.accessMode
+      return playbackResult(generation.toString())
+    })
+    const owner = new CaptureOwner(binding)
+    expect(owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
+      ok: true,
+      generation: '1'
+    })
+    expect(prepares).toBe(1)
+    expect(nativeProvider).toBe('coreaudio')
+    expect(nativeAccessMode).toBe('shared')
+
+    const staleBinding = fakeBinding()
+    staleBinding.playbackStatus = () => ({
+      ...playbackStatus(),
+      capability: 'singz.native.playback-session.q32-time-pitch.v3'
+    } as unknown as DesktopPlaybackStatus)
+    let stalePrepares = 0
+    staleBinding.preparePlayback = ((_config, _lanes, generation) => {
+      stalePrepares++
+      return playbackResult(generation.toString())
+    })
+    const staleOwner = new CaptureOwner(staleBinding)
+    expect(staleOwner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
+      ok: false,
+      errorCode: 'platform-not-ready'
+    })
+    expect(stalePrepares).toBe(0)
+  })
+
+  it('fails closed with the typed native reason when ASIO is not compiled', () => {
+    const binding = fakeBinding()
+    const owner = new CaptureOwner(binding)
+    expect(owner.playbackProviders('win32').find((row) => row.id === 'asio')).toEqual({
+      id: 'asio',
+      label: 'ASIO',
+      available: false,
+      errorCode: 'not-compiled',
+      detail: 'SDK unavailable'
+    })
+    expect(owner.preparePlayback(7, {
+      ...playbackConfig(),
+      provider: 'asio',
+      accessMode: 'exclusive',
+      outputDeviceUid: 'asio:fixture:24'
+    }, playbackLanes(), 'win32')).toMatchObject({
+      ok: false,
+      errorCode: 'platform-not-ready',
+      error: 'SDK unavailable'
+    })
+  })
+
+  it('rejects stale or unknown desktop prepare contracts before native ownership', () => {
+    const binding = fakeBinding()
+    let prepares = 0
+    binding.preparePlayback = ((_config, _lanes, generation) => {
+      prepares++
+      return playbackResult(generation.toString())
+    })
+    const owner = new CaptureOwner(binding)
+    const staleCapability = {
+      ...playbackConfig(),
+      capability: 'singz.native.playback-session.q32-time-pitch.v3'
+    } as unknown as DesktopPlaybackPrepareConfig
+    expect(owner.preparePlayback(7, staleCapability, playbackLanes(), 'darwin')).toMatchObject({
+      ok: false,
+      errorCode: 'invalid-configuration'
+    })
+    const unknownVersion = {
+      ...playbackConfig(),
+      playback: { ...playbackConfig().playback, version: 99 }
+    } as unknown as DesktopPlaybackPrepareConfig
+    expect(owner.preparePlayback(7, unknownVersion, playbackLanes(), 'darwin')).toMatchObject({
+      ok: false,
+      errorCode: 'invalid-configuration'
+    })
+    const mismatchedProviderAccess = {
+      ...playbackConfig(),
+      accessMode: 'exclusive'
+    } as DesktopPlaybackPrepareConfig
+    expect(owner.preparePlayback(7, mismatchedProviderAccess, playbackLanes(), 'darwin')).toMatchObject({
+      ok: false,
+      errorCode: 'invalid-configuration'
+    })
+    expect(prepares).toBe(0)
+  })
+
   it('permits signed-byte mutation only for the default packaged mac addon', () => {
     expect(captureIntegrityMode(true, 'darwin')).toBe('packaged-signed-mac')
     expect(captureIntegrityMode(false, 'darwin')).toBe('exact')
@@ -209,8 +506,8 @@ describe('CaptureOwner', () => {
     expect(resolveCaptureAddonPath({ ...runtime, envOverride: './fixture.node' })).toBe(
       resolve('./fixture.node')
     )
-    expect(captureAddonManifestPath('/diagnostics/override.node').replaceAll('\\', '/')).toBe(
-      '/diagnostics/singz-capture.manifest.json'
+    expect(captureAddonManifestPath('/diagnostics/override.node').replaceAll('\\', '/')).toMatch(
+      /^(?:[A-Z]:)?\/diagnostics\/singz-capture\.manifest\.json$/i
     )
   })
 
@@ -237,12 +534,17 @@ describe('CaptureOwner', () => {
   })
 
   it('stages exact bytes at unique private paths and cleans only on request', () => {
-    const first = stageArtifactForLoad(artifact)
+    const companion = new Uint8Array([4, 3, 2, 1])
+    const first = stageArtifactForLoad(artifact, [
+      { path: 'ffmpeg/libavcodec.62.dylib', bytes: companion }
+    ])
     const second = stageArtifactForLoad(artifact)
     try {
       expect(first.path).not.toBe(second.path)
       expect(first.path.endsWith('.node')).toBe(true)
       expect(readFileSync(first.path)).toEqual(Buffer.from(artifact))
+      expect(readFileSync(first.companions!['ffmpeg/libavcodec.62.dylib']))
+        .toEqual(Buffer.from(companion))
       if (process.platform !== 'win32') {
         expect(statSync(first.path).mode & 0o777).toBe(0o500)
       }
@@ -518,9 +820,10 @@ describe('CaptureOwner', () => {
   it('exposes exact HAL inventory and mints monotonic monitor generations in main', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)
-    expect(owner.hostDevices('darwin')).toMatchObject({
+    expect(owner.hostDevices(undefined, 'darwin')).toMatchObject({
       ok: true,
       platform: 'darwin',
+      provider: 'coreaudio',
       defaultInputUid: 'fixture:24',
       devices: [{ uid: 'fixture:24', inputChannels: 24, outputChannels: 2 }]
     })

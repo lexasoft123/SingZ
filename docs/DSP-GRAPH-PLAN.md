@@ -3,7 +3,7 @@
 Status: roadmap; Phase 4A native monitoring and Phase 4A.1 app-shell
 persistence are product-wired and hardware-verified on macOS with the Zen
 Quadro SC
-Last reviewed: 2026-08-29
+Last reviewed: 2026-09-02
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
 
 Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
@@ -1628,6 +1628,251 @@ output-host composition. Its B2 product coordinator now supplies the Catalog
 load guard, exact cleanup lease and exclusive legacy-engine/session handoff
 for the Experimental audible iPhone path; other platforms require their
 corresponding session slice.
+
+#### Phase 4B — transport, metronome and count-in
+
+Metronome support is not a bridge flag on the current frame-zero graph.
+Count-in is transport: project time begins below zero while the output clock
+and reference source already run. The metronome is a separately routed DSP
+source. The first full-playback slice therefore establishes both concepts
+before removing the legacy eligibility gate.
+
+The target graph is hierarchical rather than adding the metronome as another
+stem input. A mix processor accepts at most 16 inputs and playback already
+permits 16 lanes. More importantly, reference signals have different
+processing rules from song audio:
+
+```text
+transport-aware lane sources -> maps -> ramped lane gains -> SongMix
+  -> training/song processing -> SongGain -----------------------------+
+                                                                       |
+prepared ScheduledCueSource -> ramped ReferenceGain -> latency align --+-> OutputMix
+                                                                            -> OutputGain
+                                                                            -> SafetyLimiter
+                                                                            -> physical output
+```
+
+`SongGain` is the song-only master used by playback and training. Clicks and
+future pitch-reference cues bypass it, song transpose/stretch, training duck
+and song effects. `OutputGain`, the final limiter and the physical/system
+volume affect both buses. When the song path has algorithmic latency, the
+reference path receives an explicit prepared delay so the cue is heard on the
+same audible project instant without passing through the song processor.
+
+##### Ownership and APIs
+
+- `zcore_device_*` remains an OS audio host. It supplies callback timestamps,
+  route generations, latency and discontinuities, but knows nothing about
+  beats, bars, count-in or projects.
+- `zdsp_runtime` gains reusable transport-aware building blocks: a positioned
+  decoded source and a generic scheduled-cue source. Neither block accepts a
+  SingZ `BeatInfo` or performs file access. Their prepared state is immutable,
+  bounded and retained until the callback, runner and graph have retired it.
+- `native/playback` owns `PlaybackTransport`, converts the project beat map and
+  sanitized metronome settings into a prepared frame-domain cue timeline, and
+  composes the song/reference/output buses. It is the one implementation
+  shared by iOS, Android and desktop hosts.
+- Platform bridges validate bounded DTOs, translate them to the shared session
+  API and expose generation-bound controls/status. They do not schedule
+  individual clicks.
+- The UI uses a compatibility facade with the legacy engine contract. Backend
+  selection occurs behind that facade, so the normal player—not a permanent
+  second native-player screen—owns metronome, count-in and transport controls.
+
+`PlaybackTransport` anchors a transport generation to an output graph frame.
+Every callback publishes a valid `TransportContext` containing monotonically
+advancing `continuousTimeSamples` and signed `projectTimeSamples`. Beat-grid
+count-in occupies negative project time; song sources emit silence and keep
+their cursors at the selected start frame until project time crosses the entry
+boundary. A block that straddles the boundary renders silence followed by song
+audio at the exact sample offset, identically for every lane. Gridless
+count-in uses the same negative interval but leaves tempo/musical-position
+fields invalid. Output-device time remains the graph master; Bluetooth,
+CarPlay and other route latency changes only the audible projection reported
+to the UI, never hardware or project timestamps.
+
+Before transport-aware rendering is enabled, `segmentContext` must advance
+transport sample and musical fields when a graph block is split for parameter
+events or crossfades. Seek, loop, rate, route and stream-generation changes
+produce the typed discontinuity/reset boundary defined by ADR 0003. A seek or
+hot swap restarts without count-in. A normal user Start prepares count-in.
+Loop wrap re-anchors song sources, stretch state and the cue walker on one
+graph-frame boundary.
+
+The prepared cue timeline is not the existing `MusicalEventQueue`. That queue
+contains next-block relative offsets and is unsuitable as a song-long timing
+authority. Off the real-time thread, the playback session compiles a bounded,
+sorted timeline of signed project-frame cue positions and accent flags. The
+scheduled-cue source walks it without allocation or locks and renders a
+prepared click envelope across arbitrary callback boundaries. Scalar changes
+such as reference volume use the existing bounded parameter queue; beat-map
+or structural count-in changes publish a replacement prepared timeline or a
+new transport generation off RT.
+
+The compiler initially preserves the legacy behavior as the compatibility
+specification:
+
+- beat positions, not average BPM, are authoritative;
+- virtual beats before the first detected beat use the current edge-period
+  extrapolation;
+- explicit downbeats and local meter determine accents and entry bar length;
+- one grid-backed bar produces the local number of preceding beats and scales
+  with playback rate;
+- with no beat grid, one/two bars mean three/six ticks exactly one output-clock
+  second apart, independent of playback rate, with music entering one second
+  after the last tick;
+- `click=false` with count-in enabled renders only the pre-roll cues;
+- `accent=false` uses the ordinary click for every event;
+- the prepared 55 ms ordinary/accent click sounds retain the current envelope
+  and levels until a deliberate product change is separately approved;
+- audible count-in progress comes from actual rendered cue frames plus output
+  latency, not a JS timer or an average-period animation.
+
+The existing TypeScript beat functions remain the migration oracle. Shared
+JSON fixtures cover virtual beats, explicit downbeats, meter changes, no-grid
+fallback and seconds-to-frame rounding; both the TypeScript implementation and
+the C++ planner must consume them. Once parity and product rollout are complete,
+there must be one portable planner rather than independent per-OS algorithms.
+
+##### Delivery slices
+
+1. **Transport kernel.** Add a session-owned transport provider to
+   `AudioHostGraphAdapter`, advance transport correctly through segmented
+   blocks, and introduce the positioned decoded source. Prove negative-to-zero
+   crossing, variable callback sizes, lane sample lock and cursor quarantine
+   using the fake host. Keep the product eligibility gate unchanged.
+2. **Reference bus and scheduled cues.** Add the generic prepared cue source,
+   port the beat/count-in planner with shared parity fixtures, split the graph
+   into song/reference/output buses and add latency alignment. Prove exact cue
+   frames, accents, count-in-only behavior, song-bus bypass and final limiting
+   with deterministic rendered-buffer tests.
+3. **Versioned session and bridge contract.** Extend prepare with a bounded
+   transport/metronome document and publish a new capability literal. Add
+   strict unknown-key, range, duration and event-count checks in every bridge.
+   Status exposes signed render/audible project frames, continuous graph frame,
+   pre-roll total/remaining frames, cues completed, transport generation,
+   discontinuity and overflow counters. Callback code only updates bounded
+   lock-free state; ordinary threads format logs.
+4. **Player facade and persistence.** Route the ordinary player controls to
+   either backend. Resolve metronome configuration once before backend
+   eligibility, and make that same resolved value drive the UI and prepare
+   request. Changes are saved by re-reading and merging current project state;
+   a read-only Drive project uses a stable per-project local override until a
+   phone-to-Drive writer exists. Remove the metronome/count-in legacy bypass
+   only when the probed native capability declares this contract. A stale
+   installed binary remains wholly on the legacy engine.
+5. **iPhone rollout.** Rebuild/reinstall, prove the new capability literal is
+   in the installed binary, and run the shared engine contract plus real-device
+   Speaker, wired, Bluetooth and CarPlay checks. Include route change and call
+   interruption; after a discontinuity the user explicitly resumes, and the
+   transport/cue plan is rebuilt for the new route latency.
+6. **Android and desktop composition.** Reuse the same session, planner, nodes,
+   facade contract and tests. Only the AudioHost/provider, OS session policy
+   and bridge differ. Do not claim product parity merely because the portable
+   C++ code compiles; each platform needs an audible session integration and
+   physical-device gate. ASIO remains an explicit Windows provider, never a
+   disguised WASAPI fallback.
+
+##### Acceptance gates
+
+- During pre-roll every decoded lane cursor remains at its selected start and
+  the output contains reference cues only.
+- All lanes enter on the same sample when signed project time reaches zero,
+  including a boundary in the middle of a variable-sized callback.
+- 4/4 and local three-beat count-ins, virtual pre-song beats, explicit
+  downbeats, gridless three/six-tick fallback and accent-off all match shared
+  fixtures.
+- Metronome audio bypasses song mute/gain, transpose and training duck, while
+  still reaching output gain and the safety limiter. Added song-path latency
+  does not move the cue relative to audible song time.
+- Seek/loop/rate/discontinuity changes re-anchor source, stretch and cue state
+  atomically; pause, seek and hot swap do not unexpectedly replay count-in.
+- The render callback remains allocation-, lock-, log-, bridge- and file-I/O-
+  free under the existing allocation trap and real-time policy scan.
+- Stop/unload preserves host -> runner -> graph -> decoded/cue-storage release
+  order, and repeated mobile open/close remains inside the established memory
+  envelope.
+- Injected output latency delays only audible UI/countdown reporting. It does
+  not rewrite graph, project or hardware timestamps.
+- Graph diagnostics and visualization are generated from the actual
+  control-domain composition summary and show the split song/reference buses;
+  they are not a second hard-coded topology.
+- Legacy and native implementations pass one facade contract suite before the
+  feature flag defaults to native on any platform.
+
+Do not remove the current metronome/count-in eligibility rejection merely to
+exercise the new output host. It is the rollback boundary until slices 1-4 are
+complete and the new capability is present.
+
+Phase 4B slices 1-4 implemented 2026-09-02 (one source tree for all three
+hosts; native playback stays an explicit per-platform opt-in, never the
+default):
+
+- Transport kernel and reference bus: `AudioHostGraphAdapter` carries a
+  session-owned transport provider and advances signed project time through
+  segmented blocks; `zdsp_runtime` gained the positioned decoded source and
+  the generic `ScheduledCueSource`/`ScheduledGain`; `native/playback` owns
+  `PlaybackTransport`, the beat/count-in planner (`playback_cue_plan`) and the
+  song/reference/output bus composition, with the Signalsmith time/pitch
+  processor on the song bus and a matching prepared delay on the reference
+  path. The planner and the TypeScript oracle consume the same
+  `tests/shared/playback-cue-cases.json`.
+- Versioned session and bridge contract: capability literal
+  `singz.native.playback-session.anchored-preview.v4`, nested playback
+  document version 2, recursive unknown-key/range/count rejection in the
+  desktop N-API bridge, the iOS Objective-C bridge and the Android JNI bridge,
+  and a lossless status projection (signed render/audible frames, pre-roll
+  counters, cue progress, discontinuity/overflow counters, graph arena
+  accounting).
+- Player facade and persistence: the ordinary player owns transport, metronome
+  and count-in on every platform (`mobile/src/playback/backend.ts` on the
+  phones; `src/renderer/src/audio/desktop-native-playback.ts` behind the
+  desktop engine, with generation-bound scalar controls, hot-swapped structural
+  rebuilds at the signed project frame, one serialized status-read lane and a
+  cleanup-only quarantine after any failed native read). The portable graph
+  document (`src/shared/graph-document.ts`, materialized natively by
+  `native_playback_graph_document`) is persisted beside `project.json` with
+  hashes and round-trips desktop → Drive → phone with opaque adapter state and
+  missing-node placeholders (`tests/roundtrip`).
+- Extended codecs: descriptor-only FFmpeg decode in `zcore_media` behind
+  `SINGZ_ENABLE_FFMPEG_CODECS`, packaged as replaceable LGPL shared libraries
+  with the pack/proof pipeline described in docs/DEVELOPMENT.md. Only
+  `darwin-arm64` carries a full-matrix proof (host-executed); every mobile pack
+  is configuration-only, so ordinary builds are the base WAV/FLAC decoder and
+  report exactly that (`SINGZ_FFMPEG_CODECS`, opt-in by design).
+- Headless evidence: root typecheck; 1015 vitest tests including the desktop
+  facade lifecycle races; 529 mobile jest tests including the phone facade
+  contract suite; the seven parity gates; the Mac native gate (14 CTest
+  targets: session, cue plan, Signalsmith, codec provisioning, graph adapter,
+  zdsp contract/graph/analysis, ownership and failure suites) with the v4
+  literal proven in the rebuilt binary; the Swift and Objective-C bridge
+  schema runners; a scratch Electron run on 2026-09-01 that reached active v4
+  CoreAudio playback with a 13-node project graph and lossless arena status;
+  the Android Kotlin unit suites (48 tests) and an arm64 debug APK whose
+  `libsingzcore.so` carries the v4 literal, links Oboe and has no `libav*`
+  dependency; an iOS simulator Debug build through the auto-mode Pod graph
+  whose code image carries the v4 literal and the base codec tag with the
+  stale B2/v3 literals absent; and the desktop capture addon rebuilt, its
+  Electron smoke passed and the renderer bundle inside its size budget.
+
+Still open before Phase 4 can be called complete (slices 5-6 and the
+physical-device gates):
+
+- iPhone rollout: rebuild/reinstall with the v4 literal proven in the
+  installed binary, then Speaker, wired, Bluetooth and CarPlay checks with
+  route change and call interruption on a real device.
+- Android audible session: the JNI bridge, Oboe host and facade exist, but no
+  emulator or hardware run has played through them yet.
+- Windows: the WASAPI/ASIO playback providers are compiled by the Core Windows
+  workflow only; no Dell run has exercised native playback, and ASIO remains
+  gated behind the unsigned SDK agreement.
+- Target-executed codec proofs for every mobile target, which is what turns
+  the extended codec matrix on there.
+- One shared engine-contract suite executed against both legacy engines and
+  the facade; today the phone suite covers the mobile facade and the desktop
+  suite covers the desktop facade separately.
+- Route/latency and memory-envelope measurements on hardware, and the
+  feature-flag default decision, which stays "legacy" on every platform.
 
 Implement:
 

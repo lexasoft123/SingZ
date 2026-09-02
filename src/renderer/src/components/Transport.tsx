@@ -11,7 +11,7 @@ import {
   type BeatInfo,
   type MetronomeConfig
 } from '../audio/beat'
-import { analysisIsStale, BEAT_DETECT_VERSION } from '../audio/analysis'
+import { analysisIsStale, BEAT_DETECT_VERSION } from '../audio/analysis-contract'
 import { fmtClock, fmtTime, modalCoversApp, TRACK_META, type TrainingConfig } from '../model'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {

@@ -26,3 +26,10 @@ void SingzNativePlaybackSetControl(NSNumber* generation,
                                    NSDictionary* control,
                                    RCTPromiseResolveBlock resolve,
                                    RCTPromiseRejectBlock reject);
+void SingzNativePlaybackTransport(NSNumber* generation,
+                                  NSDictionary* command,
+                                  RCTPromiseResolveBlock resolve,
+                                  RCTPromiseRejectBlock reject);
+void SingzNativePlaybackPreviewClick(NSNumber* generation, NSNumber* sound,
+                                     RCTPromiseResolveBlock resolve,
+                                     RCTPromiseRejectBlock reject);

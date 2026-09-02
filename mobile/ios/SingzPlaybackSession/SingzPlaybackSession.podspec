@@ -12,12 +12,18 @@ Pod::Spec.new do |s|
   # its one callback declaration. The callback definition remains owned by
   # SingzDspRuntime, so the final app has one definition of every symbol.
   s.source_files = 'native/playback/*.{h,cpp}'
-  s.public_header_files = 'native/playback/native_playback_session.h'
+  s.public_header_files = 'native/playback/native_playback_session.h',
+                          'native/playback/native_playback_graph_document.h',
+                          'native/playback/playback_cue_plan.h'
   s.header_mappings_dir = 'native/playback'
+  s.preserve_paths = 'signalsmith/**/*'
+  s.resource_bundles = {
+    'SingzSignalsmithNotices' => 'compliance/*'
+  }
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
-    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/native/playback" "$(PODS_ROOT)/../SingzCore/core/include" "$(PODS_ROOT)/../SingzDspRuntime/zdsp/include" "$(PODS_ROOT)/../SingzDspRuntime/zcore/include"'
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/native/playback" "$(PODS_TARGET_SRCROOT)/signalsmith" "$(PODS_ROOT)/../SingzCore/core/include" "$(PODS_ROOT)/../SingzDspRuntime/zdsp/include" "$(PODS_ROOT)/../SingzDspRuntime/zcore/include"'
   }
   s.dependency 'SingzCore'
   s.dependency 'SingzDspRuntime'

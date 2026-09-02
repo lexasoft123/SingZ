@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { startMockDrive, type MockDrive } from './mock-drive'
+import graphCases from '../shared/graph-document-cases.json'
 
 /** Every fs read of a stem file — the whole point of stored stem hashes is
  *  that a clean sync performs none (hashing evicted iCloud stems downloads
@@ -146,6 +147,61 @@ describe('gdriveSync (against the mock Drive)', () => {
     expect(doc.lyricsHash?.md5).toBe(
       createHash('md5').update(lyr!.bytes as Buffer).digest('hex')
     )
+  })
+
+  it('publishes the exact graph before its project reference and removes only the managed stale graph', async () => {
+    const { readSettings } = await import('../../src/main/settings')
+    const root = (readSettings() as { projectsRoot: string }).projectsRoot
+    const dir = join(root, 'Mock Song')
+    const graph = JSON.stringify(graphCases.base)
+    await writeFile(join(dir, 'graph.json'), graph)
+    const st = await stat(join(dir, 'graph.json'))
+    const doc = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+    doc.graphHash = {
+      format: 1,
+      md5: createHash('md5').update(graph).digest('hex'),
+      size: Buffer.byteLength(graph),
+      mtimeMs: st.mtimeMs
+    }
+    await writeFile(join(dir, 'project.json'), JSON.stringify(doc, null, 2))
+
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    expect(await gdriveSync()).toMatchObject({ ok: true, uploaded: 2 })
+    const liveGraph = [...mock.files.values()].find((f) => f.name === 'graph.json' && !f.trashed)
+    expect(liveGraph?.bytes?.toString()).toBe(graph)
+    const catalogFile = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)
+    const manifest = JSON.parse(catalogFile!.bytes!.toString())
+    expect(manifest.projects[0].files.map((f: { name: string }) => f.name)).toContain('graph.json')
+
+    delete doc.graphHash
+    await unlink(join(dir, 'graph.json'))
+    await writeFile(join(dir, 'project.json'), JSON.stringify(doc, null, 2))
+    expect(await gdriveSync()).toMatchObject({ ok: true, uploaded: 1 })
+    expect(liveGraph?.trashed).toBe(true)
+  })
+
+  it('skips a project whose document names mismatched graph bytes and keeps syncing the rest', async () => {
+    const { readSettings } = await import('../../src/main/settings')
+    const root = (readSettings() as { projectsRoot: string }).projectsRoot
+    const dir = join(root, 'Mock Song')
+    const doc = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+    doc.graphHash = { format: 1, md5: '0'.repeat(32), size: 2, mtimeMs: 1 }
+    await writeFile(join(dir, 'graph.json'), '{}')
+    await writeFile(join(dir, 'project.json'), JSON.stringify(doc, null, 2))
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const { syncLogEntries } = await import('../../src/main/sync-log')
+    const startedAt = Date.now()
+    // One broken reference costs that project, never the run: the library
+    // keeps syncing and the catalog stops naming the project until it is fixed.
+    expect(await gdriveSync()).toMatchObject({ ok: true })
+    expect(syncLogEntries().filter((e) => e.at >= startedAt).some((e) =>
+      e.kind === 'error' && e.msg.includes('graph.json does not match graphHash'))).toBe(true)
+    const catalogFile = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)
+    const catalog = JSON.parse(catalogFile!.bytes!.toString())
+    expect(catalog.projects.map((p: { dir: string }) => p.dir)).not.toContain('Mock Song')
+    delete doc.graphHash
+    await unlink(join(dir, 'graph.json'))
+    await writeFile(join(dir, 'project.json'), JSON.stringify(doc, null, 2))
   })
 
   it('re-uploads only what changed', async () => {

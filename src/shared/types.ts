@@ -1,4 +1,5 @@
 import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
+import type { NativeGraphDocumentProjection } from './graph-document'
 
 export const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 export type StemName = (typeof STEMS)[number]
@@ -212,12 +213,47 @@ export interface ProjectSettings {
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
+/** Content identity for one project member. File bytes, never a ledger entry,
+ * are the authority; mtime only avoids re-hashing unchanged local files. */
+export interface ProjectFileHash {
+  md5: string
+  size: number
+  mtimeMs: number
+}
+
+/** Optional portable DSP graph reference. The member name is fixed as
+ * `graph.json`; its format version is independent of the project's WAV/FLAC
+ * storage version. */
+export interface ProjectGraphHash extends ProjectFileHash {
+  format: number
+}
+
+export interface ProjectGraphPayload {
+  hash: ProjectGraphHash
+  /** Exact verified graph.json text. Opaque state is never decoded by IPC. */
+  text: string
+}
+
+export type ProjectGraphReadResult =
+  | { ok: true; graph: ProjectGraphPayload | null }
+  | {
+      ok: false
+      code: 'not-project' | 'invalid-reference' | 'missing' | 'mismatch' | 'unsupported' | 'invalid'
+      error: string
+    }
+
+export type ProjectGraphWriteResult =
+  | { ok: true; graph: ProjectGraphPayload }
+  | { ok: false; code: 'not-project' | 'unsupported' | 'invalid' | 'write-failed'; error: string }
+
 export interface ProjectInfo {
   dir: string
   name: string
   /** 1 = WAV stems (pre-0.7), 2 = FLAC stems. Missing on old metas = 1. */
   formatVersion?: number
   settings: ProjectSettings
+  /** Present even when this build cannot interpret its future format. */
+  graphHash?: ProjectGraphHash
   /** Stem files on disk (at least the core four), when the project has them. */
   stems?: Partial<Record<StemName6, string>>
   /** Files project.json names that are there at the wrong size — a half-copied
@@ -546,6 +582,8 @@ export type DesktopAudioHostInventoryResult =
   | {
       ok: true
       platform: DesktopAudioHostPlatform
+      /** Provider whose opaque device-id namespace this inventory belongs to. */
+      provider: DesktopPlaybackProvider
       defaultInputUid: string
       defaultOutputUid: string
       devices: DesktopAudioHostDevice[]
@@ -553,6 +591,7 @@ export type DesktopAudioHostInventoryResult =
   | {
       ok: false
       platform: DesktopAudioHostPlatform
+      provider: DesktopPlaybackProvider
       defaultInputUid: ''
       defaultOutputUid: ''
       devices: []
@@ -652,6 +691,325 @@ export interface DesktopMonitorStatus {
   parameterOverflows: number
   nonFiniteSamples: number
   rejectedBlocks: number
+}
+
+export type DesktopPlaybackProvider = 'coreaudio' | 'wasapi' | 'asio'
+
+export interface DesktopPlaybackProviderInfo {
+  id: DesktopPlaybackProvider
+  label: string
+  available: boolean
+  errorCode:
+    | 'none'
+    | 'not-compiled'
+    | 'runtime-unavailable'
+    | 'platform-not-ready'
+    | 'wrong-platform'
+  detail: string
+}
+
+export interface DesktopPlaybackBeatGrid {
+  beats: number[]
+  beatsPerBar: number
+  downbeat: number
+  downbeats: number[]
+}
+
+export const DESKTOP_PLAYBACK_CONTRACT_VERSION = 2 as const
+export const DESKTOP_PLAYBACK_CAPABILITY =
+  'singz.native.playback-session.anchored-preview.v4' as const
+export const DESKTOP_PLAYBACK_CODEC_PROFILE = 'singz-playback-codecs-v1' as const
+export const DESKTOP_PLAYBACK_CODEC_BASE_TAG =
+  'singz-prepared-audio-fd-wav-flac-v1' as const
+export const DESKTOP_PLAYBACK_CODEC_FULL_TAG =
+  'singz-prepared-audio-fd-ffmpeg-full-matrix-v3' as const
+export const DESKTOP_PLAYBACK_CODEC_BASE_MASK = 0x003 as const
+export const DESKTOP_PLAYBACK_CODEC_FULL_MASK = 0x1ff as const
+export const DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS = ['wav', 'flac'] as const
+export const DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS = [
+  'wav', 'flac', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'aif', 'aiff'
+] as const
+
+export interface DesktopPlaybackRuntimeCapability {
+  available: boolean
+  playbackCapability: typeof DESKTOP_PLAYBACK_CAPABILITY
+  mediaCodec: {
+    abiVersion: 1
+    formatMask: number
+    dynamicallyLinkedFfmpeg: boolean
+    runtimeVersion: string
+    capabilityTag:
+      | typeof DESKTOP_PLAYBACK_CODEC_BASE_TAG
+      | typeof DESKTOP_PLAYBACK_CODEC_FULL_TAG
+    profile: '' | typeof DESKTOP_PLAYBACK_CODEC_PROFILE
+    target: string
+    extensions: string[]
+  }
+}
+
+export interface DesktopPlaybackTransportConfig {
+  entrySeconds: number
+  durationSeconds?: number
+  playbackRate: number
+  transposeSemitones: number
+}
+
+export interface DesktopPlaybackCueConfig {
+  click: boolean
+  countInBars: number
+  volume: number
+  accent: boolean
+  beatGrid?: DesktopPlaybackBeatGrid
+}
+
+export interface DesktopPlaybackTrainingConfig {
+  mode: 'period' | 'windows'
+  periodFrames?: number
+  windows?: Array<{
+    startProjectFrame: number
+    endProjectFrame: number
+  }>
+  laneIds: string[]
+  enabled: boolean
+}
+
+export interface DesktopPlaybackInitialTransportConfig {
+  state: 'playing' | 'paused'
+  loop?: {
+    startProjectFrame: number
+    endProjectFrame: number
+  }
+}
+
+/** Whole-project prepare DTO. Paths are accepted only by main after its media
+ * allowlist approves every lane; PCM and individual click events never cross
+ * IPC. */
+export interface DesktopPlaybackPrepareConfig {
+  capability: typeof DESKTOP_PLAYBACK_CAPABILITY
+  provider: DesktopPlaybackProvider
+  /** Provider-bound output access. ASIO is exclusive; CoreAudio/WASAPI use
+   * their ordinary shared product path. This is strict IPC input, not a hint. */
+  accessMode: AudioHostAccessMode
+  outputDeviceUid: string
+  outputChannels: number[]
+  sampleRate: number
+  bufferFrames: number
+  maximumFrames: number
+  masterGain: number
+  maximumRetainedBytes?: number
+  playback: {
+    version: typeof DESKTOP_PLAYBACK_CONTRACT_VERSION
+    transport: DesktopPlaybackTransportConfig
+    cues: DesktopPlaybackCueConfig
+  }
+  training?: DesktopPlaybackTrainingConfig
+  preparedStartProjectFrame?: number
+  initialTransport?: DesktopPlaybackInitialTransportConfig
+  graphDocument?: NativeGraphDocumentProjection
+}
+
+export interface DesktopPlaybackLaneConfig {
+  id: string
+  path: string
+  gain: number
+  muted: boolean
+  solo: boolean
+}
+
+export type DesktopPlaybackState =
+  | 'unloaded'
+  | 'preparing'
+  | 'prepared'
+  | 'output-open'
+  | 'running'
+  | 'stopped'
+  | 'terminal'
+  | 'quarantined'
+
+export type DesktopPlaybackErrorCode =
+  | 'none'
+  | 'invalid-generation'
+  | 'invalid-state'
+  | 'invalid-configuration'
+  | 'cancelled'
+  | 'decode-failure'
+  | 'limit-exceeded'
+  | 'resource-exhausted'
+  | 'graph-failure'
+  | 'host-failure'
+  | 'provider-failure'
+  | 'queue-full'
+  | 'teardown-uncertain'
+  | 'unsupported-playback-rate'
+  | 'native-audio-busy'
+  | 'platform-not-ready'
+  | 'unauthorized-path'
+
+export interface DesktopPlaybackResult {
+  ok: boolean
+  errorCode: DesktopPlaybackErrorCode
+  error: string
+  generation: string
+  state: DesktopPlaybackState
+  format: Omit<DesktopMonitorFormat, 'sampleFormat' | 'outputClockMaster' | 'accessMode'>
+  latency: DesktopMonitorLatency
+  cleanupComplete?: boolean
+  retainedBytes?: string
+  physicalOwnershipRetained?: boolean
+  /** Main-process bridge evidence; renderer behavior must not infer safety
+   * from it and instead uses cleanupComplete on unload. */
+  ownershipRetained?: boolean
+}
+
+export interface DesktopPlaybackLaneStatus {
+  id: string
+  cursorFrames: string
+  totalFrames: string
+  gain: number
+  muted: boolean
+  solo: boolean
+}
+
+export const DESKTOP_PLAYBACK_GRAPH_MAX_NODES = 128
+export const DESKTOP_PLAYBACK_GRAPH_MAX_CONNECTIONS = 256
+export const DESKTOP_PLAYBACK_GRAPH_MAX_BUSES = 16
+
+export type DesktopPlaybackGraphNodeRole = 'input' | 'processor' | 'output'
+
+export type DesktopPlaybackGraphNodeKind =
+  | 'unknown'
+  | 'physical-output'
+  | 'decoded-source'
+  | 'channel-map'
+  | 'gain'
+  | 'mix'
+  | 'scheduled-gain'
+  | 'signalsmith-time-pitch'
+  | 'scheduled-cue-source'
+  | 'peak-rms'
+  | 'tap'
+  | 'oscillator'
+  | 'safety-limiter'
+  | 'unavailable-bypass'
+  | 'unavailable-silence'
+
+export interface DesktopPlaybackGraphNodeStatus {
+  /** Exact uint64 identity. It must remain a decimal string across N-API. */
+  id: string
+  label: string
+  role: DesktopPlaybackGraphNodeRole
+  kind: DesktopPlaybackGraphNodeKind
+  /** Exact stable uint64 type identity. */
+  typeHigh: string
+  typeLow: string
+  schemaVersion: number
+  flags: number
+  inputBusCount: number
+  outputBusCount: number
+  inputBusChannels: number[]
+  outputBusChannels: number[]
+  intrinsicLatencyFrames: number
+  arrivalLatencyFrames: number
+  outputLatencyFrames: number
+}
+
+export interface DesktopPlaybackGraphConnectionStatus {
+  sourceNodeId: string
+  sourceBus: number
+  sourceChannels: number
+  destinationNodeId: string
+  destinationBus: number
+  destinationChannels: number
+  sourceOutputLatencyFrames: number
+  destinationArrivalLatencyFrames: number
+  compensationFrames: number
+  latencyCompensated: boolean
+}
+
+export interface DesktopPlaybackGraphSnapshot {
+  generation: string
+  formatVersion: number
+  sampleRate: number
+  maximumFrames: number
+  outputLatencyFrames: number
+  latencyCompensatedConnectionCount: number
+  nodes: DesktopPlaybackGraphNodeStatus[]
+  connections: DesktopPlaybackGraphConnectionStatus[]
+}
+
+export interface DesktopPlaybackStatus {
+  capability: typeof DESKTOP_PLAYBACK_CAPABILITY
+  generation: string
+  state: DesktopPlaybackState
+  hostState: AudioHostStateName
+  terminalReason: string
+  terminalOrdinal: string
+  transportGeneration: string
+  transportState: 'stopped' | 'pre-roll' | 'playing' | 'paused' | 'completed'
+  transportTelemetryQuality: 'unavailable' | 'initial' | 'current' | 'lastGood'
+  lastTransportBoundary: string
+  renderedProjectFrame: string
+  audibleProjectFrame: string
+  audibleProjectionQuality: 'unavailable' | 'current'
+  continuousFrame: string
+  durationFrames: string
+  remainingPreRollFrames: string
+  cueEventsCompleted: number
+  nextCueEventIndex: number
+  presentationLatencyFrames: string
+  graphLatencyFrames: string
+  devicePresentationLatencyFrames: string
+  totalPresentationLatencyFrames: string
+  renderedFrames: string
+  audibleFrames: string
+  routeGeneration: string
+  streamGeneration: string
+  callbacks: string
+  xruns: string
+  deadlineMisses: string
+  discontinuities: string
+  invalidCallbacks: string
+  renderFailures: string
+  loopEnabled: boolean
+  loopStartFrame: string
+  loopEndFrame: string
+  loopCount: string
+  seekCount: string
+  transportDiscontinuities: string
+  playbackRate: number
+  transposeSemitones: number
+  timePitchAnchorsPrepared: string
+  timePitchAnchorsPublished: string
+  timePitchAnchorMisses: string
+  timePitchReplacementReady: boolean
+  timePitchLoopPriming: boolean
+  preparedStartProjectFrame: string
+  retainedBytes: string
+  graphArenaBytes: string
+  masterGain: number
+  referenceGain: number
+  trainingEnabled: boolean
+  trainingLanes: string[]
+  preRollFrames: string
+  cueEventCount: number
+  previewClicksEnqueued: string
+  previewClicksStarted: string
+  previewClicksCompleted: string
+  previewClicksPending: number
+  topology: string
+  graphNodeCount: number
+  graphConnectionCount: number
+  latencyCompensatedEdgeCount: number
+  graphSnapshot: DesktopPlaybackGraphSnapshot | null
+  adapterRenderFailures: number
+  terminalRenderFailures: number
+  parameterOverflows: number
+  nonFiniteSamples: number
+  rejectedBlocks: number
+  error: string
+  format: DesktopPlaybackResult['format']
+  latency: DesktopMonitorLatency
+  lanes: DesktopPlaybackLaneStatus[]
 }
 
 export type DesktopAudioInputEvent =
@@ -825,7 +1183,7 @@ export interface SingzApi {
   captureStats(): Promise<CaptureStats>
   onCaptureWindow(cb: (window: CaptureAnalysisWindow) => void): () => void
   /** Full-duplex native host inventory. UIDs remain distinct from Chromium ids. */
-  audioHostDevices(): Promise<DesktopAudioHostInventoryResult>
+  audioHostDevices(provider?: DesktopPlaybackProvider): Promise<DesktopAudioHostInventoryResult>
   /** Starts muted. The main-process owner mints the monotonic native generation. */
   beginMonitor(config: DesktopMonitorConfig): Promise<DesktopMonitorResult>
   setMonitorGain(
@@ -835,6 +1193,38 @@ export interface SingzApi {
   ): Promise<DesktopMonitorResult>
   monitorStatus(): Promise<DesktopMonitorStatus>
   endMonitor(ownershipGeneration: string): Promise<DesktopMonitorResult>
+  desktopPlaybackProviders(): Promise<DesktopPlaybackProviderInfo[]>
+  desktopPlaybackCapability(): Promise<DesktopPlaybackRuntimeCapability>
+  prepareDesktopPlayback(
+    config: DesktopPlaybackPrepareConfig,
+    lanes: DesktopPlaybackLaneConfig[]
+  ): Promise<DesktopPlaybackResult>
+  openDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
+  startDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
+  pauseDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
+  resumeDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
+  stopDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
+  seekDesktopPlayback(generation: string, projectFrame: number): Promise<DesktopPlaybackResult>
+  setDesktopPlaybackLoop(
+    generation: string,
+    startFrame: number,
+    endFrame: number
+  ): Promise<DesktopPlaybackResult>
+  clearDesktopPlaybackLoop(generation: string): Promise<DesktopPlaybackResult>
+  reanchorDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
+  setDesktopPlaybackLane(
+    generation: string,
+    id: string,
+    gain: number,
+    muted: boolean,
+    solo: boolean
+  ): Promise<DesktopPlaybackResult>
+  setDesktopPlaybackMasterGain(
+    generation: string,
+    gain: number
+  ): Promise<DesktopPlaybackResult>
+  desktopPlaybackStatus(): Promise<DesktopPlaybackStatus>
+  unloadDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
   /** First-run setup: model inventory and the shared download flow. */
   modelsStatus(): Promise<ModelInfo[]>
   downloadModels(
@@ -880,6 +1270,10 @@ export interface SingzApi {
       }
     | { ok: false; error: string }
   >
+  /** Read graph.json only when its project.json reference matches exactly. */
+  readProjectGraph(songPath: string): Promise<ProjectGraphReadResult>
+  /** Explicit graph edit transaction: graph.json first, project.json last. */
+  writeProjectGraph(songPath: string, text: string): Promise<ProjectGraphWriteResult>
   /** Saved-project library for the in-app Open screen. */
   listProjects(): Promise<{ root: string; projects: ProjectListItem[] }>
   /** Rename a saved project's folder + metadata in place; returns the moved paths. */

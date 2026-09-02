@@ -1,5 +1,8 @@
 package com.singzplayer.split
 
+import com.singzplayer.playback.NativePlaybackGraphConnectionJni
+import com.singzplayer.playback.NativePlaybackGraphNodeJni
+
 /**
  * The shared top-level C++ zcore package (docs/PHONE-STANDALONE.md).
  * Loading is lazy and failure is a value, not a crash: an ABI the core does
@@ -85,6 +88,88 @@ object SingzCore {
 
   /** Packaging probe only; it never opens a device or acquires audio focus. */
   external fun hasAndroidAudioHostProvider(): Boolean
+
+  // Phase 4 native playback. Every method below is control-domain only. The
+  // Oboe callback stays wholly inside zcore -> zdsp and never calls JNI.
+  external fun nativePlaybackStatus(): String
+  external fun nativePlaybackClaim(generation: Long, handoffLease: Long): String
+  external fun nativePlaybackRequestCancellation(generation: Long): Boolean
+  external fun nativePlaybackPrepare(
+    generation: Long,
+    outputDeviceUid: String,
+    outputChannels: IntArray,
+    sampleRate: Int,
+    maximumFrames: Int,
+    bufferFrames: Int,
+    masterGain: Float,
+    maximumRetainedBytes: Long,
+    handoffLease: Long,
+    preparedStartProjectFramePresent: Boolean,
+    preparedStartProjectFrame: Long,
+    initialPaused: Boolean,
+    initialLoopPresent: Boolean,
+    initialLoopStartProjectFrame: Long,
+    initialLoopEndProjectFrame: Long,
+    laneIds: Array<String>,
+    lanePaths: Array<String>,
+    laneGains: FloatArray,
+    laneMuted: BooleanArray,
+    laneSolo: BooleanArray,
+    playbackPresent: Boolean,
+    entrySeconds: Double,
+    playbackRate: Double,
+    transposeSemitones: Double,
+    click: Boolean,
+    countInBars: Int,
+    cueVolume: Double,
+    accent: Boolean,
+    beats: DoubleArray,
+    beatsPerBar: Int,
+    downbeat: Int,
+    downbeats: IntArray,
+    trainingPresent: Boolean,
+    trainingMode: Int,
+    trainingPeriodFrames: Long,
+    trainingWindowStarts: LongArray,
+    trainingWindowEnds: LongArray,
+    trainingLaneIds: Array<String>,
+    trainingEnabled: Boolean,
+    graphPresent: Boolean,
+    graphNodes: Array<NativePlaybackGraphNodeJni>,
+    graphConnections: Array<NativePlaybackGraphConnectionJni>,
+    authorizedRoots: Array<String>
+  ): String
+  external fun nativePlaybackConfigured(generation: Long): String
+  external fun nativePlaybackOpenOutput(generation: Long): String
+  external fun nativePlaybackStart(generation: Long): String
+  external fun nativePlaybackStop(generation: Long): String
+  external fun nativePlaybackPause(generation: Long): String
+  external fun nativePlaybackResume(generation: Long): String
+  external fun nativePlaybackSeek(generation: Long, projectFrame: Long): String
+  external fun nativePlaybackSetLoop(
+    generation: Long,
+    startProjectFrame: Long,
+    endProjectFrame: Long
+  ): String
+  external fun nativePlaybackClearLoop(generation: Long): String
+  external fun nativePlaybackReanchor(generation: Long): String
+  external fun nativePlaybackPreviewClick(generation: Long, sound: Int): String
+  external fun nativePlaybackSetLaneControl(
+    generation: Long,
+    laneId: String,
+    gain: Float,
+    muted: Boolean,
+    solo: Boolean
+  ): String
+  external fun nativePlaybackSetMasterGain(generation: Long, gain: Float): String
+  external fun nativePlaybackSetTrainingEnabled(generation: Long, enabled: Boolean): String
+  external fun nativePlaybackUnload(generation: Long): String
+
+  /**
+   * Test-build-only full codec matrix proof. The native implementation is
+   * present only with -PsingzCodecTargetProof=true and never opens audio I/O.
+   */
+  external fun nativeCodecTargetProof(fixturePaths: Array<String>): String
 
   /**
    * [error, actualDeviceUid, sampleRate, deviceChannels, selectedChannel,

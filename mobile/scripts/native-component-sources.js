@@ -9,6 +9,8 @@ const zdspRuntimeFiles = [
   'src/runtime/realtime_arena.cpp',
   'src/runtime/builtin_nodes.cpp',
   'src/runtime/decoded_buffer_source.cpp',
+  'src/runtime/scheduled_cue_source.cpp',
+  'src/runtime/scheduled_gain.cpp',
   'src/runtime/graph_compiler.cpp',
   'src/runtime/graph_runner.cpp',
   'include/zdsp/types.h',
@@ -22,6 +24,8 @@ const zdspRuntimeFiles = [
   'include/zdsp/queues.h',
   'include/zdsp/builtin_nodes.h',
   'include/zdsp/decoded_buffer_source.h',
+  'include/zdsp/scheduled_cue_source.h',
+  'include/zdsp/scheduled_gain.h',
   'include/zdsp/graph.h',
   'include/zdsp/graph_runner.h',
   'src/runtime/graph_internal.h',
@@ -42,8 +46,28 @@ const nativePlaybackCallbackFiles = [
 ]
 
 const nativePlaybackSessionFiles = [
+  'playback/native_playback_graph_document.cpp',
+  'playback/native_playback_graph_document.h',
+  'playback/playback_cue_plan.cpp',
+  'playback/playback_cue_plan.h',
+  'playback/native_playback_projection.h',
   'playback/native_playback_session.cpp',
   'playback/native_playback_session.h',
+]
+
+const signalsmithTimePitchFiles = [
+  'playback/signalsmith_time_pitch.cpp',
+  'playback/signalsmith_time_pitch.h',
+]
+
+const signalsmithVendorFiles = [
+  'signalsmith-stretch.h',
+  'signalsmith-linear/fft.h',
+  'signalsmith-linear/linear.h',
+  'signalsmith-linear/stft.h',
+  'VENDORED.txt',
+  'LICENSE-stretch.txt',
+  'LICENSE-linear.txt',
 ]
 
 const nativePlaybackSessionSupportFiles = [
@@ -87,6 +111,8 @@ module.exports = {
   nativePlaybackCallbackFiles,
   nativePlaybackSessionFiles,
   nativePlaybackSessionSupportFiles,
+  signalsmithTimePitchFiles,
+  signalsmithVendorFiles,
   zcoreDeviceCallbackFiles,
   zcoreDeviceCallbackSupportFiles,
   zdspHostAdapterFiles,

@@ -11,7 +11,7 @@
     "postinstall": "node scripts/apply-gdrive-config.cjs && node mobile/scripts/apply-gdrive-config.js",
     "build": "node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs",
     "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.renderer-tests.json",
     "dist": "node scripts/dist.cjs",
     "test": "vitest run",
     "gates": "scripts/run-parity-gates.sh",

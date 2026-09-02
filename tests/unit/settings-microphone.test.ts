@@ -43,6 +43,7 @@ const settingsProps = () => ({
   onChangeNativeMonitorOutput: vi.fn(),
   onChangeNativeMonitorOutputChannels: vi.fn(),
   onChangeMonitorGain: vi.fn(),
+  onChangeNativePlayback: vi.fn(),
   monitorCoordinator: idleMonitorCoordinator(),
   routeApplicationQueue: new SettingsRouteApplicationQueue(),
   emergencyStopMonitoring: vi.fn(async () => ({ ok: true as const, safeToRestartPreview: true as const })),
@@ -90,6 +91,7 @@ const hostDevice = (overrides: Partial<DesktopAudioHostDevice> = {}): DesktopAud
 const inventory = (platform: DesktopAudioHostInventoryResult['platform'], device = hostDevice()): DesktopAudioHostInventoryResult => ({
   ok: true,
   platform,
+  provider: platform === 'win32' ? 'wasapi' : 'coreaudio',
   defaultInputUid: device.uid,
   defaultOutputUid: device.uid,
   devices: [device]

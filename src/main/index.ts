@@ -2,7 +2,14 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemP
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import type { DesktopMonitorConfig, LyricsProgress, SeparationProgress } from '../shared/types'
+import type {
+  DesktopMonitorConfig,
+  DesktopPlaybackLaneConfig,
+  DesktopPlaybackPrepareConfig,
+  DesktopPlaybackResult,
+  LyricsProgress,
+  SeparationProgress
+} from '../shared/types'
 import { searchCandidates } from './lrclib'
 import { preciseCapable } from './align-mms'
 import { Transcriber } from './lyrics'
@@ -15,9 +22,11 @@ import {
   migrateProjects,
   migrateProjectToV2,
   projectsRoot,
+  readProjectGraph,
   renameProject,
   saveProject,
-  setProjectsRoot
+  setProjectsRoot,
+  writeProjectGraph
 } from './projects'
 import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
 import { readSettings } from './settings'
@@ -37,7 +46,7 @@ import { Separator } from './separation'
 import { registerAnalyze } from './analyze'
 import { registerDesktopAudioInput } from './audio-input'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
-import { CaptureOwner } from './capture'
+import { CaptureOwner, playbackCodecSupportsPath } from './capture'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -347,6 +356,22 @@ function registerIpc(): void {
     return res
   })
 
+  ipcMain.handle('project:graph-read', async (_e, raw: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) {
+      return { ok: false, code: 'not-project', error: 'File is not registered.' }
+    }
+    return readProjectGraph(full)
+  })
+
+  ipcMain.handle('project:graph-write', async (_e, raw: string, text: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) {
+      return { ok: false, code: 'not-project', error: 'File is not registered.' }
+    }
+    return writeProjectGraph(full, String(text))
+  })
+
   ipcMain.handle('training-progress:load', () => loadTrainingProgress())
   ipcMain.handle('training-preferences:save', (_e, raw: unknown) => saveTrainingPreferences(raw))
   ipcMain.on('training-preferences:save-sync', (event, raw: unknown) => { event.returnValue = saveTrainingPreferences(raw) })
@@ -501,7 +526,12 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('audio-host:devices', () => captureOwner.hostDevices())
+  ipcMain.handle('audio-host:devices', (_event, provider: unknown) =>
+    captureOwner.hostDevices(
+      provider === 'coreaudio' || provider === 'wasapi' || provider === 'asio'
+        ? provider
+        : undefined
+    ))
   ipcMain.handle('audio-host:monitor-begin', (event, raw: unknown) => {
     const result = captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
     // A failed native begin may intentionally retain a quarantined generation
@@ -523,6 +553,130 @@ function registerIpc(): void {
   ipcMain.handle('audio-host:monitor-end', (event, generation: unknown) =>
     captureOwner.endMonitor(event.sender.id, typeof generation === 'string' ? generation : '')
   )
+
+  ipcMain.handle('audio-host:playback-providers', () => captureOwner.playbackProviders())
+  ipcMain.handle('audio-host:playback-capability', () => captureOwner.playbackCapability())
+  ipcMain.handle(
+    'audio-host:playback-prepare',
+    (event, rawConfig: unknown, rawLanes: unknown): DesktopPlaybackResult => {
+      if (!rawConfig || typeof rawConfig !== 'object' || !Array.isArray(rawLanes)) {
+        return {
+          ok: false,
+          errorCode: 'invalid-configuration',
+          error: 'Native playback requires a bounded project and lane list.',
+          generation: '0',
+          state: 'unloaded',
+          format: { sampleRate: 0, maximumFrames: 0, nominalBufferFrames: 0, inputChannels: 0, outputChannels: 0 },
+          latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
+        }
+      }
+      const config = rawConfig as DesktopPlaybackPrepareConfig
+      const lanes = rawLanes as DesktopPlaybackLaneConfig[]
+      if (
+        lanes.length < 1 || lanes.length > 16 ||
+        lanes.some((lane) =>
+          !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
+          lane.id.length < 1 || lane.id.length > 96 || typeof lane.path !== 'string' ||
+          typeof lane.gain !== 'number' || !Number.isFinite(lane.gain) ||
+          typeof lane.muted !== 'boolean' || typeof lane.solo !== 'boolean')
+      ) {
+        return {
+          ok: false,
+          errorCode: 'invalid-configuration',
+          error: 'Native playback lanes failed strict schema validation.',
+          generation: '0',
+          state: 'unloaded',
+          format: { sampleRate: 0, maximumFrames: 0, nominalBufferFrames: 0, inputChannels: 0, outputChannels: 0 },
+          latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
+        }
+      }
+      const authorized = lanes.map((lane) => ({ ...lane, path: resolve(lane.path) }))
+      const codecCapability = captureOwner.playbackCapability()
+      const unauthorized = authorized.find((lane) =>
+        !isAllowed(lane.path) || !codecCapability.available ||
+        !playbackCodecSupportsPath(codecCapability, lane.path))
+      if (unauthorized) {
+        return {
+          ok: false,
+          errorCode: 'unauthorized-path',
+          error: 'Every native playback lane must be authorized and supported by the proven decoder runtime.',
+          generation: '0',
+          state: 'unloaded',
+          format: { sampleRate: 0, maximumFrames: 0, nominalBufferFrames: 0, inputChannels: 0, outputChannels: 0 },
+          latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
+        }
+      }
+      const result = captureOwner.preparePlayback(event.sender.id, config, authorized)
+      bindNativeAudioCleanup(event.sender)
+      if (result.ok) {
+        log(
+          'dsp',
+          `desktop graph prepared · generation ${result.generation} · ${authorized.length} lanes · ` +
+            `${result.format.sampleRate / 1000} kHz · ${result.format.outputChannels} ch`
+        )
+      } else {
+        log('dsp', `desktop graph prepare failed · ${result.errorCode} · ${result.error}`, 'warn')
+      }
+      return result
+    }
+  )
+  const playbackGeneration = (raw: unknown): string => typeof raw === 'string' ? raw : ''
+  ipcMain.handle('audio-host:playback-open', (event, generation: unknown) =>
+    captureOwner.openPlayback(event.sender.id, playbackGeneration(generation)))
+  ipcMain.handle('audio-host:playback-start', (event, generation: unknown) =>
+    captureOwner.startPlayback(event.sender.id, playbackGeneration(generation)))
+  ipcMain.handle('audio-host:playback-pause', (event, generation: unknown) =>
+    captureOwner.pausePlayback(event.sender.id, playbackGeneration(generation)))
+  ipcMain.handle('audio-host:playback-resume', (event, generation: unknown) =>
+    captureOwner.resumePlayback(event.sender.id, playbackGeneration(generation)))
+  ipcMain.handle('audio-host:playback-stop', (event, generation: unknown) =>
+    captureOwner.stopPlayback(event.sender.id, playbackGeneration(generation)))
+  ipcMain.handle('audio-host:playback-seek', (event, generation: unknown, frame: unknown) =>
+    captureOwner.seekPlayback(
+      event.sender.id,
+      playbackGeneration(generation),
+      typeof frame === 'number' ? frame : Number.NaN
+    ))
+  ipcMain.handle(
+    'audio-host:playback-loop-set',
+    (event, generation: unknown, startFrame: unknown, endFrame: unknown) =>
+      captureOwner.setPlaybackLoop(
+        event.sender.id,
+        playbackGeneration(generation),
+        typeof startFrame === 'number' ? startFrame : Number.NaN,
+        typeof endFrame === 'number' ? endFrame : Number.NaN
+      )
+  )
+  ipcMain.handle('audio-host:playback-loop-clear', (event, generation: unknown) =>
+    captureOwner.clearPlaybackLoop(event.sender.id, playbackGeneration(generation)))
+  ipcMain.handle('audio-host:playback-reanchor', (event, generation: unknown) =>
+    captureOwner.reanchorPlayback(event.sender.id, playbackGeneration(generation)))
+  ipcMain.handle(
+    'audio-host:playback-lane',
+    (event, generation: unknown, id: unknown, gain: unknown, muted: unknown, solo: unknown) =>
+      captureOwner.setPlaybackLane(
+        event.sender.id,
+        playbackGeneration(generation),
+        typeof id === 'string' ? id : '',
+        typeof gain === 'number' ? gain : Number.NaN,
+        typeof muted === 'boolean' && muted,
+        typeof solo === 'boolean' && solo
+      )
+  )
+  ipcMain.handle('audio-host:playback-master', (event, generation: unknown, gain: unknown) =>
+    captureOwner.setPlaybackMasterGain(
+      event.sender.id,
+      playbackGeneration(generation),
+      typeof gain === 'number' ? gain : Number.NaN
+    ))
+  ipcMain.handle('audio-host:playback-status', () => captureOwner.playbackStatus())
+  ipcMain.handle('audio-host:playback-unload', (event, generation: unknown) => {
+    const result = captureOwner.unloadPlayback(event.sender.id, playbackGeneration(generation))
+    if (result.ok && result.cleanupComplete) {
+      log('dsp', `desktop graph released · generation ${result.generation} · retained 0 kB`)
+    }
+    return result
+  })
 
   ipcMain.handle('stems:reveal', (_e, raw: string) => {
     const full = resolve(String(raw))

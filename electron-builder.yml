@@ -32,7 +32,7 @@ files:
   # Tests and agent/development configuration are not runtime assets.
   - '!tests/*'
   - '!.claude/*'
-  - '!{CLAUDE.md,vitest.config.ts,tsconfig.tests.json}'
+  - '!{CLAUDE.md,vitest.config.ts,tsconfig.tests.json,tsconfig.renderer-tests.json}'
   - '!scripts/*'
   - '!docs/*'
   - '!eval/*'
@@ -116,7 +116,16 @@ mac:
       filter: ['whisper-cli*', 'singz-analyze*']
     - from: build/capture-package/darwin-${arch}
       to: engines
-      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json']
+      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json', 'ffmpeg/**/*']
+    - from: third_party/native/signalsmith
+      to: open-source-notices/signalsmith
+      filter: ['VENDORED.txt', 'LICENSE-stretch.txt', 'LICENSE-linear.txt']
+    - from: third_party
+      to: open-source-notices/ffmpeg
+      filter: ['NOTICE-FFMPEG.md', 'COPYING.LGPLv2.1-FFMPEG', 'FFMPEG-SHA256SUMS']
+    - from: third_party/ffmpeg-codec
+      to: open-source-notices/ffmpeg/product-profile
+      filter: ['README.md', 'profile.json']
   target:
     - target: dmg
 dmg:
@@ -128,7 +137,16 @@ win:
       filter: ['whisper-cli*', 'singz-analyze*']
     - from: build/capture-package/win32-x64
       to: engines
-      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json']
+      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json', '*.dll']
+    - from: third_party/native/signalsmith
+      to: open-source-notices/signalsmith
+      filter: ['VENDORED.txt', 'LICENSE-stretch.txt', 'LICENSE-linear.txt']
+    - from: third_party
+      to: open-source-notices/ffmpeg
+      filter: ['NOTICE-FFMPEG.md', 'COPYING.LGPLv2.1-FFMPEG', 'FFMPEG-SHA256SUMS']
+    - from: third_party/ffmpeg-codec
+      to: open-source-notices/ffmpeg/product-profile
+      filter: ['README.md', 'profile.json']
   target:
     - target: nsis
       arch: [x64]

@@ -4,32 +4,49 @@ import { driveLocalFile, driveReadText } from '../gdrive';
 import { fmtBytes, fmtMs, log } from '../log';
 import {
   customTracks,
+  MET_DEFAULTS,
+  sanitizeBeatInfo,
+  sanitizeMetronome,
   STEM_ORDER_ALL,
   TRACK_META,
+  type BeatInfo,
   type LyricsDoc,
+  type MetronomeConfig,
   type ProjectDoc,
 } from '../model';
 import {
   loadProject,
+  loadProjectGraph,
   localProjectFile,
   MAX_DECODED_BYTES,
+  metronomeRefForEntry,
   readProjectText,
   releaseProject,
   type LoadedProject,
   type NativePlaybackHandle,
   type NativePlaybackLaneView,
   type NativePlaybackStartOutcome,
+  type NativePlaybackTrainingSpec,
   type NativePlaybackViewState,
+  type PlaybackCountInStatus,
   type ProjectEntry,
 } from '../projects';
+import {
+  MAX_NATIVE_GRAPH_NODES,
+  projectGraphDocumentForNative,
+  synthesizedNativeGraphNodeCount,
+  type NativeGraphDocumentProjection,
+  type ParsedGraphDocument,
+} from '../gen/graph-document';
 import {
   iosNativePlaybackPreference,
   type IosNativePlaybackPreferenceStore,
 } from './preferences';
+import { mobileMetronomePersistence } from './metronome-persistence';
 
 export interface NativePlaybackResult {
   readonly ok: boolean;
-  readonly error: string;
+  readonly error: NativePlaybackErrorCode;
   readonly generation: number;
   readonly state: string;
   readonly sampleRate: number;
@@ -37,6 +54,72 @@ export interface NativePlaybackResult {
   readonly nominalBufferFrames: number;
   readonly outputChannels: number;
   readonly message: string;
+}
+
+export type NativePlaybackErrorCode =
+  | 'none'
+  | 'invalid-generation'
+  | 'invalid-state'
+  | 'invalid-configuration'
+  | 'cancelled'
+  | 'decode-failure'
+  | 'limit-exceeded'
+  | 'resource-exhausted'
+  | 'graph-failure'
+  | 'host-failure'
+  | 'provider-failure'
+  | 'queue-full'
+  | 'teardown-uncertain'
+  | 'unsupported-playback-rate';
+
+export type NativePlaybackTransportCommand =
+  | { readonly kind: 'pause' }
+  | { readonly kind: 'resume' }
+  | { readonly kind: 'seek'; readonly projectFrame: number }
+  | {
+      readonly kind: 'set-loop';
+      readonly startProjectFrame: number;
+      readonly endProjectFrame: number;
+    }
+  | { readonly kind: 'clear-loop' }
+  | { readonly kind: 'reanchor' };
+
+export type NativePlaybackCommandKind =
+  | NativePlaybackTransportCommand['kind']
+  | 'prepare'
+  | 'rebuild-cues'
+  | 'lane-control'
+  | 'master-gain'
+  | 'preview-click'
+  | 'pitch-tempo'
+  | 'training-enable';
+
+export type NativePlaybackControl =
+  | {
+      readonly laneId: string;
+      readonly gain: number;
+      readonly muted: boolean;
+      readonly solo: boolean;
+    }
+  | { readonly masterGain: number }
+  | { readonly trainingEnabled: boolean };
+
+export class NativePlaybackCommandError extends Error {
+  readonly code = 'NATIVE_PLAYBACK_COMMAND_FAILED' as const;
+
+  constructor(
+    readonly nativeCode: NativePlaybackErrorCode,
+    readonly command: NativePlaybackCommandKind,
+    readonly generation: number,
+    detail: string,
+  ) {
+    super(detail || `Native playback ${command} failed: ${nativeCode}.`);
+    this.name = 'NativePlaybackCommandError';
+  }
+
+  get retryable(): boolean {
+    return this.nativeCode === 'queue-full' || this.nativeCode === 'invalid-state';
+  }
 }
 
 export interface NativePlaybackCleanup {
@@ -74,16 +157,103 @@ export interface NativePlaybackSessionStatus {
   readonly state: string;
   readonly hostState: string;
   readonly terminalReason: string;
+  readonly terminalOrdinal: number;
   readonly sampleRate: number;
+  readonly maximumFrames: number;
+  readonly nominalBufferFrames: number;
+  readonly outputChannels: number;
   readonly renderedFrames: number;
   readonly audibleFrames: number;
+  readonly transportGeneration: number;
+  readonly transportState: NativePlaybackTransportState;
+  readonly transportTelemetryQuality: NativePlaybackTransportTelemetryQuality;
+  readonly lastTransportBoundary: NativePlaybackTransportBoundaryReason;
+  readonly renderedProjectFrame: number;
+  readonly audibleProjectFrame: number;
+  readonly audibleProjectionQuality: 'unavailable' | 'current';
+  readonly continuousFrame: number;
+  readonly durationFrames: number;
+  readonly remainingPreRollFrames: number;
+  readonly cueEventsCompleted: number;
+  readonly nextCueEventIndex: number;
+  readonly loopEnabled: boolean;
+  readonly loopStartFrame: number;
+  readonly loopEndFrame: number;
+  readonly loopCount: number;
+  readonly seekCount: number;
+  readonly transportDiscontinuities: number;
+  readonly presentationLatencyFrames: number;
+  readonly playbackRate: number;
+  readonly transposeSemitones: number;
+  readonly graphLatencyFrames: number;
+  readonly devicePresentationLatencyFrames: number;
+  readonly totalPresentationLatencyFrames: number;
+  readonly preparedStartProjectFrame: number;
   readonly retainedBytes: number;
+  readonly graphArenaBytes: number;
+  readonly masterGain: number;
+  readonly referenceGain: number;
+  readonly trainingEnabled: boolean;
+  readonly trainingLanes: readonly string[];
+  readonly preRollFrames: number;
+  readonly cueEventCount: number;
+  readonly graphNodeCount: number;
+  readonly graphConnectionCount: number;
+  readonly latencyCompensatedEdgeCount: number;
+  readonly topology: string;
   readonly xruns: number;
   readonly deadlineMisses: number;
   readonly discontinuities: number;
+  readonly renderFailures: number;
+  readonly adapterRenderFailures: number;
+  readonly terminalRenderFailures: number;
+  readonly parameterOverflows: number;
+  readonly nonFiniteSamples: number;
+  readonly rejectedBlocks: number;
+  readonly previewClicksEnqueued: number;
+  readonly previewClicksStarted: number;
+  readonly previewClicksCompleted: number;
+  readonly previewClicksPending: number;
+  readonly timePitchAnchorsPrepared: number;
+  readonly timePitchAnchorsPublished: number;
+  readonly timePitchAnchorMisses: number;
+  readonly timePitchReplacementReady: boolean;
+  readonly timePitchLoopPriming: boolean;
+  readonly latency: {
+    readonly outputDeviceFrames: number;
+    readonly bufferFrames: number;
+    readonly externalRouteFrames: number;
+    readonly presentationFrames: number;
+  };
   readonly lanes: readonly NativePlaybackLaneStatus[];
   readonly message: string;
 }
+
+export type NativePlaybackTransportState =
+  | 'stopped'
+  | 'pre-roll'
+  | 'playing'
+  | 'paused'
+  | 'completed';
+
+export type NativePlaybackTransportTelemetryQuality =
+  | 'unavailable'
+  | 'initial'
+  | 'current'
+  | 'lastGood';
+
+export type NativePlaybackTransportBoundaryReason =
+  | 'none'
+  | 'stream-generation-changed'
+  | 'sequence-gap'
+  | 'sample-rate-changed'
+  | 'route-generation-changed'
+  | 'timestamp-quality-changed'
+  | 'clock-reanchored'
+  | 'source-seek'
+  | 'source-loop'
+  | 'device-lost'
+  | 'source-frame-overflow';
 
 export interface NativePlaybackOutput {
   readonly uid: string;
@@ -95,11 +265,21 @@ export interface NativePlaybackOutput {
 
 export interface NativePlaybackCapability {
   readonly available: boolean;
+  readonly interfaceVersion: number;
+  readonly playbackContractVersion: number;
   readonly graph: boolean;
   readonly audioHostAdapter: boolean;
   readonly playbackSession: boolean;
   readonly playbackCleanupProof: boolean;
   readonly playbackHandoffLease: boolean;
+  readonly playbackTransport: boolean;
+  readonly scheduledCues: boolean;
+  readonly timePitch: boolean;
+  /** Runtime-probed zcore decoder surface. Selection uses this before native
+   * ownership is claimed, so an unsupported custom container stays wholly on
+   * the legacy backend instead of failing after RNAudioAPI has been retired. */
+  readonly mediaCodec: NativePlaybackMediaCodecCapability;
+  readonly buildId: string;
   readonly playbackBuild: string;
   readonly ownership: string;
   readonly activation: string;
@@ -107,8 +287,16 @@ export interface NativePlaybackCapability {
   readonly session: NativePlaybackSessionStatus;
 }
 
-interface NativePlaybackApi {
-  status(): Promise<NativePlaybackCapability>;
+export interface NativePlaybackMediaCodecCapability {
+  readonly abiVersion: 1;
+  readonly formatMask: number;
+  readonly dynamicallyLinkedFfmpeg: boolean;
+  readonly runtimeVersion: string;
+  readonly capabilityTag: string;
+}
+
+interface NativePlaybackBridgeApi {
+  status(): Promise<unknown>;
   prepare(
     generation: number,
     request: NativePlaybackPrepareRequest,
@@ -116,8 +304,46 @@ interface NativePlaybackApi {
   configureOutputSession(generation: number): Promise<NativePlaybackResult>;
   openOutput(generation: number): Promise<NativePlaybackResult>;
   start(generation: number): Promise<NativePlaybackResult>;
+  transport(
+    generation: number,
+    command: NativePlaybackTransportCommand,
+  ): Promise<NativePlaybackResult>;
+  setControl(
+    generation: number,
+    control: NativePlaybackControl,
+  ): Promise<NativePlaybackResult>;
+  previewClick(
+    generation: number,
+    sound: 0 | 1,
+  ): Promise<NativePlaybackResult>;
   stop(generation: number): Promise<NativePlaybackResult>;
   unload(generation: number): Promise<NativePlaybackUnloadResult>;
+}
+
+interface NativePlaybackApi
+  extends Omit<NativePlaybackBridgeApi, 'status'> {
+  status(): Promise<NativePlaybackCapability>;
+}
+
+export interface NativePlaybackPreparePlayback {
+  readonly version: 2;
+  readonly transport: {
+    readonly entrySeconds: number;
+    readonly playbackRate: number;
+    readonly transposeSemitones: number;
+  };
+  readonly cues: {
+    readonly click: boolean;
+    readonly countInBars: number;
+    readonly volume: number;
+    readonly accent: boolean;
+    readonly beatGrid?: {
+      readonly beats: readonly number[];
+      readonly beatsPerBar: number;
+      readonly downbeat: number;
+      readonly downbeats: readonly number[];
+    };
+  };
 }
 
 interface NativePlaybackPrepareRequest {
@@ -136,6 +362,61 @@ interface NativePlaybackPrepareRequest {
   masterGain: number;
   maximumRetainedBytes: number;
   handoffLease?: number;
+  playback?: NativePlaybackPreparePlayback;
+  training?: NativePlaybackPrepareTraining;
+  preparedStartProjectFrame?: number;
+  initialTransport?: NativePlaybackInitialTransport;
+  graphDocument?: NativeGraphDocumentProjection;
+}
+
+interface NativePlaybackInitialTransport {
+  readonly state: 'playing' | 'paused';
+  readonly loop?: {
+    readonly startProjectFrame: number;
+    readonly endProjectFrame: number;
+  };
+}
+
+type NativePlaybackPrepareTraining =
+  | {
+      readonly mode: 'period';
+      readonly periodFrames: number;
+      readonly laneIds: readonly string[];
+      readonly enabled: boolean;
+    }
+  | {
+      readonly mode: 'windows';
+      readonly windows: readonly {
+        readonly startProjectFrame: number;
+        readonly endProjectFrame: number;
+      }[];
+      readonly laneIds: readonly string[];
+      readonly enabled: boolean;
+    };
+
+interface NativePlaybackPrepareOverrides {
+  readonly playback?: NativePlaybackPreparePlayback;
+  readonly lanes?: readonly NativePlaybackLaneStatus[];
+  readonly masterGain?: number;
+  readonly training?: NativePlaybackPrepareTraining;
+  readonly preparedStartProjectFrame?: number;
+  readonly initialTransport?: NativePlaybackInitialTransport;
+}
+
+/** Exact generation state retained across an OS-owned interruption/route
+ * retirement. Values are stored in seconds where the next physical route may
+ * choose a different sample rate; controls remain generation-independent
+ * targets and are re-applied atomically by the next prepare request. */
+interface NativePlaybackRecoverySnapshot {
+  readonly sourceGeneration: number;
+  readonly positionSeconds: number;
+  readonly lanes: readonly NativePlaybackLaneStatus[];
+  readonly masterGain: number;
+  readonly loop: {
+    readonly startSeconds: number;
+    readonly endSeconds: number;
+  } | null;
+  readonly transportState: NativePlaybackTransportState;
 }
 
 interface MaterializedLane {
@@ -144,11 +425,15 @@ interface MaterializedLane {
   readonly gain: number;
   readonly muted: boolean;
   readonly solo: boolean;
+  readonly label: string;
+  readonly color: string;
+  readonly custom: boolean;
 }
 
 interface MaterializedProject {
   readonly entry: ProjectEntry;
   readonly doc: ProjectDoc;
+  readonly graph?: ParsedGraphDocument;
   readonly lyrics: LyricsDoc | null;
   readonly lanes: readonly MaterializedLane[];
 }
@@ -180,8 +465,713 @@ export interface NativePlaybackCoordinatorDeps {
   readonly now: () => number;
 }
 
-const nativeModule = (): NativePlaybackApi | undefined =>
-  NativeModules.NativeAudioRuntime as NativePlaybackApi | undefined;
+export type NativePlaybackPlatform = 'ios' | 'android';
+
+export interface NativePlaybackTransportIntent {
+  readonly entrySeconds: number;
+  readonly playbackRate: number;
+  readonly transposeSemitones: number;
+}
+
+const nativeModule = (): NativePlaybackApi | undefined => {
+  const candidate = NativeModules.NativeAudioRuntime as
+    | Partial<NativePlaybackBridgeApi>
+    | undefined;
+  if (
+    !candidate ||
+    typeof candidate.status !== 'function' ||
+    typeof candidate.prepare !== 'function' ||
+    typeof candidate.configureOutputSession !== 'function' ||
+    typeof candidate.openOutput !== 'function' ||
+    typeof candidate.start !== 'function' ||
+    typeof candidate.transport !== 'function' ||
+    typeof candidate.setControl !== 'function' ||
+    typeof candidate.previewClick !== 'function' ||
+    typeof candidate.stop !== 'function' ||
+    typeof candidate.unload !== 'function'
+  )
+    return undefined;
+  const bridge = candidate as NativePlaybackBridgeApi;
+  return {
+    status: async () =>
+      parseNativePlaybackCapability(await bridge.status(), Platform.OS),
+    prepare: (generation, request) => bridge.prepare(generation, request),
+    configureOutputSession: generation =>
+      bridge.configureOutputSession(generation),
+    openOutput: generation => bridge.openOutput(generation),
+    start: generation => bridge.start(generation),
+    transport: (generation, command) => bridge.transport(generation, command),
+    setControl: (generation, control) => bridge.setControl(generation, control),
+    previewClick: (generation, sound) => bridge.previewClick(generation, sound),
+    stop: generation => bridge.stop(generation),
+    unload: generation => bridge.unload(generation),
+  };
+};
+
+const emptyNativeSession = (): NativePlaybackSessionStatus => ({
+  generation: 0,
+  state: 'unloaded',
+  hostState: 'closed',
+  terminalReason: 'none',
+  terminalOrdinal: 0,
+  sampleRate: 0,
+  maximumFrames: 0,
+  nominalBufferFrames: 0,
+  outputChannels: 0,
+  renderedFrames: 0,
+  audibleFrames: 0,
+  transportGeneration: 0,
+  transportState: 'stopped',
+  transportTelemetryQuality: 'unavailable',
+  lastTransportBoundary: 'none',
+  renderedProjectFrame: 0,
+  audibleProjectFrame: 0,
+  audibleProjectionQuality: 'unavailable',
+  continuousFrame: 0,
+  durationFrames: 0,
+  remainingPreRollFrames: 0,
+  cueEventsCompleted: 0,
+  nextCueEventIndex: 0,
+  loopEnabled: false,
+  loopStartFrame: 0,
+  loopEndFrame: 0,
+  loopCount: 0,
+  seekCount: 0,
+  transportDiscontinuities: 0,
+  presentationLatencyFrames: 0,
+  playbackRate: 1,
+  transposeSemitones: 0,
+  graphLatencyFrames: 0,
+  devicePresentationLatencyFrames: 0,
+  totalPresentationLatencyFrames: 0,
+  preparedStartProjectFrame: 0,
+  retainedBytes: 0,
+  graphArenaBytes: 0,
+  masterGain: 1,
+  referenceGain: 0,
+  trainingEnabled: false,
+  trainingLanes: [],
+  preRollFrames: 0,
+  cueEventCount: 0,
+  graphNodeCount: 0,
+  graphConnectionCount: 0,
+  latencyCompensatedEdgeCount: 0,
+  topology: '',
+  xruns: 0,
+  deadlineMisses: 0,
+  discontinuities: 0,
+  renderFailures: 0,
+  adapterRenderFailures: 0,
+  terminalRenderFailures: 0,
+  parameterOverflows: 0,
+  nonFiniteSamples: 0,
+  rejectedBlocks: 0,
+  previewClicksEnqueued: 0,
+  previewClicksStarted: 0,
+  previewClicksCompleted: 0,
+  previewClicksPending: 0,
+  timePitchAnchorsPrepared: 0,
+  timePitchAnchorsPublished: 0,
+  timePitchAnchorMisses: 0,
+  timePitchReplacementReady: false,
+  timePitchLoopPriming: false,
+  latency: {
+    outputDeviceFrames: 0,
+    bufferFrames: 0,
+    externalRouteFrames: 0,
+    presentationFrames: 0,
+  },
+  lanes: [],
+  message: '',
+});
+
+const absentNativeCapability = (): NativePlaybackCapability => ({
+  available: false,
+  interfaceVersion: 0,
+  playbackContractVersion: 0,
+  graph: false,
+  audioHostAdapter: false,
+  playbackSession: false,
+  playbackCleanupProof: false,
+  playbackHandoffLease: false,
+  playbackTransport: false,
+  scheduledCues: false,
+  timePitch: false,
+  mediaCodec: {
+    abiVersion: 1,
+    formatMask: 0,
+    dynamicallyLinkedFfmpeg: false,
+    runtimeVersion: '',
+    capabilityTag: '',
+  },
+  buildId: '',
+  playbackBuild: '',
+  ownership: 'unavailable',
+  activation: 'unavailable',
+  outputs: [],
+  session: emptyNativeSession(),
+});
+
+const NATIVE_PLAYBACK_INTERFACE_VERSION = 3;
+const NATIVE_PLAYBACK_CONTRACT_VERSION = 2;
+const NATIVE_PLAYBACK_SESSION_BUILD =
+  'singz.native.playback-session.anchored-preview.v4';
+const NATIVE_PLAYBACK_RUNTIME_BUILDS: Readonly<
+  Record<NativePlaybackPlatform, string>
+> = {
+  ios: 'singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3',
+  android: 'singz.android.zdsp_runtime.phase-android-q32-time-pitch-v3',
+};
+
+const MEDIA_CODEC_ABI_VERSION = 1;
+const MEDIA_CODEC_BASE_MASK = 0x003;
+const MEDIA_CODEC_ALL_MASK = 0x1ff;
+const MEDIA_CODEC_BASE_TAG = 'singz-prepared-audio-fd-wav-flac-v1';
+const MEDIA_CODEC_FFMPEG_FULL_MATRIX_TAG =
+  'singz-prepared-audio-fd-ffmpeg-full-matrix-v3';
+
+const nativeMediaCodecIsValid = (
+  codec: NativePlaybackMediaCodecCapability,
+): boolean => {
+  if (codec.abiVersion !== MEDIA_CODEC_ABI_VERSION) return false;
+  const baseOnly =
+    codec.formatMask === MEDIA_CODEC_BASE_MASK &&
+    !codec.dynamicallyLinkedFfmpeg &&
+    codec.capabilityTag === MEDIA_CODEC_BASE_TAG &&
+    codec.runtimeVersion.length === 0;
+  const fullMatrix =
+    codec.formatMask === MEDIA_CODEC_ALL_MASK &&
+    codec.dynamicallyLinkedFfmpeg &&
+    codec.capabilityTag === MEDIA_CODEC_FFMPEG_FULL_MATRIX_TAG &&
+    codec.runtimeVersion.length > 0;
+  return baseOnly || fullMatrix;
+};
+
+const nativePlaybackPlatform = (
+  platform: string,
+): NativePlaybackPlatform | null =>
+  platform === 'ios' || platform === 'android' ? platform : null;
+
+function nativeCapabilityMatchesPlatform(
+  capability: NativePlaybackCapability | null,
+  platform: string,
+): capability is NativePlaybackCapability {
+  const supportedPlatform = nativePlaybackPlatform(platform);
+  return (
+    supportedPlatform !== null &&
+    capability !== null &&
+    capability.available &&
+    capability.interfaceVersion === NATIVE_PLAYBACK_INTERFACE_VERSION &&
+    capability.playbackContractVersion === NATIVE_PLAYBACK_CONTRACT_VERSION &&
+    capability.graph &&
+    capability.audioHostAdapter &&
+    capability.playbackSession &&
+    capability.playbackCleanupProof &&
+    capability.playbackHandoffLease &&
+    capability.playbackTransport &&
+    capability.scheduledCues &&
+    capability.timePitch &&
+    nativeMediaCodecIsValid(capability.mediaCodec) &&
+    capability.buildId === NATIVE_PLAYBACK_RUNTIME_BUILDS[supportedPlatform] &&
+    capability.playbackBuild === NATIVE_PLAYBACK_SESSION_BUILD
+  );
+}
+
+const objectValue = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const finiteNumber = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+const safeUnsigned = (value: unknown): number | null => {
+  const parsed = finiteNumber(value);
+  return parsed !== null && Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : null;
+};
+
+const safeSigned = (value: unknown): number | null => {
+  const parsed = finiteNumber(value);
+  return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
+};
+
+const oneOf = <T extends string>(
+  value: unknown,
+  accepted: readonly T[],
+): value is T => typeof value === 'string' && accepted.includes(value as T);
+
+const TRANSPORT_STATES = [
+  'stopped',
+  'pre-roll',
+  'playing',
+  'paused',
+  'completed',
+] as const;
+const TRANSPORT_TELEMETRY_QUALITIES = [
+  'unavailable',
+  'initial',
+  'current',
+  'lastGood',
+] as const;
+const TRANSPORT_BOUNDARY_REASONS = [
+  'none',
+  'stream-generation-changed',
+  'sequence-gap',
+  'sample-rate-changed',
+  'route-generation-changed',
+  'timestamp-quality-changed',
+  'clock-reanchored',
+  'source-seek',
+  'source-loop',
+  'device-lost',
+  'source-frame-overflow',
+] as const;
+const AUDIBLE_PROJECTION_QUALITIES = ['unavailable', 'current'] as const;
+const PLAYBACK_STATES = [
+  'unloaded',
+  'preparing',
+  'prepared',
+  'output-open',
+  'running',
+  'stopped',
+  'terminal',
+  'quarantined',
+] as const;
+const HOST_STATES = [
+  'closed',
+  'open',
+  'running',
+  'stopped',
+  'device-lost',
+  'error',
+  'unsupported',
+] as const;
+const TERMINAL_REASONS = [
+  'none',
+  'route-changed',
+  'interrupted',
+  'media-services-lost',
+  'media-services-reset',
+  'device-lost',
+  'provider-failure',
+] as const;
+const NATIVE_ERROR_CODES = [
+  'none',
+  'invalid-generation',
+  'invalid-state',
+  'invalid-configuration',
+  'cancelled',
+  'decode-failure',
+  'limit-exceeded',
+  'resource-exhausted',
+  'graph-failure',
+  'host-failure',
+  'provider-failure',
+  'queue-full',
+  'teardown-uncertain',
+  'unsupported-playback-rate',
+] as const;
+
+const nativeErrorCode = (value: unknown): NativePlaybackErrorCode =>
+  oneOf(value, NATIVE_ERROR_CODES) ? value : 'provider-failure';
+
+/**
+ * Normalize the native status boundary. A pre-4B binary has no versioned
+ * transport/cue capability and therefore becomes an unavailable capability,
+ * never a partially compatible session selected by structural coincidence.
+ */
+export function parseNativePlaybackCapability(
+  value: unknown,
+  platform: string = Platform.OS,
+): NativePlaybackCapability {
+  const raw = objectValue(value);
+  if (!raw) return absentNativeCapability();
+  const supportedPlatform = nativePlaybackPlatform(platform);
+  if (supportedPlatform === null) return absentNativeCapability();
+  const interfaceVersion = safeUnsigned(raw.interfaceVersion);
+  const playbackContractVersion = safeUnsigned(raw.playbackContractVersion);
+  const buildId = typeof raw.buildId === 'string' ? raw.buildId : '';
+  const playbackBuild =
+    typeof raw.playbackBuild === 'string' ? raw.playbackBuild : '';
+  const ownership = typeof raw.ownership === 'string' ? raw.ownership : '';
+  const activation = typeof raw.activation === 'string' ? raw.activation : '';
+  const rawMediaCodec = objectValue(raw.mediaCodec);
+  const codecAbiVersion = safeUnsigned(rawMediaCodec?.abiVersion);
+  const codecFormatMask = safeUnsigned(rawMediaCodec?.formatMask);
+  const mediaCodec: NativePlaybackMediaCodecCapability | null =
+    rawMediaCodec &&
+    codecAbiVersion === MEDIA_CODEC_ABI_VERSION &&
+    codecFormatMask !== null &&
+    typeof rawMediaCodec.dynamicallyLinkedFfmpeg === 'boolean' &&
+    typeof rawMediaCodec.runtimeVersion === 'string' &&
+    rawMediaCodec.runtimeVersion.length <= 128 &&
+    typeof rawMediaCodec.capabilityTag === 'string' &&
+    rawMediaCodec.capabilityTag.length <= 128
+      ? {
+          abiVersion: 1,
+          formatMask: codecFormatMask,
+          dynamicallyLinkedFfmpeg: rawMediaCodec.dynamicallyLinkedFfmpeg,
+          runtimeVersion: rawMediaCodec.runtimeVersion,
+          capabilityTag: rawMediaCodec.capabilityTag,
+        }
+      : null;
+  const featureReady =
+    raw.available === true &&
+    interfaceVersion !== null &&
+    interfaceVersion === NATIVE_PLAYBACK_INTERFACE_VERSION &&
+    playbackContractVersion === NATIVE_PLAYBACK_CONTRACT_VERSION &&
+    raw.graph === true &&
+    raw.audioHostAdapter === true &&
+    raw.playbackSession === true &&
+    raw.playbackCleanupProof === true &&
+    raw.playbackHandoffLease === true &&
+    raw.playbackTransport === true &&
+    raw.scheduledCues === true &&
+    raw.timePitch === true &&
+    mediaCodec !== null &&
+    nativeMediaCodecIsValid(mediaCodec) &&
+    buildId === NATIVE_PLAYBACK_RUNTIME_BUILDS[supportedPlatform] &&
+    playbackBuild === NATIVE_PLAYBACK_SESSION_BUILD;
+  if (!featureReady) return absentNativeCapability();
+
+  if (!Array.isArray(raw.outputs)) return absentNativeCapability();
+  const outputs: NativePlaybackOutput[] = [];
+  for (const value of raw.outputs) {
+    const output = objectValue(value);
+    const channels = safeUnsigned(output?.channels);
+    const sampleRate = finiteNumber(output?.sampleRate);
+    if (
+      !output ||
+      typeof output.uid !== 'string' ||
+      output.uid.length === 0 ||
+      typeof output.label !== 'string' ||
+      typeof output.default !== 'boolean' ||
+      channels === null ||
+      channels < 1 ||
+      sampleRate === null ||
+      sampleRate <= 0
+    )
+      return absentNativeCapability();
+    outputs.push({
+      uid: output.uid,
+      label: output.label,
+      default: output.default,
+      channels,
+      sampleRate,
+    });
+  }
+
+  const rawSession = objectValue(raw.session);
+  const rawLatency = objectValue(rawSession?.latency);
+  if (!rawSession || !rawLatency || !Array.isArray(rawSession.lanes))
+    return absentNativeCapability();
+  const unsignedSessionKeys = [
+    'generation',
+    'terminalOrdinal',
+    'maximumFrames',
+    'nominalBufferFrames',
+    'outputChannels',
+    'renderedFrames',
+    'audibleFrames',
+    'transportGeneration',
+    'continuousFrame',
+    'durationFrames',
+    'remainingPreRollFrames',
+    'cueEventsCompleted',
+    'nextCueEventIndex',
+    'loopCount',
+    'seekCount',
+    'transportDiscontinuities',
+    'presentationLatencyFrames',
+    'graphLatencyFrames',
+    'devicePresentationLatencyFrames',
+    'totalPresentationLatencyFrames',
+    'retainedBytes',
+    'graphArenaBytes',
+    'cueEventCount',
+    'graphNodeCount',
+    'graphConnectionCount',
+    'latencyCompensatedEdgeCount',
+    'xruns',
+    'deadlineMisses',
+    'discontinuities',
+    'renderFailures',
+    'adapterRenderFailures',
+    'terminalRenderFailures',
+    'parameterOverflows',
+    'nonFiniteSamples',
+    'rejectedBlocks',
+    'previewClicksEnqueued',
+    'previewClicksStarted',
+    'previewClicksCompleted',
+    'previewClicksPending',
+    'timePitchAnchorsPrepared',
+    'timePitchAnchorsPublished',
+    'timePitchAnchorMisses',
+  ] as const;
+  const integers: Record<(typeof unsignedSessionKeys)[number], number> =
+    {} as Record<(typeof unsignedSessionKeys)[number], number>;
+  for (const key of unsignedSessionKeys) {
+    const parsed = safeUnsigned(rawSession[key]);
+    if (parsed === null) return absentNativeCapability();
+    integers[key] = parsed;
+  }
+  const sampleRate = finiteNumber(rawSession.sampleRate);
+  const masterGain = finiteNumber(rawSession.masterGain);
+  const referenceGain = finiteNumber(rawSession.referenceGain);
+  const preRollFrames = safeSigned(rawSession.preRollFrames);
+  const renderedProjectFrame = safeSigned(rawSession.renderedProjectFrame);
+  const audibleProjectFrame = safeSigned(rawSession.audibleProjectFrame);
+  const preparedStartProjectFrame = safeSigned(
+    rawSession.preparedStartProjectFrame,
+  );
+  const loopStartFrame = safeSigned(rawSession.loopStartFrame);
+  const loopEndFrame = safeSigned(rawSession.loopEndFrame);
+  const playbackRate = finiteNumber(rawSession.playbackRate);
+  const transposeSemitones = finiteNumber(rawSession.transposeSemitones);
+  const rawTrainingLanes = rawSession.trainingLanes;
+  const rawTrainingLaneCount = Array.isArray(rawTrainingLanes)
+    ? rawTrainingLanes.length
+    : -1;
+  const trainingLanes = Array.isArray(rawTrainingLanes)
+    ? rawTrainingLanes.filter(
+        (lane): lane is string => typeof lane === 'string' && lane.length > 0,
+      )
+    : null;
+  if (
+    sampleRate === null ||
+    sampleRate < 0 ||
+    masterGain === null ||
+    referenceGain === null ||
+    preRollFrames === null ||
+    renderedProjectFrame === null ||
+    audibleProjectFrame === null ||
+    preparedStartProjectFrame === null ||
+    loopStartFrame === null ||
+    loopEndFrame === null ||
+    playbackRate === null ||
+    playbackRate <= 0 ||
+    transposeSemitones === null ||
+    transposeSemitones < -24 ||
+    transposeSemitones > 24 ||
+    typeof rawSession.trainingEnabled !== 'boolean' ||
+    trainingLanes === null ||
+    trainingLanes.length !== rawTrainingLaneCount ||
+    trainingLanes.length > 16 ||
+    new Set(trainingLanes).size !== trainingLanes.length ||
+    !oneOf(rawSession.state, PLAYBACK_STATES) ||
+    !oneOf(rawSession.hostState, HOST_STATES) ||
+    !oneOf(rawSession.terminalReason, TERMINAL_REASONS) ||
+    !oneOf(rawSession.transportState, TRANSPORT_STATES) ||
+    !oneOf(
+      rawSession.transportTelemetryQuality,
+      TRANSPORT_TELEMETRY_QUALITIES,
+    ) ||
+    !oneOf(rawSession.lastTransportBoundary, TRANSPORT_BOUNDARY_REASONS) ||
+    !oneOf(
+      rawSession.audibleProjectionQuality,
+      AUDIBLE_PROJECTION_QUALITIES,
+    ) ||
+    typeof rawSession.loopEnabled !== 'boolean' ||
+    typeof rawSession.timePitchReplacementReady !== 'boolean' ||
+    typeof rawSession.timePitchLoopPriming !== 'boolean' ||
+    typeof rawSession.topology !== 'string' ||
+    typeof rawSession.message !== 'string'
+  )
+    return absentNativeCapability();
+
+  const latencyKeys = [
+    'outputDeviceFrames',
+    'bufferFrames',
+    'externalRouteFrames',
+    'presentationFrames',
+  ] as const;
+  const latency = {} as Record<(typeof latencyKeys)[number], number>;
+  for (const key of latencyKeys) {
+    const parsed = safeUnsigned(rawLatency[key]);
+    if (parsed === null) return absentNativeCapability();
+    latency[key] = parsed;
+  }
+  if (latency.presentationFrames !== integers.presentationLatencyFrames)
+    return absentNativeCapability();
+  if (
+    integers.presentationLatencyFrames !==
+      integers.totalPresentationLatencyFrames ||
+    integers.totalPresentationLatencyFrames !==
+      integers.graphLatencyFrames + integers.devicePresentationLatencyFrames
+  )
+    return absentNativeCapability();
+  const lanes: NativePlaybackLaneStatus[] = [];
+  for (const value of rawSession.lanes) {
+    const lane = objectValue(value);
+    const cursorFrames = safeUnsigned(lane?.cursorFrames);
+    const totalFrames = safeUnsigned(lane?.totalFrames);
+    const gain = finiteNumber(lane?.gain);
+    if (
+      !lane ||
+      typeof lane.id !== 'string' ||
+      lane.id.length === 0 ||
+      cursorFrames === null ||
+      totalFrames === null ||
+      gain === null ||
+      typeof lane.muted !== 'boolean' ||
+      typeof lane.solo !== 'boolean'
+    )
+      return absentNativeCapability();
+    lanes.push({
+      id: lane.id,
+      cursorFrames,
+      totalFrames,
+      gain,
+      muted: lane.muted,
+      solo: lane.solo,
+    });
+  }
+
+  return {
+    available: true,
+    interfaceVersion,
+    playbackContractVersion,
+    graph: true,
+    audioHostAdapter: true,
+    playbackSession: true,
+    playbackCleanupProof: true,
+    playbackHandoffLease: true,
+    playbackTransport: true,
+    scheduledCues: true,
+    timePitch: true,
+    mediaCodec: mediaCodec!,
+    buildId,
+    playbackBuild,
+    ownership,
+    activation,
+    outputs,
+    session: {
+      generation: integers.generation,
+      state: rawSession.state,
+      hostState: rawSession.hostState,
+      terminalReason: rawSession.terminalReason,
+      terminalOrdinal: integers.terminalOrdinal,
+      sampleRate,
+      maximumFrames: integers.maximumFrames,
+      nominalBufferFrames: integers.nominalBufferFrames,
+      outputChannels: integers.outputChannels,
+      renderedFrames: integers.renderedFrames,
+      audibleFrames: integers.audibleFrames,
+      transportGeneration: integers.transportGeneration,
+      transportState: rawSession.transportState,
+      transportTelemetryQuality: rawSession.transportTelemetryQuality,
+      lastTransportBoundary: rawSession.lastTransportBoundary,
+      renderedProjectFrame,
+      audibleProjectFrame,
+      audibleProjectionQuality: rawSession.audibleProjectionQuality,
+      continuousFrame: integers.continuousFrame,
+      durationFrames: integers.durationFrames,
+      remainingPreRollFrames: integers.remainingPreRollFrames,
+      cueEventsCompleted: integers.cueEventsCompleted,
+      nextCueEventIndex: integers.nextCueEventIndex,
+      loopEnabled: rawSession.loopEnabled,
+      loopStartFrame,
+      loopEndFrame,
+      loopCount: integers.loopCount,
+      seekCount: integers.seekCount,
+      transportDiscontinuities: integers.transportDiscontinuities,
+      presentationLatencyFrames: integers.presentationLatencyFrames,
+      playbackRate,
+      transposeSemitones,
+      graphLatencyFrames: integers.graphLatencyFrames,
+      devicePresentationLatencyFrames:
+        integers.devicePresentationLatencyFrames,
+      totalPresentationLatencyFrames: integers.totalPresentationLatencyFrames,
+      preparedStartProjectFrame,
+      retainedBytes: integers.retainedBytes,
+      graphArenaBytes: integers.graphArenaBytes,
+      masterGain,
+      referenceGain,
+      trainingEnabled: rawSession.trainingEnabled,
+      trainingLanes,
+      preRollFrames,
+      cueEventCount: integers.cueEventCount,
+      graphNodeCount: integers.graphNodeCount,
+      graphConnectionCount: integers.graphConnectionCount,
+      latencyCompensatedEdgeCount: integers.latencyCompensatedEdgeCount,
+      topology: rawSession.topology,
+      xruns: integers.xruns,
+      deadlineMisses: integers.deadlineMisses,
+      discontinuities: integers.discontinuities,
+      renderFailures: integers.renderFailures,
+      adapterRenderFailures: integers.adapterRenderFailures,
+      terminalRenderFailures: integers.terminalRenderFailures,
+      parameterOverflows: integers.parameterOverflows,
+      nonFiniteSamples: integers.nonFiniteSamples,
+      rejectedBlocks: integers.rejectedBlocks,
+      previewClicksEnqueued: integers.previewClicksEnqueued,
+      previewClicksStarted: integers.previewClicksStarted,
+      previewClicksCompleted: integers.previewClicksCompleted,
+      previewClicksPending: integers.previewClicksPending,
+      timePitchAnchorsPrepared: integers.timePitchAnchorsPrepared,
+      timePitchAnchorsPublished: integers.timePitchAnchorsPublished,
+      timePitchAnchorMisses: integers.timePitchAnchorMisses,
+      timePitchReplacementReady: rawSession.timePitchReplacementReady,
+      timePitchLoopPriming: rawSession.timePitchLoopPriming,
+      latency,
+      lanes,
+      message: rawSession.message,
+    },
+  };
+}
+
+/** Build one immutable bridge request; clicks are never streamed individually. */
+export function buildNativePlaybackPreparePlayback(
+  beat: BeatInfo | null,
+  metronome: MetronomeConfig,
+  transport: NativePlaybackTransportIntent,
+): NativePlaybackPreparePlayback {
+  if (
+    !Number.isFinite(transport.entrySeconds) ||
+    transport.entrySeconds < 0 ||
+    !Number.isFinite(transport.playbackRate) ||
+    transport.playbackRate < 0.25 ||
+    transport.playbackRate > 4 ||
+    !Number.isFinite(transport.transposeSemitones) ||
+    transport.transposeSemitones < -24 ||
+    transport.transposeSemitones > 24 ||
+    !Number.isInteger(metronome.countInBars) ||
+    metronome.countInBars < 0 ||
+    metronome.countInBars > 2 ||
+    !Number.isFinite(metronome.volume) ||
+    metronome.volume < 0 ||
+    metronome.volume > 1 ||
+    typeof metronome.click !== 'boolean' ||
+    typeof metronome.accent !== 'boolean'
+  )
+    throw new Error('Native playback transport or cue configuration is invalid.');
+  if (metronome.click && beat === null)
+    throw new Error('A native metronome click requires a sanitized beat grid.');
+
+  const beatGrid =
+    beat === null
+      ? undefined
+      : {
+          beats: [...beat.beats],
+          beatsPerBar: beat.beatsPerBar,
+          downbeat: beat.downbeat,
+          downbeats: [...(beat.downbeats ?? [])],
+        };
+  return {
+    version: 2,
+    transport: { ...transport },
+    cues: {
+      click: metronome.click,
+      countInBars: metronome.countInBars,
+      volume: metronome.volume,
+      accent: metronome.accent,
+      ...(beatGrid === undefined ? {} : { beatGrid }),
+    },
+  };
+}
 
 export function nativePlaybackEligibility(
   entry: ProjectEntry,
@@ -192,45 +1182,90 @@ export function nativePlaybackEligibility(
 ): NativePlaybackEligibility {
   if (!enabled)
     return { eligible: false, reason: 'experimental toggle is off' };
-  if (platform !== 'ios') return { eligible: false, reason: 'iPhone only' };
-  if (
-    capability === null ||
-    !capability.available ||
-    !capability.graph ||
-    !capability.audioHostAdapter ||
-    !capability.playbackSession ||
-    !capability.playbackCleanupProof ||
-    !capability.playbackHandoffLease
-  )
+  const supportedPlatform = nativePlaybackPlatform(platform);
+  if (supportedPlatform === null)
+    return { eligible: false, reason: 'mobile native playback is unavailable' };
+  if (!nativeCapabilityMatchesPlatform(capability, supportedPlatform))
     return {
       eligible: false,
       reason: 'native playback capability is unavailable',
     };
-  const ids = STEM_ORDER_ALL.filter(id => entry.stems[id] != null);
-  if (ids.length < 1 || ids.length > 16)
-    return { eligible: false, reason: 'requires 1–16 split stems' };
-  if (ids.some(id => entry.stems[id] !== 'wav' && entry.stems[id] !== 'flac'))
-    return { eligible: false, reason: 'only WAV/FLAC stems are supported' };
-  if (customTracks(doc.settings).length > 0)
+  const stemExtensions = STEM_ORDER_ALL.flatMap(id =>
+    entry.stems[id] == null ? [] : [entry.stems[id]],
+  );
+  const added = customTracks(doc.settings);
+  const customExtensions = added.map(track => extensionOf(track.file));
+  const laneCount = stemExtensions.length + customExtensions.length;
+  if (laneCount < 1 || laneCount > 16)
+    return { eligible: false, reason: 'requires 1–16 playable lanes' };
+  const unsupported = [...stemExtensions, ...customExtensions].find(
+    extension =>
+      extension === null ||
+      !codecSupportsExtension(capability.mediaCodec.formatMask, extension),
+  );
+  if (unsupported !== undefined)
     return {
       eligible: false,
-      reason: 'added or original tracks require the legacy player',
+      reason:
+        unsupported === null
+          ? 'a project lane has an unsupported audio-file extension'
+          : `the native decoder does not support .${unsupported} on this build`,
     };
-  if (Math.round(doc.settings?.transpose ?? 0) !== 0)
-    return { eligible: false, reason: 'transpose is active' };
-  if (Math.abs((doc.settings?.tempo ?? 1) - 1) > 0.001)
-    return { eligible: false, reason: 'tempo change is active' };
-  if (
-    doc.settings?.metronome?.click === true ||
-    (doc.settings?.metronome?.countInBars ?? 0) > 0
-  )
-    return { eligible: false, reason: 'metronome or count-in is active' };
-  if (doc.settings?.training?.on === true)
-    return { eligible: false, reason: 'song practice mode is active' };
+  try {
+    buildNativePlaybackPreparePlayback(
+      sanitizeBeatInfo(doc.settings?.beat),
+      doc.settings?.metronome
+        ? sanitizeMetronome(doc.settings.metronome)
+        : MET_DEFAULTS,
+      {
+        entrySeconds: 0,
+        playbackRate: doc.settings?.tempo ?? 1,
+        transposeSemitones: Math.round(doc.settings?.transpose ?? 0),
+      },
+    );
+  } catch {
+    return {
+      eligible: false,
+      reason: 'the saved metronome configuration is not supported natively',
+    };
+  }
   const output = chooseOutput(capability.outputs);
   if (output === null)
     return { eligible: false, reason: 'no native output route is available' };
-  return { eligible: true, reason: 'eligible frame-zero WAV/FLAC project' };
+  return { eligible: true, reason: 'eligible native DSP project' };
+}
+
+function extensionOf(path: string): string | null {
+  const slash = path.lastIndexOf('/');
+  const dot = path.lastIndexOf('.');
+  if (dot <= slash || dot === path.length - 1) return null;
+  const extension = path.slice(dot + 1).toLowerCase();
+  return /^[a-z0-9]{1,7}$/.test(extension) ? extension : null;
+}
+
+function codecSupportsExtension(formatMask: number, extension: string): boolean {
+  switch (extension) {
+    case 'wav':
+      return (formatMask & 0x001) !== 0;
+    case 'flac':
+      return (formatMask & 0x002) !== 0;
+    case 'mp3':
+      return (formatMask & 0x004) !== 0;
+    case 'm4a':
+      return (formatMask & 0x018) === 0x018;
+    case 'aac':
+      return (formatMask & 0x020) !== 0;
+    case 'ogg':
+    case 'oga':
+      return (formatMask & 0x0c0) !== 0;
+    case 'opus':
+      return (formatMask & 0x080) !== 0;
+    case 'aif':
+    case 'aiff':
+      return (formatMask & 0x100) !== 0;
+    default:
+      return false;
+  }
 }
 
 export class IosNativePlaybackCoordinator {
@@ -259,11 +1294,11 @@ export class IosNativePlaybackCoordinator {
     readonly capability: NativePlaybackCapability | null;
   }> {
     const preference = await this.deps.preferences.load();
-    if (this.deps.platform !== 'ios')
+    if (nativePlaybackPlatform(this.deps.platform) === null)
       return {
         enabled: preference.enabled,
         supported: false,
-        detail: 'Experimental native playback is available on iPhone only.',
+        detail: 'Experimental native playback is unavailable on this platform.',
         capability: null,
       };
     if (!this.deps.native)
@@ -275,18 +1310,15 @@ export class IosNativePlaybackCoordinator {
       };
     try {
       const capability = await this.deps.native.status();
-      const supported =
-        capability.available &&
-        capability.graph &&
-        capability.audioHostAdapter &&
-        capability.playbackSession &&
-        capability.playbackCleanupProof &&
-        capability.playbackHandoffLease;
+      const supported = nativeCapabilityMatchesPlatform(
+        capability,
+        this.deps.platform,
+      );
       return {
         enabled: preference.enabled,
         supported,
         detail: supported
-          ? `${capability.playbackBuild} · ${capability.ownership} · ${capability.session.state}`
+          ? `${capability.buildId} · ${capability.playbackBuild} · ${capability.ownership} · ${capability.session.state}`
           : 'The linked native runtime is missing a required playback capability.',
         capability,
       };
@@ -316,16 +1348,18 @@ export class IosNativePlaybackCoordinator {
     let capability: NativePlaybackCapability | null = null;
     if (
       preference.enabled &&
-      this.deps.platform === 'ios' &&
+      nativePlaybackPlatform(this.deps.platform) !== null &&
       this.deps.native
     ) {
       try {
         capability = await this.deps.native.status();
-        logDspRuntime(capability);
+        logDspRuntime(capability, this.deps.platform);
       } catch (error) {
         log(
           'dsp',
-          `iOS runtime probe failed · ${message(error)} · native graph unavailable`,
+          `${platformLabel(this.deps.platform)} runtime probe failed · ${message(
+            error,
+          )} · native graph unavailable`,
           'warn',
         );
       }
@@ -432,16 +1466,18 @@ export class IosNativePlaybackCoordinator {
           if (safe && this.active === handle) this.active = null;
           throw new Error('Song load was superseded.');
         }
-        const fallback = await this.fallbackAfterPrepare(
-          handle,
-          prepared.error,
-          () =>
-            this.active === handle &&
-            handle.isCurrent() &&
-            handle.routeIsValid(),
+        const retryable = handle.hasCurrentCleanup(this.fallbackLease);
+        handle.update({
+          phase: retryable ? 'stopped' : 'error',
+          error: prepared.error,
+        });
+        log(
+          'native-playback',
+          `native selection retained after prepare failure · generation ${handle.generation} · ${prepared.error}`,
+          'error',
         );
-        if (this.active === handle) this.active = null;
-        return fallback;
+        if (!retryable) throw new Error(prepared.error);
+        return handle.loadedProject();
       }
       if (!options.isCurrent()) {
         handle.invalidateRoute();
@@ -493,6 +1529,10 @@ export class IosNativePlaybackCoordinator {
     return this.active === handle && handle.isCurrent();
   }
 
+  handleKind(): NativePlaybackHandle['kind'] {
+    return this.deps.platform === 'android' ? 'android-native' : 'ios-native';
+  }
+
   private async retireActiveLocked(reason: string): Promise<boolean> {
     const active = this.active;
     if (!active) return true;
@@ -528,7 +1568,10 @@ export class IosNativePlaybackCoordinator {
       handle.update({
         phase: 'stopped',
         positionSec: 0,
+        renderedPositionSec: 0,
         audibleFrames: 0,
+        countInStatus: null,
+        regionState: null,
         error: null,
       });
     return 'leased-stopped';
@@ -547,6 +1590,7 @@ export class IosNativePlaybackCoordinator {
     handle: IosNativePlaybackHandle,
     capability?: NativePlaybackCapability,
     continuing: () => boolean = () => true,
+    overrides?: NativePlaybackPrepareOverrides,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const native = this.deps.native;
     if (!native) return { ok: false, error: 'Native playback is unavailable.' };
@@ -555,7 +1599,7 @@ export class IosNativePlaybackCoordinator {
       return { ok: false, error: 'Native preparation was cancelled.' };
     const output = chooseOutput(status.outputs);
     if (!output)
-      return { ok: false, error: 'No iPhone audio output is available.' };
+      return { ok: false, error: 'No native audio output is available.' };
     if (this.fallbackLease !== null) {
       // A fallback lease is a bearer capability. Legacy output must be fully
       // quiescent before the synchronous prepare claim consumes it.
@@ -576,6 +1620,7 @@ export class IosNativePlaybackCoordinator {
         handle.materialized,
         output,
         lease?.token ?? 0,
+        overrides ?? handle.prepareRestartOverrides(output.sampleRate),
       );
       logDspGraphBuild(generation, handle.materialized, output, request);
       result = await native.prepare(generation, request);
@@ -649,43 +1694,22 @@ export class IosNativePlaybackCoordinator {
           }
         : { ok: false, error: cleanupUncertain('inconsistent prepare status') };
     }
-    logDspGraphPrepared(result, preparedStatus.session, handle.materialized);
+    logDspGraphPrepared(result, preparedStatus.session);
     handle.publishPrepared(preparedStatus.session);
     return { ok: true };
-  }
-
-  private async fallbackAfterPrepare(
-    handle: IosNativePlaybackHandle,
-    reason: string,
-    guard: () => boolean,
-  ): Promise<LoadedProject> {
-    if (this.fallbackLease === null)
-      throw new Error(
-        `${reason} Native cleanup did not authorize legacy fallback.`,
-      );
-    if (!guard()) throw new Error('Song load was superseded.');
-    handle.options.engine.allowLegacyOutputAfterNativeCleanup();
-    log(
-      'native-playback',
-      `prepare fallback authorized · lease ${this.fallbackLease.token} · ${reason}`,
-      'warn',
-    );
-    const loaded = await this.deps.legacyLoad(
-      handle.materialized.entry,
-      handle.options.sampleRate,
-      handle.options.onStep,
-      handle.options.crumb,
-    );
-    if (!guard()) {
-      releaseProject(loaded);
-      throw new Error('Song load was superseded.');
-    }
-    return loaded;
   }
 
   async startHandle(
     handle: IosNativePlaybackHandle,
   ): Promise<NativePlaybackStartOutcome> {
+    if (handle.snapshot().phase === 'paused') {
+      try {
+        await this.transportHandle(handle, { kind: 'resume' });
+        return { kind: 'started' };
+      } catch (error) {
+        return { kind: 'failed', error: message(error) };
+      }
+    }
     const operation = handle.tryBeginStart();
     if (operation === null)
       return {
@@ -695,6 +1719,470 @@ export class IosNativePlaybackCoordinator {
     return this.withOwnershipLock(() =>
       this.startHandleLocked(handle, operation),
     ).finally(() => handle.finishStart(operation.token));
+  }
+
+  async transportHandle(
+    handle: IosNativePlaybackHandle,
+    command: NativePlaybackTransportCommand,
+  ): Promise<void> {
+    await this.withOwnershipLock(async () => {
+      const native = this.deps.native;
+      const generation = handle.generation;
+      if (
+        !native ||
+        generation <= 0 ||
+        this.active !== handle ||
+        !handle.isCurrent() ||
+        !handle.routeIsValid()
+      )
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          command.kind,
+          generation,
+          'This native playback generation is stale.',
+        );
+      let result: NativePlaybackResult;
+      try {
+        result = await native.transport(generation, command);
+      } catch (error) {
+        throw new NativePlaybackCommandError(
+          'provider-failure',
+          command.kind,
+          generation,
+          message(error),
+        );
+      }
+      if (
+        this.active !== handle ||
+        handle.generation !== generation ||
+        !handle.isCurrent()
+      )
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          command.kind,
+          generation,
+          'The native transport receipt belongs to a stale generation.',
+        );
+      if (!result.ok || result.generation !== generation) {
+        const parsed = nativeErrorCode(result.error);
+        const code = parsed === 'none' ? 'provider-failure' : parsed;
+        throw new NativePlaybackCommandError(
+          code,
+          command.kind,
+          generation,
+          result.message,
+        );
+      }
+      handle.noteTransportCommand(command);
+      log(
+        'dsp',
+        `transport ${command.kind} queued · generation ${generation}`,
+      );
+    });
+  }
+
+  async controlHandle(
+    handle: IosNativePlaybackHandle,
+    control: NativePlaybackControl,
+    command: 'lane-control' | 'master-gain' | 'training-enable',
+  ): Promise<void> {
+    await this.withOwnershipLock(async () => {
+      const native = this.deps.native;
+      const generation = handle.generation;
+      if (
+        !native ||
+        generation <= 0 ||
+        this.active !== handle ||
+        !handle.isCurrent() ||
+        !handle.routeIsValid()
+      )
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          command,
+          generation,
+          'This native playback control belongs to a stale generation.',
+        );
+      let result: NativePlaybackResult;
+      try {
+        result = await native.setControl(generation, control);
+      } catch (error) {
+        throw new NativePlaybackCommandError(
+          'provider-failure',
+          command,
+          generation,
+          message(error),
+        );
+      }
+      if (
+        this.active !== handle ||
+        handle.generation !== generation ||
+        !handle.isCurrent()
+      )
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          command,
+          generation,
+          'The native playback control receipt belongs to a stale generation.',
+        );
+      if (!result.ok || result.generation !== generation) {
+        const parsed = nativeErrorCode(result.error);
+        throw new NativePlaybackCommandError(
+          parsed === 'none' ? 'provider-failure' : parsed,
+          command,
+          generation,
+          result.message,
+        );
+      }
+      log('dsp', `${command} ramp queued · generation ${generation}`);
+    });
+  }
+
+  async previewClickHandle(
+    handle: IosNativePlaybackHandle,
+    accent: boolean,
+  ): Promise<void> {
+    await this.withOwnershipLock(async () => {
+      const native = this.deps.native;
+      const generation = handle.generation;
+      if (
+        !native ||
+        generation <= 0 ||
+        this.active !== handle ||
+        !handle.isCurrent() ||
+        !handle.routeIsValid()
+      )
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          'preview-click',
+          generation,
+          'This native preview click belongs to a stale generation.',
+        );
+      let result: NativePlaybackResult;
+      try {
+        result = await native.previewClick(generation, accent ? 1 : 0);
+      } catch (error) {
+        throw new NativePlaybackCommandError(
+          'provider-failure',
+          'preview-click',
+          generation,
+          message(error),
+        );
+      }
+      if (
+        this.active !== handle ||
+        handle.generation !== generation ||
+        !handle.isCurrent()
+      )
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          'preview-click',
+          generation,
+          'The native preview-click receipt belongs to a stale generation.',
+        );
+      if (!result.ok || result.generation !== generation)
+        throw new NativePlaybackCommandError(
+          nativeErrorCode(result.error),
+          'preview-click',
+          generation,
+          result.message,
+        );
+      handle.update({ error: null });
+      log(
+        'dsp',
+        `preview ${accent ? 'accent' : 'ordinary'} click queued · generation ${generation}`,
+      );
+    });
+  }
+
+  async rebuildHandleCues(
+    handle: IosNativePlaybackHandle,
+    beat: BeatInfo | null,
+    metronome: MetronomeConfig,
+  ): Promise<void> {
+    const previousIntent = handle.cueIntent();
+    try {
+      await this.withOwnershipLock(async () => {
+      const native = this.deps.native;
+      const oldGeneration = handle.generation;
+      if (
+        !native ||
+        oldGeneration <= 0 ||
+        this.active !== handle ||
+        !handle.routeIsValid()
+      )
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          'rebuild-cues',
+          oldGeneration,
+          'This native cue update belongs to a stale playback generation.',
+        );
+      if (!handle.isCurrent()) {
+        log(
+          'native-playback',
+          `stale cue rebuild dropped · generation ${oldGeneration}`,
+          'warn',
+        );
+        return;
+      }
+
+      // Validate and retain the one desired plan before any graph ownership
+      // changes. If a rebuild later fails, an ordinary native retry uses this
+      // same effective persisted state rather than reverting to stale cues.
+      try {
+        handle.setCueIntent(beat, metronome);
+      } catch (error) {
+        await this.stopHandleLocked(handle, 'invalid cue rebuild intent');
+        const detail = `Native cue rebuild rejected the saved configuration: ${message(
+          error,
+        )}`;
+        handle.update({ phase: 'stopped', error: detail });
+        throw new NativePlaybackCommandError(
+          'invalid-configuration',
+          'rebuild-cues',
+          oldGeneration,
+          detail,
+        );
+      }
+      if (
+        handle.snapshot().phase === 'stopped' &&
+        handle.hasCurrentCleanup(this.fallbackLease)
+      ) {
+        log(
+          'dsp',
+          `cue update retained for next native start · generation ${oldGeneration}`,
+        );
+        return;
+      }
+
+      let status: NativePlaybackCapability;
+      try {
+        status = await native.status();
+      } catch (error) {
+        await this.stopHandleLocked(handle, 'cue rebuild status failed');
+        throw new NativePlaybackCommandError(
+          'provider-failure',
+          'rebuild-cues',
+          oldGeneration,
+          `Native cue rebuild could not read transport status: ${message(error)}`,
+        );
+      }
+      const session = status.session;
+      const telemetryUsable =
+        session.generation === oldGeneration &&
+        session.transportGeneration === oldGeneration &&
+        session.transportTelemetryQuality !== 'unavailable';
+      if (!telemetryUsable) {
+        await this.stopHandleLocked(handle, 'cue rebuild telemetry unavailable');
+        const error =
+          'Native cue rebuild stopped because a trustworthy signed transport position was unavailable.';
+        handle.update({ phase: 'stopped', error });
+        throw new NativePlaybackCommandError(
+          'invalid-state',
+          'rebuild-cues',
+          oldGeneration,
+          error,
+        );
+      }
+
+      const preparedStartProjectFrame = session.renderedProjectFrame;
+      const wasStarted = handle.startWasIssued(oldGeneration);
+      const restoreTransport =
+        session.transportState === 'paused'
+          ? 'paused'
+          : session.transportState === 'playing' ||
+              session.transportState === 'pre-roll'
+            ? 'playing'
+            : 'prepared';
+      const restoreLoop = session.loopEnabled
+        ? {
+            startProjectFrame: session.loopStartFrame,
+            endProjectFrame: session.loopEndFrame,
+          }
+        : null;
+      const statusSampleRate =
+        session.sampleRate || handle.output?.sampleRate || 48_000;
+
+      handle.stopPolling();
+      if (wasStarted) {
+        try {
+          await native.stop(oldGeneration);
+        } catch (error) {
+          log(
+            'native-playback',
+            `cue rebuild stop delivery failed · generation ${oldGeneration} · exact unload follows · ${message(
+              error,
+            )}`,
+            'warn',
+          );
+        }
+      }
+      const retired = await this.cleanupGeneration(handle, oldGeneration);
+      if (!retired) {
+        const error =
+          'Native cue rebuild could not prove that the previous graph was released.';
+        handle.fail(error);
+        throw new NativePlaybackCommandError(
+          'teardown-uncertain',
+          'rebuild-cues',
+          oldGeneration,
+          error,
+        );
+      }
+      if (
+        this.active !== handle ||
+        !handle.isCurrent() ||
+        !handle.routeIsValid()
+      ) {
+        const error = 'Native cue rebuild was superseded after releasing its old graph.';
+        handle.update({ phase: 'stopped', error });
+        throw new NativePlaybackCommandError(
+          'invalid-generation',
+          'rebuild-cues',
+          oldGeneration,
+          error,
+        );
+      }
+
+      const prepared = await this.prepareHandle(
+        handle,
+        undefined,
+        () =>
+          this.active === handle &&
+          handle.isCurrent() &&
+          handle.routeIsValid(),
+        handle.prepareOverrides(
+          preparedStartProjectFrame,
+          session.lanes,
+          session.masterGain,
+          wasStarted && restoreTransport !== 'prepared'
+            ? {
+                state: restoreTransport,
+                ...(restoreLoop === null ? {} : { loop: restoreLoop }),
+              }
+            : undefined,
+        ),
+      );
+      if (!prepared.ok) {
+        const generation = handle.generation;
+        handle.update({ phase: 'stopped', error: prepared.error });
+        log(
+          'dsp',
+          `cue rebuild failed · generation ${oldGeneration}→${generation} · ${prepared.error}`,
+          'error',
+        );
+        throw new NativePlaybackCommandError(
+          'provider-failure',
+          'rebuild-cues',
+          generation,
+          prepared.error,
+        );
+      }
+
+      const generation = handle.generation;
+      log(
+        'dsp',
+        `cue graph rebuilt · generation ${oldGeneration}→${generation} · ` +
+          `signed project frame ${preparedStartProjectFrame} · no count-in replay · ` +
+          `${handle.graphDescription()}`,
+      );
+      if (!wasStarted || restoreTransport === 'prepared') return;
+
+      try {
+        const configured = await native.configureOutputSession(generation);
+        if (!configured.ok)
+          throw new NativePlaybackCommandError(
+            nativeErrorCode(configured.error),
+            'rebuild-cues',
+            generation,
+            configured.message,
+          );
+        const opened = await native.openOutput(generation);
+        if (!opened.ok)
+          throw new NativePlaybackCommandError(
+            nativeErrorCode(opened.error),
+            'rebuild-cues',
+            generation,
+            opened.message,
+          );
+        handle.markStartIssued(generation);
+        const started = await native.start(generation);
+        if (!started.ok)
+          throw new NativePlaybackCommandError(
+            nativeErrorCode(started.error),
+            'rebuild-cues',
+            generation,
+            started.message,
+          );
+        handle.update({
+          phase: restoreTransport,
+          error: null,
+          ...(restoreLoop === null
+            ? { regionState: null }
+            : {
+                regionState: {
+                  start: restoreLoop.startProjectFrame / statusSampleRate,
+                  end: restoreLoop.endProjectFrame / statusSampleRate,
+                  loop: true,
+                },
+              }),
+        });
+        handle.startPolling();
+        log(
+          'dsp',
+          `cue graph resumed · generation ${generation} · ${restoreTransport} · ` +
+            `signed project frame ${preparedStartProjectFrame}`,
+        );
+      } catch (error) {
+        if (handle.startWasIssued(generation)) {
+          try {
+            await native.stop(generation);
+          } catch {
+            // Exact unload below is the authority even when Stop delivery is lost.
+          }
+        }
+        const released = await this.cleanupGeneration(handle, generation);
+        const detail = released
+          ? `Native cue rebuild stopped and is retryable: ${message(error)}`
+          : cleanupUncertain(error);
+        handle.update({ phase: released ? 'stopped' : 'error', error: detail });
+        log(
+          'dsp',
+          `cue rebuild activation failed · generation ${generation} · ${detail}`,
+          'error',
+        );
+        throw error instanceof NativePlaybackCommandError
+          ? error
+          : new NativePlaybackCommandError(
+              'provider-failure',
+              'rebuild-cues',
+              generation,
+              detail,
+            );
+      }
+      });
+    } catch (error) {
+      // A failed structural swap has no accepted native receipt. Keep the
+      // handle's next-retry intent aligned with the last graph that was
+      // actually published rather than poisoning recovery with the request.
+      handle.restoreCueIntent(previousIntent.beat, previousIntent.metronome);
+      throw error;
+    }
+  }
+
+  private async sendRebuildTransportLocked(
+    handle: IosNativePlaybackHandle,
+    command: NativePlaybackTransportCommand,
+  ): Promise<void> {
+    const generation = handle.generation;
+    const result = await this.deps.native?.transport(generation, command);
+    if (!result || !result.ok || result.generation !== generation)
+      throw new NativePlaybackCommandError(
+        result ? nativeErrorCode(result.error) : 'provider-failure',
+        'rebuild-cues',
+        generation,
+        result?.message ?? 'The native cue rebuild transport command failed.',
+      );
+    handle.noteTransportCommand(command);
   }
 
   private async startHandleLocked(
@@ -763,14 +2251,14 @@ export class IosNativePlaybackCoordinator {
           'Native output configuration was cancelled.',
         );
       if (!configured.ok)
-        return this.openFallback(
+        return this.openFailure(
           handle,
           configured.message || configured.error,
           operation.token,
         );
       log(
         'dsp',
-        `iOS audio session ready · generation ${generation} · ` +
+        `${platformLabel(this.deps.platform)} audio session ready · generation ${generation} · ` +
           `${formatSampleRate(configured.sampleRate)} · ${configured.outputChannels} ch · ` +
           `${configured.nominalBufferFrames} frame nominal buffer`,
       );
@@ -782,14 +2270,14 @@ export class IosNativePlaybackCoordinator {
           'Native output open was cancelled.',
         );
       if (!opened.ok)
-        return this.openFallback(
+        return this.openFailure(
           handle,
           opened.message || opened.error,
           operation.token,
         );
       log(
         'dsp',
-        `zcore AudioHost open · generation ${generation} · ${handle.output?.label ?? 'iOS output'} · ` +
+        `zcore AudioHost open · generation ${generation} · ${handle.output?.label ?? 'native output'} · ` +
           `${formatSampleRate(opened.sampleRate)} · ${opened.outputChannels} ch · ` +
           `maximum ${opened.maximumFrames} frames`,
       );
@@ -821,11 +2309,15 @@ export class IosNativePlaybackCoordinator {
         return { kind: 'failed', error };
       }
       handle.update({ phase: 'playing' });
+      handle.clearRecoverySnapshot();
       handle.startPolling();
       log(
         'dsp',
-        `rendering started · generation ${handle.generation} at frame 0 · ` +
-          `zdsp graph owns native output · ${describeDspTopology(handle.lanes.length)}`,
+        `rendering started · generation ${handle.generation} at signed project frame ${Math.round(
+          handle.snapshot().renderedPositionSec *
+            (handle.output?.sampleRate || 48_000),
+        )} · ` +
+          `zdsp graph owns native output · ${handle.graphDescription()}`,
       );
       return { kind: 'started' };
     } catch (error) {
@@ -836,7 +2328,7 @@ export class IosNativePlaybackCoordinator {
           'Native playback was cancelled during output handoff.',
         );
       if (!handle.startWasIssued(generation))
-        return this.openFallback(handle, message(error), operation.token);
+        return this.openFailure(handle, message(error), operation.token);
       log(
         'dsp',
         `render handoff failed after start · generation ${generation} · ${message(
@@ -851,7 +2343,7 @@ export class IosNativePlaybackCoordinator {
     }
   }
 
-  private async openFallback(
+  private async openFailure(
     handle: IosNativePlaybackHandle,
     reason: string,
     operationToken: number,
@@ -873,24 +2365,21 @@ export class IosNativePlaybackCoordinator {
       if (this.startIsCurrent(handle, operationToken)) handle.fail(error);
       return { kind: 'failed', error };
     }
-    try {
-      const project = await this.fallbackAfterPrepare(
-        handle,
-        `Native output did not open: ${reason}`,
-        () => this.startIsCurrent(handle, operationToken),
-      );
-      if (!this.startIsCurrent(handle, operationToken)) {
-        releaseProject(project);
-        return { kind: 'failed', error: 'Native playback was cancelled.' };
-      }
-      handle.invalidateRoute();
-      if (this.active === handle) this.active = null;
-      return { kind: 'fallback', project };
-    } catch (error) {
-      const detail = message(error);
-      if (this.startIsCurrent(handle, operationToken)) handle.fail(detail);
-      return { kind: 'failed', error: detail };
-    }
+    const error =
+      `Native output did not open: ${reason}. ` +
+      'Playback remains stopped on the native backend.';
+    if (this.startIsCurrent(handle, operationToken))
+      handle.update({
+        phase: 'stopped',
+        countInStatus: null,
+        error,
+      });
+    log(
+      'native-playback',
+      `output failure stayed native · generation ${generation} · ${reason}`,
+      'warn',
+    );
+    return { kind: 'failed', error };
   }
 
   private startIsCurrent(
@@ -933,7 +2422,9 @@ export class IosNativePlaybackCoordinator {
   async stopHandle(
     handle: IosNativePlaybackHandle,
     reason: string,
+    preserveRecovery = false,
   ): Promise<void> {
+    if (!preserveRecovery) handle.clearRecoverySnapshot();
     handle.cancelPendingStart(false);
     await this.withOwnershipLock(() => this.stopHandleLocked(handle, reason));
   }
@@ -968,7 +2459,14 @@ export class IosNativePlaybackCoordinator {
     }
     const safe = await this.cleanupGeneration(handle, generation);
     if (safe) {
-      handle.update({ phase: 'stopped', positionSec: 0, audibleFrames: 0 });
+      handle.update({
+        phase: 'stopped',
+        positionSec: 0,
+        renderedPositionSec: 0,
+        audibleFrames: 0,
+        countInStatus: null,
+        regionState: null,
+      });
       log(
         'dsp',
         `rendering stopped · generation ${generation} · ${reason} · lease ${
@@ -989,6 +2487,7 @@ export class IosNativePlaybackCoordinator {
     handle: IosNativePlaybackHandle,
     reason: string,
   ): Promise<boolean> {
+    handle.clearRecoverySnapshot();
     handle.cancelPendingStart(true);
     return this.withOwnershipLock(async () => {
       const safe = await this.unloadHandleLocked(handle, reason);
@@ -1028,7 +2527,14 @@ export class IosNativePlaybackCoordinator {
       );
       return false;
     }
-    handle.update({ phase: 'stopped', positionSec: 0, audibleFrames: 0 });
+    handle.update({
+      phase: 'stopped',
+      positionSec: 0,
+      renderedPositionSec: 0,
+      audibleFrames: 0,
+      countInStatus: null,
+      regionState: null,
+    });
     log('native-playback', `unloaded generation ${generation} · ${reason}`);
     return true;
   }
@@ -1040,9 +2546,38 @@ export class IosNativePlaybackCoordinator {
       const status = await this.deps.native?.status();
       if (!status || !this.isActive(handle)) return;
       const session = status.session;
+      if (
+        this.deps.platform === 'android' &&
+        session.state === 'unloaded' &&
+        handle.snapshot().phase !== 'stopped'
+      ) {
+        const generation = handle.generation;
+        // Android publishes the retired generation's last-good session in the
+        // unloaded status when it can. Consume that terminal snapshot before
+        // teardown; only an older runtime falls back to the last polled view.
+        handle.captureRecoverySnapshot(session);
+        log(
+          'dsp',
+          `Android native owner retired outside the JS control queue · generation ${generation} · ` +
+            'audio focus or output route changed',
+          'warn',
+        );
+        await this.stopHandle(
+          handle,
+          'Android audio focus or output route changed',
+          true,
+        );
+        handle.update({
+          phase: 'stopped',
+          error:
+            'Native audio stopped because Android changed audio focus or the output route. Tap Play to retry.',
+        });
+        return;
+      }
       if (session.generation !== handle.generation) return;
       handle.publishTelemetry(session);
       if (session.terminalReason !== 'none' || session.state === 'terminal') {
+        handle.captureRecoverySnapshot(session);
         log(
           'dsp',
           `render terminal · generation ${handle.generation} · ${session.terminalReason} · ` +
@@ -1050,18 +2585,23 @@ export class IosNativePlaybackCoordinator {
             `discontinuities ${session.discontinuities}`,
           'error',
         );
-        await this.stopHandle(handle, `terminal ${session.terminalReason}`);
-        handle.fail(
-          `Native audio stopped: ${session.terminalReason}. Reopen the song to retry.`,
+        await this.stopHandle(
+          handle,
+          `terminal ${session.terminalReason}`,
+          true,
         );
+        const detail = `Native audio stopped: ${session.terminalReason}.`;
+        // Route/interruption recovery is always explicit. Exact cleanup keeps
+        // the project intent and issues the next bearer lease; tapping Play
+        // prepares a fresh graph against the new route and rebuilds cue
+        // latency, while automatic resume is forbidden on both platforms.
+        handle.update({
+          phase: 'stopped',
+          error: `${detail} Tap Play to retry.`,
+        });
         return;
       }
-      if (
-        session.lanes.length > 0 &&
-        session.lanes.every(
-          lane => lane.totalFrames > 0 && lane.cursorFrames >= lane.totalFrames,
-        )
-      )
+      if (session.transportState === 'completed')
         await this.stopHandle(handle, 'end of song');
     } catch (error) {
       log('native-playback', `status poll failed · ${message(error)}`, 'warn');
@@ -1167,7 +2707,9 @@ export class IosNativePlaybackCoordinator {
 }
 
 class IosNativePlaybackHandle implements NativePlaybackHandle {
-  readonly kind = 'ios-native' as const;
+  readonly kind: NativePlaybackHandle['kind'];
+  readonly transportControls = true as const;
+  readonly mixerControls = true as const;
   readonly preparedAt: number;
   generation = 0;
   output: NativePlaybackOutput | null = null;
@@ -1182,13 +2724,35 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private startIssuedGeneration = 0;
   private cleanupGeneration = 0;
   private cleanupLease = 0;
+  private graphTopology = '';
+  private graphNodeCount = 0;
+  private graphConnectionCount = 0;
+  private beatInfo: BeatInfo | null;
+  private metronomeConfig: MetronomeConfig;
+  private playbackRate: number;
+  private transposeSemitones: number;
+  private trainingSpec: NativePlaybackTrainingSpec | null = null;
+  private trainingPrepared = false;
+  private trainingEnabled = false;
+  private readonly acceptedLaneControls = new Map<
+    string,
+    { gain: number; muted: boolean; solo: boolean }
+  >();
+  private acceptedMasterGain = 1;
+  private retryProjectSeconds: number | null = null;
+  private recoverySnapshot: NativePlaybackRecoverySnapshot | null = null;
+  private lastTelemetry: NativePlaybackSessionStatus | null = null;
   private listeners = new Set<() => void>();
   private state: NativePlaybackViewState = {
     phase: 'prepared',
     generation: 0,
     positionSec: 0,
+    renderedPositionSec: 0,
     durationSec: 0,
+    displayLatencySec: 0,
     audibleFrames: 0,
+    countInStatus: null,
+    regionState: null,
     terminalReason: 'none',
     error: null,
   };
@@ -1198,7 +2762,127 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     readonly materialized: MaterializedProject,
     readonly options: PlaybackLoadOptions,
   ) {
+    this.kind = coordinator.handleKind();
     this.preparedAt = Date.now();
+    this.beatInfo = sanitizeBeatInfo(materialized.doc.settings?.beat);
+    this.metronomeConfig = materialized.doc.settings?.metronome
+      ? sanitizeMetronome(materialized.doc.settings.metronome)
+      : MET_DEFAULTS;
+    this.playbackRate = materialized.doc.settings?.tempo ?? 1;
+    this.transposeSemitones = Math.round(
+      materialized.doc.settings?.transpose ?? 0,
+    );
+    for (const lane of materialized.lanes)
+      this.acceptedLaneControls.set(lane.id, {
+        gain: lane.gain,
+        muted: lane.muted,
+        solo: lane.solo,
+      });
+  }
+
+  prepareOverrides(
+    preparedStartProjectFrame?: number,
+    lanes?: readonly NativePlaybackLaneStatus[],
+    masterGain?: number,
+    initialTransport?: NativePlaybackInitialTransport,
+  ): NativePlaybackPrepareOverrides {
+    return {
+      playback: buildNativePlaybackPreparePlayback(
+        this.beatInfo,
+        this.metronomeConfig,
+        // The source/cue plan stays anchored to the song's original entry.
+        // A rebuild moves only the generation's signed transport start below;
+        // changing both would double-offset the positioned decoded source.
+        {
+          entrySeconds: 0,
+          playbackRate: this.playbackRate,
+          transposeSemitones: this.transposeSemitones,
+        },
+      ),
+      ...(preparedStartProjectFrame === undefined
+        ? {}
+        : { preparedStartProjectFrame }),
+      ...(lanes ? { lanes } : {}),
+      ...(masterGain === undefined ? {} : { masterGain }),
+      ...(initialTransport ? { initialTransport } : {}),
+      ...(this.trainingSpec === null
+        ? {}
+        : {
+            training: prepareTraining(
+              this.trainingSpec,
+              this.sampleRate(),
+              this.materialized.lanes.map(lane => lane.id),
+              this.trainingEnabled,
+            ),
+          }),
+    };
+  }
+
+  prepareRestartOverrides(outputSampleRate: number): NativePlaybackPrepareOverrides {
+    const recovery = this.recoverySnapshot;
+    if (recovery === null)
+      return this.prepareOverrides(
+        this.retryPreparedStartFrame(outputSampleRate),
+      );
+    const frame = Math.round(recovery.positionSeconds * outputSampleRate);
+    const loop = recovery.loop;
+    const initialTransport = this.startWasIssued(recovery.sourceGeneration)
+      ? {
+          // Recovery is explicit: Tap Play resumes a previously paused or
+          // interrupted owner. Retain the pause fact in the snapshot for
+          // diagnostics, but the user's action authorizes playing now.
+          state: 'playing' as const,
+          ...(loop === null
+            ? {}
+            : {
+                loop: {
+                  startProjectFrame: Math.round(
+                    loop.startSeconds * outputSampleRate,
+                  ),
+                  endProjectFrame: Math.round(loop.endSeconds * outputSampleRate),
+                },
+              }),
+        }
+      : undefined;
+    return this.prepareOverrides(
+      Number.isSafeInteger(frame) ? frame : undefined,
+      recovery.lanes,
+      recovery.masterGain,
+      initialTransport,
+    );
+  }
+
+  cueIntent(): { readonly beat: BeatInfo | null; readonly metronome: MetronomeConfig } {
+    return {
+      beat: sanitizeBeatInfo(this.beatInfo),
+      metronome: sanitizeMetronome(this.metronomeConfig),
+    };
+  }
+
+  restoreCueIntent(beat: BeatInfo | null, metronome: MetronomeConfig): void {
+    this.beatInfo = sanitizeBeatInfo(beat);
+    this.metronomeConfig = sanitizeMetronome(metronome);
+  }
+
+  setCueIntent(beat: BeatInfo | null, metronome: MetronomeConfig): void {
+    const nextBeat = sanitizeBeatInfo(beat);
+    const nextMetronome = sanitizeMetronome(metronome);
+    // Validate the immutable plan before changing the retry intent. A bad
+    // live detector payload can never poison a later ordinary native Start.
+    buildNativePlaybackPreparePlayback(nextBeat, nextMetronome, {
+      entrySeconds: 0,
+      playbackRate: this.playbackRate,
+      transposeSemitones: this.transposeSemitones,
+    });
+    this.beatInfo = nextBeat;
+    this.metronomeConfig = nextMetronome;
+  }
+
+  rebuildCues(
+    beat: BeatInfo | null,
+    metronome: MetronomeConfig,
+  ): Promise<void> {
+    return this.coordinator.rebuildHandleCues(this, beat, metronome);
   }
 
   loadedProject(): LoadedProject {
@@ -1206,9 +2890,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       name: this.materialized.doc.name ?? this.materialized.entry.dir,
       dir: this.materialized.entry.dir,
       doc: this.materialized.doc,
+      graph: this.materialized.graph,
       lyrics: this.materialized.lyrics,
       stems: [],
       nativePlayback: this,
+      metronomeRef: this.materialized.entry.metronomeRef,
     };
   }
 
@@ -1298,35 +2984,97 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       phase: 'starting',
       generation,
       positionSec: 0,
+      renderedPositionSec: 0,
+      displayLatencySec: 0,
       audibleFrames: 0,
+      countInStatus: null,
+      regionState: null,
       terminalReason: 'none',
       error: null,
     });
   }
 
   publishPrepared(session: NativePlaybackSessionStatus): void {
+    this.lastTelemetry = session;
+    this.acceptSessionControls(session);
     const sampleRate = session.sampleRate || this.output?.sampleRate || 48_000;
     this.lanes = session.lanes.map(lane => ({
       id: lane.id,
-      label: TRACK_META[lane.id]?.label ?? lane.id,
-      color: TRACK_META[lane.id]?.color ?? '#b9ad98',
+      label:
+        this.materialized.lanes.find(candidate => candidate.id === lane.id)
+          ?.label ?? TRACK_META[lane.id]?.label ?? lane.id,
+      color:
+        this.materialized.lanes.find(candidate => candidate.id === lane.id)
+          ?.color ?? TRACK_META[lane.id]?.color ?? '#b9ad98',
+      custom:
+        this.materialized.lanes.find(candidate => candidate.id === lane.id)
+          ?.custom === true,
       totalFrames: lane.totalFrames,
     }));
+    this.graphTopology = session.topology;
+    this.graphNodeCount = session.graphNodeCount;
+    this.graphConnectionCount = session.graphConnectionCount;
+    this.trainingPrepared = session.trainingLanes.length > 0;
+    this.trainingEnabled = session.trainingEnabled;
     this.update({
       phase: 'prepared',
-      durationSec: Math.max(
-        0,
-        ...session.lanes.map(lane => lane.totalFrames / sampleRate),
-      ),
+      durationSec: session.durationFrames / sampleRate,
+      positionSec:
+        (session.audibleProjectionQuality === 'current'
+          ? session.audibleProjectFrame
+          : session.renderedProjectFrame) / sampleRate,
+      renderedPositionSec: session.renderedProjectFrame / sampleRate,
+      displayLatencySec: session.presentationLatencyFrames / sampleRate,
+      countInStatus: this.countInProgress(session),
     });
+  }
+
+  graphDescription(): string {
+    const shape = `${this.graphNodeCount} nodes/${this.graphConnectionCount} connections`;
+    return this.graphTopology.length > 0
+      ? `${shape} · ${this.graphTopology}`
+      : `${shape} · native topology unavailable`;
   }
 
   publishTelemetry(session: NativePlaybackSessionStatus): void {
     const sampleRate = session.sampleRate || this.output?.sampleRate || 48_000;
-    const cursor = Math.max(0, ...session.lanes.map(lane => lane.cursorFrames));
+    if (session.transportGeneration !== this.generation) {
+      this.fail(
+        `Native transport generation ${session.transportGeneration} does not match playback generation ${this.generation}.`,
+      );
+      return;
+    }
+    this.lastTelemetry = session;
+    this.acceptSessionControls(session);
+    const phase =
+      session.transportState === 'paused'
+        ? 'paused'
+        : session.transportState === 'playing' ||
+            session.transportState === 'pre-roll'
+          ? 'playing'
+          : session.transportState === 'completed'
+            ? 'stopped'
+            : this.state.phase;
     this.update({
-      positionSec: cursor / sampleRate,
+      phase,
+      ...(session.audibleProjectionQuality === 'current'
+        ? { positionSec: session.audibleProjectFrame / sampleRate }
+        : {}),
+      renderedPositionSec: session.renderedProjectFrame / sampleRate,
+      telemetryAtMs: Date.now(),
+      advancing: session.transportState === 'playing',
+      playbackRate: this.playbackRate,
+      durationSec: session.durationFrames / sampleRate,
+      displayLatencySec: session.presentationLatencyFrames / sampleRate,
       audibleFrames: session.audibleFrames,
+      countInStatus: this.countInProgress(session),
+      regionState: session.loopEnabled
+        ? {
+            start: session.loopStartFrame / sampleRate,
+            end: session.loopEndFrame / sampleRate,
+            loop: true,
+          }
+        : null,
       terminalReason: session.terminalReason,
     });
     if (!this.firstAudibleLogged && session.audibleFrames > 0) {
@@ -1334,7 +3082,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       log(
         'dsp',
         `first audible callback · generation ${this.generation} · ` +
-          `zcore AudioHost → zdsp graph → iOS output · ${session.audibleFrames} frames · ` +
+          `zcore AudioHost → zdsp graph → native output · ${session.audibleFrames} frames · ` +
           `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
           `discontinuities ${session.discontinuities}`,
       );
@@ -1350,6 +3098,163 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
           `discontinuities ${session.discontinuities}`,
       );
     }
+  }
+
+  private countInProgress(
+    session: NativePlaybackSessionStatus,
+  ): PlaybackCountInStatus | null {
+    if (
+      session.transportState !== 'pre-roll' ||
+      session.remainingPreRollFrames <= 0
+    )
+      return null;
+    const sampleRate = session.sampleRate || this.sampleRate();
+    // The status exposes exact pre-roll time, but not the local meter or the
+    // remaining pre-roll cue boundaries. Preserve that truth: include output
+    // latency through the signed audible position, and never synthesize beat
+    // dots by evenly dividing the runway or applying a global beatsPerBar.
+    const remainingFrames = Math.max(
+      session.remainingPreRollFrames,
+      -session.audibleProjectFrame,
+    );
+    return { kind: 'time', remainingSeconds: remainingFrames / sampleRate };
+  }
+
+  noteTransportCommand(command: NativePlaybackTransportCommand): void {
+    if (command.kind === 'pause') this.update({ phase: 'paused' });
+    else if (command.kind === 'resume') this.update({ phase: 'playing' });
+    else if (command.kind === 'clear-loop') this.update({ regionState: null });
+    else if (command.kind === 'set-loop') {
+      const sampleRate = this.sampleRate();
+      this.update({
+        regionState: {
+          start: command.startProjectFrame / sampleRate,
+          end: command.endProjectFrame / sampleRate,
+          loop: true,
+        },
+      });
+    }
+  }
+
+  private sampleRate(): number {
+    return this.output?.sampleRate || 48_000;
+  }
+
+  rememberRetryProjectFrame(projectFrame: number, sampleRate: number): void {
+    if (
+      !Number.isSafeInteger(projectFrame) ||
+      !Number.isFinite(sampleRate) ||
+      sampleRate <= 0
+    )
+      return;
+    this.retryProjectSeconds = projectFrame / sampleRate;
+  }
+
+  rememberRetryAtRenderedPosition(): void {
+    const seconds = this.snapshot().renderedPositionSec;
+    if (Number.isFinite(seconds)) this.retryProjectSeconds = seconds;
+  }
+
+  captureRecoverySnapshot(candidate?: NativePlaybackSessionStatus): void {
+    const candidateUsable =
+      candidate !== undefined &&
+      candidate.generation === this.generation &&
+      candidate.transportGeneration === this.generation &&
+      candidate.transportTelemetryQuality !== 'unavailable' &&
+      Number.isFinite(candidate.sampleRate) &&
+      candidate.sampleRate > 0;
+    const previous = this.lastTelemetry;
+    const previousUsable =
+      previous !== null &&
+      previous.generation === this.generation &&
+      previous.transportGeneration === this.generation &&
+      previous.transportTelemetryQuality !== 'unavailable' &&
+      Number.isFinite(previous.sampleRate) &&
+      previous.sampleRate > 0;
+    const session = candidateUsable ? candidate! : previousUsable ? previous! : null;
+    const view = this.snapshot();
+    const sampleRate = session?.sampleRate || this.sampleRate();
+    const positionSeconds = session
+      ? session.renderedProjectFrame / sampleRate
+      : view.renderedPositionSec;
+    const lanes =
+      session && session.lanes.length > 0
+        ? session.lanes.map(lane => ({ ...lane }))
+        : this.materialized.lanes.map(lane => ({
+            id: lane.id,
+            cursorFrames: Math.round(positionSeconds * sampleRate),
+            totalFrames: 0,
+            gain: this.acceptedLaneControls.get(lane.id)?.gain ?? lane.gain,
+            muted:
+              this.acceptedLaneControls.get(lane.id)?.muted ?? lane.muted,
+            solo: this.acceptedLaneControls.get(lane.id)?.solo ?? lane.solo,
+          }));
+    const loop = session?.loopEnabled
+      ? {
+          startSeconds: session.loopStartFrame / sampleRate,
+          endSeconds: session.loopEndFrame / sampleRate,
+        }
+      : view.regionState?.loop
+        ? { startSeconds: view.regionState.start, endSeconds: view.regionState.end }
+        : null;
+    const transportState =
+      session?.transportState === 'playing' ||
+      session?.transportState === 'pre-roll' ||
+      session?.transportState === 'paused'
+        ? session.transportState
+        : view.phase === 'paused'
+          ? 'paused'
+          : view.phase === 'playing'
+            ? 'playing'
+            : 'stopped';
+    this.recoverySnapshot = {
+      sourceGeneration: this.generation,
+      positionSeconds,
+      lanes,
+      masterGain:
+        session && Number.isFinite(session.masterGain)
+          ? session.masterGain
+          : this.acceptedMasterGain,
+      loop,
+      transportState,
+    };
+    this.retryProjectSeconds = positionSeconds;
+  }
+
+  retryPreparedStartFrame(sampleRate: number): number | undefined {
+    if (this.retryProjectSeconds === null || !Number.isFinite(sampleRate))
+      return undefined;
+    const frame = Math.round(this.retryProjectSeconds * sampleRate);
+    return Number.isSafeInteger(frame) ? frame : undefined;
+  }
+
+  clearRetryPosition(): void {
+    this.retryProjectSeconds = null;
+  }
+
+  clearRecoverySnapshot(): void {
+    this.recoverySnapshot = null;
+    this.retryProjectSeconds = null;
+  }
+
+  private projectFrame(
+    seconds: number,
+    command: 'seek' | 'set-loop',
+  ): number {
+    const frame = Math.round(seconds * this.sampleRate());
+    if (
+      !Number.isFinite(seconds) ||
+      seconds < 0 ||
+      !Number.isSafeInteger(frame) ||
+      frame < 0
+    )
+      throw new NativePlaybackCommandError(
+        'invalid-configuration',
+        command,
+        this.generation,
+        'The native playback position is invalid.',
+      );
+    return frame;
   }
 
   snapshot(): NativePlaybackViewState {
@@ -1372,6 +3277,224 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   start(): Promise<NativePlaybackStartOutcome> {
     return this.coordinator.startHandle(this);
+  }
+
+  pause(): Promise<void> {
+    return this.dispatchTransport({ kind: 'pause' });
+  }
+
+  async seek(seconds: number): Promise<void> {
+    await this.dispatchTransport({
+      kind: 'seek',
+      projectFrame: this.projectFrame(seconds, 'seek'),
+    });
+  }
+
+  async setLoop(startSeconds: number, endSeconds: number): Promise<void> {
+    const startProjectFrame = this.projectFrame(startSeconds, 'set-loop');
+    const endProjectFrame = this.projectFrame(endSeconds, 'set-loop');
+    if (endProjectFrame <= startProjectFrame)
+      throw new NativePlaybackCommandError(
+        'invalid-configuration',
+        'set-loop',
+        this.generation,
+        'The native playback loop region is invalid.',
+      );
+    await this.dispatchTransport({
+      kind: 'set-loop',
+      startProjectFrame,
+      endProjectFrame,
+    });
+  }
+
+  clearLoop(): Promise<void> {
+    return this.dispatchTransport({ kind: 'clear-loop' });
+  }
+
+  reanchorTransport(): Promise<void> {
+    return this.dispatchTransport({ kind: 'reanchor' });
+  }
+
+  setLaneControl(
+    laneId: string,
+    gain: number,
+    muted: boolean,
+    solo: boolean,
+  ): Promise<void> {
+    if (
+      laneId.length === 0 ||
+      laneId.length > 96 ||
+      !Number.isFinite(gain) ||
+      gain < 0 ||
+      gain > 4
+    )
+      return Promise.reject(
+        new NativePlaybackCommandError(
+          'invalid-configuration',
+          'lane-control',
+          this.generation,
+          'The native playback lane control is invalid.',
+        ),
+      );
+    return this.dispatchControl(
+      { laneId, gain, muted, solo },
+      'lane-control',
+    ).then(() => {
+      this.acceptedLaneControls.set(laneId, { gain, muted, solo });
+    });
+  }
+
+  setMasterGain(gain: number): Promise<void> {
+    if (!Number.isFinite(gain) || gain < 0 || gain > 4)
+      return Promise.reject(
+        new NativePlaybackCommandError(
+          'invalid-configuration',
+          'master-gain',
+          this.generation,
+          'The native playback master gain is invalid.',
+        ),
+      );
+    return this.dispatchControl({ masterGain: gain }, 'master-gain').then(() => {
+      this.acceptedMasterGain = gain;
+    });
+  }
+
+  async previewClick(accent = false): Promise<void> {
+    try {
+      await this.coordinator.previewClickHandle(this, accent);
+    } catch (error) {
+      this.update({ error: message(error) });
+      throw error;
+    }
+  }
+
+  async setPitchTempo(semitones: number, rate: number): Promise<void> {
+    if (
+      !Number.isFinite(semitones) ||
+      semitones < -24 ||
+      semitones > 24 ||
+      !Number.isFinite(rate) ||
+      rate < 0.25 ||
+      rate > 4
+    )
+      throw new NativePlaybackCommandError(
+        'invalid-configuration',
+        'pitch-tempo',
+        this.generation,
+        'The native playback pitch/tempo request is invalid.',
+      );
+    if (this.transposeSemitones === semitones && this.playbackRate === rate)
+      return;
+    const previousSemitones = this.transposeSemitones;
+    const previousRate = this.playbackRate;
+    this.transposeSemitones = semitones;
+    this.playbackRate = rate;
+    try {
+      await this.coordinator.rebuildHandleCues(
+        this,
+        this.beatInfo,
+        this.metronomeConfig,
+      );
+    } catch (error) {
+      this.transposeSemitones = previousSemitones;
+      this.playbackRate = previousRate;
+      throw error;
+    }
+  }
+
+  async setTraining(spec: NativePlaybackTrainingSpec | null): Promise<void> {
+    const next = cloneTrainingSpec(spec);
+    if (next !== null)
+      prepareTraining(
+        next,
+        this.sampleRate(),
+        this.materialized.lanes.map(lane => lane.id),
+        true,
+      );
+    if (next !== null && sameTrainingSpec(this.trainingSpec, next)) {
+      if (next !== null && this.trainingPrepared && !this.trainingEnabled) {
+        await this.dispatchControl(
+          { trainingEnabled: true },
+          'training-enable',
+        );
+        this.trainingEnabled = true;
+      }
+      return;
+    }
+    if (next === null && this.trainingPrepared) {
+      if (!this.trainingEnabled) return;
+      await this.dispatchControl(
+        { trainingEnabled: false },
+        'training-enable',
+      );
+      this.trainingEnabled = false;
+      return;
+    }
+
+    // Schedule geometry is immutable callback state. A changed schedule uses
+    // the same exact-position structural rebuild as cue changes; only an
+    // already prepared schedule can be armed with the scalar control above.
+    const previousSpec = cloneTrainingSpec(this.trainingSpec);
+    const previousEnabled = this.trainingEnabled;
+    this.trainingSpec = next;
+    this.trainingEnabled = next !== null;
+    try {
+      await this.coordinator.rebuildHandleCues(
+        this,
+        this.beatInfo,
+        this.metronomeConfig,
+      );
+    } catch (error) {
+      this.trainingSpec = previousSpec;
+      this.trainingEnabled = previousEnabled;
+      throw error;
+    }
+  }
+
+  private async dispatchControl(
+    control: NativePlaybackControl,
+    command: 'lane-control' | 'master-gain' | 'training-enable',
+  ): Promise<void> {
+    try {
+      await this.coordinator.controlHandle(this, control, command);
+      // The control receipt is the publication boundary for ordinary-player
+      // subscribers. Backend-local mixer state is already updated, but it
+      // must not repaint as accepted before the generation-exact native ramp
+      // has actually entered zdsp's bounded parameter queue.
+      this.update({ error: null });
+    } catch (error) {
+      this.update({
+        error: message(error),
+      });
+      throw error;
+    }
+  }
+
+  private acceptSessionControls(session: NativePlaybackSessionStatus): void {
+    for (const lane of session.lanes)
+      this.acceptedLaneControls.set(lane.id, {
+        gain: lane.gain,
+        muted: lane.muted,
+        solo: lane.solo,
+      });
+    if (Number.isFinite(session.masterGain))
+      this.acceptedMasterGain = session.masterGain;
+  }
+
+  private async dispatchTransport(
+    command: NativePlaybackTransportCommand,
+  ): Promise<void> {
+    try {
+      await this.coordinator.transportHandle(this, command);
+    } catch (error) {
+      const fatal =
+        error instanceof NativePlaybackCommandError && !error.retryable;
+      this.update({
+        ...(fatal ? { phase: 'error' as const } : {}),
+        error: message(error),
+      });
+      throw error;
+    }
   }
 
   stop(reason = 'user stopped'): Promise<void> {
@@ -1398,9 +3521,44 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   }
 }
 
+/**
+ * Ordinary-player facade entry for a structural cue graph update. Keeping the
+ * narrow handle contract in projects.ts free of product-specific controls
+ * prevents other native owners from accidentally claiming Phase 4B parity.
+ */
+export function rebuildNativePlaybackCues(
+  handle: NativePlaybackHandle,
+  beat: BeatInfo | null,
+  metronome: MetronomeConfig,
+): Promise<void> {
+  const structural = handle as NativePlaybackHandle & {
+    rebuildCues?: (
+      nextBeat: BeatInfo | null,
+      nextMetronome: MetronomeConfig,
+    ) => Promise<void>;
+  };
+  if (typeof structural.rebuildCues !== 'function')
+    return Promise.reject(
+      new NativePlaybackCommandError(
+        'invalid-configuration',
+        'rebuild-cues',
+        handle.snapshot().generation,
+        'This native playback handle does not implement structural cue rebuilds.',
+      ),
+    );
+  return structural.rebuildCues(beat, metronome);
+}
+
+/** Compatibility name retained for existing imports. Both mobile platforms
+ * use the same structural rebuild and native ownership rules. */
+export const rebuildIosNativePlaybackCues = rebuildNativePlaybackCues;
+
 // These lines are emitted from native command receipts and telemetry polls.
 // The real-time AudioHost callback remains allocation- and logging-free.
-function logDspRuntime(capability: NativePlaybackCapability): void {
+function logDspRuntime(
+  capability: NativePlaybackCapability,
+  platform: string = Platform.OS,
+): void {
   const output = chooseOutput(capability.outputs);
   const components = [
     capability.graph ? 'zdsp graph' : 'graph missing',
@@ -1408,6 +3566,8 @@ function logDspRuntime(capability: NativePlaybackCapability): void {
       ? 'zcore AudioHost adapter'
       : 'AudioHost missing',
     capability.playbackSession ? 'playback session' : 'session missing',
+    capability.playbackTransport ? 'transport v1' : 'transport missing',
+    capability.scheduledCues ? 'scheduled cues v1' : 'scheduled cues missing',
   ].join(' + ');
   const route = output
     ? `${output.label} · ${formatSampleRate(output.sampleRate)} · ${
@@ -1416,11 +3576,19 @@ function logDspRuntime(capability: NativePlaybackCapability): void {
     : 'no output route';
   log(
     'dsp',
-    `iOS runtime ${capability.available ? 'ready' : 'unavailable'} · ${
-      capability.playbackBuild
-    } · ${components} · session ${capability.session.state} · ${route}`,
+    `${platformLabel(platform)} runtime ${capability.available ? 'ready' : 'unavailable'} · ${
+      capability.buildId
+    } · ${capability.playbackBuild} · ${components} · session ${
+      capability.session.state
+    } · ${route}`,
     capability.available ? 'info' : 'warn',
   );
+}
+
+function platformLabel(platform: string): string {
+  if (platform === 'ios') return 'iOS';
+  if (platform === 'android') return 'Android';
+  return 'Mobile';
 }
 
 function logDspGraphBuild(
@@ -1430,11 +3598,25 @@ function logDspGraphBuild(
   request: NativePlaybackPrepareRequest,
 ): void {
   const laneIds = materialized.lanes.map(lane => lane.id).join(', ');
+  const playback = request.playback;
+  const transport = playback
+    ? `transport v${playback.version} entry ${playback.transport.entrySeconds.toFixed(
+        3,
+      )} s ×${playback.transport.playbackRate}`
+    : 'frame-zero transport';
+  const cues = playback
+    ? `cues click ${playback.cues.click ? 'on' : 'off'}, count-in ${
+        playback.cues.countInBars
+      } bars, ${playback.cues.beatGrid?.beats.length ?? 0} beats`
+    : 'cues none';
+  const start =
+    request.preparedStartProjectFrame === undefined
+      ? 'ordinary start uses full configured pre-roll'
+      : `structural start frame ${request.preparedStartProjectFrame}`;
   log(
     'dsp',
-    `building graph · generation ${generation} · ${describeDspTopology(
-      materialized.lanes.length,
-    )} · lanes [${laneIds}] · ${formatSampleRate(request.sampleRate)} · ` +
+    `preparing graph · generation ${generation} · ${materialized.lanes.length} lanes [${laneIds}] · ` +
+      `${transport} · ${cues} · ${start} · ${formatSampleRate(request.sampleRate)} · ` +
       `${request.outputChannels.length} ch to ${output.label} · maximum ${request.maximumFrames} frames`,
   );
 }
@@ -1442,7 +3624,6 @@ function logDspGraphBuild(
 function logDspGraphPrepared(
   result: NativePlaybackResult,
   session: NativePlaybackSessionStatus,
-  materialized: MaterializedProject,
 ): void {
   const totalFrames = Math.max(
     0,
@@ -1454,21 +3635,16 @@ function logDspGraphPrepared(
       : '';
   log(
     'dsp',
-    `graph ready · generation ${session.generation} · ${describeDspTopology(
-      materialized.lanes.length,
-    )} · ${formatSampleRate(session.sampleRate || result.sampleRate)} · ` +
+    `graph ready · generation ${session.generation} · ${session.graphNodeCount} nodes/${
+      session.graphConnectionCount
+    } connections · ${session.topology || 'native topology unavailable'} · ` +
+      `transport pre-roll ${session.preRollFrames} frames · ${session.cueEventCount} cues · ` +
+      `reference gain ${session.referenceGain.toFixed(3)} · ` +
+      `${formatSampleRate(session.sampleRate || result.sampleRate)} · ` +
       `${result.outputChannels} ch · callback ${result.nominalBufferFrames} nominal/${
         result.maximumFrames
-      } maximum frames · decoded ${fmtBytes(session.retainedBytes)}${duration}`,
-  );
-}
-
-function describeDspTopology(laneCount: number): string {
-  const nodes = laneCount * 3 + 4;
-  const connections = laneCount * 3 + 3;
-  return (
-    `${nodes} nodes/${connections} connections · ` +
-    `source→channel map→gain ×${laneCount}→mix→master gain→safety limiter→output`
+      } maximum frames · retained ${fmtBytes(session.retainedBytes)} (` +
+      `graph arena ${fmtBytes(session.graphArenaBytes)})${duration}`,
   );
 }
 
@@ -1495,20 +3671,171 @@ function chooseOutput(
   return candidate;
 }
 
+function cloneTrainingSpec(
+  spec: NativePlaybackTrainingSpec | null,
+): NativePlaybackTrainingSpec | null {
+  if (spec === null) return null;
+  return spec.mode === 'period'
+    ? { mode: 'period', periodSec: spec.periodSec, stems: [...spec.stems] }
+    : {
+        mode: 'windows',
+        windows: spec.windows.map(window => ({ ...window })),
+        stems: [...spec.stems],
+      };
+}
+
+function sameTrainingSpec(
+  left: NativePlaybackTrainingSpec | null,
+  right: NativePlaybackTrainingSpec | null,
+): boolean {
+  if (left === null || right === null || left.mode !== right.mode)
+    return left === right;
+  if (
+    left.stems.length !== right.stems.length ||
+    !left.stems.every((stem, index) => stem === right.stems[index])
+  )
+    return false;
+  if (left.mode === 'period' && right.mode === 'period')
+    return left.periodSec === right.periodSec;
+  if (left.mode !== 'windows' || right.mode !== 'windows') return false;
+  return (
+    left.windows.length === right.windows.length &&
+    left.windows.every(
+      (window, index) =>
+        window.s === right.windows[index].s &&
+        window.e === right.windows[index].e,
+    )
+  );
+}
+
+function prepareTraining(
+  spec: NativePlaybackTrainingSpec,
+  sampleRate: number,
+  knownLanes: readonly string[],
+  enabled: boolean,
+): NativePlaybackPrepareTraining {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0)
+    throw new Error('The native training sample rate is invalid.');
+  if (
+    spec.stems.length === 0 ||
+    spec.stems.length > 16 ||
+    new Set(spec.stems).size !== spec.stems.length ||
+    spec.stems.some(stem => !knownLanes.includes(stem))
+  )
+    throw new Error('The native training lane selection is invalid.');
+  const frame = (seconds: number, label: string): number => {
+    const result = Math.round(seconds * sampleRate);
+    if (
+      !Number.isFinite(seconds) ||
+      seconds < 0 ||
+      !Number.isSafeInteger(result) ||
+      result < 0
+    )
+      throw new Error(`The native training ${label} is invalid.`);
+    return result;
+  };
+  if (spec.mode === 'period') {
+    const periodFrames = frame(spec.periodSec, 'period');
+    if (periodFrames === 0)
+      throw new Error('The native training period is invalid.');
+    return {
+      mode: 'period',
+      periodFrames,
+      laneIds: [...spec.stems],
+      enabled,
+    };
+  }
+  if (spec.windows.length === 0 || spec.windows.length > 16_384)
+    throw new Error('The native training window list is invalid.');
+  let previousEnd = 0;
+  const windows = spec.windows.map((window, index) => {
+    const startProjectFrame = frame(window.s, 'window start');
+    const endProjectFrame = frame(window.e, 'window end');
+    if (
+      endProjectFrame <= startProjectFrame ||
+      (index !== 0 && startProjectFrame < previousEnd)
+    )
+      throw new Error('The native training windows are invalid.');
+    previousEnd = endProjectFrame;
+    return { startProjectFrame, endProjectFrame };
+  });
+  return {
+    mode: 'windows',
+    windows,
+    laneIds: [...spec.stems],
+    enabled,
+  };
+}
+
 function prepareRequest(
   materialized: MaterializedProject,
   output: NativePlaybackOutput,
   handoffLease: number,
+  overrides: NativePlaybackPrepareOverrides,
 ): NativePlaybackPrepareRequest {
+  const laneControls = new Map(
+    (overrides.lanes ?? []).map(lane => [lane.id, lane] as const),
+  );
+  const graphDocument = materialized.graph
+    ? projectGraphDocumentForNative(materialized.graph)
+    : undefined;
+  if (materialized.graph && !graphDocument)
+    throw new Error('This graph document needs a newer native runtime.');
+  if (!graphDocument) {
+    const correction = overrides.playback
+      ? overrides.playback.transport.transposeSemitones -
+        12 * Math.log2(overrides.playback.transport.playbackRate)
+      : 0;
+    const nodes = synthesizedNativeGraphNodeCount({
+      laneCount: materialized.lanes.length,
+      trainingLaneCount: overrides.training?.laneIds.length ?? 0,
+      hasReference: overrides.playback !== undefined,
+      needsTimePitch:
+        Number.isFinite(correction) && Math.abs(correction) > 1e-6,
+    });
+    if (nodes > MAX_NATIVE_GRAPH_NODES) {
+      throw new Error(
+        `The default native DSP graph needs ${nodes} nodes, over the ${MAX_NATIVE_GRAPH_NODES}-node runtime cap.`,
+      );
+    }
+  }
   const request: NativePlaybackPrepareRequest = {
-    lanes: materialized.lanes.map(lane => ({ ...lane })),
+    lanes: materialized.lanes.map(lane => {
+      const control = laneControls.get(lane.id);
+      const source = {
+        id: lane.id,
+        path: lane.path,
+        gain: lane.gain,
+        muted: lane.muted,
+        solo: lane.solo,
+      };
+      return control
+        ? {
+            ...source,
+            gain: control.gain,
+            muted: control.muted,
+            solo: control.solo,
+          }
+        : source;
+    }),
     outputDeviceUid: output.uid,
     outputChannels: output.channels >= 2 ? [0, 1] : [0],
     sampleRate: Math.round(output.sampleRate),
     maximumFrames: 4096,
     bufferFrames: 0,
-    masterGain: 1,
+    masterGain: overrides.masterGain ?? 1,
     maximumRetainedBytes: MAX_DECODED_BYTES,
+    ...(overrides.playback ? { playback: overrides.playback } : {}),
+    ...(overrides.training ? { training: overrides.training } : {}),
+    ...(overrides.preparedStartProjectFrame === undefined
+      ? {}
+      : {
+          preparedStartProjectFrame: overrides.preparedStartProjectFrame,
+        }),
+    ...(overrides.initialTransport
+      ? { initialTransport: overrides.initialTransport }
+      : {}),
+    ...(graphDocument ? { graphDocument } : {}),
   };
   if (handoffLease > 0) request.handoffLease = handoffLease;
   return request;
@@ -1518,15 +3845,20 @@ async function readActualProjectDoc(
   entry: ProjectEntry,
   crumb?: (message: string) => Promise<void>,
 ): Promise<ProjectDoc> {
-  if (entry.source !== 'gdrive') return entry.doc;
-  await crumb?.('fetching project.json');
-  try {
-    return JSON.parse(
-      await driveReadText(entry.dir, 'project.json'),
-    ) as ProjectDoc;
-  } catch {
-    return entry.doc;
+  let doc = entry.doc;
+  if (entry.source === 'gdrive') {
+    await crumb?.('fetching project.json');
+    try {
+      doc = JSON.parse(
+        await driveReadText(entry.dir, 'project.json'),
+      ) as ProjectDoc;
+    } catch {
+      doc = entry.doc;
+    }
   }
+  // This changes no eligibility rule: it makes the existing rule inspect the
+  // same persisted, sanitized state that the player UI will consume.
+  return mobileMetronomePersistence.resolve(metronomeRefForEntry(entry), doc);
 }
 
 async function materializeNativeProject(
@@ -1534,32 +3866,64 @@ async function materializeNativeProject(
   doc: ProjectDoc,
 ): Promise<MaterializedProject> {
   const { entry, onStep, crumb, isCurrent } = options;
+  await crumb?.('graph');
+  const graph = await loadProjectGraph(entry, doc);
+  if (!isCurrent()) throw new Error('Song load was superseded.');
   const ids = STEM_ORDER_ALL.filter(id => entry.stems[id] != null);
+  const added = customTracks(doc.settings);
+  const sources = [
+    ...ids.map(id => ({
+      id,
+      relative: `stems/${id}.${entry.stems[id]}`,
+      hashName: `${id}.${entry.stems[id]}`,
+      label: TRACK_META[id]?.label ?? id,
+      color: TRACK_META[id]?.color ?? '#b9ad98',
+      custom: false,
+    })),
+    ...added.map(track => ({
+      id: track.id,
+      relative: track.file,
+      hashName: track.file.slice('stems/'.length),
+      label: track.label,
+      color: track.color,
+      custom: true,
+    })),
+  ];
   const lanes: MaterializedLane[] = [];
   log(
     'native-playback',
     `materializing ${doc.name ?? entry.dir} · ${
-      ids.length
-    } WAV/FLAC paths · zero JS decode`,
+      sources.length
+    } authorized audio paths · zero JS decode`,
   );
-  for (let index = 0; index < ids.length; index++) {
+  for (let index = 0; index < sources.length; index++) {
     if (!isCurrent()) throw new Error('Song load was superseded.');
-    const id = ids[index];
-    const relative = `stems/${id}.${entry.stems[id]}`;
-    const wanted = doc.stemHashes?.[`${id}.${entry.stems[id]}`];
-    onStep(`Fetching ${id} · ${index + 1}/${ids.length}`, index / ids.length);
-    await crumb?.(`fetching ${id}`);
+    const source = sources[index];
+    const wanted = doc.stemHashes?.[source.hashName];
+    onStep(
+      `Fetching ${source.label} · ${index + 1}/${sources.length}`,
+      index / sources.length,
+    );
+    await crumb?.(`fetching ${source.id}`);
     const path =
       entry.source === 'gdrive'
-        ? await driveLocalFile(entry.dir, relative, wanted?.md5, wanted?.size)
-        : await localProjectFile(entry.dir, relative);
-    const track = doc.settings?.tracks?.[id];
+        ? await driveLocalFile(
+            entry.dir,
+            source.relative,
+            wanted?.md5,
+            wanted?.size,
+          )
+        : await localProjectFile(entry.dir, source.relative);
+    const track = doc.settings?.tracks?.[source.id];
     lanes.push({
-      id,
+      id: source.id,
       path,
       gain: Math.max(0, Math.min(1, track?.volume ?? 1)),
       muted: track?.muted === true,
       solo: track?.solo === true,
+      label: source.label,
+      color: source.color,
+      custom: source.custom,
     });
   }
   let lyrics: LyricsDoc | null = null;
@@ -1575,7 +3939,7 @@ async function materializeNativeProject(
       lyrics = null;
     }
   }
-  return { entry, doc, lyrics, lanes };
+  return { entry, doc, graph, lyrics, lanes };
 }
 
 function message(error: unknown): string {
@@ -1588,4 +3952,8 @@ function cleanupUncertain(reason: unknown): string {
   )}). Legacy fallback was blocked to prevent overlapping audio owners.`;
 }
 
-export const iosNativePlayback = new IosNativePlaybackCoordinator();
+export { IosNativePlaybackCoordinator as NativePlaybackCoordinator };
+
+export const nativePlayback = new IosNativePlaybackCoordinator();
+/** Compatibility name for callers using the original experiment export. */
+export const iosNativePlayback = nativePlayback;

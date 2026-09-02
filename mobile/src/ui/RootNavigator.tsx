@@ -1,15 +1,22 @@
-import { createNativeStackNavigator } from '@react-navigation/native-stack'
+import { usePreventRemove } from '@react-navigation/native'
+import {
+  createNativeStackNavigator,
+  type NativeStackNavigationProp
+} from '@react-navigation/native-stack'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, View } from 'react-native'
+import { Alert, AppState, StyleSheet, View } from 'react-native'
 import type { MultitrackEngine } from '../engine'
 import type { RouteLatency } from '../latency'
 import { log } from '../log'
 import type { ProjectDoc } from '../model'
+import {
+  flushMetronomeForLifecycle,
+  MetronomeBackgroundFailureDelivery
+} from '../playback/metronome-durability'
 import { releaseProject, type LoadedProject } from '../projects'
 import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
 import CatalogScreen from './CatalogScreen'
 import LogPanel from './LogPanel'
-import NativePlayerScreen from './NativePlayerScreen'
 import PlayerScreen from './PlayerScreen'
 import SettingsScreen from './SettingsScreen'
 import { C, NATIVE_SHEET_FIT_SUPPORTED } from './bits'
@@ -64,9 +71,6 @@ export function PlayerRoute({
   // Route ownership ends only on unmount; cleaning on every prop replacement
   // would mark the still-visible fallback player closed and release its PCM.
   useEffect(() => () => onClosed(ownedProject.current), [onClosed])
-  if (project.nativePlayback) {
-    return <NativePlayerScreen active={active} project={project} onBack={onBack} onFallback={onFallback} />
-  }
   return (
     <PlayerScreen
       active={active}
@@ -77,17 +81,26 @@ export function PlayerRoute({
       onTrim={onTrim}
       onTrainingFacts={onTrainingFacts}
       onBack={onBack}
+      onFallback={onFallback}
     />
   )
 }
 
 export function closePlayerProject(engine: MultitrackEngine, project: LoadedProject): void {
-  if (project.nativePlayback)
-    void project.nativePlayback.unload('player route closed').catch(error =>
+  const releaseLegacyOwnership = (): void => {
+    engine.unload()
+    releaseProject(project)
+  }
+  if (!project.nativePlayback) {
+    releaseLegacyOwnership()
+    return
+  }
+  void project.nativePlayback
+    .unload('player route closed')
+    .catch(error =>
       log('native-playback', `player route cleanup could not prove native unload · ${String(error)}`, 'error')
     )
-  engine.unload()
-  releaseProject(project)
+    .finally(releaseLegacyOwnership)
 }
 
 function AddSongRoute({
@@ -127,6 +140,31 @@ function AddSongRoute({
   )
 }
 
+function PlayerRemovalFence({
+  children,
+  navigation,
+  rootMounted
+}: {
+  children: React.ReactNode
+  navigation: NativeStackNavigationProp<RootStackParamList, 'Player'>
+  rootMounted: React.RefObject<boolean>
+}): React.JSX.Element {
+  const flushing = useRef(false)
+  usePreventRemove(true, ({ data }) => {
+    if (flushing.current) return
+    flushing.current = true
+    void flushMetronomeForLifecycle('player back', {
+      onFailure: failure => {
+        if (rootMounted.current) Alert.alert('Metronome setting was not saved', failure)
+      }
+    }).then(saved => {
+      flushing.current = false
+      if (saved && rootMounted.current) navigation.dispatch(data.action)
+    })
+  })
+  return <>{children}</>
+}
+
 export default function RootNavigator({
   active = true,
   engine,
@@ -151,6 +189,35 @@ export default function RootNavigator({
 }): React.JSX.Element {
   const [project, setProject] = useState<LoadedProject | null>(null)
   const [addSong, setAddSong] = useState<AddSongRequest | null>(null)
+  const mounted = useRef(true)
+  const backgroundFailureDelivery = useRef<MetronomeBackgroundFailureDelivery | null>(null)
+  if (backgroundFailureDelivery.current === null)
+    backgroundFailureDelivery.current = new MetronomeBackgroundFailureDelivery(
+      failure => Alert.alert('Metronome setting was not saved', failure),
+      undefined,
+      AppState.currentState === 'active'
+    )
+
+  useEffect(() => {
+    mounted.current = true
+    const subscription = AppState.addEventListener('change', next => {
+      backgroundFailureDelivery.current?.appStateChanged(next)
+      if (next === 'inactive' || next === 'background') {
+        void flushMetronomeForLifecycle('background', {
+          onFailure: failure => backgroundFailureDelivery.current?.report(failure)
+        })
+      }
+    })
+    return () => {
+      mounted.current = false
+      backgroundFailureDelivery.current?.unmount()
+      subscription.remove()
+      // Best-effort eager reconciliation only. Accepted phone edits already
+      // live in the synchronously flushed native journal, so correctness does
+      // not depend on React cleanup remaining alive to await this promise.
+      void flushMetronomeForLifecycle('unmount')
+    }
+  }, [])
 
   const closeProject = useCallback(
     (closing: LoadedProject): void => {
@@ -207,18 +274,20 @@ export default function RootNavigator({
             project == null ? (
               <View style={styles.root} />
             ) : (
-              <PlayerRoute
-                active={active}
-                engine={engine}
-                project={project}
-                route={route}
-                trimMs={trimMs}
-                onTrim={onTrim}
-                onTrainingFacts={onTrainingFacts}
-                onBack={() => navigation.goBack()}
-                onClosed={closeProject}
-                onFallback={fallback => setProject(fallback)}
-              />
+              <PlayerRemovalFence navigation={navigation} rootMounted={mounted}>
+                <PlayerRoute
+                  active={active}
+                  engine={engine}
+                  project={project}
+                  route={route}
+                  trimMs={trimMs}
+                  onTrim={onTrim}
+                  onTrainingFacts={onTrainingFacts}
+                  onBack={() => navigation.goBack()}
+                  onClosed={closeProject}
+                  onFallback={fallback => setProject(fallback)}
+                />
+              </PlayerRemovalFence>
             )
           }
         </Stack.Screen>

@@ -1,3 +1,6 @@
+import graphCases from '../../tests/shared/graph-document-cases.json'
+import { createHash } from 'node:crypto'
+
 /**
  * The offline half of the Drive library: the catalog survives a cold start
  * with no signal, and a stem whose bytes have not changed is never fetched
@@ -58,13 +61,22 @@ interface DriveState {
   failMedia?: Set<string>
 }
 
+const md5 = (text: string): string => createHash('md5').update(text).digest('hex')
+
+function stampText(drive: DriveState, id: string): void {
+  const entry = Object.values(drive.children).flat().find((f) => f.id === id)
+  if (!entry) throw new Error(`No Drive entry ${id}`)
+  entry.size = String(Buffer.byteLength(drive.media[id]))
+  entry.md5Checksum = md5(drive.media[id])
+}
+
 function newDrive(md5 = { vocals: 'v-1', drums: 'd-1' }): DriveState {
-  return {
+  const drive: DriveState = {
     children: {
       ROOT: [{ id: 'D1', name: 'Song One', mimeType: FOLDER }],
       D1: [
-        { id: 'M1', name: 'project.json', mimeType: 'application/json', size: '40', md5Checksum: 'm-1' },
-        { id: 'L1', name: 'lyrics.json', mimeType: 'application/json', size: '30', md5Checksum: 'l-1' },
+        { id: 'M1', name: 'project.json', mimeType: 'application/json' },
+        { id: 'L1', name: 'lyrics.json', mimeType: 'application/json' },
         { id: 'S1', name: 'stems', mimeType: FOLDER }
       ],
       S1: [
@@ -85,6 +97,9 @@ function newDrive(md5 = { vocals: 'v-1', drums: 'd-1' }): DriveState {
     },
     offline: false
   }
+  stampText(drive, 'M1')
+  stampText(drive, 'L1')
+  return drive
 }
 
 const ok = (body: unknown): unknown => ({
@@ -98,6 +113,8 @@ const ok = (body: unknown): unknown => ({
  *  rows — a project is its project.json (plus lyrics.json, which the aligner
  *  rewrites without touching the doc). Everything else lives in the doc. */
 function addManifest(drive: DriveState, overrides: Partial<Record<string, unknown>> = {}): void {
+  const project = drive.children.D1.find((f) => f.id === 'M1')!
+  const lyrics = drive.children.D1.find((f) => f.id === 'L1')!
   drive.children.ROOT.push({ id: 'CAT', name: 'catalog.json', mimeType: 'application/json' })
   drive.media.CAT = JSON.stringify({
     format: 2,
@@ -105,8 +122,8 @@ function addManifest(drive: DriveState, overrides: Partial<Record<string, unknow
       {
         dir: 'Song One',
         files: [
-          { id: 'M1', name: 'project.json', size: '40', md5Checksum: 'm-1' },
-          { id: 'L1', name: 'lyrics.json', size: '30', md5Checksum: 'l-1' }
+          { id: 'M1', name: 'project.json', size: project.size, md5Checksum: project.md5Checksum },
+          { id: 'L1', name: 'lyrics.json', size: lyrics.size, md5Checksum: lyrics.md5Checksum }
         ]
       }
     ],
@@ -283,6 +300,127 @@ describe('catalog without internet', () => {
 })
 
 describe('the desktop-written manifest', () => {
+  it('retains every five-wide project fetch for offline reads', async () => {
+    const drive = newDrive()
+    for (let n = 2; n <= 5; n++) {
+      const dirId = `D${n}`
+      const metaId = `M${n}`
+      const lyricsId = `L${n}`
+      const stemsId = `S${n}`
+      drive.children.ROOT.push({ id: dirId, name: `Song ${n}`, mimeType: FOLDER })
+      drive.children[dirId] = [
+        { id: metaId, name: 'project.json', mimeType: 'application/json' },
+        { id: lyricsId, name: 'lyrics.json', mimeType: 'application/json' },
+        { id: stemsId, name: 'stems', mimeType: FOLDER }
+      ]
+      drive.children[stemsId] = [
+        {
+          id: `V${n}`,
+          name: 'vocals.flac',
+          mimeType: 'audio/flac',
+          size: String(100 + n),
+          md5Checksum: `v-${n}`
+        }
+      ]
+      drive.media[metaId] = JSON.stringify({
+        name: `Song ${n}`,
+        savedAt: `2026-01-0${n}T00:00:00.000Z`,
+        stemHashes: {
+          'vocals.flac': { md5: `v-${n}`, size: 100 + n, mtimeMs: 1 }
+        }
+      })
+      drive.media[lyricsId] = JSON.stringify({ lines: [{ t: 0, text: `line ${n}` }] })
+      stampText(drive, metaId)
+      stampText(drive, lyricsId)
+    }
+    addManifest(drive)
+    const manifest = JSON.parse(drive.media.CAT)
+    for (let n = 2; n <= 5; n++) {
+      const byId = (id: string): Node =>
+        Object.values(drive.children).flat().find((entry) => entry.id === id)!
+      const meta = byId(`M${n}`)
+      const lyrics = byId(`L${n}`)
+      manifest.projects.push({
+        dir: `Song ${n}`,
+        files: [
+          { ...meta, name: 'project.json' },
+          { ...lyrics, name: 'lyrics.json' }
+        ]
+      })
+    }
+    drive.media.CAT = JSON.stringify(manifest)
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    expect((await g.driveListProjects()).map((entry) => entry.dir)).toHaveLength(5)
+
+    const kept = JSON.parse(prefs['singz.gdrive.text'])
+    for (let n = 1; n <= 5; n++) expect(kept[`Song ${n === 1 ? 'One' : n}/project.json`]).toBeDefined()
+
+    drive.offline = true
+    const offlineDocs = await Promise.all(
+      ['Song One', 'Song 2', 'Song 3', 'Song 4', 'Song 5'].map((project) =>
+        g.driveReadText(project, 'project.json')
+      )
+    )
+    expect(offlineDocs.map((text) => JSON.parse(text).name)).toEqual([
+      'Song One',
+      'Song 2',
+      'Song 3',
+      'Song 4',
+      'Song 5'
+    ])
+  })
+
+  it('keeps the exact graph offline while excluding it from audio download bytes', async () => {
+    const drive = newDrive()
+    const graph = JSON.stringify(graphCases.base)
+    const graphMd5 = md5(graph)
+    drive.children.D1.splice(2, 0, {
+      id: 'G1',
+      name: 'graph.json',
+      mimeType: 'application/json',
+      size: String(Buffer.byteLength(graph)),
+      md5Checksum: graphMd5,
+    })
+    drive.media.G1 = graph
+    const doc = JSON.parse(drive.media.M1)
+    doc.graphHash = {
+      format: 1,
+      md5: graphMd5,
+      size: Buffer.byteLength(graph),
+      mtimeMs: 1,
+    }
+    drive.media.M1 = JSON.stringify(doc)
+    stampText(drive, 'M1')
+    addManifest(drive)
+    const manifest = JSON.parse(drive.media.CAT)
+    manifest.projects[0].files.push({
+      id: 'G1',
+      name: 'graph.json',
+      size: String(Buffer.byteLength(graph)),
+      md5Checksum: graphMd5,
+    })
+    drive.media.CAT = JSON.stringify(manifest)
+    install(drive)
+    signIn()
+    const g1 = require('../src/gdrive') as typeof import('../src/gdrive')
+    const entries = await g1.driveListProjects()
+    expect(entries[0].bytes).toBe(300)
+    const { loadProject } = require('../src/projects') as typeof import('../src/projects')
+    const loaded = await loadProject(entries[0], 48000, () => {})
+    expect(loaded.graph?.kind).toBe('known')
+
+    drive.offline = true
+    install(drive)
+    signIn()
+    const g2 = require('../src/gdrive') as typeof import('../src/gdrive')
+    const restored = await g2.driveStoredProjects()
+    const { loadProject: loadOffline } = require('../src/projects') as typeof import('../src/projects')
+    const offline = await loadOffline(restored![0], 48000, () => {})
+    expect(offline.graph?.raw.futureEnvelope).toEqual(graphCases.base.futureEnvelope)
+  })
+
   it('fetches a project once, then every quiet refresh is three requests', async () => {
     const drive = newDrive()
     addManifest(drive)
@@ -345,6 +483,7 @@ describe('the desktop-written manifest', () => {
         'drums.flac': { md5: 'd-1', size: 200, mtimeMs: 1 }
       }
     })
+    stampText(drive, 'M1')
     addManifest(drive)
     install(drive)
     signIn()
@@ -367,7 +506,6 @@ describe('the desktop-written manifest', () => {
     expect(calls).toBe(1) // lyrics.json, kept from here on
     // stems streamed under the doc's md5s: both fetched for real once
     expect(downloads).toEqual(['Song One/stems/vocals.flac', 'Song One/stems/drums.flac'])
-    await new Promise<void>((r) => setTimeout(() => r(), 0)) // keeps settle
 
     // reopening — even with no signal — touches the network zero times
     drive.offline = true
@@ -387,7 +525,6 @@ describe('the desktop-written manifest', () => {
     const g = require('../src/gdrive') as typeof import('../src/gdrive')
     await g.driveListProjects()
     expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('hello') // fetched + kept
-    await new Promise<void>((r) => setTimeout(() => r(), 0)) // the keep is fire-and-forget
     let calls = 0
     const inner = globalThis.fetch
     globalThis.fetch = ((...a: Parameters<typeof fetch>) => {
@@ -399,13 +536,39 @@ describe('the desktop-written manifest', () => {
 
     // the desktop re-aligned: a new md5 in the row (and the folder listing
     // behind it) forces a real read
-    drive.media.CAT = drive.media.CAT.replace('"md5Checksum":"l-1"', '"md5Checksum":"l-2"')
-    drive.children.D1.find((f) => f.id === 'L1')!.md5Checksum = 'l-2'
     drive.media.L1 = JSON.stringify({ lines: [{ t: 0, text: 'goodbye' }] })
+    stampText(drive, 'L1')
+    const nextCatalog = JSON.parse(drive.media.CAT)
+    const lyricsRow = nextCatalog.projects[0].files.find((f: Node) => f.id === 'L1')
+    Object.assign(lyricsRow, drive.children.D1.find((f) => f.id === 'L1'))
+    drive.media.CAT = JSON.stringify(nextCatalog)
     await g.driveListProjects(true)
     calls = 0
     expect(await g.driveReadText('Song One', 'lyrics.json')).toContain('goodbye')
     expect(calls).toBe(1)
+  })
+
+  it('rejects same-size changed bytes served under a stale Drive md5 and never caches them', async () => {
+    const drive = newDrive()
+    addManifest(drive)
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+    const listedMd5 = drive.children.D1.find((f) => f.id === 'L1')!.md5Checksum!
+    // Same JSON byte length, different content; the listing deliberately keeps
+    // the old checksum to model a stale/interposed response.
+    drive.media.L1 = drive.media.L1.replace('hello', 'jello')
+    await expect(g.driveReadText('Song One', 'lyrics.json')).rejects.toThrow(
+      'content checksum does not match'
+    )
+    // Old builds could have labelled these changed bytes with the listing's
+    // checksum. Re-hash persisted text before using it as an offline fallback.
+    prefs['singz.gdrive.text'] = JSON.stringify({
+      'Song One/lyrics.json': { m: listedMd5, t: drive.media.L1 }
+    })
+    drive.offline = true
+    await expect(g.driveReadText('Song One', 'lyrics.json')).rejects.toThrow('Network request failed')
   })
 
   it('an unchanged catalog.json is never even downloaded', async () => {
@@ -430,14 +593,24 @@ describe('the desktop-written manifest', () => {
 
     // a desktop that syncs something rewrites it, and the library follows
     drive.children.ROOT[1].md5Checksum = 'cat-2'
-    drive.media.CAT = drive.media.CAT.replace('"md5Checksum":"m-1"', '"md5Checksum":"m-2"')
-    // a fresh node, not a mutation: the listing maps hold these by reference
-    drive.children.D1[0] = { ...drive.children.D1[0], md5Checksum: 'm-2' }
     drive.media.M1 = JSON.stringify({
       name: 'Song One Renamed',
       savedAt: '2026-01-02T00:00:00.000Z',
       stemHashes: { 'vocals.flac': { md5: 'v-1', size: 100, mtimeMs: 1 } }
     })
+    // Replace rather than mutate: the adopted listing retains the old object,
+    // exactly as a real subsequent HTTP response does.
+    const oldProjectEntry = drive.children.D1.find((f) => f.id === 'M1')!
+    const newProjectEntry = {
+      ...oldProjectEntry,
+      size: String(Buffer.byteLength(drive.media.M1)),
+      md5Checksum: md5(drive.media.M1)
+    }
+    drive.children.D1[drive.children.D1.indexOf(oldProjectEntry)] = newProjectEntry
+    const changedCatalog = JSON.parse(drive.media.CAT)
+    const projectRow = changedCatalog.projects[0].files.find((f: Node) => f.id === 'M1')
+    Object.assign(projectRow, newProjectEntry)
+    drive.media.CAT = JSON.stringify(changedCatalog)
     expect((await g.driveListProjects(true))[0].doc.name).toBe('Song One Renamed')
   })
 
@@ -567,6 +740,7 @@ describe('stems are fetched once', () => {
         ]
       }
     })
+    stampText(drive, 'M1')
     install(drive)
     signIn()
     const g = require('../src/gdrive') as typeof import('../src/gdrive')

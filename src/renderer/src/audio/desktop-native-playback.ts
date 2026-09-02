@@ -1,0 +1,1159 @@
+import type {
+  DesktopAudioHostDevice,
+  DesktopPlaybackLaneConfig,
+  DesktopPlaybackInitialTransportConfig,
+  DesktopPlaybackPrepareConfig,
+  DesktopPlaybackProvider,
+  DesktopPlaybackResult,
+  DesktopPlaybackRuntimeCapability,
+  DesktopPlaybackTrainingConfig,
+  DesktopPlaybackStatus
+} from '../../../shared/types'
+import {
+  DESKTOP_PLAYBACK_CAPABILITY,
+  DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_BASE_MASK,
+  DESKTOP_PLAYBACK_CODEC_BASE_TAG,
+  DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+  DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+  DESKTOP_PLAYBACK_CODEC_PROFILE,
+  DESKTOP_PLAYBACK_CONTRACT_VERSION
+} from '../../../shared/types'
+import type { BeatInfo, MetronomeConfig } from './beat'
+import type { ParsedGraphDocument } from '../../../shared/graph-document'
+import {
+  MAX_NATIVE_GRAPH_NODES,
+  projectGraphDocumentForNative,
+  synthesizedNativeGraphNodeCount
+} from '../../../shared/graph-document'
+
+export { DESKTOP_PLAYBACK_CAPABILITY }
+
+export type DesktopNativeTrainingIntent =
+  | { mode: 'period'; periodSec: number; stems: string[] }
+  | { mode: 'windows'; windows: { s: number; e: number }[]; stems: string[] }
+
+export interface DesktopNativePlaybackFeatures {
+  enabled: boolean
+  playbackRate: number
+  transpose: number
+  training: DesktopNativeTrainingIntent | null
+  lanes: { id: string; path?: string }[]
+  runtime: DesktopPlaybackRuntimeCapability | null
+  requestedProvider?: DesktopPlaybackProvider
+}
+
+export type DesktopPlaybackBackendDecision =
+  | { backend: 'native'; provider: DesktopPlaybackProvider }
+  | { backend: 'legacy'; reason: string }
+
+function exactExtensions(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index])
+}
+
+function validRuntime(runtime: DesktopPlaybackRuntimeCapability | null): boolean {
+  if (!runtime?.available || runtime.playbackCapability !== DESKTOP_PLAYBACK_CAPABILITY) return false
+  const codec = runtime.mediaCodec
+  if (codec.abiVersion !== 1) return false
+  const base = codec.formatMask === DESKTOP_PLAYBACK_CODEC_BASE_MASK &&
+    !codec.dynamicallyLinkedFfmpeg && codec.runtimeVersion === '' && codec.target === '' &&
+    codec.profile === '' && codec.capabilityTag === DESKTOP_PLAYBACK_CODEC_BASE_TAG &&
+    exactExtensions(codec.extensions, DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS)
+  const full = codec.formatMask === DESKTOP_PLAYBACK_CODEC_FULL_MASK &&
+    codec.dynamicallyLinkedFfmpeg && codec.runtimeVersion.length > 0 && codec.target.length > 0 &&
+    codec.profile === DESKTOP_PLAYBACK_CODEC_PROFILE &&
+    codec.capabilityTag === DESKTOP_PLAYBACK_CODEC_FULL_TAG &&
+    exactExtensions(codec.extensions, DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS)
+  return base || full
+}
+
+function extensionOf(path: string): string | null {
+  const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  const dot = path.lastIndexOf('.')
+  if (dot <= slash || dot === path.length - 1) return null
+  const extension = path.slice(dot + 1).toLowerCase()
+  return /^[a-z0-9]{1,7}$/.test(extension) ? extension : null
+}
+
+/** Exact feature gate. Native is selected before it owns output; unsupported
+ * combinations stay on Web Audio rather than attempting a partial graph. */
+export function selectDesktopPlaybackBackend(
+  platform: string,
+  features: DesktopNativePlaybackFeatures
+): DesktopPlaybackBackendDecision {
+  if (!features.enabled) return { backend: 'legacy', reason: 'experimental toggle is off' }
+  const provider = platform === 'darwin'
+    ? (features.requestedProvider && features.requestedProvider !== 'coreaudio' ? null : 'coreaudio')
+    : platform === 'win32'
+      ? (features.requestedProvider === 'asio' ? 'asio'
+        : features.requestedProvider === undefined || features.requestedProvider === 'wasapi'
+          ? 'wasapi' : null)
+      : null
+  if (!provider) return { backend: 'legacy', reason: 'no native desktop provider for this platform' }
+  if (!validRuntime(features.runtime)) {
+    return { backend: 'legacy', reason: 'native playback runtime capability is unavailable' }
+  }
+  if (!Number.isFinite(features.playbackRate) || features.playbackRate < 0.5 ||
+      features.playbackRate > 1.5) {
+    return { backend: 'legacy', reason: 'tempo is outside the desktop control range' }
+  }
+  if (!Number.isInteger(features.transpose) || features.transpose < -12 || features.transpose > 12) {
+    return { backend: 'legacy', reason: 'transpose is outside the desktop control range' }
+  }
+  if (features.lanes.length < 1 || features.lanes.length > 16) {
+    return { backend: 'legacy', reason: 'lane count is outside the native graph bound' }
+  }
+  const supported = new Set(features.runtime!.mediaCodec.extensions)
+  if (features.lanes.some((lane) => !lane.path || !supported.has(extensionOf(lane.path) ?? ''))) {
+    return { backend: 'legacy', reason: 'a lane needs a format proven by this native runtime' }
+  }
+  return { backend: 'native', provider }
+}
+
+export interface DesktopNativePlaybackPrepare {
+  provider: DesktopPlaybackProvider
+  lanes: DesktopPlaybackLaneConfig[]
+  beat: BeatInfo | null
+  metronome: MetronomeConfig
+  countIn: boolean
+  positionSeconds: number
+  durationSeconds: number
+  sampleRate: number
+  masterGain: number
+  playbackRate: number
+  transpose: number
+  training: DesktopNativeTrainingIntent | null
+  loop: { start: number; end: number } | null
+  preferredOutputUid?: string
+  preferredOutputChannels?: number[]
+  graphDocument?: ParsedGraphDocument
+}
+
+export interface DesktopNativePlaybackLease {
+  releaseLegacyOutput(): Promise<void>
+  restoreLegacyOutput(): Promise<void>
+}
+
+export interface DesktopNativePlaybackStructuralPatch {
+  beat?: BeatInfo | null
+  metronome?: MetronomeConfig
+  countIn?: boolean
+  playbackRate?: number
+  transpose?: number
+  training?: DesktopNativeTrainingIntent | null
+  loop?: { start: number; end: number } | null
+}
+
+export interface DesktopNativeLaneControl {
+  gain: number
+  muted: boolean
+  solo: boolean
+}
+
+export interface DesktopNativePlaybackEngineRequest {
+  lanes: Array<{
+    id: string
+    path?: string
+    volume: number
+    muted: boolean
+    solo: boolean
+  }>
+  beat: BeatInfo | null
+  metronome: MetronomeConfig
+  countIn: boolean
+  positionSeconds: number
+  durationSeconds: number
+  sampleRate: number
+  masterGain: number
+  playbackRate: number
+  transpose: number
+  training: DesktopNativeTrainingIntent | null
+  loop: { start: number; end: number } | null
+  /** Sanitized canonical AudioPrefs choice injected by the app shell. */
+  nativeAudioProvider: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
+  /** Full verified renderer document; opaque fields never cross native IPC. */
+  graphDocument: ParsedGraphDocument | null
+}
+
+/** Renderer-engine adapter kept in this lazy chunk so the ordinary Web Audio
+ * entry does not pay for native provider selection or DTO composition. */
+export async function tryStartDesktopNativePlayback(
+  client: DesktopNativePlaybackClient,
+  request: DesktopNativePlaybackEngineRequest
+): Promise<boolean> {
+  if (!request.graphDocument) {
+    const correction = request.transpose - 12 * Math.log2(request.playbackRate)
+    const nodes = synthesizedNativeGraphNodeCount({
+      laneCount: request.lanes.length,
+      trainingLaneCount: request.training?.stems.length ?? 0,
+      // Desktop v4 always prepares the cue/reference branch, including a
+      // zero-event plan used by previewClick().
+      hasReference: true,
+      needsTimePitch: Number.isFinite(correction) && Math.abs(correction) > 1e-6
+    })
+    if (nodes > MAX_NATIVE_GRAPH_NODES) return false
+  }
+  const platform = /Mac/i.test(navigator.platform)
+    ? 'darwin'
+    : /Win/i.test(navigator.platform)
+      ? 'win32'
+      : 'other'
+  let runtime: DesktopPlaybackRuntimeCapability
+  try {
+    runtime = await window.singz.desktopPlaybackCapability()
+  } catch {
+    return false
+  }
+  const decision = selectDesktopPlaybackBackend(platform, {
+    enabled: typeof localStorage !== 'undefined' &&
+      localStorage.getItem('singz.desktop.native-playback') === '1',
+    playbackRate: request.playbackRate,
+    transpose: request.transpose,
+    training: request.training,
+    lanes: request.lanes,
+    runtime,
+    requestedProvider: platform === 'win32' ? request.nativeAudioProvider : 'coreaudio'
+  })
+  if (decision.backend !== 'native') return false
+  return client.prepareAndStart({
+    provider: decision.provider,
+    lanes: request.lanes.map((lane) => ({
+      id: lane.id,
+      path: lane.path!,
+      gain: lane.volume,
+      muted: lane.muted,
+      solo: lane.solo
+    })),
+    beat: request.beat,
+    metronome: request.metronome,
+    countIn: request.countIn,
+    positionSeconds: request.positionSeconds,
+    durationSeconds: request.durationSeconds,
+    sampleRate: request.sampleRate,
+    masterGain: request.masterGain,
+    playbackRate: request.playbackRate,
+    transpose: request.transpose,
+    training: request.training,
+    loop: request.loop,
+    ...(request.graphDocument ? { graphDocument: request.graphDocument } : {})
+  })
+}
+
+function ensure(result: DesktopPlaybackResult, action: string): DesktopPlaybackResult {
+  if (!result.ok) throw new Error(`${action}: ${result.error || result.errorCode}`)
+  return result
+}
+
+/** Product-visible failure for an explicitly requested provider. Callers may
+ * offer retry/provider selection, but must not reinterpret this as permission
+ * to start a different audio backend in the same play request. */
+export class DesktopNativeProviderError extends Error {
+  readonly code = 'provider-failure' as const
+
+  constructor(
+    readonly provider: DesktopPlaybackProvider,
+    cause: unknown
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    this.name = 'DesktopNativeProviderError'
+  }
+}
+
+export type DesktopNativeRecoveryErrorCode =
+  | 'provider-recovery-conflict'
+  | 'provider-recovery-unavailable'
+  | 'provider-cleanup-incomplete'
+  | 'provider-route-restore-incomplete'
+
+export type DesktopNativeRecoveryKind =
+  | 'prepare-retry'
+  | 'cleanup-required'
+  | 'route-restore'
+
+/** Stable renderer-side recovery failure. These errors describe ownership
+ * management after Chromium released its sink, not a license to choose a
+ * different provider or start Web Audio. */
+export class DesktopNativeRecoveryError extends Error {
+  constructor(
+    readonly provider: DesktopPlaybackProvider,
+    readonly code: DesktopNativeRecoveryErrorCode,
+    cause: unknown,
+    message?: string
+  ) {
+    super(message ?? (cause instanceof Error ? cause.message : String(cause)), { cause })
+    this.name = 'DesktopNativeRecoveryError'
+  }
+}
+
+function outputFor(
+  devices: DesktopAudioHostDevice[],
+  defaultOutputUid: string,
+  preferred?: string
+): DesktopAudioHostDevice | null {
+  const eligible = devices.filter((device) =>
+    device.outputChannels > 0 && (device.direction === 'output' || device.direction === 'duplex'))
+  return eligible.find((device) => device.uid === preferred) ??
+    eligible.find((device) => device.uid === defaultOutputUid) ?? eligible[0] ?? null
+}
+
+interface PreparedRoute {
+  outputDeviceUid: string
+  outputChannels: number[]
+  sampleRate: number
+  bufferFrames: number
+}
+
+function trainingConfig(
+  intent: DesktopNativeTrainingIntent | null,
+  lanes: readonly DesktopPlaybackLaneConfig[],
+  sampleRate: number
+): DesktopPlaybackTrainingConfig | undefined {
+  if (intent === null) return undefined
+  if (intent.stems.length < 1 || intent.stems.length > 16 ||
+      new Set(intent.stems).size !== intent.stems.length ||
+      intent.stems.some((id) => !lanes.some((lane) => lane.id === id))) {
+    throw new Error('Native training lane selection is invalid.')
+  }
+  const frame = (seconds: number, label: string): number => {
+    const value = Math.round(seconds * sampleRate)
+    if (!Number.isFinite(seconds) || seconds < 0 || !Number.isSafeInteger(value)) {
+      throw new Error(`Native training ${label} is invalid.`)
+    }
+    return value
+  }
+  if (intent.mode === 'period') {
+    const periodFrames = frame(intent.periodSec, 'period')
+    if (periodFrames === 0) throw new Error('Native training period is invalid.')
+    return { mode: 'period', periodFrames, laneIds: [...intent.stems], enabled: true }
+  }
+  if (intent.windows.length < 1 || intent.windows.length > 16_384) {
+    throw new Error('Native training window count is invalid.')
+  }
+  let previousEnd = 0
+  const windows = intent.windows.map((window, index) => {
+    const startProjectFrame = frame(window.s, 'window start')
+    const endProjectFrame = frame(window.e, 'window end')
+    if (endProjectFrame <= startProjectFrame || (index > 0 && startProjectFrame < previousEnd)) {
+      throw new Error('Native training windows are invalid.')
+    }
+    previousEnd = endProjectFrame
+    return { startProjectFrame, endProjectFrame }
+  })
+  return { mode: 'windows', windows, laneIds: [...intent.stems], enabled: true }
+}
+
+function finiteSignedFrame(value: string, label: string): number {
+  if (!/^-?(?:0|[1-9][0-9]*)$/.test(value)) throw new Error(`${label} is not an exact frame.`)
+  const frame = Number(value)
+  if (!Number.isSafeInteger(frame)) throw new Error(`${label} exceeds the IPC integer range.`)
+  return frame
+}
+
+export class DesktopNativePlaybackClient {
+  private generation = ''
+  private ownsOutput = false
+  private recoveryProvider: DesktopPlaybackProvider | null = null
+  private recoveryKind: DesktopNativeRecoveryKind | null = null
+  private started = false
+  private last: DesktopPlaybackStatus | null = null
+  private poller: ReturnType<typeof setTimeout> | null = null
+  private pollingEpoch = 0
+  /** Every status read, including command refreshes, runs in this one lane.
+   * Polling therefore applies backpressure instead of accumulating IPC calls,
+   * and a command refresh can never publish ahead of an older poll. */
+  private statusReadTail: Promise<void> = Promise.resolve()
+  private request: DesktopNativePlaybackPrepare | null = null
+  private route: PreparedRoute | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
+  /** Transport-boundary bookkeeping for the generation being polled. A host
+   * route/stream/clock boundary, or a rising adapter render-failure count
+   * while the transport is advancing, means the callback is refusing every
+   * block until the transport is re-anchored — and with the time/pitch
+   * processor in the graph the session never re-anchors on its own. */
+  private transportBoundary: { generation: string; key: string; failures: number } | null = null
+  private reanchorPending = false
+  /** An accepted re-anchor is answered by the core with its own
+   * ClockReanchored discontinuity (one per accepted command); that echo is a
+   * receipt, not a new boundary, and reading it as one re-anchors forever. */
+  private reanchorEchoPending = false
+
+  constructor(
+    private readonly lease: DesktopNativePlaybackLease,
+    private readonly onStateChange: (status: DesktopPlaybackStatus | null) => void
+  ) {}
+
+  get active(): boolean {
+    return this.ownsOutput
+  }
+
+  get status(): DesktopPlaybackStatus | null {
+    return this.last
+  }
+
+  /** A transport known to be parked — paused, completed or stopped, with a
+   * current status to say so. During a structural rebuild `started` is false
+   * and the status is gone, and that is NOT parked: a pause issued then must
+   * queue behind the rebuild, which restarts playback otherwise. */
+  get transportParked(): boolean {
+    const state = this.last?.transportState
+    return this.ownsOutput && this.started && this.last !== null &&
+      (state === 'paused' || state === 'completed' || state === 'stopped')
+  }
+
+  /** Whether the retained status still describes a live transport. Output
+   * ownership and the last status intentionally survive failed cleanup for
+   * diagnosis, but neither makes Pause a valid next command. */
+  get transportActive(): boolean {
+    const state = this.last?.transportState
+    return this.ownsOutput && this.started && (state === 'playing' || state === 'pre-roll')
+  }
+
+  /** Chromium's sink is still released and recovery owns the next action.
+   * A retained generation first needs exact cleanup; only a generation-free
+   * prepare-retry lease may activate the same provider again. */
+  get recoveryPending(): boolean {
+    return this.ownsOutput && this.recoveryKind !== null
+  }
+
+  get recoveryMode(): DesktopNativeRecoveryKind | null {
+    return this.recoveryPending ? this.recoveryKind : null
+  }
+
+  get recoveryProviderId(): DesktopPlaybackProvider | null {
+    return this.recoveryProvider
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const current = this.mutationTail.then(operation, operation)
+    this.mutationTail = current.then(() => undefined, () => undefined)
+    return current
+  }
+
+  private assertCommandableGeneration(): void {
+    if (!this.recoveryPending) return
+    const provider = this.recoveryProvider ?? this.request?.provider ?? 'coreaudio'
+    throw new DesktopNativeRecoveryError(
+      provider,
+      this.recoveryKind === 'cleanup-required'
+        ? 'provider-cleanup-incomplete'
+        : 'provider-recovery-unavailable',
+      null,
+      this.recoveryKind === 'cleanup-required'
+        ? 'Native playback cleanup remains quarantined.'
+        : 'Native playback recovery must complete before issuing commands.'
+    )
+  }
+
+  private cleanupRequired(
+    provider: DesktopPlaybackProvider,
+    cause: unknown,
+    message: string
+  ): DesktopNativeRecoveryError {
+    this.started = false
+    this.recoveryProvider = provider
+    this.recoveryKind = 'cleanup-required'
+    this.onStateChange(this.last)
+    return new DesktopNativeRecoveryError(
+      provider,
+      'provider-cleanup-incomplete',
+      cause,
+      message
+    )
+  }
+
+  private async requireUnloadReceipt(
+    generation: string,
+    provider: DesktopPlaybackProvider,
+    fallbackMessage: string,
+    priorCause?: unknown
+  ): Promise<void> {
+    let result: DesktopPlaybackResult
+    try {
+      result = await window.singz.unloadDesktopPlayback(generation)
+    } catch (error) {
+      throw this.cleanupRequired(provider, error, fallbackMessage)
+    }
+    if (!result.ok || !result.cleanupComplete) {
+      throw this.cleanupRequired(
+        provider,
+        priorCause ?? (result.error || result.errorCode),
+        result.error || fallbackMessage
+      )
+    }
+  }
+
+  async prepareAndStart(request: DesktopNativePlaybackPrepare): Promise<boolean> {
+    return this.serialize(async () => {
+      try {
+        const recovering = this.recoveryPending
+        if (this.active && !recovering) return false
+        if (recovering &&
+            (this.recoveryKind !== 'prepare-retry' ||
+             this.recoveryProvider !== request.provider)) {
+          throw new DesktopNativeRecoveryError(
+            this.recoveryProvider ?? request.provider,
+            'provider-recovery-conflict',
+            null,
+            `Unload the failed ${this.recoveryProvider ?? 'native'} provider before selecting ${request.provider}.`
+          )
+        }
+        const providers = await window.singz.desktopPlaybackProviders()
+        const provider = providers.find((row) => row.id === request.provider)
+        if (!provider?.available) throw new Error(provider?.detail ?? 'Native provider is unavailable.')
+        const inventory = await window.singz.audioHostDevices(request.provider)
+        if (!inventory.ok) throw new Error(inventory.error)
+        if (inventory.provider !== request.provider) {
+          throw new Error('Native output inventory belongs to a different provider.')
+        }
+        const output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
+        if (!output) throw new Error('No native output endpoint is available.')
+        const outputChannels = request.preferredOutputChannels?.length
+          ? [...request.preferredOutputChannels]
+          : Array.from({ length: Math.min(2, output.outputChannels) }, (_, index) => index)
+        const route: PreparedRoute = {
+          outputDeviceUid: output.uid,
+          outputChannels,
+          sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
+          bufferFrames: Math.max(1, output.bufferFrames.preferredFrames || 512)
+        }
+        // Validate the immutable graph before releasing Chromium's output.
+        this.configFor(request, route)
+        if (!recovering) {
+          await this.lease.releaseLegacyOutput()
+          this.ownsOutput = true
+        }
+        const activated = await this.activate(request, route, request.provider !== 'asio')
+        if (activated) {
+          this.recoveryProvider = null
+          this.recoveryKind = null
+          this.request = request
+          this.route = route
+        }
+        return activated
+      } catch (error) {
+        if (request.provider === 'asio' &&
+            !(error instanceof DesktopNativeProviderError) &&
+            !(error instanceof DesktopNativeRecoveryError)) {
+          throw new DesktopNativeProviderError(request.provider, error)
+        }
+        throw error
+      }
+    })
+  }
+
+  private configFor(
+    request: DesktopNativePlaybackPrepare,
+    route: PreparedRoute,
+    preparedStartProjectFrame?: number,
+    initialTransport?: DesktopPlaybackInitialTransportConfig
+  ): DesktopPlaybackPrepareConfig {
+    const beatGrid = request.beat && request.beat.beats.length >= 2
+      ? {
+          beats: request.beat.beats,
+          beatsPerBar: request.beat.beatsPerBar,
+          downbeat: request.beat.downbeat,
+          downbeats: request.beat.downbeats ?? []
+        }
+      : undefined
+    if (request.metronome.click && !beatGrid) {
+      throw new Error('Native metronome playback requires a beat grid.')
+    }
+    const training = trainingConfig(request.training, request.lanes, route.sampleRate)
+    const loop = request.loop
+      ? {
+          startProjectFrame: Math.round(request.loop.start * route.sampleRate),
+          endProjectFrame: Math.round(request.loop.end * route.sampleRate)
+        }
+      : undefined
+    if (loop && (!Number.isSafeInteger(loop.startProjectFrame) ||
+        !Number.isSafeInteger(loop.endProjectFrame) || loop.startProjectFrame < 0 ||
+        loop.endProjectFrame <= loop.startProjectFrame)) {
+      throw new Error('Native loop bounds are invalid.')
+    }
+    const startFrame = preparedStartProjectFrame ??
+      ((!request.countIn || request.metronome.countInBars === 0)
+        ? Math.round(request.positionSeconds * route.sampleRate)
+        : undefined)
+    const graphDocument = request.graphDocument
+      ? projectGraphDocumentForNative(request.graphDocument)
+      : undefined
+    if (request.graphDocument && !graphDocument) {
+      throw new Error('This graph document needs a newer native runtime.')
+    }
+    return {
+      capability: DESKTOP_PLAYBACK_CAPABILITY,
+      provider: request.provider,
+      accessMode: request.provider === 'asio' ? 'exclusive' : 'shared',
+      outputDeviceUid: route.outputDeviceUid,
+      outputChannels: route.outputChannels,
+      sampleRate: route.sampleRate,
+      bufferFrames: route.bufferFrames,
+      maximumFrames: 4096,
+      masterGain: request.masterGain,
+      playback: {
+        version: DESKTOP_PLAYBACK_CONTRACT_VERSION,
+        transport: {
+          entrySeconds: request.positionSeconds,
+          durationSeconds: request.durationSeconds,
+          playbackRate: request.playbackRate,
+          transposeSemitones: request.transpose
+        },
+        cues: {
+          click: request.metronome.click,
+          countInBars: request.countIn ? request.metronome.countInBars : 0,
+          volume: request.metronome.volume,
+          accent: request.metronome.accent,
+          ...(beatGrid ? { beatGrid } : {})
+        }
+      },
+      ...(training ? { training } : {}),
+      ...(startFrame === undefined ? {} : { preparedStartProjectFrame: startFrame }),
+      initialTransport: initialTransport ?? {
+        state: 'playing',
+        ...(loop ? { loop } : {})
+      },
+      ...(graphDocument ? { graphDocument } : {})
+    }
+  }
+
+  private async activate(
+    request: DesktopNativePlaybackPrepare,
+    route: PreparedRoute,
+    allowLegacyFallback: boolean,
+    preparedStartProjectFrame?: number,
+    initialTransport?: DesktopPlaybackInitialTransportConfig
+  ): Promise<boolean> {
+    const config = this.configFor(request, route, preparedStartProjectFrame, initialTransport)
+    let generation = ''
+    let started = false
+    try {
+      const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+      generation = prepared.generation !== '0' &&
+        (prepared.ok || prepared.ownershipRetained === true)
+        ? prepared.generation
+        : ''
+      if (generation) this.generation = generation
+      ensure(prepared, 'Native graph prepare failed')
+      ensure(await window.singz.openDesktopPlayback(generation), 'Native output open failed')
+      ensure(await window.singz.startDesktopPlayback(generation), 'Native playback start failed')
+      started = true
+      this.started = true
+      await this.refresh(generation)
+      this.startPolling()
+      return true
+    } catch (error) {
+      this.stopPolling()
+      // A failed start/cleanup can retain generation ownership and its last
+      // diagnostic status, but that status must not remain an active
+      // transport predicate for the next user retry.
+      this.started = false
+      if (generation) {
+        await this.requireUnloadReceipt(
+          generation,
+          request.provider,
+          'Native playback cleanup remains quarantined.',
+          error
+        )
+        this.generation = ''
+        this.last = null
+      }
+      // Once rendering started, or when ASIO was explicitly requested, a
+      // provider error is never hidden by acquiring Chromium/WASAPI output in
+      // the same play request. The renderer retains the released-output lease
+      // until an explicit same-provider retry or unload completes recovery.
+      if (started || !allowLegacyFallback) {
+        this.recoveryProvider = request.provider
+        this.recoveryKind = 'prepare-retry'
+        this.onStateChange(this.last)
+        throw error
+      }
+      this.recoveryKind = null
+      try {
+        await this.lease.restoreLegacyOutput()
+      } catch (restoreError) {
+        this.recoveryProvider = request.provider
+        this.recoveryKind = 'route-restore'
+        throw new DesktopNativeRecoveryError(
+          request.provider,
+          'provider-route-restore-incomplete',
+          restoreError
+        )
+      }
+      this.ownsOutput = false
+      this.recoveryProvider = null
+      this.recoveryKind = null
+      this.onStateChange(this.last)
+      return false
+    }
+  }
+
+  async reconfigure(
+    patch: DesktopNativePlaybackStructuralPatch,
+    options: { force?: boolean } = {}
+  ): Promise<void> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation || !this.request || !this.route) {
+        if (this.ownsOutput) throw new Error('Native playback has no rebuildable generation.')
+        return
+      }
+      const request: DesktopNativePlaybackPrepare = { ...this.request, ...patch }
+      // Reject an invalid desired graph before changing ownership.
+      const desired = this.configFor(request, this.route)
+      // An unchanged desired graph is not a rebuild. A rebuild is stop →
+      // unload → re-decode every lane → prepare → start, an audible gap each,
+      // and a selection drag or the loader's control resets arrive here many
+      // times a second with nothing new to say.
+      if (!options.force &&
+          JSON.stringify(desired) === JSON.stringify(this.configFor(this.request, this.route))) {
+        this.request = request
+        return
+      }
+      const oldGeneration = this.generation
+      const status = await this.requireCommandStatus(
+        oldGeneration,
+        request.provider,
+        'Native structural rebuild could not read the current transport.'
+      )
+      // A status-poll failure is allowed to quarantine the generation while
+      // the rebuild is queued behind that read. Revalidate immediately before
+      // the first destructive command so rebuild can never escape quarantine.
+      this.assertCommandableGeneration()
+      if (status.generation !== oldGeneration || status.transportGeneration !== oldGeneration ||
+          status.transportTelemetryQuality === 'unavailable') {
+        throw new Error('Native rebuild has no trustworthy signed transport position.')
+      }
+      const preparedStartProjectFrame = finiteSignedFrame(
+        status.renderedProjectFrame,
+        'Native rendered project frame'
+      )
+      const state = status.transportState === 'paused' || status.transportState === 'completed' ||
+        status.transportState === 'stopped' ? 'paused' : 'playing'
+      const loop = request.loop
+        ? {
+            startProjectFrame: Math.round(request.loop.start * this.route.sampleRate),
+            endProjectFrame: Math.round(request.loop.end * this.route.sampleRate)
+          }
+        : undefined
+      const initialTransport: DesktopPlaybackInitialTransportConfig = {
+        state,
+        ...(loop ? { loop } : {})
+      }
+      // Validate the signed restore request as well. Once the old rendered
+      // generation is retired, failure is fail-closed and never wakes WebAudio.
+      this.configFor(request, this.route, preparedStartProjectFrame, initialTransport)
+      this.assertCommandableGeneration()
+      this.stopPolling()
+      if (this.started) {
+        try { await window.singz.stopDesktopPlayback(oldGeneration) } catch { /* unload is authoritative */ }
+      }
+      this.started = false
+      await this.requireUnloadReceipt(
+        oldGeneration,
+        request.provider,
+        'Native structural rebuild could not release the old graph.'
+      )
+      this.generation = ''
+      this.started = false
+      this.last = null
+      await this.activate(request, this.route, false, preparedStartProjectFrame, initialTransport)
+      this.request = request
+    })
+  }
+
+  async pause(): Promise<void> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation) {
+        if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
+        return
+      }
+      ensure(await window.singz.pauseDesktopPlayback(this.generation), 'Native pause failed')
+      await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+    })
+  }
+
+  async resume(): Promise<void> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation) {
+        if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
+        return
+      }
+      ensure(await window.singz.resumeDesktopPlayback(this.generation), 'Native resume failed')
+      await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+    })
+  }
+
+  async seek(seconds: number): Promise<void> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation || !this.last?.format.sampleRate) {
+        if (this.ownsOutput) throw new Error('Native playback has no current transport status.')
+        return
+      }
+      const generation = this.generation
+      const provider = this.request?.provider ?? 'coreaudio'
+      const before = this.last.seekCount
+      ensure(
+        await window.singz.seekDesktopPlayback(
+          generation,
+          Math.round(seconds * this.last.format.sampleRate)
+        ),
+        'Native seek failed'
+      )
+      await this.refreshCommandStatus(generation, provider)
+      // The callback applies the queued seek at its next period, and a resume
+      // issued before that decides Playing/Completed from the frame the seek
+      // is about to replace. Wait, bounded, for the receipt — status reads,
+      // not timers, so the wait is a few IPC round trips at most.
+      for (let attempt = 0; attempt < 24 && this.generation === generation &&
+           this.last?.seekCount === before; attempt++) {
+        await this.refreshCommandStatus(generation, provider)
+      }
+    })
+  }
+
+  async setLoop(region: { start: number; end: number } | null, enabled: boolean): Promise<void> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation || !this.last?.format.sampleRate) {
+        if (this.ownsOutput) throw new Error('Native playback has no current transport status.')
+        return
+      }
+      const result = region && enabled
+        ? await window.singz.setDesktopPlaybackLoop(
+            this.generation,
+            Math.round(region.start * this.last.format.sampleRate),
+            Math.round(region.end * this.last.format.sampleRate)
+          )
+        : await window.singz.clearDesktopPlaybackLoop(this.generation)
+      ensure(result, 'Native loop update failed')
+      await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+    })
+  }
+
+  async setLane(id: string, gain: number, muted: boolean, solo: boolean): Promise<void> {
+    await this.updateLane(id, { gain, muted, solo })
+  }
+
+  async updateLane(
+    id: string,
+    patch: Partial<DesktopNativeLaneControl>
+  ): Promise<DesktopNativeLaneControl> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation) {
+        if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
+        throw new Error('Native playback is not active.')
+      }
+      const current = this.request?.lanes.find((lane) => lane.id === id)
+      if (!current) throw new Error('Native playback lane is not part of this generation.')
+      const next = {
+        gain: patch.gain ?? current.gain,
+        muted: patch.muted ?? current.muted,
+        solo: patch.solo ?? current.solo
+      }
+      ensure(
+        await window.singz.setDesktopPlaybackLane(
+          this.generation,
+          id,
+          next.gain,
+          next.muted,
+          next.solo
+        ),
+        'Native lane update failed'
+      )
+      if (this.request) {
+        this.request = {
+          ...this.request,
+          lanes: this.request.lanes.map((lane) =>
+            lane.id === id ? { ...lane, ...next } : lane)
+        }
+      }
+      await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+      return next
+    })
+  }
+
+  async setMasterGain(gain: number): Promise<void> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation) {
+        if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
+        return
+      }
+      ensure(
+        await window.singz.setDesktopPlaybackMasterGain(this.generation, gain),
+        'Native master gain failed'
+      )
+      if (this.request) this.request = { ...this.request, masterGain: gain }
+      await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+    })
+  }
+
+  async unload(): Promise<void> {
+    return this.serialize(async () => {
+      this.stopPolling()
+      const generation = this.generation
+      // Cleanup is now the only valid next command. Preserve `last` for
+      // diagnostics if it fails, while ensuring Play/Pause UI cannot mistake
+      // that retained snapshot for a commandable running transport.
+      this.started = false
+      if (!generation) {
+        if (this.ownsOutput) {
+          const provider = this.recoveryProvider ?? this.request?.provider ?? 'coreaudio'
+          try {
+            await this.lease.restoreLegacyOutput()
+          } catch (error) {
+            this.recoveryProvider = provider
+            this.recoveryKind = 'route-restore'
+            this.onStateChange(this.last)
+            throw new DesktopNativeRecoveryError(
+              provider,
+              'provider-route-restore-incomplete',
+              error
+            )
+          }
+          this.ownsOutput = false
+          this.recoveryProvider = null
+          this.recoveryKind = null
+          this.request = null
+          this.route = null
+          this.onStateChange(this.last)
+        }
+        return
+      }
+      const providerForCleanup = this.request?.provider ?? this.recoveryProvider ?? 'coreaudio'
+      await this.requireUnloadReceipt(
+        generation,
+        providerForCleanup,
+        'Native playback cleanup remains quarantined.'
+      )
+      this.generation = ''
+      this.last = null
+      this.recoveryProvider = this.request?.provider ?? this.recoveryProvider
+      this.recoveryKind = 'route-restore'
+      const provider = this.recoveryProvider ?? 'coreaudio'
+      try {
+        await this.lease.restoreLegacyOutput()
+      } catch (error) {
+        this.onStateChange(this.last)
+        throw new DesktopNativeRecoveryError(
+          provider,
+          'provider-route-restore-incomplete',
+          error
+        )
+      }
+      this.ownsOutput = false
+      this.recoveryProvider = null
+      this.recoveryKind = null
+      this.request = null
+      this.route = null
+      this.onStateChange(this.last)
+    })
+  }
+
+  /** Resolve a retained/quarantined generation without reacquiring Chromium's
+   * sink. Success deliberately converts cleanup recovery into the narrower
+   * no-generation same-provider prepare retry consumed by prepareAndStart(). */
+  async cleanupForRetry(): Promise<void> {
+    return this.serialize(async () => {
+      if (!this.recoveryPending || this.recoveryKind === 'prepare-retry') return
+      const provider = this.recoveryProvider ?? this.request?.provider ?? 'coreaudio'
+      if (this.recoveryKind !== 'cleanup-required' || !this.generation) {
+        throw new DesktopNativeRecoveryError(
+          provider,
+          'provider-recovery-unavailable',
+          null,
+          'Native playback recovery cannot prepare until route ownership is restored.'
+        )
+      }
+      this.stopPolling()
+      this.started = false
+      const generation = this.generation
+      await this.requireUnloadReceipt(
+        generation,
+        provider,
+        'Native playback cleanup remains quarantined.'
+      )
+      this.generation = ''
+      this.last = null
+      this.recoveryProvider = provider
+      this.recoveryKind = 'prepare-retry'
+      this.onStateChange(this.last)
+    })
+  }
+
+  private observeTransportBoundary(generation: string, status: DesktopPlaybackStatus): void {
+    const key = `${status.routeGeneration}:${status.streamGeneration}:${status.transportDiscontinuities}`
+    const failures = status.adapterRenderFailures
+    const previous = this.transportBoundary
+    this.transportBoundary = { generation, key, failures }
+    if (!previous || previous.generation !== generation) {
+      this.reanchorEchoPending = false
+      return
+    }
+    if (key === previous.key && failures === previous.failures) return
+    if (this.reanchorEchoPending) {
+      // The echo of our own re-anchor: the discontinuity counter moves by one
+      // under the clock-reanchored name and nothing else does. Re-baseline
+      // (failures included — the callbacks before the command landed still
+      // counted) and stay quiet; anything else is a genuine new boundary.
+      const [route, stream, discontinuities] = key.split(':')
+      const [previousRoute, previousStream, previousDiscontinuities] = previous.key.split(':')
+      const echo = status.lastTransportBoundary === 'clock-reanchored' &&
+        route === previousRoute && stream === previousStream &&
+        Number(discontinuities) === Number(previousDiscontinuities) + 1
+      if (echo) {
+        this.reanchorEchoPending = false
+        return
+      }
+      if (key === previous.key) return
+    }
+    const advancing = status.transportState === 'playing' || status.transportState === 'pre-roll'
+    // Seeks and loops are boundaries the session primes for itself.
+    const boundary = key !== previous.key && status.lastTransportBoundary !== 'none' &&
+      status.lastTransportBoundary !== 'source-seek' && status.lastTransportBoundary !== 'source-loop'
+    const failing = failures > previous.failures && advancing
+    if (!boundary && !failing) return
+    if (this.reanchorPending || !this.started || status.state !== 'running') return
+    this.reanchorPending = true
+    void this.serialize(async (): Promise<'ok' | 'refused' | 'skipped'> => {
+      if (this.generation !== generation || !this.started) return 'skipped'
+      this.assertCommandableGeneration()
+      const result = await window.singz.reanchorDesktopPlayback(generation)
+      return result.ok ? 'ok' : 'refused'
+    }).then((outcome) => {
+      this.reanchorPending = false
+      if (outcome === 'ok' && this.generation === generation) this.reanchorEchoPending = true
+      if (outcome !== 'refused' || this.generation !== generation) return
+      // The session would not take a re-anchor: rebuild the graph at the
+      // signed project frame, the other way out of a callback that fails
+      // every block. Its own failure paths publish recovery state.
+      void this.reconfigure({}, { force: true }).catch((error) => {
+        console.error('Native transport rebuild after a route change failed:', error)
+      })
+    }, (error) => {
+      this.reanchorPending = false
+      console.error('Native transport re-anchor failed:', error)
+    })
+  }
+
+  private readStatus(
+    expectedGeneration: string,
+    options: { pollingEpoch?: number; requireCommandable?: boolean } = {}
+  ): Promise<DesktopPlaybackStatus | null> {
+    const operation = this.statusReadTail.then(async () => {
+      if (!expectedGeneration || this.generation !== expectedGeneration) return null
+      if (options.pollingEpoch !== undefined && options.pollingEpoch !== this.pollingEpoch) return null
+      if (options.requireCommandable) this.assertCommandableGeneration()
+      try {
+        const status = await window.singz.desktopPlaybackStatus()
+        if (status.generation !== expectedGeneration || this.generation !== expectedGeneration ||
+            (options.pollingEpoch !== undefined && options.pollingEpoch !== this.pollingEpoch)) {
+          return null
+        }
+        this.last = status
+        this.observeTransportBoundary(expectedGeneration, status)
+        this.onStateChange(status)
+        if (status.state === 'terminal' || status.state === 'quarantined') this.stopPolling()
+        return status
+      } catch (error) {
+        // Publish a current polling failure before the serialized status lane
+        // admits a waiting command refresh. That waiter will then see the
+        // cleanup-only guard instead of continuing with a stale generation.
+        if (options.pollingEpoch !== undefined) {
+          this.handlePollingFailure(expectedGeneration, options.pollingEpoch, error)
+        }
+        throw error
+      }
+    })
+    this.statusReadTail = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+
+  private async requireCommandStatus(
+    generation: string,
+    provider: DesktopPlaybackProvider,
+    failureMessage: string
+  ): Promise<DesktopPlaybackStatus> {
+    try {
+      const status = await this.readStatus(generation, { requireCommandable: true })
+      if (!status) throw new Error('Native playback status belongs to a retired generation.')
+      return status
+    } catch (error) {
+      if (error instanceof DesktopNativeRecoveryError) throw error
+      throw this.cleanupRequired(provider, error, failureMessage)
+    }
+  }
+
+  private async refresh(generation: string): Promise<void> {
+    await this.readStatus(generation)
+  }
+
+  private async refreshCommandStatus(
+    generation: string,
+    provider: DesktopPlaybackProvider
+  ): Promise<void> {
+    await this.requireCommandStatus(
+      generation,
+      provider,
+      'Native playback command completed but its status could not be confirmed.'
+    )
+  }
+
+  private handlePollingFailure(
+    expectedGeneration: string,
+    expectedPollingEpoch: number,
+    error: unknown
+  ): void {
+    if (!expectedGeneration || this.generation !== expectedGeneration ||
+        expectedPollingEpoch !== this.pollingEpoch) return
+    this.started = false
+    this.stopPolling()
+    this.recoveryProvider = this.request?.provider ?? this.recoveryProvider ?? 'coreaudio'
+    this.recoveryKind = 'cleanup-required'
+    const message = error instanceof Error ? error.message : String(error)
+    if (this.last?.generation === expectedGeneration) {
+      this.last = {
+        ...this.last,
+        transportTelemetryQuality: 'unavailable',
+        error: `Native playback status refresh failed: ${message}`
+      }
+    }
+    console.error('Native playback status refresh failed:', error)
+    this.onStateChange(this.last)
+  }
+
+  private startPolling(): void {
+    this.stopPolling()
+    const pollingEpoch = this.pollingEpoch
+    const schedule = (): void => {
+      if (pollingEpoch !== this.pollingEpoch || this.poller !== null) return
+      this.poller = setTimeout(() => {
+        this.poller = null
+        const generation = this.generation
+        if (!generation || pollingEpoch !== this.pollingEpoch) return
+        // The next timer is armed only after this read settles. Slow IPC can
+        // reduce telemetry cadence, but can never grow an unbounded backlog.
+        // The rejection observer is attached in the same turn; readStatus
+        // publishes current failures before releasing queued command reads.
+        void this.readStatus(generation, { pollingEpoch }).then(() => {
+          schedule()
+        }).catch(() => {
+          // readStatus already made a current failure cleanup-only. A retired
+          // epoch is intentionally silent and must not restart polling.
+        })
+      }, 50)
+    }
+    schedule()
+  }
+
+  private stopPolling(): void {
+    this.pollingEpoch++
+    if (this.poller !== null) clearTimeout(this.poller)
+    this.poller = null
+  }
+}

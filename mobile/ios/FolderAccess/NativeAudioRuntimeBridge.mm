@@ -1,6 +1,7 @@
 #import <React/RCTBridgeModule.h>
 
 #import "NativePlaybackBridgeSupport.h"
+#import "NativeCodecTargetProof.h"
 
 // Phase iOS-B2 keeps the generation-bound B1 playback surface behind one
 // experimental product coordinator. AVAudioSession activation remains a
@@ -87,5 +88,33 @@ RCT_REMAP_METHOD(
 {
   SingzNativePlaybackSetControl(generation, control, resolve, reject);
 }
+
+RCT_REMAP_METHOD(
+    transport,
+    transport : (nonnull NSNumber*)generation
+        command : (NSDictionary*)command
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackTransport(generation, command, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    previewClick,
+    previewClick : (nonnull NSNumber*)generation
+        sound : (nonnull NSNumber*)sound
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackPreviewClick(generation, sound, resolve, reject);
+}
+
+#if defined(SINGZ_CODEC_TARGET_PROOF)
+  RCT_EXPORT_METHOD(codecTargetProof:(RCTPromiseResolveBlock)resolve
+                    rejecter:(RCTPromiseRejectBlock)reject)
+  {
+    SingzRunCodecTargetProof(resolve, reject);
+  }
+#endif
 
 @end

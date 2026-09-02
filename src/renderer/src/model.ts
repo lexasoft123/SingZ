@@ -1,5 +1,5 @@
 import { STEM_META, CUSTOM_COLORS as KIT_CUSTOM_COLORS } from '@singz/ui/stems'
-import type { StemName } from '../../shared/types'
+import type { DesktopPlaybackProvider, StemName } from '../../shared/types'
 
 export interface UITrack {
   id: string
@@ -8,6 +8,8 @@ export interface UITrack {
   peaks: Float32Array
   /** Decoded audio + envelope normalization, for sample-accurate zoomed drawing. */
   buffer: AudioBuffer
+  /** Registered file backing this lane when native playback can consume it. */
+  sourcePath?: string
   scale: number
   muted: boolean
   solo: boolean
@@ -91,6 +93,11 @@ export interface AudioPrefs {
   nativeMonitorOutputChannels?: number[]
   /** Native monitor gain only; enabled/headphone confirmation never persist. */
   monitorGainDb?: number
+  /** Experimental portable zcore/zdsp song-output backend. */
+  nativePlayback?: boolean
+  /** Explicit native song-output provider. Only Windows persists a choice;
+   * other platforms keep their single platform provider. */
+  nativeAudioProvider?: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
   /** Master output level 0..1 — belongs to the machine, not to a project. */
   master?: number
   /** Reference-tone gain shared by every exercise, stored with app audio prefs. */
@@ -132,16 +139,24 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
   const monitorGainDb = typeof r.monitorGainDb === 'number' && Number.isFinite(r.monitorGainDb)
     ? Math.max(-60, Math.min(0, r.monitorGainDb))
     : undefined
+  const outputId = id(r.outputId)
+  const inputId = id(r.inputId)
+  const nativeInputUid = id(r.nativeInputUid)
+  const nativeMonitorOutputUid = id(r.nativeMonitorOutputUid)
+  const nativeAudioProvider = r.nativeAudioProvider === 'asio' ? 'asio'
+    : r.nativeAudioProvider === 'wasapi' ? 'wasapi' : undefined
   return {
-    outputId: id(r.outputId),
-    inputId: id(r.inputId),
-    nativeInputUid: id(r.nativeInputUid),
-    inputChannel,
-    nativeMonitorOutputUid: id(r.nativeMonitorOutputUid),
-    nativeMonitorOutputChannels,
-    monitorGainDb,
-    master,
-    referenceVolume
+    ...(outputId ? { outputId } : {}),
+    ...(inputId ? { inputId } : {}),
+    ...(nativeInputUid ? { nativeInputUid } : {}),
+    ...(inputChannel === undefined ? {} : { inputChannel }),
+    ...(nativeMonitorOutputUid ? { nativeMonitorOutputUid } : {}),
+    ...(nativeMonitorOutputChannels ? { nativeMonitorOutputChannels } : {}),
+    ...(monitorGainDb === undefined ? {} : { monitorGainDb }),
+    ...(r.nativePlayback === true ? { nativePlayback: true } : {}),
+    ...(nativeAudioProvider ? { nativeAudioProvider } : {}),
+    ...(master === undefined ? {} : { master }),
+    ...(referenceVolume === undefined ? {} : { referenceVolume })
   }
 }
 

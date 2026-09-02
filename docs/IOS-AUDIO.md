@@ -460,6 +460,14 @@ graph boundary itself is always non-interleaved float32. Duplex input storage
 and its `AudioBufferList` are fully allocated during `open()`, while output is
 rendered directly into RemoteIO's planar buffers.
 
+External routes may expose a physical RemoteIO output rate that differs from
+the active AVAudioSession/client rate. In that case RemoteIO owns the output
+sample-rate conversion; the graph remains at the activated session rate. The
+provider validates the accepted planar client boundary and re-reads
+`MaximumFramesPerSlice` after `AudioUnitInitialize`, because conversion may
+increase the finalized callback bound. It rejects the route before callback
+admission if that bound exceeds prepared graph storage.
+
 The latency result deliberately keeps four values separate:
 
 - `inputDeviceFrames`: `inputLatency` converted at the actual session rate;

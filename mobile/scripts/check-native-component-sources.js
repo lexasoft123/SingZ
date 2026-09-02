@@ -7,6 +7,7 @@ const {
   iosAudioHostCallbackFiles,
   nativePlaybackCallbackFiles,
   nativePlaybackSessionFiles,
+  signalsmithTimePitchFiles,
   zcoreDeviceCallbackFiles,
   zdspHostAdapterFiles,
   zdspRuntimeFiles,
@@ -109,6 +110,8 @@ const compareExact = (label, cmakeEntries, iosEntries) => {
 const zdspCmake = readFileSync(join(repoRoot, 'zdsp', 'CMakeLists.txt'), 'utf8')
 const zcoreCmake = readFileSync(join(repoRoot, 'zcore', 'CMakeLists.txt'), 'utf8')
 const rootCmake = readFileSync(join(repoRoot, 'CMakeLists.txt'), 'utf8')
+const thirdPartyCmake = readFileSync(
+  join(repoRoot, 'third_party', 'native', 'CMakeLists.txt'), 'utf8')
 
 compareExact(
   'zdsp_runtime',
@@ -147,6 +150,12 @@ compareExact(
   addLibraryMembers(rootCmake, 'singz_native_playback_session')
     .map((entry) => entry.replace(/^native\//, '')),
   nativePlaybackSessionFiles
+)
+compareExact(
+  'Signalsmith time/pitch wrapper',
+  addLibraryMembers(thirdPartyCmake, 'singz_signalsmith_time_pitch')
+    .map((entry) => entry.replace(/^\$\{SINGZ_REPO_ROOT\}\/native\//, '')),
+  signalsmithTimePitchFiles
 )
 
 console.log('native-component-sources: CMake and iOS manifests match exactly')

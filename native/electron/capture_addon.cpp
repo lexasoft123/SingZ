@@ -2,9 +2,15 @@
 
 #include "audio_monitor_session.h"
 #include "native_audio_ownership.h"
+#include "playback_addon_bridge.h"
 
 #include <zdsp/analysis/capture_adapter.h>
 #include <zcore/device/audio_input.h>
+#include <zcore/device/audio_host.h>
+
+#if defined(_WIN32)
+#include <zcore/platform/windows/audio_host_windows_provider.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -242,6 +248,21 @@ std::string getString(napi_env env, napi_value object, const char* name) {
   if (napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok) return {};
   std::string result(size + 1, '\0');
   napi_get_value_string_utf8(env, value, result.data(), result.size(), &size);
+  result.resize(size);
+  return result;
+}
+
+std::string getStringValue(napi_env env, napi_value value) {
+  napi_valuetype type = napi_undefined;
+  size_t size = 0;
+  if (napi_typeof(env, value, &type) != napi_ok || type != napi_string ||
+      napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok ||
+      size == 0 || size > 16)
+    return {};
+  std::string result(size + 1, '\0');
+  if (napi_get_value_string_utf8(env, value, result.data(), result.size(),
+                                 &size) != napi_ok)
+    return {};
   result.resize(size);
   return result;
 }
@@ -686,22 +707,148 @@ napi_value monitorResultValue(napi_env env,
   return result;
 }
 
-napi_value audioHostDevices(napi_env env, napi_callback_info) {
-  const singz::AudioHostInventory inventory = monitor.enumerate();
+std::unique_ptr<singz::AudioHostBackend> playbackBackend(
+    const std::string& provider, std::string* unavailableReason) {
+  if (unavailableReason) unavailableReason->clear();
+#if defined(_WIN32)
+  singz::WindowsAudioHostProvider selected;
+  if (provider == "wasapi") {
+    selected = singz::WindowsAudioHostProvider::Wasapi;
+  } else if (provider == "asio") {
+    selected = singz::WindowsAudioHostProvider::Asio;
+  } else {
+    if (unavailableReason)
+      *unavailableReason = "The requested provider is not a Windows audio provider";
+    return nullptr;
+  }
+  const auto status = singz::probeWindowsAudioHostProvider(selected);
+  if (!status.available) {
+    if (unavailableReason) *unavailableReason = status.detail;
+    return nullptr;
+  }
+  return singz::createWindowsAudioHostBackend(selected);
+#elif defined(__APPLE__)
+  if (provider == "coreaudio") return singz::createPlatformAudioHostBackend();
+  if (unavailableReason)
+    *unavailableReason = "The requested provider is not available on macOS";
+  return nullptr;
+#else
+  (void)provider;
+  if (unavailableReason)
+    *unavailableReason = "Native desktop audio providers are unavailable on this platform";
+  return nullptr;
+#endif
+}
+
+void appendProvider(napi_env env, napi_value providers, uint32_t index,
+                    const char* id, const char* label, bool available,
+                    const char* errorCode, const std::string& detail) {
+  napi_value row;
+  napi_create_object(env, &row);
+  set(env, row, "id", stringValue(env, id));
+  set(env, row, "label", stringValue(env, label));
+  set(env, row, "available", boolValue(env, available));
+  set(env, row, "errorCode", stringValue(env, errorCode));
+  set(env, row, "detail", stringValue(env, detail));
+  napi_set_element(env, providers, index, row);
+}
+
+napi_value audioHostProviders(napi_env env, napi_callback_info) {
+  napi_value providers;
+  napi_create_array_with_length(env, 3, &providers);
+#if defined(_WIN32)
+  appendProvider(env, providers, 0, "coreaudio", "CoreAudio", false,
+                 "wrong-platform", "Available only on macOS");
+  const auto wasapi = singz::probeWindowsAudioHostProvider(
+      singz::WindowsAudioHostProvider::Wasapi);
+  appendProvider(env, providers, 1, "wasapi", "WASAPI", wasapi.available,
+                 wasapi.available ? "none" : "runtime-unavailable",
+                 wasapi.detail);
+  const auto asio = singz::probeWindowsAudioHostProvider(
+      singz::WindowsAudioHostProvider::Asio);
+  const char* asioError = asio.available ? "none"
+      : asio.error == singz::WindowsAudioHostProviderError::NotCompiled
+          ? "not-compiled" : "runtime-unavailable";
+  appendProvider(env, providers, 2, "asio", "ASIO", asio.available,
+                 asioError, asio.detail);
+#elif defined(__APPLE__)
+  appendProvider(env, providers, 0, "coreaudio", "CoreAudio", true, "none",
+                 "Native macOS AudioHost output");
+  appendProvider(env, providers, 1, "wasapi", "WASAPI", false,
+                 "wrong-platform", "Available only on Windows");
+  appendProvider(env, providers, 2, "asio", "ASIO", false,
+                 "wrong-platform", "ASIO is available only on Windows");
+#else
+  appendProvider(env, providers, 0, "coreaudio", "CoreAudio", false,
+                 "wrong-platform", "Available only on macOS");
+  appendProvider(env, providers, 1, "wasapi", "WASAPI", false,
+                 "wrong-platform", "Available only on Windows");
+  appendProvider(env, providers, 2, "asio", "ASIO", false,
+                 "wrong-platform", "ASIO is available only on Windows");
+#endif
+  return providers;
+}
+
+napi_value audioHostDevices(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1]{};
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  const std::string requestedProvider = argc == 1 ? getStringValue(env, argv[0]) : "";
+  std::string provider;
+  singz::AudioHostInventory inventory;
+  bool providerScoped = !requestedProvider.empty();
+  if (providerScoped) {
+    std::string unavailableReason;
+    std::unique_ptr<singz::AudioHostBackend> backend =
+        playbackBackend(requestedProvider, &unavailableReason);
+    if (!backend) {
+      napi_value failed;
+      napi_create_object(env, &failed);
+      set(env, failed, "ok", boolValue(env, false));
+      set(env, failed, "provider", stringValue(env, requestedProvider));
+      set(env, failed, "defaultInputUid", stringValue(env, ""));
+      set(env, failed, "defaultOutputUid", stringValue(env, ""));
+      napi_value empty;
+      napi_create_array_with_length(env, 0, &empty);
+      set(env, failed, "devices", empty);
+      set(env, failed, "error", stringValue(env, unavailableReason));
+      return failed;
+    }
+    singz::AudioHost host(std::move(backend));
+    inventory = host.enumerate();
+    provider = requestedProvider;
+  } else {
+    inventory = monitor.enumerate();
+#if defined(_WIN32)
+    provider = "wasapi";
+#elif defined(__APPLE__)
+    provider = "coreaudio";
+#else
+    provider = "wasapi";
+#endif
+  }
+  const auto exposedUid = [&](const std::string& uid) {
+#if defined(_WIN32)
+    return providerScoped && !uid.empty() ? provider + ":" + uid : uid;
+#else
+    return uid;
+#endif
+  };
   napi_value result;
   napi_create_object(env, &result);
   set(env, result, "ok", boolValue(env, true));
+  set(env, result, "provider", stringValue(env, provider));
   set(env, result, "defaultInputUid",
-      stringValue(env, inventory.defaultInputUid));
+      stringValue(env, exposedUid(inventory.defaultInputUid)));
   set(env, result, "defaultOutputUid",
-      stringValue(env, inventory.defaultOutputUid));
+      stringValue(env, exposedUid(inventory.defaultOutputUid)));
   napi_value devices;
   napi_create_array_with_length(env, inventory.devices.size(), &devices);
   for (size_t index = 0; index < inventory.devices.size(); ++index) {
     const singz::AudioHostDeviceInfo& source = inventory.devices[index];
     napi_value device;
     napi_create_object(env, &device);
-    set(env, device, "uid", stringValue(env, source.uid));
+    set(env, device, "uid", stringValue(env, exposedUid(source.uid)));
     set(env, device, "label", stringValue(env, source.label));
     set(env, device, "defaultInput", boolValue(env, source.defaultInput));
     set(env, device, "defaultOutput", boolValue(env, source.defaultOutput));
@@ -926,6 +1073,7 @@ napi_value endMonitor(napi_env env, napi_callback_info info) {
 }
 
 void cleanup(void*) {
+  singz::cleanupPlaybackBridge();
   std::lock_guard<std::mutex> lock(owner.mutex);
   stopLocked(owner.generation, true);
   const auto status = monitor.status();
@@ -945,6 +1093,7 @@ napi_value init(napi_env env, napi_value exports) {
       {"cancelCapture", nullptr, cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureState", nullptr, state, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureStats", nullptr, stats, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"audioHostProviders", nullptr, audioHostProviders, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostDevices", nullptr, audioHostDevices, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"beginMonitor", nullptr, beginMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"setMonitorGain", nullptr, setMonitorGain, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -952,6 +1101,8 @@ napi_value init(napi_env env, napi_value exports) {
       {"endMonitor", nullptr, endMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
+  singz::definePlaybackExports(env, exports, &nativeAudioOwnership,
+                               playbackBackend);
   // Build identity: the loader refuses an addon whose Electron differs from
   // the running process, and the source stamp names exactly which tree built
   // this binary — the vendored-binary-matches-this-build rule, addon edition.

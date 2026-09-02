@@ -277,6 +277,27 @@ ASIO remains a distinct future provider behind the existing fail-loud SDK/legal
 gate (`SINGZ_ENABLE_ASIO` plus a separately obtained `SINGZ_ASIO_SDK_DIR`). It
 must not be implemented as a fallback hidden inside WASAPI.
 
+The repository now contains only the SDK-free provider seam: an
+`AsioDriverApi` boundary, an `AudioHostBackend` adapter, and an explicit
+`Wasapi`/`Asio` selector exercised with a fake driver. Shipping builds still
+compile no Steinberg source and report ASIO as not compiled/not available with
+the licensing reason above. A future separately licensed adapter must satisfy
+that seam; an explicit ASIO request is never redirected to WASAPI.
+
+The desktop Settings audio page persists the native song-output choice as
+either **System audio (WASAPI)** or **ASIO**. Provider discovery crosses the
+Electron bridge before the choice is offered: `not-compiled` and
+`runtime-unavailable` are stable typed states, and the accompanying SDK/legal
+or driver reason is shown in Settings. An unavailable ASIO choice fails closed;
+it does not reopen the same request through WASAPI.
+
+Windows playback inventories are provider-scoped. Their public endpoint IDs
+are tagged (`wasapi:<endpoint>` or `asio:<driver>`), and native prepare accepts
+only an ID carrying the requested provider's tag before stripping it at the
+zcore boundary. A WASAPI endpoint therefore cannot accidentally be handed to
+an ASIO backend (or vice versa). CoreAudio and non-Windows monitoring retain
+their existing identities and provider behavior.
+
 The portable FIFO hot methods are required members of the callback policy scan.
 Its prepared owning header remains outside that token scan because it contains
 off-RT vectors. The Windows event-loop bodies still share the large provider

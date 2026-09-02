@@ -128,13 +128,38 @@ const api: SingzApi = {
     return () => ipcRenderer.removeListener('capture:window', listener)
   },
 
-  audioHostDevices: () => ipcRenderer.invoke('audio-host:devices'),
+  audioHostDevices: (provider) => ipcRenderer.invoke('audio-host:devices', provider),
   beginMonitor: (config) => ipcRenderer.invoke('audio-host:monitor-begin', config),
   setMonitorGain: (ownershipGeneration, gainDb, enabled) =>
     ipcRenderer.invoke('audio-host:monitor-gain', ownershipGeneration, gainDb, enabled),
   monitorStatus: () => ipcRenderer.invoke('audio-host:monitor-status'),
   endMonitor: (ownershipGeneration) =>
     ipcRenderer.invoke('audio-host:monitor-end', ownershipGeneration),
+
+  desktopPlaybackProviders: () => ipcRenderer.invoke('audio-host:playback-providers'),
+  desktopPlaybackCapability: () => ipcRenderer.invoke('audio-host:playback-capability'),
+  prepareDesktopPlayback: (config, lanes) =>
+    ipcRenderer.invoke('audio-host:playback-prepare', config, lanes),
+  openDesktopPlayback: (generation) => ipcRenderer.invoke('audio-host:playback-open', generation),
+  startDesktopPlayback: (generation) => ipcRenderer.invoke('audio-host:playback-start', generation),
+  pauseDesktopPlayback: (generation) => ipcRenderer.invoke('audio-host:playback-pause', generation),
+  resumeDesktopPlayback: (generation) => ipcRenderer.invoke('audio-host:playback-resume', generation),
+  stopDesktopPlayback: (generation) => ipcRenderer.invoke('audio-host:playback-stop', generation),
+  seekDesktopPlayback: (generation, projectFrame) =>
+    ipcRenderer.invoke('audio-host:playback-seek', generation, projectFrame),
+  setDesktopPlaybackLoop: (generation, startFrame, endFrame) =>
+    ipcRenderer.invoke('audio-host:playback-loop-set', generation, startFrame, endFrame),
+  clearDesktopPlaybackLoop: (generation) =>
+    ipcRenderer.invoke('audio-host:playback-loop-clear', generation),
+  reanchorDesktopPlayback: (generation) =>
+    ipcRenderer.invoke('audio-host:playback-reanchor', generation),
+  setDesktopPlaybackLane: (generation, id, gain, muted, solo) =>
+    ipcRenderer.invoke('audio-host:playback-lane', generation, id, gain, muted, solo),
+  setDesktopPlaybackMasterGain: (generation, gain) =>
+    ipcRenderer.invoke('audio-host:playback-master', generation, gain),
+  desktopPlaybackStatus: () => ipcRenderer.invoke('audio-host:playback-status'),
+  unloadDesktopPlayback: (generation) =>
+    ipcRenderer.invoke('audio-host:playback-unload', generation),
 
   listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
   startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
@@ -187,6 +212,11 @@ const api: SingzApi = {
 
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings),
+
+  readProjectGraph: (songPath) => ipcRenderer.invoke('project:graph-read', songPath),
+
+  writeProjectGraph: (songPath, text) =>
+    ipcRenderer.invoke('project:graph-write', songPath, text),
 
   listProjects: () => ipcRenderer.invoke('projects:list'),
 

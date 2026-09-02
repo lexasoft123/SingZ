@@ -20,6 +20,7 @@
  * pre-sign raw SHA still matches.
  */
 const { execFileSync } = require('node:child_process')
+const fs = require('node:fs')
 const path = require('node:path')
 const { Arch } = require('builder-util')
 const { verifyCaptureSnapshot } = require('./capture-artifact.cjs')
@@ -79,10 +80,32 @@ function verifyCopiedCapture(context, overrides = {}) {
   return layout
 }
 
+/** Worktree setup deliberately links vendor/ to the main checkout. Builder
+ * preserves a linked engine file as an absolute symlink, which codesign
+ * rejects as an invalid bundle destination. The packaged app must own the
+ * immutable engine bytes regardless of how the source checkout shares them. */
+function materializeLinkedEngines(engines) {
+  if (!fs.existsSync(engines)) return
+  for (const entry of fs.readdirSync(engines, { withFileTypes: true })) {
+    const destination = path.join(engines, entry.name)
+    if (!fs.lstatSync(destination).isSymbolicLink()) continue
+    const source = fs.realpathSync(destination)
+    const stat = fs.statSync(source)
+    if (!stat.isFile()) {
+      throw new Error(`Packaged engine symlink is not a file: ${destination}`)
+    }
+    fs.unlinkSync(destination)
+    fs.copyFileSync(source, destination)
+    fs.chmodSync(destination, stat.mode)
+  }
+}
+
 async function afterPack(context) {
   // Verify the bytes electron-builder actually copied, not merely the mutable
   // source snapshot checked before packaging. This closes the final check/copy
   // race and runs on both desktop platforms and every universal stage.
+  const candidate = copiedCaptureLayout(context)
+  materializeLinkedEngines(candidate.engines)
   const layout = verifyCopiedCapture(context)
   if (layout.platform !== 'darwin') return
   // electron-builder calls afterPack for both thin temporary apps before
@@ -103,3 +126,4 @@ async function afterPack(context) {
 module.exports = afterPack
 module.exports.copiedCaptureLayout = copiedCaptureLayout
 module.exports.verifyCopiedCapture = verifyCopiedCapture
+module.exports.materializeLinkedEngines = materializeLinkedEngines

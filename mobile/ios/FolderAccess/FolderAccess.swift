@@ -817,6 +817,7 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
         try self.install(tmp, at: out)
         resolve(true)
       } catch {
+        try? self.fm.removeItem(at: tmp)
         reject("write", "Cannot write \(file)", error)
       }
     }

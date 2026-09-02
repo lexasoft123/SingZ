@@ -1,7 +1,9 @@
 const { createHash, randomBytes } = require('node:crypto')
-const { copyFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync } = require('node:fs')
+const {
+  copyFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync
+} = require('node:fs')
 const { spawnSync } = require('node:child_process')
-const { join } = require('node:path')
+const { dirname, join } = require('node:path')
 const { tmpdir } = require('node:os')
 
 function sha256File(path) {
@@ -302,6 +304,35 @@ function packageRoot(root, target) {
 
 function readManifest(path) {
   const value = JSON.parse(readFileSync(path, 'utf8'))
+  const codecComponents = value?.codecRuntime?.libraries?.map((row) => row?.component).sort()
+  const codecPackBindingValid = value?.codecRuntime === undefined ||
+    (/^[0-9a-f]{64}$/.test(value.codecRuntime.packManifestSha256 || '') &&
+      value.codecRuntime.sourcePackManifestSha256 === undefined) ||
+    (value.codecRuntime.packManifestSha256 === undefined &&
+      Array.isArray(value.codecRuntime.sourcePackManifestSha256) &&
+      value.codecRuntime.sourcePackManifestSha256.length === 2 &&
+      value.codecRuntime.sourcePackManifestSha256.every(
+        (sha) => /^[0-9a-f]{64}$/.test(sha)
+      ) && new Set(value.codecRuntime.sourcePackManifestSha256).size === 2)
+  const codecRuntimeValid = value?.codecRuntime === undefined || (
+    value.codecRuntime?.format === 1 &&
+    typeof value.codecRuntime.profile === 'string' &&
+    typeof value.codecRuntime.target === 'string' &&
+    /^0x[0-9a-f]{8}$/.test(value.codecRuntime.capabilityMask) &&
+    codecPackBindingValid &&
+    JSON.stringify(codecComponents) ===
+      JSON.stringify(['avcodec', 'avformat', 'avutil', 'swresample']) &&
+    value.codecRuntime.libraries.every((row) =>
+      typeof row.path === 'string' && row.path.length > 0 &&
+      !row.path.startsWith('/') && !row.path.includes('\\') &&
+      !row.path.split('/').includes('..') &&
+      Number.isSafeInteger(row.bytes) && row.bytes > 0 &&
+      /^[0-9a-f]{64}$/.test(row.sha256) &&
+      (value.platform === 'darwin'
+        ? /^[0-9a-f]{64}$/.test(row.machCanonicalSha256)
+        : row.machCanonicalSha256 === undefined)
+    )
+  )
   if (
     value?.format !== 1 ||
     typeof value.target !== 'string' ||
@@ -313,7 +344,8 @@ function readManifest(path) {
     (value.platform === 'darwin' && !/^[0-9a-f]{64}$/.test(value.machCanonicalSha256)) ||
     (value.platform !== 'darwin' && value.machCanonicalSha256 !== undefined) ||
     !/^[0-9a-z-]{8,80}$/.test(value.generation) ||
-    value.addon !== 'singz-capture.node'
+    value.addon !== 'singz-capture.node' ||
+    !codecRuntimeValid
   ) {
     throw new Error(`Invalid capture artifact manifest: ${path}`)
   }
@@ -383,6 +415,7 @@ function verifyCaptureArtifact({
   expectedTargets,
   electronVersion,
   expectedSourceStamp,
+  expectedCodecPackManifestSha256,
   verifyBinary = true,
   allowSignedMacMutation = false,
   hostPlatform = process.platform,
@@ -409,6 +442,18 @@ function verifyCaptureArtifact({
     throw new Error(
       `Capture artifact source ${manifest.sourceStamp}, expected ${expectedSourceStamp}`
     )
+  }
+  if (expectedCodecPackManifestSha256 &&
+      manifest.codecRuntime?.packManifestSha256 !== expectedCodecPackManifestSha256) {
+    throw new Error(
+      `Capture artifact codec pack ${manifest.codecRuntime?.packManifestSha256 || 'is missing'}, ` +
+      `expected ${expectedCodecPackManifestSha256}`
+    )
+  }
+  // null (as opposed to undefined) means the caller is building the base
+  // decoder: an artifact that links a codec pack is not that build.
+  if (expectedCodecPackManifestSha256 === null && manifest.codecRuntime !== undefined) {
+    throw new Error('Capture artifact links a codec pack, but this build wants the base decoder')
   }
   let publishedSource = ''
   let publishedChecksum = ''
@@ -439,6 +484,25 @@ function verifyCaptureArtifact({
       verifySignedMac(addonPath)
     if (!acceptsSignedMutation) {
       throw new Error(`Capture artifact is incomplete or corrupt: ${addonPath}`)
+    }
+  }
+  for (const library of manifest.codecRuntime?.libraries || []) {
+    const libraryPath = join(dirname(addonPath), library.path)
+    let actual
+    try {
+      if (statSync(libraryPath).size !== library.bytes)
+        throw new Error('size differs')
+      actual = sha256File(libraryPath)
+    } catch {
+      throw new Error(`Capture FFmpeg runtime is incomplete or corrupt: ${libraryPath}`)
+    }
+    if (actual !== library.sha256) {
+      const acceptsSignedMutation =
+        allowSignedMacMutation && hostPlatform === 'darwin' &&
+        manifest.platform === 'darwin' && verifySignedMac(libraryPath) &&
+        canonicalMacDigest(libraryPath) === library.machCanonicalSha256
+      if (!acceptsSignedMutation)
+        throw new Error(`Capture FFmpeg runtime is incomplete or corrupt: ${libraryPath}`)
     }
   }
   if (verifyBinary) validateCaptureBinary(addonPath, manifest.target)

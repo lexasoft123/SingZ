@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -27,15 +28,13 @@ import {
   analysisIsStale,
   BEAT_DETECT_VERSION,
   KEY_DETECT_VERSION,
-  detectBeats,
   estimateKey,
-  estimateKeyFromStems,
   gridFromDetection,
   sanitizeKeyInfo,
   type DetectedBeats,
-  type KeyGuess,
-  type MlGrid
-} from './audio/analysis'
+  type KeyGuess
+} from './audio/analysis-contract'
+import type { MlGrid } from './audio/analysis'
 import {
   clearUserBar,
   MET_DEFAULTS,
@@ -93,6 +92,7 @@ import Transport from './components/Transport'
 import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
 import { blocksSongTransportShortcut } from './keyboard'
+import { playbackErrorToast } from './playback-error-toast'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
   restoreDesktopTrainingPracticeSettings
@@ -128,6 +128,10 @@ import {
   type DesktopTrainingSetup,
   type LoadedSongIdentity
 } from './training-ui-state'
+
+let analysisRuntimePromise: Promise<typeof import('./audio/analysis')> | null = null
+const loadAnalysisRuntime = (): Promise<typeof import('./audio/analysis')> =>
+  analysisRuntimePromise ??= import('./audio/analysis')
 
 // These dialogs are opened on demand and have no app-lifetime audio owner.
 // Each generic dialog gets two distinct Rollup module identities because a
@@ -489,7 +493,7 @@ function publishBeatDbg(
     lineStarts: number[] | null
     ml: MlGrid | null | undefined
   },
-  det: ReturnType<typeof detectBeats>,
+  det: DetectedBeats | null,
   dbg: Record<string, unknown>
 ): void {
   const stat = (b: AudioBuffer | null): { sr: number; n: number; ch: number } | null =>
@@ -520,7 +524,7 @@ function publishBeatDbg(
 function makeTrack(
   id: string,
   buffer: AudioBuffer,
-  over?: Partial<Pick<UITrack, 'label' | 'color' | 'custom'>>
+  over?: Partial<Pick<UITrack, 'label' | 'color' | 'custom' | 'sourcePath'>>
 ): UITrack {
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
   const { peaks, scale } = computePeaks(buffer)
@@ -681,6 +685,12 @@ export default function App(): React.JSX.Element {
   } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
+  const [nativePlaybackLeaseBlocked, setNativePlaybackLeaseBlocked] = useState(false)
+  const enginePlaybackErrorRef = useRef(engine.playbackError)
+  const [enginePlaybackToast, setEnginePlaybackToast] = useState(
+    () => playbackErrorToast(engine.playbackError)
+  )
+  const visibleError = error ?? enginePlaybackToast?.message ?? null
   const [dragDepth, setDragDepth] = useState(0)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
   const [dirty, setDirty] = useState(false)
@@ -828,6 +838,13 @@ export default function App(): React.JSX.Element {
   beatInfoRef.current = beatInfo
   const drumsBufRef = useRef<AudioBuffer | null>(null)
   const loadSeq = useRef(0)
+  const beatMutationSeq = useRef(0)
+  const metronomeMutationSeq = useRef(0)
+  const regionMutationSeq = useRef(0)
+  const trainingMutationSeq = useRef(0)
+  const pitchTempoMutationSeq = useRef(0)
+  const acceptedRegionUiRef = useRef({ selection, loopOn })
+  const acceptedTrainingUiRef = useRef({ enabled: training, config: trainCfg })
   const songLoadRequests=useRef(new SongLoadRequestEpoch())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const trackInputRef = useRef<HTMLInputElement>(null)
@@ -921,7 +938,14 @@ export default function App(): React.JSX.Element {
   // Device picks and the output level follow the machine, not the song.
   useEffect(() => {
     localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
+    localStorage.setItem('singz.desktop.native-playback', audioPrefs.nativePlayback ? '1' : '0')
   }, [audioPrefs])
+
+  // AudioPrefs is the provider source of truth. Inject it before browser
+  // events can start playback; the engine never restores a parallel mirror.
+  useLayoutEffect(() => {
+    engine.setNativeAudioProvider(audioPrefs.nativeAudioProvider ?? 'wasapi')
+  }, [audioPrefs.nativeAudioProvider, engine])
 
   const masterVol = audioPrefs.master ?? 1
   useEffect(() => {
@@ -1126,11 +1150,28 @@ export default function App(): React.JSX.Element {
   }, [monitorCoordinator])
 
   useEffect(() => {
-    engine.setBeats(beatInfo)
+    const mutation = ++beatMutationSeq.current
+    const songVersion = loadSeq.current
+    const songEpoch = engine.songEpoch
+    void engine.setBeats(beatInfo).catch((error) => {
+      if (mutation !== beatMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
+      const accepted = engine.beats
+      beatInfoRef.current = accepted
+      setBeatInfo(accepted)
+      setSongInfo((current) => ({ ...current, bpm: accepted?.bpm ?? null }))
+      setNotice(`The native beat-grid update was not applied: ${String(error)}`)
+    })
   }, [engine, beatInfo])
 
   useEffect(() => {
-    engine.setMetronome(metCfg)
+    const mutation = ++metronomeMutationSeq.current
+    const songVersion = loadSeq.current
+    const songEpoch = engine.songEpoch
+    void engine.setMetronome(metCfg).catch((error) => {
+      if (mutation !== metronomeMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
+      setMetCfg(engine.metronome)
+      setNotice(`The native metronome update was not applied: ${String(error)}`)
+    })
   }, [engine, metCfg])
 
   // Mirror the engine's ducked set (lane dimming + the pulsing train button).
@@ -1159,7 +1200,23 @@ export default function App(): React.JSX.Element {
     }
   }, [selection, loopOn, song])
 
-  useEffect(() => engine.subscribe(() => setPlaying(engine.playing)), [engine])
+  useEffect(() => engine.subscribe(() => {
+    setPlaying(engine.playing)
+    setNativePlaybackLeaseBlocked(engine.nativeMonitorOwnsOutput)
+    const playbackError = engine.playbackError
+    if (playbackError !== enginePlaybackErrorRef.current) {
+      enginePlaybackErrorRef.current = playbackError
+      // A successful provider retry publishes null and removes only the
+      // engine-owned recovery toast. Independent app failures remain intact.
+      setEnginePlaybackToast(playbackErrorToast(playbackError))
+    }
+  }), [engine])
+
+  useEffect(() => () => {
+    void engine.teardown().catch((error) => {
+      console.error('Native playback teardown remains incomplete:', error)
+    })
+  }, [engine])
 
   useEffect(() => {
     void window.singz.updateStateNow().then(setUpdate)
@@ -1234,6 +1291,7 @@ export default function App(): React.JSX.Element {
           return
         }
         if (selectionRef.current) {
+          regionMutationSeq.current++
           setSelection(null)
           setSaveState((st) => (st === 'saved' ? 'idle' : st))
           return
@@ -1293,6 +1351,10 @@ export default function App(): React.JSX.Element {
       setAppSection('songs')
       setShowCatalog(false)
       const seq = ++loadSeq.current
+      // Native goes first: every control reset below would otherwise be a
+      // structural rebuild of the song being left (and a failed one rolls
+      // that song's grid into this one).
+      engine.retireForSongSwitch()
       await window.singz.cancelSeparation()
       if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
       await window.singz.cancelLyrics()
@@ -1350,7 +1412,12 @@ export default function App(): React.JSX.Element {
         for (const c of defs ?? []) {
           try {
             const buf = await engine.decode(await window.singz.readAudio(c.file))
-            out.push(makeTrack(c.id, buf, { label: c.label, color: c.color, custom: { file: c.file } }))
+            out.push(makeTrack(c.id, buf, {
+              label: c.label,
+              color: c.color,
+              custom: { file: c.file },
+              sourcePath: c.file
+            }))
           } catch {
             setNotice(`“${c.label}” could not be read — that lane is missing from the mix.`)
           }
@@ -1370,7 +1437,20 @@ export default function App(): React.JSX.Element {
           engine.setVolume(t.id, s.volume)
         }
       }
+      let projectGraphModule: typeof import('./audio/desktop-project-graph') | null = null
       try {
+        projectGraphModule = reg.project
+          ? await import('./audio/desktop-project-graph')
+          : null
+        if (seq !== loadSeq.current || !songLoadRequests.current.isAccepted(request)) return
+        const loadedGraph = reg.project && projectGraphModule
+          ? await projectGraphModule.loadDesktopProjectGraph(
+              () => window.singz.readProjectGraph(reg.path),
+              () => seq === loadSeq.current && songLoadRequests.current.isAccepted(request)
+            )
+          : { accepted: true as const, graphDocument: null }
+        if (!loadedGraph.accepted) return
+        const graphDocument = loadedGraph.graphDocument
         // Saved project with stems: load them directly and restore settings.
         if (reg.project?.stems) {
           const proj = reg.project
@@ -1390,11 +1470,14 @@ export default function App(): React.JSX.Element {
           // Tracks the singer added themselves decode after the stems and sit
           // below them; one that no longer decodes must not sink the song.
           const lanes = [
-            ...order.map((s, i) => makeTrack(s, buffers[i])),
+            ...order.map((s, i) => makeTrack(s, buffers[i], { sourcePath: stems[s] })),
             ...(await decodeCustom(proj.settings.custom))
           ]
           if (seq !== loadSeq.current) return
-          engine.load(lanes.map((t) => ({ id: t.id, buffer: t.buffer })))
+          engine.load(
+            lanes.map((t) => ({ id: t.id, buffer: t.buffer, path: t.sourcePath })),
+            { graphDocument }
+          )
           applySavedMix(lanes, proj.settings.tracks)
           setTracks(lanes)
           setSplit(true)
@@ -1507,11 +1590,14 @@ export default function App(): React.JSX.Element {
         // A project saved before it was ever split has no stems, but it can
         // still carry tracks the singer added — those lanes come back here.
         const lanes = [
-          makeTrack('original', audio),
+          makeTrack('original', audio, { sourcePath: reg.path }),
           ...(await decodeCustom(reg.project?.settings.custom))
         ]
         if (seq !== loadSeq.current) return
-        engine.load(lanes.map((t) => ({ id: t.id, buffer: t.buffer })))
+        engine.load(
+          lanes.map((t) => ({ id: t.id, buffer: t.buffer, path: t.sourcePath })),
+          { graphDocument }
+        )
         applySavedMix(lanes, reg.project?.settings.tracks)
         setTracks(lanes)
         try {
@@ -1538,7 +1624,12 @@ export default function App(): React.JSX.Element {
         setPhase('empty')
         setSong(null)
         setTracks([])
-        setError('Could not decode that audio file.')
+        setError(
+          projectGraphModule !== null &&
+          err instanceof projectGraphModule.DesktopProjectGraphLoadError
+            ? `Could not load this project’s DSP graph. ${err.message}`
+            : 'Could not decode that audio file.'
+        )
       }
     },
     [engine, trainingCleanupCoordinator, trainingCues, trainingMic]
@@ -1596,7 +1687,7 @@ export default function App(): React.JSX.Element {
       const position = engine.position
       const play = engine.playing
       engine.load(
-        list.map((t) => ({ id: t.id, buffer: t.buffer })),
+        list.map((t) => ({ id: t.id, buffer: t.buffer, path: t.sourcePath })),
         { position, play }
       )
       for (const t of list) {
@@ -1659,7 +1750,7 @@ export default function App(): React.JSX.Element {
       const { order, buffers } = audibleStems(rawOrder, decoded)
       // The stems replace the full-mix lane; tracks the singer added stay.
       loadLanes([
-        ...order.map((s, i) => makeTrack(s, buffers[i])),
+        ...order.map((s, i) => makeTrack(s, buffers[i], { sourcePath: stems[s] })),
         ...tracksRef.current.filter((t) => t.custom)
       ])
       setStemFiles(stems)
@@ -1756,7 +1847,8 @@ export default function App(): React.JSX.Element {
             makeTrack(id, buf, {
               label: trackLabel(reg.name),
               color: CUSTOM_COLORS[(customSoFar + added.length) % CUSTOM_COLORS.length],
-              custom: { file: reg.path }
+              custom: { file: reg.path },
+              sourcePath: reg.path
             })
           )
         } catch {
@@ -1948,6 +2040,8 @@ export default function App(): React.JSX.Element {
       // let the melody paint before the synchronous chroma pass blocks
       await new Promise((r) => setTimeout(r, 30))
       if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+      const { estimateKeyFromStems } = await loadAnalysisRuntime()
+      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed while loading detector
       const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
       ;(window as { __keySrc?: string }).__keySrc = stems ? 'ts' : 'melody-histogram'
       // A melody-histogram fallback is displayed but never stored under
@@ -2027,6 +2121,8 @@ export default function App(): React.JSX.Element {
                   async () => ({ ml, lineStarts: aux.lineStarts, words: aux.words })
                 )
             if (drumsBufRef.current !== drums) return // song changed mid-flight
+            const { detectBeats, estimateKeyFromStems } = await loadAnalysisRuntime()
+            if (drumsBufRef.current !== drums) return // song changed while loading detector
             const det = core.beats !== undefined ? core.beats : detectBeats(stems.drums, aux, dbg)
             publishBeatDbg('auto', core.beats !== undefined ? 'core' : 'ts', stems.drums, aux, det, dbg)
             if (keyWanted) {
@@ -2068,6 +2164,7 @@ export default function App(): React.JSX.Element {
               //   `fresh || stale` gate above only sampled it seconds ago.
               const live = beatInfoRef.current
               if (!live || live.source === 'auto') {
+                beatMutationSeq.current++
                 setBeatInfo((prev) => (prev && prev.source !== 'auto' ? prev : gridFromDetection(det, prev)))
                 if (stale) touchSettings()
                 setSongInfo((s) => ({ ...s, bpm: det.bpm }))
@@ -2489,11 +2586,22 @@ export default function App(): React.JSX.Element {
   const handleTranspose = useCallback(
     (st: number) => {
       const clamped = Math.max(-12, Math.min(12, st))
+      const mutation = ++pitchTempoMutationSeq.current
+      const songVersion = loadSeq.current
+      const songEpoch = engine.songEpoch
       touchSettings()
       setTranspose(clamped)
       // Re-sync afterwards: if the stretch worklet fails, the engine reverts
       // to 0 and the badge must not keep promising a shift that isn't heard.
-      void engine.setTranspose(clamped).finally(() => setTranspose(engine.transpose))
+      void engine.setTranspose(clamped).catch((error) => {
+        if (mutation === pitchTempoMutationSeq.current && songVersion === loadSeq.current && songEpoch === engine.songEpoch) {
+          setNotice(`The native transpose update was not applied: ${String(error)}`)
+        }
+      }).finally(() => {
+        if (mutation !== pitchTempoMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
+        setTranspose(engine.transpose)
+        setTempoRate(engine.tempo)
+      })
     },
     [engine, touchSettings]
   )
@@ -2501,18 +2609,29 @@ export default function App(): React.JSX.Element {
   // Selection/loop region: with loop the region repeats; without it,
   // playback started inside the selection stops at its end.
   useEffect(() => {
-    engine.setRegion(
-      selection
-        ? { start: selection.s, end: selection.e }
-        : loopOn
-          ? { start: 0, end: engine.duration }
-          : null,
-      loopOn
-    )
+    const mutation = ++regionMutationSeq.current
+    const songVersion = loadSeq.current
+    const songEpoch = engine.songEpoch
+    const requested = selection
+      ? { start: selection.s, end: selection.e }
+      : loopOn
+        ? { start: 0, end: engine.duration }
+        : null
+    void engine.setRegion(requested, loopOn).then(() => {
+      if (mutation !== regionMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
+      acceptedRegionUiRef.current = { selection, loopOn }
+    }).catch((error) => {
+      if (mutation !== regionMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
+      const accepted = acceptedRegionUiRef.current
+      setSelection(accepted.selection)
+      setLoopOn(accepted.loopOn)
+      setNotice(`The native loop update was not applied: ${String(error)}`)
+    })
   }, [engine, loopOn, selection, tracks])
 
   const handleSelection = useCallback(
     (sel: { s: number; e: number } | null) => {
+      regionMutationSeq.current++
       touchSettings()
       setSelection(sel)
     },
@@ -2561,7 +2680,7 @@ export default function App(): React.JSX.Element {
       if (dir !== projectDir) return
       loadSeq.current++ // anything still in flight for that song lands nowhere
       engine.pause()
-      engine.load([])
+      engine.load([], { graphDocument: null })
       setSong(null)
       setTracks([])
       setStemFiles(null)
@@ -2581,6 +2700,7 @@ export default function App(): React.JSX.Element {
   )
 
   const toggleLoop = useCallback(() => {
+    regionMutationSeq.current++
     touchSettings()
     setLoopOn((on) => {
       const next = !on
@@ -2594,6 +2714,7 @@ export default function App(): React.JSX.Element {
 
   const handleMetCfg = useCallback(
     (m: MetronomeConfig) => {
+      metronomeMutationSeq.current++
       touchSettings()
       setMetCfg(m)
     },
@@ -2602,6 +2723,7 @@ export default function App(): React.JSX.Element {
 
   const handleBeat = useCallback(
     (g: BeatInfo) => {
+      beatMutationSeq.current++
       touchSettings()
       setBeatInfo(g)
       setSongInfo((s) => ({ ...s, bpm: g.bpm }))
@@ -2621,12 +2743,14 @@ export default function App(): React.JSX.Element {
   // — without waiting for a manual save. A correction the singer made and
   // then lost by closing the song is worse than never offering the edit.
   const handleMoveBar = useCallback((fromT: number, toT: number) => {
+    beatMutationSeq.current++
     touchSettings()
     setBeatInfo((g) => (g ? setUserBar(g, toT, fromT) : g))
     setAnalysisAutoSave(true)
   }, [touchSettings])
 
   const handleClearBar = useCallback((t: number) => {
+    beatMutationSeq.current++
     touchSettings()
     setBeatInfo((g) => (g ? clearUserBar(g, t) : g))
     setAnalysisAutoSave(true)
@@ -2711,9 +2835,12 @@ export default function App(): React.JSX.Element {
           async () => ({ ml: ml ?? null, lineStarts: aux.lineStarts, words: aux.words })
         )
         if (drumsBufRef.current !== buf) return // song changed mid-flight
+        const { detectBeats } = await loadAnalysisRuntime()
+        if (drumsBufRef.current !== buf) return // song changed while loading detector
         const det = core.beats !== undefined ? core.beats : detectBeats(stems.drums, aux, dbg)
         publishBeatDbg('redetect', core.beats !== undefined ? 'core' : 'ts', stems.drums, aux, det, dbg)
         if (det) {
+          beatMutationSeq.current++
           touchSettings()
           // The singer's bar lines ride across, re-folded onto the new beat
           // array — same conversion as the automatic pass, because it is the
@@ -2734,9 +2861,17 @@ export default function App(): React.JSX.Element {
   const handleTempo = useCallback(
     (rate: number) => {
       const clamped = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
+      const mutation = ++pitchTempoMutationSeq.current
+      const songVersion = loadSeq.current
+      const songEpoch = engine.songEpoch
       touchSettings()
       setTempoRate(clamped)
-      void engine.setTempo(clamped).finally(() => {
+      void engine.setTempo(clamped).catch((error) => {
+        if (mutation === pitchTempoMutationSeq.current && songVersion === loadSeq.current && songEpoch === engine.songEpoch) {
+          setNotice(`The native tempo update was not applied: ${String(error)}`)
+        }
+      }).finally(() => {
+        if (mutation !== pitchTempoMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
         setTempoRate(engine.tempo)
         setTranspose(engine.transpose)
       })
@@ -2749,6 +2884,7 @@ export default function App(): React.JSX.Element {
 
   /** Arm/disarm vocal training; arming un-mutes the stems it alternates. */
   const toggleTraining = useCallback(() => {
+    trainingMutationSeq.current++
     touchSettings()
     const arming = !trainingRef.current
     if (arming) {
@@ -2762,6 +2898,7 @@ export default function App(): React.JSX.Element {
 
   const handleTrainCfg = useCallback(
     (cfg: TrainingConfig) => {
+      trainingMutationSeq.current++
       touchSettings()
       setTrainCfg(cfg)
       // Line mode needs the lyrics — fetch them if nothing has yet (no-op
@@ -2774,19 +2911,29 @@ export default function App(): React.JSX.Element {
   // Push the training schedule into the engine. Line mode falls back to the
   // timer until synced lyrics are actually available.
   useEffect(() => {
-    if (!training || !split) {
-      engine.setTraining(null)
-      return
-    }
-    if (trainCfg.mode === 'lines' && lines && lines.length > 0) {
-      engine.setTraining({
-        mode: 'windows',
-        windows: trainingWindows(lines, trainCfg.hear, trainCfg.sing, engine.duration),
-        stems: trainCfg.stems
-      })
-    } else {
-      engine.setTraining({ mode: 'period', periodSec: trainCfg.periodSec, stems: trainCfg.stems })
-    }
+    const mutation = ++trainingMutationSeq.current
+    const songVersion = loadSeq.current
+    const songEpoch = engine.songEpoch
+    const spec = !training || !split
+      ? null
+      : trainCfg.mode === 'lines' && lines && lines.length > 0
+        ? {
+            mode: 'windows' as const,
+            windows: trainingWindows(lines, trainCfg.hear, trainCfg.sing, engine.duration),
+            stems: trainCfg.stems
+          }
+        : { mode: 'period' as const, periodSec: trainCfg.periodSec, stems: trainCfg.stems }
+    void engine.setTraining(spec).then(() => {
+      if (mutation !== trainingMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
+      acceptedTrainingUiRef.current = { enabled: training, config: trainCfg }
+    }).catch((error) => {
+      if (mutation !== trainingMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
+      const accepted = acceptedTrainingUiRef.current
+      trainingRef.current = accepted.enabled
+      setTraining(accepted.enabled)
+      setTrainCfg(accepted.config)
+      setNotice(`The native training update was not applied: ${String(error)}`)
+    })
   }, [engine, training, split, trainCfg, lines])
 
   /** Which lyric lines the singer carries alone (karaoke tints them). */
@@ -3321,13 +3468,13 @@ export default function App(): React.JSX.Element {
         </div>
       )}
 
-      {error && (
+      {visibleError && (
         <div className="toast" role="alert">
-          {error}
+          {visibleError}
         </div>
       )}
 
-      {notice && !error && <div className="toast ok">{notice}</div>}
+      {notice && !visibleError && <div className="toast ok">{notice}</div>}
 
       {trainingSaveError && (
         <div className="toast training-save-warning" role="alert">
@@ -3362,6 +3509,11 @@ export default function App(): React.JSX.Element {
           onChangeNativeMonitorOutput={changeNativeMonitorOutput}
           onChangeNativeMonitorOutputChannels={changeNativeMonitorOutputChannels}
           onChangeMonitorGain={changeMonitorGain}
+          onChangeNativePlayback={(enabled) =>
+            setAudioPrefs((prefs) => ({ ...prefs, nativePlayback: enabled }))}
+          onChangeNativeAudioProvider={(provider) =>
+            setAudioPrefs((prefs) => sanitizeAudioPrefs({ ...prefs, nativeAudioProvider: provider }))}
+          nativePlaybackLeaseBlocked={nativePlaybackLeaseBlocked}
           monitorCoordinator={monitorCoordinator}
           externalAudioLeaseBlocked={trainingCleanupPhase !== 'idle'}
           externalAudioLeaseCopy={TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY}

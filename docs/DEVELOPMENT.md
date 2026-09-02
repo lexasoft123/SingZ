@@ -139,8 +139,10 @@ and both are needed for Debug builds (`base_dir` alone was still 0%):
 | `compiler_check = content` | survives an Xcode/CLT update re-stamping clang (unrelated to worktrees, cheap) |
 
 They are passed **per build, never written to the machine's ccache config**:
-`vendor-whisper.sh` exports them, `run-with-ccache.js` puts them in the child
-env, and `mobile/scripts/ccache-xcode-conf.js` appends them to react-native's
+`vendor-whisper.sh` exports them, Android's all-project CMake prelude installs
+one env-carrying compiler launcher (`run-with-ccache.js` also puts the settings
+in the child env), and `mobile/scripts/ccache-xcode-conf.js` appends them to
+react-native's
 `scripts/xcode/ccache.conf` at postinstall — that last one because RN's
 `ccache-clang.sh` sets `CCACHE_CONFIGPATH` to that file, which *replaces* the
 machine's config (so `ccache --set-config` never reaches a pod build), and a
@@ -153,9 +155,145 @@ source file — invisible while they agree, confusing when they differ. Drop
 `CCACHE_NOHASHDIR` (or the conf line) if you are stepping through native code
 in two diverged worktrees at once.
 
-Running `mobile/android/gradlew` directly instead of `npm run android`? Prefix
-`CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
-CCACHE_BASEDIR=$PWD/../.. CCACHE_NOHASHDIR=1`.
+Running `mobile/android/gradlew` directly instead of `npm run android` is also
+cached: `mobile/scripts/android-cmake-init.cmake` is injected into the app and
+every native React Native dependency and applies the same checkout root,
+`hash_dir = false` and compiler-content identity without changing machine
+configuration. `org.gradle.workers.max=1` serializes AGP worker actions so
+native dependency modules cannot overlap. The one active Ninja graph gives
+compile and link edges one shared eight-process ceiling: four edges when
+ccache is present on POSIX because both ccache and the compiler match
+`ps ... | grep clang`, two on Windows where the PowerShell launcher remains
+resident too, otherwise eight. The POSIX launcher `exec`s ccache so it adds no
+third process line. ABIs and dependency modules therefore cannot multiply into
+dozens of simultaneous clang lines. We still run only one native build at a
+time across worktrees because separate Gradle processes cannot share a
+project-level worker limit.
+
+### Target-executed mobile codec proof
+
+The full custom-track codec promise is not certified by inspecting FFmpeg's
+configure string. Each mobile target executes the committed twelve-file corpus
+through the packaged zcore descriptor decoder, then hashes the actual loaded
+runtime, target binary, fixture bytes, selection receipt and exact normalized
+case output. Canonical inputs and expectations live in
+`tests/fixtures/codecs/{data,target-contract.json,target/}`. A normal app build
+contains neither the proof runner nor its fixtures.
+
+This is a serialized native gate. Before either command sequence, ensure no
+other native build is running; while it runs, sample
+`ps wuax | grep '[c]lang' | wc -l` and stop immediately above eight. Android's
+single Gradle worker and iOS `-jobs 4` retain the shared ccache policy described
+above.
+
+For one Android ABI, stage the configuration-only pack only into the explicit
+proof build, run just the proof instrumentation, and pull its target-written
+evidence:
+
+```bash
+cd mobile/android
+./gradlew --no-daemon --max-workers 1 \
+  -Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
+  -PreactNativeArchitectures=arm64-v8a -PsingzCodecTargetProof=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.singzplayer.CodecTargetProofInstrumentedTest \
+  :app:connectedDebugAndroidTest
+cd ../..
+node mobile/scripts/pull-codec-target-proof-android.mjs \
+  --serial emulator-5554 --target android-arm64-v8a \
+  --output build/codec-proof/android-arm64-v8a.raw.json
+node scripts/create-target-codec-proof-receipt.mjs \
+  --target android-arm64-v8a \
+  --evidence build/codec-proof/android-arm64-v8a.raw.json \
+  --output build/codec-proof/android-arm64-v8a.receipt.json
+```
+
+The proof Gradle task itself exports `SINGZ_CODEC_TARGET_PROOF=1` and invokes
+the selector/verifier with `--proof-staging --require-android-set <ABI>`. It
+requires exactly one configured ABI and refuses any task graph containing a
+Release task.
+
+Use the actual serial and matching ABI; repeat per ABI. As with every emulator
+driver, confirm the installed package is debuggable and its APK matches this
+tree before interpreting the result. Never install that debug APK over the
+user's same-application-id phone.
+
+For iOS, first compose the three verified slice packs into real dynamic
+framework XCFrameworks. Each `libav*` framework owns an
+`@rpath/libav*.framework/libav*` install name and framework-form dependencies;
+raw-dylib XCFrameworks are invalid here because CocoaPods cannot embed them in
+SingZ's otherwise-static React Native/Fabric/SingzCore/ORT Pods graph. The
+composer verifies the device and universal-simulator architectures, platform
+load commands, install names, dependency closure, headers and modules before
+publishing the immutable pack. Do not set `USE_FRAMEWORKS`: ONNX Runtime is a
+static XCFramework and target-wide dynamic Pods are not a coherent graph.
+
+Materialize the canonical proof sources/resources before the opt-in Pod
+install, select the XCFramework only in proof-staging mode, then build one
+exact simulator/device target:
+
+```bash
+SINGZ_CODEC_TARGET_PROOF=1 node scripts/compose-ffmpeg-ios-xcframeworks.mjs \
+  --proof-staging
+node mobile/scripts/prepare-codec-target-proof.mjs
+SINGZ_CODEC_TARGET_PROOF=1 node mobile/scripts/select-ffmpeg-codec-runtime.mjs \
+  --proof-staging --require-ios
+cd mobile/ios
+LANG=en_US.UTF-8 SINGZ_CODEC_TARGET_PROOF=1 pod install
+xcodebuild -workspace SingZPlayer.xcworkspace -scheme SingZPlayer \
+  -configuration Debug -destination 'id=<SIMULATOR-OR-DEVICE-UDID>' \
+  -jobs 4 build
+cd ../..
+DEVICE_NAME='<exact Metro deviceName>' METRO_PORT=8081 \
+  node mobile/tests/codec-target-ios.cjs \
+  build/codec-proof/ios-arm64.raw.json
+node scripts/create-target-codec-proof-receipt.mjs \
+  --target ios-arm64 \
+  --evidence build/codec-proof/ios-arm64.raw.json \
+  --output build/codec-proof/ios-arm64.receipt.json
+```
+
+Use `ios-simulator-arm64` or `ios-simulator-x64` for simulator evidence. The
+driver requires an exact `DEVICE_NAME` (or `SIM_UDID`) and refuses Metro's
+first arbitrary target. Device installation/signing remains a separate step;
+the receipt creator will reject evidence whose architecture/target disagree.
+
+`--proof-staging` is accepted only with `SINGZ_CODEC_TARGET_PROOF=1` and writes
+a selection receipt marked `target-proof-staging`; ordinary/release verification
+must reject that receipt. Only the promoted format-2 receipt can satisfy the
+pack/XCFramework `--require-full` gate. That promotion preserves the manifest
+that was actually executed, avoiding a circular hash when the receipt is
+attached to the final immutable pack.
+
+**The extended codecs are opt-in, and an ordinary build is the base decoder.**
+Every consumer of the packs — `mobile/scripts/select-ffmpeg-codec-runtime.mjs`
+and its verifier (run by the Android `preBuild` tasks and the iOS Podfile),
+the Android CMake, the `SingzCore` podspec and `scripts/build-capture-addon.cjs`
+— reads `SINGZ_FFMPEG_CODECS`:
+
+- `auto` (the default, and what CI runs with no pack at all): a target's pack
+  is selected and linked only when it carries full target fixture evidence.
+  Otherwise RNAudioAPI keeps its own compatibility `libav*`, zcore compiles
+  without `SINGZ_ZCORE_FFMPEG`, and the native session reports the base
+  `wav-flac-v1` capability, which both the desktop renderer and the phone
+  facade already accept: WAV/FLAC lanes play natively and other custom-track
+  codecs stay on the legacy engine. A configuration-only pack is never linked,
+  so the capability a build claims is exactly what was decoded on that target.
+  On Android the selection is all-or-nothing across the shipping ABI set — one
+  APK carries one codec capability.
+- `required`: the pre-existing fail-closed behaviour, for a release lane that
+  must ship the full matrix; a missing or unproven pack stops the build.
+- `off`: never select a pack, even a proven one.
+
+The first selection on a fresh dependency moves RNAudioAPI's original bytes to
+`node_modules/react-native-audio-api/.singz-compatibility-runtime/`, and a
+later run that selects nothing restores them and drops the receipt, so
+switching a machine between proven and base builds needs no network. A
+dependency that was replaced before that copy existed (a proof-staging install
+from before this rule) cannot be restored offline; the selector says so and
+points at `scripts/worktree-setup.sh`, which re-downloads the prebuilt
+binaries. The Gradle `-PsingzCodecTargetProof=true` harness and
+`SINGZ_CODEC_TARGET_PROOF=1 pod install` are `required`-strict regardless of
+the variable: the proof has to execute the staged pack it is proving.
 
 A system `demucs` (pipx) is the easiest dev splitter — the app auto-prefers
 it and no pack is needed. Otherwise build/install the pack for your platform:

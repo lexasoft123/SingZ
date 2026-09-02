@@ -98,6 +98,8 @@ NSString *playbackError(singz::NativePlaybackError error) {
     return @"queue-full";
   case singz::NativePlaybackError::TeardownUncertain:
     return @"teardown-uncertain";
+  case singz::NativePlaybackError::UnsupportedPlaybackRate:
+    return @"unsupported-playback-rate";
   }
   return @"provider-failure";
 }

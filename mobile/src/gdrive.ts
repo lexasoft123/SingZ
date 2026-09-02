@@ -4,6 +4,7 @@ import { fmtBytes, fmtMs, log } from './log'
 import { customTracks, STEM_ORDER_ALL } from './model'
 import type { ProjectDoc } from './model'
 import type { ProjectEntry } from './projects'
+import { md5Text } from './md5'
 
 /**
  * Google Drive as a project library — no Drive app needed on the phone. The
@@ -513,7 +514,7 @@ async function adopt(entries: ProjectEntry[]): Promise<ProjectEntry[]> {
 }
 
 /** What the desktop writes into catalog.json (format 2): one row per
- *  project — just project.json and lyrics.json with ids and md5s. The
+ *  project — project.json plus its small referenced documents with ids and md5s. The
  *  project's contents live in project.json itself. */
 interface CatalogManifest {
   format: number
@@ -605,7 +606,8 @@ async function manifestEntries(
       have &&
       row.get('project.json')?.md5Checksum !== undefined &&
       have.byName.get('project.json')?.md5Checksum === row.get('project.json')?.md5Checksum &&
-      (have.byName.get('lyrics.json')?.md5Checksum ?? '') === (row.get('lyrics.json')?.md5Checksum ?? '')
+      (have.byName.get('lyrics.json')?.md5Checksum ?? '') === (row.get('lyrics.json')?.md5Checksum ?? '') &&
+      (have.byName.get('graph.json')?.md5Checksum ?? '') === (row.get('graph.json')?.md5Checksum ?? '')
     if (same) out.push(prev)
     else changed.push({ row, dir: p.dir, dirId: folders.get(p.dir)!.id })
   }
@@ -622,8 +624,14 @@ async function manifestEntries(
     if (metaRes.status === 404) return null
     if (!metaRes.ok) throw new Error(`Drive API ${metaRes.status} reading ${c.dir}/project.json`)
     const text = await metaRes.text()
+    if (meta.size !== undefined && utf8Bytes(text) !== Number(meta.size)) {
+      throw new Error(`${c.dir}/project.json content size does not match Drive`)
+    }
+    if (meta.md5Checksum && md5Text(text) !== meta.md5Checksum) {
+      throw new Error(`${c.dir}/project.json content checksum does not match Drive`)
+    }
     const doc = JSON.parse(text) as ProjectDoc
-    void keepText(`${c.dir}/project.json`, text, meta.md5Checksum ?? '')
+    await keepText(`${c.dir}/project.json`, text, md5Text(text))
     const kid = await listChildren(c.dirId)
     const byName = new Map(kid.map((f) => [f.name, f]))
     const stemsDir = kid.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
@@ -677,7 +685,14 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
     })
     if (metaRes.status === 404) return null // deleted while we were listing
     if (!metaRes.ok) throw new Error(`Drive API ${metaRes.status} reading ${dir.name}/project.json`)
-    const doc = await metaRes.json()
+    const text = await metaRes.text()
+    if (meta.size !== undefined && utf8Bytes(text) !== Number(meta.size)) {
+      throw new Error(`${dir.name}/project.json content size does not match Drive`)
+    }
+    if (meta.md5Checksum && md5Text(text) !== meta.md5Checksum) {
+      throw new Error(`${dir.name}/project.json content checksum does not match Drive`)
+    }
+    const doc = JSON.parse(text)
     const stemsDir = kid.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
     const stemKids = stemsDir ? await listChildren(stemsDir.id) : []
     return buildEntry(dir.name, doc as ProjectDoc, byName, new Map(stemKids.map((f) => [f.name, f])))
@@ -773,12 +788,19 @@ type KeptText = string | { m: string; t: string }
 export async function driveReadText(
   project: string,
   file: string,
-  expectedMd5?: string
+  expectedMd5?: string,
+  expectedBytes?: number
 ): Promise<string> {
   const files = projectFiles.get(project)
   if (!files) throw new Error(`Project ${project} was not listed from Drive`)
   const entry = files.byName.get(file)
   if (!entry) throw new Error(`${file} is missing from Drive`)
+  if (expectedBytes !== undefined && Number(entry.size ?? -1) !== expectedBytes) {
+    throw new Error(`${file} size does not match project.json`)
+  }
+  if (expectedMd5 && entry.md5Checksum !== expectedMd5) {
+    throw new Error(`${file} checksum does not match project.json`)
+  }
   const key = `${project}/${file}`
   // project.json states what lyrics.json should be, the same way it states
   // every stem; the listing's own md5 answers for project.json itself.
@@ -786,7 +808,15 @@ export async function driveReadText(
   const kept = (await readJson<Record<string, KeptText>>(TEXT_KEY, {}))[key]
   const keptText = typeof kept === 'string' ? kept : kept?.t
   const keptMd5 = typeof kept === 'string' ? '' : (kept?.m ?? '')
-  if (keptText !== undefined && want !== '' && keptMd5 === want) return keptText
+  if (
+    keptText !== undefined &&
+    want !== '' &&
+    keptMd5 === want &&
+    md5Text(keptText) === want &&
+    (expectedBytes === undefined || utf8Bytes(keptText) === expectedBytes)
+  ) {
+    return keptText
+  }
   try {
     const token = await accessToken()
     const res = await fetch(`${API()}/drive/v3/files/${entry.id}?alt=media`, {
@@ -794,30 +824,70 @@ export async function driveReadText(
     })
     if (!res.ok) throw new Error(`Drive read failed (${res.status}) for ${file}`)
     const text = await res.text()
+    const actualBytes = utf8Bytes(text)
+    if (entry.size !== undefined && actualBytes !== Number(entry.size)) {
+      throw new Error(`${file} content size does not match Drive`)
+    }
+    if (expectedBytes !== undefined && actualBytes !== expectedBytes) {
+      throw new Error(`${file} content size does not match project.json`)
+    }
+    const actualMd5 = md5Text(text)
+    if (want && actualMd5 !== want) {
+      throw new Error(`${file} content checksum does not match Drive/project.json`)
+    }
     // labelled with what Drive says it just served, NOT with what the doc
     // expected: storing content under a hash it does not have makes every
     // later read serve the wrong bytes with no request and no way to notice
-    void keepText(key, text, entry.md5Checksum ?? want)
+    await keepText(key, text, actualMd5)
     return text
   } catch (e) {
-    if (keptText !== undefined) return keptText
+    // An offline copy is usable only when it was stored under this exact
+    // expected digest. Never silently return stale graph/project state.
+    if (
+      keptText !== undefined &&
+      want !== '' &&
+      keptMd5 === want &&
+      md5Text(keptText) === want &&
+      (expectedBytes === undefined || utf8Bytes(keptText) === expectedBytes)
+    ) {
+      return keptText
+    }
     throw e
   }
 }
 
+/** Every kept text shares one preference object, so its read-modify-write must
+ * be single-file too. Manifest refresh deliberately fetches five projects at
+ * once; without this tail each fetch read the same old object and the last
+ * preference write discarded the other four offline copies. */
+let keepTextTail: Promise<void> = Promise.resolve()
+
 /** Texts for the most recently opened songs; older ones fall off the end. */
-async function keepText(key: string, text: string, md5: string): Promise<void> {
-  try {
-    const all = await readJson<Record<string, KeptText>>(TEXT_KEY, {})
-    delete all[key] // re-insert so the freshest sits last
-    all[key] = { m: md5, t: text }
-    const keys = Object.keys(all)
-    // two texts per song: this is ~60 songs kept, well past a phone's library
-    for (const stale of keys.slice(0, Math.max(0, keys.length - 120))) delete all[stale]
-    await writeJson(TEXT_KEY, all)
-  } catch {
-    // a copy we cannot keep is not worth failing the read over
+function keepText(key: string, text: string, md5: string): Promise<void> {
+  const operation = keepTextTail.then(async () => {
+    try {
+      const all = await readJson<Record<string, KeptText>>(TEXT_KEY, {})
+      delete all[key] // re-insert so the freshest sits last
+      all[key] = { m: md5, t: text }
+      const keys = Object.keys(all)
+      // three texts per song (project, lyrics, graph): ~60 songs retained.
+      for (const stale of keys.slice(0, Math.max(0, keys.length - 180))) delete all[stale]
+      await writeJson(TEXT_KEY, all)
+    } catch {
+      // a copy we cannot keep is not worth failing the read over
+    }
+  })
+  keepTextTail = operation
+  return operation
+}
+
+function utf8Bytes(value: string): number {
+  let bytes = 0
+  for (const char of value) {
+    const cp = char.codePointAt(0) ?? 0
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4
   }
+  return bytes
 }
 
 // The catalog restore starts at import: a cold start reads and parses the

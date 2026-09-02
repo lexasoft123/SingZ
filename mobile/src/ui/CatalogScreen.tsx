@@ -48,7 +48,7 @@ import {
   type ProjectEntry,
   type RootInfo
 } from '../projects'
-import { iosNativePlayback } from '../playback/native'
+import { nativePlayback } from '../playback/native'
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable'
 import Reanimated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import {
@@ -685,8 +685,25 @@ export default function CatalogScreen({
       setError(null)
       setLoading({ dir: entry.dir, msg: 'Opening…', frac: 0 })
       try {
-        const loaded = await iosNativePlayback.load({
-          entry,
+        const pickedRoot =
+          mode === 'folder' ? (root?.kind === 'picked' ? root : await getRoot()) : null
+        if (mode === 'folder' && pickedRoot?.kind !== 'picked')
+          throw new Error('The picked folder is no longer active. Reopen it and try again.')
+        const metronomeRef =
+          mode === 'gdrive'
+            ? ({ source: 'gdrive', dir: entry.dir } as const)
+            : mode === 'folder'
+              ? ({
+                  source: 'picked',
+                  dir: entry.dir,
+                  root: pickedRoot?.path ?? ''
+                } as const)
+              : ({ source: 'phone', dir: entry.dir } as const)
+        if (metronomeRef.source === 'picked' && !metronomeRef.root)
+          throw new Error('The picked folder identity is unavailable. Reopen the folder and try again.')
+        const entryForLoad: ProjectEntry = { ...entry, metronomeRef }
+        const loaded = await nativePlayback.load({
+          entry: entryForLoad,
           engine,
           sampleRate,
           onStep: (msg, frac) => {
@@ -702,7 +719,7 @@ export default function CatalogScreen({
         }
         await setCrumb('')
         setLoading(null)
-        onLoaded({ ...loaded, library: mode })
+        onLoaded({ ...loaded, library: mode, metronomeRef })
         // A phone-library song missing its grid (or carrying an older
         // detector's) is analysed now, behind the player — the desktop's
         // on-open rule. Only the phone's own library: a picked folder or
@@ -736,7 +753,7 @@ export default function CatalogScreen({
         }
       }
     },
-    [engine, onLoaded, sampleRate, mode]
+    [engine, onLoaded, sampleRate, mode, root]
   )
 
   const openSample = useCallback(async () => {
@@ -818,11 +835,10 @@ export default function CatalogScreen({
           durationSec: facts.durationSec
         })
         if (typeof outcome === 'object') {
-          // Re-read the doc NOW: the lookup took seconds, and a project
-          // deleted meanwhile must fail here (readText throws) rather than
-          // be resurrected as a folder holding only its lyrics.
-          const freshDoc = await readProjectText(p.dir, 'project.json')
-          await writeLyrics(p.dir, freshDoc, outcome.hit)
+          // writeLyrics enters the shared project transaction and re-reads
+          // NOW: the lookup took seconds, and a project deleted meanwhile
+          // must fail rather than be resurrected with only its lyrics.
+          await writeLyrics(p.dir, outcome.hit)
           setLoading(null)
           await refresh()
         } else {

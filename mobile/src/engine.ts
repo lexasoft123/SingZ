@@ -91,6 +91,9 @@ export class MultitrackEngine {
    * may return ownership to legacy while the app remains foregrounded. */
   private nativeOutputHandoff = false
   private master = this.ctx.createGain()
+  /** Song-only master. Metronome/training references intentionally bypass
+   * this bus, matching NativePlaybackSession's song-gain/reference split. */
+  private songMasterGain = 1
   /** Cues bypass the song master/stretch chain: transposing or slowing a song
    * must never change the reference pitch the exercise core requested. */
   private trainingGain = this.ctx.createGain()
@@ -400,6 +403,19 @@ export class MultitrackEngine {
 
   get pitchTempo(): { semitones: number; rate: number } {
     return { semitones: this.pitchSemis, rate: this.rate }
+  }
+
+  get masterGain(): number {
+    return this.songMasterGain
+  }
+
+  setMasterGain(gain: number): void {
+    if (!Number.isFinite(gain)) return
+    const next = Math.max(0, Math.min(1, gain))
+    if (next === this.songMasterGain) return
+    this.songMasterGain = next
+    this.master.gain.setTargetAtTime(next, this.ctx.currentTime, 0.02)
+    this.emit()
   }
 
   private applyStretch(): void {

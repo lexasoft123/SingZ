@@ -235,6 +235,8 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/capture_addon.cpp
     native/electron/audio_monitor_session.cpp
     native/electron/audio_monitor_session.h
+    native/electron/playback_addon_bridge.cpp
+    native/electron/playback_addon_bridge.h
     native/electron/native_audio_ownership.h)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
   target_include_directories(singz_capture PRIVATE "${SINGZ_NODE_INCLUDE_DIR}")
@@ -255,6 +257,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     SingZ::zdsp_analysis
     SingZ::zdsp_host_adapter
     SingZ::monitor_callback
+    SingZ::native_playback_session
     singz_native_audio_ownership)
   set_target_properties(singz_capture PROPERTIES
     PREFIX ""

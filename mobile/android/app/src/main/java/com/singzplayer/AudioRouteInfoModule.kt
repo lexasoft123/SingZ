@@ -249,7 +249,13 @@ class AudioRouteInfoModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun setTextPref(key: String, value: String, promise: Promise) {
     // commit(), not apply(): crash breadcrumbs must survive an imminent abort
-    prefs.edit().putString("txt:$key", value).commit()
-    promise.resolve(null)
+    try {
+      DurablePreferenceWrite.requireCommitted(
+        prefs.edit().putString("txt:$key", value).commit()
+      )
+      promise.resolve(null)
+    } catch (e: Exception) {
+      promise.reject("preference_write", e.message ?: "Cannot durably save preference")
+    }
   }
 }

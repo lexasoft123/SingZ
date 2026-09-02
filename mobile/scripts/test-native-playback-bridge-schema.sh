@@ -7,14 +7,19 @@ repo_root=$(cd "$mobile_root/.." && pwd)
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
 
+# Mirror the pod's public header set: every header under native/playback,
+# so a new header the session includes (the graph document, the projection)
+# cannot silently break this runner while the pod itself still builds.
 mkdir -p "$test_root/include/SingzPlaybackSession"
-ln -s "$repo_root/native/playback/native_playback_session.h" \
-  "$test_root/include/SingzPlaybackSession/native_playback_session.h"
+for header in "$repo_root"/native/playback/*.h; do
+  ln -s "$header" "$test_root/include/SingzPlaybackSession/$(basename "$header")"
+done
 
 xcrun clang++ -std=c++20 -fobjc-arc \
   -framework Foundation \
   -I"$test_root/include" \
   -I"$repo_root/zcore/include" \
+  -I"$repo_root/zdsp/include" \
   -I"$mobile_root/ios/FolderAccess" \
   "$repo_root/zcore/src/media/owned_file_descriptor.cpp" \
   "$mobile_root/ios/FolderAccess/NativePlaybackAuthorizedPath.mm" \

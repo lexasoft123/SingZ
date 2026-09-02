@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { iosNativePlayback } from '../playback/native';
+import { nativePlayback } from '../playback/native';
 import { C } from './bits';
 
 export default function SettingsScreen({
@@ -27,7 +27,7 @@ export default function SettingsScreen({
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
-    const status = await iosNativePlayback.settingsStatus();
+    const status = await nativePlayback.settingsStatus();
     setEnabled(status.enabled);
     setSupported(status.supported);
     setDetail(status.detail);
@@ -43,7 +43,7 @@ export default function SettingsScreen({
       setEnabled(next);
       setSaving(true);
       try {
-        await iosNativePlayback.saveEnabled(next);
+        await nativePlayback.saveEnabled(next);
         await refresh();
       } catch (error) {
         setEnabled(!next);
@@ -78,9 +78,9 @@ export default function SettingsScreen({
                 <Text style={s.badge}>EXPERIMENTAL</Text>
               </View>
               <Text style={s.description}>
-                {Platform.OS === 'ios'
-                  ? 'Play eligible WAV/FLAC stem projects through zcore + zdsp. This first cut starts at the beginning and stops; seek, loop, tempo, transpose and metronome stay on the regular player.'
-                  : 'This experiment is currently available on iPhone only.'}
+                {Platform.OS === 'ios' || Platform.OS === 'android'
+                  ? 'Play eligible stem and added-track projects through zcore + zdsp. Native playback includes transport, pitch, tempo, loop, metronome, count-in and training; unsupported file formats stay on the regular player.'
+                  : 'This experiment is unavailable on this platform.'}
               </Text>
             </View>
             {loading ? (
@@ -102,8 +102,8 @@ export default function SettingsScreen({
           </Text>
           {enabled && supported && (
             <Text style={s.note}>
-              Eligible songs open in a clearly limited native player. Other
-              songs remain entirely on the regular player.
+              Eligible songs use the ordinary player controls with native DSP
+              underneath. Other songs remain entirely on the regular player.
             </Text>
           )}
         </View>

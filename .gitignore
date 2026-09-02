@@ -57,3 +57,10 @@ mobile/ios/SingzCore/flac/
 # local-only tooling state: the logged-in Ultimate Guitar browser profile the
 # score-scout agent drives (contains a live session cookie — never commit it)
 .local/
+# Test-build-only iOS materialization. The canonical sources/fixtures live in
+# tests/fixtures/codecs and are copied before the opt-in Pod install.
+mobile/ios/FolderAccess/CodecTargetProof/
+# Local native test/proof build trees that land beside the electron-builder
+# resources in build/ (the real outputs live under /build/capture-*, above).
+/build/phase4-tests/
+/build/codec-proof/

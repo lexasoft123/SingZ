@@ -108,6 +108,36 @@ require Pod::Executable.execute_command('node', ['-p',
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
+# CocoaPods snapshots RNAudioAPI's vendored XCFramework paths during install.
+# Promote the exact verified iOS product codec pack before that analysis so
+# zcore and RNAudioAPI resolve one shared libav* owner. Target-proof staging
+# is an explicit Debug-only harness mode; ordinary Pod installs require full
+# device/simulator receipts and fail closed.
+codec_target_proof = ENV['SINGZ_CODEC_TARGET_PROOF'] == '1'
+selector_args = [
+  File.expand_path('../scripts/select-ffmpeg-codec-runtime.mjs', __dir__),
+  '--require-ios'
+]
+selector_args << '--proof-staging' if codec_target_proof
+Pod::Executable.execute_command('node', selector_args)
+
+# CocoaPods consumes the materialized pod tree, not the source selector's
+# receipt beside RNAudioAPI. Refresh compliance after selection, then verify
+# both copies and every selected byte before any pod target is evaluated.
+Pod::Executable.execute_command('node', [
+  File.expand_path('../scripts/sync-singzcore.js', __dir__)
+])
+verifier_args = [
+  File.expand_path('../scripts/verify-ffmpeg-codec-runtime.mjs', __dir__),
+  '--require-ios', '--verify-ios-compliance'
+]
+if codec_target_proof
+  verifier_args << '--proof-staging'
+else
+  verifier_args << '--require-full'
+end
+Pod::Executable.execute_command('node', verifier_args)
+
 linkage = ENV['USE_FRAMEWORKS']
 if linkage != nil
   Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green

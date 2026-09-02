@@ -1,7 +1,7 @@
 #import <Foundation/Foundation.h>
 
-#import "NativePlaybackAuthorizedPath.h"
 #import "NativePlaybackAudioSession.h"
+#import "NativePlaybackAuthorizedPath.h"
 #import "NativePlaybackBridgeBoundary.h"
 #import "NativePlaybackBridgeResult.h"
 #import "NativePlaybackBridgeSchema.h"
@@ -43,6 +43,78 @@ NSDictionary *validRequest() {
     @"masterGain" : @0.5,
     @"maximumRetainedBytes" : @1048576,
   };
+}
+
+NSDictionary *validPlayback() {
+  return @{
+    @"version" : @2,
+    @"transport" : @{
+      @"entrySeconds" : @1.0,
+      @"durationSeconds" : @4.0,
+      @"playbackRate" : @1.0,
+      @"transposeSemitones" : @0.0,
+    },
+    @"cues" : @{
+      @"click" : @YES,
+      @"countInBars" : @1,
+      @"volume" : @0.7,
+      @"accent" : @YES,
+      @"beatGrid" : @{
+        @"beats" : @[ @0.0, @0.5, @1.0, @1.5, @2.0, @2.5, @3.0, @3.5 ],
+        @"beatsPerBar" : @4,
+        @"downbeat" : @0,
+        @"downbeats" : @[ @0, @4 ],
+      },
+    },
+  };
+}
+
+NSDictionary *withPlayback(NSDictionary *playback) {
+  NSMutableDictionary *request = [validRequest() mutableCopy];
+  request[@"playback"] = playback;
+  return request;
+}
+
+NSDictionary *withTraining(NSDictionary *training) {
+  NSMutableDictionary *request = [validRequest() mutableCopy];
+  request[@"training"] = training;
+  return request;
+}
+
+NSDictionary *withInitialTransport(NSDictionary *initialTransport) {
+  NSMutableDictionary *request = [validRequest() mutableCopy];
+  request[@"initialTransport"] = initialTransport;
+  return request;
+}
+
+NSDictionary *replacingObjectKey(NSDictionary *object, NSString *key,
+                                 id value) {
+  NSMutableDictionary *copy = [object mutableCopy];
+  copy[key] = value;
+  return copy;
+}
+
+NSDictionary *replacingPlaybackTransport(NSString *key, id value) {
+  NSDictionary *playback = validPlayback();
+  return withPlayback(replacingObjectKey(
+      playback, @"transport",
+      replacingObjectKey(playback[@"transport"], key, value)));
+}
+
+NSDictionary *replacingPlaybackCues(NSString *key, id value) {
+  NSDictionary *playback = validPlayback();
+  return withPlayback(replacingObjectKey(
+      playback, @"cues", replacingObjectKey(playback[@"cues"], key, value)));
+}
+
+NSDictionary *replacingPlaybackGrid(NSString *key, id value) {
+  NSDictionary *playback = validPlayback();
+  NSDictionary *cues = playback[@"cues"];
+  NSDictionary *grid = cues[@"beatGrid"];
+  return withPlayback(replacingObjectKey(
+      playback, @"cues",
+      replacingObjectKey(cues, @"beatGrid",
+                         replacingObjectKey(grid, key, value))));
 }
 
 bool parses(NSDictionary *request) {
@@ -787,6 +859,19 @@ void testUnloadCleanupResultSchema() {
         [cleanup[@"fallbackSafe"] isEqual:@NO]);
 }
 
+void testPlaybackResultErrorMapping() {
+  singz::NativePlaybackResult result;
+  result.ok = false;
+  result.error = singz::NativePlaybackError::UnsupportedPlaybackRate;
+  result.generation = 9;
+  result.state = singz::NativePlaybackState::Preparing;
+  NSDictionary *dictionary = SingzNativePlaybackResultDictionary(result);
+  CHECK([dictionary[@"ok"] isEqual:@NO] &&
+        [dictionary[@"error"] isEqual:@"unsupported-playback-rate"] &&
+        [dictionary[@"generation"] isEqual:@9] &&
+        [dictionary[@"state"] isEqual:@"preparing"]);
+}
+
 void testPlaybackAudioSessionPolicy() {
   const SingzPlaybackAudioSessionIntent intent{
       7, "ios-output:fixture", {0, 1}, 48000.0, 512};
@@ -809,8 +894,7 @@ void testPlaybackAudioSessionPolicy() {
       7, singz::NativePlaybackState::Prepared, intent, active);
   CHECK(result.ok && result.error == SingzPlaybackAudioSessionError::None &&
         result.session.active && result.session.outputChannelCount == 2);
-  NSDictionary *dictionary =
-      SingzPlaybackAudioSessionResultDictionary(result);
+  NSDictionary *dictionary = SingzPlaybackAudioSessionResultDictionary(result);
   CHECK(dictionary.count == 9 && [dictionary[@"ok"] isEqual:@YES] &&
         [dictionary[@"error"] isEqual:@"none"] &&
         [dictionary[@"generation"] isEqual:@7] &&
@@ -838,8 +922,7 @@ void testPlaybackAudioSessionPolicy() {
     const auto failure = SingzVerifyPlaybackAudioSession(
         7, singz::NativePlaybackState::Prepared, intent, std::move(snapshot));
     CHECK(!failure.ok &&
-          failure.error ==
-              SingzPlaybackAudioSessionError::VerificationFailed &&
+          failure.error == SingzPlaybackAudioSessionError::VerificationFailed &&
           !failure.message.empty());
   };
   auto malformed = active;
@@ -868,6 +951,475 @@ void testPlaybackAudioSessionPolicy() {
   verifyFailure(malformed);
 }
 
+void testPlaybackTransportCueSchema() {
+  SingzParsedPlaybackPrepare parsed;
+  NSString *error = nil;
+  CHECK(SingzParsePlaybackPrepare(withPlayback(validPlayback()), &parsed,
+                                  &error));
+  CHECK(error == nil && parsed.config.cuePlan.has_value());
+  const auto &plan = *parsed.config.cuePlan;
+  CHECK(plan.sampleRate == 48000.0 && plan.entrySeconds == 1.0 &&
+        plan.durationSeconds == singz::kPlaybackCueMaximumDurationSeconds &&
+        plan.playbackRate == 1.0 && plan.click && plan.countInBars == 1 &&
+        plan.volume == 0.7 && plan.accent &&
+        plan.beatGrid.beats.size() == 8 &&
+        plan.beatGrid.downbeats == std::vector<uint32_t>({0, 4}));
+
+  NSMutableDictionary *rebuild = [withPlayback(validPlayback()) mutableCopy];
+  rebuild[@"preparedStartProjectFrame"] = @(-24000);
+  CHECK(SingzParsePlaybackPrepare(rebuild, &parsed, &error) &&
+        parsed.config.preparedStartProjectFrame.has_value() &&
+        *parsed.config.preparedStartProjectFrame == -24000);
+  for (id invalid in @[
+         @0.5,
+         @9007199254740992.0,
+         @(-9007199254740992.0),
+         @YES,
+         @"0",
+       ]) {
+    NSMutableDictionary *candidate = [withPlayback(validPlayback()) mutableCopy];
+    candidate[@"preparedStartProjectFrame"] = invalid;
+    CHECK(!SingzParsePlaybackPrepare(candidate, &parsed, &error));
+  }
+
+  NSDictionary *playbackWithoutDuration = replacingObjectKey(
+      validPlayback(), @"transport", @{
+        @"entrySeconds" : @1.0,
+        @"playbackRate" : @1.0,
+        @"transposeSemitones" : @0.0,
+      });
+  CHECK(SingzParsePlaybackPrepare(withPlayback(playbackWithoutDuration),
+                                  &parsed, &error));
+  CHECK(parsed.config.cuePlan->durationSeconds ==
+        singz::kPlaybackCueMaximumDurationSeconds);
+
+  NSDictionary *gridless = replacingObjectKey(
+      validPlayback(), @"cues", @{
+        @"click" : @NO,
+        @"countInBars" : @2,
+        @"volume" : @0.25,
+        @"accent" : @NO,
+      });
+  CHECK(SingzParsePlaybackPrepare(withPlayback(gridless), &parsed, &error));
+  CHECK(parsed.config.cuePlan.has_value() &&
+        parsed.config.cuePlan->beatGrid.beats.empty() &&
+        parsed.config.cuePlan->countInBars == 2 &&
+        !parsed.config.cuePlan->click);
+
+  NSDictionary *transportOnly = replacingObjectKey(
+      gridless, @"cues", @{
+        @"click" : @NO,
+        @"countInBars" : @0,
+        @"volume" : @0.0,
+        @"accent" : @YES,
+      });
+  CHECK(
+      SingzParsePlaybackPrepare(withPlayback(transportOnly), &parsed, &error));
+  CHECK(parsed.config.cuePlan.has_value() &&
+        parsed.config.cuePlan->countInBars == 0 &&
+        parsed.config.cuePlan->beatGrid.beats.empty());
+
+  NSDictionary *gridCountInOnly = replacingPlaybackCues(@"click", @NO);
+  CHECK(SingzParsePlaybackPrepare(gridCountInOnly, &parsed, &error));
+  CHECK(parsed.config.cuePlan.has_value() && !parsed.config.cuePlan->click &&
+        parsed.config.cuePlan->beatGrid.beats.size() == 8);
+
+  NSMutableDictionary *sampleRateRequest =
+      [withPlayback(validPlayback()) mutableCopy];
+  sampleRateRequest[@"sampleRate"] = @44100;
+  CHECK(SingzParsePlaybackPrepare(sampleRateRequest, &parsed, &error));
+  CHECK(parsed.config.cuePlan->sampleRate == 44100.0);
+
+  const auto rejects = [&](NSDictionary *request) {
+    CHECK(SingzParsePlaybackPrepare(withPlayback(validPlayback()), &parsed,
+                                    &error));
+    CHECK(!SingzParsePlaybackPrepare(request, &parsed, &error));
+    CHECK(error != nil && !parsed.config.cuePlan.has_value() &&
+          parsed.lanes.empty() && parsed.config.outputDeviceUid.empty());
+  };
+
+  for (id invalid in @[ @YES, @0, @1, @3, @1.5, @"2", NSNull.null ])
+    rejects(
+        withPlayback(replacingObjectKey(validPlayback(), @"version", invalid)));
+  for (NSString *key in @[ @"transport", @"cues" ]) {
+    for (id invalid in @[ @YES, @1, @"object", NSNull.null ])
+      rejects(withPlayback(replacingObjectKey(validPlayback(), key, invalid)));
+  }
+  for (NSString *key in
+       @[ @"entrySeconds", @"durationSeconds", @"playbackRate",
+          @"transposeSemitones" ]) {
+    for (id invalid in @[
+           @YES, @"1", NSNull.null, [NSNumber numberWithDouble:NAN],
+           [NSNumber numberWithDouble:INFINITY]
+         ])
+      rejects(replacingPlaybackTransport(key, invalid));
+  }
+  rejects(replacingPlaybackTransport(@"entrySeconds", @(-1)));
+  rejects(replacingPlaybackTransport(@"durationSeconds", @0));
+  rejects(replacingPlaybackTransport(@"durationSeconds", @43200.1));
+  CHECK(SingzParsePlaybackPrepare(
+      replacingPlaybackTransport(@"durationSeconds", @0.5), &parsed, &error));
+  CHECK(parsed.config.cuePlan->durationSeconds ==
+        singz::kPlaybackCueMaximumDurationSeconds);
+  rejects(replacingPlaybackTransport(@"playbackRate", @0.249));
+  rejects(replacingPlaybackTransport(@"playbackRate", @4.001));
+  rejects(replacingPlaybackTransport(@"transposeSemitones", @(-24.001)));
+  rejects(replacingPlaybackTransport(@"transposeSemitones", @24.001));
+  CHECK(SingzParsePlaybackPrepare(
+      replacingPlaybackTransport(@"transposeSemitones", @(-24.0)), &parsed,
+      &error));
+  CHECK(parsed.config.transposeSemitones == -24.0);
+  NSMutableDictionary *missingTranspose = [validPlayback() mutableCopy];
+  NSMutableDictionary *missingTransposeTransport =
+      [missingTranspose[@"transport"] mutableCopy];
+  [missingTransposeTransport removeObjectForKey:@"transposeSemitones"];
+  missingTranspose[@"transport"] = missingTransposeTransport;
+  rejects(withPlayback(missingTranspose));
+  rejects(replacingPlaybackTransport(@"futureTransposeMode", @"formant"));
+
+  for (id invalid in @[ @1, @"true", NSNull.null ]) {
+    rejects(replacingPlaybackCues(@"click", invalid));
+    rejects(replacingPlaybackCues(@"accent", invalid));
+  }
+  for (id invalid in @[
+         @YES, @(-1), @3, @1.5, @"1", NSNull.null,
+         @(singz::kNativePlaybackMaximumJsSafeInteger + 1)
+       ])
+    rejects(replacingPlaybackCues(@"countInBars", invalid));
+  for (id invalid in @[
+         @YES, @(-0.01), @1.01, @"0.7", NSNull.null,
+         [NSNumber numberWithDouble:NAN]
+       ])
+    rejects(replacingPlaybackCues(@"volume", invalid));
+
+  NSDictionary *gridlessClick = replacingObjectKey(
+      validPlayback(), @"cues", @{
+        @"click" : @YES,
+        @"countInBars" : @0,
+        @"volume" : @0.7,
+        @"accent" : @YES,
+      });
+  rejects(withPlayback(gridlessClick));
+  for (id invalid in @[ @YES, @1, @"grid", NSNull.null ])
+    rejects(replacingPlaybackCues(@"beatGrid", invalid));
+  for (id invalid in @[ @YES, @1, @"beats", NSNull.null ])
+    rejects(replacingPlaybackGrid(@"beats", invalid));
+  for (id invalid in @[ @YES, @1, @"downbeats", NSNull.null ])
+    rejects(replacingPlaybackGrid(@"downbeats", invalid));
+  rejects(replacingPlaybackGrid(@"beats", @[ @0.0, @1.0, @0.5 ]));
+  rejects(replacingPlaybackGrid(@"beats", @[ @0.0, @0.05, @0.5 ]));
+  rejects(replacingPlaybackGrid(@"beats", @[ @0.0, @0.19, @0.38 ]));
+  rejects(replacingPlaybackGrid(@"beats", @[ @0.0, @2.01, @4.02 ]));
+  rejects(replacingPlaybackGrid(@"beats", @[ @0.0, @43200.1 ]));
+  rejects(replacingPlaybackGrid(
+      @"beats", @[ @0.0, [NSNumber numberWithDouble:NAN], @1.0 ]));
+  rejects(replacingPlaybackGrid(@"beats", @[ @0.0 ]));
+  for (id invalid in @[ @YES, @1, @5, @7, @3.5, @"4", NSNull.null ])
+    rejects(replacingPlaybackGrid(@"beatsPerBar", invalid));
+  for (id invalid in @[ @YES, @4, @(-1), @1.5, @"0", NSNull.null ])
+    rejects(replacingPlaybackGrid(@"downbeat", invalid));
+  rejects(replacingPlaybackGrid(@"downbeats", @[ @4, @0 ]));
+  rejects(replacingPlaybackGrid(@"downbeats", @[ @0, @8 ]));
+  rejects(replacingPlaybackGrid(@"downbeats", @[ @0, @0 ]));
+  rejects(replacingPlaybackGrid(@"downbeats", @[ @0, @1.5 ]));
+  rejects(replacingPlaybackGrid(
+      @"downbeats",
+      @[ @0, @(singz::kNativePlaybackMaximumJsSafeInteger + 1) ]));
+
+  NSMutableArray *tooManyBeats = [NSMutableArray array];
+  for (NSUInteger index = 0; index <= singz::kPlaybackCueMaximumBeats; ++index)
+    [tooManyBeats addObject:@(static_cast<double>(index) * 0.5)];
+  rejects(replacingPlaybackGrid(@"beats", tooManyBeats));
+
+  NSDictionary *denseGrid = @{
+    @"beats" : @[ @0.0, @0.21, @0.42 ],
+    @"beatsPerBar" : @4,
+    @"downbeat" : @0,
+    @"downbeats" : @[],
+  };
+  NSDictionary *durationHintDoesNotSynthesizeClicks = replacingObjectKey(
+      validPlayback(), @"transport", @{
+        @"entrySeconds" : @0.0,
+        @"durationSeconds" : @10000.0,
+        @"playbackRate" : @1.0,
+        @"transposeSemitones" : @0.0,
+      });
+  durationHintDoesNotSynthesizeClicks = replacingObjectKey(
+      durationHintDoesNotSynthesizeClicks, @"cues",
+      replacingObjectKey(durationHintDoesNotSynthesizeClicks[@"cues"],
+                         @"beatGrid", denseGrid));
+  CHECK(SingzParsePlaybackPrepare(withPlayback(durationHintDoesNotSynthesizeClicks),
+                                  &parsed, &error));
+  CHECK(parsed.config.cuePlan->beatGrid.beats.size() == 3 &&
+        parsed.config.cuePlan->durationSeconds ==
+            singz::kPlaybackCueMaximumDurationSeconds);
+
+  for (NSString *level in @[ @"playback", @"transport", @"cues", @"grid" ]) {
+    NSDictionary *playback = validPlayback();
+    if ([level isEqualToString:@"playback"]) {
+      playback = replacingObjectKey(playback, @"unexpected", @1);
+    } else if ([level isEqualToString:@"transport"]) {
+      playback = replacingObjectKey(
+          playback, @"transport",
+          replacingObjectKey(playback[@"transport"], @"unexpected", @1));
+    } else if ([level isEqualToString:@"cues"]) {
+      playback = replacingObjectKey(
+          playback, @"cues",
+          replacingObjectKey(playback[@"cues"], @"unexpected", @1));
+    } else {
+      NSDictionary *cues = playback[@"cues"];
+      playback = replacingObjectKey(
+          playback, @"cues",
+          replacingObjectKey(
+              cues, @"beatGrid",
+              replacingObjectKey(cues[@"beatGrid"], @"unexpected", @1)));
+    }
+    rejects(withPlayback(playback));
+  }
+}
+
+void testPortableGraphProjectionSchema() {
+  NSDictionary *node = @{
+    @"id" : @"13835058055282163713",
+    @"type" : @"73696e677a2d6473700000000000000d",
+    @"typeVersion" : @7,
+    @"execution" : @"vendor-bridge",
+    @"unavailable" : @"bypass",
+    @"ports" : @{
+      @"inputs" : @[ @{ @"id" : @"in", @"channels" : @2 } ],
+      @"outputs" : @[ @{ @"id" : @"out", @"channels" : @2 } ],
+    },
+    @"parameters" : @{ @"vendor.depth" : @0.25 },
+    @"binding" : @{ @"kind" : @"adapter" },
+  };
+  NSDictionary *document = @{
+    @"format" : @1,
+    @"engine" : @"singz-dsp",
+    @"nodes" : @[ node ],
+    @"connections" : @[],
+  };
+  NSMutableDictionary *request = [validRequest() mutableCopy];
+  request[@"graphDocument"] = document;
+  SingzParsedPlaybackPrepare parsed;
+  NSString *error = nil;
+  CHECK(SingzParsePlaybackPrepare(request, &parsed, &error) && error == nil &&
+        parsed.config.graphDocument.has_value());
+  const singz::NativePlaybackGraphDocument &graph =
+      *parsed.config.graphDocument;
+  CHECK(graph.nodes.size() == 1 &&
+        graph.nodes[0].id == UINT64_C(13835058055282163713) &&
+        graph.nodes[0].type.high == UINT64_C(0x73696e677a2d6473) &&
+        graph.nodes[0].type.low == UINT64_C(0x700000000000000d) &&
+        graph.nodes[0].unavailable ==
+            singz::NativePlaybackGraphUnavailablePolicy::Bypass &&
+        graph.nodes[0].parameters.size() == 1);
+
+  NSMutableDictionary *extraDocument = [document mutableCopy];
+  extraDocument[@"future"] = @YES;
+  request[@"graphDocument"] = extraDocument;
+  CHECK(!SingzParsePlaybackPrepare(request, &parsed, &error));
+
+  NSMutableDictionary *upperNode = [node mutableCopy];
+  upperNode[@"type"] = @"73696E677A2D6473700000000000000D";
+  request[@"graphDocument"] = replacingObjectKey(document, @"nodes", @[ upperNode ]);
+  CHECK(!SingzParsePlaybackPrepare(request, &parsed, &error));
+
+  NSMutableDictionary *badParameters = [node mutableCopy];
+  badParameters[@"parameters"] = @{ @"vendor.depth" : @(NAN) };
+  request[@"graphDocument"] =
+      replacingObjectKey(document, @"nodes", @[ badParameters ]);
+  CHECK(!SingzParsePlaybackPrepare(request, &parsed, &error));
+}
+
+void testPlaybackTrainingSchema() {
+  SingzParsedPlaybackPrepare parsed;
+  NSString *error = nil;
+  CHECK(SingzParsePlaybackPrepare(
+      withTraining(@{
+        @"mode" : @"period",
+        @"periodFrames" : @240000,
+        @"laneIds" : @[ @"vocals" ],
+        @"enabled" : @YES,
+      }),
+      &parsed, &error));
+  CHECK(error == nil && parsed.config.trainingDuck.has_value() &&
+        parsed.config.trainingDuck->mode ==
+            singz::NativePlaybackTrainingMode::Period &&
+        parsed.config.trainingDuck->periodFrames == 240000 &&
+        parsed.config.trainingDuck->enabled &&
+        parsed.config.trainingDuck->laneIds ==
+            std::vector<std::string>({"vocals"}));
+
+  CHECK(SingzParsePlaybackPrepare(
+      withTraining(@{
+        @"mode" : @"windows",
+        @"windows" : @[
+          @{ @"startProjectFrame" : @10, @"endProjectFrame" : @20 },
+          @{ @"startProjectFrame" : @20, @"endProjectFrame" : @40 },
+        ],
+        @"laneIds" : @[ @"vocals" ],
+        @"enabled" : @NO,
+      }),
+      &parsed, &error));
+  CHECK(parsed.config.trainingDuck.has_value() &&
+        parsed.config.trainingDuck->mode ==
+            singz::NativePlaybackTrainingMode::Windows &&
+        parsed.config.trainingDuck->windows.size() == 2 &&
+        parsed.config.trainingDuck->windows[1].endProjectFrame == 40 &&
+        !parsed.config.trainingDuck->enabled);
+
+  for (NSDictionary *invalid in @[
+         @{ @"mode" : @"period", @"periodFrames" : @0,
+            @"laneIds" : @[ @"vocals" ], @"enabled" : @YES },
+         @{ @"mode" : @"period", @"periodFrames" : @10,
+            @"windows" : @[], @"laneIds" : @[ @"vocals" ],
+            @"enabled" : @YES },
+         @{ @"mode" : @"windows",
+            @"windows" : @[
+              @{ @"startProjectFrame" : @10, @"endProjectFrame" : @30 },
+              @{ @"startProjectFrame" : @20, @"endProjectFrame" : @40 },
+            ],
+            @"laneIds" : @[ @"vocals" ], @"enabled" : @YES },
+         @{ @"mode" : @"windows", @"windows" : @[],
+            @"laneIds" : @[ @"vocals" ], @"enabled" : @YES },
+         @{ @"mode" : @"period", @"periodFrames" : @10,
+            @"laneIds" : @[ @"vocals", @"vocals" ],
+            @"enabled" : @YES },
+       ]) {
+    CHECK(!SingzParsePlaybackPrepare(withTraining(invalid), &parsed, &error));
+    CHECK(error != nil && !parsed.config.trainingDuck.has_value());
+  }
+
+  SingzParsedPlaybackControl control;
+  CHECK(SingzParsePlaybackControl(@{ @"trainingEnabled" : @YES }, &control) &&
+        control.training && control.enabled && !control.lane);
+  CHECK(!SingzParsePlaybackControl(
+      @{ @"trainingEnabled" : @YES, @"masterGain" : @1.0 }, &control));
+  CHECK(!SingzParsePlaybackControl(@{ @"trainingEnabled" : @1 }, &control));
+  CHECK(!control.training && !control.enabled && !control.lane);
+}
+
+void testPlaybackInitialTransportSchema() {
+  SingzParsedPlaybackPrepare parsed;
+  NSString *error = nil;
+  CHECK(SingzParsePlaybackPrepare(
+      withInitialTransport(@{
+        @"state" : @"paused",
+        @"loop" : @{
+          @"startProjectFrame" : @48000,
+          @"endProjectFrame" : @96000,
+        },
+      }),
+      &parsed, &error));
+  CHECK(error == nil && parsed.config.initialTransport.startPaused &&
+        parsed.config.initialTransport.loop.has_value() &&
+        parsed.config.initialTransport.loop->startProjectFrame == 48000 &&
+        parsed.config.initialTransport.loop->endProjectFrame == 96000);
+
+  CHECK(SingzParsePlaybackPrepare(
+      withInitialTransport(@{ @"state" : @"playing" }), &parsed, &error));
+  CHECK(!parsed.config.initialTransport.startPaused &&
+        !parsed.config.initialTransport.loop.has_value());
+
+  for (NSDictionary *invalid in @[
+         @{ @"state" : @"stopped" },
+         @{ @"state" : @YES },
+         @{ @"state" : @"paused", @"future" : @1 },
+         @{ @"state" : @"paused",
+            @"loop" : @{ @"startProjectFrame" : @(-1),
+                          @"endProjectFrame" : @4 } },
+         @{ @"state" : @"paused",
+            @"loop" : @{ @"startProjectFrame" : @8,
+                          @"endProjectFrame" : @8 } },
+         @{ @"state" : @"paused",
+            @"loop" : @{ @"startProjectFrame" : @8.5,
+                          @"endProjectFrame" : @10 } },
+         @{ @"state" : @"paused",
+            @"loop" : @{
+              @"startProjectFrame" : @8,
+              @"endProjectFrame" : @9007199254740992.0,
+            } },
+         @{ @"state" : @"paused",
+            @"loop" : @{ @"startProjectFrame" : @8,
+                          @"endProjectFrame" : @10,
+                          @"future" : @1 } },
+       ]) {
+    CHECK(!SingzParsePlaybackPrepare(withInitialTransport(invalid), &parsed,
+                                     &error));
+    CHECK(error != nil && !parsed.config.initialTransport.startPaused &&
+          !parsed.config.initialTransport.loop.has_value());
+  }
+}
+
+void testPlaybackPreviewClickSchema() {
+  singz::NativePlaybackPreviewClickSound sound =
+      singz::NativePlaybackPreviewClickSound::Accent;
+  CHECK(SingzParsePlaybackPreviewClickSound(@0, &sound));
+  CHECK(sound == singz::NativePlaybackPreviewClickSound::Ordinary);
+  CHECK(SingzParsePlaybackPreviewClickSound(@1, &sound));
+  CHECK(sound == singz::NativePlaybackPreviewClickSound::Accent);
+  for (id invalid in @[ @YES, @(-1), @2, @0.5, @"0", NSNull.null ]) {
+    CHECK(!SingzParsePlaybackPreviewClickSound(invalid, &sound));
+    CHECK(sound == singz::NativePlaybackPreviewClickSound::Ordinary);
+  }
+  CHECK(!SingzParsePlaybackPreviewClickSound(@0, nullptr));
+}
+
+void testPlaybackTransportCommandSchema() {
+  SingzParsedPlaybackTransportCommand command;
+  CHECK(SingzParsePlaybackTransportCommand(@{@"kind" : @"pause"}, &command));
+  CHECK(command.kind == SingzPlaybackTransportCommandKind::Pause);
+  CHECK(SingzParsePlaybackTransportCommand(@{@"kind" : @"resume"}, &command));
+  CHECK(command.kind == SingzPlaybackTransportCommandKind::Resume);
+  CHECK(SingzParsePlaybackTransportCommand(
+      @{@"kind" : @"seek", @"projectFrame" : @48000}, &command));
+  CHECK(command.kind == SingzPlaybackTransportCommandKind::Seek &&
+        command.projectFrame == 48000);
+  CHECK(SingzParsePlaybackTransportCommand(
+      @{
+        @"kind" : @"set-loop",
+        @"startProjectFrame" : @12000,
+        @"endProjectFrame" : @96000,
+      },
+      &command));
+  CHECK(command.kind == SingzPlaybackTransportCommandKind::SetLoop &&
+        command.loopStartFrame == 12000 && command.loopEndFrame == 96000);
+  CHECK(SingzParsePlaybackTransportCommand(@{@"kind" : @"clear-loop"},
+                                           &command));
+  CHECK(command.kind == SingzPlaybackTransportCommandKind::ClearLoop);
+  CHECK(SingzParsePlaybackTransportCommand(@{@"kind" : @"reanchor"},
+                                           &command));
+  CHECK(command.kind == SingzPlaybackTransportCommandKind::Reanchor);
+
+  for (NSDictionary *invalid in @[
+         @{},
+         @{@"kind" : @"future"},
+         @{@"kind" : @"pause", @"projectFrame" : @0},
+         @{@"kind" : @"seek"},
+         @{@"kind" : @"seek", @"projectFrame" : @YES},
+         @{@"kind" : @"seek", @"projectFrame" : @(-1)},
+         @{@"kind" : @"seek", @"projectFrame" : @0.5},
+         @{@"kind" : @"seek",
+           @"projectFrame" :
+               @(singz::kNativePlaybackMaximumJsSafeInteger + 1)},
+         @{@"kind" : @"set-loop",
+           @"startProjectFrame" : @2,
+           @"endProjectFrame" : @2},
+         @{@"kind" : @"set-loop",
+           @"startProjectFrame" : @3,
+           @"endProjectFrame" : @2},
+         @{@"kind" : @"set-loop",
+           @"startProjectFrame" : @0,
+           @"endProjectFrame" : @4,
+           @"unexpected" : @1},
+       ]) {
+    CHECK(!SingzParsePlaybackTransportCommand(invalid, &command));
+    CHECK(command.kind == SingzPlaybackTransportCommandKind::Pause &&
+          command.projectFrame == 0 && command.loopStartFrame == 0 &&
+          command.loopEndFrame == 0);
+  }
+}
+
 int main() {
   @autoreleasepool {
     testActualBlockCopyGuard();
@@ -875,6 +1427,11 @@ int main() {
     testCommandMutationOwnershipGuard();
     testStopUnloadDeliveryGuard();
     testPostOpenDescriptorOwnership();
+    testPlaybackTransportCueSchema();
+    testPlaybackTrainingSchema();
+    testPlaybackInitialTransportSchema();
+    testPlaybackPreviewClickSchema();
+    testPlaybackTransportCommandSchema();
     uint64_t generation = 0;
     CHECK(SingzParsePlaybackGeneration(@1, &generation) && generation == 1);
     for (id invalid in @[ @YES, @1.5, @0, @(-1), @"1", NSNull.null ]) {
@@ -920,12 +1477,15 @@ int main() {
 
     SingzParsedPlaybackPrepare reusedPrepare;
     NSString *parseError = nil;
-    CHECK(
-        SingzParsePlaybackPrepare(validRequest(), &reusedPrepare, &parseError));
+    NSMutableDictionary *positioned = [validRequest() mutableCopy];
+    positioned[@"preparedStartProjectFrame"] = @(-480);
+    CHECK(SingzParsePlaybackPrepare(positioned, &reusedPrepare, &parseError));
     CHECK(reusedPrepare.config.maximumFrames == 512 &&
           reusedPrepare.config.requestedBufferFrames == 128 &&
           reusedPrepare.config.masterGain == 0.5F &&
-          reusedPrepare.config.handoffLease == 0);
+          reusedPrepare.config.handoffLease == 0 &&
+          reusedPrepare.config.preparedStartProjectFrame.has_value() &&
+          *reusedPrepare.config.preparedStartProjectFrame == -480);
     NSDictionary *minimal = @{
       @"lanes" : @[ @{@"id" : @"vocals", @"path" : @"/app/song.flac"} ],
       @"outputDeviceUid" : @"ios:current-output",
@@ -937,6 +1497,7 @@ int main() {
           reusedPrepare.config.requestedBufferFrames == 0 &&
           reusedPrepare.config.masterGain == 1.0F &&
           reusedPrepare.config.handoffLease == 0 &&
+          !reusedPrepare.config.preparedStartProjectFrame.has_value() &&
           reusedPrepare.lanes.size() == 1 &&
           reusedPrepare.lanes[0].gain == 1.0F &&
           !reusedPrepare.lanes[0].muted && !reusedPrepare.lanes[0].solo);
@@ -1067,7 +1628,9 @@ int main() {
                                            reason:@"fixture"
                                          userInfo:nil];
           }) == SingzPlaybackBridgeBoundaryFailure::ProviderFailure);
+    testPortableGraphProjectionSchema();
     testPrepareOwnershipGuard();
+    testPlaybackResultErrorMapping();
     testUnloadCleanupResultSchema();
     testPlaybackAudioSessionPolicy();
   }

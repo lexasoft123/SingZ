@@ -13,7 +13,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import type {
   DesktopAudioHostDevice,
   DesktopAudioHostInventoryResult,
@@ -22,11 +22,29 @@ import type {
   DesktopMonitorLatency,
   DesktopMonitorResult,
   DesktopMonitorStatus,
+  DesktopPlaybackLaneConfig,
+  DesktopPlaybackPrepareConfig,
+  DesktopPlaybackProvider,
+  DesktopPlaybackProviderInfo,
+  DesktopPlaybackResult,
+  DesktopPlaybackRuntimeCapability,
+  DesktopPlaybackStatus,
   CaptureAnalysisWindow,
   CaptureInputDevice,
   CaptureStartResult,
   CaptureStateName,
   CaptureStats
+} from '../shared/types'
+import {
+  DESKTOP_PLAYBACK_CAPABILITY,
+  DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_BASE_MASK,
+  DESKTOP_PLAYBACK_CODEC_BASE_TAG,
+  DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+  DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+  DESKTOP_PLAYBACK_CODEC_PROFILE,
+  DESKTOP_PLAYBACK_CONTRACT_VERSION
 } from '../shared/types'
 import { machCanonicalSha256 } from './mach-canonical'
 
@@ -42,11 +60,36 @@ export interface NativeCaptureBinding {
   cancelCapture(generation: bigint): { ok: true; cancelled: boolean }
   captureState(): { state: CaptureStateName; ownershipGeneration: string; error: string }
   captureStats(): CaptureStats
-  audioHostDevices(): Omit<DesktopAudioHostInventoryResult, 'platform'>
+  audioHostProviders(): DesktopPlaybackProviderInfo[]
+  audioHostDevices(provider?: DesktopPlaybackProvider): Omit<DesktopAudioHostInventoryResult, 'platform'>
   beginMonitor(config: DesktopMonitorConfig, generation: bigint): DesktopMonitorResult
   setMonitorGain(generation: bigint, gainDb: number, enabled: boolean): DesktopMonitorResult
   monitorStatus(): DesktopMonitorStatus
   endMonitor(generation: bigint): DesktopMonitorResult
+  preparePlayback(
+    config: DesktopPlaybackPrepareConfig,
+    lanes: DesktopPlaybackLaneConfig[],
+    generation: bigint
+  ): DesktopPlaybackResult
+  openPlaybackOutput(generation: bigint): DesktopPlaybackResult
+  startPlayback(generation: bigint): DesktopPlaybackResult
+  pausePlayback(generation: bigint): DesktopPlaybackResult
+  resumePlayback(generation: bigint): DesktopPlaybackResult
+  stopPlayback(generation: bigint): DesktopPlaybackResult
+  seekPlayback(generation: bigint, projectFrame: number): DesktopPlaybackResult
+  setPlaybackLoop(generation: bigint, startFrame: number, endFrame: number): DesktopPlaybackResult
+  clearPlaybackLoop(generation: bigint): DesktopPlaybackResult
+  reanchorPlayback(generation: bigint): DesktopPlaybackResult
+  setPlaybackLane(
+    generation: bigint,
+    id: string,
+    gain: number,
+    muted: boolean,
+    solo: boolean
+  ): DesktopPlaybackResult
+  setPlaybackMasterGain(generation: bigint, gain: number): DesktopPlaybackResult
+  playbackStatus(): DesktopPlaybackStatus
+  unloadPlayback(generation: bigint): DesktopPlaybackResult
   /** Compiled-in identity — which Electron and which source tree built this binary. */
   buildInfo: { electronVersion: string; sourceStamp: string }
 }
@@ -98,7 +141,9 @@ export function captureSourceFingerprint(root: string, electronVersion: string):
       else files.push(path)
     }
   }
-  for (const dir of ['native/electron', 'zcore', 'zdsp', 'third_party/native', 'cmake']) {
+  for (const dir of [
+    'native/electron', 'native/playback', 'zcore', 'zdsp', 'third_party/native', 'cmake'
+  ]) {
     walk(join(root, dir))
   }
   files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts', 'build-capture-addon.cjs'))
@@ -124,10 +169,94 @@ interface CaptureArtifactManifest {
   machCanonicalSha256?: string
   generation: string
   addon: 'singz-capture.node'
+  codecRuntime?: CaptureCodecRuntime
+}
+
+export interface CaptureCodecLibrary {
+  component: 'avcodec' | 'avformat' | 'avutil' | 'swresample'
+  path: string
+  bytes: number
+  sha256: string
+  machCanonicalSha256?: string
+}
+
+export interface CaptureCodecRuntime {
+  format: 1
+  profile: string
+  target: string
+  capabilityMask: string
+  packManifestSha256?: string
+  sourcePackManifestSha256?: string[]
+  libraries: CaptureCodecLibrary[]
+}
+
+const codecRuntimeByBinding = new WeakMap<object, CaptureCodecRuntime>()
+
+function isFullPlaybackCodecRuntime(runtime: CaptureCodecRuntime | undefined): runtime is CaptureCodecRuntime {
+  if (!runtime) return false
+  const packBindingValid =
+    (/^[0-9a-f]{64}$/.test(runtime.packManifestSha256 ?? '') &&
+      runtime.sourcePackManifestSha256 === undefined) ||
+    (runtime.packManifestSha256 === undefined &&
+      runtime.sourcePackManifestSha256?.length === 2 &&
+      runtime.sourcePackManifestSha256.every((sha) => /^[0-9a-f]{64}$/.test(sha)) &&
+      new Set(runtime.sourcePackManifestSha256).size === 2)
+  return runtime.format === 1 &&
+    runtime.profile === DESKTOP_PLAYBACK_CODEC_PROFILE &&
+    runtime.capabilityMask === `0x${DESKTOP_PLAYBACK_CODEC_FULL_MASK.toString(16).padStart(8, '0')}` &&
+    /^(?:darwin-(?:arm64|x64|universal)|win32-x64)$/.test(runtime.target) &&
+    packBindingValid &&
+    runtime.libraries.length === 4 &&
+    JSON.stringify(runtime.libraries.map((library) => library.component).sort()) ===
+      JSON.stringify(['avcodec', 'avformat', 'avutil', 'swresample']) &&
+    runtime.libraries.every((library) =>
+      library.path.length > 0 && !library.path.startsWith('/') && !library.path.includes('\\') &&
+      !library.path.split('/').includes('..') && library.bytes > 0 &&
+      Number.isSafeInteger(library.bytes) && /^[0-9a-f]{64}$/.test(library.sha256) &&
+      (runtime.target.startsWith('darwin-')
+        ? /^[0-9a-f]{64}$/.test(library.machCanonicalSha256 ?? '')
+        : library.machCanonicalSha256 === undefined))
+}
+
+export function playbackCodecSupportsPath(
+  capability: DesktopPlaybackRuntimeCapability,
+  path: string
+): boolean {
+  const dot = path.lastIndexOf('.')
+  if (dot < 0 || dot === path.length - 1) return false
+  const extension = path.slice(dot + 1).toLowerCase()
+  return capability.mediaCodec.extensions.includes(extension)
 }
 
 function parseCaptureManifest(path: string): CaptureArtifactManifest {
   const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<CaptureArtifactManifest>
+  const components = value.codecRuntime?.libraries?.map((row) => row.component).sort()
+  const codecPackBindingValid = value.codecRuntime === undefined ||
+    (/^[0-9a-f]{64}$/.test(value.codecRuntime.packManifestSha256 ?? '') &&
+      value.codecRuntime.sourcePackManifestSha256 === undefined) ||
+    (value.codecRuntime.packManifestSha256 === undefined &&
+      value.codecRuntime.sourcePackManifestSha256?.length === 2 &&
+      value.codecRuntime.sourcePackManifestSha256.every(
+        (sha) => /^[0-9a-f]{64}$/.test(sha)
+      ) && new Set(value.codecRuntime.sourcePackManifestSha256).size === 2)
+  const codecValid = value.codecRuntime === undefined || (
+    value.codecRuntime.format === 1 &&
+    typeof value.codecRuntime.profile === 'string' &&
+    typeof value.codecRuntime.target === 'string' &&
+    /^0x[0-9a-f]{8}$/.test(value.codecRuntime.capabilityMask) &&
+    codecPackBindingValid &&
+    JSON.stringify(components) ===
+      JSON.stringify(['avcodec', 'avformat', 'avutil', 'swresample']) &&
+    value.codecRuntime.libraries.every((row) =>
+      row.path.length > 0 && !row.path.startsWith('/') &&
+      !row.path.includes('\\') && !row.path.split('/').includes('..') &&
+      Number.isSafeInteger(row.bytes) && row.bytes > 0 &&
+      /^[0-9a-f]{64}$/.test(row.sha256) &&
+      (value.platform === 'darwin'
+        ? /^[0-9a-f]{64}$/.test(row.machCanonicalSha256 ?? '')
+        : row.machCanonicalSha256 === undefined)
+    )
+  )
   if (
     value.format !== 1 ||
     typeof value.target !== 'string' ||
@@ -139,7 +268,7 @@ function parseCaptureManifest(path: string): CaptureArtifactManifest {
     (value.platform === 'darwin' && !/^[0-9a-f]{64}$/.test(value.machCanonicalSha256 ?? '')) ||
     (value.platform !== 'darwin' && value.machCanonicalSha256 !== undefined) ||
     !/^[0-9a-z-]{8,80}$/.test(value.generation ?? '') ||
-    value.addon !== 'singz-capture.node'
+    value.addon !== 'singz-capture.node' || !codecValid
   ) {
     throw new Error(`Invalid capture artifact manifest: ${path}`)
   }
@@ -158,11 +287,16 @@ export interface CaptureBindingLoadRuntime {
   integrityMode?: 'exact' | 'packaged-signed-mac'
   verifySignedMacArtifact?: (path: string) => boolean
   canonicalMacDigest?: (path: string) => string
-  stageArtifactForLoad?: (bytes: Uint8Array) => StagedCaptureArtifact
+  codecRuntime?: CaptureCodecRuntime
+  stageArtifactForLoad?: (
+    bytes: Uint8Array,
+    companions?: Array<{ path: string; bytes: Uint8Array }>
+  ) => StagedCaptureArtifact
 }
 
 export interface StagedCaptureArtifact {
   path: string
+  companions?: Record<string, string>
   cleanup: () => void
 }
 
@@ -225,7 +359,10 @@ export function pruneStaleCaptureLoadDirs(options: {
 }
 
 /** Stage exactly-read bytes at a unique path which require() can safely map. */
-export function stageArtifactForLoad(bytes: Uint8Array): StagedCaptureArtifact {
+export function stageArtifactForLoad(
+  bytes: Uint8Array,
+  companions: Array<{ path: string; bytes: Uint8Array }> = []
+): StagedCaptureArtifact {
   pruneStaleCaptureLoadDirs()
   const base = tmpdir()
   let directory = ''
@@ -245,17 +382,32 @@ export function stageArtifactForLoad(bytes: Uint8Array): StagedCaptureArtifact {
   if (!directory) throw new Error('Could not allocate a private capture-addon load directory')
   const path = join(directory, `${randomBytes(16).toString('hex')}.node`)
   const expected = Buffer.from(bytes)
+  const stagedCompanions: Record<string, string> = {}
   try {
     writeFileSync(path, expected, { flag: 'wx', mode: 0o500 })
     chmodSync(path, 0o500)
     const staged = readFileSync(path)
     if (!staged.equals(expected)) throw new Error('Private capture-addon staging changed artifact bytes')
+    for (const companion of companions) {
+      if (!companion.path || companion.path.startsWith('/') ||
+          companion.path.includes('\\') || companion.path.split('/').includes('..'))
+        throw new Error('Private capture-addon companion path is unsafe')
+      const companionPath = join(directory, companion.path)
+      mkdirSync(dirname(companionPath), { recursive: true, mode: 0o700 })
+      const companionBytes = Buffer.from(companion.bytes)
+      writeFileSync(companionPath, companionBytes, { flag: 'wx', mode: 0o500 })
+      chmodSync(companionPath, 0o500)
+      if (!readFileSync(companionPath).equals(companionBytes))
+        throw new Error('Private capture-addon companion staging changed artifact bytes')
+      stagedCompanions[companion.path] = companionPath
+    }
   } catch (error) {
     try { rmSync(directory, { recursive: true, force: true }) } catch { /* best effort */ }
     throw error
   }
   return {
     path,
+    companions: stagedCompanions,
     cleanup: () => {
       try { rmSync(directory, { recursive: true, force: true }) } catch { /* best effort */ }
     }
@@ -304,7 +456,11 @@ export function validateCaptureBindingIdentity(
   }
   for (const name of [
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
-    'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor'
+    'audioHostProviders', 'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor'
+    , 'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
+    'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
+    'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
+    'setPlaybackMasterGain', 'playbackStatus', 'unloadPlayback'
   ] as const) {
     if (typeof binding?.[name] !== 'function') {
       throw new Error(`singz-capture.node does not export ${name}`)
@@ -335,7 +491,11 @@ export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): Nati
       throw new Error('artifact checksum differs from its manifest')
     }
     const artifactBytes = Buffer.from(runtime.readArtifact(runtime.addonPath))
-    staged = (runtime.stageArtifactForLoad ?? stageArtifactForLoad)(artifactBytes)
+    const companionBytes = (runtime.codecRuntime?.libraries ?? []).map((library) => ({
+      path: library.path,
+      bytes: Buffer.from(runtime.readArtifact(join(dirname(runtime.addonPath), library.path)))
+    }))
+    staged = (runtime.stageArtifactForLoad ?? stageArtifactForLoad)(artifactBytes, companionBytes)
     const actualChecksum = createHash('sha256').update(artifactBytes).digest('hex')
     if (actualChecksum !== publishedChecksum) {
       const acceptsSignedMutation =
@@ -344,6 +504,22 @@ export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): Nati
         /^[0-9a-f]{64}$/.test(runtime.expectedMachCanonicalSha256 ?? '') &&
         runtime.canonicalMacDigest?.(staged.path) === runtime.expectedMachCanonicalSha256
       if (!acceptsSignedMutation) throw new Error('artifact bytes fail their checksum')
+    }
+    for (let index = 0; index < companionBytes.length; index += 1) {
+      const library = runtime.codecRuntime!.libraries[index]
+      const bytes = Buffer.from(companionBytes[index].bytes)
+      if (bytes.byteLength !== library.bytes)
+        throw new Error(`FFmpeg ${library.component} bytes fail their size`)
+      const actual = createHash('sha256').update(bytes).digest('hex')
+      if (actual === library.sha256) continue
+      const stagedPath = staged.companions?.[library.path]
+      const acceptsSignedMutation =
+        runtime.integrityMode === 'packaged-signed-mac' && stagedPath != null &&
+        runtime.verifySignedMacArtifact?.(stagedPath) === true &&
+        /^[0-9a-f]{64}$/.test(library.machCanonicalSha256 ?? '') &&
+        runtime.canonicalMacDigest?.(stagedPath) === library.machCanonicalSha256
+      if (!acceptsSignedMutation)
+        throw new Error(`FFmpeg ${library.component} bytes fail their checksum`)
     }
   } catch (error) {
     staged?.cleanup()
@@ -366,7 +542,13 @@ export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): Nati
   }
 
   try {
-    return validateCaptureBindingIdentity(binding, runtime.electronVersion, runtime.expectedSourceStamp)
+    const validated = validateCaptureBindingIdentity(
+      binding,
+      runtime.electronVersion,
+      runtime.expectedSourceStamp
+    )
+    if (runtime.codecRuntime) codecRuntimeByBinding.set(validated, runtime.codecRuntime)
+    return validated
   } catch (error) {
     throw new CaptureAddonLoadError(
       `${String(error)}. Restart SingZ after rebuilding with npm run capture:addon.`,
@@ -435,6 +617,7 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
     expectedSourceStamp: manifest.sourceStamp,
     expectedArtifactSha256: manifest.artifactSha256,
     expectedMachCanonicalSha256: manifest.machCanonicalSha256,
+    codecRuntime: manifest.codecRuntime,
     readText: (path) => readFileSync(path, 'utf8'),
     readArtifact: (path) => readFileSync(path),
     loadAddon: (path) => require(path),
@@ -550,6 +733,31 @@ function unsupportedMonitorStatus(error: string): DesktopMonitorStatus {
     parameterOverflows: 0,
     nonFiniteSamples: 0,
     rejectedBlocks: 0
+  }
+}
+
+const EMPTY_PLAYBACK_FORMAT: DesktopPlaybackResult['format'] = {
+  sampleRate: 0,
+  maximumFrames: 0,
+  nominalBufferFrames: 0,
+  inputChannels: 0,
+  outputChannels: 0
+}
+
+function failedPlayback(
+  error: string,
+  errorCode: DesktopPlaybackResult['errorCode'] = 'host-failure',
+  generation = '0',
+  state: DesktopPlaybackResult['state'] = 'unloaded'
+): DesktopPlaybackResult {
+  return {
+    ok: false,
+    errorCode,
+    error,
+    generation,
+    state,
+    format: { ...EMPTY_PLAYBACK_FORMAT },
+    latency: { ...EMPTY_MONITOR_LATENCY }
   }
 }
 
@@ -702,11 +910,15 @@ export class CaptureOwner {
   private monitorGeneration = ''
   private monitorRendererId: number | null = null
   private monitorHighWater = 0n
+  private playbackGeneration = ''
+  private playbackRendererId: number | null = null
+  private playbackHighWater = 0n
   private cleanupRenderers = new Set<number>()
 
   constructor(
     binding?: NativeCaptureBinding,
-    private readonly bindingLoader: () => NativeCaptureBinding = loadCaptureBinding
+    private readonly bindingLoader: () => NativeCaptureBinding = loadCaptureBinding,
+    private readonly injectedCodecRuntime?: CaptureCodecRuntime
   ) {
     if (binding) this.binding = binding
   }
@@ -735,15 +947,34 @@ export class CaptureOwner {
     return binding.inputDevices()
   }
 
-  hostDevices(platform: NodeJS.Platform = process.platform): DesktopAudioHostInventoryResult {
+  hostDevices(
+    provider?: DesktopPlaybackProvider,
+    platform: NodeJS.Platform = process.platform
+  ): DesktopAudioHostInventoryResult {
     const exposedPlatform = platform === 'darwin' || platform === 'win32' || platform === 'linux'
       ? platform
       : 'other'
+    const exposedProvider = provider ?? (platform === 'darwin' ? 'coreaudio' : 'wasapi')
+    const providerMatchesPlatform = provider === undefined ||
+      (platform === 'darwin' && provider === 'coreaudio') ||
+      (platform === 'win32' && (provider === 'wasapi' || provider === 'asio'))
+    if (!providerMatchesPlatform) {
+      return {
+        ok: false,
+        platform: exposedPlatform,
+        provider: exposedProvider,
+        defaultInputUid: '',
+        defaultOutputUid: '',
+        devices: [],
+        error: 'The requested native audio provider is not available on this platform.'
+      }
+    }
     const binding = this.native()
     if (!binding) {
       return {
         ok: false,
         platform: exposedPlatform,
+        provider: exposedProvider,
         defaultInputUid: '',
         defaultOutputUid: '',
         devices: [],
@@ -751,21 +982,23 @@ export class CaptureOwner {
       }
     }
     try {
-      const raw = binding.audioHostDevices() as {
+      const raw = binding.audioHostDevices(provider) as {
         ok?: unknown
+        provider?: unknown
         defaultInputUid?: unknown
         defaultOutputUid?: unknown
         devices?: unknown
         error?: unknown
       }
       if (
-        raw.ok !== true || typeof raw.defaultInputUid !== 'string' ||
+        raw.ok !== true || raw.provider !== exposedProvider || typeof raw.defaultInputUid !== 'string' ||
         typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
         !raw.devices.every(validHostDevice)
       ) {
         return {
           ok: false,
           platform: exposedPlatform,
+          provider: exposedProvider,
           defaultInputUid: '',
           defaultOutputUid: '',
           devices: [],
@@ -777,6 +1010,7 @@ export class CaptureOwner {
       return {
         ok: true,
         platform: exposedPlatform,
+        provider: exposedProvider,
         defaultInputUid: raw.defaultInputUid,
         defaultOutputUid: raw.defaultOutputUid,
         devices: raw.devices
@@ -785,6 +1019,7 @@ export class CaptureOwner {
       return {
         ok: false,
         platform: exposedPlatform,
+        provider: exposedProvider,
         defaultInputUid: '',
         defaultOutputUid: '',
         devices: [],
@@ -935,6 +1170,270 @@ export class CaptureOwner {
     }
   }
 
+  playbackProviders(platform: NodeJS.Platform = process.platform): DesktopPlaybackProviderInfo[] {
+    const fallback: DesktopPlaybackProviderInfo[] = [
+      {
+        id: 'coreaudio',
+        label: 'CoreAudio',
+        available: platform === 'darwin',
+        errorCode: platform === 'darwin' ? 'none' : 'wrong-platform',
+        detail: platform === 'darwin' ? 'Native macOS AudioHost output' : 'Available only on macOS'
+      },
+      {
+        id: 'wasapi',
+        label: 'WASAPI',
+        available: platform === 'win32',
+        errorCode: platform === 'win32' ? 'none' : 'wrong-platform',
+        detail: platform === 'win32' ? 'Native Windows AudioHost output' : 'Available only on Windows'
+      },
+      {
+        id: 'asio',
+        label: 'ASIO',
+        available: false,
+        errorCode: platform === 'win32' ? 'not-compiled' : 'wrong-platform',
+        detail: platform === 'win32'
+          ? 'The separately licensed Steinberg ASIO SDK/runtime is not vendored'
+          : 'ASIO is a separate Windows provider and is not available on this platform.'
+      }
+    ]
+    const binding = this.native()
+    if (!binding) return fallback
+    try {
+      const native = binding.audioHostProviders()
+      if (!Array.isArray(native)) return fallback
+      const validCodes = new Set([
+        'none', 'not-compiled', 'runtime-unavailable', 'platform-not-ready', 'wrong-platform'
+      ])
+      const valid = native.every((row) => row &&
+        (row.id === 'coreaudio' || row.id === 'wasapi' || row.id === 'asio') &&
+        typeof row.label === 'string' && typeof row.available === 'boolean' &&
+        validCodes.has(row.errorCode) && typeof row.detail === 'string')
+      if (!valid) return fallback
+      return fallback.map((row) => row.errorCode === 'wrong-platform'
+        ? row
+        : native.find((candidate) => candidate.id === row.id) ?? row)
+    } catch {
+      return fallback
+    }
+  }
+
+  playbackCapability(): DesktopPlaybackRuntimeCapability {
+    const unavailable = (): DesktopPlaybackRuntimeCapability => ({
+      available: false,
+      playbackCapability: DESKTOP_PLAYBACK_CAPABILITY,
+      mediaCodec: {
+        abiVersion: 1,
+        formatMask: DESKTOP_PLAYBACK_CODEC_BASE_MASK,
+        dynamicallyLinkedFfmpeg: false,
+        runtimeVersion: '',
+        capabilityTag: DESKTOP_PLAYBACK_CODEC_BASE_TAG,
+        profile: '',
+        target: '',
+        extensions: [...DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS]
+      }
+    })
+    const binding = this.native()
+    if (!binding) return unavailable()
+    try {
+      if (binding.playbackStatus().capability !== DESKTOP_PLAYBACK_CAPABILITY) return unavailable()
+    } catch {
+      return unavailable()
+    }
+    const runtime = this.injectedCodecRuntime ?? codecRuntimeByBinding.get(binding)
+    if (!isFullPlaybackCodecRuntime(runtime)) {
+      return { ...unavailable(), available: true }
+    }
+    const packBinding = runtime.packManifestSha256 ??
+      runtime.sourcePackManifestSha256?.join('+') ?? ''
+    return {
+      available: true,
+      playbackCapability: DESKTOP_PLAYBACK_CAPABILITY,
+      mediaCodec: {
+        abiVersion: 1,
+        formatMask: DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+        dynamicallyLinkedFfmpeg: true,
+        runtimeVersion: packBinding,
+        capabilityTag: DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+        profile: DESKTOP_PLAYBACK_CODEC_PROFILE,
+        target: runtime.target,
+        extensions: [...DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS]
+      }
+    }
+  }
+
+  preparePlayback(
+    rendererId: number,
+    config: DesktopPlaybackPrepareConfig,
+    lanes: DesktopPlaybackLaneConfig[],
+    platform: NodeJS.Platform = process.platform
+  ): DesktopPlaybackResult {
+    if (this.playbackGeneration) {
+      return failedPlayback(
+        'Unload the active native player before preparing another.',
+        'native-audio-busy',
+        this.playbackGeneration
+      )
+    }
+    if (
+      config.capability !== DESKTOP_PLAYBACK_CAPABILITY ||
+      config.playback?.version !== DESKTOP_PLAYBACK_CONTRACT_VERSION ||
+      config.accessMode !== (config.provider === 'asio' ? 'exclusive' : 'shared')
+    ) {
+      return failedPlayback(
+        'The desktop native playback contract is not the current strict version.',
+        'invalid-configuration'
+      )
+    }
+    const provider = this.playbackProviders(platform).find((row) => row.id === config.provider)
+    if (!provider?.available) {
+      return failedPlayback(
+        provider?.detail ?? 'The requested native playback provider is invalid.',
+        provider && provider.errorCode !== 'wrong-platform'
+          ? 'platform-not-ready'
+          : 'invalid-configuration'
+      )
+    }
+    if (this.playbackHighWater >= BigInt(Number.MAX_SAFE_INTEGER)) {
+      return failedPlayback('The native playback generation range is exhausted.', 'invalid-generation')
+    }
+    const binding = this.native()
+    if (!binding) return failedPlayback(this.loadError ?? 'Native playback unavailable')
+    const codec = this.playbackCapability()
+    if (lanes.some((lane) => !playbackCodecSupportsPath(codec, lane.path))) {
+      return failedPlayback(
+        'A native playback lane is not supported by the proven decoder runtime.',
+        'invalid-configuration'
+      )
+    }
+    try {
+      if (binding.playbackStatus().capability !== DESKTOP_PLAYBACK_CAPABILITY) {
+        return failedPlayback(
+          'The loaded native playback addon does not implement the current capability.',
+          'platform-not-ready'
+        )
+      }
+    } catch (error) {
+      return failedPlayback(
+        `Could not verify the native playback capability: ${String(error)}`,
+        'host-failure'
+      )
+    }
+    const generation = ++this.playbackHighWater
+    const rawGeneration = generation.toString()
+    try {
+      const result = binding.preparePlayback(config, lanes, generation)
+      // Once the native session claims a generation, even a decode/graph
+      // failure owns a cleanup receipt. Retain it until exact unload proves
+      // every graph/host/quarantine domain empty.
+      if (result.generation === rawGeneration && result.ownershipRetained === true) {
+        this.playbackGeneration = rawGeneration
+        this.playbackRendererId = rendererId
+      }
+      return result
+    } catch (error) {
+      return failedPlayback(`Native playback prepare failed: ${String(error)}`, 'host-failure', rawGeneration)
+    }
+  }
+
+  private playbackCommand(
+    rendererId: number,
+    rawGeneration: string,
+    invoke: (binding: NativeCaptureBinding, generation: bigint) => DesktopPlaybackResult
+  ): DesktopPlaybackResult {
+    const generation = parseGeneration(rawGeneration)
+    if (!generation || this.playbackRendererId !== rendererId || this.playbackGeneration !== rawGeneration) {
+      return failedPlayback(
+        'The native playback generation is no longer active.',
+        'invalid-generation',
+        rawGeneration
+      )
+    }
+    const binding = this.native()
+    if (!binding) return failedPlayback(this.loadError ?? 'Native playback unavailable', 'host-failure', rawGeneration)
+    try {
+      return invoke(binding, generation)
+    } catch (error) {
+      return failedPlayback(`Native playback command failed: ${String(error)}`, 'host-failure', rawGeneration)
+    }
+  }
+
+  openPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.openPlaybackOutput(value))
+  }
+
+  startPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.startPlayback(value))
+  }
+
+  pausePlayback(rendererId: number, generation: string): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.pausePlayback(value))
+  }
+
+  resumePlayback(rendererId: number, generation: string): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.resumePlayback(value))
+  }
+
+  stopPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.stopPlayback(value))
+  }
+
+  seekPlayback(rendererId: number, generation: string, frame: number): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.seekPlayback(value, frame))
+  }
+
+  setPlaybackLoop(
+    rendererId: number,
+    generation: string,
+    startFrame: number,
+    endFrame: number
+  ): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) =>
+      binding.setPlaybackLoop(value, startFrame, endFrame))
+  }
+
+  clearPlaybackLoop(rendererId: number, generation: string): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.clearPlaybackLoop(value))
+  }
+
+  reanchorPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) => binding.reanchorPlayback(value))
+  }
+
+  setPlaybackLane(
+    rendererId: number,
+    generation: string,
+    id: string,
+    gain: number,
+    muted: boolean,
+    solo: boolean
+  ): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) =>
+      binding.setPlaybackLane(value, id, gain, muted, solo))
+  }
+
+  setPlaybackMasterGain(rendererId: number, generation: string, gain: number): DesktopPlaybackResult {
+    return this.playbackCommand(rendererId, generation, (binding, value) =>
+      binding.setPlaybackMasterGain(value, gain))
+  }
+
+  playbackStatus(): DesktopPlaybackStatus | null {
+    try {
+      const status = this.native()?.playbackStatus() ?? null
+      return status?.capability === DESKTOP_PLAYBACK_CAPABILITY ? status : null
+    } catch {
+      return null
+    }
+  }
+
+  unloadPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
+    const result = this.playbackCommand(rendererId, generation, (binding, value) => binding.unloadPlayback(value))
+    if (result.ok && result.cleanupComplete) {
+      this.playbackGeneration = ''
+      this.playbackRendererId = null
+    }
+    return result
+  }
+
   begin(
     rendererId: number,
     config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
@@ -1039,7 +1538,10 @@ export class CaptureOwner {
   }
 
   rendererGone(rendererId: number): void {
-    if (rendererId === this.rendererId || rendererId === this.monitorRendererId) this.stop()
+    if (
+      rendererId === this.rendererId || rendererId === this.monitorRendererId ||
+      rendererId === this.playbackRendererId
+    ) this.stop()
   }
 
   /** True once per webContents lifetime, so restarts/reloads add no listeners. */
@@ -1050,6 +1552,15 @@ export class CaptureOwner {
   }
 
   stop(): void {
+    if (this.playbackGeneration && this.binding) {
+      try {
+        const result = this.binding.unloadPlayback(BigInt(this.playbackGeneration))
+        if (result.ok && result.cleanupComplete) {
+          this.playbackGeneration = ''
+          this.playbackRendererId = null
+        }
+      } catch { /* addon cleanup hook remains the final fail-closed owner */ }
+    }
     if (this.monitorGeneration && this.binding) {
       try {
         const result = this.binding.endMonitor(BigInt(this.monitorGeneration))

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -26,6 +26,8 @@ export interface ScenarioProject {
   /** Extra lanes the singer added, as project.json records them. */
   custom?: { id: string; label: string; color: string; file: string }[]
   settings?: Record<string, unknown>
+  /** Optional portable graph payload, kept separate from audio truth. */
+  graph?: { format: number; body: string }
 }
 
 export interface Scenario {
@@ -84,6 +86,13 @@ export function seedLibraryOnDisk(root: string, scenario: Scenario): void {
     for (const f of p.files) writeFileSync(join(root, p.dir, f.path), f.body)
     // the song itself: listProjects skips a project whose songFile is missing
     writeFileSync(join(root, p.dir, 'song.mp3'), `ID3 ${p.dir}`)
+    let graphHash: { format: number; md5: string; size: number; mtimeMs: number } | undefined
+    if (p.graph) {
+      const path = join(root, p.dir, 'graph.json')
+      writeFileSync(path, p.graph.body)
+      const st = statSync(path)
+      graphHash = { format: p.graph.format, md5: md5(p.graph.body), size: st.size, mtimeMs: st.mtimeMs }
+    }
     writeFileSync(
       join(root, p.dir, 'project.json'),
       JSON.stringify(
@@ -92,7 +101,8 @@ export function seedLibraryOnDisk(root: string, scenario: Scenario): void {
           name: p.name,
           songFile: 'song.mp3',
           savedAt: p.savedAt,
-          settings: { transpose: 0, tracks: {}, custom: p.custom ?? null, ...p.settings }
+          settings: { transpose: 0, tracks: {}, custom: p.custom ?? null, ...p.settings },
+          ...(graphHash ? { graphHash } : {})
         },
         null,
         2

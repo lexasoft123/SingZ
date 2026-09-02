@@ -48,6 +48,33 @@ if (TEST) {
     const m = (NativeModules as Record<string, Record<string, unknown>>)[mod] ?? {}
     return method ? typeof m[method] : Object.keys(m)
   }
+  // Opt-in iOS codec target proof. The native method and fixture bundle do
+  // not exist in ordinary product builds; a permanent driver polls these two
+  // fields instead of trying to call `require()` inside a CDP expression.
+  hooks.codecTargetProof = (): boolean => {
+    hooks.codecTargetProofDone = false
+    hooks.codecTargetProofResult = null
+    const method = (NativeModules.NativeAudioRuntime as {
+      codecTargetProof?: () => Promise<string>
+    } | undefined)?.codecTargetProof
+    if (typeof method !== 'function') {
+      hooks.codecTargetProofResult = JSON.stringify({
+        error: 'codecTargetProof is not in this installed binary'
+      })
+      hooks.codecTargetProofDone = true
+      return false
+    }
+    method()
+      .then(result => {
+        hooks.codecTargetProofResult = result
+        hooks.codecTargetProofDone = true
+      })
+      .catch((error: unknown) => {
+        hooks.codecTargetProofResult = JSON.stringify({ error: String(error) })
+        hooks.codecTargetProofDone = true
+      })
+    return true
+  }
   // ORT probe (SingzSplit native module) — drivers reach natives through
   // __test only; `require` does not exist inside CDP evals.
   hooks.ortProbe = (path: string): boolean => {

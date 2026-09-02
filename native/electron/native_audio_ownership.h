@@ -9,6 +9,7 @@ enum class NativeAudioOwnerKind : uint32_t {
   None,
   Capture,
   Monitor,
+  Playback,
 };
 
 enum class NativeAudioAcquireResult : uint32_t {
@@ -22,8 +23,10 @@ struct NativeAudioOwnershipSnapshot {
   uint64_t generation{0};
 };
 
-// Addon-wide control-domain arbitration. Capture analysis and full-duplex
-// monitoring must never own the native microphone at the same time.
+// Addon-wide control-domain arbitration. Capture analysis, full-duplex
+// monitoring and native song playback must never open competing platform
+// streams. Playback is output-only today, but it still owns the same physical
+// device/output lease that Chromium and monitoring coordinate around.
 class NativeAudioOwnership final {
  public:
   NativeAudioAcquireResult acquire(NativeAudioOwnerKind kind,

@@ -19,3 +19,36 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+
+// AGP gives every native React Native dependency its own CMake/Ninja task.
+// A pool in app/CMakeLists.txt therefore leaves dependencies free to consume
+// every core. Inject the same pre-project CMake policy into every Android
+// application/library. gradle.properties serializes AGP worker actions; the
+// CMake policy itself caps the one active task at eight visible clang lines.
+def singzAndroidCmakeInit = file("../scripts/android-cmake-init.cmake")
+def singzAndroidCmakePolicyDigest = java.security.MessageDigest.getInstance("SHA-256")
+[
+    singzAndroidCmakeInit,
+    file("../scripts/android-ccache-launcher.sh"),
+    file("../scripts/android-ccache-launcher.ps1")
+].each { policyFile -> singzAndroidCmakePolicyDigest.update(policyFile.bytes) }
+def singzAndroidCmakePolicyHash = singzAndroidCmakePolicyDigest.digest()
+    .encodeHex().toString().take(16)
+def configureSingzAndroidNativeBuild = { Project androidProject ->
+    def androidExtension = androidProject.extensions.getByName("android")
+    androidExtension.defaultConfig.externalNativeBuild.cmake.arguments(
+        "-DCMAKE_PROJECT_INCLUDE_BEFORE=${singzAndroidCmakeInit.absolutePath}",
+        "-DSINGZ_ANDROID_NATIVE_MAX_JOBS=8",
+        "-DSINGZ_ANDROID_BUILD_POLICY_HASH=${singzAndroidCmakePolicyHash}"
+    )
+
+}
+
+subprojects { androidProject ->
+    androidProject.plugins.withId("com.android.application") {
+        configureSingzAndroidNativeBuild(androidProject)
+    }
+    androidProject.plugins.withId("com.android.library") {
+        configureSingzAndroidNativeBuild(androidProject)
+    }
+}

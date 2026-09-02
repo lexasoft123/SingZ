@@ -45,6 +45,28 @@ const settingsChunks = files.filter((file) => /^SettingsModal-[\w-]+\.js$/.test(
 if (settingsChunks.length !== 1) {
   throw new Error(`Renderer split check: expected one terminal Settings chunk, found ${settingsChunks.length}.`)
 }
+const nativePlaybackChunks = files.filter((file) =>
+  /^desktop-native-playback-[\w-]+\.js$/.test(file)
+)
+if (nativePlaybackChunks.length !== 1) {
+  throw new Error(
+    `Renderer split check: expected one lazy desktop native-playback chunk, found ${nativePlaybackChunks.length}.`
+  )
+}
+const projectGraphChunks = files.filter((file) =>
+  /^desktop-project-graph-[\w-]+\.js$/.test(file)
+)
+if (projectGraphChunks.length !== 1) {
+  throw new Error(
+    `Renderer split check: expected one lazy desktop project-graph chunk, found ${projectGraphChunks.length}.`
+  )
+}
+const analysisChunks = files.filter((file) => /^analysis-[\w-]+\.js$/.test(file))
+if (analysisChunks.length !== 1) {
+  throw new Error(
+    `Renderer split check: expected one lazy beat/key analysis chunk, found ${analysisChunks.length}.`
+  )
+}
 const trackChunks = files.filter((file) => /^TrackStack-[\w-]+\.js$/.test(file))
 if (trackChunks.length !== 0) {
   throw new Error('Renderer split check: TrackStack must stay eager with the song engine and transport.')
@@ -63,6 +85,18 @@ for (const [name, chunks] of [
       throw new Error(`Renderer split check: entry does not reference ${name} route chunk ${chunk}.`)
     }
   }
+}
+if (!entrySource.includes(`./${nativePlaybackChunks[0]}`)) {
+  throw new Error('Renderer split check: entry does not reference the native-playback chunk.')
+}
+if (!entrySource.includes(`./${projectGraphChunks[0]}`)) {
+  throw new Error('Renderer split check: entry does not reference the project-graph chunk.')
+}
+if (!entrySource.includes(`./${analysisChunks[0]}`)) {
+  throw new Error('Renderer split check: entry does not reference the beat/key analysis chunk.')
+}
+if (entrySource.includes('invalid-node-id')) {
+  throw new Error('Renderer split check: portable graph parsing leaked into the eager entry.')
 }
 
 const sourceCache = new Map([[entryFile, entrySource]])
@@ -91,14 +125,21 @@ for (const chunk of [
   ...[...dialogChunks.values()].flatMap((chunks) => chunks),
   ...dropScreenChunks,
   ...trainingChunks,
-  ...settingsChunks
+  ...settingsChunks,
+  ...nativePlaybackChunks,
+  ...projectGraphChunks,
+  ...analysisChunks
 ]) {
   if (indexHtml.includes(chunk)) {
     throw new Error(`Renderer split check: on-demand chunk ${chunk} is preloaded by index.html.`)
   }
 }
 
-const ENTRY_RAW_BUDGET = 1_275_000
+// The native-playback product bridge added a 1.7 kB eager selection/facade
+// seam while its provider/schema implementation is held in the checked lazy
+// chunk above. Keep the allowance bounded rather than pulling the native DTO
+// and control client into the ordinary Web Audio entry.
+const ENTRY_RAW_BUDGET = 1_278_000
 const TRAINING_RAW_BUDGET = 80_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size
 const trainingBytes = await Promise.all(trainingChunks.map(async (file) =>

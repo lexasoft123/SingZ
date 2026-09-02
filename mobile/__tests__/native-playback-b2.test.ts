@@ -5,12 +5,17 @@ import type { ProjectDoc } from '../src/model';
 import type { LoadedProject, ProjectEntry } from '../src/projects';
 import {
   IosNativePlaybackCoordinator,
+  NativePlaybackCommandError,
   nativePlaybackEligibility,
+  rebuildIosNativePlaybackCues,
+  rebuildNativePlaybackCues,
   type NativePlaybackCapability,
   type NativePlaybackResult,
   type NativePlaybackUnloadResult,
 } from '../src/playback/native';
 import type { IosNativePlaybackPreferenceStore } from '../src/playback/preferences';
+import { playbackCountInDisplay } from '../src/playback/count-in-display';
+import { md5Text, utf8TextByteLength } from '../src/md5';
 
 const doc = (overrides: Partial<ProjectDoc['settings']> = {}): ProjectDoc => ({
   version: 2,
@@ -30,6 +35,32 @@ const entry = (
   bytes: 200,
   hasLyrics: false,
 });
+
+const androidEntry = (
+  settings: Partial<ProjectDoc['settings']> = {},
+): ProjectEntry => ({
+  ...entry(settings),
+  stems: {
+    vocals: 'flac',
+    drums: 'wav',
+    bass: 'flac',
+    guitar: 'flac',
+    piano: 'flac',
+    other: 'flac',
+  },
+});
+
+const legacyOnlyEntry = (): ProjectEntry =>
+  entry({
+    custom: [
+      {
+        id: 'custom-caf',
+        label: 'CAF fixture',
+        color: '#ffffff',
+        file: 'stems/custom-caf.caf',
+      },
+    ],
+  });
 
 const result = (
   generation: number,
@@ -74,20 +105,37 @@ const capability = (
   generation = 0,
   state = 'unloaded',
   cursor = 0,
+  platform: 'ios' | 'android' = 'ios',
 ): NativePlaybackCapability => ({
   available: true,
+  interfaceVersion: 3,
+  playbackContractVersion: 2,
   graph: true,
   audioHostAdapter: true,
   playbackSession: true,
   playbackCleanupProof: true,
   playbackHandoffLease: true,
-  playbackBuild: 'test-native',
+  playbackTransport: true,
+  scheduledCues: true,
+  timePitch: true,
+  mediaCodec: {
+    abiVersion: 1,
+    formatMask: 0x1ff,
+    dynamicallyLinkedFfmpeg: true,
+    runtimeVersion: '8.0.1',
+    capabilityTag: 'singz-prepared-audio-fd-ffmpeg-full-matrix-v3',
+  },
+  buildId:
+    platform === 'android'
+      ? 'singz.android.zdsp_runtime.phase-android-q32-time-pitch-v3'
+      : 'singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3',
+  playbackBuild: 'singz.native.playback-session.anchored-preview.v4',
   ownership: state === 'unloaded' ? 'legacy' : 'native',
   activation: 'experimental',
   outputs: [
     {
-      uid: 'ios-output:speaker',
-      label: 'iPhone Speaker',
+      uid: platform === 'android' ? 'android:7' : 'ios-output:speaker',
+      label: platform === 'android' ? 'Android speaker' : 'iPhone Speaker',
       default: true,
       channels: 2,
       sampleRate: 48_000,
@@ -98,13 +146,78 @@ const capability = (
     state,
     hostState: state === 'running' ? 'running' : 'closed',
     terminalReason: 'none',
+    terminalOrdinal: 0,
     sampleRate: 48_000,
+    maximumFrames: 4096,
+    nominalBufferFrames: 256,
+    outputChannels: 2,
     renderedFrames: cursor,
     audibleFrames: cursor,
+    transportGeneration: generation,
+    transportTelemetryQuality: 'current',
+    lastTransportBoundary: 'none',
+    transportState:
+      state === 'running' ? 'playing' : state === 'stopped' ? 'stopped' : 'stopped',
+    renderedProjectFrame: cursor,
+    audibleProjectFrame: cursor - 304,
+    audibleProjectionQuality: 'current',
+    continuousFrame: cursor,
+    durationFrames: 96_000,
+    remainingPreRollFrames: 0,
+    cueEventsCompleted: 0,
+    nextCueEventIndex: 0,
+    loopEnabled: false,
+    loopStartFrame: 0,
+    loopEndFrame: 0,
+    loopCount: 0,
+    seekCount: 0,
+    transportDiscontinuities: 0,
+    presentationLatencyFrames: 304,
+    playbackRate: 1,
+    transposeSemitones: 0,
+    graphLatencyFrames: 0,
+    devicePresentationLatencyFrames: 304,
+    totalPresentationLatencyFrames: 304,
+    preparedStartProjectFrame: 0,
     retainedBytes: state === 'unloaded' ? 0 : 384_000,
+    graphArenaBytes: state === 'unloaded' ? 0 : 128_000,
+    masterGain: 1,
+    referenceGain: 0,
+    trainingEnabled: false,
+    trainingLanes: [],
+    preRollFrames: 0,
+    cueEventCount: 0,
+    graphNodeCount: state === 'unloaded' ? 0 : 10,
+    graphConnectionCount: state === 'unloaded' ? 0 : 9,
+    latencyCompensatedEdgeCount: 0,
+    topology:
+      state === 'unloaded'
+        ? ''
+        : 'fixture source→map→gain→mix→limiter→output',
     xruns: 0,
     deadlineMisses: 0,
     discontinuities: 0,
+    renderFailures: 0,
+    adapterRenderFailures: 0,
+    terminalRenderFailures: 0,
+    parameterOverflows: 0,
+    nonFiniteSamples: 0,
+    rejectedBlocks: 0,
+    previewClicksEnqueued: 0,
+    previewClicksStarted: 0,
+    previewClicksCompleted: 0,
+    previewClicksPending: 0,
+    timePitchAnchorsPrepared: 0,
+    timePitchAnchorsPublished: 0,
+    timePitchAnchorMisses: 0,
+    timePitchReplacementReady: true,
+    timePitchLoopPriming: true,
+    latency: {
+      outputDeviceFrames: 48,
+      bufferFrames: 256,
+      externalRouteFrames: 0,
+      presentationFrames: 304,
+    },
     lanes: [
       {
         id: 'vocals',
@@ -136,15 +249,19 @@ function harness(
     suspendRejectOnCall?: number;
     suspendWait?: Promise<void>;
     suspendWaitOnCall?: number;
+    transportError?: NativePlaybackResult['error'];
+    transportReject?: Error;
+    platform?: 'ios' | 'android';
   } = {},
 ) {
+  const platform = options.platform ?? 'ios';
   const calls: string[] = [];
   let generation = 0;
   let state = 'unloaded';
   let nextLease = 40;
   const prepareRequests: Array<Record<string, unknown>> = [];
   const native = {
-    status: jest.fn(async () => capability(generation, state)),
+    status: jest.fn(async () => capability(generation, state, 0, platform)),
     prepare: jest.fn(async (next: number, request: Record<string, unknown>) => {
       calls.push(`native.prepare:${next}`);
       generation = next;
@@ -168,6 +285,27 @@ function harness(
     start: jest.fn(async (next: number) => {
       calls.push(`native.start:${next}`);
       state = 'running';
+      return result(next, state);
+    }),
+    transport: jest.fn(async (next: number, command: { kind: string }) => {
+      calls.push(`native.transport:${next}:${command.kind}`);
+      if (options.transportReject) throw options.transportReject;
+      if (options.transportError && options.transportError !== 'none')
+        return {
+          ...result(next, state, false),
+          error: options.transportError,
+          message: `injected ${options.transportError}`,
+        };
+      return result(next, state);
+    }),
+    setControl: jest.fn(async (next: number, control: Record<string, unknown>) => {
+      calls.push(
+        `native.control:${next}:${'laneId' in control ? 'lane' : 'master'}`,
+      );
+      return result(next, state);
+    }),
+    previewClick: jest.fn(async (next: number, sound: 0 | 1) => {
+      calls.push(`native.preview:${next}:${sound === 1 ? 'accent' : 'ordinary'}`);
       return result(next, state);
     }),
     stop: jest.fn(async (next: number) => {
@@ -255,7 +393,7 @@ function harness(
     save: jest.fn(),
   } as unknown as IosNativePlaybackPreferenceStore;
   const coordinator = new IosNativePlaybackCoordinator({
-    platform: 'ios',
+    platform,
     native: native as never,
     preferences,
     legacyLoad: legacyLoad as never,
@@ -263,7 +401,7 @@ function harness(
   });
   const current = options.current ?? (() => true);
   const load = (
-    nextEntry: ProjectEntry = entry(),
+    nextEntry: ProjectEntry = platform === 'android' ? androidEntry() : entry(),
     isCurrent: () => boolean = current,
   ) =>
     coordinator.load({
@@ -313,7 +451,283 @@ beforeEach(() => {
   (NativeModules.FolderAccess as Record<string, unknown>).readText = jest.fn(
     async () => '{"lines":[]}',
   );
+  (NativeModules.FolderAccess as Record<string, unknown>).statFile = jest.fn(
+    async () => ({ md5: '', size: 0, mtimeMs: 0 }),
+  );
 });
+
+describe.each(['ios', 'android'] as const)(
+  '%s Phase 4B product coordinator',
+  platform => {
+    it('selects one native owner with a whole-song cue DTO and no JS PCM decode', async () => {
+      const h = harness({ platform });
+      const project = await h.load();
+
+      expect(project.nativePlayback?.kind).toBe(`${platform}-native`);
+      expect(project.stems).toEqual([]);
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+      expect(h.native.prepare).toHaveBeenCalledTimes(1);
+      expect(h.prepareRequests[0]).toMatchObject({
+        outputDeviceUid:
+          platform === 'android' ? 'android:7' : 'ios-output:speaker',
+        playback: {
+          version: 2,
+          transport: { entrySeconds: 0, playbackRate: 1 },
+          cues: {
+            click: false,
+            countInBars: 0,
+            volume: 0.7,
+            accent: true,
+          },
+        },
+      });
+      expect(h.prepareRequests[0]).not.toHaveProperty('events');
+      expect(h.native.previewClick).toBeDefined();
+      await project.nativePlayback?.unload('cross-platform contract cleanup');
+    });
+
+    it('queues an accent preview click on the exact running generation', async () => {
+      const h = harness({ platform });
+      const project = await h.load();
+      const handle = project.nativePlayback!;
+      await handle.start();
+
+      await handle.previewClick(true);
+
+      expect(h.native.previewClick).toHaveBeenCalledWith(1, 1);
+      expect(h.calls).toContain('native.preview:1:accent');
+      await handle.stop('preview click cleanup');
+    });
+
+    it('rebuilds structural cues at the signed project frame without replaying count-in', async () => {
+      const h = harness({ platform });
+      const beat = {
+        beats: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5],
+        bpm: 120,
+        beatsPerBar: 4,
+        downbeat: 0,
+        downbeats: [0, 4],
+        source: 'manual' as const,
+      };
+      const settings = {
+        beat,
+        metronome: {
+          click: true,
+          countInBars: 1,
+          volume: 0.6,
+          accent: true,
+        },
+      };
+      const project = await h.load(
+        platform === 'android' ? androidEntry(settings) : entry(settings),
+      );
+      h.native.status.mockResolvedValueOnce(
+        capability(1, 'prepared', 72_000, platform),
+      );
+
+      await rebuildNativePlaybackCues(project.nativePlayback!, beat, {
+        click: true,
+        countInBars: 2,
+        volume: 0.25,
+        accent: false,
+      });
+
+      expect(h.prepareRequests[1]).toMatchObject({
+        preparedStartProjectFrame: 72_000,
+        playback: {
+          transport: { entrySeconds: 0, playbackRate: 1 },
+          cues: {
+            click: true,
+            countInBars: 2,
+            volume: 0.25,
+            accent: false,
+          },
+        },
+      });
+      expect(h.prepareRequests[1]).not.toHaveProperty('events');
+      expect(h.calls).not.toContain('native.start:2');
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+      await project.nativePlayback?.unload('cross-platform rebuild cleanup');
+    });
+
+    it('prepares one frame-domain training schedule instead of streaming duck ticks', async () => {
+      const h = harness({ platform });
+      const project = await h.load();
+      h.native.status.mockResolvedValueOnce(
+        capability(1, 'prepared', 48_000, platform),
+      );
+
+      await project.nativePlayback!.setTraining({
+        mode: 'windows',
+        windows: [
+          { s: 0.25, e: 0.5 },
+          { s: 1, e: 1.5 },
+        ],
+        stems: ['vocals'],
+      });
+
+      expect(h.prepareRequests[1]).toMatchObject({
+        preparedStartProjectFrame: 48_000,
+        training: {
+          mode: 'windows',
+          windows: [
+            { startProjectFrame: 12_000, endProjectFrame: 24_000 },
+            { startProjectFrame: 48_000, endProjectFrame: 72_000 },
+          ],
+          laneIds: ['vocals'],
+          enabled: true,
+        },
+      });
+      expect(h.native.setControl).not.toHaveBeenCalled();
+      expect(h.native).not.toHaveProperty('setTrainingTick');
+      await project.nativePlayback!.unload('training schedule cleanup');
+    });
+
+    it('never falls back after native ownership when output start fails', async () => {
+      const h = harness({ platform });
+      const project = await h.load();
+      h.native.start.mockResolvedValueOnce(result(1, 'terminal', false));
+
+      await expect(project.nativePlayback!.start()).resolves.toMatchObject({
+        kind: 'failed',
+      });
+
+      expect(project.nativePlayback?.kind).toBe(`${platform}-native`);
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+    });
+  },
+);
+
+describe('Android Phase 4B product boundary', () => {
+  it('keeps an iOS-tagged or missing Android capability on legacy before ownership', async () => {
+    const h = harness({ platform: 'android' });
+    h.native.status.mockResolvedValue(capability(0, 'unloaded', 0, 'ios'));
+
+    const project = await h.load();
+
+    expect(project.nativePlayback).toBeUndefined();
+    expect(h.native.prepare).not.toHaveBeenCalled();
+    expect(h.legacyLoad).toHaveBeenCalledTimes(1);
+    expect(h.calls).toEqual(['legacy.decode']);
+  });
+
+  it.each([0, 1])(
+    'keeps audio-focus or route retirement with status generation %i stopped and retryable on the native owner',
+    async retiredGeneration => {
+      const h = harness({ platform: 'android' });
+      const project = await h.load();
+      const handle = project.nativePlayback!;
+      await handle.start();
+      await until(() => !((handle as unknown as { polling: boolean }).polling));
+      h.native.status.mockResolvedValueOnce(
+        capability(retiredGeneration, 'unloaded', 0, 'android'),
+      );
+
+      await h.coordinator.pollHandle(handle as never);
+
+      expect(handle.snapshot()).toMatchObject({
+        phase: 'stopped',
+        error: expect.stringMatching(/Tap Play to retry/i),
+      });
+      expect(h.calls).toContain('native.unload:1');
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe.each(['ios', 'android'] as const)(
+  '%s route/interruption recovery',
+  platform => {
+    it('retires the exact generation and requires an explicit Play retry on the new route', async () => {
+      const h = harness({ platform });
+      const project = await h.load(entry({
+        transpose: 2,
+        tempo: 0.9,
+        beat: {
+          beats: [0, 0.5, 1, 1.5],
+          bpm: 120,
+          beatsPerBar: 4,
+          downbeat: 0,
+          source: 'manual',
+        },
+        metronome: {
+          click: true,
+          countInBars: 1,
+          volume: 0.7,
+          accent: true,
+        },
+      }));
+      const handle = project.nativePlayback!;
+      await handle.start();
+      await until(() => !((handle as unknown as { polling: boolean }).polling));
+      await handle.setLaneControl('vocals', 0.35, true, false);
+      await handle.setMasterGain(0.55);
+      await handle.setLoop(0.25, 1.25);
+      const terminal = capability(1, 'terminal', 24_000, platform);
+      Object.assign(terminal.session as unknown as Record<string, unknown>, {
+        terminalReason: 'interrupted',
+        transportState: 'playing',
+        playbackRate: 0.9,
+        transposeSemitones: 2,
+        masterGain: 0.55,
+        loopEnabled: true,
+        loopStartFrame: 12_000,
+        loopEndFrame: 60_000,
+        lanes: terminal.session.lanes.map(lane =>
+          lane.id === 'vocals'
+            ? { ...lane, gain: 0.35, muted: true, solo: false }
+            : lane,
+        ),
+      });
+      h.native.status.mockResolvedValueOnce(terminal);
+
+      await h.coordinator.pollHandle(handle as never);
+
+      expect(handle.snapshot()).toMatchObject({
+        phase: 'stopped',
+        error: expect.stringMatching(/interrupted.*Tap Play to retry/i),
+      });
+      expect(h.calls).toContain('native.unload:1');
+      expect(h.native.start).toHaveBeenCalledTimes(1);
+
+      await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+      expect(h.prepareRequests).toHaveLength(2);
+      expect(h.prepareRequests[0]).not.toHaveProperty(
+        'preparedStartProjectFrame',
+      );
+      expect(h.prepareRequests[1]).toMatchObject({
+        handoffLease: 41,
+        // An explicit structural start resumes at the discontinuity and tells
+        // the native cue planner not to replay the configured count-in.
+        preparedStartProjectFrame: 24_000,
+        playback: {
+          transport: { playbackRate: 0.9, transposeSemitones: 2 },
+          cues: { countInBars: 1 },
+        },
+        masterGain: 0.55,
+        lanes: [
+          expect.objectContaining({
+            id: 'vocals',
+            gain: 0.35,
+            muted: true,
+            solo: false,
+          }),
+          expect.objectContaining({ id: 'drums' }),
+        ],
+        initialTransport: {
+          state: 'playing',
+          loop: {
+            startProjectFrame: 12_000,
+            endProjectFrame: 60_000,
+          },
+        },
+      });
+      expect(h.native.start).toHaveBeenCalledTimes(2);
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+      await handle.stop('route recovery test cleanup');
+    });
+  },
+);
 
 describe('iOS B2 backend selection and ownership', () => {
   it('records explicit DSP initialization, graph, AudioHost and render evidence', async () => {
@@ -331,10 +745,12 @@ describe('iOS B2 backend selection and ownership', () => {
       expect(lines).toEqual(
         expect.arrayContaining([
           expect.stringMatching(
-            /iOS runtime ready.*zdsp graph.*zcore AudioHost adapter/i,
+            /iOS runtime ready.*phase-ios-q32-time-pitch-v3.*anchored-preview\.v4.*zdsp graph.*zcore AudioHost adapter/i,
           ),
-          expect.stringMatching(/building graph.*10 nodes\/9 connections/i),
-          expect.stringMatching(/graph ready.*source→channel map→gain/i),
+          expect.stringMatching(
+            /preparing graph.*transport v2 entry 0\.000 s.*cues click off, count-in 0 bars/i,
+          ),
+          expect.stringMatching(/graph ready.*fixture source→map→gain/i),
           expect.stringMatching(/iOS audio session ready.*48 kHz.*256 frame/i),
           expect.stringMatching(/zcore AudioHost open.*iPhone Speaker/i),
           expect.stringMatching(
@@ -377,7 +793,19 @@ describe('iOS B2 backend selection and ownership', () => {
         }),
         expect.objectContaining({ id: 'drums', path: '/app/stems/drums.wav' }),
       ],
+      playback: {
+        version: 2,
+        transport: { entrySeconds: 0, playbackRate: 1 },
+        cues: {
+          click: false,
+          countInBars: 0,
+          volume: 0.7,
+          accent: true,
+        },
+      },
     });
+    expect(h.prepareRequests[0]).not.toHaveProperty('durationSeconds');
+    expect(h.prepareRequests[0]).not.toHaveProperty('preparedStartProjectFrame');
   });
 
   it('quiesces legacy output before configuring/opening and starts only at frame zero', async () => {
@@ -396,25 +824,25 @@ describe('iOS B2 backend selection and ownership', () => {
     await project.nativePlayback?.stop('test complete');
   });
 
-  it('decodes legacy lazily only after a complete cleanup proof', async () => {
+  it('keeps a failed selected project native after a complete cleanup proof', async () => {
     const h = harness({ prepareOk: false });
     const project = await h.load();
 
-    expect(project).toBe(h.legacyProject);
+    expect(project.nativePlayback).toBeDefined();
+    expect(project.nativePlayback?.snapshot()).toMatchObject({
+      phase: 'stopped',
+      error: expect.stringMatching(/prepare refused/i),
+    });
     expect(h.calls).toEqual([
       'native.prepare:1',
       'native.unload:1',
       'legacy.allow',
-      'legacy.allow',
-      'legacy.decode',
     ]);
-    expect(h.calls.indexOf('legacy.decode')).toBeGreaterThan(
-      h.calls.indexOf('native.unload:1'),
-    );
+    expect(h.legacyLoad).not.toHaveBeenCalled();
   });
 
   it.each(['configureOutputSession', 'openOutput'] as const)(
-    'allows exact-proof fallback when pre-start %s delivery fails',
+    'stays native when pre-start %s delivery fails',
     async command => {
       const h = harness();
       const project = await h.load();
@@ -422,9 +850,12 @@ describe('iOS B2 backend selection and ownership', () => {
 
       const outcome = await project.nativePlayback?.start();
 
-      expect(outcome).toEqual({ kind: 'fallback', project: h.legacyProject });
+      expect(outcome).toMatchObject({
+        kind: 'failed',
+        error: expect.stringMatching(/remains stopped on the native backend/i),
+      });
       expect(h.calls).toContain('native.unload:1');
-      expect(h.calls).toContain('legacy.decode');
+      expect(h.legacyLoad).not.toHaveBeenCalled();
       expect(h.calls).not.toContain('native.start:1');
     },
   );
@@ -438,6 +869,26 @@ describe('iOS B2 backend selection and ownership', () => {
 
     expect(outcome).toMatchObject({ kind: 'failed' });
     expect(h.calls).toContain('native.unload:1');
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+
+  it('keeps a stopped native owner native when a later restart cannot reopen output', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    await handle.start();
+    await handle.stop('first native run complete');
+    h.native.configureOutputSession.mockRejectedValueOnce(
+      new Error('route disappeared during restart'),
+    );
+
+    const outcome = await handle.start();
+
+    expect(outcome).toMatchObject({
+      kind: 'failed',
+      error: expect.stringMatching(/remains stopped on the native backend/i),
+    });
+    expect(handle.snapshot()).toMatchObject({ phase: 'stopped' });
     expect(h.legacyLoad).not.toHaveBeenCalled();
   });
 
@@ -488,7 +939,7 @@ describe('iOS B2 backend selection and ownership', () => {
       h.coordinator.stopForOwnership('Train after pre-claim rollback'),
     ).resolves.toBe(true);
 
-    const legacy = await h.load(entry({ transpose: 2 }));
+    const legacy = await h.load(legacyOnlyEntry());
     expect(legacy).toBe(h.legacyProject);
 
     const recovered = await h.load();
@@ -584,6 +1035,66 @@ describe('iOS B2 backend selection and ownership', () => {
     });
   });
 
+  it('passes the hash-bound portable graph projection to native without opaque fields', async () => {
+      const graph = {
+        format: 1,
+        engine: 'singz-dsp',
+        nodes: [{
+          id: '1',
+          type: '73696e677a2d6473700000000000000d',
+          typeVersion: 7,
+          execution: 'vendor-bridge',
+          unavailable: 'silence',
+          ports: { inputs: [], outputs: [{ id: 'out', channels: 2 }] },
+          parameters: { depth: 0.25 },
+          adapterState: {
+            encoding: 'base64',
+            data: '',
+            bytes: 0,
+            sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+          },
+          vendorOpaque: { keep: true },
+        }],
+        connections: [],
+      };
+      const text = JSON.stringify(graph);
+      const graphMd5 = md5Text(text);
+      const graphBytes = utf8TextByteLength(text);
+      const next = entry();
+      next.doc = {
+        ...next.doc,
+        graphHash: {
+          format: 1,
+          md5: graphMd5,
+          size: graphBytes,
+          mtimeMs: 1,
+        },
+      };
+      (NativeModules.FolderAccess as Record<string, jest.Mock>).statFile.mockResolvedValue({
+        md5: graphMd5, size: graphBytes, mtimeMs: 1,
+      });
+      (NativeModules.FolderAccess as Record<string, jest.Mock>).readText.mockImplementation(
+        async (_project: string, file: string) => file === 'graph.json' ? text : '{"lines":[]}',
+      );
+      const h = harness();
+      const project = await h.load(next);
+      expect(project.graph?.kind).toBe('known');
+      expect(h.prepareRequests[0]).toMatchObject({
+        graphDocument: {
+          format: 1,
+          engine: 'singz-dsp',
+          nodes: [expect.objectContaining({ id: '1', unavailable: 'silence' })],
+          connections: [],
+        },
+      });
+      expect(
+        ((h.prepareRequests[0].graphDocument as { nodes: Record<string, unknown>[] }).nodes[0]),
+      ).not.toHaveProperty('adapterState');
+      expect(
+        ((h.prepareRequests[0].graphDocument as { nodes: Record<string, unknown>[] }).nodes[0]),
+      ).not.toHaveProperty('vendorOpaque');
+  });
+
   it('restores the stopped restart lease when pre-claim suspension rejects', async () => {
     const h = harness({ suspendRejectOnCall: 2 });
     const project = await h.load();
@@ -646,27 +1157,20 @@ describe('iOS B2 backend selection and ownership', () => {
     },
   );
 
-  it('invalidates pre-start fallback on Back and releases decoded stale PCM', async () => {
+  it('keeps Back native-only after a pre-start output refusal', async () => {
     const h = harness();
     const project = await h.load();
     const handle = project.nativePlayback!;
     h.native.configureOutputSession.mockResolvedValueOnce(
       result(1, 'prepared', false),
     );
-    const decoded = deferred<LoadedProject>();
-    h.legacyLoad.mockImplementationOnce(async () => {
-      h.calls.push('legacy.decode');
-      return decoded.promise;
-    });
-
     const starting = handle.start();
-    await until(() => h.calls.includes('legacy.decode'));
+    await until(() => h.calls.includes('native.unload:1'));
     const leaving = handle.unload('Back pressed during fallback');
-    decoded.resolve(h.legacyProject);
 
     await expect(starting).resolves.toMatchObject({ kind: 'failed' });
     await expect(leaving).resolves.toBeUndefined();
-    expect(h.releasePcm).toHaveBeenCalledTimes(1);
+    expect(h.legacyLoad).not.toHaveBeenCalled();
   });
 
   it('keeps native ownership published while retirement proof is pending', async () => {
@@ -679,7 +1183,7 @@ describe('iOS B2 backend selection and ownership', () => {
       return proof.promise;
     });
 
-    const legacy = h.load(entry({ transpose: 2 }));
+    const legacy = h.load(legacyOnlyEntry());
     await until(() => h.calls.includes('native.unload:1'));
     expect(h.legacyLoad).not.toHaveBeenCalled();
     expect(h.engine.outputHeldForNativePlayback).toBe(true);
@@ -725,7 +1229,7 @@ describe('iOS B2 backend selection and ownership', () => {
     const project = await h.load();
     await project.nativePlayback!.start();
 
-    await expect(h.load(entry({ transpose: 2 }))).rejects.toThrow(
+    await expect(h.load(legacyOnlyEntry())).rejects.toThrow(
       /cleanup is uncertain/i,
     );
     await expect(
@@ -923,7 +1427,7 @@ describe('iOS B2 backend selection and ownership', () => {
       return {
         ...unload(next, 61),
         ok: false,
-        error: 'older-command-failure',
+        error: 'provider-failure' as const,
         generation: next - 1,
       };
     });
@@ -1002,7 +1506,7 @@ describe('iOS B2 backend selection and ownership', () => {
       return proof.promise;
     });
 
-    const oldLoad = h.load(entry({ transpose: 2 }), () => stale);
+    const oldLoad = h.load(legacyOnlyEntry(), () => stale);
     await until(() => h.calls.includes('native.unload:1'));
     stale = false;
     proof.resolve(unload(1, 93));
@@ -1053,7 +1557,7 @@ describe('iOS B2 backend selection and ownership', () => {
       return legacyDecode.promise;
     });
 
-    const legacyLoading = h.load(entry({ transpose: 2 }));
+    const legacyLoading = h.load(legacyOnlyEntry());
     await until(() => h.calls.includes('legacy.decode'));
     const nativeLoading = h.load();
     await until(
@@ -1081,10 +1585,432 @@ describe('iOS B2 backend selection and ownership', () => {
       h.calls.indexOf('native.unload:1'),
     );
   });
+
+  it('delivers generation-bound pause, resume, seek, loop and reanchor commands', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    await handle.start();
+    await handle.pause();
+    await handle.start();
+    await handle.seek(2);
+    await handle.setLoop(1, 1.5);
+    await handle.clearLoop();
+    await handle.reanchorTransport();
+
+    expect(h.native.transport.mock.calls).toEqual([
+      [1, { kind: 'pause' }],
+      [1, { kind: 'resume' }],
+      [1, { kind: 'seek', projectFrame: 96_000 }],
+      [
+        1,
+        {
+          kind: 'set-loop',
+          startProjectFrame: 48_000,
+          endProjectFrame: 72_000,
+        },
+      ],
+      [1, { kind: 'clear-loop' }],
+      [1, { kind: 'reanchor' }],
+    ]);
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+    await h.coordinator.stopForOwnership('transport test cleanup');
+  });
+
+  it.each(['invalid-generation', 'queue-full'] as const)(
+    'keeps %s transport failures typed and on the native owner',
+    async nativeCode => {
+      const h = harness({ transportError: nativeCode });
+      const project = await h.load();
+      await project.nativePlayback!.start();
+
+      await expect(project.nativePlayback!.pause()).rejects.toEqual(
+        expect.objectContaining({
+          name: 'NativePlaybackCommandError',
+          code: 'NATIVE_PLAYBACK_COMMAND_FAILED',
+          nativeCode,
+          command: 'pause',
+          generation: 1,
+        }) as NativePlaybackCommandError,
+      );
+      expect(project.nativePlayback!.kind).toBe('ios-native');
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+      expect(h.native.unload).not.toHaveBeenCalled();
+      await h.coordinator.stopForOwnership('transport failure test cleanup');
+    },
+  );
+
+  it('keeps a rejected scalar control visible without falsely terminating playback', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    await handle.start();
+    h.native.setControl.mockResolvedValueOnce({
+      ...result(1, 'running', false),
+      error: 'queue-full',
+      message: 'The native parameter queue is full.',
+    });
+
+    await expect(handle.setMasterGain(0.4)).rejects.toEqual(
+      expect.objectContaining({
+        name: 'NativePlaybackCommandError',
+        nativeCode: 'queue-full',
+        command: 'master-gain',
+      }) as NativePlaybackCommandError,
+    );
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'playing',
+      error: 'The native parameter queue is full.',
+    });
+    await handle.stop('control rejection cleanup');
+  });
+
+  it('publishes truthful pre-roll time without inventing dots from a variable meter', async () => {
+    const h = harness();
+    const project = await h.load();
+    project.doc.settings.beat = {
+      beats: [0, 0.48, 1.03, 1.51, 2.02, 2.63, 3.11, 3.6],
+      bpm: 117,
+      beatsPerBar: 4,
+      downbeat: 0,
+      downbeats: [0, 4, 7],
+      source: 'manual',
+    };
+    project.doc.settings.metronome = {
+      click: false,
+      countInBars: 1,
+      volume: 0.7,
+      accent: true,
+    };
+    const status = capability(1, 'running', 40_000);
+    const session = status.session as unknown as Record<string, unknown>;
+    session.transportState = 'pre-roll';
+    session.renderedProjectFrame = -2_000;
+    session.audibleProjectFrame = -2_304;
+    session.preRollFrames = 4_800;
+    session.remainingPreRollFrames = 2_000;
+    session.cueEventsCompleted = 1;
+    session.nextCueEventIndex = 1;
+    session.lanes = [{
+      ...status.session.lanes[0],
+      cursorFrames: 88_000,
+    }, status.session.lanes[1]];
+    h.native.status.mockResolvedValue(status);
+
+    await h.coordinator.pollHandle(project.nativePlayback as never);
+    const snapshot = project.nativePlayback!.snapshot();
+    expect(snapshot).toMatchObject({
+      phase: 'playing',
+      positionSec: -2_304 / 48_000,
+      renderedPositionSec: -2_000 / 48_000,
+      displayLatencySec: 304 / 48_000,
+      countInStatus: { kind: 'time', remainingSeconds: 2_304 / 48_000 },
+    });
+    expect(snapshot.countInStatus).not.toHaveProperty('total');
+    expect(snapshot.countInStatus).not.toHaveProperty('done');
+    expect(snapshot.countInStatus).not.toHaveProperty('perBar');
+    const display = playbackCountInDisplay(snapshot.countInStatus!);
+    expect(display.beatDots).toBe(false);
+    expect(display.text).not.toMatch(/[●○]/);
+  });
 });
 
-describe('iOS B2 eligibility', () => {
-  it('is opt-in, iOS-only, standard WAV/FLAC, and rejects active parity features', () => {
+describe('iOS Phase 4B structural cue rebuild', () => {
+  const beat: NonNullable<ProjectDoc['settings']['beat']> = {
+    beats: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5],
+    bpm: 120,
+    beatsPerBar: 4,
+    downbeat: 0,
+    downbeats: [0, 4],
+    source: 'manual',
+  };
+  const initialMetronome = {
+    click: true,
+    countInBars: 1,
+    volume: 0.5,
+    accent: true,
+  } as const;
+
+  it('passes persisted beat/metronome intent to the actual first prepare', async () => {
+    const h = harness();
+    await h.load(entry({ beat, metronome: initialMetronome }));
+
+    expect(h.prepareRequests).toHaveLength(1);
+    expect(h.prepareRequests[0]).toMatchObject({
+      playback: {
+        version: 2,
+        transport: { entrySeconds: 0, playbackRate: 1 },
+        cues: {
+          click: true,
+          countInBars: 1,
+          volume: 0.5,
+          accent: true,
+          beatGrid: {
+            beats: beat.beats,
+            beatsPerBar: 4,
+            downbeat: 0,
+            downbeats: [0, 4],
+          },
+        },
+      },
+    });
+    expect(h.prepareRequests[0]).not.toHaveProperty('durationSeconds');
+    expect(h.prepareRequests[0]).not.toHaveProperty('events');
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+
+  it('passes a gridless count-in-only plan without JS click events', async () => {
+    const h = harness();
+    await h.load(
+      entry({
+        metronome: {
+          click: false,
+          countInBars: 2,
+          volume: 0.25,
+          accent: false,
+        },
+      }),
+    );
+
+    expect(h.prepareRequests[0]).toMatchObject({
+      playback: {
+        transport: { entrySeconds: 0, playbackRate: 1 },
+        cues: {
+          click: false,
+          countInBars: 2,
+          volume: 0.25,
+          accent: false,
+        },
+      },
+    });
+    expect(
+      (h.prepareRequests[0].playback as { cues: Record<string, unknown> }).cues,
+    ).not.toHaveProperty('beatGrid');
+    expect(h.native.previewClick).toBeDefined();
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+
+  it('rebuilds from the trustworthy signed project frame and preserves play, loop and controls', async () => {
+    const h = harness();
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const old = capability(1, 'running', 72_000);
+    const session = old.session as unknown as Record<string, unknown>;
+    session.transportState = 'playing';
+    session.transportTelemetryQuality = 'lastGood';
+    session.renderedProjectFrame = 72_000;
+    session.audibleProjectFrame = 71_696;
+    session.loopEnabled = true;
+    session.loopStartFrame = 48_000;
+    session.loopEndFrame = 96_000;
+    session.masterGain = 0.8;
+    session.lanes = [
+      { ...old.session.lanes[0], gain: 0.4, muted: true, solo: false },
+      { ...old.session.lanes[1], gain: 0.75, muted: false, solo: true },
+    ];
+    const resumed = capability(2, 'running', 72_000);
+    const resumedSession = resumed.session as unknown as Record<string, unknown>;
+    resumedSession.loopEnabled = true;
+    resumedSession.loopStartFrame = 48_000;
+    resumedSession.loopEndFrame = 96_000;
+    h.native.status
+      .mockResolvedValueOnce(old)
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(resumed);
+
+    await rebuildIosNativePlaybackCues(handle, beat, {
+      click: true,
+      countInBars: 2,
+      volume: 0.3,
+      accent: false,
+    });
+
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(h.prepareRequests[1]).toMatchObject({
+      handoffLease: 41,
+      preparedStartProjectFrame: 72_000,
+      initialTransport: {
+        state: 'playing',
+        loop: { startProjectFrame: 48_000, endProjectFrame: 96_000 },
+      },
+      masterGain: 0.8,
+      lanes: [
+        expect.objectContaining({ id: 'vocals', gain: 0.4, muted: true }),
+        expect.objectContaining({ id: 'drums', gain: 0.75, solo: true }),
+      ],
+      playback: {
+        transport: { entrySeconds: 0, playbackRate: 1 },
+        cues: {
+          click: true,
+          countInBars: 2,
+          volume: 0.3,
+          accent: false,
+          beatGrid: expect.objectContaining({ beats: beat.beats }),
+        },
+      },
+    });
+    expect(h.calls.slice(-9)).toEqual([
+      'native.stop:1',
+      'native.unload:1',
+      'legacy.allow',
+      'legacy.unload',
+      'legacy.suspend',
+      'native.prepare:2',
+      'native.configure:2',
+      'native.open:2',
+      'native.start:2',
+    ]);
+    expect(h.native.transport).not.toHaveBeenCalled();
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'playing',
+      generation: 2,
+      regionState: { start: 1, end: 2, loop: true },
+    });
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+    await handle.stop('structural rebuild test complete');
+  });
+
+  it('restores pause after rebuild without replaying count-in', async () => {
+    const h = harness();
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const old = capability(1, 'running', 24_000);
+    const session = old.session as unknown as Record<string, unknown>;
+    session.transportState = 'paused';
+    session.transportTelemetryQuality = 'current';
+    session.renderedProjectFrame = 24_000;
+    session.audibleProjectFrame = 23_696;
+    const resumed = capability(2, 'running', 24_000);
+    (resumed.session as unknown as Record<string, unknown>).transportState =
+      'paused';
+    h.native.status
+      .mockResolvedValueOnce(old)
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(resumed);
+
+    await rebuildIosNativePlaybackCues(handle, beat, {
+      ...initialMetronome,
+      volume: 0.25,
+    });
+
+    expect(h.prepareRequests[1]).toMatchObject({
+      preparedStartProjectFrame: 24_000,
+      initialTransport: { state: 'paused' },
+      playback: { transport: { entrySeconds: 0 } },
+    });
+    expect(h.calls.at(-1)).toBe('native.start:2');
+    expect(h.native.transport).not.toHaveBeenCalled();
+    expect(handle.snapshot().phase).toBe('paused');
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+    await handle.stop('paused rebuild test complete');
+  });
+
+  it('fails stopped/retryable and never falls back when rebuild prepare fails', async () => {
+    const h = harness();
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    h.native.status.mockResolvedValueOnce(capability(1, 'running', 48_000));
+    h.native.prepare.mockImplementationOnce(
+      async (next: number, request: Record<string, unknown>) => {
+        h.calls.push(`native.prepare:${next}`);
+        h.prepareRequests.push(request);
+        return result(next, 'unloaded', false);
+      },
+    );
+
+    await expect(
+      rebuildIosNativePlaybackCues(handle, beat, {
+        ...initialMetronome,
+        volume: 0.2,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: 'NativePlaybackCommandError',
+        command: 'rebuild-cues',
+        generation: 2,
+      }) as NativePlaybackCommandError,
+    );
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'stopped',
+      error: expect.stringMatching(/prepare refused/i),
+    });
+    expect(h.calls.indexOf('native.stop:1')).toBeLessThan(
+      h.calls.indexOf('native.unload:1'),
+    );
+    expect(h.calls.indexOf('native.unload:1')).toBeLessThan(
+      h.calls.indexOf('native.prepare:2'),
+    );
+    expect(h.calls).toContain('native.unload:2');
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unavailable telemetry', { transportTelemetryQuality: 'unavailable' }],
+    ['mismatched transport generation', { transportGeneration: 99 }],
+  ] as const)(
+    'stops without guessing the rebuild position for %s',
+    async (_name, statusPatch) => {
+      const h = harness();
+      const project = await h.load(entry({ beat, metronome: initialMetronome }));
+      const handle = project.nativePlayback!;
+      await handle.start();
+      const untrusted = capability(1, 'running', 48_000);
+      Object.assign(
+        untrusted.session as unknown as Record<string, unknown>,
+        statusPatch,
+      );
+      h.native.status.mockResolvedValueOnce(untrusted);
+      const preparesBefore = h.prepareRequests.length;
+
+      await expect(
+        rebuildIosNativePlaybackCues(handle, beat, {
+          ...initialMetronome,
+          volume: 0.2,
+        }),
+      ).rejects.toEqual(
+        expect.objectContaining({
+          name: 'NativePlaybackCommandError',
+          nativeCode: 'invalid-state',
+          command: 'rebuild-cues',
+          generation: 1,
+        }) as NativePlaybackCommandError,
+      );
+
+      expect(h.prepareRequests).toHaveLength(preparesBefore);
+      expect(h.calls).toContain('native.stop:1');
+      expect(h.calls).toContain('native.unload:1');
+      expect(handle.snapshot()).toMatchObject({
+        phase: 'stopped',
+        error: expect.stringMatching(/trustworthy signed transport position/i),
+      });
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+    },
+  );
+
+  it('drops a stale loadSeq cue update before touching native ownership', async () => {
+    let current = true;
+    const h = harness({ current: () => current });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const before = [...h.calls];
+    current = false;
+
+    await rebuildIosNativePlaybackCues(project.nativePlayback!, beat, {
+      ...initialMetronome,
+      volume: 0.1,
+    });
+
+    expect(h.calls).toEqual(before);
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+});
+
+describe('mobile native eligibility', () => {
+  it('is opt-in, exact-platform and full-matrix capable across stems and added lanes', () => {
     const cap = capability();
     expect(
       nativePlaybackEligibility(entry(), doc(), false, 'ios', cap).eligible,
@@ -1094,13 +2020,39 @@ describe('iOS B2 eligibility', () => {
     ).toBe(false);
     expect(
       nativePlaybackEligibility(
+        androidEntry(),
+        doc(),
+        true,
+        'android',
+        capability(0, 'unloaded', 0, 'android'),
+      ).eligible,
+    ).toBe(true);
+    const custom = [
+      {
+        id: 'custom-x',
+        label: 'X',
+        color: '#ffffff',
+        file: 'stems/custom-x.mp3',
+      },
+    ];
+    expect(
+      nativePlaybackEligibility(
+        entry(),
+        doc(),
+        true,
+        'android',
+        capability(0, 'unloaded', 0, 'android'),
+      ).eligible,
+    ).toBe(true);
+    expect(
+      nativePlaybackEligibility(
         entry({ transpose: 2 }),
         doc({ transpose: 2 }),
         true,
         'ios',
         cap,
       ).eligible,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       nativePlaybackEligibility(
         entry({
@@ -1114,14 +2066,84 @@ describe('iOS B2 eligibility', () => {
         cap,
       ).eligible,
     ).toBe(false);
-    const custom = [
-      {
-        id: 'custom-x',
-        label: 'X',
-        color: '#ffffff',
-        file: 'stems/custom-x.mp3',
+    const wavFlacOnly = {
+      ...cap,
+      mediaCodec: {
+        abiVersion: 1 as const,
+        formatMask: 0x003,
+        dynamicallyLinkedFfmpeg: false,
+        runtimeVersion: '',
+        capabilityTag: 'singz-prepared-audio-fd-wav-flac-v1',
       },
-    ];
+    };
+    expect(
+      nativePlaybackEligibility(
+        entry({ custom }),
+        doc({ custom }),
+        true,
+        'ios',
+        wavFlacOnly,
+      ).reason,
+    ).toMatch(/does not support \.mp3/i);
+    expect(
+      nativePlaybackEligibility(legacyOnlyEntry(), legacyOnlyEntry().doc, true, 'ios', cap)
+        .eligible,
+    ).toBe(false);
+    const cueBeat = {
+      beats: [0, 0.5, 1, 1.5],
+      bpm: 120,
+      beatsPerBar: 4,
+      downbeat: 0,
+      source: 'manual' as const,
+    };
+    expect(
+      nativePlaybackEligibility(
+        entry({
+          beat: cueBeat,
+          metronome: {
+            click: true,
+            countInBars: 1,
+            volume: 0.7,
+            accent: true,
+          },
+        }),
+        doc({
+          beat: cueBeat,
+          metronome: {
+            click: true,
+            countInBars: 1,
+            volume: 0.7,
+            accent: true,
+          },
+        }),
+        true,
+        'ios',
+        cap,
+      ).eligible,
+    ).toBe(true);
+    expect(
+      nativePlaybackEligibility(
+        entry({
+          metronome: {
+            click: false,
+            countInBars: 2,
+            volume: 0.4,
+            accent: false,
+          },
+        }),
+        doc({
+          metronome: {
+            click: false,
+            countInBars: 2,
+            volume: 0.4,
+            accent: false,
+          },
+        }),
+        true,
+        'ios',
+        cap,
+      ).eligible,
+    ).toBe(true);
     expect(
       nativePlaybackEligibility(
         entry({ custom }),
@@ -1130,9 +2152,49 @@ describe('iOS B2 eligibility', () => {
         'ios',
         cap,
       ).eligible,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       nativePlaybackEligibility(entry(), doc(), true, 'ios', cap).eligible,
     ).toBe(true);
   });
+
+  it.each(['ios', 'android'] as const)(
+    'materializes added lanes for %s without leaking display metadata into the strict bridge schema',
+    async platform => {
+      const h = harness({ platform });
+      const custom = [{
+        id: 'custom-harmony',
+        label: 'Harmony',
+        color: '#c7e06a',
+        file: 'stems/custom-harmony.mp3',
+      }];
+      const projectEntry = entry({ custom });
+      h.native.status
+        .mockResolvedValueOnce(capability(0, 'unloaded', 0, platform))
+        .mockResolvedValueOnce(capability(1, 'prepared', 0, platform));
+
+      const project = await h.load(projectEntry);
+      const request = h.prepareRequests[0] as {
+        lanes: Array<Record<string, unknown>>;
+      };
+
+      expect(request.lanes).toEqual(
+        expect.arrayContaining([
+          {
+            id: 'custom-harmony',
+            path: '/app/stems/custom-harmony.mp3',
+            gain: 1,
+            muted: false,
+            solo: false,
+          },
+        ]),
+      );
+      expect(request.lanes.find(lane => lane.id === 'custom-harmony')).not.toHaveProperty(
+        'label',
+      );
+      expect(project.stems).toEqual([]);
+      expect(h.legacyLoad).not.toHaveBeenCalled();
+      await project.nativePlayback?.unload('custom lane test cleanup');
+    },
+  );
 });

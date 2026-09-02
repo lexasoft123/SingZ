@@ -32,6 +32,7 @@ const {
   verifyCaptureArtifact,
   verifyCaptureSnapshot
 } = require('./capture-artifact.cjs')
+const { assertNativeBuildLockHeld } = require('./native-build-lock.cjs')
 
 const root = resolve(__dirname, '..')
 const electronVersion = require(join(root, 'node_modules/electron/package.json')).version
@@ -121,7 +122,9 @@ function sourceFingerprint() {
       else files.push(path)
     }
   }
-  for (const dir of ['native/electron', 'zcore', 'zdsp', 'third_party/native', 'cmake']) {
+  for (const dir of [
+    'native/electron', 'native/playback', 'zcore', 'zdsp', 'third_party/native', 'cmake'
+  ]) {
     walk(join(root, dir))
   }
   files.push(join(root, 'CMakeLists.txt'), __filename)
@@ -139,6 +142,156 @@ function sourceFingerprint() {
 function run(command, args, cwd = root) {
   const result = spawnSync(command, args, { cwd, stdio: 'inherit' })
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`)
+}
+
+/** SINGZ_FFMPEG_CODECS mirrors mobile/scripts/ffmpeg-codec-selection-policy.mjs:
+ * `auto` (default, and what CI runs) links a fully proven product pack when one
+ * exists and otherwise builds the base WAV/FLAC decoder; `required` fails
+ * closed; `off` never links a pack. */
+function codecRuntimeMode() {
+  const value = process.env.SINGZ_FFMPEG_CODECS || 'auto'
+  if (!['auto', 'required', 'off'].includes(value)) {
+    throw new Error(`SINGZ_FFMPEG_CODECS must be auto, required or off (got ${JSON.stringify(value)})`)
+  }
+  return value
+}
+
+/** The proven product pack for this target, or null for a base build. A pack
+ * with configuration evidence only is never linked outside `required`, which
+ * refuses it: the addon's codec claim must match what was actually decoded. */
+function loadCodecPack() {
+  const mode = codecRuntimeMode()
+  if (mode === 'off') {
+    console.log('FFmpeg codec runtime: off; building the base WAV/FLAC native decoder')
+    return null
+  }
+  const pack = join(root, 'vendor', 'ffmpeg-codec', target)
+  const manifestPath = join(pack, 'manifest.json')
+  if (!existsSync(manifestPath)) {
+    if (mode === 'required') {
+      throw new Error(
+        `Full product FFmpeg pack is missing for ${target}; build and prove it before the desktop addon`
+      )
+    }
+    console.log(`FFmpeg codec runtime: no ${target} product pack; building the base WAV/FLAC native decoder`)
+    return null
+  }
+  const manifestBytes = readFileSync(manifestPath)
+  const manifest = JSON.parse(manifestBytes.toString('utf8'))
+  if (manifest.fixtureEvidence?.fullMatrix !== true) {
+    if (mode === 'required') {
+      throw new Error(
+        `FFmpeg pack ${target} has configuration evidence but no full fixture decode evidence; run codec_provisioning_tests and publish its receipt`
+      )
+    }
+    console.log(
+      `FFmpeg codec runtime: ${target} pack is configuration-only, not linked; building the base WAV/FLAC native decoder`
+    )
+    return null
+  }
+  try {
+    run(process.execPath, [
+      join(root, 'scripts/verify-ffmpeg-codec-pack.mjs'),
+      '--pack', pack,
+      '--require-full'
+    ])
+  } catch (error) {
+    // A pack whose proof no longer binds this tree is deliberately NOT
+    // dropped to the base decoder: the addon would then claim less than the
+    // machine was set up to prove and nobody would notice. Say what fixes it.
+    throw new Error(
+      `FFmpeg pack ${target} no longer binds this tree (${error instanceof Error ? error.message : String(error)}); ` +
+      `re-prove it with \`bash scripts/build-ffmpeg-codec-runtime.sh ${target} --prove-existing\`, ` +
+      'or build with SINGZ_FFMPEG_CODECS=off'
+    )
+  }
+  const libraries = Object.entries(manifest.runtimeLibraries).map(([component, source]) => {
+    const sourcePath = join(pack, source)
+    const linkPath = platform === 'win32'
+      ? [join(pack, 'lib', `${component}.lib`), join(pack, 'lib', `lib${component}.lib`)]
+          .find((candidate) => existsSync(candidate))
+      : sourcePath
+    if (!linkPath) throw new Error(`FFmpeg ${target} pack has no ${component} import library`)
+    const destination = platform === 'win32'
+      ? basename(source)
+      : join('ffmpeg', basename(source))
+    return {
+      component,
+      source,
+      sourcePath,
+      linkPath,
+      path: destination.replaceAll('\\', '/'),
+      bytes: statSync(sourcePath).size,
+      sha256: sha256File(sourcePath),
+      ...(platform === 'darwin'
+        ? { machCanonicalSha256: machCanonicalSha256(sourcePath) }
+        : {})
+    }
+  })
+  return {
+    pack,
+    manifest,
+    manifestSha256: createHash('sha256').update(manifestBytes).digest('hex'),
+    libraries
+  }
+}
+
+function validateFfmpegImports(addon, codecPack) {
+  const command = platform === 'darwin' ? 'otool' : 'dumpbin.exe'
+  const args = platform === 'darwin' ? ['-L', addon] : ['/dependents', addon]
+  const result = spawnSync(command, args, { encoding: 'utf8' })
+  if (!codecPack) {
+    // A base build must not have picked up a developer machine's libav*:
+    // its capability report would then describe bytes nobody proved. The
+    // scan is best effort here: a runner without the inspection tool built
+    // exactly this base addon before the codec runtime existed.
+    if (result.error || result.status !== 0) {
+      console.log(`FFmpeg import scan skipped for the base ${target} addon (${command} unavailable)`)
+      return
+    }
+    if (/libav(?:codec|format|util)|libswresample/i.test(result.stdout)) {
+      throw new Error('Base capture addon unexpectedly imports an FFmpeg library')
+    }
+    return
+  }
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Could not inspect ${target} FFmpeg imports: ${result.error?.message || result.stderr || result.stdout || result.status}`
+    )
+  }
+  for (const library of codecPack.libraries) {
+    const expected = platform === 'darwin'
+      ? `@rpath/${basename(library.source)}`
+      : basename(library.source).toLowerCase()
+    if (!(platform === 'darwin' ? result.stdout.includes(expected) :
+      result.stdout.toLowerCase().includes(expected))) {
+      throw new Error(`Capture addon has no dynamic ${library.component} import: ${expected}`)
+    }
+  }
+}
+
+function nativeBuildPolicy() {
+  const requested = Number(process.env.SINGZ_NATIVE_JOBS || 8)
+  if (!Number.isInteger(requested) || requested < 1 || requested > 8)
+    throw new Error(`SINGZ_NATIVE_JOBS must be an integer from 1 through 8 (got ${process.env.SINGZ_NATIVE_JOBS})`)
+  const lookup = spawnSync(
+    process.platform === 'win32' ? 'where.exe' : 'command',
+    process.platform === 'win32' ? ['ccache.exe'] : ['-v', 'ccache'],
+    { encoding: 'utf8', shell: process.platform !== 'win32' }
+  )
+  const ccache = lookup.status === 0 ? lookup.stdout.trim().split(/\r?\n/)[0] : ''
+  // The user-visible safety limit is the number of process command lines
+  // containing `clang`, not Ninja's edge count. An edge can expose the build
+  // shell, launcher, driver and frontend even without ccache, so serialize
+  // until an independently measured launcher proves a larger value <= 8.
+  const jobs = Math.min(requested, 1)
+  if (ccache) {
+    process.env.CCACHE_BASEDIR = root
+    process.env.CCACHE_NOHASHDIR = '1'
+    process.env.CCACHE_COMPILERCHECK = 'content'
+  }
+  console.log(`Capture native compile edges: ${jobs} (requested ${requested}; ccache ${ccache ? 'enabled' : 'disabled'})`)
+  return { ccache, jobs }
 }
 
 function findAddon(buildDir) {
@@ -170,7 +323,7 @@ function writeAtomic(path, contents) {
   }
 }
 
-function artifactManifest(fingerprint, artifactSha256, generation, canonicalSha256) {
+function artifactManifest(fingerprint, artifactSha256, generation, canonicalSha256, codecPack) {
   const manifest = {
     format: 1,
     target,
@@ -180,17 +333,41 @@ function artifactManifest(fingerprint, artifactSha256, generation, canonicalSha2
     sourceStamp: fingerprint,
     artifactSha256,
     generation,
-    addon: 'singz-capture.node'
+    addon: 'singz-capture.node',
+    // A base build carries no codecRuntime at all; main then reports the
+    // WAV/FLAC capability and the renderer keeps other codecs on WebAudio.
+    ...(codecPack ? {
+      codecRuntime: {
+        format: 1,
+        profile: codecPack.manifest.profile,
+        target: codecPack.manifest.target,
+        capabilityMask: codecPack.manifest.capabilityMask,
+        packManifestSha256: codecPack.manifestSha256,
+        libraries: codecPack.libraries.map(({ component, path, bytes, sha256, machCanonicalSha256 }) => ({
+          component, path, bytes, sha256, ...(machCanonicalSha256 ? { machCanonicalSha256 } : {})
+        }))
+      }
+    } : {})
   }
   if (platform === 'darwin') manifest.machCanonicalSha256 = canonicalSha256
   return manifest
 }
 
-function publishRuntimeArtifact(built, fingerprint) {
+function copyCodecRuntime(destination, codecPack) {
+  for (const library of codecPack?.libraries ?? []) {
+    const output = join(destination, library.path)
+    mkdirSync(dirname(output), { recursive: true })
+    copyFileSync(library.sourcePath, output)
+  }
+}
+
+function publishRuntimeArtifact(built, fingerprint, codecPack) {
   const artifactSha256 = sha256File(built)
   const canonicalSha256 = platform === 'darwin' ? machCanonicalSha256(built) : undefined
   const generation = uniqueGeneration()
-  const manifest = artifactManifest(fingerprint, artifactSha256, generation, canonicalSha256)
+  const manifest = artifactManifest(
+    fingerprint, artifactSha256, generation, canonicalSha256, codecPack
+  )
   const addon = runtimeArtifact(root, target, fingerprint, artifactSha256, generation)
   const destination = dirname(addon)
   const staging = join(dirname(destination), `.part-${generation}`)
@@ -198,6 +375,7 @@ function publishRuntimeArtifact(built, fingerprint) {
   mkdirSync(staging, { recursive: false })
   const stagedAddon = join(staging, 'singz-capture.node')
   copyFileSync(built, stagedAddon)
+  copyCodecRuntime(staging, codecPack)
   writeFileSync(`${stagedAddon}.source-hash`, `${fingerprint}\n`)
   writeFileSync(`${stagedAddon}.sha256`, `${artifactSha256}\n`)
   writeFileSync(
@@ -224,6 +402,12 @@ function writePackageSnapshot(addon, manifest) {
   mkdirSync(staging, { recursive: true })
   const snapshotAddon = join(staging, manifest.addon)
   copyFileSync(addon, snapshotAddon)
+  for (const library of manifest.codecRuntime?.libraries ?? []) {
+    const source = join(dirname(addon), library.path)
+    const output = join(staging, library.path)
+    mkdirSync(dirname(output), { recursive: true })
+    copyFileSync(source, output)
+  }
   if (sha256File(snapshotAddon) !== manifest.artifactSha256) {
     rmSync(staging, { recursive: true, force: true })
     throw new Error(`Capture package snapshot copy failed checksum validation: ${target}`)
@@ -346,6 +530,8 @@ async function main() {
     console.log(fingerprint)
     return
   }
+  const codecPack = loadCodecPack()
+  const buildPolicy = nativeBuildPolicy()
   let addon
   let manifest
   try {
@@ -355,7 +541,8 @@ async function main() {
       addonPath: current.addonPath,
       expectedTargets: target,
       electronVersion,
-      expectedSourceStamp: fingerprint
+      expectedSourceStamp: fingerprint,
+      expectedCodecPackManifestSha256: codecPack ? codecPack.manifestSha256 : null
     })
     addon = current.addonPath
     manifest = current.manifest
@@ -388,14 +575,35 @@ async function main() {
       '-DCMAKE_BUILD_TYPE=Release',
       `-DSINGZ_NODE_INCLUDE_DIR=${includeDir}`,
       `-DSINGZ_CAPTURE_ELECTRON=${electronVersion}`,
-      `-DSINGZ_CAPTURE_SOURCE_STAMP=${fingerprint}`
+      `-DSINGZ_CAPTURE_SOURCE_STAMP=${fingerprint}`,
+      ...(codecPack ? [
+        '-DSINGZ_ENABLE_FFMPEG_CODECS=ON',
+        `-DSINGZ_FFMPEG_INCLUDE_DIR=${join(codecPack.pack, 'include')}`,
+        `-DSINGZ_FFMPEG_AVCODEC_LIBRARY=${codecPack.libraries.find((row) => row.component === 'avcodec').linkPath}`,
+        `-DSINGZ_FFMPEG_AVFORMAT_LIBRARY=${codecPack.libraries.find((row) => row.component === 'avformat').linkPath}`,
+        `-DSINGZ_FFMPEG_AVUTIL_LIBRARY=${codecPack.libraries.find((row) => row.component === 'avutil').linkPath}`,
+        `-DSINGZ_FFMPEG_SWRESAMPLE_LIBRARY=${codecPack.libraries.find((row) => row.component === 'swresample').linkPath}`
+      ] : ['-DSINGZ_ENABLE_FFMPEG_CODECS=OFF'])
     ]
+    if (buildPolicy.ccache) {
+      configure.push(`-DCMAKE_C_COMPILER_LAUNCHER=${buildPolicy.ccache}`)
+      configure.push(`-DCMAKE_CXX_COMPILER_LAUNCHER=${buildPolicy.ccache}`)
+    }
     if (platform === 'darwin') {
       configure.push(`-DCMAKE_OSX_ARCHITECTURES=${arch === 'x64' ? 'x86_64' : 'arm64'}`)
     }
-    if (platform === 'win32') configure.push(`-DSINGZ_NODE_LIBRARY=${nodeLibrary}`)
+    if (platform === 'win32') {
+      configure.push(`-DSINGZ_NODE_LIBRARY=${nodeLibrary}`)
+      for (const component of codecPack ? ['avcodec', 'avformat', 'avutil', 'swresample'] : []) {
+        const library = codecPack.libraries.find((row) => row.component === component)
+        configure.push(`-DSINGZ_FFMPEG_${component.toUpperCase()}_RUNTIME=${library.sourcePath}`)
+      }
+    }
     run('cmake', configure)
-    run('cmake', ['--build', buildDir, '--config', 'Release', '--target', 'singz_capture'])
+    run('cmake', [
+      '--build', buildDir, '--config', 'Release', '--target', 'singz_capture',
+      '--parallel', String(buildPolicy.jobs)
+    ])
 
     const built = findAddon(buildDir)
     if (!built) throw new Error(`singz-capture.node was not produced under ${buildDir}`)
@@ -405,7 +613,8 @@ async function main() {
       'while CMake was building; discarded the result'
     )
     validateCaptureBinary(built, target)
-    const published = publishRuntimeArtifact(built, fingerprint)
+    validateFfmpegImports(built, codecPack)
+    const published = publishRuntimeArtifact(built, fingerprint, codecPack)
     addon = published.addon
     manifest = published.manifest
     console.log(`Capture addon: ${relative(root, addon)}`)
@@ -423,10 +632,23 @@ async function main() {
 }
 
 if (runningAsScript) {
-  main().catch((error) => {
-    console.error(error)
-    process.exitCode = 1
-  })
+  if (!printingFingerprint && !process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) {
+    const locked = spawnSync(process.execPath, [
+      join(root, 'scripts', 'with-native-build-lock.mjs'),
+      '--owner', `capture-addon:${target}`,
+      '--', process.execPath, __filename, ...process.argv.slice(2)
+    ], { cwd: process.cwd(), stdio: 'inherit' })
+    if (locked.error) throw locked.error
+    process.exitCode = locked.status ?? 1
+  } else {
+    if (!printingFingerprint) {
+      assertNativeBuildLockHeld(root, process.env.SINGZ_NATIVE_BUILD_LOCK_HELD)
+    }
+    main().catch((error) => {
+      console.error(error)
+      process.exitCode = 1
+    })
+  }
 }
 
 module.exports = { findAddon, sourceFingerprint }

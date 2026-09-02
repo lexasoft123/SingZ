@@ -8,7 +8,7 @@
  * This is the test the "✓ but it downloads again" bug slipped through: each
  * side was checked against its own idea of what the other does.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,6 +16,7 @@ import { newStore, treeOf, type FakeDriveStore } from '../shared/fake-drive'
 import { installFakeDrive, type InstalledFakeDrive } from '../shared/fake-drive-fetch'
 import { fakeNativeCache, type FakeNativeCache } from '../shared/fake-native-cache'
 import { scenarios, seedLibraryOnDisk, song, type Scenario } from '../shared/scenarios'
+import graphCases from '../shared/graph-document-cases.json'
 
 const CONFIG = {
   clientId: 'roundtrip-client',
@@ -179,6 +180,40 @@ describe('desktop → Drive → phone', () => {
     const again = await openOnPhone(g2, 'Song One')
     expect(JSON.stringify(again)).toContain('Song One realigned')
     expect(native.downloads).toHaveLength(6) // words changed; audio did not
+  })
+
+  it('preserves one exact graph desktop → Drive → phone → desktop', async () => {
+    const graph = JSON.stringify(graphCases.base)
+    seed({ projects: [song('Graph Song', { graph: { format: 1, body: graph } })] })
+    expect(await desktopSync()).toMatchObject({ ok: true })
+
+    const singz = [...store.files.values()].find((f) => f.name === 'SingZ')!
+    const remote = treeOf(store, singz.id)
+    expect(remote.get('Graph Song/graph.json')?.bytes?.toString()).toBe(graph)
+
+    const g = await phone()
+    const loaded = (await openOnPhone(g, 'Graph Song')) as import('../../mobile/src/projects').LoadedProject
+    expect(loaded.graph?.raw.futureEnvelope).toEqual(graphCases.base.futureEnvelope)
+
+    // A second phone session has no network. Its retained small-text copy is
+    // still the exact graph bound by project.json, not an adopted stale file.
+    const offlinePhone = await phone()
+    net.setOffline(true)
+    const stored = await offlinePhone.driveStoredProjects()
+    const { loadProject } = await import('../../mobile/src/projects')
+    const offline = await loadProject(stored!.find((p) => p.dir === 'Graph Song')!, 48000, () => {})
+    expect(offline.graph?.raw).toEqual(loaded.graph?.raw)
+
+    // Materialize the Drive pair as another desktop would receive it and ask
+    // the real desktop reader to verify the reference against those bytes.
+    const returned = join(root, 'Returned Graph Song')
+    mkdirSync(returned)
+    writeFileSync(join(returned, 'song.mp3'), 'audio')
+    writeFileSync(join(returned, 'project.json'), remote.get('Graph Song/project.json')!.bytes!)
+    writeFileSync(join(returned, 'graph.json'), remote.get('Graph Song/graph.json')!.bytes!)
+    const { readProjectGraph } = await import('../../src/main/projects')
+    const readBack = await readProjectGraph(join(returned, 'song.mp3'))
+    expect(readBack).toMatchObject({ ok: true, graph: { text: graph } })
   })
 
   it('re-fetches only the stem the desktop re-split', async () => {

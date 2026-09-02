@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -69,6 +77,7 @@ const dist = require('../../scripts/dist.cjs') as {
   }
 }
 const afterPack = require('../../scripts/afterPack.cjs') as {
+  materializeLinkedEngines(engines: string): void
   verifyCopiedCapture(context: {
     electronPlatformName: string
     arch: number | string
@@ -92,6 +101,72 @@ const read = (path: string): string =>
   readFileSync(resolve(root, path), 'utf8').replaceAll('\r\n', '\n')
 
 describe('Electron capture addon build', () => {
+  it('keeps desktop playback on the strict v4 prepare and complete status contract', () => {
+    const bridge = read('native/electron/playback_addon_bridge.cpp')
+    const addon = read('native/electron/capture_addon.cpp')
+    expect(bridge).toContain('capability != nativePlaybackSessionCapabilityTag()')
+    expect(bridge).toContain('version != kDesktopPlaybackContractVersion')
+    expect(bridge).toContain('{"capability", "provider", "accessMode", "outputDeviceUid", "outputChannels", "sampleRate",')
+    expect(bridge).toContain('config.exclusive = accessMode == "exclusive"')
+    expect(bridge).toContain('playback.provider == "asio"')
+    expect(bridge).toContain('explicitProviderFailure ? "provider-failure" : nullptr')
+    expect(bridge).toContain('playback.backendFactory(provider, &unavailableReason)')
+    expect(bridge).toContain('consumeProviderDeviceUid(provider, &config.outputDeviceUid)')
+    expect(bridge).toContain('playback.session.replaceAudioHostBackend(std::move(backend))')
+    const session = read('native/playback/native_playback_session.cpp')
+    expect(session).toContain('hostConfig.exclusive = config.exclusive')
+    expect(addon).toContain('probeWindowsAudioHostProvider(')
+    expect(addon).toContain('provider + ":" + uid')
+    expect(addon).toContain('{"audioHostProviders", nullptr, audioHostProviders')
+    for (const recursiveObject of [
+      '{"version", "transport", "cues"}',
+      '{"entrySeconds", "durationSeconds", "playbackRate",',
+      '{"click", "countInBars", "volume", "accent",',
+      '{"beats", "beatsPerBar", "downbeat", "downbeats"}',
+      '{"mode", "periodFrames", "windows", "laneIds",',
+      '{"startProjectFrame", "endProjectFrame"}',
+      '{"state", "loop"}',
+      '{"id", "path", "gain", "muted", "solo"}',
+      '{"format", "engine", "nodes", "connections"}',
+      '{"id", "type", "typeVersion", "execution",',
+      '{"inputs", "outputs"}',
+      '{"kind", "laneId"}',
+      '{"from", "to"}',
+      '{"node", "port"}'
+    ]) expect(bridge).toContain(recursiveObject)
+    expect(bridge).toContain('nodeCount > zdsp::kMaximumGraphNodes')
+    expect(bridge).toContain('connectionCount > zdsp::kMaximumGraphConnections')
+    expect(bridge).toContain('"countInBars", 0, 2')
+    expect(bridge).toContain('grid.beats.size() < 2')
+    expect(bridge).toContain('kPlaybackCueMaximumEvents')
+    expect(bridge).toContain('kNativePlaybackMaximumTrainingWindows')
+
+    for (const projected of [
+      'terminalOrdinal', 'transportGeneration', 'audibleProjectionQuality',
+      'cueEventsCompleted', 'transportDiscontinuities', 'graphLatencyFrames',
+      'timePitchAnchorsPrepared', 'timePitchAnchorsPublished',
+      'timePitchAnchorMisses', 'timePitchReplacementReady',
+      'timePitchLoopPriming', 'devicePresentationLatencyFrames',
+      'totalPresentationLatencyFrames', 'preparedStartProjectFrame',
+      'retainedBytes', 'graphArenaBytes',
+      'trainingEnabled', 'trainingLanes', 'preRollFrames', 'cueEventCount',
+      'previewClicksEnqueued', 'previewClicksStarted',
+      'previewClicksCompleted', 'previewClicksPending',
+      'latencyCompensatedEdgeCount', 'graphSnapshot', 'adapterRenderFailures',
+      'terminalRenderFailures', 'parameterOverflows', 'nonFiniteSamples',
+      'rejectedBlocks'
+    ]) expect(bridge).toContain(`"${projected}"`)
+    expect(bridge).toContain('validGraphSnapshot(status)')
+    expect(bridge).toContain('static_cast<uint64_t>(source.graphArenaBytes)')
+    expect(session).toContain('result.graphArenaBytes = impl_->prepared->graphArenaBytes')
+    expect(session).toContain('graphArenaBytes = arenaBytes.capacity()')
+    expect(bridge).toContain('setCounter(env, node, "id", source.id)')
+    expect(bridge).toContain('setCounter(env, node, "typeHigh", source.typeHigh)')
+    expect(bridge).toContain('setCounter(env, connection, "sourceNodeId", source.sourceNodeId)')
+    expect(bridge).toContain('kNativePlaybackMaximumGraphConnections')
+    expect(bridge).toContain('return makeNull(env)')
+  })
+
   it('uses the Windows command shell only for fixed cmd shims', () => {
     expect(dist.spawnOptions('npm.cmd', 'win32')).toMatchObject({ shell: true })
     expect(dist.spawnOptions('npm', 'win32')).toMatchObject({ shell: false })
@@ -156,6 +231,8 @@ describe('Electron capture addon build', () => {
   })
 
   it('uses the same native-source fingerprint in the builder and app loader', () => {
+    expect(read('scripts/build-capture-addon.cjs')).toContain("'native/playback'")
+    expect(read('src/main/capture.ts')).toContain("'native/playback'")
     const electronVersion = JSON.parse(read('node_modules/electron/package.json')).version as string
     const built = spawnSync(
       process.execPath,
@@ -420,6 +497,20 @@ describe('Electron capture addon build', () => {
     expect(smoke).toContain('verifyCaptureArtifact({')
     expect(smoke).toContain('expectedSourceStamp: expectsCurrentSource ? sourceFingerprint() : undefined')
     expect(smoke).toContain("assert.equal(addon.buildInfo.sourceStamp, manifest.sourceStamp")
+    expect(smoke).toContain(
+      "const PLAYBACK_CAPABILITY = 'singz.native.playback-session.anchored-preview.v4'"
+    )
+    expect(smoke).toContain('assert.equal(playback.graphArenaBytes, \'0\')')
+    expect(smoke).toContain('BigInt(prepared.graphArenaBytes) > 0n')
+    expect(smoke).toContain("assert.equal(prepared.state, 'prepared')")
+    expect(smoke).toContain(
+      "assert.equal(playback.graphSnapshot, null, 'unloaded status has no guessed graph')"
+    )
+    expect(smoke).toContain('graphDocument: {')
+    expect(smoke).toContain("capability: 'singz.native.playback-session.unknown.v99'")
+    expect(smoke).toContain("Object.entries(strictPlaybackConfig).filter(([name]) => name !== 'capability')")
+    expect(smoke).toContain("assert.equal(hostDevices.provider, expectedProvider)")
+    expect(smoke).toContain("assert.equal(device.accessMode, 'shared')")
     expect(packageJson.scripts['capture:verify']).toContain('--current-source')
     expect(read('tests/e2e/capture-addon-hardware.cjs')).toContain(
       'expectedSourceStamp: sourceFingerprint()'
@@ -580,7 +671,11 @@ describe('Electron capture addon build', () => {
     )
     expect(read('src/main/capture.ts')).toContain("spawnSync('/usr/bin/codesign'")
     expect(read('scripts/capture-artifact.cjs')).toContain("'/usr/bin/codesign'")
+    expect(hook).toContain('materializeLinkedEngines(candidate.engines)')
     expect(hook).toContain('const layout = verifyCopiedCapture(context)')
+    expect(hook.indexOf('materializeLinkedEngines(candidate.engines)')).toBeLessThan(
+      hook.indexOf('verifyCopiedCapture(context)')
+    )
     expect(hook.indexOf('verifyCopiedCapture(context)')).toBeLessThan(
       hook.indexOf('layout.universalIntermediate')
     )
@@ -630,6 +725,26 @@ describe('Electron capture addon build', () => {
     })).toThrow('stale copied fixture')
   })
 
+  it.skipIf(process.platform === 'win32')(
+    'materializes worktree-linked engines before signing the app bundle',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'singz-linked-engine-'))
+      try {
+        const source = join(dir, 'source-engine')
+        const engines = join(dir, 'engines')
+        mkdirSync(engines)
+        writeFileSync(source, 'engine bytes')
+        symlinkSync(source, join(engines, 'whisper-cli'))
+        afterPack.materializeLinkedEngines(engines)
+        const copied = join(engines, 'whisper-cli')
+        expect(lstatSync(copied).isSymbolicLink()).toBe(false)
+        expect(readFileSync(copied, 'utf8')).toBe('engine bytes')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  )
+
   it('keys temporary CMake caches by the full checkout path', () => {
     for (const path of [
       'scripts/build-analyze-host.sh',
@@ -640,5 +755,20 @@ describe('Electron capture addon build', () => {
       expect(script).toContain('git -C "$ROOT" hash-object --stdin | cut -c1-12')
       expect(script).not.toContain('$(basename "$ROOT")')
     }
+  })
+
+  it('keeps portable graph parsing and detector work behind checked lazy boundaries', () => {
+    const app = read('src/renderer/src/App.tsx')
+    const transport = read('src/renderer/src/components/Transport.tsx')
+    const split = read('scripts/check-renderer-split.mjs')
+    expect(app).toContain("import('./audio/desktop-project-graph')")
+    expect(app).toContain("import('./audio/analysis')")
+    expect(app).not.toMatch(/^import .*desktop-project-graph/m)
+    expect(transport).toContain("from '../audio/analysis-contract'")
+    expect(split).toContain('/^desktop-project-graph-[\\w-]+\\.js$/')
+    expect(split).toContain('/^analysis-[\\w-]+\\.js$/')
+    expect(split).toContain("entrySource.includes('invalid-node-id')")
+    expect(split).toContain('...projectGraphChunks')
+    expect(split).toContain('...analysisChunks')
   })
 })

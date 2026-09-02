@@ -25,6 +25,7 @@ const src = join(repoRoot, 'zcore')
 const dst = join(mobileRoot, 'ios', 'SingzCore', 'core')
 const dspSrc = join(repoRoot, 'zdsp')
 const dspDst = join(mobileRoot, 'ios', 'SingzCore', 'dsp')
+const complianceDst = join(mobileRoot, 'ios', 'SingzCore', 'compliance')
 
 // The broad pod's exclusions and the strict pods' inclusions must move as one
 // ownership boundary. Refuse to regenerate either side if CMake and the
@@ -114,4 +115,37 @@ const flacDst = join(mobileRoot, 'ios', 'SingzCore', 'flac')
 unlockTree(flacDst)
 rmSync(flacDst, { recursive: true, force: true })
 copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
-console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac}/`)
+
+// These files must be inside the final IPA, not merely beside the source.
+// Materialize them under the pod root so CocoaPods' resource bundle owns the
+// exact notice/license/provenance records checked by the mobile verifier.
+unlockTree(complianceDst)
+rmSync(complianceDst, { recursive: true, force: true })
+mkdirSync(complianceDst, { recursive: true })
+for (const name of [
+  'NOTICE-FFMPEG.md',
+  'COPYING.LGPLv2.1-FFMPEG',
+  'FFMPEG-SHA256SUMS',
+]) {
+  const target = join(complianceDst, name)
+  copyFileSync(join(repoRoot, 'third_party', name), target)
+  chmodSync(target, 0o444)
+  n++
+}
+{
+  const target = join(complianceDst, 'profile.json')
+  copyFileSync(join(repoRoot, 'third_party', 'ffmpeg-codec', 'profile.json'), target)
+  chmodSync(target, 0o444)
+  n++
+}
+const selectionReceipt = join(
+  mobileRoot,
+  'node_modules/react-native-audio-api/common/cpp/audioapi/external/singz-ffmpeg-selection.json',
+)
+if (existsSync(selectionReceipt)) {
+  const target = join(complianceDst, 'singz-ffmpeg-selection.json')
+  copyFileSync(selectionReceipt, target)
+  chmodSync(target, 0o444)
+  n++
+}
+console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac,compliance}/`)

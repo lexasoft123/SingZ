@@ -21,6 +21,8 @@ const {
   nativePlaybackCallbackFiles,
   nativePlaybackSessionFiles,
   nativePlaybackSessionSupportFiles,
+  signalsmithTimePitchFiles,
+  signalsmithVendorFiles,
   zcoreDeviceCallbackFiles,
   zcoreDeviceCallbackSupportFiles,
   zdspHostAdapterFiles,
@@ -47,6 +49,20 @@ const playbackCallbackDestinationRoot = join(
 const playbackSessionDestinationRoot = join(
   mobileRoot, 'ios', 'SingzPlaybackSession', 'native'
 )
+const signalsmithSourceRoot = join(
+  repoRoot, 'third_party', 'native', 'signalsmith'
+)
+const signalsmithDestinationRoot = join(
+  mobileRoot, 'ios', 'SingzPlaybackSession', 'signalsmith'
+)
+const signalsmithComplianceDestinationRoot = join(
+  mobileRoot, 'ios', 'SingzPlaybackSession', 'compliance'
+)
+const signalsmithComplianceFiles = [
+  'VENDORED.txt',
+  'LICENSE-stretch.txt',
+  'LICENSE-linear.txt',
+]
 
 const files = [...zdspRuntimeFiles, ...zdspHostAdapterFiles]
 const zcoreFiles = zdspSupportZcoreFiles
@@ -57,7 +73,8 @@ const callbackFiles = [
 ]
 const totalFiles = files.length + zcoreFiles.length + callbackFiles.length +
   nativePlaybackCallbackFiles.length + nativePlaybackSessionFiles.length +
-  nativePlaybackSessionSupportFiles.length
+  nativePlaybackSessionSupportFiles.length + signalsmithTimePitchFiles.length +
+  signalsmithVendorFiles.length + signalsmithComplianceFiles.length
 
 execFileSync(process.execPath, [
   join(__dirname, 'check-native-component-sources.js'),
@@ -121,8 +138,21 @@ if (check) {
   verify(
     nativeSourceRoot,
     playbackSessionDestinationRoot,
-    [...nativePlaybackSessionFiles, ...nativePlaybackSessionSupportFiles],
+    [...nativePlaybackSessionFiles, ...nativePlaybackSessionSupportFiles,
+      ...signalsmithTimePitchFiles],
     'native playback session'
+  )
+  verify(
+    signalsmithSourceRoot,
+    signalsmithDestinationRoot,
+    signalsmithVendorFiles,
+    'Signalsmith vendor'
+  )
+  verify(
+    signalsmithSourceRoot,
+    signalsmithComplianceDestinationRoot,
+    signalsmithComplianceFiles,
+    'Signalsmith compliance'
   )
   console.log(
     'sync-singz-dsp-runtime: verified ' +
@@ -152,7 +182,18 @@ materialize(
 materialize(
   nativeSourceRoot,
   playbackSessionDestinationRoot,
-  [...nativePlaybackSessionFiles, ...nativePlaybackSessionSupportFiles]
+  [...nativePlaybackSessionFiles, ...nativePlaybackSessionSupportFiles,
+    ...signalsmithTimePitchFiles]
+)
+materialize(
+  signalsmithSourceRoot,
+  signalsmithDestinationRoot,
+  signalsmithVendorFiles
+)
+materialize(
+  signalsmithSourceRoot,
+  signalsmithComplianceDestinationRoot,
+  signalsmithComplianceFiles
 )
 console.log(
   'sync-singz-dsp-runtime: ' +
