@@ -1696,6 +1696,7 @@ export class IosNativePlaybackCoordinator {
     }
     logDspGraphPrepared(result, preparedStatus.session);
     handle.publishPrepared(preparedStatus.session);
+    handle.recordPreparedConfig();
     return { ok: true };
   }
 
@@ -1953,6 +1954,13 @@ export class IosNativePlaybackCoordinator {
         );
         return;
       }
+      if (handle.preparedConfigUnchanged()) {
+        log(
+          'dsp',
+          `cue rebuild skipped · generation ${oldGeneration} · configuration unchanged`,
+        );
+        return;
+      }
 
       let status: NativePlaybackCapability;
       try {
@@ -1984,7 +1992,6 @@ export class IosNativePlaybackCoordinator {
         );
       }
 
-      const preparedStartProjectFrame = session.renderedProjectFrame;
       const wasStarted = handle.startWasIssued(oldGeneration);
       const restoreTransport =
         session.transportState === 'paused'
@@ -1993,6 +2000,21 @@ export class IosNativePlaybackCoordinator {
               session.transportState === 'pre-roll'
             ? 'playing'
             : 'prepared';
+      // A rendered frame inside the song is kept whether or not the
+      // transport advanced: a prepared generation parked at a remembered
+      // position restarts there. A NEGATIVE frame is the OLD plan's
+      // pre-roll, which a plan without a count-in has no room for — the
+      // refusal that used to destroy the prepared graph on every song open:
+      // a transport that never advanced (the core reports it stopped,
+      // 'prepared' here) takes the ordinary start, entry plus whatever
+      // pre-roll the NEW plan wants, and one still inside its count-in
+      // restarts at the song's first frame rather than replaying it.
+      const preparedStartProjectFrame =
+        session.renderedProjectFrame >= 0
+          ? session.renderedProjectFrame
+          : restoreTransport === 'prepared'
+            ? undefined
+            : 0;
       const restoreLoop = session.loopEnabled
         ? {
             startProjectFrame: session.loopStartFrame,
@@ -2082,7 +2104,7 @@ export class IosNativePlaybackCoordinator {
       log(
         'dsp',
         `cue graph rebuilt · generation ${oldGeneration}→${generation} · ` +
-          `signed project frame ${preparedStartProjectFrame} · no count-in replay · ` +
+          `signed project frame ${preparedStartProjectFrame ?? 'entry'} · no count-in replay · ` +
           `${handle.graphDescription()}`,
       );
       if (!wasStarted || restoreTransport === 'prepared') return;
@@ -2130,7 +2152,7 @@ export class IosNativePlaybackCoordinator {
         log(
           'dsp',
           `cue graph resumed · generation ${generation} · ${restoreTransport} · ` +
-            `signed project frame ${preparedStartProjectFrame}`,
+            `signed project frame ${preparedStartProjectFrame ?? 'entry'}`,
         );
       } catch (error) {
         if (handle.startWasIssued(generation)) {
@@ -2852,6 +2874,29 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     );
   }
 
+  /** The structural configuration a generation is prepared with. A rebuild
+   * request whose configuration equals the prepared one is not a rebuild:
+   * a rebuild is stop → release → re-decode every lane → prepare → start,
+   * seconds of silence each, and one pitch change was measured issuing four
+   * of them back to back with nothing new in the last three. */
+  configKey(): string {
+    return JSON.stringify({
+      beat: this.beatInfo,
+      metronome: this.metronomeConfig,
+      rate: this.playbackRate,
+      transpose: this.transposeSemitones,
+      training: this.trainingSpec,
+      trainingEnabled: this.trainingEnabled,
+    });
+  }
+  private preparedConfigKey: string | null = null;
+  recordPreparedConfig(): void {
+    this.preparedConfigKey = this.configKey();
+  }
+  preparedConfigUnchanged(): boolean {
+    return this.preparedConfigKey !== null && this.preparedConfigKey === this.configKey();
+  }
+
   cueIntent(): { readonly beat: BeatInfo | null; readonly metronome: MetronomeConfig } {
     return {
       beat: sanitizeBeatInfo(this.beatInfo),
@@ -3426,6 +3471,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
           'training-enable',
         );
         this.trainingEnabled = true;
+        this.recordPreparedConfig();
       }
       return;
     }
@@ -3436,6 +3482,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         'training-enable',
       );
       this.trainingEnabled = false;
+      this.recordPreparedConfig();
       return;
     }
 

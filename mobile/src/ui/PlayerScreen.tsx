@@ -357,8 +357,18 @@ export default function PlayerScreen({
   const [ktPitch, setKtPitch] = useState(0)
   const [ktTempo, setKtTempo] = useState(100)
   /** Beat track from the project (desktop-saved) + metronome session prefs. */
-  const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(null)
-  const [met, setMet] = useState<MetronomeConfig>(MET_DEFAULTS)
+  // Start from the project's saved grid and metronome, derived exactly as
+  // the playback backend derives its own. The first render's effects push
+  // these into the engine, and under native playback a value that differs
+  // from what the backend already holds is a full graph rebuild: pushing
+  // the empty defaults first cost a refused rebuild on every song open, and
+  // the next Play then had to decode all six stems again.
+  const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(() =>
+    sanitizeBeatInfo(project.doc.settings?.beat)
+  )
+  const [met, setMet] = useState<MetronomeConfig>(() =>
+    project.doc.settings?.metronome ? sanitizeMetronome(project.doc.settings.metronome) : MET_DEFAULTS
+  )
   const acceptedMetRef = useRef(met)
   const desiredMetRef = useRef(met)
   const metSaveSequence = useRef(0)
