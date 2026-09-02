@@ -3284,9 +3284,17 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   }
 
   async seek(seconds: number): Promise<void> {
-    await this.dispatchTransport({
-      kind: 'seek',
-      projectFrame: this.projectFrame(seconds, 'seek'),
+    const projectFrame = this.projectFrame(seconds, 'seek');
+    await this.dispatchTransport({ kind: 'seek', projectFrame });
+    // The next poll is up to 200 ms away, and until it lands the screen
+    // would keep showing — and projecting forward — the position the seek
+    // just left: a scrub that visibly bounces back before it settles. Adopt
+    // the accepted target now; telemetry corrects it within one period.
+    const positionSec = projectFrame / this.sampleRate();
+    this.update({
+      positionSec,
+      renderedPositionSec: positionSec,
+      telemetryAtMs: Date.now(),
     });
   }
 
