@@ -461,6 +461,53 @@ question, not only a correctness one.
 | `cd mobile/android && ./gradlew :app:testDebugUnitTest` | Kotlin's half of the shared cache-currency table |
 | `mobile/scripts/test-swift-currency.sh` | Swift's half — swiftc only, no simulator, no Pods |
 
+### Mutation-checking a native test (the stale-object trap)
+
+A new test in `tests/native/` is not finished until the code it covers has
+been broken and the test seen going red. The trap on this machine is that the
+rebuild can silently not happen: Apple's `make` compares whole-second mtimes,
+so `touch`ing the source is **not** enough when the object file was written in
+the same second — which is exactly what happens when you restore the original
+immediately after a mutation run and rebuild straight away. The binary keeps
+the mutation, the suite fails, and the obvious reading ("my restore was
+wrong") is the wrong one. It cost a confusing red during the Phase 4 lane-peaks
+work, on a source that `git diff` said was clean.
+
+Delete the object instead of relying on the timestamp:
+
+```bash
+rm -f build/phase4-tests/CMakeFiles/singz_native_playback_session.dir/native/playback/native_playback_session.cpp.o
+```
+
+The same hazard runs the other way — a mutation that never reached the binary
+reports a **pass** — so when a mutation comes back green, delete the object and
+run it again before believing it. `shasum` the test binary either side, or use
+the `build/p4-gate-inner.sh` freshness assertions (`test <binary> -nt
+<source>`), which exist for this.
+
+**A green mutation means "look again", and twice out of three times the answer
+was not the code.** All three were found in one session:
+
+1. The rebuild did not happen (above). The same thing bites at the END of a
+   mutation loop: if the final restore-and-rebuild is not checked for a
+   non-zero exit, a build that fails leaves the LAST MUTATION'S binary in
+   place, and the "restored" run reports that mutation's failure as though the
+   original code were broken. Check the exit status of every build in the
+   loop, including the restore.
+2. **The mutation landed somewhere else.** A text anchor that matches several
+   functions edits the first one. `if (generation == 0 || generation !=
+   impl_->generation || ...)` appears in `stop`, `unload` and `lanePeaks`, so a
+   patch aimed at one silently mutated another — and reported a pass for a
+   function it never touched. Anchor on something unique to the target (a
+   neighbouring line from that body), and `grep -c` the pattern first.
+3. **The test masked its own subject.** A stale-generation sweep probed
+   `stop(g)` first, and `stop` advances the cancellation epoch to `g` before
+   anything else reads it — so every later probe was refused by the epoch
+   rather than by the generation check under test, and deleting that check
+   changed nothing. When a mutation of a compound guard survives, check
+   whether an earlier line of the test already satisfies one of the other
+   terms.
+
 `tests/shared/` is one fake Drive (`serveRequest` as a pure function, with an
 http adapter for the desktop/emulator and a `fetch` adapter for jest), one
 reference `FolderAccess` over a temp dir, and fixtures whose md5s come from

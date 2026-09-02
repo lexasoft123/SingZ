@@ -273,6 +273,19 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     }) rejectUnavailable(promise)
   }
 
+  /**
+   * The prepared lane envelopes for one generation. One argument plus the
+   * promise, exactly like iOS's lanePeaks. Immutable for the generation, so
+   * the caller reads it once and caches it.
+   */
+  @ReactMethod
+  fun lanePeaks(generationValue: Double, promise: Promise) {
+    val generation = parseGenerationOrReject(generationValue, promise) ?: return
+    if (!postResult(promise) {
+      requiredJson(SingzCore.nativePlaybackLanePeaks(generation))
+    }) rejectUnavailable(promise)
+  }
+
   @ReactMethod
   fun unload(generationValue: Double, promise: Promise) {
     val generation = parseGenerationOrReject(generationValue, promise) ?: return
@@ -281,6 +294,34 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
       val result = requiredJson(SingzCore.nativePlaybackUnload(generation))
       abandonFocus(generation)
       currentGeneration.compareAndSet(generation, 0)
+      result
+    }) rejectUnavailable(promise)
+  }
+
+  /**
+   * Unload, keeping this generation's decoded lanes for the next prepare of
+   * the same files. One argument plus the promise, exactly like unload above
+   * and exactly like iOS's unloadRetainingLanes — an arity that disagrees
+   * with JS is never dispatched and never says so. The resolved shape is
+   * unload's, including cleanup.parkedLaneBytes.
+   */
+  @ReactMethod
+  fun unloadRetainingLanes(generationValue: Double, promise: Promise) {
+    val generation = parseGenerationOrReject(generationValue, promise) ?: return
+    SingzCore.nativePlaybackRequestCancellation(generation)
+    if (!postResult(promise) {
+      val result = requiredJson(SingzCore.nativePlaybackUnloadRetainingLanes(generation))
+      abandonFocus(generation)
+      // DELIBERATELY leaves currentGeneration set, unlike unload above. Every
+      // lifecycle path here — invalidate/onHostDestroy, audio-focus loss and
+      // route change — reads it and no-ops at zero. For a plain unload that is
+      // harmless because nothing is held; after a RETAINING unload it would
+      // strand a song's decoded PCM across backgrounding, focus loss, route
+      // change and RN module teardown, in a process Android keeps alive. That
+      // is the jetsam shape the explicit-free rule exists for. Holding the
+      // generation until the lanes are actually gone means those paths still
+      // fire, and nativePlaybackUnload releases parked lanes unconditionally
+      // before it looks at the generation at all.
       result
     }) rejectUnavailable(promise)
   }

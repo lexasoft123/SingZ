@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -940,6 +941,1174 @@ float rangePeak(const std::vector<float> &samples, size_t first, size_t last,
   for (size_t index = first; index < last; ++index)
     peak = std::max(peak, std::fabs(samples[index] - baseline));
   return peak;
+}
+
+// The envelope is generation-exact and lives off the status poll now, so a
+// test asks for it the same way the facade will.
+singz::NativePlaybackLanePeaksResult
+peaksOf(const singz::NativePlaybackSession &session, uint64_t generation) {
+  const singz::NativePlaybackLanePeaksResult result =
+      session.lanePeaks(generation);
+  CHECK(result.ok && result.error == singz::NativePlaybackError::None &&
+        result.generation == generation &&
+        result.bucketCount == singz::kNativePlaybackLaneSummaryBuckets);
+  return result;
+}
+
+// Samples what the session is holding at the moment the replacement decode
+// starts. A declining prepare that freed its parked lanes only afterwards
+// would be holding two copies of a song at once — ~1.7 GB for a six-lane
+// five-minute project, which is a jetsam kill rather than a slow rebuild.
+struct ParkedPeakWatch {
+  singz::NativePlaybackSession *session{nullptr};
+  std::mutex mutex;
+  bool sampled{false};
+  size_t parkedAtFirstDecodePoll{0};
+  size_t retainedAtFirstDecodePoll{0};
+};
+
+bool watchParkedAtDecode(void *opaque) noexcept {
+  auto *watch = static_cast<ParkedPeakWatch *>(opaque);
+  try {
+    std::lock_guard<std::mutex> lock(watch->mutex);
+    if (!watch->sampled && watch->session != nullptr) {
+      // prepare() holds no session lock while decoding, so this is the
+      // ordinary status any observer would read at that instant.
+      const singz::NativePlaybackStatus status = watch->session->status();
+      watch->parkedAtFirstDecodePoll = status.parkedLaneBytes;
+      watch->retainedAtFirstDecodePoll = status.retainedBytes;
+      watch->sampled = true;
+    }
+  } catch (...) {
+  }
+  return false;
+}
+
+singz::NativePlaybackLaneSource keyedLane(const char *id,
+                                          const std::string &path,
+                                          const char *key = nullptr) {
+  singz::NativePlaybackLaneSource source =
+      lane(id, path);
+  source.sourceKey = key == nullptr ? path : std::string(key);
+  return source;
+}
+
+// A tempo or transpose change rebuilds the graph over the same six files. The
+// decode is the expensive half, so a retaining unload parks it — and every
+// claim that makes about what the session is holding has to be true.
+void decodedLaneRetentionAcrossRebuild() {
+  const std::vector<float> original(2400, 0.4F);
+  const std::vector<float> replacement(2400, 0.1F);
+  const std::string first = writeWav("retain-a.wav", 1, original);
+  const std::string second = writeWav("retain-b.wav", 1, original);
+  const float originalPeak = std::fabs(pcm16(0.4F));
+  const float replacementPeak = std::fabs(pcm16(0.1F));
+  CHECK(originalPeak != replacementPeak);
+
+  constexpr size_t arenaBytes =
+      4u * 1024u * 1024u + 16u * 2u * 512u * sizeof(float);
+  constexpr size_t laneBytes = 2400u * sizeof(float);
+  constexpr size_t parkedBytes = 2u * laneBytes;
+
+  // Rewriting the files after the park is what makes adoption visible: an
+  // adopted lane still carries the audio it was decoded from, a re-decoded
+  // one carries what is on disk now.
+  const auto rewriteFiles = [&](const std::vector<float> &samples) {
+    CHECK(writeWav("retain-a.wav", 1, samples) == first);
+    CHECK(writeWav("retain-b.wav", 1, samples) == second);
+  };
+
+  // A cleanup that proves the session empty hands the process fallback lease
+  // away, and the next prepare has to hand it back. Threading it here is the
+  // same bookkeeping the product bridge does.
+  uint64_t handoffLease = 0;
+  const auto adoptLease = [&](const singz::NativePlaybackCleanupResult &proof) {
+    if (proof.globallyComplete())
+      handoffLease = proof.handoffLease;
+  };
+  const auto prepareTwo = [&](singz::NativePlaybackSession &session,
+                              uint64_t generation, const char *firstId,
+                              const char *secondId, const char *firstKey,
+                              double sampleRate) {
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane(firstId, first, firstKey));
+    lanes.push_back(keyedLane(secondId, second));
+    singz::NativePlaybackPrepareConfig request = config();
+    request.requestedSampleRate = sampleRate;
+    request.handoffLease = handoffLease;
+    handoffLease = 0;
+    return session.prepare(std::move(request), std::move(lanes), generation);
+  };
+
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, 901, "a", "b", nullptr, 48000.0).ok);
+    auto status = session.status();
+    CHECK(status.parkedLaneBytes == 0 && status.parkedLaneCount == 0 &&
+          status.retainedBytes == arenaBytes + parkedBytes &&
+          peaksOf(session, 901).lanes[0].peaks[0] == originalPeak);
+
+    // Default retention is exactly today's: nothing is kept.
+    CHECK(session.unload(901).ok);
+    CHECK(session.status().parkedLaneBytes == 0 &&
+          session.status().retainedBytes == 0);
+    const auto releasedProof = session.cleanupProof(901);
+    CHECK(releasedProof.parkedLaneBytes == 0 &&
+          releasedProof.retainedBytes == 0 &&
+          releasedProof.globallyComplete());
+    adoptLease(releasedProof);
+  }
+
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, 911, "a", "b", nullptr, 48000.0).ok);
+    CHECK(session.unload(911, singz::NativePlaybackLaneRetention::Park).ok);
+    auto parked = session.status();
+    // The graph is gone; the PCM is not, and the status says so rather than
+    // reporting an empty session that is still holding a song.
+    CHECK(parked.state == singz::NativePlaybackState::Unloaded &&
+          parked.generation == 0 && parked.graphArenaBytes == 0 &&
+          parked.lanes.empty() && parked.parkedLaneCount == 2 &&
+          parked.parkedLaneBytes == parkedBytes &&
+          parked.retainedBytes == parkedBytes);
+    const auto proof = session.cleanupProof(911);
+    CHECK(proof.parkedLaneBytes == parkedBytes &&
+          proof.retainedBytes == parkedBytes && !proof.globallyComplete() &&
+          proof.handoffLease == 0);
+
+    rewriteFiles(replacement);
+    CHECK(prepareTwo(session, 912, "a", "b", nullptr, 48000.0).ok);
+    auto adopted = session.status();
+    const auto adoptedPeaks = peaksOf(session, 912);
+    CHECK(adopted.parkedLaneBytes == 0 && adopted.parkedLaneCount == 0 &&
+          adopted.retainedBytes == arenaBytes + parkedBytes &&
+          adopted.lanes.size() == 2 && adoptedPeaks.lanes.size() == 2 &&
+          adoptedPeaks.lanes[0].peaks[0] == originalPeak &&
+          adoptedPeaks.lanes[1].peaks[0] == originalPeak &&
+          adopted.durationFrames == 2400);
+    CHECK(session.unload(912).ok);
+    CHECK(session.status().retainedBytes == 0);
+  }
+
+  // Every way of not being the same lane set decodes instead of adopting.
+  struct Mismatch {
+    const char *firstId;
+    const char *secondId;
+    const char *firstKey;
+    double sampleRate;
+    bool dropSecondLane;
+  };
+  const Mismatch mismatches[]{
+      {"renamed", "b", nullptr, 48000.0, false},
+      {"a", "b", "a-different-key", 48000.0, false},
+      {"a", "b", "", 48000.0, false},
+      {"a", "b", nullptr, 44100.0, false},
+      {"a", "b", nullptr, 48000.0, true},
+  };
+  uint64_t generation = 921;
+  for (const Mismatch &mismatch : mismatches) {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, generation, "a", "b", nullptr, 48000.0).ok);
+    CHECK(
+        session.unload(generation, singz::NativePlaybackLaneRetention::Park).ok);
+    CHECK(session.status().parkedLaneBytes == parkedBytes);
+    ++generation;
+    rewriteFiles(replacement);
+    if (mismatch.dropSecondLane) {
+      auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+      lanes.push_back(keyedLane("a", first));
+      singz::NativePlaybackPrepareConfig request = config();
+      request.handoffLease = handoffLease;
+      handoffLease = 0;
+      CHECK(session.prepare(std::move(request), std::move(lanes), generation)
+                .ok);
+    } else {
+      CHECK(prepareTwo(session, generation, mismatch.firstId,
+                       mismatch.secondId, mismatch.firstKey,
+                       mismatch.sampleRate)
+                .ok);
+    }
+    const auto status = session.status();
+    const auto mismatchPeaks = peaksOf(session, generation);
+    // Not adopted: the lane carries what is on disk now. At a rate the parked
+    // lane was not decoded at, the re-decode also resamples, so the exact
+    // value is only asserted where no resampling is involved.
+    CHECK(status.parkedLaneBytes == 0 && status.parkedLaneCount == 0 &&
+          mismatchPeaks.lanes[0].peaks[0] != originalPeak &&
+          (mismatch.sampleRate != 48000.0 ||
+           mismatchPeaks.lanes[0].peaks[0] == replacementPeak));
+    CHECK(session.unload(generation).ok);
+    ++generation;
+  }
+
+  // A declining prepare must free the parked lanes BEFORE it allocates the
+  // replacement, not after. The decode cancellation token is polled by the
+  // decoding thread immediately before the first lane is read, so what the
+  // session reports there is the peak this rebuild ever reaches.
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, 931, "a", "b", nullptr, 48000.0).ok);
+    CHECK(session.unload(931, singz::NativePlaybackLaneRetention::Park).ok);
+    CHECK(session.status().parkedLaneBytes == parkedBytes);
+    rewriteFiles(replacement);
+    ParkedPeakWatch watch;
+    watch.session = &session;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("a", first, "a-different-key"));
+    lanes.push_back(keyedLane("b", second));
+    singz::NativePlaybackPrepareConfig request = config();
+    request.handoffLease = handoffLease;
+    handoffLease = 0;
+    CHECK(session
+              .prepare(std::move(request), std::move(lanes), 932,
+                       {&watch, watchParkedAtDecode})
+              .ok);
+    // Sampled at all (the decline really did decode), and holding nothing:
+    // the old song's PCM is gone and the new graph's arena is not yet
+    // reserved, so one song is the high-water mark, never two.
+    CHECK(watch.sampled && watch.parkedAtFirstDecodePoll == 0 &&
+          watch.retainedAtFirstDecodePoll == 0);
+    const auto status = session.status();
+    CHECK(status.parkedLaneBytes == 0 &&
+          peaksOf(session, 932).lanes[0].peaks[0] == replacementPeak &&
+          status.retainedBytes == arenaBytes + parkedBytes);
+    CHECK(session.unload(932).ok);
+  }
+
+  // Anything that is not the adopting prepare hands the memory back. The
+  // commands are driven through a live generation so each one is a real call
+  // rather than a rejected one.
+  const auto releasedBy =
+      [&](uint64_t base,
+          const std::function<void(singz::NativePlaybackSession &, uint64_t)>
+              &command) {
+        rewriteFiles(original);
+        auto backend = std::make_unique<ManualOutputBackend>();
+        singz::NativePlaybackSession session(std::move(backend));
+        CHECK(prepareTwo(session, base, "a", "b", nullptr, 48000.0).ok);
+        CHECK(session.unload(base, singz::NativePlaybackLaneRetention::Park).ok);
+        CHECK(session.status().parkedLaneBytes == parkedBytes);
+        command(session, base);
+        CHECK(session.status().parkedLaneBytes == 0 &&
+              session.status().parkedLaneCount == 0 &&
+              session.status().retainedBytes == 0);
+      };
+  releasedBy(941, [](singz::NativePlaybackSession &session, uint64_t base) {
+    CHECK(session.unload(base).ok);
+  });
+  releasedBy(943, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.openOutput(base);
+  });
+  releasedBy(945, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.start(base);
+  });
+  releasedBy(947, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.stop(base);
+  });
+  releasedBy(949, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.pause(base);
+  });
+  releasedBy(951, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.resume(base);
+  });
+  releasedBy(953, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.seek(base, 0);
+  });
+  releasedBy(955, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.setLoop(base, 0, 100);
+  });
+  releasedBy(957, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.clearLoop(base);
+  });
+  releasedBy(959, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.reanchorTransport(base);
+  });
+  releasedBy(961, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.setLaneControl(base, "a", 1.0F, true, false);
+  });
+  releasedBy(963, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.setMasterGain(base, 0.5F);
+  });
+  releasedBy(965, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.setTrainingEnabled(base, true);
+  });
+  releasedBy(967, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.previewClick(base);
+  });
+  releasedBy(969, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.requestCancellation(base);
+  });
+  releasedBy(973, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.failPrepareAdmission(base + 1,
+                                       singz::NativePlaybackError::HostFailure);
+  });
+  releasedBy(975, [&](singz::NativePlaybackSession &session, uint64_t base) {
+    // This one proves cleanup on the way through, so it takes the process
+    // fallback lease with it; the next prepare has to hand it back.
+    adoptLease(session.abortPrepareDelivery(base));
+  });
+  releasedBy(977, [&](singz::NativePlaybackSession &session, uint64_t base) {
+    const auto proof = session.cleanupProof(base);
+    adoptLease(proof);
+    // cleanupProof only observes; the parked bytes must survive it, and the
+    // unload below is what actually releases them.
+    CHECK(session.status().parkedLaneBytes != 0);
+    CHECK(session.unload(base).ok);
+  });
+  releasedBy(979, [](singz::NativePlaybackSession &session, uint64_t base) {
+    (void)session.replaceAudioHostBackend(
+        std::make_unique<ManualOutputBackend>());
+    (void)base;
+  });
+
+  // A lane nobody named can never be recognized again, so it is not parked at
+  // all — the retaining unload refuses the whole set rather than parking
+  // something that a later prepare might adopt on an empty-equals-empty
+  // match. This is the only thing standing between an unnamed lane and a
+  // wrong adoption, so it is checked on the PARK side, where it acts.
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("a", first, ""));
+    lanes.push_back(keyedLane("b", second, ""));
+    singz::NativePlaybackPrepareConfig request = config();
+    request.handoffLease = handoffLease;
+    handoffLease = 0;
+    CHECK(session.prepare(std::move(request), std::move(lanes), 981).ok);
+    CHECK(session.unload(981, singz::NativePlaybackLaneRetention::Park).ok);
+    CHECK(session.status().parkedLaneBytes == 0 &&
+          session.status().parkedLaneCount == 0 &&
+          session.status().retainedBytes == 0);
+
+    rewriteFiles(replacement);
+    auto again = std::vector<singz::NativePlaybackLaneSource>{};
+    again.push_back(keyedLane("a", first, ""));
+    again.push_back(keyedLane("b", second, ""));
+    CHECK(session.prepare(config(), std::move(again), 982).ok);
+    CHECK(peaksOf(session, 982).lanes[0].peaks[0] == replacementPeak);
+    CHECK(session.unload(982).ok);
+  }
+
+  // THE SEQUENCE THE PRODUCT ACTUALLY ISSUES. All three bridges claim the
+  // next generation before preparing it, so a claim that released the parked
+  // lanes would free them microseconds before the only call that can adopt
+  // them — which is what happened, and it made retention dead code in the
+  // product while a test that never claimed went on passing.
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, 971, "a", "b", nullptr, 48000.0).ok);
+    CHECK(session.openOutput(971).ok && session.start(971).ok);
+    CHECK(fake->drive(128, singz::AudioHostDiscontinuityStart));
+    CHECK(session.stop(971).ok);
+    CHECK(session.unload(971, singz::NativePlaybackLaneRetention::Park).ok);
+    CHECK(session.status().parkedLaneBytes == parkedBytes);
+
+    // The claim is the first half of a prepare, and the only command that
+    // leaves the parked lanes alone.
+    CHECK(session.claimGeneration(972));
+    CHECK(session.status().parkedLaneBytes == parkedBytes &&
+          session.status().parkedLaneCount == 2 &&
+          session.status().retainedBytes == parkedBytes);
+
+    rewriteFiles(replacement);
+    CHECK(prepareTwo(session, 972, "a", "b", nullptr, 48000.0).ok);
+    // Adopted: the lanes still carry the audio they were decoded from, not
+    // what is on disk now.
+    CHECK(peaksOf(session, 972).lanes[0].peaks[0] == originalPeak &&
+          peaksOf(session, 972).lanes[1].peaks[0] == originalPeak);
+    CHECK(session.status().parkedLaneBytes == 0 &&
+          session.status().retainedBytes == arenaBytes + parkedBytes);
+    CHECK(session.unload(972).ok);
+  }
+
+  // ...and the same sequence with lanes that do not match still decodes, so
+  // the claim's exemption cannot smuggle a stale song into a new one.
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, 973, "a", "b", nullptr, 48000.0).ok);
+    CHECK(session.unload(973, singz::NativePlaybackLaneRetention::Park).ok);
+    CHECK(session.claimGeneration(974));
+    CHECK(session.status().parkedLaneBytes == parkedBytes);
+    rewriteFiles(replacement);
+    CHECK(prepareTwo(session, 974, "a", "b", "a-different-key", 48000.0).ok);
+    CHECK(peaksOf(session, 974).lanes[0].peaks[0] == replacementPeak &&
+          session.status().parkedLaneBytes == 0);
+    CHECK(session.unload(974).ok);
+  }
+
+  // THE RELEASE EVERY BRIDGE ACTUALLY ISSUES. All three call
+  // unloadWithCleanup and none calls unload, and unloadWithCleanup can return
+  // a journaled receipt without ever reaching unload() — which was the only
+  // caller that released a park. A park receipt can never be Complete
+  // (parked bytes ARE retained bytes), so it would have replayed forever and
+  // the memory would never have come back through the product's own path.
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, 985, "a", "b", nullptr, 48000.0).ok);
+    const auto parked = session.unloadWithCleanup(
+        985, singz::NativePlaybackLaneRetention::Park);
+    CHECK(parked.playback.ok &&
+          parked.cleanup.parkedLaneBytes == parkedBytes &&
+          !parked.cleanup.globallyComplete());
+    CHECK(session.status().parkedLaneBytes == parkedBytes);
+
+    // The same generation, released through the same entry point the bridges
+    // use. It must free the park AND stop replaying the park's verdict.
+    const auto released = session.unloadWithCleanup(985);
+    CHECK(session.status().parkedLaneBytes == 0 &&
+          session.status().parkedLaneCount == 0 &&
+          session.status().retainedBytes == 0);
+    CHECK(released.cleanup.parkedLaneBytes == 0 &&
+          released.cleanup.retainedBytes == 0);
+    // Not the park's receipt handed back a second time: the desktop addon
+    // only releases its ownership when this says the session is empty.
+    CHECK(released.cleanup.globallyComplete());
+    adoptLease(released.cleanup);
+  }
+
+  // The receipt an exceptional bridge delivery reads must carry the same fact.
+  {
+    rewriteFiles(original);
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    CHECK(prepareTwo(session, 991, "a", "b", nullptr, 48000.0).ok);
+    const auto receipt = session.unloadWithCleanup(
+        991, singz::NativePlaybackLaneRetention::Park);
+    CHECK(receipt.playback.ok &&
+          receipt.cleanup.parkedLaneBytes == parkedBytes &&
+          receipt.cleanup.retainedBytes == parkedBytes &&
+          !receipt.cleanup.globallyComplete() &&
+          receipt.cleanup.handoffLease == 0);
+    rewriteFiles(replacement);
+    CHECK(prepareTwo(session, 992, "a", "b", nullptr, 48000.0).ok);
+    CHECK(peaksOf(session, 992).lanes[0].peaks[0] == originalPeak &&
+          session.status().parkedLaneBytes == 0);
+    const auto released = session.unloadWithCleanup(992);
+    CHECK(released.playback.ok && released.cleanup.parkedLaneBytes == 0 &&
+          released.cleanup.retainedBytes == 0 &&
+          released.cleanup.globallyComplete());
+    adoptLease(released.cleanup);
+  }
+
+  // Hand back the process fallback lease this test acquired, so the suites
+  // after it start from the same Available coordinator it found.
+  if (handoffLease != 0) {
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend));
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("a", first));
+    singz::NativePlaybackPrepareConfig request = config();
+    request.handoffLease = handoffLease;
+    handoffLease = 0;
+    CHECK(session.prepare(std::move(request), std::move(lanes), 999).ok);
+    CHECK(session.unload(999).ok);
+  }
+
+  std::remove(first.c_str());
+  std::remove(second.c_str());
+}
+
+// The bounded pool's admission decision, as the pool itself reports it.
+struct LaneDecodePoolDecision {
+  std::mutex mutex;
+  uint32_t claims{0};
+  uint32_t workers{0};
+  uint64_t laneBudget{0};
+  uint64_t smallestDecodedBytes{UINT64_MAX};
+  uint64_t largestDecodedBytes{0};
+  uint64_t largestWorkingBytes{0};
+  // THE number: the largest sum of allowances held by decodes in flight at
+  // once. Any single lane's allowance is the adjacent quantity, and a pool
+  // that hands out too many perfectly reasonable allowances passes on it.
+  uint64_t peakInFlightBytes{0};
+  bool workingMatchesDecoded{true};
+};
+
+// Called from the pool's own worker threads, once per lane claim.
+void observeLaneDecodePool(void *opaque, uint32_t workers, uint64_t laneBudget,
+                           uint64_t laneDecodedBytes,
+                           uint64_t laneWorkingBytes,
+                           uint64_t inFlightDecodedBytes) noexcept {
+  auto *decision = static_cast<LaneDecodePoolDecision *>(opaque);
+  std::lock_guard<std::mutex> lock(decision->mutex);
+  ++decision->claims;
+  decision->workers = workers;
+  decision->laneBudget = laneBudget;
+  decision->smallestDecodedBytes =
+      std::min(decision->smallestDecodedBytes, laneDecodedBytes);
+  decision->largestDecodedBytes =
+      std::max(decision->largestDecodedBytes, laneDecodedBytes);
+  decision->largestWorkingBytes =
+      std::max(decision->largestWorkingBytes, laneWorkingBytes);
+  decision->peakInFlightBytes =
+      std::max(decision->peakInFlightBytes, inFlightDecodedBytes);
+  // Bounded relative to what the lane may publish, and never above the
+  // caller's own per-decode working budget.
+  const singz::DecodedAudioPrepareOptions defaults{};
+  const uint64_t expected = std::min<uint64_t>(
+      defaults.maximumWorkingBytes,
+      laneDecodedBytes *
+          singz::kNativePlaybackLaneWorkingBytesPerDecodedByte);
+  if (laneWorkingBytes != expected)
+    decision->workingMatchesDecoded = false;
+}
+
+// A command carrying a generation that is not the live one must be refused,
+// and — this is the part that matters — must leave the generation that IS
+// live exactly as it was. Getting this wrong reaches a singer as "the audio
+// stopped for no reason": a late stop from a superseded generation tears down
+// a graph that is happily playing, and every log line looks healthy.
+//
+// Two shapes, because the guards are two. A generation that never existed
+// probes stop()'s and unload()'s own inline checks. A NEWER generation that
+// the bridge has claimed but not yet prepared probes the shared
+// currentForCommand() equality — until that prepare publishes a graph, the
+// only graph in the session belongs to the older generation.
+void staleGenerationCommandsCannotDisturbTheLiveOne() {
+  const std::string wav =
+      writeWav("stale-command.wav", 1, std::vector<float>(8192, 0.25F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 1101).ok);
+  CHECK(session.openOutput(1101).ok && session.start(1101).ok);
+  CHECK(fake->drive(128, singz::AudioHostDiscontinuityStart));
+  CHECK(session.setMasterGain(1101, 0.75F).ok);
+  CHECK(session.setLaneControl(1101, "song", 0.5F, false, false).ok);
+
+  const auto stillLive = [&](const char *what) {
+    const singz::NativePlaybackStatus status = session.status();
+    CHECK(status.generation == 1101);
+    CHECK(status.state == singz::NativePlaybackState::Running);
+    CHECK(status.masterGain == 0.75F);
+    CHECK(status.lanes.size() == 1 && status.lanes[0].gain == 0.5F);
+    CHECK(status.transportState ==
+          singz::NativePlaybackTransportState::Playing);
+    // Still rendering: a graph that was quietly torn down cannot do this.
+    const uint64_t before = status.renderedFrames;
+    CHECK(fake->drive(128));
+    CHECK(session.status().renderedFrames > before);
+    (void)what;
+  };
+  stillLive("baseline");
+
+  const auto refused = [&](const singz::NativePlaybackResult &result) {
+    CHECK(!result.ok &&
+          result.error == singz::NativePlaybackError::InvalidGeneration);
+  };
+
+  // A generation this session has never seen.
+  const uint64_t ghost = 990001;
+  refused(session.stop(ghost));
+  stillLive("stop(ghost)");
+  refused(session.unload(ghost));
+  stillLive("unload(ghost)");
+  refused(session.unload(ghost, singz::NativePlaybackLaneRetention::Park));
+  stillLive("unload(ghost, park)");
+  refused(session.pause(ghost));
+  refused(session.resume(ghost));
+  refused(session.seek(ghost, 0));
+  refused(session.setLoop(ghost, 0, 1024));
+  refused(session.clearLoop(ghost));
+  refused(session.reanchorTransport(ghost));
+  refused(session.setLaneControl(ghost, "song", 1.0F, true, false));
+  refused(session.setMasterGain(ghost, 0.1F));
+  refused(session.setTrainingEnabled(ghost, true));
+  refused(session.previewClick(ghost));
+  refused(session.openOutput(ghost));
+  refused(session.start(ghost));
+  stillLive("ghost command sweep");
+  CHECK(session.unloadWithCleanup(ghost).playback.ok == false);
+  stillLive("unloadWithCleanup(ghost)");
+
+  // A newer generation the bridge has claimed but not yet prepared. Its
+  // commands must not reach the graph that is still playing under 1101.
+  CHECK(session.claimGeneration(1102));
+  const uint64_t claimed = 1102;
+  // ORDER MATTERS HERE, and getting it wrong hid the very defect this covers:
+  // stop() and unload() advance the cancellation epoch to the generation they
+  // are handed before anything else looks at it, so probing stop() first
+  // leaves every command after it refused by the epoch rather than by the
+  // generation equality under test. The shared-guard commands go first.
+  refused(session.pause(claimed));
+  refused(session.resume(claimed));
+  refused(session.seek(claimed, 0));
+  refused(session.setLoop(claimed, 0, 1024));
+  refused(session.clearLoop(claimed));
+  refused(session.reanchorTransport(claimed));
+  refused(session.setLaneControl(claimed, "song", 1.0F, true, false));
+  refused(session.setMasterGain(claimed, 0.1F));
+  refused(session.setTrainingEnabled(claimed, true));
+  refused(session.previewClick(claimed));
+  refused(session.openOutput(claimed));
+  refused(session.start(claimed));
+  // Last, for the reason above.
+  refused(session.stop(claimed));
+  const singz::NativePlaybackStatus afterClaim = session.status();
+  CHECK(afterClaim.generation == 1101 &&
+        afterClaim.state == singz::NativePlaybackState::Running &&
+        afterClaim.masterGain == 0.75F &&
+        afterClaim.lanes.size() == 1 && afterClaim.lanes[0].gain == 0.5F);
+
+  CHECK(session.unload(1101).ok);
+  std::remove(wav.c_str());
+}
+
+// Concurrent decoding is bounded by memory, not by the core count. Six
+// five-minute 44.1 kHz stems resampled to 48 kHz measured 881 MB peak decoded
+// one at a time and 1940 MB decoded all six at once; the bound holds it to
+// 1097 MB. This pins the arithmetic that produces that, from the numbers the
+// pool actually used rather than from a stopwatch or an RSS reading.
+void laneDecodePoolStaysInsideTheMemoryBudget() {
+  // Lanes sized so that one lane's bytes are a MEANINGFUL fraction of its
+  // share of the budget. With a default 1 GB budget and 16 kB lanes the share
+  // is ten thousand times the lane, and every accounting slip rounds to
+  // nothing — which is how a pool that returned each reservation in full
+  // instead of minus what it published went unnoticed.
+  constexpr size_t laneFrames = 4096;
+  constexpr size_t laneBytes = laneFrames * sizeof(float);
+  std::vector<std::string> files;
+  for (int index = 0; index < 6; ++index) {
+    files.push_back(writeWav(("pool-bound-" + std::to_string(index)).c_str(), 1,
+                             std::vector<float>(laneFrames, 0.1F)));
+  }
+  const auto laneSet = [&]() {
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    for (int index = 0; index < 6; ++index)
+      lanes.push_back(lane(("lane" + std::to_string(index)).c_str(),
+                           files[static_cast<size_t>(index)]));
+    return lanes;
+  };
+
+  // Measure the graph arena first, so the tight budget below can be stated in
+  // lanes rather than guessed.
+  size_t arenaBytes = 0;
+  {
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession probe(std::move(backend));
+    CHECK(probe.prepare(config(), laneSet(), 1000).ok);
+    const auto status = probe.status();
+    CHECK(status.retainedBytes > 6u * laneBytes);
+    arenaBytes = status.retainedBytes - 6u * laneBytes;
+    CHECK(probe.unload(1000).ok);
+  }
+
+  LaneDecodePoolDecision decision;
+  singz::NativePlaybackTestHooks hooks{};
+  hooks.context = &decision;
+  hooks.observeLaneDecodePool = observeLaneDecodePool;
+  auto backend = std::make_unique<ManualOutputBackend>();
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
+  auto lanes = laneSet();
+  singz::NativePlaybackPrepareConfig request = config();
+  // Nine lanes' worth of budget for six lanes: every lane fits its share of
+  // one and a half, and a reservation the pool forgets to reclaim is visible
+  // within two claims instead of within ten thousand.
+  request.maximumRetainedBytes = arenaBytes + 9u * laneBytes;
+  const size_t budget = request.maximumRetainedBytes;
+  CHECK(session.prepare(std::move(request), std::move(lanes), 1001).ok);
+  CHECK(decision.claims == 6 && decision.workers != 0 &&
+        decision.laneBudget == 9u * laneBytes &&
+        decision.laneBudget <= budget);
+
+  // THE CEILING, asserted on the sum rather than on any one allowance: at no
+  // moment was more of the budget spoken for — by lanes already decoded plus
+  // every decode in flight — than there is. The version this replaced handed
+  // out 1x, 1x, 2x, 3x, 4x, 5x the share and peaked at 1.49x the budget, and
+  // passed a test that looked at one lane at a time.
+  CHECK(decision.peakInFlightBytes <= decision.laneBudget);
+  // Every lane really did get decoded inside that ceiling.
+  CHECK(session.status().retainedBytes == arenaBytes + 6u * laneBytes);
+  // Not vacuous: more than one lane really was in flight at once, so the sum
+  // above is a sum and not a single allowance wearing its name.
+  if (decision.workers > 1)
+    CHECK(decision.peakInFlightBytes > decision.largestDecodedBytes);
+  // Every individual allowance is inside the budget too, necessarily.
+  CHECK(decision.largestDecodedBytes <= decision.laneBudget &&
+        decision.smallestDecodedBytes != 0);
+  // Each lane's transient is bounded relative to what it may publish, not by
+  // the 2 GB per-decode default no caller ever chose.
+  const singz::DecodedAudioPrepareOptions decodeDefaults{};
+  CHECK(decision.workingMatchesDecoded &&
+        decision.largestWorkingBytes <= decodeDefaults.maximumWorkingBytes);
+  // Concurrency is the declared constant, not the core count.
+  CHECK(decision.workers <=
+        singz::kNativePlaybackMaximumConcurrentLaneDecodes);
+  if (std::thread::hardware_concurrency() >=
+      singz::kNativePlaybackMaximumConcurrentLaneDecodes) {
+    CHECK(decision.workers ==
+          singz::kNativePlaybackMaximumConcurrentLaneDecodes);
+  }
+  CHECK(session.unload(1001).ok);
+  for (const std::string &file : files)
+    std::remove(file.c_str());
+  (void)laneBytes;
+}
+
+// Records which threads polled the cancellation token, which is how this
+// suite proves the bounded decode pool actually ran rather than trusting a
+// stopwatch. Also flips to cancelled after a chosen number of polls.
+struct DecodeWatch {
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::vector<std::thread::id> threads; // distinct, in arrival order
+  uint32_t polls{0};
+  uint32_t cancelAfter{0};
+  // Hold the first caller until a second one arrives. Whether two threads
+  // decode at once is the thing being asserted, and counting arrivals after
+  // the fact is a race: with four small lanes the calling thread can take
+  // every one of them before a spawned worker is ever scheduled.
+  bool rendezvous{false};
+
+  size_t distinctThreads() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return threads.size();
+  }
+};
+
+bool watchDecode(void *opaque) noexcept {
+  auto *watch = static_cast<DecodeWatch *>(opaque);
+  try {
+    std::unique_lock<std::mutex> lock(watch->mutex);
+    if (std::find(watch->threads.begin(), watch->threads.end(),
+                  std::this_thread::get_id()) == watch->threads.end())
+      watch->threads.push_back(std::this_thread::get_id());
+    ++watch->polls;
+    watch->condition.notify_all();
+    // A machine with one core has no second thread to wait for, so this is
+    // bounded rather than a barrier.
+    if (watch->rendezvous && watch->threads.size() < 2) {
+      (void)watch->condition.wait_for(lock, std::chrono::seconds(5), [&] {
+        return watch->threads.size() >= 2;
+      });
+    }
+    return watch->cancelAfter != 0 && watch->polls > watch->cancelAfter;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool forceSequentialDecode(void *opaque) noexcept {
+  return *static_cast<const bool *>(opaque);
+}
+
+// Lanes decoded on the pool must be the same audio, admitted by the same
+// accounting, refused in the same words as lanes decoded one at a time.
+void parallelLaneDecodeMatchesSequential() {
+  const std::string wavA =
+      writeWav("parallel-a.wav", 1, std::vector<float>(3000, 0.11F));
+  std::vector<float> stereo(2 * 2500);
+  for (size_t frame = 0; frame < 2500; ++frame) {
+    stereo[frame * 2] = 0.2F * static_cast<float>((frame % 7) + 1) / 7.0F;
+    stereo[frame * 2 + 1] = -0.3F * static_cast<float>((frame % 5) + 1) / 5.0F;
+  }
+  const std::string wavB = writeWav("parallel-b.wav", 2, stereo);
+  const std::string wavC =
+      writeWav("parallel-c.wav", 1, std::vector<float>(1800, -0.07F));
+  const std::string flacSource =
+      writeWav("parallel-d-source.wav", 1, std::vector<float>(2200, 0.23F));
+  const std::string flacD = scratch("parallel-d.flac");
+  std::remove(flacD.c_str());
+  CHECK(singz::compactStem(flacSource, flacD).ok);
+
+  bool sequential = false;
+  singz::NativePlaybackTestHooks hooks{};
+  hooks.context = &sequential;
+  hooks.forceSequentialLaneDecode = forceSequentialDecode;
+
+  struct Observed {
+    singz::NativePlaybackStatus status;
+    singz::NativePlaybackLanePeaksResult peaks;
+    std::vector<float> left;
+    std::vector<float> right;
+    size_t decodeThreads{0};
+  };
+  const auto run = [&](uint64_t generation, bool forceSequential) {
+    sequential = forceSequential;
+    DecodeWatch watch;
+    watch.rendezvous = !forceSequential;
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("a", wavA));
+    lanes.push_back(lane("b", wavB));
+    lanes.push_back(lane("c", wavC));
+    lanes.push_back(lane("d", flacD));
+    const singz::DecodeCancellation cancellation{&watch, watchDecode};
+    CHECK(session
+              .prepare(config(), std::move(lanes), generation, cancellation)
+              .ok);
+    Observed observed;
+    observed.status = session.status();
+    observed.peaks = peaksOf(session, generation);
+    observed.decodeThreads = watch.distinctThreads();
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    CHECK(fake->drive(512, singz::AudioHostDiscontinuityStart));
+    observed.left.assign(fake->left.begin(), fake->left.begin() + 512);
+    observed.right.assign(fake->right.begin(), fake->right.begin() + 512);
+    CHECK(session.unload(generation).ok);
+    return observed;
+  };
+
+  const Observed pooled = run(801, false);
+  const Observed serial = run(802, true);
+  // Not a stopwatch: the token is polled by whichever thread is decoding, so
+  // more than one caller is the pool itself. A single-core machine has no
+  // pool to prove, and the value equality below is the point either way.
+  if (std::thread::hardware_concurrency() > 1)
+    CHECK(pooled.decodeThreads > 1);
+  CHECK(serial.decodeThreads == 1);
+  CHECK(pooled.status.lanes.size() == 4 &&
+        serial.status.lanes.size() == 4 &&
+        pooled.status.retainedBytes == serial.status.retainedBytes &&
+        pooled.status.durationFrames == serial.status.durationFrames &&
+        pooled.status.durationFrames == 3000);
+  for (size_t index = 0; index < 4; ++index) {
+    CHECK(pooled.status.lanes[index].id == serial.status.lanes[index].id &&
+          pooled.status.lanes[index].totalFrames ==
+              serial.status.lanes[index].totalFrames &&
+          pooled.peaks.lanes[index].id == serial.peaks.lanes[index].id &&
+          pooled.peaks.lanes[index].valid ==
+              serial.peaks.lanes[index].valid &&
+          pooled.peaks.lanes[index].peaks == serial.peaks.lanes[index].peaks);
+  }
+  CHECK(pooled.left == serial.left && pooled.right == serial.right);
+  // The mixed lanes must actually be audible, or the comparison above is a
+  // comparison of two silences.
+  CHECK(std::any_of(pooled.left.begin(), pooled.left.end(),
+                    [](float value) { return value != 0.0F; }));
+
+  // Aggregate refusals: same code AND same words on both paths. The first is
+  // a budget exhausted before a lane starts, the second a lane larger than
+  // the cap that budget leaves its decoder.
+  constexpr size_t arenaBytes =
+      4u * 1024u * 1024u + 16u * 2u * 512u * sizeof(float);
+  const auto refuse = [&](uint64_t generation, bool forceSequential,
+                          size_t maximumRetainedBytes) {
+    sequential = forceSequential;
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("a", wavA));
+    lanes.push_back(lane("b", wavB));
+    singz::NativePlaybackPrepareConfig request = config();
+    request.maximumRetainedBytes = maximumRetainedBytes;
+    const auto result =
+        session.prepare(std::move(request), std::move(lanes), generation);
+    CHECK(!result.ok && session.status().retainedBytes == 0);
+    CHECK(session.unload(generation).ok);
+    return result;
+  };
+  const auto exhausted = refuse(803, false, arenaBytes);
+  const auto exhaustedSerial = refuse(804, true, arenaBytes);
+  CHECK(exhausted.error == singz::NativePlaybackError::LimitExceeded &&
+        exhausted.message ==
+            "Prepared playback lanes reached the aggregate memory limit" &&
+        exhausted.error == exhaustedSerial.error &&
+        exhausted.message == exhaustedSerial.message);
+  const size_t squeezed = arenaBytes + 3000u * sizeof(float) + 16u;
+  const auto tooBig = refuse(805, false, squeezed);
+  const auto tooBigSerial = refuse(806, true, squeezed);
+  CHECK(tooBig.error == singz::NativePlaybackError::LimitExceeded &&
+        tooBig.message == "A WAV/FLAC playback lane could not be prepared" &&
+        tooBig.error == tooBigSerial.error &&
+        tooBig.message == tooBigSerial.message);
+
+  // The pool's own per-lane budget is not the only door: two lanes that each
+  // fit the whole budget can still not fit TOGETHER, and only the ordered
+  // admission that follows the pool can see that. Making the first lane much
+  // slower to decode than the second is what puts the second lane's decode
+  // before the first lane's commit, so the pool cannot refuse this on its own
+  // and the ordered pass is the thing under test. (On a single-core machine
+  // the pool refuses it first instead; the refusal is the same either way.)
+  const std::string bigSource =
+      writeWav("parallel-big-source.wav", 1, std::vector<float>(400000, 0.3F));
+  const std::string bigFlac = scratch("parallel-big.flac");
+  std::remove(bigFlac.c_str());
+  CHECK(singz::compactStem(bigSource, bigFlac).ok);
+  const std::string tinyWav =
+      writeWav("parallel-tiny.wav", 1, std::vector<float>(64, 0.2F));
+  const size_t together =
+      arenaBytes + 400000u * sizeof(float) + 64u * sizeof(float) - 4u;
+  const auto refusePair = [&](uint64_t generation, bool forceSequential) {
+    sequential = forceSequential;
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("big", bigFlac));
+    lanes.push_back(lane("tiny", tinyWav));
+    singz::NativePlaybackPrepareConfig request = config();
+    request.maximumRetainedBytes = together;
+    const auto result =
+        session.prepare(std::move(request), std::move(lanes), generation);
+    CHECK(!result.ok && session.status().retainedBytes == 0);
+    CHECK(session.unload(generation).ok);
+    return result;
+  };
+  const auto pair = refusePair(809, false);
+  const auto pairSerial = refusePair(810, true);
+  CHECK(pair.error == singz::NativePlaybackError::LimitExceeded &&
+        pair.message == "A WAV/FLAC playback lane could not be prepared" &&
+        pair.error == pairSerial.error && pair.message == pairSerial.message);
+
+  // THE CLIFF, and the line that explains it. Lanes are not all the same
+  // length here — a singer's own added track can be any length beside six
+  // equal stems — so a lane larger than its share of the budget is a real
+  // shape. The pool declines it and the whole open drops to one lane at a
+  // time, which is correct and costs seconds; silent, it is unexplainable
+  // from a log. The status must name the lane that caused it.
+  {
+    sequential = false;
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("oversized", bigFlac));
+    lanes.push_back(lane("small", tinyWav));
+    singz::NativePlaybackPrepareConfig request = config();
+    // Room for both lanes with a little to spare, so the SEQUENTIAL path
+    // admits them comfortably — but each lane's share is about half of that,
+    // which the big lane alone exceeds.
+    const size_t bigBytes = 400000u * sizeof(float);
+    const size_t smallBytes = 64u * sizeof(float);
+    request.maximumRetainedBytes =
+        arenaBytes + bigBytes + smallBytes + 64u * 1024u;
+    const auto prepared =
+        session.prepare(std::move(request), std::move(lanes), 811);
+    CHECK(prepared.ok);
+    const singz::NativePlaybackStatus status = session.status();
+    // It opened — just the slow way, and it says which lane made it so.
+    CHECK(status.lanes.size() == 2 &&
+          status.retainedBytes == arenaBytes + bigBytes + smallBytes);
+    CHECK(!status.laneDecodeFallback.empty());
+    CHECK(status.laneDecodeFallback.find("oversized") != std::string::npos);
+    CHECK(status.laneDecodeFallback.find("share of the decode budget") !=
+          std::string::npos);
+    CHECK(session.unload(811).ok);
+  }
+
+  // An ordinary open says nothing, because there is nothing to explain.
+  {
+    sequential = false;
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("a", wavA));
+    lanes.push_back(lane("b", wavB));
+    CHECK(session.prepare(config(), std::move(lanes), 812).ok);
+    CHECK(session.status().laneDecodeFallback.empty());
+    CHECK(session.unload(812).ok);
+  }
+
+  // Cancellation is answered by the pool's own workers, so it aborts without
+  // waiting for the slowest lane, and it says exactly what it always said.
+  const auto cancel = [&](uint64_t generation, bool forceSequential) {
+    sequential = forceSequential;
+    DecodeWatch watch;
+    watch.cancelAfter = 1;
+    auto backend = std::make_unique<ManualOutputBackend>();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("a", wavA));
+    lanes.push_back(lane("b", wavB));
+    lanes.push_back(lane("c", wavC));
+    lanes.push_back(lane("d", flacD));
+    const singz::DecodeCancellation cancellation{&watch, watchDecode};
+    const auto result = session.prepare(config(), std::move(lanes), generation,
+                                        cancellation);
+    CHECK(!result.ok && session.status().retainedBytes == 0 &&
+          session.status().lanes.empty() &&
+          session.status().state == singz::NativePlaybackState::Unloaded);
+    CHECK(session.unload(generation).ok);
+    return result;
+  };
+  const auto cancelled = cancel(807, false);
+  const auto cancelledSerial = cancel(808, true);
+  CHECK(cancelled.error == singz::NativePlaybackError::Cancelled &&
+        cancelled.message == "Native playback preparation was superseded" &&
+        cancelled.error == cancelledSerial.error &&
+        cancelled.message == cancelledSerial.message);
+
+  std::remove(wavA.c_str());
+  std::remove(wavB.c_str());
+  std::remove(wavC.c_str());
+  std::remove(flacSource.c_str());
+  std::remove(flacD.c_str());
+  std::remove(bigSource.c_str());
+  std::remove(bigFlac.c_str());
+  std::remove(tinyWav.c_str());
+}
+
+// The two facts a facade cannot recover from telemetry alone: how many
+// count-in beats there are and what the bars are, and what each lane's audio
+// looks like when nothing decodes the stems in JavaScript.
+void laneWaveformSummaryAndCountInMeter() {
+  constexpr size_t buckets = singz::kNativePlaybackLaneSummaryBuckets;
+  static_assert(buckets == 96, "the phones draw exactly 96 slivers");
+  constexpr size_t framesPerBucket = 400;
+  constexpr size_t frames = buckets * framesPerBucket; // 0.8 s at 48 kHz
+  constexpr size_t spikeOffset = 137;
+  constexpr size_t stereoBucket = 7;
+  constexpr float stereoSpike = -0.75F;
+
+  // One spike per bucket, alternating sign and rising in amplitude: a bucket
+  // that reads the wrong span, drops the sign or normalizes the envelope
+  // cannot reproduce this shape.
+  std::vector<float> mono(frames, 0.0F);
+  for (size_t bucket = 0; bucket < buckets; ++bucket) {
+    mono[bucket * framesPerBucket + spikeOffset] =
+        (bucket % 2 == 0 ? 1.0F : -1.0F) *
+        (0.01F * static_cast<float>(bucket + 1));
+  }
+  const std::string monoWav = writeWav("summary-mono.wav", 1, mono);
+
+  // The same shape on channel 0 plus one louder spike on channel 1: the
+  // bucket peak is taken across every channel, not from the first one.
+  std::vector<float> stereo(frames * 2, 0.0F);
+  for (size_t frame = 0; frame < frames; ++frame)
+    stereo[frame * 2] = mono[frame];
+  stereo[(stereoBucket * framesPerBucket + 200) * 2 + 1] = stereoSpike;
+  const std::string stereoWav = writeWav("summary-stereo.wav", 2, stereo);
+
+  // Fewer frames than buckets: every bucket must still be defined.
+  const std::vector<float> shortSamples = {0.5F, -0.25F, 0.125F, 0.0625F,
+                                           0.03125F};
+  const std::string shortWav = writeWav("summary-short.wav", 1, shortSamples);
+  const std::string silentWav =
+      writeWav("summary-silent.wav", 1, std::vector<float>(framesPerBucket));
+
+  struct Summary {
+    singz::NativePlaybackStatus status;
+    singz::NativePlaybackLanePeaksResult peaks;
+  };
+  const auto summarize =
+      [&](uint64_t generation,
+          const std::optional<singz::PlaybackCuePlanRequest> &cue) {
+        auto backend = std::make_unique<ManualOutputBackend>();
+        singz::NativePlaybackSession session(std::move(backend));
+        auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+        lanes.push_back(lane("mono", monoWav));
+        lanes.push_back(lane("stereo", stereoWav));
+        lanes.push_back(lane("short", shortWav));
+        lanes.push_back(lane("silent", silentWav));
+        singz::NativePlaybackPrepareConfig request = config();
+        request.cuePlan = cue;
+        CHECK(session.prepare(std::move(request), std::move(lanes), generation)
+                  .ok);
+        Summary summary;
+        summary.status = session.status();
+        summary.peaks = peaksOf(session, generation);
+        // A second read of the same generation returns the same bytes.
+        const singz::NativePlaybackLanePeaksResult again =
+            peaksOf(session, generation);
+        CHECK(summary.peaks.lanes.size() == again.lanes.size());
+        for (size_t index = 0; index < again.lanes.size(); ++index)
+          CHECK(summary.peaks.lanes[index].peaks == again.lanes[index].peaks);
+        // A stale generation is refused rather than answered with an older
+        // envelope, so a cache keyed on the generation cannot go wrong.
+        const auto stale = session.lanePeaks(generation + 1);
+        CHECK(!stale.ok &&
+              stale.error == singz::NativePlaybackError::InvalidGeneration &&
+              stale.lanes.empty());
+        CHECK(session.unload(generation).ok);
+        CHECK(session.status().lanes.empty());
+        CHECK(!session.lanePeaks(generation).ok);
+        return summary;
+      };
+
+  const Summary plain = summarize(701, std::nullopt);
+  CHECK(plain.status.preRollFrames == 0 && plain.status.cueEventCount == 0 &&
+        plain.status.countInEventCount == 0 &&
+        plain.status.countInBeatsPerBar == 0);
+
+  // Click without a count-in: cues exist, the count-in meter is still empty.
+  const Summary clickOnly = summarize(702, cueRequest(true, 0, 0.5));
+  CHECK(clickOnly.status.cueEventCount != 0 &&
+        clickOnly.status.preRollFrames == 0 &&
+        clickOnly.status.countInEventCount == 0 &&
+        clickOnly.status.countInBeatsPerBar == 0);
+
+  // One count-in bar over a grid whose downbeats are every second beat: two
+  // beats in the bar, two count-in events, 0.4 s of pre-roll.
+  const Summary countedIn = summarize(703, cueRequest(true, 1, 0.5));
+  CHECK(countedIn.status.preRollFrames == 19200 &&
+        countedIn.status.countInEventCount == 2 &&
+        countedIn.status.countInBeatsPerBar == 2);
+
+  // Two count-in bars over the same grid: four events, the meter unchanged.
+  singz::PlaybackCuePlanRequest twoBars = cueRequest(false, 2, 0.5);
+  const Summary twoBarStatus = summarize(704, twoBars);
+  CHECK(twoBarStatus.status.countInEventCount == 4 &&
+        twoBarStatus.status.countInBeatsPerBar == 2 &&
+        twoBarStatus.status.preRollFrames == 38400);
+
+  CHECK(plain.status.lanes.size() == 4 && plain.peaks.lanes.size() == 4);
+  const auto &monoLane = plain.peaks.lanes[0];
+  const auto &stereoLane = plain.peaks.lanes[1];
+  const auto &shortLane = plain.peaks.lanes[2];
+  const auto &silentLane = plain.peaks.lanes[3];
+  CHECK(monoLane.id == "mono" && stereoLane.id == "stereo" &&
+        shortLane.id == "short" && silentLane.id == "silent");
+  CHECK(monoLane.peaks.size() == buckets && monoLane.valid &&
+        stereoLane.valid && shortLane.valid && silentLane.valid);
+
+  for (size_t bucket = 0; bucket < buckets; ++bucket) {
+    const float expected =
+        std::fabs(pcm16(0.01F * static_cast<float>(bucket + 1)));
+    CHECK(monoLane.peaks[bucket] == expected);
+    const float expectedStereo =
+        bucket == stereoBucket
+            ? std::max(expected, std::fabs(pcm16(stereoSpike)))
+            : expected;
+    CHECK(stereoLane.peaks[bucket] == expectedStereo);
+    CHECK(silentLane.peaks[bucket] == 0.0F);
+    // Fewer frames than buckets: each bucket reads the one frame it starts
+    // on rather than reporting silence the lane does not contain.
+    const size_t frame = bucket * shortSamples.size() / buckets;
+    CHECK(shortLane.peaks[bucket] == std::fabs(pcm16(shortSamples[frame])));
+  }
+  // The envelope is the audio's own level, never normalized to full scale.
+  CHECK(monoLane.peaks[buckets - 1] < 1.0F &&
+        monoLane.peaks[0] < monoLane.peaks[buckets - 1]);
+
+  // Same input, same bytes: a second preparation of the same files.
+  const Summary repeated = summarize(705, std::nullopt);
+  CHECK(repeated.peaks.lanes.size() == plain.peaks.lanes.size());
+  for (size_t index = 0; index < plain.peaks.lanes.size(); ++index) {
+    CHECK(repeated.peaks.lanes[index].peaks ==
+              plain.peaks.lanes[index].peaks &&
+          repeated.peaks.lanes[index].valid ==
+              plain.peaks.lanes[index].valid);
+  }
+  // A cue plan changes the timeline, never the lanes' own audio.
+  CHECK(countedIn.peaks.lanes.size() == plain.peaks.lanes.size());
+  for (size_t index = 0; index < plain.peaks.lanes.size(); ++index)
+    CHECK(countedIn.peaks.lanes[index].peaks ==
+          plain.peaks.lanes[index].peaks);
+
+  std::remove(monoWav.c_str());
+  std::remove(stereoWav.c_str());
+  std::remove(shortWav.c_str());
+  std::remove(silentWav.c_str());
 }
 
 void cueGraphTransportCompositionAndLifetime() {
@@ -3786,6 +4955,11 @@ int main() {
     return 0;
   }
   compositionAndLifetime();
+  laneWaveformSummaryAndCountInMeter();
+  parallelLaneDecodeMatchesSequential();
+  laneDecodePoolStaysInsideTheMemoryBudget();
+  staleGenerationCommandsCannotDisturbTheLiveOne();
+  decodedLaneRetentionAcrossRebuild();
   portableGraphDocumentMaterializesActualTopology();
   trainingDuckComposition();
   cueGraphTransportCompositionAndLifetime();

@@ -163,7 +163,26 @@ object SingzCore {
   ): String
   external fun nativePlaybackSetMasterGain(generation: Long, gain: Float): String
   external fun nativePlaybackSetTrainingEnabled(generation: Long, enabled: Boolean): String
+  /**
+   * The prepared lane envelopes for one generation: immutable for it, so read
+   * once and cache under the generation. Deliberately not part of status,
+   * which is polled several times a second.
+   *
+   * JSON: {ok, error, generation, bucketCount, lanes[{id, peaksValid,
+   * peaks[bucketCount]}], message}. `generation` is a number here and on iOS;
+   * the desktop addon publishes it as a decimal string.
+   */
+  external fun nativePlaybackLanePeaks(generation: Long): String
+
   external fun nativePlaybackUnload(generation: Long): String
+
+  /**
+   * Unload that parks this generation's decoded lanes for the very next
+   * prepare of the same files at the same rate — a tempo or transpose rebuild
+   * then costs a graph rebuild instead of a whole re-decode. Anything else
+   * releases them. iOS's unloadRetainingLanes is its exact twin.
+   */
+  external fun nativePlaybackUnloadRetainingLanes(generation: Long): String
 
   /**
    * Test-build-only full codec matrix proof. The native implementation is

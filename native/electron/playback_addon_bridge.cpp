@@ -841,6 +841,10 @@ bool parseLanes(napi_env env, napi_value value,
       return false;
     lane.descriptor = OwnedFileDescriptor(descriptor);
     lane.gain = static_cast<float>(gain);
+    // The path this bridge opened is the core's opaque identity for the
+    // bytes; it is compared, never opened, when a retaining unload offers an
+    // already decoded lane to the next prepare.
+    lane.sourceKey = path;
     lanes.push_back(std::move(lane));
   }
   *result = std::move(lanes);
@@ -1419,7 +1423,65 @@ napi_value setPlaybackLane(napi_env env, napi_callback_info info) {
                               solo));
 }
 
-napi_value unloadPlayback(napi_env env, napi_callback_info info) {
+// The prepared lane envelopes for one generation, published once rather than
+// on every status poll. Matches the phones' lanePeaks(generation), with one
+// documented difference: `generation` goes out as a lossless decimal STRING
+// here, as every 64-bit counter this addon publishes does, where the phones
+// send a number.
+napi_value playbackLanePeaks(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1]{};
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  uint64_t generation = 0;
+  napi_value result{};
+  napi_create_object(env, &result);
+  if (argc != 1 || !exactU64(env, argv[0], &generation)) {
+    setValue(env, result, "ok", makeBool(env, false));
+    setValue(env, result, "error",
+             makeString(env, nativePlaybackErrorName(
+                                 NativePlaybackError::InvalidGeneration)));
+    setCounter(env, result, "generation", 0);
+    setValue(env, result, "bucketCount",
+             makeNumber(env, kNativePlaybackLaneSummaryBuckets));
+    napi_value empty{};
+    napi_create_array_with_length(env, 0, &empty);
+    setValue(env, result, "lanes", empty);
+    setValue(env, result, "message",
+             makeString(env, "Playback generation is invalid"));
+    return result;
+  }
+  std::lock_guard<std::mutex> lock(playback.mutex);
+  const NativePlaybackLanePeaksResult peaks =
+      playback.session.lanePeaks(generation);
+  setValue(env, result, "ok", makeBool(env, peaks.ok));
+  setValue(env, result, "error",
+           makeString(env, nativePlaybackErrorName(peaks.error)));
+  setCounter(env, result, "generation", peaks.generation);
+  setValue(env, result, "bucketCount", makeNumber(env, peaks.bucketCount));
+  napi_value lanes{};
+  napi_create_array_with_length(env, peaks.lanes.size(), &lanes);
+  for (size_t index = 0; index < peaks.lanes.size(); ++index) {
+    napi_value lane{};
+    napi_create_object(env, &lane);
+    setValue(env, lane, "id", makeString(env, peaks.lanes[index].id));
+    setValue(env, lane, "peaksValid",
+             makeBool(env, peaks.lanes[index].valid));
+    const auto &values = peaks.lanes[index].peaks;
+    napi_value array{};
+    napi_create_array_with_length(env, values.size(), &array);
+    for (size_t bucket = 0; bucket < values.size(); ++bucket)
+      napi_set_element(env, array, bucket, makeNumber(env, values[bucket]));
+    setValue(env, lane, "peaks", array);
+    napi_set_element(env, lanes, index, lane);
+  }
+  setValue(env, result, "lanes", lanes);
+  setValue(env, result, "message", makeString(env, peaks.message));
+  return result;
+}
+
+napi_value unloadPlaybackWithRetention(napi_env env,
+                                       napi_callback_info info,
+                                       NativePlaybackLaneRetention retention) {
   size_t argc = 1;
   napi_value argv[1]{};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
@@ -1430,7 +1492,7 @@ napi_value unloadPlayback(napi_env env, napi_callback_info info) {
                            "Playback generation is invalid"));
   std::lock_guard<std::mutex> lock(playback.mutex);
   NativePlaybackUnloadReceipt receipt =
-      playback.session.unloadWithCleanup(generation);
+      playback.session.unloadWithCleanup(generation, retention);
   if (receipt.cleanup.globallyComplete()) {
     playback.handoffLease = receipt.cleanup.handoffLease;
     if (playback.generation != 0)
@@ -1443,9 +1505,24 @@ napi_value unloadPlayback(napi_env env, napi_callback_info info) {
   setValue(env, result, "cleanupComplete",
            makeBool(env, receipt.cleanup.globallyComplete()));
   setCounter(env, result, "retainedBytes", receipt.cleanup.retainedBytes);
+  setCounter(env, result, "parkedLaneBytes", receipt.cleanup.parkedLaneBytes);
   setValue(env, result, "physicalOwnershipRetained",
            makeBool(env, receipt.cleanup.physicalOwnershipRetained));
   return result;
+}
+
+napi_value unloadPlayback(napi_env env, napi_callback_info info) {
+  return unloadPlaybackWithRetention(env, info,
+                                     NativePlaybackLaneRetention::Release);
+}
+
+// One argument and the same resolved object as unloadPlayback, matching the
+// phones' unloadRetainingLanes: this generation's decoded lanes are kept for
+// the very next prepare of the same files at the same rate.
+napi_value unloadPlaybackRetainingLanes(napi_env env,
+                                        napi_callback_info info) {
+  return unloadPlaybackWithRetention(env, info,
+                                     NativePlaybackLaneRetention::Park);
 }
 
 constexpr size_t kDesktopPlaybackGraphMaximumLabelBytes = 256;
@@ -1722,6 +1799,10 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
              static_cast<uint64_t>(source.retainedBytes));
   setCounter(env, result, "graphArenaBytes",
              static_cast<uint64_t>(source.graphArenaBytes));
+  setCounter(env, result, "parkedLaneBytes",
+             static_cast<uint64_t>(source.parkedLaneBytes));
+  setValue(env, result, "parkedLaneCount",
+           makeNumber(env, source.parkedLaneCount));
   setValue(env, result, "masterGain", makeNumber(env, source.masterGain));
   setValue(env, result, "referenceGain",
            makeNumber(env, source.referenceGain));
@@ -1737,6 +1818,10 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
   setSignedCounter(env, result, "preRollFrames", source.preRollFrames);
   setValue(env, result, "cueEventCount",
            makeNumber(env, source.cueEventCount));
+  setValue(env, result, "countInEventCount",
+           makeNumber(env, source.countInEventCount));
+  setValue(env, result, "countInBeatsPerBar",
+           makeNumber(env, source.countInBeatsPerBar));
   setCounter(env, result, "previewClicksEnqueued",
              source.previewClicksEnqueued);
   setCounter(env, result, "previewClicksStarted", source.previewClicksStarted);
@@ -1744,6 +1829,8 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
              source.previewClicksCompleted);
   setValue(env, result, "previewClicksPending",
            makeNumber(env, source.previewClicksPending));
+  setValue(env, result, "laneDecodeFallback",
+           makeString(env, source.laneDecodeFallback));
   setValue(env, result, "topology", makeString(env, source.topology));
   setValue(env, result, "graphNodeCount",
            makeNumber(env, source.graphNodeCount));
@@ -1776,6 +1863,8 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
     setValue(env, lane, "gain", makeNumber(env, source.lanes[index].gain));
     setValue(env, lane, "muted", makeBool(env, source.lanes[index].muted));
     setValue(env, lane, "solo", makeBool(env, source.lanes[index].solo));
+    // No envelope here: it never changes for a generation. playbackLanePeaks
+    // publishes it once instead.
     napi_set_element(env, lanes, index, lane);
   }
   setValue(env, result, "lanes", lanes);
@@ -1820,6 +1909,10 @@ void definePlaybackExports(napi_env env, napi_value exports,
        napi_default, nullptr},
       {"unloadPlayback", nullptr, unloadPlayback, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"unloadPlaybackRetainingLanes", nullptr, unloadPlaybackRetainingLanes,
+       nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"playbackLanePeaks", nullptr, playbackLanePeaks, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports,
                          sizeof(properties) / sizeof(properties[0]),

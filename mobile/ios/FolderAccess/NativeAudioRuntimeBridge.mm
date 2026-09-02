@@ -71,12 +71,33 @@ RCT_REMAP_METHOD(
 }
 
 RCT_REMAP_METHOD(
+    lanePeaks,
+    lanePeaks : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackLanePeaks(generation, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
     unload,
     unload : (nonnull NSNumber*)generation
         resolver : (RCTPromiseResolveBlock)resolve
         rejecter : (RCTPromiseRejectBlock)reject)
 {
   SingzNativePlaybackUnload(generation, resolve, reject);
+}
+
+// One argument plus the promise pair, exactly like unload above and exactly
+// like Android's unloadRetainingLanes(generationValue, promise). An arity that
+// disagrees with JS is never dispatched and never says so.
+RCT_REMAP_METHOD(
+    unloadRetainingLanes,
+    unloadRetainingLanes : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackUnloadRetainingLanes(generation, resolve, reject);
 }
 
 RCT_REMAP_METHOD(

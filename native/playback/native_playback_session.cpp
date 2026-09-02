@@ -12,8 +12,15 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 #include <utility>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <zdsp/audio_host_graph_adapter.h>
 #include <zdsp/builtin_nodes.h>
@@ -1408,6 +1415,351 @@ struct PlaybackGraphComposition {
   }
 };
 
+using NativePlaybackLanePeaks =
+    std::array<float, kNativePlaybackLaneSummaryBuckets>;
+
+// Everything that decides whether an already-decoded lane is the same audio
+// as a lane a new prepare is asking for: the bridge's opaque identity for the
+// bytes, and the decode settings that shaped the published samples. Nothing
+// here is ever used to open anything; it is only ever compared.
+struct PlaybackLaneDecodeIdentity {
+  std::string sourceKey;
+  uint32_t requiredSampleRate{0};
+  DecodedAudioSourceFormat sourceFormat{DecodedAudioSourceFormat::Auto};
+  uint32_t maximumChannels{0};
+  uint64_t maximumFrames{0};
+
+  [[nodiscard]] bool operator==(const PlaybackLaneDecodeIdentity &other) const {
+    return sourceKey == other.sourceKey &&
+           requiredSampleRate == other.requiredSampleRate &&
+           sourceFormat == other.sourceFormat &&
+           maximumChannels == other.maximumChannels &&
+           maximumFrames == other.maximumFrames;
+  }
+  // An unnamed source can never be recognized again, so it never adopts.
+  [[nodiscard]] bool adoptable() const noexcept { return !sourceKey.empty(); }
+};
+
+[[nodiscard]] PlaybackLaneDecodeIdentity
+laneDecodeIdentity(const NativePlaybackLaneSource &source,
+                   const DecodedAudioPrepareOptions &options,
+                   uint32_t requiredSampleRate) {
+  return {source.sourceKey, requiredSampleRate, options.sourceFormat,
+          options.maximumChannels, options.maximumFrames};
+}
+
+// Fixed-resolution amplitude envelope of one decoded lane, taken from the
+// planar PCM the graph is about to borrow. Each bucket is the peak absolute
+// sample of every channel inside its half-open frame span; buckets partition
+// the lane exactly, in integer arithmetic, so the same decode always yields
+// the same bytes on every platform. A lane shorter than the bucket count
+// still fills every bucket: an otherwise empty span reads the single frame it
+// starts on rather than reporting silence that is not there. The envelope is
+// deliberately unnormalized — scaling is a drawing decision, and normalizing
+// here would make a quiet lane indistinguishable from a loud one.
+[[nodiscard]] bool summarizeLanePeaks(const DecodedAudio &audio,
+                                      NativePlaybackLanePeaks *peaks) noexcept {
+  if (peaks == nullptr)
+    return false;
+  peaks->fill(0.0F);
+  const uint64_t frames = audio.frameCount();
+  const uint32_t channels = audio.channelCount();
+  if (frames == 0 || channels == 0)
+    return false;
+  constexpr uint64_t buckets = kNativePlaybackLaneSummaryBuckets;
+  for (uint32_t channel = 0; channel < channels; ++channel) {
+    const float *samples = audio.channelData(channel);
+    if (samples == nullptr)
+      continue;
+    for (uint64_t bucket = 0; bucket < buckets; ++bucket) {
+      const uint64_t begin = bucket * frames / buckets;
+      uint64_t end = (bucket + 1) * frames / buckets;
+      if (end <= begin)
+        end = begin + 1;
+      if (end > frames)
+        end = frames;
+      float peak = (*peaks)[static_cast<size_t>(bucket)];
+      for (uint64_t frame = begin; frame < end; ++frame) {
+        const float sample = samples[static_cast<size_t>(frame)];
+        // Non-finite PCM cannot reach a drawing surface as a height. The
+        // decoded lane is trusted, so this only pins the contract.
+        if (!std::isfinite(sample))
+          continue;
+        const float magnitude = sample < 0.0F ? -sample : sample;
+        if (magnitude > peak)
+          peak = magnitude;
+      }
+      (*peaks)[static_cast<size_t>(bucket)] = peak > 1.0F ? 1.0F : peak;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] int duplicateDescriptor(int descriptor) noexcept {
+  if (descriptor < 0)
+    return -1;
+#if defined(_WIN32)
+  return _dup(descriptor);
+#else
+  return ::dup(descriptor);
+#endif
+}
+
+struct ParallelLaneDecode {
+  struct Lane {
+    DecodedAudioResult result;
+    NativePlaybackLanePeaks peaks{};
+    bool peaksValid{false};
+  };
+
+  std::vector<Lane> lanes;
+  // True only when every lane decoded. Anything else — a decode failure, a
+  // cancellation, a budget the reservation cannot promise, a thread that
+  // could not be created — leaves this false and hands the decision back to
+  // the one sequential definition of lane admission.
+  bool complete{false};
+  // Set only for the one decline a singer can FEEL and nothing else would
+  // explain: a lane too large for its share of the decode budget, which sends
+  // an otherwise healthy open down the one-lane-at-a-time path and costs
+  // seconds. Lanes are not all the same length on this product — six stems
+  // from one song are, but a singer's own added track can be any length — so
+  // this is a real shape, not a hypothetical. Empty for every other outcome,
+  // because those either surface as an error or were asked for.
+  std::string declineReason;
+};
+
+// Decodes every lane on a bounded worker pool, and summarizes each one on the
+// thread that decoded it. This is an OPTIMIZATION ONLY: the pool decides
+// nothing and reports nothing. Every refusal, error code and message still
+// comes from the sequential loop, which the caller re-runs over its own
+// descriptors when this returns incomplete — which is why each worker is
+// handed a DUPLICATE (prepareDecodedAudio consumes and closes the descriptor
+// it is given, and rewinds it first, so the caller's original stays usable).
+//
+// A worker's cap IS tighter than the sequential loop's, deliberately: the
+// sequential loop may give one lane the whole remaining budget, while here
+// every concurrent decode holds a reservation at once, so each gets a share.
+// A lane too large for its share is therefore refused here and admitted
+// there — that is the fallback working as intended, not a bug, and it is
+// exactly what status().laneDecodeFallback exists to explain. Nothing here
+// reports a refusal of its own; it only sends the caller back to the
+// sequential loop, which remains the one definition of what is admissible.
+[[nodiscard]] ParallelLaneDecode decodeLanesConcurrently(
+    const std::vector<NativePlaybackLaneSource> &sources,
+    const DecodedAudioPrepareOptions &decodeOptions,
+    uint32_t requiredSampleRate, size_t maximumRetainedBytes,
+    size_t arenaBytes, const DecodeCancellation &outer,
+    NativePlaybackTestHooks *testHooks) noexcept {
+  ParallelLaneDecode outcome;
+  const size_t laneCount = sources.size();
+  if (laneCount < 2 || arenaBytes > maximumRetainedBytes)
+    return outcome;
+  try {
+    std::vector<OwnedFileDescriptor> duplicates;
+    duplicates.reserve(laneCount);
+    for (const NativePlaybackLaneSource &source : sources) {
+      const int copy = duplicateDescriptor(source.descriptor.get());
+      if (copy < 0)
+        return outcome;
+      duplicates.emplace_back(copy);
+    }
+    outcome.lanes.resize(laneCount);
+    std::vector<size_t> committedBytes(laneCount, 0);
+    std::vector<char> committed(laneCount, 0);
+    std::mutex budget;
+    const size_t laneBudget = maximumRetainedBytes - arenaBytes;
+    const size_t laneShare = laneBudget / laneCount;
+    // A REAL reservation, not an accounting comment. `available` is the part
+    // of the budget no in-flight decode has been promised; a worker takes its
+    // allowance out of it before decoding and puts back only what the lane
+    // did not use. The sum of the allowances held by concurrent decodes is
+    // therefore `laneBudget - available`, which cannot exceed laneBudget —
+    // the earlier version merely accumulated an unspent `surplus` and handed
+    // out 1x, 1x, 2x, 3x, 4x, 5x the share, peaking at 1.49x the budget.
+    size_t available = laneBudget;
+    size_t claimedLanes = 0;
+    size_t inFlightBytes = 0;
+    // What the lanes already decoded actually hold. Reported with the
+    // in-flight reservations because the two are alive at the same time: the
+    // ceiling is on their SUM, and tracking it from the real byte counts
+    // rather than from `available` means a bookkeeping slip in the allocator
+    // shows up here instead of hiding behind it.
+    size_t spentBytes = 0;
+    std::atomic<bool> refused{false};
+    std::atomic<size_t> next{0};
+    struct PoolCancellation {
+      const DecodeCancellation *outer;
+      std::atomic<bool> *refused;
+    };
+    PoolCancellation cancellationState{&outer, &refused};
+    // A sibling's refusal cancels the decodes already in flight, so the
+    // caller's fallback starts promptly instead of after the slowest lane.
+    const DecodeCancellation poolCancellation{
+        &cancellationState, [](void *context) noexcept -> bool {
+          auto *state = static_cast<PoolCancellation *>(context);
+          return state->refused->load(std::memory_order_acquire) ||
+                 state->outer->isRequested();
+        }};
+    size_t workers = 1;
+    const auto work = [&]() {
+      for (;;) {
+        const size_t index = next.fetch_add(1, std::memory_order_relaxed);
+        if (index >= laneCount)
+          return;
+        if (refused.load(std::memory_order_acquire) || outer.isRequested()) {
+          refused.store(true, std::memory_order_release);
+          return;
+        }
+        // Take this lane's allowance out of the budget before decoding it,
+        // leaving every lane that has not claimed yet its own share. An equal
+        // set gets exactly its share each; an unequal one still fits, because
+        // the lanes claimed late may spend what the early ones returned.
+        size_t allowance = 0;
+        uint64_t inFlightNow = 0;
+        {
+          std::lock_guard<std::mutex> lock(budget);
+          ++claimedLanes;
+          const size_t unclaimed = laneCount - claimedLanes;
+          const size_t reservedForOthers = unclaimed * laneShare;
+          allowance = available > reservedForOthers
+                          ? available - reservedForOthers
+                          : std::min(available, laneShare);
+          available -= allowance;
+          inFlightBytes += allowance;
+          inFlightNow = spentBytes + inFlightBytes;
+        }
+        if (allowance == 0) {
+          std::lock_guard<std::mutex> lock(budget);
+          inFlightBytes -= allowance;
+          available += allowance;
+          refused.store(true, std::memory_order_release);
+          return;
+        }
+        DecodedAudioPrepareOptions options = decodeOptions;
+        options.requiredSampleRate = requiredSampleRate;
+        options.maximumDecodedBytes =
+            std::min(options.maximumDecodedBytes, allowance);
+        // A resampling decode holds input, output and interleaved planes at
+        // once. Bound that to what the lane may publish rather than leaving
+        // it at the 2 GB per-decode default no caller chose.
+        options.maximumWorkingBytes = std::min(
+            options.maximumWorkingBytes,
+            allowance > std::numeric_limits<size_t>::max() /
+                            kNativePlaybackLaneWorkingBytesPerDecodedByte
+                ? std::numeric_limits<size_t>::max()
+                : allowance * kNativePlaybackLaneWorkingBytesPerDecodedByte);
+        if (testHooks != nullptr && testHooks->observeLaneDecodePool != nullptr) {
+          testHooks->observeLaneDecodePool(
+              testHooks->context, static_cast<uint32_t>(workers),
+              static_cast<uint64_t>(laneBudget),
+              static_cast<uint64_t>(options.maximumDecodedBytes),
+              static_cast<uint64_t>(options.maximumWorkingBytes), inFlightNow);
+        }
+        DecodedAudioResult result = prepareDecodedAudio(
+            std::move(duplicates[index]), options, poolCancellation);
+        if (!result.ok()) {
+          if (result.status == DecodedAudioStatus::LimitExceeded) {
+            std::lock_guard<std::mutex> lock(budget);
+            if (outcome.declineReason.empty()) {
+              outcome.declineReason =
+                  "lane '" + sources[index].id + "' did not fit its " +
+                  std::to_string(allowance) +
+                  "-byte share of the decode budget; lanes were decoded one "
+                  "at a time";
+            }
+          }
+          // Defensive, and deliberately unobservable: the first failure sets
+          // `refused`, every other worker returns before claiming, and the
+          // whole pool is abandoned for the sequential path — so nothing can
+          // spend what this returns. It stays because a future pool that
+          // retries instead of abandoning would need it, and no mutation test
+          // can cover it while the abandon-on-first-failure rule holds.
+          std::lock_guard<std::mutex> lock(budget);
+          inFlightBytes -= allowance;
+          available += allowance;
+          refused.store(true, std::memory_order_release);
+          return;
+        }
+        const size_t bytes = result.audio->retainedBytes();
+        ParallelLaneDecode::Lane &lane = outcome.lanes[index];
+        lane.peaksValid = summarizeLanePeaks(*result.audio, &lane.peaks);
+        lane.result = std::move(result);
+        {
+          // The reservation is released; only what the lane actually publishes
+          // stays spent, so the lanes that follow may use the difference.
+          std::lock_guard<std::mutex> lock(budget);
+          committedBytes[index] = bytes;
+          committed[index] = 1;
+          inFlightBytes -= allowance;
+          spentBytes += bytes;
+          available += allowance > bytes ? allowance - bytes : 0;
+        }
+      }
+    };
+    // Concurrency is the declared constant, and nothing else. An earlier
+    // version also divided the budget by a per-lane transient estimate, but
+    // that estimate was itself the budget over the lane count, so the budget
+    // cancelled and the term was only ever `laneCount / 2` — it could not
+    // respond to a tighter budget and never bound at four lanes or more. What
+    // DOES scale with the budget is the reservation above, which caps what
+    // each concurrent decode may publish and, through it, how large a working
+    // set the decoder will accept.
+    const unsigned hardware = std::thread::hardware_concurrency();
+    workers = std::max<size_t>(
+        1, std::min<size_t>({laneCount, hardware == 0 ? 1 : hardware,
+                             kNativePlaybackMaximumConcurrentLaneDecodes}));
+
+    std::vector<std::thread> pool;
+    pool.reserve(workers - 1);
+    // Every worker is joined before this frame goes away, on ANY exit path.
+    // ~thread on a joinable thread is std::terminate, and these workers hold
+    // references into this frame, so an exception escaping past them would
+    // turn a handled error into an abort. Nothing inside can throw today —
+    // prepareDecodedAudio is noexcept and only a small string build and a
+    // mutex lock remain — but that is a property of today's body, not of the
+    // structure, and the structure is what a later call has to be safe in.
+    struct PoolJoin {
+      std::vector<std::thread> &pool;
+      // Idempotent: joinable() is false once a thread has been joined, so the
+      // ordinary path joins here and the destructor becomes a no-op.
+      void join() noexcept {
+        for (std::thread &thread : pool)
+          if (thread.joinable())
+            thread.join();
+      }
+      ~PoolJoin() { join(); }
+    } joinPool{pool};
+    try {
+      for (size_t index = 1; index < workers; ++index)
+        pool.emplace_back(work);
+    } catch (...) {
+      // A pool this machine will not give us is not an error: the lanes this
+      // thread cannot reach are simply left to the sequential fallback.
+      refused.store(true, std::memory_order_release);
+    }
+    work();
+    joinPool.join();
+    if (refused.load(std::memory_order_acquire) || outer.isRequested()) {
+      outcome.lanes.clear();
+      return outcome;
+    }
+    // A pool that delivered every lane declined nothing.
+    outcome.declineReason.clear();
+    for (const ParallelLaneDecode::Lane &lane : outcome.lanes) {
+      if (!lane.result.ok()) {
+        outcome.lanes.clear();
+        return outcome;
+      }
+    }
+    outcome.complete = true;
+    return outcome;
+  } catch (...) {
+    outcome.lanes.clear();
+    outcome.complete = false;
+    return outcome;
+  }
+}
+
 struct PreparedPlaybackGraph {
   struct Lane {
     std::string id;
@@ -1415,6 +1767,13 @@ struct PreparedPlaybackGraph {
     std::array<const float *, zdsp::kMaximumChannelsPerBus> channelPointers{};
     std::array<zdsp::AudioChannelRole, zdsp::kMaximumChannelsPerBus> roles{};
     zdsp::AudioBusDescriptor sourceBus{};
+    // Prepared once from this lane's decoded PCM and never mutated. Status
+    // republishes it verbatim for every poll of the generation.
+    NativePlaybackLanePeaks peaks{};
+    bool peaksValid{false};
+    // Compared, never used, when a retaining unload offers this lane to the
+    // prepare that follows it.
+    PlaybackLaneDecodeIdentity identity{};
     zdsp::ProcessorHandle source{};
     zdsp::ProcessorHandle gainProcessor{};
     zdsp::ProcessorHandle trainingProcessor{};
@@ -1543,6 +1902,7 @@ struct PreparedPlaybackGraph {
   uint32_t latencyCompensatedEdgeCount{0};
   std::shared_ptr<const NativePlaybackGraphSnapshot> graphSnapshot;
   std::string topology;
+  std::string laneDecodeFallback;
   std::string graphPreparationError;
   bool runnerInitialized{false};
   bool telemetryLive{true};
@@ -3503,7 +3863,24 @@ struct NativePlaybackSession::Impl {
     abandonPlaybackOwnership(sessionId);
   }
 
+  // One decoded lane kept alive across a structural rebuild. It owns nothing
+  // callback-visible: the graph that borrowed this PCM is already gone.
+  struct ParkedLane {
+    std::string id;
+    PlaybackLaneDecodeIdentity identity;
+    std::shared_ptr<const DecodedAudio> owner;
+    NativePlaybackLanePeaks peaks{};
+    bool peaksValid{false};
+  };
+
   mutable std::mutex mutex;
+  // Parked lanes have their own small lock so the callback-safe cancellation
+  // admission can drop them without reaching for the control-domain mutex it
+  // deliberately never takes. Lock order: this one is always innermost.
+  mutable std::mutex parkedMutex;
+  std::vector<ParkedLane> parkedLanes;
+  std::atomic<size_t> parkedLaneBytes{0};
+  std::atomic<uint32_t> parkedLaneCount{0};
   // A short control-domain gate linearizes generation/cancellation claims
   // with prepared/open/running publication. It is never held across decode,
   // graph compilation or an AudioHost call.
@@ -3552,6 +3929,65 @@ struct NativePlaybackSession::Impl {
   std::array<UnloadReceiptEntry, kUnloadReceiptCapacity> unloadReceipts{};
   uint64_t unloadReceiptJournalExhaustedGeneration{0};
   bool retiringOldUnloadCommandAccepted{false};
+
+  // Every command other than an adopting prepare goes through here. Parked
+  // PCM is freed OUTSIDE the lock: it can be hundreds of megabytes.
+  void releaseParkedLanes() noexcept {
+    std::vector<ParkedLane> released;
+    try {
+      std::lock_guard<std::mutex> lock(parkedMutex);
+      released.swap(parkedLanes);
+      parkedLaneBytes.store(0, std::memory_order_release);
+      parkedLaneCount.store(0, std::memory_order_release);
+    } catch (...) {
+      // A mutex this process cannot lock is not a reason to abandon the
+      // process; the lanes stay parked and the next command tries again.
+      return;
+    }
+  }
+
+  // Hands the parked lanes to a caller that will own them for a while. The
+  // published byte counters deliberately stay as they are: the PCM has not
+  // gone anywhere, and a status read while it is still held must not report
+  // an empty session. The caller publishes zero when it has actually let go.
+  std::vector<ParkedLane> claimParkedLanes() noexcept {
+    std::vector<ParkedLane> claimed;
+    try {
+      std::lock_guard<std::mutex> lock(parkedMutex);
+      claimed.swap(parkedLanes);
+    } catch (...) {
+      return {};
+    }
+    return claimed;
+  }
+
+  void publishParkedLaneBytes(size_t bytes, uint32_t count) noexcept {
+    parkedLaneBytes.store(bytes, std::memory_order_release);
+    parkedLaneCount.store(count, std::memory_order_release);
+  }
+
+  bool parkLanes(std::vector<ParkedLane> lanes) noexcept {
+    size_t bytes = 0;
+    for (const ParkedLane &lane : lanes) {
+      if (lane.owner == nullptr)
+        return false;
+      bytes += lane.owner->retainedBytes();
+    }
+    try {
+      std::lock_guard<std::mutex> lock(parkedMutex);
+      parkedLanes = std::move(lanes);
+      parkedLaneBytes.store(bytes, std::memory_order_release);
+      parkedLaneCount.store(static_cast<uint32_t>(parkedLanes.size()),
+                            std::memory_order_release);
+    } catch (...) {
+      return false;
+    }
+    return true;
+  }
+
+  [[nodiscard]] size_t parkedBytes() const noexcept {
+    return parkedLaneBytes.load(std::memory_order_acquire);
+  }
 
   void latchTerminal(AudioHostTerminalCause cause) noexcept {
     if (cause.reason != AudioHostTerminalReason::None && cause.ordinal == 0)
@@ -3614,7 +4050,11 @@ struct NativePlaybackSession::Impl {
            prepareMutationGeneration == 0 && !hostMutationActive() &&
            openInvocationGeneration == 0 && startInvocationGeneration == 0 &&
            !pendingOpenDelivery.valid() && !pendingStartDelivery.valid() &&
-           !quarantineSlotReserved && pendingClaimGeneration == 0;
+           !quarantineSlotReserved && pendingClaimGeneration == 0 &&
+           // A session parking a song's decoded lanes has not proved every
+           // ownership domain empty, and must not hand output to the legacy
+           // path while it is still holding hundreds of megabytes of PCM.
+           parkedLaneBytes.load(std::memory_order_acquire) == 0;
   }
 
   bool armDelivery(NativePlaybackDeliveryCommand command, uint64_t requested,
@@ -3655,13 +4095,22 @@ struct NativePlaybackSession::Impl {
     result.error = error;
     result.generation = requested;
     result.state = state;
+    const size_t parked = parkedBytes();
+    result.parkedLaneBytes = parked;
     const size_t preparedRetained =
         prepared == nullptr ? 0 : prepared->retainedBytes;
-    const size_t localRetained =
+    const size_t ownedRetained =
         retiringPrepareBytes >
                 std::numeric_limits<size_t>::max() - preparedRetained
             ? std::numeric_limits<size_t>::max()
             : preparedRetained + retiringPrepareBytes;
+    // Parked decoded lanes are this session's, exactly like a prepared
+    // graph's PCM. A cleanup that omitted them would report an empty session
+    // that is still holding a song.
+    const size_t localRetained =
+        parked > std::numeric_limits<size_t>::max() - ownedRetained
+            ? std::numeric_limits<size_t>::max()
+            : ownedRetained + parked;
     const PlaybackQuarantineSnapshot quarantine = playbackQuarantineSnapshot();
     result.processQuarantineRetainedBytes = quarantine.retainedBytes;
     result.processQuarantineReserved =
@@ -3725,6 +4174,15 @@ struct NativePlaybackSession::Impl {
 
   bool cleanupReceiptStillCurrent(
       const NativePlaybackCleanupResult &cleanup) const noexcept {
+    // A receipt taken while lanes were parked describes a session holding a
+    // song. The moment those lanes are released it describes nothing that is
+    // still true, and replaying it would answer the release that just freed
+    // them with the park's own verdict — leaving the caller believing the
+    // generation is still held. Park receipts are never Complete (parked
+    // bytes are retained bytes), so without this they would replay forever.
+    if (cleanup.parkedLaneBytes != 0 &&
+        parkedLaneBytes.load(std::memory_order_acquire) == 0)
+      return false;
     if (cleanup.safety != NativePlaybackCleanupSafety::Complete)
       return true;
     const PlaybackOwnershipSnapshot ownership = playbackOwnershipSnapshot();
@@ -4073,6 +4531,7 @@ AudioHostInventory NativePlaybackSession::enumerate() const {
 
 bool NativePlaybackSession::replaceAudioHostBackend(
     std::unique_ptr<AudioHostBackend> backend) {
+  impl_->releaseParkedLanes();
   if (!backend) return false;
   std::scoped_lock lock(impl_->mutex, impl_->generationGate);
   if (impl_->prepared != nullptr || impl_->generation != 0 ||
@@ -4095,6 +4554,14 @@ bool NativePlaybackSession::claimGeneration(uint64_t generation) noexcept {
 NativePlaybackResult
 NativePlaybackSession::claimGeneration(uint64_t generation,
                                        uint64_t handoffLease) noexcept {
+  // Deliberately does NOT release parked lanes, and it is the only command
+  // that does not. A claim is the first half of a prepare, not a command in
+  // its own right: all three bridges claim the next generation and then issue
+  // its prepare, so releasing here would free the parked lanes microseconds
+  // before the only call that can adopt them — which is exactly what it did,
+  // making retention dead code in the product while its own test (which never
+  // claimed) passed. The prepare that follows still releases them if its
+  // lanes do not match, and so does every other command.
   if (generation == 0 || handoffLease > kNativePlaybackMaximumJsSafeInteger)
     return failureWithoutMessage(NativePlaybackError::InvalidConfiguration,
                                  generation, NativePlaybackState::Unloaded);
@@ -4125,6 +4592,7 @@ NativePlaybackSession::claimGeneration(uint64_t generation,
 }
 
 bool NativePlaybackSession::requestCancellation(uint64_t generation) noexcept {
+  impl_->releaseParkedLanes();
   if (generation == 0)
     return false;
   try {
@@ -4144,6 +4612,7 @@ bool NativePlaybackSession::requestCancellation(uint64_t generation) noexcept {
 
 NativePlaybackResult NativePlaybackSession::failPrepareAdmission(
     uint64_t generation, NativePlaybackError error) noexcept {
+  impl_->releaseParkedLanes();
   try {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     std::lock_guard<std::mutex> gate(impl_->generationGate);
@@ -4186,6 +4655,29 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
                                std::vector<NativePlaybackLaneSource> sources,
                                uint64_t generation,
                                DecodeCancellation cancellation) try {
+  // Take any parked lanes into this call's own hands immediately. Only an
+  // adopting prepare keeps them: an early refusal, a throw, or a lane set
+  // that does not match frees them on the way out of this function. They
+  // stay counted as retained for exactly as long as they are held, so a
+  // status read from inside the replacement decode cannot report an empty
+  // session that is in fact still holding a song.
+  struct ParkedLaneClaim {
+    ParkedLaneClaim(Impl *owner, std::vector<Impl::ParkedLane> claimed)
+        : impl(owner), lanes(std::move(claimed)) {}
+    ParkedLaneClaim(const ParkedLaneClaim &) = delete;
+    ParkedLaneClaim &operator=(const ParkedLaneClaim &) = delete;
+    ~ParkedLaneClaim() { release(); }
+
+    void release() noexcept {
+      lanes.clear();
+      if (impl != nullptr)
+        impl->publishParkedLaneBytes(0, 0);
+    }
+
+    Impl *impl{nullptr};
+    std::vector<Impl::ParkedLane> lanes;
+  } parked{impl_.get(), impl_->claimParkedLanes()};
+  std::vector<Impl::ParkedLane> &parkedLanes = parked.lanes;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     std::lock_guard<std::mutex> gate(impl_->generationGate);
@@ -4422,47 +4914,199 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   std::vector<PreparedPlaybackGraph::Lane> decoded;
   decoded.reserve(sources.size());
   uint64_t authoritativeDurationFrames = 0;
-  for (NativePlaybackLaneSource &source : sources) {
-    if (combined.isRequested())
-      return failPreparation(NativePlaybackError::Cancelled,
-                             "Native playback preparation was superseded");
-    DecodedAudioPrepareOptions options = config.decodeOptions;
-    options.requiredSampleRate =
-        static_cast<uint32_t>(std::llround(config.requestedSampleRate));
-    const size_t remaining = config.maximumRetainedBytes - retained;
-    if (remaining == 0) {
-      return failPreparation(
-          NativePlaybackError::LimitExceeded,
-          "Prepared playback lanes reached the aggregate memory limit");
+
+  const uint32_t requiredSampleRate =
+      static_cast<uint32_t>(std::llround(config.requestedSampleRate));
+
+  // Adoption: a structural rebuild (a tempo or transpose change) unloads and
+  // prepares the same six files at the same rate. Decoding them again is
+  // seconds of silence for what is a parameter change, so a retaining unload
+  // parked them and this is where they are taken up. The identity compared is
+  // the bridge's own key for the bytes plus the decode settings that shaped
+  // the samples; anything less than an exact, whole-set, same-order match
+  // decodes normally. The aggregate accounting is the same running one, in
+  // the same lane order, so an adopted set is admitted on the same terms.
+  bool adoptedParkedLanes = false;
+  if (!parkedLanes.empty() && parkedLanes.size() == sources.size()) {
+    bool matches = true;
+    size_t ordered = *graphArenaAdmission;
+    for (size_t index = 0; index < sources.size() && matches; ++index) {
+      const Impl::ParkedLane &parked = parkedLanes[index];
+      const PlaybackLaneDecodeIdentity wanted = laneDecodeIdentity(
+          sources[index], config.decodeOptions, requiredSampleRate);
+      const size_t bytes =
+          parked.owner == nullptr ? 0 : parked.owner->retainedBytes();
+      const size_t remaining = config.maximumRetainedBytes - ordered;
+      matches = parked.owner != nullptr && wanted.adoptable() &&
+                parked.id == sources[index].id && parked.identity == wanted &&
+                remaining != 0 && bytes <= remaining;
+      ordered += bytes;
     }
-    options.maximumDecodedBytes =
-        std::min(options.maximumDecodedBytes, remaining);
-    DecodedAudioResult result =
-        prepareDecodedAudio(std::move(source.descriptor), options, combined);
-    if (!result.ok()) {
-      const NativePlaybackError error = decodeError(result.status);
-      return failPreparation(
-          error, error == NativePlaybackError::Cancelled
-                     ? "Native playback preparation was superseded"
-                     : "A WAV/FLAC playback lane could not be prepared");
+    if (matches) {
+      for (size_t index = 0; index < sources.size(); ++index) {
+        NativePlaybackLaneSource &source = sources[index];
+        Impl::ParkedLane &parked = parkedLanes[index];
+        retained += parked.owner->retainedBytes();
+        authoritativeDurationFrames = std::max(authoritativeDurationFrames,
+                                               parked.owner->frameCount());
+        PreparedPlaybackGraph::Lane lane;
+        lane.id = std::move(source.id);
+        lane.owner = std::move(parked.owner);
+        lane.peaks = parked.peaks;
+        lane.peaksValid = parked.peaksValid;
+        lane.identity = std::move(parked.identity);
+        lane.gain = source.gain;
+        lane.muted = source.muted;
+        lane.solo = source.solo;
+        decoded.push_back(std::move(lane));
+        injectFailure(impl_->testHooks,
+                      NativePlaybackAllocationPoint::AfterDecode);
+      }
+      for (NativePlaybackLaneSource &source : sources)
+        source.descriptor.reset();
+      adoptedParkedLanes = true;
     }
-    const size_t bytes = result.audio->retainedBytes();
-    if (bytes > config.maximumRetainedBytes - retained) {
-      return failPreparation(
-          NativePlaybackError::LimitExceeded,
-          "Prepared playback lanes exceed the aggregate memory limit");
+  }
+  // Whatever was not adopted is released HERE, before a single replacement
+  // byte is decoded. A six-lane song is hundreds of megabytes; holding a
+  // declined set across its own replacement's decode would peak at two songs
+  // at once, which on a phone is a per-process kill rather than a slow
+  // rebuild. The published counters go to zero with the memory, not before.
+  parked.release();
+
+  // Fast path: decode the lanes concurrently, then admit them in lane order
+  // with the exact running accounting the sequential loop performs. Six lanes
+  // decoded one after another is seconds of a song opening; the pool decides
+  // nothing, so a set it cannot deliver whole falls through to the sequential
+  // loop below and is refused there, in its own words.
+  const bool sequentialLaneDecodeForced =
+      impl_->testHooks != nullptr &&
+      impl_->testHooks->forceSequentialLaneDecode != nullptr &&
+      impl_->testHooks->forceSequentialLaneDecode(impl_->testHooks->context);
+  ParallelLaneDecode parallel =
+      adoptedParkedLanes || sequentialLaneDecodeForced
+          ? ParallelLaneDecode{}
+          : decodeLanesConcurrently(sources, config.decodeOptions,
+                                    requiredSampleRate,
+                                    config.maximumRetainedBytes,
+                                    *graphArenaAdmission, combined,
+                                    impl_->testHooks);
+  bool adoptedParallelLanes = false;
+  if (parallel.complete) {
+    size_t ordered = *graphArenaAdmission;
+    bool admissible = true;
+    // A fail-safe for the reservation above, and — while that reservation
+    // holds — unreachable: every lane publishes at most the allowance drawn
+    // for it, allowances are drawn from a pool that starts at the lane budget
+    // and is only replenished by what a lane did NOT use, so the decoded
+    // total cannot exceed the budget and no prefix of it can either. It stays
+    // because it is what makes a future regression in the reservation degrade
+    // to the sequential path instead of admitting an over-budget set, and it
+    // costs one pass over six integers. Mutating it away is green for that
+    // reason, not because the set below is unchecked: the budget invariant it
+    // guards is asserted directly in laneDecodePoolStaysInsideTheMemoryBudget.
+    for (const ParallelLaneDecode::Lane &lane : parallel.lanes) {
+      const size_t remaining = config.maximumRetainedBytes - ordered;
+      const size_t bytes = lane.result.audio->retainedBytes();
+      // Both are the sequential loop's own refusals: an exhausted budget
+      // before the lane, and a lane larger than the cap that budget would
+      // have given its decoder. Either one hands the lane set back.
+      if (remaining == 0 || bytes > remaining) {
+        admissible = false;
+        break;
+      }
+      ordered += bytes;
     }
-    retained += bytes;
-    authoritativeDurationFrames =
-        std::max(authoritativeDurationFrames, result.audio->frameCount());
-    PreparedPlaybackGraph::Lane lane;
-    lane.id = std::move(source.id);
-    lane.owner = std::move(result.audio);
-    lane.gain = source.gain;
-    lane.muted = source.muted;
-    lane.solo = source.solo;
-    decoded.push_back(std::move(lane));
-    injectFailure(impl_->testHooks, NativePlaybackAllocationPoint::AfterDecode);
+    if (admissible) {
+      for (size_t index = 0; index < sources.size(); ++index) {
+        NativePlaybackLaneSource &source = sources[index];
+        ParallelLaneDecode::Lane &prepared = parallel.lanes[index];
+        retained += prepared.result.audio->retainedBytes();
+        authoritativeDurationFrames = std::max(
+            authoritativeDurationFrames, prepared.result.audio->frameCount());
+        PreparedPlaybackGraph::Lane lane;
+        lane.id = std::move(source.id);
+        lane.owner = std::move(prepared.result.audio);
+        lane.peaks = prepared.peaks;
+        lane.peaksValid = prepared.peaksValid;
+        lane.identity = laneDecodeIdentity(source, config.decodeOptions,
+                                           requiredSampleRate);
+        lane.gain = source.gain;
+        lane.muted = source.muted;
+        lane.solo = source.solo;
+        decoded.push_back(std::move(lane));
+        // Ordinary-thread fault injection stays on the ordinary thread, once
+        // per lane and in lane order, exactly as the sequential loop does it.
+        injectFailure(impl_->testHooks,
+                      NativePlaybackAllocationPoint::AfterDecode);
+      }
+      // The pool consumed its duplicates; a parallel prepare must not go on
+      // holding more descriptors than a sequential one.
+      for (NativePlaybackLaneSource &source : sources)
+        source.descriptor.reset();
+      adoptedParallelLanes = true;
+    }
+  }
+  // Release the pool's PCM before any fallback re-decode: the aggregate limit
+  // describes what a prepared graph holds, not what an abandoned attempt did.
+  // The reason it declined outlives the attempt, because it is the only
+  // explanation the singer's log will have for a slow open.
+  const std::string laneDecodeFallback = std::move(parallel.declineReason);
+  parallel.lanes.clear();
+  parallel.complete = false;
+
+  // The one definition of lane admission. Every refusal below — its error
+  // code and its exact words — is the original, and the parallel path above
+  // deliberately reports none of its own: it hands the set back to this loop.
+  if (!adoptedParallelLanes && !adoptedParkedLanes) {
+    for (NativePlaybackLaneSource &source : sources) {
+      if (combined.isRequested())
+        return failPreparation(NativePlaybackError::Cancelled,
+                               "Native playback preparation was superseded");
+      DecodedAudioPrepareOptions options = config.decodeOptions;
+      options.requiredSampleRate =
+          static_cast<uint32_t>(std::llround(config.requestedSampleRate));
+      const size_t remaining = config.maximumRetainedBytes - retained;
+      if (remaining == 0) {
+        return failPreparation(
+            NativePlaybackError::LimitExceeded,
+            "Prepared playback lanes reached the aggregate memory limit");
+      }
+      options.maximumDecodedBytes =
+          std::min(options.maximumDecodedBytes, remaining);
+      DecodedAudioResult result =
+          prepareDecodedAudio(std::move(source.descriptor), options, combined);
+      if (!result.ok()) {
+        const NativePlaybackError error = decodeError(result.status);
+        return failPreparation(
+            error, error == NativePlaybackError::Cancelled
+                       ? "Native playback preparation was superseded"
+                       : "A WAV/FLAC playback lane could not be prepared");
+      }
+      const size_t bytes = result.audio->retainedBytes();
+      if (bytes > config.maximumRetainedBytes - retained) {
+        return failPreparation(
+            NativePlaybackError::LimitExceeded,
+            "Prepared playback lanes exceed the aggregate memory limit");
+      }
+      retained += bytes;
+      authoritativeDurationFrames =
+          std::max(authoritativeDurationFrames, result.audio->frameCount());
+      PreparedPlaybackGraph::Lane lane;
+      lane.id = std::move(source.id);
+      lane.owner = std::move(result.audio);
+      // One extra linear pass over PCM that is already resident and warm. It
+      // costs no I/O and gives the seek bar a waveform under native playback,
+      // where the stems are never decoded in JavaScript.
+      lane.peaksValid = summarizeLanePeaks(*lane.owner, &lane.peaks);
+      lane.identity =
+          laneDecodeIdentity(source, config.decodeOptions, requiredSampleRate);
+      lane.gain = source.gain;
+      lane.muted = source.muted;
+      lane.solo = source.solo;
+      decoded.push_back(std::move(lane));
+      injectFailure(impl_->testHooks, NativePlaybackAllocationPoint::AfterDecode);
+    }
   }
   if (combined.isRequested())
     return failPreparation(NativePlaybackError::Cancelled,
@@ -4546,6 +5190,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       config.masterGain, config.playbackRate, config.transposeSemitones,
       preparedStartProjectFrame,
       config.initialTransport, generation, impl_->testHooks);
+  prepared->laneDecodeFallback = laneDecodeFallback;
   prepared->inject(NativePlaybackAllocationPoint::AfterArena);
   zdsp::GraphCompileError compileError{};
   const zdsp::Status graphStatus = prepared->prepare(&compileError);
@@ -4712,6 +5357,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
 
 NativePlaybackResult NativePlaybackSession::openOutput(
     uint64_t generation, NativePlaybackDeliveryToken *deliveryToken) try {
+  impl_->releaseParkedLanes();
   if (deliveryToken != nullptr)
     *deliveryToken = {};
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -4836,6 +5482,7 @@ NativePlaybackSession::start(uint64_t generation,
 NativePlaybackResult NativePlaybackSession::startOutput(
     uint64_t generation, bool startTransport,
     NativePlaybackDeliveryToken *deliveryToken) try {
+  impl_->releaseParkedLanes();
   if (deliveryToken != nullptr)
     *deliveryToken = {};
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -5008,6 +5655,7 @@ NativePlaybackResult NativePlaybackSession::startOutput(
 
 bool NativePlaybackSession::acknowledgeDelivery(
     NativePlaybackDeliveryToken token) noexcept {
+  impl_->releaseParkedLanes();
   if (!token.valid())
     return false;
   try {
@@ -5028,6 +5676,7 @@ bool NativePlaybackSession::acknowledgeDelivery(
 
 NativePlaybackCleanupResult NativePlaybackSession::abortDelivery(
     NativePlaybackDeliveryToken token) noexcept {
+  impl_->releaseParkedLanes();
   NativePlaybackCleanupResult uncertain{
       NativePlaybackCleanupSafety::Uncertain,
       NativePlaybackError::TeardownUncertain,
@@ -5075,6 +5724,7 @@ NativePlaybackCleanupResult NativePlaybackSession::abortDelivery(
 
 NativePlaybackCleanupResult
 NativePlaybackSession::abortPrepareDelivery(uint64_t generation) noexcept {
+  impl_->releaseParkedLanes();
   NativePlaybackCleanupResult uncertain{
       NativePlaybackCleanupSafety::Uncertain,
       NativePlaybackError::TeardownUncertain,
@@ -5187,6 +5837,7 @@ NativePlaybackSession::cleanupProof(uint64_t generation) const noexcept {
 }
 
 NativePlaybackResult NativePlaybackSession::pause(uint64_t generation) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation))
@@ -5207,6 +5858,7 @@ NativePlaybackResult NativePlaybackSession::pause(uint64_t generation) {
 }
 
 NativePlaybackResult NativePlaybackSession::resume(uint64_t generation) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation))
@@ -5226,6 +5878,7 @@ NativePlaybackResult NativePlaybackSession::resume(uint64_t generation) {
 
 NativePlaybackResult NativePlaybackSession::seek(uint64_t generation,
                                                  int64_t projectFrame) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation))
@@ -5253,6 +5906,7 @@ NativePlaybackResult NativePlaybackSession::seek(uint64_t generation,
 NativePlaybackResult NativePlaybackSession::setLoop(uint64_t generation,
                                                     int64_t startFrame,
                                                     int64_t endFrame) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation))
@@ -5287,6 +5941,7 @@ NativePlaybackResult NativePlaybackSession::setLoop(uint64_t generation,
 }
 
 NativePlaybackResult NativePlaybackSession::clearLoop(uint64_t generation) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation))
@@ -5311,6 +5966,7 @@ NativePlaybackResult NativePlaybackSession::clearLoop(uint64_t generation) {
 
 NativePlaybackResult
 NativePlaybackSession::reanchorTransport(uint64_t generation) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation))
@@ -5342,6 +5998,7 @@ NativePlaybackSession::reanchorTransport(uint64_t generation) {
 }
 
 NativePlaybackResult NativePlaybackSession::stop(uint64_t generation) {
+  impl_->releaseParkedLanes();
   (void)requestCancellation(generation);
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
@@ -5378,7 +6035,13 @@ NativePlaybackResult NativePlaybackSession::stop(uint64_t generation) {
   return impl_->success(generation);
 }
 
-NativePlaybackResult NativePlaybackSession::unload(uint64_t generation) {
+NativePlaybackResult
+NativePlaybackSession::unload(uint64_t generation,
+                              NativePlaybackLaneRetention retention) {
+  // Whatever an earlier unload parked is released here regardless: only the
+  // lanes of the generation being unloaded now may be offered to the next
+  // prepare, and only when this caller asked for that.
+  impl_->releaseParkedLanes();
   (void)requestCancellation(generation);
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (const auto *receipt = impl_->findUnloadReceipt(generation);
@@ -5471,6 +6134,23 @@ NativePlaybackResult NativePlaybackSession::unload(uint64_t generation) {
     return failure(NativePlaybackError::TeardownUncertain, generation,
                    impl_->state, impl_->lastError);
   }
+  // Copy the decoded owners out before shutdown() drops the lane vector. This
+  // is only shared_ptr traffic — nothing is decoded, copied or moved — and it
+  // is committed below only once the graph has actually retired. A lane with
+  // no bridge identity can never be recognized again, so an unidentifiable
+  // set parks nothing rather than parking something unusable.
+  std::vector<Impl::ParkedLane> parking;
+  if (retention == NativePlaybackLaneRetention::Park) {
+    parking.reserve(impl_->prepared->lanes.size());
+    for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes) {
+      if (lane.owner == nullptr || !lane.identity.adoptable()) {
+        parking.clear();
+        break;
+      }
+      parking.push_back(
+          {lane.id, lane.identity, lane.owner, lane.peaks, lane.peaksValid});
+    }
+  }
   if (!impl_->prepared->shutdown()) {
     impl_->state = NativePlaybackState::Quarantined;
     impl_->lastError = "The native playback graph did not retire cleanly";
@@ -5489,6 +6169,11 @@ NativePlaybackResult NativePlaybackSession::unload(uint64_t generation) {
     return failed;
   }
   impl_->prepared.reset();
+  // The graph is gone and its arena is released; what remains held is exactly
+  // the decoded PCM, and status/cleanup report it as retained until the next
+  // command takes it back.
+  if (!parking.empty())
+    (void)impl_->parkLanes(std::move(parking));
   impl_->lastUnloadedGeneration = generation;
   if (impl_->prepareUnloadRequestedGeneration == generation)
     impl_->prepareUnloadRequestedGeneration = 0;
@@ -5516,8 +6201,8 @@ NativePlaybackResult NativePlaybackSession::unload(uint64_t generation) {
   return impl_->success(generation);
 }
 
-NativePlaybackUnloadReceipt
-NativePlaybackSession::unloadWithCleanup(uint64_t generation) noexcept {
+NativePlaybackUnloadReceipt NativePlaybackSession::unloadWithCleanup(
+    uint64_t generation, NativePlaybackLaneRetention retention) noexcept {
   NativePlaybackUnloadReceipt fallback;
   fallback.playback =
       failureWithoutMessage(NativePlaybackError::TeardownUncertain, generation,
@@ -5529,6 +6214,13 @@ NativePlaybackSession::unloadWithCleanup(uint64_t generation) noexcept {
                       0,
                       AudioHostTerminalReason::ProviderFailure,
                       true};
+  // BEFORE the replay check, because the replay can return without ever
+  // reaching unload() — which was the only caller that released a park. Every
+  // bridge calls unloadWithCleanup and none calls unload, so without this the
+  // releasing path is unreachable from the product and the header's "any
+  // other command releases them" is false.
+  if (retention == NativePlaybackLaneRetention::Release)
+    impl_->releaseParkedLanes();
   try {
     {
       std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -5537,7 +6229,7 @@ NativePlaybackSession::unloadWithCleanup(uint64_t generation) noexcept {
           impl_->cleanupReceiptStillCurrent(entry->cleanup))
         return Impl::unloadReceiptFromEntry(*entry);
     }
-    NativePlaybackResult playback = unload(generation);
+    NativePlaybackResult playback = unload(generation, retention);
     {
       std::lock_guard<std::mutex> lock(impl_->mutex);
       if (const auto *entry = impl_->findUnloadReceipt(generation);
@@ -5571,6 +6263,7 @@ NativePlaybackResult
 NativePlaybackSession::setLaneControl(uint64_t generation,
                                       const std::string &laneId, float gain,
                                       bool muted, bool solo) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation)) {
@@ -5615,6 +6308,7 @@ NativePlaybackSession::setLaneControl(uint64_t generation,
 
 NativePlaybackResult NativePlaybackSession::setMasterGain(uint64_t generation,
                                                           float gain) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation)) {
@@ -5642,6 +6336,7 @@ NativePlaybackResult NativePlaybackSession::setMasterGain(uint64_t generation,
 
 NativePlaybackResult
 NativePlaybackSession::setTrainingEnabled(uint64_t generation, bool enabled) {
+  impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->refreshTerminalState();
   if (!impl_->currentForCommand(generation)) {
@@ -5671,6 +6366,7 @@ NativePlaybackSession::setTrainingEnabled(uint64_t generation, bool enabled) {
 
 NativePlaybackResult NativePlaybackSession::previewClick(
     uint64_t generation, NativePlaybackPreviewClickSound sound) {
+  impl_->releaseParkedLanes();
   bool needsOpen = false;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -5778,6 +6474,13 @@ NativePlaybackStatus NativePlaybackSession::status() const {
   result.devicePresentationLatencyFrames = deviceLatency;
   result.totalPresentationLatencyFrames = latency;
   result.error = impl_->lastError;
+  result.parkedLaneBytes = impl_->parkedBytes();
+  result.parkedLaneCount =
+      impl_->parkedLaneCount.load(std::memory_order_acquire);
+  // Parked PCM is held by this session as surely as a prepared graph's is.
+  // It is added once, here, so a status that says nothing is retained means
+  // exactly that on both paths.
+  result.retainedBytes = result.parkedLaneBytes;
   if (impl_->prepared != nullptr) {
     const PreparedPlaybackTransport &transport = impl_->prepared->transport;
     PreparedPlaybackTransport::Telemetry telemetry{};
@@ -5857,7 +6560,7 @@ NativePlaybackStatus NativePlaybackSession::status() const {
     result.timePitchLoopPriming = anchors.recurring;
     result.preparedStartProjectFrame =
         impl_->prepared->preparedStartProjectFrame;
-    result.retainedBytes = impl_->prepared->retainedBytes;
+    result.retainedBytes += impl_->prepared->retainedBytes;
     result.graphArenaBytes = impl_->prepared->graphArenaBytes;
     result.masterGain = impl_->prepared->masterGain;
     result.referenceGain = impl_->prepared->referenceGain;
@@ -5869,6 +6572,13 @@ NativePlaybackStatus NativePlaybackSession::status() const {
                                : impl_->prepared->cuePlan->preRollFrames;
     result.cueEventCount =
         static_cast<uint32_t>(impl_->prepared->cueEvents.size());
+    result.countInEventCount = impl_->prepared->cuePlan == nullptr
+                                   ? 0
+                                   : impl_->prepared->cuePlan->countInEventCount;
+    result.countInBeatsPerBar =
+        impl_->prepared->cuePlan == nullptr
+            ? 0
+            : impl_->prepared->cuePlan->countInBeatsPerBar;
     const zdsp::ScheduledCueOneShotStatus previews =
         impl_->prepared->previewClickStatus();
     result.previewClicksEnqueued = previews.enqueued;
@@ -5880,6 +6590,7 @@ NativePlaybackStatus NativePlaybackSession::status() const {
     result.latencyCompensatedEdgeCount =
         impl_->prepared->latencyCompensatedEdgeCount;
     result.graphSnapshot = impl_->prepared->graphSnapshot;
+    result.laneDecodeFallback = impl_->prepared->laneDecodeFallback;
     result.topology = impl_->prepared->topology;
     result.adapterRenderFailures =
         impl_->prepared->adapter.renderFailures.load(std::memory_order_relaxed);
@@ -5896,12 +6607,35 @@ NativePlaybackStatus NativePlaybackSession::status() const {
         std::memory_order_relaxed);
     result.lanes.reserve(impl_->prepared->lanes.size());
     for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes) {
-      result.lanes.push_back(
-          {lane.id,
-           zdsp::decodedBufferSourceCursor(lane.source, &lane.cursorReader),
-           lane.owner->frameCount(), lane.gain, lane.muted, lane.solo});
+      NativePlaybackLaneStatus laneStatus;
+      laneStatus.id = lane.id;
+      laneStatus.cursorFrames =
+          zdsp::decodedBufferSourceCursor(lane.source, &lane.cursorReader);
+      laneStatus.totalFrames = lane.owner->frameCount();
+      laneStatus.gain = lane.gain;
+      laneStatus.muted = lane.muted;
+      laneStatus.solo = lane.solo;
+      result.lanes.push_back(std::move(laneStatus));
     }
   }
+  return result;
+}
+
+NativePlaybackLanePeaksResult
+NativePlaybackSession::lanePeaks(uint64_t generation) const {
+  NativePlaybackLanePeaksResult result;
+  result.generation = generation;
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (generation == 0 || generation != impl_->generation ||
+      impl_->prepared == nullptr) {
+    result.message = "The playback generation is stale";
+    return result;
+  }
+  result.lanes.reserve(impl_->prepared->lanes.size());
+  for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes)
+    result.lanes.push_back({lane.id, lane.peaksValid, lane.peaks});
+  result.ok = true;
+  result.error = NativePlaybackError::None;
   return result;
 }
 

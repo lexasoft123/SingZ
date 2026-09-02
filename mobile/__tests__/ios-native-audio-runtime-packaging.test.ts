@@ -135,8 +135,12 @@ describe('iOS native DSP runtime packaging', () => {
       .sort()
     expect(directExports).toEqual(['codecTargetProof', 'status'])
     expect(remappedExports).toEqual([
-      'configureOutputSession', 'openOutput', 'prepare', 'previewClick',
-      'setControl', 'start', 'stop', 'transport', 'unload'
+      'configureOutputSession', 'lanePeaks', 'openOutput', 'prepare',
+      'previewClick', 'setControl', 'start', 'stop', 'transport', 'unload',
+      // Retention is a separate method, never an extra argument on unload:
+      // a native method whose arity does not match JS is not dispatched at
+      // all and says nothing about it.
+      'unloadRetainingLanes'
     ])
     expect(bridge).toMatch(
       /#if defined\(SINGZ_CODEC_TARGET_PROOF\)[\s\S]*RCT_EXPORT_METHOD\(codecTargetProof:[\s\S]*#endif/
@@ -149,6 +153,11 @@ describe('iOS native DSP runtime packaging', () => {
       'start',
       'stop',
       'unload',
+      'unloadRetainingLanes',
+      // The waveform envelope is immutable for a prepared generation, so it
+      // is fetched once and cached rather than re-marshalled on every status
+      // poll — 576 floats at up to 66 Hz, for a consumer that reads it once.
+      'lanePeaks',
       'setControl',
       'transport',
       'previewClick'
@@ -162,7 +171,12 @@ describe('iOS native DSP runtime packaging', () => {
     expect(authorizedPath).toContain('owner.get()')
     expect(support).toContain('bridge.session->claimGeneration(generation,')
     expect(support).toContain('session->failPrepareAdmission(')
-    expect(support).toMatch(/session->unloadWithCleanup\(\s*(?:generation|dispatchedGeneration)\)/)
+    // The generation is still the dispatched one, and the retention rides
+    // beside it rather than being captured from anywhere else: a stale
+    // retention would park a song the caller asked to have released.
+    expect(support).toMatch(
+      /session->unloadWithCleanup\(\s*(?:generation|dispatchedGeneration),\s*dispatchedRetention\)/
+    )
     expect(support).toContain('@"playbackCleanupProof"')
     expect(support).toContain('@"playbackHandoffLease"')
     for (const field of [
@@ -297,7 +311,7 @@ describe('iOS native DSP runtime packaging', () => {
     expect(
       support.match(/runBridgeBoundary\((?:reject|asyncReject)/g)
     ).toHaveLength(12)
-    expect(support.match(/SingzPlaybackBridgeBoundary\(\[&\]/g)).toHaveLength(9)
+    expect(support.match(/SingzPlaybackBridgeBoundary\(\[&\]/g)).toHaveLength(10)
     expect(support.match(/dispatch_async\(/g)).toHaveLength(10)
     expect(
       support.match(/RCTPromiseResolveBlock asyncResolve = \[resolve copy\];/g)

@@ -134,6 +134,7 @@ NSDictionary *SingzNativePlaybackCleanupDictionary(
     @"generation" : @(cleanup.generation),
     @"state" : playbackState(cleanup.state),
     @"retainedBytes" : @(cleanup.retainedBytes),
+    @"parkedLaneBytes" : @(cleanup.parkedLaneBytes),
     @"physicalOwnershipRetained" : @(cleanup.physicalOwnershipRetained),
     @"processQuarantineRetainedBytes" :
         @(cleanup.processQuarantineRetainedBytes),

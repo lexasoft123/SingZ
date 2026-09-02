@@ -334,6 +334,8 @@ void appendCleanup(std::string &output,
   output += ",\"state\":";
   appendQuoted(output, playbackState(cleanup.state));
   output += ",\"retainedBytes\":" + std::to_string(cleanup.retainedBytes);
+  output += ",\"parkedLaneBytes\":" +
+            std::to_string(cleanup.parkedLaneBytes);
   output += ",\"physicalOwnershipRetained\":";
   output += cleanup.physicalOwnershipRetained ? "true" : "false";
   output += ",\"processQuarantineRetainedBytes\":" +
@@ -462,6 +464,10 @@ void appendStatus(std::string &output,
   output += ",\"preparedStartProjectFrame\":" +
             std::to_string(status.preparedStartProjectFrame);
   output += ",\"retainedBytes\":" + std::to_string(status.retainedBytes);
+  output += ",\"parkedLaneBytes\":" +
+            std::to_string(status.parkedLaneBytes);
+  output += ",\"parkedLaneCount\":" +
+            std::to_string(status.parkedLaneCount);
   output += ",\"graphArenaBytes\":" +
             std::to_string(status.graphArenaBytes);
   output += ",\"masterGain\":";
@@ -479,6 +485,10 @@ void appendStatus(std::string &output,
   output.push_back(']');
   output += ",\"preRollFrames\":" + std::to_string(status.preRollFrames);
   output += ",\"cueEventCount\":" + std::to_string(status.cueEventCount);
+  output += ",\"countInEventCount\":" +
+            std::to_string(status.countInEventCount);
+  output += ",\"countInBeatsPerBar\":" +
+            std::to_string(status.countInBeatsPerBar);
   output += ",\"previewClicksEnqueued\":" +
             std::to_string(status.previewClicksEnqueued);
   output += ",\"previewClicksStarted\":" +
@@ -492,6 +502,8 @@ void appendStatus(std::string &output,
             std::to_string(status.graphConnectionCount);
   output += ",\"latencyCompensatedEdgeCount\":" +
             std::to_string(status.latencyCompensatedEdgeCount);
+  output += ",\"laneDecodeFallback\":";
+  appendQuoted(output, status.laneDecodeFallback);
   output += ",\"topology\":";
   appendQuoted(output, status.topology);
   output += ",\"xruns\":" + std::to_string(host.xruns);
@@ -535,6 +547,8 @@ void appendStatus(std::string &output,
     output += lane.muted ? "true" : "false";
     output += ",\"solo\":";
     output += lane.solo ? "true" : "false";
+    // No envelope here: it never changes for a generation and this runs every
+    // 200 ms. nativePlaybackLanePeaks publishes it once instead.
     output.push_back('}');
   }
   output += "],\"message\":";
@@ -1246,11 +1260,15 @@ static jstring nativePlaybackPrepare(
                                  generation,
                                  singz::NativePlaybackError::DecodeFailure)));
       }
+      // The authorized path is this bridge's opaque identity for the bytes:
+      // the core never opens or resolves it, it only compares it when a
+      // retaining unload offers an already decoded lane to the next prepare.
       lanes.push_back({laneIds[static_cast<size_t>(index)],
                        std::move(descriptor),
                        gains[static_cast<size_t>(index)],
                        muted[static_cast<size_t>(index)] == JNI_TRUE,
-                       solo[static_cast<size_t>(index)] == JNI_TRUE});
+                       solo[static_cast<size_t>(index)] == JNI_TRUE,
+                       lanePaths[static_cast<size_t>(index)]});
     }
     CancellationContext cancellation{&bridge, generation};
     const auto result = bridge.session.prepare(
@@ -1415,13 +1433,16 @@ static jstring nativePlaybackSetTrainingEnabled(JNIEnv *env, jobject,
   });
 }
 
-static jstring nativePlaybackUnload(JNIEnv *env, jobject,
-                                    jlong generationValue) {
+static jstring unloadWithRetention(JNIEnv *env, jlong generationValue,
+                                   singz::NativePlaybackLaneRetention
+                                       retention) {
   const uint64_t generation = static_cast<uint64_t>(generationValue);
   auto &bridge = owner();
   std::lock_guard<std::mutex> lock(bridge.commandMutex);
   try {
-    return javaJson(env, unloadJson(bridge.session.unloadWithCleanup(generation)));
+    return javaJson(
+        env, unloadJson(bridge.session.unloadWithCleanup(generation,
+                                                         retention)));
   } catch (...) {
     singz::NativePlaybackUnloadReceipt receipt;
     receipt.playback = providerFailure(
@@ -1433,6 +1454,61 @@ static jstring nativePlaybackUnload(JNIEnv *env, jobject,
     receipt.cleanup.physicalOwnershipRetained = true;
     return javaJson(env, unloadJson(receipt));
   }
+}
+
+// The prepared lane envelopes for one generation, published once rather than
+// on every status poll. The exact twin of iOS's SingzNativePlaybackLanePeaks.
+static jstring nativePlaybackLanePeaks(JNIEnv *env, jobject,
+                                       jlong generationValue) {
+  auto &bridge = owner();
+  const auto peaks =
+      bridge.session.lanePeaks(static_cast<uint64_t>(generationValue));
+  std::string output = "{\"ok\":";
+  output += peaks.ok ? "true" : "false";
+  output += ",\"error\":";
+  appendQuoted(output, singz::nativePlaybackErrorName(peaks.error));
+  output += ",\"generation\":" + std::to_string(peaks.generation);
+  output += ",\"bucketCount\":" + std::to_string(peaks.bucketCount);
+  output += ",\"lanes\":[";
+  for (size_t index = 0; index < peaks.lanes.size(); ++index) {
+    if (index != 0)
+      output.push_back(',');
+    const auto &lane = peaks.lanes[index];
+    output += "{\"id\":";
+    appendQuoted(output, lane.id);
+    output += ",\"peaksValid\":";
+    output += lane.valid ? "true" : "false";
+    output += ",\"peaks\":[";
+    for (size_t bucket = 0; bucket < lane.peaks.size(); ++bucket) {
+      if (bucket != 0)
+        output.push_back(',');
+      // %.17g, like every other number on this hop: Kotlin's parser is
+      // correctly rounded, so the double JavaScript receives here is the same
+      // double iOS builds straight from the core's float.
+      appendDouble(output, lane.peaks[bucket]);
+    }
+    output.push_back(']');
+    output.push_back('}');
+  }
+  output += "],\"message\":";
+  appendQuoted(output, peaks.message);
+  output.push_back('}');
+  return javaJson(env, output);
+}
+
+static jstring nativePlaybackUnload(JNIEnv *env, jobject,
+                                    jlong generationValue) {
+  return unloadWithRetention(env, generationValue,
+                             singz::NativePlaybackLaneRetention::Release);
+}
+
+// The exact twin of iOS's SingzNativePlaybackUnloadRetainingLanes: one
+// argument, the same resolved JSON, and this generation's decoded lanes kept
+// for the very next prepare of the same files.
+static jstring nativePlaybackUnloadRetainingLanes(JNIEnv *env, jobject,
+                                                  jlong generationValue) {
+  return unloadWithRetention(env, generationValue,
+                             singz::NativePlaybackLaneRetention::Park);
 }
 
 namespace {
@@ -1503,6 +1579,12 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
     {const_cast<char *>("nativePlaybackUnload"),
      const_cast<char *>("(J)Ljava/lang/String;"),
      reinterpret_cast<void *>(nativePlaybackUnload)},
+    {const_cast<char *>("nativePlaybackLanePeaks"),
+     const_cast<char *>("(J)Ljava/lang/String;"),
+     reinterpret_cast<void *>(nativePlaybackLanePeaks)},
+    {const_cast<char *>("nativePlaybackUnloadRetainingLanes"),
+     const_cast<char *>("(J)Ljava/lang/String;"),
+     reinterpret_cast<void *>(nativePlaybackUnloadRetainingLanes)},
 };
 
 } // namespace

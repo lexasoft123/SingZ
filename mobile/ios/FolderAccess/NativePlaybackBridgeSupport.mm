@@ -344,6 +344,8 @@ NSDictionary *statusDictionary(singz::NativePlaybackSession &session) {
   const singz::NativePlaybackStatus status = session.status();
   NSMutableArray *lanes = [NSMutableArray array];
   for (const auto &lane : status.lanes) {
+    // No envelope here: it never changes for a generation and this runs every
+    // 200 ms. SingzNativePlaybackLanePeaks publishes it once instead.
     [lanes addObject:@{
       @"id" : fromStd(lane.id),
       @"cursorFrames" : @(lane.cursorFrames),
@@ -405,12 +407,16 @@ NSDictionary *statusDictionary(singz::NativePlaybackSession &session) {
     @"preparedStartProjectFrame" : @(status.preparedStartProjectFrame),
     @"retainedBytes" : @(status.retainedBytes),
     @"graphArenaBytes" : @(status.graphArenaBytes),
+    @"parkedLaneBytes" : @(status.parkedLaneBytes),
+    @"parkedLaneCount" : @(status.parkedLaneCount),
     @"masterGain" : @(status.masterGain),
     @"referenceGain" : @(status.referenceGain),
     @"trainingEnabled" : @(status.trainingEnabled),
     @"trainingLanes" : trainingLanes,
     @"preRollFrames" : @(status.preRollFrames),
     @"cueEventCount" : @(status.cueEventCount),
+    @"countInEventCount" : @(status.countInEventCount),
+    @"countInBeatsPerBar" : @(status.countInBeatsPerBar),
     @"previewClicksEnqueued" : @(status.previewClicksEnqueued),
     @"previewClicksStarted" : @(status.previewClicksStarted),
     @"previewClicksCompleted" : @(status.previewClicksCompleted),
@@ -419,6 +425,7 @@ NSDictionary *statusDictionary(singz::NativePlaybackSession &session) {
     @"graphConnectionCount" : @(status.graphConnectionCount),
     @"latencyCompensatedEdgeCount" :
         @(status.latencyCompensatedEdgeCount),
+    @"laneDecodeFallback" : fromStd(status.laneDecodeFallback),
     @"topology" : fromStd(status.topology),
     @"xruns" : @(status.host.xruns),
     @"deadlineMisses" : @(status.host.deadlineMisses),
@@ -603,8 +610,12 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
                     dispatchedGuard->markDelivered();
                     return;
                   }
+                  // The authorized path is this bridge's opaque identity for
+                  // the bytes: the core never opens or resolves it, it only
+                  // compares it when a retaining unload offers an already
+                  // decoded lane to the next prepare.
                   lanes.push_back({lane.id, std::move(descriptor), lane.gain,
-                                   lane.muted, lane.solo});
+                                   lane.muted, lane.solo, lane.path});
                 }
                 dispatchedGuard->markSessionMutation();
                 const singz::NativePlaybackResult result =
@@ -852,9 +863,9 @@ void SingzNativePlaybackStop(NSNumber *generationValue,
   }
 }
 
-void SingzNativePlaybackUnload(NSNumber *generationValue,
-                               RCTPromiseResolveBlock resolve,
-                               RCTPromiseRejectBlock reject) {
+static void SingzUnloadWithRetention(
+    NSNumber *generationValue, singz::NativePlaybackLaneRetention retention,
+    RCTPromiseResolveBlock resolve, RCTPromiseRejectBlock reject) {
   uint64_t generation = 0;
   PlaybackBridgeOwner *bridge = nullptr;
   bool cleanupClaimed = false;
@@ -878,6 +889,8 @@ void SingzNativePlaybackUnload(NSNumber *generationValue,
             SingzPlaybackPrepareFaultPoint::UnloadBlockCaptureCopy);
         PlaybackBridgeOwner *dispatchedBridge = bridge;
         const uint64_t dispatchedGeneration = generation;
+        const singz::NativePlaybackLaneRetention dispatchedRetention =
+            retention;
         const auto dispatchedGuard = asyncGuard;
         RCTPromiseResolveBlock asyncResolve = [resolve copy];
         RCTPromiseRejectBlock asyncReject = [reject copy];
@@ -887,7 +900,7 @@ void SingzNativePlaybackUnload(NSNumber *generationValue,
               SingzPlaybackBridgeBoundary([&] {
                 const singz::NativePlaybackUnloadReceipt receipt =
                     dispatchedBridge->session->unloadWithCleanup(
-                        dispatchedGeneration);
+                        dispatchedGeneration, dispatchedRetention);
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::
                         UnloadResultDictionaryConversion);
@@ -920,6 +933,64 @@ void SingzNativePlaybackUnload(NSNumber *generationValue,
     }
     rejectBoundaryFailure(reject, outerFailure, cleanupResult, cleanupClaimed);
   }
+}
+
+void SingzNativePlaybackLanePeaks(NSNumber *generationValue,
+                                  RCTPromiseResolveBlock resolve,
+                                  RCTPromiseRejectBlock reject) {
+  const SingzPlaybackBridgeBoundaryFailure failure =
+      SingzPlaybackBridgeBoundary([&] {
+        uint64_t generation = 0;
+        if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+          reject(@"E_NATIVE_PLAYBACK",
+                 @"The native playback generation is invalid", nil);
+          return;
+        }
+        const singz::NativePlaybackLanePeaksResult peaks =
+            owner().session->lanePeaks(generation);
+        NSMutableArray *lanes =
+            [NSMutableArray arrayWithCapacity:peaks.lanes.size()];
+        for (const auto &lane : peaks.lanes) {
+          // Built from the core's own floats, never from text: Foundation's
+          // JSON parser is not correctly rounded, so a number that crosses
+          // this boundary as a string is a different number on arrival.
+          NSMutableArray *values =
+              [NSMutableArray arrayWithCapacity:lane.peaks.size()];
+          for (const float peak : lane.peaks)
+            [values addObject:@(peak)];
+          [lanes addObject:@{
+            @"id" : fromStd(lane.id),
+            @"peaksValid" : @(lane.valid),
+            @"peaks" : values,
+          }];
+        }
+        resolve(@{
+          @"ok" : @(peaks.ok),
+          @"error" : fromStd(singz::nativePlaybackErrorName(peaks.error)),
+          @"generation" : @(peaks.generation),
+          @"bucketCount" : @(peaks.bucketCount),
+          @"lanes" : lanes,
+          @"message" : fromStd(peaks.message),
+        });
+      });
+  if (failure != SingzPlaybackBridgeBoundaryFailure::None)
+    rejectBoundaryFailure(reject, failure, SingzPlaybackNoCleanup(0), false);
+}
+
+void SingzNativePlaybackUnload(NSNumber *generationValue,
+                               RCTPromiseResolveBlock resolve,
+                               RCTPromiseRejectBlock reject) {
+  SingzUnloadWithRetention(generationValue,
+                           singz::NativePlaybackLaneRetention::Release, resolve,
+                           reject);
+}
+
+void SingzNativePlaybackUnloadRetainingLanes(NSNumber *generationValue,
+                                             RCTPromiseResolveBlock resolve,
+                                             RCTPromiseRejectBlock reject) {
+  SingzUnloadWithRetention(generationValue,
+                           singz::NativePlaybackLaneRetention::Park, resolve,
+                           reject);
 }
 
 void SingzNativePlaybackSetControl(NSNumber *generationValue,

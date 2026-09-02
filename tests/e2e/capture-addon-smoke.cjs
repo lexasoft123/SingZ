@@ -66,7 +66,8 @@ app.whenReady().then(() => {
     'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
     'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
-    'setPlaybackMasterGain', 'playbackStatus', 'unloadPlayback'
+    'setPlaybackMasterGain', 'playbackStatus', 'unloadPlayback',
+    'unloadPlaybackRetainingLanes', 'playbackLanePeaks'
   ]) {
     assert.equal(typeof addon[name], 'function', `${name} export`)
   }
