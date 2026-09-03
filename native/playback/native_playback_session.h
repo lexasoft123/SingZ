@@ -508,6 +508,8 @@ struct NativePlaybackStatus {
      Latched on the first visit of a generation and cleared by resetForOpen.
 
      The readings that exist:
+       0   no stretch stage at all, or no callback has landed yet — the store
+           is gated on the processor existing, so this one value covers both
        11  the first visit found no valid plan — nothing could be armed
        20  armed
        21  arming was attempted and failed

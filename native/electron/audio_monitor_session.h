@@ -68,6 +68,10 @@ struct AudioMonitorStatus {
   uint32_t adapterRenderFailures{0};
   uint32_t terminalRenderFailures{0};
   uint32_t adapterLastStatusCode{0};
+  /* The `detail` beside that code. Same AudioHostGraphAdapter the playback
+     path reads, so the same collapse applied here: a dozen distinct refusals
+     all reported as "InvalidArgument". */
+  uint32_t adapterLastStatusDetail{0};
   uint32_t parameterOverflows{0};
   uint32_t nonFiniteSamples{0};
   uint32_t rejectedBlocks{0};

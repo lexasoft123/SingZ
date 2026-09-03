@@ -688,6 +688,9 @@ export interface DesktopMonitorStatus {
   adapterRenderFailures: number
   terminalRenderFailures: number
   adapterLastStatusCode: number
+  /** The `detail` beside that code — which check the graph refused on, where
+   *  the code alone collapses a dozen refusals into one value. */
+  adapterLastStatusDetail: number
   parameterOverflows: number
   nonFiniteSamples: number
   rejectedBlocks: number

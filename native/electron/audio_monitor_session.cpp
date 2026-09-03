@@ -98,6 +98,7 @@ struct PreparedMonitorTelemetry {
   uint32_t adapterRenderFailures{0};
   uint32_t terminalRenderFailures{0};
   uint32_t adapterLastStatusCode{0};
+  uint32_t adapterLastStatusDetail{0};
   uint32_t parameterOverflows{0};
   uint32_t nonFiniteSamples{0};
   uint32_t rejectedBlocks{0};
@@ -412,6 +413,8 @@ struct PreparedMonitorGraph {
         callback.terminalFailures.load(std::memory_order_relaxed);
     result.adapterLastStatusCode =
         adapter.lastStatusCode.load(std::memory_order_relaxed);
+    result.adapterLastStatusDetail =
+        adapter.lastStatusDetail.load(std::memory_order_relaxed);
     result.parameterOverflows =
         diagnostics.parameterOverflows.load(std::memory_order_relaxed);
     result.nonFiniteSamples =
@@ -747,6 +750,7 @@ AudioMonitorStatus AudioMonitorSession::status() const {
   result.adapterRenderFailures = telemetry.adapterRenderFailures;
   result.terminalRenderFailures = telemetry.terminalRenderFailures;
   result.adapterLastStatusCode = telemetry.adapterLastStatusCode;
+  result.adapterLastStatusDetail = telemetry.adapterLastStatusDetail;
   result.parameterOverflows = telemetry.parameterOverflows;
   result.nonFiniteSamples = telemetry.nonFiniteSamples;
   result.rejectedBlocks = telemetry.rejectedBlocks;

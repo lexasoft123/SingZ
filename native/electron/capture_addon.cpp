@@ -1047,6 +1047,8 @@ napi_value monitorStatus(napi_env env, napi_callback_info) {
       uintValue(env, source.terminalRenderFailures));
   set(env, result, "adapterLastStatusCode",
       uintValue(env, source.adapterLastStatusCode));
+  set(env, result, "adapterLastStatusDetail",
+      uintValue(env, source.adapterLastStatusDetail));
   set(env, result, "parameterOverflows",
       uintValue(env, source.parameterOverflows));
   set(env, result, "nonFiniteSamples",

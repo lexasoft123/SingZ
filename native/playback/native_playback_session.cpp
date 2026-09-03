@@ -5463,6 +5463,26 @@ NativePlaybackResult NativePlaybackSession::openOutput(
                    impl_->lastError);
   }
 
+  if (impl_->prepared->hasTimePitch) {
+    const SignalsmithTimePitchReanchorPlan reopenPlan =
+        impl_->prepared->primeTimePitchReanchor(
+            impl_->prepared->preparedStartProjectFrame, 0);
+    // Priming RETIRES the pending anchor before it claims a slot, so a prime
+    // that then fails has already destroyed the plan prepare validated — and
+    // storing that empty result would wedge even a first open, silently and
+    // for the life of the generation. Fail the open instead, the way the
+    // reanchor command does.
+    if (!reopenPlan.valid())
+      return failure(NativePlaybackError::GraphFailure, generation,
+                     impl_->state,
+                     "The playback stretch anchor could not be prepared off RT");
+    impl_->prepared->transport.initialTimePitchReanchorPlan = reopenPlan;
+  }
+  // Deliberately BEFORE armDelivery: a failure above is a plain precondition
+  // and needs no teardown, where every failure after it has to stopHost or
+  // recover, and this one did neither — it left the open-mutation markers set
+  // with no host ever opened.
+
   AudioHostConfig hostConfig;
   hostConfig.outputDeviceUid = config.outputDeviceUid;
   hostConfig.outputChannels = config.outputChannels;
@@ -5479,35 +5499,9 @@ NativePlaybackResult NativePlaybackSession::openOutput(
   impl_->openMutationGeneration = generation;
   // openOutput is admitted only while the prior provider is quiescent and all
   // positioned sources remain at their prepared entry. The next stream owns
-  // a fresh output-frame anchor even if a previous open/start failed.
-  //
-  // It also owns a fresh STRETCH anchor, and that is not optional. The
-  // initial reanchor plan is seeded once by initialize() and then CONSUMED by
-  // the audio thread, which clears it after its one arming attempt in
-  // beginBlock; resetForOpen does not restore it. So a second open of this
-  // same prepared graph — exactly what a transpose or a tempo change does,
-  // stop then openOutput then start — used to find an invalid plan, skip the
-  // arming block, and leave the boundary unprepared. Every later callback
-  // then failed the render contract for want of an anchor, deterministically
-  // and for the life of the generation: silence, climbing render failures,
-  // and a terminal reported as a provider fault. Priming is off-RT and
-  // self-cleaning (it retires any pending anchor before claiming a slot), so
-  // each open simply takes its own.
-  if (impl_->prepared->hasTimePitch) {
-    const SignalsmithTimePitchReanchorPlan reopenPlan =
-        impl_->prepared->primeTimePitchReanchor(
-            impl_->prepared->preparedStartProjectFrame, 0);
-    // Priming RETIRES the pending anchor before it claims a slot, so a prime
-    // that then fails has already destroyed the plan prepare validated — and
-    // storing that empty result would wedge even a first open, silently and
-    // for the life of the generation. Fail the open instead, the way the
-    // reanchor command does.
-    if (!reopenPlan.valid())
-      return failure(NativePlaybackError::GraphFailure, generation,
-                     impl_->state,
-                     "The playback stretch anchor could not be prepared off RT");
-    impl_->prepared->transport.initialTimePitchReanchorPlan = reopenPlan;
-  }
+  // a fresh output-frame anchor even if a previous open/start failed. (Its
+  // fresh STRETCH anchor is primed further up, before anything is armed —
+  // see the hasTimePitch block beside the route check.)
   impl_->prepared->transport.resetForOpen();
   const AudioHostResult opened = impl_->host.open(
       hostConfig, &nativePlaybackRender, &impl_->prepared->callback);

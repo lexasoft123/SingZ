@@ -730,6 +730,7 @@ function unsupportedMonitorStatus(error: string): DesktopMonitorStatus {
     adapterRenderFailures: 0,
     terminalRenderFailures: 0,
     adapterLastStatusCode: 0,
+    adapterLastStatusDetail: 0,
     parameterOverflows: 0,
     nonFiniteSamples: 0,
     rejectedBlocks: 0
@@ -847,7 +848,8 @@ function validMonitorStatus(value: unknown): value is DesktopMonitorStatus {
     exactCounter(row.renderedFrames) && exactCounter(row.xruns) &&
     exactCounter(row.deadlineMisses) && exactCounter(row.renderFailures) &&
     exactUnsigned(row.adapterRenderFailures) && exactUnsigned(row.terminalRenderFailures) &&
-    exactUnsigned(row.adapterLastStatusCode) && exactUnsigned(row.parameterOverflows) &&
+    exactUnsigned(row.adapterLastStatusCode) &&
+    exactUnsigned(row.adapterLastStatusDetail) && exactUnsigned(row.parameterOverflows) &&
     exactUnsigned(row.nonFiniteSamples) && exactUnsigned(row.rejectedBlocks)
 }
 

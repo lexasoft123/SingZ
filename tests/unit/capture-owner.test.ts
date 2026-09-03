@@ -110,7 +110,8 @@ const monitorStatus = (generation = '0', active = false): DesktopMonitorStatus =
   latency: monitorResult(generation).latency,
   routeGeneration: '0', streamGeneration: '0', callbacks: '0', renderedFrames: '0',
   xruns: '0', deadlineMisses: '0', renderFailures: '0', adapterRenderFailures: 0,
-  terminalRenderFailures: 0, adapterLastStatusCode: 0, parameterOverflows: 0,
+  terminalRenderFailures: 0, adapterLastStatusCode: 0,
+  adapterLastStatusDetail: 0, parameterOverflows: 0,
   nonFiniteSamples: 0, rejectedBlocks: 0
 })
 

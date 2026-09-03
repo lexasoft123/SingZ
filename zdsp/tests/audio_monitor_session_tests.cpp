@@ -308,6 +308,7 @@ void monitorCompositionAndLifecycle() {
     CHECK(status.adapterRenderFailures == 1);
     CHECK(status.terminalRenderFailures == 1);
     CHECK(status.adapterLastStatusCode == 0);
+    CHECK(status.adapterLastStatusDetail == 0);
     CHECK(status.parameterOverflows == 0);
     CHECK(status.nonFiniteSamples == 0);
     CHECK(status.rejectedBlocks == 0);
@@ -499,6 +500,7 @@ void partialDeactivationFreezesTelemetry() {
           repeated.adapterRenderFailures == frozen.adapterRenderFailures &&
           repeated.terminalRenderFailures == frozen.terminalRenderFailures &&
           repeated.adapterLastStatusCode == frozen.adapterLastStatusCode &&
+          repeated.adapterLastStatusDetail == frozen.adapterLastStatusDetail &&
           repeated.parameterOverflows == frozen.parameterOverflows &&
           repeated.nonFiniteSamples == frozen.nonFiniteSamples &&
           repeated.rejectedBlocks == frozen.rejectedBlocks);

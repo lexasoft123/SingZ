@@ -69,6 +69,7 @@ const status = (enabled: boolean, callbacks = '1'): DesktopMonitorStatus => ({
   adapterRenderFailures: 0,
   terminalRenderFailures: 0,
   adapterLastStatusCode: 0,
+  adapterLastStatusDetail: 0,
   parameterOverflows: 0,
   nonFiniteSamples: 0,
   rejectedBlocks: 0
