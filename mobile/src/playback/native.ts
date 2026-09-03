@@ -128,6 +128,15 @@ export interface NativePlaybackCleanup {
   readonly generation: number;
   readonly state: string;
   readonly retainedBytes: number;
+  /** Decoded lanes this unload PARKED for the next prepare of the same files
+   *  at the same rate, and 0 for every ordinary unload. The core counts them
+   *  inside retainedBytes as well, so `retained 0` keeps meaning that nothing
+   *  at all is held — and a parking unload therefore reports
+   *  globallyComplete false, fallbackSafe false and handoffLease 0 by design:
+   *  a session still holding a song's PCM has not proved itself empty and
+   *  legacy playback must not be let back in behind it. Absent on a native
+   *  build older than this JS. */
+  readonly parkedLaneBytes?: number;
   readonly physicalOwnershipRetained: boolean;
   readonly processQuarantineRetainedBytes: number;
   readonly processQuarantineReserved: boolean;
@@ -340,6 +349,16 @@ interface NativePlaybackBridgeApi {
    *  A stale generation is refused rather than answered with an old one. */
   lanePeaks(generation: number): Promise<unknown>;
   unload(generation: number): Promise<NativePlaybackUnloadResult>;
+  /** Unload, keeping this generation's decoded lanes for the next prepare of
+   *  the same files. Optional for the same reason lanePeaks is: Metro serves
+   *  this JS to whatever binary is installed, and an app built before the
+   *  bridge gained the method would otherwise fail its whole module over a
+   *  rebuild optimisation. The adapter falls back to a plain unload, and the
+   *  caller reads what actually happened off the RECEIPT rather than off what
+   *  it asked for. */
+  unloadRetainingLanes?(
+    generation: number,
+  ): Promise<NativePlaybackUnloadResult>;
 }
 
 interface NativePlaybackApi
@@ -546,6 +565,13 @@ const nativeModule = (): NativePlaybackApi | undefined => {
         ? bridge.lanePeaks(generation)
         : Promise.resolve(null),
     unload: generation => bridge.unload(generation),
+    // Deliberately NOT in the guard above, exactly like lanePeaks: an older
+    // native build simply releases where this one parks, which costs a
+    // re-decode and breaks nothing.
+    unloadRetainingLanes: generation =>
+      typeof bridge.unloadRetainingLanes === 'function'
+        ? bridge.unloadRetainingLanes(generation)
+        : bridge.unload(generation),
   };
 };
 
@@ -2368,66 +2394,164 @@ export class IosNativePlaybackCoordinator {
           );
         }
       }
-      const retired = await this.cleanupGeneration(handle, oldGeneration);
-      if (!retired) {
-        const error =
-          'Native cue rebuild could not prove that the previous graph was released.';
-        handle.fail(error);
-        throw new NativePlaybackCommandError(
-          'teardown-uncertain',
-          'rebuild-cues',
-          oldGeneration,
-          error,
-        );
-      }
-      if (
-        this.active !== handle ||
-        !handle.isCurrent() ||
-        !handle.routeIsValid()
-      ) {
-        const error = 'Native cue rebuild was superseded after releasing its old graph.';
-        handle.update({ phase: 'stopped', error });
-        throw new NativePlaybackCommandError(
-          'invalid-generation',
-          'rebuild-cues',
-          oldGeneration,
-          error,
-        );
-      }
+      /* PARK the decoded lanes. A rebuild re-prepares the same six files at
+         the same rate below, and decoding them again is the entire cost of
+         every cue, pitch/tempo and training change: measured on a 122 s song,
+         2.96 s of a 3.2 s rebuild, against 206 ms for the release itself.
+         Adoption is by the bridge's authorized path, so a build whose bridge
+         cannot park just decodes as before.
 
-      const prepared = await this.prepareHandle(
-        handle,
-        undefined,
-        () =>
-          this.active === handle &&
-          handle.isCurrent() &&
-          handle.routeIsValid(),
-        handle.prepareOverrides(
-          preparedStartProjectFrame,
-          session.lanes,
-          session.masterGain,
-          wasStarted && restoreTransport !== 'prepared'
-            ? {
-                state: restoreTransport,
-                ...(restoreLoop === null ? {} : { loop: restoreLoop }),
+         From here to the delivered prepare, a song's decoded PCM — ~140 MB
+         per two minutes — is held by the core with no graph attached, on a
+         phone that is killed for holding it. It has ONE owner, the finally
+         below, rather than a guard at each exit: the exits are not two but
+         several (an unproved park, a cancelled or superseded prepare, no
+         output to choose during a route change, any throw in between), and
+         the one that gets forgotten is the one that strands a song. */
+      try {
+        const retired = await this.cleanupGeneration(
+          handle,
+          oldGeneration,
+          'park',
+        );
+        if (!retired) {
+          const error =
+            'Native cue rebuild could not prove that the previous graph was released.';
+          handle.fail(error);
+          throw new NativePlaybackCommandError(
+            'teardown-uncertain',
+            'rebuild-cues',
+            oldGeneration,
+            error,
+          );
+        }
+        if (
+          this.active !== handle ||
+          !handle.isCurrent() ||
+          !handle.routeIsValid()
+        ) {
+          const error = 'Native cue rebuild was superseded after releasing its old graph.';
+          handle.update({ phase: 'stopped', error });
+          throw new NativePlaybackCommandError(
+            'invalid-generation',
+            'rebuild-cues',
+            oldGeneration,
+            error,
+          );
+        }
+
+        const prepared = await this.prepareHandle(
+          handle,
+          undefined,
+          () =>
+            this.active === handle &&
+            handle.isCurrent() &&
+            handle.routeIsValid(),
+          handle.prepareOverrides(
+            preparedStartProjectFrame,
+            session.lanes,
+            session.masterGain,
+            wasStarted && restoreTransport !== 'prepared'
+              ? {
+                  state: restoreTransport,
+                  ...(restoreLoop === null ? {} : { loop: restoreLoop }),
+                }
+              : undefined,
+          ),
+        );
+        if (!prepared.ok) {
+          const generation = handle.generation;
+          handle.update({ phase: 'stopped', error: prepared.error });
+          log(
+            'dsp',
+            `cue rebuild failed · generation ${oldGeneration}→${generation} · ${prepared.error}`,
+            'error',
+          );
+          throw new NativePlaybackCommandError(
+            'provider-failure',
+            'rebuild-cues',
+            generation,
+            prepared.error,
+          );
+        }
+
+      } finally {
+        /* prepareHandle claims its generation synchronously with the prepare
+           call (beginPrepare), so an UNMOVED handle generation means no core
+           command was ever issued against the park and this side still owns
+           it. Once it has moved, the core owns the lanes: its prepare claims
+           them into an RAII guard that adopts them or frees them on every
+           other exit, refusals and exceptions included.
+
+           A plain unload is the cheapest command that frees a park, and it
+           releases parked lanes before it so much as looks at the generation,
+           so it is safe when there is nothing parked — which is what a bridge
+           too old to park leaves behind. What it is NOT is free of
+           consequences, which is the whole of the block below. */
+        if (handle.generation === oldGeneration) {
+          try {
+            const receipt = await this.deps.native?.unload(oldGeneration);
+            const cleanup = receipt?.cleanup;
+            /* CONSUME the receipt. Releasing a park does not merely drop the
+               lanes: dropping them makes the session locally empty, so the
+               core's cleanup proof acquires a fallback lease and flips the
+               PROCESS-GLOBAL coordinator to FallbackLeased. Throwing that
+               token away wedges native playback for good — the next prepare
+               sends lease 0 into the FallbackLeased arm and is refused
+               ResourceExhausted, which is "graph build refused" for this song
+               and every song after it, with legacy output still suspended.
+               Play does not heal it: startHandleLocked prepares first, and
+               once the generation moves the token is unreachable.
+
+               No await between the ownership check and publication, the same
+               rule the release arm keeps: an older receipt must never reopen
+               the legacy gate after a newer generation consumed its token. */
+            if (
+              receipt?.ok === true &&
+              cleanup !== undefined &&
+              cleanup.globallyComplete === true &&
+              cleanup.fallbackSafe === true &&
+              Number.isSafeInteger(cleanup.handoffLease) &&
+              cleanup.handoffLease > 0
+            ) {
+              if (this.fallbackLease === null) {
+                this.fallbackLease = {
+                  generation: oldGeneration,
+                  token: cleanup.handoffLease,
+                };
+                handle.recordCleanup(oldGeneration, cleanup.handoffLease);
+                handle.options.engine.allowLegacyOutputAfterNativeCleanup();
+              } else {
+                // Not a second token: acquireFallbackLease short-circuits to
+                // the existing snapshot when the coordinator is already
+                // leased for this session and generation, so this branch can
+                // only be holding the very token it discards.
+                log(
+                  'native-playback',
+                  `abandoned rebuild re-read an already published fallback lease · ` +
+                    `generation ${oldGeneration} · holding ${this.fallbackLease.token}, ` +
+                    `discarding ${cleanup.handoffLease}`,
+                  'warn',
+                );
               }
-            : undefined,
-        ),
-      );
-      if (!prepared.ok) {
-        const generation = handle.generation;
-        handle.update({ phase: 'stopped', error: prepared.error });
-        log(
-          'dsp',
-          `cue rebuild failed · generation ${oldGeneration}→${generation} · ${prepared.error}`,
-          'error',
-        );
-        throw new NativePlaybackCommandError(
-          'provider-failure',
-          'rebuild-cues',
-          generation,
-          prepared.error,
-        );
+            } else if (receipt !== undefined) {
+              log(
+                'native-playback',
+                `abandoned rebuild released its park without a usable lease · ` +
+                  `generation ${oldGeneration} · ok ${receipt.ok} · ` +
+                  `complete ${cleanup?.globallyComplete} · lease ${cleanup?.handoffLease}`,
+                'error',
+              );
+            }
+          } catch (releaseError) {
+            log(
+              'native-playback',
+              `parked lanes outlived an abandoned rebuild · generation ${oldGeneration} · ` +
+                message(releaseError),
+              'error',
+            );
+          }
+        }
       }
 
       const generation = handle.generation;
@@ -2991,9 +3115,29 @@ export class IosNativePlaybackCoordinator {
     return this.nextGeneration;
   }
 
+  /**
+   * Release this generation's graph and prove it gone.
+   *
+   * `retention` is the ONE thing a caller chooses. 'release' is the historical
+   * behaviour in every respect: nothing survives, the session proves itself
+   * globally empty, and the handoff lease it hands back is what lets legacy
+   * audio run again. 'park' keeps the decoded lanes alive for the next
+   * prepare of the same files — the whole cost of a structural rebuild is
+   * re-decoding six lanes, measured at 2.96 s against 206 ms for the release
+   * itself on a 122 s song — and it therefore proves something WEAKER on
+   * purpose: the graph is gone and the callback is released, but the session
+   * is still holding a song, so there is no lease and legacy stays out.
+   *
+   * A park is safe against its own failure paths because the core claims the
+   * parked lanes into an RAII guard at the top of prepare: adopted lanes are
+   * moved out, and every other exit — refusal, exception, cancellation —
+   * releases them. What this side still owes is the case where no prepare
+   * follows at all, and each caller that parks handles it explicitly.
+   */
   private async cleanupGeneration(
     handle: IosNativePlaybackHandle,
     generation: number,
+    retention: 'release' | 'park' = 'release',
   ): Promise<boolean> {
     const releaseStartedAt = Date.now();
     const native = this.deps.native;
@@ -3009,9 +3153,20 @@ export class IosNativePlaybackCoordinator {
       );
       return false;
     }
+    // Retry with the SAME retention the caller asked for. Retrying a park as
+    // a plain unload would silently release the lanes the rebuild is about to
+    // adopt, turning a lost receipt into a re-decode nobody can see.
+    // Optional on the API type so a test double — or a native module older
+    // than this JS — needs nothing new. Absent, a park degrades to a release
+    // and the receipt below says so.
+    const parkingUnload = native.unloadRetainingLanes?.bind(native);
+    const deliver = (): Promise<NativePlaybackUnloadResult> =>
+      retention === 'park' && parkingUnload !== undefined
+        ? parkingUnload(generation)
+        : native.unload(generation);
     let receipt: NativePlaybackUnloadResult;
     try {
-      receipt = await native.unload(generation);
+      receipt = await deliver();
     } catch (firstError) {
       log(
         'native-playback',
@@ -3020,7 +3175,7 @@ export class IosNativePlaybackCoordinator {
         'warn',
       );
       try {
-        receipt = await native.unload(generation);
+        receipt = await deliver();
       } catch (retryError) {
         log(
           'native-playback',
@@ -3033,26 +3188,80 @@ export class IosNativePlaybackCoordinator {
       }
     }
     const cleanup = receipt.cleanup;
-    const complete =
+    // Ask the RECEIPT what happened, never the request. A native build older
+    // than this JS answers a park with a plain release, and that has to read
+    // as the ordinary release it is rather than as a park that lost its lanes.
+    const parkedBytes = Number.isSafeInteger(cleanup.parkedLaneBytes)
+      ? (cleanup.parkedLaneBytes as number)
+      : 0;
+    const parked = parkedBytes > 0;
+    // Common to both proofs: this generation, the callback surrendered, and
+    // no process-wide quarantine. These say the GRAPH is gone, which a park
+    // proves exactly as strongly as a release.
+    const graphSurrendered =
       cleanup.generation === generation &&
-      cleanup.globallyComplete === true &&
-      cleanup.fallbackSafe === true &&
-      Number.isSafeInteger(cleanup.handoffLease) &&
-      cleanup.handoffLease > 0 &&
-      cleanup.retainedBytes === 0 &&
       cleanup.physicalOwnershipRetained === false &&
       cleanup.processQuarantineRetainedBytes === 0 &&
       cleanup.processQuarantineReserved === false &&
       cleanup.processQuarantinePoisoned === false;
+    // A park's own proof, and it is deliberately not the release proof with a
+    // term removed. globallyComplete/fallbackSafe are FALSE by construction
+    // while lanes are held (the core's globallyComplete requires
+    // parkedLaneBytes == 0), and the lease is 0 — so requiring them would
+    // reject every park, and accepting them either way would stop noticing a
+    // release that failed. Retained must be EXACTLY the parked lanes: any
+    // excess is a graph or arena that did not go away.
+    const complete = parked
+      ? graphSurrendered &&
+        // A healthy park reports safety 'uncertain' and error
+        // 'teardown-uncertain': parked lanes make the session not locally
+        // empty, so the cleanup lease is refused. Those two therefore say
+        // nothing here, and receipt.ok is the only discriminator left — the
+        // core's unload-receipt journal exhaustion forces ok false while
+        // still reporting retained == parked, and that must not read as a
+        // healthy park.
+        receipt.ok === true &&
+        cleanup.retainedBytes === parkedBytes &&
+        cleanup.globallyComplete === false &&
+        cleanup.handoffLease === 0
+      : graphSurrendered &&
+        cleanup.globallyComplete === true &&
+        cleanup.fallbackSafe === true &&
+        Number.isSafeInteger(cleanup.handoffLease) &&
+        cleanup.handoffLease > 0 &&
+        cleanup.retainedBytes === 0;
     if (!complete) {
       log(
         'dsp',
         `graph cleanup uncertain · generation ${generation} · safety ${cleanup.safety} · ` +
           `error ${cleanup.error} · retained ${cleanup.retainedBytes} · ` +
+          `parked ${parkedBytes} · asked ${retention} · ` +
           `physical ${cleanup.physicalOwnershipRetained}`,
         'error',
       );
       return false;
+    }
+    if (parked) {
+      // No lease, no recordCleanup, no allowLegacyOutputAfterNativeCleanup:
+      // all three say "the session is empty and legacy may run", and it is
+      // not. The adopting prepare passes lease 0, which the core accepts
+      // because the coordinator stays NativeOwned across a park — and which
+      // is exactly what the core's own retention test does.
+      //
+      // There is deliberately no ownership re-check here, unlike the release
+      // path below. That check exists to stop a stale receipt republishing a
+      // lease after ownership moved; a park publishes nothing. Repeating it
+      // would only add an exit that returns false with the lanes still
+      // parked, and the caller's release owner is what covers that case.
+      log(
+        'dsp',
+        `graph released · generation ${cleanup.generation} · retained ${fmtBytes(
+          cleanup.retainedBytes,
+        )} parked for reuse · callback ownership released · ${since(
+          releaseStartedAt,
+        )}`,
+      );
+      return true;
     }
     // No await is permitted between this owner/generation check and lease
     // publication. An older exact receipt can never reopen the legacy gate

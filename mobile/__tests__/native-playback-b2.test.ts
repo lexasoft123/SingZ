@@ -103,6 +103,41 @@ const unload = (
   },
 });
 
+/** What a RETAINING unload actually answers — shaped from what the core
+ *  produces, not from what a healthy unload looks like.
+ *
+ *  Parked lanes make the session NOT locally empty, so acquireFallbackLease
+ *  refuses: safety is 'uncertain', error is 'teardown-uncertain',
+ *  coordinatorState stays 'native-owned' and handoffLease is 0, while the
+ *  command itself resolves ok. Those are alarming words for the healthy path,
+ *  and that is exactly why the park proof cannot read them — a plausible
+ *  follow-up ("the proof should also require safety complete") would pass a
+ *  fake that said 'complete' here and then refuse every rebuild on both
+ *  phones. The parked bytes are counted inside retainedBytes. */
+const parkedUnload = (
+  generation: number,
+  parkedBytes: number,
+): NativePlaybackUnloadResult => ({
+  ...result(generation, 'unloaded'),
+  cleanup: {
+    safety: 'uncertain',
+    error: 'teardown-uncertain',
+    generation,
+    state: 'unloaded',
+    retainedBytes: parkedBytes,
+    parkedLaneBytes: parkedBytes,
+    physicalOwnershipRetained: false,
+    processQuarantineRetainedBytes: 0,
+    processQuarantineReserved: false,
+    processQuarantinePoisoned: false,
+    terminalReason: 'none',
+    coordinatorState: 'native-owned',
+    handoffLease: 0,
+    globallyComplete: false,
+    fallbackSafe: false,
+  },
+});
+
 const capability = (
   generation = 0,
   state = 'unloaded',
@@ -259,6 +294,14 @@ function harness(
     suspendWaitOnCall?: number;
     transportError?: NativePlaybackResult['error'];
     transportReject?: Error;
+    /** Drop unloadRetainingLanes from the bridge, the way a native build
+     *  older than this JS has it. A rebuild must still work, by decoding. */
+    noLaneRetention?: boolean;
+    /** Parked bytes a retaining unload reports, and how much it says it still
+     *  retains. Equal is the healthy shape; a mismatch is a graph that did not
+     *  go away and must be refused. */
+    parkedLaneBytes?: number;
+    retainedOnPark?: number;
     platform?: 'ios' | 'android';
   } = {},
 ) {
@@ -354,6 +397,24 @@ function harness(
       }
       return receipt;
     }),
+    ...(options.noLaneRetention === true
+      ? {}
+      : {
+          unloadRetainingLanes: jest.fn(async (next: number) => {
+            calls.push(`native.unloadRetainingLanes:${next}`);
+            state = 'unloaded';
+            const parked = options.parkedLaneBytes ?? 140_000_000;
+            const receipt = parkedUnload(next, parked);
+            if (options.retainedOnPark === undefined) return receipt;
+            return {
+              ...receipt,
+              cleanup: {
+                ...receipt.cleanup,
+                retainedBytes: options.retainedOnPark,
+              },
+            };
+          }),
+        }),
   };
   let outputHeldForNativePlayback = false;
   let suspensionRejected = false;
@@ -1850,8 +1911,13 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     });
 
     expect(h.prepareRequests).toHaveLength(2);
+    // A PARKING unload issues no lease — the session is still holding this
+    // song's decoded lanes, so it has not proved itself empty and legacy must
+    // not be let back in. The adopting prepare passes 0, which is what the
+    // core's own retention test does, and prepareRequest OMITS the key at 0
+    // rather than sending it: absence is the assertion, not a zero.
+    expect(h.prepareRequests[1]).not.toHaveProperty('handoffLease');
     expect(h.prepareRequests[1]).toMatchObject({
-      handoffLease: 41,
       preparedStartProjectFrame: 72_000,
       initialTransport: {
         state: 'playing',
@@ -1873,17 +1939,20 @@ describe('iOS Phase 4B structural cue rebuild', () => {
         },
       },
     });
-    expect(h.calls.slice(-9)).toEqual([
+    // The three legacy transitions are GONE from a rebuild, and their absence
+    // is the point rather than an omission: releasing outright handed the
+    // output back to legacy and took it away again on the next line, three
+    // times per cue change, for a graph that was never going to be legacy's.
+    expect(h.calls.slice(-6)).toEqual([
       'native.stop:1',
-      'native.unload:1',
-      'legacy.allow',
-      'legacy.unload',
-      'legacy.suspend',
+      'native.unloadRetainingLanes:1',
       'native.prepare:2',
       'native.configure:2',
       'native.open:2',
       'native.start:2',
     ]);
+    expect(h.calls).not.toContain('legacy.allow');
+    expect(h.calls).not.toContain('native.unload:1');
     expect(h.native.transport).not.toHaveBeenCalled();
     expect(handle.snapshot()).toMatchObject({
       phase: 'playing',
@@ -1892,6 +1961,155 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     });
     expect(h.legacyLoad).not.toHaveBeenCalled();
     await handle.stop('structural rebuild test complete');
+  });
+
+  /* Decoded-lane retention across a rebuild.
+   *
+   * Re-decoding six lanes IS the cost of a structural rebuild: measured on an
+   * emulator with a 122 s song, 2.96 s of a 3.2 s rebuild, against 206 ms for
+   * the release itself. The core has parked and adopted lanes since Phase 4B
+   * and both phone bridges expose the call; nothing in JS asked for it, so
+   * every cue, pitch/tempo and training change paid the decode again.
+   *
+   * These pin the three things that can go wrong in a way no timing does. */
+  const rebuildOnce = async (h: ReturnType<typeof harness>) => {
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const old = capability(1, 'running', 48_000);
+    const session = old.session as unknown as Record<string, unknown>;
+    session.transportState = 'playing';
+    session.transportTelemetryQuality = 'lastGood';
+    session.renderedProjectFrame = 48_000;
+    h.native.status
+      .mockResolvedValueOnce(old)
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 48_000));
+    return { handle, rebuild: () =>
+      rebuildIosNativePlaybackCues(handle, beat, {
+        ...initialMetronome,
+        volume: 0.42,
+      }) };
+  };
+
+  it('parks the decoded lanes across a cue rebuild instead of decoding again', async () => {
+    const h = harness();
+    const { handle, rebuild } = await rebuildOnce(h);
+    await rebuild();
+    expect(h.native.unloadRetainingLanes).toHaveBeenCalledWith(1);
+    expect(h.native.unload).not.toHaveBeenCalledWith(1);
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    await handle.stop('lane retention test complete');
+  });
+
+  it('still rebuilds against a native build whose bridge cannot park', async () => {
+    // Metro serves this JS to whatever binary is installed. An app built
+    // before the bridge gained the method must decode as before, not fail.
+    const h = harness({ noLaneRetention: true });
+    const { handle, rebuild } = await rebuildOnce(h);
+    await rebuild();
+    expect(h.native).not.toHaveProperty('unloadRetainingLanes');
+    expect(h.native.unload).toHaveBeenCalledWith(1);
+    expect(h.prepareRequests).toHaveLength(2);
+    // The ordinary release still hands its lease to the adopting prepare.
+    expect(h.prepareRequests[1]).toHaveProperty('handoffLease');
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    await handle.stop('lane retention fallback test complete');
+  });
+
+  it('frees the parked lanes when no prepare is ever delivered', async () => {
+    /* The park's failure mode is not a slow rebuild, it is ~140 MB of decoded
+       PCM held with no graph, on a phone that is killed for holding it. There
+       are several exits between the park and the delivered prepare — an
+       unproved park, a cancelled or superseded prepare, no output to choose
+       during a route change, any throw in between — and prepareHandle returns
+       from some of them BEFORE claiming a generation, so the core never sees
+       a command and its own RAII release never runs.
+
+       Here prepare finds no output at all, which is what Android publishes
+       mid-route-change. Nothing may be left parked afterwards. */
+    const h = harness();
+    const { handle, rebuild } = await rebuildOnce(h);
+    const outputless = capability(1, 'unloaded');
+    (outputless as unknown as Record<string, unknown>).outputs = [];
+    h.native.status.mockReset();
+    const old = capability(1, 'running', 48_000);
+    const session = old.session as unknown as Record<string, unknown>;
+    session.transportState = 'playing';
+    session.transportTelemetryQuality = 'lastGood';
+    session.renderedProjectFrame = 48_000;
+    h.native.status
+      .mockResolvedValueOnce(old)
+      .mockResolvedValue(outputless);
+
+    await expect(rebuild()).rejects.toMatchObject({
+      name: 'NativePlaybackCommandError',
+      command: 'rebuild-cues',
+    });
+    expect(h.native.unloadRetainingLanes).toHaveBeenCalledWith(1);
+    expect(h.prepareRequests).toHaveLength(1);
+    // The whole point: the abandoned park was handed back.
+    expect(h.native.unload).toHaveBeenCalledWith(1);
+    /* And its receipt was CONSUMED. Releasing a park makes the session
+       locally empty, so the core mints a fallback lease and flips the
+       process-global coordinator to FallbackLeased; dropping that token
+       leaves every later prepare sending lease 0 into the FallbackLeased arm,
+       refused ResourceExhausted — "graph build refused" for this song and
+       every song after it. */
+    expect(h.calls).toContain('legacy.allow');
+
+    /* legacy.allow alone only says the gate reopened. The half that wedges is
+       the TOKEN surviving in this.fallbackLease, so close the loop: the next
+       prepare must actually carry it. Without this, dropping the assignment
+       and keeping the engine call passes. */
+    // mockReset destroys the harness's live implementation and there is no way
+    // to restore it from here, so the follow-on statuses are spelled out: the
+    // first is read before the generation is claimed, the rest after, and they
+    // have to AGREE with it or prepareHandle exits on inconsistent session
+    // status and the start proves nothing about consumption.
+    h.native.status.mockReset();
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValue(capability(2, 'prepared'));
+    const restarted = await handle.start();
+    // 'started' exactly, not merely "not failed": the outcome has a third arm,
+    // 'fallback', which means native gave up and handed back a decoded legacy
+    // project — a pass this test must not accept, since the whole question is
+    // whether NATIVE could prepare again after the abandoned park.
+    expect(restarted.kind).toBe('started');
+    expect(h.prepareRequests).toHaveLength(2);
+    // The exact token, not merely a nonzero one: one unload ran before this
+    // prepare and the harness mints from 40, so 41 pins the provenance to that
+    // receipt rather than to any lease that happened to be lying around.
+    expect(h.prepareRequests[1]).toMatchObject({ handoffLease: 41 });
+    // And the observable end state, the way the sibling rebuild tests close.
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    // A start that gets this far starts the real 200 ms poll.
+    await handle.stop('abandoned park lease test complete');
+  });
+
+  it('refuses a park that still retains more than the lanes it parked', async () => {
+    // retainedBytes above parkedLaneBytes is an arena or a graph that did not
+    // go away. Accepting it would let a rebuild prepare a second graph on top
+    // of a live one, which is the failure the release proof exists to stop —
+    // so the weaker park proof must still be a proof.
+    const h = harness({ parkedLaneBytes: 140_000_000, retainedOnPark: 145_000_000 });
+    const { handle, rebuild } = await rebuildOnce(h);
+    await expect(rebuild()).rejects.toMatchObject({
+      name: 'NativePlaybackCommandError',
+      command: 'rebuild-cues',
+    });
+    expect(h.prepareRequests).toHaveLength(1);
+    // The other exit the park's single owner covers: the park landed, its
+    // proof did not, and nothing prepares afterwards.
+    expect(h.native.unload).toHaveBeenCalledWith(1);
+    // 'error', not 'stopped': an unprovable teardown is handle.fail(), the
+    // same hard state a release that cannot prove itself produces. A rebuild
+    // that cannot say where the old graph went must not leave a handle that
+    // looks merely paused.
+    expect(handle.snapshot()).toMatchObject({ phase: 'error' });
   });
 
   it('restores pause after rebuild without replaying count-in', async () => {
@@ -1962,11 +2180,14 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       error: expect.stringMatching(/prepare refused/i),
     });
     expect(h.calls.indexOf('native.stop:1')).toBeLessThan(
-      h.calls.indexOf('native.unload:1'),
+      h.calls.indexOf('native.unloadRetainingLanes:1'),
     );
-    expect(h.calls.indexOf('native.unload:1')).toBeLessThan(
+    expect(h.calls.indexOf('native.unloadRetainingLanes:1')).toBeLessThan(
       h.calls.indexOf('native.prepare:2'),
     );
+    // The failed prepare's own cleanup. It also frees the parked lanes: the
+    // core claims them into an RAII guard at the top of prepare, so a refusal
+    // releases them on the way out rather than stranding a song's PCM.
     expect(h.calls).toContain('native.unload:2');
     expect(h.legacyLoad).not.toHaveBeenCalled();
   });

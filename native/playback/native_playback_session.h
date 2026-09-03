@@ -130,21 +130,37 @@ struct NativePlaybackLaneSource {
 // same rate can adopt them; every other command releases them, and the parked
 // bytes are reported as retained until they are.
 //
-// DORMANT ON PURPOSE. Nothing in the product asks for Park: the bridges
-// expose unloadRetainingLanes, no facade calls it, and Release is the default
-// everywhere — so this ships inert and the only reachable behaviour is
-// today's. It is dormant because retention produced three memory-shaped
-// defects in three review rounds on a device that gets killed for holding
-// memory: a claim that released the park before the prepare that would adopt
-// it, a release path unreachable from any bridge, and an Android lifecycle
-// that stranded the PCM across backgrounding. All three are fixed and pinned
-// by tests, and none of that is the same as evidence from a device.
+// LIVE ON THE PHONES, DORMANT ON THE DESKTOP. mobile/src/playback/native.ts
+// parks across a structural cue/pitch/training rebuild; the desktop facade
+// (src/renderer/src/audio/desktop-native-playback.ts) still releases,
+// though the addon
+// bridge exposes the call. Release remains the default everywhere else.
 //
-// The gate for turning it on is a hardware pass that watches parked bytes
-// across a rebuild AND across backgrounding — the shape mobile/tests/
-// open-close-memory.cjs already has for the JS decode path — not another
-// headless suite. The win it buys is ~150 ms on a rebuild; the parallel
-// decode that ships alongside it is worth ~2100 ms and stands on its own.
+// It was dormant for a long time because retention produced three
+// memory-shaped defects in three review rounds on a device that gets killed
+// for holding memory: a claim that released the park before the prepare that
+// would adopt it, a release path unreachable from any bridge, and an Android
+// lifecycle that stranded the PCM across backgrounding. A fourth turned up in
+// the facade that finally called it — several exits between the park and the
+// prepare return before any core command is issued, so the RAII claim inside
+// prepare never runs and ~140 MB rides into the background. That is why the
+// facade gives the park ONE owner rather than a guard per exit.
+//
+// "~150 ms on a rebuild" is what this comment used to estimate the win at,
+// and that figure came from a fixture rather than a song. Measured on an
+// Android emulator with a 122 s six-lane project: a rebuild went from 3.2 s
+// to ~200 ms, prepare being linear in audio length and therefore decode-
+// bound. The parallel decode that ships alongside it is worth ~2100 ms and
+// stands on its own.
+//
+// HALF THE GATE THIS COMMENT SET IS STILL OPEN. It asked for a hardware pass
+// watching parked bytes across a rebuild AND across backgrounding. What
+// exists is an Android-emulator run that watches them across a REBUILD (the
+// log shows `retained 141 MB parked for reuse` and a final `retained 0 kB`).
+// There is no parked-bytes-across-backgrounding measurement, and nothing on
+// iOS at all — the platform whose jetsam kill the explicit-free rule was
+// written for. mobile/tests/player-session.cjs and open-close-memory.cjs on
+// real hardware, both platforms, are what close it.
 enum class NativePlaybackLaneRetention : uint32_t {
   Release = 0,
   Park,
