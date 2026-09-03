@@ -2996,6 +2996,30 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     });
   });
 
+  it('turning the count-in on before Play still counts the singer in', async () => {
+    const h = harness();
+    const project = await h.load(entry({ metronome: { click: false, countInBars: 0, volume: 0.5, accent: true } }));
+    open.push(project.nativePlayback!);
+    // Opened with the click off, so the graph is prepared AT the entry with
+    // no pre-roll and nothing has rendered. Turning the count-in on rebuilds.
+    h.native.status.mockResolvedValueOnce(capability(1, 'prepared', 0, 'ios'));
+
+    await rebuildNativePlaybackCues(project.nativePlayback!, null, {
+      click: false,
+      countInBars: 2,
+      volume: 0.5,
+      accent: true,
+    });
+
+    // Pinning the entry frame here prepared a graph with a pre-roll of zero:
+    // the transport never entered pre-roll, so Play produced no count-in at
+    // all — worse than the bare countdown the dots replaced.
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(h.prepareRequests[1]).not.toHaveProperty(
+      'preparedStartProjectFrame',
+    );
+  });
+
   it('a graph that never rendered is discarded, not "stopped"', async () => {
     const lines: string[] = [];
     const unsubscribe = onLogLine(entry => {

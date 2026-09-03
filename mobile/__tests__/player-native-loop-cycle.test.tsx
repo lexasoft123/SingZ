@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactTestRenderer from 'react-test-renderer'
-import { View } from 'react-native'
+import { Alert, View } from 'react-native'
 import type { MultitrackEngine } from '../src/engine'
 import type {
   LoadedProject,
@@ -218,6 +218,54 @@ test('ordinary PlayerScreen serializes and reconciles the native A-B three-state
   await ReactTestRenderer.act(async () => {
     tree.unmount()
   })
+})
+
+test('says nothing while a control is only withdrawn for the moment', async () => {
+  const h = nativePlayerHarness()
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined)
+  const legacy = {} as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(
+      <View>
+        <PlayerScreen
+          active
+          engine={legacy}
+          project={h.project}
+          route={null}
+          trimMs={0}
+          onTrim={jest.fn()}
+          onBack={jest.fn()}
+        />
+      </View>
+    )
+    await Promise.resolve()
+  })
+  const test = (globalThis as Record<string, any>).__test
+
+  // A metronome touch swaps the whole graph, and the core refuses a seek or
+  // a loop for its duration — several seconds on a phone. The rail stays
+  // live, so the gesture still arrives.
+  // Both synchronously: on a phone the window is seconds wide, but the mock
+  // rebuild resolves at once, so awaiting between them would measure the
+  // moment after it closed rather than the moment the singer's gesture lands.
+  alert.mockClear()
+  await ReactTestRenderer.act(async () => {
+    test.backend.setMetronome({ click: true, countInBars: 1, volume: 0.5, accent: true })
+    expect(test.backend.reconfiguring).toBe(true)
+    void test.cycleLoop()
+    await Promise.resolve()
+  })
+
+  // Swallowed. Telling the singer A-B repeat "stays disabled until its
+  // native DSP control is connected" would be false, and a grid arriving on
+  // its own would raise that modal with no user action at all.
+  expect(alert).not.toHaveBeenCalled()
+
+  await ReactTestRenderer.act(async () => {
+    tree.unmount()
+  })
+  alert.mockRestore()
 })
 
 /**

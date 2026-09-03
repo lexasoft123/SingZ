@@ -175,12 +175,18 @@ export default function PlayerScreen({
   )
   const unsupported = useCallback(
     (operation: PlaybackOperation): void => {
+      // Withdrawn for the moment is not the same as never implemented. A
+      // structural graph swap takes seeking away for a few seconds, and
+      // saying it "stays disabled until its native DSP control is connected"
+      // in a modal would be false — and toggling the click, or a grid
+      // arriving on its own, would raise it with no user action at all.
+      if (engine.reconfiguring) return
       Alert.alert(
         'Not available in native playback yet',
         `${operation.replace('-', ' ')} stays disabled until its native DSP control is connected.`
       )
     },
-    []
+    [engine]
   )
   const finishPlaybackAction = useCallback(
     (action: Promise<PlaybackActionOutcome>): void => {

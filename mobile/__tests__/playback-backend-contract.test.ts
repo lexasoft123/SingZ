@@ -364,6 +364,38 @@ describe('the singer\'s latency trim', () => {
   })
 })
 
+describe('what the transport offers during a cue rebuild', () => {
+  it('takes the scrub rail away, because the core will refuse it', async () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    expect(h.backend.capabilities.seek).toBe(true)
+
+    // A metronome change is a full generation swap — 4.2 s of silence on a
+    // phone — and the core refuses every seek in that window. Leaving the
+    // rail live meant the singer's drag was accepted by the UI and dropped.
+    h.backend.setMetronome({ click: true, countInBars: 1, volume: 0.5, accent: true })
+
+    expect(h.backend.capabilities.seek).toBe(false)
+    expect(h.backend.capabilities.loopRegion).toBe(false)
+
+    // ...and says it is only for the moment, so the screen can swallow the
+    // gesture instead of telling the singer seeking is unimplemented.
+    expect(h.backend.reconfiguring).toBe(true)
+
+    await flushTransportQueue()
+    await flushTransportQueue()
+
+    expect(h.backend.capabilities.seek).toBe(true)
+    expect(h.backend.reconfiguring).toBe(false)
+  })
+
+  it('legacy never withdraws what it offers', () => {
+    const h = legacyHarness()
+    h.backend.attach(h.project)
+    expect(h.backend.reconfiguring).toBe(false)
+  })
+})
+
 describe('native facade boundaries', () => {
   it('attaches an already-prepared empty-stems project without calling legacy load', () => {
     const h = nativeHarness()

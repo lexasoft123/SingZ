@@ -2310,8 +2310,19 @@ export class IosNativePlaybackCoordinator {
       // 'prepared' here) takes the ordinary start, entry plus whatever
       // pre-roll the NEW plan wants, and one still inside its count-in
       // restarts at the song's first frame rather than replaying it.
-      const preparedStartProjectFrame =
-        session.renderedProjectFrame >= 0
+      // Nothing has rendered AND nothing has moved from where this graph was
+      // prepared: there is no position to preserve, and the NEW plan's
+      // pre-roll is the whole point of the rebuild. Pinning the entry frame
+      // here is what made turning the count-in ON and pressing Play produce
+      // no count-in at all — the rebuild prepared at the entry with a
+      // pre-roll of zero and the transport never entered pre-roll. A graph
+      // parked at a REMEMBERED position is the other case and keeps it.
+      const untouchedSincePrepare =
+        !wasStarted &&
+        session.renderedProjectFrame === session.preparedStartProjectFrame;
+      const preparedStartProjectFrame = untouchedSincePrepare
+        ? undefined
+        : session.renderedProjectFrame >= 0
           ? session.renderedProjectFrame
           : restoreTransport === 'prepared'
             ? undefined

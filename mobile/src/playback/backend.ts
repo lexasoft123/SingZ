@@ -75,6 +75,15 @@ export interface PlaybackBackend {
   readonly audioPosition: number
   readonly duration: number
   readonly displayLatency: number
+  /**
+   * A control is withdrawn only for the moment, not for good.
+   *
+   * A structural graph swap makes the core refuse seeks for its duration, so
+   * `capabilities.seek` goes false — but the singer has not asked for
+   * something the app cannot do, and telling them it "stays disabled until
+   * its native DSP control is connected" would be a lie in a modal.
+   */
+  readonly reconfiguring: boolean
   readonly countInStatus: PlaybackCountInStatus | null
   readonly regionState: { start: number; end: number; loop: boolean } | null
   readonly duckedStems: string[]
@@ -170,6 +179,10 @@ export class LegacyPlaybackBackend implements PlaybackBackend {
   }
   get displayLatency(): number {
     return this.engine.displayLatency
+  }
+  /** Legacy swaps nothing: what it offers, it offers always. */
+  get reconfiguring(): boolean {
+    return false
   }
   /** Already applied: the app shell folds route latency and this trim
    *  together into the engine's own display latency. Taking it a second
@@ -408,6 +421,9 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   }
   get duration(): number {
     return this.state().durationSec
+  }
+  get reconfiguring(): boolean {
+    return this.structuralChangesPending > 0
   }
   /** What the UI reports as the shift it is applying — both halves of it,
    *  or the readout would contradict the correction it describes. */
@@ -656,6 +672,13 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   private reconcileCueState(): void {
     if (this.cueReconcileRunning) return
     this.cueReconcileRunning = true
+    // A cue rebuild is a full generation swap — measured at 4.2 s of silence
+    // on a phone — and the core refuses a seek throughout it. Without this
+    // the scrub rail stayed live and every drag the singer made during those
+    // seconds was accepted by the UI and thrown away by the core.
+    this.structuralChangesPending += 1
+    this.refreshCapabilities()
+    this.emit()
     this.serialize(async () => {
       for (;;) {
         const version = this.cueIntentVersion
@@ -694,6 +717,7 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
       }
     }).finally(() => {
       this.cueReconcileRunning = false
+      this.finishStructuralChange()
       const accepted: NativeCueState = {
         beat: this.beatInfo,
         metronome: this.metronomeConfig
