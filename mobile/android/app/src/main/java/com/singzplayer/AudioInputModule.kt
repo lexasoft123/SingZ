@@ -442,7 +442,12 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
           hostDevices.map { AudioInputPolicy.hostTransport(it.type) }.toTypedArray(),
           hostDevices.map {
             AudioInputPolicy.hostMonitoringSuitability(it.type)
-          }.toTypedArray()
+          }.toTypedArray(),
+          AudioInputPolicy.mediaOutputUid(
+            hostDevices.map { AudioInputPolicy.portableUid(it.id) }.toTypedArray(),
+            hostDevices.map { it.type }.toIntArray(),
+            hostDevices.map { it.isSink }.toBooleanArray()
+          )
         )
       }
     )

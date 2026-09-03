@@ -2208,6 +2208,62 @@ describe('reading a native status across build versions', () => {
 });
 
 describe('mobile native eligibility', () => {
+  /* The platform names the route, or there is no route.
+   *
+   * Taking the first published output when nothing is marked is the Android
+   * defect this whole change exists to remove: the published list is ordered
+   * by uid STRING, so a real handset put "android:10" — a 16 kHz telephony
+   * endpoint — ahead of "android:3", its speaker, and six lanes were prepared
+   * against it. An unmarked list must make native playback DECLINE, so the
+   * singer gets legacy rather than a graph aimed at the earpiece. */
+  it('declines native playback when no output is marked the default', () => {
+    const unmarked = (platform: 'ios' | 'android') => {
+      const cap = capability(0, 'unloaded', 0, platform);
+      return {
+        ...cap,
+        outputs: [
+          // Deliberately in the uid-string order a registry publishes, with
+          // the WRONG endpoint first: taking [0] would pick the 16 kHz one.
+          {
+            uid: 'android:10',
+            label: 'Telephony',
+            default: false,
+            channels: 2,
+            sampleRate: 16_000,
+          },
+          {
+            uid: 'android:3',
+            label: 'Speaker',
+            default: false,
+            channels: 2,
+            sampleRate: 48_000,
+          },
+        ],
+      };
+    };
+    const refused = nativePlaybackEligibility(
+      androidEntry(),
+      doc(),
+      true,
+      'android',
+      unmarked('android'),
+    );
+    expect(refused.eligible).toBe(false);
+    expect(refused.reason).toContain('no native output route');
+
+    // And the same list WITH the speaker marked is accepted — otherwise this
+    // test would pass against a build that refused every route.
+    const marked = unmarked('android');
+    expect(
+      nativePlaybackEligibility(androidEntry(), doc(), true, 'android', {
+        ...marked,
+        outputs: marked.outputs.map(output =>
+          output.uid === 'android:3' ? { ...output, default: true } : output,
+        ),
+      }).eligible,
+    ).toBe(true);
+  });
+
   it('is opt-in, exact-platform and full-matrix capable across stems and added lanes', () => {
     const cap = capability();
     expect(

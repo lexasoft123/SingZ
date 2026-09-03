@@ -83,7 +83,8 @@ object SingzCore {
     inputs: BooleanArray,
     outputs: BooleanArray,
     transports: Array<String>,
-    monitoringSuitability: Array<String>
+    monitoringSuitability: Array<String>,
+    defaultOutputUid: String
   )
 
   /** Packaging probe only; it never opens a device or acquires audio focus. */

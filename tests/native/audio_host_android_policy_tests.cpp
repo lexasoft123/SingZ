@@ -153,7 +153,9 @@ void testOpenedFacts() {
   auto stream = goodOpened();
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::None);
 
   // Android route substitution is typed for both members of the pair. The
@@ -161,50 +163,66 @@ void testOpenedFacts() {
   stream.deviceId = 33;
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::DeviceNotFound);  // output substitution
   stream = goodOpened();
   stream.deviceId = 41;
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 40, 8, 48000, 0, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::DeviceNotFound);  // input substitution
 
   stream.api = singz::detail::AndroidAudioHostApi::OpenSles;
   stream.deviceId = 32;
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::ProviderFailure);
   stream = goodOpened();
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Exclusive, true, error) ==
+            singz::AudioHostAccessMode::Exclusive, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::ProviderFailure);
   stream = goodOpened();
   stream.bufferSizeFrames = 769;
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::ProviderFailure);
   stream = goodOpened();
   stream.framesPerBurst = 2048;
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::ProviderFailure);
   stream = goodOpened();
   stream.hardwareChannels = 8;
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::ProviderFailure);
   stream.hardwareSampleRate = 48000;
   stream.hardwareFormat =
       singz::AudioHostSampleFormat::Other;
   CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
             stream, 32, 8, 48000, 192, 1024,
-            singz::AudioHostAccessMode::Shared, true, error) ==
+            singz::AudioHostAccessMode::Shared, true,
+            singz::detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+            error) ==
         singz::AudioHostError::None);
 }
 
@@ -882,12 +900,110 @@ void testStartCommitLinearizationWindows() {
 
 }  // namespace
 
+/* The rate a published Android endpoint is opened at.
+ *
+ * AudioManager may publish no rate metadata at all, and the JNI leaves the
+ * device's nominalSampleRate at zero on that path. openOutput compares that
+ * field against the prepared rate, so before this policy existed the
+ * comparison was 0 == 48000 for EVERY Android endpoint ever enumerated and
+ * native playback could not open output on any Android device — an emulator
+ * and a phone alike refused at the first Play. */
+void testNominalSampleRateIsTheRateWeWillOpenAt() {
+  using Device = singz::detail::AndroidAudioHostDevice;
+  const auto nominal = singz::detail::androidAudioHostNominalSampleRate;
+
+  Device silent{9, "android:9", "no metadata", false, true, 2, 0.0, {},
+                singz::AudioHostTransport::BuiltIn,
+                singz::AudioHostMonitoringSuitability::Unknown};
+  // The case that was broken: nothing advertised, nothing declared.
+  CHECK(nominal(silent) == 48000.0);
+
+  Device declared = silent;
+  declared.nominalSampleRate = 44100.0;
+  // A platform that DOES state a rate is believed over any preference.
+  CHECK(nominal(declared) == 44100.0);
+
+  Device offers48k = silent;
+  offers48k.sampleRates = {44100.0, 48000.0, 96000.0};
+  // 48 kHz when offered, so a device is not opened at 96 kHz for no reason.
+  CHECK(nominal(offers48k) == 48000.0);
+
+  Device without48k = silent;
+  without48k.sampleRates = {22050.0, 44100.0};
+  // Otherwise the best it actually advertises, never an invented 48 kHz.
+  CHECK(nominal(without48k) == 44100.0);
+
+  Device rubbish = silent;
+  rubbish.sampleRates = {0.0, -1.0};
+  CHECK(nominal(rubbish) == 48000.0);
+
+  // Deterministic in the same metadata, which is what lets openOutput treat a
+  // CHANGED value as a genuinely changed route rather than as noise.
+  CHECK(nominal(offers48k) == nominal(offers48k));
+}
+
+/* Ordinary latency fails a monitoring pair and passes a played-back song.
+ *
+ * Every other exactness in the list still applies to both: this relaxes the
+ * ONE fact that playback compensates for by reading the stream's real
+ * presentation latency, and it relaxes it only where nobody is listening to
+ * themselves through the phone. Before it, an OS declining the fast path
+ * turned native playback off entirely — which is every stream an emulator
+ * will ever hand out, and some Bluetooth routes on real phones. */
+void testOrdinaryLatencyPlaysBackButCannotMonitor() {
+  using Requirement = singz::detail::AndroidAudioHostLatencyRequirement;
+  std::string error;
+  auto stream = goodOpened();
+  stream.performance = singz::detail::AndroidAudioHostPerformance::Unknown;
+
+  CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
+            stream, 32, 8, 48000, 192, 1024,
+            singz::AudioHostAccessMode::Shared, true,
+            Requirement::AnyGranted, error) == singz::AudioHostError::None);
+  CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
+            stream, 32, 8, 48000, 192, 1024,
+            singz::AudioHostAccessMode::Shared, true,
+            Requirement::LowLatencyRequired,
+            error) == singz::AudioHostError::ProviderFailure);
+
+  // Relaxing latency must relax NOTHING else: a playback stream that came
+  // back at the wrong rate, the wrong width or the wrong format is still
+  // refused, and the message still says which.
+  auto wrongRate = stream;
+  wrongRate.sampleRate = 44100;
+  CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
+            wrongRate, 32, 8, 48000, 192, 1024,
+            singz::AudioHostAccessMode::Shared, true,
+            Requirement::AnyGranted, error) != singz::AudioHostError::None);
+  auto wrongChannels = stream;
+  wrongChannels.channels = 2;
+  CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
+            wrongChannels, 32, 8, 48000, 192, 1024,
+            singz::AudioHostAccessMode::Shared, true,
+            Requirement::AnyGranted, error) != singz::AudioHostError::None);
+  auto wrongFormat = stream;
+  wrongFormat.format = singz::AudioHostSampleFormat::Other;
+  CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
+            wrongFormat, 32, 8, 48000, 192, 1024,
+            singz::AudioHostAccessMode::Shared, true,
+            Requirement::AnyGranted, error) != singz::AudioHostError::None);
+  auto substituted = stream;
+  substituted.deviceId = 33;
+  CHECK(singz::detail::validateAndroidAudioHostOpenedStream(
+            substituted, 32, 8, 48000, 192, 1024,
+            singz::AudioHostAccessMode::Shared, true,
+            Requirement::AnyGranted,
+            error) == singz::AudioHostError::DeviceNotFound);
+}
+
 int main() {
+  testNominalSampleRateIsTheRateWeWillOpenAt();
   testSparsePairedRoute();
   testMonitoringSuitabilityIsTriState();
   testOutputOnlyAndHighLatency();
   testFailClosedPreparation();
   testOpenedFacts();
+  testOrdinaryLatencyPlaysBackButCannotMonitor();
   testDrainPolicy();
   testTimestampFreshnessAndDeadline();
   testBothDriverXrunsResetTheGraph();

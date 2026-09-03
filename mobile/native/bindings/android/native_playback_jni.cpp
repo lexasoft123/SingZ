@@ -371,18 +371,16 @@ std::string unloadJson(const singz::NativePlaybackUnloadReceipt &receipt) {
   return output;
 }
 
+// The host already applied androidAudioHostNominalSampleRate when it built
+// this inventory, and openOutput's route check compares against that same
+// field. A second rule here is how the two came to disagree: the listing
+// showed JS a usable 48 kHz while the route check saw the raw zero and
+// refused every Android handoff ever attempted.
 double inventorySampleRate(const singz::AudioHostDeviceInfo &device) noexcept {
-  if (std::isfinite(device.nominalSampleRate) &&
-      device.nominalSampleRate > 0.0)
-    return device.nominalSampleRate;
-  for (const auto &range : device.sampleRateRanges) {
-    if (std::isfinite(range.minimumHz) && range.minimumHz > 0.0)
-      return range.minimumHz;
-  }
-  // AudioManager commonly omits rate metadata. Oboe still exact-negotiates
-  // and status reports the actual stream rate after open; this is only the
-  // dormant route intent consumed by the product coordinator.
-  return 48000.0;
+  return std::isfinite(device.nominalSampleRate) &&
+                 device.nominalSampleRate > 0.0
+             ? device.nominalSampleRate
+             : 0.0;
 }
 
 void appendStatus(std::string &output,

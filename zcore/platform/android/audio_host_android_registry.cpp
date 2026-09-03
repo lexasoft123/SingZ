@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <string>
 #include <utility>
 
 namespace singz::detail {
@@ -12,6 +13,7 @@ namespace {
 
 std::mutex registryMutex;
 std::vector<AndroidAudioHostDevice> registry;
+std::string registryDefaultOutputUid;
 std::atomic<uint32_t> routeGeneration{1};
 
 bool sameDevice(const AndroidAudioHostDevice& left,
@@ -33,8 +35,8 @@ bool sameInventory(const std::vector<AndroidAudioHostDevice>& left,
 
 }  // namespace
 
-void replaceAndroidAudioHostDevices(
-    std::vector<AndroidAudioHostDevice> devices) {
+void replaceAndroidAudioHostDevices(std::vector<AndroidAudioHostDevice> devices,
+                                    std::string defaultOutputUid) {
   devices.erase(
       std::remove_if(devices.begin(), devices.end(), [](const auto& device) {
         return device.deviceId <= 0 || device.uid.rfind("android:", 0) != 0 ||
@@ -71,10 +73,24 @@ void replaceAndroidAudioHostDevices(
                                      left.output == right.output;
                             }),
                 devices.end());
+  // A named default that survived none of the filters above is not a route.
+  if (!defaultOutputUid.empty() &&
+      std::none_of(devices.begin(), devices.end(),
+                   [&](const AndroidAudioHostDevice& device) {
+                     return device.output && device.uid == defaultOutputUid;
+                   }))
+    defaultOutputUid.clear();
   {
     std::lock_guard<std::mutex> lock(registryMutex);
-    if (sameInventory(registry, devices)) return;
+    // The default is part of the inventory: a route change that only moves
+    // WHICH endpoint plays (headphones in, speaker out, same device list) is
+    // still a route change, and a generation that did not move would let a
+    // prepared graph keep the endpoint the singer just stopped using.
+    if (sameInventory(registry, devices) &&
+        registryDefaultOutputUid == defaultOutputUid)
+      return;
     registry = std::move(devices);
+    registryDefaultOutputUid = std::move(defaultOutputUid);
     routeGeneration.fetch_add(1, std::memory_order_release);
   }
 }
@@ -83,6 +99,7 @@ AndroidAudioHostInventorySnapshot androidAudioHostInventorySnapshot() {
   AndroidAudioHostInventorySnapshot snapshot;
   std::lock_guard<std::mutex> lock(registryMutex);
   snapshot.devices = registry;
+  snapshot.defaultOutputUid = registryDefaultOutputUid;
   snapshot.routeGeneration = routeGeneration.load(std::memory_order_acquire);
   return snapshot;
 }

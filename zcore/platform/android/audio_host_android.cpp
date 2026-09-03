@@ -256,7 +256,7 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
       device.label = source.label;
       device.inputChannels = source.input ? source.channels : 0;
       device.outputChannels = source.output ? source.channels : 0;
-      device.nominalSampleRate = source.nominalSampleRate;
+      device.nominalSampleRate = detail::androidAudioHostNominalSampleRate(source);
       for (double rate : source.sampleRates) {
         device.sampleRateRanges.push_back({rate, rate});
       }
@@ -266,6 +266,9 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
                                             : AudioHostEndpointDirection::Output;
       device.transport = source.transport;
       device.monitoringSuitability = source.monitoringSuitability;
+      device.defaultOutput =
+          !snapshot.defaultOutputUid.empty() &&
+          source.uid == snapshot.defaultOutputUid && source.output;
       for (uint32_t channel = 0; channel < device.inputChannels; ++channel) {
         device.inputChannelLabels.push_back("Input " +
                                             std::to_string(channel + 1));
@@ -274,6 +277,7 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
         device.outputChannelLabels.push_back("Output " +
                                              std::to_string(channel + 1));
       }
+      if (device.defaultOutput) inventory.defaultOutputUid = device.uid;
       inventory.devices.push_back(std::move(device));
     }
     return inventory;
@@ -425,7 +429,15 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
             config.maximumFrames,
             config.exclusive ? AudioHostAccessMode::Exclusive
                              : AudioHostAccessMode::Shared,
-            true, error);
+            true,
+            // Playing a song back is held to every other exactness the list
+            // above states, but not to the fast path. Monitoring alongside a
+            // microphone still is: the pair is opened as one, so the output
+            // half inherits the input half's requirement.
+            route.inputEndpointChannels != 0
+                ? detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired
+                : detail::AndroidAudioHostLatencyRequirement::AnyGranted,
+            error);
     if (outputValidation != AudioHostError::None) {
       return failLocked(lifecycle, outputValidation, std::move(error));
     }
@@ -491,7 +503,9 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
               outputFacts.sampleRate, 0, config.maximumFrames,
               config.exclusive ? AudioHostAccessMode::Exclusive
                                : AudioHostAccessMode::Shared,
-              true, error);
+              true,
+              detail::AndroidAudioHostLatencyRequirement::LowLatencyRequired,
+              error);
       if (inputValidation != AudioHostError::None) {
         return failLocked(lifecycle, inputValidation, std::move(error));
       }

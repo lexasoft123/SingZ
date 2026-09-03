@@ -49,6 +49,25 @@ uint32_t endpointChannels(const std::vector<uint32_t>& channels) noexcept {
 
 }  // namespace
 
+// AAudio's own default, and the rate every Android media path is built
+// around. Only ever reached when the endpoint advertises nothing usable.
+constexpr double kAndroidFallbackSampleRate = 48000.0;
+
+double androidAudioHostNominalSampleRate(
+    const AndroidAudioHostDevice& device) noexcept {
+  if (std::isfinite(device.nominalSampleRate) && device.nominalSampleRate > 0.0)
+    return device.nominalSampleRate;
+  bool advertised = false;
+  double best = 0.0;
+  for (double rate : device.sampleRates) {
+    if (!std::isfinite(rate) || rate <= 0.0) continue;
+    if (rate == kAndroidFallbackSampleRate) return kAndroidFallbackSampleRate;
+    advertised = true;
+    best = std::max(best, rate);
+  }
+  return advertised ? best : kAndroidFallbackSampleRate;
+}
+
 AudioHostTransport androidAudioHostTransport(
     const std::string& token) noexcept {
   if (token == "built-in") return AudioHostTransport::BuiltIn;
@@ -159,7 +178,7 @@ AudioHostError validateAndroidAudioHostOpenedStream(
     uint32_t requestedChannels, double requestedSampleRate,
     uint32_t requestedBufferFrames, uint32_t maximumFrames,
     AudioHostAccessMode requestedAccess, bool namedEndpoint,
-    std::string& error) {
+    AndroidAudioHostLatencyRequirement latency, std::string& error) {
   error.clear();
   if (actual.deviceId != requestedDeviceId) {
     error = "Oboe routed the stream to a different Android endpoint";
@@ -172,7 +191,8 @@ AudioHostError validateAndroidAudioHostOpenedStream(
     error = "Oboe did not preserve the exact callback-boundary sample rate";
   } else if (actual.format != AudioHostSampleFormat::Float32) {
     error = "Oboe did not preserve the float32 callback format";
-  } else if (actual.performance != AndroidAudioHostPerformance::LowLatency) {
+  } else if (latency == AndroidAudioHostLatencyRequirement::LowLatencyRequired &&
+             actual.performance != AndroidAudioHostPerformance::LowLatency) {
     error = "Oboe did not grant the low-latency performance mode";
   } else if (actual.accessMode != requestedAccess) {
     error = requestedAccess == AudioHostAccessMode::Exclusive

@@ -236,7 +236,7 @@ Java_com_singzplayer_split_SingzCore_replaceAudioHostDevices(
     JNIEnv* env, jobject /*thiz*/, jobjectArray juids, jobjectArray jlabels,
     jobjectArray jrates, jintArray jchannels, jbooleanArray jinputs,
     jbooleanArray joutputs, jobjectArray jtransports,
-    jobjectArray jmonitoringSuitability) {
+    jobjectArray jmonitoringSuitability, jstring jdefaultOutputUid) {
   if (!juids || !jlabels || !jrates || !jchannels || !jinputs || !joutputs ||
       !jtransports || !jmonitoringSuitability) {
     singz::detail::replaceAndroidAudioHostDevices({});
@@ -325,7 +325,12 @@ Java_com_singzplayer_split_SingzCore_replaceAudioHostDevices(
     if (jmonitoring) env->DeleteLocalRef(jmonitoring);
     if (jdeviceRates) env->DeleteLocalRef(jdeviceRates);
   }
-  singz::detail::replaceAndroidAudioHostDevices(std::move(devices));
+  // A null default is the honest "this phone offers nothing to play music
+  // through" — never a reason to drop the whole inventory.
+  singz::detail::replaceAndroidAudioHostDevices(
+      std::move(devices),
+      jdefaultOutputUid != nullptr ? toStd(env, jdefaultOutputUid)
+                                   : std::string());
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

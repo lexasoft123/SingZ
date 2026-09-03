@@ -4091,13 +4091,29 @@ function logDspRuntime(
         output.channels
       } ch`
     : 'no output route';
+  /* Every route the platform published, not only the one taken. A phone has
+     no inspector and no run-as, so what the app wrote down is the only
+     evidence there is — and which endpoint a singer hears through is decided
+     here, by a `default` flag the platform layer has to set and a channel
+     count it has to get right. Both were wrong on Android for as long as
+     Android has had a native path, with nothing on screen or in the log able
+     to show it. Labels do not identify anything (every emulator endpoint
+     shares one product name), so this prints uids. */
+  const routes = capability.outputs
+    .map(
+      candidate =>
+        `${candidate.uid}${candidate.default ? '*' : ''} ${
+          candidate.channels
+        }ch@${Math.round(candidate.sampleRate)}`,
+    )
+    .join(', ');
   log(
     'dsp',
     `${platformLabel(platform)} runtime ${capability.available ? 'ready' : 'unavailable'} · ${
       capability.buildId
     } · ${capability.playbackBuild} · ${components} · session ${
       capability.session.state
-    } · ${route}`,
+    } · ${route} · ${capability.outputs.length} published [${routes}]`,
     capability.available ? 'info' : 'warn',
   );
 }
@@ -4182,7 +4198,14 @@ function formatSampleRate(sampleRate: number): string {
 function chooseOutput(
   outputs: readonly NativePlaybackOutput[],
 ): NativePlaybackOutput | null {
-  const candidate = outputs.find(output => output.default) ?? outputs[0];
+  /* The platform names the route, or there is no route. Taking outputs[0]
+     when nothing is marked was the whole Android defect: the published list
+     is sorted by uid STRING, so "android:10" — a 16 kHz telephony endpoint —
+     came ahead of "android:3", the speaker, and a six-lane graph was prepared
+     against it. Declining is the honest answer, and it costs a device
+     nothing: native playback is opt-in and legacy plays the song. iOS always
+     marks its one current route, so this decides Android alone. */
+  const candidate = outputs.find(output => output.default);
   if (
     !candidate ||
     typeof candidate.uid !== 'string' ||

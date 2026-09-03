@@ -492,7 +492,12 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
       devices.map { it.isSource }.toBooleanArray(),
       devices.map { it.isSink }.toBooleanArray(),
       devices.map { AudioInputPolicy.hostTransport(it.type) }.toTypedArray(),
-      devices.map { AudioInputPolicy.hostMonitoringSuitability(it.type) }.toTypedArray()
+      devices.map { AudioInputPolicy.hostMonitoringSuitability(it.type) }.toTypedArray(),
+      AudioInputPolicy.mediaOutputUid(
+        devices.map { AudioInputPolicy.portableUid(it.id) }.toTypedArray(),
+        devices.map { it.type }.toIntArray(),
+        devices.map { it.isSink }.toBooleanArray()
+      )
     )
   }
 

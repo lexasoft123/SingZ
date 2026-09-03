@@ -5392,14 +5392,27 @@ NativePlaybackResult NativePlaybackSession::openOutput(
                (device.direction == AudioHostEndpointDirection::Output ||
                 device.direction == AudioHostEndpointDirection::Duplex);
       });
-  bool routeValid = output != inventory.devices.end() &&
-                    output->outputChannels != 0 &&
-                    output->nominalSampleRate == config.requestedSampleRate;
-  for (uint32_t channel : config.outputChannels)
-    routeValid = routeValid && output != inventory.devices.end() &&
-                 channel < output->outputChannels;
-  if (!routeValid) {
-    impl_->lastError = "The prepared iOS output route no longer matches";
+  // Name the term that failed. This is the last gate before the handoff and
+  // it can refuse for four unrelated reasons; one undifferentiated sentence
+  // (which also said "iOS" on Android) is what turned a platform never
+  // publishing a nominal rate into hours of route archaeology.
+  const char *routeFault = nullptr;
+  if (output == inventory.devices.end())
+    routeFault = "the endpoint is gone";
+  else if (output->outputChannels == 0)
+    routeFault = "the endpoint has no output channels";
+  else if (output->nominalSampleRate != config.requestedSampleRate)
+    routeFault = "the endpoint rate changed";
+  else
+    for (uint32_t channel : config.outputChannels)
+      if (channel >= output->outputChannels) {
+        routeFault = "the endpoint lost a prepared channel";
+        break;
+      }
+  if (routeFault != nullptr) {
+    impl_->lastError = std::string("The prepared output route no longer "
+                                   "matches — ") +
+                       routeFault;
     return failure(NativePlaybackError::HostFailure, generation, impl_->state,
                    impl_->lastError);
   }
@@ -5447,8 +5460,13 @@ NativePlaybackResult NativePlaybackSession::openOutput(
             : opened.message;
     if (!impl_->stopHost(true, true)) {
       impl_->state = NativePlaybackState::Quarantined;
+      // Carry WHY the open failed into the quarantine. Reporting only the
+      // quiescence failure loses the host's own sentence — the one that says
+      // which negotiated fact the provider refused — and leaves a reader of
+      // the log with the consequence and no cause.
       impl_->lastError =
-          "The failed output open did not confirm callback quiescence";
+          "The failed output open did not confirm callback quiescence — after "
+          + message;
       return failure(NativePlaybackError::TeardownUncertain, generation,
                      impl_->state, impl_->lastError);
     }
