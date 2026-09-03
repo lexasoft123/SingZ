@@ -2808,6 +2808,15 @@ export class IosNativePlaybackCoordinator {
         'dsp',
         `zcore AudioHost open · generation ${generation} · ${handle.output?.label ?? 'native output'} · ` +
           `${formatSampleRate(opened.sampleRate)} · ${opened.outputChannels} ch · ` +
+          /* The NEGOTIATED callback size: how many frames the hardware asks
+             for at a time. The first number to want when native playback
+             costs more CPU than it should — 960 on the Android emulator.
+
+             It is a floor on graph walks rather than a count of them — the
+             prepared path slices a callback at a boundary — and it says
+             nothing about the per-frame DSP work, which is frames per second
+             either way. */
+          `${opened.nominalBufferFrames} frame nominal buffer · ` +
           `maximum ${opened.maximumFrames} frames · ` +
           `${since(handle.startRequestedAt)} after Play`,
       );
