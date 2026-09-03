@@ -86,6 +86,18 @@ export interface PlaybackBackend {
    * without publishing the requested control as accepted. */
   readonly error: string | null
 
+  /**
+   * The singer's per-route latency correction, in seconds.
+   *
+   * The OS under-reports output latency on Bluetooth and CarPlay by 30-100 ms,
+   * which is why this trim exists at all. The legacy engine has always been
+   * given it folded into its display latency by the app shell; the native
+   * backend was given nothing, so on exactly the routes where the correction
+   * matters the lyric highlight ran early by whatever the singer had dialled
+   * in — the "highlighting moves slow" report.
+   */
+  setDisplayTrim(seconds: number): void
+
   attach(project: LoadedProject): void
   subscribe(listener: () => void): () => void
   getTrackStates(): TrackState[]
@@ -159,6 +171,10 @@ export class LegacyPlaybackBackend implements PlaybackBackend {
   get displayLatency(): number {
     return this.engine.displayLatency
   }
+  /** Already applied: the app shell folds route latency and this trim
+   *  together into the engine's own display latency. Taking it a second
+   *  time here would double the correction. */
+  setDisplayTrim(): void {}
   get countInStatus(): PlaybackCountInStatus | null {
     const status = this.engine.countInStatus
     return status === null ? null : { kind: 'beats', ...status }
@@ -296,6 +312,7 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   private masterRequest = 0
   private trainingRequest = 0
   private structuralChangesPending = 0
+  private displayTrimSec = 0
   private readonly listeners = new Set<() => void>()
   private readonly unsubscribeHandle: () => void
   /** Serialize compound/native commands so seek→loop cannot be interleaved. */
@@ -353,17 +370,58 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     const elapsed = Math.max(0, Math.min(0.4, (Date.now() - state.telemetryAtMs) / 1000))
     return Math.min(state.durationSec, sec + elapsed * (state.playbackRate ?? 1))
   }
-  get position(): number {
-    return this.projected(this.state().positionSec)
+  /**
+   * A trim can only ever ADD lag, never remove more than there is.
+   *
+   * The singer can dial the trim negative, and legacy floors the TOTAL at
+   * zero (route latency plus trim), so its highlight can at most track the
+   * render clock. Subtracting a raw negative trim here would push the
+   * highlight AHEAD of audio that has not been rendered yet — the same
+   * setting giving two answers on the two backends, which is the thing this
+   * work exists to stop.
+   */
+  private get effectiveTrimSec(): number {
+    return Math.max(this.displayTrimSec, -this.state().displayLatencySec)
   }
+  /**
+   * What the singer is hearing RIGHT NOW, corrected twice.
+   *
+   * The core already subtracts the presentation latency it can measure, which
+   * is what `positionSec` carries. The trim is the part it cannot measure —
+   * the OS's own figure is short on Bluetooth and CarPlay — so the true heard
+   * frame is earlier still by exactly the amount the singer dialled in.
+   */
+  get position(): number {
+    return Math.max(0, this.projected(this.state().positionSec) - this.effectiveTrimSec)
+  }
+  /**
+   * The RENDER clock, deliberately untrimmed.
+   *
+   * This is the base for relative seeks, loop marks and region arming, so a
+   * trim folded in here is subtracted again on every use: one skip forward
+   * and back would lose twice the trim, and it accumulates without bound.
+   * Legacy keeps the same split for the same reason — its `audioPosition`
+   * passes a lag of zero while `position` carries the full display lag.
+   */
   get audioPosition(): number {
     return this.projected(this.state().renderedPositionSec)
   }
   get duration(): number {
     return this.state().durationSec
   }
+  /** What the UI reports as the shift it is applying — both halves of it,
+   *  or the readout would contradict the correction it describes. */
   get displayLatency(): number {
-    return this.state().displayLatencySec
+    return this.state().displayLatencySec + this.effectiveTrimSec
+  }
+  setDisplayTrim(seconds: number): void {
+    const next = Number.isFinite(seconds) ? Math.max(-2, Math.min(2, seconds)) : 0
+    if (next === this.displayTrimSec) return
+    this.displayTrimSec = next
+    // The count-in dots are computed inside the handle, from the same
+    // audible frame, so it needs the trim too or the two disagree.
+    this.handle.setDisplayTrim(next)
+    this.emit()
   }
   get countInStatus(): PlaybackCountInStatus | null {
     return this.state().countInStatus

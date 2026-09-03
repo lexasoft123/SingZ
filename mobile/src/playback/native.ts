@@ -197,6 +197,16 @@ export interface NativePlaybackSessionStatus {
   readonly trainingLanes: readonly string[];
   readonly preRollFrames: number;
   readonly cueEventCount: number;
+  /** The prepared count-in's shape: how many beats it sounds and how many of
+   *  them fall in a bar. Both 0 when the plan schedules no count-in, and both
+   *  absent on a native build older than this one — which is why they are
+   *  read leniently rather than joining the strict key list. */
+  readonly countInEventCount: number;
+  readonly countInBeatsPerBar: number;
+  /** Empty for an ordinary open. Otherwise names the lane whose size sent
+   *  the whole decode down the one-at-a-time path — the only decline a
+   *  singer can feel and nothing else in the log would explain. */
+  readonly laneDecodeFallback: string;
   readonly graphNodeCount: number;
   readonly graphConnectionCount: number;
   readonly latencyCompensatedEdgeCount: number;
@@ -317,12 +327,29 @@ interface NativePlaybackBridgeApi {
     sound: 0 | 1,
   ): Promise<NativePlaybackResult>;
   stop(generation: number): Promise<NativePlaybackResult>;
+  /** The prepared generation's per-lane amplitude envelope. Off the status
+   *  poll on purpose: it cannot change while a generation is prepared, and
+   *  six lanes of 96 floats at the poll rate is a payload nobody reads twice.
+   *  A stale generation is refused rather than answered with an old one. */
+  lanePeaks(generation: number): Promise<unknown>;
   unload(generation: number): Promise<NativePlaybackUnloadResult>;
 }
 
 interface NativePlaybackApi
   extends Omit<NativePlaybackBridgeApi, 'status'> {
   status(): Promise<NativePlaybackCapability>;
+}
+
+/** One lane's drawable envelope: peak absolute sample per bucket, 0..1. */
+export interface NativePlaybackLanePeaks {
+  readonly id: string;
+  readonly peaksValid: boolean;
+  readonly peaks: readonly number[];
+}
+
+export interface NativePlaybackLanePeaksResult {
+  readonly bucketCount: number;
+  readonly lanes: readonly NativePlaybackLanePeaks[];
 }
 
 export interface NativePlaybackPreparePlayback {
@@ -504,9 +531,42 @@ const nativeModule = (): NativePlaybackApi | undefined => {
     setControl: (generation, control) => bridge.setControl(generation, control),
     previewClick: (generation, sound) => bridge.previewClick(generation, sound),
     stop: generation => bridge.stop(generation),
+    // Deliberately NOT in the guard above: a native build older than this
+    // one has no lanePeaks, and refusing the whole module over a drawable
+    // waveform would turn native playback off rather than draw a plain bar.
+    lanePeaks: generation =>
+      typeof bridge.lanePeaks === 'function'
+        ? bridge.lanePeaks(generation)
+        : Promise.resolve(null),
     unload: generation => bridge.unload(generation),
   };
 };
+
+/** Read a lane envelope the core published, or null if this build cannot
+ *  produce one. Every value is clamped: the seek bar must never be handed a
+ *  NaN, and a malformed payload is a plain bar rather than a crash. */
+export function parseNativePlaybackLanePeaks(
+  raw: unknown,
+): NativePlaybackLanePeaksResult | null {
+  const root = objectValue(raw);
+  if (!root || root.ok !== true || !Array.isArray(root.lanes)) return null;
+  const bucketCount = safeUnsigned(root.bucketCount) ?? 0;
+  if (bucketCount <= 0 || bucketCount > MAX_LANE_PEAK_BUCKETS) return null;
+  const lanes: NativePlaybackLanePeaks[] = [];
+  for (const entry of root.lanes) {
+    const lane = objectValue(entry);
+    if (!lane || typeof lane.id !== 'string' || !Array.isArray(lane.peaks))
+      return null;
+    if (lane.peaks.length !== bucketCount) return null;
+    const peaks: number[] = [];
+    for (const value of lane.peaks) {
+      const level = finiteNumber(value);
+      peaks.push(level === null ? 0 : Math.max(0, Math.min(1, level)));
+    }
+    lanes.push({ id: lane.id, peaksValid: lane.peaksValid === true, peaks });
+  }
+  return { bucketCount, lanes };
+}
 
 const emptyNativeSession = (): NativePlaybackSessionStatus => ({
   generation: 0,
@@ -553,6 +613,9 @@ const emptyNativeSession = (): NativePlaybackSessionStatus => ({
   trainingLanes: [],
   preRollFrames: 0,
   cueEventCount: 0,
+  countInEventCount: 0,
+  countInBeatsPerBar: 0,
+  laneDecodeFallback: '',
   graphNodeCount: 0,
   graphConnectionCount: 0,
   latencyCompensatedEdgeCount: 0,
@@ -626,6 +689,10 @@ const SEEK_RECEIPT_DEADLINE_MS = 250;
 /** One render block is what the receipt waits on, so ask about that often
  *  rather than as fast as the bridge will answer. */
 const SEEK_RECEIPT_POLL_MS = 15;
+
+/** The core pins 96. This only has to be small enough that spreading a
+ *  lane's buckets cannot overflow the stack if a bridge ever lies. */
+const MAX_LANE_PEAK_BUCKETS = 4096;
 
 const NATIVE_PLAYBACK_INTERFACE_VERSION = 3;
 const NATIVE_PLAYBACK_CONTRACT_VERSION = 2;
@@ -1109,6 +1176,15 @@ export function parseNativePlaybackCapability(
       trainingLanes,
       preRollFrames,
       cueEventCount: integers.cueEventCount,
+      // Lenient on purpose: an older native build does not send these, and
+      // rejecting the whole capability over a missing count-in shape would
+      // disable native playback rather than draw a plainer count-in.
+      countInEventCount: safeUnsigned(rawSession.countInEventCount) ?? 0,
+      countInBeatsPerBar: safeUnsigned(rawSession.countInBeatsPerBar) ?? 0,
+      laneDecodeFallback:
+        typeof rawSession.laneDecodeFallback === 'string'
+          ? rawSession.laneDecodeFallback
+          : '',
       graphNodeCount: integers.graphNodeCount,
       graphConnectionCount: integers.graphConnectionCount,
       latencyCompensatedEdgeCount: integers.latencyCompensatedEdgeCount,
@@ -1531,6 +1607,12 @@ export class IosNativePlaybackCoordinator {
         );
       return safe;
     });
+  }
+
+  /** One bridge read, so the handle need not hold the native module. */
+  readLanePeaks(generation: number): Promise<unknown> {
+    const native = this.deps.native;
+    return native ? native.lanePeaks(generation) : Promise.resolve(null);
   }
 
   /**
@@ -3005,6 +3087,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     { gain: number; muted: boolean; solo: boolean }
   >();
   private acceptedMasterGain = 1;
+  private displayTrimSec = 0;
+  private lanePeaksGeneration = 0;
+  private lanePeaksCache: NativePlaybackLanePeaksResult | null = null;
   private retryProjectSeconds: number | null = null;
   private recoverySnapshot: NativePlaybackRecoverySnapshot | null = null;
   private lastTelemetry: NativePlaybackSessionStatus | null = null;
@@ -3294,6 +3379,39 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     return durationSec > 0 && renderedPositionSec >= durationSec - 0.01;
   }
 
+  /**
+   * The prepared lanes' amplitude envelope, for the seek bar.
+   *
+   * Immutable for the generation, so it is read once and cached under it; a
+   * rebuild simply asks again. Failure is a null, never a throw — a song
+   * whose waveform cannot be drawn is still a song that plays.
+   */
+  async lanePeaks(): Promise<NativePlaybackLanePeaksResult | null> {
+    const generation = this.generation;
+    if (generation <= 0) return null;
+    if (this.lanePeaksGeneration === generation) return this.lanePeaksCache;
+    let parsed: NativePlaybackLanePeaksResult | null = null;
+    try {
+      parsed = parseNativePlaybackLanePeaks(
+        await this.coordinator.readLanePeaks(generation),
+      );
+    } catch {
+      parsed = null;
+    }
+    if (this.generation !== generation) return null;
+    this.lanePeaksGeneration = generation;
+    this.lanePeaksCache = parsed;
+    return parsed;
+  }
+
+  /** The singer's per-route correction, so the count-in dots and the lyric
+   *  sweep are drawn against the same instant. */
+  setDisplayTrim(seconds: number): void {
+    this.displayTrimSec = Number.isFinite(seconds)
+      ? Math.max(-2, Math.min(2, seconds))
+      : 0;
+  }
+
   /** The core's seek receipt counter, for a caller waiting on the next one. */
   seekCountNow(): number {
     return this.lastTelemetry?.seekCount ?? 0;
@@ -3437,21 +3555,49 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private countInProgress(
     session: NativePlaybackSessionStatus,
   ): PlaybackCountInStatus | null {
-    if (
-      session.transportState !== 'pre-roll' ||
-      session.remainingPreRollFrames <= 0
-    )
-      return null;
+    if (session.transportState !== 'pre-roll') return null;
     const sampleRate = session.sampleRate || this.sampleRate();
-    // The status exposes exact pre-roll time, but not the local meter or the
-    // remaining pre-roll cue boundaries. Preserve that truth: include output
-    // latency through the signed audible position, and never synthesize beat
-    // dots by evenly dividing the runway or applying a global beatsPerBar.
-    const remainingFrames = Math.max(
-      session.remainingPreRollFrames,
-      -session.audibleProjectFrame,
+    // Output latency through the signed audible position, plus the singer's
+    // own trim — the part the OS under-reports and therefore the part the
+    // core cannot know. The dots have to light on the same clock the lyrics
+    // sweep on, or the two disagree on the same screen.
+    // Floored exactly as the backend floors it for the lyric clock: a trim
+    // can only ever ADD lag. Taking a raw negative here would make the dots
+    // vanish before the song starts and read a beat early before they did —
+    // the same setting giving two answers, on one screen.
+    const trimFrames = Math.round(
+      Math.max(
+        this.displayTrimSec,
+        -session.presentationLatencyFrames / sampleRate,
+      ) * sampleRate,
     );
-    return { kind: 'time', remainingSeconds: remainingFrames / sampleRate };
+    const remainingFrames =
+      Math.max(session.remainingPreRollFrames, -session.audibleProjectFrame) +
+      trimFrames;
+    // Held to the AUDIBLE start, not the render one: exiting on the core's
+    // render-domain remaining takes the dots away a presentation latency
+    // plus a trim before the singer hears the song begin.
+    if (remainingFrames <= 0) return null;
+    const total = session.countInEventCount;
+    const perBar = session.countInBeatsPerBar;
+    const span = Math.abs(session.preRollFrames);
+    if (total > 0 && perBar > 0 && span > 0) {
+      // The core owns how many beats the count-in sounds and how they group;
+      // this only asks how far through the runway the ear has got. Dividing
+      // that runway evenly is what the LEGACY engine does for its own dots
+      // (its clicks land on real beat times, its progress does not), so the
+      // two backends agree by construction rather than by coincidence.
+      const elapsed = span - Math.max(0, remainingFrames);
+      const done = Math.max(
+        0,
+        Math.min(total, Math.floor((elapsed * total) / span) + 1),
+      );
+      return { kind: 'beats', total, done, perBar };
+    }
+    return {
+      kind: 'time',
+      remainingSeconds: Math.max(0, remainingFrames) / sampleRate,
+    };
   }
 
   noteTransportCommand(command: NativePlaybackTransportCommand): void {
@@ -4008,7 +4154,11 @@ function logDspGraphPrepared(
         result.maximumFrames
       } maximum frames · retained ${fmtBytes(session.retainedBytes)} (` +
       `graph arena ${fmtBytes(session.graphArenaBytes)})${duration} · ` +
-      `prepared in ${since(startedAt)}`,
+      `prepared in ${since(startedAt)}` +
+      // Right beside what the open cost, because it is the reason for it.
+      (session.laneDecodeFallback
+        ? ` · ${session.laneDecodeFallback}`
+        : ''),
   );
 }
 

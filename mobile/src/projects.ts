@@ -88,6 +88,28 @@ export interface ProjectEntry {
  * playable but metronome persistence fails closed until their catalog stamps
  * the explicit source/root identity.
  */
+/**
+ * Below this level a lane is silence, not audio.
+ *
+ * The desktop's audibleStems rule, and the reason a song with no guitar does
+ * not get a guitar row in the mixer. Legacy measures sampled RMS against it;
+ * the native player has no decoded audio in JS and measures the core's peak
+ * envelope against the same number, which hides strictly less because peak
+ * is never below RMS.
+ */
+export const SILENT_LANE_LEVEL = 0.004
+
+/**
+ * The only lanes the silence rule may hide.
+ *
+ * The splitter always returns six stems, and a song with no guitar gets a
+ * guitar lane of silence — but a vocals lane that happens to be silent is a
+ * song with no singing, which the singer still gets to see and unmute. The
+ * desktop's audibleStems rule is scoped this way and both phone backends
+ * follow it, or the same song shows different lanes on different devices.
+ */
+export const HIDEABLE_LANE_IDS: readonly string[] = ['guitar', 'piano']
+
 export function metronomeRefForEntry(
   entry: Pick<ProjectEntry, 'dir' | 'metronomeRef' | 'source'>
 ): MetronomeProjectRef {
@@ -251,6 +273,21 @@ export interface NativePlaybackHandle {
   readonly mixerControls: true
   snapshot(): NativePlaybackViewState
   subscribe(listener: () => void): () => void
+  /** The singer's per-route latency correction, in seconds. The count-in
+   * dots are derived from the same audible frame the lyric sweep uses, and
+   * that frame carries only the latency the OS reports — which is short on
+   * Bluetooth and CarPlay by exactly the amount this trim exists to add. */
+  setDisplayTrim(seconds: number): void
+  /** Per-lane amplitude envelope for the seek bar, or null when this build
+   * cannot produce one. Cached under the prepared generation by the owner. */
+  lanePeaks(): Promise<{
+    readonly bucketCount: number
+    readonly lanes: readonly {
+      readonly id: string
+      readonly peaksValid: boolean
+      readonly peaks: readonly number[]
+    }[]
+  } | null>
   start(): Promise<NativePlaybackStartOutcome>
   pause(): Promise<void>
   seek(seconds: number): Promise<void>
@@ -478,12 +515,12 @@ export async function loadProject(
     if (projected > MAX_DECODED_BYTES) tooBig(projected)
   }
   // Guitar/piano lanes only appear when the song actually has them — the
-  // desktop's audibleStems rule (sampled RMS < 0.004), ported so a
+  // desktop's audibleStems rule (sampled RMS < SILENT_LANE_LEVEL), ported so a
   // phone-split six-stem project shows the same lanes the desktop would.
   // Dropped buffers are released on the spot: the GC-is-too-late rule.
   for (let i = stems.length - 1; i >= 0; i--) {
     const lane = stems[i]
-    if (lane.id !== 'guitar' && lane.id !== 'piano') continue
+    if (!HIDEABLE_LANE_IDS.includes(lane.id)) continue
     const data = lane.buffer.getChannelData(0)
     let energy = 0
     let n = 0
@@ -492,7 +529,7 @@ export async function loadProject(
       energy += data[j] * data[j]
       n++
     }
-    if (Math.sqrt(energy / Math.max(1, n)) < 0.004) {
+    if (Math.sqrt(energy / Math.max(1, n)) < SILENT_LANE_LEVEL) {
       log('song', `${lane.id} lane is silent — hidden`)
       releaseStems([lane])
       stems.splice(i, 1)

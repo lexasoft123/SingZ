@@ -39,6 +39,8 @@ function nativeProject(): { project: LoadedProject; handle: NativePlaybackHandle
     transportControls: true,
     mixerControls: true,
     snapshot: () => state,
+    setDisplayTrim: jest.fn(),
+    lanePeaks: jest.fn(async () => null),
     subscribe: () => () => undefined,
     start: jest.fn(async () => ({ kind: 'started' as const })),
     pause: jest.fn(async () => undefined),

@@ -122,6 +122,8 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
     transportControls: true,
     mixerControls: true,
     snapshot: () => state,
+    setDisplayTrim: jest.fn(),
+    lanePeaks: jest.fn(async () => null),
     subscribe: listener => {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -271,6 +273,94 @@ describe('legacy facade delegation', () => {
     expect(h.engine.setTraining).toHaveBeenCalledWith(training)
     expect(h.engine.previewClick).toHaveBeenCalledWith(true)
     expect(h.engine.pause).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('the singer\'s latency trim', () => {
+  it('shifts the native clock by the correction the OS cannot measure', () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    h.publish({
+      phase: 'paused',
+      positionSec: 10,
+      renderedPositionSec: 10.2,
+      displayLatencySec: 0.02
+    })
+
+    expect(h.backend.position).toBeCloseTo(10, 5)
+    expect(h.backend.displayLatency).toBeCloseTo(0.02, 5)
+
+    // 80 ms dialled in for a CarPlay head unit whose reported latency is
+    // short. What is heard now was rendered 80 ms earlier still, so the
+    // highlight has to move back by exactly that much — and the readout
+    // that tells the singer how far it shifted has to agree.
+    h.backend.setDisplayTrim(0.08)
+
+    expect(h.backend.position).toBeCloseTo(9.92, 5)
+    expect(h.backend.displayLatency).toBeCloseTo(0.1, 5)
+    // The RENDER clock must not move. It is the base for relative seeks and
+    // loop marks, so a trim folded in here is subtracted again on every use:
+    // one skip forward and back would lose twice the trim, for ever.
+    expect(h.backend.audioPosition).toBeCloseTo(10.2, 5)
+  })
+
+  it('does not lose the trim on every skip, forwards and back', async () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    // Mid-song in the fixture, which runs to 12 s — past its end both seeks
+    // would clamp and the drift this pins would be invisible.
+    h.publish({ phase: 'paused', positionSec: 6, renderedPositionSec: 6, durationSec: 12 })
+    h.backend.setDisplayTrim(0.08)
+
+    h.backend.seekBy(2)
+    await flushTransportQueue()
+    h.publish({ positionSec: 8, renderedPositionSec: 8 })
+    h.backend.seekBy(-2)
+    await flushTransportQueue()
+
+    // A relative seek is measured from the RENDER head. Trimming that head
+    // subtracts the correction again on every press, so working a phrase
+    // with the skip buttons would walk the song away under the singer.
+    expect(h.handle.seek).toHaveBeenNthCalledWith(1, 8)
+    expect(h.handle.seek).toHaveBeenNthCalledWith(2, 6)
+  })
+
+  it('cannot let the highlight run ahead of the audio, however far it is dialled back', () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    h.publish({ phase: 'paused', positionSec: 10, renderedPositionSec: 10.02, displayLatencySec: 0.02 })
+
+    // The singer can step the trim negative, and legacy floors the TOTAL
+    // shift at zero, so its highlight can at most track the render clock.
+    // Subtracting a raw negative here would put the highlight ahead of audio
+    // that has not been rendered — the same setting, two different answers.
+    h.backend.setDisplayTrim(-0.5)
+
+    expect(h.backend.displayLatency).toBe(0)
+    expect(h.backend.position).toBeCloseTo(h.backend.audioPosition, 5)
+  })
+
+  it('never reports a negative position at the very start of a song', () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    h.publish({ phase: 'paused', positionSec: 0.01, renderedPositionSec: 0.01 })
+
+    h.backend.setDisplayTrim(0.5)
+
+    expect(h.backend.position).toBe(0)
+    expect(h.backend.audioPosition).toBeCloseTo(0.01, 5)
+  })
+
+  it('is already folded in on the legacy side, so taking it twice is refused', () => {
+    const h = legacyHarness()
+    h.backend.attach(h.project)
+    const before = h.backend.displayLatency
+
+    h.backend.setDisplayTrim(0.08)
+
+    // The app shell gives the legacy engine route latency and trim together.
+    // A second application here would double the singer's own correction.
+    expect(h.backend.displayLatency).toBe(before)
   })
 })
 

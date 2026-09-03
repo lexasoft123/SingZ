@@ -108,10 +108,16 @@ function nativePlayerHarness(): {
   })
   const handle: NativePlaybackHandle = {
     kind: 'ios-native',
-    lanes: [{ id: 'vocals', label: 'Vocals', color: '#e64b3c', custom: false, totalFrames: 576_000 }],
+    lanes: [
+      { id: 'vocals', label: 'Vocals', color: '#e64b3c', custom: false, totalFrames: 576_000 },
+      { id: 'guitar', label: 'Guitar', color: '#8ab4f8', custom: false, totalFrames: 576_000 },
+      { id: 'custom-harmony', label: 'Harmony', color: '#7bd88f', custom: true, totalFrames: 576_000 }
+    ],
     transportControls: true,
     mixerControls: true,
     snapshot: () => state,
+    setDisplayTrim: jest.fn(),
+    lanePeaks: jest.fn(async () => null),
     subscribe: listener => {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -208,6 +214,90 @@ test('ordinary PlayerScreen serializes and reconciles the native A-B three-state
     await clear
   })
   expect(test.loopMarks).toEqual({ a: null, b: null })
+
+  await ReactTestRenderer.act(async () => {
+    tree.unmount()
+  })
+})
+
+/**
+ * The two product wirings this screen owns. Both were added with the backend
+ * halves fully covered and the SCREEN halves covered by nothing: deleting
+ * either effect left every suite green, because every harness stubs the
+ * seams and passes a zero trim. These are the actual fixes a singer sees.
+ */
+test('hands the singer\'s latency trim to the native backend', async () => {
+  const h = nativePlayerHarness()
+  const legacy = {} as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(
+      <View>
+        <PlayerScreen
+          active
+          engine={legacy}
+          project={h.project}
+          route={null}
+          trimMs={80}
+          onTrim={jest.fn()}
+          onBack={jest.fn()}
+        />
+      </View>
+    )
+    await Promise.resolve()
+  })
+
+  // 80 ms dialled in for a CarPlay head unit. Without this the native
+  // highlight runs early by exactly that much — "highlighting moves slow".
+  expect(h.project.nativePlayback!.setDisplayTrim).toHaveBeenCalledWith(0.08)
+
+  await ReactTestRenderer.act(async () => {
+    tree.unmount()
+  })
+})
+
+test('does not draw a mixer row for a lane the core reports silent', async () => {
+  const h = nativePlayerHarness()
+  ;(h.project.nativePlayback!.lanePeaks as jest.Mock).mockResolvedValue({
+    bucketCount: 2,
+    lanes: [
+      // Silent, but NOT a lane the rule may hide: an instrumental has no
+      // singing, and the singer still gets to see and unmute that fader.
+      { id: 'vocals', peaksValid: true, peaks: [0, 0] },
+      // A song with no guitar still gets a guitar stem from the splitter.
+      { id: 'guitar', peaksValid: true, peaks: [0, 0.0001] },
+      // A track the singer added themselves is never hidden either.
+      { id: 'custom-harmony', peaksValid: true, peaks: [0, 0] }
+    ]
+  })
+  const legacy = {} as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(
+      <View>
+        <PlayerScreen
+          active
+          engine={legacy}
+          project={h.project}
+          route={null}
+          trimMs={0}
+          onTrim={jest.fn()}
+          onBack={jest.fn()}
+        />
+      </View>
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+
+  const test = (globalThis as Record<string, any>).__test
+  // One answer drives the count, the rows and the pills: a header reading
+  // "1 stem" over two faders is worse than either alone.
+  expect(test.lanes().map((lane: { id: string }) => lane.id)).toEqual([
+    'vocals',
+    'custom-harmony'
+  ])
+  expect(test.stems).toEqual({ total: 2, added: 1, originalOnly: false })
 
   await ReactTestRenderer.act(async () => {
     tree.unmount()

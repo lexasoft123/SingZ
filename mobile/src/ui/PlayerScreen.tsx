@@ -45,7 +45,13 @@ import {
   type MetronomeConfig,
   type TrainingConfig
 } from '../model'
-import { readProjectText, type LoadedProject, type PlaybackCountInStatus } from '../projects'
+import {
+  readProjectText,
+  HIDEABLE_LANE_IDS,
+  SILENT_LANE_LEVEL,
+  type LoadedProject,
+  type PlaybackCountInStatus
+} from '../projects'
 import type { ProjectDoc } from '../model'
 import {
   b,
@@ -188,7 +194,7 @@ export default function PlayerScreen({
     },
     [onFallback]
   )
-  const [tracks, setTracks] = useState<TrackState[]>([])
+  const [allTracks, setTracks] = useState<TrackState[]>([])
   /** The fader being dragged right now, for the value bubble — set on every
    *  move, cleared on commit (Bar fires commit on release AND on the
    *  scroller stealing an engaged drag, so the bubble cannot strand). */
@@ -574,13 +580,39 @@ export default function PlayerScreen({
     })
     return () => lyricFrame.setActive(false)
   }, [active, engine, lastTs, lyricFrame, pendingMs, pushPos, sinceSample])
-  const stemIds = useMemo(
+  /**
+   * Lanes the core's envelope shows to be silent.
+   *
+   * Legacy hides a stem whose RMS is under SILENT_LANE_LEVEL — a song with
+   * no guitar gets a guitar stem anyway, and a mixer row for silence is
+   * noise. Native decodes nothing in JS, so the same question is asked of
+   * the envelope, against the same constant but on the PEAK, and over the
+   * same lanes: peak is never below RMS and the id set is identical, so this
+   * hides a strict subset. A lane one backend shows and the other does not
+   * is always shown, never lost.
+   */
+  const [nativeSilent, setNativeSilent] = useState<readonly string[]>([])
+  /** What the singer is shown. `allTracks` is what the backend owns; a lane
+   *  the core's envelope proves silent is not a row, a fader or a pill —
+   *  the same lane legacy never builds in the first place. */
+  const tracks = useMemo(
+    () => (nativeSilent.length === 0
+      ? allTracks
+      : allTracks.filter(t => !nativeSilent.includes(t.id))),
+    [allTracks, nativeSilent]
+  )
+  /** The one filtered list. Everything the singer is shown counts from it,
+   *  so the header cannot disagree with the rows beside it. */
+  const visibleLanes = useMemo(
     () =>
       project.stems.length > 0
-        ? project.stems.map(st => st.id)
-        : (project.nativePlayback?.lanes.map(lane => lane.id) ?? []),
-    [project]
+        ? project.stems.map(st => ({ id: st.id, custom: st.custom === true }))
+        : (project.nativePlayback?.lanes
+            .filter(lane => !nativeSilent.includes(lane.id))
+            .map(lane => ({ id: lane.id, custom: lane.custom === true })) ?? []),
+    [project, nativeSilent]
   )
+  const stemIds = useMemo(() => visibleLanes.map(lane => lane.id), [visibleLanes])
   /* Live window size for the tint washes — Android rotates and split-screens
      and the iPad target allows all four orientations, so a module-load
      capture would strand portrait extents on a landscape canvas. Still
@@ -625,8 +657,61 @@ export default function PlayerScreen({
   useEffect(() => {
     let cancelled = false
     setWave(null)
+    setNativeSilent([])
     const stems = project.stems
-    if (stems.length === 0) return
+    if (stems.length === 0) {
+      // Native playback never decodes in JS, so there are no buffers to
+      // scan. The core summarised the same audio while it decoded, once per
+      // prepared generation; ask it rather than leaving the rail blank.
+      const native = project.nativePlayback
+      if (!native) return
+      void native
+        .lanePeaks()
+        .then(envelope => {
+          if (cancelled || !envelope || envelope.lanes.length === 0) return
+          setNativeSilent(
+            envelope.lanes
+              .filter(
+                lane =>
+                  HIDEABLE_LANE_IDS.includes(lane.id) &&
+                  lane.peaksValid &&
+                  Math.max(...lane.peaks) < SILENT_LANE_LEVEL
+              )
+              .map(lane => lane.id)
+          )
+          const buckets = envelope.bucketCount
+          const raw: { level: number; color: string }[] = []
+          for (let i = 0; i < buckets; i++) {
+            let total = 0
+            let loudest = 0
+            let color: string = C.dim
+            for (const lane of envelope.lanes) {
+              if (!lane.peaksValid) continue
+              const level = lane.peaks[i] ?? 0
+              total += level * level
+              if (level > loudest) {
+                loudest = level
+                color = laneMeta[lane.id]?.color ?? C.dim
+              }
+            }
+            raw.push({ level: Math.sqrt(total), color })
+          }
+          const peak = Math.max(0.0001, ...raw.map(r => r.level))
+          setWave(
+            raw.map(r => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color }))
+          )
+        })
+        .catch(() => {
+          // A song whose waveform cannot be drawn is still a song that plays.
+        })
+      // Register the cleanup rather than returning past it: the project can
+      // be replaced in place under a mounted screen (the native pre-start
+      // fallback does exactly that), and without this the `cancelled` check
+      // above is dead and a late envelope repopulates what the re-run cleared.
+      return () => {
+        cancelled = true
+      }
+    }
     const N = 96
     const WIN = 2048
     const t = setTimeout(() => {
@@ -702,14 +787,17 @@ export default function PlayerScreen({
   )
 
   // The pre-split original lane is the app's, not the singer's: counting it
-  // made an unsplit song read "0 stems · 1 added".
+  // made an unsplit song read "0 stems · 1 added". Under native playback
+  // there are no JS stems to ask, so the same question goes to the lanes the
+  // core prepared — otherwise a six-stem song with one added track reads
+  // "7 stems" where legacy reads "6 stems · 1 added".
   const addedCount = useMemo(
-    () => project.stems.filter((st) => st.custom && st.id !== ORIGINAL_LANE_ID).length,
-    [project]
+    () => visibleLanes.filter(lane => lane.custom && lane.id !== ORIGINAL_LANE_ID).length,
+    [visibleLanes]
   )
   const originalOnly = useMemo(
-    () => project.stems.every((st) => st.custom) && project.stems.length > 0,
-    [project]
+    () => visibleLanes.every(lane => lane.custom) && visibleLanes.length > 0,
+    [visibleLanes]
   )
 
   /* Feed the engine + apply the project's saved settings. */
@@ -779,6 +867,15 @@ export default function PlayerScreen({
     }, 100)
     return () => clearInterval(t)
   }, [active, engine, playing, pushPos])
+
+  /* The singer's own latency correction. The app shell folds it into the
+   * legacy engine's display latency, but the native backend never saw it, so
+   * on the routes the trim exists FOR — Bluetooth and CarPlay, where the OS
+   * under-reports by 30-100 ms — the highlight ran early by whatever had
+   * been dialled in. */
+  useEffect(() => {
+    engine.setDisplayTrim(trimMs / 1000)
+  }, [engine, trimMs])
 
   /* Beat track + metronome prefs -> engine. */
   useEffect(() => {
@@ -1096,6 +1193,12 @@ export default function PlayerScreen({
     TEST.keyTempo = { pitch: ktPitch, tempo: ktTempo }
     /* What the count-in row actually shows: `beatDots` false means the
        singer sees "2.4s" where the dots belong. */
+    /** What the header says, which nothing else in the suite can read. */
+    TEST.stems = {
+      total: stemIds.length,
+      added: addedCount,
+      originalOnly
+    }
     TEST.countIn = countInDisplay === null
       ? null
       : { ...countInDisplay, kind: countInSt?.kind ?? null }

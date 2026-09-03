@@ -7,6 +7,8 @@ import {
   IosNativePlaybackCoordinator,
   NativePlaybackCommandError,
   nativePlaybackEligibility,
+  parseNativePlaybackCapability,
+  parseNativePlaybackLanePeaks,
   rebuildIosNativePlaybackCues,
   rebuildNativePlaybackCues,
   type NativePlaybackCapability,
@@ -166,6 +168,9 @@ const capability = (
     remainingPreRollFrames: 0,
     cueEventsCompleted: 0,
     nextCueEventIndex: 0,
+    countInEventCount: 0,
+    countInBeatsPerBar: 0,
+    laneDecodeFallback: '',
     loopEnabled: false,
     loopStartFrame: 0,
     loopEndFrame: 0,
@@ -307,6 +312,20 @@ function harness(
     previewClick: jest.fn(async (next: number, sound: 0 | 1) => {
       calls.push(`native.preview:${next}:${sound === 1 ? 'accent' : 'ordinary'}`);
       return result(next, state);
+    }),
+    lanePeaks: jest.fn(async (next: number) => {
+      calls.push(`native.lanePeaks:${next}`);
+      return {
+        ok: true,
+        error: 'none',
+        generation: next,
+        bucketCount: 2,
+        lanes: [
+          { id: 'vocals', peaksValid: true, peaks: [0.5, 1] },
+          { id: 'drums', peaksValid: true, peaks: [1, 0.25] },
+        ],
+        message: '',
+      };
     }),
     stop: jest.fn(async (next: number) => {
       calls.push(`native.stop:${next}`);
@@ -2009,6 +2028,185 @@ describe('iOS Phase 4B structural cue rebuild', () => {
   });
 });
 
+describe('a slow open explains itself', () => {
+  it('prints why the lanes were decoded one at a time, beside what it cost', async () => {
+    const lines: string[] = [];
+    const unsubscribe = onLogLine(entry => {
+      if (entry.source === 'dsp') lines.push(entry.line);
+    });
+    try {
+      const h = harness();
+      const reason =
+        "lane 'custom-guitar' did not fit its 178257920-byte share of the " +
+        'decode budget; lanes were decoded one at a time';
+      const lifecycle = h.native.status.getMockImplementation()!;
+      h.native.status.mockImplementation(async () => {
+        const base = await lifecycle();
+        return {
+          ...base,
+          session: { ...base.session, laneDecodeFallback: reason },
+        };
+      });
+
+      await h.load();
+
+      // A singer's own long custom track can trigger this, and without the
+      // reason the only evidence is an open that took twice as long as the
+      // last one for no visible cause.
+      const ready = lines.find(line => line.startsWith('graph ready'))!;
+      expect(ready).toContain(reason);
+      expect(ready).toMatch(/prepared in/);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('says nothing at all about an ordinary open', async () => {
+    const lines: string[] = [];
+    const unsubscribe = onLogLine(entry => {
+      if (entry.source === 'dsp') lines.push(entry.line);
+    });
+    try {
+      const h = harness();
+      await h.load();
+
+      const ready = lines.find(line => line.startsWith('graph ready'))!;
+      expect(ready).toMatch(/prepared in/);
+      expect(ready).not.toMatch(/decoded one at a time|did not fit/);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
+describe("the seek bar's waveform", () => {
+  it('is read once per prepared generation and cached under it', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    const generation = handle.snapshot().generation;
+    h.calls.length = 0;
+
+    const first = await handle.lanePeaks();
+    const second = await handle.lanePeaks();
+
+    // Immutable while a generation is prepared, so a second read is free.
+    // This is why it is off the 200 ms status poll at all.
+    expect(h.calls).toEqual([`native.lanePeaks:${generation}`]);
+    expect(first).toEqual(second);
+    expect(first?.bucketCount).toBe(2);
+    expect(first?.lanes.map(lane => lane.id)).toEqual(['vocals', 'drums']);
+  });
+
+  it('draws nothing rather than throwing when the envelope is malformed', () => {
+    const good = {
+      ok: true,
+      bucketCount: 2,
+      lanes: [{ id: 'vocals', peaksValid: true, peaks: [0.5, 1] }],
+    };
+    expect(parseNativePlaybackLanePeaks(good)).toMatchObject({
+      bucketCount: 2,
+    });
+
+    // A seek bar handed a NaN draws nothing at all, so every one of these
+    // has to end as a plain bar rather than as an exception on a screen.
+    expect(parseNativePlaybackLanePeaks(null)).toBeNull();
+    expect(parseNativePlaybackLanePeaks({ ...good, ok: false })).toBeNull();
+    expect(parseNativePlaybackLanePeaks({ ...good, bucketCount: 0 })).toBeNull();
+    // Both consumers SPREAD these arrays, so an absurd count is not a
+    // plain bar, it is a stack overflow on a screen. The payload has to be
+    // internally consistent or the length check refuses it first and the
+    // bound is never asked.
+    expect(
+      parseNativePlaybackLanePeaks({
+        ...good,
+        bucketCount: 500_000,
+        lanes: [
+          {
+            id: 'vocals',
+            peaksValid: true,
+            peaks: new Array(500_000).fill(0.5),
+          },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      parseNativePlaybackLanePeaks({
+        ...good,
+        lanes: [{ id: 'vocals', peaksValid: true, peaks: [0.5] }],
+      }),
+    ).toBeNull();
+    expect(
+      parseNativePlaybackLanePeaks({
+        ...good,
+        lanes: [{ id: 'vocals', peaksValid: true, peaks: [Number.NaN, 2] }],
+      })?.lanes[0].peaks,
+    ).toEqual([0, 1]);
+  });
+});
+
+describe('reading a native status across build versions', () => {
+  it('carries the count-in meter through the strict parser', () => {
+    const raw = capability(3, 'running', 0, 'ios');
+    const parsed = parseNativePlaybackCapability(
+      {
+        ...raw,
+        session: {
+          ...raw.session,
+          countInEventCount: 4,
+          countInBeatsPerBar: 4,
+        },
+      },
+      'ios',
+    );
+
+    expect(parsed.available).toBe(true);
+    expect(parsed.session.countInEventCount).toBe(4);
+    expect(parsed.session.countInBeatsPerBar).toBe(4);
+  });
+
+  it('carries the decode-fallback reason through the strict parser', () => {
+    const raw = capability(3, 'running', 0, 'ios');
+    const reason = "lane 'custom-guitar' did not fit its share";
+    const parsed = parseNativePlaybackCapability(
+      { ...raw, session: { ...raw.session, laneDecodeFallback: reason } },
+      'ios',
+    );
+
+    expect(parsed.session.laneDecodeFallback).toBe(reason);
+
+    // Absent on an older native build, and a non-string is not a reason.
+    const older = { ...raw.session } as Record<string, unknown>;
+    delete older.laneDecodeFallback;
+    expect(
+      parseNativePlaybackCapability({ ...raw, session: older }, 'ios').session
+        .laneDecodeFallback,
+    ).toBe('');
+    expect(
+      parseNativePlaybackCapability(
+        { ...raw, session: { ...raw.session, laneDecodeFallback: 7 } },
+        'ios',
+      ).session.laneDecodeFallback,
+    ).toBe('');
+  });
+
+  it('still runs against a native build that predates the count-in fields', () => {
+    const raw = capability(3, 'running', 0, 'ios');
+    const session = { ...raw.session } as Record<string, unknown>;
+    delete session.countInEventCount;
+    delete session.countInBeatsPerBar;
+
+    const parsed = parseNativePlaybackCapability({ ...raw, session }, 'ios');
+
+    // Refusing the whole capability over a missing count-in shape would turn
+    // native playback off on an older app rather than draw a plainer
+    // count-in, which is why these two are read leniently.
+    expect(parsed.available).toBe(true);
+    expect(parsed.session.countInEventCount).toBe(0);
+    expect(parsed.session.countInBeatsPerBar).toBe(0);
+  });
+});
+
 describe('mobile native eligibility', () => {
   it('is opt-in, exact-platform and full-matrix capable across stems and added lanes', () => {
     const cap = capability();
@@ -2686,6 +2884,116 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     await handle.start();
 
     expect(h.calls[0]).toBe(`native.transport:${generation}:seek`);
+  });
+
+  it('counts the singer in with beat dots, not a bare countdown', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    // One bar of four at 120 bpm: a two-second runway, four beats.
+    const preRoll = 96_000;
+    const countIn = (audibleFrame: number) => {
+      const base = capability(generation, 'running', 0, 'ios');
+      return {
+        ...base,
+        session: {
+          ...base.session,
+          transportState: 'pre-roll',
+          preRollFrames: preRoll,
+          remainingPreRollFrames: Math.max(0, -audibleFrame),
+          audibleProjectFrame: audibleFrame,
+          renderedProjectFrame: audibleFrame,
+          countInEventCount: 4,
+          countInBeatsPerBar: 4,
+        },
+      } as never;
+    };
+
+    // Just started: the first beat has sounded, three to go.
+    h.native.status.mockImplementation(async () => countIn(-preRoll));
+    await h.coordinator.pollHandle(handle as never);
+    expect(handle.snapshot().countInStatus).toEqual({
+      kind: 'beats',
+      total: 4,
+      done: 1,
+      perBar: 4,
+    });
+
+    // Three quarters through the runway: three beats heard.
+    h.native.status.mockImplementation(async () => countIn(-preRoll / 4));
+    await h.coordinator.pollHandle(handle as never);
+    expect(handle.snapshot().countInStatus).toMatchObject({ done: 4 });
+
+    // The dots survive to the audible start: the core's render-domain
+    // remaining hits zero a presentation latency before the ear does, and
+    // taking them away then is a count-in that stops short.
+    h.native.status.mockImplementation(async () => {
+      const status = countIn(-2_400) as unknown as {
+        session: Record<string, unknown>;
+      };
+      status.session.remainingPreRollFrames = 0;
+      return status as never;
+    });
+    await h.coordinator.pollHandle(handle as never);
+    expect(handle.snapshot().countInStatus).toMatchObject({ kind: 'beats' });
+    h.native.status.mockImplementation(async () => countIn(-preRoll / 4));
+    await h.coordinator.pollHandle(handle as never);
+
+    // The display is what the singer actually reads.
+    expect(
+      playbackCountInDisplay(handle.snapshot().countInStatus!),
+    ).toMatchObject({ beatDots: true });
+
+    // A CarPlay trim means the ear is further behind than the core knows, so
+    // fewer beats have been HEARD than rendered. Half the runway of trim
+    // walks the count back by two of the four beats.
+    handle.setDisplayTrim(1);
+    await h.coordinator.pollHandle(handle as never);
+    expect(handle.snapshot().countInStatus).toMatchObject({ done: 2 });
+
+    // A trim dialled NEGATIVE can only ever remove the latency there is, the
+    // same floor the lyric clock uses. Taking it raw made the dots vanish up
+    // to two seconds before the song began and read a beat early first.
+    handle.setDisplayTrim(-2);
+    await h.coordinator.pollHandle(handle as never);
+    expect(handle.snapshot().countInStatus).toMatchObject({
+      kind: 'beats',
+      total: 4,
+    });
+  });
+
+  it('falls back to a countdown when the core cannot state the meter', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    // A native build older than the count-in fields sends neither, and a
+    // gridless count-in has no bar to group by. Both must still count in.
+    h.native.status.mockImplementation(async () => {
+      const base = capability(generation, 'running', 0, 'ios');
+      return {
+        ...base,
+        session: {
+          ...base.session,
+          transportState: 'pre-roll',
+          preRollFrames: 96_000,
+          remainingPreRollFrames: 48_000,
+          audibleProjectFrame: -48_000,
+          countInEventCount: 0,
+          countInBeatsPerBar: 0,
+        },
+      } as never;
+    });
+
+    await h.coordinator.pollHandle(handle as never);
+
+    expect(handle.snapshot().countInStatus).toEqual({
+      kind: 'time',
+      remainingSeconds: 1,
+    });
   });
 
   it('a graph that never rendered is discarded, not "stopped"', async () => {
