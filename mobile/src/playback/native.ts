@@ -122,6 +122,52 @@ export class NativePlaybackCommandError extends Error {
   }
 }
 
+/**
+ * How often the native transport is asked where it is.
+ *
+ * Every tick marshals the WHOLE session status across the RN bridge — 85
+ * fields plus a lane array — and parses and validates it in Hermes, to obtain
+ * a position legacy reads in-process. Profiled on an Android emulator during
+ * ordinary playback (simpleperf, `-e cpu-clock`; the emulator has no PMU), JS
+ * was 1.93x legacy's while the native audio engine itself measured 2.5x
+ * CHEAPER than legacy's — so the cost of native playback is telemetry, not
+ * DSP. Dropping the rate 5x cut TOTAL process CPU by 30%.
+ *
+ * The seek bar and lyric sweep do NOT step at this rate: `projected()` in
+ * backend.ts advances the last published position by wall time between ticks.
+ * That projection is deliberately bounded to TWO missed polls, so a stalled
+ * poll cannot run the clock ahead — which is why the bound is derived from
+ * this constant rather than written down twice. Raise this and the sweep
+ * stays smooth; raise it far and end-of-song, route and focus changes are
+ * noticed later, which is the real ceiling.
+ */
+export const NATIVE_TELEMETRY_POLL_MS = 400;
+
+/**
+ * Pre-roll keeps the old rate, and this is not a hedge.
+ *
+ * The count-in DOTS are the one telemetry display projection cannot smooth:
+ * `countInStatus` only ever takes a non-null value on a telemetry read, and
+ * during pre-roll
+ * `advancing` is false — `transportState` is 'pre-roll', not 'playing' — so
+ * `projected()` deliberately refuses to advance it. The dots therefore sample
+ * the count-in on the POLL GRID rather than a clock. At 400 ms and 180 bpm a
+ * two-bar count-in spans 2667 ms and the polls land on 0/400/…/2400, which
+ * lights dots 1,2,3,4,5,7,8 — the sixth never appears at all — while any
+ * tempo puts a dot up to a whole beat late. Legacy computes the same dots
+ * live from ctx.currentTime, so a slow poll here is also one setting giving
+ * two answers on one screen.
+ *
+ * A count-in is at most a couple of bars, so paying the old rate through it
+ * costs nothing that matters and leaves the steady-state win untouched.
+ */
+export const NATIVE_PRE_ROLL_POLL_MS = 200;
+
+/** The projection bound: two missed polls, in seconds. Derived from the
+ *  SLOWER of the two rates, because it has to cover the widest gap. */
+export const NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC =
+  (2 * NATIVE_TELEMETRY_POLL_MS) / 1000;
+
 export interface NativePlaybackCleanup {
   readonly safety: string;
   readonly error: string;
@@ -3302,6 +3348,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   lanes: NativePlaybackLaneView[] = [];
   polling = false;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private pollIntervalArmedMs = NATIVE_TELEMETRY_POLL_MS;
   private firstAudibleLogged = false;
   private steadyRenderLogged = false;
   private operationEpoch = 0;
@@ -3591,7 +3638,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   /**
    * True once per generation, on the first Completed poll: the end-of-song
-   * park is issued once, not on every 200 ms tick for the rest of the song's
+   * park is issued once, not on every telemetry tick for the rest of the song's
    * life on screen.
    */
   beginEndOfSongPark(): boolean {
@@ -4012,10 +4059,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     // Leaving the mark set would make the next Play throw their scrub away
     // and start from the top — the very thing this contract exists to stop.
     this.clearEndOfSongPark();
-    // The next poll is up to 200 ms away, and until it lands the screen
-    // would keep showing — and projecting forward — the position the seek
-    // just left: a scrub that visibly bounces back before it settles. Adopt
-    // the accepted target now; telemetry corrects it within one period.
+    // The next poll is up to NATIVE_TELEMETRY_POLL_MS away, and until it
+    // lands the screen would keep showing — and projecting forward — the
+    // position the seek just left: a scrub that visibly bounces back before
+    // it settles. Adopt the accepted target now; telemetry corrects it within
+    // one period.
     const positionSec = projectFrame / this.sampleRate();
     this.update({
       positionSec,
@@ -4248,7 +4296,40 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   startPolling(): void {
     this.stopPolling();
     void this.coordinator.pollHandle(this);
-    this.timer = setInterval(() => void this.coordinator.pollHandle(this), 200);
+    /* Arm FAST and let the first tick relax it, rather than reading the phase
+       now. On the fresh-start path the phase cannot answer yet: beginPrepare
+       has nulled countInStatus, and while publishPrepared does recompute it
+       before this runs, countInProgress returns null unless transportState is
+       already 'pre-roll' — so asking here arms a count-in at the slow rate
+       for its first tick. On the REBUILD
+       path it can — rebuildHandleCues never calls beginPrepare, so a pitch
+       change made during a count-in arrives with the previous session's
+       status still set — and fast is right there too. The cost of being wrong
+       the new way is one extra poll on a start with no count-in; the cost of
+       being wrong the old way is a dropped dot. */
+    this.armPoll(NATIVE_PRE_ROLL_POLL_MS);
+  }
+
+  /** The count-in is sampled on this grid rather than projected, so pre-roll
+   *  pays the fast rate. See NATIVE_PRE_ROLL_POLL_MS. */
+  private pollIntervalMs(): number {
+    return this.state.countInStatus !== null
+      ? NATIVE_PRE_ROLL_POLL_MS
+      : NATIVE_TELEMETRY_POLL_MS;
+  }
+
+  private armPoll(intervalMs: number): void {
+    this.pollIntervalArmedMs = intervalMs;
+    this.timer = setInterval(() => {
+      // Re-arm across the pre-roll boundary: entering or leaving a count-in
+      // changes which rate is right, and an interval never changes itself.
+      const wanted = this.pollIntervalMs();
+      if (wanted !== this.pollIntervalArmedMs) {
+        if (this.timer !== null) clearInterval(this.timer);
+        this.armPoll(wanted);
+      }
+      void this.coordinator.pollHandle(this);
+    }, intervalMs);
   }
 
   stopPolling(): void {

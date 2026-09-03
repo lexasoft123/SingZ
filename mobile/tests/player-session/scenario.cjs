@@ -39,6 +39,15 @@
 
 const { sleep } = require('./cdp.cjs')
 
+/* The app's telemetry poll interval, mirrored. A driver cannot import from
+   src/ (it runs in node against a device, not in the bundle), so this is the
+   one place it is written down twice — and the sampling windows below are all
+   derived from it rather than from independent literals, which is what went
+   wrong when the interval moved and a fixed 300 ms window stopped containing
+   the correction it existed to catch. Keep in step with
+   NATIVE_TELEMETRY_POLL_MS in mobile/src/playback/native.ts. */
+const POLL_MS = 400
+
 /** A sample is "advancing" when the transport moved by more than this since
  *  the previous one — comfortably above sampler jitter, well under one
  *  sampler interval of real playback (30 ms interval ~ 0.030 s of song). */
@@ -599,7 +608,9 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
       ms: 12000,
       every: 20,
       stopOnHit: false,
-      holdAfterHitMs: 400,
+      // Must outlast the echo window below, or sampling stops before the
+      // correction it is looking for can arrive.
+      holdAfterHitMs: POLL_MS + 200,
       action: `(function go() { if (!b.capabilities || b.capabilities.seek) { b.seek(${target}) } else { setTimeout(go, 20) } })();`,
       extra: 'b.capabilities ? b.capabilities.seek : null',
       cond: `s.pos >= ${target} - 0.5 && s.pos <= ${target} + 1.5`
@@ -617,9 +628,22 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
     }
     /* A seek that reads its target and is then yanked backwards is the
        "re-anchor echo" the field build shows: the UI lands, then jumps to
-       where the old graph thought it was. 300 ms is long enough to catch it
-       and short enough not to trip over an ordinary loop wrap. */
-    const win = r.out.filter((s) => s.t >= r.hit && s.t <= r.hit + 300 && s.pos !== null)
+       where the old graph thought it was.
+
+       The window is DERIVED from the telemetry poll interval, never written
+       down beside it. `hit` fires on the optimistic seek adoption, which is
+       immediate, while the correction that would reveal an echo arrives on
+       the next poll — uniformly distributed over one interval. A fixed 300 ms
+       was strictly wider than that at a 200 ms poll and silently narrower
+       than it the moment the interval moved: a quarter of seeks would have
+       their correction land outside the window, each measuring a confident
+       zero, and with four seeks a pass most runs would go green having looked
+       at nothing. One interval plus a margin keeps it strictly wider, and
+       still short enough not to trip over an ordinary loop wrap. */
+    const echoWindowMs = POLL_MS + 100
+    const win = r.out.filter(
+      (s) => s.t >= r.hit && s.t <= r.hit + echoWindowMs && s.pos !== null
+    )
     let peak = -Infinity
     let worst = 0
     for (const s of win) {

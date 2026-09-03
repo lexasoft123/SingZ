@@ -7,6 +7,8 @@ import {
   IosNativePlaybackCoordinator,
   NativePlaybackCommandError,
   nativePlaybackEligibility,
+  NATIVE_PRE_ROLL_POLL_MS,
+  NATIVE_TELEMETRY_POLL_MS,
   parseNativePlaybackCapability,
   parseNativePlaybackLanePeaks,
   rebuildIosNativePlaybackCues,
@@ -2086,7 +2088,7 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     expect(h.prepareRequests[1]).toMatchObject({ handoffLease: 41 });
     // And the observable end state, the way the sibling rebuild tests close.
     expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
-    // A start that gets this far starts the real 200 ms poll.
+    // A start that gets this far starts the real telemetry poll.
     await handle.stop('abandoned park lease test complete');
   });
 
@@ -2315,7 +2317,7 @@ describe("the seek bar's waveform", () => {
     const second = await handle.lanePeaks();
 
     // Immutable while a generation is prepared, so a second read is free.
-    // This is why it is off the 200 ms status poll at all.
+    // This is why it is off the status poll at all.
     expect(h.calls).toEqual([`native.lanePeaks:${generation}`]);
     expect(first).toEqual(second);
     expect(first?.bucketCount).toBe(2);
@@ -2745,6 +2747,52 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     return handle;
   };
 
+  it('polls fast through a count-in and relaxes once it is over', async () => {
+    /* The count-in DOTS are the one telemetry display projection cannot
+       smooth: countInStatus only ever takes a non-null value on a telemetry
+       read, and during pre-roll
+       `advancing` is false so projected() deliberately refuses to advance it.
+       So the dots sample the poll grid, and at the ordinary rate a two-bar
+       count-in at 180 bpm would light 1,2,3,4,5,7,8 — the sixth never
+       appearing. Pre-roll therefore keeps the fast rate.
+
+       This is the only test that drives the real setInterval path; everything
+       else calls coordinator.pollHandle directly, so the rate and the re-arm
+       were unguarded. Fake timers are scoped to this test alone. */
+    const h = harness();
+    const handle = (await started(h)) as unknown as {
+      startPolling: () => void
+      stopPolling: () => void
+    };
+    const poll = jest
+      .spyOn(h.coordinator, 'pollHandle')
+      .mockResolvedValue(undefined);
+    jest.useFakeTimers();
+    try {
+      handle.startPolling();
+      expect(poll).toHaveBeenCalledTimes(1); // the immediate read
+
+      // Armed FAST, because a start cannot yet know whether it has a count-in.
+      jest.advanceTimersByTime(NATIVE_PRE_ROLL_POLL_MS);
+      expect(poll).toHaveBeenCalledTimes(2);
+
+      // That first tick found no count-in and relaxed to the ordinary rate,
+      // so the next one is NOT due yet. An interval never changes itself;
+      // this is the re-arm doing it.
+      jest.advanceTimersByTime(NATIVE_PRE_ROLL_POLL_MS);
+      expect(poll).toHaveBeenCalledTimes(2);
+
+      jest.advanceTimersByTime(
+        NATIVE_TELEMETRY_POLL_MS - NATIVE_PRE_ROLL_POLL_MS
+      );
+      expect(poll).toHaveBeenCalledTimes(3);
+    } finally {
+      handle.stopPolling();
+      jest.useRealTimers();
+      poll.mockRestore();
+    }
+  });
+
   it('iOS keeps rendering in the background rather than releasing the graph', async () => {
     const h = harness();
     const handle = await started(h);
@@ -2787,7 +2835,7 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     });
 
     // Every later poll still reports completed; the park is issued once, not
-    // once per 200 ms tick for as long as the song sits on screen — and each
+    // once per telemetry tick for as long as the song sits on screen — and each
     // of those polls must keep calling the transport parked. Reporting it as
     // stopped is what let Play resume straight into the end of the song.
     await h.coordinator.pollHandle(handle as never);

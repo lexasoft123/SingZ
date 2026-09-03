@@ -17,7 +17,10 @@ import type {
   NativePlaybackStartOutcome,
   PlaybackCountInStatus
 } from '../projects'
-import { rebuildNativePlaybackCues } from './native'
+import {
+  NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC,
+  rebuildNativePlaybackCues
+} from './native'
 
 export type PlaybackOperation =
   | 'pause'
@@ -372,16 +375,39 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   get playing(): boolean {
     return this.state().phase === 'playing'
   }
-  /** Native telemetry lands every 200 ms. Between polls the last audible
-   * position advances by wall time at the playback rate — bounded to two
-   * missed polls, so a stalled poll cannot run the clock ahead — which is
-   * what keeps the lyric sweep gliding instead of stepping five times a
-   * second. Count-in and paused telemetry are never advanced. */
+  /** Native telemetry lands every NATIVE_TELEMETRY_POLL_MS. Between polls the
+   * last audible position advances by wall time at the playback rate —
+   * bounded to two missed polls, so a stalled poll cannot run the clock ahead
+   * — which is what keeps the lyric sweep gliding instead of stepping at the
+   * poll rate. Count-in and paused telemetry are never advanced.
+   *
+   * The bound is DERIVED from the poll interval, never written down beside
+   * it: the two are one decision, and a hardcoded 0.4 s silently became a
+   * stalling sweep the moment the interval moved past 200 ms. */
   private projected(sec: number): number {
     const state = this.state()
     if (state.phase !== 'playing' || state.advancing !== true || state.telemetryAtMs === undefined) return sec
-    const elapsed = Math.max(0, Math.min(0.4, (Date.now() - state.telemetryAtMs) / 1000))
-    return Math.min(state.durationSec, sec + elapsed * (state.playbackRate ?? 1))
+    const elapsed = Math.max(
+      0,
+      Math.min(NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC, (Date.now() - state.telemetryAtMs) / 1000)
+    )
+    const advanced = sec + elapsed * (state.playbackRate ?? 1)
+    /* A LOOP folds; only a song clamps.
+     *
+     * The core wraps at B, but the projection runs on wall time and knows
+     * nothing about it, so clamping at durationSec let the scrub band and the
+     * lyric sweep glide straight past B and snap back to A on the next poll —
+     * once per lap, for as long as the singer practises a phrase, which is
+     * exactly when A/B repeat is in use. Legacy folds mathematically and never
+     * overshoots, so this was also one setting giving two answers on the two
+     * backends. Folding here costs nothing and makes the two agree. */
+    const region = state.regionState
+    if (region && region.loop && region.end > region.start) {
+      const span = region.end - region.start
+      if (advanced > region.end)
+        return region.start + ((advanced - region.start) % span)
+    }
+    return Math.min(state.durationSec, advanced)
   }
   /**
    * A trim can only ever ADD lag, never remove more than there is.

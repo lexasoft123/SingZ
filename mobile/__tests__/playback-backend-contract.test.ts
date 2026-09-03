@@ -9,6 +9,10 @@ import {
   type PlaybackBackend
 } from '../src/playback/backend'
 import { playbackCountInDisplay } from '../src/playback/count-in-display'
+import {
+  NATIVE_TELEMETRY_POLL_MS,
+  NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC
+} from '../src/playback/native'
 import type {
   LoadedProject,
   NativePlaybackHandle,
@@ -273,6 +277,133 @@ describe('legacy facade delegation', () => {
     expect(h.engine.setTraining).toHaveBeenCalledWith(training)
     expect(h.engine.previewClick).toHaveBeenCalledWith(true)
     expect(h.engine.pause).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('the position between telemetry ticks', () => {
+  /* The native transport is polled, and the poll is the single largest JS
+     cost native playback has: every tick marshals an 85-field session status
+     across the RN bridge and parses and validates it in Hermes. Profiled on
+     an emulator, JS ran at 1.93x legacy's during ordinary playback while the
+     native audio engine itself measured 2.5x CHEAPER — so the poll rate is
+     the lever, and it is only safe to pull because the seek bar and the lyric
+     sweep do not step at it: they are projected forward by wall time between
+     ticks.
+
+     That makes the projection bound and the poll interval ONE decision. The
+     bound was a hardcoded 0.4 s while the interval was 200 ms, and the moment
+     the interval moved past 200 ms the sweep would have stalled at the end of
+     every gap — silently, because nothing exercised the projection at all.
+     These pin the derivation from the outside, in behaviour. */
+  const playing = (h: ReturnType<typeof nativeHarness>, atMs: number): void =>
+    h.publish({
+      phase: 'playing',
+      advancing: true,
+      positionSec: 5,
+      renderedPositionSec: 5,
+      playbackRate: 1,
+      telemetryAtMs: atMs
+    })
+
+  it('glides through a missed poll instead of stepping at the poll rate', () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    const t0 = Date.now()
+    playing(h, t0)
+    const halfway = NATIVE_TELEMETRY_POLL_MS * 1.5
+    jest.spyOn(Date, 'now').mockReturnValue(t0 + halfway)
+    try {
+      expect(h.backend.audioPosition).toBeCloseTo(5 + halfway / 1000, 5)
+    } finally {
+      ;(Date.now as jest.Mock).mockRestore()
+    }
+  })
+
+  it('stops projecting after two missed polls, however late the next one is', () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    const t0 = Date.now()
+    playing(h, t0)
+    jest.spyOn(Date, 'now').mockReturnValue(t0 + NATIVE_TELEMETRY_POLL_MS * 20)
+    try {
+      // Two polls' worth and not one millisecond more: a stalled poll must
+      // never run the singer's clock ahead of audio that was never rendered.
+      expect(h.backend.audioPosition).toBeCloseTo(
+        5 + NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC,
+        5
+      )
+    } finally {
+      ;(Date.now as jest.Mock).mockRestore()
+    }
+  })
+
+  it('never advances a count-in, however long the tick is', () => {
+    /* The count-in shape: phase 'playing' but advancing false, which is what
+       pre-roll publishes. Nothing reached projected() this way before, so
+       deleting the advancing term left every test green while running the
+       sweep forward through a count-in the singer has not sung a note of. */
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    const t0 = Date.now()
+    h.publish({
+      phase: 'playing',
+      advancing: false,
+      positionSec: -2,
+      renderedPositionSec: -2,
+      telemetryAtMs: t0
+    })
+    jest.spyOn(Date, 'now').mockReturnValue(t0 + NATIVE_TELEMETRY_POLL_MS * 3)
+    try {
+      expect(h.backend.audioPosition).toBeCloseTo(-2, 5)
+    } finally {
+      ;(Date.now as jest.Mock).mockRestore()
+    }
+  })
+
+  it('folds at the loop boundary instead of gliding past it', () => {
+    /* The core wraps at B. A projection that clamps at the SONG's end instead
+       glides past B and snaps back to A on the next poll — once per lap, for
+       as long as the singer practises the phrase. Legacy folds and never
+       overshoots. */
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    const t0 = Date.now()
+    h.publish({
+      phase: 'playing',
+      advancing: true,
+      positionSec: 3.9,
+      renderedPositionSec: 3.9,
+      playbackRate: 1,
+      regionState: { start: 2, end: 4, loop: true },
+      telemetryAtMs: t0
+    })
+    jest.spyOn(Date, 'now').mockReturnValue(t0 + 300)
+    try {
+      // 3.9 + 0.3 = 4.2, past B at 4.0 — so it belongs 0.2 s past A, not at
+      // 4.2 and not clamped to the song's 12 s duration.
+      expect(h.backend.audioPosition).toBeCloseTo(2.2, 5)
+    } finally {
+      ;(Date.now as jest.Mock).mockRestore()
+    }
+  })
+
+  it('never advances a paused transport', () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    const t0 = Date.now()
+    h.publish({
+      phase: 'paused',
+      advancing: false,
+      positionSec: 5,
+      renderedPositionSec: 5,
+      telemetryAtMs: t0
+    })
+    jest.spyOn(Date, 'now').mockReturnValue(t0 + NATIVE_TELEMETRY_POLL_MS * 3)
+    try {
+      expect(h.backend.audioPosition).toBeCloseTo(5, 5)
+    } finally {
+      ;(Date.now as jest.Mock).mockRestore()
+    }
   })
 })
 

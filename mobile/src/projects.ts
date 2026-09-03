@@ -239,8 +239,9 @@ export interface NativePlaybackViewState {
   readonly error: string | null
   /** Wall-clock stamp of the telemetry behind the two positions, whether the
    * transport was advancing then, and its rate: native telemetry arrives
-   * every 200 ms, and the backend projects the position forward between
-   * polls so the lyric sweep and the clock glide instead of stepping. */
+   * on the telemetry poll interval, and the backend projects the
+   * position forward between polls so the lyric sweep and the clock glide
+   * instead of stepping. */
   readonly telemetryAtMs?: number
   readonly advancing?: boolean
   readonly playbackRate?: number
