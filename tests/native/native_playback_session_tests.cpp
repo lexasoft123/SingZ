@@ -3117,6 +3117,128 @@ void audibleProjectionWaitsForLatencyHistory() {
   std::remove(wav.c_str());
 }
 
+/* The host raises boundaries nobody asked for, and a time/pitch graph has to
+   survive all of them. There is exactly ONE reanchor slot per open — the
+   protocol admits a single pending plan, and nextSlice spends it on the first
+   boundary it emits — so any rule that demands an anchor per boundary wedges
+   the generation at its second one. That shipped: the refusal asked "is a
+   boundary pending", every stream start raises the host's ClockReanchored
+   when its output host time becomes valid, and so every transpose or tempo
+   change killed native playback on every device.
+
+   None of these boundaries moves the source. The Stretch state is a function
+   of source-signal history alone, so rendering must simply continue, however
+   many arrive and without an anchor being consumed. A seek in the middle is
+   the control: that one does move the source, and it still anchors.
+
+   Mutation-checked: restore the old "is a boundary pending" term and this
+   test dies on the FIRST host boundary, with drive() returning false.
+
+   The other half of the guard — a source move arriving with no anchor
+   prepared must still refuse — is not covered here and cannot be, from the
+   session API. Both paths that move the source prime off-RT and REFUSE THE
+   COMMAND when priming fails (seek, reanchorTransport), and the arm can only
+   fail when nothing was primed; a batch of one-shots still arms its final
+   member. So that branch is defence-in-depth on the raw
+   PreparedPlaybackTransport contract, and only a transport-level harness
+   could reach it. It rests on the guard reading as written. */
+void hostBoundariesWithoutSourceMovementKeepRendering() {
+  const std::string wav = writeWav("host-boundary-no-source-move.wav", 1,
+                                   std::vector<float>(50000, 0.1F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  singz::NativePlaybackPrepareConfig request = config();
+  // Off-identity rate is what materializes the Stretch stage at all; at 1.0
+  // there is no processor and this whole guard is unreachable.
+  request.playbackRate = 0.75;
+  request.transposeSemitones = 2.0;
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 61).ok);
+  CHECK(session.openOutput(61).ok);
+  CHECK(session.start(61).ok);
+  CHECK(fake->drive(64));
+  auto status = session.status();
+  CHECK(status.renderedProjectFrame > 0 && status.adapterRenderFailures == 0 &&
+        status.timePitchAnchorMisses == 0);
+
+  // Every host boundary in turn, none of them preceded by a reanchor command,
+  // and the sequence repeated so a one-anchor-per-open rule cannot pass by
+  // spending its single anchor on the first one.
+  const uint64_t anchorsAfterStart = status.timePitchAnchorsPublished;
+  const uint64_t misses = status.timePitchAnchorMisses;
+  const uint64_t discontinuities = status.transportDiscontinuities;
+  for (uint32_t round = 0; round < 3; ++round) {
+    const int64_t before = status.renderedProjectFrame;
+    CHECK(fake->drive(64, singz::AudioHostDiscontinuityClockReanchored));
+    status = session.status();
+    CHECK(status.lastTransportBoundary ==
+              singz::NativePlaybackTransportBoundaryReason::ClockReanchored &&
+          status.renderedProjectFrame > before &&
+          status.adapterRenderFailures == 0 &&
+          status.graphStatusDetail != 202);
+
+    fake->reanchorRouteAndStream();
+    CHECK(fake->drive(64));
+    status = session.status();
+    CHECK(status.lastTransportBoundary ==
+              singz::NativePlaybackTransportBoundaryReason::
+                  RouteGenerationChanged &&
+          status.adapterRenderFailures == 0 &&
+          status.graphStatusDetail != 202);
+
+    fake->advanceStreamIdentityOnly();
+    CHECK(fake->drive(64));
+    status = session.status();
+    CHECK(status.lastTransportBoundary ==
+              singz::NativePlaybackTransportBoundaryReason::ClockReanchored &&
+          status.adapterRenderFailures == 0 &&
+          status.graphStatusDetail != 202);
+
+    CHECK(fake->drive(64, singz::AudioHostDiscontinuityXRun));
+    status = session.status();
+    CHECK(status.adapterRenderFailures == 0 && status.graphStatusDetail != 202);
+  }
+  /* Twelve boundaries, and not one anchor spent on them: they had nothing to
+     anchor. A published count that moved here would mean the graph is
+     re-anchoring on facts about the timestamp domain.
+
+     Each one is a MISS, and that is the designed reading rather than a
+     complaint. The boundary still has to propagate — other stages reset on a
+     route change and must keep doing so — and the Stretch's own reset with no
+     ready slot deliberately keeps the last valid processor and counts one
+     (signalsmith_time_pitch.cpp, the reset path). So on a graph with a
+     time/pitch stage, timePitchAnchorMisses tracks host boundaries and is NOT
+     a health signal; renderedProjectFrame advancing and adapterRenderFailures
+     staying at zero are. Nothing in the product gates on it — the desktop
+     monitor and the addon bridge only report it. */
+  CHECK(status.timePitchAnchorsPublished == anchorsAfterStart &&
+        status.timePitchAnchorMisses == misses + 12 &&
+        status.transportDiscontinuities == discontinuities + 12);
+
+  // The control. A seek does move the source, so it anchors, and rendering
+  // continues from the new position rather than refusing.
+  const uint64_t anchorsBeforeSeek = status.timePitchAnchorsPublished;
+  const uint64_t missesBeforeSeek = status.timePitchAnchorMisses;
+  CHECK(session.seek(61, 20000).ok);
+  CHECK(fake->drive(64));
+  status = session.status();
+  CHECK(status.renderedProjectFrame >= 20000 &&
+        status.timePitchAnchorsPublished == anchorsBeforeSeek + 1 &&
+        status.timePitchAnchorMisses == missesBeforeSeek &&
+        status.adapterRenderFailures == 0 && status.graphStatusDetail != 202);
+
+  // And a host boundary immediately after that seek is still free.
+  CHECK(fake->drive(64, singz::AudioHostDiscontinuityClockReanchored));
+  status = session.status();
+  CHECK(status.adapterRenderFailures == 0 && status.graphStatusDetail != 202 &&
+        status.timePitchAnchorsPublished == anchorsBeforeSeek + 1);
+
+  CHECK(session.unload(61).ok);
+  std::remove(wav.c_str());
+}
+
 void telemetryCollisionPublishesCoherentGeneration() {
   const std::string wav =
       writeWav("telemetry-collision.wav", 1, std::vector<float>(64, 0.1F));
@@ -4966,6 +5088,7 @@ int main() {
   nativeReferencePreviewClickContract();
   transportControlKernelAndTelemetry();
   audibleProjectionWaitsForLatencyHistory();
+  hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();
   preparedStartOverridePreservesRebuildPosition();
   preparedInitialTransportIsAtomicAtFirstCallback();

@@ -378,6 +378,33 @@ struct PreparedPlaybackTransport {
   zdsp::DiscontinuityReason callbackLastBoundary{
       zdsp::DiscontinuityReason::None};
   bool callbackTimePitchBoundaryPrepared{false};
+  /* The raw AudioHost flag word behind the coalesced pending boundary, or 0
+     when this code queued it. ClockReanchored has three producers — the host
+     flag, a Reanchor command, and streamChanged — and the reason alone cannot
+     tell them apart, which is the difference between "supply more anchors"
+     and "stop queueing this". Callback-thread only, cleared when the boundary
+     is emitted. */
+  uint32_t pendingHostDiscontinuityFlags{0};
+  /* Did the SOURCE position move inside this coalesce window?
+   *
+   * This, not the reason, is what decides whether the Stretch needs a fresh
+   * anchor. The stage's state is a function of source-signal history alone —
+   * process() reads no transport time, and an unanchored reset() keeps the
+   * last valid processor rather than flushing — so a boundary that does not
+   * move the source cannot invalidate it. Keying on the reason cannot express
+   * that: ClockReanchored arrives BOTH from the host merely learning its
+   * clock (source untouched) and from a Reanchor command that writes
+   * callbackProjectFrame (source moved), and only the second needs an anchor.
+   *
+   * Set at the three sites that move the source AND queue a boundary for it:
+   * Seek, a Reanchor carrying a valid plan, and the loop wrap. Cleared when
+   * the boundary is emitted. Start moves the source too and is deliberately
+   * NOT here — it queues no boundary, so setting it would make the guard
+   * refuse the first callback of every generation on a reason of None; the
+   * start position is covered instead by the initial reanchor plan that
+   * openOutput primes and beginBlock arms. advancePosition is ordinary
+   * per-block advance, not a move. */
+  bool pendingSourcePositionMoved{false};
   /* Which of nextSlice's refusals fired last. Every one of them presents to
      the product as the same "provider-failure", so without this the only way
      to tell them apart is to guess. */
@@ -644,6 +671,8 @@ struct PreparedPlaybackTransport {
     callbackHostIdentityValid = false;
     pendingDiscontinuity = {zdsp::DiscontinuityReason::None,
                             zdsp::DiscontinuityFlagNone};
+    pendingHostDiscontinuityFlags = 0;
+    pendingSourcePositionMoved = false;
     callbackLoopCount = 0;
     callbackSeekCount = 0;
     callbackDiscontinuities = 0;
@@ -793,6 +822,8 @@ struct PreparedPlaybackTransport {
     const zdsp::Discontinuity emitted = pendingDiscontinuity;
     pendingDiscontinuity = {zdsp::DiscontinuityReason::None,
                             zdsp::DiscontinuityFlagNone};
+    pendingHostDiscontinuityFlags = 0;
+    pendingSourcePositionMoved = false;
     if (emitted.reason == zdsp::DiscontinuityReason::None)
       return emitted;
     increment(&callbackDiscontinuities);
@@ -857,6 +888,7 @@ struct PreparedPlaybackTransport {
       case PlaybackTransportCommandKind::Seek:
         callbackProjectFrame = command.projectFrame;
         callbackProjectFractionQ32 = 0;
+        pendingSourcePositionMoved = true;
         callbackState = command.state;
         callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
         if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand &&
@@ -885,6 +917,7 @@ struct PreparedPlaybackTransport {
         if (command.reanchorPlan.valid()) {
           callbackProjectFrame = command.projectFrame;
           callbackProjectFractionQ32 = command.projectFractionQ32;
+          pendingSourcePositionMoved = true;
         }
         if (timePitchProcessor.state != nullptr) {
           if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand) {
@@ -926,6 +959,7 @@ struct PreparedPlaybackTransport {
     // Coalesce every same-frame reset fact before emitting one boundary.
     // Host/identity reset reasons outrank source seek/loop by the shared
     // adapter priority table, so provider requests cannot erase route truth.
+    pendingHostDiscontinuityFlags |= block.discontinuity;
     queueDiscontinuity(zdsp::mapAudioHostDiscontinuity(block.discontinuity));
     if (routeChanged)
       queueDiscontinuity({zdsp::DiscontinuityReason::RouteGenerationChanged,
@@ -1030,6 +1064,7 @@ struct PreparedPlaybackTransport {
                              static_cast<uint64_t>(callbackLoopStart);
     callbackProjectFrame = callbackLoopStart +
                            static_cast<int64_t>(elapsed % span);
+    pendingSourcePositionMoved = true;
     callbackState = NativePlaybackTransportState::Playing;
     callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
     queueDiscontinuity({zdsp::DiscontinuityReason::SourceLoop,
@@ -1048,17 +1083,57 @@ struct PreparedPlaybackTransport {
     if (offset == 0)
       beginBlock(block);
 
-    if (timePitchProcessor.state != nullptr &&
-        pendingDiscontinuity.reason != zdsp::DiscontinuityReason::None &&
+    if (timePitchProcessor.state != nullptr && pendingSourcePositionMoved &&
         pendingDiscontinuity.reason !=
             zdsp::DiscontinuityReason::SourceLoop &&
         !callbackTimePitchBoundaryPrepared) {
-      // Route/stream/sample-rate/clock resets may only reach the graph with an
-      // off-RT prepared Stretch replacement. Failing this callback is bounded
-      // and observable; silently resetting or rendering with mismatched source
-      // and time/pitch state would corrupt the audible project position.
+      /* A boundary that MOVED THE SOURCE may only reach the graph with an
+         off-RT prepared Stretch replacement: rendering a moved source against
+         a stale time/pitch state would corrupt the audible project position.
+         Failing this callback is bounded and observable.
+
+         It used to ask "is a boundary pending" instead, which is a different
+         and much wider question. Every stream start raises the host's
+         ClockReanchored the moment its host time becomes valid — a fact about
+         the TIMESTAMP domain, with the source untouched — and since one open
+         carries one anchor and the first boundary spends it, that flip
+         refused every callback for the rest of the generation. Measured: any
+         transpose or tempo change wedged native playback on every device.
+         The stage's state depends on source-signal history alone (process()
+         reads no transport time; an unanchored reset() keeps the last valid
+         processor), so a boundary that moves nothing cannot invalidate it.
+
+         The SourceLoop exemption is on the COALESCED reason, and SourceLoop
+         has the lowest priority there is, so it survives coalescing only when
+         nothing else lands in the same callback. A host flag on a wrap
+         callback (an XRun, a clock reanchor) therefore outranks it: this
+         guard passes — the wrap runs later in the block, so the source has
+         not moved yet — the wrap queues SourceLoop, the emitted reason is the
+         host's, and the Stretch's reset takes its generic branch without ever
+         consulting the loop bank. That seam renders against the pre-wrap
+         state. It is a deliberate widening: the old guard refused the
+         callback instead, which is the wedge this change exists to remove,
+         and a glitched loop seam is the better failure. The bank is not
+         damaged by it (the slot stays Ready and `consumed` does not move).
+         Unmeasured on a device — it needs a short A/B loop under a non-unity
+         rate with an xrun landing on the wrap. The fix, when someone has that
+         measurement, is to consume the loop bank when SourceLoop was queued
+         but outranked, rather than to widen this guard again — and the hard
+         part is that reset() is handed one COALESCED Discontinuity and
+         branches on reason == SourceLoop, so at an outranked seam it cannot
+         know a wrap happened at all. Either that fact travels to it, or the
+         transport consumes the bank itself. */
       noteSignalsmithTimePitchLoopDeadlineMiss(timePitchProcessor);
       lastSliceRefusal.store(202, std::memory_order_relaxed);
+      // WHICH boundary went unanchored. 202 says only "no anchor"; the fix
+      // for a host-reported discontinuity (more anchors) and for one this
+      // code queues itself (stop queueing it) are opposite, so the reason is
+      // the thing worth knowing. 50 + reason, clear of the 30 + reason the
+      // discard path uses.
+      lastAnchorOutcome.store(
+          (pendingHostDiscontinuityFlags != 0 ? 70u : 50u) +
+              static_cast<uint32_t>(pendingDiscontinuity.reason),
+          std::memory_order_relaxed);
       return false;
     }
 

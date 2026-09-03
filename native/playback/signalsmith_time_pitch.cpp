@@ -518,9 +518,18 @@ void reset(void *opaque, zdsp::Discontinuity discontinuity) noexcept {
       state->loopConsumptionEpoch.fetch_add(1u, std::memory_order_release);
     return;
   }
-  // Never flush the active Stretch object from the callback. The session
-  // rejects an unprepared generic boundary before render; standalone callers
-  // receive an observable miss while the last valid processor remains intact.
+  // Never flush the active Stretch object from the callback: the last valid
+  // processor stays, and the caller gets an observable miss instead.
+  //
+  // This is the ORDINARY path, not an error one. The session used to refuse
+  // any unprepared generic boundary before render, which turned out to wedge
+  // every transposed song — one anchor per open against a host that raises a
+  // clock reanchor of its own at every stream start. It now refuses only a
+  // boundary that MOVED THE SOURCE (nextSlice in
+  // native_playback_session.cpp), and everything else arrives here: the
+  // Stretch state is a function of source-signal history alone, so a boundary
+  // that moves nothing has nothing to re-anchor. anchorMisses therefore
+  // counts host boundaries on a live session and is a diagnostic, not a fault.
   state->anchorMisses.fetch_add(1, std::memory_order_relaxed);
 }
 

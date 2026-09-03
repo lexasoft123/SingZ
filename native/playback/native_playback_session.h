@@ -505,7 +505,10 @@ struct NativePlaybackStatus {
   uint32_t graphStatusCode{0};
   uint32_t graphStatusDetail{0};
   /* What happened at the one site that can arm a Stretch boundary anchor.
-     Latched on the first visit of a generation and cleared by resetForOpen.
+     Written on the first visit of a generation (the arming readings), then
+     overwritten by every subsequent refusal (the 50+/70+ readings), and
+     cleared by resetForOpen. So it names the LAST thing that happened to an
+     anchor, not the first.
 
      The readings that exist:
        0   no stretch stage at all, or no callback has landed yet — the store
@@ -515,6 +518,12 @@ struct NativePlaybackStatus {
        21  arming was attempted and failed
        22  a seek or reanchor had already armed this boundary
        30+ the coalesced boundary reason whose discard threw the plan away
+       50+ a boundary THIS CODE queued went unanchored and refused at 202
+       70+ a boundary the HOST reported went unanchored and refused at 202
+           (the raw AudioHost flag word decides which; ClockReanchored has
+           three producers and the reason alone cannot separate them, while
+           the fix differs completely — supply more anchors, or stop queueing
+           the boundary)
      10 is transient: whenever it is stored the arming block below runs on the
      identical condition and overwrites it in the same call. 12 is UNREACHABLE
      by construction, because resetForOpen clears callbackHostIdentityValid and
@@ -529,17 +538,64 @@ struct NativePlaybackStatus {
      so a second open of the same prepared graph read 11 and armed nothing;
      it reads 20 now.
 
-     Still open, and this field will say 20 right through it: there is exactly
-     ONE anchor per open, and nextSlice clears the prepared flag whenever it
-     emits a boundary. A host that reports more than one discontinuity wedges
-     the generation at refusal 202, and nothing in the RT path can replenish
-     an anchor. That is the off-RT replenishment the loop path already has. */
+     The third defect is the one that wedged every device, and it is fixed.
+     A stream start produces TWO boundaries: whatever the open carries, and
+     the host's ClockReanchored when its output host-time validity flips
+     0->1 a few callbacks later. Measured through this field as 76 —
+     host-reported, not self-queued. There is one anchor per open and
+     nextSlice clears the prepared flag on every boundary it emits, so while
+     the refusal was keyed on "a boundary is pending" the second one refused
+     every callback for the rest of the generation: any transpose or tempo
+     change killed native playback outright, on every device.
+
+     Supplying a second anchor is NOT the fix, and the session tests say so
+     within seconds: primeSignalsmithTimePitchReanchor opens with
+     retirePendingReanchor, so a second prime destroys the first. The
+     protocol admits exactly one pending reanchor — which is why loops use a
+     dedicated two-entry BANK (configureSignalsmithTimePitchLoop) rather
+     than two primes. What the host's clock boundary needed was no anchor at
+     all: it moves nothing the Stretch state is a function of. nextSlice now
+     refuses on "the source position MOVED" instead, and the guard there
+     carries the argument.
+
+     So 50+/70+ no longer describe an ordinary session. Either reading means
+     a boundary that moved the source arrived with no anchor prepared, and
+     70+ says the host raised that boundary — the reason digits say which.
+     On such a generation this field reads 20 only until the first boundary
+     is emitted and then 50+/70+ for the rest of it: "did the one anchor
+     arm" survives in the anchor status counters, not here. */
   uint32_t timePitchAnchorOutcome{0};
   double playbackRate{1.0};
   double transposeSemitones{0.0};
   uint64_t graphLatencyFrames{0};
   uint64_t timePitchAnchorsPrepared{0};
   uint64_t timePitchAnchorsPublished{0};
+  /* "An anchor was wanted and none was ready", counted from TWO places, which
+     is worth knowing before reading a number off it:
+
+       - the Stretch's own reset() finding no ready replacement slot. It keeps
+         the last valid processor and counts one.
+       - nextSlice refusing the callback outright, at either the unanchored
+         source move (202) or the loop-deadline miss (203). No boundary
+         reaches reset() on that path at all; the refusal notes the miss
+         itself.
+
+     So the two are NOT disjoint readings of one event — every 202 adds a miss
+     AND stops the render — and this is NOT a health signal on any graph
+     carrying a time/pitch stage. Since the nextSlice guard stopped refusing
+     boundaries that move nothing, every host boundary — a stream start's
+     clock reanchor, an xrun, a timestamp-quality flip — propagates, because
+     the rest of the graph needs it, and takes the first branch above. The
+     counter therefore climbs steadily through ordinary healthy playback.
+
+     What says a boundary was REFUSED is rendering stopping, with
+     graphStatusDetail 202 and timePitchAnchorOutcome 50+/70+ — or detail 203,
+     which writes NO outcome, so the outcome beside it is whatever was last
+     written there: 11, 20/21/22, 30+reason, or a stale 50+/70+ left by an
+     earlier 202 in the same generation. Reading 203 as "not a real refusal
+     because the outcome disagrees" is the mistake that sentence exists to
+     prevent. Nothing in the product gates on this counter; the desktop addon
+     bridge reports it and mobile/src/playback/native.ts republishes it. */
   uint64_t timePitchAnchorMisses{0};
   bool timePitchReplacementReady{false};
   bool timePitchLoopPriming{false};
