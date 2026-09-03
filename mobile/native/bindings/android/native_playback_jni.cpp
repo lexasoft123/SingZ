@@ -509,6 +509,9 @@ void appendStatus(std::string &output,
   output += ",\"discontinuities\":" +
             std::to_string(host.discontinuities);
   output += ",\"renderFailures\":" + std::to_string(host.renderFailures);
+  output += ",\"graphStatusCode\":" + std::to_string(status.graphStatusCode);
+  output += ",\"graphStatusDetail\":" + std::to_string(status.graphStatusDetail);
+  output += ",\"timePitchAnchorOutcome\":" + std::to_string(status.timePitchAnchorOutcome);
   output += ",\"adapterRenderFailures\":" +
             std::to_string(status.adapterRenderFailures);
   output += ",\"terminalRenderFailures\":" +

@@ -120,6 +120,7 @@ bool renderSlice(AudioHostGraphAdapter *adapter,
                        hasInput ? 1u : 0u, &output, 1);
   adapter->lastStatusCode.store(static_cast<uint32_t>(status.code),
                                 std::memory_order_relaxed);
+  adapter->lastStatusDetail.store(status.detail, std::memory_order_relaxed);
   return succeeded(status);
 }
 
@@ -259,6 +260,9 @@ bool renderAudioHostGraph(void *context,
       adapter->lastStatusCode.store(
           static_cast<uint32_t>(StatusCode::InvalidArgument),
           std::memory_order_relaxed);
+      // 101: the transport refused to slice this block, or handed back a
+      // slice of zero frames or more frames than were asked for.
+      adapter->lastStatusDetail.store(101, std::memory_order_relaxed);
       saturate(adapter->renderFailures);
       silence(block);
       return false;
@@ -269,6 +273,8 @@ bool renderAudioHostGraph(void *context,
       adapter->lastStatusCode.store(
           static_cast<uint32_t>(StatusCode::InvalidArgument),
           std::memory_order_relaxed);
+      // 102: the slice does not fit the block it was cut from.
+      adapter->lastStatusDetail.store(102, std::memory_order_relaxed);
       saturate(adapter->renderFailures);
       silence(block);
       return false;
@@ -288,6 +294,8 @@ bool renderAudioHostGraph(void *context,
     adapter->lastStatusCode.store(
         static_cast<uint32_t>(StatusCode::InvalidArgument),
         std::memory_order_relaxed);
+    // 103: the loop ran out of slice budget before covering the callback.
+    adapter->lastStatusDetail.store(103, std::memory_order_relaxed);
     saturate(adapter->renderFailures);
     silence(block);
     return false;

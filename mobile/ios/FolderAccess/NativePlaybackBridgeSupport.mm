@@ -432,6 +432,14 @@ NSDictionary *statusDictionary(singz::NativePlaybackSession &session) {
     @"discontinuities" : @(status.host.discontinuities),
     @"renderFailures" : @(status.host.renderFailures),
     @"adapterRenderFailures" : @(status.adapterRenderFailures),
+    // The same three the Android bridge publishes. Without them the iOS half
+    // of a wedged graph prints `graph status 0/0 · anchor 0`, which is
+    // indistinguishable from "the graph reported nothing" — the exact false
+    // negative these fields exist to remove. The coordinator is shared, so a
+    // key missing here silently degrades one platform only.
+    @"graphStatusCode" : @(status.graphStatusCode),
+    @"graphStatusDetail" : @(status.graphStatusDetail),
+    @"timePitchAnchorOutcome" : @(status.timePitchAnchorOutcome),
     @"terminalRenderFailures" : @(status.terminalRenderFailures),
     @"parameterOverflows" : @(status.parameterOverflows),
     @"nonFiniteSamples" : @(status.nonFiniteSamples),

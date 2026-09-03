@@ -221,7 +221,7 @@ async function assertNoFatalLog(dev, from, to, what) {
       from +
       ' && x.t <= ' +
       to +
-      " && /" + pattern + "/.test(x.line)).map(x => x.source + ': ' + x.line.slice(0, 190))))"
+      " && /" + pattern + "/.test(x.line)).map(x => x.source + ': ' + x.line.slice(0, 260))))"
   )
   const hits = JSON.parse(raw)
   if (hits.length)

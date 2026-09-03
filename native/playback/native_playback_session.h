@@ -496,6 +496,43 @@ struct NativePlaybackStatus {
   uint64_t seekCount{0};
   uint64_t transportDiscontinuities{0};
   uint64_t presentationLatencyFrames{0};
+  /* The graph runner's own last status code, as the render callback recorded
+     it. A failing render is reported to the product as "provider-failure",
+     which is true and useless: the host is healthy and the GRAPH refused. The
+     desktop monitor has always read this; mobile discarded it, so a graph
+     that would not render looked like an audio-device fault on a phone.
+     Zero means the graph has not reported a status. */
+  uint32_t graphStatusCode{0};
+  uint32_t graphStatusDetail{0};
+  /* What happened at the one site that can arm a Stretch boundary anchor.
+     Latched on the first visit of a generation and cleared by resetForOpen.
+
+     The readings that exist:
+       11  the first visit found no valid plan — nothing could be armed
+       20  armed
+       21  arming was attempted and failed
+       22  a seek or reanchor had already armed this boundary
+       30+ the coalesced boundary reason whose discard threw the plan away
+     10 is transient: whenever it is stored the arming block below runs on the
+     identical condition and overwrites it in the same call. 12 is UNREACHABLE
+     by construction, because resetForOpen clears callbackHostIdentityValid and
+     this field together and beginBlock is the only writer of either — so a 12
+     in a log means that pairing has been broken, never that the site was late.
+
+     Two defects were found through this field and both are fixed. The store
+     was once unconditional, so it reported 12 for any session past one block,
+     healthy or not — that is where every observed 12 came from, and a delta
+     measured against one is not evidence. And openOutput did not re-prime the
+     initial plan, which the audio thread consumes on its one arming attempt,
+     so a second open of the same prepared graph read 11 and armed nothing;
+     it reads 20 now.
+
+     Still open, and this field will say 20 right through it: there is exactly
+     ONE anchor per open, and nextSlice clears the prepared flag whenever it
+     emits a boundary. A host that reports more than one discontinuity wedges
+     the generation at refusal 202, and nothing in the RT path can replenish
+     an anchor. That is the off-RT replenishment the loop path already has. */
+  uint32_t timePitchAnchorOutcome{0};
   double playbackRate{1.0};
   double transposeSemitones{0.0};
   uint64_t graphLatencyFrames{0};

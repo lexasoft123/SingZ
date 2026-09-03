@@ -43,6 +43,11 @@ struct AudioHostGraphAdapter {
   AudioHostTransportSliceProvider transport{};
   std::atomic<uint32_t> renderFailures{0};
   std::atomic<uint32_t> lastStatusCode{0};
+  /* Status carries a `detail` naming WHICH check failed. The codes alone
+     collapse a dozen different refusals into "InvalidArgument", so keeping
+     only the code makes a graph that will not render look exactly like an
+     audio-device fault. */
+  std::atomic<uint32_t> lastStatusDetail{0};
 };
 
 // Normalizes hardware callback flags into the one typed reset boundary that

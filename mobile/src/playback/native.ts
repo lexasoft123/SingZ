@@ -215,6 +215,13 @@ export interface NativePlaybackSessionStatus {
   readonly deadlineMisses: number;
   readonly discontinuities: number;
   readonly renderFailures: number;
+  /** The graph runner's own last status code, 0 when it has said nothing.
+   *  Read leniently: a phone can run this bundle against an older native
+   *  binary that never published it, and refusing the capability over a
+   *  diagnostic would turn native playback off rather than degrade it. */
+  readonly graphStatusCode: number;
+  readonly graphStatusDetail: number;
+  readonly timePitchAnchorOutcome: number;
   readonly adapterRenderFailures: number;
   readonly terminalRenderFailures: number;
   readonly parameterOverflows: number;
@@ -624,6 +631,9 @@ const emptyNativeSession = (): NativePlaybackSessionStatus => ({
   deadlineMisses: 0,
   discontinuities: 0,
   renderFailures: 0,
+  graphStatusCode: 0,
+  graphStatusDetail: 0,
+  timePitchAnchorOutcome: 0,
   adapterRenderFailures: 0,
   terminalRenderFailures: 0,
   parameterOverflows: 0,
@@ -1193,6 +1203,14 @@ export function parseNativePlaybackCapability(
       deadlineMisses: integers.deadlineMisses,
       discontinuities: integers.discontinuities,
       renderFailures: integers.renderFailures,
+      // The file's one idiom for a leniently-read unsigned, same as the
+      // count-in fields above: three hand-rolled predicates were a second
+      // answer to one question, and they disagreed with this one about 3.7
+      // and 1e300.
+      graphStatusCode: safeUnsigned(rawSession.graphStatusCode) ?? 0,
+      graphStatusDetail: safeUnsigned(rawSession.graphStatusDetail) ?? 0,
+      timePitchAnchorOutcome:
+        safeUnsigned(rawSession.timePitchAnchorOutcome) ?? 0,
       adapterRenderFailures: integers.adapterRenderFailures,
       terminalRenderFailures: integers.terminalRenderFailures,
       parameterOverflows: integers.parameterOverflows,
@@ -2933,6 +2951,10 @@ export class IosNativePlaybackCoordinator {
         log(
           'dsp',
           `render terminal · generation ${handle.generation} · ${session.terminalReason} · ` +
+            `host ${session.hostState} · render failures ${session.renderFailures} · ` +
+            `graph status ${session.graphStatusCode}/${session.graphStatusDetail} · ` +
+            `anchor ${session.timePitchAnchorOutcome} · ` +
+            `rendered ${session.renderedFrames} · audible ${session.audibleFrames} · ` +
             `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
             `discontinuities ${session.discontinuities}`,
           'error',

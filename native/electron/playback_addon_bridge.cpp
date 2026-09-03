@@ -1841,6 +1841,16 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
   setValue(env, result, "graphSnapshot", graphSnapshotValue(env, source));
   setValue(env, result, "adapterRenderFailures",
            makeNumber(env, source.adapterRenderFailures));
+  // The same three the phones publish. Without them the desktop reads a
+  // graph that refuses to render as an undifferentiated provider fault —
+  // which is the state both phones were in until these were plumbed, one
+  // platform further along.
+  setValue(env, result, "graphStatusCode",
+           makeNumber(env, source.graphStatusCode));
+  setValue(env, result, "graphStatusDetail",
+           makeNumber(env, source.graphStatusDetail));
+  setValue(env, result, "timePitchAnchorOutcome",
+           makeNumber(env, source.timePitchAnchorOutcome));
   setValue(env, result, "terminalRenderFailures",
            makeNumber(env, source.terminalRenderFailures));
   setValue(env, result, "parameterOverflows",

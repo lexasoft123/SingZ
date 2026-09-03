@@ -378,6 +378,14 @@ struct PreparedPlaybackTransport {
   zdsp::DiscontinuityReason callbackLastBoundary{
       zdsp::DiscontinuityReason::None};
   bool callbackTimePitchBoundaryPrepared{false};
+  /* Which of nextSlice's refusals fired last. Every one of them presents to
+     the product as the same "provider-failure", so without this the only way
+     to tell them apart is to guess. */
+  std::atomic<uint32_t> lastSliceRefusal{0};
+  /* What happened at the ONE site that can arm the first-stream Stretch
+     anchor. Refusal 202 says only "no anchor was armed"; this says why. */
+  std::atomic<uint32_t> lastAnchorOutcome{0};
+
 
   std::atomic<uint64_t> publishedGeneration{0};
   std::atomic<uint32_t> publishedSequence{0};
@@ -642,6 +650,11 @@ struct PreparedPlaybackTransport {
     callbackProjectionAnchorContinuousFrame = 0;
     callbackLastBoundary = zdsp::DiscontinuityReason::None;
     callbackTimePitchBoundaryPrepared = false;
+    // Both diagnostics describe THIS generation. Left unreset they carry the
+    // previous one's codes across a re-prepare and describe a graph that no
+    // longer exists.
+    lastSliceRefusal.store(0, std::memory_order_relaxed);
+    lastAnchorOutcome.store(0, std::memory_order_relaxed);
     initialTelemetry = callbackTelemetry();
     publishTelemetry();
   }
@@ -922,6 +935,17 @@ struct PreparedPlaybackTransport {
       queueDiscontinuity({zdsp::DiscontinuityReason::ClockReanchored,
                           zdsp::DiscontinuityFlagResetState |
                               zdsp::DiscontinuityFlagTimeValid});
+    /* FIRST visit only. beginBlock runs once per hardware callback, so an
+       unconditional store overwrites the arming result with "the site was not
+       reachable" on callback two — and the terminal poll lands milliseconds
+       later, so every session read 12 whether it armed an anchor or never
+       tried. That made a healthy first callback indistinguishable from a
+       missing one, in the field, in the value the diagnosis rests on. */
+    if (timePitchProcessor.state != nullptr &&
+        lastAnchorOutcome.load(std::memory_order_relaxed) == 0)
+      lastAnchorOutcome.store(firstHostIdentity ? (initialTimePitchReanchorPlan.valid() ? 10 : 11)
+                                                : 12,
+                              std::memory_order_relaxed);
     if (firstHostIdentity && timePitchProcessor.state != nullptr &&
         initialTimePitchReanchorPlan.valid()) {
       const bool genericBoundary =
@@ -931,12 +955,20 @@ struct PreparedPlaybackTransport {
       // A seek or explicit reanchor command may already have armed the exact
       // source anchor for this coalesced boundary. The duplicate initial plan
       // is only the first-host fallback and must never overwrite it.
-      if (genericBoundary && !callbackTimePitchBoundaryPrepared)
+      if (genericBoundary && !callbackTimePitchBoundaryPrepared) {
         callbackTimePitchBoundaryPrepared = armSignalsmithTimePitchReanchor(
             timePitchProcessor, initialTimePitchReanchorPlan);
-      else
+        lastAnchorOutcome.store(callbackTimePitchBoundaryPrepared ? 20 : 21,
+                                std::memory_order_relaxed);
+      } else {
         discardSignalsmithTimePitchReanchor(timePitchProcessor,
                                             initialTimePitchReanchorPlan);
+        lastAnchorOutcome.store(
+            callbackTimePitchBoundaryPrepared ? 22
+                                              : (30 + static_cast<uint32_t>(
+                                                          pendingDiscontinuity.reason)),
+            std::memory_order_relaxed);
+      }
       initialTimePitchReanchorPlan = {};
     }
   }
@@ -1009,8 +1041,10 @@ struct PreparedPlaybackTransport {
                  uint32_t remaining,
                  zdsp::AudioHostTransportSlice *slice) noexcept {
     if (slice == nullptr || remaining == 0 || offset > block.frames ||
-        remaining > block.frames - offset)
+        remaining > block.frames - offset) {
+      lastSliceRefusal.store(201, std::memory_order_relaxed);
       return false;
+    }
     if (offset == 0)
       beginBlock(block);
 
@@ -1024,6 +1058,7 @@ struct PreparedPlaybackTransport {
       // and observable; silently resetting or rendering with mismatched source
       // and time/pitch state would corrupt the audible project position.
       noteSignalsmithTimePitchLoopDeadlineMiss(timePitchProcessor);
+      lastSliceRefusal.store(202, std::memory_order_relaxed);
       return false;
     }
 
@@ -1040,6 +1075,7 @@ struct PreparedPlaybackTransport {
         // immediately: advancing a stream of silence would hide an unbounded
         // callback starvation fault behind apparently healthy transport.
         noteSignalsmithTimePitchLoopDeadlineMiss(timePitchProcessor);
+        lastSliceRefusal.store(203, std::memory_order_relaxed);
         return false;
       }
       wrapAtLoopBoundary();
@@ -1051,8 +1087,10 @@ struct PreparedPlaybackTransport {
       callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
     }
     if (callbackContinuousFrame >
-        static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      lastSliceRefusal.store(204, std::memory_order_relaxed);
       return false;
+    }
 
     uint32_t frames = remaining;
     const bool advancesProject =
@@ -1071,9 +1109,15 @@ struct PreparedPlaybackTransport {
         callbackContinuousFrame >
             static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) -
                 frames ||
-        (advancesProject && !positionAtOffset(frames, &advancedPosition)))
+        (advancesProject && !positionAtOffset(frames, &advancedPosition))) {
+      lastSliceRefusal.store(205, std::memory_order_relaxed);
       return false;
+    }
 
+    // Cleared on the way OUT, not just on reset: detail 101 is substituted
+    // with whatever this holds, and a stale 20x from an earlier block would
+    // then be reported for a refusal that never set one.
+    lastSliceRefusal.store(0, std::memory_order_relaxed);
     *slice = {};
     slice->transport.validFields = zdsp::TransportValidProjectSamples |
                                    zdsp::TransportValidContinuousSamples |
@@ -1092,8 +1136,10 @@ struct PreparedPlaybackTransport {
 
     callbackContinuousFrame += frames;
     if (advancesProject) {
-      if (!advancePosition(frames))
+      if (!advancePosition(frames)) {
+        lastSliceRefusal.store(206, std::memory_order_relaxed);
         return false;
+      }
       callbackState = callbackProjectFrame < 0
                           ? NativePlaybackTransportState::PreRoll
                           : NativePlaybackTransportState::Playing;
@@ -5434,6 +5480,34 @@ NativePlaybackResult NativePlaybackSession::openOutput(
   // openOutput is admitted only while the prior provider is quiescent and all
   // positioned sources remain at their prepared entry. The next stream owns
   // a fresh output-frame anchor even if a previous open/start failed.
+  //
+  // It also owns a fresh STRETCH anchor, and that is not optional. The
+  // initial reanchor plan is seeded once by initialize() and then CONSUMED by
+  // the audio thread, which clears it after its one arming attempt in
+  // beginBlock; resetForOpen does not restore it. So a second open of this
+  // same prepared graph — exactly what a transpose or a tempo change does,
+  // stop then openOutput then start — used to find an invalid plan, skip the
+  // arming block, and leave the boundary unprepared. Every later callback
+  // then failed the render contract for want of an anchor, deterministically
+  // and for the life of the generation: silence, climbing render failures,
+  // and a terminal reported as a provider fault. Priming is off-RT and
+  // self-cleaning (it retires any pending anchor before claiming a slot), so
+  // each open simply takes its own.
+  if (impl_->prepared->hasTimePitch) {
+    const SignalsmithTimePitchReanchorPlan reopenPlan =
+        impl_->prepared->primeTimePitchReanchor(
+            impl_->prepared->preparedStartProjectFrame, 0);
+    // Priming RETIRES the pending anchor before it claims a slot, so a prime
+    // that then fails has already destroyed the plan prepare validated — and
+    // storing that empty result would wedge even a first open, silently and
+    // for the life of the generation. Fail the open instead, the way the
+    // reanchor command does.
+    if (!reopenPlan.valid())
+      return failure(NativePlaybackError::GraphFailure, generation,
+                     impl_->state,
+                     "The playback stretch anchor could not be prepared off RT");
+    impl_->prepared->transport.initialTimePitchReanchorPlan = reopenPlan;
+  }
   impl_->prepared->transport.resetForOpen();
   const AudioHostResult opened = impl_->host.open(
       hostConfig, &nativePlaybackRender, &impl_->prepared->callback);
@@ -6488,6 +6562,33 @@ NativePlaybackStatus NativePlaybackSession::status() const {
   result.audibleFrames =
       result.renderedFrames > latency ? result.renderedFrames - latency : 0;
   result.presentationLatencyFrames = latency;
+  /* Whatever the graph runner last said. Read from the callback state's
+     adapter, which is the same object the RT callback writes it on; this is
+     an ordinary relaxed load off the audio thread. */
+  result.graphStatusCode =
+      impl_->prepared != nullptr && impl_->prepared->callback.adapter != nullptr
+          ? impl_->prepared->callback.adapter->lastStatusCode.load(
+                std::memory_order_relaxed)
+          : 0;
+  const uint32_t adapterDetail =
+      impl_->prepared != nullptr && impl_->prepared->callback.adapter != nullptr
+          ? impl_->prepared->callback.adapter->lastStatusDetail.load(
+                std::memory_order_relaxed)
+          : 0;
+  /* 101 says only "the transport refused"; the transport knows WHICH of its
+     six refusals fired, so report that instead of the generic code. */
+  const uint32_t sliceRefusal =
+      impl_->prepared != nullptr
+          ? impl_->prepared->transport.lastSliceRefusal.load(
+                std::memory_order_relaxed)
+          : 0;
+  result.graphStatusDetail =
+      adapterDetail == 101 && sliceRefusal != 0 ? sliceRefusal : adapterDetail;
+  result.timePitchAnchorOutcome =
+      impl_->prepared != nullptr
+          ? impl_->prepared->transport.lastAnchorOutcome.load(
+                std::memory_order_relaxed)
+          : 0;
   result.graphLatencyFrames = graphLatency;
   result.devicePresentationLatencyFrames = deviceLatency;
   result.totalPresentationLatencyFrames = latency;
