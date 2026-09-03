@@ -161,7 +161,7 @@ directions. Details + env hooks:
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
-`beats-native-ios.cjs`, `song-sheet-beat.cjs`): CDP over
+`beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
 after engine or loading changes. `loop-region` and `ab-repeat` are a PAIR
@@ -172,7 +172,34 @@ hooks exported and nothing referencing either. `song-sheet-beat.cjs` is the one 
 a SCREEN rather than the engine: it seeds two phone-library projects (a
 hand-made grid, and a song with nothing detected), opens the Song sheet and
 reads the Beat row through somebody else's analysis — the rule in
-`song-sheet-copy.ts`, which no headless suite can see applied to a real row. `beats-native-{ios,android}.cjs` are a PAIR
+`song-sheet-copy.ts`, which no headless suite can see applied to a real row.
+`player-session.cjs` is the only one that runs the SAME session TWICE, once
+on each playback backend, and compares the two — and the only one that can
+drive a REAL iPhone (`--platform ios-device`, opt-in, named by `IOS_DEVICE`,
+never part of a bare run because it writes into somebody's own library; its
+CPU/memory columns are blank because a phone has no `top`): a singer's evening
+compressed into one script (a long six-lane song, three metronome touches,
+four seeks, three lane ramps, transpose, training, pause/resume,
+background/foreground, out to the end of the song, a second song, an app
+restart), every timing taken IN-APP, CPU and PSS/RSS sampled in five phases,
+and the app's own log read for `graph build refused` / `cue rebuild failed`
+/ `durable save failed`. Native must be no slower than legacy + max(50 ms,
+10%) and no heavier in any phase — with THREE carve-outs, all printed
+UNCOMPARED. The backgrounded phase is not compared at all when the two
+backends disagree about whether the transport is still running, because
+"still rendering six lanes" against "stopped" is two different jobs. The transpose is a full graph rebuild under native today and is
+held to an absolute 12 s ceiling instead, because a comparison nobody can
+pass teaches nothing; and first-audible is reported only, because legacy
+times it from its own position clock and native from the core's first audible
+callback, so the two columns are not the same measurement. Its CPU/memory columns are a legacy-vs-native comparison on ONE
+host and are never a phone's numbers. Two things to know before running it:
+the Mac's default output must be at 48 kHz or the simulator's RemoteIO
+refuses the native handoff and the "native" pass silently measures legacy
+(it refuses to start rather than produce that red), and NOTHING under
+`mobile/` may be edited while it runs — Metro reloads the app's JS on any
+change there, unmounting the player mid-session, so every measurement window
+carries a run id and a reload now fails loudly instead of arriving as a
+mystery stall. `beats-native-{ios,android}.cjs` are a PAIR
 and both are owed: the two bindings marshal differently (iOS builds its dict
 from the core's doubles, Android crosses a JSON line and parses it in Kotlin),
 so a value lost in that text hop is invisible to the iOS half. Both want a
