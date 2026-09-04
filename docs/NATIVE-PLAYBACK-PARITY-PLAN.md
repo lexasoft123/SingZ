@@ -206,12 +206,28 @@ code-reviewer gate.
   `invalid-state` refusal (a held stream, a route that changed under the song); any other
   failure throws with the song still playing under its old generation. The handle accepts
   the outgoing generation's number from the telemetry and the clock until the seam
-  (`swappingFromGeneration`), and the backend asks `swapsInPlace()` before taking the scrub
-  rail away, so `capabilities.seek` never drops for a seam. Seven facade mutants killed;
-  b2 pins the one-prepare seam, a paused song and its loop carried across, the refusal
-  fallback, a failed candidate leaving the song playing, and no seam on a held stream.
-  **Next:** the phone measurement (the seam facts arrive in the app log as
-  `swap landed · seams N · late M`; read late against seams at rest before believing it).
+  (`swappingFromGeneration`); a second change arriving inside that window waits, bounded by
+  `SWAP_LANDING_DEADLINE_MS`, for the seam before it reads the transport (the first cut read
+  the outgoing generation's telemetry and stopped the song — review), and a seam that never
+  lands runs the wait out and takes the rebuild; the backend asks `swapsInPlace()` before
+  taking the scrub rail away, so `capabilities.seek` never drops for a seam. Nine facade
+  mutants killed; b2 pins the one-prepare seam, a paused song and its loop carried across,
+  the refusal fallback, a failed candidate leaving the song playing, no seam on a held stream,
+  a second change waiting for the first seam, and a seam that never lands.
+- **First phone run (POCO, .debug build, `poco-run-3c-1.log`):** the seams work — six in one
+  session, metronome touches 137 ms vs legacy 217 (was 297), training on 100 vs 99 (was
+  511), resume 172 vs 303, lane ramps 34 vs 91, seek worst-of-4 184 vs 110 (was 352). Two
+  fails with one cause: Android grants audio focus BY GENERATION at
+  `configureOutputSession`, a swap opens nothing, so the replacement owned the stream and
+  not the focus and the foreground release of the background hold was refused (`Android
+  audio focus is not owned`) — the song stayed held for the rest of the session. Fixed: an
+  accepted swap prepare inherits the outgoing generation's focus. And the two rate-change
+  seams landed late (`late 1`, `late 2`): the three-buffer budget is 12 ms at 192 frames,
+  priming the Stretch stage on the phone costs tens — fixed: the budget adds twice the prime
+  cost the candidate's own prepare measured (`timePitchPrimeNs`; under 5 ms ignored).
+  Metronome save (478 vs 185) is the one rebuild-family rule left; CPU playing 123 vs 110,
+  idle 15.1 vs 14.5, backgrounded 13.6 vs 11.6 are Step 4's. **Next:** the second phone run
+  with both fixes.
 
 ### Step 4 — CPU on the phone (~1–2 days)
 Measure after steps 1–3 on the POCO; only then the stream-mode A/B

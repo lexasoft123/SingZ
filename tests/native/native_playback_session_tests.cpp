@@ -4021,6 +4021,54 @@ void aLoopSurvivesARateSwapAcrossItsWrap() {
   std::remove(wav.c_str());
 }
 
+// A phone primes a Stretch stage in tens of milliseconds where this suite
+// takes microseconds, and the swap re-primes the candidate AFTER predicting
+// its landing: measured on the POCO, every rate-change seam landed late by
+// exactly that price. The budget therefore grows by twice the prime cost the
+// candidate's prepare measured — and the seam still lands on the frame.
+void aSlowStretchPrimeStretchesTheLandingBudget() {
+  const std::vector<float> ramp = swapRamp(60000);
+  const std::string wav = writeWav("swap-slow-prime.wav", 1, ramp);
+  singz::NativePlaybackTestHooks hooks{};
+  // 20 ms at 48 kHz: 960 frames, twice that is 1920, plus the three
+  // two-frame nominal buffers of the fake.
+  hooks.timePitchPrimeNs = 20'000'000;
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 140).ok);
+  CHECK(session.openOutput(140).ok && session.start(140).ok);
+  CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 140;
+  replacement.playbackRate = 0.75;
+  replacement.preparedStartProjectFrame = 8;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                        141)
+            .ok);
+  // Armed for stream frame 8 + 6 + 1920 = 1934: fifteen full blocks of 128
+  // stay the outgoing generation's, the sixteenth splits at offset 6.
+  for (uint32_t block = 0; block < 15; ++block)
+    CHECK(fake->drive(128));
+  auto status = session.status();
+  CHECK(status.transportGeneration == 140 && status.swapLandings == 0 &&
+        status.continuousFrame == 1928 && status.renderedProjectFrame == 1928);
+  CHECK(fake->drive(128));
+  status = session.status();
+  // 1934 at 1.0, then 122 frames at 0.75 → 2025.5.
+  CHECK(status.transportGeneration == 141 && status.swapLandings == 1 &&
+        status.swapLateLandings == 0 && status.timePitchAnchorOutcome == 40 &&
+        status.timePitchAnchorsPublished == 1 &&
+        status.timePitchAnchorMisses == 0 && status.continuousFrame == 2056 &&
+        status.renderedProjectFrame == 2025);
+  CHECK(session.unload(141).ok);
+  std::remove(wav.c_str());
+}
+
 struct SwapArmingLatch {
   std::mutex mutex;
   std::condition_variable condition;
@@ -6251,6 +6299,7 @@ int main() {
   aSwapArmedBehindAnUnappliedCommandLandsUnanchored();
   aLoopSurvivesARateSwapAcrossItsWrap();
   aSwapArmedTooLateLandsUnanchoredAndSaysSo();
+  aSlowStretchPrimeStretchesTheLandingBudget();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();

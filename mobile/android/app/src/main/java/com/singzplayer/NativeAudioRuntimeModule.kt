@@ -243,7 +243,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
         val trainingWindows =
           (training as? NativePlaybackBridgeSchema.Training.Windows)?.windows.orEmpty()
         val graph = parsed.graphDocument
-        SingzCore.nativePlaybackPrepare(
+        val result = SingzCore.nativePlaybackPrepare(
           generation,
           parsed.outputDeviceUid,
           parsed.outputChannels,
@@ -291,6 +291,8 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
             ?: emptyArray<NativePlaybackGraphConnectionJni>(),
           roots.toTypedArray()
         )
+        inheritFocusForSwap(parsed.swapFromGeneration, generation, result)
+        result
       }) {
         // The synchronous claim is already authoritative. If dispatch itself
         // fails, retire that exact generation before rejecting JavaScript.
@@ -592,6 +594,20 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
   )
 
   private fun ownsFocus(generation: Long): Boolean = focusOwned && focusGeneration == generation
+
+  /** A swap prepare the core accepted takes over the stream — and the audio
+   *  focus granted for it — from the generation it replaces. Focus is
+   *  granted once, at configureOutputSession, to the generation that opens
+   *  the stream, and every later command checks ownsFocus by generation; a
+   *  swap opens nothing, so without this the replacement owned the stream
+   *  and not the focus, and the first resumeOutput after a background hold
+   *  was refused with "audio focus is not owned" — measured on the POCO as
+   *  a song that never came back from the home screen. */
+  private fun inheritFocusForSwap(from: Long, to: Long, result: String?) {
+    if (from == 0L || result == null) return
+    val accepted = runCatching { parseJson(result).getBoolean("ok") }.getOrDefault(false)
+    if (accepted && ownsFocus(from)) focusGeneration = to
+  }
 
   private fun abandonFocus(generation: Long) {
     if (!focusOwned || focusGeneration != generation) return

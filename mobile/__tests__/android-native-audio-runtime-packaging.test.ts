@@ -94,6 +94,10 @@ describe('Android native DSP runtime packaging', () => {
     // The swap's request key crosses as one more positional JNI argument.
     expect(core).toContain('swapFromGeneration: Long,');
     expect(module).toContain('parsed.swapFromGeneration,');
+    // A swap opens no stream, so the focus granted to the generation it
+    // replaces must follow it, or the first hold's release is refused.
+    expect(module).toContain('inheritFocusForSwap(parsed.swapFromGeneration, generation, result)');
+    expect(module).toContain('if (accepted && ownsFocus(from)) focusGeneration = to');
     expect(core).toContain('external fun nativePlaybackReanchor(');
     expect(core).toContain('external fun nativePlaybackPreviewClick(');
     expect(core).toContain('graphNodes: Array<NativePlaybackGraphNodeJni>');

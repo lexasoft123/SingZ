@@ -793,6 +793,11 @@ struct NativePlaybackTestHooks {
                                 uint64_t laneWorkingBytes,
                                 uint64_t inFlightDecodedBytes) noexcept {
       nullptr};
+  // Pretend priming a Stretch stage took this long (a phone's price, where
+  // the host suite's takes microseconds): a swap's landing budget grows by
+  // twice it. Zero measures. Last on purpose: the hooks are brace-initialized
+  // positionally throughout the suite.
+  uint64_t timePitchPrimeNs{0};
 };
 
 // Reusable ordinary-thread composition owner. It accepts only already-opened

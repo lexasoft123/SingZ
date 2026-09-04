@@ -2354,6 +2354,12 @@ struct PreparedPlaybackGraph {
   std::array<const float *, kSignalsmithTimePitchMaximumChannels>
       timePitchAnchorChannels{};
   uint32_t timePitchAnchorFrames{0};
+  // What priming the Stretch stage cost at prepare (fill + initial + reanchor
+  // + loop plan), steady-clock. A swap re-primes the candidate at the
+  // predicted landing position AFTER predicting it, and this is the best
+  // estimate of how long that takes on this device: the landing budget adds
+  // twice this, so the seam is not late by the price of its own anchor.
+  uint64_t timePitchPrimeNs{0};
   SignalsmithTimePitchLoopPlan initialTimePitchLoopPlan{};
   SignalsmithTimePitchReanchorPlan initialTimePitchReanchorPlan{};
   float timePitchCorrectionSemitones{0.0F};
@@ -2409,6 +2415,18 @@ struct PreparedPlaybackGraph {
       return {};
     }
     return processor;
+  }
+
+  // Steady-clock nanoseconds since `started`, unless a test injected the
+  // price of a slow device (the fake host primes in microseconds).
+  uint64_t measuredOrInjectedPrimeNs(
+      std::chrono::steady_clock::time_point started) const noexcept {
+    if (testHooks != nullptr && testHooks->timePitchPrimeNs != 0)
+      return testHooks->timePitchPrimeNs;
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    const auto ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+    return ns < 0 ? 0 : static_cast<uint64_t>(ns);
   }
 
   bool trainingInside(int64_t projectFrame) const noexcept {
@@ -3105,6 +3123,7 @@ struct PreparedPlaybackGraph {
                   timePitchAnchorSamples.capacity() * sizeof(float))
         return {zdsp::StatusCode::CapacityExceeded, 35};
       retainedBytes += timePitchAnchorSamples.capacity() * sizeof(float);
+      const auto primeStarted = std::chrono::steady_clock::now();
       if (!fillTimePitchAnchor(preparedStartProjectFrame) ||
           !primeSignalsmithTimePitchInitial(timePitchProcessor,
                                             timePitchAnchorInput()))
@@ -3113,6 +3132,10 @@ struct PreparedPlaybackGraph {
           timePitchProcessor, timePitchAnchorInput());
       if (!initialTimePitchReanchorPlan.valid())
         return {zdsp::StatusCode::InvalidArgument, 37};
+      // Exactly the work a swap repeats at its predicted landing position:
+      // the anchor fill, the initial prime, the reanchor plan. Not the loop
+      // bank below, which a swap does not re-prime.
+      timePitchPrimeNs = measuredOrInjectedPrimeNs(primeStarted);
       const SignalsmithTimePitchLoopPrepareResult loopPrepared =
           configureTimePitchLoop(initialTransport.loop);
       if (!loopPrepared.ok())
@@ -3619,6 +3642,7 @@ struct PreparedPlaybackGraph {
                   timePitchAnchorSamples.capacity() * sizeof(float))
         return {zdsp::StatusCode::CapacityExceeded, 14};
       retainedBytes += timePitchAnchorSamples.capacity() * sizeof(float);
+      const auto primeStarted = std::chrono::steady_clock::now();
       if (!fillTimePitchAnchor(preparedStartProjectFrame) ||
           !primeSignalsmithTimePitchInitial(timePitchProcessor,
                                             timePitchAnchorInput()))
@@ -3627,6 +3651,10 @@ struct PreparedPlaybackGraph {
           timePitchProcessor, timePitchAnchorInput());
       if (!initialTimePitchReanchorPlan.valid())
         return {zdsp::StatusCode::InvalidArgument, 15};
+      // Exactly the work a swap repeats at its predicted landing position:
+      // the anchor fill, the initial prime, the reanchor plan. Not the loop
+      // bank below, which a swap does not re-prime.
+      timePitchPrimeNs = measuredOrInjectedPrimeNs(primeStarted);
       const SignalsmithTimePitchLoopPrepareResult loopPrepared =
           configureTimePitchLoop(initialTransport.loop);
       if (!loopPrepared.ok())
@@ -6224,10 +6252,29 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
           const bool advancing =
               from.state == NativePlaybackTransportState::Playing ||
               from.state == NativePlaybackTransportState::PreRoll;
-          const uint64_t margin =
+          // Three nominal buffers past the last publication, plus twice
+          // what priming this candidate's Stretch stage cost at prepare —
+          // the same work is about to be done again, after the prediction,
+          // and on a phone it is tens of milliseconds where the buffers are
+          // four. Measured on the POCO before this: every rate-change seam
+          // landed late by exactly that price. Costs under five milliseconds
+          // are ignored so a host suite's frame arithmetic stays exact — a
+          // phone's are tens.
+          const uint64_t buffers =
               hostNow.format.nominalBufferFrames != 0
                   ? 3ull * hostNow.format.nominalBufferFrames
                   : 2ull * std::max<uint32_t>(hostNow.format.maximumFrames, 1);
+          const uint64_t primeNs = candidate->timePitchPrimeNs;
+          const uint64_t primeFrames =
+              primeNs >= 5'000'000ull
+                  ? static_cast<uint64_t>(std::ceil(
+                        static_cast<double>(primeNs) * 2.0 *
+                        candidate->sampleRate / 1.0e9))
+                  : 0;
+          const uint64_t margin =
+              buffers + std::min<uint64_t>(primeFrames,
+                                           static_cast<uint64_t>(
+                                               candidate->sampleRate * 2.0));
           const PreparedPlaybackTransport &land = candidate->transport;
           const PreparedPlaybackTransport::PredictedPosition predicted =
               advancing ? outgoing.transport.predictPosition(
