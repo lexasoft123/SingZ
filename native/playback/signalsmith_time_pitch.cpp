@@ -26,6 +26,22 @@ constexpr float kSignalsmithTonalityLimitHz = 8000.0F;
 constexpr double kSignalsmithLoopReplenishSeconds = 0.25;
 constexpr auto kSignalsmithLoopWorkerPollInterval =
     std::chrono::milliseconds(2);
+// While no recurring loop is active the worker has nothing to replenish, so
+// it polls at this rate instead: measured on the POCO (exact per-thread ticks,
+// parity plan Step 4 run 7), the 2 ms poll cost about 1.2% of a core PER LIVE
+// STAGE, hold or not, and a project whose graph carries a Stretch stage at
+// unity has one in every generation. Activation happens on the render thread
+// (the Start/loop command in the callback), which must not enter the wake
+// machinery, so the worker notices it by polling — within this interval,
+// which sits inside the design's own margin: the bank is pre-primed with two
+// entries at plan time and the minimum loop length already reserves
+// kSignalsmithLoopReplenishSeconds per wrap for the worker.
+constexpr auto kSignalsmithLoopWorkerIdlePollInterval =
+    std::chrono::milliseconds(100);
+static_assert(kSignalsmithLoopWorkerIdlePollInterval.count() * 2 <
+                  static_cast<long>(kSignalsmithLoopReplenishSeconds * 1000.0),
+              "the idle poll must notice an activation well inside one "
+              "replenishment period");
 constexpr uint32_t kSignalsmithAnchorSlotCount = 6;
 constexpr uint32_t kNoSignalsmithAnchorSlot = UINT32_MAX;
 constexpr uint32_t kSignalsmithReanchorSlotBits = 3;
@@ -106,6 +122,7 @@ struct SignalsmithTimePitchState {
   std::atomic<bool> recurringEnabled{false};
   std::atomic<uint64_t> loopConsumptionEpoch{0};
   std::atomic<bool> workerStop{false};
+  std::atomic<uint64_t> workerWakeups{0};
   std::atomic<uint64_t> anchorsPrepared{0};
   std::atomic<uint64_t> anchorsPublished{0};
   std::atomic<uint64_t> anchorMisses{0};
@@ -352,11 +369,16 @@ void anchorWorker(SignalsmithTimePitchState *state) noexcept {
     // enter the platform atomic-wake machinery.  The condition variable is
     // reserved for ordinary-thread shutdown so teardown never waits for the
     // next poll interval.
-    state->workerWake.wait_for(lock, kSignalsmithLoopWorkerPollInterval, [&] {
+    const auto interval =
+        state->recurringEnabled.load(std::memory_order_acquire)
+            ? kSignalsmithLoopWorkerPollInterval
+            : kSignalsmithLoopWorkerIdlePollInterval;
+    state->workerWake.wait_for(lock, interval, [&] {
       return state->workerStop.load(std::memory_order_acquire) ||
              state->loopConsumptionEpoch.load(std::memory_order_acquire) !=
                  observed;
     });
+    state->workerWakeups.fetch_add(1u, std::memory_order_relaxed);
     if (state->workerStop.load(std::memory_order_acquire))
       break;
     const uint64_t published =
@@ -949,7 +971,8 @@ SignalsmithTimePitchAnchorStatus signalsmithTimePitchAnchorStatus(
                             return bank.lifecycle.load(
                                        std::memory_order_relaxed) ==
                                    LoopBankState::Ready;
-                          })};
+                          }),
+          state->workerWakeups.load(std::memory_order_relaxed)};
 }
 
 size_t signalsmithTimePitchPreparedBytes(

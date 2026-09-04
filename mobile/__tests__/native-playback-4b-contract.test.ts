@@ -525,6 +525,31 @@ describe('session(): the poll reads the session block alone', () => {
     expect(status).not.toHaveBeenCalled();
   });
 
+  it('reads a session() answered as JSON text exactly as one answered as a map', async () => {
+    // Android resolves the core's text and lets Hermes parse it — the map it
+    // used to rebuild on its control thread was a measurable share of a
+    // phone core during a background hold.
+    const raw = nativeStatus();
+    const asText = jest.fn(async () => JSON.stringify(raw.session));
+    const asMap = jest.fn(async () => raw.session);
+    const status = jest.fn(async () => raw);
+    const text = nativePlaybackBridge({ ...bridgeStubs(), status, session: asText })!;
+    const map = nativePlaybackBridge({ ...bridgeStubs(), status, session: asMap })!;
+    const parsed = await text.session();
+    expect(parsed).toEqual(await map.session());
+    expect(parsed.generation).toBeGreaterThan(0);
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('answers malformed session text with the empty session', async () => {
+    const api = nativePlaybackBridge({
+      ...bridgeStubs(),
+      status: jest.fn(async () => nativeStatus()),
+      session: jest.fn(async () => '{"generation": 7,'),
+    })!;
+    await expect(api.session()).resolves.toMatchObject({ generation: 0, state: 'unloaded' });
+  });
+
   it('falls back to status() on a native build older than the method', async () => {
     const raw = nativeStatus();
     const status = jest.fn(async () => raw);

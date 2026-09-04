@@ -262,6 +262,115 @@ LowLatency callbacks, so fewer callbacks is not why legacy is cheaper on the emu
 if anything remains, the legacy Hermes profile with `jsprof-hermes-android.cjs`
 (kept beside the project memory on the dev Mac).
 
+**Shipped (2026-09-05):**
+- **The phone had been measuring a -O0 core.** AGP's Debug configuration hands clang `-g`
+  and no `-O` flag at all (read off `compile_commands.json`, not assumed), and the `.debug`
+  APK is the only build a driver can measure — so every CPU column and every Stretch
+  prime cost in Steps 1–3 was the unoptimized engine against Hermes. The Debug variant
+  now compiles the app's own native code with `-O2` (asserts stay in, no NDEBUG;
+  `-PsingzNativeUnoptimized=1` is the opt-out; React Native's own `appmodules` is
+  untouched), verified on the compile lines of the core, the callback, the JNI shim and
+  the Android host. Two POCO runs on that build (`poco-run-4a-{1,2}.log`, host load 5–7):
+  **CPU playing 88.7% / 99.6% native vs 108.8% / 107.4% legacy; pitch-change 184.4% /
+  180.5% vs 199.8% / 198.5%** — the two rules Step 4 was written for pass on both runs,
+  with no stream-mode change; the seams' prime cost fell from 55 ms to 3–4 ms
+  (`prime 3 ms · armed in 157 ms`). The stream-mode A/B is therefore not taken: what it was
+  meant to buy is already there. Also folded into the same commit, found while closing a
+  reviewer risk: the Android bridge tracked ONE generation, set at the claim, so while a
+  swap was armed a focus loss or route change cancelled the candidate — which the core,
+  correctly, answers by keeping the song playing — and the song rendered on under lost
+  focus; and a refused or abandoned candidate's unload released the focus it had inherited
+  while the song played on untracked. `NativePlaybackGenerationLedger` (pure, JUnit-tested
+  off the device, five mutants killed) is the one account of both generations and the
+  focus; fail-closed retires both; the facade acknowledges every landed seam through the
+  existing `unload` of the replaced generation (which the core already answers as an
+  acknowledgement), and the core's own answer to an unload — the live state for a cancelled
+  candidate, `unloaded` for a teardown — tells the ledger which case it was. Not yet
+  measurable by any driver: a focus loss taken between the arm and the landing (owed a
+  device driver).
+- **What the two runs still fail, and why each is or is not a backend property:**
+  `CPU (backgrounded)` 13.1% / 13.6% native vs 12.1% / 11.7% legacy — consistent, about
+  three scheduler ticks over the two-second sample, with the stream held and the graph
+  parked; the third run carries a per-thread sampler (`top -H`, once a second) to say
+  which thread spends them. `CPU (idle-in-player)` 15.9% / 15.5% vs 15.0% / 15.0% — one to
+  two ticks, inside the sample's own resolution. `app restart → app ready` flipped sides
+  across the three optimized/unoptimized runs (legacy 6779 / 5443 / 5519, native 5572 /
+  6803 / 6872 — bimodal at about 5.5 and 6.8 s on BOTH backends), because the timing is
+  host-side and its attach polled Metro's target list once a second and the pid twice a
+  second while the rule's tolerance is about half a second: the measurement could not
+  resolve the difference it was asked to judge. The first fix — polling Metro's list and
+  `typeof __test` over the inspector at 250 / 100 ms — was withdrawn after one run: the
+  native pass's process died 4 s after launch in Fabric's first commit
+  (`MountingCoordinator::pullTransaction`, program counter in the scudo heap, on
+  `mqt_v_js`), with the harness's 100 ms `Runtime.evaluate` poll the only new thing on a
+  booting JS thread; one sample, but the same class as the inspector-during-decode crash
+  this file's Android section already forbids. The restart is now timed by an IN-APP mark:
+  `CatalogScreen` writes `singz.boot` to the pref store on mount, and the Android driver
+  polls it through `run-as` at 100 ms (`awaitBoot`) before attaching at the old cadence —
+  no inspector traffic until the app is up; the iOS drivers keep the host-side timing and
+  its quantum. From the fourth run on the Android rule can answer.
+- **Fourth run (`poco-run-4a-4.log`, in-app restart mark, per-thread sampler): 57/58.**
+  Restart native 3797 vs legacy 3958 ms — the rule was the harness's quantum. Idle
+  17.5 vs 26.6 (legacy sampled at host load 9.7), playing 95.1 vs 122.6, pitch-change
+  178.3 vs 213.7. The one miss, `CPU (backgrounded)` 13.1 vs 12.2, the sampler explains
+  thread by thread: in legacy's held window the app is its main thread alone (10–14%,
+  AudioTrack 0, JS 0); in native's it is the same main thread (10.5%) plus the bridge's
+  control thread at 2.6% — the facade's idle-rate poll, answered on Android by parsing
+  the core's ~150-field JSON with org.json and rebuilding it as a WritableMap, every two
+  seconds, for a stream that delivers nothing. Two cuts, both pinned and mutation-checked:
+  the Android `session()` resolves the core's JSON TEXT and Hermes parses it (iOS keeps
+  its dictionary built from doubles — its text parser is not correctly rounded), and a
+  held stream polls at `NATIVE_TELEMETRY_HELD_POLL_MS` (10 s) instead of the idle rate,
+  because the release on foreground meets a focus loss or a route change anyway (and the
+  tick that discovers the hold does not read — the park just published the transport).
+- **Fifth run (`poco-run-4b-1.log`, both cuts in): 56/58**, restart 3804 vs 3805 ms,
+  playing 95.4 vs 106.1, pitch-change 181.8 vs 199.4 — and `CPU (backgrounded)` STILL
+  13.5 vs 11.2, idle 15.6 vs 15.0. The sampler then showed what the rule could not: over
+  the hold, native is its main thread alone at 10.7–14.2% with the bridge thread at 0.0,
+  and legacy is its main thread alone at 10.3–18.5% — the same steady state. The harness
+  compared a two-second `utime+stime` window taken three seconds into a seven-second
+  hold, i.e. two different seconds of it, quantized to ten-millisecond ticks, and that
+  is a rule no number of runs can settle. The backgrounded phase is now sampled over
+  five seconds from one second into the hold (`sample(phase, windowMs)`; the iOS
+  devices keep their fixed window). What is left of the idle gap (0.5–0.9 points at the
+  same resolution) has one plausible source, unmeasured: every poll writes
+  `telemetryAtMs` into the view state and notifies the screen even when a paused
+  transport has not moved, one React commit per idle poll — noted, not chased.
+- **Sixth and seventh runs: the five-second window still read 13.0 vs 11.7 and 12.9 vs 11.3,
+  and exact per-thread ticks (`/proc/<pid>/task/*/stat` deltas, not `top` snapshots)
+  found what the snapshots missed.** Two threads carrying the bridge control thread's
+  name — Linux names a thread after its creator — each at 1.2% for as long as their
+  generation lived, hold or not: the Stretch stage's loop anchor worker
+  (`anchorWorker`, `signalsmith_time_pitch.cpp`), one per live time-pitch stage,
+  polling every 2 ms to replenish loop-bank slots that are only filled while a recurring
+  loop is active — and this project's persisted graph puts a Stretch stage at unity in
+  every generation, so every song paid it in every quiet phase (the legacy engine has no
+  such thread; its hold is the main thread alone at 10–14%, native's the same main thread
+  plus these two). Activation happens on the render thread, so the worker cannot be
+  notified; it now polls at 100 ms while no loop is active and at 2 ms once one is, inside
+  the design's own margin (two pre-primed entries, a replenishment period reserved per
+  wrap in the minimum loop length). Pinned through a wake counter in the anchor status
+  (idle ≤ 12 wakes in 300 ms, active ≥ 30), two mutants killed.
+- **Eighth run (`poco-run-4c-1.log`, worker fix in): 57/58** — idle 15.5 vs 16.0 (native
+  under legacy for the first time), playing 93.2 vs 104.6, pitch-change 166.7 vs 188.5,
+  backgrounded 11.7 vs 11.1. The exact ticks over that hold: native is its main thread
+  at 11.8% plus binder at 3.7% and nothing else (17.9% in all); legacy's hold is main at
+  11–14.6%, binder 4.4%, a JNI destructor thread 2.7% (19–23%). Thread for thread native
+  is at or under legacy, and the 0.6 the harness still reads is three ten-millisecond
+  ticks over five seconds. The CPU rules therefore carry the sample's own quantum as
+  their tolerance — two ticks over the window, 1.0 point at 2 s and 0.4 at 5 s on
+  Android (`tickPct` from the sampler; the iOS samplers report none and keep zero) —
+  because two utime+stime windows taken at different moments cannot resolve less than
+  that, and a rule that asks them to is decided by which second it lands on. **Step 4's
+  engine work is done**: playing and pitch-change pass by 10–20 points on every
+  optimized-core run, idle is inside the quantum, and backgrounded's 0.6 is three ticks
+  where the tolerance is two — one tick outside, deliberately not widened to cover it: if
+  it is systematic, a longer window shrinks the tick and shows it; the exact ticks say it
+  is the main thread and binder on both sides, so the next quiet-host run decides. Not chased: the
+  React commit per idle poll (see above). Host load during runs 4–8 was 5–12, and 88
+  during run 8 (Chrome and XProtect on the Mac, not this work); the phone's own
+  `utime+stime` does not see the host, the timing rules may.
+
 ### Step 5 — iOS memory (~1–2 days)
 `vmmap --summary` at idle-in-player for both backends before any theory; the likely causes
 are the decode pool's transient peak held by the allocator (decode into final-sized buffers,

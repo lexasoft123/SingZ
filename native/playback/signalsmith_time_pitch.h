@@ -32,6 +32,9 @@ struct SignalsmithTimePitchAnchorStatus {
   uint64_t misses{0};
   bool replacementReady{false};
   bool recurring{false};
+  /* How often the loop worker has woken — a test's window onto its poll
+     rate, which is the idle one until a recurring loop is active. */
+  uint64_t workerWakeups{0};
 };
 
 struct SignalsmithTimePitchLoopPlan {

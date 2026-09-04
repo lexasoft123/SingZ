@@ -437,8 +437,8 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
      it. A simulator or emulator number taken on a busy Mac describes the Mac;
      the load is what says so, printed in the table and judged as a rule
      (`hostQuiet`) when the device is host-bound. */
-  const sample = async (phase) => {
-    const s = await dev.sample()
+  const sample = async (phase, windowMs = 2000) => {
+    const s = await dev.sample(windowMs)
     const h = hostLoad()
     const out = { ...s, load1: h.load1 }
     say(`${phase}: cpu ${s.cpuPct ?? '—'}% · host load ${h.load1}${isQuiet(h.load1) ? '' : ` (BUSY — quiet is ≤ ${QUIET_LOAD})`}`)
@@ -773,8 +773,14 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   const posBefore = await dev.val('__test.backend ? __test.backend.position : null')
   const bgWindowFrom = await dev.val('Date.now()')
   const bg = await dev.background()
-  await sleep(3000)
-  cpu.backgrounded = await sample('backgrounded')
+  /* The hold lasts about seven seconds. A two-second sample three seconds in
+     compared two different seconds of it and flipped the rule by a point or
+     two run after run while a per-thread top showed both backends at the
+     same one thread (the main one, 10-14%) for the whole hold — so this
+     phase is sampled over five seconds from early in the hold. (The iOS
+     devices sample their own fixed window; the argument is Android's.) */
+  await sleep(1000)
+  cpu.backgrounded = await sample('backgrounded', 5000)
   /* A backgrounded app may legitimately be FROZEN, and then it cannot answer.
    *
    * On a real iPhone iOS suspends an app that is not playing audio, so its JS
@@ -930,14 +936,23 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
      merging two fetches by (t, line) is cheaper than trusting the replay to
      be complete. */
   const logBefore = JSON.parse(await dev.val("__r('src/log.ts').logEntries().then(e => JSON.stringify(e))"))
+  // Clear the app's boot mark so the poll below cannot read the old one.
+  await dev.ev("void __r('src/latency.ts').setStoredText('singz.boot', '')")
+  await sleep(300)
   await dev.detach()
   const tRestart = Date.now()
-  await dev.launch()
-  await dev.attach()
-  /* Host-side and therefore coarse (the Metro target poll is on a 1 s
-     cadence) — but the same coarseness on both backends, which is the only
-     property this comparison needs. */
-  m.coldRestart = round(Date.now() - tRestart)
+  const launched = await dev.launch()
+  /* Timed by the app's own boot mark where the device can poll it without
+     the inspector (Android); host-side and coarse otherwise — the Metro
+     target poll is on a 1 s cadence, wider than this rule's tolerance, so
+     on those platforms the rule can only see differences of a poll or more. */
+  if (dev.awaitBoot) {
+    m.coldRestart = round(await dev.awaitBoot(launched.t0 ?? tRestart))
+    await dev.attach()
+  } else {
+    await dev.attach()
+    m.coldRestart = round(Date.now() - tRestart)
+  }
   await dev.installHooks()
   await goQuiet(dev)
   await dev.ev("void __test.selectMode('phone')")
@@ -1113,10 +1128,22 @@ function evaluate(legacy, native) {
             ` vs legacy ${l.cpuPct}% (transport ${legacy.detail.backgroundPlaying ? 'still playing' : 'stopped'})`
         })
       } else {
+        /* The tolerance is the sample's own quantum: two scheduler ticks over
+           its window (1.0 point at 2 s, 0.4 at 5 s on Android; the iOS
+           samplers report no tick and keep zero). Eight POCO runs flipped
+           the backgrounded rule by one to three ticks while exact per-thread
+           tick deltas over the whole hold showed the two backends on the
+           same threads at the same cost — two utime+stime windows taken at
+           different moments cannot resolve less than their quantum, and a
+           rule that asks them to is decided by which second it lands on. */
+        const tol = Math.max(n.tickPct ?? 0, l.tickPct ?? 0) * 2
+        const budget = Math.round((l.cpuPct + tol) * 10) / 10
         rows.push({
-          rule: `CPU (${phase}): native ≤ legacy`,
-          ok: n.cpuPct <= l.cpuPct,
-          detail: `native ${n.cpuPct}% vs legacy ${l.cpuPct}%`
+          rule: tol > 0 ? `CPU (${phase}): native ≤ legacy + 2 ticks` : `CPU (${phase}): native ≤ legacy`,
+          ok: n.cpuPct <= budget,
+          detail: tol > 0
+            ? `native ${n.cpuPct}% vs legacy ${l.cpuPct}% (budget ${budget}%, tick ${Math.max(n.tickPct ?? 0, l.tickPct ?? 0)} pt)`
+            : `native ${n.cpuPct}% vs legacy ${l.cpuPct}%`
         })
       }
     }

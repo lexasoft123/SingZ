@@ -156,6 +156,13 @@ export const NATIVE_TELEMETRY_POLL_MS = 1000;
  * rate there.
  */
 export const NATIVE_TELEMETRY_IDLE_POLL_MS = 2000;
+/** While the stream is held in the background (Android's park) nothing
+ *  renders and nothing the poll reads can change except a focus loss or a
+ *  route change, both of which the release on foreground meets anyway — so
+ *  the poll runs at this rate there. Measured on the POCO (per-thread top,
+ *  Step 4 run 4): the bridge's control thread spent 2.6% of a core answering
+ *  the idle-rate poll during a hold where the legacy engine spent nothing. */
+export const NATIVE_TELEMETRY_HELD_POLL_MS = 10000;
 
 /**
  * The count-in on a native build WITHOUT the synchronous clock.
@@ -739,6 +746,15 @@ const nativeModule = (): NativePlaybackApi | undefined =>
 /** Wrap whatever native module is installed into the typed facade, or nothing
  *  if it lacks the methods native playback cannot do without. Exported so a
  *  test can hand it a bridge shaped like an older build. */
+const sessionValue = (raw: unknown): unknown => {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
 export const nativePlaybackBridge = (
   candidate: Partial<NativePlaybackBridgeApi> | undefined,
 ): NativePlaybackApi | undefined => {
@@ -765,9 +781,15 @@ export const nativePlaybackBridge = (
     // of the full status rather than native playback going away. A malformed
     // session block is the empty session, which is what a malformed status
     // always polled as.
+    // Android resolves the core's JSON as TEXT (the bridge map it used to
+    // rebuild on its control thread cost 2.6% of a POCO core during a
+    // background hold); Hermes parses it here. iOS hands a dictionary built
+    // from the core's doubles and must keep doing so — its text parser is
+    // not correctly rounded. Malformed text is the empty session, as a
+    // malformed block always was.
     session: async () =>
       typeof bridge.session === 'function'
-        ? (parseNativePlaybackSession(await bridge.session()) ??
+        ? (parseNativePlaybackSession(sessionValue(await bridge.session())) ??
           emptyNativeSession())
         : parseNativePlaybackCapability(await bridge.status(), Platform.OS)
             .session,
@@ -5352,16 +5374,20 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     );
   }
 
-  /** Playing polls at the ordinary rate; paused, parked at the end, or
-   *  parked in the background on Android polls at the idle one — the read
-   *  still notices focus loss, route changes and owner retirement, a second
-   *  or two later, on a transport that makes no sound. iOS keeps playing in
+  /** Playing polls at the ordinary rate; paused or parked at the end polls
+   *  at the idle one — the read still notices focus loss, route changes and
+   *  owner retirement, a second or two later, on a transport that makes no
+   *  sound; a stream held in the background on Android polls at the held
+   *  rate, because the release on foreground meets those anyway and each
+   *  read costs a bridge round trip on a phone that is not being looked
+   *  at. iOS keeps playing in
    *  the background by decision, so its phase keeps it at the playing rate.
    *  A build without the synchronous clock keeps the fast pre-roll poll,
    *  because its dots sample this grid. */
   private pollIntervalMs(): number {
     if (!this.coordinator.syncClock && this.state.countInStatus !== null)
       return NATIVE_PRE_ROLL_POLL_MS;
+    if (this.streamHeldGeneration !== 0) return NATIVE_TELEMETRY_HELD_POLL_MS;
     return this.state.phase === 'playing'
       ? NATIVE_TELEMETRY_POLL_MS
       : NATIVE_TELEMETRY_IDLE_POLL_MS;
@@ -5376,6 +5402,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       if (wanted !== this.pollIntervalArmedMs) {
         if (this.timer !== null) clearInterval(this.timer);
         this.armPoll(wanted);
+        // The tick that finds the stream held has nothing to read: the park
+        // that held it published the transport itself a moment ago, and on
+        // the POCO this one read landed inside the very window the backend
+        // comparison samples the backgrounded phase in.
+        if (wanted === NATIVE_TELEMETRY_HELD_POLL_MS) return;
       }
       void this.coordinator.pollHandle(this);
     }, intervalMs);

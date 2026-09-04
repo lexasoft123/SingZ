@@ -137,7 +137,15 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
    *  above. Same name and arity as the iOS bridge's session. */
   @ReactMethod
   fun session(promise: Promise) {
-    if (!postResult(promise) {
+    // Resolved as the core's JSON TEXT, not as a bridge map: this is the
+    // poll's read, once a second while playing, and parsing ~150 fields
+    // with org.json and rebuilding them as a WritableMap on the control
+    // thread was 2.6% of a POCO core during a background hold where nothing
+    // renders (per-thread top, run 4 of the parity plan's Step 4); Hermes
+    // parses the same text natively on the JS side. The text hop is exact
+    // here — Hermes's JSON.parse is correctly rounded — where iOS's is not
+    // (NativePlaybackBridgeSupport builds its dictionary from doubles).
+    if (!postText(promise) {
       requireCore()
       SingzCore.nativePlaybackSession()
     }) rejectUnavailable(promise)
@@ -494,6 +502,29 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
   ) {
     val generation = parseGenerationOrReject(generationValue, promise) ?: return
     if (!postResult(promise) { operation(generation) }) rejectUnavailable(promise)
+  }
+
+  /** postResult without the parse: the JSON text crosses as a string and
+   *  JavaScript parses it (see session). */
+  private fun postText(promise: Promise, operation: () -> String?): Boolean {
+    if (invalidated.get()) return false
+    return try {
+      control.execute {
+        if (invalidated.get()) {
+          rejectUnavailable(promise)
+          return@execute
+        }
+        try {
+          requireCore()
+          promise.resolve(requiredJson(operation()))
+        } catch (error: Throwable) {
+          promise.reject("E_NATIVE_PLAYBACK", error.message ?: "Native playback failed", error)
+        }
+      }
+      true
+    } catch (_: RejectedExecutionException) {
+      false
+    }
   }
 
   private fun postResult(promise: Promise, operation: () -> String?): Boolean {

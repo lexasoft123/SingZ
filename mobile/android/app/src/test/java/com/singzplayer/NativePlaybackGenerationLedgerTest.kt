@@ -56,7 +56,10 @@ class NativePlaybackGenerationLedgerTest {
     val ledger = NativePlaybackGenerationLedger()
     playingSong(ledger, 7)
     ledger.claimed(8, 7)
-    assertFalse(ledger.unloaded(7, songRemains = false))
+    // The acknowledgement carries the LIVE state: the core answers an unload
+    // of the generation a landed swap replaced with the session's own state,
+    // which is running.
+    assertFalse(ledger.unloaded(7, songRemains = true))
     assertEquals(8L, ledger.current)
     assertEquals(0L, ledger.outgoing)
     assertTrue(ledger.ownsFocus(8))

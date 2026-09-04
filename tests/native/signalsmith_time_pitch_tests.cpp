@@ -2,6 +2,8 @@
 #include "zdsp/tests/allocation_trap.h"
 
 #include <array>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -284,6 +286,53 @@ void preparedSeekAndRecurringLoopAnchors() {
   status = singz::signalsmithTimePitchAnchorStatus(dirty.processor);
   expect(!status.recurring && !status.replacementReady,
          "disabling a loop retires its unused prepared replacement");
+}
+
+void idleWorkerBarelyWakes() {
+  // A prepared stage with no recurring loop has nothing to replenish, and its
+  // worker polled at 2 ms anyway — about 1.2% of a phone core per live stage
+  // (exact per-thread ticks on the POCO), in every quiet phase. Idle it polls
+  // at the slow rate; an active loop takes it back to the fast one. Margins
+  // are wide on purpose (a loaded host shortens sleeps and starves threads):
+  // the slow rate wakes ~3 times in 300 ms where the fast one wakes ~150.
+  Harness stage(5.0F);
+  const auto sleepMs = [](int ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+  };
+  const auto wakeups = [&] {
+    return singz::signalsmithTimePitchAnchorStatus(stage.processor)
+        .workerWakeups;
+  };
+  const uint64_t before = wakeups();
+  sleepMs(300);
+  const uint64_t idle = wakeups() - before;
+  expect(idle <= 12, "an idle loop worker wakes at the slow poll rate");
+
+  std::array<float, 128> input{};
+  std::array<float, 128> left{};
+  std::array<float, 128> right{};
+  input.fill(0.5F);
+  for (uint32_t block = 0; block < 12; ++block)
+    stage.render(input.data(), input.data(), left.data(), right.data(),
+                 input.size());
+  std::vector<float> anchorLeft(stage.anchorFrames(), 0.25F);
+  std::vector<float> anchorRight(stage.anchorFrames(), 0.25F);
+  const auto anchor = stage.anchorInput(anchorLeft, anchorRight);
+  const uint32_t minimumLoopFrames =
+      singz::signalsmithTimePitchMinimumLoopOutputFrames(stage.processor);
+  const auto plan = singz::configureSignalsmithTimePitchLoop(
+      stage.processor, &anchor, minimumLoopFrames);
+  expect(plan.ok() && singz::activateSignalsmithTimePitchLoop(stage.processor,
+                                                              plan.plan),
+         "a recurring loop activates for the wake-rate check");
+  // The worker notices the activation within one idle interval and then
+  // polls fast; give it that interval before counting.
+  sleepMs(150);
+  const uint64_t activeBefore = wakeups();
+  sleepMs(300);
+  const uint64_t active = wakeups() - activeBefore;
+  expect(active >= 30, "an active recurring loop wakes the worker at the fast poll rate");
+  singz::deactivateSignalsmithTimePitchLoop(stage.processor);
 }
 
 void preparedGenericReanchorBoundaries() {
@@ -586,6 +635,7 @@ int main() {
   retainedEstimateCoversPinnedAllocator();
   preparedDeterministicRealtimeContract();
   preparedSeekAndRecurringLoopAnchors();
+  idleWorkerBarelyWakes();
   preparedGenericReanchorBoundaries();
   drainsPreparedTail();
   std::puts("signalsmith time/pitch tests passed");

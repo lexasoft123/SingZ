@@ -102,7 +102,13 @@ describe('Android native DSP runtime packaging', () => {
     // the poll's read, must not — a 400 ms poll re-enumerating every audio
     // device was a per-tick cost nothing consumed.
     expect(module).toMatch(
-      /fun session\(promise: Promise\) \{\s*if \(!postResult\(promise\) \{\s*requireCore\(\)\s*SingzCore\.nativePlaybackSession\(\)/,
+      /fun session\(promise: Promise\) \{[\s\S]*?if \(!postText\(promise\) \{\s*requireCore\(\)\s*SingzCore\.nativePlaybackSession\(\)/,
+    );
+    // ...and it crosses as the core's JSON TEXT, parsed by Hermes, not as a
+    // WritableMap rebuilt on the control thread: that rebuild was 2.6% of a
+    // POCO core during a background hold (Step 4, run 4's per-thread top).
+    expect(module).toMatch(
+      /private fun postText\(promise: Promise, operation: \(\) -> String\?\): Boolean \{[\s\S]*?promise\.resolve\(requiredJson\(operation\(\)\)\)/,
     );
     // positionNow is the player's clock and the ONE blocking-synchronous
     // method: it runs on the JS thread and answers from the core's lock-free

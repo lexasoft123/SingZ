@@ -202,11 +202,32 @@ function createDevice({ serial, port, log, mobileRoot }) {
       const t0 = Date.now()
       pid = null // a stale pid from the previous launch would skip the wait
       shell(`am start -n ${launchIntent()}`)
-      for (let i = 0; i < 60 && !pid; i++) {
+      // 100 ms, not 500: this wait is inside the cold-restart timing, whose
+      // tolerance is about half a second (see connect's pollMs).
+      for (let i = 0; i < 300 && !pid; i++) {
         pid = appPid()
-        if (!pid) await sleep(500)
+        if (!pid) await sleep(100)
       }
       return { pid, out: `pid ${pid}`, t0 }
+    },
+
+    /** The app's own boot mark (CatalogScreen writes `singz.boot` on mount),
+     *  polled through run-as at 100 ms: a cold restart timed in-app, with
+     *  no inspector traffic on a booting JS thread and a quantum under the
+     *  rule's tolerance — the host-side attach used to be the timing, and
+     *  its one-second target poll flipped the rule by a whole poll. */
+    async awaitBoot(t0, maxMs = 60000) {
+      const deadline = Date.now() + maxMs
+      while (Date.now() < deadline) {
+        let xml = ''
+        try {
+          xml = shell(`run-as ${PKG} cat shared_prefs/singz.xml 2>/dev/null || true`)
+        } catch {}
+        const hit = /<string name="(?:txt:)?singz\.boot">([\s\S]*?)<\/string>/.exec(xml)
+        if (hit && hit[1].trim()) return Date.now() - t0
+        await sleep(100)
+      }
+      throw new Error('the app never wrote its boot mark (singz.boot)')
     },
 
     async attach() {
@@ -309,7 +330,7 @@ function createDevice({ serial, port, log, mobileRoot }) {
     /** utime+stime over a known wall window — the only CPU number Android
      *  will give for one process without a profiler. PSS from meminfo, which
      *  is the figure Android itself uses when it decides who to kill. */
-    async sample() {
+    async sample(windowMs = 2000) {
       const p = appPid()
       if (!p) return { cpuPct: null, rssMb: null, pssMb: null }
       const read = () => {
@@ -320,17 +341,20 @@ function createDevice({ serial, port, log, mobileRoot }) {
       }
       const a = read()
       const t0 = Date.now()
-      await sleep(2000)
+      await sleep(windowMs)
       const b = read()
       const wall = (Date.now() - t0) / 1000
       const cpuPct = a === null || b === null ? null : Math.round(((b - a) / CLOCK_TICK / wall) * 1000) / 10
+      // One scheduler tick over this window, in percentage points: the
+      // resolution of the number above, which the rule that judges it needs.
+      const tickPct = Math.round((100 / CLOCK_TICK / wall) * 100) / 100
       let pssMb = null
       try {
         const mem = shell(`dumpsys meminfo ${PKG} 2>/dev/null || true`)
         const hit = /TOTAL PSS:\s*(\d+)/.exec(mem) ?? /^\s*TOTAL\s+(\d+)/m.exec(mem)
         if (hit) pssMb = Math.round(Number(hit[1]) / 1024)
       } catch {}
-      return { cpuPct, rssMb: null, pssMb }
+      return { cpuPct, tickPct, rssMb: null, pssMb }
     }
   }
 

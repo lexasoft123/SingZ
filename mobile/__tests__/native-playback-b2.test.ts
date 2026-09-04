@@ -10,6 +10,7 @@ import {
   NATIVE_CLOCK_PROJECTION_LIMIT_SEC,
   NATIVE_PRE_ROLL_POLL_MS,
   NATIVE_TELEMETRY_IDLE_POLL_MS,
+  NATIVE_TELEMETRY_HELD_POLL_MS,
   NATIVE_TELEMETRY_POLL_MS,
   NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC,
   parseNativePlaybackCapability,
@@ -4225,6 +4226,51 @@ describe("the player's clock", () => {
         jest.advanceTimersByTime(NATIVE_TELEMETRY_POLL_MS);
         expect(poll).toHaveBeenCalledTimes(3);
         jest.advanceTimersByTime(NATIVE_TELEMETRY_IDLE_POLL_MS - NATIVE_TELEMETRY_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(4);
+      } finally {
+        handle.stopPolling();
+        jest.useRealTimers();
+        poll.mockRestore();
+      }
+    });
+
+    it('polls at the held rate while the stream is parked in the background', async () => {
+      // Nothing renders on a held stream, and the release on foreground meets
+      // a focus loss or a route change anyway: the poll that cost the POCO's
+      // bridge thread 2.6% of a core during a hold runs ten seconds apart.
+      const h = harness({ syncClock: true });
+      const handle = (await started(h)) as unknown as {
+        startPolling: () => void;
+        stopPolling: () => void;
+        noteTransportCommand: (command: { kind: string }) => void;
+        streamHeldGeneration: number;
+        generation: number;
+      };
+      const poll = jest
+        .spyOn(h.coordinator, 'pollHandle')
+        .mockResolvedValue(undefined);
+      jest.useFakeTimers();
+      try {
+        handle.startPolling();
+        expect(poll).toHaveBeenCalledTimes(1);
+        handle.noteTransportCommand({ kind: 'pause' });
+        handle.streamHeldGeneration = handle.generation;
+        // The tick that finds the hold re-arms at the held rate WITHOUT
+        // reading: the park published the transport itself, and that one
+        // read fell inside the window the phone comparison samples.
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(1);
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_IDLE_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(1);
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_HELD_POLL_MS - NATIVE_TELEMETRY_IDLE_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(2);
+        // Released: back to the idle rate for a paused transport, and that
+        // tick does read — the release is what a focus loss during the hold
+        // shows up in.
+        handle.streamHeldGeneration = 0;
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_HELD_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(3);
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_IDLE_POLL_MS);
         expect(poll).toHaveBeenCalledTimes(4);
       } finally {
         handle.stopPolling();

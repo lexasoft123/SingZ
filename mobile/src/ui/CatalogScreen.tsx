@@ -350,6 +350,15 @@ export default function CatalogScreen({
    *  adjustResize moves the whole window, so the absolute bar rises free).
    *  Same measurement AddSongSheet trusts. */
   const [kbInset, setKbInset] = useState(0)
+  // The app's own "ready" mark for the cold-restart timing: a phone-clock
+  // stamp in the pref store the player-session harness polls through
+  // `run-as`, so the restart is timed with no JS evaluation on a booting
+  // thread (a 100 ms inspector poll during boot was the last thing on the
+  // JS thread before a Fabric first-commit crash on the POCO, measured once).
+  useEffect(() => {
+    void setStoredText('singz.boot', String(Date.now()))
+  }, [])
+
   useEffect(() => {
     if (Platform.OS !== 'ios') return
     const onShow = Keyboard.addListener('keyboardWillChangeFrame', e =>
