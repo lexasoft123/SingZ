@@ -26,10 +26,30 @@ IOS_DEVICE=<name|udid|identifier> node mobile/tests/player-session.cjs --platfor
 Exit code is 0 only when every rule passes. One run is roughly 6-8 minutes
 per backend, so ~15 minutes for a platform.
 
+```bash
+node mobile/tests/player-session.cjs --platform android --wait-quiet   # block until the host is quiet
+QUIET_LOAD=3 ALLOW_BUSY_HOST=1 node mobile/tests/player-session.cjs    # run anyway; the host-quiet rule fails
+```
+
 ## Preconditions
 
 **Both platforms**
 
+- **The host must be quiet.** A simulator is a process on this Mac and an
+  emulator is a VM on it, so the CPU and memory columns carry whatever else
+  the Mac is doing. One afternoon of runs was thrown away for this: the
+  1-minute load at 8-11 from the user's own apps, legacy's playing CPU
+  reading 40% where the morning had read 29%, both backends' pitch-change
+  CPU at 126%, and the table judging them anyway. The suite samples the
+  1-minute load at start and **beside every CPU phase**: it refuses to start
+  above `QUIET_LOAD` (default 4, a third of a twelve-core rig) when a
+  simulator or emulator is in the run, `--wait-quiet` blocks until three
+  consecutive 30 s samples are quiet (bounded by `QUIET_WAIT_MIN`, default
+  45), and `ALLOW_BUSY_HOST=1` runs regardless — the load then prints in the
+  CPU table with a `!` on every busy row, and the *host was quiet through
+  every CPU/memory phase* rule fails, so a polluted run cannot pass as a
+  result. A physical phone's numbers are its own; the rule and the refusal
+  do not apply to it.
 - Metro is running **from this worktree** and the app was built from it. A
   neighbour's Metro on 8081 will happily serve its bundle to your app —
   pass `METRO_PORT`.
@@ -216,6 +236,18 @@ change, backgrounded, and after leaving the song.
 > comparison on one rig**, and must never be quoted as a phone's CPU or a
 > phone's memory. If you want a phone number, measure a phone.
 
+Every phase row also carries the host's 1-minute load at the moment each
+side's sample was taken (`load@legacy`, `load@native`), with a `!` where it
+was above `QUIET_LOAD` — see *Preconditions*. And the table's first line
+names the **callback size** each backend ran with: native's is the
+negotiated buffer read from its own `zcore AudioHost open · … · N frame
+nominal buffer` log line after Play (960 frames on the Android emulator);
+legacy's is react-native-audio-api's 128-frame render quantum — a constant,
+labelled as one, because on Android its engine asks Oboe for exactly that
+many frames per callback while on iOS the OS picks a callback size the app
+never sees. It is the first number to want when one backend costs more CPU
+than the other, and until this line nothing could answer it.
+
 ## Running against a real iPhone (`--platform ios-device`)
 
 It is **opt-in and never part of a bare run**: it is somebody's own handset,
@@ -290,7 +322,12 @@ behaviour, recorded rather than asserted.
   always) and the `__p<n>` promise-parking evaluator, because RN's Promise
   polyfill defeats the inspector's `awaitPromise`.
 - `player-session/seed.cjs` — the two staged songs.
+- `player-session/host-load.cjs` — the host-quiet rule: the 1-minute load,
+  the threshold, and the bounded three-consecutive-samples wait. Pure, and
+  unit-tested in `mobile/__tests__/player-session-host-load.test.ts`.
 - `player-session/ios.cjs`, `player-session/android.cjs` — device plumbing.
+  Each says whether it is `hostBound` (simulator, emulator) — the load rule
+  applies only then.
 - `player-session/ios-device.cjs` — the same for a PHYSICAL iPhone, over
   `devicectl` instead of `simctl`. Opt-in, blank CPU/memory columns, and the
   three device-only traps documented above.

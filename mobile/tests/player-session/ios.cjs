@@ -86,6 +86,9 @@ function createDevice({ udid, port, log }) {
     label: `iOS · ${NAME}`,
     deviceName: NAME,
     udid: UDID,
+    /* A simulator is a process on this Mac: its CPU and memory samples carry
+       whatever else the Mac is doing, so the host-load rule applies. */
+    hostBound: true,
 
     preflight() {
       const out = defaultOutputRate()
