@@ -411,6 +411,8 @@ NSDictionary *statusDictionary(singz::NativePlaybackSession &session) {
     @"retiringSwapGeneration" : @(status.retiringSwapGeneration),
     @"swapLandings" : @(status.swapLandings),
     @"swapLateLandings" : @(status.swapLateLandings),
+    @"swapPrimeNs" : @(status.swapPrimeNs),
+    @"swapLandingFrames" : @(status.swapLandingFrames),
     @"retainedBytes" : @(status.retainedBytes),
     @"graphArenaBytes" : @(status.graphArenaBytes),
     @"parkedLaneBytes" : @(status.parkedLaneBytes),

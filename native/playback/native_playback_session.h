@@ -36,6 +36,13 @@ inline constexpr uint64_t kNativePlaybackMaximumJsSafeInteger =
 // publish it beside the lane arrays as `bucketCount`, in lanePeaks()'s
 // result — NOT in status(), and not under any other name.
 inline constexpr uint32_t kNativePlaybackLaneSummaryBuckets = 96;
+// A swap's landing budget (see armSwap): Stretch prime costs under the floor
+// are ignored, and the budget never exceeds the cap — which must stay below
+// the facade's wait for a seam (mobile/src/playback/native.ts,
+// SWAP_LANDING_DEADLINE_MS = 1 s), or the change after a slow prime gives the
+// seam up and rebuilds.
+inline constexpr uint64_t kSwapPrimeCostFloorNs = UINT64_C(5'000'000);
+inline constexpr double kSwapLandingBudgetCapSeconds = 0.75;
 // Concurrent lane decoding is bounded by MEMORY, not by the core count. A
 // decode that resamples holds its input planes, its output planes and the
 // interleaved output at once, so a lane in flight costs far more than the
@@ -548,6 +555,12 @@ struct NativePlaybackStatus {
   uint64_t retiringSwapGeneration{0};
   uint32_t swapLandings{0};
   uint32_t swapLateLandings{0};
+  /* What the last arm chose: the candidate's measured Stretch prime cost
+     (0 without a stage) and the landing budget in stream frames it bought
+     (0 = the next block's first frame). The phone's log prints them beside
+     the seam so a late landing says what it was late against. */
+  uint64_t swapPrimeNs{0};
+  uint64_t swapLandingFrames{0};
   NativePlaybackTransportTelemetryQuality transportTelemetryQuality{
       NativePlaybackTransportTelemetryQuality::Unavailable};
   NativePlaybackTransportState transportState{

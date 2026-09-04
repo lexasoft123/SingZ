@@ -226,8 +226,33 @@ code-reviewer gate.
   priming the Stretch stage on the phone costs tens — fixed: the budget adds twice the prime
   cost the candidate's own prepare measured (`timePitchPrimeNs`; under 5 ms ignored).
   Metronome save (478 vs 185) is the one rebuild-family rule left; CPU playing 123 vs 110,
-  idle 15.1 vs 14.5, backgrounded 13.6 vs 11.6 are Step 4's. **Next:** the second phone run
-  with both fixes.
+  idle 15.1 vs 14.5, backgrounded 13.6 vs 11.6 are Step 4's.
+- **Second, third and fourth phone runs (`poco-run-3d/3e/3f-1.log`): 51, 49, 49 of 58 — and
+  all three measured a MUTANT binary.** The focus fix held throughout (foreground → Play
+  110 ms vs legacy 438, the end of song parks, Play again 286 vs 367), but every seam after
+  the first arm "did not land", the seam counter climbed by hundreds a second and the
+  outgoing generation's clock stayed frozen: the phone APK and the simulator app had been
+  built while `mutate-swap-core.py` was rewriting the core sources, so they compiled
+  whichever mutant was applied when the compiler read the file — the "swap request left
+  armed after landing" one, exactly the behaviour observed. The host suite lands exactly
+  once (`aSeamLandsExactlyOnceHoweverManyBlocksFollow` pins it against a hundred blocks).
+  Rule: never build a phone or simulator binary while a mutation script runs; a device result
+  that contradicts the host suite is a stale or mutant binary first. What those runs still
+  taught: the `.debug` APK compiles the core unoptimized (CMake Debug), so a Stretch prime
+  costs hundreds of milliseconds there and the CPU columns are pessimistic; the landing
+  budget is therefore 1.5× the prime and capped at 0.75 s (`kSwapLandingBudgetCapSeconds`,
+  below `SWAP_LANDING_DEADLINE_MS`) so a slow prime lands late and unanchored rather than
+  past the facade's wait, and status carries `swapPrimeNs`/`swapLandingFrames`, printed on
+  every seam's log line.
+- **Fifth phone run, clean binary (`poco-run-3g-1.log`): 55/58 — every timing rule passes.**
+  Six seams, all exact (`late 0`), the two rate-change ones included now that the budget
+  pays for their 55 ms prime. Native vs legacy: seek worst-of-4 133 vs 142 ms, metronome
+  touches 150 vs 228, metronome save 204 vs 174 (inside budget), training on 100 vs 100,
+  pitch +2 122 vs 125, pause 113 vs 92, resume 140 vs 304, foreground → Play 148 vs 442, end
+  of song → Play 265 vs 374, open 8.8 s vs 19.3 s. What remains is Step 4's: CPU playing
+  122.3% vs 110.8%, pitch-change 223.4% vs 201.3%, backgrounded 13.6% vs 12.1% (idle equal at
+  15.1%; PSS lower in every phase) — all from the unoptimized `.debug` core, so the first
+  Step 4 act is a release-flavoured measurement.
 
 ### Step 4 — CPU on the phone (~1–2 days)
 Measure after steps 1–3 on the POCO; only then the stream-mode A/B

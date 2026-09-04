@@ -200,6 +200,8 @@ describe('Android native DSP runtime packaging', () => {
       'retiringSwapGeneration',
       'swapLandings',
       'swapLateLandings',
+      'swapPrimeNs',
+      'swapLandingFrames',
       'playbackSwap',
       'previewClicksEnqueued',
       'previewClicksStarted',

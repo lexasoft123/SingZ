@@ -275,6 +275,11 @@ export interface NativePlaybackSessionStatus {
   readonly retiringSwapGeneration: number;
   readonly swapLandings: number;
   readonly swapLateLandings: number;
+  /** What the last arm chose: the candidate's measured Stretch prime cost
+   *  in ns (0 without a stage) and the landing budget in stream frames it
+   *  bought (0 = the next block). Logged beside the seam. */
+  readonly swapPrimeNs: number;
+  readonly swapLandingFrames: number;
   readonly retainedBytes: number;
   readonly graphArenaBytes: number;
   readonly masterGain: number;
@@ -883,6 +888,8 @@ const emptyNativeSession = (): NativePlaybackSessionStatus => ({
   retiringSwapGeneration: 0,
   swapLandings: 0,
   swapLateLandings: 0,
+  swapPrimeNs: 0,
+  swapLandingFrames: 0,
   retainedBytes: 0,
   graphArenaBytes: 0,
   masterGain: 1,
@@ -989,6 +996,20 @@ const PAUSE_RECEIPT_DEADLINE_MS = SEEK_RECEIPT_DEADLINE_MS;
 /** The core pins 96. This only has to be small enough that spreading a
  *  lane's buckets cannot overflow the stack if a bridge ever lies. */
 const MAX_LANE_PEAK_BUCKETS = 4096;
+
+/** What the core says about a seam, for the log: enough to tell "the render
+ *  thread never landed it" from "it landed and nobody serviced it" from "the
+ *  stream is not running" without a debugger on the phone. */
+function seamFacts(session: NativePlaybackSessionStatus | null): string {
+  if (!session) return 'nothing';
+  return (
+    `generation ${session.generation} · transport generation ${session.transportGeneration} · ` +
+    `seams ${session.swapLandings} · late ${session.swapLateLandings} · ` +
+    `pending ${session.swapPendingGeneration} · retiring ${session.retiringSwapGeneration} · ` +
+    `${session.state}/${session.hostState}/${session.transportState} · ` +
+    `frame ${session.renderedProjectFrame} · budget ${session.swapLandingFrames}`
+  );
+}
 
 const NATIVE_PLAYBACK_INTERFACE_VERSION = 3;
 const NATIVE_PLAYBACK_CONTRACT_VERSION = 2;
@@ -1411,6 +1432,8 @@ export function parseNativePlaybackSession(
       safeUnsigned(rawSession.retiringSwapGeneration) ?? 0,
     swapLandings: safeUnsigned(rawSession.swapLandings) ?? 0,
     swapLateLandings: safeUnsigned(rawSession.swapLateLandings) ?? 0,
+    swapPrimeNs: safeUnsigned(rawSession.swapPrimeNs) ?? 0,
+    swapLandingFrames: safeUnsigned(rawSession.swapLandingFrames) ?? 0,
     graphStatusDetail: safeUnsigned(rawSession.graphStatusDetail) ?? 0,
     timePitchAnchorOutcome:
       safeUnsigned(rawSession.timePitchAnchorOutcome) ?? 0,
@@ -2211,6 +2234,7 @@ export class IosNativePlaybackCoordinator {
   private async awaitSeamLanded(handle: IosNativePlaybackHandle): Promise<void> {
     const startedAt = Date.now();
     let reads = 0;
+    let last: NativePlaybackSessionStatus | null = null;
     while (
       handle.swappingFromGeneration !== 0 &&
       Date.now() - startedAt < SWAP_LANDING_DEADLINE_MS
@@ -2218,6 +2242,7 @@ export class IosNativePlaybackCoordinator {
       const session = await this.deps.native?.session();
       if (!session || !this.isActive(handle)) return;
       reads++;
+      last = session;
       if (session.generation === handle.generation)
         handle.publishTelemetry(session);
       if (handle.swappingFromGeneration === 0) return;
@@ -2227,7 +2252,8 @@ export class IosNativePlaybackCoordinator {
       log(
         'dsp',
         `seam did not land · generation ${handle.swappingFromGeneration}→${handle.generation} · ` +
-          `${reads} session reads in ${since(startedAt)} · the next change rebuilds`,
+          `${reads} session reads in ${since(startedAt)} · the next change rebuilds · ` +
+          `core says ${seamFacts(last)}`,
         'warn',
       );
   }
@@ -2501,7 +2527,9 @@ export class IosNativePlaybackCoordinator {
       `cue graph swapped on the running stream · generation ${oldGeneration}→${generation} · ` +
         `signed project frame ${session.renderedProjectFrame} · ` +
         `${armed === null || armed.swapPendingGeneration !== 0 ? 'seam armed' : 'seam landed'} · ` +
-        `armed in ${since(rebuildStartedAt)} · ${handle.graphDescription()}`,
+        `prime ${armed === null ? '?' : Math.round(armed.swapPrimeNs / 1e6)} ms · ` +
+        `armed in ${since(rebuildStartedAt)} · core says ${seamFacts(armed)} · ` +
+        handle.graphDescription(),
     );
     return true;
   }

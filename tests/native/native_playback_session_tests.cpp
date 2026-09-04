@@ -4029,9 +4029,12 @@ void aLoopSurvivesARateSwapAcrossItsWrap() {
 void aSlowStretchPrimeStretchesTheLandingBudget() {
   const std::vector<float> ramp = swapRamp(60000);
   const std::string wav = writeWav("swap-slow-prime.wav", 1, ramp);
+  // Two sessions, in turn: the process coordinator owns one at a time, and a
+  // session hands ownership back only when it is destroyed.
+  {
   singz::NativePlaybackTestHooks hooks{};
-  // 20 ms at 48 kHz: 960 frames, twice that is 1920, plus the three
-  // two-frame nominal buffers of the fake.
+  // 20 ms at 48 kHz: 960 frames, one and a half times that is 1440, plus
+  // the three two-frame nominal buffers of the fake.
   hooks.timePitchPrimeNs = 20'000'000;
   auto backend = std::make_unique<ManualOutputBackend>();
   ManualOutputBackend *fake = backend.get();
@@ -4050,22 +4053,92 @@ void aSlowStretchPrimeStretchesTheLandingBudget() {
   CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
                         141)
             .ok);
-  // Armed for stream frame 8 + 6 + 1920 = 1934: fifteen full blocks of 128
-  // stay the outgoing generation's, the sixteenth splits at offset 6.
-  for (uint32_t block = 0; block < 15; ++block)
-    CHECK(fake->drive(128));
+  // Armed for stream frame 8 + 6 + 1440 = 1454: eleven full blocks of 128
+  // stay the outgoing generation's, the twelfth splits at offset 38.
   auto status = session.status();
+  CHECK(status.swapPrimeNs == 20'000'000 && status.swapLandingFrames == 1446);
+  for (uint32_t block = 0; block < 11; ++block)
+    CHECK(fake->drive(128));
+  status = session.status();
   CHECK(status.transportGeneration == 140 && status.swapLandings == 0 &&
-        status.continuousFrame == 1928 && status.renderedProjectFrame == 1928);
+        status.continuousFrame == 1416 && status.renderedProjectFrame == 1416);
   CHECK(fake->drive(128));
   status = session.status();
-  // 1934 at 1.0, then 122 frames at 0.75 → 2025.5.
+  // 1454 at 1.0, then 90 frames at 0.75 → 1521.5.
   CHECK(status.transportGeneration == 141 && status.swapLandings == 1 &&
         status.swapLateLandings == 0 && status.timePitchAnchorOutcome == 40 &&
         status.timePitchAnchorsPublished == 1 &&
-        status.timePitchAnchorMisses == 0 && status.continuousFrame == 2056 &&
-        status.renderedProjectFrame == 2025);
+        status.timePitchAnchorMisses == 0 && status.continuousFrame == 1544 &&
+        status.renderedProjectFrame == 1521);
+  // The cap: a prime the budget cannot afford is bought only up to the cap,
+  // which stays below the facade's wait, and the seam lands (late) rather
+  // than being given up.
   CHECK(session.unload(141).ok);
+  }
+  {
+  auto capped = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *cappedFake = capped.get();
+  singz::NativePlaybackTestHooks slow{};
+  slow.timePitchPrimeNs = 3'000'000'000; // 3 s
+  singz::NativePlaybackSession slowSession(std::move(capped), &slow);
+  auto slowLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  slowLanes.push_back(keyedLane("song", wav));
+  CHECK(slowSession.prepare(config(), std::move(slowLanes), 150).ok);
+  CHECK(slowSession.openOutput(150).ok && slowSession.start(150).ok);
+  CHECK(cappedFake->drive(8, singz::AudioHostDiscontinuityStart));
+  singz::NativePlaybackPrepareConfig slowReplacement = config();
+  slowReplacement.swapFromGeneration = 150;
+  slowReplacement.playbackRate = 0.75;
+  slowReplacement.preparedStartProjectFrame = 8;
+  auto slowReplacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  slowReplacementLanes.push_back(keyedLane("song", wav));
+  CHECK(slowSession
+            .prepare(std::move(slowReplacement), std::move(slowReplacementLanes),
+                     151)
+            .ok);
+  const auto slowStatus = slowSession.status();
+  CHECK(slowStatus.swapLandingFrames == 6 + 36000);
+  CHECK(slowSession.unload(151).ok);
+  }
+  std::remove(wav.c_str());
+}
+
+// Straight from a phone log: the seam counter climbing by hundreds a second
+// after one arm, the pending generation never clearing. The host suite must
+// say what a landing is: exactly one per arm, however many blocks follow it
+// before anyone asks the session.
+void aSeamLandsExactlyOnceHoweverManyBlocksFollow() {
+  const std::vector<float> ramp = swapRamp(60000);
+  const std::string wav = writeWav("swap-once.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 160).ok);
+  CHECK(session.openOutput(160).ok && session.start(160).ok);
+  CHECK(fake->drive(192, singz::AudioHostDiscontinuityStart));
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 160;
+  replacement.preparedStartProjectFrame = 192;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                        161)
+            .ok);
+  for (uint32_t block = 0; block < 100; ++block)
+    CHECK(fake->drive(192));
+  auto status = session.status();
+  CHECK(status.swapLandings == 1 && status.swapPendingGeneration == 0 &&
+        status.retiringSwapGeneration == 0 && status.transportGeneration == 161 &&
+        status.renderedProjectFrame == 192 * 101 &&
+        status.continuousFrame == 192 * 101 &&
+        status.adapterRenderFailures == 0);
+  for (uint32_t block = 0; block < 100; ++block)
+    CHECK(fake->drive(192));
+  status = session.status();
+  CHECK(status.swapLandings == 1 && status.renderedProjectFrame == 192 * 201);
+  CHECK(session.unload(161).ok);
   std::remove(wav.c_str());
 }
 
@@ -6300,6 +6373,7 @@ int main() {
   aLoopSurvivesARateSwapAcrossItsWrap();
   aSwapArmedTooLateLandsUnanchoredAndSaysSo();
   aSlowStretchPrimeStretchesTheLandingBudget();
+  aSeamLandsExactlyOnceHoweverManyBlocksFollow();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();

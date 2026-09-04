@@ -470,6 +470,9 @@ void appendStatus(std::string &output,
   output += ",\"swapLandings\":" + std::to_string(status.swapLandings);
   output += ",\"swapLateLandings\":" +
             std::to_string(status.swapLateLandings);
+  output += ",\"swapPrimeNs\":" + std::to_string(status.swapPrimeNs);
+  output += ",\"swapLandingFrames\":" +
+            std::to_string(status.swapLandingFrames);
   output += ",\"retainedBytes\":" + std::to_string(status.retainedBytes);
   output += ",\"parkedLaneBytes\":" +
             std::to_string(status.parkedLaneBytes);

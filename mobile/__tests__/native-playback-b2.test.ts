@@ -229,6 +229,8 @@ const capability = (
     retiringSwapGeneration: 0,
     swapLandings: 0,
     swapLateLandings: 0,
+    swapPrimeNs: 0,
+    swapLandingFrames: 0,
     retainedBytes: state === 'unloaded' ? 0 : 384_000,
     graphArenaBytes: state === 'unloaded' ? 0 : 128_000,
     masterGain: 1,

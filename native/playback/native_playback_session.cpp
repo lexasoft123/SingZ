@@ -4460,6 +4460,10 @@ struct NativePlaybackSession::Impl {
   size_t retiringSwapUnsharedBytes{0};
   bool swapPending{false};
   uint32_t swapsLandedSeen{0};
+  // What the last arm chose, for status: the candidate's measured Stretch
+  // prime cost and the landing budget it bought (0 = the next block).
+  uint64_t swapPrimeNs{0};
+  uint64_t swapLandingFrames{0};
   // The generation a swap prepare is building while `generation` keeps
   // rendering; zero otherwise. Its cancellation is its own (below), so that
   // giving up on the replacement never cancels the song that is playing.
@@ -6244,6 +6248,8 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
         int64_t frame{0};
         uint32_t fractionQ32{0};
       } landing;
+      impl_->swapPrimeNs = 0;
+      impl_->swapLandingFrames = 0;
       if (candidate->hasTimePitch) {
         PreparedPlaybackTransport::Telemetry from{};
         if (outgoing.transport.mailboxDrained() &&
@@ -6252,29 +6258,38 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
           const bool advancing =
               from.state == NativePlaybackTransportState::Playing ||
               from.state == NativePlaybackTransportState::PreRoll;
-          // Three nominal buffers past the last publication, plus twice
-          // what priming this candidate's Stretch stage cost at prepare —
-          // the same work is about to be done again, after the prediction,
-          // and on a phone it is tens of milliseconds where the buffers are
-          // four. Measured on the POCO before this: every rate-change seam
-          // landed late by exactly that price. Costs under five milliseconds
-          // are ignored so a host suite's frame arithmetic stays exact — a
-          // phone's are tens.
+          // Three nominal buffers past the last publication, plus one and a
+          // half times what priming this candidate's Stretch stage cost at
+          // prepare — the same work is about to be done ONCE more, after the
+          // prediction, and on a phone it is tens of milliseconds where the
+          // buffers are four. Measured on the POCO before this: every
+          // rate-change seam landed late by exactly that price. Costs under
+          // five milliseconds are ignored so a host suite's frame arithmetic
+          // stays exact — a phone's are tens. Capped BELOW the facade's wait
+          // for a seam (SWAP_LANDING_DEADLINE_MS, one second): a budget past
+          // that made the next change give the seam up and rebuild, measured
+          // on the phone's unoptimized build where a prime is hundreds of
+          // milliseconds; a seam the budget cannot afford lands late and
+          // unanchored instead, which is the cheaper failure.
           const uint64_t buffers =
               hostNow.format.nominalBufferFrames != 0
                   ? 3ull * hostNow.format.nominalBufferFrames
                   : 2ull * std::max<uint32_t>(hostNow.format.maximumFrames, 1);
           const uint64_t primeNs = candidate->timePitchPrimeNs;
           const uint64_t primeFrames =
-              primeNs >= 5'000'000ull
+              primeNs >= kSwapPrimeCostFloorNs
                   ? static_cast<uint64_t>(std::ceil(
-                        static_cast<double>(primeNs) * 2.0 *
+                        static_cast<double>(primeNs) * 1.5 *
                         candidate->sampleRate / 1.0e9))
                   : 0;
           const uint64_t margin =
-              buffers + std::min<uint64_t>(primeFrames,
-                                           static_cast<uint64_t>(
-                                               candidate->sampleRate * 2.0));
+              buffers +
+              std::min<uint64_t>(primeFrames,
+                                 static_cast<uint64_t>(
+                                     candidate->sampleRate *
+                                     kSwapLandingBudgetCapSeconds));
+          impl_->swapPrimeNs = primeNs;
+          impl_->swapLandingFrames = margin;
           const PreparedPlaybackTransport &land = candidate->transport;
           const PreparedPlaybackTransport::PredictedPosition predicted =
               advancing ? outgoing.transport.predictPosition(
@@ -7704,6 +7719,8 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       impl_->router->swapsLanded.load(std::memory_order_acquire);
   result.swapLateLandings =
       impl_->renderShared->lateLandings.load(std::memory_order_relaxed);
+  result.swapPrimeNs = impl_->swapPrimeNs;
+  result.swapLandingFrames = impl_->swapLandingFrames;
   result.graphLatencyFrames = graphLatency;
   result.devicePresentationLatencyFrames = deviceLatency;
   result.totalPresentationLatencyFrames = latency;

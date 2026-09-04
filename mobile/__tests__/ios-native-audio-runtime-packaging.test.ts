@@ -211,6 +211,8 @@ describe('iOS native DSP runtime packaging', () => {
       'retiringSwapGeneration',
       'swapLandings',
       'swapLateLandings',
+      'swapPrimeNs',
+      'swapLandingFrames',
       'previewClicksEnqueued',
       'previewClicksStarted',
       'previewClicksCompleted',
