@@ -481,6 +481,43 @@ enum class NativePlaybackTransportBoundaryReason : uint32_t {
   SourceFrameOverflow,
 };
 
+// Where the song is RIGHT NOW, for a caller that must not wait.
+//
+// The phones' UI clock reads this synchronously, many times a second, on the
+// JS thread — the way the legacy engine reads its AudioContext's currentTime.
+// status() cannot serve that: it takes the control mutex, which open, start
+// and stop hold across host calls (stop waits for callback quiescence), and
+// it assembles ~75 fields. This read takes no lock and touches no mailbox: it
+// is a bounded seqlock snapshot of what the audio callback published at the
+// end of its last block, plus how long ago that was on the steady clock.
+//
+// `available` is false when nothing is prepared, when the published frame
+// belongs to a generation that is not the active one (before its prepare has
+// committed, after its unload), or when the bounded read collided with the
+// writer eight times running — the caller keeps what it last had.
+//
+// Deliberately absent: the audible projection (rendered minus presentation
+// latency is the caller's one subtraction, from a latency it already polls),
+// and any overlay of a queued seek — the caller issued the seek and carries
+// its own intent until `seekCount` moves, so this read never has to look
+// inside the mailbox while the control thread may be writing to it.
+struct NativePlaybackPositionNow {
+  bool available{false};
+  uint64_t generation{0};
+  NativePlaybackTransportState transportState{
+      NativePlaybackTransportState::Stopped};
+  // The signed project frame the callback had rendered up to when it last
+  // published; negative during a count-in.
+  int64_t renderedProjectFrame{0};
+  uint64_t continuousFrame{0};
+  uint64_t remainingPreRollFrames{0};
+  uint64_t seekCount{0};
+  // Steady-clock nanoseconds since that publication. While the transport is
+  // playing the frame has advanced by about this much since; while it is
+  // paused it has not, whatever this says.
+  uint64_t ageNs{0};
+};
+
 struct NativePlaybackStatus {
   uint64_t generation{0};
   NativePlaybackState state{NativePlaybackState::Unloaded};
@@ -842,6 +879,10 @@ public:
       NativePlaybackPreviewClickSound sound =
           NativePlaybackPreviewClickSound::Ordinary);
   NativePlaybackStatus status() const;
+  // Lock-free and wait-free from any thread: see NativePlaybackPositionNow.
+  // Safe to call at UI rate while a prepare decodes, while stop waits for
+  // quiescence, and from a DecodeCancellation callback.
+  NativePlaybackPositionNow positionNow() const noexcept;
   // Generation-exact, immutable for that generation, and an OBSERVER like
   // status(): it issues no command and does not release parked lanes. A stale
   // or unprepared generation is refused rather than answered with an older

@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  NATIVE_CLOCK_PROJECTION_LIMIT_SEC,
   NATIVE_PRE_ROLL_POLL_MS,
+  NATIVE_TELEMETRY_IDLE_POLL_MS,
   NATIVE_TELEMETRY_POLL_MS,
   NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC
 } from '../src/playback/native'
@@ -57,6 +59,17 @@ describe('the telemetry poll interval is written down once', () => {
     expect(NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC).toBeCloseTo(
       (2 * NATIVE_TELEMETRY_POLL_MS) / 1000,
       6
+    )
+  })
+
+  it('idles slower than it plays, and the live clock projects less than a poll', () => {
+    // The idle poll exists to be the slower one; an idle rate at or under the
+    // playing rate would be the old poll under a new name. And the
+    // synchronous clock's own age bound must stay under one poll, so that a
+    // stalled callback is named by the poll before the clock has run past it.
+    expect(NATIVE_TELEMETRY_IDLE_POLL_MS).toBeGreaterThan(NATIVE_TELEMETRY_POLL_MS)
+    expect(NATIVE_CLOCK_PROJECTION_LIMIT_SEC * 1000).toBeLessThanOrEqual(
+      NATIVE_TELEMETRY_POLL_MS
     )
   })
 })

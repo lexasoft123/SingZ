@@ -94,6 +94,11 @@ object SingzCore {
   // Oboe callback stays wholly inside zcore -> zdsp and never calls JNI.
   external fun nativePlaybackStatus(): String
   external fun nativePlaybackSession(): String
+  /** Eight doubles, no JSON, no lock: available, generation, transport state
+   *  code, renderedProjectFrame, continuousFrame, remainingPreRollFrames,
+   *  seekCount, ageMs. The one native playback read that runs on the JS
+   *  thread rather than the control thread — see NativeAudioRuntimeModule. */
+  external fun nativePlaybackPositionNow(): DoubleArray
   external fun nativePlaybackClaim(generation: Long, handoffLease: Long): String
   external fun nativePlaybackRequestCancellation(generation: Long): Boolean
   external fun nativePlaybackPrepare(

@@ -17,10 +17,7 @@ import type {
   NativePlaybackStartOutcome,
   PlaybackCountInStatus
 } from '../projects'
-import {
-  NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC,
-  rebuildNativePlaybackCues
-} from './native'
+import { rebuildNativePlaybackCues } from './native'
 
 export type PlaybackOperation =
   | 'pause'
@@ -372,42 +369,12 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     return this.handle.snapshot()
   }
 
+  /** Playing is what the core's transport says RIGHT NOW when the clock is
+   *  live — a song that ran out reads as stopped on the next render, not on
+   *  the next poll — and the polled phase on a build without the clock. */
   get playing(): boolean {
-    return this.state().phase === 'playing'
-  }
-  /** Native telemetry lands every NATIVE_TELEMETRY_POLL_MS. Between polls the
-   * last audible position advances by wall time at the playback rate —
-   * bounded to two missed polls, so a stalled poll cannot run the clock ahead
-   * — which is what keeps the lyric sweep gliding instead of stepping at the
-   * poll rate. Count-in and paused telemetry are never advanced.
-   *
-   * The bound is DERIVED from the poll interval, never written down beside
-   * it: the two are one decision, and a hardcoded 0.4 s silently became a
-   * stalling sweep the moment the interval moved past 200 ms. */
-  private projected(sec: number): number {
-    const state = this.state()
-    if (state.phase !== 'playing' || state.advancing !== true || state.telemetryAtMs === undefined) return sec
-    const elapsed = Math.max(
-      0,
-      Math.min(NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC, (Date.now() - state.telemetryAtMs) / 1000)
-    )
-    const advanced = sec + elapsed * (state.playbackRate ?? 1)
-    /* A LOOP folds; only a song clamps.
-     *
-     * The core wraps at B, but the projection runs on wall time and knows
-     * nothing about it, so clamping at durationSec let the scrub band and the
-     * lyric sweep glide straight past B and snap back to A on the next poll —
-     * once per lap, for as long as the singer practises a phrase, which is
-     * exactly when A/B repeat is in use. Legacy folds mathematically and never
-     * overshoots, so this was also one setting giving two answers on the two
-     * backends. Folding here costs nothing and makes the two agree. */
-    const region = state.regionState
-    if (region && region.loop && region.end > region.start) {
-      const span = region.end - region.start
-      if (advanced > region.end)
-        return region.start + ((advanced - region.start) % span)
-    }
-    return Math.min(state.durationSec, advanced)
+    const clock = this.handle.clock()
+    return clock.live ? clock.playing : this.state().phase === 'playing'
   }
   /**
    * A trim can only ever ADD lag, never remove more than there is.
@@ -423,15 +390,21 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     return Math.max(this.displayTrimSec, -this.state().displayLatencySec)
   }
   /**
-   * What the singer is hearing RIGHT NOW, corrected twice.
+   * What the singer is hearing RIGHT NOW, corrected twice — legacy's exact
+   * shape: `startOffset + (currentTime − startedAt − lag) · rate`, with the
+   * render head read synchronously from the core in place of currentTime.
    *
-   * The core already subtracts the presentation latency it can measure, which
-   * is what `positionSec` carries. The trim is the part it cannot measure —
-   * the OS's own figure is short on Bluetooth and CarPlay — so the true heard
-   * frame is earlier still by exactly the amount the singer dialled in.
+   * The presentation latency is the part the core can measure; the trim is
+   * the part it cannot — the OS's own figure is short on Bluetooth and
+   * CarPlay — so the true heard frame is earlier still by exactly the amount
+   * the singer dialled in. Both are subtracted here, once, for both the
+   * live clock and the polled fallback.
    */
   get position(): number {
-    return Math.max(0, this.projected(this.state().positionSec) - this.effectiveTrimSec)
+    return Math.max(
+      0,
+      this.handle.clock().renderedSec - this.state().displayLatencySec - this.effectiveTrimSec
+    )
   }
   /**
    * The RENDER clock, deliberately untrimmed.
@@ -443,7 +416,7 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
    * passes a lag of zero while `position` carries the full display lag.
    */
   get audioPosition(): number {
-    return this.projected(this.state().renderedPositionSec)
+    return this.handle.clock().renderedSec
   }
   get duration(): number {
     return this.state().durationSec
@@ -465,8 +438,10 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     this.handle.setDisplayTrim(next)
     this.emit()
   }
+  /** The dots read the clock too, so they light on the frame the lyric
+   *  sweep is on rather than on the poll grid. */
   get countInStatus(): PlaybackCountInStatus | null {
-    return this.state().countInStatus
+    return this.handle.clock().countIn
   }
   get regionState(): { start: number; end: number; loop: boolean } | null {
     return this.state().regionState

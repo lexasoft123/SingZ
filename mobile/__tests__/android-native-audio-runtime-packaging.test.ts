@@ -41,6 +41,10 @@ describe('Android native DSP runtime packaging', () => {
       'previewClick',
       'stop',
       'unload',
+      'unloadRetainingLanes',
+      'lanePeaks',
+      'setControl',
+      'positionNow',
     ])
       expect(module).toMatch(new RegExp(`fun ${method}\\(`));
     // status() refreshes the host inventory before every answer; session(),
@@ -49,6 +53,25 @@ describe('Android native DSP runtime packaging', () => {
     expect(module).toMatch(
       /fun session\(promise: Promise\) \{\s*if \(!postResult\(promise\) \{\s*requireCore\(\)\s*SingzCore\.nativePlaybackSession\(\)/,
     );
+    // positionNow is the player's clock and the ONE blocking-synchronous
+    // method: it runs on the JS thread and answers from the core's lock-free
+    // publication — no postResult (the control thread can be held for
+    // seconds by a prepare or a stop), no JSON. Same name, no arguments, on
+    // iOS too (RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD there).
+    expect(
+      module.match(/@ReactMethod\(isBlockingSynchronousMethod = true\)/g),
+    ).toHaveLength(1);
+    expect(module).toMatch(
+      /@ReactMethod\(isBlockingSynchronousMethod = true\)\s*fun positionNow\(\): WritableMap \{/,
+    );
+    const positionNowBody = /fun positionNow\(\): WritableMap \{([\s\S]*?)\n  \}/.exec(
+      module,
+    );
+    expect(positionNowBody).not.toBeNull();
+    expect(positionNowBody![1]).toContain('SingzCore.nativePlaybackPositionNow()');
+    expect(positionNowBody![1]).not.toContain('postResult');
+    expect(positionNowBody![1]).not.toContain('parseJson');
+    expect(core).toContain('external fun nativePlaybackPositionNow(): DoubleArray');
     expect(module).toContain('NativePlaybackPathPolicy.authorize');
     expect(module).toContain('ctx.filesDir');
     expect(module).toContain('ctx.cacheDir');
@@ -116,6 +139,7 @@ describe('Android native DSP runtime packaging', () => {
     for (const symbol of [
       'nativePlaybackStatus',
       'nativePlaybackSession',
+      'nativePlaybackPositionNow',
       'nativePlaybackPrepare',
       'nativePlaybackStart',
       'nativePlaybackPause',
@@ -125,6 +149,14 @@ describe('Android native DSP runtime packaging', () => {
       'nativePlaybackUnload',
     ])
       expect(binding).toContain(symbol);
+    // The clock's JNI leg takes no lock and registers as a double array, not
+    // a JSON string: `()[D` is the arity-and-type contract the Kotlin extern
+    // above must match, or the method never dispatches and never says so.
+    expect(binding).toMatch(
+      /static jdoubleArray nativePlaybackPositionNow\(JNIEnv \*env, jobject\) \{\s*const singz::NativePlaybackPositionNow now = owner\(\)\.session\.positionNow\(\);/,
+    );
+    expect(binding).toContain('"nativePlaybackPositionNow"');
+    expect(binding).toContain('"()[D"');
     expect(binding).toContain('nativePlaybackSessionCapabilityTag()');
     expect(binding).toContain('decodedAudioCodecCapabilities()');
     expect(binding).toContain('decodedAudioCapabilityTag()');

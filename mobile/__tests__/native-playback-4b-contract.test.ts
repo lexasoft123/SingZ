@@ -3,6 +3,7 @@ import {
   buildNativePlaybackPreparePlayback,
   nativePlaybackBridge,
   parseNativePlaybackCapability,
+  parseNativePlaybackPositionNow,
   parseNativePlaybackSession,
 } from '../src/playback/native';
 
@@ -510,5 +511,105 @@ describe('session(): the poll reads the session block alone', () => {
     const session = await api.session();
     expect(session).toMatchObject({ generation: 0, state: 'unloaded' });
     expect(parseNativePlaybackCapability({}, 'ios').session).toEqual(session);
+  });
+});
+
+describe("positionNow(): the player's clock, read synchronously", () => {
+  const bridgeStubs = () =>
+    Object.fromEntries(
+      [
+        'prepare',
+        'configureOutputSession',
+        'openOutput',
+        'start',
+        'transport',
+        'setControl',
+        'previewClick',
+        'stop',
+        'unload',
+      ].map(name => [name, jest.fn()]),
+    );
+  const raw = () => ({
+    available: true,
+    generation: 7,
+    transportState: 'playing',
+    renderedProjectFrame: 96_000,
+    continuousFrame: 120_000,
+    remainingPreRollFrames: 0,
+    seekCount: 2,
+    ageMs: 4.5,
+  });
+
+  it('parses the shape both bridges promise, numbers as numbers', () => {
+    expect(parseNativePlaybackPositionNow(raw())).toEqual({
+      generation: 7,
+      transportState: 'playing',
+      renderedProjectFrame: 96_000,
+      continuousFrame: 120_000,
+      remainingPreRollFrames: 0,
+      seekCount: 2,
+      ageMs: 4.5,
+    });
+    // A count-in is a negative rendered frame, and that is allowed.
+    expect(
+      parseNativePlaybackPositionNow({
+        ...raw(),
+        transportState: 'pre-roll',
+        renderedProjectFrame: -4800,
+        remainingPreRollFrames: 4800,
+      }),
+    ).toMatchObject({ renderedProjectFrame: -4800, remainingPreRollFrames: 4800 });
+  });
+
+  it('is null for an unavailable read, and for anything off the shape', () => {
+    // The core says so itself when nothing is prepared, when the generation
+    // is not the active one, or when the bounded read collided.
+    expect(parseNativePlaybackPositionNow({ available: false })).toBeNull();
+    expect(parseNativePlaybackPositionNow({ ...raw(), available: 1 })).toBeNull();
+    expect(parseNativePlaybackPositionNow({ ...raw(), generation: 0 })).toBeNull();
+    expect(parseNativePlaybackPositionNow({ ...raw(), seekCount: -1 })).toBeNull();
+    expect(parseNativePlaybackPositionNow({ ...raw(), ageMs: 'soon' })).toBeNull();
+    expect(
+      parseNativePlaybackPositionNow({ ...raw(), renderedProjectFrame: 1.5 }),
+    ).toBeNull();
+    expect(
+      parseNativePlaybackPositionNow({ ...raw(), transportState: 'humming' }),
+    ).toBeNull();
+    expect(parseNativePlaybackPositionNow(undefined)).toBeNull();
+    expect(parseNativePlaybackPositionNow('now')).toBeNull();
+  });
+
+  it('reads the bridge synchronously and says the build has a clock', () => {
+    const positionNow = jest.fn(() => raw());
+    const api = nativePlaybackBridge({
+      ...bridgeStubs(),
+      status: jest.fn(async () => nativeStatus()),
+      positionNow,
+    })!;
+    expect(api.syncClock).toBe(true);
+    // Synchronous: a value, not a promise, and the bridge asked exactly once.
+    const now = api.positionNow();
+    expect(now).toMatchObject({ generation: 7, renderedProjectFrame: 96_000 });
+    expect(positionNow).toHaveBeenCalledTimes(1);
+  });
+
+  it('has no clock on a native build older than the method, and never throws', () => {
+    const api = nativePlaybackBridge({
+      ...bridgeStubs(),
+      status: jest.fn(async () => nativeStatus()),
+    })!;
+    expect(api.syncClock).toBe(false);
+    expect(api.positionNow()).toBeNull();
+    // A synchronous method that throws (the module invalidated under the
+    // caller) reads as unavailable: this is read from renders.
+    const throwing = nativePlaybackBridge({
+      ...bridgeStubs(),
+      status: jest.fn(async () => nativeStatus()),
+      positionNow: jest.fn(() => {
+        throw new Error('module invalidated');
+      }),
+    })!;
+    expect(throwing.syncClock).toBe(true);
+    expect(throwing.positionNow()).toBeNull();
   });
 });

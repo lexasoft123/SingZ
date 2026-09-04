@@ -133,10 +133,21 @@ describe('iOS native DSP runtime packaging', () => {
     const remappedExports = [...bridge.matchAll(/RCT_REMAP_METHOD\(\s*([A-Za-z0-9_]+)/g)]
       .map(match => match[1])
       .sort()
+    const synchronousExports = [
+      ...bridge.matchAll(/RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD\(\s*([A-Za-z0-9_]+)/g)
+    ]
+      .map(match => match[1])
+      .sort()
     // session is status's session block alone, for the telemetry poll — no
     // route inventory, no runtime description. Same name, no arguments, on
     // Android too.
     expect(directExports).toEqual(['codecTargetProof', 'session', 'status'])
+    // positionNow is the player's clock and the ONE synchronous method: it
+    // answers on the JS thread from the core's lock-free publication, never
+    // through the control queue. Exact, so a second synchronous method is a
+    // decision taken here rather than a habit. Same name, no arguments, on
+    // Android too (isBlockingSynchronousMethod there).
+    expect(synchronousExports).toEqual(['positionNow'])
     expect(remappedExports).toEqual([
       'configureOutputSession', 'lanePeaks', 'openOutput', 'prepare',
       'previewClick', 'setControl', 'start', 'stop', 'transport', 'unload',
@@ -314,6 +325,13 @@ describe('iOS native DSP runtime packaging', () => {
     expect(boundary).toContain('@catch (NSException*)')
     // Status and Session are the two queue-dispatched reads: each crosses the
     // boundary twice (once on the caller's thread, once inside the block).
+    // PositionNow is neither: no queue, no boundary, no promise pair — a
+    // noexcept core read answered on the calling thread. The counts below
+    // therefore do not move for it, and its definition is pinned by name.
+    expect(support).toContain('NSDictionary *SingzNativePlaybackPositionNow(void)')
+    expect(support).toMatch(
+      /SingzNativePlaybackPositionNow\(void\) \{[\s\S]*?owner\(\)\.session->positionNow\(\)/
+    )
     expect(
       support.match(/runBridgeBoundary\((?:reject|asyncReject)/g)
     ).toHaveLength(14)

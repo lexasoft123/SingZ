@@ -1022,6 +1022,48 @@ static jstring nativePlaybackSession(JNIEnv *env, jobject) {
   }
 }
 
+/* Where the song is, synchronously, for the player's clock — the read the
+   legacy engine makes of its AudioContext's currentTime and native never had.
+   Runs on the JS thread, many times a second, so two things are deliberately
+   NOT here: commandMutex (prepare's graph build and stop's quiescence wait
+   hold it for as long as they take, and a UI clock cannot wait on either;
+   the core's positionNow() is lock-free by contract), and JSON (a fixed
+   layout of eight doubles, which Kotlin turns into the map without parsing
+   anything). Layout, in order: available (0/1), generation, transport state
+   code (the enum's own values, pinned below), renderedProjectFrame,
+   continuousFrame, remainingPreRollFrames, seekCount, ageMs. iOS's
+   positionNow is its exact twin: same name, no arguments. */
+static_assert(
+    static_cast<uint32_t>(singz::NativePlaybackTransportState::Stopped) == 0 &&
+        static_cast<uint32_t>(singz::NativePlaybackTransportState::PreRoll) ==
+            1 &&
+        static_cast<uint32_t>(singz::NativePlaybackTransportState::Playing) ==
+            2 &&
+        static_cast<uint32_t>(singz::NativePlaybackTransportState::Paused) ==
+            3 &&
+        static_cast<uint32_t>(
+            singz::NativePlaybackTransportState::Completed) == 4,
+    "NativeAudioRuntimeModule.kt maps these codes by value");
+
+static jdoubleArray nativePlaybackPositionNow(JNIEnv *env, jobject) {
+  const singz::NativePlaybackPositionNow now = owner().session.positionNow();
+  const jdouble values[8] = {
+      now.available ? 1.0 : 0.0,
+      static_cast<jdouble>(now.generation),
+      static_cast<jdouble>(static_cast<uint32_t>(now.transportState)),
+      static_cast<jdouble>(now.renderedProjectFrame),
+      static_cast<jdouble>(now.continuousFrame),
+      static_cast<jdouble>(now.remainingPreRollFrames),
+      static_cast<jdouble>(now.seekCount),
+      static_cast<jdouble>(now.ageNs) / 1.0e6,
+  };
+  jdoubleArray out = env->NewDoubleArray(8);
+  if (out == nullptr)
+    return nullptr;
+  env->SetDoubleArrayRegion(out, 0, 8, values);
+  return out;
+}
+
 static jstring nativePlaybackClaim(JNIEnv *env, jobject, jlong generationValue,
                                    jlong handoffLeaseValue) {
   const uint64_t generation = static_cast<uint64_t>(generationValue);
@@ -1608,6 +1650,9 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
     {const_cast<char *>("nativePlaybackUnloadRetainingLanes"),
      const_cast<char *>("(J)Ljava/lang/String;"),
      reinterpret_cast<void *>(nativePlaybackUnloadRetainingLanes)},
+    {const_cast<char *>("nativePlaybackPositionNow"),
+     const_cast<char *>("()[D"),
+     reinterpret_cast<void *>(nativePlaybackPositionNow)},
 };
 
 } // namespace

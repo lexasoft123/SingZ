@@ -54,8 +54,14 @@ const LEGACY_RENDER_QUANTUM = 128
    derived from it rather than from independent literals, which is what went
    wrong when the interval moved and a fixed 300 ms window stopped containing
    the correction it existed to catch. Keep in step with
-   NATIVE_TELEMETRY_POLL_MS in mobile/src/playback/native.ts. */
-const POLL_MS = 400
+   NATIVE_TELEMETRY_POLL_MS in mobile/src/playback/native.ts.
+
+   Since the position moved onto the synchronous clock the poll carries no
+   position, so a correction no longer "arrives" on it — but the seek rule's
+   window still spans one poll plus, so that a build without the clock (which
+   still projects between polls) is measured over the whole gap it can bounce
+   in. */
+const POLL_MS = 1000
 
 /** A sample is "advancing" when the transport moved by more than this since
  *  the previous one — comfortably above sampler jitter, well under one

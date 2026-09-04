@@ -30,6 +30,17 @@ RCT_EXPORT_METHOD(session:(RCTPromiseResolveBlock)resolve
   SingzNativePlaybackSession(resolve, reject);
 }
 
+// The player's clock. Blocking-synchronous on purpose and the only such
+// method here: it answers on the JS thread from the core's lock-free
+// publication, the way the legacy engine's currentTime does, instead of a
+// promise round trip through the control queue. react-native-audio-api's
+// install/getDevicePreferredSampleRate already run this way under the same
+// bridgeless runtime. Same name and arity (none) as Android's positionNow.
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(positionNow)
+{
+  return SingzNativePlaybackPositionNow();
+}
+
 RCT_REMAP_METHOD(
     prepare,
     prepare : (nonnull NSNumber*)generation

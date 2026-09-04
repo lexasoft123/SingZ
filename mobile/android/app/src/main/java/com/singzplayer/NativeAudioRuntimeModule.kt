@@ -148,6 +148,48 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     }) rejectUnavailable(promise)
   }
 
+  /** Where the song is RIGHT NOW: the player's clock, read the way the legacy
+   *  engine reads its AudioContext's currentTime. Blocking-synchronous on
+   *  purpose, and the only such method here: it runs on the JS thread, many
+   *  times a second, and answers from the core's lock-free publication — no
+   *  control-thread hop (prepare and stop can hold that thread for seconds),
+   *  no JSON, no device inventory. A core that is not loaded answers
+   *  `available: false` rather than throwing into the caller's render.
+   *  Same name and arity (none) as the iOS bridge's positionNow; the state
+   *  codes are the core enum's own values, pinned by a static_assert beside
+   *  the JNI function. */
+  @ReactMethod(isBlockingSynchronousMethod = true)
+  fun positionNow(): WritableMap {
+    val map = Arguments.createMap()
+    if (invalidated.get() || SingzCore.ensureLoaded() != null) {
+      map.putBoolean("available", false)
+      return map
+    }
+    val v = SingzCore.nativePlaybackPositionNow()
+    if (v.size < 8) {
+      map.putBoolean("available", false)
+      return map
+    }
+    map.putBoolean("available", v[0] != 0.0)
+    map.putDouble("generation", v[1])
+    map.putString(
+      "transportState",
+      when (v[2].toInt()) {
+        1 -> "pre-roll"
+        2 -> "playing"
+        3 -> "paused"
+        4 -> "completed"
+        else -> "stopped"
+      },
+    )
+    map.putDouble("renderedProjectFrame", v[3])
+    map.putDouble("continuousFrame", v[4])
+    map.putDouble("remainingPreRollFrames", v[5])
+    map.putDouble("seekCount", v[6])
+    map.putDouble("ageMs", v[7])
+    return map
+  }
+
   @ReactMethod
   fun prepare(generationValue: Double, request: ReadableMap, promise: Promise) {
     val generation: Long

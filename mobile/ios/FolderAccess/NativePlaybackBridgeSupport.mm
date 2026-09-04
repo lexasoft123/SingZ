@@ -546,6 +546,24 @@ void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
   });
 }
 
+NSDictionary *SingzNativePlaybackPositionNow(void) {
+  // No queue hop and no boundary wrapper: positionNow() is noexcept and
+  // lock-free by contract, and this runs on the JS thread at UI rate. The
+  // numbers cross as NSNumbers, never as text — Foundation's JSON parser is
+  // the one that is not correctly rounded, and nothing here goes near it.
+  const singz::NativePlaybackPositionNow now = owner().session->positionNow();
+  return @{
+    @"available" : @(now.available),
+    @"generation" : @(now.generation),
+    @"transportState" : transportState(now.transportState),
+    @"renderedProjectFrame" : @(now.renderedProjectFrame),
+    @"continuousFrame" : @(now.continuousFrame),
+    @"remainingPreRollFrames" : @(now.remainingPreRollFrames),
+    @"seekCount" : @(now.seekCount),
+    @"ageMs" : @(static_cast<double>(now.ageNs) / 1.0e6),
+  };
+}
+
 void SingzNativePlaybackPrepare(NSNumber *generationValue,
                                 NSDictionary *request,
                                 RCTPromiseResolveBlock resolve,
