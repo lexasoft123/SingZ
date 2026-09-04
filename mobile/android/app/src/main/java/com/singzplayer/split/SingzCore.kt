@@ -99,6 +99,11 @@ object SingzCore {
    *  seekCount, ageMs. The one native playback read that runs on the JS
    *  thread rather than the control thread — see NativeAudioRuntimeModule. */
   external fun nativePlaybackPositionNow(): DoubleArray
+  /** Hold a parked generation's Oboe stream (AAudio pause, nothing closed)
+   *  and let it go again; the result JSON is the same shape every command
+   *  answers with. See NativeAudioRuntimeModule.suspendOutput. */
+  external fun nativePlaybackSuspendOutput(generation: Long): String
+  external fun nativePlaybackResumeOutput(generation: Long): String
   external fun nativePlaybackClaim(generation: Long, handoffLease: Long): String
   external fun nativePlaybackRequestCancellation(generation: Long): Boolean
   external fun nativePlaybackPrepare(

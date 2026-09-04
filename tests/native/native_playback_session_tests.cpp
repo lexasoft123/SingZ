@@ -343,6 +343,30 @@ public:
     return {true, singz::AudioHostError::None, state, format, latency, {}};
   }
 
+  // Hold and release the stream the way the Android host does: no close, no
+  // reopen, the render context untouched. drive() renders nothing while held
+  // (it checks Running), which is exactly the silence a real paused stream
+  // gives. `refuseSuspend` models a backend that cannot hold a stream.
+  singz::AudioHostResult suspend() override {
+    ++suspends;
+    if (refuseSuspend || state != singz::AudioHostState::Running)
+      return {false,   singz::AudioHostError::InvalidState,
+              state,   format,
+              latency, "not running"};
+    state = singz::AudioHostState::Suspended;
+    return {true, singz::AudioHostError::None, state, format, latency, {}};
+  }
+
+  singz::AudioHostResult resume() override {
+    ++resumes;
+    if (state != singz::AudioHostState::Suspended)
+      return {false,   singz::AudioHostError::InvalidState,
+              state,   format,
+              latency, "not suspended"};
+    state = singz::AudioHostState::Running;
+    return {true, singz::AudioHostError::None, state, format, latency, {}};
+  }
+
   void stop() noexcept override {
     ++stops;
     if (graphTerminalDuringStop && context != nullptr) {
@@ -490,6 +514,9 @@ public:
   mutable uint32_t enumerations{0};
   uint32_t opens{0};
   uint32_t starts{0};
+  uint32_t suspends{0};
+  uint32_t resumes{0};
+  bool refuseSuspend{false};
   bool captureOutput{false};
   std::vector<float> outputTrace;
   singz::AudioHostConfig lastConfig{};
@@ -3156,6 +3183,93 @@ void positionNowReadsTheCallbackWithoutTheControlLock() {
   std::remove(wav.c_str());
 }
 
+// The background park on Android: pause the transport, then HOLD the stream
+// — no close, no reopen, no re-prepare — and let it go at the next Play. What
+// is pinned: a hold is refused while the transport advances (the stream keeps
+// rendering, untouched); a hold on a parked transport stops the host asking
+// for blocks while the clock stays exactly where it was; the release resumes
+// the SAME stream (no second open, no second start) and the song continues
+// from the held frame; a host that cannot hold refuses and the stream keeps
+// rendering; and a held stream still closes on unload — the cleanup proof
+// does not depend on the stream having been released first.
+void aHeldStreamKeepsTheGraphAndResumesInPlace() {
+  std::vector<float> ramp(128);
+  for (uint32_t frame = 0; frame < ramp.size(); ++frame)
+    ramp[frame] = static_cast<float>(frame) * 0.002F;
+  const std::string wav = writeWav("held-stream.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 44).ok);
+  CHECK(session.openOutput(44).ok && session.start(44).ok);
+  CHECK(fake->drive(5, singz::AudioHostDiscontinuityStart));
+  CHECK(fake->drive(10));
+
+  // Advancing: refused, and the host was never asked.
+  auto held = session.suspendOutput(44);
+  CHECK(!held.ok && held.error == singz::NativePlaybackError::InvalidState &&
+        fake->suspends == 0 && fake->status().state == singz::AudioHostState::Running);
+  CHECK(fake->drive(1));
+
+  // Pause ASKED but not yet rendered: still refused, host untouched — a hold
+  // here would freeze the stream with the callback's transport still Playing
+  // and every clock projecting forward from it.
+  CHECK(session.pause(44).ok);
+  held = session.suspendOutput(44);
+  CHECK(!held.ok && held.error == singz::NativePlaybackError::InvalidState &&
+        fake->suspends == 0);
+  // Parked, then held: the host stops asking for blocks, the clock stays put.
+  CHECK(fake->drive(1));
+  CHECK(session.suspendOutput(44).ok && fake->suspends == 1);
+  auto status = session.status();
+  CHECK(status.host.state == singz::AudioHostState::Suspended &&
+        status.state == singz::NativePlaybackState::Running &&
+        status.renderedProjectFrame == 16);
+  CHECK(!fake->drive(8));
+  auto now = session.positionNow();
+  CHECK(now.available && now.renderedProjectFrame == 16 &&
+        now.transportState == singz::NativePlaybackTransportState::Paused);
+  // Holding twice is idempotent, not a second pause.
+  CHECK(session.suspendOutput(44).ok && fake->suspends == 1);
+
+  // Released: the SAME stream — no reopen, no restart — and the song goes on
+  // from the held frame once the transport resumes.
+  CHECK(session.resumeOutput(44).ok && fake->resumes == 1);
+  CHECK(fake->opens == 1 && fake->starts == 1);
+  status = session.status();
+  CHECK(status.host.state == singz::AudioHostState::Running &&
+        status.renderedProjectFrame == 16);
+  CHECK(session.resume(44).ok && fake->drive(4));
+  status = session.status();
+  CHECK(status.transportState ==
+            singz::NativePlaybackTransportState::Playing &&
+        status.renderedProjectFrame == 20);
+  // Releasing what is not held is nothing to do, not an error.
+  CHECK(session.resumeOutput(44).ok && fake->resumes == 1);
+
+  // A host that cannot hold: refused, and the stream keeps rendering.
+  CHECK(session.pause(44).ok && fake->drive(1));
+  fake->refuseSuspend = true;
+  held = session.suspendOutput(44);
+  CHECK(!held.ok && held.error == singz::NativePlaybackError::InvalidState &&
+        fake->suspends == 2 && fake->status().state == singz::AudioHostState::Running);
+  fake->refuseSuspend = false;
+  status = session.status();
+  CHECK(status.state == singz::NativePlaybackState::Running &&
+        status.host.state == singz::AudioHostState::Running);
+
+  // Held at unload: the stream still closes. (Not cleanupProof here — asking
+  // it after an unload mints the process-global fallback lease, and the next
+  // session's plain claim is then refused; the fake's stop count and state
+  // are the closure.)
+  CHECK(session.suspendOutput(44).ok && fake->suspends == 3);
+  CHECK(session.unload(44).ok);
+  CHECK(fake->stops == 1 && fake->status().state == singz::AudioHostState::Stopped);
+  std::remove(wav.c_str());
+}
+
 void audibleProjectionWaitsForLatencyHistory() {
   const std::string wav = writeWav(
       "audible-projection.wav", 1, std::vector<float>(50000, 0.1F));
@@ -5281,6 +5395,7 @@ int main() {
   transportControlKernelAndTelemetry();
   resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands();
   positionNowReadsTheCallbackWithoutTheControlLock();
+  aHeldStreamKeepsTheGraphAndResumesInPlace();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();

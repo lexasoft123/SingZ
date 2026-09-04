@@ -150,7 +150,12 @@ describe('iOS native DSP runtime packaging', () => {
     expect(synchronousExports).toEqual(['positionNow'])
     expect(remappedExports).toEqual([
       'configureOutputSession', 'lanePeaks', 'openOutput', 'prepare',
-      'previewClick', 'setControl', 'start', 'stop', 'transport', 'unload',
+      'previewClick',
+      // The background park's hold and release. iOS never calls them (it
+      // keeps rendering in the background by decision) and its host refuses
+      // them, but the surface is the same on both bridges.
+      'resumeOutput',
+      'setControl', 'start', 'stop', 'suspendOutput', 'transport', 'unload',
       // Retention is a separate method, never an extra argument on unload:
       // a native method whose arity does not match JS is not dispatched at
       // all and says nothing about it.
@@ -332,17 +337,20 @@ describe('iOS native DSP runtime packaging', () => {
     expect(support).toMatch(
       /SingzNativePlaybackPositionNow\(void\) \{[\s\S]*?owner\(\)\.session->positionNow\(\)/
     )
+    // SuspendOutput and ResumeOutput are two more queue-dispatched commands
+    // of previewClick's shape: two boundary crossings, one dispatch, one
+    // promise pair each.
     expect(
       support.match(/runBridgeBoundary\((?:reject|asyncReject)/g)
-    ).toHaveLength(14)
+    ).toHaveLength(18)
     expect(support.match(/SingzPlaybackBridgeBoundary\(\[&\]/g)).toHaveLength(10)
-    expect(support.match(/dispatch_async\(/g)).toHaveLength(11)
+    expect(support.match(/dispatch_async\(/g)).toHaveLength(13)
     expect(
       support.match(/RCTPromiseResolveBlock asyncResolve = \[resolve copy\];/g)
-    ).toHaveLength(11)
+    ).toHaveLength(13)
     expect(
       support.match(/RCTPromiseRejectBlock asyncReject = \[reject copy\];/g)
-    ).toHaveLength(11)
+    ).toHaveLength(13)
     expect(support).toContain('SingzPlaybackPrepareOwnershipGuard admissionGuard')
     expect(support).toContain('SingzPlaybackFinishPrepareOuterBoundary(')
     expect(support).toContain('PrepareGuardAllocation')

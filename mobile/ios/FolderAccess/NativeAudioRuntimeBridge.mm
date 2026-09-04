@@ -41,6 +41,28 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(positionNow)
   return SingzNativePlaybackPositionNow();
 }
 
+// One argument plus the promise pair, exactly like stop and exactly like
+// Android's suspendOutput/resumeOutput(generationValue, promise). iOS keeps
+// rendering in the background by decision, so JS never calls these here; the
+// surface is the same on both bridges regardless.
+RCT_REMAP_METHOD(
+    suspendOutput,
+    suspendOutput : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackSuspendOutput(generation, resolve, reject);
+}
+
+RCT_REMAP_METHOD(
+    resumeOutput,
+    resumeOutput : (nonnull NSNumber*)generation
+        resolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackResumeOutput(generation, resolve, reject);
+}
+
 RCT_REMAP_METHOD(
     prepare,
     prepare : (nonnull NSNumber*)generation

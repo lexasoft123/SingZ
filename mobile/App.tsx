@@ -758,7 +758,13 @@ export default function App(): React.JSX.Element {
         // before Play made a sound, and the playhead came back at zero.
         void iosNativePlayback.parkForBackground('app backgrounded')
         void engine.suspendForBackground()
-      } else if (next === 'active') engine.allowForegroundAudio()
+      } else if (next === 'active') {
+        // Let a held stream go as soon as the singer is back: the callback
+        // is what consumes a metronome preview click, a seek, a resume, and
+        // a held stream would collect them all and fire them at the next Play.
+        void iosNativePlayback.releaseHeldStream('app foregrounded')
+        engine.allowForegroundAudio()
+      }
     })
     return () => {
       appState.remove()

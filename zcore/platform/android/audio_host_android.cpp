@@ -81,6 +81,13 @@ struct AndroidAudioHostControlBlock {
   std::atomic<uint32_t> outputPresentationFrames{0};
   std::atomic<uint32_t> inputDriverXruns{0};
   std::atomic<uint32_t> outputDriverXruns{0};
+  // Set while suspend() holds the output stream: the timestamp sampler naps
+  // instead of querying a paused stream every 10 ms. The sampler THREAD is
+  // never stopped for a hold — its owner's stop epoch is monotonic (a start
+  // for an epoch already stopped is refused, deliberately, to close a race
+  // with Oboe's before-close path), so a stop-and-restart within one pair
+  // epoch cannot work and a resume that tried it fail-stopped the stream.
+  std::atomic<uint32_t> samplerHeld{0};
   std::atomic<AudioHostState> state{AudioHostState::Closed};
   detail::AndroidAudioHostPairState pairState{};
   double sampleRate{0.0};
@@ -221,6 +228,29 @@ bool waitStarted(oboe::AudioStream& stream) {
     state = next;
   }
   return state == oboe::StreamState::Started;
+}
+
+// The pause twin of waitStarted: requestPause is asynchronous, and no data
+// callback is guaranteed absent until the stream reports Paused.
+bool waitPaused(oboe::AudioStream& stream) {
+  oboe::StreamState state = stream.getState();
+  const uint64_t start = monotonicNowNs();
+  while (state != oboe::StreamState::Paused &&
+         state != oboe::StreamState::Disconnected &&
+         state != oboe::StreamState::Closed) {
+    if (start == 0 || monotonicNowNs() - start >=
+                          static_cast<uint64_t>(kStateTimeoutNs)) {
+      return false;
+    }
+    oboe::StreamState next = state;
+    const oboe::Result waited =
+        stream.waitForStateChange(state, &next, 100000000LL);
+    if (waited != oboe::Result::OK && waited != oboe::Result::ErrorTimeout) {
+      return false;
+    }
+    state = next;
+  }
+  return state == oboe::StreamState::Paused;
 }
 
 bool waitCallbacks(const detail::AndroidAudioHostCallback& callback,
@@ -747,6 +777,134 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
             currentLatencyLocked(), {}};
   }
 
+  /* Hold the output stream where it is — AAudio's own pause — with the pair
+     still owned, the callback owner still attached and nothing renegotiated,
+     so resume() is requestStart on the same stream. Output-only: pausing one
+     half of a duplex pair would let the input FIFO fill against a consumer
+     that is not draining it, and no playback session ever opens an input
+     here. The pair phase stays Running throughout, deliberately: Oboe's
+     error path (a disconnect while held) claims teardown from Running exactly
+     as it would from a playing stream, and a user stop() from Suspended runs
+     the ordinary stop+close, which AAudio accepts from Paused.
+
+     The timestamp sampler is told to nap (samplerHeld) rather than stopped:
+     a paused stream answers getTimestamp with an error, so the sampler would
+     spin on nothing, and its thread waking every 10 ms is part of the idle
+     cost this verb exists to remove — but its owner refuses to restart an
+     epoch it has stopped, so stopping it here would make the resume fail.
+     A failure MID-way fail-stops the stream like a failed start does — the
+     session then reads Error/Terminal and its retry is a fresh generation,
+     never a stream in an unknown state. */
+  AudioHostResult suspend() override {
+    std::lock_guard<std::recursive_mutex> api(control_->apiMutex);
+    std::unique_lock<std::mutex> lifecycle(control_->operationMutex);
+    if (control_->input || !control_->output || !control_->prepared ||
+        control_->state.load(std::memory_order_acquire) !=
+            AudioHostState::Running) {
+      return {false, AudioHostError::InvalidState,
+              control_->state.load(std::memory_order_acquire), format_,
+              latency_,
+              "only a running output-only Android Oboe host can be held"};
+    }
+    uint64_t pairEpoch = 0;
+    {
+      std::lock_guard<std::mutex> pair(control_->pairMutex);
+      if (control_->pairState.phase != detail::AndroidAudioHostPairPhase::Running ||
+          control_->pairState.teardownOwner !=
+              detail::AndroidAudioHostTeardownOwner::None ||
+          control_->pairState.uncertainty) {
+        return {false, AudioHostError::InvalidState,
+                control_->state.load(std::memory_order_acquire), format_,
+                latency_, "the Android Oboe pair is not simply running"};
+      }
+      pairEpoch = control_->pairState.epoch;
+    }
+    control_->samplerHeld.store(1, std::memory_order_release);
+    if (control_->output->requestPause() != oboe::Result::OK) {
+      control_->samplerHeld.store(0, std::memory_order_release);
+      return failLocked(lifecycle, AudioHostError::ProviderFailure,
+                        "Android Oboe refused to pause the output stream");
+    }
+    if (!waitPaused(*control_->output)) {
+      control_->samplerHeld.store(0, std::memory_order_release);
+      return failLocked(lifecycle, AudioHostError::ProviderFailure,
+                        "the Android Oboe output stream did not reach Paused");
+    }
+    {
+      std::lock_guard<std::mutex> pair(control_->pairMutex);
+      if (control_->pairState.epoch != pairEpoch ||
+          control_->pairState.phase != detail::AndroidAudioHostPairPhase::Running ||
+          control_->pairState.teardownOwner !=
+              detail::AndroidAudioHostTeardownOwner::None) {
+        control_->samplerHeld.store(0, std::memory_order_release);
+        return failLocked(lifecycle, AudioHostError::ProviderFailure,
+                          "the Android Oboe pair changed while being held");
+      }
+    }
+    control_->state.store(AudioHostState::Suspended, std::memory_order_release);
+    return {true, AudioHostError::None, AudioHostState::Suspended, format_,
+            currentLatencyLocked(), {}};
+  }
+
+  AudioHostResult resume() override {
+    std::lock_guard<std::recursive_mutex> api(control_->apiMutex);
+    std::unique_lock<std::mutex> lifecycle(control_->operationMutex);
+    if (!control_->output || !control_->prepared ||
+        control_->state.load(std::memory_order_acquire) !=
+            AudioHostState::Suspended) {
+      return {false, AudioHostError::InvalidState,
+              control_->state.load(std::memory_order_acquire), format_,
+              latency_, "the Android Oboe host is not being held"};
+    }
+    uint64_t pairEpoch = 0;
+    {
+      std::lock_guard<std::mutex> pair(control_->pairMutex);
+      if (control_->pairState.phase != detail::AndroidAudioHostPairPhase::Running ||
+          control_->pairState.teardownOwner !=
+              detail::AndroidAudioHostTeardownOwner::None ||
+          control_->pairState.uncertainty) {
+        return {false, AudioHostError::InvalidState,
+                control_->state.load(std::memory_order_acquire), format_,
+                latency_, "the Android Oboe pair is no longer simply running"};
+      }
+      pairEpoch = control_->pairState.epoch;
+    }
+    // A route that moved while the song was parked is a fresh generation's
+    // problem, the same refusal start() gives: never resume onto a device
+    // the prepared graph was not opened against.
+    if (detail::androidAudioHostRouteGenerationSignal()->load(
+            std::memory_order_acquire) != routeGeneration_) {
+      return failLocked(lifecycle, AudioHostError::DeviceNotFound,
+                        "Android endpoints changed while the stream was held");
+    }
+    auto& callback = control_->prepared->callbackContext;
+    if (callback.runtimeFailure.load(std::memory_order_acquire) !=
+        static_cast<int32_t>(detail::AndroidAudioHostRuntimeFailure::None)) {
+      return failLocked(lifecycle, AudioHostError::ProviderFailure,
+                        "the Android Oboe pair failed while the stream was held");
+    }
+    if (control_->output->requestStart() != oboe::Result::OK ||
+        !waitStarted(*control_->output)) {
+      return failLocked(lifecycle, AudioHostError::ProviderFailure,
+                        "the Android Oboe output stream did not restart");
+    }
+    {
+      std::lock_guard<std::mutex> pair(control_->pairMutex);
+      if (control_->pairState.epoch != pairEpoch ||
+          control_->pairState.phase != detail::AndroidAudioHostPairPhase::Running ||
+          control_->pairState.teardownOwner !=
+              detail::AndroidAudioHostTeardownOwner::None) {
+        return failLocked(lifecycle, AudioHostError::ProviderFailure,
+                          "the Android Oboe pair changed while resuming");
+      }
+    }
+    // The sampler thread was napping, not stopped; wake it.
+    control_->samplerHeld.store(0, std::memory_order_release);
+    control_->state.store(AudioHostState::Running, std::memory_order_release);
+    return {true, AudioHostError::None, AudioHostState::Running, format_,
+            currentLatencyLocked(), {}};
+  }
+
   void stop() noexcept override {
     std::lock_guard<std::recursive_mutex> api(control_->apiMutex);
     std::unique_lock<std::mutex> lifecycle(control_->operationMutex);
@@ -791,6 +949,9 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
       control_->prepared->callbackContext.admission.beginClose();
       deactivateAudioHostCallback(&control_->prepared->callbackContext.endpoint);
     }
+    // A stop from a held stream (focus lost while parked, a route change the
+    // resume refused) ends the hold with it.
+    control_->samplerHeld.store(0, std::memory_order_release);
     // This owner is independent of operationMutex/pairMutex. If Oboe is in
     // before-close, the two callers serialize here and both return only after
     // every timestamp/xrun query for this epoch has left the stream.
@@ -1327,11 +1488,31 @@ class AndroidOboeAudioHostBackend final : public AudioHostBackend {
     auto* prepared = control.prepared.get();
     const double sampleRate = control.sampleRate;
     if (prepared == nullptr || output == nullptr) return false;
+    // A hold that ended in anything but a clean resume (focus loss, a route
+    // change while parked) must not leave the NEXT generation's sampler
+    // napping for the life of the process; the control block outlives the
+    // generation, so the flag is reset here as well as at every hold exit.
+    control.samplerHeld.store(0, std::memory_order_release);
     return control.timestampSampler.start(
         pairEpoch,
         [&control, input = std::move(input), output = std::move(output),
          prepared, sampleRate](const std::atomic<uint32_t>& stop) {
         while (stop.load(std::memory_order_acquire) == 0) {
+          if (control.samplerHeld.load(std::memory_order_acquire) != 0) {
+            // Held: nothing to sample from a paused stream. Nap in 20 ms
+            // slices — a stop or a release still lands within one slice,
+            // and fifty wakeups a second is what a held song costs here
+            // rather than five hundred (measured on the phone: the first
+            // cut's 2 ms slices left the backgrounded phase at 15.5% CPU
+            // against the legacy engine's 11.2%).
+            for (uint32_t count = 0;
+                 count < 5 && stop.load(std::memory_order_acquire) == 0 &&
+                 control.samplerHeld.load(std::memory_order_acquire) != 0;
+                 ++count) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            continue;
+          }
           if (output) {
             const auto stamp = output->getTimestamp(CLOCK_MONOTONIC);
             if (stamp) {

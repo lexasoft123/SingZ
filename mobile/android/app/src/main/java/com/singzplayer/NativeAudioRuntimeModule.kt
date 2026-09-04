@@ -190,6 +190,29 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     return map
   }
 
+  /** Hold a PARKED generation's output stream without closing it — the
+   *  background park on Android. The transport is already paused; without
+   *  this the AAudio callback kept rendering the whole graph as silence
+   *  behind the home screen, at four times the CPU of the legacy engine's
+   *  suspended context. Audio focus is kept: a held song is still ours, and
+   *  the next Play is resumeOutput then a transport resume, not a fresh
+   *  focus request. Same name and arity as the iOS bridge's suspendOutput. */
+  @ReactMethod
+  fun suspendOutput(generationValue: Double, promise: Promise) {
+    command(generationValue, promise) { generation ->
+      requiredJson(SingzCore.nativePlaybackSuspendOutput(generation))
+    }
+  }
+
+  @ReactMethod
+  fun resumeOutput(generationValue: Double, promise: Promise) {
+    command(generationValue, promise) { generation ->
+      if (!ownsFocus(generation))
+        failureResult(generation, "invalid-state", "Android audio focus is not owned").toString()
+      else requiredJson(SingzCore.nativePlaybackResumeOutput(generation))
+    }
+  }
+
   @ReactMethod
   fun prepare(generationValue: Double, request: ReadableMap, promise: Promise) {
     val generation: Long

@@ -93,7 +93,8 @@ export type NativePlaybackCommandKind =
   | 'master-gain'
   | 'preview-click'
   | 'pitch-tempo'
-  | 'training-enable';
+  | 'training-enable'
+  | 'resume-output';
 
 export type NativePlaybackControl =
   | {
@@ -472,6 +473,12 @@ interface NativePlaybackBridgeApi {
    *  back to projecting the polled position. Same name and arity (none) on
    *  both bridges. */
   positionNow?(): unknown;
+  /** Hold a parked generation's output stream without closing it, and let it
+   *  go again (Android's background park; iOS answers InvalidState and keeps
+   *  rendering, by decision). Optional like the others: an older native build
+   *  simply keeps rendering while parked. Same name and arity on both. */
+  suspendOutput?(generation: number): Promise<NativePlaybackResult>;
+  resumeOutput?(generation: number): Promise<NativePlaybackResult>;
   prepare(
     generation: number,
     request: NativePlaybackPrepareRequest,
@@ -511,7 +518,14 @@ interface NativePlaybackBridgeApi {
 }
 
 interface NativePlaybackApi
-  extends Omit<NativePlaybackBridgeApi, 'status' | 'session' | 'positionNow'> {
+  extends Omit<
+    NativePlaybackBridgeApi,
+    'status' | 'session' | 'positionNow' | 'suspendOutput' | 'resumeOutput'
+  > {
+  /** Null on a native build without the method: the caller keeps the stream
+   *  rendering, which is what such a build always did. */
+  suspendOutput(generation: number): Promise<NativePlaybackResult | null>;
+  resumeOutput(generation: number): Promise<NativePlaybackResult | null>;
   status(): Promise<NativePlaybackCapability>;
   /** Always answers: on a native build without session() it goes through
    *  status() and returns its session, so the poll pays for the inventory
@@ -765,6 +779,16 @@ export const nativePlaybackBridge = (
       typeof bridge.unloadRetainingLanes === 'function'
         ? bridge.unloadRetainingLanes(generation)
         : bridge.unload(generation),
+    // Deliberately NOT in the guard above, like the two before it: a build
+    // without them keeps rendering while parked, which is what it always did.
+    suspendOutput: generation =>
+      typeof bridge.suspendOutput === 'function'
+        ? bridge.suspendOutput(generation)
+        : Promise.resolve(null),
+    resumeOutput: generation =>
+      typeof bridge.resumeOutput === 'function'
+        ? bridge.resumeOutput(generation)
+        : Promise.resolve(null),
   };
 };
 
@@ -1065,6 +1089,9 @@ const HOST_STATES = [
   'device-lost',
   'error',
   'unsupported',
+  // Held open and paused by the host (a parked song in the background on
+  // Android): callbacks stopped, render context attached, resumable in place.
+  'suspended',
 ] as const;
 const TERMINAL_REASONS = [
   'none',
@@ -1628,6 +1655,9 @@ export class IosNativePlaybackCoordinator {
     readonly token: number;
   } | null = null;
   private active: IosNativePlaybackHandle | null = null;
+  /** Bumped by every background park and every foreground release, so a
+   *  park still waiting for its pause receipt can tell the app came back. */
+  private parkSeq = 0;
   private ownershipTail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -1940,17 +1970,48 @@ export class IosNativePlaybackCoordinator {
       return;
     }
     if (phase !== 'playing') {
+      // Already parked (the ordinary way a song reaches the background is
+      // pause, then home): nothing to pause, but the stream is rendering
+      // silence exactly as it would after a park, and it is held all the same.
+      const held = phase === 'paused' ? await this.holdStream(handle) : 'not held (not paused)';
       log(
         'dsp',
-        `native graph parked for background · generation ${generation} · already ${phase} · ${reason}`,
+        `native graph parked for background · generation ${generation} · already ${phase} · stream ${held} · ${reason}`,
       );
       return;
     }
+    // The park's sequence: a foreground flip that lands while the pause is
+    // still waiting for its receipt bumps it (see releaseHeldStream), and
+    // the hold is then skipped rather than landing in the foreground, where
+    // a preview click or a seek would go into a stream that renders nothing.
+    const park = ++this.parkSeq;
     try {
-      await this.transportHandle(handle, { kind: 'pause' });
+      // handle.pause(), not a bare transport command: it waits, on the
+      // synchronous clock, for the callback to have RENDERED the pause. A
+      // hold that beat the next callback would pause the stream with the
+      // rendered transport still playing, and the clock would walk on by
+      // wall time for as long as the phone sat on the home screen.
+      await handle.pause();
+      if (park !== this.parkSeq) {
+        log(
+          'dsp',
+          `native graph parked for background · generation ${generation} · paused in place · ` +
+            `stream not held (foregrounded during the park) · ${reason}`,
+        );
+        return;
+      }
+      // Then HOLD the stream. Pausing the transport left the AAudio callback
+      // running the whole graph as silence behind the home screen — 49% CPU
+      // on a phone against the legacy engine's 12% with its context
+      // suspended. The core holds the stream open and paused (no close, no
+      // reopen, the graph untouched) and the next Play lets it go first. A
+      // build or host that cannot hold keeps rendering, exactly as before,
+      // and says so.
+      const held = await this.holdStream(handle);
       log(
         'dsp',
-        `native graph parked for background · generation ${generation} · paused in place · ${reason}`,
+        `native graph parked for background · generation ${generation} · paused in place · ` +
+          `stream ${held} · ${reason}`,
       );
     } catch (error) {
       // A refused pause leaves the graph running, which on Android means the
@@ -1960,6 +2021,92 @@ export class IosNativePlaybackCoordinator {
         `background park could not pause · generation ${generation} · ${message(
           error,
         )}`,
+        'warn',
+      );
+    }
+  }
+
+  /**
+   * Hold a parked handle's output stream. Returns a word for the log: 'held',
+   * or why not. Never throws into the app-state handler.
+   */
+  private async holdStream(handle: IosNativePlaybackHandle): Promise<string> {
+    const native = this.deps.native;
+    const generation = handle.generation;
+    if (!native || generation <= 0 || this.active !== handle) return 'not held (no generation)';
+    const park = this.parkSeq;
+    try {
+      const result = await native.suspendOutput(generation);
+      if (result === null) return 'kept rendering (this native build cannot hold a stream)';
+      if (!result.ok) return `kept rendering (${result.message || result.error})`;
+      // The app came back during this one bridge round trip: the foreground
+      // release found nothing to release, so let go here instead of holding
+      // a stream the singer is looking at.
+      if (park !== this.parkSeq) {
+        handle.streamHeldGeneration = generation;
+        await this.releaseStream(handle);
+        return 'released (foregrounded during the hold)';
+      }
+      handle.streamHeldGeneration = generation;
+      return 'held';
+    } catch (error) {
+      return `kept rendering (${message(error)})`;
+    }
+  }
+
+  /**
+   * Let a held stream go before anything asks the transport to move again.
+   * A refusal here is a Play that cannot sound, so it is thrown as the
+   * command error Play reports rather than logged and forgotten.
+   */
+  private async releaseStream(handle: IosNativePlaybackHandle): Promise<void> {
+    const native = this.deps.native;
+    const generation = handle.generation;
+    if (handle.streamHeldGeneration !== generation || generation <= 0) return;
+    if (!native) {
+      handle.streamHeldGeneration = 0;
+      return;
+    }
+    const result = await native.resumeOutput(generation);
+    // The hold is forgotten only once the host has let go (or never held):
+    // a refusal that leaves the stream Suspended keeps the mark, so the next
+    // Play asks again rather than resuming a transport into a stream that
+    // never renders.
+    if (result !== null && !result.ok)
+      throw new NativePlaybackCommandError(
+        nativeErrorCode(result.error),
+        'resume-output',
+        generation,
+        result.message ||
+          'The native output stream could not be released after the background park.',
+      );
+    handle.streamHeldGeneration = 0;
+    log(
+      'dsp',
+      `native stream released · generation ${generation} · ${result === null ? 'nothing was held' : 'resumed in place'}`,
+    );
+  }
+
+  /**
+   * The app is in the foreground again: let a held stream go now rather
+   * than at the next Play. The callback is what consumes a metronome preview
+   * click, a seek and a resume, and a stream held in the foreground would
+   * collect them silently and fire them all at once later. Never throws into
+   * the app-state handler; a refusal is logged and Play will ask again.
+   */
+  async releaseHeldStream(reason: string): Promise<void> {
+    // Whether or not anything is held yet: a park still waiting for its
+    // pause receipt reads this and skips its hold.
+    ++this.parkSeq;
+    const handle = this.active;
+    if (!handle || handle.streamHeldGeneration !== handle.generation) return;
+    try {
+      await this.withOwnershipLock(() => this.releaseStream(handle));
+      log('dsp', `native stream released on foreground · generation ${handle.generation} · ${reason}`);
+    } catch (error) {
+      log(
+        'native-playback',
+        `held stream could not be released on foreground · generation ${handle.generation} · ${message(error)}`,
         'warn',
       );
     }
@@ -2240,6 +2387,10 @@ export class IosNativePlaybackCoordinator {
     handle.startRequestedAt = Date.now();
     if (handle.snapshot().phase === 'paused') {
       try {
+        // A stream held across the background park goes first: a seek or a
+        // resume queued into a held stream is applied only when it next
+        // renders, which would be never.
+        await this.releaseStream(handle);
         // Play on a song parked at its end restarts it — the same contract
         // the desktop keeps. resume() only continues a paused transport and
         // a seek issued while paused stays paused, so seek first (to the
@@ -3608,6 +3759,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   } | null = null;
   private pauseHold: { generation: number; projectFrame: number } | null =
     null;
+  /** The generation whose output stream the background park is holding, or
+   *  0. Generation-bound so a rebuild or a new song never inherits a hold. */
+  streamHeldGeneration = 0;
   private listeners = new Set<() => void>();
   private state: NativePlaybackViewState = {
     phase: 'prepared',
@@ -4453,6 +4607,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       const startedAt = Date.now();
       while (this.polling && Date.now() - startedAt < PAUSE_RECEIPT_DEADLINE_MS)
         await new Promise(resolve => setTimeout(resolve, SEEK_RECEIPT_POLL_MS));
+      // The poll that just finished may have been one already in flight,
+      // whose session was read before the song ran out; then nothing parked,
+      // and one more poll of our own is what lands the park.
+      if (this.state.phase === 'playing')
+        await this.coordinator.pollHandle(this);
     }
     return this.coordinator.startHandle(this);
   }

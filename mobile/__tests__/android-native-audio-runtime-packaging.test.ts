@@ -45,8 +45,21 @@ describe('Android native DSP runtime packaging', () => {
       'lanePeaks',
       'setControl',
       'positionNow',
+      'suspendOutput',
+      'resumeOutput',
     ])
       expect(module).toMatch(new RegExp(`fun ${method}\\(`));
+    // The background park's hold keeps audio focus (a held song is still
+    // ours); its release requires it, like start, because a stream resumed
+    // without focus is a stream Android will silence under us.
+    expect(module).toMatch(
+      /fun suspendOutput\(generationValue: Double, promise: Promise\) \{\s*command\(generationValue, promise\) \{ generation ->\s*requiredJson\(SingzCore\.nativePlaybackSuspendOutput\(generation\)\)/,
+    );
+    expect(module).toMatch(
+      /fun resumeOutput\(generationValue: Double, promise: Promise\) \{\s*command\(generationValue, promise\) \{ generation ->\s*if \(!ownsFocus\(generation\)\)/,
+    );
+    expect(core).toContain('external fun nativePlaybackSuspendOutput(generation: Long): String');
+    expect(core).toContain('external fun nativePlaybackResumeOutput(generation: Long): String');
     // status() refreshes the host inventory before every answer; session(),
     // the poll's read, must not — a 400 ms poll re-enumerating every audio
     // device was a per-tick cost nothing consumed.
@@ -140,6 +153,8 @@ describe('Android native DSP runtime packaging', () => {
       'nativePlaybackStatus',
       'nativePlaybackSession',
       'nativePlaybackPositionNow',
+      'nativePlaybackSuspendOutput',
+      'nativePlaybackResumeOutput',
       'nativePlaybackPrepare',
       'nativePlaybackStart',
       'nativePlaybackPause',

@@ -17,6 +17,18 @@ void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
 // publication. Android's positionNow() is its exact twin: same name, no
 // arguments, the same keys.
 NSDictionary* SingzNativePlaybackPositionNow(void);
+// Hold a parked generation's output stream without closing it, and let it go
+// again. iOS keeps rendering in the background by decision and never calls
+// these; they exist so both bridges expose the same surface (same name, one
+// argument plus the promise pair, like stop) — the RemoteIO host refuses
+// with InvalidState and the stream keeps rendering, which is exactly the
+// contract. Android's suspendOutput/resumeOutput are the twins that act.
+void SingzNativePlaybackSuspendOutput(NSNumber* generation,
+                                      RCTPromiseResolveBlock resolve,
+                                      RCTPromiseRejectBlock reject);
+void SingzNativePlaybackResumeOutput(NSNumber* generation,
+                                     RCTPromiseResolveBlock resolve,
+                                     RCTPromiseRejectBlock reject);
 void SingzNativePlaybackPrepare(NSNumber* generation, NSDictionary* request,
                                 RCTPromiseResolveBlock resolve,
                                 RCTPromiseRejectBlock reject);

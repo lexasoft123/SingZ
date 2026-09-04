@@ -122,6 +122,8 @@ const char *hostStateName(AudioHostState state) noexcept {
     return "error";
   case AudioHostState::Unsupported:
     return "unsupported";
+  case AudioHostState::Suspended:
+    return "suspended";
   }
   return "error";
 }

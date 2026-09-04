@@ -610,6 +610,7 @@ const char* hostStateName(singz::AudioHostState state) {
     case singz::AudioHostState::DeviceLost: return "device-lost";
     case singz::AudioHostState::Error: return "error";
     case singz::AudioHostState::Unsupported: return "unsupported";
+    case singz::AudioHostState::Suspended: return "suspended";
   }
   return "error";
 }

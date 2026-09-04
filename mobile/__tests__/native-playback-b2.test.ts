@@ -313,6 +313,12 @@ function harness(
      *  `setPositionNow`; the default harness has no clock, the way an older
      *  build has none, so everything else keeps exercising the polled path. */
     syncClock?: boolean;
+    /** Drop suspendOutput/resumeOutput from the bridge, the way a native
+     *  build older than the background hold has it. */
+    noStreamHold?: boolean;
+    /** The host refuses to hold (iOS, or a duplex stream): suspendOutput
+     *  answers a failed result and the stream keeps rendering. */
+    refuseStreamHold?: boolean;
   } = {},
 ) {
   const platform = options.platform ?? 'ios';
@@ -337,6 +343,20 @@ function harness(
           positionNow: jest.fn(() => positionNow),
         }
       : {}),
+    ...(options.noStreamHold === true
+      ? {}
+      : {
+          suspendOutput: jest.fn(async (next: number) => {
+            calls.push(`native.suspendOutput:${next}`);
+            if (options.refuseStreamHold === true)
+              return result(next, state, false);
+            return result(next, state);
+          }),
+          resumeOutput: jest.fn(async (next: number) => {
+            calls.push(`native.resumeOutput:${next}`);
+            return result(next, state);
+          }),
+        }),
     prepare: jest.fn(async (next: number, request: Record<string, unknown>) => {
       calls.push(`native.prepare:${next}`);
       generation = next;
@@ -2854,7 +2874,7 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     expect(handle.snapshot().phase).toBe('playing');
   });
 
-  it('Android parks paused in place, keeping the decoded graph', async () => {
+  it('Android parks paused in place, keeping the decoded graph, and holds the stream', async () => {
     const h = harness({ platform: 'android' });
     const handle = await started(h);
     const generation = handle.snapshot().generation;
@@ -2862,9 +2882,140 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
 
     await h.coordinator.parkForBackground('app backgrounded');
 
-    expect(h.calls).toEqual([`native.transport:${generation}:pause`]);
+    // Pause the transport, then hold the stream: no stop, no unload, and no
+    // silence rendered through the graph behind the home screen.
+    expect(h.calls).toEqual([
+      `native.transport:${generation}:pause`,
+      `native.suspendOutput:${generation}`,
+    ]);
     expect(h.native.stop).not.toHaveBeenCalled();
     expect(h.native.unload).not.toHaveBeenCalled();
+
+    // Play on return lets the SAME stream go before the transport resumes —
+    // no reopen, no restart, no rebuild.
+    h.calls.length = 0;
+    await handle.start();
+    expect(h.calls).toEqual([
+      `native.resumeOutput:${generation}`,
+      `native.transport:${generation}:resume`,
+    ]);
+    expect(h.native.openOutput).toHaveBeenCalledTimes(1);
+    expect(h.native.start).toHaveBeenCalledTimes(1);
+
+    // Released is released: a second Play cycle holds and releases again,
+    // never releases twice.
+    h.calls.length = 0;
+    await h.coordinator.parkForBackground('app backgrounded again');
+    await handle.start();
+    expect(h.calls).toEqual([
+      `native.transport:${generation}:pause`,
+      `native.suspendOutput:${generation}`,
+      `native.resumeOutput:${generation}`,
+      `native.transport:${generation}:resume`,
+    ]);
+  });
+
+  it('a song paused before the background is held too, and coming back releases it', async () => {
+    const h = harness({ platform: 'android' });
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    await handle.pause();
+    h.calls.length = 0;
+
+    // Pause, then home: nothing to pause, and the stream is held all the same.
+    await h.coordinator.parkForBackground('app backgrounded');
+    expect(h.calls).toEqual([`native.suspendOutput:${generation}`]);
+
+    // Back in the foreground: the hold goes at once, not at the next Play —
+    // a preview click or a seek would otherwise queue into a stream that
+    // renders nothing until then.
+    h.calls.length = 0;
+    await h.coordinator.releaseHeldStream('app foregrounded');
+    expect(h.calls).toEqual([`native.resumeOutput:${generation}`]);
+
+    h.calls.length = 0;
+    await handle.start();
+    expect(h.calls).toEqual([`native.transport:${generation}:resume`]);
+
+    // Nothing held, nothing to release.
+    h.calls.length = 0;
+    await h.coordinator.releaseHeldStream('again');
+    expect(h.calls).toEqual([]);
+  });
+
+  it('a foreground flip during the park leaves nothing held in the foreground', async () => {
+    const h = harness({ platform: 'android' });
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    // The app comes back while the park's pause is still in flight: the
+    // release runs first (nothing held yet), and the park must then NOT hold
+    // a stream the singer is looking at.
+    h.native.transport.mockImplementation(async (next: number, command: { kind: string }) => {
+      h.calls.push(`native.transport:${next}:${command.kind}`);
+      if (command.kind === 'pause') await h.coordinator.releaseHeldStream('app foregrounded');
+      return result(next, 'running');
+    });
+    h.calls.length = 0;
+
+    await h.coordinator.parkForBackground('app backgrounded');
+    expect(h.calls).toEqual([`native.transport:${generation}:pause`]);
+    expect(h.native.suspendOutput).not.toHaveBeenCalled();
+  });
+
+  it('a foreground flip during the hold itself lets the stream go at once', async () => {
+    const h = harness({ platform: 'android' });
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    // The flip lands during the hold's own bridge round trip: the foreground
+    // release finds nothing held yet, so the hold has to undo itself.
+    h.native.suspendOutput!.mockImplementationOnce(async (next: number) => {
+      h.calls.push(`native.suspendOutput:${next}`);
+      await h.coordinator.releaseHeldStream('app foregrounded');
+      return result(next, 'running');
+    });
+    h.calls.length = 0;
+
+    await h.coordinator.parkForBackground('app backgrounded');
+    expect(h.calls).toEqual([
+      `native.transport:${generation}:pause`,
+      `native.suspendOutput:${generation}`,
+      `native.resumeOutput:${generation}`,
+    ]);
+    h.calls.length = 0;
+    await handle.start();
+    expect(h.calls).toEqual([`native.transport:${generation}:resume`]);
+  });
+
+  it('a host that cannot hold the stream keeps rendering, and Play needs no release', async () => {
+    const h = harness({ platform: 'android', refuseStreamHold: true });
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    h.calls.length = 0;
+
+    await h.coordinator.parkForBackground('app backgrounded');
+    expect(h.calls).toEqual([
+      `native.transport:${generation}:pause`,
+      `native.suspendOutput:${generation}`,
+    ]);
+    expect(handle.snapshot().phase).toBe('paused');
+
+    h.calls.length = 0;
+    await handle.start();
+    expect(h.calls).toEqual([`native.transport:${generation}:resume`]);
+  });
+
+  it('an older native build without the hold parks exactly as before', async () => {
+    const h = harness({ platform: 'android', noStreamHold: true });
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    h.calls.length = 0;
+
+    await h.coordinator.parkForBackground('app backgrounded');
+    expect(h.calls).toEqual([`native.transport:${generation}:pause`]);
+
+    h.calls.length = 0;
+    await handle.start();
+    expect(h.calls).toEqual([`native.transport:${generation}:resume`]);
   });
 
   it('the end of a song parks at the end and keeps every decoded lane', async () => {

@@ -35,6 +35,22 @@ AudioHostResult AudioHost::start() {
   return backend_->start();
 }
 
+AudioHostResult AudioHost::suspend() {
+  if (backend_ == nullptr) {
+    return {false, AudioHostError::Unsupported, AudioHostState::Unsupported,
+            {}, {}, "No audio host provider is available"};
+  }
+  return backend_->suspend();
+}
+
+AudioHostResult AudioHost::resume() {
+  if (backend_ == nullptr) {
+    return {false, AudioHostError::Unsupported, AudioHostState::Unsupported,
+            {}, {}, "No audio host provider is available"};
+  }
+  return backend_->resume();
+}
+
 void AudioHost::stop() noexcept {
   if (backend_ != nullptr) backend_->stop();
 }

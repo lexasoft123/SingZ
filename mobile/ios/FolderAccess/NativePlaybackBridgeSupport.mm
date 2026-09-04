@@ -225,6 +225,8 @@ NSString *hostState(singz::AudioHostState state) {
     return @"error";
   case singz::AudioHostState::Unsupported:
     return @"unsupported";
+  case singz::AudioHostState::Suspended:
+    return @"suspended";
   }
   return @"error";
 }
@@ -562,6 +564,53 @@ NSDictionary *SingzNativePlaybackPositionNow(void) {
     @"seekCount" : @(now.seekCount),
     @"ageMs" : @(static_cast<double>(now.ageNs) / 1.0e6),
   };
+}
+
+// The same queue-dispatched shape as previewClick: parse, hop to the control
+// queue, answer the core's result. Neither is a teardown, so neither needs
+// stop's delivery guard.
+void SingzNativePlaybackSuspendOutput(NSNumber *generationValue,
+                                      RCTPromiseResolveBlock resolve,
+                                      RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK",
+             @"The native playback generation is invalid", nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        asyncResolve(
+            resultDictionary(bridge.session->suspendOutput(generation)));
+      });
+    });
+  });
+}
+
+void SingzNativePlaybackResumeOutput(NSNumber *generationValue,
+                                     RCTPromiseResolveBlock resolve,
+                                     RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK",
+             @"The native playback generation is invalid", nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        asyncResolve(
+            resultDictionary(bridge.session->resumeOutput(generation)));
+      });
+    });
+  });
 }
 
 void SingzNativePlaybackPrepare(NSNumber *generationValue,

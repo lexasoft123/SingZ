@@ -12,6 +12,7 @@ const mockGetTrimMs = jest.fn()
 const mockSetTrimMs = jest.fn()
 const mockStopForOwnership = jest.fn()
 const mockParkForBackground = jest.fn()
+const mockReleaseHeldStream = jest.fn((..._args: unknown[]) => Promise.resolve())
 
 const shellProps = (): {
   catalog: Record<string, any>
@@ -83,6 +84,7 @@ jest.mock('../src/playback/native', () => ({
   iosNativePlayback: {
     stopForOwnership: (...args: unknown[]) => mockStopForOwnership(...args),
     parkForBackground: (...args: unknown[]) => mockParkForBackground(...args),
+    releaseHeldStream: (...args: unknown[]) => mockReleaseHeldStream(...args),
     unloadActive: jest.fn(() => Promise.resolve())
   }
 }))
@@ -320,6 +322,7 @@ describe('mobile training app shell', () => {
     await ReactTestRenderer.act(() => appStateChange('inactive'))
     expect(shellEngine().suspendForBackground).not.toHaveBeenCalled()
     expect(mockParkForBackground).not.toHaveBeenCalled()
+    expect(mockReleaseHeldStream).not.toHaveBeenCalled()
     await ReactTestRenderer.act(() => appStateChange('background'))
     expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
     // The native graph is PARKED, never stopped. Stopping released the
@@ -328,11 +331,18 @@ describe('mobile training app shell', () => {
     expect(mockParkForBackground).toHaveBeenCalledTimes(1)
     expect(mockParkForBackground).toHaveBeenCalledWith('app backgrounded')
     expect(mockStopForOwnership).not.toHaveBeenCalled()
+    expect(mockReleaseHeldStream).not.toHaveBeenCalled()
     await ReactTestRenderer.act(() => appStateChange('active'))
     expect(shellEngine().allowForegroundAudio).toHaveBeenCalledTimes(1)
     expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
-    // Foreground re-arms user actions only; nothing resumes by itself, and
-    // nothing needs re-preparing because the graph was never released.
+    // Foreground re-arms user actions and lets a HELD stream go (the park
+    // pauses the transport and then holds the output stream so nothing
+    // renders silence behind the home screen; a held stream in the
+    // foreground would swallow a preview click or a seek until Play).
+    // Nothing RESUMES by itself, and nothing needs re-preparing because the
+    // graph was never released.
+    expect(mockReleaseHeldStream).toHaveBeenCalledTimes(1)
+    expect(mockReleaseHeldStream).toHaveBeenCalledWith('app foregrounded')
     expect(mockParkForBackground).toHaveBeenCalledTimes(1)
     expect(mockStopForOwnership).not.toHaveBeenCalled()
 

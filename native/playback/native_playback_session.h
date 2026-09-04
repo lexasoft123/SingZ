@@ -842,6 +842,20 @@ public:
   // legacy PCM. A locally successful unload is deliberately insufficient.
   NativePlaybackCleanupResult cleanupProof(uint64_t generation) const noexcept;
   NativePlaybackResult stop(uint64_t generation);
+  // Hold the host stream of a PARKED generation without closing it, and let
+  // it go again — the graph, its cursors and its callback state untouched
+  // throughout, so what comes back is the same song at the same frame with
+  // no reopen and no re-prepare. What it is for: Android parks a song in the
+  // background by pausing the transport, and the stream then rendered a
+  // 27-node graph of silence behind the home screen at four times the CPU
+  // of the legacy engine's suspended context. The transport must already be
+  // paused or completed (a held stream cannot advance a playing one, so the
+  // request is refused rather than silently stalling the song); a host that
+  // cannot hold a stream refuses too, and the stream keeps rendering — a
+  // refusal is never a teardown. A host that fails MID-way fail-stops the
+  // stream and the session reads Terminal, exactly as a failed start does.
+  NativePlaybackResult suspendOutput(uint64_t generation);
+  NativePlaybackResult resumeOutput(uint64_t generation);
   NativePlaybackResult pause(uint64_t generation);
   NativePlaybackResult resume(uint64_t generation);
   NativePlaybackResult seek(uint64_t generation, int64_t projectFrame);

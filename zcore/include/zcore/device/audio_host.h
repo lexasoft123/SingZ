@@ -17,6 +17,11 @@ enum class AudioHostState : uint32_t {
   DeviceLost,
   Error,
   Unsupported,
+  // Open and started once, callbacks held: the stream is paused by the host
+  // (suspend()) and the render context is still attached, so resume() puts
+  // it back to Running with no reopen, no renegotiation and no re-prepare.
+  // Not a stopped state — see safeStoppedState in the playback session.
+  Suspended,
 };
 
 enum class AudioHostError : uint32_t {
@@ -226,12 +231,31 @@ class AudioHostBackend {
   virtual AudioHostResult start() = 0;
   virtual void stop() noexcept = 0;
   virtual AudioHostStatus status() const noexcept = 0;
+  // Hold a Running stream without closing it: no callbacks arrive while it is
+  // held, the render context stays attached, and resume() returns it to
+  // Running at the same format and route. What it is FOR is a parked song
+  // in the background on Android — the alternative was a stream rendering a
+  // 27-node graph of silence behind the home screen at four times the
+  // CPU of the legacy engine's suspended context. Both return
+  // InvalidState/Unsupported rather than tearing down when a backend cannot
+  // do it (the default), so a caller may treat "could not suspend" as "keep
+  // rendering", never as "the stream is gone". A backend that fails
+  // MID-suspend/resume may fail-stop the stream and report Error, exactly as
+  // a failed start does.
+  virtual AudioHostResult suspend() {
+    return {false, AudioHostError::Unsupported, status().state, {}, {},
+            "This audio host cannot hold a stream without closing it"};
+  }
+  virtual AudioHostResult resume() {
+    return {false, AudioHostError::Unsupported, status().state, {}, {},
+            "This audio host cannot hold a stream without closing it"};
+  }
 };
 
 // Control-domain lifecycle owner. Construction and enumeration do not open,
-// start, or otherwise mutate an audio device. Calls to open(), start(), stop(),
-// and status() are serialized by the owner; status() may overlap only the
-// audio callback's lock-free telemetry updates.
+// start, or otherwise mutate an audio device. Calls to open(), start(),
+// suspend(), resume(), stop(), and status() are serialized by the owner;
+// status() may overlap only the audio callback's lock-free telemetry updates.
 class AudioHost final {
  public:
   AudioHost();
@@ -246,6 +270,8 @@ class AudioHost final {
   AudioHostResult open(const AudioHostConfig& config, AudioHostRender render,
                        void* renderContext);
   AudioHostResult start();
+  AudioHostResult suspend();
+  AudioHostResult resume();
   void stop() noexcept;
   AudioHostStatus status() const noexcept;
 

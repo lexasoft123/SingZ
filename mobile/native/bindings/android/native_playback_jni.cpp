@@ -184,6 +184,8 @@ const char *hostState(singz::AudioHostState state) noexcept {
     return "error";
   case singz::AudioHostState::Unsupported:
     return "unsupported";
+  case singz::AudioHostState::Suspended:
+    return "suspended";
   }
   return "error";
 }
@@ -1423,6 +1425,13 @@ SINGZ_PLAYBACK_RESULT_JNI(nativePlaybackClearLoop,
                           bridge.session.clearLoop(generation))
 SINGZ_PLAYBACK_RESULT_JNI(nativePlaybackReanchor,
                           bridge.session.reanchorTransport(generation))
+// The background park's hold and release: AAudio pause on the open output
+// stream, nothing closed, the graph untouched. iOS exposes the same pair and
+// its host refuses; here it is what takes a parked song's CPU away.
+SINGZ_PLAYBACK_RESULT_JNI(nativePlaybackSuspendOutput,
+                          bridge.session.suspendOutput(generation))
+SINGZ_PLAYBACK_RESULT_JNI(nativePlaybackResumeOutput,
+                          bridge.session.resumeOutput(generation))
 
 #undef SINGZ_PLAYBACK_RESULT_JNI
 
@@ -1653,6 +1662,12 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
     {const_cast<char *>("nativePlaybackPositionNow"),
      const_cast<char *>("()[D"),
      reinterpret_cast<void *>(nativePlaybackPositionNow)},
+    {const_cast<char *>("nativePlaybackSuspendOutput"),
+     const_cast<char *>("(J)Ljava/lang/String;"),
+     reinterpret_cast<void *>(nativePlaybackSuspendOutput)},
+    {const_cast<char *>("nativePlaybackResumeOutput"),
+     const_cast<char *>("(J)Ljava/lang/String;"),
+     reinterpret_cast<void *>(nativePlaybackResumeOutput)},
 };
 
 } // namespace

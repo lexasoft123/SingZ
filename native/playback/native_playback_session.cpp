@@ -6118,6 +6118,104 @@ NativePlaybackSession::cleanupProof(uint64_t generation) const noexcept {
   }
 }
 
+NativePlaybackResult
+NativePlaybackSession::suspendOutput(uint64_t generation) {
+  impl_->releaseParkedLanes();
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback has no running stream to hold");
+  const NativePlaybackTransportState desired =
+      impl_->prepared->transport.desiredState;
+  if (desired == NativePlaybackTransportState::Playing ||
+      desired == NativePlaybackTransportState::PreRoll)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback is still advancing — pause it before "
+                   "holding its stream");
+  // The control domain may have ASKED for the pause while the callback has
+  // not yet rendered it. Holding the stream in that window pauses it with
+  // the rendered transport still Playing, and every clock downstream keeps
+  // projecting forward. The callback's own last publication is the truth.
+  {
+    NativePlaybackPositionNow rendered;
+    int64_t publishedAt = 0;
+    if (impl_->position->snapshot(&rendered, &publishedAt) &&
+        rendered.generation == generation &&
+        (rendered.transportState == NativePlaybackTransportState::Playing ||
+         rendered.transportState == NativePlaybackTransportState::PreRoll))
+      return failure(NativePlaybackError::InvalidState, generation,
+                     impl_->state,
+                     "Native playback has not rendered its pause yet — hold "
+                     "the stream after the next block");
+  }
+  const AudioHostStatus before = impl_->host.status();
+  if (before.state == AudioHostState::Suspended)
+    return impl_->success(generation);
+  const AudioHostResult held = impl_->host.suspend();
+  if (!held.ok) {
+    // A host that cannot hold (or would not, from this state) leaves the
+    // stream exactly as it was: say so and keep rendering. A host that
+    // fail-stopped on the way is read the way a failed start is read.
+    const AudioHostStatus after = impl_->host.status();
+    if (after.state == AudioHostState::Running)
+      return failure(NativePlaybackError::InvalidState, generation,
+                     impl_->state,
+                     held.message.empty()
+                         ? "The native output host could not hold its stream"
+                         : held.message);
+    impl_->latchTerminal(effectiveTerminalCause(
+        after, impl_->callbackTerminalCause()));
+    if (impl_->lastTerminal.reason == AudioHostTerminalReason::None)
+      impl_->latchTerminal(
+          makeAudioHostTerminalCause(AudioHostTerminalReason::ProviderFailure));
+    impl_->state = NativePlaybackState::Terminal;
+    impl_->lastError = held.message;
+    return failure(NativePlaybackError::HostFailure, generation, impl_->state,
+                   held.message);
+  }
+  return impl_->success(generation);
+}
+
+NativePlaybackResult
+NativePlaybackSession::resumeOutput(uint64_t generation) {
+  impl_->releaseParkedLanes();
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation,
+                   impl_->state, "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback has no held stream to let go");
+  const AudioHostStatus before = impl_->host.status();
+  if (before.state != AudioHostState::Suspended)
+    return impl_->success(generation);
+  const AudioHostResult released = impl_->host.resume();
+  if (!released.ok) {
+    const AudioHostStatus after = impl_->host.status();
+    if (after.state == AudioHostState::Suspended)
+      return failure(NativePlaybackError::InvalidState, generation,
+                     impl_->state,
+                     released.message.empty()
+                         ? "The native output host could not release its stream"
+                         : released.message);
+    impl_->latchTerminal(effectiveTerminalCause(
+        after, impl_->callbackTerminalCause()));
+    if (impl_->lastTerminal.reason == AudioHostTerminalReason::None)
+      impl_->latchTerminal(
+          makeAudioHostTerminalCause(AudioHostTerminalReason::ProviderFailure));
+    impl_->state = NativePlaybackState::Terminal;
+    impl_->lastError = released.message;
+    return failure(NativePlaybackError::HostFailure, generation, impl_->state,
+                   released.message);
+  }
+  return impl_->success(generation);
+}
+
 NativePlaybackResult NativePlaybackSession::pause(uint64_t generation) {
   impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
