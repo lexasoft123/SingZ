@@ -6952,8 +6952,10 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
 NativePlaybackPositionNow NativePlaybackSession::positionNow() const noexcept {
   NativePlaybackPositionNow out;
   // activeGeneration is the one generation fact the control thread publishes
-  // atomically (claim sets it, every retirement zeroes it), so it is the
-  // guard here instead of impl_->generation, which lives under the mutex.
+  // atomically — prepare ADMISSION stores it, before the decode, and every
+  // retirement zeroes it (a bare claimGeneration does not touch it) — so it
+  // is the guard here instead of impl_->generation, which lives under the
+  // mutex.
   const uint64_t active =
       impl_->activeGeneration.load(std::memory_order_acquire);
   if (active == 0)

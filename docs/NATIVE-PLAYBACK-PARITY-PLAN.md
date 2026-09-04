@@ -97,9 +97,11 @@ code-reviewer gate.
 
 ### Step 1 — an in-process clock for native (choice 3; ~2 days; JS + both bridges)
 - One **blocking-synchronous** bridge method, same name and arity on both bridges —
-  `positionNow()` → `{generation, transportState, renderedProjectFrame, audibleProjectFrame,
-  continuousFrame, seekCount, hostTimeNs}` — read from the core's published seqlock fields,
-  never touching the mailbox. iOS `RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD`, Android
+  `positionNow()` → `{generation, transportState, renderedProjectFrame, continuousFrame,
+  remainingPreRollFrames, seekCount, ageMs}` (as shipped: the audible frame is the caller's
+  one subtraction from a latency it already polls, and the host time became an AGE on the
+  steady clock so the two sides never compare clocks) — read from a second session-owned
+  seqlock the callback publishes, never touching the mailbox. iOS `RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD`, Android
   `@ReactMethod(isBlockingSynchronousMethod = true)`; the desktop addon already answers
   synchronously. React Native is 0.86 with the new architecture and Hermes; **spike the sync
   method first** (one call, both platforms, under bridgeless) — if the interop refuses, the

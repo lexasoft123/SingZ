@@ -3737,6 +3737,33 @@ describe("the player's clock", () => {
         poll.mockRestore();
       }
     });
+
+    it('lets a Play tap in the window before the park lands restart the song, not be refused', async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      // The song ran out: the clock says completed, and the poll that parks
+      // it has not run yet — the phase still says playing. A tap here used to
+      // be a start on a "running" transport, refused.
+      h.native.status.mockImplementation(async () =>
+        at(generation, 'completed', 120 * SR),
+      );
+      h.setPositionNow(
+        answer(generation, {
+          transportState: 'completed',
+          renderedProjectFrame: 120 * SR,
+        }),
+      );
+      h.native.transport.mockClear();
+      expect(handle.snapshot().phase).toBe('playing');
+      await handle.start();
+      // The park landed first (pause), then Play restarted from the top.
+      expect(h.native.transport.mock.calls.map(call => call[1].kind)).toEqual([
+        'pause',
+        'seek',
+        'resume',
+      ]);
+    });
   });
 
   describe('on a native build without it', () => {

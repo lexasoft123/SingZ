@@ -4434,10 +4434,26 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.update({ phase: 'error', error });
   }
 
-  start(): Promise<NativePlaybackStartOutcome> {
+  async start(): Promise<NativePlaybackStartOutcome> {
     // Whatever Play does from here — resume, restart, a fresh start — the
     // clock reads the core again; a held pause frame must not outlive it.
     this.pauseHold = null;
+    // The clock reads a song that ran out before the poll has parked it, so
+    // for one bridge round trip `playing` is false while the phase still
+    // says playing — and a Play tap in that window would be refused as a
+    // start on a running transport. Let the park land first; Play then
+    // restarts the song, which is what the tap meant.
+    const now = this.coordinator.positionNow(this);
+    if (
+      now !== null &&
+      now.transportState === 'completed' &&
+      this.state.phase === 'playing'
+    ) {
+      await this.coordinator.pollHandle(this);
+      const startedAt = Date.now();
+      while (this.polling && Date.now() - startedAt < PAUSE_RECEIPT_DEADLINE_MS)
+        await new Promise(resolve => setTimeout(resolve, SEEK_RECEIPT_POLL_MS));
+    }
     return this.coordinator.startHandle(this);
   }
 

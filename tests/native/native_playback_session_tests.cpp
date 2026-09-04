@@ -3131,11 +3131,12 @@ void positionNowReadsTheCallbackWithoutTheControlLock() {
   CHECK(!session.positionNow().available);
 
   // The next song publishes under its own number through the same sink —
-  // and NOT before its prepare commits. The claim makes 44 the active
-  // generation while the sink still says nothing, and a read from inside the
-  // decode must come back unavailable rather than lend the new song a frame
-  // it has not rendered (or the old song's last one). It must also come
-  // back at all: the read takes no lock the prepare could be holding.
+  // and NOT before its prepare commits. Prepare admission makes 44 the
+  // active generation before the decode starts, while the sink still says
+  // nothing, and a read from inside the decode must come back unavailable
+  // rather than lend the new song a frame it has not rendered (or the old
+  // song's last one). It must also come back at all: the read takes no lock
+  // the prepare could be holding. (The claim alone changes nothing here.)
   CHECK(session.claimGeneration(44));
   CHECK(!session.positionNow().available);
   auto second = std::vector<singz::NativePlaybackLaneSource>{};
