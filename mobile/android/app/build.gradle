@@ -184,7 +184,11 @@ android {
                     "-DCMAKE_PROJECT_INCLUDE_BEFORE=${singzAndroidCmakeInit.absolutePath}",
                     "-DSINGZ_ANDROID_NATIVE_MAX_JOBS=8",
                     "-DSINGZ_ANDROID_BUILD_POLICY_HASH=${singzAndroidCmakePolicyHash}",
-                    "-DSINGZ_CODEC_TARGET_PROOF=${singzCodecTargetProof ? 'ON' : 'OFF'}"
+                    "-DSINGZ_CODEC_TARGET_PROOF=${singzCodecTargetProof ? 'ON' : 'OFF'}",
+                    // The debug variant optimizes the app's own native code
+                    // (src/main/cpp/CMakeLists.txt says why); this is the
+                    // opt-out for stepping through the core in a debugger.
+                    "-DSINGZ_NATIVE_UNOPTIMIZED=${project.hasProperty('singzNativeUnoptimized') ? 'ON' : 'OFF'}"
             }
         }
     }

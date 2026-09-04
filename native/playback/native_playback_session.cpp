@@ -6248,7 +6248,10 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
         int64_t frame{0};
         uint32_t fractionQ32{0};
       } landing;
-      impl_->swapPrimeNs = 0;
+      // Reported whenever the candidate has a stage, whether or not the
+      // landing below is anchored: a seam that lands unanchored still says
+      // what its prime cost, and a budget of 0 then means "next block".
+      impl_->swapPrimeNs = candidate->hasTimePitch ? candidate->timePitchPrimeNs : 0;
       impl_->swapLandingFrames = 0;
       if (candidate->hasTimePitch) {
         PreparedPlaybackTransport::Telemetry from{};
@@ -6288,7 +6291,6 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
                                  static_cast<uint64_t>(
                                      candidate->sampleRate *
                                      kSwapLandingBudgetCapSeconds));
-          impl_->swapPrimeNs = primeNs;
           impl_->swapLandingFrames = margin;
           const PreparedPlaybackTransport &land = candidate->transport;
           const PreparedPlaybackTransport::PredictedPosition predicted =

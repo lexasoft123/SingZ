@@ -556,9 +556,11 @@ struct NativePlaybackStatus {
   uint32_t swapLandings{0};
   uint32_t swapLateLandings{0};
   /* What the last arm chose: the candidate's measured Stretch prime cost
-     (0 without a stage) and the landing budget in stream frames it bought
-     (0 = the next block's first frame). The phone's log prints them beside
-     the seam so a late landing says what it was late against. */
+     (0 without a stage; reported whether or not the arm could predict a
+     landing) and the landing budget in stream frames it bought (0 = the
+     next block's first frame, which is what a seam armed without a
+     prediction gets). The phone's log prints them beside the seam so a late
+     landing says what it was late against. */
   uint64_t swapPrimeNs{0};
   uint64_t swapLandingFrames{0};
   NativePlaybackTransportTelemetryQuality transportTelemetryQuality{

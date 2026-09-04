@@ -2244,7 +2244,7 @@ export class IosNativePlaybackCoordinator {
       reads++;
       last = session;
       if (session.generation === handle.generation)
-        handle.publishTelemetry(session);
+        this.publishTelemetry(handle, session);
       if (handle.swappingFromGeneration === 0) return;
       await new Promise(resolve => setTimeout(resolve, SEEK_RECEIPT_POLL_MS));
     }
@@ -2256,6 +2256,33 @@ export class IosNativePlaybackCoordinator {
           `core says ${seamFacts(last)}`,
         'warn',
       );
+  }
+
+  /** Every telemetry read the coordinator makes is published through here,
+   *  so that a seam the read shows landed is acknowledged to the bridge:
+   *  the core retires the generation a swap replaced by itself and answers
+   *  that generation's unload as an acknowledgement, not a second teardown
+   *  — and the Android bridge keeps its own account of which generations a
+   *  focus loss or a route change must retire, for which this unload is
+   *  the only way it learns the song's number changed. Nothing waits on
+   *  the answer; it carries nothing the handle needs. */
+  private publishTelemetry(
+    handle: IosNativePlaybackHandle,
+    session: NativePlaybackSessionStatus,
+  ): void {
+    handle.publishTelemetry(session);
+    const retired = handle.takeSwappedOutGeneration();
+    if (retired === 0) return;
+    const native = this.deps.native;
+    if (!native) return;
+    void native.unload(retired).catch((error: unknown) => {
+      log(
+        'dsp',
+        `swapped-out generation ${retired} was not acknowledged · ` +
+          (error instanceof Error ? error.message : String(error)),
+        'warn',
+      );
+    });
   }
 
   private async awaitSeekApplied(
@@ -2277,7 +2304,7 @@ export class IosNativePlaybackCoordinator {
         if (!session || !this.isActive(handle)) return;
         if (session.generation !== handle.generation) return;
         reads++;
-        handle.publishTelemetry(session);
+        this.publishTelemetry(handle, session);
         if (session.seekCount !== before) return;
       }
       await new Promise(resolve =>
@@ -3789,7 +3816,7 @@ export class IosNativePlaybackCoordinator {
         return;
       }
       if (session.generation !== handle.generation) return;
-      handle.publishTelemetry(session);
+      this.publishTelemetry(handle, session);
       if (session.terminalReason !== 'none' || session.state === 'terminal') {
         handle.captureRecoverySnapshot(session);
         log(
@@ -4552,6 +4579,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  seam. Zero otherwise. */
   swappingFromGeneration = 0;
 
+  /** The generation a seam has just replaced, held until the coordinator
+   *  takes it to acknowledge the landing to the bridge. */
+  private swappedOutGeneration = 0;
+
+  takeSwappedOutGeneration(): number {
+    const retired = this.swappedOutGeneration;
+    this.swappedOutGeneration = 0;
+    return retired;
+  }
+
   /** The claim for a swap: the new generation takes over the handle without
    *  the song being interrupted — no phase reset, no position reset, the
    *  poll left running — because nothing stops. The old generation is kept
@@ -4702,6 +4739,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
           `seams ${session.swapLandings} · late ${session.swapLateLandings} · ` +
           `rendered frame ${session.renderedProjectFrame}`,
       );
+      this.swappedOutGeneration = this.swappingFromGeneration;
       this.swappingFromGeneration = 0;
       // The replacement's lanes, topology and training shape, in case the
       // read right after the arm failed — this is the first status that is

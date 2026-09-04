@@ -32,6 +32,21 @@ endif()
 
 include(${REACT_ANDROID_DIR}/cmake-utils/ReactNative-application.cmake)
 
+# The debug variant is the one every phone measurement is taken on (release
+# APKs have no inspector and no run-as), and AGP's Debug configuration hands
+# the compiler -g and no -O at all, so the core it measured was clang's -O0:
+# a Stretch prime that costs 5 ms optimized cost hundreds there, and every
+# CPU column of the native-vs-legacy comparison was the unoptimized engine
+# against Hermes. The app's own native code is therefore optimized in every
+# variant; asserts stay in (no NDEBUG), so a debug number is still a shade
+# pessimistic against a release APK, never flattering. Pass
+# -PsingzNativeUnoptimized=1 to gradle to get -O0 back for stepping through
+# the core in a debugger. libappmodules above is React Native's and is left
+# exactly as its own CMake builds it.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT SINGZ_NATIVE_UNOPTIMIZED)
+    add_compile_options(-O2)
+endif()
+
 set(ORT_SDK_DIR "" CACHE PATH "Extracted onnxruntime-android AAR (headers/ + jni/<abi>/)")
 
 if(NOT EXISTS ${ORT_SDK_DIR}/headers/onnxruntime_cxx_api.h)

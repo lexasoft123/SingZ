@@ -2419,7 +2419,14 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     const before = h.calls.length;
     await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.4 });
     await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.5 });
-    expect(h.calls.slice(before)).toEqual(['native.prepare:2', 'native.prepare:3']);
+    // Between the two prepares: the landing acknowledged to the bridge by
+    // unloading the generation the seam replaced (the core answers that as
+    // an acknowledgement; the Android bridge's focus ledger needs it).
+    expect(h.calls.slice(before)).toEqual([
+      'native.prepare:2',
+      'native.unload:1',
+      'native.prepare:3',
+    ]);
     expect(h.prepareRequests[2]).toMatchObject({ swapFromGeneration: 2 });
     expect(h.native.stop).not.toHaveBeenCalled();
     expect(phases.filter(phase => phase !== 'playing')).toEqual([]);

@@ -19,6 +19,7 @@ import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
 import com.singzplayer.audio.AudioInputPolicy
 import com.singzplayer.playback.NativePlaybackBridgeSchema
+import com.singzplayer.playback.NativePlaybackGenerationLedger
 import com.singzplayer.playback.NativePlaybackGraphConnectionJni
 import com.singzplayer.playback.NativePlaybackGraphNodeJni
 import com.singzplayer.playback.NativePlaybackPathPolicy
@@ -29,7 +30,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -49,23 +49,16 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     Thread(runnable, "singz-native-playback-control")
   }
   private val invalidated = AtomicBoolean(false)
-  private val currentGeneration = AtomicLong(0)
-  @Volatile private var focusGeneration = 0L
-  @Volatile private var focusOwned = false
+  /** The generations this bridge answers for and the focus they hold — the
+   *  ledger says why a fail-closed event has to retire BOTH of them. */
+  private val ledger = NativePlaybackGenerationLedger()
   private var callbackRegistered = false
 
   private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
     if (change == AudioManager.AUDIOFOCUS_GAIN || invalidated.get()) return@OnAudioFocusChangeListener
-    val generation = currentGeneration.get()
-    if (generation <= 0) return@OnAudioFocusChangeListener
     // Every loss/duck is fail-closed. GAIN never restarts automatically: the
     // product must observe Unloaded and explicitly prepare/open/start again.
-    SingzCore.nativePlaybackRequestCancellation(generation)
-    post {
-      runCatching { SingzCore.nativePlaybackUnload(generation) }
-      abandonFocus(generation)
-      currentGeneration.compareAndSet(generation, 0)
-    }
+    failClosed()
   }
 
   private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
@@ -102,14 +95,16 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
       audioManager.unregisterAudioDeviceCallback(deviceCallback)
       callbackRegistered = false
     }
-    val generation = currentGeneration.get()
-    if (generation > 0) SingzCore.nativePlaybackRequestCancellation(generation)
+    val verdict = ledger.failClosed()
+    for (generation in verdict.targets) SingzCore.nativePlaybackRequestCancellation(generation)
     val stopped = CountDownLatch(1)
     try {
       control.execute {
         try {
-          if (generation > 0) runCatching { SingzCore.nativePlaybackUnload(generation) }
-          abandonFocus(generation)
+          for (generation in verdict.targets) {
+            runCatching { SingzCore.nativePlaybackUnload(generation) }
+          }
+          if (verdict.releaseFocus) audioManager.abandonAudioFocusRequest(focusRequest)
         } finally {
           stopped.countDown()
         }
@@ -207,7 +202,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun resumeOutput(generationValue: Double, promise: Promise) {
     command(generationValue, promise) { generation ->
-      if (!ownsFocus(generation))
+      if (!ledger.ownsFocus(generation))
         failureResult(generation, "invalid-state", "Android audio focus is not owned").toString()
       else requiredJson(SingzCore.nativePlaybackResumeOutput(generation))
     }
@@ -235,7 +230,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
         promise.resolve(jsonObjectToMap(claim))
         return
       }
-      currentGeneration.set(generation)
+      ledger.claimed(generation, parsed.swapFromGeneration)
       if (!postResult(promise) {
         val playback = parsed.playback
         val grid = playback?.beatGrid
@@ -291,13 +286,15 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
             ?: emptyArray<NativePlaybackGraphConnectionJni>(),
           roots.toTypedArray()
         )
-        inheritFocusForSwap(parsed.swapFromGeneration, generation, result)
         result
       }) {
         // The synchronous claim is already authoritative. If dispatch itself
         // fails, retire that exact generation before rejecting JavaScript.
         runCatching { SingzCore.nativePlaybackRequestCancellation(generation) }
-        runCatching { SingzCore.nativePlaybackUnload(generation) }
+        val retired = runCatching { SingzCore.nativePlaybackUnload(generation) }.getOrNull()
+        if (ledger.unloaded(generation, songRemains(retired))) {
+          audioManager.abandonAudioFocusRequest(focusRequest)
+        }
         rejectUnavailable(promise)
       }
     } catch (error: Throwable) {
@@ -319,8 +316,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
           "Android denied media audio focus"
         ).toString()
       }
-      focusGeneration = generation
-      focusOwned = true
+      ledger.focusGranted(generation)
       ready.toString()
     }
   }
@@ -328,7 +324,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun openOutput(generationValue: Double, promise: Promise) {
     command(generationValue, promise) { generation ->
-      if (!ownsFocus(generation))
+      if (!ledger.ownsFocus(generation))
         failureResult(generation, "invalid-state", "Android audio focus is not owned").toString()
       else requiredJson(SingzCore.nativePlaybackOpenOutput(generation))
     }
@@ -337,7 +333,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun start(generationValue: Double, promise: Promise) {
     command(generationValue, promise) { generation ->
-      if (!ownsFocus(generation))
+      if (!ledger.ownsFocus(generation))
         failureResult(generation, "invalid-state", "Android audio focus is not owned").toString()
       else requiredJson(SingzCore.nativePlaybackStart(generation))
     }
@@ -349,7 +345,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     SingzCore.nativePlaybackRequestCancellation(generation)
     if (!postResult(promise) {
       val result = requiredJson(SingzCore.nativePlaybackStop(generation))
-      abandonFocus(generation)
+      if (ledger.releaseFocus(generation)) audioManager.abandonAudioFocusRequest(focusRequest)
       result
     }) rejectUnavailable(promise)
   }
@@ -373,8 +369,12 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     SingzCore.nativePlaybackRequestCancellation(generation)
     if (!postResult(promise) {
       val result = requiredJson(SingzCore.nativePlaybackUnload(generation))
-      abandonFocus(generation)
-      currentGeneration.compareAndSet(generation, 0)
+      // A generation a landed swap replaced is acknowledged here too — the
+      // core answers that unload as an acknowledgement, and the ledger
+      // learns the song's number changed.
+      if (ledger.unloaded(generation, songRemains(result))) {
+        audioManager.abandonAudioFocusRequest(focusRequest)
+      }
       result
     }) rejectUnavailable(promise)
   }
@@ -392,8 +392,8 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     SingzCore.nativePlaybackRequestCancellation(generation)
     if (!postResult(promise) {
       val result = requiredJson(SingzCore.nativePlaybackUnloadRetainingLanes(generation))
-      abandonFocus(generation)
-      // DELIBERATELY leaves currentGeneration set, unlike unload above. Every
+      if (ledger.releaseFocus(generation)) audioManager.abandonAudioFocusRequest(focusRequest)
+      // DELIBERATELY leaves the generation in the ledger, unlike unload above. Every
       // lifecycle path here — invalidate/onHostDestroy, audio-focus loss and
       // route change — reads it and no-ops at zero. For a plain unload that is
       // harmless because nothing is held; after a RETAINING unload it would
@@ -530,20 +530,41 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
   }
 
   private fun routeChanged() {
-    val generation = currentGeneration.get()
-    if (generation > 0) {
-      // AudioDeviceCallback does not identify whether Android rerouted an
-      // already-open Oboe stream. Retire the owner conservatively: a fresh
-      // prepare is the only operation allowed to adopt the new snapshot.
+    // AudioDeviceCallback does not identify whether Android rerouted an
+    // already-open Oboe stream. Retire the owners conservatively: a fresh
+    // prepare is the only operation allowed to adopt the new snapshot.
+    failClosed { runCatching { refreshHostInventory() } }
+  }
+
+  /** Whether the core's answer to an unload says a song is still there: a
+   *  swap candidate it cancelled by name is answered with the live
+   *  session's state, a real teardown with unloaded, stopped or terminal.
+   *  The ledger needs the difference (NativePlaybackGenerationLedger.unloaded). */
+  private fun songRemains(result: String?): Boolean {
+    val state = result?.let { runCatching { parseJson(it).optString("state") }.getOrNull() }
+      ?: return false
+    return state == "running" || state == "output-open" ||
+      state == "prepared" || state == "preparing"
+  }
+
+  /** A focus loss, a route change, module teardown: every generation the
+   *  ledger answers for is retired — the song AND, while a swap is armed,
+   *  its candidate, because the core keeps the song playing when only the
+   *  candidate is cancelled (a candidate JavaScript gives up on must not
+   *  stop the song). Cancellation is synchronous, the render thread reads
+   *  it on its next block; the teardown, the focus release and `andThen`
+   *  follow on the control thread. */
+  private fun failClosed(andThen: () -> Unit = {}) {
+    val verdict = ledger.failClosed()
+    for (generation in verdict.targets) {
       runCatching { SingzCore.nativePlaybackRequestCancellation(generation) }
     }
     post {
-      if (generation > 0) {
+      for (generation in verdict.targets) {
         runCatching { SingzCore.nativePlaybackUnload(generation) }
-        abandonFocus(generation)
-        currentGeneration.compareAndSet(generation, 0)
       }
-      runCatching { refreshHostInventory() }
+      if (verdict.releaseFocus) audioManager.abandonAudioFocusRequest(focusRequest)
+      andThen()
     }
   }
 
@@ -593,28 +614,6 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     )
   )
 
-  private fun ownsFocus(generation: Long): Boolean = focusOwned && focusGeneration == generation
-
-  /** A swap prepare the core accepted takes over the stream — and the audio
-   *  focus granted for it — from the generation it replaces. Focus is
-   *  granted once, at configureOutputSession, to the generation that opens
-   *  the stream, and every later command checks ownsFocus by generation; a
-   *  swap opens nothing, so without this the replacement owned the stream
-   *  and not the focus, and the first resumeOutput after a background hold
-   *  was refused with "audio focus is not owned" — measured on the POCO as
-   *  a song that never came back from the home screen. */
-  private fun inheritFocusForSwap(from: Long, to: Long, result: String?) {
-    if (from == 0L || result == null) return
-    val accepted = runCatching { parseJson(result).getBoolean("ok") }.getOrDefault(false)
-    if (accepted && ownsFocus(from)) focusGeneration = to
-  }
-
-  private fun abandonFocus(generation: Long) {
-    if (!focusOwned || focusGeneration != generation) return
-    audioManager.abandonAudioFocusRequest(focusRequest)
-    focusOwned = false
-    focusGeneration = 0
-  }
 
   private fun parseGenerationOrReject(value: Double, promise: Promise): Long? = try {
     NativePlaybackBridgeSchema.generation(value)

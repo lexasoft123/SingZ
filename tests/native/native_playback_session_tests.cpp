@@ -3894,9 +3894,13 @@ void aRateChangeSwapLandsOnItsAnchorFrame() {
 void aSwapArmedBehindAnUnappliedCommandLandsUnanchored() {
   const std::vector<float> ramp = swapRamp(4096);
   const std::string wav = writeWav("swap-unapplied.wav", 1, ramp);
+  // An injected prime cost: the arm below can predict nothing, and must
+  // still say what the stage cost.
+  singz::NativePlaybackTestHooks hooks{};
+  hooks.timePitchPrimeNs = 20'000'000;
   auto backend = std::make_unique<ManualOutputBackend>();
   ManualOutputBackend *fake = backend.get();
-  singz::NativePlaybackSession session(std::move(backend));
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
   auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
   lanes.push_back(keyedLane("song", wav));
   CHECK(session.prepare(config(), std::move(lanes), 110).ok);
@@ -3926,6 +3930,9 @@ void aSwapArmedBehindAnUnappliedCommandLandsUnanchored() {
         status.timePitchAnchorsPublished == 0 &&
         status.timePitchAnchorMisses == 1 &&
         status.renderedProjectFrame == 1006 && status.adapterRenderFailures == 0);
+  // What the arm reports for a seam it could not predict: the prime cost it
+  // measured, and no budget — the next block's first frame.
+  CHECK(status.swapPrimeNs == 20'000'000 && status.swapLandingFrames == 0);
   // And the song is fine from there: a seek on the new generation anchors
   // as any seek does.
   CHECK(session.seek(111, 2000).ok && fake->drive(8));

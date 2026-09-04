@@ -600,6 +600,19 @@ was driven; the gotchas that follow from it are below.
   that misses arrives as a null dereference three steps later. **`run-as` is useless for diagnosing any of this** — it does not
   inherit the app's storage sandbox, so it reports "Permission denied" even
   for directories the app itself created.
+- **The Android debug variant optimizes the app's own native code** —
+  AGP's Debug configuration hands clang `-g` and no `-O` at all, and the
+  `.debug` APK is the only one a driver can measure (no inspector, no
+  `run-as` on release), so until 2026-09-05 every phone CPU column and
+  every Stretch prime cost was the -O0 core against Hermes: a prime that
+  costs 5 ms optimized cost hundreds there, and the landing budget for a
+  swap seam was sized to that. `mobile/android/app/src/main/cpp/CMakeLists.txt`
+  adds `-O2` to the Debug configuration (asserts stay in — no NDEBUG — so a
+  debug number is still a shade pessimistic, never flattering);
+  `-PsingzNativeUnoptimized=1` is the opt-out for stepping through the core
+  in a debugger. Check `compile_commands.json` under
+  `app/.cxx/Debug/*/arm64-v8a/` for the flag before trusting a CPU number
+  from a build you did not make.
 - **Android builds need a JDK 21** (`brew install openjdk@21`; CI pins
   temurin 21). The Android Studio JBR moved to JDK 25, and AGP's
   GeneratePrefabPackages treats the JDK 24+ restricted-native-access warning

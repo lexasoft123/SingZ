@@ -21,6 +21,9 @@ describe('Android native DSP runtime packaging', () => {
     const core = readMobile(
       'android/app/src/main/java/com/singzplayer/split/SingzCore.kt',
     );
+    const ledger = readMobile(
+      'android/app/src/main/java/com/singzplayer/playback/NativePlaybackGenerationLedger.kt',
+    );
 
     expect(gradle).toContain('implementation("com.google.oboe:oboe:1.9.3")');
     expect(cmake).toContain('mobile/native/bindings/android/native_playback_jni.cpp');
@@ -56,9 +59,44 @@ describe('Android native DSP runtime packaging', () => {
       /fun suspendOutput\(generationValue: Double, promise: Promise\) \{\s*command\(generationValue, promise\) \{ generation ->\s*requiredJson\(SingzCore\.nativePlaybackSuspendOutput\(generation\)\)/,
     );
     expect(module).toMatch(
-      /fun resumeOutput\(generationValue: Double, promise: Promise\) \{\s*command\(generationValue, promise\) \{ generation ->\s*if \(!ownsFocus\(generation\)\)/,
+      /fun resumeOutput\(generationValue: Double, promise: Promise\) \{\s*command\(generationValue, promise\) \{ generation ->\s*if \(!ledger\.ownsFocus\(generation\)\)/,
     );
     expect(core).toContain('external fun nativePlaybackSuspendOutput(generation: Long): String');
+    // The bridge remembers its generations in ONE ledger, and a focus loss
+    // or a route change retires every generation it answers for — the song
+    // and, while a swap is armed, its candidate — because the core keeps
+    // the song playing when only the candidate is cancelled: a loss that
+    // retired the newest generation alone silenced the candidate and left
+    // the song rendering under lost focus. The ledger's rules are JUnit-
+    // tested off the device (NativePlaybackGenerationLedgerTest); this pins
+    // that the module actually routes through them, on every path.
+    expect(ledger).toContain('class NativePlaybackGenerationLedger');
+    expect(module).toContain('private val ledger = NativePlaybackGenerationLedger()');
+    expect(module).not.toMatch(/AtomicLong|focusGeneration|focusOwned/);
+    expect(module).toMatch(
+      /OnAudioFocusChangeListener \{ change ->\s*if \(change == AudioManager\.AUDIOFOCUS_GAIN \|\| invalidated\.get\(\)\) return@OnAudioFocusChangeListener\s*(?:\/\/[^\n]*\n\s*)*failClosed\(\)\s*\}/,
+    );
+    expect(module).toMatch(/private fun routeChanged\(\) \{\s*(?:\/\/[^\n]*\n\s*)*failClosed \{/);
+    expect(module).toMatch(
+      /private fun failClosed\(andThen: \(\) -> Unit = \{\}\) \{\s*val verdict = ledger\.failClosed\(\)\s*for \(generation in verdict\.targets\) \{\s*runCatching \{ SingzCore\.nativePlaybackRequestCancellation\(generation\) \}\s*\}\s*post \{\s*for \(generation in verdict\.targets\) \{\s*runCatching \{ SingzCore\.nativePlaybackUnload\(generation\) \}\s*\}\s*if \(verdict\.releaseFocus\) audioManager\.abandonAudioFocusRequest\(focusRequest\)/,
+    );
+    expect(module).toMatch(/override fun invalidate\(\) \{[\s\S]*?val verdict = ledger\.failClosed\(\)/);
+    // The claim names the generation it was prepared from, so a candidate
+    // inherits the song's focus before the prepare verdict; every unload
+    // asks the ledger whether the focus request goes with it, handing it
+    // the core's own word on whether a song is still there — the only way
+    // to tell a candidate given up on from the song unloaded before its
+    // seam was acknowledged.
+    expect(module).toMatch(
+      /private fun songRemains\(result: String\?\): Boolean \{[\s\S]*?state == "running" \|\| state == "output-open" \|\|\s*state == "prepared" \|\| state == "preparing"/,
+    );
+    expect(module).toContain('ledger.claimed(generation, parsed.swapFromGeneration)');
+    expect(module).toMatch(
+      /fun unload\(generationValue: Double, promise: Promise\)[\s\S]*?if \(ledger\.unloaded\(generation, songRemains\(result\)\)\) \{\s*audioManager\.abandonAudioFocusRequest\(focusRequest\)/,
+    );
+    expect(module).toMatch(
+      /fun configureOutputSession\(generationValue: Double, promise: Promise\)[\s\S]*?ledger\.focusGranted\(generation\)/,
+    );
     expect(core).toContain('external fun nativePlaybackResumeOutput(generation: Long): String');
     // status() refreshes the host inventory before every answer; session(),
     // the poll's read, must not — a 400 ms poll re-enumerating every audio
@@ -96,8 +134,7 @@ describe('Android native DSP runtime packaging', () => {
     expect(module).toContain('parsed.swapFromGeneration,');
     // A swap opens no stream, so the focus granted to the generation it
     // replaces must follow it, or the first hold's release is refused.
-    expect(module).toContain('inheritFocusForSwap(parsed.swapFromGeneration, generation, result)');
-    expect(module).toContain('if (accepted && ownsFocus(from)) focusGeneration = to');
+    expect(ledger).toContain('if (ownsFocus(current)) focusGeneration = generation');
     expect(core).toContain('external fun nativePlaybackReanchor(');
     expect(core).toContain('external fun nativePlaybackPreviewClick(');
     expect(core).toContain('graphNodes: Array<NativePlaybackGraphNodeJni>');
