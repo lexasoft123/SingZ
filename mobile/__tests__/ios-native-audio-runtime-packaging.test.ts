@@ -1,6 +1,12 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import bridgeManifest from '../../tests/shared/native-playback-bridge-manifest.json'
+import {
+  iosBridgeMethods,
+  objectiveCDictionaryKeys,
+  switchStringTable
+} from '../../tests/shared/native-playback-bridge-sources'
 
 const root = join(__dirname, '..')
 const read = (relative: string): string => readFileSync(join(root, relative), 'utf8')
@@ -123,50 +129,38 @@ describe('iOS native DSP runtime packaging', () => {
   test('exposes experimental Phase 4B through one typed product facade', () => {
     const bridge = read('ios/FolderAccess/NativeAudioRuntimeBridge.mm')
     const support = read('ios/FolderAccess/NativePlaybackBridgeSupport.mm')
+    const bridgeResult = read('ios/FolderAccess/NativePlaybackBridgeResult.mm')
     const authorizedPath = read('ios/FolderAccess/NativePlaybackAuthorizedPath.mm')
     const capability = read('ios/SingzDspRuntime/SingzDspRuntimeCapability.cpp')
     const capabilityHeader = read('ios/SingzDspRuntime/SingzDspRuntimeCapability.h')
 
-    const directExports = [...bridge.matchAll(/RCT_EXPORT_METHOD\(\s*([A-Za-z0-9_]+)/g)]
-      .map(match => match[1])
-      .sort()
-    const remappedExports = [...bridge.matchAll(/RCT_REMAP_METHOD\(\s*([A-Za-z0-9_]+)/g)]
-      .map(match => match[1])
-      .sort()
-    // session is status's session block alone, for the telemetry poll — no
-    // route inventory, no runtime description. Same name, no arguments, on
-    // Android too.
-    expect(directExports).toEqual(['codecTargetProof', 'session', 'status'])
-    expect(remappedExports).toEqual([
-      'configureOutputSession', 'lanePeaks', 'openOutput', 'prepare',
-      'previewClick', 'setControl', 'start', 'stop', 'transport', 'unload',
-      // Retention is a separate method, never an extra argument on unload:
-      // a native method whose arity does not match JS is not dispatched at
-      // all and says nothing about it.
-      'unloadRetainingLanes'
+    // Names AND arity, both read out of the selectors rather than written
+    // down here, and both compared against the one list Android answers to as
+    // well. Retention is a separate method, never an extra argument on
+    // unload: a native method whose arity does not match JS is not dispatched
+    // at all and says nothing about it. `session` is status's session block
+    // alone, for the telemetry poll — no route inventory, no runtime
+    // description, same name and no arguments on Android too.
+    const exported = iosBridgeMethods(bridge)
+    const expected = [...bridgeManifest.methods.phone, ...bridgeManifest.methods.iosOnly].sort(
+      (left, right) => left.name.localeCompare(right.name)
+    )
+    expect(exported).toEqual(expected)
+    // codecTargetProof is the one method Android's module does not carry, so
+    // it is listed apart rather than quietly widening the shared surface.
+    expect(bridgeManifest.methods.iosOnly.map(method => method.name)).toEqual([
+      'codecTargetProof'
     ])
     expect(bridge).toMatch(
       /#if defined\(SINGZ_CODEC_TARGET_PROOF\)[\s\S]*RCT_EXPORT_METHOD\(codecTargetProof:[\s\S]*#endif/
     )
     expect(bridge).toContain('RCT_EXPORT_METHOD(status:')
     expect(bridge).toContain('RCT_EXPORT_METHOD(session:')
-    for (const method of [
-      'prepare',
-      'configureOutputSession',
-      'openOutput',
-      'start',
-      'stop',
-      'unload',
-      'unloadRetainingLanes',
-      // The waveform envelope is immutable for a prepared generation, so it
-      // is fetched once and cached rather than re-marshalled on every status
-      // poll — 576 floats at up to 66 Hz, for a consumer that reads it once.
-      'lanePeaks',
-      'setControl',
-      'transport',
-      'previewClick'
-    ])
-      expect(bridge).toContain(`${method},`)
+    // The waveform envelope is immutable for a prepared generation, so
+    // lanePeaks is fetched once and cached rather than re-marshalled on every
+    // status poll — 576 floats at up to 66 Hz, for a consumer that reads it
+    // once.
+    expect(exported.map(method => method.name)).toContain('lanePeaks')
     expect(support).toMatch(/@"ownership"\s*:\s*@"coordinated"/)
     expect(support).toMatch(/@"activation"\s*:\s*@"experimental-4c"/)
     expect(authorizedPath).toContain('OwnedFileDescriptor owner(::open(')
@@ -183,34 +177,48 @@ describe('iOS native DSP runtime packaging', () => {
     )
     expect(support).toContain('@"playbackCleanupProof"')
     expect(support).toContain('@"playbackHandoffLease"')
-    for (const field of [
-      'timePitchAnchorsPrepared',
-      'timePitchAnchorsPublished',
-      'timePitchAnchorMisses',
-      'timePitchReplacementReady',
-      'timePitchLoopPriming',
-      'lastTransportBoundary',
-      'preparedStartProjectFrame',
-      'previewClicksEnqueued',
-      'previewClicksStarted',
-      'previewClicksCompleted',
-      'previewClicksPending'
-    ])
-      expect(support).toContain(`@"${field}"`)
-    for (const reason of [
-      'none',
-      'stream-generation-changed',
-      'sequence-gap',
-      'sample-rate-changed',
-      'route-generation-changed',
-      'timestamp-quality-changed',
-      'clock-reanchored',
-      'source-seek',
-      'source-loop',
-      'device-lost',
-      'source-frame-overflow'
-    ])
-      expect(support).toContain(`@"${reason}"`)
+    // The whole session block, as an exact set — eleven names used to be
+    // listed here, which could not see a twelfth arrive or Android drift away.
+    // A set, not a sequence: Android emits the same names in a slightly
+    // different order and both are read by name, so order is not contractual.
+    const sessionBlock = objectiveCDictionaryKeys(support, 'NSDictionary *statusDictionary(')
+    expect([...sessionBlock.keys].sort()).toEqual([...bridgeManifest.session.common].sort())
+    expect(sessionBlock.nested.latency).toEqual(bridgeManifest.session.nested.latency)
+    expect(
+      objectiveCDictionaryKeys(support, 'NSDictionary *statusDictionary(', '[lanes addObject:@{')
+        .keys
+    ).toEqual(bridgeManifest.session.nested.lanes)
+    // Every switch table this bridge publishes, fallthrough included, and from
+    // every file that defines one. playbackState and terminalReason appear
+    // TWICE — Result.mm's copies serve the result and cleanup objects, while
+    // Support.mm keeps its own for the session block's `state` and
+    // `terminalReason`. Pinning only one copy leaves the other free to drift:
+    // add an enumerator, update Result.mm and forget Support.mm, and the pod
+    // compiles with a -Wswitch warning nobody reads while the session reports
+    // "terminal" for a running song. The parser accepts it, because "terminal"
+    // is a valid state. Both copies are checked against the same manifest
+    // entry, which also asserts the two files still agree with each other.
+    for (const [name, source, signature] of [
+      ['playbackState', bridgeResult, 'NSString *playbackState('],
+      ['terminalReason', bridgeResult, 'NSString *terminalReason('],
+      ['playbackState', support, 'NSString *playbackState('],
+      ['terminalReason', support, 'NSString *terminalReason('],
+      ['cleanupSafety', bridgeResult, 'NSString *cleanupSafety('],
+      ['coordinatorState', bridgeResult, 'NSString *coordinatorState('],
+      ['playbackError', bridgeResult, 'NSString *playbackError('],
+      ['hostState', support, 'NSString *hostState('],
+      ['transportState', support, 'NSString *transportState('],
+      ['transportTelemetryQuality', support, 'NSString *transportTelemetryQuality('],
+      ['transportBoundaryReason', support, 'NSString *transportBoundaryReason(']
+    ] as const) {
+      const declared = (bridgeManifest.enums as Record<string, Record<string, {
+        strings: string[]
+        fallback: string | null
+      }>>)[name].ios
+      const extracted = switchStringTable(source, signature)
+      expect(extracted.cases).toEqual(declared.strings)
+      expect(extracted.fallback).toEqual(declared.fallback)
+    }
     expect(capabilityHeader).toContain('SingzDspRuntimeCapabilityPlaybackCleanupProof')
     expect(capabilityHeader).toContain('SingzDspRuntimeCapabilityPlaybackHandoffLease')
     expect(capabilityHeader).toContain('SingzDspRuntimeCapabilityPlaybackTransport')
@@ -348,6 +356,9 @@ describe('iOS native DSP runtime packaging', () => {
     expect(tests).toContain('testStopUnloadDeliveryGuard()')
     expect(tests).toContain('testUnloadCleanupResultSchema()')
     expect(tests).toContain('testPlaybackAudioSessionPolicy()')
+    // Asserts what this schema deliberately does NOT check, so the "no" cells
+    // in the contract's validation matrix are proved rather than assumed.
+    expect(tests).toContain('testWhatTheSchemaLeavesToTheCore()')
     expect(runner).toContain('NativePlaybackAudioSessionPolicy.mm')
     expect(support).toContain('SingzNativePlaybackConfigureOutputSession(')
     expect(support.match(/SingzConfigurePlaybackAudioSession\(/g)).toHaveLength(1)
@@ -430,6 +441,12 @@ describe('iOS native DSP runtime packaging', () => {
       "'mobile/scripts/**'",
       "'native/playback/**'",
       "'tests/native/**'",
+      // The bridge manifest and the extractors that read it. An edit there is
+      // exactly what "the manifest is wrong too, and fixing it is part of the
+      // change" looks like, and without this path that edit would run neither
+      // packaging suite — the change would be reviewed by nothing that could
+      // see it.
+      "'tests/shared/**'",
       "'third_party/native/**'",
       "'zcore/**'",
       "'zdsp/**'"

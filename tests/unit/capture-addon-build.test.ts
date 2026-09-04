@@ -141,21 +141,11 @@ describe('Electron capture addon build', () => {
     expect(bridge).toContain('kPlaybackCueMaximumEvents')
     expect(bridge).toContain('kNativePlaybackMaximumTrainingWindows')
 
-    for (const projected of [
-      'terminalOrdinal', 'transportGeneration', 'audibleProjectionQuality',
-      'cueEventsCompleted', 'transportDiscontinuities', 'graphLatencyFrames',
-      'timePitchAnchorsPrepared', 'timePitchAnchorsPublished',
-      'timePitchAnchorMisses', 'timePitchReplacementReady',
-      'timePitchLoopPriming', 'devicePresentationLatencyFrames',
-      'totalPresentationLatencyFrames', 'preparedStartProjectFrame',
-      'retainedBytes', 'graphArenaBytes',
-      'trainingEnabled', 'trainingLanes', 'preRollFrames', 'cueEventCount',
-      'previewClicksEnqueued', 'previewClicksStarted',
-      'previewClicksCompleted', 'previewClicksPending',
-      'latencyCompensatedEdgeCount', 'graphSnapshot', 'adapterRenderFailures',
-      'terminalRenderFailures', 'parameterOverflows', 'nonFiniteSamples',
-      'rejectedBlocks'
-    ]) expect(bridge).toContain(`"${projected}"`)
+    // The projected status keys used to be 31 names typed out here. They are
+    // in tests/shared/native-playback-bridge-manifest.json now, checked as an
+    // exact set by native-playback-bridge-manifest.test.ts against the same
+    // list the two phone bridges answer to — a contains-list of 31 could not
+    // see a 32nd key appear, nor one bridge drifting from another.
     expect(bridge).toContain('validGraphSnapshot(status)')
     expect(bridge).toContain('static_cast<uint64_t>(source.graphArenaBytes)')
     expect(session).toContain('result.graphArenaBytes = impl_->prepared->graphArenaBytes')

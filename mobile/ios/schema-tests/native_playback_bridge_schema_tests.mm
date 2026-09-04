@@ -290,6 +290,39 @@ void injectPrepareFault(void *opaque, SingzPlaybackPrepareFaultPoint point,
   throw std::bad_alloc();
 }
 
+// What this schema deliberately does NOT check.
+//
+// The validation matrix in docs/NATIVE-PLAYBACK-BRIDGE.md section 9 has the
+// core as its authoritative row: a bridge may reject earlier for a better
+// error message, but the core is what actually enforces. Two of that matrix's
+// "no" cells belong to this file, and until now they were an assertion about
+// code nobody had asked. Android's schema rejects a duplicate lane ID; this
+// one accepts it and lets prepare fail with InvalidConfiguration and the
+// message "Playback lane IDs must be unique".
+//
+// So this test asserts the ACCEPTANCE. If someone adds the check here — a
+// reasonable thing to want — this goes red, and the matrix has to be updated
+// in the same change rather than quietly becoming wrong.
+void testWhatTheSchemaLeavesToTheCore() {
+  NSMutableDictionary *duplicated = [validRequest() mutableCopy];
+  NSDictionary *lane = @{
+    @"id" : @"vocals",
+    @"path" : @"/app/other.flac",
+    @"gain" : @1.0,
+    @"muted" : @NO,
+    @"solo" : @NO,
+  };
+  duplicated[@"lanes"] = @[ ((NSArray *)validRequest()[@"lanes"]).firstObject, lane ];
+  CHECK(parses(duplicated));
+
+  // The lanes really are duplicates by ID, so the acceptance above is the
+  // interesting kind rather than an accident of the fixture.
+  NSArray *lanes = duplicated[@"lanes"];
+  CHECK(lanes.count == 2);
+  CHECK([lanes[0][@"id"] isEqualToString:lanes[1][@"id"]]);
+  CHECK(![lanes[0][@"path"] isEqualToString:lanes[1][@"path"]]);
+}
+
 void testPrepareOwnershipGuard() {
   const std::vector<SingzPlaybackPrepareFaultPoint> beforeMutation{
       SingzPlaybackPrepareFaultPoint::AfterGenerationClaim,
@@ -1629,6 +1662,7 @@ int main() {
                                          userInfo:nil];
           }) == SingzPlaybackBridgeBoundaryFailure::ProviderFailure);
     testPortableGraphProjectionSchema();
+    testWhatTheSchemaLeavesToTheCore();
     testPrepareOwnershipGuard();
     testPlaybackResultErrorMapping();
     testUnloadCleanupResultSchema();

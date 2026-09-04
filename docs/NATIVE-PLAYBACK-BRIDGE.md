@@ -10,9 +10,12 @@ where the three disagree on purpose.
 It is a description of the code as it stands, not a design proposal. Every
 claim here is pinned by a test — the surfaces by
 `tests/shared/native-playback-bridge-manifest.json`, the shared behaviours by
-`tests/shared/native-playback-agreement-cases.json`. If this document and the
-code ever disagree, one of those two files is wrong as well, and fixing it is
-part of the change. See **Changing the contract** at the end.
+`tests/shared/native-playback-agreement-cases.json`. Both files are read by
+more than one language: the manifest by the two mobile packaging suites, a
+vitest over the Electron addon and a native ctest; the agreement cases by that
+ctest and a vitest. If this document and the code ever disagree, one of those
+two files is wrong as well, and fixing it is part of the change. See
+**Changing the contract** at the end.
 
 Line numbers drift. Every reference names the identifier too, so it can be
 re-found after it moves.
@@ -762,14 +765,15 @@ unnoticed, and each is a candidate for its own change — none should be
    the core's `nativePlaybackErrorName`. Three copies of one table, and the
    TypeScript fallback (`provider-failure`) differs from the core's
    (`host-failure`).
-4. **The desktop declares eight fewer status fields than the addon emits** —
-   `graphStatusCode`, `graphStatusDetail`, `timePitchAnchorOutcome`,
-   `countInEventCount`, `countInBeatsPerBar`, `laneDecodeFallback`,
-   `parkedLaneBytes` and `parkedLaneCount` are absent from
-   `DesktopPlaybackStatus`. The phones model six of the eight. The unload
-   receipt has the same gap in miniature: it emits four cleanup keys and
-   `DesktopPlaybackResult` declares three, `parkedLaneBytes` being undeclared
-   anywhere in `src/`.
+4. **CLOSED.** `DesktopPlaybackStatus` used to declare eight fewer fields than
+   the addon emits — `graphStatusCode`, `graphStatusDetail`,
+   `timePitchAnchorOutcome`, `countInEventCount`, `countInBeatsPerBar`,
+   `laneDecodeFallback`, `parkedLaneBytes` and `parkedLaneCount`. All eight are
+   declared now, and the two sets are compared for equality by
+   `tests/unit/native-playback-bridge-manifest.test.ts`, so the gap cannot
+   reopen quietly. The unload receipt still has the same gap in miniature: it
+   emits four cleanup keys and `DesktopPlaybackResult` declares three,
+   `parkedLaneBytes` being undeclared anywhere in `src/`.
 5. **`ownership` and `activation` are never gated.** The phones publish
    `experimental-4c`; the parser reads the strings and ignores them.
 6. **The iOS schema checks fewer duplicates than Android's** — no duplicate

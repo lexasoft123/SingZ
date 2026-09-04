@@ -569,6 +569,28 @@ if(SINGZ_CORE_TESTS)
     SingZ::native_playback_session)
   add_test(NAME playback_cue_plan_tests COMMAND playback_cue_plan_tests)
 
+  # The core's half of the TypeScript/C++ playback contract. It reads the same
+  # two shared files jest and vitest read, so a value restated on both sides of
+  # the boundary is compared rather than copied.
+  add_executable(native_playback_contract_tests
+    ${SINGZ_REPO_ROOT}/tests/native/native_playback_contract_tests.cpp)
+  target_compile_features(native_playback_contract_tests PRIVATE cxx_std_20)
+  target_include_directories(native_playback_contract_tests PRIVATE
+    "${SINGZ_REPO_ROOT}")
+  # The enum-size pins are exhaustive switches with no default. Without this
+  # an appended enumerator is a warning nobody reads, and the test's own count
+  # keeps matching because the enumerator it names has not moved.
+  if(NOT MSVC)
+    target_compile_options(native_playback_contract_tests PRIVATE -Werror=switch)
+  endif()
+  target_compile_definitions(native_playback_contract_tests PRIVATE
+    SINGZ_NATIVE_PLAYBACK_MANIFEST_PATH="${SINGZ_REPO_ROOT}/tests/shared/native-playback-bridge-manifest.json"
+    SINGZ_NATIVE_PLAYBACK_AGREEMENT_PATH="${SINGZ_REPO_ROOT}/tests/shared/native-playback-agreement-cases.json")
+  target_link_libraries(native_playback_contract_tests PRIVATE
+    SingZ::native_playback_session)
+  add_test(NAME native_playback_contract_tests
+    COMMAND native_playback_contract_tests)
+
   add_executable(signalsmith_time_pitch_tests
     tests/native/signalsmith_time_pitch_tests.cpp
     zdsp/tests/allocation_trap.cpp)

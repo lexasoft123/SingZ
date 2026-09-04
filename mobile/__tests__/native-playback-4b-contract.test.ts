@@ -44,7 +44,12 @@ const nativeStatus = (): Record<string, unknown> => ({
   buildId: 'singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3',
   playbackBuild: 'singz.native.playback-session.anchored-preview.v4',
   ownership: 'coordinated',
-  activation: 'experimental-4b',
+  // What both shipping bridges actually publish. The fixture said
+  // 'experimental-4b' and passed regardless, because the capability parser
+  // reads this field and gates on nothing — which is exactly why a fixture
+  // carrying a label no bridge sends is worth correcting rather than shrugging
+  // at. See docs/NATIVE-PLAYBACK-BRIDGE.md section 2.
+  activation: 'experimental-4c',
   outputs: [
     {
       uid: 'ios-output:speaker',

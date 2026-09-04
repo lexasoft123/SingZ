@@ -3,6 +3,7 @@ out/
 dist/
 /build/native/
 /build/capture-*/
+/build/contract/
 vendor
 .engines-src/
 *.log

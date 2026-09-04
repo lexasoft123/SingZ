@@ -1,0 +1,413 @@
+{
+  "version": 1,
+  "note": "Rules restated on both sides of the TypeScript/C++ boundary. Read by tests/unit/native-playback-agreement.test.ts and tests/native/native_playback_contract_tests.cpp. Rows carrying an \"agree\" of false are DOCUMENTED divergences, not bugs to fix in passing — see docs/NATIVE-PLAYBACK-BRIDGE.md section 11.",
+  "sampleRate": 48000,
+  "graphNodeCount": [
+    {
+      "name": "one lane, nothing else",
+      "laneCount": 1,
+      "trainingLaneCount": 0,
+      "hasReference": false,
+      "needsTimePitch": false,
+      "expected": 7,
+      "agreement": "both"
+    },
+    {
+      "name": "six stems, no cue branch",
+      "laneCount": 6,
+      "trainingLaneCount": 0,
+      "hasReference": false,
+      "needsTimePitch": false,
+      "expected": 22,
+      "agreement": "both"
+    },
+    {
+      "name": "six stems with the cue branch",
+      "laneCount": 6,
+      "trainingLaneCount": 0,
+      "hasReference": true,
+      "needsTimePitch": false,
+      "expected": 27,
+      "agreement": "both"
+    },
+    {
+      "name": "six stems, cue branch and time pitch",
+      "laneCount": 6,
+      "trainingLaneCount": 0,
+      "hasReference": true,
+      "needsTimePitch": true,
+      "expected": 28,
+      "agreement": "both"
+    },
+    {
+      "name": "six stems, every lane in training",
+      "laneCount": 6,
+      "trainingLaneCount": 6,
+      "hasReference": true,
+      "needsTimePitch": true,
+      "expected": 34,
+      "agreement": "both"
+    },
+    {
+      "name": "the sixteen-lane ceiling",
+      "laneCount": 16,
+      "trainingLaneCount": 16,
+      "hasReference": true,
+      "needsTimePitch": true,
+      "expected": 74,
+      "agreement": "both"
+    },
+    {
+      "name": "past the 128-node cap",
+      "laneCount": 42,
+      "trainingLaneCount": 0,
+      "hasReference": true,
+      "needsTimePitch": true,
+      "expected": 136,
+      "agreement": "both"
+    },
+    {
+      "name": "more training lanes than lanes",
+      "laneCount": 4,
+      "trainingLaneCount": 5,
+      "hasReference": false,
+      "needsTimePitch": false,
+      "expected": 21,
+      "agreement": "tsOnly"
+    }
+  ],
+  "loopFold": [
+    {
+      "name": "inside the region",
+      "loopStart": 2.0,
+      "loopEnd": 4.0,
+      "position": 3.0,
+      "frames": {
+        "loopStartFrame": 96000,
+        "loopEndFrame": 192000,
+        "positionFrame": 144000
+      },
+      "typescript": 3.0,
+      "core": 3.0,
+      "agree": true
+    },
+    {
+      "name": "one sample before the end",
+      "loopStart": 2.0,
+      "loopEnd": 4.0,
+      "position": 3.999979166666667,
+      "frames": {
+        "loopStartFrame": 96000,
+        "loopEndFrame": 192000,
+        "positionFrame": 191999
+      },
+      "typescript": 3.999979167,
+      "core": 3.999979167,
+      "agree": true
+    },
+    {
+      "name": "exactly at the loop end",
+      "loopStart": 2.0,
+      "loopEnd": 4.0,
+      "position": 4.0,
+      "frames": {
+        "loopStartFrame": 96000,
+        "loopEndFrame": 192000,
+        "positionFrame": 192000
+      },
+      "typescript": 4.0,
+      "core": 2.0,
+      "agree": false
+    },
+    {
+      "name": "one sample past the end",
+      "loopStart": 2.0,
+      "loopEnd": 4.0,
+      "position": 4.000020833333333,
+      "frames": {
+        "loopStartFrame": 96000,
+        "loopEndFrame": 192000,
+        "positionFrame": 192001
+      },
+      "typescript": 2.000020833,
+      "core": 2.000020833,
+      "agree": true
+    },
+    {
+      "name": "half a span past the end",
+      "loopStart": 2.0,
+      "loopEnd": 4.0,
+      "position": 5.0,
+      "frames": {
+        "loopStartFrame": 96000,
+        "loopEndFrame": 192000,
+        "positionFrame": 240000
+      },
+      "typescript": 3.0,
+      "core": 3.0,
+      "agree": true
+    },
+    {
+      "name": "a whole span past the end",
+      "loopStart": 2.0,
+      "loopEnd": 4.0,
+      "position": 6.0,
+      "frames": {
+        "loopStartFrame": 96000,
+        "loopEndFrame": 192000,
+        "positionFrame": 288000
+      },
+      "typescript": 2.0,
+      "core": 2.0,
+      "agree": true
+    }
+  ],
+  "atEnd": [
+    {
+      "name": "well short of the end",
+      "durationSeconds": 180.0,
+      "positionSeconds": 179.5,
+      "durationFrames": 8640000,
+      "positionFrame": 8616000,
+      "typescript": false,
+      "core": false,
+      "agree": true
+    },
+    {
+      "name": "inside the TypeScript epsilon",
+      "durationSeconds": 180.0,
+      "positionSeconds": 179.995,
+      "durationFrames": 8640000,
+      "positionFrame": 8639760,
+      "typescript": true,
+      "core": false,
+      "agree": false
+    },
+    {
+      "name": "exactly at the epsilon",
+      "durationSeconds": 180.0,
+      "positionSeconds": 179.99,
+      "durationFrames": 8640000,
+      "positionFrame": 8639520,
+      "typescript": true,
+      "core": false,
+      "agree": false
+    },
+    {
+      "name": "just outside the epsilon",
+      "durationSeconds": 180.0,
+      "positionSeconds": 179.98,
+      "durationFrames": 8640000,
+      "positionFrame": 8639040,
+      "typescript": false,
+      "core": false,
+      "agree": true
+    },
+    {
+      "name": "exactly at the end",
+      "durationSeconds": 180.0,
+      "positionSeconds": 180.0,
+      "durationFrames": 8640000,
+      "positionFrame": 8640000,
+      "typescript": true,
+      "core": true,
+      "agree": true
+    },
+    {
+      "name": "past the end",
+      "durationSeconds": 180.0,
+      "positionSeconds": 180.5,
+      "durationFrames": 8640000,
+      "positionFrame": 8664000,
+      "typescript": true,
+      "core": true,
+      "agree": true
+    }
+  ],
+  "codecBits": [
+    {
+      "name": "wav on a base build",
+      "formatMask": 3,
+      "extension": "wav",
+      "supported": true
+    },
+    {
+      "name": "flac on a base build",
+      "formatMask": 3,
+      "extension": "flac",
+      "supported": true
+    },
+    {
+      "name": "mp3 on a base build",
+      "formatMask": 3,
+      "extension": "mp3",
+      "supported": false
+    },
+    {
+      "name": "m4a on a base build",
+      "formatMask": 3,
+      "extension": "m4a",
+      "supported": false
+    },
+    {
+      "name": "mp3 on a full-matrix build",
+      "formatMask": 511,
+      "extension": "mp3",
+      "supported": true
+    },
+    {
+      "name": "m4a on a full-matrix build",
+      "formatMask": 511,
+      "extension": "m4a",
+      "supported": true
+    },
+    {
+      "name": "aac on a full-matrix build",
+      "formatMask": 511,
+      "extension": "aac",
+      "supported": true
+    },
+    {
+      "name": "ogg on a full-matrix build",
+      "formatMask": 511,
+      "extension": "ogg",
+      "supported": true
+    },
+    {
+      "name": "opus on a full-matrix build",
+      "formatMask": 511,
+      "extension": "opus",
+      "supported": true
+    },
+    {
+      "name": "aiff on a full-matrix build",
+      "formatMask": 511,
+      "extension": "aiff",
+      "supported": true
+    },
+    {
+      "name": "m4a with only the AAC half",
+      "formatMask": 11,
+      "extension": "m4a",
+      "supported": false
+    },
+    {
+      "name": "m4a with both halves",
+      "formatMask": 27,
+      "extension": "m4a",
+      "supported": true
+    }
+  ],
+  "codecBitValues": {
+    "wav": 1,
+    "flac": 2,
+    "mp3": 4,
+    "m4aAac": 8,
+    "m4aAlac": 16,
+    "aac": 32,
+    "oggVorbis": 64,
+    "oggOpus": 128,
+    "aiff": 256,
+    "productMask": 511
+  },
+  "scalarBounds": [
+    {
+      "name": "playbackRateMinimum",
+      "value": 0.25
+    },
+    {
+      "name": "playbackRateMaximum",
+      "value": 4.0
+    },
+    {
+      "name": "transposeSemitonesMinimum",
+      "value": -24.0
+    },
+    {
+      "name": "transposeSemitonesMaximum",
+      "value": 24.0
+    },
+    {
+      "name": "maximumLanes",
+      "value": 16
+    },
+    {
+      "name": "maximumLinearGain",
+      "value": 4.0
+    },
+    {
+      "name": "defaultMaximumRetainedBytes",
+      "value": 1073741824
+    },
+    {
+      "name": "laneSummaryBuckets",
+      "value": 96
+    },
+    {
+      "name": "maximumConcurrentLaneDecodes",
+      "value": 2
+    },
+    {
+      "name": "maximumGraphNodes",
+      "value": 128
+    },
+    {
+      "name": "maximumGraphConnections",
+      "value": 256
+    },
+    {
+      "name": "maximumTrainingWindows",
+      "value": 16384
+    },
+    {
+      "name": "maximumBeats",
+      "value": 20000
+    },
+    {
+      "name": "maximumCueEvents",
+      "value": 40000
+    },
+    {
+      "name": "maximumCountInBars",
+      "value": 2
+    },
+    {
+      "name": "maximumDurationSeconds",
+      "value": 43200.0
+    },
+    {
+      "name": "maximumJsSafeInteger",
+      "value": 9007199254740991
+    },
+    {
+      "name": "minimumBpm",
+      "value": 30.0
+    },
+    {
+      "name": "maximumBpm",
+      "value": 300.0
+    },
+    {
+      "name": "minimumBeatSeparationSeconds",
+      "value": 0.05
+    },
+    {
+      "name": "limiterCeiling",
+      "value": 0.891250938
+    },
+    {
+      "name": "gridlessBeatsPerBar",
+      "value": 3
+    },
+    {
+      "name": "gridlessPeriodSeconds",
+      "value": 1.0
+    }
+  ],
+  "admissibleMeters": [
+    2,
+    3,
+    4,
+    6
+  ]
+}

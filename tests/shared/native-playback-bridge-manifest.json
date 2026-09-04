@@ -1,0 +1,1044 @@
+{
+  "version": 1,
+  "gates": {
+    "interfaceVersion": 3,
+    "playbackContractVersion": 2,
+    "playbackBuild": "singz.native.playback-session.anchored-preview.v4",
+    "buildId": {
+      "ios": "singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3",
+      "android": "singz.android.zdsp_runtime.phase-android-q32-time-pitch-v3"
+    },
+    "ownership": "coordinated",
+    "activation": "experimental-4c",
+    "desktopCapability": "singz.native.playback-session.anchored-preview.v4",
+    "desktopContractVersion": 2,
+    "mediaCodec": {
+      "abiVersion": 1,
+      "baseMask": 3,
+      "fullMask": 511,
+      "baseTag": "singz-prepared-audio-fd-wav-flac-v1",
+      "fullMatrixTag": "singz-prepared-audio-fd-ffmpeg-full-matrix-v3",
+      "partialRuntimeTag": "singz-prepared-audio-fd-ffmpeg-partial-runtime-v2"
+    }
+  },
+  "methods": {
+    "phone": [
+      {
+        "name": "configureOutputSession",
+        "arity": 1
+      },
+      {
+        "name": "lanePeaks",
+        "arity": 1
+      },
+      {
+        "name": "openOutput",
+        "arity": 1
+      },
+      {
+        "name": "prepare",
+        "arity": 2
+      },
+      {
+        "name": "previewClick",
+        "arity": 2
+      },
+      {
+        "name": "session",
+        "arity": 0
+      },
+      {
+        "name": "setControl",
+        "arity": 2
+      },
+      {
+        "name": "start",
+        "arity": 1
+      },
+      {
+        "name": "status",
+        "arity": 0
+      },
+      {
+        "name": "stop",
+        "arity": 1
+      },
+      {
+        "name": "transport",
+        "arity": 2
+      },
+      {
+        "name": "unload",
+        "arity": 1
+      },
+      {
+        "name": "unloadRetainingLanes",
+        "arity": 1
+      }
+    ],
+    "iosOnly": [
+      {
+        "name": "codecTargetProof",
+        "arity": 0
+      }
+    ],
+    "desktopAddon": [
+      {
+        "name": "preparePlayback",
+        "ipc": "audio-host:playback-prepare",
+        "preload": "prepareDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "openPlaybackOutput",
+        "ipc": "audio-host:playback-open",
+        "preload": "openDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "startPlayback",
+        "ipc": "audio-host:playback-start",
+        "preload": "startDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "pausePlayback",
+        "ipc": "audio-host:playback-pause",
+        "preload": "pauseDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "resumePlayback",
+        "ipc": "audio-host:playback-resume",
+        "preload": "resumeDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "stopPlayback",
+        "ipc": "audio-host:playback-stop",
+        "preload": "stopDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "seekPlayback",
+        "ipc": "audio-host:playback-seek",
+        "preload": "seekDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "setPlaybackLoop",
+        "ipc": "audio-host:playback-loop-set",
+        "preload": "setDesktopPlaybackLoop",
+        "dormant": false
+      },
+      {
+        "name": "clearPlaybackLoop",
+        "ipc": "audio-host:playback-loop-clear",
+        "preload": "clearDesktopPlaybackLoop",
+        "dormant": false
+      },
+      {
+        "name": "reanchorPlayback",
+        "ipc": "audio-host:playback-reanchor",
+        "preload": "reanchorDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "setPlaybackLane",
+        "ipc": "audio-host:playback-lane",
+        "preload": "setDesktopPlaybackLane",
+        "dormant": false
+      },
+      {
+        "name": "setPlaybackMasterGain",
+        "ipc": "audio-host:playback-master",
+        "preload": "setDesktopPlaybackMasterGain",
+        "dormant": false
+      },
+      {
+        "name": "playbackStatus",
+        "ipc": "audio-host:playback-status",
+        "preload": "desktopPlaybackStatus",
+        "dormant": false
+      },
+      {
+        "name": "unloadPlayback",
+        "ipc": "audio-host:playback-unload",
+        "preload": "unloadDesktopPlayback",
+        "dormant": false
+      },
+      {
+        "name": "unloadPlaybackRetainingLanes",
+        "ipc": null,
+        "preload": null,
+        "dormant": true
+      },
+      {
+        "name": "playbackLanePeaks",
+        "ipc": null,
+        "preload": null,
+        "dormant": true
+      }
+    ]
+  },
+  "jni": {
+    "kotlinExternals": [
+      "nativePlaybackStatus",
+      "nativePlaybackSession",
+      "nativePlaybackClaim",
+      "nativePlaybackRequestCancellation",
+      "nativePlaybackPrepare",
+      "nativePlaybackConfigured",
+      "nativePlaybackOpenOutput",
+      "nativePlaybackStart",
+      "nativePlaybackStop",
+      "nativePlaybackPause",
+      "nativePlaybackResume",
+      "nativePlaybackSeek",
+      "nativePlaybackSetLoop",
+      "nativePlaybackClearLoop",
+      "nativePlaybackReanchor",
+      "nativePlaybackPreviewClick",
+      "nativePlaybackSetLaneControl",
+      "nativePlaybackSetMasterGain",
+      "nativePlaybackSetTrainingEnabled",
+      "nativePlaybackLanePeaks",
+      "nativePlaybackUnload",
+      "nativePlaybackUnloadRetainingLanes"
+    ],
+    "symbols": [
+      "nativePlaybackClaim",
+      "nativePlaybackClearLoop",
+      "nativePlaybackConfigured",
+      "nativePlaybackLanePeaks",
+      "nativePlaybackOpenOutput",
+      "nativePlaybackPause",
+      "nativePlaybackPrepare",
+      "nativePlaybackPreviewClick",
+      "nativePlaybackReanchor",
+      "nativePlaybackRequestCancellation",
+      "nativePlaybackResume",
+      "nativePlaybackSeek",
+      "nativePlaybackSession",
+      "nativePlaybackSetLaneControl",
+      "nativePlaybackSetLoop",
+      "nativePlaybackSetMasterGain",
+      "nativePlaybackSetTrainingEnabled",
+      "nativePlaybackStart",
+      "nativePlaybackStatus",
+      "nativePlaybackStop",
+      "nativePlaybackUnload",
+      "nativePlaybackUnloadRetainingLanes"
+    ]
+  },
+  "session": {
+    "common": [
+      "generation",
+      "state",
+      "hostState",
+      "terminalReason",
+      "terminalOrdinal",
+      "sampleRate",
+      "maximumFrames",
+      "nominalBufferFrames",
+      "outputChannels",
+      "renderedFrames",
+      "audibleFrames",
+      "transportGeneration",
+      "transportState",
+      "transportTelemetryQuality",
+      "lastTransportBoundary",
+      "renderedProjectFrame",
+      "audibleProjectFrame",
+      "audibleProjectionQuality",
+      "continuousFrame",
+      "durationFrames",
+      "remainingPreRollFrames",
+      "cueEventsCompleted",
+      "nextCueEventIndex",
+      "loopEnabled",
+      "loopStartFrame",
+      "loopEndFrame",
+      "loopCount",
+      "seekCount",
+      "transportDiscontinuities",
+      "presentationLatencyFrames",
+      "playbackRate",
+      "transposeSemitones",
+      "graphLatencyFrames",
+      "timePitchAnchorsPrepared",
+      "timePitchAnchorsPublished",
+      "timePitchAnchorMisses",
+      "timePitchReplacementReady",
+      "timePitchLoopPriming",
+      "devicePresentationLatencyFrames",
+      "totalPresentationLatencyFrames",
+      "preparedStartProjectFrame",
+      "retainedBytes",
+      "graphArenaBytes",
+      "parkedLaneBytes",
+      "parkedLaneCount",
+      "masterGain",
+      "referenceGain",
+      "trainingEnabled",
+      "trainingLanes",
+      "preRollFrames",
+      "cueEventCount",
+      "countInEventCount",
+      "countInBeatsPerBar",
+      "previewClicksEnqueued",
+      "previewClicksStarted",
+      "previewClicksCompleted",
+      "previewClicksPending",
+      "graphNodeCount",
+      "graphConnectionCount",
+      "latencyCompensatedEdgeCount",
+      "laneDecodeFallback",
+      "topology",
+      "xruns",
+      "deadlineMisses",
+      "discontinuities",
+      "renderFailures",
+      "adapterRenderFailures",
+      "graphStatusCode",
+      "graphStatusDetail",
+      "timePitchAnchorOutcome",
+      "terminalRenderFailures",
+      "parameterOverflows",
+      "nonFiniteSamples",
+      "rejectedBlocks",
+      "latency",
+      "lanes",
+      "message"
+    ],
+    "androidExtra": [
+      "sampleFormat",
+      "routeGeneration",
+      "streamGeneration"
+    ],
+    "lenient": [
+      "countInEventCount",
+      "countInBeatsPerBar",
+      "laneDecodeFallback",
+      "graphStatusCode",
+      "graphStatusDetail",
+      "timePitchAnchorOutcome"
+    ],
+    "unparsed": [
+      "parkedLaneBytes",
+      "parkedLaneCount"
+    ],
+    "nested": {
+      "latency": [
+        "outputDeviceFrames",
+        "bufferFrames",
+        "externalRouteFrames",
+        "presentationFrames"
+      ],
+      "lanes": [
+        "id",
+        "cursorFrames",
+        "totalFrames",
+        "gain",
+        "muted",
+        "solo"
+      ]
+    },
+    "desktop": {
+      "keys": [
+        "generation",
+        "state",
+        "hostState",
+        "terminalReason",
+        "terminalOrdinal",
+        "transportGeneration",
+        "transportState",
+        "transportTelemetryQuality",
+        "lastTransportBoundary",
+        "renderedProjectFrame",
+        "audibleProjectFrame",
+        "audibleProjectionQuality",
+        "continuousFrame",
+        "durationFrames",
+        "remainingPreRollFrames",
+        "cueEventsCompleted",
+        "nextCueEventIndex",
+        "presentationLatencyFrames",
+        "graphLatencyFrames",
+        "devicePresentationLatencyFrames",
+        "totalPresentationLatencyFrames",
+        "renderedFrames",
+        "audibleFrames",
+        "routeGeneration",
+        "streamGeneration",
+        "callbacks",
+        "xruns",
+        "deadlineMisses",
+        "discontinuities",
+        "invalidCallbacks",
+        "renderFailures",
+        "loopEnabled",
+        "loopStartFrame",
+        "loopEndFrame",
+        "loopCount",
+        "seekCount",
+        "transportDiscontinuities",
+        "playbackRate",
+        "transposeSemitones",
+        "timePitchAnchorsPrepared",
+        "timePitchAnchorsPublished",
+        "timePitchAnchorMisses",
+        "timePitchReplacementReady",
+        "timePitchLoopPriming",
+        "preparedStartProjectFrame",
+        "retainedBytes",
+        "graphArenaBytes",
+        "parkedLaneBytes",
+        "parkedLaneCount",
+        "masterGain",
+        "referenceGain",
+        "trainingEnabled",
+        "trainingLanes",
+        "preRollFrames",
+        "cueEventCount",
+        "countInEventCount",
+        "countInBeatsPerBar",
+        "previewClicksEnqueued",
+        "previewClicksStarted",
+        "previewClicksCompleted",
+        "previewClicksPending",
+        "laneDecodeFallback",
+        "topology",
+        "graphNodeCount",
+        "graphConnectionCount",
+        "latencyCompensatedEdgeCount",
+        "graphSnapshot",
+        "adapterRenderFailures",
+        "graphStatusCode",
+        "graphStatusDetail",
+        "timePitchAnchorOutcome",
+        "terminalRenderFailures",
+        "parameterOverflows",
+        "nonFiniteSamples",
+        "rejectedBlocks",
+        "error",
+        "format",
+        "latency",
+        "lanes",
+        "capability"
+      ],
+      "nested": {
+        "format": [
+          "sampleRate",
+          "maximumFrames",
+          "nominalBufferFrames",
+          "inputChannels",
+          "outputChannels"
+        ],
+        "latency": [
+          "inputDeviceFrames",
+          "outputDeviceFrames",
+          "bufferFrames",
+          "externalRouteFrames"
+        ],
+        "lanes": [
+          "id",
+          "cursorFrames",
+          "totalFrames",
+          "gain",
+          "muted",
+          "solo"
+        ]
+      },
+      "underFormat": [
+        "sampleRate",
+        "maximumFrames",
+        "nominalBufferFrames",
+        "outputChannels"
+      ],
+      "extra": [
+        "callbacks",
+        "invalidCallbacks",
+        "graphSnapshot",
+        "capability"
+      ],
+      "absent": []
+    }
+  },
+  "capability": {
+    "keys": [
+      "available",
+      "interfaceVersion",
+      "playbackContractVersion",
+      "buildId",
+      "graph",
+      "audioHostAdapter",
+      "playbackSession",
+      "playbackCleanupProof",
+      "playbackHandoffLease",
+      "playbackTransport",
+      "scheduledCues",
+      "timePitch",
+      "mediaCodec",
+      "playbackBuild",
+      "ownership",
+      "activation",
+      "outputs",
+      "session"
+    ],
+    "mediaCodec": [
+      "abiVersion",
+      "formatMask",
+      "dynamicallyLinkedFfmpeg",
+      "runtimeVersion",
+      "capabilityTag"
+    ]
+  },
+  "result": {
+    "phone": [
+      "ok",
+      "error",
+      "generation",
+      "state",
+      "sampleRate",
+      "maximumFrames",
+      "nominalBufferFrames",
+      "outputChannels",
+      "message"
+    ],
+    "androidExtra": [
+      "sampleFormat"
+    ],
+    "desktop": [
+      "ok",
+      "errorCode",
+      "error",
+      "generation",
+      "state",
+      "format",
+      "latency"
+    ]
+  },
+  "cleanup": {
+    "phone": [
+      "safety",
+      "error",
+      "generation",
+      "state",
+      "retainedBytes",
+      "parkedLaneBytes",
+      "physicalOwnershipRetained",
+      "processQuarantineRetainedBytes",
+      "processQuarantineReserved",
+      "processQuarantinePoisoned",
+      "terminalReason",
+      "coordinatorState",
+      "coordinatorEpoch",
+      "coordinatorOwnerSession",
+      "coordinatorOwnerGeneration",
+      "handoffLease",
+      "globallyComplete",
+      "fallbackSafe"
+    ],
+    "desktop": [
+      "cleanupComplete",
+      "retainedBytes",
+      "parkedLaneBytes",
+      "physicalOwnershipRetained"
+    ]
+  },
+  "lanePeaks": {
+    "keys": [
+      "ok",
+      "error",
+      "generation",
+      "bucketCount",
+      "lanes",
+      "message"
+    ],
+    "lane": [
+      "id",
+      "peaksValid",
+      "peaks"
+    ],
+    "bucketCount": 96
+  },
+  "outputs": {
+    "common": [
+      "uid",
+      "label",
+      "default",
+      "channels",
+      "sampleRate"
+    ],
+    "iosExtra": [
+      "channelLabels"
+    ],
+    "androidExtra": [
+      "sampleFormat"
+    ]
+  },
+  "enums": {
+    "playbackState": {
+      "enumerators": [
+        "Unloaded",
+        "Preparing",
+        "Prepared",
+        "OutputOpen",
+        "Running",
+        "Stopped",
+        "Terminal",
+        "Quarantined"
+      ],
+      "ios": {
+        "strings": [
+          "unloaded",
+          "preparing",
+          "prepared",
+          "output-open",
+          "running",
+          "stopped",
+          "terminal",
+          "quarantined"
+        ],
+        "fallback": "terminal"
+      },
+      "android": {
+        "strings": [
+          "unloaded",
+          "preparing",
+          "prepared",
+          "output-open",
+          "running",
+          "stopped",
+          "terminal",
+          "quarantined"
+        ],
+        "fallback": "terminal"
+      },
+      "desktop": {
+        "strings": [
+          "unloaded",
+          "preparing",
+          "prepared",
+          "output-open",
+          "running",
+          "stopped",
+          "terminal",
+          "quarantined"
+        ],
+        "fallback": "quarantined"
+      }
+    },
+    "hostState": {
+      "enumerators": [
+        "Closed",
+        "Open",
+        "Running",
+        "Stopped",
+        "DeviceLost",
+        "Error",
+        "Unsupported"
+      ],
+      "ios": {
+        "strings": [
+          "closed",
+          "open",
+          "running",
+          "stopped",
+          "device-lost",
+          "error",
+          "unsupported"
+        ],
+        "fallback": "error"
+      },
+      "android": {
+        "strings": [
+          "closed",
+          "open",
+          "running",
+          "stopped",
+          "device-lost",
+          "error",
+          "unsupported"
+        ],
+        "fallback": "error"
+      },
+      "desktop": {
+        "strings": [
+          "closed",
+          "open",
+          "running",
+          "stopped",
+          "device-lost",
+          "error",
+          "unsupported"
+        ],
+        "fallback": "error"
+      }
+    },
+    "terminalReason": {
+      "enumerators": [
+        "None",
+        "RouteChanged",
+        "Interrupted",
+        "MediaServicesLost",
+        "MediaServicesReset",
+        "DeviceLost",
+        "ProviderFailure"
+      ],
+      "ios": {
+        "strings": [
+          "none",
+          "route-changed",
+          "interrupted",
+          "media-services-lost",
+          "media-services-reset",
+          "device-lost",
+          "provider-failure"
+        ],
+        "fallback": "provider-failure"
+      },
+      "android": {
+        "strings": [
+          "none",
+          "route-changed",
+          "interrupted",
+          "media-services-lost",
+          "media-services-reset",
+          "device-lost",
+          "provider-failure"
+        ],
+        "fallback": "provider-failure"
+      },
+      "desktop": {
+        "strings": [
+          "none",
+          "device-lost",
+          "route-changed",
+          "interrupted",
+          "media-services-lost",
+          "media-services-reset",
+          "provider-failure"
+        ],
+        "fallback": "provider-failure"
+      }
+    },
+    "transportState": {
+      "enumerators": [
+        "Stopped",
+        "PreRoll",
+        "Playing",
+        "Paused",
+        "Completed"
+      ],
+      "ios": {
+        "strings": [
+          "stopped",
+          "pre-roll",
+          "playing",
+          "paused",
+          "completed"
+        ],
+        "fallback": "stopped"
+      },
+      "android": {
+        "strings": [
+          "stopped",
+          "pre-roll",
+          "playing",
+          "paused",
+          "completed"
+        ],
+        "fallback": "stopped"
+      },
+      "desktop": {
+        "strings": [
+          "stopped",
+          "pre-roll",
+          "playing",
+          "paused",
+          "completed"
+        ],
+        "fallback": "stopped"
+      }
+    },
+    "transportTelemetryQuality": {
+      "enumerators": [
+        "Unavailable",
+        "Initial",
+        "Current",
+        "LastGood"
+      ],
+      "ios": {
+        "strings": [
+          "unavailable",
+          "initial",
+          "current",
+          "lastGood"
+        ],
+        "fallback": "unavailable"
+      },
+      "android": {
+        "strings": [
+          "unavailable",
+          "initial",
+          "current",
+          "lastGood"
+        ],
+        "fallback": "unavailable"
+      },
+      "desktop": {
+        "strings": [
+          "unavailable",
+          "initial",
+          "current",
+          "lastGood"
+        ],
+        "fallback": "unavailable"
+      }
+    },
+    "transportBoundaryReason": {
+      "enumerators": [
+        "None",
+        "StreamGenerationChanged",
+        "SequenceGap",
+        "SampleRateChanged",
+        "RouteGenerationChanged",
+        "TimestampQualityChanged",
+        "ClockReanchored",
+        "SourceSeek",
+        "SourceLoop",
+        "DeviceLost",
+        "SourceFrameOverflow"
+      ],
+      "ios": {
+        "strings": [
+          "none",
+          "stream-generation-changed",
+          "sequence-gap",
+          "sample-rate-changed",
+          "route-generation-changed",
+          "timestamp-quality-changed",
+          "clock-reanchored",
+          "source-seek",
+          "source-loop",
+          "device-lost",
+          "source-frame-overflow"
+        ],
+        "fallback": "none"
+      },
+      "android": {
+        "strings": [
+          "none",
+          "stream-generation-changed",
+          "sequence-gap",
+          "sample-rate-changed",
+          "route-generation-changed",
+          "timestamp-quality-changed",
+          "clock-reanchored",
+          "source-seek",
+          "source-loop",
+          "device-lost",
+          "source-frame-overflow"
+        ],
+        "fallback": "none"
+      },
+      "desktop": {
+        "strings": [
+          "none",
+          "stream-generation-changed",
+          "sequence-gap",
+          "sample-rate-changed",
+          "route-generation-changed",
+          "timestamp-quality-changed",
+          "clock-reanchored",
+          "source-seek",
+          "source-loop",
+          "device-lost",
+          "source-frame-overflow"
+        ],
+        "fallback": "none"
+      }
+    },
+    "cleanupSafety": {
+      "enumerators": [
+        "NotOwned",
+        "Complete",
+        "Uncertain"
+      ],
+      "ios": {
+        "strings": [
+          "not-owned",
+          "complete",
+          "uncertain"
+        ],
+        "fallback": "uncertain"
+      },
+      "android": {
+        "strings": [
+          "not-owned",
+          "complete",
+          "uncertain"
+        ],
+        "fallback": "uncertain"
+      }
+    },
+    "coordinatorState": {
+      "enumerators": [
+        "Available",
+        "NativeOwned",
+        "FallbackLeased",
+        "Poisoned"
+      ],
+      "ios": {
+        "strings": [
+          "available",
+          "native-owned",
+          "fallback-leased",
+          "poisoned"
+        ],
+        "fallback": "poisoned"
+      },
+      "android": {
+        "strings": [
+          "available",
+          "native-owned",
+          "fallback-leased",
+          "poisoned"
+        ],
+        "fallback": "poisoned"
+      }
+    },
+    "audibleProjectionQuality": {
+      "enumerators": [
+        "Unavailable",
+        "Current"
+      ],
+      "desktop": {
+        "strings": [
+          "unavailable",
+          "current"
+        ],
+        "fallback": "unavailable"
+      }
+    },
+    "playbackError": {
+      "enumerators": [
+        "None",
+        "InvalidGeneration",
+        "InvalidState",
+        "InvalidConfiguration",
+        "Cancelled",
+        "DecodeFailure",
+        "LimitExceeded",
+        "ResourceExhausted",
+        "GraphFailure",
+        "HostFailure",
+        "ProviderFailure",
+        "QueueFull",
+        "TeardownUncertain",
+        "UnsupportedPlaybackRate"
+      ],
+      "ios": {
+        "strings": [
+          "none",
+          "invalid-generation",
+          "invalid-state",
+          "invalid-configuration",
+          "cancelled",
+          "decode-failure",
+          "limit-exceeded",
+          "resource-exhausted",
+          "graph-failure",
+          "host-failure",
+          "provider-failure",
+          "queue-full",
+          "teardown-uncertain",
+          "unsupported-playback-rate"
+        ],
+        "fallback": "provider-failure"
+      }
+    },
+    "graphNodeRole": {
+      "enumerators": [
+        "Input",
+        "Processor",
+        "Output"
+      ],
+      "desktop": {
+        "strings": [
+          "input",
+          "processor",
+          "output"
+        ],
+        "fallback": null
+      }
+    },
+    "graphNodeKind": {
+      "enumerators": [
+        "Unknown",
+        "PhysicalOutput",
+        "DecodedSource",
+        "ChannelMap",
+        "Gain",
+        "Mix",
+        "ScheduledGain",
+        "SignalsmithTimePitch",
+        "ScheduledCueSource",
+        "PeakRms",
+        "Tap",
+        "Oscillator",
+        "SafetyLimiter",
+        "UnavailableBypass",
+        "UnavailableSilence"
+      ],
+      "desktop": {
+        "strings": [
+          "unknown",
+          "physical-output",
+          "decoded-source",
+          "channel-map",
+          "gain",
+          "mix",
+          "scheduled-gain",
+          "signalsmith-time-pitch",
+          "scheduled-cue-source",
+          "peak-rms",
+          "tap",
+          "oscillator",
+          "safety-limiter",
+          "unavailable-bypass",
+          "unavailable-silence"
+        ],
+        "fallback": null
+      }
+    }
+  },
+  "desktopRenames": [
+    {
+      "object": "result",
+      "phone": "error",
+      "desktop": "errorCode",
+      "meaning": "the NativePlaybackError name"
+    },
+    {
+      "object": "result",
+      "phone": "message",
+      "desktop": "error",
+      "meaning": "the free-text explanation"
+    },
+    {
+      "object": "session",
+      "phone": "message",
+      "desktop": "error",
+      "meaning": "the free-text explanation"
+    },
+    {
+      "object": "cleanup",
+      "phone": "globallyComplete",
+      "desktop": "cleanupComplete",
+      "meaning": "the whole-process cleanup proof"
+    }
+  ]
+}
