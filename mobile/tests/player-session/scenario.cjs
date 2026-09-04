@@ -38,6 +38,15 @@
  */
 
 const { sleep } = require('./cdp.cjs')
+const { hostLoad, isQuiet, QUIET_LOAD } = require('./host-load.cjs')
+
+/* The legacy engine's callback size, written down once. react-native-audio-api
+   renders in RENDER_QUANTUM_SIZE frames (Constants.h) and on Android asks
+   Oboe for exactly that many per callback (AudioPlayer.cpp,
+   setFramesPerDataCallback); on iOS the OS chooses its own callback size
+   and the app cannot observe it. Nothing in the app logs it, so this is the
+   one figure the table has for legacy — a constant, and labelled as one. */
+const LEGACY_RENDER_QUANTUM = 128
 
 /* The app's telemetry poll interval, mirrored. A driver cannot import from
    src/ (it runs in node against a device, not in the bundle), so this is the
@@ -45,8 +54,14 @@ const { sleep } = require('./cdp.cjs')
    derived from it rather than from independent literals, which is what went
    wrong when the interval moved and a fixed 300 ms window stopped containing
    the correction it existed to catch. Keep in step with
-   NATIVE_TELEMETRY_POLL_MS in mobile/src/playback/native.ts. */
-const POLL_MS = 400
+   NATIVE_TELEMETRY_POLL_MS in mobile/src/playback/native.ts.
+
+   Since the position moved onto the synchronous clock the poll carries no
+   position, so a correction no longer "arrives" on it — but the seek rule's
+   window still spans one poll plus, so that a build without the clock (which
+   still projects between polls) is measured over the whole gap it can bounce
+   in. */
+const POLL_MS = 1000
 
 /** A sample is "advancing" when the transport moved by more than this since
  *  the previous one — comfortably above sampler jitter, well under one
@@ -418,6 +433,17 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
 
   const say = (line) => log(`  ${line}`)
   let observedKind = null
+  /* Every CPU/memory phase is sampled WITH the host's 1-minute load beside
+     it. A simulator or emulator number taken on a busy Mac describes the Mac;
+     the load is what says so, printed in the table and judged as a rule
+     (`hostQuiet`) when the device is host-bound. */
+  const sample = async (phase) => {
+    const s = await dev.sample()
+    const h = hostLoad()
+    const out = { ...s, load1: h.load1 }
+    say(`${phase}: cpu ${s.cpuPct ?? '—'}% · host load ${h.load1}${isQuiet(h.load1) ? '' : ` (BUSY — quiet is ≤ ${QUIET_LOAD})`}`)
+    return out
+  }
 
   /* A void must not throw away what it already measured.
    *
@@ -502,7 +528,7 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   const duration = await dev.val('__test.backend ? __test.backend.duration : 0')
   say(`duration ${duration.toFixed(1)} s · lanes ${await dev.val('__test.lanes().map(l => l.id).join(",")')}`)
 
-  cpu['idle-in-player'] = await dev.sample()
+  cpu['idle-in-player'] = await sample('idle-in-player')
 
   // ---- 3. Play -----------------------------------------------------------
   const play = await watch(dev, {
@@ -538,8 +564,23 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   flags.playStarted = play.hit !== null
   detail.playStarted = detail.playOutcome
   say(`Play → advancing ${m.playAdvance} ms · first audible ${m.playAudible} ms (${detail.playOutcome})`)
+  /* The NEGOTIATED callback size — the number to want first when one backend
+     costs more CPU than the other. Native logs it when the host output opens
+     (`zcore AudioHost open · … · N frame nominal buffer`); legacy logs
+     nothing and the table carries its render quantum, marked as the
+     constant it is. */
+  if (backend === 'native') {
+    const frames = await dev.val(
+      `__r('src/log.ts').logEntries().then(e => { const a = e.filter(x => /zcore AudioHost open/.test(x.line) && x.t >= ${play.t0}); const m = a.length ? /(\\d+) frame nominal buffer/.exec(a[a.length - 1].line) : null; return m ? Number(m[1]) : null })`
+    )
+    detail.callbackFrames = frames === null ? null : { frames, source: 'negotiated (app log)' }
+    if (frames === null) notes.push('no "zcore AudioHost open" line after Play, so the callback size is unknown')
+  } else {
+    detail.callbackFrames = { frames: LEGACY_RENDER_QUANTUM, source: 'render quantum (RNAudioAPI constant)' }
+  }
+  say(`callback: ${detail.callbackFrames ? `${detail.callbackFrames.frames} frames · ${detail.callbackFrames.source}` : 'unknown'}`)
   await sleep(1500)
-  cpu.playing = await dev.sample()
+  cpu.playing = await sample('playing')
 
   // ---- 4. three metronome touches ---------------------------------------
   /* Through the SCREEN's handler, which is the one that persists — a save
@@ -681,7 +722,7 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
     stopOnHit: false,
     action: '__test.setPitchTempo(2, 100);'
   })
-  cpu['pitch-change'] = await dev.sample()
+  cpu['pitch-change'] = await sample('pitch-change')
   const pitch = await watchEnd(dev, pitchToken)
   const stall = longestStall(pitch.out)
   m.pitchGap = round(stall.ms)
@@ -733,7 +774,7 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   const bgWindowFrom = await dev.val('Date.now()')
   const bg = await dev.background()
   await sleep(3000)
-  cpu.backgrounded = await dev.sample()
+  cpu.backgrounded = await sample('backgrounded')
   /* A backgrounded app may legitimately be FROZEN, and then it cannot answer.
    *
    * On a real iPhone iOS suspends an app that is not playing audio, so its JS
@@ -859,7 +900,7 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   const back = await watch(dev, { ms: 15000, every: 30, action: '__test.back();', cond: "s.screen === 'catalog'" })
   m.backUnload = round(back.hit)
   await sleep(2500)
-  cpu['after-leaving'] = await dev.sample()
+  cpu['after-leaving'] = await sample('after-leaving')
   if (backend === 'native') {
     const unloaded = await dev.val(
       `__r('src/log.ts').logEntries().then(e => e.filter(x => /unloaded generation/.test(x.line) && x.t >= ${back.t0}).length)`
@@ -959,6 +1000,18 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   say(
     `log: graph build refused=${counts.refused} · cue rebuild failed=${counts.cueFailed} · durable save failed=${counts.durableFailed} · preparing graph per open ${counts.preparePerOpen.map((o) => `${o.label}=${o.n}`).join(', ')}`
   )
+  /* A host-bound device's CPU and memory phases are only a measurement when
+     the host was quiet through every one of them. This is judged per PASS:
+     a busy host during the legacy pass alone poisons the comparison just as
+     surely. A phone is never host-bound and gets no such rule. */
+  if (dev.hostBound) {
+    const busy = CPU_PHASES.filter((p) => cpu[p] && !isQuiet(cpu[p].load1))
+    flags.hostQuiet = busy.length === 0
+    detail.hostQuiet =
+      CPU_PHASES.map((p) => `${p}=${cpu[p] ? cpu[p].load1 : '—'}`).join(' ') +
+      ` (quiet ≤ ${QUIET_LOAD})` +
+      (busy.length ? ` — BUSY during ${busy.join(', ')}: those CPU/memory rows describe the host, not the app` : '')
+  }
 
   await watch(dev, { ms: 15000, every: 30, action: '__test.back();', cond: "s.screen === 'catalog'" })
   /* Before the socket closes, not after. The runner's `finally` also calls
@@ -1106,7 +1159,8 @@ function evaluate(legacy, native) {
     ['noRefusals', 'no "graph build refused" in the whole session'],
     ['noCueFailures', 'no "cue rebuild failed" in the whole session'],
     ['noDurableSaveFailures', 'no "durable save failed" in the whole session'],
-    ['onePreparePerOpen', 'exactly one "preparing graph" per open (native) / none (legacy)']
+    ['onePreparePerOpen', 'exactly one "preparing graph" per open (native) / none (legacy)'],
+    ['hostQuiet', 'the host was quiet (1-min load ≤ QUIET_LOAD) through every CPU/memory phase']
   ]
   for (const [key, label] of boolRules) {
     for (const pass of [legacy, native]) {
@@ -1164,13 +1218,25 @@ function renderTables(platformLabel, legacy, native, rows) {
 
   out.push('')
   out.push(`==== ${platformLabel} · CPU and memory (HOST-side numbers — see README) ====`)
-  out.push(`${pad('phase', 20)} ${padL('legacy %', 10)} ${padL('native %', 10)} ${padL('legacy MB', 11)} ${padL('native MB', 11)}`)
+  const cbOf = (p) => (p.detail.callbackFrames ? `${p.detail.callbackFrames.frames} frames · ${p.detail.callbackFrames.source}` : 'unknown')
+  out.push(`callback size: legacy ${cbOf(legacy)} · native ${cbOf(native)}`)
+  out.push(
+    `${pad('phase', 20)} ${padL('legacy %', 10)} ${padL('native %', 10)} ${padL('legacy MB', 11)} ${padL('native MB', 11)}` +
+      ` ${padL('load@legacy', 12)} ${padL('load@native', 12)}`
+  )
   for (const phase of CPU_PHASES) {
     const l = legacy.cpu[phase] ?? {}
     const n = native.cpu[phase] ?? {}
     const memOf = (s) => (s.pssMb !== null && s.pssMb !== undefined ? s.pssMb : s.rssMb)
-    out.push(`${pad(phase, 20)} ${padL(l.cpuPct, 10)} ${padL(n.cpuPct, 10)} ${padL(memOf(l), 11)} ${padL(memOf(n), 11)}`)
+    /* The host's 1-minute load when each side's sample was taken. A "!"
+       marks a busy host: that row's numbers describe the Mac, not the app. */
+    const loadOf = (s) => (s.load1 === null || s.load1 === undefined ? null : `${s.load1}${isQuiet(s.load1) ? '' : ' !'}`)
+    out.push(
+      `${pad(phase, 20)} ${padL(l.cpuPct, 10)} ${padL(n.cpuPct, 10)} ${padL(memOf(l), 11)} ${padL(memOf(n), 11)}` +
+        ` ${padL(loadOf(l), 12)} ${padL(loadOf(n), 12)}`
+    )
   }
+  out.push(`(load is the host's 1-minute average; quiet is ≤ ${QUIET_LOAD}, set QUIET_LOAD to move it)`)
 
   out.push('')
   out.push(`==== ${platformLabel} · rules ====`)

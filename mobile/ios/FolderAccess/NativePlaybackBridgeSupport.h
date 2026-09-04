@@ -10,6 +10,13 @@ void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
 // same name, no arguments.
 void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
                                 RCTPromiseRejectBlock reject);
+// Where the song is RIGHT NOW, answered on the CALLING thread — the player's
+// clock, read the way the legacy engine reads its AudioContext's currentTime.
+// The only synchronous entry here: it never touches the control queue
+// (prepare and stop can hold it for seconds) and reads the core's lock-free
+// publication. Android's positionNow() is its exact twin: same name, no
+// arguments, the same keys.
+NSDictionary* SingzNativePlaybackPositionNow(void);
 void SingzNativePlaybackPrepare(NSNumber* generation, NSDictionary* request,
                                 RCTPromiseResolveBlock resolve,
                                 RCTPromiseRejectBlock reject);

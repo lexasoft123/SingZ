@@ -116,6 +116,12 @@ function nativePlayerHarness(): {
     transportControls: true,
     mixerControls: true,
     snapshot: () => state,
+    clock: () => ({
+      renderedSec: state.renderedPositionSec,
+      playing: state.phase === 'playing',
+      live: false,
+      countIn: state.countInStatus
+    }),
     setDisplayTrim: jest.fn(),
     lanePeaks: jest.fn(async () => null),
     subscribe: listener => {

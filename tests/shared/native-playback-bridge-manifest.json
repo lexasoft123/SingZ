@@ -25,61 +25,80 @@
     "phone": [
       {
         "name": "configureOutputSession",
-        "arity": 1
+        "arity": 1,
+        "synchronous": false
       },
       {
         "name": "lanePeaks",
-        "arity": 1
+        "arity": 1,
+        "synchronous": false
       },
       {
         "name": "openOutput",
-        "arity": 1
+        "arity": 1,
+        "synchronous": false
+      },
+      {
+        "name": "positionNow",
+        "arity": 0,
+        "synchronous": true
       },
       {
         "name": "prepare",
-        "arity": 2
+        "arity": 2,
+        "synchronous": false
       },
       {
         "name": "previewClick",
-        "arity": 2
+        "arity": 2,
+        "synchronous": false
       },
       {
         "name": "session",
-        "arity": 0
+        "arity": 0,
+        "synchronous": false
       },
       {
         "name": "setControl",
-        "arity": 2
+        "arity": 2,
+        "synchronous": false
       },
       {
         "name": "start",
-        "arity": 1
+        "arity": 1,
+        "synchronous": false
       },
       {
         "name": "status",
-        "arity": 0
+        "arity": 0,
+        "synchronous": false
       },
       {
         "name": "stop",
-        "arity": 1
+        "arity": 1,
+        "synchronous": false
       },
       {
         "name": "transport",
-        "arity": 2
+        "arity": 2,
+        "synchronous": false
       },
       {
         "name": "unload",
-        "arity": 1
+        "arity": 1,
+        "synchronous": false
       },
       {
         "name": "unloadRetainingLanes",
-        "arity": 1
+        "arity": 1,
+        "synchronous": false
       }
     ],
     "iosOnly": [
       {
         "name": "codecTargetProof",
-        "arity": 0
+        "arity": 0,
+        "synchronous": false
       }
     ],
     "desktopAddon": [
@@ -185,6 +204,7 @@
     "kotlinExternals": [
       "nativePlaybackStatus",
       "nativePlaybackSession",
+      "nativePlaybackPositionNow",
       "nativePlaybackClaim",
       "nativePlaybackRequestCancellation",
       "nativePlaybackPrepare",
@@ -213,6 +233,7 @@
       "nativePlaybackLanePeaks",
       "nativePlaybackOpenOutput",
       "nativePlaybackPause",
+      "nativePlaybackPositionNow",
       "nativePlaybackPrepare",
       "nativePlaybackPreviewClick",
       "nativePlaybackReanchor",
@@ -464,6 +485,19 @@
       ],
       "absent": []
     }
+  },
+  "positionNow": {
+    "note": "The synchronous clock payload. Built as a dictionary literal on iOS and a WritableMap on Android, parsed by parseNativePlaybackPositionNow. A key misspelled on one platform makes that parse return null and the player silently falls back to the polled clock on THAT PLATFORM ONLY, with every suite green — which is why both spellings are compared here rather than the parser alone.",
+    "keys": [
+      "available",
+      "generation",
+      "transportState",
+      "renderedProjectFrame",
+      "continuousFrame",
+      "remainingPreRollFrames",
+      "seekCount",
+      "ageMs"
+    ]
   },
   "capability": {
     "keys": [
@@ -755,6 +789,16 @@
       "desktop": {
         "strings": [
           "stopped",
+          "pre-roll",
+          "playing",
+          "paused",
+          "completed"
+        ],
+        "fallback": "stopped"
+      },
+      "kotlin": {
+        "note": "A fourth copy of this table, mapping the core's integer codes inside positionNow. The JNI static_assert pins the codes; this pins the names.",
+        "strings": [
           "pre-roll",
           "playing",
           "paused",

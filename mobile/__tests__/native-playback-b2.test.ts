@@ -7,8 +7,11 @@ import {
   IosNativePlaybackCoordinator,
   NativePlaybackCommandError,
   nativePlaybackEligibility,
+  NATIVE_CLOCK_PROJECTION_LIMIT_SEC,
   NATIVE_PRE_ROLL_POLL_MS,
+  NATIVE_TELEMETRY_IDLE_POLL_MS,
   NATIVE_TELEMETRY_POLL_MS,
+  NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC,
   parseNativePlaybackCapability,
   parseNativePlaybackLanePeaks,
   rebuildIosNativePlaybackCues,
@@ -305,6 +308,11 @@ function harness(
     parkedLaneBytes?: number;
     retainedOnPark?: number;
     platform?: 'ios' | 'android';
+    /** Give the bridge the synchronous clock (`positionNow`), the way a
+     *  native build with the method has it. Tests shape what it answers with
+     *  `setPositionNow`; the default harness has no clock, the way an older
+     *  build has none, so everything else keeps exercising the polled path. */
+    syncClock?: boolean;
   } = {},
 ) {
   const platform = options.platform ?? 'ios';
@@ -314,6 +322,7 @@ function harness(
   let nextLease = 40;
   const prepareRequests: Array<Record<string, unknown>> = [];
   const status = jest.fn(async () => capability(generation, state, 0, platform));
+  let positionNow: Record<string, unknown> | null = null;
   const native = {
     status,
     // The poll and the seek-receipt wait read session(); it derives from
@@ -322,6 +331,12 @@ function harness(
     // bridge's session() never touches status() — the contract suite pins
     // that at the wrapper.
     session: jest.fn(async () => (await status()).session),
+    ...(options.syncClock === true
+      ? {
+          syncClock: true,
+          positionNow: jest.fn(() => positionNow),
+        }
+      : {}),
     prepare: jest.fn(async (next: number, request: Record<string, unknown>) => {
       calls.push(`native.prepare:${next}`);
       generation = next;
@@ -515,6 +530,11 @@ function harness(
     releasePcm,
     preferences,
     preferenceLoad,
+    /** What the synchronous clock answers next (a `syncClock` harness). The
+     *  parsed shape, already shaped like the bridge's answer. */
+    setPositionNow: (next: Record<string, unknown> | null) => {
+      positionNow = next;
+    },
   };
 }
 
@@ -3251,17 +3271,24 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     const generation = handle.snapshot().generation;
     // One bar of four at 120 bpm: a two-second runway, four beats.
     const preRoll = 96_000;
+    // The dots are computed from the RENDER head minus the presentation
+    // latency the session states, so a fixture that names an audible frame
+    // puts the render head that latency ahead of it — the shape the core
+    // actually publishes. (The old fixture set the two equal while declaring
+    // 304 frames of latency, which only went unnoticed while the audible
+    // frame was read straight off the block.)
     const countIn = (audibleFrame: number) => {
       const base = capability(generation, 'running', 0, 'ios');
+      const latency = base.session.presentationLatencyFrames;
       return {
         ...base,
         session: {
           ...base.session,
           transportState: 'pre-roll',
           preRollFrames: preRoll,
-          remainingPreRollFrames: Math.max(0, -audibleFrame),
+          remainingPreRollFrames: Math.max(0, -(audibleFrame + latency)),
           audibleProjectFrame: audibleFrame,
-          renderedProjectFrame: audibleFrame,
+          renderedProjectFrame: audibleFrame + latency,
           countInEventCount: 4,
           countInBeatsPerBar: 4,
         },
@@ -3331,14 +3358,16 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     // gridless count-in has no bar to group by. Both must still count in.
     h.native.status.mockImplementation(async () => {
       const base = capability(generation, 'running', 0, 'ios');
+      const latency = base.session.presentationLatencyFrames;
       return {
         ...base,
         session: {
           ...base.session,
           transportState: 'pre-roll',
           preRollFrames: 96_000,
-          remainingPreRollFrames: 48_000,
+          remainingPreRollFrames: 48_000 - latency,
           audibleProjectFrame: -48_000,
+          renderedProjectFrame: -48_000 + latency,
           countInEventCount: 0,
           countInBeatsPerBar: 0,
         },
@@ -3423,5 +3452,405 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     expect(
       h.native.transport.mock.calls.at(-2)?.[1],
     ).toMatchObject({ kind: 'seek', projectFrame: 24_000 });
+  });
+});
+
+describe("the player's clock", () => {
+  /* Legacy's position is a computation on a synchronous getter of its
+     AudioContext's clock. Native's was a value that ARRIVED — on a poll,
+     projected by wall time until the next one — and everything the driver
+     measured native losing on the position followed from that: the seek bar
+     pulling back after every scrub (the poll republished the frame the seek
+     had left), the position drifting for hundreds of milliseconds after
+     every pause (nothing froze it), the position sitting at zero after Play
+     until the core's audible projection had warmed up and a poll had landed,
+     and a poll that was cheap only because it was slow. These pin the clock
+     as a computation on the synchronous read, and the polled projection as
+     what a native build without that read still gets. */
+  const open: Array<{ unload(reason: string): Promise<void> }> = [];
+  afterEach(async () => {
+    for (const handle of open.splice(0))
+      await handle.unload('test').catch(() => undefined);
+  });
+  const started = async (h: ReturnType<typeof harness>) => {
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    await handle.start();
+    h.calls.length = 0;
+    return handle;
+  };
+  const SR = 48_000;
+  /** capability()'s presentationLatencyFrames. */
+  const LATENCY = 304;
+  /** What the bridge's positionNow answers, already parsed. */
+  const answer = (generation: number, patch: Record<string, unknown> = {}) => ({
+    available: true,
+    generation,
+    transportState: 'playing',
+    renderedProjectFrame: 0,
+    continuousFrame: 0,
+    remainingPreRollFrames: 0,
+    seekCount: 0,
+    ageMs: 0,
+    ...patch,
+  });
+  /** A status for the poll: the transport in a state at a render position. */
+  const at = (
+    generation: number,
+    transportState: string,
+    renderedProjectFrame: number,
+    patch: Record<string, unknown> = {},
+  ) => {
+    const base = capability(generation, 'running', 0, 'ios');
+    return {
+      ...base,
+      session: {
+        ...base.session,
+        // A real song, not the fixture's two seconds: the clock clamps at the
+        // song's end, and these tests project several seconds past a poll.
+        durationFrames: 120 * SR,
+        transportState,
+        renderedProjectFrame,
+        ...patch,
+      },
+    } as never;
+  };
+
+  describe('on a native build with the synchronous read', () => {
+    it('is a computation on the read, advanced by its age at the playback rate, and bounded', async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      h.setPositionNow(answer(generation, { renderedProjectFrame: SR, ageMs: 100 }));
+      const clock = handle.clock();
+      expect(clock.live).toBe(true);
+      expect(clock.playing).toBe(true);
+      expect(clock.renderedSec).toBeCloseTo(1.1, 5);
+      // Every read asks the bridge: there is no cache between renders, and
+      // nothing here waited for a poll — the polled view is still at zero.
+      expect(h.native.positionNow).toHaveBeenCalled();
+      expect(handle.snapshot().renderedPositionSec).toBe(0);
+      // A read that is seconds old is a stalled callback, not seconds of
+      // song: the advance is bounded, and the poll will name the stall.
+      h.setPositionNow(answer(generation, { renderedProjectFrame: SR, ageMs: 5_000 }));
+      expect(handle.clock().renderedSec).toBeCloseTo(
+        1 + NATIVE_CLOCK_PROJECTION_LIMIT_SEC,
+        5,
+      );
+    });
+
+    it('reads a paused transport exactly where the callback left it, however old the read', async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      h.setPositionNow(
+        answer(generation, {
+          transportState: 'paused',
+          renderedProjectFrame: 2 * SR,
+          ageMs: 800,
+        }),
+      );
+      const clock = handle.clock();
+      expect(clock.playing).toBe(false);
+      expect(clock.renderedSec).toBeCloseTo(2, 5);
+    });
+
+    it("holds a pause at the frame under the singer's finger, not where the callback caught up", async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      h.setPositionNow(answer(generation, { renderedProjectFrame: SR }));
+      const pausing = handle.pause();
+      // The core applies the pause one block later, a block further on, and
+      // the read then ages while the singer looks at the paused screen.
+      h.setPositionNow(
+        answer(generation, {
+          transportState: 'paused',
+          renderedProjectFrame: SR + 960,
+        }),
+      );
+      await pausing;
+      h.setPositionNow(
+        answer(generation, {
+          transportState: 'paused',
+          renderedProjectFrame: SR + 960,
+          ageMs: 900,
+        }),
+      );
+      expect(handle.clock().playing).toBe(false);
+      // Not 1.02 (the block the pause landed on) and not further (the age):
+      // exactly the 1.0 the singer stopped at, for as long as they stay
+      // stopped. The 300-490 ms of drift after every pause was this.
+      expect(handle.clock().renderedSec).toBeCloseTo(1, 5);
+      // Resume reads the core again — from ITS frame, a block on at most,
+      // at the one moment a block's jump cannot be seen.
+      h.setPositionNow(answer(generation, { renderedProjectFrame: SR + 960 }));
+      await handle.start();
+      expect(handle.clock().renderedSec).toBeCloseTo(1.02, 5);
+    });
+
+    it("reads a seek's target until the receipt moves, never the frame it left", async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      h.setPositionNow(answer(generation, { renderedProjectFrame: 1.5 * SR }));
+      await handle.seek(0.5);
+      // Accepted, not yet drained: the callback still publishes 1.5 s and the
+      // read is a few ms old. The old clock showed the target, then the next
+      // poll republished 1.5 s minus a latency — the pull-back the driver
+      // measured at 65-143 ms and the singer called "the seek bar jumps
+      // back".
+      h.setPositionNow(
+        answer(generation, { renderedProjectFrame: 1.5 * SR, seekCount: 0, ageMs: 20 }),
+      );
+      expect(handle.clock().renderedSec).toBeCloseTo(0.5, 5);
+      // Drained: the receipt moved and the core is at the target, moving.
+      h.setPositionNow(
+        answer(generation, { renderedProjectFrame: 0.5 * SR + 960, seekCount: 1 }),
+      );
+      expect(handle.clock().renderedSec).toBeCloseTo(0.52, 5);
+    });
+
+    it('moves the position from the first block, before the audible projection is current', async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      // What the poll says at this moment: the core's audible projection is
+      // still warming up (a latency history's worth after the stream
+      // starts), which used to hold the displayed position at zero until
+      // first-audible plus a poll — 373 ms on the simulator against
+      // legacy's 223.
+      h.native.status.mockImplementation(async () =>
+        at(generation, 'playing', 4_800, {
+          audibleProjectionQuality: 'unavailable',
+          audibleProjectFrame: 0,
+        }),
+      );
+      await h.coordinator.pollHandle(handle as never);
+      // The polled view did not move (it never adopts an audible frame that
+      // is not current), and the clock does not care.
+      expect(handle.snapshot().positionSec).toBeLessThan(0.05);
+      h.setPositionNow(answer(generation, { renderedProjectFrame: 4_800, ageMs: 10 }));
+      expect(handle.clock().renderedSec).toBeCloseTo(0.11, 5);
+    });
+
+    it('lights the count-in dots from the clock, on the frame the ear is at', async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      // The count-in's SHAPE comes from the poll — four beats in one bar over
+      // a two-second runway, and the latency the ear trails the render head
+      // by — and its progress from the clock, read by read.
+      h.native.status.mockImplementation(async () =>
+        at(generation, 'pre-roll', -96_000 + LATENCY, {
+          preRollFrames: 96_000,
+          remainingPreRollFrames: 96_000 - LATENCY,
+          countInEventCount: 4,
+          countInBeatsPerBar: 4,
+        }),
+      );
+      await h.coordinator.pollHandle(handle as never);
+      h.setPositionNow(
+        answer(generation, {
+          transportState: 'pre-roll',
+          renderedProjectFrame: -48_000 + LATENCY,
+          remainingPreRollFrames: 48_000 - LATENCY,
+        }),
+      );
+      expect(handle.clock().countIn).toEqual({
+        kind: 'beats',
+        total: 4,
+        done: 3,
+        perBar: 4,
+      });
+      // And they advance with the read's age, not with the poll: half a
+      // second on is the fourth beat, with no poll in between.
+      h.setPositionNow(
+        answer(generation, {
+          transportState: 'pre-roll',
+          renderedProjectFrame: -48_000 + LATENCY,
+          remainingPreRollFrames: 48_000 - LATENCY,
+          ageMs: 500,
+        }),
+      );
+      expect(handle.clock().countIn).toMatchObject({ done: 4 });
+      expect(handle.snapshot().countInStatus).toMatchObject({ done: 1 });
+    });
+
+    it('polls at the playing rate, and at the idle rate once paused', async () => {
+      const h = harness({ syncClock: true });
+      const handle = (await started(h)) as unknown as {
+        startPolling: () => void;
+        stopPolling: () => void;
+        noteTransportCommand: (command: { kind: string }) => void;
+      };
+      const poll = jest
+        .spyOn(h.coordinator, 'pollHandle')
+        .mockResolvedValue(undefined);
+      jest.useFakeTimers();
+      try {
+        handle.startPolling();
+        expect(poll).toHaveBeenCalledTimes(1); // the immediate read
+        // No fast pre-roll arming: the dots are read from the clock now.
+        jest.advanceTimersByTime(NATIVE_PRE_ROLL_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(1);
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_POLL_MS - NATIVE_PRE_ROLL_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(2);
+        // Paused: the tick that finds the phase paused re-arms at the idle
+        // rate, so the next one is not due a playing-interval later.
+        handle.noteTransportCommand({ kind: 'pause' });
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(3);
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(3);
+        jest.advanceTimersByTime(NATIVE_TELEMETRY_IDLE_POLL_MS - NATIVE_TELEMETRY_POLL_MS);
+        expect(poll).toHaveBeenCalledTimes(4);
+      } finally {
+        handle.stopPolling();
+        jest.useRealTimers();
+        poll.mockRestore();
+      }
+    });
+
+    it('asks for the park the moment the clock sees the song ran out', async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      const poll = jest
+        .spyOn(h.coordinator, 'pollHandle')
+        .mockResolvedValue(undefined);
+      try {
+        h.setPositionNow(
+          answer(generation, {
+            transportState: 'completed',
+            renderedProjectFrame: 120 * SR,
+          }),
+        );
+        // Playing reads false on this very render; the park (which is the
+        // poll's) is asked for now rather than up to a poll later, so a Play
+        // in that window restarts the song instead of resuming a transport
+        // the core will only complete again.
+        expect(handle.clock().playing).toBe(false);
+        expect(poll).toHaveBeenCalledTimes(1);
+      } finally {
+        poll.mockRestore();
+      }
+    });
+
+    it('lets a Play tap in the window before the park lands restart the song, not be refused', async () => {
+      const h = harness({ syncClock: true });
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      // The song ran out: the clock says completed, and the poll that parks
+      // it has not run yet — the phase still says playing. A tap here used to
+      // be a start on a "running" transport, refused.
+      h.native.status.mockImplementation(async () =>
+        at(generation, 'completed', 120 * SR),
+      );
+      h.setPositionNow(
+        answer(generation, {
+          transportState: 'completed',
+          renderedProjectFrame: 120 * SR,
+        }),
+      );
+      h.native.transport.mockClear();
+      expect(handle.snapshot().phase).toBe('playing');
+      await handle.start();
+      // The park landed first (pause), then Play restarted from the top.
+      expect(h.native.transport.mock.calls.map(call => call[1].kind)).toEqual([
+        'pause',
+        'seek',
+        'resume',
+      ]);
+    });
+  });
+
+  describe('on a native build without it', () => {
+    /* The projection that used to be the whole clock. The bound and the poll
+       interval are ONE decision: the bound was a hardcoded 0.4 s while the
+       interval was 200 ms, and the moment the interval moved past that the
+       sweep would have stalled at the end of every gap — silently, because
+       nothing exercised the projection at all. */
+    const polled = async (
+      h: ReturnType<typeof harness>,
+      handle: { snapshot(): { generation: number } },
+      t0: number,
+      transportState: string,
+      renderedProjectFrame: number,
+      patch: Record<string, unknown> = {},
+    ) => {
+      h.native.status.mockImplementation(async () =>
+        at(handle.snapshot().generation, transportState, renderedProjectFrame, patch),
+      );
+      const spy = jest.spyOn(Date, 'now').mockReturnValue(t0);
+      try {
+        await h.coordinator.pollHandle(handle as never);
+      } finally {
+        spy.mockRestore();
+      }
+    };
+    const readAt = (handle: { clock(): { renderedSec: number; live: boolean } }, t: number) => {
+      const spy = jest.spyOn(Date, 'now').mockReturnValue(t);
+      try {
+        const clock = handle.clock();
+        expect(clock.live).toBe(false);
+        return clock.renderedSec;
+      } finally {
+        spy.mockRestore();
+      }
+    };
+
+    it('glides through a missed poll instead of stepping at the poll rate', async () => {
+      const h = harness();
+      const handle = await started(h);
+      const t0 = Date.now();
+      await polled(h, handle, t0, 'playing', 5 * SR);
+      const halfway = NATIVE_TELEMETRY_POLL_MS * 1.5;
+      expect(readAt(handle, t0 + halfway)).toBeCloseTo(5 + halfway / 1000, 5);
+    });
+
+    it('stops projecting after two missed polls, however late the next one is', async () => {
+      const h = harness();
+      const handle = await started(h);
+      const t0 = Date.now();
+      await polled(h, handle, t0, 'playing', 5 * SR);
+      // Two polls' worth and not one millisecond more: a stalled poll must
+      // never run the singer's clock ahead of audio that was never rendered.
+      expect(readAt(handle, t0 + NATIVE_TELEMETRY_POLL_MS * 20)).toBeCloseTo(
+        5 + NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC,
+        5,
+      );
+    });
+
+    it('never advances a count-in, however long the tick is', async () => {
+      const h = harness();
+      const handle = await started(h);
+      const t0 = Date.now();
+      await polled(h, handle, t0, 'pre-roll', -2 * SR);
+      expect(readAt(handle, t0 + NATIVE_TELEMETRY_POLL_MS * 3)).toBeCloseTo(-2, 5);
+    });
+
+    it('folds at the loop boundary instead of gliding past it', async () => {
+      const h = harness();
+      const handle = await started(h);
+      const t0 = Date.now();
+      await polled(h, handle, t0, 'playing', 3.9 * SR, {
+        loopEnabled: true,
+        loopStartFrame: 2 * SR,
+        loopEndFrame: 4 * SR,
+      });
+      // 3.9 + 0.3 = 4.2, past B at 4.0 — so it belongs 0.2 s past A, not at
+      // 4.2 and not clamped to the song's end.
+      expect(readAt(handle, t0 + 300)).toBeCloseTo(2.2, 5);
+    });
+
+    it('never advances a paused transport', async () => {
+      const h = harness();
+      const handle = await started(h);
+      const t0 = Date.now();
+      await polled(h, handle, t0, 'paused', 5 * SR);
+      expect(readAt(handle, t0 + NATIVE_TELEMETRY_POLL_MS * 3)).toBeCloseTo(5, 5);
+    });
   });
 });

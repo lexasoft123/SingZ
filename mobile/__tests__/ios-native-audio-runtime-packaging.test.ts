@@ -146,6 +146,15 @@ describe('iOS native DSP runtime packaging', () => {
       (left, right) => left.name.localeCompare(right.name)
     )
     expect(exported).toEqual(expected)
+    // positionNow is the player's clock and the ONE synchronous method: it
+    // answers on the JS thread from the core's lock-free publication, never
+    // through the control queue. Exact, so a second synchronous method is a
+    // decision taken here rather than a habit. Same name, same arity and also
+    // synchronous on Android (isBlockingSynchronousMethod there), which the
+    // manifest is what makes checkable.
+    expect(exported.filter(method => method.synchronous).map(method => method.name)).toEqual([
+      'positionNow'
+    ])
     // codecTargetProof is the one method Android's module does not carry, so
     // it is listed apart rather than quietly widening the shared surface.
     expect(bridgeManifest.methods.iosOnly.map(method => method.name)).toEqual([
@@ -181,6 +190,12 @@ describe('iOS native DSP runtime packaging', () => {
     // listed here, which could not see a twelfth arrive or Android drift away.
     // A set, not a sequence: Android emits the same names in a slightly
     // different order and both are read by name, so order is not contractual.
+    // The clock payload, whose keys Android builds independently. A
+    // misspelling on either side is a silent fallback to the polled clock on
+    // that platform alone.
+    expect(
+      objectiveCDictionaryKeys(support, 'NSDictionary *SingzNativePlaybackPositionNow(').keys
+    ).toEqual(bridgeManifest.positionNow.keys)
     const sessionBlock = objectiveCDictionaryKeys(support, 'NSDictionary *statusDictionary(')
     expect([...sessionBlock.keys].sort()).toEqual([...bridgeManifest.session.common].sort())
     expect(sessionBlock.nested.latency).toEqual(bridgeManifest.session.nested.latency)
@@ -322,6 +337,13 @@ describe('iOS native DSP runtime packaging', () => {
     expect(boundary).toContain('@catch (NSException*)')
     // Status and Session are the two queue-dispatched reads: each crosses the
     // boundary twice (once on the caller's thread, once inside the block).
+    // PositionNow is neither: no queue, no boundary, no promise pair — a
+    // noexcept core read answered on the calling thread. The counts below
+    // therefore do not move for it, and its definition is pinned by name.
+    expect(support).toContain('NSDictionary *SingzNativePlaybackPositionNow(void)')
+    expect(support).toMatch(
+      /SingzNativePlaybackPositionNow\(void\) \{[\s\S]*?owner\(\)\.session->positionNow\(\)/
+    )
     expect(
       support.match(/runBridgeBoundary\((?:reject|asyncReject)/g)
     ).toHaveLength(14)

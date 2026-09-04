@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -324,6 +325,91 @@ struct PlaybackTransportCommand {
   uint32_t projectFractionQ32{0};
 };
 
+// Where the song is, for a reader that holds NO lock.
+//
+// The control mutex is held across host open, start and stop (stop waits for
+// callback quiescence), and the transport mailbox has one producer serialized
+// by that same mutex — so neither may be touched by a read the UI thread
+// makes synchronously many times a second. This is that read's source: a
+// second, smaller seqlock beside the transport's own, published by the same
+// callback at the same moment, but OWNED BY THE SESSION rather than by the
+// generation. The graph holds a shared_ptr to it too, so a quarantined graph
+// whose callback never quiesced keeps publishing into memory that is still
+// alive rather than into a freed Impl. Every publication carries its
+// steady-clock instant, so the reader can say how stale the frame is without
+// a wall clock the two sides might not share.
+struct PlaybackPositionPublication {
+  std::atomic<uint32_t> sequence{0};
+  std::atomic<uint64_t> generation{0};
+  std::atomic<uint32_t> state{
+      static_cast<uint32_t>(NativePlaybackTransportState::Stopped)};
+  std::atomic<int64_t> projectFrame{0};
+  std::atomic<uint64_t> continuousFrame{0};
+  std::atomic<uint64_t> remainingPreRoll{0};
+  std::atomic<uint64_t> seekCount{0};
+  std::atomic<int64_t> publishedAtNs{0};
+
+  static int64_t nowNs() noexcept {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+  // One writer at a time: the callback while a stream runs, the control
+  // thread only while the callback is provably not running (prepare commit,
+  // resetForOpen, forced stop after quiescence, unload).
+  void publish(uint64_t publishedGeneration,
+               NativePlaybackTransportState publishedState, int64_t frame,
+               uint64_t continuous, uint64_t preRoll,
+               uint64_t seeks) noexcept {
+    sequence.fetch_add(1u, std::memory_order_acq_rel);
+    generation.store(publishedGeneration, std::memory_order_relaxed);
+    state.store(static_cast<uint32_t>(publishedState),
+                std::memory_order_relaxed);
+    projectFrame.store(frame, std::memory_order_relaxed);
+    continuousFrame.store(continuous, std::memory_order_relaxed);
+    remainingPreRoll.store(preRoll, std::memory_order_relaxed);
+    seekCount.store(seeks, std::memory_order_relaxed);
+    publishedAtNs.store(nowNs(), std::memory_order_relaxed);
+    sequence.fetch_add(1u, std::memory_order_release);
+  }
+
+  void clear() noexcept {
+    publish(0, NativePlaybackTransportState::Stopped, 0, 0, 0, 0);
+  }
+
+  // Bounded like the transport's reader: eight collisions and the caller
+  // keeps what it last had rather than spinning on a UI thread.
+  bool snapshot(NativePlaybackPositionNow *out,
+                int64_t *publishedAt) const noexcept {
+    if (out == nullptr || publishedAt == nullptr)
+      return false;
+    for (uint32_t attempt = 0; attempt < 8; ++attempt) {
+      const uint32_t before = sequence.load(std::memory_order_acquire);
+      if ((before & 1u) != 0)
+        continue;
+      NativePlaybackPositionNow sampled;
+      sampled.generation = generation.load(std::memory_order_relaxed);
+      sampled.transportState = static_cast<NativePlaybackTransportState>(
+          state.load(std::memory_order_relaxed));
+      sampled.renderedProjectFrame =
+          projectFrame.load(std::memory_order_relaxed);
+      sampled.continuousFrame = continuousFrame.load(std::memory_order_relaxed);
+      sampled.remainingPreRollFrames =
+          remainingPreRoll.load(std::memory_order_relaxed);
+      sampled.seekCount = seekCount.load(std::memory_order_relaxed);
+      const int64_t at = publishedAtNs.load(std::memory_order_relaxed);
+      std::atomic_thread_fence(std::memory_order_acquire);
+      if (before == sequence.load(std::memory_order_acquire)) {
+        *out = sampled;
+        *publishedAt = at;
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
 // Prepared with the graph and owned by the session until callback quiescence.
 // The fixed SPSC mailbox is written only by session commands under the control
 // mutex and drained only by the audio callback at hardware-block offset zero.
@@ -335,6 +421,10 @@ struct PreparedPlaybackTransport {
   std::array<PlaybackTransportCommand, kCommandCapacity> commands{};
   std::atomic<uint32_t> commandWrite{0};
   std::atomic<uint32_t> commandRead{0};
+  // The session's lock-free position sink. Set once, at prepare commit,
+  // before any callback of this generation can run; never changed after, so
+  // the callback reads a plain pointer. Shared, not borrowed: see the struct.
+  std::shared_ptr<PlaybackPositionPublication> positionSink;
   uint64_t generation{0};
   int64_t initialProjectFrame{0};
   bool initialPaused{false};
@@ -543,6 +633,13 @@ struct PreparedPlaybackTransport {
     publishedLastBoundary.store(static_cast<uint32_t>(telemetry.lastBoundary),
                                 std::memory_order_relaxed);
     publishedSequence.fetch_add(1u, std::memory_order_release);
+    // The same moment, the same numbers, into the sink the lock-free read
+    // sees. Kept after the transport's own publication so status() and
+    // positionNow() can never disagree about which callback they describe.
+    if (positionSink != nullptr)
+      positionSink->publish(telemetry.generation, telemetry.state,
+                            telemetry.projectFrame, telemetry.continuousFrame,
+                            telemetry.remainingPreRoll, telemetry.seekCount);
   }
 
   bool snapshotTelemetry(Telemetry *result) const noexcept {
@@ -3988,6 +4085,7 @@ struct NativePlaybackSession::Impl {
         return;
       }
       prepared.reset();
+      position->clear();
     }
     releaseQuarantineReservation();
     abandonPlaybackOwnership(sessionId);
@@ -4017,6 +4115,12 @@ struct NativePlaybackSession::Impl {
   mutable std::mutex generationGate;
   AudioHost host;
   std::unique_ptr<PreparedPlaybackGraph> prepared;
+  // The lock-free position sink every generation of this session publishes
+  // into (see PlaybackPositionPublication). Cleared wherever the live graph
+  // is retired with its callback proven quiescent; a quarantined graph keeps
+  // its own reference and positionNow() screens its stale generation out.
+  std::shared_ptr<PlaybackPositionPublication> position =
+      std::make_shared<PlaybackPositionPublication>();
   uint64_t generation{0};
   uint64_t highestAttemptGeneration{0};
   uint64_t lastCancelledGeneration{0};
@@ -4523,6 +4627,7 @@ struct NativePlaybackSession::Impl {
                                        requested, state);
         }
         prepared.reset();
+        position->clear();
       }
       generation = 0;
       activeGeneration.store(0, std::memory_order_release);
@@ -5382,6 +5487,13 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       staleState = impl_->state;
     } else {
       impl_->prepared = std::move(prepared);
+      // Wire the lock-free position sink before any callback of this
+      // generation can exist, and publish the prepared baseline into it now
+      // (the callback is not running; this is the control thread's turn) so
+      // a synchronous read between prepare and open already names this
+      // generation at its entry frame rather than the previous song's exit.
+      impl_->prepared->transport.positionSink = impl_->position;
+      impl_->prepared->transport.publishTelemetry();
       publishPlaybackQuarantineRetainedBytes(impl_->prepared->retainedBytes);
       impl_->preparedConfig = std::move(config);
       impl_->state = NativePlaybackState::Prepared;
@@ -6339,6 +6451,7 @@ NativePlaybackSession::unload(uint64_t generation,
     return failed;
   }
   impl_->prepared.reset();
+  impl_->position->clear();
   // The graph is gone and its arena is released; what remains held is exactly
   // the decoded PCM, and status/cleanup report it as retained until the next
   // command takes it back.
@@ -6834,6 +6947,31 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
   result.ok = true;
   result.error = NativePlaybackError::None;
   return result;
+}
+
+NativePlaybackPositionNow NativePlaybackSession::positionNow() const noexcept {
+  NativePlaybackPositionNow out;
+  // activeGeneration is the one generation fact the control thread publishes
+  // atomically — prepare ADMISSION stores it, before the decode, and every
+  // retirement zeroes it (a bare claimGeneration does not touch it) — so it
+  // is the guard here instead of impl_->generation, which lives under the
+  // mutex.
+  const uint64_t active =
+      impl_->activeGeneration.load(std::memory_order_acquire);
+  if (active == 0)
+    return out;
+  int64_t publishedAt = 0;
+  if (!impl_->position->snapshot(&out, &publishedAt))
+    return {};
+  // Before this generation's prepare commits the sink still says 0 (or a
+  // quarantined predecessor's number); after unload it says 0 again. Either
+  // way the frame is not this song's, and the caller must not adopt it.
+  if (out.generation != active)
+    return {};
+  const int64_t now = PlaybackPositionPublication::nowNs();
+  out.ageNs = now > publishedAt ? static_cast<uint64_t>(now - publishedAt) : 0;
+  out.available = true;
+  return out;
 }
 
 const char *nativePlaybackSessionCapabilityTag() noexcept {

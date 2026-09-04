@@ -23,6 +23,7 @@ import {
   readProjectText,
   releaseProject,
   type LoadedProject,
+  type NativePlaybackClock,
   type NativePlaybackHandle,
   type NativePlaybackLaneView,
   type NativePlaybackStartOutcome,
@@ -141,32 +142,50 @@ export class NativePlaybackCommandError extends Error {
  * stays smooth; raise it far and end-of-song, route and focus changes are
  * noticed later, which is the real ceiling.
  */
-export const NATIVE_TELEMETRY_POLL_MS = 400;
+export const NATIVE_TELEMETRY_POLL_MS = 1000;
 
 /**
- * Pre-roll keeps the old rate, and this is not a hedge.
+ * The poll while nothing is moving: paused, parked at the end of the song,
+ * or parked in the background on Android. What it still notices there —
+ * audio-focus loss, a route change, Android retiring the owner — happens
+ * exactly while backgrounded and is worth a read every couple of seconds on
+ * a transport that makes no sound; the position it used to carry now comes
+ * from the synchronous clock, which is why the idle poll can be this slow.
+ * iOS keeps playing in the background by decision, so it keeps the playing
+ * rate there.
+ */
+export const NATIVE_TELEMETRY_IDLE_POLL_MS = 2000;
+
+/**
+ * The count-in on a native build WITHOUT the synchronous clock.
  *
- * The count-in DOTS are the one telemetry display projection cannot smooth:
- * `countInStatus` only ever takes a non-null value on a telemetry read, and
- * during pre-roll
- * `advancing` is false — `transportState` is 'pre-roll', not 'playing' — so
- * `projected()` deliberately refuses to advance it. The dots therefore sample
- * the count-in on the POLL GRID rather than a clock. At 400 ms and 180 bpm a
- * two-bar count-in spans 2667 ms and the polls land on 0/400/…/2400, which
- * lights dots 1,2,3,4,5,7,8 — the sixth never appears at all — while any
- * tempo puts a dot up to a whole beat late. Legacy computes the same dots
- * live from ctx.currentTime, so a slow poll here is also one setting giving
- * two answers on one screen.
- *
- * A count-in is at most a couple of bars, so paying the old rate through it
- * costs nothing that matters and leaves the steady-state win untouched.
+ * On such a build the count-in DOTS sample the poll grid — `countInStatus`
+ * only ever takes a non-null value on a telemetry read there — and at 1 s
+ * and 180 bpm a two-bar count-in would light every third dot. A count-in is
+ * at most a couple of bars, so paying this rate through it costs nothing
+ * that matters. On a build that answers `positionNow()` the dots are read
+ * live from the clock and this rate is never armed.
  */
 export const NATIVE_PRE_ROLL_POLL_MS = 200;
 
-/** The projection bound: two missed polls, in seconds. Derived from the
- *  SLOWER of the two rates, because it has to cover the widest gap. */
+/** The projection bound for a build without the synchronous clock: two
+ *  missed polls, in seconds. Derived from the SLOWER of the two poll rates,
+ *  because it has to cover the widest gap. */
 export const NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC =
   (2 * NATIVE_TELEMETRY_POLL_MS) / 1000;
+
+/**
+ * How far the synchronous clock may advance a published frame by its age.
+ *
+ * The core stamps every publication with the steady clock and reports how
+ * long ago it was; while the transport is playing the true frame is that
+ * much further on, so the clock adds it. A callback that stopped without
+ * anyone noticing yet would otherwise run the clock ahead for as long as the
+ * next poll takes, so the advance is bounded — generously, at a whole
+ * second, because a healthy callback publishes every block (4-85 ms) and any
+ * age near this bound is a stall the poll will name.
+ */
+export const NATIVE_CLOCK_PROJECTION_LIMIT_SEC = 1;
 
 export interface NativePlaybackCleanup {
   readonly safety: string;
@@ -367,6 +386,72 @@ export interface NativePlaybackMediaCodecCapability {
   readonly capabilityTag: string;
 }
 
+/**
+ * What the synchronous bridge read answers: where the song is RIGHT NOW,
+ * read from the core's lock-free publication on the JS thread, the way the
+ * legacy engine reads its AudioContext's currentTime. Same keys from both
+ * bridges. `ageMs` is steady-clock time since the callback published the
+ * frame; while the transport is playing the frame has advanced by about that
+ * much since, while it is paused it has not.
+ */
+export interface NativePlaybackPositionNow {
+  readonly generation: number;
+  readonly transportState: NativePlaybackTransportState;
+  /** Signed project frame the callback had rendered up to; negative during
+   *  a count-in. Never overlaid with a queued seek — the handle carries that
+   *  intent itself until `seekCount` moves. */
+  readonly renderedProjectFrame: number;
+  readonly continuousFrame: number;
+  readonly remainingPreRollFrames: number;
+  readonly seekCount: number;
+  readonly ageMs: number;
+}
+
+/** Null when the bridge said the read is unavailable (nothing prepared, a
+ *  generation not yet committed or already unloaded, a collided read) or the
+ *  payload is not the shape both bridges promise — the caller keeps what it
+ *  last had, exactly as with a malformed session block. */
+export function parseNativePlaybackPositionNow(
+  value: unknown,
+): NativePlaybackPositionNow | null {
+  const raw = objectValue(value);
+  if (!raw || raw.available !== true) return null;
+  const integer = (candidate: unknown): number | null => {
+    const parsed = finiteNumber(candidate);
+    return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const generation = integer(raw.generation);
+  const renderedProjectFrame = integer(raw.renderedProjectFrame);
+  const continuousFrame = integer(raw.continuousFrame);
+  const remainingPreRollFrames = integer(raw.remainingPreRollFrames);
+  const seekCount = integer(raw.seekCount);
+  const ageMs = finiteNumber(raw.ageMs);
+  if (
+    generation === null ||
+    generation <= 0 ||
+    renderedProjectFrame === null ||
+    continuousFrame === null ||
+    continuousFrame < 0 ||
+    remainingPreRollFrames === null ||
+    remainingPreRollFrames < 0 ||
+    seekCount === null ||
+    seekCount < 0 ||
+    ageMs === null ||
+    ageMs < 0 ||
+    !oneOf(raw.transportState, TRANSPORT_STATES)
+  )
+    return null;
+  return {
+    generation,
+    transportState: raw.transportState,
+    renderedProjectFrame,
+    continuousFrame,
+    remainingPreRollFrames,
+    seekCount,
+    ageMs,
+  };
+}
+
 interface NativePlaybackBridgeApi {
   status(): Promise<unknown>;
   /** The session block alone — the object status() nests under `session`,
@@ -378,6 +463,15 @@ interface NativePlaybackBridgeApi {
    *  older than this JS answers status() only. Same name and arity (none) on
    *  both bridges — a method whose arity disagrees never dispatches. */
   session?(): Promise<unknown>;
+  /** The player's clock: SYNCHRONOUS, the one such method on either bridge
+   *  (`RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD` on iOS,
+   *  `isBlockingSynchronousMethod = true` on Android), answered on the JS
+   *  thread from the core's lock-free publication with no control-thread
+   *  hop and no JSON. Optional for the same reason session is: a native
+   *  build older than this JS has no such method, and the clock then falls
+   *  back to projecting the polled position. Same name and arity (none) on
+   *  both bridges. */
+  positionNow?(): unknown;
   prepare(
     generation: number,
     request: NativePlaybackPrepareRequest,
@@ -417,12 +511,19 @@ interface NativePlaybackBridgeApi {
 }
 
 interface NativePlaybackApi
-  extends Omit<NativePlaybackBridgeApi, 'status' | 'session'> {
+  extends Omit<NativePlaybackBridgeApi, 'status' | 'session' | 'positionNow'> {
   status(): Promise<NativePlaybackCapability>;
   /** Always answers: on a native build without session() it goes through
    *  status() and returns its session, so the poll pays for the inventory
    *  it never reads rather than turning native playback off. */
   session(): Promise<NativePlaybackSessionStatus>;
+  /** Whether the installed native build answers positionNow() at all. The
+   *  handle arms the pre-roll poll only when it does not. */
+  readonly syncClock: boolean;
+  /** Null on a build without the method, when the core says the read is
+   *  unavailable, or when the payload is malformed — never a throw into a
+   *  render. */
+  positionNow(): NativePlaybackPositionNow | null;
 }
 
 /** One lane's drawable envelope: peak absolute sample per bucket, 0..1. */
@@ -627,6 +728,19 @@ export const nativePlaybackBridge = (
           emptyNativeSession())
         : parseNativePlaybackCapability(await bridge.status(), Platform.OS)
             .session,
+    // Same policy as session: an older build simply has no clock, and the
+    // handle projects the polled position instead. A synchronous method that
+    // throws (a module invalidated under the caller) reads as unavailable —
+    // the clock is read from renders, which must never see it throw.
+    syncClock: typeof bridge.positionNow === 'function',
+    positionNow: () => {
+      if (typeof bridge.positionNow !== 'function') return null;
+      try {
+        return parseNativePlaybackPositionNow(bridge.positionNow());
+      } catch {
+        return null;
+      }
+    },
     prepare: (generation, request) => bridge.prepare(generation, request),
     configureOutputSession: generation =>
       bridge.configureOutputSession(generation),
@@ -808,6 +922,9 @@ const SEEK_RECEIPT_DEADLINE_MS = 250;
 /** One render block is what the receipt waits on, so ask about that often
  *  rather than as fast as the bridge will answer. */
 const SEEK_RECEIPT_POLL_MS = 15;
+/** A pause is applied at the next block boundary too, and pause() waits for
+ *  it on the synchronous clock for the same reason and the same bound. */
+const PAUSE_RECEIPT_DEADLINE_MS = SEEK_RECEIPT_DEADLINE_MS;
 
 /** The core pins 96. This only has to be small enough that spreading a
  *  lane's buckets cannot overflow the stack if a bridge ever lies. */
@@ -1897,12 +2014,21 @@ export class IosNativePlaybackCoordinator {
     const startedAt = Date.now();
     let reads = 0;
     while (Date.now() - startedAt < SEEK_RECEIPT_DEADLINE_MS) {
-      const session = await this.deps.native?.session();
-      if (!session || !this.isActive(handle)) return;
-      if (session.generation !== handle.generation) return;
-      reads++;
-      handle.publishTelemetry(session);
-      if (session.seekCount !== before) return;
+      // The synchronous clock answers the receipt question without a bridge
+      // round trip; a build without it asks the session block as before.
+      const now = this.positionNow(handle);
+      if (now !== null) {
+        reads++;
+        if (!this.isActive(handle)) return;
+        if (now.seekCount !== before) return;
+      } else {
+        const session = await this.deps.native?.session();
+        if (!session || !this.isActive(handle)) return;
+        if (session.generation !== handle.generation) return;
+        reads++;
+        handle.publishTelemetry(session);
+        if (session.seekCount !== before) return;
+      }
       await new Promise(resolve =>
         setTimeout(resolve, SEEK_RECEIPT_POLL_MS),
       );
@@ -3143,6 +3269,27 @@ export class IosNativePlaybackCoordinator {
     return true;
   }
 
+  /** Whether the installed native build answers the synchronous clock. */
+  get syncClock(): boolean {
+    return this.deps.native?.syncClock === true;
+  }
+
+  /**
+   * The synchronous clock read, for THIS handle: null unless the core
+   * answered, and answered about this generation. Guarded against a bridge
+   * shaped like an older build (no method at all), because this is read from
+   * renders and a throw here would take the player screen down.
+   */
+  positionNow(
+    handle: IosNativePlaybackHandle,
+  ): NativePlaybackPositionNow | null {
+    const native = this.deps.native;
+    if (!native || typeof native.positionNow !== 'function') return null;
+    const now = native.positionNow();
+    if (now === null || now.generation !== handle.generation) return null;
+    return now;
+  }
+
   async pollHandle(handle: IosNativePlaybackHandle): Promise<void> {
     if (!this.isActive(handle) || handle.polling) return;
     handle.polling = true;
@@ -3445,6 +3592,22 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private retryProjectSeconds: number | null = null;
   private recoverySnapshot: NativePlaybackRecoverySnapshot | null = null;
   private lastTelemetry: NativePlaybackSessionStatus | null = null;
+  /* The two things the clock knows that the core has not applied yet.
+     A seek the core has accepted but whose callback has not drained: the
+     clock reads the target until `seekCount` moves, so a scrub never shows
+     the frame it just left (the seek pull-back). A pause the singer just
+     tapped: the clock freezes at the frame under their finger and stays
+     there for the whole pause, while the core's own frame lands up to one
+     block later — the resume then starts from the core's frame, a block at
+     most past what was shown, which is the moment nobody can see. Both are
+     generation-bound, so a rebuild cannot inherit either. */
+  private seekIntent: {
+    generation: number;
+    projectFrame: number;
+    seekCountBefore: number;
+  } | null = null;
+  private pauseHold: { generation: number; projectFrame: number } | null =
+    null;
   private listeners = new Set<() => void>();
   private state: NativePlaybackViewState = {
     phase: 'prepared',
@@ -3764,9 +3927,152 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       : 0;
   }
 
-  /** The core's seek receipt counter, for a caller waiting on the next one. */
+  /** The core's seek receipt counter, for a caller waiting on the next one.
+   *  From the synchronous clock when there is one — the poll may not have
+   *  seen a receipt that landed since its last tick. */
   seekCountNow(): number {
-    return this.lastTelemetry?.seekCount ?? 0;
+    return (
+      this.coordinator.positionNow(this)?.seekCount ??
+      this.lastTelemetry?.seekCount ??
+      0
+    );
+  }
+
+  /**
+   * The player's clock — the legacy engine's shape, at last: a computation
+   * on a synchronous read of where the render head is, not a value that
+   * arrives on a poll and is projected by wall time until the next one.
+   *
+   * The render head is the core's last published frame plus how far it has
+   * moved since (its age at the playback rate, bounded), with two things the
+   * core has not applied yet laid over it: a seek still in the mailbox reads
+   * as its target, and a pause the singer just tapped reads as the frame
+   * under their finger. A loop region folds and the song clamps, as the
+   * core's own frame would. What the singer HEARS is this minus the
+   * presentation latency and their trim; the backend subtracts that once.
+   *
+   * A native build without `positionNow()` gets the previous behaviour: the
+   * last polled position, projected by wall time between polls.
+   */
+  clock(): NativePlaybackClock {
+    const now = this.coordinator.positionNow(this);
+    if (now === null) return this.polledClock();
+    const sampleRate = this.sampleRate();
+    let frame = now.renderedProjectFrame;
+    let transportState = now.transportState;
+    let queued = false;
+    if (this.seekIntent !== null) {
+      if (
+        this.seekIntent.generation === this.generation &&
+        now.seekCount === this.seekIntent.seekCountBefore
+      ) {
+        frame = this.seekIntent.projectFrame;
+        queued = true;
+      } else this.seekIntent = null;
+    }
+    if (this.pauseHold !== null) {
+      if (
+        this.pauseHold.generation === this.generation &&
+        (transportState === 'playing' ||
+          transportState === 'pre-roll' ||
+          transportState === 'paused')
+      ) {
+        frame = this.pauseHold.projectFrame;
+        transportState = 'paused';
+        queued = true;
+      } else this.pauseHold = null;
+    }
+    const moving =
+      transportState === 'playing' || transportState === 'pre-roll';
+    // A song that ran out is parked by the poll; the clock sees it first and
+    // asks for that poll now, so Play at the end restarts rather than
+    // resuming a transport the core will only complete again.
+    if (
+      now.transportState === 'completed' &&
+      this.state.phase === 'playing' &&
+      !this.polling
+    )
+      void this.coordinator.pollHandle(this);
+    const ageSec = Math.min(
+      NATIVE_CLOCK_PROJECTION_LIMIT_SEC,
+      Math.max(0, now.ageMs / 1000),
+    );
+    const advanced =
+      moving && !queued ? ageSec * this.playbackRate * sampleRate : 0;
+    const renderedFrame = this.foldFrame(frame + advanced, sampleRate);
+    return {
+      renderedSec: renderedFrame / sampleRate,
+      playing: moving,
+      live: true,
+      countIn: this.countInAt(transportState, renderedFrame, this.lastTelemetry),
+    };
+  }
+
+  /** The clock on a native build without the synchronous read: the last
+   *  polled position, projected by wall time between polls, bounded to two
+   *  missed polls so a stalled poll cannot run it ahead. Count-in and paused
+   *  telemetry are never advanced. */
+  private polledClock(): NativePlaybackClock {
+    const state = this.state;
+    const sampleRate = this.sampleRate();
+    let renderedSec = state.renderedPositionSec;
+    if (
+      state.phase === 'playing' &&
+      state.advancing === true &&
+      state.telemetryAtMs !== undefined
+    ) {
+      const elapsed = Math.max(
+        0,
+        Math.min(
+          NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC,
+          (Date.now() - state.telemetryAtMs) / 1000,
+        ),
+      );
+      renderedSec =
+        this.foldFrame(
+          (renderedSec + elapsed * (state.playbackRate ?? 1)) * sampleRate,
+          sampleRate,
+        ) / sampleRate;
+    }
+    return {
+      renderedSec,
+      playing: state.phase === 'playing' && state.advancing === true,
+      live: false,
+      countIn: state.countInStatus,
+    };
+  }
+
+  /** A LOOP folds; only a song clamps. The core wraps at B, but an advance
+   *  by age or by wall time knows nothing about it, and clamping at the song's
+   *  end let the sweep glide past B and snap back to A once per lap — exactly
+   *  when A/B repeat is in use. Negative (count-in) frames pass through. */
+  private foldFrame(frame: number, sampleRate: number): number {
+    const region = this.state.regionState;
+    if (region && region.loop && region.end > region.start) {
+      const start = region.start * sampleRate;
+      const end = region.end * sampleRate;
+      if (frame > end) return start + ((frame - start) % (end - start));
+    }
+    const durationFrames = this.state.durationSec * sampleRate;
+    return durationFrames > 0 ? Math.min(durationFrames, frame) : frame;
+  }
+
+  /** Wait, on the synchronous clock, until the core's transport has left
+   *  'playing' after a pause — at most one block, in practice — so the
+   *  caller's promise resolves with the pause applied, the way legacy's
+   *  pause() returns with its sources already stopped. Bounded; a callback
+   *  that never applies it is a stall the poll will name. */
+  private async awaitPauseApplied(): Promise<void> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < PAUSE_RECEIPT_DEADLINE_MS) {
+      const now = this.coordinator.positionNow(this);
+      if (
+        now === null ||
+        (now.transportState !== 'playing' && now.transportState !== 'pre-roll')
+      )
+        return;
+      await new Promise(resolve => setTimeout(resolve, SEEK_RECEIPT_POLL_MS));
+    }
   }
 
   beginPrepare(generation: number, output: NativePlaybackOutput): void {
@@ -3814,6 +4120,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.graphConnectionCount = session.graphConnectionCount;
     this.trainingPrepared = session.trainingLanes.length > 0;
     this.trainingEnabled = session.trainingEnabled;
+    this.lastTelemetry = session;
     this.update({
       phase: 'prepared',
       durationSec: session.durationFrames / sampleRate,
@@ -3823,7 +4130,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
           : session.renderedProjectFrame) / sampleRate,
       renderedPositionSec: session.renderedProjectFrame / sampleRate,
       displayLatencySec: session.presentationLatencyFrames / sampleRate,
-      countInStatus: this.countInProgress(session),
+      countInStatus: this.countInAt(
+        session.transportState,
+        session.renderedProjectFrame,
+        session,
+      ),
     });
   }
 
@@ -3870,7 +4181,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       durationSec: session.durationFrames / sampleRate,
       displayLatencySec: session.presentationLatencyFrames / sampleRate,
       audibleFrames: session.audibleFrames,
-      countInStatus: this.countInProgress(session),
+      countInStatus: this.countInAt(
+        session.transportState,
+        session.renderedProjectFrame,
+        session,
+      ),
       regionState: session.loopEnabled
         ? {
             start: session.loopStartFrame / sampleRate,
@@ -3904,11 +4219,19 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     }
   }
 
-  private countInProgress(
-    session: NativePlaybackSessionStatus,
+  /**
+   * The count-in in progress at a given render frame. `base` is the last
+   * session block — the count-in's shape (how many beats, how grouped, how
+   * long the runway) and the presentation latency never change within a
+   * generation, so the poll's copy serves the clock's every read.
+   */
+  private countInAt(
+    transportState: NativePlaybackTransportState,
+    renderedFrame: number,
+    base: NativePlaybackSessionStatus | null,
   ): PlaybackCountInStatus | null {
-    if (session.transportState !== 'pre-roll') return null;
-    const sampleRate = session.sampleRate || this.sampleRate();
+    if (transportState !== 'pre-roll' || base === null) return null;
+    const sampleRate = base.sampleRate || this.sampleRate();
     // Output latency through the signed audible position, plus the singer's
     // own trim — the part the OS under-reports and therefore the part the
     // core cannot know. The dots have to light on the same clock the lyrics
@@ -3920,19 +4243,19 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     const trimFrames = Math.round(
       Math.max(
         this.displayTrimSec,
-        -session.presentationLatencyFrames / sampleRate,
+        -base.presentationLatencyFrames / sampleRate,
       ) * sampleRate,
     );
+    // Held to the AUDIBLE start, not the render one: the ear is a
+    // presentation latency behind the render head, so the runway it has left
+    // is that much longer. Exiting on the render-domain remaining took the
+    // dots away a latency plus a trim before the singer heard the song begin.
     const remainingFrames =
-      Math.max(session.remainingPreRollFrames, -session.audibleProjectFrame) +
-      trimFrames;
-    // Held to the AUDIBLE start, not the render one: exiting on the core's
-    // render-domain remaining takes the dots away a presentation latency
-    // plus a trim before the singer hears the song begin.
+      base.presentationLatencyFrames - renderedFrame + trimFrames;
     if (remainingFrames <= 0) return null;
-    const total = session.countInEventCount;
-    const perBar = session.countInBeatsPerBar;
-    const span = Math.abs(session.preRollFrames);
+    const total = base.countInEventCount;
+    const perBar = base.countInBeatsPerBar;
+    const span = Math.abs(base.preRollFrames);
     if (total > 0 && perBar > 0 && span > 0) {
       // The core owns how many beats the count-in sounds and how they group;
       // this only asks how far through the runway the ear has got. Dividing
@@ -3954,8 +4277,12 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   noteTransportCommand(command: NativePlaybackTransportCommand): void {
     if (command.kind === 'pause') this.update({ phase: 'paused' });
-    else if (command.kind === 'resume') this.update({ phase: 'playing' });
-    else if (command.kind === 'clear-loop') this.update({ regionState: null });
+    else if (command.kind === 'resume') {
+      // The core resumes from ITS paused frame, at most one block past the
+      // one the clock held; from here the clock reads the core again.
+      this.pauseHold = null;
+      this.update({ phase: 'playing' });
+    } else if (command.kind === 'clear-loop') this.update({ regionState: null });
     else if (command.kind === 'set-loop') {
       const sampleRate = this.sampleRate();
       this.update({
@@ -4107,26 +4434,79 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.update({ phase: 'error', error });
   }
 
-  start(): Promise<NativePlaybackStartOutcome> {
+  async start(): Promise<NativePlaybackStartOutcome> {
+    // Whatever Play does from here — resume, restart, a fresh start — the
+    // clock reads the core again; a held pause frame must not outlive it.
+    this.pauseHold = null;
+    // The clock reads a song that ran out before the poll has parked it, so
+    // for one bridge round trip `playing` is false while the phase still
+    // says playing — and a Play tap in that window would be refused as a
+    // start on a running transport. Let the park land first; Play then
+    // restarts the song, which is what the tap meant.
+    const now = this.coordinator.positionNow(this);
+    if (
+      now !== null &&
+      now.transportState === 'completed' &&
+      this.state.phase === 'playing'
+    ) {
+      await this.coordinator.pollHandle(this);
+      const startedAt = Date.now();
+      while (this.polling && Date.now() - startedAt < PAUSE_RECEIPT_DEADLINE_MS)
+        await new Promise(resolve => setTimeout(resolve, SEEK_RECEIPT_POLL_MS));
+    }
     return this.coordinator.startHandle(this);
   }
 
-  pause(): Promise<void> {
-    return this.dispatchTransport({ kind: 'pause' });
+  async pause(): Promise<void> {
+    // Freeze the clock at the frame under the singer's finger BEFORE the
+    // command crosses, the way legacy captures `startOffset = audioPosition`
+    // on the same line it stops — so the position cannot drain forward by a
+    // presentation latency while the pause is in flight, which is what the
+    // driver measured as 300-490 ms of drift after every pause.
+    const live = this.coordinator.positionNow(this) !== null;
+    if (live) {
+      const held = this.clock();
+      this.pauseHold = {
+        generation: this.generation,
+        projectFrame: Math.round(held.renderedSec * this.sampleRate()),
+      };
+    }
+    try {
+      await this.dispatchTransport({ kind: 'pause' });
+    } catch (error) {
+      this.pauseHold = null;
+      throw error;
+    }
+    if (live) await this.awaitPauseApplied();
   }
 
   async seek(seconds: number): Promise<void> {
     const projectFrame = this.projectFrame(seconds, 'seek');
-    await this.dispatchTransport({ kind: 'seek', projectFrame });
+    // The clock reads the target from the moment the seek is issued until
+    // the core's receipt counter moves — never the frame the seek is
+    // leaving, which is the pull-back the singer saw as "the seek bar jumps
+    // back". A pause hold is superseded: the core will sit at the target.
+    const before = this.coordinator.positionNow(this);
+    this.pauseHold = null;
+    if (before !== null)
+      this.seekIntent = {
+        generation: this.generation,
+        projectFrame,
+        seekCountBefore: before.seekCount,
+      };
+    try {
+      await this.dispatchTransport({ kind: 'seek', projectFrame });
+    } catch (error) {
+      this.seekIntent = null;
+      throw error;
+    }
     // Wherever the singer moved to, the song is no longer sitting at its end.
     // Leaving the mark set would make the next Play throw their scrub away
     // and start from the top — the very thing this contract exists to stop.
     this.clearEndOfSongPark();
-    // The next poll is up to NATIVE_TELEMETRY_POLL_MS away, and until it
-    // lands the screen would keep showing — and projecting forward — the
-    // position the seek just left: a scrub that visibly bounces back before
-    // it settles. Adopt the accepted target now; telemetry corrects it within
-    // one period.
+    // The polled view adopts the target too, for a build without the
+    // synchronous clock and for everything that reads the snapshot rather
+    // than the clock; telemetry corrects it within one period.
     const positionSec = projectFrame / this.sampleRate();
     this.update({
       positionSec,
@@ -4359,26 +4739,34 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   startPolling(): void {
     this.stopPolling();
     void this.coordinator.pollHandle(this);
-    /* Arm FAST and let the first tick relax it, rather than reading the phase
-       now. On the fresh-start path the phase cannot answer yet: beginPrepare
-       has nulled countInStatus, and while publishPrepared does recompute it
-       before this runs, countInProgress returns null unless transportState is
-       already 'pre-roll' — so asking here arms a count-in at the slow rate
-       for its first tick. On the REBUILD
-       path it can — rebuildHandleCues never calls beginPrepare, so a pitch
-       change made during a count-in arrives with the previous session's
-       status still set — and fast is right there too. The cost of being wrong
-       the new way is one extra poll on a start with no count-in; the cost of
-       being wrong the old way is a dropped dot. */
-    this.armPoll(NATIVE_PRE_ROLL_POLL_MS);
+    /* With the synchronous clock the poll carries no position and no dots,
+       so it starts at the playing rate and relaxes to the idle one as the
+       phase settles. WITHOUT it, arm FAST and let the first tick relax it,
+       rather than reading the phase now: on the fresh-start path the phase
+       cannot answer yet (beginPrepare has nulled countInStatus, and
+       countInAt returns null unless transportState is already 'pre-roll'),
+       so asking here would arm a count-in at the slow rate for its first
+       tick and drop a dot. */
+    this.armPoll(
+      this.coordinator.syncClock
+        ? NATIVE_TELEMETRY_POLL_MS
+        : NATIVE_PRE_ROLL_POLL_MS,
+    );
   }
 
-  /** The count-in is sampled on this grid rather than projected, so pre-roll
-   *  pays the fast rate. See NATIVE_PRE_ROLL_POLL_MS. */
+  /** Playing polls at the ordinary rate; paused, parked at the end, or
+   *  parked in the background on Android polls at the idle one — the read
+   *  still notices focus loss, route changes and owner retirement, a second
+   *  or two later, on a transport that makes no sound. iOS keeps playing in
+   *  the background by decision, so its phase keeps it at the playing rate.
+   *  A build without the synchronous clock keeps the fast pre-roll poll,
+   *  because its dots sample this grid. */
   private pollIntervalMs(): number {
-    return this.state.countInStatus !== null
-      ? NATIVE_PRE_ROLL_POLL_MS
-      : NATIVE_TELEMETRY_POLL_MS;
+    if (!this.coordinator.syncClock && this.state.countInStatus !== null)
+      return NATIVE_PRE_ROLL_POLL_MS;
+    return this.state.phase === 'playing'
+      ? NATIVE_TELEMETRY_POLL_MS
+      : NATIVE_TELEMETRY_IDLE_POLL_MS;
   }
 
   private armPoll(intervalMs: number): void {

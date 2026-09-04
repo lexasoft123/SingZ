@@ -75,6 +75,14 @@ export interface BridgeMethod {
   name: string
   /** Arguments JavaScript passes, promise pair excluded. */
   arity: number
+  /**
+   * Answers on the JS thread instead of resolving a promise —
+   * `RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD` on iOS,
+   * `@ReactMethod(isBlockingSynchronousMethod = true)` on Android. It changes
+   * how arity is counted (there is no promise pair to exclude), so it is part
+   * of the method's identity rather than a footnote.
+   */
+  synchronous: boolean
 }
 
 /**
@@ -85,7 +93,7 @@ export interface BridgeMethod {
  */
 export function iosBridgeMethods(source: string): BridgeMethod[] {
   const methods: BridgeMethod[] = []
-  const macro = /RCT_(EXPORT|REMAP)_METHOD\(/g
+  const macro = /RCT_(EXPORT_BLOCKING_SYNCHRONOUS_METHOD|EXPORT_METHOD|REMAP_METHOD)\(/g
   let match = macro.exec(source)
   while (match !== null) {
     const open = match.index + match[0].length - 1
@@ -103,14 +111,15 @@ export function iosBridgeMethods(source: string): BridgeMethod[] {
     }
     if (close < 0) throw new Error(`unbalanced ${match[0]} at ${match.index}`)
     const declaration = source.slice(open + 1, close)
+    const remapped = match[1] === 'REMAP_METHOD'
+    const synchronous = match[1] === 'EXPORT_BLOCKING_SYNCHRONOUS_METHOD'
     // REMAP names the JS method first, then repeats it as the first selector
-    // segment; EXPORT has the selector alone.
-    const selector =
-      match[1] === 'REMAP' ? declaration.slice(declaration.indexOf(',') + 1) : declaration
-    const name =
-      match[1] === 'REMAP'
-        ? declaration.slice(0, declaration.indexOf(',')).trim()
-        : (selector.match(/^\s*([A-Za-z0-9_]+)\s*:/)?.[1] ?? '')
+    // segment; EXPORT has the selector alone; the synchronous macro takes a
+    // bare name when the method has no arguments.
+    const selector = remapped ? declaration.slice(declaration.indexOf(',') + 1) : declaration
+    const name = remapped
+      ? declaration.slice(0, declaration.indexOf(',')).trim()
+      : (selector.match(/^\s*([A-Za-z0-9_]+)\s*[:)]?/)?.[1] ?? '')
     if (name === '') throw new Error(`could not name the method at ${match.index}`)
     // Segments are `label:` at paren depth 0 of the selector — the argument
     // types are parenthesized, so their own colons never count.
@@ -122,7 +131,9 @@ export function iosBridgeMethods(source: string): BridgeMethod[] {
       else if (character === ')') parenthesis -= 1
       else if (character === ':' && parenthesis === 0) segments += 1
     }
-    methods.push({ name, arity: segments - 2 })
+    // A synchronous method returns rather than resolving, so there is no
+    // resolver/rejecter pair to discount.
+    methods.push({ name, arity: synchronous ? segments : segments - 2, synchronous })
     match = macro.exec(source)
   }
   return methods.sort((left, right) => left.name.localeCompare(right.name))
@@ -135,7 +146,7 @@ export function iosBridgeMethods(source: string): BridgeMethod[] {
  */
 export function androidBridgeMethods(source: string): BridgeMethod[] {
   const methods: BridgeMethod[] = []
-  const declaration = /@ReactMethod\s*(?:\([^)]*\)\s*)?fun\s+([A-Za-z0-9_]+)\s*\(/g
+  const declaration = /@ReactMethod\s*(\([^)]*\)\s*)?fun\s+([A-Za-z0-9_]+)\s*\(/g
   let match = declaration.exec(source)
   while (match !== null) {
     const open = match.index + match[0].length - 1
@@ -151,7 +162,7 @@ export function androidBridgeMethods(source: string): BridgeMethod[] {
         }
       }
     }
-    if (close < 0) throw new Error(`unbalanced parameter list for ${match[1]}`)
+    if (close < 0) throw new Error(`unbalanced parameter list for ${match[2]}`)
     const parameters = source.slice(open + 1, close).trim()
     let count = 0
     if (parameters !== '') {
@@ -164,9 +175,19 @@ export function androidBridgeMethods(source: string): BridgeMethod[] {
         else if (character === ',' && depths === 0) count += 1
       }
     }
-    if (!/\bpromise\s*:\s*Promise\b/.test(parameters))
-      throw new Error(`${match[1]} does not take a Promise`)
-    methods.push({ name: match[1], arity: count - 1 })
+    const synchronous = /isBlockingSynchronousMethod\s*=\s*true/.test(match[1] ?? '')
+    // Everything else must take the promise this counts out; a synchronous
+    // method must not, and a method that lost its Promise by accident would
+    // otherwise read as one.
+    if (!synchronous && !/\bpromise\s*:\s*Promise\b/.test(parameters))
+      throw new Error(`${match[2]} does not take a Promise`)
+    if (synchronous && /\bPromise\b/.test(parameters))
+      throw new Error(`${match[2]} is synchronous but takes a Promise`)
+    methods.push({
+      name: match[2],
+      arity: synchronous ? count : count - 1,
+      synchronous
+    })
     match = declaration.exec(source)
   }
   return methods.sort((left, right) => left.name.localeCompare(right.name))
@@ -445,6 +466,24 @@ export function switchStringTable(source: string, signature: string): StringTabl
   // is a state in its own right), so this must not be filtered against them.
   const trailing = /return\s+@?"([^"]*)"\s*;\s*$/.exec(body.trimEnd())
   return { cases, fallback: trailing !== null ? trailing[1] : null }
+}
+
+/**
+ * Keys a Kotlin function puts on a `WritableMap`, in order. React Native's
+ * map builder is the Android counterpart of an Objective-C dictionary
+ * literal, and `positionNow` is built this way on one platform and as a
+ * literal on the other — so both need reading to compare them.
+ */
+export function writableMapKeys(source: string, signature: string): string[] {
+  const body = stripComments(functionBody(source, signature))
+  // One ordered pass, deduplicated: a key can be put more than once (an early
+  // return sets `available` on its own before the real payload is built), and
+  // what the other side sees is one copy of each in first-appearance order.
+  return [
+    ...new Set(
+      [...body.matchAll(/\.put[A-Za-z]*\(\s*"([A-Za-z0-9_]+)"/g)].map(match => match[1])
+    )
+  ]
 }
 
 /** The `X -> "y"` table of a Kotlin `when`, in order. */

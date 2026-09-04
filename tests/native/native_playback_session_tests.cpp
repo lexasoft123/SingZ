@@ -3032,6 +3032,130 @@ void resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands() {
   std::remove(wav.c_str());
 }
 
+// The synchronous read the phones' UI clock is built on. Its whole point is
+// what it does NOT do — take the control mutex, look inside the mailbox,
+// assemble a status — so the test pins what it reads (the callback's last
+// published frame, block by block, equal to status()'s), what it refuses (a
+// generation that is not the active one: before its prepare has committed,
+// after its unload), what it leaves alone (a queued seek is NOT overlaid —
+// the JS side carries that intent until seekCount moves, which is what lets
+// the read stay out of the mailbox), that a paused frame stays put however
+// many blocks the host asks for, and that its age is a steady-clock delta
+// that grows between reads with no callback in between.
+// Reads positionNow() from inside a prepare's decode — the one place a
+// synchronous read provably races a control-thread command — and records
+// whether it ever handed out a frame while the generation was still being
+// prepared. Returns false: it never asks the decode to stop.
+struct PositionNowDuringPrepare {
+  singz::NativePlaybackSession *session{nullptr};
+  std::atomic<uint32_t> polls{0};
+  std::atomic<bool> sawAvailable{false};
+};
+
+bool probePositionNowDuringPrepare(void *opaque) noexcept {
+  auto *probe = static_cast<PositionNowDuringPrepare *>(opaque);
+  if (probe->session->positionNow().available)
+    probe->sawAvailable.store(true, std::memory_order_relaxed);
+  probe->polls.fetch_add(1u, std::memory_order_relaxed);
+  return false;
+}
+
+void positionNowReadsTheCallbackWithoutTheControlLock() {
+  std::vector<float> ramp(128);
+  for (uint32_t frame = 0; frame < ramp.size(); ++frame)
+    ramp[frame] = static_cast<float>(frame) * 0.002F;
+  const std::string wav = writeWav("position-now.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  // Nothing prepared: nothing to read, and it says so.
+  CHECK(!session.positionNow().available);
+
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 43).ok);
+  // Prepared, not yet opened: the read already names THIS generation at its
+  // entry frame, so a UI that asks between prepare and Play is not shown the
+  // previous song's exit.
+  auto now = session.positionNow();
+  CHECK(now.available && now.generation == 43 &&
+        now.transportState == singz::NativePlaybackTransportState::Stopped &&
+        now.renderedProjectFrame == 0 && now.seekCount == 0);
+
+  CHECK(session.openOutput(43).ok && session.start(43).ok);
+  CHECK(fake->drive(5, singz::AudioHostDiscontinuityStart));
+  CHECK(fake->drive(10));
+  now = session.positionNow();
+  auto status = session.status();
+  CHECK(now.available && now.generation == 43 &&
+        now.transportState == singz::NativePlaybackTransportState::Playing &&
+        now.renderedProjectFrame == status.renderedProjectFrame &&
+        now.renderedProjectFrame == 15 &&
+        now.continuousFrame == status.continuousFrame && now.seekCount == 0 &&
+        now.ageNs < 1'000'000'000ULL);
+  // Age is a delta on the steady clock: it grows between two reads with no
+  // callback between them, while the frame does not move.
+  const auto earlier = session.positionNow();
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  const auto later = session.positionNow();
+  CHECK(later.available && later.ageNs > earlier.ageNs &&
+        later.renderedProjectFrame == earlier.renderedProjectFrame);
+
+  // A queued seek is not overlaid: until the callback drains it the read
+  // still says 15 with seekCount 0, and one block later it says the landing
+  // frame with seekCount 1. status() overlays nothing here either, so the
+  // two agree throughout.
+  CHECK(session.seek(43, 60).ok);
+  now = session.positionNow();
+  CHECK(now.renderedProjectFrame == 15 && now.seekCount == 0);
+  CHECK(fake->drive(1));
+  now = session.positionNow();
+  status = session.status();
+  CHECK(now.seekCount == 1 && now.renderedProjectFrame == 61 &&
+        status.renderedProjectFrame == 61);
+
+  // Paused: the frame freezes at the block the pause landed on and stays
+  // there however many blocks the host keeps asking for.
+  CHECK(session.pause(43).ok && fake->drive(1));
+  now = session.positionNow();
+  CHECK(now.transportState == singz::NativePlaybackTransportState::Paused &&
+        now.renderedProjectFrame == 61);
+  CHECK(fake->drive(7));
+  now = session.positionNow();
+  CHECK(now.transportState == singz::NativePlaybackTransportState::Paused &&
+        now.renderedProjectFrame == 61 && now.seekCount == 1);
+
+  // Unloaded: the sink is cleared with the callback proven quiescent, and a
+  // generation the session no longer owns is never handed out as a frame.
+  CHECK(session.unload(43).ok);
+  CHECK(!session.positionNow().available);
+
+  // The next song publishes under its own number through the same sink —
+  // and NOT before its prepare commits. Prepare admission makes 44 the
+  // active generation before the decode starts, while the sink still says
+  // nothing, and a read from inside the decode must come back unavailable
+  // rather than lend the new song a frame it has not rendered (or the old
+  // song's last one). It must also come back at all: the read takes no lock
+  // the prepare could be holding. (The claim alone changes nothing here.)
+  CHECK(session.claimGeneration(44));
+  CHECK(!session.positionNow().available);
+  auto second = std::vector<singz::NativePlaybackLaneSource>{};
+  second.push_back(lane("song", wav));
+  PositionNowDuringPrepare probe;
+  probe.session = &session;
+  CHECK(session
+            .prepare(config(), std::move(second), 44,
+                     {&probe, probePositionNowDuringPrepare})
+            .ok);
+  CHECK(probe.polls.load(std::memory_order_relaxed) > 0 &&
+        !probe.sawAvailable.load(std::memory_order_relaxed));
+  now = session.positionNow();
+  CHECK(now.available && now.generation == 44 && now.renderedProjectFrame == 0);
+  CHECK(session.unload(44).ok);
+  CHECK(!session.positionNow().available);
+  std::remove(wav.c_str());
+}
+
 void audibleProjectionWaitsForLatencyHistory() {
   const std::string wav = writeWav(
       "audible-projection.wav", 1, std::vector<float>(50000, 0.1F));
@@ -5156,6 +5280,7 @@ int main() {
   nativeReferencePreviewClickContract();
   transportControlKernelAndTelemetry();
   resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands();
+  positionNowReadsTheCallbackWithoutTheControlLock();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();

@@ -37,6 +37,7 @@
 const path = require('path')
 const { stageSongs } = require('./player-session/seed.cjs')
 const { runPass, evaluate, renderTables, restoreVoice, restorePreference } = require('./player-session/scenario.cjs')
+const { hostLoad, isQuiet, waitQuiet, QUIET_LOAD } = require('./player-session/host-load.cjs')
 
 const MOBILE_ROOT = path.resolve(__dirname, '..')
 const PORT = process.env.METRO_PORT || '8081'
@@ -50,6 +51,13 @@ const argOf = (name, fallback = null) => {
 }
 const wanted = (argOf('platform', 'both') || 'both').toLowerCase()
 const onlyBackend = argOf('backend', null) // 'legacy' | 'native', for a quick half-run
+/* `--wait-quiet` blocks until the host has given three consecutive quiet
+   samples 30 s apart (bounded; QUIET_WAIT_MIN minutes, default 45) before
+   anything is staged. `ALLOW_BUSY_HOST=1` runs on a busy host anyway — the
+   load still prints beside every CPU row and the host-quiet rule still
+   fails, so the run cannot read as a result by accident. */
+const waitForQuiet = argv.includes('--wait-quiet')
+const QUIET_WAIT_MIN = Number(process.env.QUIET_WAIT_MIN || 45)
 
 function which() {
   const out = []
@@ -185,6 +193,34 @@ async function runPlatform(target, songs) {
 ;(async () => {
   const targets = which()
   if (!targets.length) throw new Error('no devices to run against')
+
+  /* THE HOST MUST BE QUIET, or the CPU and memory columns describe the Mac.
+     A simulator is a process on it and an emulator a VM on it; one afternoon
+     of runs at load 8-11 from the user's own apps printed legacy at 40%
+     where the morning had 29% and both backends' pitch change at 126%, and
+     the table judged them anyway. A physical phone's numbers are its own, so
+     the refusal only applies when a host-bound target is in the run. */
+  const hostBound = targets.some(
+    (t) => t.platform === 'ios' || (t.platform === 'android' && /^emulator-/.test(t.serial))
+  )
+  const load = hostLoad()
+  console.log(`host load ${load.load1} (1-min average, ${load.cpus} cores; quiet is ≤ ${QUIET_LOAD})`)
+  if (hostBound && waitForQuiet && !isQuiet(load.load1)) {
+    const waited = await waitQuiet({ maxMs: QUIET_WAIT_MIN * 60_000, log: (l) => console.log(`  ${l}`) })
+    if (!waited.quiet && process.env.ALLOW_BUSY_HOST !== '1') {
+      throw new Error(
+        `the host never went quiet in ${QUIET_WAIT_MIN} min (samples: ${waited.samples.join(' ')}). ` +
+          'Nothing was measured. Re-run later, or ALLOW_BUSY_HOST=1 to run anyway and have the host-quiet rule fail.'
+      )
+    }
+  } else if (hostBound && !isQuiet(load.load1) && process.env.ALLOW_BUSY_HOST !== '1') {
+    throw new Error(
+      `the host is busy (1-min load ${load.load1}, quiet is ≤ ${QUIET_LOAD}): a simulator's or emulator's CPU and memory ` +
+        'would be measuring this Mac. Wait, pass --wait-quiet, or ALLOW_BUSY_HOST=1 to run anyway — the load then ' +
+        'prints beside every CPU row and the host-quiet rule fails, so the run cannot pass as a result.'
+    )
+  }
+
   console.log(`staging songs (ffmpeg-looped from the bundled sample)…`)
   const songs = stageSongs(MOBILE_ROOT)
   for (const s of songs) console.log(`  ${s.name} · ${s.seconds.toFixed(1)} s · ${s.bars} bars @ ${s.bpm} bpm`)

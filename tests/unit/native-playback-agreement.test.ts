@@ -17,11 +17,18 @@ import {
 } from '../../src/shared/types'
 
 // The TypeScript half of tests/shared/native-playback-agreement-cases.json.
-// tests/native/native_playback_contract_tests.cpp reads the same file and puts
-// the same rows to the core. Neither side may edit a row to make itself pass;
-// a row whose two columns differ is a DOCUMENTED divergence, listed in
-// docs/NATIVE-PLAYBACK-BRIDGE.md section 11, and closing one is its own
-// change with its own reasoning.
+// tests/native/native_playback_contract_tests.cpp reads the same file, but not
+// all of it: it puts scalarBounds, codecBitValues, graphNodeCount and
+// admissibleMeters to the core, and cannot reach loopFold or atEnd, which live
+// inside a render callback and a park decision respectively. For those two the
+// `core` column is pinned by the OPERATOR in its source rather than by
+// execution — worth knowing before trusting a green run here to mean the core
+// was asked.
+//
+// Neither side may edit a row to make itself pass. A row whose two columns
+// differ is a DOCUMENTED divergence, listed in
+// docs/NATIVE-PLAYBACK-BRIDGE.md section 11, and closing one is its own change
+// with its own reasoning.
 
 const root = process.cwd()
 const read = (path: string): string =>
@@ -29,8 +36,9 @@ const read = (path: string): string =>
 
 it('is the fixture both runners read', () => {
   expect(cases.version).toBe(1)
-  for (const group of ['graphNodeCount', 'loopFold', 'atEnd', 'codecBits', 'scalarBounds'])
+  for (const group of ['graphNodeCount', 'atEnd', 'codecBits', 'scalarBounds'])
     expect((cases as Record<string, unknown[]>)[group].length).toBeGreaterThan(0)
+  expect(cases.loopFold.rows.length).toBeGreaterThan(0)
 })
 
 describe('the synthesized graph node count', () => {
@@ -116,43 +124,61 @@ describe('the codec bit table', () => {
   })
 })
 
-// The loop fold and the at-end test are TypeScript's own arithmetic; the core
-// does the same job inside its render callback, where no test can call it. So
-// what is pinned here is the TypeScript column of each row AND the operator
-// the product uses — because the fixture's whole value is that it records
-// which operator each side has, and a transcription nobody checks would drift
-// away from the source it claims to describe.
+// The loop fold is TWO implementations of one wrap, and they disagree by one
+// sample at the loop end. It moved out of backend.ts's projected() when the
+// synchronous clock landed — into foldFrame in native.ts, which both the live
+// clock and the polled fallback call — but it was not removed, and it still
+// folds on `>` where the core wraps on `>=`.
+//
+// Getting that wrong is how this test earned its shape: an earlier version of
+// this file declared the divergence closed on the strength of a grep for the
+// old spelling, and guarded the claim with a pattern that could not match the
+// new one. So what is pinned here is the OPERATOR in each implementation, read
+// from source, and the seam row that separates them.
 describe('the loop fold', () => {
-  const fold = (start: number, end: number, advanced: number): number => {
-    const span = end - start
-    if (advanced > end) return start + ((advanced - start) % span)
-    return advanced
+  const native = read('mobile/src/playback/native.ts')
+
+  const fold = (row: (typeof cases.loopFold.rows)[number]): number => {
+    const span = row.loopEndFrame - row.loopStartFrame
+    if (row.positionFrame > row.loopEndFrame)
+      return row.loopStartFrame + ((row.positionFrame - row.loopStartFrame) % span)
+    return Math.min(row.durationFrames, row.positionFrame)
   }
 
-  it('uses a strictly-greater comparison, where the core uses greater-or-equal', () => {
-    const backend = read('mobile/src/playback/backend.ts')
-    expect(functionBody(backend, 'private projected(sec: number)')).toContain(
-      'if (advanced > region.end)'
+  it('folds past the loop end in TypeScript and at it in the core', () => {
+    // The comparison itself, from the function that actually performs it.
+    expect(functionBody(native, 'private foldFrame(')).toContain('if (frame > end)')
+    expect(read('native/playback/native_playback_session.cpp')).toContain(
+      'callbackProjectFrame >= callbackLoopEnd'
     )
-    const core = read('native/playback/native_playback_session.cpp')
-    expect(core).toContain('callbackProjectFrame >= callbackLoopEnd')
+    expect(cases.loopFold.typescriptOperator).toBe('>')
+    expect(cases.loopFold.coreOperator).toBe('>=')
   })
 
-  for (const row of cases.loopFold) {
+  it('runs that fold on both the live clock and the polled fallback', () => {
+    // If either path stopped folding, the seam below would stop describing the
+    // product even though every row still passed.
+    expect(functionBody(native, 'clock(): NativePlaybackClock')).toContain('this.foldFrame(')
+    expect(functionBody(native, 'private polledClock()')).toContain('this.foldFrame(')
+  })
+
+  for (const row of cases.loopFold.rows) {
     it(row.name, () => {
-      expect(fold(row.loopStart, row.loopEnd, row.position)).toBeCloseTo(row.typescript, 9)
-      if (row.agree) expect(row.typescript).toBeCloseTo(row.core, 9)
+      expect(fold(row)).toBeCloseTo(row.typescript, 6)
+      if (row.agree) expect(row.typescript).toBeCloseTo(row.core, 6)
+      else expect(row.typescript).not.toBeCloseTo(row.core, 6)
     })
   }
 
-  // Exactly one row may disagree, and it is the loop end itself. If a second
-  // ever appears, the two folds have diverged somewhere new.
+  // Exactly one row may disagree, and it is the loop end itself. A second one
+  // means the two folds have parted somewhere new.
   it('disagrees with the core at the loop end and nowhere else', () => {
-    const disagreeing = cases.loopFold.filter(row => !row.agree)
+    const disagreeing = cases.loopFold.rows.filter(row => !row.agree)
     expect(disagreeing.map(row => row.name)).toEqual(['exactly at the loop end'])
     const [seam] = disagreeing
-    expect(seam.position).toBe(seam.loopEnd)
-    expect(seam.core).toBe(seam.loopStart)
+    expect(seam.positionFrame).toBe(seam.loopEndFrame)
+    expect(seam.core).toBe(seam.loopStartFrame)
+    expect(seam.typescript).toBe(seam.loopEndFrame)
   })
 })
 

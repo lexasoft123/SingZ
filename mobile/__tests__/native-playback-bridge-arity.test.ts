@@ -48,7 +48,11 @@ describe('native playback bridge arity', () => {
 
   it('agrees with the manifest, which the two packaging suites also answer to', () => {
     expect(android).toEqual(bridgeManifest.methods.phone);
-    expect(bridgeManifest.methods.phone).toHaveLength(13);
+    // A deliberate literal, and the one assertion here that has to be edited
+    // by hand. Everything else compares two extractions, so a method dropped
+    // from both bridges AND the manifest in one change would pass all of them;
+    // this is what notices the surface shrinking.
+    expect(bridgeManifest.methods.phone).toHaveLength(14);
   });
 
   // A method present on one platform only is allowed, but it has to be

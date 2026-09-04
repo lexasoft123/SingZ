@@ -117,7 +117,7 @@ ogg/oga `0x0c0`, opus `0x080`, aif/aiff `0x100`.
 
 ## 3. Methods
 
-### The phones: thirteen, same name, same arity
+### The phones: fourteen, same name, same arity
 
 This is a rule, not an observation. **A native method whose arity disagrees
 with JavaScript is never dispatched and never says so** — no work, no error,
@@ -141,23 +141,40 @@ promise pair (iOS `resolver:`/`rejecter:` segments, Android's trailing
 | `lanePeaks` | 1 | generation |
 | `unload` | 1 | generation |
 | `unloadRetainingLanes` | 1 | generation |
+| `positionNow` | 0 | — (**synchronous**) |
+
+`positionNow` is the player's clock and the one **synchronous** method: it
+answers on the JS thread out of the core's lock-free publication rather than
+resolving a promise through the control queue. That changes how its arity is
+counted — there is no resolver/rejecter pair to discount — so the manifest
+records `synchronous` as part of a method's identity, and both bridges must
+agree on it as well as on the name and the count. iOS spells it
+`RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD`, Android
+`@ReactMethod(isBlockingSynchronousMethod = true)`.
 
 iOS additionally exports `codecTargetProof` (arity 0) behind
 `#if defined(SINGZ_CODEC_TARGET_PROOF)`; Android's equivalent lives on
 `SingzCore`, not on this module, so it is outside the shared surface.
 
 The TypeScript wrapper (`nativePlaybackBridge` in `native.ts`) requires ten of
-the thirteen to exist and refuses the whole module otherwise. Three are
-optional with defined fallbacks, because they were added after the first
+the fourteen to exist and refuses the whole module otherwise. **Four are
+optional**, each with a defined fallback, because each was added after a
 shipping build: `session()` falls back to `status().session`, `lanePeaks()`
-resolves `null`, and `unloadRetainingLanes()` falls back to `unload()` — which
-means an old binary silently loses lane parking rather than breaking.
+resolves `null`, `unloadRetainingLanes()` falls back to `unload()`, and
+`positionNow()` falls back to the polled clock. In every case an old binary
+degrades rather than breaks — it loses lane parking, or reads its position
+from the poll instead of the core — which is the point, but it also means the
+degradation is silent. If a phone seems to have lost a capability rather than
+playback, this list is where to look first.
 
-`session()` exists because the poll runs 2.5 times a second and `status()`
-re-enumerates the output devices every time. Asking the phone only where it is,
-rather than what it is, is the whole point of the method.
+`session()` exists because `status()` re-enumerates the output devices on
+every call, and the poll wants only the session block. Asking the phone where
+it is rather than what it is is the whole point of the method — and since
+`positionNow()` took over the playhead, the poll runs about once a second
+instead of several times.
 
-`nativePlaybackClaim` and `nativePlaybackRequestCancellation` have no
+There are 23 JNI symbols behind these, not 14: `nativePlaybackClaim` and
+`nativePlaybackRequestCancellation` have no
 `@ReactMethod`: they are reached through `prepare` and cancellation, and appear
 only in the JNI surface below.
 
@@ -301,9 +318,16 @@ the output open. Its iOS result carries **its own error table** —
 
 ## 5. The session block
 
-77 keys on both phones plus three Android-only ones, polled every 400 ms
-(`NATIVE_TELEMETRY_POLL_MS`; 200 ms during pre-roll, where count-in dots
-sample the poll grid and cannot be projected). `parseNativePlaybackSession`
+77 keys on both phones plus three Android-only ones, polled every second
+(`NATIVE_TELEMETRY_POLL_MS`, 1000 ms; `NATIVE_TELEMETRY_IDLE_POLL_MS` doubles
+that to 2000 when nothing is playing). The poll used to carry the position as
+well, which is why it ran several times a second; the synchronous
+`positionNow` clock carries the playhead now, and this block carries
+everything that is not the playhead. `NATIVE_PRE_ROLL_POLL_MS` (200 ms) is
+armed **only on a build without that clock** — count-in dots sample the poll
+grid there and cannot be projected — so on both shipping bridges it never
+fires.
+`parseNativePlaybackSession`
 returns `null` if any of the **69 strictly parsed** keys is missing or out of
 type. The other eight are the six read leniently and the two nothing reads at
 all, both noted below.
@@ -750,17 +774,26 @@ unnoticed, and each is a candidate for its own change — none should be
 "fixed" as a side effect of something else.
 
 1. **The loop fold disagrees at exactly the loop end.** TypeScript folds when
-   `advanced > region.end` (`mobile/src/playback/backend.ts`, ~:404-410); the
-   core wraps when `callbackProjectFrame >= callbackLoopEnd`
-   (`native_playback_session.cpp`, ~:1152). At the end sample the core has
-   already wrapped to the start and TypeScript still reports the end. The
-   modulo arithmetic is otherwise identical. Recorded in the agreement
-   fixture as a `coreOnly` row; **not** fixed here, because changing the
-   projection is a behaviour change and this commit is not.
+   the position is past the end (`foldFrame`, `mobile/src/playback/native.ts`,
+   ~:4049-4056); the core wraps when it reaches it
+   (`callbackProjectFrame >= callbackLoopEnd`, `native_playback_session.cpp`,
+   ~:1250). At the end sample the core has already wrapped to the start and
+   TypeScript still reports the end. The modulo arithmetic is otherwise
+   identical, and both the live clock and the polled fallback fold this way.
+
+   Worth knowing how this entry reads today: the fold used to live in
+   `backend.ts`'s `projected()`, and when the synchronous clock replaced that
+   projection it was easy to conclude the divergence had gone with it. It had
+   not — it moved into `native.ts` and changed spelling, from `% span` to
+   `% (end - start)`. The agreement fixture pins both operators from source
+   for that reason, rather than grepping for the shape either one used to
+   have.
 2. **At-end is exact in the core and approximate in TypeScript.** The core
    completes on `projectFrame >= durationFrames`; both TypeScript facades use
    a 0.01 s epsilon (`parkedAtEndOfSong` in `native.ts`,
-   `src/renderer/src/audio/engine.ts`). At 48 kHz that is 480 frames.
+   `src/renderer/src/audio/engine.ts`). At 48 kHz that is 480 frames. This one
+   survived the clock work: the epsilon is about deciding when to PARK a song,
+   not about where the playhead is.
 3. **iOS hand-rolls the error-name table** while Android and the desktop call
    the core's `nativePlaybackErrorName`. Three copies of one table, and the
    TypeScript fallback (`provider-failure`) differs from the core's

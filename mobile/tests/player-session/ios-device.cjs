@@ -194,6 +194,7 @@ function createDevice({ port, log, device }) {
     udid: DEV.udid,
     identifier: DEV.id,
     physical: true,
+    hostBound: false,
 
     async preflight() {
       /* Deliberately NOT the simulator's 48 kHz Mac-output check: that guards

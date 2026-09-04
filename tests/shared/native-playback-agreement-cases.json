@@ -76,92 +76,73 @@
       "agreement": "tsOnly"
     }
   ],
-  "loopFold": [
-    {
-      "name": "inside the region",
-      "loopStart": 2.0,
-      "loopEnd": 4.0,
-      "position": 3.0,
-      "frames": {
+  "loopFold": {
+    "note": "Two implementations of one wrap, in frames. foldFrame in mobile/src/playback/native.ts folds when the position is PAST the loop end; the core wraps when it REACHES it. They disagree by one sample at the end itself and agree everywhere else. The fold moved out of backend.ts's projected() when the synchronous clock landed — it was not removed, and both the live clock and the polled fallback call it.",
+    "typescriptOperator": ">",
+    "coreOperator": ">=",
+    "rows": [
+      {
+        "name": "inside the region",
         "loopStartFrame": 96000,
         "loopEndFrame": 192000,
-        "positionFrame": 144000
+        "positionFrame": 144000,
+        "durationFrames": 28800000,
+        "typescript": 144000.0,
+        "core": 144000.0,
+        "agree": true
       },
-      "typescript": 3.0,
-      "core": 3.0,
-      "agree": true
-    },
-    {
-      "name": "one sample before the end",
-      "loopStart": 2.0,
-      "loopEnd": 4.0,
-      "position": 3.999979166666667,
-      "frames": {
+      {
+        "name": "one sample before the end",
         "loopStartFrame": 96000,
         "loopEndFrame": 192000,
-        "positionFrame": 191999
+        "positionFrame": 191999,
+        "durationFrames": 28800000,
+        "typescript": 191999.0,
+        "core": 191999.0,
+        "agree": true
       },
-      "typescript": 3.999979167,
-      "core": 3.999979167,
-      "agree": true
-    },
-    {
-      "name": "exactly at the loop end",
-      "loopStart": 2.0,
-      "loopEnd": 4.0,
-      "position": 4.0,
-      "frames": {
+      {
+        "name": "exactly at the loop end",
         "loopStartFrame": 96000,
         "loopEndFrame": 192000,
-        "positionFrame": 192000
+        "positionFrame": 192000,
+        "durationFrames": 28800000,
+        "typescript": 192000.0,
+        "core": 96000.0,
+        "agree": false
       },
-      "typescript": 4.0,
-      "core": 2.0,
-      "agree": false
-    },
-    {
-      "name": "one sample past the end",
-      "loopStart": 2.0,
-      "loopEnd": 4.0,
-      "position": 4.000020833333333,
-      "frames": {
+      {
+        "name": "one sample past the end",
         "loopStartFrame": 96000,
         "loopEndFrame": 192000,
-        "positionFrame": 192001
+        "positionFrame": 192001,
+        "durationFrames": 28800000,
+        "typescript": 96001.0,
+        "core": 96001.0,
+        "agree": true
       },
-      "typescript": 2.000020833,
-      "core": 2.000020833,
-      "agree": true
-    },
-    {
-      "name": "half a span past the end",
-      "loopStart": 2.0,
-      "loopEnd": 4.0,
-      "position": 5.0,
-      "frames": {
+      {
+        "name": "half a span past the end",
         "loopStartFrame": 96000,
         "loopEndFrame": 192000,
-        "positionFrame": 240000
+        "positionFrame": 240000,
+        "durationFrames": 28800000,
+        "typescript": 144000.0,
+        "core": 144000.0,
+        "agree": true
       },
-      "typescript": 3.0,
-      "core": 3.0,
-      "agree": true
-    },
-    {
-      "name": "a whole span past the end",
-      "loopStart": 2.0,
-      "loopEnd": 4.0,
-      "position": 6.0,
-      "frames": {
+      {
+        "name": "a whole span past the end",
         "loopStartFrame": 96000,
         "loopEndFrame": 192000,
-        "positionFrame": 288000
-      },
-      "typescript": 2.0,
-      "core": 2.0,
-      "agree": true
-    }
-  ],
+        "positionFrame": 288000,
+        "durationFrames": 28800000,
+        "typescript": 96000.0,
+        "core": 96000.0,
+        "agree": true
+      }
+    ]
+  },
   "atEnd": [
     {
       "name": "well short of the end",

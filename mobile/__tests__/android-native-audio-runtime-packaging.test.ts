@@ -3,6 +3,8 @@ import path from 'node:path';
 import bridgeManifest from '../../tests/shared/native-playback-bridge-manifest.json';
 import {
   androidBridgeMethods,
+  kotlinWhenTable,
+  writableMapKeys,
   jniJsonKeys,
   jniPlaybackSymbols,
   jniRegisteredNames,
@@ -39,6 +41,26 @@ describe('Android native DSP runtime packaging', () => {
       1,
     );
     expect(module).toContain('override fun getName(): String = "NativeAudioRuntime"');
+    // The clock payload, built here as a WritableMap and on iOS as a
+    // dictionary literal. Same eight keys or the parser returns null and this
+    // platform alone drops back to the polled clock, silently.
+    expect(writableMapKeys(module, 'fun positionNow(')).toEqual(
+      bridgeManifest.positionNow.keys,
+    );
+    // A FOURTH transportState table, mapping the core's integer codes. The
+    // other three are pinned against the manifest elsewhere; without this one
+    // a sixth enumerator could update them all and leave this answering
+    // "stopped".
+    const clockStates = kotlinWhenTable(module, 'fun positionNow(');
+    expect(clockStates.slice(0, -1)).toEqual(
+      bridgeManifest.enums.transportState.kotlin.strings,
+    );
+    expect(clockStates[clockStates.length - 1]).toBe(
+      bridgeManifest.enums.transportState.kotlin.fallback,
+    );
+    // …and every name it produces has to be one the shared table already has.
+    for (const state of clockStates)
+      expect(bridgeManifest.enums.transportState.android.strings).toContain(state);
     // EXACT, and with arity. This was a contains-list of ten, which is how
     // lanePeaks, setControl and unloadRetainingLanes came to be absent from
     // it while shipping — a list that cannot notice a missing name is not a
@@ -53,6 +75,25 @@ describe('Android native DSP runtime packaging', () => {
     expect(module).toMatch(
       /fun session\(promise: Promise\) \{\s*if \(!postResult\(promise\) \{\s*requireCore\(\)\s*SingzCore\.nativePlaybackSession\(\)/,
     );
+    // positionNow is the player's clock and the ONE blocking-synchronous
+    // method: it runs on the JS thread and answers from the core's lock-free
+    // publication — no postResult (the control thread can be held for
+    // seconds by a prepare or a stop), no JSON. Same name, no arguments, on
+    // iOS too (RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD there).
+    expect(
+      module.match(/@ReactMethod\(isBlockingSynchronousMethod = true\)/g),
+    ).toHaveLength(1);
+    expect(module).toMatch(
+      /@ReactMethod\(isBlockingSynchronousMethod = true\)\s*fun positionNow\(\): WritableMap \{/,
+    );
+    const positionNowBody = /fun positionNow\(\): WritableMap \{([\s\S]*?)\n  \}/.exec(
+      module,
+    );
+    expect(positionNowBody).not.toBeNull();
+    expect(positionNowBody![1]).toContain('SingzCore.nativePlaybackPositionNow()');
+    expect(positionNowBody![1]).not.toContain('postResult');
+    expect(positionNowBody![1]).not.toContain('parseJson');
+    expect(core).toContain('external fun nativePlaybackPositionNow(): DoubleArray');
     expect(module).toContain('NativePlaybackPathPolicy.authorize');
     expect(module).toContain('ctx.filesDir');
     expect(module).toContain('ctx.cacheDir');
@@ -139,6 +180,14 @@ describe('Android native DSP runtime packaging', () => {
     expect([...jniRegisteredNames(binding)].sort()).toEqual(
       [...bridgeManifest.jni.kotlinExternals].sort(),
     );
+    // The clock's JNI leg takes no lock and registers as a double array, not
+    // a JSON string: `()[D` is the arity-and-type contract the Kotlin extern
+    // must match, or the method never dispatches and never says so. The name
+    // lists above cannot see a signature, so this stays beside them.
+    expect(binding).toMatch(
+      /static jdoubleArray nativePlaybackPositionNow\(JNIEnv \*env, jobject\) \{\s*const singz::NativePlaybackPositionNow now = owner\(\)\.session\.positionNow\(\);/,
+    );
+    expect(binding).toContain('"()[D"');
     expect(binding).toContain('nativePlaybackSessionCapabilityTag()');
     expect(binding).toContain('decodedAudioCodecCapabilities()');
     expect(binding).toContain('decodedAudioCapabilityTag()');

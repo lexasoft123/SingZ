@@ -238,13 +238,32 @@ export interface NativePlaybackViewState {
   readonly terminalReason: string
   readonly error: string | null
   /** Wall-clock stamp of the telemetry behind the two positions, whether the
-   * transport was advancing then, and its rate: native telemetry arrives
-   * on the telemetry poll interval, and the backend projects the
-   * position forward between polls so the lyric sweep and the clock glide
-   * instead of stepping. */
+   * transport was advancing then, and its rate. The player's clock no longer
+   * reads these on a native build that answers `positionNow()`; they remain
+   * the fallback projection for a build older than that method, where the
+   * position still arrives on the telemetry poll and is projected forward
+   * between polls so the sweep glides instead of stepping. */
   readonly telemetryAtMs?: number
   readonly advancing?: boolean
   readonly playbackRate?: number
+}
+
+/**
+ * What the player's clock reads, as often as it likes.
+ *
+ * `renderedSec` is the render head — the signed project time the core had
+ * rendered up to, advanced by how long ago it said so — untrimmed and before
+ * presentation latency, exactly the legacy engine's `audioPosition`. What
+ * the singer hears is that minus the latency and the trim, which the backend
+ * subtracts once. `live` says whether this came from the synchronous native
+ * read (`positionNow`) or, on an older native build, from the last polled
+ * telemetry projected by wall time.
+ */
+export interface NativePlaybackClock {
+  readonly renderedSec: number
+  readonly playing: boolean
+  readonly live: boolean
+  readonly countIn: PlaybackCountInStatus | null
 }
 
 export type NativePlaybackStartOutcome =
@@ -273,6 +292,10 @@ export interface NativePlaybackHandle {
    * bounded parameter queue; no per-platform mixer graph is allowed here. */
   readonly mixerControls: true
   snapshot(): NativePlaybackViewState
+  /** The clock, read synchronously: the render head now, whether the
+   * transport is moving, and the count-in in progress. Cheap enough to call
+   * from every render and every ticker tick — that is the point of it. */
+  clock(): NativePlaybackClock
   subscribe(listener: () => void): () => void
   /** The singer's per-route latency correction, in seconds. The count-in
    * dots are derived from the same audible frame the lyric sweep uses, and

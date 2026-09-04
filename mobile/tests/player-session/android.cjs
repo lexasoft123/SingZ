@@ -89,6 +89,10 @@ function createDevice({ serial, port, log, mobileRoot }) {
     platform: 'android',
     label: `Android · ${SERIAL}`,
     serial: SERIAL,
+    /* An emulator is a VM on this Mac, so its /proc numbers move with the
+       host's load; a phone's are the phone's own and the host-load rule does
+       not apply to them. */
+    hostBound: /^emulator-/.test(SERIAL),
 
     preflight() {
       const model = shell('getprop ro.product.model').trim()
