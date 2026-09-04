@@ -377,7 +377,38 @@ are the decode pool's transient peak held by the allocator (decode into final-si
 `malloc_zone_pressure_relief` after prepare) or a JS-side decode surviving under native.
 Guard with an open-close-memory-shaped legacy-vs-native check on the simulator.
 
+**Measured (2026-09-05, `sim-run-4c-2.log`, iOS simulator on the tip after Step 4, host load
+11–13 so only the memory columns are trusted — RSS does not see the host):** native RSS is
+UNDER legacy in every phase — idle-in-player 734 vs 780 MB, playing 727 vs 770, pitch-change
+lower too, after-leaving 671 vs 710. The premise of this step does not hold on this tip; the
+player-session RSS rules already are the open-close-memory-shaped guard, and they pass. No
+`vmmap` theory was needed. The same functional run: 51/58 on iOS, every miss a CPU column
+(1.0 vs 0.6%, 20.8 vs 20.7%) or a timing on a simulator that shares a host at load 11 (seek
+worst-of-4 463 vs 60 — the first of four, the other three 66–68 — metronome touches 244 vs
+123, metronome save 172 vs 104), plus the two "host was quiet" rules, which say exactly that.
+Lifecycle rules all pass: background/foreground in place, end of song, second song, restart.
+The summary line's "2 never reached (the run stopped early)" is the two NOT-compared
+backgrounded rows miscounted — both passes ran to the end; a harness nit, not fixed here.
+The emulator's functional leg on the same tip (`emu-run-4c-1.log`, plain debug APK on
+`emulator-5554`, host load 13–17): 54/60, PSS under legacy in every phase (736 vs 767 MB idle,
+731 vs 760 playing), every lifecycle rule green; the six misses are three timings (lane ramp
+1531 vs 926 ms, metronome save 4069 vs 1297, training on 1596 vs 1252 — an emulator at that
+host load is the Mac), `CPU (backgrounded)` 99.2 vs 66.1% (both backends still rendering
+there, the emulator's numbers again), and the two host-quiet rules. So on the tip every
+platform passes its lifecycle and memory rules; what Step 6 still owes is the quiet host.
+
 ### Step 6 — acceptance
+**Status (2026-09-05 02:45):** not started — the host has been at load 5–17 throughout
+Step 4 (the singer's own applications), and a simulator or emulator number taken then is
+the Mac's. What is in hand: POCO run 8 at 57/58 with the last rule one tick outside a
+two-tick tolerance; functional iOS (51/58) and emulator (54/60) runs whose every miss is
+host-bound. Owed: the three quiet-host greens per platform, the iPhone `--platform
+ios-device` timings, the e2e-verifier pass per platform (the reviewer asks for Android
+in particular — the APK's native code changed twice), `DSP-GRAPH-PLAN.md`, build 48.
+Also owed, found on the way: a device driver that pulls audio focus during an armed swap
+or a held stream (nothing in `mobile/tests/` can), and the iOS drivers' restart timing
+and CPU tolerance brought to the Android ones' resolution.
+
 Three consecutive green runs per platform on a quiet host (58/58, 56/56 — the
 metronome-save rule flips on a heavy tail, so three greens, not one), the POCO run, an
 iPhone `--platform ios-device` for timings, the e2e-verifier pass, project memory and
