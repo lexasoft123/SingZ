@@ -5,6 +5,7 @@ import com.singzplayer.playback.NativePlaybackPathPolicy
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,6 +50,16 @@ class NativePlaybackBridgeSchemaTest {
       )
     )
   )
+
+  @Test
+  fun `a swap source generation parses and defaults to an ordinary prepare`() {
+    assertEquals(0L, NativePlaybackBridgeSchema.prepare(validPrepare()).swapFromGeneration)
+    val swap = validPrepare() + ("swapFromGeneration" to 3.0)
+    assertEquals(3L, NativePlaybackBridgeSchema.prepare(swap).swapFromGeneration)
+    assertThrows(IllegalArgumentException::class.java) {
+      NativePlaybackBridgeSchema.prepare(validPrepare() + ("swapFromGeneration" to -1.0))
+    }
+  }
 
   @Test
   fun `whole transport cue request parses without per-click events`() {

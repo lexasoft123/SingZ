@@ -296,6 +296,13 @@ export interface NativePlaybackHandle {
    * transport is moving, and the count-in in progress. Cheap enough to call
    * from every render and every ticker tick — that is the point of it. */
   clock(): NativePlaybackClock
+  /** Whether a structural change (cue, training, pitch/tempo) would be
+   * landed on the running stream as a seam rather than as a stop/unload/
+   * prepare/open/start rebuild — true only on a core that can swap and while
+   * the song is playing or paused on a running stream. The player's
+   * capabilities use it: a seam refuses no seek, a rebuild refuses every
+   * one for seconds. */
+  swapsInPlace(): boolean
   subscribe(listener: () => void): () => void
   /** The singer's per-route latency correction, in seconds. The count-in
    * dots are derived from the same audible frame the lyric sweep uses, and

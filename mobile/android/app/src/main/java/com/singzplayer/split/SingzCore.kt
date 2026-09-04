@@ -116,6 +116,7 @@ object SingzCore {
     masterGain: Float,
     maximumRetainedBytes: Long,
     handoffLease: Long,
+    swapFromGeneration: Long,
     preparedStartProjectFramePresent: Boolean,
     preparedStartProjectFrame: Long,
     initialPaused: Boolean,

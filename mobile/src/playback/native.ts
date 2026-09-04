@@ -264,6 +264,17 @@ export interface NativePlaybackSessionStatus {
   readonly devicePresentationLatencyFrames: number;
   readonly totalPresentationLatencyFrames: number;
   readonly preparedStartProjectFrame: number;
+  /** A swap in flight (see NativePlaybackCapability.playbackSwap):
+   *  `swapPendingGeneration` names the generation still rendering while
+   *  `generation` already names its replacement; `retiringSwapGeneration`
+   *  one that has landed and is not yet freed; `swapLandings` counts seams
+   *  this stream has rendered and `swapLateLandings` those that missed the
+   *  frame their Stretch anchor was filled for. Read leniently: absent on a
+   *  binary older than the swap. */
+  readonly swapPendingGeneration: number;
+  readonly retiringSwapGeneration: number;
+  readonly swapLandings: number;
+  readonly swapLateLandings: number;
   readonly retainedBytes: number;
   readonly graphArenaBytes: number;
   readonly masterGain: number;
@@ -367,6 +378,12 @@ export interface NativePlaybackCapability {
   readonly playbackTransport: boolean;
   readonly scheduledCues: boolean;
   readonly timePitch: boolean;
+  /** The core can replace a generation ON ITS RUNNING STREAM
+   *  (`swapFromGeneration` on prepare): a cue, training or pitch change is
+   *  then one prepare and a seam the render thread lands, not stop / unload
+   *  / prepare / open / start. Additive and read leniently: a binary older
+   *  than the bit keeps the six-call rebuild, it does not lose native. */
+  readonly playbackSwap: boolean;
   /** Runtime-probed zcore decoder surface. Selection uses this before native
    * ownership is claimed, so an unsupported custom container stays wholly on
    * the legacy backend instead of failing after RNAudioAPI has been retired. */
@@ -594,6 +611,10 @@ interface NativePlaybackPrepareRequest {
   preparedStartProjectFrame?: number;
   initialTransport?: NativePlaybackInitialTransport;
   graphDocument?: NativeGraphDocumentProjection;
+  /** Replace this generation on its running stream instead of requiring it
+   *  to be unloaded first (see NativePlaybackCapability.playbackSwap). Sent
+   *  only when positive; absent is an ordinary prepare. */
+  swapFromGeneration?: number;
 }
 
 interface NativePlaybackInitialTransport {
@@ -627,6 +648,9 @@ interface NativePlaybackPrepareOverrides {
   readonly masterGain?: number;
   readonly training?: NativePlaybackPrepareTraining;
   readonly preparedStartProjectFrame?: number;
+  /** Prepare this generation as the replacement of the named one on its
+   *  running stream (NativePlaybackPrepareRequest.swapFromGeneration). */
+  readonly swapFromGeneration?: number;
   readonly initialTransport?: NativePlaybackInitialTransport;
 }
 
@@ -855,6 +879,10 @@ const emptyNativeSession = (): NativePlaybackSessionStatus => ({
   devicePresentationLatencyFrames: 0,
   totalPresentationLatencyFrames: 0,
   preparedStartProjectFrame: 0,
+  swapPendingGeneration: 0,
+  retiringSwapGeneration: 0,
+  swapLandings: 0,
+  swapLateLandings: 0,
   retainedBytes: 0,
   graphArenaBytes: 0,
   masterGain: 1,
@@ -913,6 +941,7 @@ const absentNativeCapability = (): NativePlaybackCapability => ({
   playbackTransport: false,
   scheduledCues: false,
   timePitch: false,
+  playbackSwap: false,
   mediaCodec: {
     abiVersion: 1,
     formatMask: 0,
@@ -946,6 +975,13 @@ const SEEK_RECEIPT_DEADLINE_MS = 250;
 /** One render block is what the receipt waits on, so ask about that often
  *  rather than as fast as the bridge will answer. */
 const SEEK_RECEIPT_POLL_MS = 15;
+/** How long a second structural change waits for the previous swap's seam
+ *  to land before going on. A seam is one to three blocks away on a running
+ *  stream — tens of milliseconds — so this is far past any healthy landing;
+ *  a stream that does not deliver blocks (held, stalled) runs it out, and
+ *  the change then takes the six-call rebuild, which stops that stream
+ *  anyway. */
+const SWAP_LANDING_DEADLINE_MS = 1_000;
 /** A pause is applied at the next block boundary too, and pause() waits for
  *  it on the synchronous clock for the same reason and the same bound. */
 const PAUSE_RECEIPT_DEADLINE_MS = SEEK_RECEIPT_DEADLINE_MS;
@@ -1369,6 +1405,12 @@ export function parseNativePlaybackSession(
     // answer to one question, and they disagreed with this one about 3.7
     // and 1e300.
     graphStatusCode: safeUnsigned(rawSession.graphStatusCode) ?? 0,
+    swapPendingGeneration:
+      safeUnsigned(rawSession.swapPendingGeneration) ?? 0,
+    retiringSwapGeneration:
+      safeUnsigned(rawSession.retiringSwapGeneration) ?? 0,
+    swapLandings: safeUnsigned(rawSession.swapLandings) ?? 0,
+    swapLateLandings: safeUnsigned(rawSession.swapLateLandings) ?? 0,
     graphStatusDetail: safeUnsigned(rawSession.graphStatusDetail) ?? 0,
     timePitchAnchorOutcome:
       safeUnsigned(rawSession.timePitchAnchorOutcome) ?? 0,
@@ -1493,6 +1535,7 @@ export function parseNativePlaybackCapability(
     playbackTransport: true,
     scheduledCues: true,
     timePitch: true,
+    playbackSwap: raw.playbackSwap === true,
     mediaCodec: mediaCodec!,
     buildId,
     playbackBuild,
@@ -2154,6 +2197,41 @@ export class IosNativePlaybackCoordinator {
    * reads, not timers: a handful of bridge round trips at most. Giving up
    * quietly is correct here; a stale resume is recoverable, a hang is not.
    */
+  /**
+   * A structural change arriving while the previous one's seam is still in
+   * the air — a metronome volume drag, two taps on the transpose stepper —
+   * waits here, bounded, for the core's telemetry to name the replacement.
+   * Without this the second change read the outgoing generation's
+   * transport, called it untrustworthy and stopped the song; and even
+   * accepted, the core refuses a second swap while the first is unretired,
+   * so the change would have taken the rebuild that stops the song for the
+   * seam. Each read that names the replacement is published to the handle,
+   * which is what clears the armed window.
+   */
+  private async awaitSeamLanded(handle: IosNativePlaybackHandle): Promise<void> {
+    const startedAt = Date.now();
+    let reads = 0;
+    while (
+      handle.swappingFromGeneration !== 0 &&
+      Date.now() - startedAt < SWAP_LANDING_DEADLINE_MS
+    ) {
+      const session = await this.deps.native?.session();
+      if (!session || !this.isActive(handle)) return;
+      reads++;
+      if (session.generation === handle.generation)
+        handle.publishTelemetry(session);
+      if (handle.swappingFromGeneration === 0) return;
+      await new Promise(resolve => setTimeout(resolve, SEEK_RECEIPT_POLL_MS));
+    }
+    if (handle.swappingFromGeneration !== 0)
+      log(
+        'dsp',
+        `seam did not land · generation ${handle.swappingFromGeneration}→${handle.generation} · ` +
+          `${reads} session reads in ${since(startedAt)} · the next change rebuilds`,
+        'warn',
+      );
+  }
+
   private async awaitSeekApplied(
     handle: IosNativePlaybackHandle,
     before: number,
@@ -2266,6 +2344,168 @@ export class IosNativePlaybackCoordinator {
     return previous.then(operation).finally(release);
   }
 
+  /**
+   * One prepare, one seam: the replacement generation is prepared while the
+   * song plays and the core's render thread hands the clock across at a
+   * block boundary. Nothing here stops, unloads, opens or starts anything,
+   * and the poll keeps running throughout — the telemetry names the old
+   * generation until the seam and the handle accepts that (see
+   * publishTelemetry).
+   *
+   * Returns false when the core REFUSED to swap (invalid-state: the stream
+   * is held, or is not running), with the song untouched and the caller
+   * free to rebuild the six-call way. Any other failure throws, also with
+   * the song untouched — a replacement that could not be built is not a
+   * reason to silence the one that is playing.
+   */
+  private async swapHandleGeneration(
+    handle: IosNativePlaybackHandle,
+    context: {
+      oldGeneration: number;
+      status: NativePlaybackCapability;
+      session: NativePlaybackSessionStatus;
+      restoreTransport: 'playing' | 'paused';
+      restoreLoop: { startProjectFrame: number; endProjectFrame: number } | null;
+      statusSampleRate: number;
+      rebuildStartedAt: number;
+    },
+  ): Promise<boolean> {
+    const native = this.deps.native;
+    if (!native) return false;
+    const {
+      oldGeneration,
+      status,
+      session,
+      restoreTransport,
+      restoreLoop,
+      statusSampleRate,
+      rebuildStartedAt,
+    } = context;
+    // A stream is not moved between outputs by a swap: a route that changed
+    // under the song takes the rebuild, which opens the new one.
+    const output = chooseOutput(status.outputs);
+    if (!output || output.uid !== handle.output?.uid) return false;
+    const generation = this.claimGeneration();
+    handle.beginSwapPrepare(generation, output, oldGeneration);
+    const overrides: NativePlaybackPrepareOverrides = {
+      ...handle.prepareOverrides(
+        // The clock is carried across by the core; this is only where the
+        // replacement's Stretch anchor is primed before the core predicts
+        // the landing frame itself, and a pre-roll frame has no place in
+        // a plan that may have no count-in.
+        Math.max(0, session.renderedProjectFrame),
+        session.lanes,
+        session.masterGain,
+        {
+          state: restoreTransport,
+          ...(restoreLoop === null ? {} : { loop: restoreLoop }),
+        },
+      ),
+      swapFromGeneration: oldGeneration,
+    };
+    const abandon = async (): Promise<void> => {
+      handle.abandonSwapPrepare();
+      // The candidate is answered as a cancelled generation is; the unload
+      // is the receipt the core expects and it frees nothing that plays.
+      try {
+        await native.unload(generation);
+      } catch {
+        // Nothing of the candidate exists; a lost receipt changes nothing.
+      }
+    };
+    let result: NativePlaybackResult;
+    try {
+      const request = prepareRequest(handle.materialized, output, 0, overrides);
+      logDspGraphBuild(generation, handle.materialized, output, request);
+      result = await native.prepare(generation, request);
+    } catch (error) {
+      await abandon();
+      const detail = `Native swap prepare failed: ${message(error)}`;
+      log(
+        'dsp',
+        `swap prepare command failed · generation ${oldGeneration}→${generation} · ${message(
+          error,
+        )}`,
+        'error',
+      );
+      handle.update({ error: detail });
+      throw new NativePlaybackCommandError(
+        'provider-failure',
+        'rebuild-cues',
+        generation,
+        detail,
+      );
+    }
+    if (!result.ok) {
+      await abandon();
+      if (result.error === 'invalid-state') {
+        log(
+          'dsp',
+          `swap refused · generation ${oldGeneration}→${generation} · ${
+            result.message || result.error
+          } · rebuilding instead`,
+          'warn',
+        );
+        return false;
+      }
+      const detail = `Native swap refused the song: ${
+        result.message || result.error
+      }`;
+      log(
+        'dsp',
+        `swap prepare refused · generation ${oldGeneration}→${generation} · ${detail}`,
+        'error',
+      );
+      handle.update({ error: detail });
+      throw new NativePlaybackCommandError(
+        nativeErrorCode(result.error),
+        'rebuild-cues',
+        generation,
+        detail,
+      );
+    }
+    // Armed. The core owns the seam from here; the status is read for the
+    // replacement's lanes, config and description, and a failed read is
+    // only a missed log line — the next poll reads the same thing.
+    let armed: NativePlaybackSessionStatus | null = null;
+    try {
+      const read = await native.status();
+      if (read.session.generation === generation) armed = read.session;
+    } catch (error) {
+      log(
+        'dsp',
+        `swap status read failed · generation ${generation} · ${message(error)}`,
+        'warn',
+      );
+    }
+    if (armed) handle.adoptPreparedSession(armed);
+    handle.recordPreparedConfig();
+    // This generation is audible because of the SWAP, not the last Play tap.
+    handle.startRequestedAt = rebuildStartedAt;
+    handle.markStartIssued(generation);
+    handle.update({
+      phase: restoreTransport,
+      error: null,
+      ...(restoreLoop === null
+        ? { regionState: null }
+        : {
+            regionState: {
+              start: restoreLoop.startProjectFrame / statusSampleRate,
+              end: restoreLoop.endProjectFrame / statusSampleRate,
+              loop: true,
+            },
+          }),
+    });
+    log(
+      'dsp',
+      `cue graph swapped on the running stream · generation ${oldGeneration}→${generation} · ` +
+        `signed project frame ${session.renderedProjectFrame} · ` +
+        `${armed === null || armed.swapPendingGeneration !== 0 ? 'seam armed' : 'seam landed'} · ` +
+        `armed in ${since(rebuildStartedAt)} · ${handle.graphDescription()}`,
+    );
+    return true;
+  }
+
   private async prepareHandle(
     handle: IosNativePlaybackHandle,
     capability?: NativePlaybackCapability,
@@ -2375,6 +2615,7 @@ export class IosNativePlaybackCoordinator {
         : { ok: false, error: cleanupUncertain('inconsistent prepare status') };
     }
     logDspGraphPrepared(result, preparedStatus.session, handle.preparedStartedAt);
+    handle.swapCapable = preparedStatus.playbackSwap;
     handle.publishPrepared(preparedStatus.session);
     handle.recordPreparedConfig();
     return { ok: true };
@@ -2679,6 +2920,7 @@ export class IosNativePlaybackCoordinator {
       }
 
       const rebuildStartedAt = Date.now();
+      if (handle.swappingFromGeneration !== 0) await this.awaitSeamLanded(handle);
       let status: NativePlaybackCapability;
       try {
         status = await native.status();
@@ -2692,9 +2934,13 @@ export class IosNativePlaybackCoordinator {
         );
       }
       const session = status.session;
+      // During an armed swap the transport names the outgoing generation
+      // until the seam; the frame it carries is this song's all the same.
       const telemetryUsable =
         session.generation === oldGeneration &&
-        session.transportGeneration === oldGeneration &&
+        (session.transportGeneration === oldGeneration ||
+          (handle.swappingFromGeneration !== 0 &&
+            session.transportGeneration === handle.swappingFromGeneration)) &&
         session.transportTelemetryQuality !== 'unavailable';
       if (!telemetryUsable) {
         await this.stopHandleLocked(handle, 'cue rebuild telemetry unavailable');
@@ -2757,6 +3003,37 @@ export class IosNativePlaybackCoordinator {
         : null;
       const statusSampleRate =
         session.sampleRate || handle.output?.sampleRate || 48_000;
+      handle.swapCapable = status.playbackSwap;
+
+      /* The seam. On a core that can replace a generation on its running
+         stream, a started song is never stopped for a structural change:
+         the replacement is prepared while the song plays and the render
+         thread lands it at a block boundary — a rate change on the very
+         frame its Stretch anchor was filled for. Refused (a held stream, a
+         stream that is not running) and the six-call rebuild below is what
+         it always was. */
+      if (
+        status.playbackSwap &&
+        wasStarted &&
+        restoreTransport !== 'prepared' &&
+        session.state === 'running' &&
+        session.hostState === 'running' &&
+        // A seam still in the air: the core would refuse a second one, and
+        // the rebuild below stops the song for it — which is the one case
+        // awaitSeamLanded above is there to make rare.
+        handle.swappingFromGeneration === 0
+      ) {
+        const swapped = await this.swapHandleGeneration(handle, {
+          oldGeneration,
+          status,
+          session,
+          restoreTransport,
+          restoreLoop,
+          statusSampleRate,
+          rebuildStartedAt,
+        });
+        if (swapped) return;
+      }
 
       handle.stopPolling();
       if (wasStarted) {
@@ -3437,7 +3714,15 @@ export class IosNativePlaybackCoordinator {
     const native = this.deps.native;
     if (!native || typeof native.positionNow !== 'function') return null;
     const now = native.positionNow();
-    if (now === null || now.generation !== handle.generation) return null;
+    // During an armed swap the core's sink still says the outgoing
+    // generation's number until the seam, and the frame it carries is this
+    // song's — accept it, exactly as the core's own positionNow() does.
+    if (
+      now === null ||
+      (now.generation !== handle.generation &&
+        now.generation !== handle.swappingFromGeneration)
+    )
+      return null;
     return now;
   }
 
@@ -4229,9 +4514,65 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     }
   }
 
+  /** Whether the core behind this handle can replace a generation on its
+   *  running stream — the bridge's `playbackSwap` bit, recorded at every
+   *  status read the coordinator makes for this handle. */
+  swapCapable = false;
+  /** Non-zero from a swap prepare's claim until the core's telemetry names
+   *  the replacement: the outgoing generation, whose number the transport
+   *  telemetry and the clock keep saying until the render thread lands the
+   *  seam. Zero otherwise. */
+  swappingFromGeneration = 0;
+
+  /** The claim for a swap: the new generation takes over the handle without
+   *  the song being interrupted — no phase reset, no position reset, the
+   *  poll left running — because nothing stops. The old generation is kept
+   *  as the one the telemetry may still name. */
+  beginSwapPrepare(
+    generation: number,
+    output: NativePlaybackOutput,
+    outgoing: number,
+  ): void {
+    this.swappingFromGeneration = outgoing;
+    this.generation = generation;
+    this.output = output;
+    this.cleanupGeneration = 0;
+    this.cleanupLease = 0;
+    this.endOfSongParkedGeneration = 0;
+    this.preparedStartedAt = Date.now();
+    // The view names the generation the way beginPrepare's does — and
+    // nothing else changes: same phase, same position, same error.
+    this.update({ generation });
+  }
+
+  /** A swap that was refused or failed before it armed: the outgoing
+   *  generation is still the song, and the handle says so again. */
+  abandonSwapPrepare(): void {
+    if (this.swappingFromGeneration === 0) return;
+    this.generation = this.swappingFromGeneration;
+    this.swappingFromGeneration = 0;
+    this.update({ generation: this.generation });
+  }
+
+  swapsInPlace(): boolean {
+    if (this.swappingFromGeneration !== 0) return true;
+    const phase = this.snapshot().phase;
+    return (
+      this.swapCapable &&
+      (phase === 'playing' || phase === 'paused') &&
+      this.startWasIssued(this.generation) &&
+      // A held stream delivers no blocks, so no seam could land on it; the
+      // mark is fresher than the poll's hostState, which is refreshed only
+      // every idle tick.
+      this.streamHeldGeneration === 0 &&
+      this.lastTelemetry?.hostState === 'running'
+    );
+  }
+
   beginPrepare(generation: number, output: NativePlaybackOutput): void {
     this.generation = generation;
     this.output = output;
+    this.swappingFromGeneration = 0;
     this.firstAudibleLogged = false;
     this.steadyRenderLogged = false;
     this.cleanupGeneration = 0;
@@ -4253,9 +4594,32 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   }
 
   publishPrepared(session: NativePlaybackSessionStatus): void {
+    this.adoptPreparedSession(session);
+    const sampleRate = session.sampleRate || this.output?.sampleRate || 48_000;
+    this.update({
+      phase: 'prepared',
+      durationSec: session.durationFrames / sampleRate,
+      positionSec:
+        (session.audibleProjectionQuality === 'current'
+          ? session.audibleProjectFrame
+          : session.renderedProjectFrame) / sampleRate,
+      renderedPositionSec: session.renderedProjectFrame / sampleRate,
+      displayLatencySec: session.presentationLatencyFrames / sampleRate,
+      countInStatus: this.countInAt(
+        session.transportState,
+        session.renderedProjectFrame,
+        session,
+      ),
+    });
+  }
+
+  /** What a prepared generation's status says about ITSELF — lanes,
+   *  topology, training shape, controls — without touching the phase or the
+   *  position. A fresh prepare publishes those too (publishPrepared); a swap
+   *  adopts only these, since the song it replaces is still playing. */
+  adoptPreparedSession(session: NativePlaybackSessionStatus): void {
     this.lastTelemetry = session;
     this.acceptSessionControls(session);
-    const sampleRate = session.sampleRate || this.output?.sampleRate || 48_000;
     this.lanes = session.lanes.map(lane => ({
       id: lane.id,
       label:
@@ -4275,21 +4639,6 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.trainingPrepared = session.trainingLanes.length > 0;
     this.trainingEnabled = session.trainingEnabled;
     this.lastTelemetry = session;
-    this.update({
-      phase: 'prepared',
-      durationSec: session.durationFrames / sampleRate,
-      positionSec:
-        (session.audibleProjectionQuality === 'current'
-          ? session.audibleProjectFrame
-          : session.renderedProjectFrame) / sampleRate,
-      renderedPositionSec: session.renderedProjectFrame / sampleRate,
-      displayLatencySec: session.presentationLatencyFrames / sampleRate,
-      countInStatus: this.countInAt(
-        session.transportState,
-        session.renderedProjectFrame,
-        session,
-      ),
-    });
   }
 
   graphDescription(): string {
@@ -4302,10 +4651,34 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   publishTelemetry(session: NativePlaybackSessionStatus): void {
     const sampleRate = session.sampleRate || this.output?.sampleRate || 48_000;
     if (session.transportGeneration !== this.generation) {
+      // An armed swap: the outgoing generation renders, and its number is
+      // what the transport telemetry says, until the seam lands. Nothing to
+      // fail — the song is playing exactly as before.
+      if (
+        this.swappingFromGeneration !== 0 &&
+        session.transportGeneration === this.swappingFromGeneration
+      ) {
+        this.lastTelemetry = session;
+        this.acceptSessionControls(session);
+        return;
+      }
       this.fail(
         `Native transport generation ${session.transportGeneration} does not match playback generation ${this.generation}.`,
       );
       return;
+    }
+    if (this.swappingFromGeneration !== 0) {
+      log(
+        'dsp',
+        `swap landed · generation ${this.swappingFromGeneration}→${this.generation} · ` +
+          `seams ${session.swapLandings} · late ${session.swapLateLandings} · ` +
+          `rendered frame ${session.renderedProjectFrame}`,
+      );
+      this.swappingFromGeneration = 0;
+      // The replacement's lanes, topology and training shape, in case the
+      // read right after the arm failed — this is the first status that is
+      // certainly the replacement's own.
+      this.adoptPreparedSession(session);
     }
     this.lastTelemetry = session;
     this.acceptSessionControls(session);
@@ -5308,6 +5681,11 @@ function prepareRequest(
     ...(graphDocument ? { graphDocument } : {}),
   };
   if (handoffLease > 0) request.handoffLease = handoffLease;
+  if (
+    overrides.swapFromGeneration !== undefined &&
+    overrides.swapFromGeneration > 0
+  )
+    request.swapFromGeneration = overrides.swapFromGeneration;
   return request;
 }
 

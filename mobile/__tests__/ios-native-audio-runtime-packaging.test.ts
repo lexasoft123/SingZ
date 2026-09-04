@@ -207,12 +207,18 @@ describe('iOS native DSP runtime packaging', () => {
       'timePitchLoopPriming',
       'lastTransportBoundary',
       'preparedStartProjectFrame',
+      'swapPendingGeneration',
+      'retiringSwapGeneration',
+      'swapLandings',
+      'swapLateLandings',
       'previewClicksEnqueued',
       'previewClicksStarted',
       'previewClicksCompleted',
       'previewClicksPending'
     ])
       expect(support).toContain(`@"${field}"`)
+    // The swap's capability bit, which the facade keys on.
+    expect(support).toContain('@"playbackSwap"')
     for (const reason of [
       'none',
       'stream-generation-changed',
@@ -293,6 +299,9 @@ describe('iOS native DSP runtime packaging', () => {
     expect(schema).toContain('bool SingzParsePlaybackControl(')
     expect(schema).toContain('bool SingzParsePlaybackPreviewClickSound(')
     expect(schema).toContain('@"handoffLease"')
+    // The prepare key the schema must admit for a swap to reach the core.
+    expect(schema).toContain('@"swapFromGeneration"')
+    expect(schema).toContain('&candidate.config.swapFromGeneration')
     expect(schema).toContain('&candidate.config.handoffLease')
     expect(schema).toContain('@"sampleRate"')
     expect(schema).toContain('@"playback"')

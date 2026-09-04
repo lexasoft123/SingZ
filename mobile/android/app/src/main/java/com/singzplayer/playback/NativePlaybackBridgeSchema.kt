@@ -151,6 +151,9 @@ object NativePlaybackBridgeSchema {
     val masterGain: Float,
     val maximumRetainedBytes: Long,
     val handoffLease: Long,
+    /** Replace this generation on its running stream; 0 is an ordinary
+     *  prepare. See NativePlaybackPrepareConfig::swapFromGeneration. */
+    val swapFromGeneration: Long,
     val preparedStartProjectFrame: Long?,
     val initialTransport: InitialTransport,
     val playback: Playback?,
@@ -202,7 +205,7 @@ object NativePlaybackBridgeSchema {
         "lanes", "outputDeviceUid", "outputChannels", "sampleRate",
         "maximumFrames", "bufferFrames", "masterGain", "maximumRetainedBytes",
         "handoffLease", "playback", "training", "preparedStartProjectFrame",
-        "initialTransport", "graphDocument"
+        "initialTransport", "graphDocument", "swapFromGeneration"
       )
     )
     val laneValues = list(value["lanes"], "lanes")
@@ -242,6 +245,9 @@ object NativePlaybackBridgeSchema {
     val lease = value["handoffLease"]?.let {
       unsignedInteger(number(it, "handoff lease"), false, "handoff lease")
     } ?: 0L
+    val swapFrom = value["swapFromGeneration"]?.let {
+      unsignedInteger(number(it, "swap source generation"), false, "swap source generation")
+    } ?: 0L
 
     return Prepare(
       lanes = lanes,
@@ -253,6 +259,7 @@ object NativePlaybackBridgeSchema {
       masterGain = optionalGain(value, "masterGain", 1.0F),
       maximumRetainedBytes = retained,
       handoffLease = lease,
+      swapFromGeneration = swapFrom,
       preparedStartProjectFrame = value["preparedStartProjectFrame"]?.let {
         signedInteger(it, "prepared start project frame")
       },

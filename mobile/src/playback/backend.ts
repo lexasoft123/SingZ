@@ -777,9 +777,11 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   }
 
   private refreshCapabilities(): void {
+    // A seam on the running stream refuses no seek; only the six-call
+    // rebuild does, and only that takes the scrub rail away.
     this.capabilities = nativeTransportCapabilities(
       this.handle.transportControls,
-      this.structuralChangesPending > 0
+      this.structuralChangesPending > 0 && !this.handle.swapsInPlace()
     )
   }
 

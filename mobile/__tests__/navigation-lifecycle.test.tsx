@@ -39,6 +39,7 @@ function nativeProject(): { project: LoadedProject; handle: NativePlaybackHandle
     transportControls: true,
     mixerControls: true,
     snapshot: () => state,
+    swapsInPlace: () => false,
     clock: () => ({
       renderedSec: state.renderedPositionSec,
       playing: state.phase === 'playing',

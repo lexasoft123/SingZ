@@ -116,6 +116,7 @@ function nativePlayerHarness(): {
     transportControls: true,
     mixerControls: true,
     snapshot: () => state,
+    swapsInPlace: () => false,
     clock: () => ({
       renderedSec: state.renderedPositionSec,
       playing: state.phase === 'playing',

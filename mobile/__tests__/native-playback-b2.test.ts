@@ -160,6 +160,7 @@ const capability = (
   playbackTransport: true,
   scheduledCues: true,
   timePitch: true,
+  playbackSwap: false,
   mediaCodec: {
     abiVersion: 1,
     formatMask: 0x1ff,
@@ -224,6 +225,10 @@ const capability = (
     devicePresentationLatencyFrames: 304,
     totalPresentationLatencyFrames: 304,
     preparedStartProjectFrame: 0,
+    swapPendingGeneration: 0,
+    retiringSwapGeneration: 0,
+    swapLandings: 0,
+    swapLateLandings: 0,
     retainedBytes: state === 'unloaded' ? 0 : 384_000,
     graphArenaBytes: state === 'unloaded' ? 0 : 128_000,
     masterGain: 1,
@@ -319,6 +324,15 @@ function harness(
     /** The host refuses to hold (iOS, or a duplex stream): suspendOutput
      *  answers a failed result and the stream keeps rendering. */
     refuseStreamHold?: boolean;
+    /** The bridge says `playbackSwap` and its prepare accepts
+     *  `swapFromGeneration`: the generation moves while the state stays
+     *  running, the way the core arms a seam. The default harness has no
+     *  swap, the way a binary older than it has none, so every other test
+     *  keeps exercising the six-call rebuild. */
+    swapCapable?: boolean;
+    /** With swapCapable: the core refuses the swap (invalid-state — a held
+     *  stream, a stream that is not running) and the facade must rebuild. */
+    refuseSwap?: boolean;
   } = {},
 ) {
   const platform = options.platform ?? 'ios';
@@ -327,7 +341,10 @@ function harness(
   let state = 'unloaded';
   let nextLease = 40;
   const prepareRequests: Array<Record<string, unknown>> = [];
-  const status = jest.fn(async () => capability(generation, state, 0, platform));
+  const status = jest.fn(async () => ({
+    ...capability(generation, state, 0, platform),
+    playbackSwap: options.swapCapable === true,
+  }));
   let positionNow: Record<string, unknown> | null = null;
   const native = {
     status,
@@ -359,8 +376,20 @@ function harness(
         }),
     prepare: jest.fn(async (next: number, request: Record<string, unknown>) => {
       calls.push(`native.prepare:${next}`);
-      generation = next;
       prepareRequests.push(request);
+      if (typeof request.swapFromGeneration === 'number') {
+        // A swap prepare: the song keeps running under the old generation
+        // until the seam; a refusal leaves everything exactly as it was.
+        if (options.swapCapable !== true || options.refuseSwap === true)
+          return {
+            ...result(next, state, false),
+            error: 'invalid-state',
+            message: 'Native playback cannot replace that generation on its stream',
+          };
+        generation = next;
+        return result(next, state);
+      }
+      generation = next;
       if (options.prepareOk === false) {
         state = 'unloaded';
         return result(next, 'unloaded', false);
@@ -2217,6 +2246,337 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     expect(handle.snapshot().phase).toBe('paused');
     expect(h.legacyLoad).not.toHaveBeenCalled();
     await handle.stop('paused rebuild test complete');
+  });
+
+  /* The seam. A core that can replace a generation on its running stream
+     (capability bit `playbackSwap`) turns every structural change — cue,
+     training, pitch/tempo — from stop / unload / prepare / open / start into
+     ONE prepare, with the song never interrupted: the render thread lands the
+     replacement at a block boundary. The telemetry keeps naming the old
+     generation until then, and the handle has to accept that. */
+  const swapCapability = (
+    generationValue: number,
+    stateValue: string,
+    cursor: number,
+    patch: Record<string, unknown> = {},
+  ) => {
+    const value = capability(generationValue, stateValue, cursor);
+    Object.assign(value.session as unknown as Record<string, unknown>, patch);
+    return { ...value, playbackSwap: true };
+  };
+
+  it('lands a cue change as a seam on the running stream, one prepare and no gap', async () => {
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const phases: string[] = [];
+    const unsubscribe = handle.subscribe(() => phases.push(handle.snapshot().phase));
+    const old = swapCapability(1, 'running', 48_000, {
+      transportState: 'playing',
+      renderedProjectFrame: 48_000,
+    });
+    // Armed, not landed: the replacement is generation 2, the transport
+    // still says 1.
+    const armed = swapCapability(2, 'running', 48_000, {
+      transportState: 'playing',
+      transportGeneration: 1,
+      swapPendingGeneration: 1,
+      renderedProjectFrame: 48_000,
+    });
+    h.native.status.mockResolvedValueOnce(old).mockResolvedValueOnce(armed);
+    const before = h.calls.length;
+
+    await rebuildIosNativePlaybackCues(handle, beat, {
+      ...initialMetronome,
+      volume: 0.42,
+    });
+
+    // The six calls are gone; what is left is the one prepare that names
+    // the generation it replaces, at the frame the song is at, playing.
+    expect(h.calls.slice(before)).toEqual(['native.prepare:2']);
+    expect(h.prepareRequests[1]).toMatchObject({
+      swapFromGeneration: 1,
+      preparedStartProjectFrame: 48_000,
+      initialTransport: { state: 'playing' },
+    });
+    expect(h.prepareRequests[1]).not.toHaveProperty('handoffLease');
+    expect(h.native.stop).not.toHaveBeenCalled();
+    expect(h.native).toHaveProperty('unloadRetainingLanes');
+    expect(h.native.unloadRetainingLanes).not.toHaveBeenCalled();
+    expect(h.native.unload).not.toHaveBeenCalled();
+    expect(h.native.openOutput).toHaveBeenCalledTimes(1);
+    expect(h.native.start).toHaveBeenCalledTimes(1);
+    // Never a moment that was not 'playing'.
+    expect(phases.filter(phase => phase !== 'playing')).toEqual([]);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    expect(handle.swapsInPlace()).toBe(true);
+
+    // The poll during the armed window: the transport names the outgoing
+    // generation, and that is not a mismatch to fail on. (publishTelemetry
+    // is the real handle's, behind the narrow product interface.)
+    const telemetry = (session: unknown): void =>
+      (handle as unknown as { publishTelemetry: (value: unknown) => void })
+        .publishTelemetry(session);
+    telemetry(armed.session);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2, error: null });
+    // The seam landed: the replacement's number, the same song a few frames on.
+    const landed = swapCapability(2, 'running', 48_400, {
+      transportState: 'playing',
+      swapLandings: 1,
+      renderedProjectFrame: 48_400,
+    });
+    telemetry(landed.session);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2, error: null });
+    // A generation that is neither is still a mismatch.
+    const stranger = swapCapability(2, 'running', 48_400, { transportGeneration: 9 });
+    telemetry(stranger.session);
+    expect(handle.snapshot().phase).toBe('error');
+    unsubscribe();
+    await handle.stop('seam test complete');
+  });
+
+  it('carries a paused song across the seam paused, and its loop with it', async () => {
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const old = swapCapability(1, 'running', 24_000, {
+      transportState: 'paused',
+      renderedProjectFrame: 24_000,
+      loopEnabled: true,
+      loopStartFrame: 12_000,
+      loopEndFrame: 36_000,
+    });
+    const armed = swapCapability(2, 'running', 24_000, {
+      transportState: 'paused',
+      transportGeneration: 1,
+      swapPendingGeneration: 1,
+      renderedProjectFrame: 24_000,
+    });
+    h.native.status.mockResolvedValueOnce(old).mockResolvedValueOnce(armed);
+    await rebuildIosNativePlaybackCues(handle, beat, {
+      ...initialMetronome,
+      volume: 0.25,
+    });
+    expect(h.prepareRequests[1]).toMatchObject({
+      swapFromGeneration: 1,
+      initialTransport: {
+        state: 'paused',
+        loop: { startProjectFrame: 12_000, endProjectFrame: 36_000 },
+      },
+    });
+    expect(h.native.transport).not.toHaveBeenCalled();
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'paused',
+      generation: 2,
+      regionState: { start: 0.25, end: 0.75, loop: true },
+    });
+    await handle.stop('paused seam test complete');
+  });
+
+  it('waits for the seam before landing a second change on top of it', async () => {
+    // A metronome volume drag, two taps on the transpose stepper: the second
+    // change arrives while the first swap's seam is still in the air. It
+    // must wait for the core to name the replacement — not read the outgoing
+    // generation's transport, call it untrustworthy and stop the song.
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const phases: string[] = [];
+    const unsubscribe = handle.subscribe(() => phases.push(handle.snapshot().phase));
+    const playing = { transportState: 'playing', renderedProjectFrame: 48_000 };
+    const old = swapCapability(1, 'running', 48_000, playing);
+    const armed = swapCapability(2, 'running', 48_000, {
+      ...playing,
+      transportGeneration: 1,
+      swapPendingGeneration: 1,
+    });
+    const landed = swapCapability(2, 'running', 48_400, {
+      ...playing,
+      renderedProjectFrame: 48_400,
+      swapLandings: 1,
+    });
+    const armedAgain = swapCapability(3, 'running', 48_400, {
+      ...playing,
+      renderedProjectFrame: 48_400,
+      transportGeneration: 2,
+      swapPendingGeneration: 2,
+      swapLandings: 1,
+    });
+    h.native.status
+      .mockResolvedValueOnce(old)
+      .mockResolvedValueOnce(armed)
+      // The second change: one read still in the air, then the landing (the
+      // wait's reads), then the rebuild's own status read, then its arm.
+      .mockResolvedValueOnce(armed)
+      .mockResolvedValueOnce(landed)
+      .mockResolvedValueOnce(landed)
+      .mockResolvedValueOnce(armedAgain);
+    const before = h.calls.length;
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.4 });
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.5 });
+    expect(h.calls.slice(before)).toEqual(['native.prepare:2', 'native.prepare:3']);
+    expect(h.prepareRequests[2]).toMatchObject({ swapFromGeneration: 2 });
+    expect(h.native.stop).not.toHaveBeenCalled();
+    expect(phases.filter(phase => phase !== 'playing')).toEqual([]);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 3, error: null });
+    unsubscribe();
+    await handle.stop('double change test complete');
+  });
+
+  it('rebuilds when a seam never lands, instead of stacking a second swap on it', async () => {
+    // A stream that stops delivering blocks between the arm and the next
+    // change: the wait runs out, the outgoing generation's frame is still
+    // this song's (accepted, not called untrustworthy), and the change takes
+    // the rebuild the core would have forced anyway.
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const playing = { transportState: 'playing', renderedProjectFrame: 48_000 };
+    const old = swapCapability(1, 'running', 48_000, playing);
+    const armed = swapCapability(2, 'running', 48_000, {
+      ...playing,
+      transportGeneration: 1,
+      swapPendingGeneration: 1,
+    });
+    h.native.status.mockResolvedValueOnce(old).mockResolvedValue(armed);
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.4 });
+    // The wait's own reads come from session(), which derives from status():
+    // every read says "still in the air" until the deadline has run out, and
+    // only then does the six-call sequence answer — the rebuild's own status
+    // read (still the outgoing generation's transport, and still this
+    // song's frame), the park, the prepare, the restart.
+    const started = Date.now();
+    const afterDeadline = [
+      armed,
+      capability(2, 'unloaded'),
+      capability(3, 'prepared'),
+    ];
+    h.native.status.mockReset();
+    h.native.status.mockImplementation(async () =>
+      Date.now() - started < 1_000
+        ? armed
+        : afterDeadline.shift() ?? capability(3, 'running', 48_000),
+    );
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.5 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(h.calls).toContain('native.stop:2');
+    expect(h.calls).toContain('native.unloadRetainingLanes:2');
+    expect(h.prepareRequests[2]).not.toHaveProperty('swapFromGeneration');
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 3 });
+    await handle.stop('seam never landed test complete');
+  }, 10_000);
+
+  it('rebuilds the six-call way when the core refuses the swap', async () => {
+    // A held stream, a stream that is not running: the core says
+    // invalid-state and the facade does what it always did — after handing
+    // the refused candidate back, so nothing of it is left claimed.
+    const h = harness({ swapCapable: true, refuseSwap: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const old = swapCapability(1, 'running', 48_000, {
+      transportState: 'playing',
+      renderedProjectFrame: 48_000,
+    });
+    h.native.status
+      .mockResolvedValueOnce(old)
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(3, 'prepared'))
+      .mockResolvedValueOnce(capability(3, 'running', 48_000));
+    const before = h.calls.length;
+    await rebuildIosNativePlaybackCues(handle, beat, {
+      ...initialMetronome,
+      volume: 0.42,
+    });
+    expect(h.calls.slice(before)).toEqual([
+      'native.prepare:2',
+      'native.unload:2',
+      'native.stop:1',
+      'native.unloadRetainingLanes:1',
+      'native.prepare:3',
+      'native.configure:3',
+      'native.open:3',
+      'native.start:3',
+    ]);
+    expect(h.prepareRequests[1]).toMatchObject({ swapFromGeneration: 1 });
+    expect(h.prepareRequests[2]).not.toHaveProperty('swapFromGeneration');
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 3 });
+    await handle.stop('refused seam test complete');
+  });
+
+  it('leaves the song playing when the replacement cannot be built', async () => {
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const old = swapCapability(1, 'running', 48_000, {
+      transportState: 'playing',
+      renderedProjectFrame: 48_000,
+    });
+    h.native.status.mockResolvedValueOnce(old);
+    h.native.prepare.mockImplementationOnce(
+      async (next: number, request: Record<string, unknown>) => {
+        h.calls.push(`native.prepare:${next}`);
+        h.prepareRequests.push(request);
+        return { ...result(next, 'running', false), error: 'decode-failure' };
+      },
+    );
+    await expect(
+      rebuildIosNativePlaybackCues(handle, beat, {
+        ...initialMetronome,
+        volume: 0.2,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: 'NativePlaybackCommandError',
+        command: 'rebuild-cues',
+        generation: 2,
+      }) as NativePlaybackCommandError,
+    );
+    // Nothing that plays was touched: no stop, no park, the old generation
+    // still the song's, and the refused candidate handed back.
+    expect(h.native.stop).not.toHaveBeenCalled();
+    expect(h.native.unloadRetainingLanes).not.toHaveBeenCalled();
+    expect(h.calls).toContain('native.unload:2');
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'playing',
+      generation: 1,
+      error: expect.stringMatching(/swap refused/i),
+    });
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+    await handle.stop('failed candidate test complete');
+  });
+
+  it('does not try a seam on a stream that is held in the background', async () => {
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    // Parked and held: the host reports Suspended, and a held stream renders
+    // no blocks, so no seam could ever land. Straight to the rebuild.
+    const held = swapCapability(1, 'running', 24_000, {
+      transportState: 'paused',
+      hostState: 'suspended',
+      renderedProjectFrame: 24_000,
+    });
+    h.native.status
+      .mockResolvedValueOnce(held)
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 24_000));
+    await rebuildIosNativePlaybackCues(handle, beat, {
+      ...initialMetronome,
+      volume: 0.3,
+    });
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(h.prepareRequests[1]).not.toHaveProperty('swapFromGeneration');
+    expect(h.calls).toContain('native.stop:1');
+    expect(handle.snapshot()).toMatchObject({ generation: 2 });
+    await handle.stop('held stream test complete');
   });
 
   it('fails stopped/retryable and never falls back when rebuild prepare fails', async () => {

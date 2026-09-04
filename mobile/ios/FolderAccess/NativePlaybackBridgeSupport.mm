@@ -407,6 +407,10 @@ NSDictionary *statusDictionary(singz::NativePlaybackSession &session) {
     @"totalPresentationLatencyFrames" :
         @(status.totalPresentationLatencyFrames),
     @"preparedStartProjectFrame" : @(status.preparedStartProjectFrame),
+    @"swapPendingGeneration" : @(status.swapPendingGeneration),
+    @"retiringSwapGeneration" : @(status.retiringSwapGeneration),
+    @"swapLandings" : @(status.swapLandings),
+    @"swapLateLandings" : @(status.swapLateLandings),
     @"retainedBytes" : @(status.retainedBytes),
     @"graphArenaBytes" : @(status.graphArenaBytes),
     @"parkedLaneBytes" : @(status.parkedLaneBytes),
@@ -508,6 +512,11 @@ void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
           @"timePitch" :
               @(available && (link->capabilityFlags &
                               SingzDspRuntimeCapabilityTimePitch) != 0),
+          // The session in this binary replaces a generation on its running
+          // stream (prepare's swapFromGeneration). Additive: JS without the
+          // key ignores it, JS with it falls back to the six-call rebuild on
+          // a binary that says false.
+          @"playbackSwap" : @(available),
           @"mediaCodec" : @{
             @"abiVersion" : @(mediaCodec.abiVersion),
             @"formatMask" : @(mediaCodec.formatMask),

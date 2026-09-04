@@ -665,7 +665,8 @@ bool SingzParsePlaybackPrepare(NSDictionary *request,
                              @"masterGain", @"maximumRetainedBytes",
                              @"handoffLease", @"playback", @"training",
                              @"preparedStartProjectFrame",
-                             @"initialTransport", @"graphDocument"})) {
+                             @"initialTransport", @"graphDocument",
+                             @"swapFromGeneration"})) {
     *error = @"The native playback prepare schema is invalid";
     return false;
   }
@@ -782,6 +783,13 @@ bool SingzParsePlaybackPrepare(NSDictionary *request,
       !parseJsSafeUint64(handoffLeaseValue, &candidate.config.handoffLease,
                          false)) {
     *error = @"The native playback handoff lease is invalid";
+    return false;
+  }
+  id swapFromValue = request[@"swapFromGeneration"];
+  if (swapFromValue != nil &&
+      !parseJsSafeUint64(swapFromValue, &candidate.config.swapFromGeneration,
+                         false)) {
+    *error = @"The native playback swap source generation is invalid";
     return false;
   }
 

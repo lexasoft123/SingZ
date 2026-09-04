@@ -91,6 +91,9 @@ describe('Android native DSP runtime packaging', () => {
     expect(module).toContain('AudioManager.AUDIOFOCUS_GAIN');
     expect(module).toContain('AudioDeviceCallback');
     expect(core).toContain('external fun nativePlaybackPrepare(');
+    // The swap's request key crosses as one more positional JNI argument.
+    expect(core).toContain('swapFromGeneration: Long,');
+    expect(module).toContain('parsed.swapFromGeneration,');
     expect(core).toContain('external fun nativePlaybackReanchor(');
     expect(core).toContain('external fun nativePlaybackPreviewClick(');
     expect(core).toContain('graphNodes: Array<NativePlaybackGraphNodeJni>');
@@ -189,6 +192,11 @@ describe('Android native DSP runtime packaging', () => {
       'timePitchLoopPriming',
       'lastTransportBoundary',
       'preparedStartProjectFrame',
+      'swapPendingGeneration',
+      'retiringSwapGeneration',
+      'swapLandings',
+      'swapLateLandings',
+      'playbackSwap',
       'previewClicksEnqueued',
       'previewClicksStarted',
       'previewClicksCompleted',

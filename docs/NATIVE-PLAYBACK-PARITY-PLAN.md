@@ -191,10 +191,27 @@ code-reviewer gate.
   driven through the `SwapArming` lifecycle hook. **Owed by the phone run:** the landing
   budget (three nominal buffers, less what elapsed since the publication read and two Stretch
   primes under the mutex) is unmeasured on a device — read `swapLateLandings` against
-  `swapLandings` at rest before believing the seam. **Not yet:** 3c (the bridges'
-  `swapFromGeneration` key, the facade's `swapGeneration` replacing the six-call rebuild,
-  `capabilities.seek` never dropping, the JS telemetry guard accepting the outgoing
-  generation until the seam, the capability tag bump), then the phone measurement.
+  `swapLandings` at rest before believing the seam. A second late source the reviewer
+  named: a command applied in the block being rendered passes the drained-mailbox check
+  while the telemetry sample is one block stale — safe (unanchored, counted), and part of
+  what that counter will include.
+- **Shipped (3c, facade + bridges):** the swap is announced as a capability BIT
+  (`playbackSwap`, additive, read leniently) rather than a tag bump, so an older binary and
+  every existing fixture take the six-call path unchanged; both phone bridges admit the
+  `swapFromGeneration` prepare key (one more positional JNI argument on Android, the schema
+  allowlist on both) and project the four swap counters. `rebuildHandleCues` keeps its one
+  entry point: on a started song whose session and stream are both running it tries
+  `swapHandleGeneration` first — one prepare naming the outgoing generation, the poll left
+  running, no stop/unload/open/start — and falls back to the rebuild only on the core's
+  `invalid-state` refusal (a held stream, a route that changed under the song); any other
+  failure throws with the song still playing under its old generation. The handle accepts
+  the outgoing generation's number from the telemetry and the clock until the seam
+  (`swappingFromGeneration`), and the backend asks `swapsInPlace()` before taking the scrub
+  rail away, so `capabilities.seek` never drops for a seam. Seven facade mutants killed;
+  b2 pins the one-prepare seam, a paused song and its loop carried across, the refusal
+  fallback, a failed candidate leaving the song playing, and no seam on a held stream.
+  **Next:** the phone measurement (the seam facts arrive in the app log as
+  `swap landed · seams N · late M`; read late against seams at rest before believing it).
 
 ### Step 4 — CPU on the phone (~1–2 days)
 Measure after steps 1–3 on the POCO; only then the stream-mode A/B

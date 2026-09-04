@@ -91,9 +91,14 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
   calls: string[]
   handle: NativePlaybackHandle
   publish: (patch: Partial<NativePlaybackViewState>) => void
+  setSwapsInPlace: (value: boolean) => void
 } {
   const calls: string[] = []
   const listeners = new Set<() => void>()
+  // What the fake handle answers to swapsInPlace(): false is the six-call
+  // rebuild (the core refuses seeks throughout), true is a seam on the
+  // running stream (nothing is refused).
+  let swapsInPlace = false
   let state: NativePlaybackViewState = {
     phase: initialPhase,
     generation: 7,
@@ -130,6 +135,7 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
       live: false,
       countIn: state.countInStatus
     }),
+    swapsInPlace: () => swapsInPlace,
     setDisplayTrim: jest.fn(),
     lanePeaks: jest.fn(async () => null),
     subscribe: listener => {
@@ -209,7 +215,8 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
     project,
     calls,
     handle,
-    publish
+    publish,
+    setSwapsInPlace: value => { swapsInPlace = value }
   }
 }
 
@@ -376,6 +383,25 @@ describe('the singer\'s latency trim', () => {
 })
 
 describe('what the transport offers during a cue rebuild', () => {
+  it('keeps the scrub rail when the change lands as a seam on the running stream', async () => {
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    // A core that swaps replaces the generation while the song plays: the
+    // render thread lands the seam at a block boundary and no seek is ever
+    // refused, so nothing is taken away from the singer for the ~50 ms it
+    // takes. The handle knows which path the change will take; the backend
+    // asks it rather than assuming the rebuild.
+    h.setSwapsInPlace(true)
+    h.backend.setMetronome({ click: true, countInBars: 1, volume: 0.5, accent: true })
+    expect(h.backend.capabilities.seek).toBe(true)
+    expect(h.backend.capabilities.loopRegion).toBe(true)
+    expect(h.backend.reconfiguring).toBe(true)
+    await flushTransportQueue()
+    await flushTransportQueue()
+    expect(h.backend.capabilities.seek).toBe(true)
+    expect(h.backend.reconfiguring).toBe(false)
+  })
+
   it('takes the scrub rail away, because the core will refuse it', async () => {
     const h = nativeHarness()
     h.backend.attach(h.project)

@@ -317,6 +317,39 @@ describe('iOS Phase 4B bridge contract', () => {
     });
   });
 
+  it('reads the swap facts and the playbackSwap bit leniently', () => {
+    // A binary older than the swap publishes neither: the capability stays
+    // available, the bit reads false and the counters read zero, so such a
+    // build keeps the six-call rebuild rather than losing native.
+    const older = parseNativePlaybackCapability(nativeStatus(), 'ios');
+    expect(older.available).toBe(true);
+    expect(older.playbackSwap).toBe(false);
+    expect(older.session).toMatchObject({
+      swapPendingGeneration: 0,
+      retiringSwapGeneration: 0,
+      swapLandings: 0,
+      swapLateLandings: 0,
+    });
+    const newer = nativeStatus();
+    newer.playbackSwap = true;
+    Object.assign(newer.session as Record<string, unknown>, {
+      swapPendingGeneration: 6,
+      retiringSwapGeneration: 0,
+      swapLandings: 3,
+      swapLateLandings: 1,
+    });
+    const parsed = parseNativePlaybackCapability(newer, 'ios');
+    expect(parsed.playbackSwap).toBe(true);
+    expect(parsed.session).toMatchObject({
+      swapPendingGeneration: 6,
+      swapLandings: 3,
+      swapLateLandings: 1,
+    });
+    // The bit is a boolean or nothing; a truthy string is not a capability.
+    newer.playbackSwap = 'yes';
+    expect(parseNativePlaybackCapability(newer, 'ios').playbackSwap).toBe(false);
+  });
+
   it('accepts signed rendered and audible project-position facts', () => {
     const raw = nativeStatus();
     (raw.session as Record<string, unknown>).renderedProjectFrame = -512;

@@ -463,6 +463,13 @@ void appendStatus(std::string &output,
             std::to_string(status.totalPresentationLatencyFrames);
   output += ",\"preparedStartProjectFrame\":" +
             std::to_string(status.preparedStartProjectFrame);
+  output += ",\"swapPendingGeneration\":" +
+            std::to_string(status.swapPendingGeneration);
+  output += ",\"retiringSwapGeneration\":" +
+            std::to_string(status.retiringSwapGeneration);
+  output += ",\"swapLandings\":" + std::to_string(status.swapLandings);
+  output += ",\"swapLateLandings\":" +
+            std::to_string(status.swapLateLandings);
   output += ",\"retainedBytes\":" + std::to_string(status.retainedBytes);
   output += ",\"parkedLaneBytes\":" +
             std::to_string(status.parkedLaneBytes);
@@ -573,6 +580,10 @@ std::string capabilityJson(AndroidPlaybackOwner &bridge) {
       ",\"playbackCleanupProof\":true,\"playbackHandoffLease\":true";
   output +=
       ",\"playbackTransport\":true,\"scheduledCues\":true,\"timePitch\":true";
+  // The session in this binary replaces a generation on its running stream
+  // (prepare's swapFromGeneration). Additive: JS without the key ignores it,
+  // JS with it falls back to the six-call rebuild on a binary that says false.
+  output += ",\"playbackSwap\":true";
   output += ",\"mediaCodec\":{\"abiVersion\":" +
             std::to_string(mediaCodec.abiVersion);
   output += ",\"formatMask\":" + std::to_string(mediaCodec.formatMask);
@@ -1092,7 +1103,8 @@ static jstring nativePlaybackPrepare(
     JNIEnv *env, jobject, jlong generationValue, jstring outputDeviceUid,
     jintArray outputChannelsValue, jint sampleRate, jint maximumFrames,
     jint bufferFrames, jfloat masterGain, jlong maximumRetainedBytes,
-    jlong handoffLease, jboolean preparedStartProjectFramePresent,
+    jlong handoffLease, jlong swapFromGeneration,
+    jboolean preparedStartProjectFramePresent,
     jlong preparedStartProjectFrame, jboolean initialPaused,
     jboolean initialLoopPresent, jlong initialLoopStartProjectFrame,
     jlong initialLoopEndProjectFrame, jobjectArray laneIdsValue,
@@ -1176,6 +1188,9 @@ static jstring nativePlaybackPrepare(
         handoffLease >= 0 &&
         static_cast<uint64_t>(handoffLease) <=
             singz::kNativePlaybackMaximumJsSafeInteger &&
+        swapFromGeneration >= 0 &&
+        static_cast<uint64_t>(swapFromGeneration) <=
+            singz::kNativePlaybackMaximumJsSafeInteger &&
         (!preparedStartProjectFramePresent ||
          (preparedStartProjectFrame >=
               -static_cast<jlong>(singz::kNativePlaybackMaximumJsSafeInteger) &&
@@ -1221,6 +1236,7 @@ static jstring nativePlaybackPrepare(
     config.masterGain = masterGain;
     config.maximumRetainedBytes = static_cast<size_t>(maximumRetainedBytes);
     config.handoffLease = static_cast<uint64_t>(handoffLease);
+    config.swapFromGeneration = static_cast<uint64_t>(swapFromGeneration);
     if (preparedStartProjectFramePresent == JNI_TRUE)
       config.preparedStartProjectFrame =
           static_cast<int64_t>(preparedStartProjectFrame);
@@ -1602,7 +1618,7 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
      reinterpret_cast<void *>(nativePlaybackRequestCancellation)},
     {const_cast<char *>("nativePlaybackPrepare"),
      const_cast<char *>(
-         "(JLjava/lang/String;[IIIIFJJZJZZJJ[Ljava/lang/String;[Ljava/lang/String;"
+         "(JLjava/lang/String;[IIIIFJJJZJZZJJ[Ljava/lang/String;[Ljava/lang/String;"
          "[F[Z[ZZDDDZIDZ[DII[IZIJ[J[J[Ljava/lang/String;Z"
          "Z[Lcom/singzplayer/playback/NativePlaybackGraphNodeJni;"
          "[Lcom/singzplayer/playback/NativePlaybackGraphConnectionJni;"
