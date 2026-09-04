@@ -1118,16 +1118,56 @@ struct PreparedPlaybackTransport {
     }
   }
 
-  bool positionAtOffset(uint32_t outputOffset,
-                        zdsp::ProjectSamplePositionQ32 *position) const
-      noexcept {
+  // The project clock's arithmetic, on any (frame, fraction, rate) — the
+  // callback's own, and the control thread's when it predicts where the
+  // callback will be at a stream frame it has yet to reach (a swap landing
+  // on the frame its Stretch anchor was filled for). One definition, so the
+  // prediction is the callback's answer to the bit.
+  static bool positionFrom(int64_t frame, uint32_t fractionQ32,
+                           uint64_t rateQ32, uint32_t outputOffset,
+                           zdsp::ProjectSamplePositionQ32 *position) noexcept {
     zdsp::TransportContext transport{};
     transport.validFields = zdsp::TransportValidProjectSamples |
                             zdsp::TransportValidProjectRateQ32;
-    transport.projectTimeSamples = callbackProjectFrame;
-    transport.projectTimeFractionQ32 = callbackProjectFractionQ32;
-    transport.projectRateQ32 = playbackRateQ32;
+    transport.projectTimeSamples = frame;
+    transport.projectTimeFractionQ32 = fractionQ32;
+    transport.projectRateQ32 = rateQ32;
     return zdsp::projectSamplePositionAt(transport, outputOffset, position);
+  }
+
+  // Return the first rendered-output offset whose Q32 project position is at
+  // or beyond the integer project boundary. The callback block is tiny and
+  // rate is positive, so a bounded binary search avoids wide multiplication
+  // and remains portable to MSVC without compiler-specific 128-bit integers.
+  static uint32_t framesToBoundaryFrom(int64_t frame, uint32_t fractionQ32,
+                                       uint64_t rateQ32, int64_t boundary,
+                                       uint32_t maximumFrames) noexcept {
+    const auto reaches = [&](uint32_t offset) noexcept {
+      zdsp::ProjectSamplePositionQ32 position{};
+      return positionFrom(frame, fractionQ32, rateQ32, offset, &position) &&
+             position.samples >= boundary;
+    };
+    if (maximumFrames == 0 || frame >= boundary)
+      return 0;
+    if (!reaches(maximumFrames))
+      return maximumFrames;
+    uint32_t low = 1;
+    uint32_t high = maximumFrames;
+    while (low < high) {
+      const uint32_t middle = low + (high - low) / 2u;
+      if (reaches(middle))
+        high = middle;
+      else
+        low = middle + 1u;
+    }
+    return low;
+  }
+
+  bool positionAtOffset(uint32_t outputOffset,
+                        zdsp::ProjectSamplePositionQ32 *position) const
+      noexcept {
+    return positionFrom(callbackProjectFrame, callbackProjectFractionQ32,
+                        playbackRateQ32, outputOffset, position);
   }
 
   bool advancePosition(uint32_t outputFrames) noexcept {
@@ -1139,33 +1179,93 @@ struct PreparedPlaybackTransport {
     return true;
   }
 
-  bool positionReachesBoundary(uint32_t outputOffset,
-                               int64_t boundary) const noexcept {
-    zdsp::ProjectSamplePositionQ32 position{};
-    return positionAtOffset(outputOffset, &position) &&
-           position.samples >= boundary;
-  }
-
-  // Return the first rendered-output offset whose Q32 project position is at
-  // or beyond the integer project boundary. The callback block is tiny and
-  // rate is positive, so a bounded binary search avoids wide multiplication
-  // and remains portable to MSVC without compiler-specific 128-bit integers.
   uint32_t framesToBoundary(int64_t boundary,
                             uint32_t maximumFrames) const noexcept {
-    if (maximumFrames == 0 || callbackProjectFrame >= boundary)
-      return 0;
-    if (!positionReachesBoundary(maximumFrames, boundary))
-      return maximumFrames;
-    uint32_t low = 1;
-    uint32_t high = maximumFrames;
-    while (low < high) {
-      const uint32_t middle = low + (high - low) / 2u;
-      if (positionReachesBoundary(middle, boundary))
-        high = middle;
-      else
-        low = middle + 1u;
+    return framesToBoundaryFrom(callbackProjectFrame,
+                                callbackProjectFractionQ32, playbackRateQ32,
+                                boundary, maximumFrames);
+  }
+
+  /* Where the callback's clock will be `outputFrames` stream frames after a
+     published telemetry sample, assuming no command lands in between (the
+     caller checks the mailbox is drained): nextSlice's own advance — cut at
+     the loop end and the duration, wrap at the loop end, stop advancing at
+     the end of the song — replayed off the render thread. Exact, because
+     Q32 advance is associative and nextSlice cuts at the same boundaries. */
+  struct PredictedPosition {
+    int64_t frame{0};
+    uint32_t fractionQ32{0};
+    bool valid{false};
+  };
+  /* `landLoop*` is the INCOMING generation's loop: the handoff wraps the
+     adopted clock by that loop before comparing (a seam that falls on the
+     outgoing loop's end hands over the pre-wrap frame, since the wrap is the
+     next slice's first act), so the prediction wraps the same way. */
+  PredictedPosition predictPosition(const Telemetry &from,
+                                    uint64_t outputFrames, bool landLoopEnabled,
+                                    int64_t landLoopStart,
+                                    int64_t landLoopEnd) const noexcept {
+    PredictedPosition out{from.projectFrame, from.projectFractionQ32, true};
+    bool advancing = from.state == NativePlaybackTransportState::Playing ||
+                     from.state == NativePlaybackTransportState::PreRoll;
+    uint64_t remaining = outputFrames;
+    // Bounded: every pass either consumes at least one frame or wraps, and
+    // a wrap is followed by a pass that consumes. A pass is cut at the loop
+    // end exactly as nextSlice cuts a slice there, and the wrap by the
+    // OUTGOING loop comes first in the next pass, exactly as nextSlice wraps
+    // before it looks at the duration — a loop that ends at the song's end
+    // is the case where the order matters (the duration check would stop
+    // the advance a wrap should have continued), and an incoming loop that
+    // differs from the outgoing one is the case where the end wrap below
+    // is not the same modulo.
+    for (uint32_t pass = 0; pass < 64 && advancing && remaining != 0; ++pass) {
+      if (from.loopEnabled && from.loopEnd > from.loopStart &&
+          out.frame >= from.loopEnd) {
+        out.frame = wrappedLoopFrame(out.frame, from.loopStart, from.loopEnd);
+        continue;
+      }
+      if (out.frame >= durationFrames) {
+        advancing = false;
+        break;
+      }
+      int64_t boundary = durationFrames;
+      if (from.loopEnabled && out.frame < from.loopEnd)
+        boundary = std::min(boundary, from.loopEnd);
+      const uint32_t chunk = static_cast<uint32_t>(
+          std::min<uint64_t>(remaining, kAudioHostMaxFrames));
+      const uint32_t frames =
+          framesToBoundaryFrom(out.frame, out.fractionQ32, playbackRateQ32,
+                               boundary, chunk);
+      zdsp::ProjectSamplePositionQ32 position{};
+      if (frames == 0 ||
+          !positionFrom(out.frame, out.fractionQ32, playbackRateQ32, frames,
+                        &position)) {
+        out.valid = false;
+        return out;
+      }
+      out.frame = position.samples;
+      out.fractionQ32 = position.fraction;
+      remaining -= frames;
     }
-    return low;
+    out.valid = out.valid && (!advancing || remaining == 0);
+    if (out.valid && landLoopEnabled && landLoopEnd > landLoopStart &&
+        out.frame >= landLoopEnd)
+      out.frame = wrappedLoopFrame(out.frame, landLoopStart, landLoopEnd);
+    return out;
+  }
+
+  static int64_t wrappedLoopFrame(int64_t frame, int64_t loopStart,
+                                  int64_t loopEnd) noexcept {
+    const uint64_t span = static_cast<uint64_t>(loopEnd) -
+                          static_cast<uint64_t>(loopStart);
+    const uint64_t elapsed = static_cast<uint64_t>(frame) -
+                             static_cast<uint64_t>(loopStart);
+    return loopStart + static_cast<int64_t>(elapsed % span);
+  }
+
+  bool mailboxDrained() const noexcept {
+    return commandWrite.load(std::memory_order_acquire) ==
+           commandRead.load(std::memory_order_acquire);
   }
 
   // --- Replacing a generation on the running stream ---------------------
@@ -1223,16 +1323,24 @@ struct PreparedPlaybackTransport {
      render callback clears the host flags off the incoming graph's view for
      exactly that reason). The loop is this generation's own, as above.
 
-     `exactLanding` says the clock is at the frame this generation's initial
-     Stretch anchor was filled for: then the anchor is armed and the seam
-     renders phase-coherent; otherwise the plan is discarded and the stage
-     keeps the state it was primed with at prepare, which is a few
-     milliseconds off at worst. A swap never sets pendingSourcePositionMoved:
-     from the incoming graph's point of view the source has not moved, its
-     state is simply fresh, and a boundary that merely resets it must not be
-     refused for lack of an anchor (that refusal is a wedge, see nextSlice). */
-  void adoptClock(const PreparedPlaybackTransport &from,
-                  bool exactLanding) noexcept {
+     A clock at or past this generation's loop end wraps here, by this
+     generation's loop, before anything else looks at it — the outgoing
+     transport hands over the pre-wrap frame when the seam falls on its loop
+     end, because a wrap is the next slice's first act. The wrap counts as a
+     loop pass; it queues no SourceLoop, the seam's own boundary covers it.
+
+     `predicted*` (when `exactRequested`) is the position this generation's
+     Stretch anchor was filled for. When the adopted clock is exactly there
+     the anchor is armed and the seam renders phase-coherent; otherwise the
+     plan is discarded and the stage keeps the state it was primed with at
+     prepare, which is a few milliseconds off at worst. Returns whether the
+     seam was exact. A swap never sets pendingSourcePositionMoved: from the
+     incoming graph's point of view the source has not moved, its state is
+     simply fresh, and a boundary that merely resets it must not be refused
+     for lack of an anchor (that refusal is a wedge, see nextSlice). */
+  bool adoptClock(const PreparedPlaybackTransport &from, bool exactRequested,
+                  int64_t predictedFrame,
+                  uint32_t predictedFractionQ32) noexcept {
     callbackState = from.callbackState;
     callbackProjectFrame = from.callbackProjectFrame;
     callbackProjectFractionQ32 = from.callbackProjectFractionQ32;
@@ -1251,6 +1359,14 @@ struct PreparedPlaybackTransport {
     callbackLoopEnabled = initialLoopEnabled;
     callbackLoopStart = initialLoopEnabled ? initialLoopStart : 0;
     callbackLoopEnd = initialLoopEnabled ? initialLoopEnd : 0;
+    if (callbackLoopEnabled && callbackProjectFrame >= callbackLoopEnd) {
+      callbackProjectFrame = wrappedLoopFrame(
+          callbackProjectFrame, callbackLoopStart, callbackLoopEnd);
+      increment(&callbackLoopCount);
+    }
+    const bool exactLanding =
+        exactRequested && callbackProjectFrame == predictedFrame &&
+        callbackProjectFractionQ32 == predictedFractionQ32;
     blockBegun = false;
     callbackTimePitchBoundaryPrepared = false;
     if (timePitchProcessor.state != nullptr) {
@@ -1274,6 +1390,7 @@ struct PreparedPlaybackTransport {
     queueDiscontinuity({zdsp::DiscontinuityReason::ClockReanchored,
                         zdsp::DiscontinuityFlagResetState |
                             zdsp::DiscontinuityFlagTimeValid});
+    return exactLanding;
   }
 
   void wrapAtLoopBoundary() noexcept {
@@ -4206,6 +4323,12 @@ struct PlaybackRenderShared {
     PreparedPlaybackTransport *incoming{nullptr};
     // Stream frame to land on; 0 lands on the next block's first frame.
     uint64_t landingContinuousFrame{0};
+    // The incoming generation's Stretch anchor was filled for this project
+    // position (when `exactRequested`); the seam is exact when the outgoing
+    // clock is there, and its anchor is armed only then.
+    bool exactRequested{false};
+    int64_t predictedFrame{0};
+    uint32_t predictedFractionQ32{0};
     std::atomic<uint32_t> *lateLandings{nullptr};
   } context{};
   NativePlaybackSwapRequest request{};
@@ -4494,6 +4617,13 @@ struct NativePlaybackSession::Impl {
     // callback refuses to land on one, so whatever it latched is read by
     // callbackTerminalCause() while it still renders, and merged by stopHost
     // before the stop that follows retires it.
+    //
+    // The shutdown below runs under the session mutex, where the stale
+    // prepare retirement deliberately drops every lock. That is sound here
+    // and only here: the acquire on swapsLanded above synchronizes with the
+    // release the render thread stored after the outgoing graph's LAST
+    // render returned, so its runner is idle by proof rather than by wait,
+    // and the PCM is shared with the replacement — nothing large is freed.
     return retireSwappedOut();
   }
 
@@ -4536,13 +4666,13 @@ struct NativePlaybackSession::Impl {
 
   static void swapLand(void *opaque, uint32_t) noexcept {
     auto *context = static_cast<PlaybackRenderShared::SwapContext *>(opaque);
-    const bool armedForAFrame = context->landingContinuousFrame != 0;
-    const bool exact =
-        armedForAFrame && context->outgoing->callbackContinuousFrame ==
-                              context->landingContinuousFrame;
-    if (armedForAFrame && !exact && context->lateLandings != nullptr)
+    // Exact means the clock is where the anchor was filled for — the
+    // prediction proved right — whatever stream frame that happened on.
+    const bool exact = context->incoming->adoptClock(
+        *context->outgoing, context->exactRequested, context->predictedFrame,
+        context->predictedFractionQ32);
+    if (context->exactRequested && !exact && context->lateLandings != nullptr)
       context->lateLandings->fetch_add(1u, std::memory_order_relaxed);
-    context->incoming->adoptClock(*context->outgoing, exact);
   }
 
   bool hostMutationActive() const noexcept {
@@ -5020,13 +5150,17 @@ struct NativePlaybackSession::Impl {
     // both domains before graph retirement can release callback state.
     latchTerminal(effectiveTerminalCause(lastHost, callbackTerminalCause()));
     const bool quiesced = safeStoppedState(lastHost.state);
+    bool swapRetired = true;
     if (quiesced) {
       // A swap that had not landed: the outgoing graph rendered to the end
       // and is idle now, exactly like a landed one. Retire it here, after
-      // the terminal merge above has read its latch.
+      // the terminal merge above has read its latch. A retirement that fails
+      // has quarantined the graph and said why (lastError, state
+      // Quarantined); reporting "not quiesced" keeps that verdict in front
+      // of the caller instead of a Stopped it would otherwise write over it.
       if (retiringSwap != nullptr) {
         retiringSwap->transport.forceStoppedAfterQuiescence();
-        (void)retireSwappedOut();
+        swapRetired = retireSwappedOut();
         if (prepared != nullptr)
           router->current.store(&prepared->callback,
                                 std::memory_order_release);
@@ -5044,7 +5178,7 @@ struct NativePlaybackSession::Impl {
         pendingStartDelivery = {};
       }
     }
-    return quiesced;
+    return quiesced && swapRetired;
   }
 
   NativePlaybackResult success(uint64_t resultGeneration) const noexcept {
@@ -6043,13 +6177,14 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
             generation ||
         impl_->swapPrepareGeneration != generation ||
         impl_->swapPrepareUnloadRequested;
+    const AudioHostStatus hostNow = impl_->host.status();
     const bool replaceable =
         impl_->prepared != nullptr &&
         impl_->generation == config.swapFromGeneration &&
         impl_->state == NativePlaybackState::Running &&
         impl_->retiringSwap == nullptr && impl_->hostMutationActive() &&
         impl_->lastTerminal.reason == AudioHostTerminalReason::None &&
-        impl_->host.status().state == AudioHostState::Running;
+        hostNow.state == AudioHostState::Running;
     if (impl_->swapPrepareGeneration == generation) {
       impl_->swapPrepareGeneration = 0;
       impl_->swapPrepareUnloadRequested = false;
@@ -6066,6 +6201,61 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
       candidate->transport.positionSink = impl_->position;
       candidate->router = impl_->router;
       candidate->transport.adoptControlState(outgoing.transport);
+      // Where to land. A candidate with a Stretch stage wants the seam on
+      // the exact position its anchor is filled for: predict the outgoing
+      // clock a few blocks ahead of its last publication (sound only while
+      // its mailbox is drained — a command it has not applied yet moves
+      // it), re-prime the candidate's anchor and initial state there, and
+      // land on that stream frame. A paused song lands on the next block at
+      // the frame it is parked on. Anything else lands on the next block
+      // unanchored: the stage keeps the state prepare primed, a few
+      // milliseconds off at worst, and the seam is counted as late.
+      struct Landing {
+        uint64_t continuousFrame{0};
+        bool exact{false};
+        int64_t frame{0};
+        uint32_t fractionQ32{0};
+      } landing;
+      if (candidate->hasTimePitch) {
+        PreparedPlaybackTransport::Telemetry from{};
+        if (outgoing.transport.mailboxDrained() &&
+            outgoing.transport.snapshotTelemetry(&from) &&
+            from.generation == outgoing.transportGeneration) {
+          const bool advancing =
+              from.state == NativePlaybackTransportState::Playing ||
+              from.state == NativePlaybackTransportState::PreRoll;
+          const uint64_t margin =
+              hostNow.format.nominalBufferFrames != 0
+                  ? 3ull * hostNow.format.nominalBufferFrames
+                  : 2ull * std::max<uint32_t>(hostNow.format.maximumFrames, 1);
+          const PreparedPlaybackTransport &land = candidate->transport;
+          const PreparedPlaybackTransport::PredictedPosition predicted =
+              advancing ? outgoing.transport.predictPosition(
+                              from, margin, land.initialLoopEnabled,
+                              land.initialLoopStart, land.initialLoopEnd)
+                        : PreparedPlaybackTransport::PredictedPosition{
+                              from.projectFrame, from.projectFractionQ32,
+                              true};
+          if (predicted.valid &&
+              candidate->fillTimePitchAnchor(predicted.frame,
+                                             predicted.fractionQ32)) {
+            const SignalsmithTimePitchAnchorInput input =
+                candidate->timePitchAnchorInput();
+            if (primeSignalsmithTimePitchInitial(candidate->timePitchProcessor,
+                                                 input)) {
+              const SignalsmithTimePitchReanchorPlan plan =
+                  primeSignalsmithTimePitchReanchor(
+                      candidate->timePitchProcessor, input);
+              if (plan.valid()) {
+                candidate->initialTimePitchReanchorPlan = plan;
+                candidate->transport.initialTimePitchReanchorPlan = plan;
+                landing = {advancing ? from.continuousFrame + margin : 0, true,
+                           predicted.frame, predicted.fractionQ32};
+              }
+            }
+          }
+        }
+      }
       // Decoded PCM the candidate adopted is the same memory the outgoing
       // graph holds; count it once, under the generation that lives on.
       size_t shared = 0;
@@ -6097,7 +6287,12 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
       impl_->startMutationGeneration = generation;
       PlaybackRenderShared &render = *impl_->renderShared;
       render.context = {&impl_->retiringSwap->transport,
-                        &impl_->prepared->transport, 0, &render.lateLandings};
+                        &impl_->prepared->transport,
+                        landing.continuousFrame,
+                        landing.exact,
+                        landing.frame,
+                        landing.fractionQ32,
+                        &render.lateLandings};
       render.request = {&impl_->prepared->callback, &render.context,
                         &Impl::swapOutgoingFrames, &Impl::swapLand};
       impl_->swapsLandedSeen =
@@ -6106,6 +6301,9 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
       publishPlaybackQuarantineRetainedBytes(
           impl_->prepared->retainedBytes + impl_->retiringSwapUnsharedBytes);
       impl_->lastError.clear();
+      // Test-only: the window in which the prediction above can go stale.
+      // A control thread held here past the landing frame lands late.
+      impl_->prepared->observe(NativePlaybackLifecycleEvent::SwapArming);
       // The one store the render thread is waiting on. Everything above is
       // ordered before it.
       impl_->router->swap.store(&render.request, std::memory_order_release);
@@ -6951,8 +7149,12 @@ NativePlaybackResult NativePlaybackSession::stop(uint64_t generation) {
   if (impl_->state == NativePlaybackState::Running)
     (void)impl_->prepared->transport.stop();
   if (!impl_->stopHost()) {
+    // A swap retirement that failed on the way has already quarantined its
+    // graph and said why; that verdict is the one worth keeping.
+    if (!(impl_->state == NativePlaybackState::Quarantined &&
+          !impl_->lastError.empty()))
+      impl_->lastError = "The native output host did not confirm quiescence";
     impl_->state = NativePlaybackState::Quarantined;
-    impl_->lastError = "The native output host did not confirm quiescence";
     return failure(NativePlaybackError::TeardownUncertain, generation,
                    impl_->state, impl_->lastError);
   }
@@ -7069,8 +7271,12 @@ NativePlaybackSession::unload(uint64_t generation,
                    impl_->state, "The playback generation is stale");
   }
   if (!impl_->stopHost()) {
+    // A swap retirement that failed on the way has already quarantined its
+    // graph and said why; that verdict is the one worth keeping.
+    if (!(impl_->state == NativePlaybackState::Quarantined &&
+          !impl_->lastError.empty()))
+      impl_->lastError = "The native output host did not confirm quiescence";
     impl_->state = NativePlaybackState::Quarantined;
-    impl_->lastError = "The native output host did not confirm quiescence";
     return failure(NativePlaybackError::TeardownUncertain, generation,
                    impl_->state, impl_->lastError);
   }

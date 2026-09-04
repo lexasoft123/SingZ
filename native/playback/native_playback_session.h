@@ -732,6 +732,9 @@ enum class NativePlaybackLifecycleEvent : uint32_t {
   GraphDeactivate,
   DecodedRelease,
   PreparedQuarantined,
+  // A swap's landing frame and anchor are decided; the request is about to
+  // be published to the render thread (under the session locks).
+  SwapArming,
 };
 
 // Ordinary-thread fault-injection boundary used only by deterministic host

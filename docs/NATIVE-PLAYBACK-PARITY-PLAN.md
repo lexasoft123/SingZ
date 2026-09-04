@@ -176,12 +176,25 @@ code-reviewer gate.
   freed while rendering, landing never comes, not retired at quiescence). The candidate's
   cancellation is by name (`cancelledSwapCandidate`) so giving up on a replacement never
   cancels the song; a refused or failed candidate leaves the song controllable
-  (`liveBehindLatest`) and is unloaded as a cancelled generation is. Landing is at the next
-  block's first frame; the exact-frame landing that a rate change's Stretch anchor needs
-  (`landingContinuousFrame`, `swapLateLandings`) is plumbed but always "next block" until 3b.
-  **Not yet:** 3b (pitch/rate swaps landing on the frame their anchor was filled for), 3c
-  (the bridges' `swapFromGeneration` key, the facade's `swapGeneration` replacing the
-  six-call rebuild, `capabilities.seek` never dropping, the capability tag bump).
+  (`liveBehindLatest`) and is unloaded as a cancelled generation is.
+- **Shipped (3b, core):** a candidate with a Stretch stage lands on the frame its anchor
+  was filled for. `armSwap` predicts the outgoing clock three nominal buffers ahead of its
+  last publication (nextSlice's own Q32 advance replayed off the render thread, cut at the
+  loop end and the duration, wrapped by the INCOMING loop — sound only while the outgoing
+  mailbox is drained), primes the candidate's anchor and initial state there and arms the
+  landing on that stream frame; the render thread splits the block there, the handoff
+  wraps the adopted clock by the incoming loop and compares to the prediction: exact →
+  anchor armed (`timePitchAnchorOutcome` 40); not exact (a stalled control thread, or no
+  sound prediction) → plan discarded, the stage's prepared state renders the seam, a
+  counted miss on the stage and `swapLateLandings` when a frame had been asked for. Paused
+  lands on the parked frame, which is the anchor's. Thirteen mutants killed; the late path is
+  driven through the `SwapArming` lifecycle hook. **Owed by the phone run:** the landing
+  budget (three nominal buffers, less what elapsed since the publication read and two Stretch
+  primes under the mutex) is unmeasured on a device — read `swapLateLandings` against
+  `swapLandings` at rest before believing the seam. **Not yet:** 3c (the bridges'
+  `swapFromGeneration` key, the facade's `swapGeneration` replacing the six-call rebuild,
+  `capabilities.seek` never dropping, the JS telemetry guard accepting the outgoing
+  generation until the seam, the capability tag bump), then the phone measurement.
 
 ### Step 4 — CPU on the phone (~1–2 days)
 Measure after steps 1–3 on the POCO; only then the stream-mode A/B

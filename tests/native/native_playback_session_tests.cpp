@@ -3792,6 +3792,315 @@ void aSwapWaitsOnAnOutgoingGenerationThatLatchedTerminal() {
   std::remove(wav.c_str());
 }
 
+// --- Rate and pitch swaps land on the frame their Stretch anchor was filled
+// for (Step 3b). The control thread predicts where the outgoing clock will
+// be a few blocks ahead, primes the incoming graph's anchor there, and the
+// render thread splits the block on that stream frame.
+
+void aRateChangeSwapLandsOnItsAnchorFrame() {
+  const std::vector<float> ramp = swapRamp(4096);
+  const std::string wav = writeWav("swap-rate.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 100).ok);
+  CHECK(session.openOutput(100).ok && session.start(100).ok);
+  // The fake's nominal buffer is 2 frames, so the landing is armed 6 stream
+  // frames ahead of the last publication.
+  CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+  CHECK(fake->drive(8));
+  auto status = session.status();
+  CHECK(status.renderedProjectFrame == 16 && status.continuousFrame == 16);
+
+  // 1.0 → 0.75: the candidate gains a Stretch stage.
+  const auto swapTo = [&](uint64_t from, uint64_t to, double rate) {
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = from;
+    replacement.playbackRate = rate;
+    replacement.preparedStartProjectFrame = session.status().renderedProjectFrame;
+    auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    replacementLanes.push_back(keyedLane("song", wav));
+    return session.prepare(std::move(replacement), std::move(replacementLanes),
+                           to);
+  };
+  CHECK(swapTo(100, 101, 0.75).ok);
+  status = session.status();
+  CHECK(status.swapPendingGeneration == 100 &&
+        status.timePitchAnchorsPublished == 0);
+  // Not in this block (4 < 6 frames ahead) …
+  CHECK(fake->drive(4));
+  status = session.status();
+  CHECK(status.transportGeneration == 100 && status.renderedProjectFrame == 20 &&
+        status.swapLandings == 0);
+  // … but two frames into the next: 2 frames at 1.0 (→ 22), then 6 at 0.75
+  // (→ 26.5). Exactly where the anchor was filled for.
+  CHECK(fake->drive(8));
+  status = session.status();
+  CHECK(status.transportGeneration == 101 && status.continuousFrame == 28 &&
+        status.renderedProjectFrame == 26 && status.swapLandings == 1 &&
+        status.swapLateLandings == 0 &&
+        status.lastTransportBoundary ==
+            singz::NativePlaybackTransportBoundaryReason::ClockReanchored &&
+        status.timePitchAnchorOutcome == 40 &&
+        status.timePitchAnchorsPublished == 1 &&
+        status.timePitchAnchorMisses == 0 && status.adapterRenderFailures == 0 &&
+        status.graphStatusDetail == 0);
+  CHECK(fake->drive(8));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 32 && status.continuousFrame == 36 &&
+        status.timePitchAnchorMisses == 0);
+
+  // 0.75 → 1.25: both graphs carry a stage; the seam is exact again and the
+  // new stage publishes exactly one anchor.
+  CHECK(swapTo(101, 102, 1.25).ok);
+  CHECK(fake->drive(8) && fake->drive(8));
+  status = session.status();
+  CHECK(status.transportGeneration == 102 && status.swapLandings == 2 &&
+        status.swapLateLandings == 0 && status.timePitchAnchorOutcome == 40 &&
+        status.timePitchAnchorsPublished == 1 &&
+        status.timePitchAnchorMisses == 0 && status.adapterRenderFailures == 0);
+  // continuous 52; landing at 42 = 6 frames at 0.75 from 32.5 (→ 37.0),
+  // then 10 at 1.25 (→ 49.5).
+  CHECK(status.continuousFrame == 52 && status.renderedProjectFrame == 49);
+
+  // 1.25 → 1.0: the stage goes away; no anchor to land on, nothing late.
+  CHECK(swapTo(102, 103, 1.0).ok);
+  CHECK(fake->drive(8));
+  status = session.status();
+  CHECK(status.transportGeneration == 103 && status.swapLandings == 3 &&
+        status.swapLateLandings == 0 && status.timePitchAnchorOutcome == 0 &&
+        status.renderedProjectFrame == 57 && status.continuousFrame == 60);
+
+  // Paused: the seam lands on the next block at the parked frame, and that
+  // IS the anchor's frame — exact, and the anchor publishes on resume.
+  CHECK(session.pause(103).ok && fake->drive(4));
+  CHECK(swapTo(103, 104, 0.8).ok);
+  CHECK(fake->drive(4));
+  status = session.status();
+  CHECK(status.transportGeneration == 104 && status.swapLandings == 4 &&
+        status.swapLateLandings == 0 && status.renderedProjectFrame == 57 &&
+        status.transportState == singz::NativePlaybackTransportState::Paused &&
+        status.timePitchAnchorOutcome == 40 &&
+        status.timePitchAnchorsPublished == 1);
+  CHECK(session.resume(104).ok && fake->drive(5));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 61 && status.timePitchAnchorMisses == 0);
+  CHECK(session.unload(104).ok);
+  std::remove(wav.c_str());
+}
+
+void aSwapArmedBehindAnUnappliedCommandLandsUnanchored() {
+  const std::vector<float> ramp = swapRamp(4096);
+  const std::string wav = writeWav("swap-unapplied.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 110).ok);
+  CHECK(session.openOutput(110).ok && session.start(110).ok);
+  CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+  // A seek the callback has not applied yet: the prediction would be for the
+  // wrong place, so none is made, and the seam lands on the next block with
+  // the stage's prepared state (frame 8's, a few frames off) rather than an
+  // anchor for a frame the song is not at.
+  CHECK(session.seek(110, 1000).ok);
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 110;
+  replacement.playbackRate = 0.75;
+  replacement.preparedStartProjectFrame = 8;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                        111)
+            .ok);
+  CHECK(fake->drive(8));
+  auto status = session.status();
+  // An unanchored seam is a counted miss on the new stage (the diagnostic
+  // the Stretch keeps for a generic boundary it had nothing prepared for),
+  // and nothing was late: no frame was ever asked for.
+  CHECK(status.transportGeneration == 111 && status.swapLandings == 1 &&
+        status.swapLateLandings == 0 && status.timePitchAnchorOutcome == 42 &&
+        status.timePitchAnchorsPublished == 0 &&
+        status.timePitchAnchorMisses == 1 &&
+        status.renderedProjectFrame == 1006 && status.adapterRenderFailures == 0);
+  // And the song is fine from there: a seek on the new generation anchors
+  // as any seek does.
+  CHECK(session.seek(111, 2000).ok && fake->drive(8));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 2006 &&
+        status.timePitchAnchorsPublished == 1 &&
+        status.timePitchAnchorMisses == 1);
+  CHECK(session.unload(111).ok);
+  std::remove(wav.c_str());
+}
+
+enum class LoopSwapShape { LoopToSongEnd, IncomingDropsLoop, SeamOnTheWrap };
+
+void aLoopSurvivesARateSwapAcrossItsWrap() {
+  const std::vector<float> ramp = swapRamp(60000);
+  const std::string wav = writeWav("swap-loop.wav", 1, ramp);
+  // Three loop shapes the prediction has to get right: a loop to the END of
+  // the song crossed on the way to the seam (where a wrap the prediction
+  // skipped would let the duration stop the advance instead); an outgoing
+  // loop the incoming generation does not have (where the end wrap by the
+  // incoming loop is no substitute for wrapping on the way); and a seam that
+  // falls exactly on the loop end (where the outgoing transport hands over
+  // the PRE-wrap frame, and the handoff itself must wrap it).
+  for (const LoopSwapShape shape :
+       {LoopSwapShape::LoopToSongEnd, LoopSwapShape::IncomingDropsLoop,
+        LoopSwapShape::SeamOnTheWrap}) {
+    const bool incomingLoops = shape != LoopSwapShape::IncomingDropsLoop;
+    const bool seamOnTheWrap = shape == LoopSwapShape::SeamOnTheWrap;
+    const int64_t loopEnd = shape == LoopSwapShape::LoopToSongEnd ? 60000 : 20000;
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    singz::NativePlaybackPrepareConfig looping = config();
+    looping.playbackRate = 0.75;
+    // 8 frames at 0.75 land one frame short of the loop end, or four short
+    // for the seam that is to fall on it (6 × 0.75 = 4.5 → loopEnd + 0.5).
+    looping.preparedStartProjectFrame = loopEnd - (seamOnTheWrap ? 10 : 7);
+    looping.initialTransport.loop =
+        singz::NativePlaybackInitialLoop{1000, loopEnd};
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(looping), std::move(lanes), 120).ok);
+    CHECK(session.openOutput(120).ok && session.start(120).ok);
+    CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+    auto status = session.status();
+    const int64_t before = loopEnd - (seamOnTheWrap ? 4 : 1);
+    CHECK(status.renderedProjectFrame == before && status.loopCount == 0);
+    // The seam is armed 6 stream frames ahead. One frame short: 2 of them
+    // reach the loop end (→ loopEnd + 0.5), the wrap lands at 1000.5, and 4
+    // more at 0.75 put the seam at 1003.5. Four short: all 6 reach exactly
+    // loopEnd + 0.5, the outgoing hands that over, the handoff wraps it to
+    // 1000.5.
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = 120;
+    replacement.playbackRate = 1.25;
+    replacement.preparedStartProjectFrame = before;
+    if (incomingLoops)
+      replacement.initialTransport.loop =
+          singz::NativePlaybackInitialLoop{1000, loopEnd};
+    auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    replacementLanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                          121)
+              .ok);
+    CHECK(fake->drive(8));
+    status = session.status();
+    CHECK(status.transportGeneration == 121 && status.swapLandings == 1 &&
+          status.swapLateLandings == 0 && status.timePitchAnchorOutcome == 40 &&
+          status.loopCount == 1 && status.loopEnabled == incomingLoops &&
+          status.timePitchAnchorsPublished == 1 &&
+          status.timePitchAnchorMisses == 0 && status.adapterRenderFailures == 0);
+    // 1003.5 + 2 × 1.25 = 1006, or 1000.5 + 2 × 1.25 = 1003.
+    CHECK(status.renderedProjectFrame == (seamOnTheWrap ? 1003 : 1006) &&
+          status.continuousFrame == 16);
+    if (incomingLoops) {
+      // The new generation's loop bank is live: the next wrap is its own.
+      CHECK(session.seek(121, loopEnd - 5).ok);
+      CHECK(fake->drive(8) && fake->drive(8));
+      status = session.status();
+      CHECK(status.loopCount == 2 && status.renderedProjectFrame >= 1000 &&
+            status.renderedProjectFrame < 1020 &&
+            status.adapterRenderFailures == 0 &&
+            status.timePitchAnchorMisses == 0 && status.timePitchLoopPriming);
+    } else {
+      // No loop any more: the song plays on past where the old one wrapped.
+      CHECK(session.seek(121, 19995).ok && fake->drive(8));
+      status = session.status();
+      CHECK(status.renderedProjectFrame == 20005 && status.loopCount == 1 &&
+            status.adapterRenderFailures == 0);
+    }
+    CHECK(session.unload(121).ok);
+  }
+  std::remove(wav.c_str());
+}
+
+struct SwapArmingLatch {
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool enabled{false};
+  bool ready{false};
+  bool release{false};
+};
+
+void blockSwapArming(void *opaque,
+                     singz::NativePlaybackLifecycleEvent event) noexcept {
+  if (event != singz::NativePlaybackLifecycleEvent::SwapArming)
+    return;
+  auto *latch = static_cast<SwapArmingLatch *>(opaque);
+  std::unique_lock<std::mutex> lock(latch->mutex);
+  if (!latch->enabled)
+    return;
+  latch->ready = true;
+  latch->condition.notify_all();
+  latch->condition.wait(lock, [&] { return latch->release; });
+}
+
+void waitUntilArming(SwapArmingLatch *latch) {
+  std::unique_lock<std::mutex> lock(latch->mutex);
+  latch->condition.wait(lock, [&] { return latch->ready; });
+}
+
+void releaseArming(SwapArmingLatch *latch) {
+  std::lock_guard<std::mutex> lock(latch->mutex);
+  latch->release = true;
+  latch->condition.notify_all();
+}
+
+// The control thread stalls between reading the clock and publishing the
+// request — a phone under load — and the song passes the frame the anchor
+// was filled for. The seam then lands late: on the next block, unanchored,
+// counted, and never with an anchor for a frame the song is not at.
+void aSwapArmedTooLateLandsUnanchoredAndSaysSo() {
+  const std::vector<float> ramp = swapRamp(4096);
+  const std::string wav = writeWav("swap-late.wav", 1, ramp);
+  SwapArmingLatch latch;
+  singz::NativePlaybackTestHooks hooks{blockSwapArming, &latch};
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 130).ok);
+  CHECK(session.openOutput(130).ok && session.start(130).ok);
+  CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+  latch.enabled = true;
+  singz::NativePlaybackResult armed;
+  std::thread arming([&] {
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = 130;
+    replacement.playbackRate = 0.75;
+    replacement.preparedStartProjectFrame = 8;
+    auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    replacementLanes.push_back(keyedLane("song", wav));
+    armed = session.prepare(std::move(replacement),
+                            std::move(replacementLanes), 131);
+  });
+  waitUntilArming(&latch);
+  // The landing was armed for stream frame 14 (8 + 3 × the fake's 2-frame
+  // nominal buffer). Two blocks go by first.
+  CHECK(fake->drive(8) && fake->drive(8));
+  releaseArming(&latch);
+  arming.join();
+  CHECK(armed.ok);
+  latch.enabled = false;
+  CHECK(fake->drive(8));
+  auto status = session.status();
+  CHECK(status.transportGeneration == 131 && status.swapLandings == 1 &&
+        status.swapLateLandings == 1 && status.timePitchAnchorOutcome == 42 &&
+        status.timePitchAnchorsPublished == 0 &&
+        status.timePitchAnchorMisses == 1 && status.continuousFrame == 32 &&
+        status.renderedProjectFrame == 30 && status.adapterRenderFailures == 0);
+  CHECK(session.unload(131).ok);
+  std::remove(wav.c_str());
+}
+
 void audibleProjectionWaitsForLatencyHistory() {
   const std::string wav = writeWav(
       "audible-projection.wav", 1, std::vector<float>(50000, 0.1F));
@@ -5938,6 +6247,10 @@ int main() {
   aSwapIsRefusedWhereItCouldNotLand();
   aFailedOrCancelledSwapCandidateLeavesTheSongPlaying();
   aSwapWaitsOnAnOutgoingGenerationThatLatchedTerminal();
+  aRateChangeSwapLandsOnItsAnchorFrame();
+  aSwapArmedBehindAnUnappliedCommandLandsUnanchored();
+  aLoopSurvivesARateSwapAcrossItsWrap();
+  aSwapArmedTooLateLandsUnanchoredAndSaysSo();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();
