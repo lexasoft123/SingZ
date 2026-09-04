@@ -4,6 +4,12 @@
 
 void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
                                RCTPromiseRejectBlock reject);
+// The session block alone — the object Status nests under "session" — for the
+// telemetry poll, without the route inventory and runtime description Status
+// rebuilds on every call. Android's nativePlaybackSession() is its exact twin:
+// same name, no arguments.
+void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
+                                RCTPromiseRejectBlock reject);
 void SingzNativePlaybackPrepare(NSNumber* generation, NSDictionary* request,
                                 RCTPromiseResolveBlock resolve,
                                 RCTPromiseRejectBlock reject);

@@ -1003,6 +1003,25 @@ static jstring nativePlaybackStatus(JNIEnv *env, jobject) {
   }
 }
 
+/* The session block alone: what the telemetry poll reads 2.5 times a second.
+   nativePlaybackStatus above also enumerates the host's devices and describes
+   the runtime and codec build on every call — none of it can change within a
+   generation, and the poll never read any of it. iOS's session is its exact
+   twin: same name, no arguments, the same object status() nests under
+   "session". A failure resolves to something the session parser refuses, the
+   way status() resolves an unavailable capability. */
+static jstring nativePlaybackSession(JNIEnv *env, jobject) {
+  auto &bridge = owner();
+  std::lock_guard<std::mutex> lock(bridge.commandMutex);
+  try {
+    std::string output;
+    appendStatus(output, bridge.session.status());
+    return javaJson(env, output);
+  } catch (...) {
+    return javaJson(env, "{\"error\":\"provider-failure\"}");
+  }
+}
+
 static jstring nativePlaybackClaim(JNIEnv *env, jobject, jlong generationValue,
                                    jlong handoffLeaseValue) {
   const uint64_t generation = static_cast<uint64_t>(generationValue);
@@ -1521,6 +1540,9 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
     {const_cast<char *>("nativePlaybackStatus"),
      const_cast<char *>("()Ljava/lang/String;"),
      reinterpret_cast<void *>(nativePlaybackStatus)},
+    {const_cast<char *>("nativePlaybackSession"),
+     const_cast<char *>("()Ljava/lang/String;"),
+     reinterpret_cast<void *>(nativePlaybackSession)},
     {const_cast<char *>("nativePlaybackClaim"),
      const_cast<char *>("(JJ)Ljava/lang/String;"),
      reinterpret_cast<void *>(nativePlaybackClaim)},

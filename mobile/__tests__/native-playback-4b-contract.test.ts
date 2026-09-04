@@ -1,7 +1,9 @@
 import type { BeatInfo, MetronomeConfig } from '../src/model';
 import {
   buildNativePlaybackPreparePlayback,
+  nativePlaybackBridge,
   parseNativePlaybackCapability,
+  parseNativePlaybackSession,
 } from '../src/playback/native';
 
 const beat: BeatInfo = {
@@ -443,5 +445,70 @@ describe('iOS Phase 4B bridge contract', () => {
       incompatible[key] = value;
       expect(parseNativePlaybackCapability(incompatible, 'ios').available).toBe(false);
     }
+  });
+});
+
+describe('session(): the poll reads the session block alone', () => {
+  const bridgeStubs = () =>
+    Object.fromEntries(
+      [
+        'prepare',
+        'configureOutputSession',
+        'openOutput',
+        'start',
+        'transport',
+        'setControl',
+        'previewClick',
+        'stop',
+        'unload',
+      ].map(name => [name, jest.fn()]),
+    );
+
+  it('parses a bare session block exactly as the capability parser does', () => {
+    const raw = nativeStatus();
+    expect(parseNativePlaybackSession(raw.session)).toEqual(
+      parseNativePlaybackCapability(nativeStatus(), 'ios').session,
+    );
+  });
+
+  it('refuses a malformed block with null, never a partial session', () => {
+    const raw = nativeStatus().session as Record<string, unknown>;
+    delete raw.latency;
+    expect(parseNativePlaybackSession(raw)).toBeNull();
+    expect(parseNativePlaybackSession(undefined)).toBeNull();
+    expect(parseNativePlaybackSession('session')).toBeNull();
+  });
+
+  it('reads session() from a bridge that has it, without touching status()', async () => {
+    const raw = nativeStatus();
+    const status = jest.fn(async () => raw);
+    const session = jest.fn(async () => raw.session);
+    const api = nativePlaybackBridge({ ...bridgeStubs(), status, session })!;
+    await expect(api.session()).resolves.toEqual(
+      parseNativePlaybackCapability(nativeStatus(), 'ios').session,
+    );
+    expect(session).toHaveBeenCalledTimes(1);
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('falls back to status() on a native build older than the method', async () => {
+    const raw = nativeStatus();
+    const status = jest.fn(async () => raw);
+    const api = nativePlaybackBridge({ ...bridgeStubs(), status })!;
+    await expect(api.session()).resolves.toEqual(
+      parseNativePlaybackCapability(nativeStatus(), 'ios').session,
+    );
+    expect(status).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers a malformed session with the empty one, as a bad status always polled', async () => {
+    const api = nativePlaybackBridge({
+      ...bridgeStubs(),
+      status: jest.fn(async () => nativeStatus()),
+      session: jest.fn(async () => ({ generation: 'seven' })),
+    })!;
+    const session = await api.session();
+    expect(session).toMatchObject({ generation: 0, state: 'unloaded' });
+    expect(parseNativePlaybackCapability({}, 'ios').session).toEqual(session);
   });
 });

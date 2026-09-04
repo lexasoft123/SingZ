@@ -32,6 +32,7 @@ describe('Android native DSP runtime packaging', () => {
     expect(module).toContain('override fun getName(): String = "NativeAudioRuntime"');
     for (const method of [
       'status',
+      'session',
       'prepare',
       'configureOutputSession',
       'openOutput',
@@ -42,6 +43,12 @@ describe('Android native DSP runtime packaging', () => {
       'unload',
     ])
       expect(module).toMatch(new RegExp(`fun ${method}\\(`));
+    // status() refreshes the host inventory before every answer; session(),
+    // the poll's read, must not — a 400 ms poll re-enumerating every audio
+    // device was a per-tick cost nothing consumed.
+    expect(module).toMatch(
+      /fun session\(promise: Promise\) \{\s*if \(!postResult\(promise\) \{\s*requireCore\(\)\s*SingzCore\.nativePlaybackSession\(\)/,
+    );
     expect(module).toContain('NativePlaybackPathPolicy.authorize');
     expect(module).toContain('ctx.filesDir');
     expect(module).toContain('ctx.cacheDir');
@@ -108,6 +115,7 @@ describe('Android native DSP runtime packaging', () => {
     );
     for (const symbol of [
       'nativePlaybackStatus',
+      'nativePlaybackSession',
       'nativePlaybackPrepare',
       'nativePlaybackStart',
       'nativePlaybackPause',

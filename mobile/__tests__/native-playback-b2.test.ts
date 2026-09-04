@@ -313,8 +313,15 @@ function harness(
   let state = 'unloaded';
   let nextLease = 40;
   const prepareRequests: Array<Record<string, unknown>> = [];
+  const status = jest.fn(async () => capability(generation, state, 0, platform));
   const native = {
-    status: jest.fn(async () => capability(generation, state, 0, platform)),
+    status,
+    // The poll and the seek-receipt wait read session(); it derives from
+    // status() here so a test that shapes the status (reportCompleted, the
+    // terminal and retirement cases) shapes what the poll sees too. The real
+    // bridge's session() never touches status() — the contract suite pins
+    // that at the wrapper.
+    session: jest.fn(async () => (await status()).session),
     prepare: jest.fn(async (next: number, request: Record<string, unknown>) => {
       calls.push(`native.prepare:${next}`);
       generation = next;
@@ -718,6 +725,27 @@ describe('Android Phase 4B product boundary', () => {
       expect(h.legacyLoad).not.toHaveBeenCalled();
     },
   );
+
+  it('polls the session block, not the whole status, once the owner is up', async () => {
+    const h = harness({ platform: 'android' });
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    await handle.start();
+    await until(() => !((handle as unknown as { polling: boolean }).polling));
+    // The interval must not race the explicit poll below.
+    (handle as unknown as { stopPolling(): void }).stopPolling();
+    h.native.session.mockClear();
+    h.native.status.mockClear();
+
+    await h.coordinator.pollHandle(handle as never);
+
+    // The harness derives session() from status(), so status is reached
+    // exactly once, through session — never by the poll itself. The real
+    // bridge's session() never calls status() at all (the contract suite).
+    expect(h.native.session).toHaveBeenCalledTimes(1);
+    expect(h.native.status).toHaveBeenCalledTimes(1);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 1 });
+  });
 });
 
 describe.each(['ios', 'android'] as const)(

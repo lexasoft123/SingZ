@@ -93,6 +93,7 @@ object SingzCore {
   // Phase 4 native playback. Every method below is control-domain only. The
   // Oboe callback stays wholly inside zcore -> zdsp and never calls JNI.
   external fun nativePlaybackStatus(): String
+  external fun nativePlaybackSession(): String
   external fun nativePlaybackClaim(generation: Long, handoffLease: Long): String
   external fun nativePlaybackRequestCancellation(generation: Long): Boolean
   external fun nativePlaybackPrepare(

@@ -135,6 +135,19 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     }) rejectUnavailable(promise)
   }
 
+  /** The session block alone, for the telemetry poll. Deliberately NOT
+   *  refreshHostInventory(): status() re-enumerates every audio device and
+   *  hands the core eight arrays on every call, and the poll never read the
+   *  result — route changes reach the core through the AudioDeviceCallback
+   *  above. Same name and arity as the iOS bridge's session. */
+  @ReactMethod
+  fun session(promise: Promise) {
+    if (!postResult(promise) {
+      requireCore()
+      SingzCore.nativePlaybackSession()
+    }) rejectUnavailable(promise)
+  }
+
   @ReactMethod
   fun prepare(generationValue: Double, request: ReadableMap, promise: Promise) {
     val generation: Long

@@ -530,6 +530,22 @@ void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
   });
 }
 
+void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
+                                RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    PlaybackBridgeOwner &bridge = owner();
+    // Same shape as Status: the nested block captures real block values, not
+    // the lambda's closure, which is dead by the time the queue runs it.
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        asyncResolve(statusDictionary(*bridge.session));
+      });
+    });
+  });
+}
+
 void SingzNativePlaybackPrepare(NSNumber *generationValue,
                                 NSDictionary *request,
                                 RCTPromiseResolveBlock resolve,

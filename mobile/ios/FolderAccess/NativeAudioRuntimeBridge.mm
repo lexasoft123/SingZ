@@ -24,6 +24,12 @@ RCT_EXPORT_METHOD(status:(RCTPromiseResolveBlock)resolve
   SingzNativePlaybackStatus(resolve, reject);
 }
 
+RCT_EXPORT_METHOD(session:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  SingzNativePlaybackSession(resolve, reject);
+}
+
 RCT_REMAP_METHOD(
     prepare,
     prepare : (nonnull NSNumber*)generation

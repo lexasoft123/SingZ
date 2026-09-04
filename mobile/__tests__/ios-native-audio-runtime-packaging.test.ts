@@ -133,7 +133,10 @@ describe('iOS native DSP runtime packaging', () => {
     const remappedExports = [...bridge.matchAll(/RCT_REMAP_METHOD\(\s*([A-Za-z0-9_]+)/g)]
       .map(match => match[1])
       .sort()
-    expect(directExports).toEqual(['codecTargetProof', 'status'])
+    // session is status's session block alone, for the telemetry poll — no
+    // route inventory, no runtime description. Same name, no arguments, on
+    // Android too.
+    expect(directExports).toEqual(['codecTargetProof', 'session', 'status'])
     expect(remappedExports).toEqual([
       'configureOutputSession', 'lanePeaks', 'openOutput', 'prepare',
       'previewClick', 'setControl', 'start', 'stop', 'transport', 'unload',
@@ -146,6 +149,7 @@ describe('iOS native DSP runtime packaging', () => {
       /#if defined\(SINGZ_CODEC_TARGET_PROOF\)[\s\S]*RCT_EXPORT_METHOD\(codecTargetProof:[\s\S]*#endif/
     )
     expect(bridge).toContain('RCT_EXPORT_METHOD(status:')
+    expect(bridge).toContain('RCT_EXPORT_METHOD(session:')
     for (const method of [
       'prepare',
       'configureOutputSession',
@@ -308,17 +312,19 @@ describe('iOS native DSP runtime packaging', () => {
     expect(tests).toContain('tooManyBeats')
     expect(boundary).toContain('catch (const std::bad_alloc&)')
     expect(boundary).toContain('@catch (NSException*)')
+    // Status and Session are the two queue-dispatched reads: each crosses the
+    // boundary twice (once on the caller's thread, once inside the block).
     expect(
       support.match(/runBridgeBoundary\((?:reject|asyncReject)/g)
-    ).toHaveLength(12)
+    ).toHaveLength(14)
     expect(support.match(/SingzPlaybackBridgeBoundary\(\[&\]/g)).toHaveLength(10)
-    expect(support.match(/dispatch_async\(/g)).toHaveLength(10)
+    expect(support.match(/dispatch_async\(/g)).toHaveLength(11)
     expect(
       support.match(/RCTPromiseResolveBlock asyncResolve = \[resolve copy\];/g)
-    ).toHaveLength(10)
+    ).toHaveLength(11)
     expect(
       support.match(/RCTPromiseRejectBlock asyncReject = \[reject copy\];/g)
-    ).toHaveLength(10)
+    ).toHaveLength(11)
     expect(support).toContain('SingzPlaybackPrepareOwnershipGuard admissionGuard')
     expect(support).toContain('SingzPlaybackFinishPrepareOuterBoundary(')
     expect(support).toContain('PrepareGuardAllocation')

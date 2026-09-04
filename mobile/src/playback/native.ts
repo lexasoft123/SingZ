@@ -369,6 +369,15 @@ export interface NativePlaybackMediaCodecCapability {
 
 interface NativePlaybackBridgeApi {
   status(): Promise<unknown>;
+  /** The session block alone — the object status() nests under `session`,
+   *  and the only part of it the telemetry poll reads, 2.5 times a second.
+   *  status() also enumerates the host's devices (Android re-queries
+   *  AudioManager and hands the core eight arrays per call) and re-describes
+   *  the runtime and codec build; none of that can change within a
+   *  generation. Optional for the same reason lanePeaks is: a native build
+   *  older than this JS answers status() only. Same name and arity (none) on
+   *  both bridges — a method whose arity disagrees never dispatches. */
+  session?(): Promise<unknown>;
   prepare(
     generation: number,
     request: NativePlaybackPrepareRequest,
@@ -408,8 +417,12 @@ interface NativePlaybackBridgeApi {
 }
 
 interface NativePlaybackApi
-  extends Omit<NativePlaybackBridgeApi, 'status'> {
+  extends Omit<NativePlaybackBridgeApi, 'status' | 'session'> {
   status(): Promise<NativePlaybackCapability>;
+  /** Always answers: on a native build without session() it goes through
+   *  status() and returns its session, so the poll pays for the inventory
+   *  it never reads rather than turning native playback off. */
+  session(): Promise<NativePlaybackSessionStatus>;
 }
 
 /** One lane's drawable envelope: peak absolute sample per bucket, 0..1. */
@@ -572,10 +585,19 @@ export interface NativePlaybackTransportIntent {
   readonly transposeSemitones: number;
 }
 
-const nativeModule = (): NativePlaybackApi | undefined => {
-  const candidate = NativeModules.NativeAudioRuntime as
-    | Partial<NativePlaybackBridgeApi>
-    | undefined;
+const nativeModule = (): NativePlaybackApi | undefined =>
+  nativePlaybackBridge(
+    NativeModules.NativeAudioRuntime as
+      | Partial<NativePlaybackBridgeApi>
+      | undefined,
+  );
+
+/** Wrap whatever native module is installed into the typed facade, or nothing
+ *  if it lacks the methods native playback cannot do without. Exported so a
+ *  test can hand it a bridge shaped like an older build. */
+export const nativePlaybackBridge = (
+  candidate: Partial<NativePlaybackBridgeApi> | undefined,
+): NativePlaybackApi | undefined => {
   if (
     !candidate ||
     typeof candidate.status !== 'function' ||
@@ -594,6 +616,17 @@ const nativeModule = (): NativePlaybackApi | undefined => {
   return {
     status: async () =>
       parseNativePlaybackCapability(await bridge.status(), Platform.OS),
+    // Deliberately NOT in the guard above, like lanePeaks: an older native
+    // build answers status() only, and the poll then reads its session out
+    // of the full status rather than native playback going away. A malformed
+    // session block is the empty session, which is what a malformed status
+    // always polled as.
+    session: async () =>
+      typeof bridge.session === 'function'
+        ? (parseNativePlaybackSession(await bridge.session()) ??
+          emptyNativeSession())
+        : parseNativePlaybackCapability(await bridge.status(), Platform.OS)
+            .session,
     prepare: (generation, request) => bridge.prepare(generation, request),
     configureOutputSession: generation =>
       bridge.configureOutputSession(generation),
@@ -946,6 +979,276 @@ const nativeErrorCode = (value: unknown): NativePlaybackErrorCode =>
   oneOf(value, NATIVE_ERROR_CODES) ? value : 'provider-failure';
 
 /**
+ * Parse one session block — the part of the status that moves.
+ *
+ * The telemetry poll reads this and nothing else, so both bridges publish it
+ * on its own (`session()`) without the device inventory and runtime
+ * description that `status()` rebuilds on every call. Null for a malformed
+ * block: the capability parser turns that into an absent capability, and the
+ * poll into the empty session a bad status always polled as.
+ */
+export function parseNativePlaybackSession(
+  value: unknown,
+): NativePlaybackSessionStatus | null {
+  const rawSession = objectValue(value);
+  const rawLatency = objectValue(rawSession?.latency);
+  if (!rawSession || !rawLatency || !Array.isArray(rawSession.lanes))
+    return null;
+  const unsignedSessionKeys = [
+    'generation',
+    'terminalOrdinal',
+    'maximumFrames',
+    'nominalBufferFrames',
+    'outputChannels',
+    'renderedFrames',
+    'audibleFrames',
+    'transportGeneration',
+    'continuousFrame',
+    'durationFrames',
+    'remainingPreRollFrames',
+    'cueEventsCompleted',
+    'nextCueEventIndex',
+    'loopCount',
+    'seekCount',
+    'transportDiscontinuities',
+    'presentationLatencyFrames',
+    'graphLatencyFrames',
+    'devicePresentationLatencyFrames',
+    'totalPresentationLatencyFrames',
+    'retainedBytes',
+    'graphArenaBytes',
+    'cueEventCount',
+    'graphNodeCount',
+    'graphConnectionCount',
+    'latencyCompensatedEdgeCount',
+    'xruns',
+    'deadlineMisses',
+    'discontinuities',
+    'renderFailures',
+    'adapterRenderFailures',
+    'terminalRenderFailures',
+    'parameterOverflows',
+    'nonFiniteSamples',
+    'rejectedBlocks',
+    'previewClicksEnqueued',
+    'previewClicksStarted',
+    'previewClicksCompleted',
+    'previewClicksPending',
+    'timePitchAnchorsPrepared',
+    'timePitchAnchorsPublished',
+    'timePitchAnchorMisses',
+  ] as const;
+  const integers: Record<(typeof unsignedSessionKeys)[number], number> =
+    {} as Record<(typeof unsignedSessionKeys)[number], number>;
+  for (const key of unsignedSessionKeys) {
+    const parsed = safeUnsigned(rawSession[key]);
+    if (parsed === null) return null;
+    integers[key] = parsed;
+  }
+  const sampleRate = finiteNumber(rawSession.sampleRate);
+  const masterGain = finiteNumber(rawSession.masterGain);
+  const referenceGain = finiteNumber(rawSession.referenceGain);
+  const preRollFrames = safeSigned(rawSession.preRollFrames);
+  const renderedProjectFrame = safeSigned(rawSession.renderedProjectFrame);
+  const audibleProjectFrame = safeSigned(rawSession.audibleProjectFrame);
+  const preparedStartProjectFrame = safeSigned(
+    rawSession.preparedStartProjectFrame,
+  );
+  const loopStartFrame = safeSigned(rawSession.loopStartFrame);
+  const loopEndFrame = safeSigned(rawSession.loopEndFrame);
+  const playbackRate = finiteNumber(rawSession.playbackRate);
+  const transposeSemitones = finiteNumber(rawSession.transposeSemitones);
+  const rawTrainingLanes = rawSession.trainingLanes;
+  const rawTrainingLaneCount = Array.isArray(rawTrainingLanes)
+    ? rawTrainingLanes.length
+    : -1;
+  const trainingLanes = Array.isArray(rawTrainingLanes)
+    ? rawTrainingLanes.filter(
+        (lane): lane is string => typeof lane === 'string' && lane.length > 0,
+      )
+    : null;
+  if (
+    sampleRate === null ||
+    sampleRate < 0 ||
+    masterGain === null ||
+    referenceGain === null ||
+    preRollFrames === null ||
+    renderedProjectFrame === null ||
+    audibleProjectFrame === null ||
+    preparedStartProjectFrame === null ||
+    loopStartFrame === null ||
+    loopEndFrame === null ||
+    playbackRate === null ||
+    playbackRate <= 0 ||
+    transposeSemitones === null ||
+    transposeSemitones < -24 ||
+    transposeSemitones > 24 ||
+    typeof rawSession.trainingEnabled !== 'boolean' ||
+    trainingLanes === null ||
+    trainingLanes.length !== rawTrainingLaneCount ||
+    trainingLanes.length > 16 ||
+    new Set(trainingLanes).size !== trainingLanes.length ||
+    !oneOf(rawSession.state, PLAYBACK_STATES) ||
+    !oneOf(rawSession.hostState, HOST_STATES) ||
+    !oneOf(rawSession.terminalReason, TERMINAL_REASONS) ||
+    !oneOf(rawSession.transportState, TRANSPORT_STATES) ||
+    !oneOf(
+      rawSession.transportTelemetryQuality,
+      TRANSPORT_TELEMETRY_QUALITIES,
+    ) ||
+    !oneOf(rawSession.lastTransportBoundary, TRANSPORT_BOUNDARY_REASONS) ||
+    !oneOf(
+      rawSession.audibleProjectionQuality,
+      AUDIBLE_PROJECTION_QUALITIES,
+    ) ||
+    typeof rawSession.loopEnabled !== 'boolean' ||
+    typeof rawSession.timePitchReplacementReady !== 'boolean' ||
+    typeof rawSession.timePitchLoopPriming !== 'boolean' ||
+    typeof rawSession.topology !== 'string' ||
+    typeof rawSession.message !== 'string'
+  )
+    return null;
+
+  const latencyKeys = [
+    'outputDeviceFrames',
+    'bufferFrames',
+    'externalRouteFrames',
+    'presentationFrames',
+  ] as const;
+  const latency = {} as Record<(typeof latencyKeys)[number], number>;
+  for (const key of latencyKeys) {
+    const parsed = safeUnsigned(rawLatency[key]);
+    if (parsed === null) return null;
+    latency[key] = parsed;
+  }
+  if (latency.presentationFrames !== integers.presentationLatencyFrames)
+    return null;
+  if (
+    integers.presentationLatencyFrames !==
+      integers.totalPresentationLatencyFrames ||
+    integers.totalPresentationLatencyFrames !==
+      integers.graphLatencyFrames + integers.devicePresentationLatencyFrames
+  )
+    return null;
+  const lanes: NativePlaybackLaneStatus[] = [];
+  for (const value of rawSession.lanes) {
+    const lane = objectValue(value);
+    const cursorFrames = safeUnsigned(lane?.cursorFrames);
+    const totalFrames = safeUnsigned(lane?.totalFrames);
+    const gain = finiteNumber(lane?.gain);
+    if (
+      !lane ||
+      typeof lane.id !== 'string' ||
+      lane.id.length === 0 ||
+      cursorFrames === null ||
+      totalFrames === null ||
+      gain === null ||
+      typeof lane.muted !== 'boolean' ||
+      typeof lane.solo !== 'boolean'
+    )
+      return null;
+    lanes.push({
+      id: lane.id,
+      cursorFrames,
+      totalFrames,
+      gain,
+      muted: lane.muted,
+      solo: lane.solo,
+    });
+  }
+
+  return {
+    generation: integers.generation,
+    state: rawSession.state,
+    hostState: rawSession.hostState,
+    terminalReason: rawSession.terminalReason,
+    terminalOrdinal: integers.terminalOrdinal,
+    sampleRate,
+    maximumFrames: integers.maximumFrames,
+    nominalBufferFrames: integers.nominalBufferFrames,
+    outputChannels: integers.outputChannels,
+    renderedFrames: integers.renderedFrames,
+    audibleFrames: integers.audibleFrames,
+    transportGeneration: integers.transportGeneration,
+    transportState: rawSession.transportState,
+    transportTelemetryQuality: rawSession.transportTelemetryQuality,
+    lastTransportBoundary: rawSession.lastTransportBoundary,
+    renderedProjectFrame,
+    audibleProjectFrame,
+    audibleProjectionQuality: rawSession.audibleProjectionQuality,
+    continuousFrame: integers.continuousFrame,
+    durationFrames: integers.durationFrames,
+    remainingPreRollFrames: integers.remainingPreRollFrames,
+    cueEventsCompleted: integers.cueEventsCompleted,
+    nextCueEventIndex: integers.nextCueEventIndex,
+    loopEnabled: rawSession.loopEnabled,
+    loopStartFrame,
+    loopEndFrame,
+    loopCount: integers.loopCount,
+    seekCount: integers.seekCount,
+    transportDiscontinuities: integers.transportDiscontinuities,
+    presentationLatencyFrames: integers.presentationLatencyFrames,
+    playbackRate,
+    transposeSemitones,
+    graphLatencyFrames: integers.graphLatencyFrames,
+    devicePresentationLatencyFrames:
+      integers.devicePresentationLatencyFrames,
+    totalPresentationLatencyFrames: integers.totalPresentationLatencyFrames,
+    preparedStartProjectFrame,
+    retainedBytes: integers.retainedBytes,
+    graphArenaBytes: integers.graphArenaBytes,
+    masterGain,
+    referenceGain,
+    trainingEnabled: rawSession.trainingEnabled,
+    trainingLanes,
+    preRollFrames,
+    cueEventCount: integers.cueEventCount,
+    // Lenient on purpose: an older native build does not send these, and
+    // rejecting the whole capability over a missing count-in shape would
+    // disable native playback rather than draw a plainer count-in.
+    countInEventCount: safeUnsigned(rawSession.countInEventCount) ?? 0,
+    countInBeatsPerBar: safeUnsigned(rawSession.countInBeatsPerBar) ?? 0,
+    laneDecodeFallback:
+      typeof rawSession.laneDecodeFallback === 'string'
+        ? rawSession.laneDecodeFallback
+        : '',
+    graphNodeCount: integers.graphNodeCount,
+    graphConnectionCount: integers.graphConnectionCount,
+    latencyCompensatedEdgeCount: integers.latencyCompensatedEdgeCount,
+    topology: rawSession.topology,
+    xruns: integers.xruns,
+    deadlineMisses: integers.deadlineMisses,
+    discontinuities: integers.discontinuities,
+    renderFailures: integers.renderFailures,
+    // The file's one idiom for a leniently-read unsigned, same as the
+    // count-in fields above: three hand-rolled predicates were a second
+    // answer to one question, and they disagreed with this one about 3.7
+    // and 1e300.
+    graphStatusCode: safeUnsigned(rawSession.graphStatusCode) ?? 0,
+    graphStatusDetail: safeUnsigned(rawSession.graphStatusDetail) ?? 0,
+    timePitchAnchorOutcome:
+      safeUnsigned(rawSession.timePitchAnchorOutcome) ?? 0,
+    adapterRenderFailures: integers.adapterRenderFailures,
+    terminalRenderFailures: integers.terminalRenderFailures,
+    parameterOverflows: integers.parameterOverflows,
+    nonFiniteSamples: integers.nonFiniteSamples,
+    rejectedBlocks: integers.rejectedBlocks,
+    previewClicksEnqueued: integers.previewClicksEnqueued,
+    previewClicksStarted: integers.previewClicksStarted,
+    previewClicksCompleted: integers.previewClicksCompleted,
+    previewClicksPending: integers.previewClicksPending,
+    timePitchAnchorsPrepared: integers.timePitchAnchorsPrepared,
+    timePitchAnchorsPublished: integers.timePitchAnchorsPublished,
+    timePitchAnchorMisses: integers.timePitchAnchorMisses,
+    timePitchReplacementReady: rawSession.timePitchReplacementReady,
+    timePitchLoopPriming: rawSession.timePitchLoopPriming,
+    latency,
+    lanes,
+    message: rawSession.message,
+  };
+}
+
+/**
  * Normalize the native status boundary. A pre-4B binary has no versioned
  * transport/cue capability and therefore becomes an unavailable capability,
  * never a partially compatible session selected by structural coincidence.
@@ -1031,172 +1334,8 @@ export function parseNativePlaybackCapability(
     });
   }
 
-  const rawSession = objectValue(raw.session);
-  const rawLatency = objectValue(rawSession?.latency);
-  if (!rawSession || !rawLatency || !Array.isArray(rawSession.lanes))
-    return absentNativeCapability();
-  const unsignedSessionKeys = [
-    'generation',
-    'terminalOrdinal',
-    'maximumFrames',
-    'nominalBufferFrames',
-    'outputChannels',
-    'renderedFrames',
-    'audibleFrames',
-    'transportGeneration',
-    'continuousFrame',
-    'durationFrames',
-    'remainingPreRollFrames',
-    'cueEventsCompleted',
-    'nextCueEventIndex',
-    'loopCount',
-    'seekCount',
-    'transportDiscontinuities',
-    'presentationLatencyFrames',
-    'graphLatencyFrames',
-    'devicePresentationLatencyFrames',
-    'totalPresentationLatencyFrames',
-    'retainedBytes',
-    'graphArenaBytes',
-    'cueEventCount',
-    'graphNodeCount',
-    'graphConnectionCount',
-    'latencyCompensatedEdgeCount',
-    'xruns',
-    'deadlineMisses',
-    'discontinuities',
-    'renderFailures',
-    'adapterRenderFailures',
-    'terminalRenderFailures',
-    'parameterOverflows',
-    'nonFiniteSamples',
-    'rejectedBlocks',
-    'previewClicksEnqueued',
-    'previewClicksStarted',
-    'previewClicksCompleted',
-    'previewClicksPending',
-    'timePitchAnchorsPrepared',
-    'timePitchAnchorsPublished',
-    'timePitchAnchorMisses',
-  ] as const;
-  const integers: Record<(typeof unsignedSessionKeys)[number], number> =
-    {} as Record<(typeof unsignedSessionKeys)[number], number>;
-  for (const key of unsignedSessionKeys) {
-    const parsed = safeUnsigned(rawSession[key]);
-    if (parsed === null) return absentNativeCapability();
-    integers[key] = parsed;
-  }
-  const sampleRate = finiteNumber(rawSession.sampleRate);
-  const masterGain = finiteNumber(rawSession.masterGain);
-  const referenceGain = finiteNumber(rawSession.referenceGain);
-  const preRollFrames = safeSigned(rawSession.preRollFrames);
-  const renderedProjectFrame = safeSigned(rawSession.renderedProjectFrame);
-  const audibleProjectFrame = safeSigned(rawSession.audibleProjectFrame);
-  const preparedStartProjectFrame = safeSigned(
-    rawSession.preparedStartProjectFrame,
-  );
-  const loopStartFrame = safeSigned(rawSession.loopStartFrame);
-  const loopEndFrame = safeSigned(rawSession.loopEndFrame);
-  const playbackRate = finiteNumber(rawSession.playbackRate);
-  const transposeSemitones = finiteNumber(rawSession.transposeSemitones);
-  const rawTrainingLanes = rawSession.trainingLanes;
-  const rawTrainingLaneCount = Array.isArray(rawTrainingLanes)
-    ? rawTrainingLanes.length
-    : -1;
-  const trainingLanes = Array.isArray(rawTrainingLanes)
-    ? rawTrainingLanes.filter(
-        (lane): lane is string => typeof lane === 'string' && lane.length > 0,
-      )
-    : null;
-  if (
-    sampleRate === null ||
-    sampleRate < 0 ||
-    masterGain === null ||
-    referenceGain === null ||
-    preRollFrames === null ||
-    renderedProjectFrame === null ||
-    audibleProjectFrame === null ||
-    preparedStartProjectFrame === null ||
-    loopStartFrame === null ||
-    loopEndFrame === null ||
-    playbackRate === null ||
-    playbackRate <= 0 ||
-    transposeSemitones === null ||
-    transposeSemitones < -24 ||
-    transposeSemitones > 24 ||
-    typeof rawSession.trainingEnabled !== 'boolean' ||
-    trainingLanes === null ||
-    trainingLanes.length !== rawTrainingLaneCount ||
-    trainingLanes.length > 16 ||
-    new Set(trainingLanes).size !== trainingLanes.length ||
-    !oneOf(rawSession.state, PLAYBACK_STATES) ||
-    !oneOf(rawSession.hostState, HOST_STATES) ||
-    !oneOf(rawSession.terminalReason, TERMINAL_REASONS) ||
-    !oneOf(rawSession.transportState, TRANSPORT_STATES) ||
-    !oneOf(
-      rawSession.transportTelemetryQuality,
-      TRANSPORT_TELEMETRY_QUALITIES,
-    ) ||
-    !oneOf(rawSession.lastTransportBoundary, TRANSPORT_BOUNDARY_REASONS) ||
-    !oneOf(
-      rawSession.audibleProjectionQuality,
-      AUDIBLE_PROJECTION_QUALITIES,
-    ) ||
-    typeof rawSession.loopEnabled !== 'boolean' ||
-    typeof rawSession.timePitchReplacementReady !== 'boolean' ||
-    typeof rawSession.timePitchLoopPriming !== 'boolean' ||
-    typeof rawSession.topology !== 'string' ||
-    typeof rawSession.message !== 'string'
-  )
-    return absentNativeCapability();
-
-  const latencyKeys = [
-    'outputDeviceFrames',
-    'bufferFrames',
-    'externalRouteFrames',
-    'presentationFrames',
-  ] as const;
-  const latency = {} as Record<(typeof latencyKeys)[number], number>;
-  for (const key of latencyKeys) {
-    const parsed = safeUnsigned(rawLatency[key]);
-    if (parsed === null) return absentNativeCapability();
-    latency[key] = parsed;
-  }
-  if (latency.presentationFrames !== integers.presentationLatencyFrames)
-    return absentNativeCapability();
-  if (
-    integers.presentationLatencyFrames !==
-      integers.totalPresentationLatencyFrames ||
-    integers.totalPresentationLatencyFrames !==
-      integers.graphLatencyFrames + integers.devicePresentationLatencyFrames
-  )
-    return absentNativeCapability();
-  const lanes: NativePlaybackLaneStatus[] = [];
-  for (const value of rawSession.lanes) {
-    const lane = objectValue(value);
-    const cursorFrames = safeUnsigned(lane?.cursorFrames);
-    const totalFrames = safeUnsigned(lane?.totalFrames);
-    const gain = finiteNumber(lane?.gain);
-    if (
-      !lane ||
-      typeof lane.id !== 'string' ||
-      lane.id.length === 0 ||
-      cursorFrames === null ||
-      totalFrames === null ||
-      gain === null ||
-      typeof lane.muted !== 'boolean' ||
-      typeof lane.solo !== 'boolean'
-    )
-      return absentNativeCapability();
-    lanes.push({
-      id: lane.id,
-      cursorFrames,
-      totalFrames,
-      gain,
-      muted: lane.muted,
-      solo: lane.solo,
-    });
-  }
+  const session = parseNativePlaybackSession(raw.session);
+  if (!session) return absentNativeCapability();
 
   return {
     available: true,
@@ -1216,95 +1355,7 @@ export function parseNativePlaybackCapability(
     ownership,
     activation,
     outputs,
-    session: {
-      generation: integers.generation,
-      state: rawSession.state,
-      hostState: rawSession.hostState,
-      terminalReason: rawSession.terminalReason,
-      terminalOrdinal: integers.terminalOrdinal,
-      sampleRate,
-      maximumFrames: integers.maximumFrames,
-      nominalBufferFrames: integers.nominalBufferFrames,
-      outputChannels: integers.outputChannels,
-      renderedFrames: integers.renderedFrames,
-      audibleFrames: integers.audibleFrames,
-      transportGeneration: integers.transportGeneration,
-      transportState: rawSession.transportState,
-      transportTelemetryQuality: rawSession.transportTelemetryQuality,
-      lastTransportBoundary: rawSession.lastTransportBoundary,
-      renderedProjectFrame,
-      audibleProjectFrame,
-      audibleProjectionQuality: rawSession.audibleProjectionQuality,
-      continuousFrame: integers.continuousFrame,
-      durationFrames: integers.durationFrames,
-      remainingPreRollFrames: integers.remainingPreRollFrames,
-      cueEventsCompleted: integers.cueEventsCompleted,
-      nextCueEventIndex: integers.nextCueEventIndex,
-      loopEnabled: rawSession.loopEnabled,
-      loopStartFrame,
-      loopEndFrame,
-      loopCount: integers.loopCount,
-      seekCount: integers.seekCount,
-      transportDiscontinuities: integers.transportDiscontinuities,
-      presentationLatencyFrames: integers.presentationLatencyFrames,
-      playbackRate,
-      transposeSemitones,
-      graphLatencyFrames: integers.graphLatencyFrames,
-      devicePresentationLatencyFrames:
-        integers.devicePresentationLatencyFrames,
-      totalPresentationLatencyFrames: integers.totalPresentationLatencyFrames,
-      preparedStartProjectFrame,
-      retainedBytes: integers.retainedBytes,
-      graphArenaBytes: integers.graphArenaBytes,
-      masterGain,
-      referenceGain,
-      trainingEnabled: rawSession.trainingEnabled,
-      trainingLanes,
-      preRollFrames,
-      cueEventCount: integers.cueEventCount,
-      // Lenient on purpose: an older native build does not send these, and
-      // rejecting the whole capability over a missing count-in shape would
-      // disable native playback rather than draw a plainer count-in.
-      countInEventCount: safeUnsigned(rawSession.countInEventCount) ?? 0,
-      countInBeatsPerBar: safeUnsigned(rawSession.countInBeatsPerBar) ?? 0,
-      laneDecodeFallback:
-        typeof rawSession.laneDecodeFallback === 'string'
-          ? rawSession.laneDecodeFallback
-          : '',
-      graphNodeCount: integers.graphNodeCount,
-      graphConnectionCount: integers.graphConnectionCount,
-      latencyCompensatedEdgeCount: integers.latencyCompensatedEdgeCount,
-      topology: rawSession.topology,
-      xruns: integers.xruns,
-      deadlineMisses: integers.deadlineMisses,
-      discontinuities: integers.discontinuities,
-      renderFailures: integers.renderFailures,
-      // The file's one idiom for a leniently-read unsigned, same as the
-      // count-in fields above: three hand-rolled predicates were a second
-      // answer to one question, and they disagreed with this one about 3.7
-      // and 1e300.
-      graphStatusCode: safeUnsigned(rawSession.graphStatusCode) ?? 0,
-      graphStatusDetail: safeUnsigned(rawSession.graphStatusDetail) ?? 0,
-      timePitchAnchorOutcome:
-        safeUnsigned(rawSession.timePitchAnchorOutcome) ?? 0,
-      adapterRenderFailures: integers.adapterRenderFailures,
-      terminalRenderFailures: integers.terminalRenderFailures,
-      parameterOverflows: integers.parameterOverflows,
-      nonFiniteSamples: integers.nonFiniteSamples,
-      rejectedBlocks: integers.rejectedBlocks,
-      previewClicksEnqueued: integers.previewClicksEnqueued,
-      previewClicksStarted: integers.previewClicksStarted,
-      previewClicksCompleted: integers.previewClicksCompleted,
-      previewClicksPending: integers.previewClicksPending,
-      timePitchAnchorsPrepared: integers.timePitchAnchorsPrepared,
-      timePitchAnchorsPublished: integers.timePitchAnchorsPublished,
-      timePitchAnchorMisses: integers.timePitchAnchorMisses,
-      timePitchReplacementReady: rawSession.timePitchReplacementReady,
-      timePitchLoopPriming: rawSession.timePitchLoopPriming,
-      latency,
-      lanes,
-      message: rawSession.message,
-    },
+    session,
   };
 }
 
@@ -1718,8 +1769,7 @@ export class IosNativePlaybackCoordinator {
     handle: IosNativePlaybackHandle,
   ): Promise<void> {
     try {
-      const status = await this.deps.native?.status();
-      const session = status?.session;
+      const session = await this.deps.native?.session();
       // Only a playhead that has actually moved is worth keeping. Recording
       // frame 0 would ALSO suppress the count-in on the next Play, because a
       // remembered position restarts without one — so a song that was merely
@@ -1847,9 +1897,8 @@ export class IosNativePlaybackCoordinator {
     const startedAt = Date.now();
     let reads = 0;
     while (Date.now() - startedAt < SEEK_RECEIPT_DEADLINE_MS) {
-      const status = await this.deps.native?.status();
-      if (!status || !this.isActive(handle)) return;
-      const session = status.session;
+      const session = await this.deps.native?.session();
+      if (!session || !this.isActive(handle)) return;
       if (session.generation !== handle.generation) return;
       reads++;
       handle.publishTelemetry(session);
@@ -1866,7 +1915,7 @@ export class IosNativePlaybackCoordinator {
     log(
       'dsp',
       `seek receipt did not arrive · generation ${handle.generation} · ` +
-        `${reads} status reads in ${since(startedAt)} · restart may not sound`,
+        `${reads} session reads in ${since(startedAt)} · restart may not sound`,
       'warn',
     );
   }
@@ -3098,9 +3147,8 @@ export class IosNativePlaybackCoordinator {
     if (!this.isActive(handle) || handle.polling) return;
     handle.polling = true;
     try {
-      const status = await this.deps.native?.status();
-      if (!status || !this.isActive(handle)) return;
-      const session = status.session;
+      const session = await this.deps.native?.session();
+      if (!session || !this.isActive(handle)) return;
       if (
         this.deps.platform === 'android' &&
         session.state === 'unloaded' &&
@@ -3163,7 +3211,7 @@ export class IosNativePlaybackCoordinator {
       if (session.transportState === 'completed')
         await this.parkAtEndOfSong(handle, session);
     } catch (error) {
-      log('native-playback', `status poll failed · ${message(error)}`, 'warn');
+      log('native-playback', `session poll failed · ${message(error)}`, 'warn');
     } finally {
       handle.polling = false;
     }
