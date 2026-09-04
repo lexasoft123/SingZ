@@ -804,10 +804,12 @@ export class DesktopNativePlaybackClient {
         'Native seek failed'
       )
       await this.refreshCommandStatus(generation, provider)
-      // The callback applies the queued seek at its next period, and a resume
-      // issued before that decides Playing/Completed from the frame the seek
-      // is about to replace. Wait, bounded, for the receipt — status reads,
-      // not timers, so the wait is a few IPC round trips at most.
+      // The callback applies the queued seek at its next period. The core's
+      // resume() resolves Playing either way now and lets the callback end the
+      // song from its own frame, so this wait no longer decides whether the
+      // restart sounds; it keeps the status base fresh before the resume and
+      // gives up quietly. Bounded — status reads, not timers, so the wait is
+      // a few IPC round trips at most.
       for (let attempt = 0; attempt < 24 && this.generation === generation &&
            this.last?.seekCount === before; attempt++) {
         await this.refreshCommandStatus(generation, provider)

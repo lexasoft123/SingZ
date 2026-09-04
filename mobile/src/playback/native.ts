@@ -760,12 +760,16 @@ const absentNativeCapability = (): NativePlaybackCapability => ({
 /**
  * How long to wait for the core to take a queued seek before resuming.
  *
- * seekCount only advances when the render callback applies the seek, and
- * resume() decides Playing or Completed from the frame that callback last
- * published — so a resume issued too early ends the song again on the spot.
- * A deadline, not a count of reads: a bigger output buffer makes each
- * callback period longer without changing how many bridge round trips fit
- * inside it, and the wait has to survive that.
+ * seekCount only advances when the render callback applies the seek. The
+ * core's resume() no longer needs the seek to have landed — it resolves
+ * Playing and lets the callback end the song from its own frame, so a resume
+ * queued behind a seek plays from where the seek lands (it used to resolve
+ * Completed off the stale published frame, and Play did nothing). The wait
+ * stays as belt and braces: a seek that never reaches the callback is worth a
+ * line in a field log before Play is reported done. A deadline, not a count
+ * of reads: a bigger output buffer makes each callback period longer without
+ * changing how many bridge round trips fit inside it, and the wait has to
+ * survive that.
  */
 const SEEK_RECEIPT_DEADLINE_MS = 250;
 /** One render block is what the receipt waits on, so ask about that often
@@ -1829,11 +1833,12 @@ export class IosNativePlaybackCoordinator {
   /**
    * Wait, bounded, for a queued seek to reach the callback.
    *
-   * resume() decides Playing or Completed from the frame the callback last
-   * PUBLISHED, so resuming before the seek lands ends the song again on the
-   * spot — the restart would look like Play doing nothing. Status reads, not
-   * timers: a handful of bridge round trips at most. Giving up quietly is
-   * correct here; a stale resume is recoverable, a hang is not.
+   * The core resolves a resume as Playing whichever of the seek and the
+   * resume the callback drains first, so this is no longer what keeps the
+   * restart audible (see SEEK_RECEIPT_DEADLINE_MS). It keeps the telemetry
+   * base fresh before the resume and names a seek that never landed. Status
+   * reads, not timers: a handful of bridge round trips at most. Giving up
+   * quietly is correct here; a stale resume is recoverable, a hang is not.
    */
   private async awaitSeekApplied(
     handle: IosNativePlaybackHandle,
@@ -1853,10 +1858,11 @@ export class IosNativePlaybackCoordinator {
         setTimeout(resolve, SEEK_RECEIPT_POLL_MS),
       );
     }
-    // Resuming now enqueues Completed from the frame the seek was about to
-    // replace: silence, and a transport that parks itself again. Nothing is
-    // left to do about it here, but a field log must be able to tell that
-    // apart from Play simply being ignored.
+    // The core resumes from wherever the seek lands, so the order is not the
+    // worry — a callback that has not drained a seek in this long is not
+    // draining anything, and the resume queued behind it will stay silent
+    // too. A field log must be able to tell that apart from Play being
+    // ignored, which is what the line below is for.
     log(
       'dsp',
       `seek receipt did not arrive · generation ${handle.generation} · ` +
@@ -3667,8 +3673,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    * The mark answers for the generation that ran out. The POSITION answers
    * for everything that carries a playhead across a generation — a
    * structural rebuild re-prepares at the frame it was parked on and starts
-   * a fresh mark, and a resume at that frame is resolved Completed by the
-   * core and makes no sound. Same epsilon as the desktop.
+   * a fresh mark, and a plain resume at that frame ends the song again on
+   * the callback's next block without a sound. Same epsilon as the desktop.
    */
   parkedAtEndOfSong(): boolean {
     if (this.generation <= 0 || this.state.phase !== 'paused') return false;

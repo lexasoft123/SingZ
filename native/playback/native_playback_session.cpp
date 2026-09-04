@@ -744,12 +744,21 @@ struct PreparedPlaybackTransport {
   bool resume() noexcept {
     if (desiredState != NativePlaybackTransportState::Paused)
       return false;
+    /* The published frame is where the callback LAST was, not where it will
+       be: a seek it has not drained yet, or has drained and not yet published,
+       moves the transport before this Resume is applied. Resolving Completed
+       here off that stale frame is how `seek(0); resume()` on a song parked at
+       its end came back as Completed AT FRAME ZERO — the callback applied the
+       seek, then a Resume that said the song was over, and Play did nothing.
+       So this decides only PreRoll or Playing. Completed is the callback's
+       call, made from its own frame on the next block, which is exactly how a
+       song running out is reported — the control domain still says Playing,
+       so the park that follows (pause) is accepted, and a resume that really
+       is at the end ends the song one block later instead of at once. */
     const int64_t frame = publishedProjectFrame.load(std::memory_order_relaxed);
     const NativePlaybackTransportState state =
-        frame < 0
-            ? NativePlaybackTransportState::PreRoll
-            : (frame >= durationFrames ? NativePlaybackTransportState::Completed
-                                       : NativePlaybackTransportState::Playing);
+        frame < 0 ? NativePlaybackTransportState::PreRoll
+                  : NativePlaybackTransportState::Playing;
     if (!enqueue(
             {generation, PlaybackTransportCommandKind::Resume, state, 0, 0, 0}))
       return false;

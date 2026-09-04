@@ -2862,9 +2862,10 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
 
     await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
 
-    // Seek first, then resume: resume() decides Playing or Completed from the
-    // frame the callback last published, so resuming first ends the song
-    // again immediately. No re-prepare — the graph was never released.
+    // Seek first, then resume: a seek while paused stays paused and resume()
+    // only continues a paused transport, so resuming first would end the
+    // song again on the next block. No re-prepare — the graph was never
+    // released.
     expect(h.calls).toEqual([
       `native.transport:${generation}:seek`,
       `native.transport:${generation}:resume`,
@@ -3010,16 +3011,16 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
       reportCompleted(h, generation);
       await h.coordinator.pollHandle(handle as never);
 
-      // Play proceeds anyway, deliberately: the failed resume lands in
-      // Completed, the poll re-parks, and the next tap finds the late
-      // receipt already absorbed — a condition that heals itself is not
-      // worth showing the singer an error for.
+      // Play proceeds anyway, deliberately: the resume queues behind the
+      // seek in the core's mailbox and plays from the top the moment a block
+      // renders, so a condition that heals itself is not worth showing the
+      // singer an error for.
       await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
 
-      // Resuming without the receipt enqueues Completed from the frame the
-      // seek was about to replace — silence. Nothing here can fix that, but
-      // a field log is the only evidence there is, and it must be able to
-      // tell this apart from Play simply being ignored.
+      // A callback that has not drained the seek in this long is not
+      // draining anything, so the restart is silent for now. Nothing here can
+      // fix that, but a field log is the only evidence there is, and it must
+      // be able to tell this apart from Play simply being ignored.
       expect(
         lines.filter(line => line.startsWith('seek receipt did not arrive')),
       ).toHaveLength(1);
@@ -3104,8 +3105,8 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
 
     // A rebuild re-prepares AT the parked frame and starts a fresh mark, so
     // the mark alone cannot see that the playhead is still at the end. A
-    // plain resume there is resolved Completed by the core and is silent,
-    // which reads to the singer as Play doing nothing once.
+    // plain resume there is ended again by the callback's next block and is
+    // silent, which reads to the singer as Play doing nothing once.
     await rebuildNativePlaybackCues(handle, null, {
       click: false,
       countInBars: 2,

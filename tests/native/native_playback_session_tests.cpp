@@ -2964,6 +2964,74 @@ void transportControlKernelAndTelemetry() {
   std::remove(wav.c_str());
 }
 
+/* Play on a song that ran out is `seek(0); resume()` back to back, with no
+   callback between them. resume() used to resolve Playing or Completed from the
+   frame the callback last PUBLISHED — still the end — so the callback applied
+   the seek and then a Resume that said the song was over: Completed at frame
+   zero, no sound, and Play looked ignored (measured on the iOS simulator,
+   2026-09-04; Android passed the same step on timing alone). */
+void resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands() {
+  std::vector<float> ramp(64);
+  for (uint32_t frame = 0; frame < ramp.size(); ++frame)
+    ramp[frame] = static_cast<float>(frame) * 0.005F;
+  const std::string wav = writeWav("resume-after-seek.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 43).ok);
+  CHECK(session.openOutput(43).ok && session.start(43).ok);
+
+  // Let the song run out on its own.
+  CHECK(fake->drive(5, singz::AudioHostDiscontinuityStart));
+  CHECK(fake->drive(60));
+  auto status = session.status();
+  CHECK(status.transportState ==
+            singz::NativePlaybackTransportState::Completed &&
+        status.renderedProjectFrame == 64);
+  // The park: accepted, because the control domain still says Playing.
+  CHECK(session.pause(43).ok && fake->drive(1));
+  status = session.status();
+  CHECK(status.transportState == singz::NativePlaybackTransportState::Paused &&
+        status.renderedProjectFrame == 64);
+
+  // Play again — the seek is still in the mailbox when resume() decides.
+  CHECK(session.seek(43, 0).ok);
+  CHECK(session.resume(43).ok);
+  CHECK(fake->drive(3));
+  // ramp[0] is zero, so left[0] alone would pass on silence: the teeth are
+  // the two non-zero frames.
+  CHECK(near(fake->left[0], pcm16(ramp[0])) &&
+        near(fake->left[1], pcm16(ramp[1])) &&
+        near(fake->left[2], pcm16(ramp[2])));
+  status = session.status();
+  CHECK(status.transportState ==
+            singz::NativePlaybackTransportState::Playing &&
+        status.renderedProjectFrame == 3 && status.seekCount == 1);
+  // And the restarted song is pausable: both domains agree it is playing.
+  CHECK(session.pause(43).ok && fake->drive(1));
+  status = session.status();
+  CHECK(status.transportState == singz::NativePlaybackTransportState::Paused &&
+        status.renderedProjectFrame == 3);
+
+  // A resume genuinely AT the end still ends the song — one block later, the
+  // way running out does — and that completion is the natural shape: the
+  // control domain says Playing, so pause() is accepted rather than refused.
+  CHECK(session.seek(43, 64).ok && fake->drive(1));
+  status = session.status();
+  CHECK(status.transportState == singz::NativePlaybackTransportState::Paused &&
+        status.renderedProjectFrame == 64);
+  CHECK(session.resume(43).ok && fake->drive(1));
+  status = session.status();
+  CHECK(status.transportState ==
+            singz::NativePlaybackTransportState::Completed &&
+        status.renderedProjectFrame == 64);
+  CHECK(session.pause(43).ok);
+  CHECK(session.unload(43).ok);
+  std::remove(wav.c_str());
+}
+
 void audibleProjectionWaitsForLatencyHistory() {
   const std::string wav = writeWav(
       "audible-projection.wav", 1, std::vector<float>(50000, 0.1F));
@@ -5087,6 +5155,7 @@ int main() {
   cueGraphTransportCompositionAndLifetime();
   nativeReferencePreviewClickContract();
   transportControlKernelAndTelemetry();
+  resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();
