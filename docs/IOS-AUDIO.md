@@ -239,6 +239,12 @@ control-domain last-good snapshot; they never return an unverified pair.
 
 ### Frozen bridge contract for Phase iOS-B2
 
+The whole TypeScript-to-C++ boundary — this bridge, Android's, the desktop
+addon, and where the three disagree — is stated in
+[docs/NATIVE-PLAYBACK-BRIDGE.md](NATIVE-PLAYBACK-BRIDGE.md) and pinned by
+`tests/shared/native-playback-bridge-manifest.json`. What follows is the iOS
+half of it.
+
 The experimental `NativeAudioRuntime` surface is fixed as follows. All generation
 values are positive exact JavaScript integers. Malformed schemas reject with
 `E_NATIVE_PLAYBACK`; valid operations always resolve a typed result, including
@@ -247,7 +253,7 @@ ordinary session failures.
 - `status()` returns `available`, `buildId`, `graph`, `audioHostAdapter`,
   `playbackSession`, `playbackBuild`, `ownership: "coordinated"`,
   `playbackCleanupProof`, `playbackHandoffLease`,
-  `activation: "experimental-b2"`, read-only `outputs`, and `session`
+  `activation: "experimental-4c"`, read-only `outputs`, and `session`
   telemetry.
 - `prepare(generation, request)` accepts one to sixteen
   `lanes: [{id, path, gain?, muted?, solo?}]` plus required exact

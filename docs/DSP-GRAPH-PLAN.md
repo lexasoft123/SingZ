@@ -1343,10 +1343,13 @@ foundation; experimentally activated by B2):
   archives, final Release link/symbol ownership and an exact-consumer Jest
   gate cover the packaging boundary.
 - `NativeAudioRuntime` reports `ownership: coordinated` and
-  `activation: experimental-b2`. Only `mobile/src/playback/native.ts` may
+  `activation: experimental-4c`. Both are labels: the capability parser reads
+  them and gates on neither. Only `mobile/src/playback/native.ts` may
   consume its playback surface; packaging tests reject ad-hoc product callers.
   The frozen request/result/status schema is documented in
-  `docs/IOS-AUDIO.md`.
+  `docs/IOS-AUDIO.md`, and the whole three-bridge boundary — methods, DTOs,
+  the session block, enum tables, the lifetime protocol and the divergence
+  register — in `docs/NATIVE-PLAYBACK-BRIDGE.md`.
 - Exact bridge strings reject malformed UTF-16 and embedded NUL for route UID,
   lane ID/path and control ID before any C/filesystem conversion. Output
   channel indexes at or above the native host limit reject before decode.

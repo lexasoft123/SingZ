@@ -52,6 +52,12 @@ session, then opens and starts RemoteIO. The Train tab is not activated until
 matching native stop/unload returns a process-global cleanup lease, so its mic
 session cannot race the native output owner.
 
+The boundary itself — the thirteen phone methods and their arity rule, the
+request DTOs with units and bounds, the session block field by field, the
+result/receipt/cleanup shapes, the enum tables, the lifetime protocol and the
+places the three bridges diverge — is
+[docs/NATIVE-PLAYBACK-BRIDGE.md](NATIVE-PLAYBACK-BRIDGE.md).
+
 Cleanup is a transferable ownership protocol rather than an empty-state
 snapshot. Lazy legacy fallback is allowed only when exact unload returns
 `cleanup.globallyComplete`, `cleanup.fallbackSafe` and a positive

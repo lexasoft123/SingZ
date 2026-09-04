@@ -460,6 +460,16 @@ question, not only a correctness one.
 | `cd mobile && npx jest` | the phone's Drive protocol, offline fallbacks, ✓ rule and log |
 | `cd mobile/android && ./gradlew :app:testDebugUnitTest` | Kotlin's half of the shared cache-currency table |
 | `mobile/scripts/test-swift-currency.sh` | Swift's half — swiftc only, no simulator, no Pods |
+| `bash mobile/scripts/test-native-playback-bridge-schema.sh` | the iOS bridge's request/result validators — one `clang++` call over the real `.mm` sources, no Xcode, no Pods, no simulator; run by the iOS native canary |
+| `bash zdsp/run-sanitizer-gates.sh` | the native gate, three presets (strict, asan/ubsan, tsan): the playback session and its two injected-failure runs, the graph and analysis suites, the realtime-source policies. What each preset runs is the `filter.include.name` regex in `CMakePresets.json` — a new `add_test` is NOT picked up until it is added there, which is why `playback_cue_plan_tests` runs only under the unfiltered Windows job |
+
+The three-language agreement fixtures under `tests/shared/` are read by more
+than one of these at once — `native-playback-bridge-manifest.json` by jest,
+vitest and ctest; `native-playback-agreement-cases.json` and
+`playback-cue-cases.json` by vitest and ctest; `currency-cases.json` by
+vitest, Kotlin and Swift. Editing one means running every runner that reads
+it, not the nearest one. What each pins is
+[docs/NATIVE-PLAYBACK-BRIDGE.md](NATIVE-PLAYBACK-BRIDGE.md).
 
 ### Mutation-checking a native test (the stale-object trap)
 
