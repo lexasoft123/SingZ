@@ -231,6 +231,16 @@ struct NativePlaybackPrepareConfig {
   // the first Start position without replaying earlier count-in/cues.
   std::optional<int64_t> preparedStartProjectFrame;
   NativePlaybackInitialTransportConfig initialTransport{};
+  // Replace this generation ON ITS RUNNING STREAM instead of requiring it to
+  // be unloaded first: the new generation is prepared while the named one
+  // keeps rendering (adopting its decoded lanes, so nothing is decoded
+  // twice), and the render thread hands the clock across at a block boundary.
+  // No open, no start, no gap; the stream, its format and its route are
+  // untouched. Refused (InvalidState) unless that generation is this
+  // session's, Running, with its stream Running (not held) and no other swap
+  // in flight — the caller then falls back to unload-and-prepare. Zero is an
+  // ordinary prepare.
+  uint64_t swapFromGeneration{0};
   // Optional portable format-1 graph projection. Absence synthesizes the
   // behavior-preserving fixed graph entirely in memory and never persists it.
   // The bridge keeps opaque/unknown document data outside native code; these
@@ -527,6 +537,17 @@ struct NativePlaybackStatus {
   uint64_t renderedFrames{0};
   uint64_t audibleFrames{0};
   uint64_t transportGeneration{0};
+  /* A swap in flight. `swapPendingGeneration` names the generation still
+     rendering while `generation` already names its replacement (armed, not
+     yet landed); `retiringSwapGeneration` names one that has landed and whose
+     graph is not yet freed. Both zero between swaps. `swapLandings` counts
+     seams this session's stream has rendered; `swapLateLandings` those that
+     missed the frame they were armed for (the seam then rendered unanchored,
+     a few milliseconds off at worst). */
+  uint64_t swapPendingGeneration{0};
+  uint64_t retiringSwapGeneration{0};
+  uint32_t swapLandings{0};
+  uint32_t swapLateLandings{0};
   NativePlaybackTransportTelemetryQuality transportTelemetryQuality{
       NativePlaybackTransportTelemetryQuality::Unavailable};
   NativePlaybackTransportState transportState{
@@ -913,6 +934,10 @@ private:
   NativePlaybackResult
   startOutput(uint64_t generation, bool startTransport,
               NativePlaybackDeliveryToken *deliveryToken = nullptr);
+  // The second half of a swap prepare: the compiled candidate (parked in the
+  // Impl by prepare()) takes the stream over from the generation it names.
+  NativePlaybackResult armSwap(NativePlaybackPrepareConfig config,
+                               uint64_t generation);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

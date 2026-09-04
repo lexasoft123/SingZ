@@ -135,6 +135,16 @@ code-reviewer gate.
   closes the stream on unload.
 - Flips: Play → advancing on iOS (the 116→323 ms warm-up leaves Play's path), CPU
   backgrounded on Android, and halves every rebuild's silence.
+- **Shipped (first slice):** the Android background park HOLDS the stream —
+  `AudioHostBackend::suspend()/resume()` (AAudio pause on the open output stream, the
+  timestamp sampler napping, every other host refusing = "keep rendering"), a `Suspended`
+  host state, `suspendOutput/resumeOutput` on the session gated on both the requested and
+  the RENDERED transport state, the facade holding after the park's rendered pause (and for
+  a song already paused) and releasing on foreground or at Play. Phone: backgrounded CPU
+  49.1% → 14.1% (legacy 11.2%), foreground Play → advancing 435 ms legacy vs 152 ms
+  native. **Not done here, by decision:** the stream kept across a generation handoff and
+  the generalized `allCursorsAtStart` — Step 3's swap never opens a second stream, so a
+  swap makes both moot; "Play → advancing on iOS" already flipped with Step 1's clock.
 
 ### Step 3 — the block-boundary swap the design specified (choice 1; ~1 week; core + facade)
 - Prepare the next generation **while the current one renders** (lanes adopted from the
@@ -150,6 +160,28 @@ code-reviewer gate.
   CPU. Tests: native swap-at-boundary continuity (no discontinuity beyond the one reanchor;
   the old graph freed only after the switch is published — mutation: free early); b2 three
   touches = zero silence windows.
+- **Shipped (3a, core):** `NativePlaybackPrepareConfig::swapFromGeneration` — the
+  candidate is prepared while the named generation renders (its decoded lanes adopted, so
+  nothing is decoded twice), and the host's render context is now a session-level
+  `NativePlaybackRenderRouter` in front of the per-generation callback states: the render
+  thread lands the seam itself, between the outgoing graph's last frame and the incoming
+  one's first, copying the callback-owned clock across (`adoptClock`) and clearing the
+  request, so no zdsp change and no shared runner were needed — every graph stays
+  self-contained and the outgoing one is freed by the first status() or command after the
+  landing. The swap never opens or starts: same stream, same route, same format. Measured
+  in the native suite sample-for-sample: every frame reaches the output exactly once across
+  the seam (no repeat, no skip, no silence), the transport carries Playing or Paused across
+  untouched, and a stop or unload during the armed window retires both graphs on one host
+  stop. Six mutants killed (clock not carried, request left armed, old graph never freed,
+  freed while rendering, landing never comes, not retired at quiescence). The candidate's
+  cancellation is by name (`cancelledSwapCandidate`) so giving up on a replacement never
+  cancels the song; a refused or failed candidate leaves the song controllable
+  (`liveBehindLatest`) and is unloaded as a cancelled generation is. Landing is at the next
+  block's first frame; the exact-frame landing that a rate change's Stretch anchor needs
+  (`landingContinuousFrame`, `swapLateLandings`) is plumbed but always "next block" until 3b.
+  **Not yet:** 3b (pitch/rate swaps landing on the frame their anchor was filled for), 3c
+  (the bridges' `swapFromGeneration` key, the facade's `swapGeneration` replacing the
+  six-call rebuild, `capabilities.seek` never dropping, the capability tag bump).
 
 ### Step 4 — CPU on the phone (~1–2 days)
 Measure after steps 1–3 on the POCO; only then the stream-mode A/B

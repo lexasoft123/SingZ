@@ -557,6 +557,12 @@ if(SINGZ_CORE_TESTS)
     COMMAND "${CMAKE_COMMAND}" -E env
       SINGZ_NATIVE_PLAYBACK_PROVIDER_DISPOSE_FAILURE=1
       $<TARGET_FILE:native_playback_session_tests>)
+  # Its own process too: it consumes the process-global quarantine, and then
+  # keeps rendering through it after the session is gone.
+  add_test(NAME native_playback_quarantined_swap_tests
+    COMMAND "${CMAKE_COMMAND}" -E env
+      SINGZ_NATIVE_PLAYBACK_QUARANTINED_SWAP=1
+      $<TARGET_FILE:native_playback_session_tests>)
 
   add_executable(playback_cue_plan_tests
     ${SINGZ_REPO_ROOT}/tests/native/playback_cue_plan_tests.cpp)

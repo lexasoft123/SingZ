@@ -495,6 +495,10 @@ struct PreparedPlaybackTransport {
    * openOutput primes and beginBlock arms. advancePosition is ordinary
    * per-block advance, not a move. */
   bool pendingSourcePositionMoved{false};
+  /* A swap asked this transport how much of the current block is still its
+     own, which begins the block (commands drained, host flags coalesced) a
+     little early. The first slice then must not begin it again. */
+  bool blockBegun{false};
   /* Which of nextSlice's refusals fired last. Every one of them presents to
      the product as the same "provider-failure", so without this the only way
      to tell them apart is to guess. */
@@ -770,6 +774,7 @@ struct PreparedPlaybackTransport {
                             zdsp::DiscontinuityFlagNone};
     pendingHostDiscontinuityFlags = 0;
     pendingSourcePositionMoved = false;
+    blockBegun = false;
     callbackLoopCount = 0;
     callbackSeekCount = 0;
     callbackDiscontinuities = 0;
@@ -1163,6 +1168,114 @@ struct PreparedPlaybackTransport {
     return low;
   }
 
+  // --- Replacing a generation on the running stream ---------------------
+  //
+  // A swap prepares the next generation while this one renders and hands the
+  // clock across at a block boundary of the render thread's choosing. Three
+  // pieces: the control domain copies its desired state across at arm time
+  // (adoptControlState, under the session mutex); the render thread asks the
+  // OUTGOING transport how much of the current block is still its own
+  // (framesBeforeSwap); and between the two renders the INCOMING transport
+  // takes the outgoing one's clock (adoptClock). Sources follow the clock, so
+  // the incoming graph is never repositioned — it simply renders from the
+  // frame the outgoing one reached.
+
+  void adoptControlState(const PreparedPlaybackTransport &from) noexcept {
+    desiredState = from.desiredState;
+    // The loop is the incoming generation's own declaration (its initial
+    // transport carries the current loop, exactly as a rebuild's does), not
+    // the outgoing one's: its Stretch loop bank was primed for that loop and
+    // no other. resetForOpen already made desiredLoop* say so.
+  }
+
+  void beginBlockOnce(const AudioHostRenderBlock &block) noexcept {
+    if (blockBegun)
+      return;
+    blockBegun = true;
+    beginBlock(block);
+  }
+
+  /* How many frames of `block` this (outgoing) transport still owns.
+     `landingContinuousFrame` is the stream frame the swap was armed to land
+     on, 0 for "the first frame of the next block". Begins the block first,
+     so the answer is taken after this block's commands have been applied — a
+     pause drained here lands the swap at once rather than a block later. A
+     landing frame already behind the clock lands at once too (late, and the
+     session counts it). */
+  uint32_t framesBeforeSwap(const AudioHostRenderBlock &block,
+                            uint64_t landingContinuousFrame) noexcept {
+    beginBlockOnce(block);
+    if (landingContinuousFrame == 0)
+      return 0;
+    const bool advancing =
+        callbackState == NativePlaybackTransportState::Playing ||
+        callbackState == NativePlaybackTransportState::PreRoll;
+    if (!advancing || landingContinuousFrame <= callbackContinuousFrame)
+      return 0;
+    const uint64_t ahead = landingContinuousFrame - callbackContinuousFrame;
+    return ahead >= block.frames ? block.frames
+                                 : static_cast<uint32_t>(ahead);
+  }
+
+  /* The handoff at the seam, on the render thread, with neither graph
+     rendering. Everything callback-owned crosses, including a boundary the
+     outgoing transport coalesced for this block and had not emitted (the
+     render callback clears the host flags off the incoming graph's view for
+     exactly that reason). The loop is this generation's own, as above.
+
+     `exactLanding` says the clock is at the frame this generation's initial
+     Stretch anchor was filled for: then the anchor is armed and the seam
+     renders phase-coherent; otherwise the plan is discarded and the stage
+     keeps the state it was primed with at prepare, which is a few
+     milliseconds off at worst. A swap never sets pendingSourcePositionMoved:
+     from the incoming graph's point of view the source has not moved, its
+     state is simply fresh, and a boundary that merely resets it must not be
+     refused for lack of an anchor (that refusal is a wedge, see nextSlice). */
+  void adoptClock(const PreparedPlaybackTransport &from,
+                  bool exactLanding) noexcept {
+    callbackState = from.callbackState;
+    callbackProjectFrame = from.callbackProjectFrame;
+    callbackProjectFractionQ32 = from.callbackProjectFractionQ32;
+    callbackContinuousFrame = from.callbackContinuousFrame;
+    callbackRouteGeneration = from.callbackRouteGeneration;
+    callbackStreamGeneration = from.callbackStreamGeneration;
+    callbackHostIdentityValid = from.callbackHostIdentityValid;
+    pendingDiscontinuity = from.pendingDiscontinuity;
+    pendingHostDiscontinuityFlags = from.pendingHostDiscontinuityFlags;
+    pendingSourcePositionMoved = false;
+    callbackLoopCount = from.callbackLoopCount;
+    callbackSeekCount = from.callbackSeekCount;
+    callbackDiscontinuities = from.callbackDiscontinuities;
+    callbackLastBoundary = from.callbackLastBoundary;
+    callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+    callbackLoopEnabled = initialLoopEnabled;
+    callbackLoopStart = initialLoopEnabled ? initialLoopStart : 0;
+    callbackLoopEnd = initialLoopEnabled ? initialLoopEnd : 0;
+    blockBegun = false;
+    callbackTimePitchBoundaryPrepared = false;
+    if (timePitchProcessor.state != nullptr) {
+      if (callbackLoopEnabled)
+        (void)activateSignalsmithTimePitchLoop(timePitchProcessor,
+                                               initialTimePitchLoopPlan);
+      if (exactLanding && initialTimePitchReanchorPlan.valid()) {
+        callbackTimePitchBoundaryPrepared = armSignalsmithTimePitchReanchor(
+            timePitchProcessor, initialTimePitchReanchorPlan);
+        lastAnchorOutcome.store(callbackTimePitchBoundaryPrepared ? 40 : 41,
+                                std::memory_order_relaxed);
+      } else {
+        discardSignalsmithTimePitchReanchor(timePitchProcessor,
+                                            initialTimePitchReanchorPlan);
+        lastAnchorOutcome.store(42, std::memory_order_relaxed);
+      }
+      initialTimePitchReanchorPlan = {};
+    }
+    // The seam resets the incoming graph's processors and says why. It
+    // coalesces with (and is outranked by) any host boundary carried across.
+    queueDiscontinuity({zdsp::DiscontinuityReason::ClockReanchored,
+                        zdsp::DiscontinuityFlagResetState |
+                            zdsp::DiscontinuityFlagTimeValid});
+  }
+
   void wrapAtLoopBoundary() noexcept {
     const uint64_t span = static_cast<uint64_t>(callbackLoopEnd) -
                           static_cast<uint64_t>(callbackLoopStart);
@@ -1186,8 +1299,10 @@ struct PreparedPlaybackTransport {
       lastSliceRefusal.store(201, std::memory_order_relaxed);
       return false;
     }
-    if (offset == 0)
-      beginBlock(block);
+    if (offset == 0) {
+      beginBlockOnce(block);
+      blockBegun = false;
+    }
 
     if (timePitchProcessor.state != nullptr && pendingSourcePositionMoved &&
         pendingDiscontinuity.reason !=
@@ -2098,6 +2213,9 @@ struct PreparedPlaybackGraph {
   PreparedPlaybackTransport transport{};
   zdsp::AudioHostGraphAdapter adapter{};
   NativePlaybackCallbackState callback{};
+  // The session's render router, shared so that a graph whose callback never
+  // quiesced (quarantined) keeps the object the host still dereferences alive.
+  std::shared_ptr<NativePlaybackRenderRouter> router;
   double sampleRate{0.0};
   uint32_t outputChannels{0};
   uint32_t maximumFrames{0};
@@ -3576,7 +3694,12 @@ struct QuarantinedPlaybackGraph {
   // off-lock stale-retirement call. Publishing its size here lets every other
   // session report the process owner without dereferencing that session.
   std::atomic<size_t> reservedRetainedBytes{0};
-  std::unique_ptr<PreparedPlaybackGraph> graph;
+  // Two, not one: a swap has two graphs the callback can see at once (the
+  // outgoing one until the seam, its replacement after), and a stream that
+  // never proves quiescent leaves both unfreeable. One reservation still
+  // covers a session, and a third graph is still the impossible case.
+  std::array<std::unique_ptr<PreparedPlaybackGraph>, 2> graphs;
+  std::atomic<uint32_t> graphCount{0};
 };
 
 static_assert(
@@ -3626,13 +3749,18 @@ bool consumePlaybackQuarantineSlot(
   if (graph == nullptr || *graph == nullptr)
     return true;
   auto &holder = playbackQuarantine();
-  if (holder.state.load(std::memory_order_acquire) !=
-          PlaybackQuarantineSlotState::Reserved ||
-      holder.graph != nullptr) {
+  const PlaybackQuarantineSlotState state =
+      holder.state.load(std::memory_order_acquire);
+  const uint32_t count = holder.graphCount.load(std::memory_order_acquire);
+  // The first graph consumes the reservation; the second (a swap's other
+  // half) rides on the same one. Anything past two is the impossible case.
+  if (!(state == PlaybackQuarantineSlotState::Reserved && count == 0) &&
+      !(state == PlaybackQuarantineSlotState::Consumed &&
+        count < holder.graphs.size()))
     return false;
-  }
   (*graph)->observe(NativePlaybackLifecycleEvent::PreparedQuarantined);
-  holder.graph = std::move(*graph);
+  holder.graphs[count] = std::move(*graph);
+  holder.graphCount.store(count + 1u, std::memory_order_release);
   holder.state.store(PlaybackQuarantineSlotState::Consumed,
                      std::memory_order_release);
   return true;
@@ -3665,8 +3793,11 @@ PlaybackQuarantineSnapshot playbackQuarantineSnapshot() noexcept {
     // the release-store of Consumed and is never mutated or released again,
     // so an acquire snapshot can safely expose its retained-byte fact.
     snapshot.graphPresent = true;
-    if (holder.graph != nullptr)
-      snapshot.retainedBytes = holder.graph->retainedBytes;
+    const uint32_t count = holder.graphCount.load(std::memory_order_acquire);
+    for (uint32_t index = 0; index < count && index < holder.graphs.size();
+         ++index)
+      if (holder.graphs[index] != nullptr)
+        snapshot.retainedBytes += holder.graphs[index]->retainedBytes;
   } else if (snapshot.state == PlaybackQuarantineSlotState::Reserved) {
     snapshot.retainedBytes =
         holder.reservedRetainedBytes.load(std::memory_order_acquire);
@@ -4004,6 +4135,9 @@ void advanceAtomic(std::atomic<uint64_t> *value, uint64_t requested) noexcept {
 struct PrepareCancellationState {
   std::atomic<uint64_t> *latestGeneration{nullptr};
   std::atomic<uint64_t> *cancelledThrough{nullptr};
+  // A swap candidate's own cancellation: naming exactly it, so that giving
+  // up on the replacement cancels nothing of the song still playing.
+  std::atomic<uint64_t> *cancelledExactly{nullptr};
   uint64_t generation{0};
   DecodeCancellation external{};
 };
@@ -4016,6 +4150,9 @@ bool prepareCancelled(void *opaque) noexcept {
              state->generation ||
          state->cancelledThrough->load(std::memory_order_acquire) >=
              state->generation ||
+         (state->cancelledExactly != nullptr &&
+          state->cancelledExactly->load(std::memory_order_acquire) ==
+              state->generation) ||
          state->external.isRequested();
 }
 
@@ -4055,6 +4192,26 @@ const char *nativePlaybackErrorName(NativePlaybackError error) noexcept {
   return "host-failure";
 }
 
+// Everything the render thread can hold a pointer to across a swap, in ONE
+// heap block owned by the session and by every graph it has pointed the
+// router at. A graph whose callback never quiesced is quarantined alive, and
+// its callback may still land the swap it was rendering toward — so the
+// request, the two transport pointers and the late-landings counter must
+// outlive the Impl exactly as the router does. The Impl reaches the router
+// through an aliasing shared_ptr into this block.
+struct PlaybackRenderShared {
+  NativePlaybackRenderRouter router;
+  struct SwapContext {
+    PreparedPlaybackTransport *outgoing{nullptr};
+    PreparedPlaybackTransport *incoming{nullptr};
+    // Stream frame to land on; 0 lands on the next block's first frame.
+    uint64_t landingContinuousFrame{0};
+    std::atomic<uint32_t> *lateLandings{nullptr};
+  } context{};
+  NativePlaybackSwapRequest request{};
+  std::atomic<uint32_t> lateLandings{0};
+};
+
 struct NativePlaybackSession::Impl {
   static constexpr size_t kUnloadReceiptCapacity = 8;
 
@@ -4078,13 +4235,19 @@ struct NativePlaybackSession::Impl {
 
   ~Impl() {
     if (prepared != nullptr) {
+      // A swap's outgoing graph goes first: stopHost retires it once the
+      // stream is quiescent, and if the stream never is, it is as
+      // callback-visible as the replacement and is quarantined beside it.
       if (!stopHost() || !prepared->shutdown()) {
+        if (retiringSwap != nullptr)
+          quarantineReserved(&retiringSwap);
         quarantineReserved(&prepared);
         quarantineSlotReserved = false;
         poisonPlaybackOwnership(sessionId, generation);
         return;
       }
       prepared.reset();
+      router->current.store(nullptr, std::memory_order_release);
       position->clear();
     }
     releaseQuarantineReservation();
@@ -4121,6 +4284,46 @@ struct NativePlaybackSession::Impl {
   // its own reference and positionNow() screens its stale generation out.
   std::shared_ptr<PlaybackPositionPublication> position =
       std::make_shared<PlaybackPositionPublication>();
+  // The host's render context for the session's whole life (see
+  // PlaybackRenderShared). Which graph renders is a pointer inside it,
+  // flipped by the render thread at a swap seam and by the control thread
+  // only while no callback runs. `router` aliases into `renderShared`, so
+  // holding either keeps the whole block alive.
+  std::shared_ptr<PlaybackRenderShared> renderShared =
+      std::make_shared<PlaybackRenderShared>();
+  std::shared_ptr<NativePlaybackRenderRouter> router{renderShared,
+                                                     &renderShared->router};
+  // A swap in flight: the outgoing graph, still rendering until the router
+  // says otherwise, and (in renderShared) the request the render thread
+  // lands. `retiringSwap` is non-null from arm until the graph is freed;
+  // `swapPending` is set only while the render thread has yet to land it.
+  std::unique_ptr<PreparedPlaybackGraph> retiringSwap;
+  // A compiled swap candidate on its way from prepare() to armSwap(): the
+  // graph type is this file's own, so the header's declaration cannot carry
+  // it. Held for the length of that call and no longer.
+  std::unique_ptr<PreparedPlaybackGraph> swapCandidate;
+  uint64_t retiringSwapGeneration{0};
+  // The outgoing graph's bytes NOT shared with its replacement (its arena,
+  // cue runtime, anchors); its decoded PCM is the same memory the new graph
+  // holds and is counted once, under the new one.
+  size_t retiringSwapUnsharedBytes{0};
+  bool swapPending{false};
+  uint32_t swapsLandedSeen{0};
+  // The generation a swap prepare is building while `generation` keeps
+  // rendering; zero otherwise. Its cancellation is its own (below), so that
+  // giving up on the replacement never cancels the song that is playing.
+  uint64_t swapPrepareGeneration{0};
+  std::atomic<uint64_t> cancelledSwapCandidate{0};
+  bool swapPrepareUnloadRequested{false};
+  // While a swap candidate is claimed (latestGeneration names it) the live
+  // generation behind it must keep accepting commands: the player is still
+  // driving it, and will be until the swap lands.
+  uint64_t liveBehindLatest{0};
+  uint64_t lastSwappedOutGeneration{0};
+  uint64_t lastFailedSwapGeneration{0};
+  // positionNow()'s second accepted generation: the outgoing one, from arm
+  // until its graph is freed (the sink says its number until the seam).
+  std::atomic<uint64_t> swapFromGeneration{0};
   uint64_t generation{0};
   uint64_t highestAttemptGeneration{0};
   uint64_t lastCancelledGeneration{0};
@@ -4249,10 +4452,97 @@ struct NativePlaybackSession::Impl {
     poisonPlaybackOwnership(sessionId, generation);
   }
 
+  // Whichever generation is RENDERING: during an armed swap that is still
+  // the outgoing one, and a route change lands on its latch, not the
+  // replacement's.
   AudioHostTerminalCause callbackTerminalCause() const noexcept {
+    const NativePlaybackCallbackState *rendering =
+        router->current.load(std::memory_order_acquire);
+    if (rendering != nullptr)
+      return rendering->firstTerminalCause.current();
     return prepared == nullptr
                ? AudioHostTerminalCause{}
                : prepared->callback.firstTerminalCause.current();
+  }
+
+  // The graph whose transport the stream is rendering right now.
+  const PreparedPlaybackGraph *renderingGraph() const noexcept {
+    return swapPending && retiringSwap != nullptr ? retiringSwap.get()
+                                                  : prepared.get();
+  }
+
+  bool swapLanded() const noexcept {
+    return retiringSwap != nullptr && swapPending &&
+           router->swapsLanded.load(std::memory_order_acquire) !=
+               swapsLandedSeen;
+  }
+
+  // Once the render thread has landed a swap, the outgoing graph's runner is
+  // idle for good: retire it. Called at the top of status() and of every
+  // command, so the memory goes back within one poll of the seam. Returns
+  // false only when that retirement failed and the graph went to quarantine.
+  bool serviceSwapRetirement() noexcept {
+    if (retiringSwap == nullptr)
+      return true;
+    if (swapPending) {
+      if (!swapLanded())
+        return true;
+      swapPending = false;
+      swapsLandedSeen = router->swapsLanded.load(std::memory_order_acquire);
+    }
+    // A landed swap's outgoing graph carries no terminal latch: the render
+    // callback refuses to land on one, so whatever it latched is read by
+    // callbackTerminalCause() while it still renders, and merged by stopHost
+    // before the stop that follows retires it.
+    return retireSwappedOut();
+  }
+
+  // The outgoing graph is no longer callback-visible (landed, or the host
+  // is quiescent). Free it. Its decoded PCM lives on in the new graph.
+  bool retireSwappedOut() noexcept {
+    if (retiringSwap == nullptr)
+      return true;
+    swapPending = false;
+    router->swap.store(nullptr, std::memory_order_release);
+    const uint64_t retired = retiringSwapGeneration;
+    if (!retiringSwap->shutdown()) {
+      quarantineReserved(&retiringSwap);
+      quarantineSlotReserved = false;
+      poisonPlaybackOwnership(sessionId, retired);
+      retiringSwapGeneration = 0;
+      retiringSwapUnsharedBytes = 0;
+      swapFromGeneration.store(0, std::memory_order_release);
+      state = NativePlaybackState::Quarantined;
+      lastError = "The replaced native playback graph did not retire cleanly";
+      return false;
+    }
+    retiringSwap.reset();
+    retiringSwapGeneration = 0;
+    retiringSwapUnsharedBytes = 0;
+    lastSwappedOutGeneration = retired;
+    swapFromGeneration.store(0, std::memory_order_release);
+    if (prepared != nullptr)
+      publishPlaybackQuarantineRetainedBytes(prepared->retainedBytes);
+    return true;
+  }
+
+  // The two render-thread halves of a swap (see NativePlaybackSwapRequest).
+  static uint32_t swapOutgoingFrames(void *opaque,
+                                     const AudioHostRenderBlock &block) noexcept {
+    auto *context = static_cast<PlaybackRenderShared::SwapContext *>(opaque);
+    return context->outgoing->framesBeforeSwap(block,
+                                               context->landingContinuousFrame);
+  }
+
+  static void swapLand(void *opaque, uint32_t) noexcept {
+    auto *context = static_cast<PlaybackRenderShared::SwapContext *>(opaque);
+    const bool armedForAFrame = context->landingContinuousFrame != 0;
+    const bool exact =
+        armedForAFrame && context->outgoing->callbackContinuousFrame ==
+                              context->landingContinuousFrame;
+    if (armedForAFrame && !exact && context->lateLandings != nullptr)
+      context->lateLandings->fetch_add(1u, std::memory_order_relaxed);
+    context->incoming->adoptClock(*context->outgoing, exact);
   }
 
   bool hostMutationActive() const noexcept {
@@ -4277,6 +4567,8 @@ struct NativePlaybackSession::Impl {
            generation == 0 &&
            activeGeneration.load(std::memory_order_acquire) == 0 &&
            failedPrepareCleanupGeneration == 0 &&
+           retiringSwap == nullptr && retiringSwapGeneration == 0 &&
+           swapPrepareGeneration == 0 &&
            retiringPrepareGeneration == 0 && retiringPrepareBytes == 0 &&
            !retiringUnloadRequested && !retiringSupersededByNewerClaim &&
            prepareUnloadRequestedGeneration == 0 &&
@@ -4331,8 +4623,11 @@ struct NativePlaybackSession::Impl {
     result.state = state;
     const size_t parked = parkedBytes();
     result.parkedLaneBytes = parked;
+    // A swapped-out graph not yet freed still holds its own bytes (its PCM
+    // is the replacement's and counted there), exactly as status() says.
     const size_t preparedRetained =
-        prepared == nullptr ? 0 : prepared->retainedBytes;
+        (prepared == nullptr ? 0 : prepared->retainedBytes) +
+        retiringSwapUnsharedBytes;
     const size_t ownedRetained =
         retiringPrepareBytes >
                 std::numeric_limits<size_t>::max() - preparedRetained
@@ -4583,6 +4878,7 @@ struct NativePlaybackSession::Impl {
   }
 
   void refreshTerminalState() noexcept {
+    (void)serviceSwapRetirement();
     if (prepared == nullptr || state == NativePlaybackState::Preparing ||
         state == NativePlaybackState::Prepared ||
         state == NativePlaybackState::Unloaded ||
@@ -4602,9 +4898,18 @@ struct NativePlaybackSession::Impl {
     }
   }
 
+  // A swap candidate claims the latest generation while the song it will
+  // replace is still the one being driven; that song stays current until
+  // the swap is armed (then `generation` moves) or the candidate fails.
+  bool latestForOutput(uint64_t requested) const noexcept {
+    return requested != 0 &&
+           (requested == latestGeneration.load(std::memory_order_acquire) ||
+            requested == liveBehindLatest);
+  }
+
   bool currentForCommand(uint64_t requested) const noexcept {
     return requested != 0 && requested == generation && prepared != nullptr &&
-           requested == latestGeneration.load(std::memory_order_acquire) &&
+           latestForOutput(requested) &&
            cancelledThrough.load(std::memory_order_acquire) < requested;
   }
 
@@ -4614,6 +4919,14 @@ struct NativePlaybackSession::Impl {
     if (prepareMutationGeneration != requested)
       return failureWithoutMessage(error, requested, state);
     prepareMutationGeneration = 0;
+    if (swapPrepareGeneration == requested) {
+      // The candidate threw; the song it was to replace is untouched.
+      swapPrepareGeneration = 0;
+      swapPrepareUnloadRequested = false;
+      lastFailedSwapGeneration = requested;
+      lastCancelledGeneration = requested;
+      return failureWithoutMessage(error, requested, state);
+    }
     if (generation == requested) {
       if (prepared != nullptr) {
         if (!prepared->shutdown()) {
@@ -4627,6 +4940,7 @@ struct NativePlaybackSession::Impl {
                                        requested, state);
         }
         prepared.reset();
+        router->current.store(nullptr, std::memory_order_release);
         position->clear();
       }
       generation = 0;
@@ -4707,6 +5021,16 @@ struct NativePlaybackSession::Impl {
     latchTerminal(effectiveTerminalCause(lastHost, callbackTerminalCause()));
     const bool quiesced = safeStoppedState(lastHost.state);
     if (quiesced) {
+      // A swap that had not landed: the outgoing graph rendered to the end
+      // and is idle now, exactly like a landed one. Retire it here, after
+      // the terminal merge above has read its latch.
+      if (retiringSwap != nullptr) {
+        retiringSwap->transport.forceStoppedAfterQuiescence();
+        (void)retireSwappedOut();
+        if (prepared != nullptr)
+          router->current.store(&prepared->callback,
+                                std::memory_order_release);
+      }
       if (prepared != nullptr)
         prepared->transport.forceStoppedAfterQuiescence();
       // These admission markers are physical-ownership facts, not transient
@@ -4832,6 +5156,18 @@ bool NativePlaybackSession::requestCancellation(uint64_t generation) noexcept {
     return false;
   try {
     std::lock_guard<std::mutex> gate(impl_->generationGate);
+    // A swap candidate is cancelled by name. Advancing the epoch to it would
+    // cancel the live generation behind it — the song that is playing.
+    if (generation == impl_->swapPrepareGeneration) {
+      impl_->cancelledSwapCandidate.store(generation,
+                                          std::memory_order_release);
+      return true;
+    }
+    // A candidate that was refused or failed is the latest number claimed
+    // and has nothing left to cancel; the epoch must not pass the live song
+    // on its account.
+    if (generation == impl_->lastFailedSwapGeneration)
+      return true;
     const uint64_t active =
         impl_->activeGeneration.load(std::memory_order_acquire);
     const uint64_t latest =
@@ -4955,17 +5291,74 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
                      generation, impl_->state,
                      "The native playback ownership claim is stale");
     }
-    if (impl_->prepared != nullptr || impl_->generation != 0 ||
-        impl_->activeGeneration.load(std::memory_order_acquire) != 0 ||
-        impl_->failedPrepareCleanupGeneration != 0 ||
-        impl_->retiringPrepareGeneration != 0) {
+    if (config.swapFromGeneration != 0) {
+      // Replacing a generation on its running stream. The one named must be
+      // this session's, rendering, on a stream that is Running (a held
+      // stream renders no blocks, so a swap could never land) and nothing
+      // else may be in flight. Everything the ordinary arm below resets
+      // stays exactly as it is: the song keeps playing under `generation`
+      // while the candidate is built, and its commands keep landing.
+      (void)impl_->serviceSwapRetirement();
+      // Whatever happens to the candidate, the claim it made (latestGeneration)
+      // must not make the song being driven stale for its own commands.
+      if (impl_->prepared != nullptr && impl_->generation != 0)
+        impl_->liveBehindLatest = impl_->generation;
+      const bool replaceable =
+          impl_->prepared != nullptr &&
+          impl_->generation == config.swapFromGeneration &&
+          impl_->state == NativePlaybackState::Running &&
+          impl_->retiringSwap == nullptr &&
+          impl_->swapPrepareGeneration == 0 &&
+          impl_->failedPrepareCleanupGeneration == 0 &&
+          impl_->retiringPrepareGeneration == 0 &&
+          impl_->prepareMutationGeneration == 0 &&
+          impl_->hostMutationActive() &&
+          impl_->host.status().state == AudioHostState::Running;
+      if (!replaceable) {
+        // The candidate's claim is spent and nothing of it exists: its
+        // unload and cleanup proof are answered as a cancelled generation's.
+        impl_->highestAttemptGeneration = generation;
+        impl_->pendingClaimGeneration = 0;
+        impl_->claimedHandoffLeaseGeneration = 0;
+        impl_->claimedHandoffLease = 0;
+        impl_->lastFailedSwapGeneration = generation;
+        impl_->lastCancelledGeneration = generation;
+        injectFailure(impl_->testHooks,
+                      NativePlaybackAllocationPoint::PreparePreconditionResult);
+        return failure(NativePlaybackError::InvalidState, generation,
+                       impl_->state,
+                       "Native playback cannot replace that generation on its "
+                       "stream — unload it and prepare afresh");
+      }
+      impl_->highestAttemptGeneration = generation;
+      impl_->pendingClaimGeneration = 0;
+      impl_->claimedHandoffLeaseGeneration = 0;
+      impl_->claimedHandoffLease = 0;
+      impl_->swapPrepareGeneration = generation;
+      impl_->swapPrepareUnloadRequested = false;
+      impl_->cancelledSwapCandidate.store(0, std::memory_order_release);
+      impl_->liveBehindLatest = impl_->generation;
+      impl_->prepareMutationGeneration = generation;
+      // The live graph's decoded lanes, offered to the candidate exactly as
+      // a retaining unload's are: shared_ptr copies, nothing decoded twice.
+      // The song they belong to keeps rendering from the same memory.
+      parkedLanes.clear();
+      for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes)
+        parkedLanes.push_back(
+            {lane.id, lane.identity, lane.owner, lane.peaks, lane.peaksValid});
+    } else if (impl_->prepared != nullptr || impl_->generation != 0 ||
+               impl_->activeGeneration.load(std::memory_order_acquire) != 0 ||
+               impl_->failedPrepareCleanupGeneration != 0 ||
+               impl_->retiringPrepareGeneration != 0) {
       injectFailure(impl_->testHooks,
                     NativePlaybackAllocationPoint::PreparePreconditionResult);
       return failure(NativePlaybackError::InvalidState, generation,
                      impl_->state,
                      "Unload the active native playback generation first");
     }
-    if (!impl_->reserveQuarantineReservation()) {
+    if (config.swapFromGeneration != 0) {
+      // Admitted; the reservation is the live generation's already.
+    } else if (!impl_->reserveQuarantineReservation()) {
       impl_->highestAttemptGeneration = generation;
       impl_->pendingClaimGeneration = 0;
       impl_->claimedHandoffLeaseGeneration = 0;
@@ -4977,23 +5370,41 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       return failure(NativePlaybackError::ResourceExhausted, generation,
                      impl_->state,
                      "The bounded native playback quarantine is unavailable");
+    } else {
+      impl_->highestAttemptGeneration = generation;
+      impl_->pendingClaimGeneration = 0;
+      impl_->claimedHandoffLeaseGeneration = 0;
+      impl_->claimedHandoffLease = 0;
+      impl_->liveBehindLatest = 0;
+      impl_->generation = generation;
+      impl_->activeGeneration.store(generation, std::memory_order_release);
+      impl_->state = NativePlaybackState::Preparing;
+      impl_->prepareMutationGeneration = generation;
+      impl_->lastHost = {};
+      impl_->lastTerminal = {};
+      impl_->lastError.clear();
     }
-    impl_->highestAttemptGeneration = generation;
-    impl_->pendingClaimGeneration = 0;
-    impl_->claimedHandoffLeaseGeneration = 0;
-    impl_->claimedHandoffLease = 0;
-    impl_->generation = generation;
-    impl_->activeGeneration.store(generation, std::memory_order_release);
-    impl_->state = NativePlaybackState::Preparing;
-    impl_->prepareMutationGeneration = generation;
-    impl_->lastHost = {};
-    impl_->lastTerminal = {};
-    impl_->lastError.clear();
   }
+  const bool swapPrepare = config.swapFromGeneration != 0;
 
   const auto failPreparation = [&](NativePlaybackError error,
                                    std::string message) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (swapPrepare) {
+      // The candidate failed; the song it was to replace plays on, its
+      // commands still accepted (liveBehindLatest stays). unload()/stop() of
+      // the candidate are answered as a cancelled generation's are: nothing
+      // of it exists.
+      std::lock_guard<std::mutex> gate(impl_->generationGate);
+      if (impl_->swapPrepareGeneration == generation) {
+        impl_->swapPrepareGeneration = 0;
+        impl_->swapPrepareUnloadRequested = false;
+        impl_->prepareMutationGeneration = 0;
+        impl_->lastFailedSwapGeneration = generation;
+        impl_->lastCancelledGeneration = generation;
+      }
+      return failure(error, generation, impl_->state, std::move(message));
+    }
     if (impl_->generation == generation && impl_->prepared == nullptr) {
       impl_->prepareMutationGeneration = 0;
       impl_->generation = 0;
@@ -5137,9 +5548,10 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
         "The native playback graph arena exceeds the aggregate memory limit");
   }
 
-  PrepareCancellationState cancellationState{&impl_->latestGeneration,
-                                             &impl_->cancelledThrough,
-                                             generation, cancellation};
+  PrepareCancellationState cancellationState{
+      &impl_->latestGeneration, &impl_->cancelledThrough,
+      swapPrepare ? &impl_->cancelledSwapCandidate : nullptr, generation,
+      cancellation};
   const DecodeCancellation combined{&cancellationState, prepareCancelled};
 
   // Reserve the graph's exact realtime-arena allocation before decoding. The
@@ -5446,6 +5858,13 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   prepared->inject(NativePlaybackAllocationPoint::AfterGraphCompile);
 
   prepared->observe(NativePlaybackLifecycleEvent::PrepareReadyToPublish);
+  if (swapPrepare) {
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      impl_->swapCandidate = std::move(prepared);
+    }
+    return armSwap(std::move(config), generation);
+  }
   std::unique_ptr<PreparedPlaybackGraph> stale;
   NativePlaybackState staleState = NativePlaybackState::Unloaded;
   {
@@ -5494,6 +5913,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       // generation at its entry frame rather than the previous song's exit.
       impl_->prepared->transport.positionSink = impl_->position;
       impl_->prepared->transport.publishTelemetry();
+      impl_->prepared->router = impl_->router;
       publishPlaybackQuarantineRetainedBytes(impl_->prepared->retainedBytes);
       impl_->preparedConfig = std::move(config);
       impl_->state = NativePlaybackState::Prepared;
@@ -5595,6 +6015,121 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
 } catch (...) {
   return impl_->recoverPrepareException(NativePlaybackError::GraphFailure,
                                         generation);
+}
+
+// The candidate is compiled; hand it the stream. The final admission check
+// and the publication to the render thread are one linearized action under
+// both locks, exactly like an ordinary prepare's commit: a cancellation or an
+// unload that won first discards the candidate (off-lock, it never rendered),
+// and one that follows finds the new generation already live. The outgoing
+// graph keeps rendering until the render thread lands the seam, and is freed
+// by the first status() or command after that.
+NativePlaybackResult
+NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
+                               uint64_t generation) {
+  std::unique_ptr<PreparedPlaybackGraph> stale;
+  bool cancelled = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::mutex> gate(impl_->generationGate);
+    std::unique_ptr<PreparedPlaybackGraph> candidate =
+        std::move(impl_->swapCandidate);
+    (void)impl_->serviceSwapRetirement();
+    cancelled =
+        candidate == nullptr ||
+        impl_->latestGeneration.load(std::memory_order_acquire) != generation ||
+        impl_->cancelledThrough.load(std::memory_order_acquire) >= generation ||
+        impl_->cancelledSwapCandidate.load(std::memory_order_acquire) ==
+            generation ||
+        impl_->swapPrepareGeneration != generation ||
+        impl_->swapPrepareUnloadRequested;
+    const bool replaceable =
+        impl_->prepared != nullptr &&
+        impl_->generation == config.swapFromGeneration &&
+        impl_->state == NativePlaybackState::Running &&
+        impl_->retiringSwap == nullptr && impl_->hostMutationActive() &&
+        impl_->lastTerminal.reason == AudioHostTerminalReason::None &&
+        impl_->host.status().state == AudioHostState::Running;
+    if (impl_->swapPrepareGeneration == generation) {
+      impl_->swapPrepareGeneration = 0;
+      impl_->swapPrepareUnloadRequested = false;
+      impl_->prepareMutationGeneration = 0;
+    }
+    if (cancelled || !replaceable) {
+      stale = std::move(candidate);
+      impl_->lastFailedSwapGeneration = generation;
+      impl_->lastCancelledGeneration = generation;
+    } else {
+      PreparedPlaybackGraph &outgoing = *impl_->prepared;
+      // The sink is shared with the outgoing transport, which is publishing
+      // into it from the render thread right now: wire it, publish nothing.
+      candidate->transport.positionSink = impl_->position;
+      candidate->router = impl_->router;
+      candidate->transport.adoptControlState(outgoing.transport);
+      // Decoded PCM the candidate adopted is the same memory the outgoing
+      // graph holds; count it once, under the generation that lives on.
+      size_t shared = 0;
+      for (const PreparedPlaybackGraph::Lane &lane : candidate->lanes) {
+        for (const PreparedPlaybackGraph::Lane &old : outgoing.lanes) {
+          if (lane.owner != nullptr && lane.owner == old.owner) {
+            shared += lane.owner->retainedBytes();
+            break;
+          }
+        }
+      }
+      impl_->retiringSwapUnsharedBytes =
+          outgoing.retainedBytes > shared ? outgoing.retainedBytes - shared
+                                          : 0;
+      impl_->retiringSwapGeneration = impl_->generation;
+      impl_->retiringSwap = std::move(impl_->prepared);
+      impl_->prepared = std::move(candidate);
+      impl_->swapFromGeneration.store(impl_->retiringSwapGeneration,
+                                      std::memory_order_release);
+      impl_->generation = generation;
+      impl_->activeGeneration.store(generation, std::memory_order_release);
+      impl_->liveBehindLatest = 0;
+      impl_->preparedConfig = std::move(config);
+      // The stream is this generation's now: every physical-ownership marker
+      // names it, so stop and cleanup prove quiescence against the right one.
+      impl_->openInvocationGeneration = generation;
+      impl_->openMutationGeneration = generation;
+      impl_->startInvocationGeneration = generation;
+      impl_->startMutationGeneration = generation;
+      PlaybackRenderShared &render = *impl_->renderShared;
+      render.context = {&impl_->retiringSwap->transport,
+                        &impl_->prepared->transport, 0, &render.lateLandings};
+      render.request = {&impl_->prepared->callback, &render.context,
+                        &Impl::swapOutgoingFrames, &Impl::swapLand};
+      impl_->swapsLandedSeen =
+          impl_->router->swapsLanded.load(std::memory_order_acquire);
+      impl_->swapPending = true;
+      publishPlaybackQuarantineRetainedBytes(
+          impl_->prepared->retainedBytes + impl_->retiringSwapUnsharedBytes);
+      impl_->lastError.clear();
+      // The one store the render thread is waiting on. Everything above is
+      // ordered before it.
+      impl_->router->swap.store(&render.request, std::memory_order_release);
+      return impl_->success(generation);
+    }
+  }
+  // A candidate that never rendered: its runner is idle by construction, and
+  // the shutdown is the ordinary off-lock one.
+  const bool retired = stale == nullptr || stale->shutdown();
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (!retired) {
+    quarantineReserved(&stale);
+    impl_->quarantineSlotReserved = false;
+    poisonPlaybackOwnership(impl_->sessionId, generation);
+    impl_->state = NativePlaybackState::Quarantined;
+    return failureWithoutMessage(NativePlaybackError::TeardownUncertain,
+                                 generation, impl_->state);
+  }
+  return failure(cancelled ? NativePlaybackError::Cancelled
+                           : NativePlaybackError::InvalidState,
+                 generation, impl_->state,
+                 cancelled ? "Native playback preparation was superseded"
+                           : "The generation to replace is no longer "
+                             "rendering on a running stream");
 }
 
 NativePlaybackResult NativePlaybackSession::openOutput(
@@ -5699,8 +6234,12 @@ NativePlaybackResult NativePlaybackSession::openOutput(
   // fresh STRETCH anchor is primed further up, before anything is armed —
   // see the hasTimePitch block beside the route check.)
   impl_->prepared->transport.resetForOpen();
+  // The router is the host's context for the session's life; this
+  // generation is what it renders until a swap lands another.
+  impl_->router->current.store(&impl_->prepared->callback,
+                               std::memory_order_release);
   const AudioHostResult opened = impl_->host.open(
-      hostConfig, &nativePlaybackRender, &impl_->prepared->callback);
+      hostConfig, &nativePlaybackRender, impl_->router.get());
   const uint32_t actualMaximumFrames = opened.format.maximumFrames;
   const uint32_t nominalBufferFrames = opened.format.nominalBufferFrames;
   const bool exact =
@@ -5711,7 +6250,7 @@ NativePlaybackResult NativePlaybackSession::openOutput(
       opened.format.outputChannels == config.outputChannels.size();
   std::unique_lock<std::mutex> gate(impl_->generationGate);
   const bool stillCurrent =
-      impl_->latestGeneration.load(std::memory_order_acquire) == generation &&
+      impl_->latestForOutput(generation) &&
       impl_->cancelledThrough.load(std::memory_order_acquire) < generation;
   if (!exact || !stillCurrent) {
     // The decision not to publish OutputOpen is now linearized. Do not hold
@@ -5845,8 +6384,7 @@ NativePlaybackResult NativePlaybackSession::startOutput(
   const AudioHostTerminalCause terminalAfter =
       effectiveTerminalCause(after, callbackAfter);
   std::unique_lock<std::mutex> gate(impl_->generationGate);
-  const bool stillLatest =
-      impl_->latestGeneration.load(std::memory_order_acquire) == generation;
+  const bool stillLatest = impl_->latestForOutput(generation);
   const bool notCancelled =
       impl_->cancelledThrough.load(std::memory_order_acquire) < generation;
   const bool callbackHealthy =
@@ -5892,8 +6430,7 @@ NativePlaybackResult NativePlaybackSession::startOutput(
   const AudioHostTerminalCause finalTerminal =
       effectiveTerminalCause(finalHost, finalCallback);
   gate.lock();
-  const bool finallyLatest =
-      impl_->latestGeneration.load(std::memory_order_acquire) == generation;
+  const bool finallyLatest = impl_->latestForOutput(generation);
   const bool finallyNotCancelled =
       impl_->cancelledThrough.load(std::memory_order_acquire) < generation;
   const bool finallyHealthy =
@@ -6093,7 +6630,8 @@ NativePlaybackSession::cleanupProof(uint64_t generation) const noexcept {
                                     NativePlaybackError::TeardownUncertain,
                                     generation);
     }
-    if (generation == impl_->retiringPrepareGeneration) {
+    if (generation == impl_->retiringPrepareGeneration ||
+        generation == impl_->retiringSwapGeneration) {
       return impl_->cleanupSnapshot(NativePlaybackCleanupSafety::Uncertain,
                                     NativePlaybackError::TeardownUncertain,
                                     generation);
@@ -6105,6 +6643,7 @@ NativePlaybackSession::cleanupProof(uint64_t generation) const noexcept {
         generation == impl_->failedPrepareCleanupGeneration ||
         generation == impl_->pendingClaimGeneration ||
         generation == impl_->prepareMutationGeneration ||
+        generation == impl_->swapPrepareGeneration ||
         generation == impl_->generation ||
         impl_->hostMutationActiveFor(generation);
     return impl_->cleanupSnapshot(
@@ -6143,8 +6682,13 @@ NativePlaybackSession::suspendOutput(uint64_t generation) {
   {
     NativePlaybackPositionNow rendered;
     int64_t publishedAt = 0;
+    // During an armed swap the sink still says the outgoing generation's
+    // number, and its transport is the one that must have rendered the pause.
+    const uint64_t outgoing =
+        impl_->swapFromGeneration.load(std::memory_order_acquire);
     if (impl_->position->snapshot(&rendered, &publishedAt) &&
-        rendered.generation == generation &&
+        (rendered.generation == generation ||
+         (outgoing != 0 && rendered.generation == outgoing)) &&
         (rendered.transportState == NativePlaybackTransportState::Playing ||
          rendered.transportState == NativePlaybackTransportState::PreRoll))
       return failure(NativePlaybackError::InvalidState, generation,
@@ -6389,6 +6933,10 @@ NativePlaybackResult NativePlaybackSession::stop(uint64_t generation) {
       return impl_->success(generation);
     if (generation != 0 && generation == impl_->lastCancelledGeneration)
       return impl_->success(generation);
+    // A swap candidate has nothing to stop; the song it will replace is the
+    // one to stop, under its own generation.
+    if (generation != 0 && generation == impl_->swapPrepareGeneration)
+      return impl_->success(generation);
     return failure(NativePlaybackError::InvalidGeneration, generation,
                    impl_->state, "The playback generation is stale");
   }
@@ -6501,6 +7049,18 @@ NativePlaybackSession::unload(uint64_t generation,
   }
   if (generation != 0 && generation == impl_->lastUnloadedGeneration)
     return impl_->success(generation);
+  // A swap in flight. Its candidate is cancelled by name (nothing of it
+  // exists yet); a generation the swap replaced retires by itself, and this
+  // is an acknowledgement, not a second teardown.
+  if (generation != 0 && generation == impl_->swapPrepareGeneration) {
+    impl_->cancelledSwapCandidate.store(generation, std::memory_order_release);
+    impl_->swapPrepareUnloadRequested = true;
+    impl_->lastCancelledGeneration = generation;
+    return impl_->success(generation);
+  }
+  if (generation != 0 && (generation == impl_->retiringSwapGeneration ||
+                          generation == impl_->lastSwappedOutGeneration))
+    return impl_->success(generation);
   if (generation == 0 || generation != impl_->generation ||
       impl_->prepared == nullptr) {
     if (generation != 0 && generation == impl_->lastCancelledGeneration)
@@ -6549,6 +7109,7 @@ NativePlaybackSession::unload(uint64_t generation,
     return failed;
   }
   impl_->prepared.reset();
+  impl_->router->current.store(nullptr, std::memory_order_release);
   impl_->position->clear();
   // The graph is gone and its arena is released; what remains held is exactly
   // the decoded PCM, and status/cleanup report it as retained until the next
@@ -6853,31 +7414,43 @@ NativePlaybackStatus NativePlaybackSession::status() const {
   result.presentationLatencyFrames = latency;
   /* Whatever the graph runner last said. Read from the callback state's
      adapter, which is the same object the RT callback writes it on; this is
-     an ordinary relaxed load off the audio thread. */
+     an ordinary relaxed load off the audio thread. Everything the CALLBACK
+     writes is read off the generation that is rendering: during an armed
+     swap that is still the outgoing one, and its replacement has rendered
+     nothing yet. */
+  const PreparedPlaybackGraph *rendering = impl_->renderingGraph();
   result.graphStatusCode =
-      impl_->prepared != nullptr && impl_->prepared->callback.adapter != nullptr
-          ? impl_->prepared->callback.adapter->lastStatusCode.load(
+      rendering != nullptr && rendering->callback.adapter != nullptr
+          ? rendering->callback.adapter->lastStatusCode.load(
                 std::memory_order_relaxed)
           : 0;
   const uint32_t adapterDetail =
-      impl_->prepared != nullptr && impl_->prepared->callback.adapter != nullptr
-          ? impl_->prepared->callback.adapter->lastStatusDetail.load(
+      rendering != nullptr && rendering->callback.adapter != nullptr
+          ? rendering->callback.adapter->lastStatusDetail.load(
                 std::memory_order_relaxed)
           : 0;
   /* 101 says only "the transport refused"; the transport knows WHICH of its
      six refusals fired, so report that instead of the generic code. */
   const uint32_t sliceRefusal =
-      impl_->prepared != nullptr
-          ? impl_->prepared->transport.lastSliceRefusal.load(
+      rendering != nullptr
+          ? rendering->transport.lastSliceRefusal.load(
                 std::memory_order_relaxed)
           : 0;
   result.graphStatusDetail =
       adapterDetail == 101 && sliceRefusal != 0 ? sliceRefusal : adapterDetail;
   result.timePitchAnchorOutcome =
-      impl_->prepared != nullptr
-          ? impl_->prepared->transport.lastAnchorOutcome.load(
+      rendering != nullptr
+          ? rendering->transport.lastAnchorOutcome.load(
                 std::memory_order_relaxed)
           : 0;
+  result.swapPendingGeneration =
+      impl_->swapPending ? impl_->retiringSwapGeneration : 0;
+  result.retiringSwapGeneration =
+      impl_->swapPending ? 0 : impl_->retiringSwapGeneration;
+  result.swapLandings =
+      impl_->router->swapsLanded.load(std::memory_order_acquire);
+  result.swapLateLandings =
+      impl_->renderShared->lateLandings.load(std::memory_order_relaxed);
   result.graphLatencyFrames = graphLatency;
   result.devicePresentationLatencyFrames = deviceLatency;
   result.totalPresentationLatencyFrames = latency;
@@ -6889,8 +7462,11 @@ NativePlaybackStatus NativePlaybackSession::status() const {
   // It is added once, here, so a status that says nothing is retained means
   // exactly that on both paths.
   result.retainedBytes = result.parkedLaneBytes;
-  if (impl_->prepared != nullptr) {
-    const PreparedPlaybackTransport &transport = impl_->prepared->transport;
+  // A landed-but-unfreed swap still holds the outgoing graph's own bytes;
+  // its decoded PCM is the replacement's and is counted there.
+  result.retainedBytes += impl_->retiringSwapUnsharedBytes;
+  if (impl_->prepared != nullptr && rendering != nullptr) {
+    const PreparedPlaybackTransport &transport = rendering->transport;
     PreparedPlaybackTransport::Telemetry telemetry{};
     const bool forcedCollision =
         impl_->testHooks != nullptr &&
@@ -6899,7 +7475,7 @@ NativePlaybackStatus NativePlaybackSession::status() const {
             impl_->testHooks->context);
     const bool sampled =
         !forcedCollision && transport.snapshotTelemetry(&telemetry) &&
-        telemetry.generation == impl_->prepared->transportGeneration;
+        telemetry.generation == rendering->transportGeneration;
     if (sampled) {
       impl_->lastGoodTransportTelemetry = telemetry;
       impl_->lastGoodTransportTelemetryGeneration = telemetry.generation;
@@ -6908,7 +7484,7 @@ NativePlaybackStatus NativePlaybackSession::status() const {
           NativePlaybackTransportTelemetryQuality::Current;
     } else if (impl_->hasLastGoodTransportTelemetry &&
                impl_->lastGoodTransportTelemetryGeneration ==
-                   impl_->prepared->transportGeneration) {
+                   rendering->transportGeneration) {
       telemetry = impl_->lastGoodTransportTelemetry;
       result.transportTelemetryQuality =
           NativePlaybackTransportTelemetryQuality::LastGood;
@@ -7053,9 +7629,13 @@ NativePlaybackPositionNow NativePlaybackSession::positionNow() const noexcept {
   // atomically — prepare ADMISSION stores it, before the decode, and every
   // retirement zeroes it (a bare claimGeneration does not touch it) — so it
   // is the guard here instead of impl_->generation, which lives under the
-  // mutex.
+  // mutex. During a swap the outgoing generation is a second accepted
+  // number: the sink keeps saying it until the seam, and the frame it
+  // carries is the same song's.
   const uint64_t active =
       impl_->activeGeneration.load(std::memory_order_acquire);
+  const uint64_t outgoing =
+      impl_->swapFromGeneration.load(std::memory_order_acquire);
   if (active == 0)
     return out;
   int64_t publishedAt = 0;
@@ -7064,7 +7644,8 @@ NativePlaybackPositionNow NativePlaybackSession::positionNow() const noexcept {
   // Before this generation's prepare commits the sink still says 0 (or a
   // quarantined predecessor's number); after unload it says 0 again. Either
   // way the frame is not this song's, and the caller must not adopt it.
-  if (out.generation != active)
+  if (out.generation != active &&
+      (outgoing == 0 || out.generation != outgoing))
     return {};
   const int64_t now = PlaybackPositionPublication::nowNs();
   out.ageNs = now > publishedAt ? static_cast<uint64_t>(now - publishedAt) : 0;

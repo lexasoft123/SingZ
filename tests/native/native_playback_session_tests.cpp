@@ -238,6 +238,11 @@ injectAllocationFailure(void *opaque,
   return fault->failure;
 }
 
+struct CallbackCapture {
+  singz::AudioHostRender callback{nullptr};
+  void *context{nullptr};
+};
+
 class ManualOutputBackend final : public singz::AudioHostBackend {
 public:
   singz::AudioHostInventory enumerate() const override {
@@ -289,6 +294,10 @@ public:
     }
     callback = render;
     context = renderContext;
+    if (capture != nullptr) {
+      capture->callback = render;
+      capture->context = renderContext;
+    }
     const uint32_t openedMaximum =
         actualMaximumFrames == 0 ? config.maximumFrames : actualMaximumFrames;
     const uint32_t openedNominal = actualNominalBufferFrames == 0
@@ -369,8 +378,8 @@ public:
 
   void stop() noexcept override {
     ++stops;
-    if (graphTerminalDuringStop && context != nullptr) {
-      auto *graph = static_cast<singz::NativePlaybackCallbackState *>(context);
+    if (graphTerminalDuringStop && renderingGraph() != nullptr) {
+      auto *graph = renderingGraph();
       graph->firstTerminalCause.publish(
           singz::AudioHostTerminalReason::RouteChanged,
           singz::AudioHostTerminalProducer::GraphCallback);
@@ -463,8 +472,16 @@ public:
                 : singz::AudioHostState::Error;
   }
 
+  // The host's context is the session's render router; the generation that
+  // is rendering hangs off it.
+  singz::NativePlaybackCallbackState *renderingGraph() const noexcept {
+    auto *router = static_cast<singz::NativePlaybackRenderRouter *>(context);
+    return router == nullptr ? nullptr
+                             : router->current.load(std::memory_order_acquire);
+  }
+
   void setGraphTerminal(singz::AudioHostTerminalReason reason) noexcept {
-    auto *graph = static_cast<singz::NativePlaybackCallbackState *>(context);
+    auto *graph = renderingGraph();
     CHECK(graph != nullptr);
     graph->firstTerminalCause.publish(
         reason, singz::AudioHostTerminalProducer::GraphCallback);
@@ -507,6 +524,9 @@ public:
   bool hiddenStartResources{false};
   std::atomic<bool> *cancelOnOpen{nullptr};
   StartLatch *startLatch{nullptr};
+  // Test-owned copy of what open() was handed, for a test that must keep
+  // calling the callback after this backend (and its session) are gone.
+  CallbackCapture *capture{nullptr};
   uint32_t actualMaximumFrames{0};
   uint32_t actualNominalBufferFrames{0};
   uint32_t stops{0};
@@ -3270,6 +3290,508 @@ void aHeldStreamKeepsTheGraphAndResumesInPlace() {
   std::remove(wav.c_str());
 }
 
+// --- Replacing a generation on the running stream (Step 3 of the parity
+// plan). A metronome toggle, a training change, a transpose: the player used
+// to stop the stream, unload, prepare, open and start again, and the singer
+// heard the gap. Now the replacement is prepared while the song plays and
+// the render thread hands the clock across at a block boundary.
+
+std::vector<float> swapRamp(uint32_t frames) {
+  std::vector<float> ramp(frames);
+  for (uint32_t frame = 0; frame < frames; ++frame)
+    ramp[frame] = pcm16(static_cast<float>(frame % 1000) * 0.0009F + 0.01F);
+  return ramp;
+}
+
+uint32_t countEvents(const Trace &trace,
+                     singz::NativePlaybackLifecycleEvent event) {
+  return static_cast<uint32_t>(
+      std::count(trace.events.begin(), trace.events.end(), event));
+}
+
+void aSwapLandsOnTheRunningStreamWithoutAGap() {
+  const std::vector<float> ramp = swapRamp(4096);
+  const std::string wav = writeWav("swap-seam.wav", 1, ramp);
+  Trace trace;
+  singz::NativePlaybackTestHooks hooks{observe, &trace};
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  // Gains are set at prepare (instant), not by command (a 128-frame ramp),
+  // so every output sample below is a known multiple of the lane's.
+  singz::NativePlaybackPrepareConfig original = config();
+  original.masterGain = 0.5F;
+  CHECK(session.prepare(std::move(original), std::move(lanes), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  fake->captureOutput = true;
+  CHECK(fake->drive(5, singz::AudioHostDiscontinuityStart));
+  CHECK(fake->drive(10));
+  auto status = session.status();
+  CHECK(status.renderedProjectFrame == 15 && status.continuousFrame == 15);
+  const uint64_t discontinuitiesBefore = status.transportDiscontinuities;
+  const size_t oneGraphBytes = status.retainedBytes;
+  const uint32_t deactivationsBefore =
+      countEvents(trace, singz::NativePlaybackLifecycleEvent::GraphDeactivate);
+
+  // The replacement: same lanes (adopted, not decoded again), a different
+  // master gain so the seam is visible in the samples.
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 1;
+  replacement.preparedStartProjectFrame = 15;
+  replacement.masterGain = 0.25F;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  const auto armed =
+      session.prepare(std::move(replacement), std::move(replacementLanes), 2);
+  CHECK(armed.ok && armed.generation == 2 &&
+        armed.state == singz::NativePlaybackState::Running);
+  // Armed, not landed: the stream, its format and the old graph untouched.
+  status = session.status();
+  CHECK(status.generation == 2 &&
+        status.state == singz::NativePlaybackState::Running &&
+        status.swapPendingGeneration == 1 && status.retiringSwapGeneration == 0 &&
+        status.transportGeneration == 1 && status.renderedProjectFrame == 15 &&
+        status.swapLandings == 0 && status.masterGain == 0.25F);
+  CHECK(status.retainedBytes > oneGraphBytes &&
+        status.retainedBytes < 2 * oneGraphBytes);
+  CHECK(fake->opens == 1 && fake->starts == 1 && fake->stops == 0);
+  CHECK(countEvents(trace, singz::NativePlaybackLifecycleEvent::GraphDeactivate) ==
+        deactivationsBefore);
+  auto now = session.positionNow();
+  CHECK(now.available && now.generation == 1 && now.renderedProjectFrame == 15);
+  // The song is generation 2's now; generation 1 is only ever acknowledged.
+  CHECK(session.pause(1).error == singz::NativePlaybackError::InvalidGeneration);
+  auto proof = session.cleanupProof(1);
+  CHECK(proof.safety == singz::NativePlaybackCleanupSafety::Uncertain);
+
+  // The seam: one block. The clock carries across, the graph resets and says
+  // why, and the outgoing graph is freed by the first status() after.
+  CHECK(fake->drive(8));
+  status = session.status();
+  CHECK(status.generation == 2 && status.transportGeneration == 2 &&
+        status.state == singz::NativePlaybackState::Running &&
+        status.transportState == singz::NativePlaybackTransportState::Playing &&
+        status.renderedProjectFrame == 23 && status.continuousFrame == 23 &&
+        status.transportDiscontinuities == discontinuitiesBefore + 1 &&
+        status.lastTransportBoundary ==
+            singz::NativePlaybackTransportBoundaryReason::ClockReanchored &&
+        status.swapLandings == 1 && status.swapLateLandings == 0 &&
+        status.swapPendingGeneration == 0 &&
+        status.retiringSwapGeneration == 0 &&
+        status.adapterRenderFailures == 0 &&
+        status.terminalRenderFailures == 0);
+  CHECK(status.retainedBytes == oneGraphBytes);
+  CHECK(countEvents(trace, singz::NativePlaybackLifecycleEvent::GraphDeactivate) ==
+        deactivationsBefore + 1);
+  CHECK(fake->opens == 1 && fake->starts == 1 && fake->stops == 0);
+  now = session.positionNow();
+  CHECK(now.available && now.generation == 2 && now.renderedProjectFrame == 23);
+  CHECK(fake->drive(9));
+  fake->captureOutput = false;
+  // Every frame of the song reached the output exactly once, the first 15 at
+  // the old gain and the rest at the new one: no repeat, no skip, no silence.
+  CHECK(fake->outputTrace.size() == 32);
+  for (uint32_t frame = 0; frame < 32; ++frame)
+    CHECK(near(fake->outputTrace[frame],
+               ramp[frame] * (frame < 15 ? 0.5F : 0.25F), 0.00002F));
+
+  proof = session.cleanupProof(1);
+  CHECK(proof.safety == singz::NativePlaybackCleanupSafety::NotOwned);
+  CHECK(session.unload(1).ok);
+  CHECK(session.seek(1, 0).error ==
+        singz::NativePlaybackError::InvalidGeneration);
+  status = session.status();
+  CHECK(status.generation == 2 &&
+        status.state == singz::NativePlaybackState::Running &&
+        status.renderedProjectFrame == 32);
+
+  // A second swap on the same stream, back to a louder mix.
+  singz::NativePlaybackPrepareConfig third = config();
+  third.swapFromGeneration = 2;
+  third.preparedStartProjectFrame = 32;
+  third.masterGain = 1.0F;
+  auto thirdLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  thirdLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(third), std::move(thirdLanes), 3).ok);
+  fake->outputTrace.clear();
+  fake->captureOutput = true;
+  // Two blocks with no status() between them: the render thread alone must
+  // put the request down after landing it, or the second block would land
+  // it again and drag the clock back to the outgoing transport's frame.
+  CHECK(fake->drive(8) && fake->drive(8));
+  fake->captureOutput = false;
+  status = session.status();
+  CHECK(status.generation == 3 && status.transportGeneration == 3 &&
+        status.renderedProjectFrame == 48 && status.swapLandings == 2 &&
+        status.retiringSwapGeneration == 0);
+  for (uint32_t frame = 0; frame < 16; ++frame)
+    CHECK(near(fake->outputTrace[frame], ramp[32 + frame], 0.00002F));
+  CHECK(session.pause(3).ok && fake->drive(1));
+  // A plain unload, not a cleanup proof: the proof mints the process
+  // fallback lease, and the next test's plain claim would be refused.
+  CHECK(session.unload(3).ok && fake->stops == 1);
+  CHECK(session.cleanupProof(2).safety ==
+        singz::NativePlaybackCleanupSafety::NotOwned);
+  std::remove(wav.c_str());
+}
+
+void aSwapWhilePausedLandsAtTheNextBlockAndKeepsTheFrame() {
+  const std::vector<float> ramp = swapRamp(2048);
+  const std::string wav = writeWav("swap-paused.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 7).ok);
+  CHECK(session.openOutput(7).ok && session.start(7).ok);
+  CHECK(fake->drive(12, singz::AudioHostDiscontinuityStart));
+  CHECK(session.pause(7).ok && fake->drive(4));
+  auto status = session.status();
+  CHECK(status.transportState == singz::NativePlaybackTransportState::Paused &&
+        status.renderedProjectFrame == 12 && status.continuousFrame == 16);
+
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 7;
+  replacement.preparedStartProjectFrame = 12;
+  replacement.initialTransport.startPaused = true;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(replacement), std::move(replacementLanes), 8)
+            .ok);
+  // Paused is carried across untouched: the seam does not move the song.
+  CHECK(fake->drive(4));
+  status = session.status();
+  CHECK(status.generation == 8 && status.transportGeneration == 8 &&
+        status.transportState == singz::NativePlaybackTransportState::Paused &&
+        status.renderedProjectFrame == 12 && status.continuousFrame == 20 &&
+        status.swapLandings == 1);
+  auto now = session.positionNow();
+  CHECK(now.available && now.generation == 8 && now.renderedProjectFrame == 12 &&
+        now.transportState == singz::NativePlaybackTransportState::Paused);
+  // A resume queued into the replacement plays on from the held frame.
+  CHECK(session.resume(8).ok && fake->drive(5));
+  status = session.status();
+  CHECK(status.transportState == singz::NativePlaybackTransportState::Playing &&
+        status.renderedProjectFrame == 17);
+  // The stream can still be held and released, under the new generation.
+  CHECK(session.pause(8).ok && fake->drive(1));
+  CHECK(session.suspendOutput(8).ok && session.resumeOutput(8).ok);
+  CHECK(session.unload(8).ok && fake->stops == 1);
+  std::remove(wav.c_str());
+}
+
+void stoppingDuringAnArmedSwapRetiresBothGraphs() {
+  const std::vector<float> ramp = swapRamp(2048);
+  const std::string wav = writeWav("swap-stop.wav", 1, ramp);
+  Trace trace;
+  singz::NativePlaybackTestHooks hooks{observe, &trace};
+  for (const bool viaStop : {false, true}) {
+    trace.events.clear();
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(config(), std::move(lanes), 20).ok);
+    CHECK(session.openOutput(20).ok && session.start(20).ok);
+    CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = 20;
+    replacement.preparedStartProjectFrame = 8;
+    auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    replacementLanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                          21)
+              .ok);
+    CHECK(session.status().swapPendingGeneration == 20);
+    // Armed but never landed: no block was rendered. Both graphs retire on
+    // the one stop, and nothing of either is left behind.
+    if (viaStop) {
+      CHECK(session.stop(21).ok);
+      CHECK(fake->stops == 1 && session.status().state ==
+                                    singz::NativePlaybackState::Stopped);
+    }
+    const auto unloaded = session.unloadWithCleanup(21);
+    CHECK(unloaded.playback.ok && fake->stops == 1 &&
+          unloaded.cleanup.globallyComplete() &&
+          unloaded.cleanup.retainedBytes == 0);
+    CHECK(countEvents(trace,
+                      singz::NativePlaybackLifecycleEvent::GraphDeactivate) == 2);
+    CHECK(session.cleanupProof(20).safety ==
+              singz::NativePlaybackCleanupSafety::NotOwned &&
+          session.unload(20).ok);
+    // The session is empty enough to start over.
+    singz::NativePlaybackPrepareConfig fresh = config();
+    fresh.handoffLease = unloaded.cleanup.handoffLease;
+    auto freshLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    freshLanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(fresh), std::move(freshLanes), 22).ok);
+    CHECK(session.unload(22).ok);
+  }
+  std::remove(wav.c_str());
+}
+
+void aSwapIsRefusedWhereItCouldNotLand() {
+  const std::vector<float> ramp = swapRamp(2048);
+  const std::string wav = writeWav("swap-refused.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  const auto swapPrepare = [&](uint64_t from, uint64_t to) {
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = from;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    return session.prepare(std::move(replacement), std::move(lanes), to);
+  };
+  // Every refused candidate is answered as a cancelled generation is, the
+  // way the player unloads a failed prepare: nothing of it exists, and
+  // asking is not an error.
+  const auto refused = [&](const singz::NativePlaybackResult &result) {
+    CHECK(!result.ok &&
+          result.error == singz::NativePlaybackError::InvalidState);
+    CHECK(session.unload(result.generation).ok);
+    CHECK(session.cleanupProof(result.generation).safety ==
+          singz::NativePlaybackCleanupSafety::NotOwned);
+  };
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  // Merely prepared: there is no stream to land on.
+  CHECK(session.prepare(config(), std::move(lanes), 30).ok);
+  refused(swapPrepare(30, 31));
+  auto status = session.status();
+  CHECK(status.generation == 30 &&
+        status.state == singz::NativePlaybackState::Prepared);
+  // ...and the song it would have replaced is still the singer's to drive.
+  CHECK(session.openOutput(30).ok && session.start(30).ok);
+  CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+  // A generation this session is not rendering.
+  refused(swapPrepare(29, 32));
+  refused(swapPrepare(0x7777, 33));
+  // A held stream renders no blocks, so the seam could never come.
+  CHECK(session.pause(30).ok && fake->drive(1));
+  CHECK(session.suspendOutput(30).ok);
+  refused(swapPrepare(30, 34));
+  CHECK(session.resumeOutput(30).ok && session.resume(30).ok);
+  CHECK(fake->drive(4));
+  status = session.status();
+  CHECK(status.generation == 30 &&
+        status.state == singz::NativePlaybackState::Running &&
+        status.transportState == singz::NativePlaybackTransportState::Playing &&
+        status.renderedProjectFrame == 12 && status.swapLandings == 0);
+  CHECK(fake->opens == 1 && fake->starts == 1 && fake->stops == 0);
+  // And once the stream is running again, a swap lands as usual.
+  CHECK(swapPrepare(30, 35).ok && fake->drive(3));
+  status = session.status();
+  CHECK(status.generation == 35 && status.transportGeneration == 35 &&
+        status.renderedProjectFrame == 15 && status.swapLandings == 1);
+  CHECK(session.unload(35).ok && fake->stops == 1);
+  std::remove(wav.c_str());
+}
+
+void aFailedOrCancelledSwapCandidateLeavesTheSongPlaying() {
+  const std::vector<float> ramp = swapRamp(2048);
+  const std::string wav = writeWav("swap-candidate.wav", 1, ramp);
+  {
+    // A candidate that cannot be prepared: a lane that is not there.
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(config(), std::move(lanes), 40).ok);
+    CHECK(session.openOutput(40).ok && session.start(40).ok);
+    CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = 40;
+    auto broken = std::vector<singz::NativePlaybackLaneSource>{};
+    broken.push_back(keyedLane("song", wav));
+    broken.push_back(keyedLane("missing", scratch("swap-not-there.wav")));
+    const auto failed =
+        session.prepare(std::move(replacement), std::move(broken), 41);
+    CHECK(!failed.ok && failed.error != singz::NativePlaybackError::InvalidState);
+    auto status = session.status();
+    CHECK(status.generation == 40 &&
+          status.state == singz::NativePlaybackState::Running &&
+          status.swapPendingGeneration == 0 && status.error.empty());
+    // The song plays on and answers its own commands.
+    CHECK(fake->drive(4) && session.pause(40).ok && fake->drive(1) &&
+          session.resume(40).ok && fake->drive(3));
+    status = session.status();
+    CHECK(status.renderedProjectFrame == 15 &&
+          status.transportState ==
+              singz::NativePlaybackTransportState::Playing);
+    CHECK(session.unload(41).ok && session.stop(41).ok &&
+          session.cleanupProof(41).safety ==
+              singz::NativePlaybackCleanupSafety::NotOwned);
+    // The next candidate is fine.
+    singz::NativePlaybackPrepareConfig again = config();
+    again.swapFromGeneration = 40;
+    auto goodLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    goodLanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(again), std::move(goodLanes), 42).ok);
+    CHECK(fake->drive(5));
+    status = session.status();
+    CHECK(status.generation == 42 && status.transportGeneration == 42 &&
+          status.renderedProjectFrame == 20);
+    CHECK(session.unload(42).ok);
+  }
+  for (const bool viaUnload : {false, true}) {
+    // A candidate given up on while it is being built: cancelled by name,
+    // and the song behind it never notices.
+    PublicationLatch latch;
+    singz::NativePlaybackTestHooks hooks{blockPublication, &latch};
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    latch.enabled = false;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(config(), std::move(lanes), 50).ok);
+    CHECK(session.openOutput(50).ok && session.start(50).ok);
+    CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+    latch.enabled = true;
+    singz::NativePlaybackResult candidate;
+    std::thread preparing([&] {
+      singz::NativePlaybackPrepareConfig replacement = config();
+      replacement.swapFromGeneration = 50;
+      auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+      replacementLanes.push_back(keyedLane("song", wav));
+      candidate = session.prepare(std::move(replacement),
+                                  std::move(replacementLanes), 51);
+    });
+    waitUntilReady(&latch);
+    // While the candidate is compiled the song keeps rendering and taking
+    // commands under its own number.
+    CHECK(fake->drive(4) && session.pause(50).ok && fake->drive(1) &&
+          session.resume(50).ok);
+    if (viaUnload)
+      CHECK(session.unload(51).ok);
+    else
+      CHECK(session.requestCancellation(51));
+    releasePublication(&latch);
+    preparing.join();
+    CHECK(!candidate.ok &&
+          candidate.error == singz::NativePlaybackError::Cancelled);
+    latch.enabled = false;
+    CHECK(fake->drive(3));
+    auto status = session.status();
+    CHECK(status.generation == 50 &&
+          status.state == singz::NativePlaybackState::Running &&
+          status.transportGeneration == 50 &&
+          status.renderedProjectFrame == 15 && status.swapLandings == 0 &&
+          status.swapPendingGeneration == 0);
+    CHECK(session.unload(51).ok &&
+          session.cleanupProof(51).safety ==
+              singz::NativePlaybackCleanupSafety::NotOwned);
+    CHECK(session.unload(50).ok && fake->stops == 1);
+  }
+  std::remove(wav.c_str());
+}
+
+// The one path a swap adds to the quarantine story: a stream that never
+// proves quiescence takes BOTH graphs and the render block with it, and the
+// callback it may still be running lands the seam it was armed for out of
+// memory nothing freed. Its own process — the quarantine is process-global
+// and terminal.
+void aQuarantinedSwapKeepsRenderingAfterTheSessionIsGone() {
+  const std::vector<float> ramp = swapRamp(2048);
+  const std::string wav = writeWav("swap-quarantine.wav", 1, ramp);
+  CallbackCapture capture;
+  {
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    fake->capture = &capture;
+    fake->uncertainStop = true;
+    singz::NativePlaybackSession session(std::move(backend));
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(config(), std::move(lanes), 70).ok);
+    CHECK(session.openOutput(70).ok && session.start(70).ok);
+    CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = 70;
+    replacement.preparedStartProjectFrame = 8;
+    replacement.masterGain = 0.5F;
+    auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    replacementLanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                          71)
+              .ok);
+    CHECK(session.status().swapPendingGeneration == 70);
+    // The session goes away with a host that will not confirm quiescence.
+  }
+  CHECK(capture.callback != nullptr && capture.context != nullptr);
+  const auto proof = singz::NativePlaybackSession().cleanupProof(71);
+  CHECK(proof.processQuarantinePoisoned);
+
+  // The host keeps calling. The seam lands and the song plays on from frame
+  // 8 at the replacement's gain; nothing it touches has been freed.
+  std::array<float, 8> left{};
+  std::array<float, 8> right{};
+  float *output[]{left.data(), right.data()};
+  uint64_t rendered = 8;
+  for (uint32_t block = 0; block < 3; ++block) {
+    std::fill(left.begin(), left.end(), 1.0F);
+    std::fill(right.begin(), right.end(), 1.0F);
+    singz::AudioHostRenderBlock view{
+        nullptr, output, 0,     2,     8,    8,    48000.0, 1, 1, 1,
+        block + 2, 0,    0,     false, false, rendered, 0, true, true,
+        0,       0,      true};
+    CHECK(capture.callback(capture.context, view));
+    for (uint32_t frame = 0; frame < 8; ++frame)
+      CHECK(near(left[frame], ramp[rendered + frame] * 0.5F, 0.00002F));
+    rendered += 8;
+  }
+  std::remove(wav.c_str());
+}
+
+// A terminal boundary on the block after the arm: the outgoing generation
+// latches it, and the swap must NOT land on top of that — the session reads
+// the latch off the generation that is rendering, and both graphs retire on
+// the stop that follows.
+void aSwapWaitsOnAnOutgoingGenerationThatLatchedTerminal() {
+  const std::vector<float> ramp = swapRamp(2048);
+  const std::string wav = writeWav("swap-latched.wav", 1, ramp);
+  Trace trace;
+  singz::NativePlaybackTestHooks hooks{observe, &trace};
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 80).ok);
+  CHECK(session.openOutput(80).ok && session.start(80).ok);
+  CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 80;
+  replacement.preparedStartProjectFrame = 8;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                        81)
+            .ok);
+  // The route goes away on the very block the seam was due on, and then the
+  // host (as a real one would not, but the fake does) keeps calling.
+  CHECK(!fake->drive(4, singz::AudioHostDiscontinuityRouteChanged));
+  CHECK(!fake->drive(4));
+  auto status = session.status();
+  CHECK(status.swapLandings == 0 && status.swapPendingGeneration == 80 &&
+        status.state == singz::NativePlaybackState::Terminal &&
+        status.terminalReason == singz::AudioHostTerminalReason::RouteChanged);
+  CHECK(session.unload(81).ok && fake->stops == 1);
+  CHECK(countEvents(trace, singz::NativePlaybackLifecycleEvent::GraphDeactivate) ==
+        2);
+  // (Not the unloaded generation's own proof: that one mints the process
+  // fallback lease and the next test's plain claim would be refused.)
+  CHECK(session.cleanupProof(80).safety ==
+        singz::NativePlaybackCleanupSafety::NotOwned);
+  std::remove(wav.c_str());
+}
+
 void audibleProjectionWaitsForLatencyHistory() {
   const std::string wav = writeWav(
       "audible-projection.wav", 1, std::vector<float>(50000, 0.1F));
@@ -3940,6 +4462,9 @@ void callbackTerminalLatch() {
   zdsp::AudioHostGraphAdapter adapter{};
   singz::NativePlaybackCallbackState callback;
   callback.adapter = &adapter;
+  // The host's context is the router; the generation hangs off it.
+  singz::NativePlaybackRenderRouter router;
+  router.current.store(&callback, std::memory_order_release);
   std::array<float, 8> left{};
   std::array<float, 8> right{};
   float *output[]{left.data(), right.data()};
@@ -3948,14 +4473,20 @@ void callbackTerminalLatch() {
       0,       0,      false, false, 0, 0, true,    true, 0, 0, true};
   std::fill(left.begin(), left.end(), 1.0F);
   std::fill(right.begin(), right.end(), 1.0F);
-  CHECK(!singz::nativePlaybackRender(&callback, block));
+  // No generation at all: silence and a refusal, nothing to latch on.
+  singz::NativePlaybackRenderRouter empty;
+  CHECK(!singz::nativePlaybackRender(&empty, block) &&
+        std::all_of(left.begin(), left.end(),
+                    [](float sample) { return sample == 0.0F; }));
+  std::fill(left.begin(), left.end(), 1.0F);
+  CHECK(!singz::nativePlaybackRender(&router, block));
   CHECK(callback.firstTerminalCause.current().reason ==
             singz::AudioHostTerminalReason::ProviderFailure &&
         adapter.renderFailures.load(std::memory_order_relaxed) == 1 &&
         std::all_of(left.begin(), left.end(),
                     [](float sample) { return sample == 0.0F; }));
   std::fill(left.begin(), left.end(), 1.0F);
-  CHECK(!singz::nativePlaybackRender(&callback, block));
+  CHECK(!singz::nativePlaybackRender(&router, block));
   CHECK(adapter.renderFailures.load(std::memory_order_relaxed) == 1 &&
         callback.terminalFailures.load(std::memory_order_relaxed) >= 2 &&
         std::all_of(left.begin(), left.end(),
@@ -5382,6 +5913,11 @@ int main() {
     std::puts("native playback stale retirement failure tests: ok");
     return 0;
   }
+  if (std::getenv("SINGZ_NATIVE_PLAYBACK_QUARANTINED_SWAP") != nullptr) {
+    aQuarantinedSwapKeepsRenderingAfterTheSessionIsGone();
+    std::puts("native playback quarantined swap tests: ok");
+    return 0;
+  }
   compositionAndLifetime();
   laneWaveformSummaryAndCountInMeter();
   parallelLaneDecodeMatchesSequential();
@@ -5396,6 +5932,12 @@ int main() {
   resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands();
   positionNowReadsTheCallbackWithoutTheControlLock();
   aHeldStreamKeepsTheGraphAndResumesInPlace();
+  aSwapLandsOnTheRunningStreamWithoutAGap();
+  aSwapWhilePausedLandsAtTheNextBlockAndKeepsTheFrame();
+  stoppingDuringAnArmedSwapRetiresBothGraphs();
+  aSwapIsRefusedWhereItCouldNotLand();
+  aFailedOrCancelledSwapCandidateLeavesTheSongPlaying();
+  aSwapWaitsOnAnOutgoingGenerationThatLatchedTerminal();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();
