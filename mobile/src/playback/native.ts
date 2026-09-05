@@ -2822,6 +2822,8 @@ export class IosNativePlaybackCoordinator {
   ): Promise<NativePlaybackStartOutcome> {
     // One clock for Play, opened where both branches below share it.
     handle.startRequestedAt = Date.now();
+    if (handle.snapshot().phase === 'paused' && handle.countsInOnPlay())
+      return this.restartPausedWithCountIn(handle);
     if (handle.snapshot().phase === 'paused') {
       try {
         // A stream held across the background park goes first: a seek or a
@@ -2862,6 +2864,45 @@ export class IosNativePlaybackCoordinator {
     return this.withOwnershipLock(() =>
       this.startHandleLocked(handle, operation),
     ).finally(() => handle.finishStart(operation.token));
+  }
+
+  /** Legacy counts in on EVERY Play, a resume included. A paused native
+   *  song cannot be counted in by the transport it sits in (the plan's
+   *  count-in is fixed at prepare), so Play stops it where it is with its
+   *  lanes parked — the position, faders, master gain and loop kept in the
+   *  recovery snapshot exactly as the training handoff keeps them — and
+   *  restarts it through the anchored prepare a pre-Play scrub takes: the
+   *  pre-roll, the clicks on the real preceding beats, the landing on the
+   *  paused spot. Paused inside its own count-in, it counts in again to the
+   *  same landing. ~30 ms of prepare on parked lanes plus the count-in bar,
+   *  against an instant resume — the metronome setting's own choice. */
+  private async restartPausedWithCountIn(
+    handle: IosNativePlaybackHandle,
+  ): Promise<NativePlaybackStartOutcome> {
+    try {
+      await this.releaseStream(handle);
+      const safe = await this.withOwnershipLock(async () => {
+        // Under the lock, as the training handoff reads: a rebuild or a
+        // route-loss stop cannot swap the generation between the read and
+        // the park. The shown loop is kept BEFORE the stop, which blanks the
+        // region — at the end of a looped region the restart counts in to A
+        // with the loop declared, where it used to seek to A and resume.
+        await this.rememberPositionForRestart(handle);
+        handle.rememberCountInLandingIfPreRoll();
+        handle.rememberShownLoopBeforeStop();
+        return this.stopHandleLocked(handle, 'Play counts in from here', 'park');
+      });
+      if (!safe)
+        return {
+          kind: 'failed',
+          error: 'Native playback could not be stopped to count in again.',
+        };
+    } catch (error) {
+      return { kind: 'failed', error: message(error) };
+    }
+    if (handle.snapshot().phase !== 'stopped')
+      return { kind: 'failed', error: 'Native playback did not stop to count in again.' };
+    return this.startHandle(handle);
   }
 
   async transportHandle(
@@ -3733,10 +3774,7 @@ export class IosNativePlaybackCoordinator {
       handle.startPolling();
       log(
         'dsp',
-        `rendering started · generation ${handle.generation} at signed project frame ${Math.round(
-          handle.snapshot().renderedPositionSec *
-            (handle.output?.sampleRate || 48_000),
-        )} · ` +
+        `rendering started · generation ${handle.generation} at signed project frame ${handle.lastRawRenderedFrame()} · ` +
           `${since(handle.startRequestedAt)} after Play · ` +
           `zdsp graph owns native output · ${handle.graphDescription()}`,
       );
@@ -3853,6 +3891,7 @@ export class IosNativePlaybackCoordinator {
   private async stopHandleLocked(
     handle: IosNativePlaybackHandle,
     reason: string,
+    retention: 'release' | 'park' = 'release',
   ): Promise<boolean> {
     const stopStartedAt = Date.now();
     handle.stopPolling();
@@ -3883,7 +3922,7 @@ export class IosNativePlaybackCoordinator {
         );
       }
     }
-    const safe = await this.cleanupGeneration(handle, generation);
+    const safe = await this.cleanupGeneration(handle, generation, retention);
     if (safe) {
       handle.update({
         phase: 'stopped',
@@ -4352,6 +4391,12 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  fall on, which is what the legacy bar sweeps through. Set when the
    *  prepare request names the anchor, cleared by any prepare that does not. */
   private countInLandingFrame = 0;
+  /** The last rendered frame as the core reported it — the SIGNED frame a
+   *  log about the transport wants, where the snapshot holds the shown one. */
+  private rawRenderedFrame = 0;
+  lastRawRenderedFrame(): number {
+    return this.rawRenderedFrame;
+  }
   /** An A-B loop set before Play on a song that never started: the core
    *  takes a loop only on a running transport or as a prepare parameter, so
    *  it is remembered here and travels with the prepare Play makes. */
@@ -4481,16 +4526,14 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       // has ACCEPTED, or the new generation comes up at the defaults — a
       // master gain zeroed before Play came back at full volume at Play.
       const frame = this.retryPreparedStartFrame(outputSampleRate);
+      // A loop remembered before Play, or kept from the screen before the
+      // stop that preceded this restart (rememberShownLoopBeforeStop).
       const loop = this.pendingPreparedLoop;
       // Legacy counts in on every Play from wherever the singer is. With the
       // count-in on, the remembered position is the count-in's anchor and the
       // start is the ordinary one (pre-roll, clicks on the real preceding
       // beats, then the landing); with it off, the song starts there flat.
-      const countsIn =
-        frame !== undefined &&
-        frame > 0 &&
-        this.metronomeConfig.countInBars > 0 &&
-        this.beatInfo !== null;
+      const countsIn = frame !== undefined && frame > 0 && this.countsInOnPlay();
       return this.prepareOverrides(
         countsIn ? undefined : frame,
         this.materialized.lanes.map(lane => ({
@@ -4509,6 +4552,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       );
     }
     const frame = Math.round(recovery.positionSeconds * outputSampleRate);
+    // Play after a pause counts in from the paused spot when the count-in
+    // is on: the anchored ordinary start, not the flat structural one.
+    const countsIn = frame > 0 && this.countsInOnPlay();
     const loop = recovery.loop;
     const initialTransport = this.startWasIssued(recovery.sourceGeneration)
       ? {
@@ -4529,10 +4575,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         }
       : undefined;
     return this.prepareOverrides(
-      Number.isSafeInteger(frame) ? frame : undefined,
+      countsIn || !Number.isSafeInteger(frame) ? undefined : frame,
       recovery.lanes,
       recovery.masterGain,
       initialTransport,
+      countsIn ? recovery.positionSeconds : undefined,
     );
   }
 
@@ -4849,6 +4896,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  landing, as the legacy bar sweeps them; everywhere else the frame
    *  itself. The dots and the receipt logic keep the raw frame. */
   private shownFrame(renderedFrame: number): number {
+    this.rawRenderedFrame = renderedFrame;
     return renderedFrame < 0 && this.countInLandingFrame > 0
       ? this.countInLandingFrame + renderedFrame
       : renderedFrame;
@@ -5690,6 +5738,48 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       (phase === 'prepared' || phase === 'stopped') &&
       !this.startWasIssued(this.generation)
     );
+  }
+
+  /** Whether Play counts in at all: the metronome's count-in is on. A grid
+   *  counts in on its beats, no grid by the clock (the gridless ticks) —
+   *  both legacy behaviours, both planned by the core. */
+  countsInOnPlay(): boolean {
+    return this.metronomeConfig.countInBars > 0;
+  }
+
+  /** A song paused inside its own mid-song count-in has no positive frame
+   *  for the recovery snapshot to keep; the count-in's landing is where Play
+   *  counts in to again. */
+  rememberCountInLandingIfPreRoll(): void {
+    // The clock read is already generation-checked (positionNow returns null
+    // for a stranger). A native build without the synchronous read cannot
+    // tell: its polled position is the shown, landing-shifted one and never
+    // negative, so a pause inside the count-in restarts from the top there.
+    if (this.recoverySnapshot !== null || this.countInLandingFrame <= 0) return;
+    const now = this.coordinator.positionNow(this);
+    const frame = now === null
+      ? Math.round(this.state.renderedPositionSec * this.sampleRate())
+      : now.renderedProjectFrame;
+    if (frame < 0 || (now !== null && now.transportState === 'pre-roll'))
+      this.rememberRetryProjectFrame(this.countInLandingFrame, this.sampleRate());
+  }
+
+  /** Before a stop that blanks the region: a loop shown on screen with no
+   *  recovery snapshot to carry it (the song parked at its end) is kept as
+   *  the loop Play prepares with, and a song parked at its end restarts at
+   *  the loop's start — legacy restarts a looped song at A, not at the top. */
+  rememberShownLoopBeforeStop(): void {
+    if (this.recoverySnapshot !== null) return;
+    const region = this.state.regionState;
+    if (!region || !region.loop) return;
+    const sampleRate = this.sampleRate();
+    const loop = {
+      startProjectFrame: Math.round(region.start * sampleRate),
+      endProjectFrame: Math.round(region.end * sampleRate),
+    };
+    this.pendingPreparedLoop = loop;
+    if (this.parkedAtEndOfSong() && this.retryProjectSeconds === null)
+      this.rememberRetryProjectFrame(loop.startProjectFrame, sampleRate);
   }
 
   /** The region the screen shows for a loop remembered before Play — null

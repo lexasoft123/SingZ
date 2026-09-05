@@ -882,11 +882,12 @@ describe.each(['ios', 'android'] as const)(
       );
       expect(h.prepareRequests[1]).toMatchObject({
         handoffLease: 41,
-        // An explicit structural start resumes at the discontinuity and tells
-        // the native cue planner not to replay the configured count-in.
-        preparedStartProjectFrame: 24_000,
+        // Play after the interruption counts in again from where the song
+        // stopped, as legacy does on every Play: the ordinary start with the
+        // paused spot as the count-in's anchor, not a flat structural start
+        // (decided 2026-09-05, with Play after a pause).
         playback: {
-          transport: { playbackRate: 0.9, transposeSemitones: 2 },
+          transport: { playbackRate: 0.9, transposeSemitones: 2, countInAnchorSeconds: 0.5 },
           cues: { countInBars: 1 },
         },
         masterGain: 0.55,
@@ -907,6 +908,7 @@ describe.each(['ios', 'android'] as const)(
           },
         },
       });
+      expect(h.prepareRequests[1]).not.toHaveProperty('preparedStartProjectFrame');
       expect(h.native.start).toHaveBeenCalledTimes(2);
       expect(h.legacyLoad).not.toHaveBeenCalled();
       await handle.stop('route recovery test cleanup');
@@ -2954,6 +2956,84 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('count-in bar test complete');
   });
 
+  it('Play after a pause counts in from the paused spot when the count-in is on, and resumes in place when it is off', async () => {
+    // Legacy counts in on every Play, a resume included (decided 2026-09-05).
+    for (const countInBars of [1, 0]) {
+      const h = harness({ swapCapable: true, syncClock: true });
+      const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars } }));
+      const handle = project.nativePlayback!;
+      await handle.start();
+      await handle.pause();
+      expect(handle.snapshot().phase).toBe('paused');
+      // The read that remembers where the singer stopped, then the lifecycle
+      // of the restart: proof of the park, the new prepare, the start.
+      h.native.status
+        .mockResolvedValueOnce(swapCapability(1, 'running', 72_000, { transportState: 'paused', renderedProjectFrame: 72_000 }))
+        .mockResolvedValueOnce(capability(1, 'unloaded'))
+        .mockResolvedValueOnce(capability(2, 'prepared'))
+        .mockResolvedValueOnce(capability(2, 'running', 72_000));
+      const mark = h.calls.length;
+      await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+      const since = h.calls.slice(mark);
+      if (countInBars > 0) {
+        expect(since).toEqual([
+          'native.stop:1',
+          'native.unloadRetainingLanes:1',
+          'native.prepare:2',
+          'legacy.unload',
+          'legacy.suspend',
+          'native.configure:2',
+          'native.open:2',
+          'native.start:2',
+        ]);
+        expect(h.prepareRequests[1]).toMatchObject({
+          playback: { transport: { countInAnchorSeconds: 1.5 } },
+          initialTransport: { state: 'playing' },
+        });
+        expect(h.prepareRequests[1]).not.toHaveProperty('preparedStartProjectFrame');
+        expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+      } else {
+        expect(since.some(call => /resume/.test(call))).toBe(true);
+        expect(since.some(call => call.startsWith('native.prepare:'))).toBe(false);
+        expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 1 });
+      }
+      await handle.stop('play after pause test complete');
+    }
+  });
+
+  it('paused inside its own mid-song count-in, Play counts in again to the same landing', async () => {
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
+    const handle = project.nativePlayback!;
+    await handle.seek(1.5);
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 72_000));
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    // Half a second into the pre-roll, the singer pauses.
+    h.setPositionNow({
+      generation: 2,
+      transportState: 'pre-roll',
+      renderedProjectFrame: -24_000,
+      continuousFrame: 24_000,
+      remainingPreRollFrames: 24_000,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    await handle.pause();
+    // No positive frame for a snapshot: the read reports the pre-roll frame.
+    h.native.status
+      .mockResolvedValueOnce(swapCapability(2, 'running', 0, { transportState: 'paused', renderedProjectFrame: -24_000 }))
+      .mockResolvedValueOnce(capability(2, 'unloaded'))
+      .mockResolvedValueOnce(capability(3, 'prepared'))
+      .mockResolvedValueOnce(capability(3, 'running', 72_000));
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    expect(h.prepareRequests[2]).toMatchObject({ playback: { transport: { countInAnchorSeconds: 1.5 } } });
+    expect(h.prepareRequests[2]).not.toHaveProperty('preparedStartProjectFrame');
+    await handle.stop('pause inside count-in test complete');
+  });
+
   it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {
     // The generation moved; nothing the singer sees did.
     const h = harness({ swapCapable: true, syncClock: true });
@@ -4424,12 +4504,19 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
       if (command.kind === 'seek') advancing = true;
       return result(next, 'running');
     });
+    // Wrap the harness's lifecycle: with the count-in on (two bars above),
+    // Play at the end is a restart — stop, park, prepare from the top with
+    // the count-in, start — and the reads after it must follow the new
+    // generation, not keep answering for the parked one.
+    const lifecycle = h.native.status.getMockImplementation()!;
     h.native.status.mockImplementation(async () => {
-      const base = capability(rebuilt, 'running', advancing ? 0 : 96_000, 'ios');
+      const base = await lifecycle();
+      if (base.session.generation !== rebuilt) return base;
+      const parked = capability(rebuilt, 'running', advancing ? 0 : 96_000, 'ios');
       return {
-        ...base,
+        ...parked,
         session: {
-          ...base.session,
+          ...parked.session,
           transportState: 'paused',
           seekCount: advancing ? 1 : 0,
         },
@@ -4440,10 +4527,24 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
 
     await expect(handle.start()).resolves.toMatchObject({ kind: 'started' });
 
+    // Legacy counts in on every Play, a Play at the end included: the song
+    // restarts from the top through the count-in, not through a bare seek
+    // and resume that skipped it.
     expect(h.calls).toEqual([
-      `native.transport:${rebuilt}:seek`,
-      `native.transport:${rebuilt}:resume`,
+      `native.stop:${rebuilt}`,
+      `native.unloadRetainingLanes:${rebuilt}`,
+      `native.prepare:${rebuilt + 1}`,
+      'legacy.unload',
+      'legacy.suspend',
+      `native.configure:${rebuilt + 1}`,
+      `native.open:${rebuilt + 1}`,
+      `native.start:${rebuilt + 1}`,
     ]);
+    const request = h.prepareRequests.at(-1) as { playback: { transport: { countInAnchorSeconds?: number }; cues: { countInBars: number } } };
+    expect(request).not.toHaveProperty('preparedStartProjectFrame');
+    expect(request.playback.transport).not.toHaveProperty('countInAnchorSeconds');
+    expect(request.playback.cues.countInBars).toBe(2);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: rebuilt + 1 });
   });
 
   it('a rebuild taken at the end restores a parked graph, not a dormant one', async () => {
@@ -4686,6 +4787,35 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it('Play at the end of a looped region with the count-in on counts in to A with the loop declared', async () => {
+    // Count-in on: the restart is a park and an anchored prepare; the loop
+    // the screen shows must travel with it (the stop blanks the region), and
+    // the count-in anchors at A, not at the top.
+    const h = harness();
+    // Click off: a click with no beat grid is not a native cue plan, and
+    // this entry carries none; the count-in is the gridless one.
+    const project = await h.load(entry({ metronome: { click: false, countInBars: 1, volume: 0.5, accent: true } }));
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    await handle.start();
+    const generation = handle.snapshot().generation;
+    reportCompleted(h, generation, { loop: { start: 24_000, end: 96_000 } });
+    await h.coordinator.pollHandle(handle as never);
+    expect(handle.snapshot().regionState).toMatchObject({ loop: true });
+    h.calls.length = 0;
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    expect(h.calls.slice(0, 3)).toEqual([
+      `native.stop:${generation}`,
+      `native.unloadRetainingLanes:${generation}`,
+      `native.prepare:${generation + 1}`,
+    ]);
+    expect(h.prepareRequests.at(-1)).toMatchObject({
+      playback: { transport: { countInAnchorSeconds: 0.5 } },
+      initialTransport: { state: 'playing', loop: { startProjectFrame: 24_000, endProjectFrame: 96_000 } },
+    });
+    expect(h.prepareRequests.at(-1)).not.toHaveProperty('preparedStartProjectFrame');
   });
 
   it('Play at the end of a looped region restarts at the region, not the top', async () => {
