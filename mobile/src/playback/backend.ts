@@ -520,18 +520,44 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   seek(seconds: number): void {
     if (!this.capabilities.seek) return this.unsupported('seek')
     const target = Math.max(0, Math.min(this.duration, seconds))
-    this.serialize(() => this.handle.seek(target)).catch(() => undefined)
+    this.dispatchSeek(() => this.handle.seek(target))
   }
 
   seekBy(seconds: number): void {
     if (!this.capabilities.seek) return this.unsupported('seek')
+    // Queued, never ahead of it: a relative seek reads the render head, and
+    // only after all earlier transport commands have settled does that read
+    // mean what the singer meant — seek(2); seekBy(1) ahead of the queue
+    // observes the pre-seek position on a build whose clock carries no seek
+    // overlay (no positionNow), and queues an absolute seek to 1 instead
+    // of 3. A skip tap waiting a seam out costs nothing a scrub does.
     this.serialize(() => {
-      // Read the render head only after all earlier transport commands have
-      // settled. Otherwise seek(2); seekBy(1) observes the pre-seek position
-      // and incorrectly queues an absolute seek to 1 instead of 3.
       const target = Math.max(0, Math.min(this.duration, this.audioPosition + seconds))
       return this.handle.seek(target)
     }).catch(() => undefined)
+  }
+
+  /** An absolute seek does not wait behind a seam. The cue rebuild sits in
+   *  the transport queue, and a scrub issued while one was in flight used to
+   *  sit behind it — behind the wait for the PREVIOUS seam to land, the
+   *  prepare and the arm read — before the handle so much as recorded the
+   *  target: 568 ms for the first seek after three metronome touches on the
+   *  simulator, against 25–35 ms for the next three. A seam refuses no seek
+   *  (the core carries one across the landing), so while the handle swaps in
+   *  place the seek goes straight to it: the handle records the target and
+   *  its clock reads it at once, and the command itself still takes its
+   *  turn behind the coordinator's ownership lock if a rebuild holds it.
+   *  Refused all the same — the seam turned into the six-call rebuild
+   *  underneath — and it takes the place in the queue it always had, after
+   *  the rebuild. Relative seeks stay queued (see seekBy). */
+  private dispatchSeek(operation: () => Promise<void>): void {
+    if (!this.handle.swapsInPlace()) {
+      this.serialize(operation).catch(() => undefined)
+      return
+    }
+    operation().catch(() => {
+      this.serialize(operation).catch(() => undefined)
+    })
   }
 
   setRegion(

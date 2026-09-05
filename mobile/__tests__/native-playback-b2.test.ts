@@ -2588,6 +2588,47 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('playing seek notification test complete');
   });
 
+  it('a seek issued against the outgoing generation keeps its clock overlay through the claim', async () => {
+    // The wrapper hands a scrub straight to the handle while a seam is in
+    // flight; the rebuild then claims the new generation. The intent named
+    // the outgoing one, and dropping it there read as target, pull-back,
+    // jump. The core's seek count crosses the seam, so the intent does too.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(
+      swapCapability(1, 'running', 48_000, { transportState: 'playing', renderedProjectFrame: 48_000 }).session,
+    );
+    const live = {
+      generation: 1,
+      transportState: 'playing',
+      renderedProjectFrame: 48_000,
+      continuousFrame: 48_000,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    };
+    h.setPositionNow(live);
+    // Inside the harness's two-second song: the clock clamps to its end.
+    await handle.seek(1.5);
+    // The receipt has not moved: the clock reads the target.
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
+    const claimable = handle as unknown as {
+      output: unknown;
+      beginSwapPrepare: (generation: number, output: unknown, outgoing: number) => void;
+      abandonSwapPrepare: () => void;
+    };
+    claimable.beginSwapPrepare(2, claimable.output, 1);
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
+    claimable.abandonSwapPrepare();
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
+    // The receipt moves: the clock reads the core again.
+    h.setPositionNow({ ...live, renderedProjectFrame: 72_000, seekCount: 1 });
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
+    await handle.stop('intent across claim test complete');
+  });
+
   it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {
     // The generation moved; nothing the singer sees did.
     const h = harness({ swapCapable: true, syncClock: true });

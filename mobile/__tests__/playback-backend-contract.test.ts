@@ -402,6 +402,40 @@ describe('what the transport offers during a cue rebuild', () => {
     expect(h.backend.reconfiguring).toBe(false)
   })
 
+  it('a seek does not wait behind a seam on the running stream', async () => {
+    // The cue rebuild sits in the transport queue; a scrub issued while one
+    // is in flight used to sit behind it — the wait for the previous seam to
+    // land, the prepare, the arm read — before the handle recorded the
+    // target (568 ms for the first seek after three touches on the
+    // simulator, 25–35 ms for the next three). A seam refuses no seek, so
+    // the handle gets it at once.
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    h.setSwapsInPlace(true)
+    h.backend.setMetronome({ click: true, countInBars: 1, volume: 0.5, accent: true })
+    h.backend.seek(3)
+    // Synchronously — before the queued rebuild has had a microtask.
+    expect(h.handle.seek).toHaveBeenCalledWith(3)
+    await flushTransportQueue()
+    await flushTransportQueue()
+    expect(h.handle.seek).toHaveBeenCalledTimes(1)
+  })
+
+  it('a seek the core refuses mid-seam takes its old place in the queue', async () => {
+    // The seam turned into the six-call rebuild underneath: the refused
+    // seek is re-issued after the rebuild, where it always used to run.
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    h.setSwapsInPlace(true)
+    ;(h.handle.seek as jest.Mock).mockRejectedValueOnce(new Error('invalid-state'))
+    h.backend.seek(4)
+    expect(h.handle.seek).toHaveBeenCalledTimes(1)
+    await flushTransportQueue()
+    await flushTransportQueue()
+    expect(h.handle.seek).toHaveBeenCalledTimes(2)
+    expect((h.handle.seek as jest.Mock).mock.calls.map(c => c[0])).toEqual([4, 4])
+  })
+
   it('takes the scrub rail away, because the core will refuse it', async () => {
     const h = nativeHarness()
     h.backend.attach(h.project)

@@ -4802,6 +4802,14 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   ): void {
     this.swappingFromGeneration = outgoing;
     this.generation = generation;
+    // A seek issued against the outgoing generation is this song's all the
+    // same, and the core's receipt counter crosses the seam with it (the
+    // landing copies the outgoing generation's seek count): the clock keeps
+    // reading the target through the prepare instead of snapping back to
+    // the live frame — target, pull-back, jump was what a scrub during a
+    // seam looked like otherwise.
+    if (this.seekIntent !== null && this.seekIntent.generation === outgoing)
+      this.seekIntent = { ...this.seekIntent, generation };
     this.output = output;
     this.cleanupGeneration = 0;
     this.cleanupLease = 0;
@@ -4816,7 +4824,10 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  generation is still the song, and the handle says so again. */
   abandonSwapPrepare(): void {
     if (this.swappingFromGeneration === 0) return;
+    const abandoned = this.generation;
     this.generation = this.swappingFromGeneration;
+    if (this.seekIntent !== null && this.seekIntent.generation === abandoned)
+      this.seekIntent = { ...this.seekIntent, generation: this.generation };
     this.swappingFromGeneration = 0;
     this.update({ generation: this.generation });
   }
