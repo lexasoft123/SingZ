@@ -632,6 +632,23 @@ emulator PASS ×3 after the fixes (emulator landing 45.56 against a 45.55 bar, w
 against 45.59; the last emulator run's final pre-roll sample was raw frame −248, the
 crossing case, showing 39.84 where it showed 0). The driver is in the e2e-verifier roster.
 
+**The desktop has the same harness now (`tests/e2e/mac/player-session-e2e.cjs`,
+2026-09-05):** the phones' script and rule table replayed on the built app, Web Audio
+then the native CoreAudio graph, one invocation. Its first native pass found a rebuild
+race — the click and the count-in toggled back to back re-prepared the song PAUSED,
+because the second rebuild read the first's freshly prepared generation as 'stopped'
+(start acknowledged, not yet reported) and took that for a pause; the facade restores
+the intended transport state now (`transportIntent`), pinned in
+desktop-native-playback.test.ts. What it measures on this Mac after that, 17-20/28 over
+three runs: parity
+on open → ready, faders, metronome save, pause, resume, back, second song, restart and
+reopen; the reds are the desktop native path's own shape and are the desktop's Step 4 —
+the graph is prepared lazily at Play (+690 ms over legacy), a seek is an IPC round trip
+plus a status refresh (72 vs 11 ms), training on is an 840 ms rebuild where the phones
+seam, the metronome VOLUME is structural (a rebuild per touch, where the phones treat it
+as a scalar), and playing costs +130 MB because the renderer keeps its Web Audio buffers
+beside the core's lanes. Backgrounding is n/a on the desktop.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so

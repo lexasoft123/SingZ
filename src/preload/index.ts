@@ -193,6 +193,8 @@ const api: SingzApi = {
 
   getLog: () => ipcRenderer.invoke('log:all'),
 
+  e2eHooks: process.env.SINGZ_E2E_HOOKS === '1',
+
   saveLog: (path) => ipcRenderer.invoke('log:save', path),
 
   onLogLine: (cb) => {

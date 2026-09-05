@@ -508,6 +508,94 @@ describe('desktop native playback facade', () => {
     expect(restore).toHaveBeenCalledTimes(1)
   })
 
+  it('a second rebuild queued behind the first restores the intended transport, not the snapshot', async () => {
+    // Measured on the desktop player-session run (2026-09-05): the click and
+    // the count-in toggled within one popover visit are two structural
+    // rebuilds back to back. The second read the status of the generation the
+    // first had prepared 80 ms earlier — start acknowledged, transport not yet
+    // reported running — took 'stopped' for a pause, and re-prepared the song
+    // paused. The music stopped and Play had to be pressed again.
+    let generation = '1'
+    let nextGeneration = 0
+    const prepared: DesktopPlaybackPrepareConfig[] = []
+    const api = {
+      desktopPlaybackProviders: vi.fn(async () => [{
+        id: 'coreaudio', label: 'CoreAudio', available: true, errorCode: 'none', detail: ''
+      }]),
+      audioHostDevices: vi.fn(async () => ({
+        ok: true, platform: 'darwin', provider: 'coreaudio', defaultInputUid: '',
+        defaultOutputUid: 'speaker', error: '',
+        devices: [{
+          uid: 'speaker', label: 'Speaker', defaultInput: false, defaultOutput: true,
+          inputChannels: 0, outputChannels: 2, inputChannelLabels: [],
+          outputChannelLabels: ['L', 'R'], nominalSampleRate: 48_000,
+          direction: 'output', accessMode: 'shared', transport: 'built-in',
+          monitoringSuitability: 'low-latency',
+          sampleRateRanges: [{ minimumHz: 48_000, maximumHz: 48_000 }],
+          bufferFrames: { minimumFrames: 32, maximumFrames: 512, preferredFrames: 128, fundamentalFrames: 1 }
+        }]
+      })),
+      prepareDesktopPlayback: vi.fn(async (config: DesktopPlaybackPrepareConfig) => {
+        generation = String(++nextGeneration)
+        prepared.push(config)
+        return result(generation)
+      }),
+      openDesktopPlayback: vi.fn(async (value: string) => result(value, 'output-open')),
+      startDesktopPlayback: vi.fn(async (value: string) => result(value, 'running')),
+      stopDesktopPlayback: vi.fn(async (value: string) => result(value, 'stopped')),
+      // Every status after the first generation reads the transport as
+      // freshly prepared and not yet running — what the core reports in the
+      // window between the start acknowledgement and the render thread's
+      // first report.
+      desktopPlaybackStatus: vi.fn(async () => ({
+        ...status(generation, '48000'),
+        transportState: generation === '1' ? 'playing' : 'stopped'
+      })),
+      pauseDesktopPlayback: vi.fn(async (value: string) => result(value, 'running')),
+      unloadDesktopPlayback: vi.fn(async (value: string) => result(value, 'unloaded', true)),
+      setDesktopPlaybackLane: vi.fn(async (value: string) => result(value, 'running')),
+      setDesktopPlaybackMasterGain: vi.fn(async (value: string) => result(value, 'running'))
+    } as unknown as SingzApi
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient(
+      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
+      () => undefined
+    )
+    const metronome = { click: false, countInBars: 0, volume: 0, accent: true, grid: false }
+    expect(await client.prepareAndStart({
+      provider: 'coreaudio',
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: { beats: [0, 0.5, 1, 1.5], bpm: 120, beatsPerBar: 4, downbeat: 0, downbeats: [0], source: 'auto' },
+      metronome,
+      // Play's count-in permission travels in the request: with it off the
+      // count-in toggle changes no cue and is no rebuild at all.
+      countIn: true,
+      positionSeconds: 0,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    })).toBe(true)
+    // The click, then the count-in, as fast as a thumb: two rebuilds, the
+    // second queued behind the first.
+    await Promise.all([
+      client.reconfigure({ metronome: { ...metronome, click: true } }),
+      client.reconfigure({ metronome: { ...metronome, click: true, countInBars: 1 } })
+    ])
+    expect(prepared).toHaveLength(3)
+    expect(prepared[1].initialTransport).toMatchObject({ state: 'playing' })
+    expect(prepared[2].initialTransport).toMatchObject({ state: 'playing' })
+    // And a rebuild after a real pause restores the pause.
+    await client.pause()
+    await client.reconfigure({ metronome: { ...metronome, click: true, countInBars: 2 } })
+    expect(prepared[3].initialTransport).toMatchObject({ state: 'paused' })
+    await client.unload()
+  })
+
   it.each(['prepare', 'open'] as const)(
     'binds explicit ASIO to exclusive output and never starts or restores legacy on %s failure',
     async (failureStage) => {

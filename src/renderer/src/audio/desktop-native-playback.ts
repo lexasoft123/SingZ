@@ -356,6 +356,15 @@ export class DesktopNativePlaybackClient {
   private recoveryProvider: DesktopPlaybackProvider | null = null
   private recoveryKind: DesktopNativeRecoveryKind | null = null
   private started = false
+  /** What the singer asked the transport to be doing — 'playing' after a
+   * start or resume, 'paused' after a pause or the song running out. A
+   * structural rebuild restores THIS, never a status snapshot: the snapshot
+   * of a generation prepared 80 ms earlier still reads its transport as
+   * stopped (the start is acknowledged, the render thread has not reported
+   * it yet), and a second rebuild queued behind the first read exactly that
+   * and re-prepared the song paused — the click and the count-in toggled
+   * within one popover visit stopped the music. */
+  private transportIntent: 'playing' | 'paused' = 'paused'
   private last: DesktopPlaybackStatus | null = null
   private poller: ReturnType<typeof setTimeout> | null = null
   private pollingEpoch = 0
@@ -639,6 +648,7 @@ export class DesktopNativePlaybackClient {
       ensure(await window.singz.startDesktopPlayback(generation), 'Native playback start failed')
       started = true
       this.started = true
+      this.transportIntent = initialTransport?.state === 'paused' ? 'paused' : 'playing'
       await this.refresh(generation)
       this.startPolling()
       return true
@@ -728,8 +738,11 @@ export class DesktopNativePlaybackClient {
         status.renderedProjectFrame,
         'Native rendered project frame'
       )
-      const state = status.transportState === 'paused' || status.transportState === 'completed' ||
-        status.transportState === 'stopped' ? 'paused' : 'playing'
+      // The intent, not the snapshot (see transportIntent). A song that ran
+      // out is parked whatever was intended: the core says so itself.
+      const state = this.transportIntent === 'playing' && status.transportState !== 'completed'
+        ? 'playing'
+        : 'paused'
       const loop = request.loop
         ? {
             startProjectFrame: Math.round(request.loop.start * this.route.sampleRate),
@@ -770,6 +783,7 @@ export class DesktopNativePlaybackClient {
         return
       }
       ensure(await window.singz.pauseDesktopPlayback(this.generation), 'Native pause failed')
+      this.transportIntent = 'paused'
       await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
     })
   }
@@ -782,6 +796,7 @@ export class DesktopNativePlaybackClient {
         return
       }
       ensure(await window.singz.resumeDesktopPlayback(this.generation), 'Native resume failed')
+      this.transportIntent = 'playing'
       await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
     })
   }

@@ -67,11 +67,14 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (ten of them: align, wizard/consent, audio settings,
+in `tests/e2e/mac/` (eleven of them: align, wizard/consent, audio settings,
 bar editing — TWO of those, because dragging a line and pressing Re-detect
 are different code paths and only the drag was covered — and the
 analysis-rule drivers: the two stem-rate ones, the two song-switch races,
-and stamp-upgrade; the `e2e-verifier` agent in
+and stamp-upgrade — and `player-session-e2e.cjs`, the desktop's
+native-vs-legacy session replay judged by the phone harness's rules, which needs the
+DSP-graph addon built for the tree and zeroes the master gain itself because the native
+CoreAudio path bypasses Chromium's mute; the `e2e-verifier` agent in
 `.claude/agents/` holds the roster of record, and a new driver is not
 finished until it is listed there — launch one instance per platform in
 parallel for cross-platform verification) — vitest unit tests in

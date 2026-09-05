@@ -395,6 +395,13 @@ export class MultitrackEngine {
     this.requestedPlaybackError = null
   }
 
+  /** Which backend is rendering right now: true while a native desktop
+   *  generation is active, false on Web Audio. Read by the E2E hook so a
+   *  driver can prove which backend a pass actually measured. */
+  get nativeActive(): boolean {
+    return this.nativePlayback?.active === true
+  }
+
   get playing(): boolean {
     if (this.nativePlayback?.active) return this._playing && this.nativePlayback.transportActive
     return this._playing

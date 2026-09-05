@@ -1061,6 +1061,11 @@ export type DesktopAudioInputStartResult =
     }
 
 export interface SingzApi {
+  /** True only when main was launched with SINGZ_E2E_HOOKS=1: the renderer
+   * then publishes `window.__test` (engine, transport, metronome, training,
+   * open/back) for the desktop player-session driver. Never set in a
+   * shipped build; the app behaves identically either way. */
+  e2eHooks: boolean
   /** Windows splitting engine preference (backed by the dml-disabled marker). */
   getSplitterMode(): Promise<{ mode: 'auto' | 'cpu'; reason?: string }>
   setSplitterMode(mode: 'auto' | 'cpu'): Promise<{ ok: boolean; error?: string }>

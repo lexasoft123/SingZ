@@ -3097,6 +3097,36 @@ export default function App(): React.JSX.Element {
     switchSection('songs')
   }, [engine, song, switchSection])
 
+  // The desktop player-session driver's door (tests/e2e/mac/player-session-
+  // e2e.cjs): the same session replayed on Web Audio and on the native graph,
+  // judged by the phone harness's rules. Published ONLY when main was
+  // launched with SINGZ_E2E_HOOKS=1 — the phone's `__test` is the model. It
+  // hands out the live objects and the same setters the UI uses, so a
+  // measurement goes through the app's own state, not around it.
+  useEffect(() => {
+    if (!window.singz.e2eHooks) return
+    ;(window as { __test?: unknown }).__test = {
+      engine,
+      phase,
+      showCatalog,
+      tracks,
+      met: metCfg,
+      training,
+      trainCfg,
+      transpose,
+      loadPath,
+      setMetCfg,
+      setTraining,
+      setTrainCfg,
+      setShowCatalog,
+      setTranspose: (st: number) => {
+        setTranspose(st)
+        void engine.setTranspose(st)
+      },
+      log: () => window.singz.getLog()
+    }
+  }, [engine, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath])
+
   return (
     <div className="app">
       <header className="titlebar">
