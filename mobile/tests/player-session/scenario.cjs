@@ -593,9 +593,15 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   ]
   const metMs = []
   for (const t of touches) {
+    /* 10 ms samples, not the 30 ms the other windows use: this rule's budget
+       is legacy + 50 ms, and a 30 ms quantum against it is 1.7 ticks of
+       headroom — the seam arms in 3–10 ms (the app's own "armed in" line)
+       and the number still read 97 / 124 / 159 against legacy's 92 / 95 /
+       99, one and two ticks apart, with the difference in when the tick
+       fell. Both backends are sampled the same way. */
     const r = await watch(dev, {
       ms: 15000,
-      every: 30,
+      every: 10,
       action: `__test.changeMet(${t.patch});`,
       extra: t.read,
       cond: t.cond

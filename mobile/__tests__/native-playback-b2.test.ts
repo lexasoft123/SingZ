@@ -2558,6 +2558,66 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     }
   });
 
+  it('under the clock, a seek while playing does not tell the screen — it reads the clock', async () => {
+    // A playing screen reads the position off the clock every frame; the
+    // notification is a full re-render on top, and under the inspector it
+    // was the 391 ms first seek. Paused, the screen is told (next test).
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(
+      swapCapability(1, 'running', 48_000, { transportState: 'playing', renderedProjectFrame: 48_000 }).session,
+    );
+    h.setPositionNow({
+      generation: 1,
+      transportState: 'playing',
+      renderedProjectFrame: 48_000,
+      continuousFrame: 48_000,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    let notifications = 0;
+    const unsubscribe = handle.subscribe(() => notifications++);
+    await handle.seek(10);
+    expect(notifications).toBe(0);
+    // The snapshot still adopted the target for whoever reads it.
+    expect(handle.snapshot().positionSec).toBeCloseTo(10, 3);
+    unsubscribe();
+    await handle.stop('playing seek notification test complete');
+  });
+
+  it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {
+    // The generation moved; nothing the singer sees did.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(
+      swapCapability(1, 'running', 48_000, { transportState: 'playing', renderedProjectFrame: 48_000 }).session,
+    );
+    h.setPositionNow({
+      generation: 1,
+      transportState: 'playing',
+      renderedProjectFrame: 48_000,
+      continuousFrame: 48_000,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    h.native.status.mockResolvedValueOnce(
+      swapCapability(2, 'running', 48_400, { transportState: 'playing', swapLandings: 1, renderedProjectFrame: 48_400 }),
+    );
+    let notifications = 0;
+    const unsubscribe = handle.subscribe(() => notifications++);
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    expect(notifications).toBe(0);
+    unsubscribe();
+    await handle.stop('quiet seam test complete');
+  });
+
   it('a seek while paused still tells the screen, clock or no clock', async () => {
     // A paused player re-reads the position only when notified; the seek's
     // own update is position-only, which the clock-driven dedupe would

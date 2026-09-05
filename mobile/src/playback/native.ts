@@ -5286,6 +5286,10 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     const clockDriven = this.coordinator.syncClock;
     for (const key of Object.keys(patch) as (keyof NativePlaybackViewState)[]) {
       if (key === 'telemetryAtMs') continue;
+      // The generation is the facade's bookkeeping, not a thing the screen
+      // shows: a landed seam that changed nothing visible used to notify on
+      // it alone, one more full re-render per metronome touch.
+      if (key === 'generation') continue;
       if (
         clockDriven &&
         (key === 'positionSec' ||
@@ -5415,17 +5419,23 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     // synchronous clock and for everything that reads the snapshot rather
     // than the clock; telemetry corrects it within one period.
     const positionSec = projectFrame / this.sampleRate();
-    // Forced: under the clock these keys are quiet in a poll, but a seek is
-    // the singer moving the song, and a PAUSED screen re-reads the position
-    // only when told — without this the bar snapped back after a scrub and
-    // the lyric highlight stayed put until the next Play.
+    // Forced when the screen would not see it by itself: under the clock
+    // these keys are quiet in a poll because a PLAYING screen reads the
+    // position off the clock every frame — and a notification here is a
+    // full re-render of the player on top of that, which under the
+    // inspector's per-component task wrapper measured 330 ms on the first
+    // seek after a metronome touch (the seek read back at 391 ms against
+    // legacy's 61). A PAUSED screen re-reads the position only when told —
+    // without the force the bar snapped back after a scrub and the lyric
+    // highlight stayed put until the next Play — and a build without the
+    // clock reads the snapshot for everything.
     this.update(
       {
         positionSec,
         renderedPositionSec: positionSec,
         telemetryAtMs: Date.now(),
       },
-      { force: true },
+      { force: !this.coordinator.syncClock || this.state.phase !== 'playing' },
     );
   }
 

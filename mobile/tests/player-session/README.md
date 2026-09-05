@@ -151,7 +151,7 @@ its own latency inside every number.
 | metronome touches → advancing again | after the three touches and the count-in restore, how long until the transport moves again. A metronome touch is a **cue rebuild** under the native graph, and the transport is not Running while it is in flight |
 | seek → position reads target | worst of four seeks: from wanting to seek to the transport reading within \[t−0.5, t+1.5\]. The seek is issued the moment `capabilities.seek` goes true — the screen greys the scrub rail out while a structural graph swap owns the transport, so a driver that seeks through that window measures something no singer can do, and the wait is inside the number because it is inside the singer's second |
 | lane ramp → applied | worst of three: `setVolume`/`setMuted` → `getTrackStates()` agrees |
-| metronome save → accepted | worst of three: `__test.changeMet(…)` (the SCREEN's handler, the one that persists) → `__test.met` shows it. A save that throws is the field bug this exists for |
+| metronome save → accepted | worst of three: `__test.changeMet(…)` (the SCREEN's handler, the one that persists) → `__test.met` shows it, sampled in-app at 10 ms (the other windows sample at 30, which against this rule's 50 ms budget is 1.7 ticks of headroom: the seam arms in 3–10 ms and the rule still flipped on which tick the save landed in). A save that throws is the field bug this exists for |
 | pitch +2 → advancing again | the **longest stall** in the 16 s after the transpose: the silence the singer hears. **Not compared** — see below |
 | training on → advancing again | the longest stall in the 12 s after arming |
 | pause → stopped | `pause()` → `playing === false` |
