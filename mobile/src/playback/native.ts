@@ -743,6 +743,32 @@ const nativeModule = (): NativePlaybackApi | undefined =>
       | undefined,
   );
 
+/** Field equality for the view state: the two object-valued fields
+ *  (region, count-in) are rebuilt on every publish, so they compare by
+ *  value; everything else by identity. */
+const sameViewField = (a: unknown, b: unknown): boolean => {
+  if (Object.is(a, b)) return true;
+  if (
+    a === null ||
+    b === null ||
+    typeof a !== 'object' ||
+    typeof b !== 'object'
+  )
+    return false;
+  const ka = Object.keys(a as Record<string, unknown>);
+  const kb = Object.keys(b as Record<string, unknown>);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka)
+    if (
+      !Object.is(
+        (a as Record<string, unknown>)[k],
+        (b as Record<string, unknown>)[k],
+      )
+    )
+      return false;
+  return true;
+};
+
 /** Wrap whatever native module is installed into the typed facade, or nothing
  *  if it lacks the methods native playback cannot do without. Exported so a
  *  test can hand it a bridge shaped like an older build. */
@@ -2458,6 +2484,27 @@ export class IosNativePlaybackCoordinator {
       rebuildStartedAt: number;
     },
   ): Promise<boolean> {
+    // One notification for the whole swap — see holdNotifications.
+    const release = handle.holdNotifications();
+    try {
+      return await this.swapHandleGenerationHeld(handle, context);
+    } finally {
+      release();
+    }
+  }
+
+  private async swapHandleGenerationHeld(
+    handle: IosNativePlaybackHandle,
+    context: {
+      oldGeneration: number;
+      status: NativePlaybackCapability;
+      session: NativePlaybackSessionStatus;
+      restoreTransport: 'playing' | 'paused';
+      restoreLoop: { startProjectFrame: number; endProjectFrame: number } | null;
+      statusSampleRate: number;
+      rebuildStartedAt: number;
+    },
+  ): Promise<boolean> {
     const native = this.deps.native;
     if (!native) return false;
     const {
@@ -4142,6 +4189,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  0. Generation-bound so a rebuild or a new song never inherits a hold. */
   streamHeldGeneration = 0;
   private listeners = new Set<() => void>();
+  private notifyHold = 0;
+  private notifyPending = false;
   private state: NativePlaybackViewState = {
     phase: 'prepared',
     generation: 0,
@@ -5058,9 +5107,49 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     return () => this.listeners.delete(listener);
   }
 
+  /** Listeners are told only when something they can see changed. A poll
+   *  that finds a paused transport where it left it writes its timestamp
+   *  (the projection's staleness clock) and nothing else — and used to
+   *  re-render the whole player screen for it every two seconds; in a
+   *  development build under an attached inspector, where React captures an
+   *  owner stack per component, that render is tens of milliseconds. */
   update(patch: Partial<NativePlaybackViewState>): void {
+    let changed = false;
+    for (const key of Object.keys(patch) as (keyof NativePlaybackViewState)[]) {
+      if (key === 'telemetryAtMs') continue;
+      if (!sameViewField(this.state[key], patch[key])) {
+        changed = true;
+        break;
+      }
+    }
     this.state = { ...this.state, ...patch };
+    if (!changed) return;
+    if (this.notifyHold > 0) {
+      this.notifyPending = true;
+      return;
+    }
     for (const listener of this.listeners) listener();
+  }
+
+  /** Hold every notification until the returned release runs, then send
+   *  one if anything changed meanwhile. A swap moves the handle through
+   *  claim, adoption, phase and telemetry across its awaits — four
+   *  notifications, four full re-renders of the player, for a change the
+   *  singer never sees as more than one. Measured on the iOS simulator: the
+   *  seek issued right after a metronome touch read back 445 ms late while
+   *  the JS thread rendered under the inspector's owner-stack capture. */
+  holdNotifications(): () => void {
+    this.notifyHold++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.notifyHold--;
+      if (this.notifyHold === 0 && this.notifyPending) {
+        this.notifyPending = false;
+        for (const listener of this.listeners) listener();
+      }
+    };
   }
 
   fail(error: string): void {

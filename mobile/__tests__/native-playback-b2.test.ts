@@ -2339,6 +2339,62 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('seam test complete');
   });
 
+  it('tells the screen about a swap once, not once per step', async () => {
+    // Claim, adoption, phase, telemetry: four notifications for one change
+    // the singer sees as one, each a full re-render of the player — under
+    // the inspector's owner-stack capture, the 445 ms the first seek after a
+    // metronome touch read back late on the simulator.
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const old = swapCapability(1, 'running', 48_000, {
+      transportState: 'playing',
+      renderedProjectFrame: 48_000,
+    });
+    const landed = swapCapability(2, 'running', 48_400, {
+      transportState: 'playing',
+      swapLandings: 1,
+      renderedProjectFrame: 48_400,
+    });
+    h.native.status.mockResolvedValueOnce(old).mockResolvedValueOnce(landed);
+    let notifications = 0;
+    const unsubscribe = handle.subscribe(() => notifications++);
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    expect(notifications).toBe(1);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    unsubscribe();
+    await handle.stop('single notification test complete');
+  });
+
+  it('a telemetry read that changed nothing visible does not notify', async () => {
+    const h = harness({ swapCapable: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    await handle.pause();
+    const paused = swapCapability(1, 'running', 24_000, {
+      transportState: 'paused',
+      renderedProjectFrame: 24_000,
+    }).session;
+    const telemetry = (session: unknown): void =>
+      (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(session);
+    telemetry(paused);
+    let notifications = 0;
+    const unsubscribe = handle.subscribe(() => notifications++);
+    // The idle poll reads the same paused transport again: the timestamp
+    // moves, nothing the screen shows does.
+    telemetry(paused);
+    telemetry(paused);
+    expect(notifications).toBe(0);
+    expect(handle.snapshot().telemetryAtMs).toBeGreaterThan(0);
+    // It moves: one notification.
+    telemetry(swapCapability(1, 'running', 30_000, { transportState: 'paused', renderedProjectFrame: 30_000 }).session);
+    expect(notifications).toBe(1);
+    unsubscribe();
+    await handle.stop('unchanged telemetry test complete');
+  });
+
   it('carries a paused song across the seam paused, and its loop with it', async () => {
     const h = harness({ swapCapable: true });
     const project = await h.load(entry({ beat, metronome: initialMetronome }));
