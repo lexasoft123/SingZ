@@ -189,5 +189,28 @@ target 'SingZPlayer' do
     # regenerates the aggregate xcconfigs from the in-memory spec, so running
     # first left the app target compiling against the absolute path again.
     singz_relativize_hermes_cli_path(installer)
+    singz_optimize_core_pods_in_debug(installer)
+  end
+end
+
+# CocoaPods compiles every pod's Debug configuration at -O0, and the Debug
+# simulator app is the only one the player-session harness can drive — so
+# every swap prime, every prepare and every CPU column measured on the
+# simulator was the unoptimized engine against Hermes, the same trap the
+# Android debug variant had until 2026-09-05 (its CMakeLists.txt says why).
+# The three pods that are ours and C++ compile Debug at -O2 here; asserts
+# stay in (no NDEBUG), so a Debug number is still a shade pessimistic, never
+# flattering. Swift stays unoptimized — it is UI glue, and stepping through
+# it is what Debug is for. SingzCore (split and beats) is deliberately NOT
+# on the list: this is for the playback harness, and a Debug-simulator split
+# or beat time keeps the -O0 trap — read neither as the product's.
+def singz_optimize_core_pods_in_debug(installer)
+  targets = %w[SingzPlaybackSession SingzDspRuntime FolderAccess]
+  installer.pods_project.targets.each do |target|
+    next unless targets.include?(target.name)
+    target.build_configurations.each do |config|
+      next unless config.name == 'Debug'
+      config.build_settings['GCC_OPTIMIZATION_LEVEL'] = '2'
+    end
   end
 end

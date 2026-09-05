@@ -1148,9 +1148,14 @@ function evaluate(legacy, native) {
         })
       }
     }
-    const memKey = n.pssMb !== null && n.pssMb !== undefined ? 'pssMb' : 'rssMb'
+    const memKey =
+      n.pssMb !== null && n.pssMb !== undefined
+        ? 'pssMb'
+        : n.footprintMb !== null && n.footprintMb !== undefined
+          ? 'footprintMb'
+          : 'rssMb'
     if (l[memKey] !== null && n[memKey] !== null && l[memKey] !== undefined && n[memKey] !== undefined) {
-      const label = memKey === 'pssMb' ? 'PSS' : 'RSS'
+      const label = memKey === 'pssMb' ? 'PSS' : memKey === 'footprintMb' ? 'Footprint' : 'RSS'
       rows.push(
         comparable
           ? {

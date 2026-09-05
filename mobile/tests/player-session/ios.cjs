@@ -139,8 +139,36 @@ function createDevice({ udid, port, log }) {
       // the file edit below (cfprefsd may write its cache back) is proof
       // against reading the previous boot's mark; a changed value is.
       bootMarkBefore = readBootMark()
+      const was = pid
       execSync(`xcrun simctl terminate ${UDID} ${BUNDLE} 2>/dev/null || true`)
-      await sleep(1200)
+      /* Wait for the process to be GONE, and make it so if it is not: with
+         native playback holding an active audio session, `simctl terminate`
+         returned while the process stayed up, `simctl launch` then merely
+         fronted it, and the "restart" the rule timed was the dev client
+         reloading its bundle inside the same pid — 7.7 s against legacy's
+         real 4.8 s relaunch, and never a cold start at all. */
+      const gone = () => !alive(was)
+      const tTerm = Date.now()
+      for (let i = 0; i < 30 && was && !gone(); i++) await sleep(100)
+      let forced = false
+      if (was && !gone()) {
+        /* Still there 3 s after terminate: say so, keep a native stack sample
+           of what it is doing (scratchpad-independent: beside the run's cwd),
+           and force it. A restart timed past this point measured the wait for
+           a process that would not die, not a boot. */
+        forced = true
+        try {
+          const lingerFile = path.join(require('os').tmpdir(), `singz-exit-linger-${was}.txt`)
+          execSync(`sample ${was} 1 1 -file ${lingerFile} 2>/dev/null`)
+          log(`  launch: previous pid ${was} still up 3 s after terminate · stack sample in ${lingerFile}`)
+        } catch {}
+        try {
+          execSync(`kill -9 ${was} 2>/dev/null || true`)
+        } catch {}
+        for (let i = 0; i < 30 && !gone(); i++) await sleep(100)
+      }
+      const exitMs = Date.now() - tTerm
+      await sleep(400)
       /* The boot mark is removed from the plist FILE here, with the app dead:
          the scenario's in-app clear goes through cfprefsd, which had not
          flushed it to disk by the time the process was terminated, so the
@@ -156,6 +184,10 @@ function createDevice({ udid, port, log }) {
       const t0 = Date.now()
       const out = execSync(`xcrun simctl launch ${UDID} ${BUNDLE}`).toString().trim()
       pid = /:\s*(\d+)/.exec(out)?.[1] ?? null
+      log(
+        `  launch: previous pid ${was ?? '—'} ${was ? (forced ? `did NOT exit on terminate (forced after ${exitMs} ms)` : `exited in ${exitMs} ms`) : ''}` +
+          ` · simctl launch ${Date.now() - t0} ms → pid ${pid}`
+      )
       return { pid, out, t0 }
     },
 
@@ -171,7 +203,20 @@ function createDevice({ udid, port, log }) {
       const deadline = Date.now() + maxMs
       while (Date.now() < deadline) {
         const mark = readBootMark()
-        if (mark && mark !== bootMarkBefore) return Date.now() - t0
+        if (mark && mark !== bootMarkBefore) {
+          /* The restart is the STAMP minus the launch, not the moment the
+             plist showed it: a simulator's app reads the Mac's own clock, so
+             the two are one clock, and what the file's appearance adds is
+             cfprefsd's write-back — 27 ms standalone, and EIGHT SECONDS
+             inside a run (the unified log put the process start at
+             13:52:15.7 and the app's stamp at 13:52:17.0; the poll saw it
+             at 13:52:25), which the rule then compared at 10%. A stamp
+             outside [t0, now] is not this launch's clock and the arrival
+             time is kept. */
+          const stamp = Number(mark)
+          const seen = Date.now()
+          return Number.isFinite(stamp) && stamp >= t0 && stamp <= seen ? stamp - t0 : seen - t0
+        }
         await sleep(100)
       }
       throw new Error('the app never wrote a new boot mark (singz.boot)')
@@ -236,15 +281,36 @@ function createDevice({ udid, port, log }) {
     },
 
     /** `top -l 2` because the first sample is a since-boot average and is
-     *  garbage; `ps` for the resident set, which is the number the other
-     *  memory drivers in this directory report. */
-    async sample() {
+     *  garbage, and `-s` so the second sample spans the WHOLE window the
+     *  scenario asked for: top's default is one second, and a one-second
+     *  window over a paused player catches the native session's two-second
+     *  telemetry poll on every other sample — idle CPU read 1.4% against
+     *  legacy's 0.9% on one run and 1.6% against 1.6% on the next, the
+     *  quantum and not the backend. `ps` for the resident set, which is the
+     *  number the other memory drivers in this directory report. */
+    async sample(windowMs = 2000) {
       if (!pid) return { cpuPct: null, rssMb: null, pssMb: null }
       let cpuPct = null
+      const windowSec = Math.max(1, Math.round(windowMs / 1000))
       try {
-        const out = execSync(`top -l 2 -pid ${pid} -stats pid,cpu,mem 2>/dev/null`, { encoding: 'utf8' })
+        const out = execSync(`top -l 2 -s ${windowSec} -pid ${pid} -stats pid,cpu,mem 2>/dev/null`, { encoding: 'utf8' })
         const lines = out.trim().split('\n').filter((l) => new RegExp(`^\\s*${pid}\\s`).test(l))
         if (lines.length) cpuPct = Number(lines[lines.length - 1].trim().split(/\s+/)[1])
+      } catch {}
+      /* The physical footprint — what iOS's jetsam decides on, the twin of
+         the PSS the Android leg reads — not `ps -o rss=`: RSS keeps counting
+         the pages the allocator has already marked reusable, and vmmap of
+         the two backends idle in the player showed native 60 MB of exactly
+         that (MALLOC_SMALL (empty), the decode's freed magazines) against
+         legacy's 4 MB — 30 MB "heavier" by RSS while 19 MB lighter by
+         footprint (532.6 vs 551.6 MB). `footprint -p` reads it in ~50 ms
+         without suspending the process; vmmap --summary takes a second and
+         does. */
+      let footprintMb = null
+      try {
+        const out = execFileSync('footprint', ['-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        const hit = /phys_footprint:\s*([\d.]+)\s*(MB|GB|KB)/.exec(out)
+        if (hit) footprintMb = Math.round(Number(hit[1]) * (hit[2] === 'GB' ? 1024 : hit[2] === 'KB' ? 1 / 1024 : 1))
       } catch {}
       let rssMb = null
       try {
@@ -253,7 +319,7 @@ function createDevice({ udid, port, log }) {
       // The resolution of top's printed %CPU: one tenth of a point over its
       // one-second interval. The CPU rule tolerates two of these, as it does
       // two scheduler ticks on Android.
-      return { cpuPct, tickPct: 0.1, rssMb, pssMb: null }
+      return { cpuPct, tickPct: 0.1, footprintMb, rssMb, pssMb: null }
     }
   }
 

@@ -1030,6 +1030,12 @@ const SEEK_RECEIPT_DEADLINE_MS = 250;
 /** One render block is what the receipt waits on, so ask about that often
  *  rather than as fast as the bridge will answer. */
 const SEEK_RECEIPT_POLL_MS = 15;
+/** How old the poll's last session read may be for a seam to be prepared
+ *  from it and the clock without a read of its own — the playing poll is
+ *  1 s, the idle one 2 s, so anything fresher than this is the poll's own
+ *  cadence and anything older is a poll that stopped (a held stream polls
+ *  at 10 s, and a held stream is refused a seam anyway). */
+export const NATIVE_SWAP_CLOCK_TELEMETRY_MAX_AGE_MS = 3000;
 /** How long a second structural change waits for the previous swap's seam
  *  to land before going on. A seam is one to three blocks away on a running
  *  stream — tens of milliseconds — so this is far past any healthy landing;
@@ -2476,7 +2482,6 @@ export class IosNativePlaybackCoordinator {
     handle: IosNativePlaybackHandle,
     context: {
       oldGeneration: number;
-      status: NativePlaybackCapability;
       session: NativePlaybackSessionStatus;
       restoreTransport: 'playing' | 'paused';
       restoreLoop: { startProjectFrame: number; endProjectFrame: number } | null;
@@ -2484,12 +2489,22 @@ export class IosNativePlaybackCoordinator {
       rebuildStartedAt: number;
     },
   ): Promise<boolean> {
-    // One notification for the whole swap — see holdNotifications.
+    // One notification for the whole swap — see holdNotifications. The
+    // arm's session read is not waited for by the swap (it is off the
+    // critical path of a metronome touch), but the hold outlives it, so the
+    // landing it publishes is part of the same single notification.
     const release = handle.holdNotifications();
+    let released = false;
     try {
       return await this.swapHandleGenerationHeld(handle, context);
     } finally {
-      release();
+      const pending = handle.pendingSwapRead;
+      handle.pendingSwapRead = null;
+      if (pending) {
+        released = true;
+        void pending.then(release, release);
+      }
+      if (!released) release();
     }
   }
 
@@ -2497,7 +2512,6 @@ export class IosNativePlaybackCoordinator {
     handle: IosNativePlaybackHandle,
     context: {
       oldGeneration: number;
-      status: NativePlaybackCapability;
       session: NativePlaybackSessionStatus;
       restoreTransport: 'playing' | 'paused';
       restoreLoop: { startProjectFrame: number; endProjectFrame: number } | null;
@@ -2509,17 +2523,21 @@ export class IosNativePlaybackCoordinator {
     if (!native) return false;
     const {
       oldGeneration,
-      status,
       session,
       restoreTransport,
       restoreLoop,
       statusSampleRate,
       rebuildStartedAt,
     } = context;
-    // A stream is not moved between outputs by a swap: a route that changed
-    // under the song takes the rebuild, which opens the new one.
-    const output = chooseOutput(status.outputs);
-    if (!output || output.uid !== handle.output?.uid) return false;
+    // A swap keeps the output the song is on: a route that changed under
+    // the song has already retired its generation (iOS: the core's
+    // route-generation-changed; Android: the bridge's fail-closed), and the
+    // caller only gets here on a session it just read as running with no
+    // terminal reason. Re-enumerating the host's devices to prove the same
+    // thing was the one reason the swap read the full status, and on the
+    // simulator that read was a measurable share of a metronome save.
+    const output = handle.output;
+    if (!output) return false;
     const generation = this.claimGeneration();
     handle.beginSwapPrepare(generation, output, oldGeneration);
     const overrides: NativePlaybackPrepareOverrides = {
@@ -2599,22 +2617,29 @@ export class IosNativePlaybackCoordinator {
         detail,
       );
     }
-    // Armed. The core owns the seam from here; the status is read for the
-    // replacement's lanes, config and description, and a failed read is
-    // only a missed log line — the next poll reads the same thing.
-    let armed: NativePlaybackSessionStatus | null = null;
-    try {
-      const read = await native.status();
-      if (read.session.generation === generation) armed = read.session;
-    } catch (error) {
-      log(
-        'dsp',
-        `swap status read failed · generation ${generation} · ${message(error)}`,
-        'warn',
-      );
-    }
-    if (armed) handle.adoptPreparedSession(armed);
+    // Armed. The core owns the seam from here. The session is read for the
+    // log line's account of the arm and for the replacement's lanes and
+    // config — but not WAITED for: the next poll publishes the same thing
+    // (publishTelemetry adopts the replacement at the landing), and this
+    // round trip sat on the critical path of every metronome touch and
+    // pitch step, measured on the simulator. A failed read is a missed log
+    // line and nothing else.
     handle.recordPreparedConfig();
+    const armRead: Promise<NativePlaybackSessionStatus | null> = native.session().then(
+      read => {
+        if (read.generation !== generation) return null;
+        if (this.isActive(handle)) this.publishTelemetry(handle, read);
+        return read;
+      },
+      (error: unknown) => {
+        log(
+          'dsp',
+          `swap status read failed · generation ${generation} · ${message(error)}`,
+          'warn',
+        );
+        return null;
+      },
+    );
     // This generation is audible because of the SWAP, not the last Play tap.
     handle.startRequestedAt = rebuildStartedAt;
     handle.markStartIssued(generation);
@@ -2631,14 +2656,18 @@ export class IosNativePlaybackCoordinator {
             },
           }),
     });
-    log(
-      'dsp',
-      `cue graph swapped on the running stream · generation ${oldGeneration}→${generation} · ` +
-        `signed project frame ${session.renderedProjectFrame} · ` +
-        `${armed === null || armed.swapPendingGeneration !== 0 ? 'seam armed' : 'seam landed'} · ` +
-        `prime ${armed === null ? '?' : Math.round(armed.swapPrimeNs / 1e6)} ms · ` +
-        `armed in ${since(rebuildStartedAt)} · core says ${seamFacts(armed)} · ` +
-        handle.graphDescription(),
+    handle.pendingSwapRead = armRead;
+    const armedIn = since(rebuildStartedAt);
+    void armRead.then(armed =>
+      log(
+        'dsp',
+        `cue graph swapped on the running stream · generation ${oldGeneration}→${generation} · ` +
+          `signed project frame ${session.renderedProjectFrame} · ` +
+          `${armed === null || armed.swapPendingGeneration !== 0 ? 'seam armed' : 'seam landed'} · ` +
+          `prime ${armed === null ? '?' : Math.round(armed.swapPrimeNs / 1e6)} ms · ` +
+          `armed in ${armedIn} · core says ${seamFacts(armed)} · ` +
+          handle.graphDescription(),
+      ),
     );
     return true;
   }
@@ -3058,89 +3087,113 @@ export class IosNativePlaybackCoordinator {
 
       const rebuildStartedAt = Date.now();
       if (handle.swappingFromGeneration !== 0) await this.awaitSeamLanded(handle);
-      let status: NativePlaybackCapability;
-      try {
-        status = await native.status();
-      } catch (error) {
-        await this.stopHandleLocked(handle, 'cue rebuild status failed');
-        throw new NativePlaybackCommandError(
-          'provider-failure',
-          'rebuild-cues',
-          oldGeneration,
-          `Native cue rebuild could not read transport status: ${message(error)}`,
-        );
-      }
-      const session = status.session;
-      // During an armed swap the transport names the outgoing generation
-      // until the seam; the frame it carries is this song's all the same.
-      const telemetryUsable =
-        session.generation === oldGeneration &&
-        (session.transportGeneration === oldGeneration ||
-          (handle.swappingFromGeneration !== 0 &&
-            session.transportGeneration === handle.swappingFromGeneration)) &&
-        session.transportTelemetryQuality !== 'unavailable';
-      if (!telemetryUsable) {
-        await this.stopHandleLocked(handle, 'cue rebuild telemetry unavailable');
-        const error =
-          'Native cue rebuild stopped because a trustworthy signed transport position was unavailable.';
-        handle.update({ phase: 'stopped', error });
-        throw new NativePlaybackCommandError(
-          'invalid-state',
-          'rebuild-cues',
-          oldGeneration,
-          error,
-        );
-      }
+      // The session block, not the full status: status() also enumerates
+      // the host's devices and describes the runtime and codec build on
+      // every call, none of which a cue change needs — the swap bit was read
+      // at prepare and cannot change within a generation. On the simulator
+      // this read was a measurable share of a metronome save.
+      const readSession = async (): Promise<NativePlaybackSessionStatus> => {
+        try {
+          return await native.session();
+        } catch (error) {
+          await this.stopHandleLocked(handle, 'cue rebuild status failed');
+          throw new NativePlaybackCommandError(
+            'provider-failure',
+            'rebuild-cues',
+            oldGeneration,
+            `Native cue rebuild could not read transport status: ${message(error)}`,
+          );
+        }
+      };
+      /* On a build with the synchronous clock a seam needs no read before
+         its prepare: the frame and the transport state come off the clock
+         and the structural facts off the poll's last read, a second or two
+         old at most. What that read answered on the simulator was already
+         known, and the round trip was the last measurable share of a
+         metronome save — 146 ms against legacy's 95 on a 145 ms budget.
+         Only the seam may use it: the six-call rebuild below stops the song
+         on what it learns, so a refused seam re-reads before it. */
+      const clockSession = this.swapSessionFromClock(handle, oldGeneration);
+      let session = clockSession ?? (await readSession());
+      const derive = async (read: NativePlaybackSessionStatus) => {
+        // During an armed swap the transport names the outgoing generation
+        // until the seam; the frame it carries is this song's all the same.
+        const telemetryUsable =
+          read.generation === oldGeneration &&
+          (read.transportGeneration === oldGeneration ||
+            (handle.swappingFromGeneration !== 0 &&
+              read.transportGeneration === handle.swappingFromGeneration)) &&
+          read.transportTelemetryQuality !== 'unavailable';
+        if (!telemetryUsable) {
+          await this.stopHandleLocked(handle, 'cue rebuild telemetry unavailable');
+          const error =
+            'Native cue rebuild stopped because a trustworthy signed transport position was unavailable.';
+          handle.update({ phase: 'stopped', error });
+          throw new NativePlaybackCommandError(
+            'invalid-state',
+            'rebuild-cues',
+            oldGeneration,
+            error,
+          );
+        }
 
-      const wasStarted = handle.startWasIssued(oldGeneration);
-      // A song that has run out is PARKED, the same reading publishTelemetry
-      // takes. Calling it 'prepared' left the rebuilt graph with no output
-      // open at the last frame, and the next Play started it there: the core
-      // accepts the start and its first callback flips straight to Completed,
-      // so nothing sounds until the poll parks it and the singer taps twice.
-      const restoreTransport =
-        session.transportState === 'paused' ||
-        session.transportState === 'completed'
-          ? 'paused'
-          : session.transportState === 'playing' ||
-              session.transportState === 'pre-roll'
-            ? 'playing'
-            : 'prepared';
-      // A rendered frame inside the song is kept whether or not the
-      // transport advanced: a prepared generation parked at a remembered
-      // position restarts there. A NEGATIVE frame is the OLD plan's
-      // pre-roll, which a plan without a count-in has no room for — the
-      // refusal that used to destroy the prepared graph on every song open:
-      // a transport that never advanced (the core reports it stopped,
-      // 'prepared' here) takes the ordinary start, entry plus whatever
-      // pre-roll the NEW plan wants, and one still inside its count-in
-      // restarts at the song's first frame rather than replaying it.
-      // Nothing has rendered AND nothing has moved from where this graph was
-      // prepared: there is no position to preserve, and the NEW plan's
-      // pre-roll is the whole point of the rebuild. Pinning the entry frame
-      // here is what made turning the count-in ON and pressing Play produce
-      // no count-in at all — the rebuild prepared at the entry with a
-      // pre-roll of zero and the transport never entered pre-roll. A graph
-      // parked at a REMEMBERED position is the other case and keeps it.
-      const untouchedSincePrepare =
-        !wasStarted &&
-        session.renderedProjectFrame === session.preparedStartProjectFrame;
-      const preparedStartProjectFrame = untouchedSincePrepare
-        ? undefined
-        : session.renderedProjectFrame >= 0
-          ? session.renderedProjectFrame
-          : restoreTransport === 'prepared'
-            ? undefined
-            : 0;
-      const restoreLoop = session.loopEnabled
-        ? {
-            startProjectFrame: session.loopStartFrame,
-            endProjectFrame: session.loopEndFrame,
-          }
-        : null;
-      const statusSampleRate =
-        session.sampleRate || handle.output?.sampleRate || 48_000;
-      handle.swapCapable = status.playbackSwap;
+        const wasStarted = handle.startWasIssued(oldGeneration);
+        // A song that has run out is PARKED, the same reading publishTelemetry
+        // takes. Calling it 'prepared' left the rebuilt graph with no output
+        // open at the last frame, and the next Play started it there: the core
+        // accepts the start and its first callback flips straight to Completed,
+        // so nothing sounds until the poll parks it and the singer taps twice.
+        const restoreTransport =
+          read.transportState === 'paused' ||
+          read.transportState === 'completed'
+            ? 'paused'
+            : read.transportState === 'playing' ||
+                read.transportState === 'pre-roll'
+              ? 'playing'
+              : 'prepared';
+        // A rendered frame inside the song is kept whether or not the
+        // transport advanced: a prepared generation parked at a remembered
+        // position restarts there. A NEGATIVE frame is the OLD plan's
+        // pre-roll, which a plan without a count-in has no room for — the
+        // refusal that used to destroy the prepared graph on every song open:
+        // a transport that never advanced (the core reports it stopped,
+        // 'prepared' here) takes the ordinary start, entry plus whatever
+        // pre-roll the NEW plan wants, and one still inside its count-in
+        // restarts at the song's first frame rather than replaying it.
+        // Nothing has rendered AND nothing has moved from where this graph was
+        // prepared: there is no position to preserve, and the NEW plan's
+        // pre-roll is the whole point of the rebuild. Pinning the entry frame
+        // here is what made turning the count-in ON and pressing Play produce
+        // no count-in at all — the rebuild prepared at the entry with a
+        // pre-roll of zero and the transport never entered pre-roll. A graph
+        // parked at a REMEMBERED position is the other case and keeps it.
+        const untouchedSincePrepare =
+          !wasStarted &&
+          read.renderedProjectFrame === read.preparedStartProjectFrame;
+        const preparedStartProjectFrame = untouchedSincePrepare
+          ? undefined
+          : read.renderedProjectFrame >= 0
+            ? read.renderedProjectFrame
+            : restoreTransport === 'prepared'
+              ? undefined
+              : 0;
+        const restoreLoop = read.loopEnabled
+          ? {
+              startProjectFrame: read.loopStartFrame,
+              endProjectFrame: read.loopEndFrame,
+            }
+          : null;
+        const statusSampleRate =
+          read.sampleRate || handle.output?.sampleRate || 48_000;
+        return {
+          wasStarted,
+          restoreTransport,
+          preparedStartProjectFrame,
+          restoreLoop,
+          statusSampleRate,
+        } as const;
+      };
+      let derived = await derive(session);
 
       /* The seam. On a core that can replace a generation on its running
          stream, a started song is never stopped for a structural change:
@@ -3150,9 +3203,9 @@ export class IosNativePlaybackCoordinator {
          stream that is not running) and the six-call rebuild below is what
          it always was. */
       if (
-        status.playbackSwap &&
-        wasStarted &&
-        restoreTransport !== 'prepared' &&
+        handle.swapCapable &&
+        derived.wasStarted &&
+        derived.restoreTransport !== 'prepared' &&
         session.state === 'running' &&
         session.hostState === 'running' &&
         // A seam still in the air: the core would refuse a second one, and
@@ -3162,15 +3215,28 @@ export class IosNativePlaybackCoordinator {
       ) {
         const swapped = await this.swapHandleGeneration(handle, {
           oldGeneration,
-          status,
           session,
-          restoreTransport,
-          restoreLoop,
-          statusSampleRate,
+          restoreTransport: derived.restoreTransport,
+          restoreLoop: derived.restoreLoop,
+          statusSampleRate: derived.statusSampleRate,
           rebuildStartedAt,
         });
         if (swapped) return;
       }
+      // A seam built from the clock and refused: the rebuild below stops
+      // the song on the transport's position, and that is read, not
+      // remembered.
+      if (clockSession !== null) {
+        session = await readSession();
+        derived = await derive(session);
+      }
+      const {
+        wasStarted,
+        restoreTransport,
+        preparedStartProjectFrame,
+        restoreLoop,
+        statusSampleRate,
+      } = derived;
 
       handle.stopPolling();
       if (wasStarted) {
@@ -3849,6 +3915,49 @@ export class IosNativePlaybackCoordinator {
    * shaped like an older build (no method at all), because this is read from
    * renders and a throw here would take the player screen down.
    */
+  /** The session a seam can be prepared from WITHOUT a bridge round trip:
+   *  the frame and transport state off the synchronous clock, everything
+   *  structural (loop, host state, rate, lanes) off the poll's last read.
+   *  Null whenever any of that is missing or stale, when a seam is already
+   *  in the air, or when the clock says the song is not running — every one
+   *  of those is the ordinary read's case, never a stop. */
+  private swapSessionFromClock(
+    handle: IosNativePlaybackHandle,
+    generation: number,
+  ): NativePlaybackSessionStatus | null {
+    if (
+      !this.syncClock ||
+      !handle.swapCapable ||
+      handle.swappingFromGeneration !== 0
+    )
+      return null;
+    const last = handle.clockSeamTelemetry(
+      NATIVE_SWAP_CLOCK_TELEMETRY_MAX_AGE_MS,
+    );
+    if (
+      last === null ||
+      last.generation !== generation ||
+      last.transportGeneration !== generation ||
+      last.transportTelemetryQuality === 'unavailable' ||
+      last.state !== 'running' ||
+      last.hostState !== 'running'
+    )
+      return null;
+    const now = this.positionNow(handle);
+    if (
+      now === null ||
+      now.generation !== generation ||
+      (now.transportState !== 'playing' && now.transportState !== 'pre-roll')
+    )
+      return null;
+    return {
+      ...last,
+      transportState: now.transportState,
+      renderedProjectFrame: now.renderedProjectFrame,
+      seekCount: now.seekCount,
+    };
+  }
+
   positionNow(
     handle: IosNativePlaybackHandle,
   ): NativePlaybackPositionNow | null {
@@ -4169,6 +4278,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private retryProjectSeconds: number | null = null;
   private recoverySnapshot: NativePlaybackRecoverySnapshot | null = null;
   private lastTelemetry: NativePlaybackSessionStatus | null = null;
+  /** When the poll last replaced `lastTelemetry` — its own stamp, not the
+   *  state's `telemetryAtMs`, which a seek re-stamps without a read. */
+  private lastTelemetryAtMs = 0;
   /* The two things the clock knows that the core has not applied yet.
      A seek the core has accepted but whose callback has not drained: the
      clock reads the target until `seekCount` moves, so a scrub never shows
@@ -4191,6 +4303,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private listeners = new Set<() => void>();
   private notifyHold = 0;
   private notifyPending = false;
+  /** The arm's session read a swap left in flight, for the hold to outlive. */
+  pendingSwapRead: Promise<NativePlaybackSessionStatus | null> | null = null;
   private state: NativePlaybackViewState = {
     phase: 'prepared',
     generation: 0,
@@ -4767,12 +4881,55 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     });
   }
 
+  /** The session a seam may be prepared from without a read: the poll's
+   *  last block, at most `maxAgeMs` old, with the controls this handle has
+   *  ACCEPTED since laid over it — lane gain/mute/solo, the master gain and
+   *  the loop, each recorded on the command's receipt and each of which the
+   *  core takes from the prepare request and does not carry across a seam.
+   *  A poll is a second old; a fader dragged or an A-B set inside that
+   *  second would otherwise be undone at the seam and then "confirmed" by
+   *  the next poll. Null when there is no read or it is stale. The
+   *  generation it names is the caller's to check — adoptPreparedSession
+   *  stores a candidate's block here. */
+  clockSeamTelemetry(maxAgeMs: number): NativePlaybackSessionStatus | null {
+    const last = this.lastTelemetry;
+    if (last === null || Date.now() - this.lastTelemetryAtMs > maxAgeMs)
+      return null;
+    const sampleRate = last.sampleRate || this.sampleRate();
+    const region = this.state.regionState;
+    const loop =
+      region && region.loop
+        ? {
+            loopEnabled: true,
+            loopStartFrame: Math.round(region.start * sampleRate),
+            loopEndFrame: Math.round(region.end * sampleRate),
+          }
+        : { loopEnabled: false };
+    return {
+      ...last,
+      lanes: last.lanes.map(lane => {
+        const accepted = this.acceptedLaneControls.get(lane.id);
+        return accepted === undefined
+          ? lane
+          : {
+              ...lane,
+              gain: accepted.gain,
+              muted: accepted.muted,
+              solo: accepted.solo,
+            };
+      }),
+      masterGain: this.acceptedMasterGain,
+      ...loop,
+    };
+  }
+
   /** What a prepared generation's status says about ITSELF — lanes,
    *  topology, training shape, controls — without touching the phase or the
    *  position. A fresh prepare publishes those too (publishPrepared); a swap
    *  adopts only these, since the song it replaces is still playing. */
   adoptPreparedSession(session: NativePlaybackSessionStatus): void {
     this.lastTelemetry = session;
+    this.lastTelemetryAtMs = Date.now();
     this.acceptSessionControls(session);
     this.lanes = session.lanes.map(lane => ({
       id: lane.id,
@@ -4793,6 +4950,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.trainingPrepared = session.trainingLanes.length > 0;
     this.trainingEnabled = session.trainingEnabled;
     this.lastTelemetry = session;
+    this.lastTelemetryAtMs = Date.now();
   }
 
   graphDescription(): string {
@@ -4813,6 +4971,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         session.transportGeneration === this.swappingFromGeneration
       ) {
         this.lastTelemetry = session;
+        this.lastTelemetryAtMs = Date.now();
         this.acceptSessionControls(session);
         return;
       }
@@ -4836,6 +4995,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       this.adoptPreparedSession(session);
     }
     this.lastTelemetry = session;
+    this.lastTelemetryAtMs = Date.now();
     this.acceptSessionControls(session);
     // A song that ran out is PARKED, not stopped: the graph is still
     // prepared and the playhead is still at the end, exactly as the legacy
@@ -5130,8 +5290,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         clockDriven &&
         (key === 'positionSec' ||
           key === 'renderedPositionSec' ||
-          key === 'audibleFrames' ||
-          key === 'displayLatencySec')
+          key === 'audibleFrames')
       )
         continue;
       if (!sameViewField(this.state[key], patch[key])) {

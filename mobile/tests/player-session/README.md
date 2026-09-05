@@ -160,7 +160,7 @@ its own latency inside every number.
 | end of song → Play restart | at the end: `seek(0); play()` → moving again near the top |
 | back → catalog | `__test.back()` → the catalog is on screen |
 | second song → player screen | a different song's open |
-| app restart → app ready | from relaunch to the app's own boot mark: `CatalogScreen` writes `singz.boot` on mount and the driver polls it at 100 ms — Android through `run-as` on the pref store, iOS off the app container's plist (`plutil`; the simulator's cfprefsd denies the key exists). Nothing is evaluated over the inspector while the app boots: a 100 ms `typeof __test` poll there preceded a Fabric first-commit crash on the POCO, once. The previous host-side timing (Metro's target poll, 1 s) flipped this rule by 1.3 s on both backends across runs and could not resolve its own tolerance; the iPhone driver still uses it |
+| app restart → app ready | from relaunch to the app's own boot mark: `CatalogScreen` writes `singz.boot` on mount and the driver polls it at 100 ms — Android through `run-as` on the pref store, iOS off the app container's plist (`plutil`; the simulator's cfprefsd denies the key exists) — and on the simulator the number is the STAMP minus the launch, not the poll's arrival: the app and the driver read the same Mac clock, and the plist's appearance adds cfprefsd's write-back, which measured 27 ms standalone and eight seconds inside a run (process start 13:52:15.7, stamp 13:52:17.0, seen 13:52:25) — a rule at 10% compared that lag, not the boot. Nothing is evaluated over the inspector while the app boots: a 100 ms `typeof __test` poll there preceded a Fabric first-commit crash on the POCO, once. The previous host-side timing (Metro's target poll, 1 s) flipped this rule by 1.3 s on both backends across runs and could not resolve its own tolerance; the iPhone driver still uses it |
 | reopen after restart | the first song again, on the restarted app |
 
 Alongside the timings, three boolean families:
@@ -215,8 +215,17 @@ behind a PASS.
 Sampled in five phases — idle in the player, playing, during the pitch
 change, backgrounded, and after leaving the song.
 
-- **iOS**: `top -l 2 -pid <pid> -stats pid,cpu,mem` (the second sample; the
-  first is a since-boot average and is garbage) plus `ps -o rss=`. The pid
+- **iOS**: `top -l 2 -s <window> -pid <pid> -stats pid,cpu,mem` (the second
+  sample; the first is a since-boot average and is garbage, and `-s` makes
+  the second span the phase's whole window — top's one-second default caught
+  the native session's two-second idle poll on every other sample, so idle
+  read 1.4% against 0.9% on one run and 1.6% against 1.6% on the next) plus `footprint -p` for the
+  physical footprint — what jetsam decides on, the twin of Android's PSS.
+  Not `ps -o rss=`: RSS keeps counting pages the allocator has marked
+  reusable, and the two backends idle in the player differ by 56 MB of
+  exactly that (native's decode leaves freed small-allocation magazines
+  behind), which read as native 30 MB heavier by RSS while 19 MB lighter by
+  footprint. `ps -o rss=` is still recorded, unjudged. The pid
   is the one `simctl launch` printed — never `pgrep`, which with two
   simulators up returns two SingZPlayer processes and answers about the
   wrong one.

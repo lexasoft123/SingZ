@@ -471,6 +471,40 @@ What the two simulator legs' misses are, now measured rather than presumed:
   since the optimized core (1 of 8 native restart steps, 1 of 9 pass-start relaunches, 0 of
   9 legacy restarts).
 
+**iOS chain since (2026-09-05 12:00–13:52, `sim-run-4g`…`sim-run-4j-3`), one cause per run:**
+50 → 51 → 55 → 57 → 55 of 58. What each run measured and what it changed:
+- **The swap's notification storm** (4g): the handle notified the player screen four times
+  across a seam (claim, adopt, phase, telemetry), each a DEV re-render with an owner-stack
+  capture under the attached inspector — the 445 ms first seek above. `holdNotifications()`
+  across the swap, `update()` notifying on VISIBLE change only, the hold outliving the async
+  arm read; the first seek fell to the other three's figure.
+- **Unoptimized Debug pods** (4h): the simulator's `SingzPlaybackSession`, `SingzDspRuntime`
+  and `FolderAccess` compiled at -O0 in Debug, the Android trap in Xcode's clothes. The
+  Podfile's `singz_optimize_core_pods_in_debug` sets `GCC_OPTIMIZATION_LEVEL=2` on those
+  three; a Stretch prime measured in hundreds of milliseconds costs single digits.
+- **RSS was the wrong memory column** (4i): native's RSS ran ~20 MB over legacy's with the
+  difference sitting entirely in MALLOC_SMALL (empty) — freed pages the allocator keeps
+  mapped, 60 MB native against 4 MB legacy by `vmmap --summary`. The physical footprint,
+  what jetsam decides on, read native 532.6 against legacy 551.6 MB; the iOS column is
+  `footprint -p` now ("Footprint"), the twin of Android's PSS, RSS recorded unjudged.
+- **The restart the harness timed was not always a boot** (4i): `simctl terminate` returned
+  with the process still up under an active audio session, `simctl launch` fronted it, and
+  the "restart" was the dev client reloading its bundle in the same pid — 7.7 s. The driver
+  now waits for the old pid to be gone (samples and kills it after 3 s), removes the mark
+  from the plist with the app dead, and waits for a DIFFERENT mark.
+- **The remaining three flips at 4j-3 (55/58, host quiet ≤ 4 throughout)** are each a
+  measurement or a round trip, none a cost of the backend: *metronome save* 146 vs 95 ms on a
+  145 ms budget — the seam's pre-read of the session block, the last bridge round trip before
+  its prepare, now skipped on a build with the synchronous clock (frame and state off the
+  clock, loop/host/rate off the poll's last read at most 3 s old; a refused seam re-reads
+  before the six-call rebuild — both under test); *app restart* 9436 vs 8248 ms — the unified
+  log put every one of the run's four boots at 1.25 s from process start to the catalog's
+  first asset request and the app's stamp at 1.3 s, while the plist showed the mark eight
+  seconds later (27 ms in a standalone probe, with and without the pre-launch key removal),
+  so the driver now reports the stamp minus the launch, one Mac clock on both sides; *CPU
+  idle* 1.4 vs 0.9% — `top -l 2` samples one second by default, which catches native's
+  two-second idle poll on every other sample; the sample spans the phase's window now.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so

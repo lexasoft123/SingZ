@@ -2395,6 +2395,145 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('unchanged telemetry test complete');
   });
 
+  it('under the clock, a seam is prepared from the clock and the last poll with no read before it', async () => {
+    // The pre-read was the last measurable share of a metronome save on
+    // the simulator; with the clock the frame comes off it and the loop,
+    // host state and rate off the poll's last read. The ONE read left is
+    // the arm read after the prepare.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(
+      swapCapability(1, 'running', 48_000, { transportState: 'playing', renderedProjectFrame: 48_000 }).session,
+    );
+    // The clock is ahead of the poll: the prepare must name ITS frame.
+    h.setPositionNow({
+      generation: 1,
+      transportState: 'playing',
+      renderedProjectFrame: 52_000,
+      continuousFrame: 52_000,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    const armed = swapCapability(2, 'running', 52_000, {
+      transportState: 'playing',
+      transportGeneration: 1,
+      swapPendingGeneration: 1,
+      renderedProjectFrame: 52_000,
+    });
+    h.native.status.mockResolvedValueOnce(armed);
+    const before = h.calls.length;
+    const reads = h.native.session.mock.calls.length;
+
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+
+    expect(h.calls.slice(before)).toEqual(['native.prepare:2']);
+    expect(h.prepareRequests[1]).toMatchObject({
+      swapFromGeneration: 1,
+      preparedStartProjectFrame: 52_000,
+      initialTransport: { state: 'playing' },
+    });
+    expect(h.native.session.mock.calls.length - reads).toBe(1);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    await handle.stop('clock seam test complete');
+  });
+
+  it('a clock-built seam carries the controls accepted since the last poll', async () => {
+    // The core takes lane gains, the master gain and the loop from the
+    // prepare request and does not carry them across a seam; a poll is a
+    // second old, and a fader or an A-B set inside that second must not be
+    // undone by the seam that follows it.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(
+      swapCapability(1, 'running', 48_000, { transportState: 'playing', renderedProjectFrame: 48_000 }).session,
+    );
+    await handle.setLaneControl('vocals', 0.35, true, false);
+    await handle.setMasterGain(0.55);
+    await handle.setLoop(0.25, 1.25);
+    h.setPositionNow({
+      generation: 1,
+      transportState: 'playing',
+      renderedProjectFrame: 52_000,
+      continuousFrame: 52_000,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    h.native.status.mockResolvedValueOnce(
+      swapCapability(2, 'running', 52_000, {
+        transportState: 'playing',
+        transportGeneration: 1,
+        swapPendingGeneration: 1,
+        renderedProjectFrame: 52_000,
+      }),
+    );
+    const before = h.calls.length;
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    expect(h.calls.slice(before)).toEqual(['native.prepare:2']);
+    expect(h.prepareRequests[1]).toMatchObject({
+      swapFromGeneration: 1,
+      masterGain: 0.55,
+      lanes: expect.arrayContaining([
+        expect.objectContaining({ id: 'vocals', gain: 0.35, muted: true, solo: false }),
+      ]),
+      initialTransport: {
+        state: 'playing',
+        loop: { startProjectFrame: 12_000, endProjectFrame: 60_000 },
+      },
+    });
+    await handle.stop('clock seam controls test complete');
+  });
+
+  it('a clock-built seam the core refuses reads the session before the six-call rebuild', async () => {
+    // The rebuild stops the song on the transport's position; a position
+    // remembered from the clock a moment ago is not the one to stop on.
+    const h = harness({ swapCapable: true, syncClock: true, refuseSwap: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(
+      swapCapability(1, 'running', 48_000, { transportState: 'playing', renderedProjectFrame: 48_000 }).session,
+    );
+    h.setPositionNow({
+      generation: 1,
+      transportState: 'playing',
+      renderedProjectFrame: 52_000,
+      continuousFrame: 52_000,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    // Three different frames — poll 48 000, clock 52 000, re-read 60 000 —
+    // so the frame the fallback prepares at says which one it was built on.
+    h.native.status
+      .mockResolvedValueOnce(swapCapability(1, 'running', 60_000, { transportState: 'playing', renderedProjectFrame: 60_000 }))
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(3, 'prepared'))
+      .mockResolvedValueOnce(capability(3, 'running', 60_000));
+    const before = h.calls.length;
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    expect(h.calls.slice(before)).toEqual([
+      'native.prepare:2',
+      'native.unload:2',
+      'native.stop:1',
+      'native.unloadRetainingLanes:1',
+      'native.prepare:3',
+      'native.configure:3',
+      'native.open:3',
+      'native.start:3',
+    ]);
+    expect(h.prepareRequests[1]).toMatchObject({ swapFromGeneration: 1, preparedStartProjectFrame: 52_000 });
+    expect(h.prepareRequests[2]).not.toHaveProperty('swapFromGeneration');
+    expect(h.prepareRequests[2]).toMatchObject({ preparedStartProjectFrame: 60_000 });
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 3 });
+    await handle.stop('refused clock seam test complete');
+  });
+
   it('under the clock, a poll that only moved the position does not notify', async () => {
     // The screen reads the position from the clock every frame; the poll's
     // renderedPositionSec is nobody's display. Without the clock it is the
