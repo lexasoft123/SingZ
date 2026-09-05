@@ -23,6 +23,8 @@ scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
 cd mobile && npx jest                                  # phone-side Drive logic
 cd mobile/android && ./gradlew :app:testDebugUnitTest   # Kotlin cache-currency table
 mobile/scripts/test-swift-currency.sh                   # Swift cache-currency table
+bash mobile/scripts/test-native-playback-bridge-schema.sh  # iOS bridge validators (clang only, no Xcode)
+bash zdsp/run-sanitizer-gates.sh                        # the phase-4 native ctest gate (3 presets)
 ```
 
 All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
@@ -335,7 +337,19 @@ was driven; the gotchas that follow from it are below.
   name, **method arity** and event payloads are identical on both platforms is
   written at the top of `SingzSplit.mm` for this reason; when a method changes
   on one side, sweep the whole surface against `SplitModule.kt`, not just the
-  method in hand. Suites that drive a native call need a settle DEADLINE, not
+  method in hand. For the PLAYBACK bridges the sweep is mechanical now:
+  `tests/shared/native-playback-bridge-manifest.json` pins every method with
+  its arity, every emitted key set, every enum table and the desktop's
+  renames, extracted from the three bridges' own sources by the two packaging
+  suites, a vitest over the addon and a native ctest — so a key added to one
+  bridge and forgotten on another is a red test rather than a platform that
+  quietly degrades. What it all means is
+  [docs/NATIVE-PLAYBACK-BRIDGE.md](docs/NATIVE-PLAYBACK-BRIDGE.md), which also
+  carries the core-encoded product policy (click timbre, gridless count-in,
+  BPM/meter bands, the −1 dBFS limiter, the two-decode budget, odd-period
+  training) and a divergence register. The manifest is edited BY HAND on
+  purpose: regenerating it would let drift fix itself.
+  Suites that drive a native call need a settle DEADLINE, not
   a poll count — an unsettled promise is what this looks like from the driver.
 - **Foundation's JSON parser is not correctly rounded, so no core number may
   reach iOS as text** — `NSJSONSerialization` reads `"0.053999999999999999"`

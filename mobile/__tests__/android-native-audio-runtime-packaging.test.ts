@@ -1,5 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import bridgeManifest from '../../tests/shared/native-playback-bridge-manifest.json';
+import {
+  androidBridgeMethods,
+  kotlinWhenTable,
+  writableMapKeys,
+  jniJsonKeys,
+  jniPlaybackSymbols,
+  jniRegisteredNames,
+  kotlinExternalFunctions,
+  switchStringTable,
+} from '../../tests/shared/native-playback-bridge-sources';
 
 const mobileRoot = path.join(__dirname, '..');
 const repositoryRoot = path.join(mobileRoot, '..');
@@ -33,25 +44,6 @@ describe('Android native DSP runtime packaging', () => {
       1,
     );
     expect(module).toContain('override fun getName(): String = "NativeAudioRuntime"');
-    for (const method of [
-      'status',
-      'session',
-      'prepare',
-      'configureOutputSession',
-      'openOutput',
-      'start',
-      'transport',
-      'previewClick',
-      'stop',
-      'unload',
-      'unloadRetainingLanes',
-      'lanePeaks',
-      'setControl',
-      'positionNow',
-      'suspendOutput',
-      'resumeOutput',
-    ])
-      expect(module).toMatch(new RegExp(`fun ${method}\\(`));
     // The background park's hold keeps audio focus (a held song is still
     // ours); its release requires it, like start, because a stream resumed
     // without focus is a stream Android will silence under us.
@@ -104,6 +96,42 @@ describe('Android native DSP runtime packaging', () => {
       /fun configureOutputSession\(generationValue: Double, promise: Promise\)[\s\S]*?ledger\.focusGranted\(generation\)/,
     );
     expect(core).toContain('external fun nativePlaybackResumeOutput(generation: Long): String');
+    // The clock payload, built here as a WritableMap and on iOS as a
+    // dictionary literal. Same eight keys or the parser returns null and this
+    // platform alone drops back to the polled clock, silently.
+    expect(writableMapKeys(module, 'fun positionNow(')).toEqual(
+      bridgeManifest.positionNow.keys,
+    );
+    // A FOURTH transportState table, mapping the core's integer codes. The
+    // other three are pinned against the manifest elsewhere; without this one
+    // a sixth enumerator could update them all and leave this answering
+    // "stopped".
+    const clockStates = kotlinWhenTable(module, 'fun positionNow(');
+    expect(clockStates.slice(0, -1)).toEqual(
+      bridgeManifest.enums.transportState.kotlin.strings,
+    );
+    expect(clockStates[clockStates.length - 1]).toBe(
+      bridgeManifest.enums.transportState.kotlin.fallback,
+    );
+    // …and every name it produces has to be one the shared table already has.
+    for (const state of clockStates)
+      expect(bridgeManifest.enums.transportState.android.strings).toContain(state);
+    // EXACT, and with arity. This was a contains-list of ten, which is how
+    // lanePeaks, setControl and unloadRetainingLanes came to be absent from
+    // it while shipping — a list that cannot notice a missing name is not a
+    // pin. The same thirteen are checked against the iOS selectors in
+    // ios-native-audio-runtime-packaging.test.ts, and the two must agree,
+    // because a native method whose arity disagrees with JS is never
+    // dispatched and never says so.
+    // Plus the one method only Android carries: the debug-build door onto
+    // the focus listener that focus-loss-android.cjs drives. Listed apart in
+    // the manifest, as codecTargetProof is for iOS, so it never widens the
+    // shared surface by accident.
+    expect(androidBridgeMethods(module)).toEqual(
+      [...bridgeManifest.methods.phone, ...bridgeManifest.methods.androidOnly].sort(
+        (left, right) => left.name.localeCompare(right.name),
+      ),
+    );
     // status() refreshes the host inventory before every answer; session(),
     // the poll's read, must not — a 400 ms poll re-enumerating every audio
     // device was a per-tick cost nothing consumed.
@@ -205,28 +233,40 @@ describe('Android native DSP runtime packaging', () => {
     const binding = readRepository(
       'mobile/native/bindings/android/native_playback_jni.cpp',
     );
-    for (const symbol of [
-      'nativePlaybackStatus',
-      'nativePlaybackSession',
-      'nativePlaybackPositionNow',
-      'nativePlaybackSuspendOutput',
-      'nativePlaybackResumeOutput',
-      'nativePlaybackPrepare',
-      'nativePlaybackStart',
-      'nativePlaybackPause',
-      'nativePlaybackSeek',
-      'nativePlaybackSetLoop',
-      'nativePlaybackPreviewClick',
-      'nativePlaybackUnload',
-    ])
-      expect(binding).toContain(symbol);
+    const core = readMobile(
+      'android/app/src/main/java/com/singzplayer/split/SingzCore.kt',
+    );
+    // Both halves of one surface, pinned exactly and against each other. Nine
+    // symbols used to be listed here out of twenty-two; the thirteen unlisted
+    // ones included every transport command and lane control. Registration is
+    // dynamic through RegisterNatives, so a rename on one side alone is not a
+    // link error — it is JNI_OnLoad returning JNI_ERR at app start.
+    expect(jniPlaybackSymbols(binding)).toEqual(bridgeManifest.jni.symbols);
+    // The swap's capability bit, which the facade keys on and deliberately
+    // does not gate: dropped or renamed in one bridge, every cue, training or
+    // pitch change on that phone silently becomes stop → prepare → start.
+    // Nothing reads the manifest's capability block yet, so this is the pin.
+    expect(binding).toContain('\\"playbackSwap\\"');
+    expect(
+      kotlinExternalFunctions(core).filter(name => name.startsWith('nativePlayback')),
+    ).toEqual(bridgeManifest.jni.kotlinExternals);
+    expect([...bridgeManifest.jni.symbols].sort()).toEqual(
+      [...bridgeManifest.jni.kotlinExternals].sort(),
+    );
+    // THE list RegisterNatives resolves against. The C symbols above and the
+    // Kotlin externals can agree perfectly while a table string disagrees with
+    // both, and that failure is JNI_OnLoad returning JNI_ERR at app start —
+    // not a link error, and not visible to either of the other two lists.
+    expect([...jniRegisteredNames(binding)].sort()).toEqual(
+      [...bridgeManifest.jni.kotlinExternals].sort(),
+    );
     // The clock's JNI leg takes no lock and registers as a double array, not
     // a JSON string: `()[D` is the arity-and-type contract the Kotlin extern
-    // above must match, or the method never dispatches and never says so.
+    // must match, or the method never dispatches and never says so. The name
+    // lists above cannot see a signature, so this stays beside them.
     expect(binding).toMatch(
       /static jdoubleArray nativePlaybackPositionNow\(JNIEnv \*env, jobject\) \{\s*const singz::NativePlaybackPositionNow now = owner\(\)\.session\.positionNow\(\);/,
     );
-    expect(binding).toContain('"nativePlaybackPositionNow"');
     expect(binding).toContain('"()[D"');
     expect(binding).toContain('nativePlaybackSessionCapabilityTag()');
     expect(binding).toContain('decodedAudioCodecCapabilities()');
@@ -237,40 +277,41 @@ describe('Android native DSP runtime packaging', () => {
     expect(binding).toContain(
       '[Lcom/singzplayer/playback/NativePlaybackGraphNodeJni;',
     );
-    for (const field of [
-      'timePitchAnchorsPrepared',
-      'timePitchAnchorsPublished',
-      'timePitchAnchorMisses',
-      'timePitchReplacementReady',
-      'timePitchLoopPriming',
-      'lastTransportBoundary',
-      'preparedStartProjectFrame',
-      'swapPendingGeneration',
-      'retiringSwapGeneration',
-      'swapLandings',
-      'swapLateLandings',
-      'swapPrimeNs',
-      'swapLandingFrames',
-      'playbackSwap',
-      'previewClicksEnqueued',
-      'previewClicksStarted',
-      'previewClicksCompleted',
-      'previewClicksPending',
-    ])
-      expect(binding).toContain(`\\"${field}\\"`);
-    for (const reason of [
-      'none',
-      'stream-generation-changed',
-      'sequence-gap',
-      'sample-rate-changed',
-      'route-generation-changed',
-      'timestamp-quality-changed',
-      'clock-reanchored',
-      'source-seek',
-      'source-loop',
-      'device-lost',
-      'source-frame-overflow',
-    ])
-      expect(binding).toContain(`"${reason}"`);
+    // The whole emitted session block, as an exact set: everything iOS sends
+    // plus Android's own three. Eleven names were listed here before, which
+    // could see neither a twelfth arriving nor one platform drifting from the
+    // other.
+    // Compared as a SET: the two bridges emit the same names in slightly
+    // different order (Android puts the three graph-status fields before
+    // adapterRenderFailures, iOS after), and order is not part of the
+    // contract — both sides are read by name.
+    const session = jniJsonKeys(binding, 'void appendStatus(');
+    expect([...session.keys].sort()).toEqual(
+      [...bridgeManifest.session.common, ...bridgeManifest.session.androidExtra].sort(),
+    );
+    expect(session.nested.latency).toEqual(bridgeManifest.session.nested.latency);
+    expect(session.nested.lanes).toEqual(bridgeManifest.session.nested.lanes);
+    // Every switch table this bridge publishes, fallthrough included. Only the
+    // boundary reasons were compared against source before, so the manifest
+    // could have drifted from the other seven with every suite green — two
+    // answers to one question, which is what the manifest exists to prevent.
+    for (const [name, signature] of [
+      ['playbackState', 'const char *playbackState('],
+      ['hostState', 'const char *hostState('],
+      ['terminalReason', 'const char *terminalReason('],
+      ['transportState', 'const char *transportState('],
+      ['transportTelemetryQuality', 'const char *transportTelemetryQuality('],
+      ['transportBoundaryReason', 'const char *transportBoundaryReason('],
+      ['cleanupSafety', 'const char *cleanupSafety('],
+      ['coordinatorState', 'const char *coordinatorState('],
+    ] as const) {
+      const declared = (bridgeManifest.enums as unknown as Record<string, Record<string, {
+        strings: string[];
+        fallback: string | null;
+      }>>)[name].android;
+      const extracted = switchStringTable(binding, signature);
+      expect(extracted.cases).toEqual(declared.strings);
+      expect(extracted.fallback).toEqual(declared.fallback);
+    }
   });
 });

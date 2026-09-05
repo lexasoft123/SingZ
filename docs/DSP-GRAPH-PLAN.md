@@ -1343,10 +1343,13 @@ foundation; experimentally activated by B2):
   archives, final Release link/symbol ownership and an exact-consumer Jest
   gate cover the packaging boundary.
 - `NativeAudioRuntime` reports `ownership: coordinated` and
-  `activation: experimental-b2`. Only `mobile/src/playback/native.ts` may
+  `activation: experimental-4c`. Both are labels: the capability parser reads
+  them and gates on neither. Only `mobile/src/playback/native.ts` may
   consume its playback surface; packaging tests reject ad-hoc product callers.
   The frozen request/result/status schema is documented in
-  `docs/IOS-AUDIO.md`.
+  `docs/IOS-AUDIO.md`, and the whole three-bridge boundary — methods, DTOs,
+  the session block, enum tables, the lifetime protocol and the divergence
+  register — in `docs/NATIVE-PLAYBACK-BRIDGE.md`.
 - Exact bridge strings reject malformed UTF-16 and embedded NUL for route UID,
   lane ID/path and control ID before any C/filesystem conversion. Output
   channel indexes at or above the native host limit reject before decode.
@@ -1873,6 +1876,50 @@ physical-device gates):
   suite covers the desktop facade separately.
 - Route/latency and memory-envelope measurements on hardware, and the
   feature-flag default decision, which stays "legacy" on every platform.
+
+Where that list stands on 2026-09-05 (the record of record is
+`docs/NATIVE-PLAYBACK-PARITY-PLAN.md`, Step 6; this is the summary):
+
+- The Android audible session has played: the emulator runs the native
+  backend through the JNI bridge and Oboe host end to end (`player-session`
+  55-60/60 on a loaded host, all functional rules green), and the physical
+  phone ran 57/58 on the side-by-side `.debug` build before its keyguard
+  blocked further legs. The iPhone rollout reached testers as builds 49 and
+  50 (0.19.1) through the ad-hoc install page; the simulator leg reached
+  58/58 on the compared rules. Speaker/wired/Bluetooth/CarPlay route checks on
+  a real iPhone remain owed.
+- The native/legacy behaviour gaps the phones surfaced are closed and driven:
+  a scrub or an A-B before Play (the core refused both; the facade now
+  remembers them and Play prepares from there), the count-in from a scrubbed
+  or paused spot (the cue planner's `countInAnchorSeconds`, negative pre-roll
+  frames, the bar sweeping the beats before the landing, landing on the spot
+  the singer HEARD rather than the render head), Play after a pause counting
+  in as legacy does on every Play, and the seek bar's RMS level envelope
+  matching legacy's. Backgrounding differs by decision: iOS native keeps
+  rendering (audio background mode + playback session category), Android
+  native pauses in place (no media-playback foreground service), legacy stops
+  on both.
+- The live command surface on the phones: `node mobile/tests/player-session.cjs
+  --platform ios|android` (one session driven twice, legacy then native, with
+  per-rule comparison; `--wait-quiet` gates the start on host load, and the
+  host-quiet, CPU and metronome-save rows are known to flip under a busy Mac —
+  three quiet greens per platform is the bar, not one) and
+  `node mobile/tests/play-from-anywhere.cjs --platform ios|android` (the
+  Plays that are not a fresh song's first: pre-Play scrub and A-B, count-in
+  from a scrub or a pause, plain resume, level-envelope parity). Both are in
+  the e2e-verifier roster; both are silent. Headless: `cd mobile && npx jest`
+  (`native-playback-b2`, `playback-backend-contract`, `native-playback-4b-
+  contract`, `lane-levels`), the native CTest gate (`cmake --build
+  build/phase4-tests` then `ctest`, 48 tests with the bridge-contract
+  suite), the shared
+  `tests/shared/playback-cue-cases.json` fixture read by vitest and CTest, and
+  the iOS/Android bridge schema runners.
+- Still open from the list above: the Windows providers on the Dell, the
+  target-executed codec proofs, one shared engine-contract suite across both
+  legacy engines and the facade, hardware route/latency and memory envelopes,
+  and the default decision, which stays "legacy" on every platform. Two
+  harness rules are reported rather than compared: Play → first audible (the
+  two backends measure different events) and backgrounded CPU.
 
 Implement:
 

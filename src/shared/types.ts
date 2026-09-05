@@ -989,21 +989,45 @@ export interface DesktopPlaybackStatus {
   preparedStartProjectFrame: string
   retainedBytes: string
   graphArenaBytes: string
+  /**
+   * Bytes and lanes the core is holding for the next prepare to adopt. The
+   * addon has always emitted both; nothing here declared them, so the desktop
+   * could not tell a park from a release without reading the receipt. Lane
+   * parking is still dormant on this platform — see docs/NATIVE-PLAYBACK-BRIDGE.md
+   * §3 — but a field the bridge emits belongs in the type either way.
+   */
+  parkedLaneBytes: string
+  parkedLaneCount: number
   masterGain: number
   referenceGain: number
   trainingEnabled: boolean
   trainingLanes: string[]
   preRollFrames: string
   cueEventCount: number
+  /** Count-in events in the prepared plan, and the meter they were laid to. */
+  countInEventCount: number
+  countInBeatsPerBar: number
   previewClicksEnqueued: string
   previewClicksStarted: string
   previewClicksCompleted: string
   previewClicksPending: number
+  /** Empty when the parallel decode pool got the concurrency it asked for. */
+  laneDecodeFallback: string
   topology: string
   graphNodeCount: number
   graphConnectionCount: number
   latencyCompensatedEdgeCount: number
   graphSnapshot: DesktopPlaybackGraphSnapshot | null
+  /**
+   * The three the phones publish too. Without them a graph that refuses to
+   * render reads as an undifferentiated provider fault — the state both phones
+   * were in until these were plumbed, and the state this side stayed in
+   * afterwards because the addon emitted them and nothing declared them.
+   * Value tables are in native_playback_session.h.
+   */
+  graphStatusCode: number
+  graphStatusDetail: number
+  timePitchAnchorOutcome: number
   adapterRenderFailures: number
   terminalRenderFailures: number
   parameterOverflows: number

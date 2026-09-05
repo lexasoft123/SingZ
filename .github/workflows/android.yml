@@ -28,6 +28,7 @@ on:
       - 'scripts/store-notes.cjs'
       # the canary compiles these — an edit must run its own gate
       - 'tests/native/**'
+      - 'tests/shared/**'
       - 'scripts/run-core-host-tests.sh'
       # …and it now runs the Beat This! parity gate, which reads these. The
       # expectation is a RECORDING of the python runner's answer, so a bad
@@ -52,6 +53,7 @@ on:
       - 'docs/release-notes/**'
       - 'scripts/store-notes.cjs'
       - 'tests/native/**'
+      - 'tests/shared/**'
       - 'scripts/run-core-host-tests.sh'
       - 'eval/mlgrid-parity.mjs'
       - 'eval/beats/ml-fixtures.mjs'
