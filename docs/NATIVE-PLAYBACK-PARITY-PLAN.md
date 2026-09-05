@@ -575,6 +575,18 @@ every sample of every channel in the sliver now (`summarizeLanePeaks` keeps its 
 older JS and older natives keep reading each other; `mobile/src/playback/lane-levels.ts` is
 the legacy side, unit-tested against a sine).
 
+**Android on the new bridge (2026-09-05 night, emulator `emu-run-4l-1.log`, plain debug
+APK built 19:03 from f42bc31):** 55/60 — every functional rule green; the five misses are
+the host-bound rows (both host-quiet, the two CPU rows the emulator borrows from the Mac,
+the metronome save under load 4–5). The count-in probe ported to the Android driver proves
+the anchor crosses the JNI: pre-roll from −96 000, landing on 1 923 016, and the bar
+sweeping 38 → 40 through the pre-roll (2c6e1cc: the handle shows landing + frame for the
+negative pre-roll frames, on the clock, the poll and the prepared publisher alike; the dots
+were never late on screen — the player reads them from the clock, the earlier probe read
+the polled snapshot). The POCO leg is owed and blocked on the phone's keyguard; it takes the
+`-PdebugAppIdSuffix=.debug` build, never the plain one. Build 50 (0.19.1) shipped from
+f42bc31 with the count-in and the histogram; 2c6e1cc is not in it.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so
