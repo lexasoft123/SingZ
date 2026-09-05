@@ -1,0 +1,3 @@
+Fix the words yourself, right down to the syllable.
+
+Until now a mis-heard lyric meant listening again and hoping. There's a lyrics editor now — type or paste the real words, drag any word onto the exact instant it's sung on the recording's own waveform, or let SingZ line everything up for you in one pass. Correct it once on the computer, and every phone gets the fixed lyrics the next time it syncs.

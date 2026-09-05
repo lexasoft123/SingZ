@@ -100,6 +100,19 @@ const api: SingzApi = {
   applyLyrics: (songPath, id, durationSec) =>
     ipcRenderer.invoke('lyrics:apply', songPath, id, durationSec),
 
+  saveLyrics: (songPath, lines, credit) =>
+    ipcRenderer.invoke('lyrics:save-edited', songPath, lines, credit),
+
+  alignLyricsDraft: (songPath, durationSec, lines, tier, allowDownload) =>
+    ipcRenderer.invoke(
+      'lyrics:align-draft',
+      songPath,
+      durationSec,
+      lines,
+      tier,
+      Boolean(allowDownload)
+    ),
+
   cancelLyrics: () => ipcRenderer.invoke('lyrics:cancel'),
 
   onLyricsProgress: (cb) => {

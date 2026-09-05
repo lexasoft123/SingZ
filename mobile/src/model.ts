@@ -19,7 +19,7 @@ export interface LyricLine {
 }
 
 export interface LyricsDoc {
-  source: 'lrclib' | 'whisper'
+  source: 'lrclib' | 'whisper' | 'edited'
   credit?: string
   aligned?: boolean
   lines: LyricLine[]

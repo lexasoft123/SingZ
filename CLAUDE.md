@@ -67,7 +67,9 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (eleven of them: align, wizard/consent, audio settings,
+in `tests/e2e/mac/` (twelve of them: align, lyrics editing (the editor's
+align-draft leg is a different code path from the panel's Check & align —
+both are covered), wizard/consent, audio settings,
 bar editing — TWO of those, because dragging a line and pressing Re-detect
 are different code paths and only the drag was covered — and the
 analysis-rule drivers: the two stem-rate ones, the two song-switch races,
@@ -958,7 +960,10 @@ builds the full APK only on `v*` tags / manual dispatch, attaching
 `SingZ-<tag>-android.apk` to the release — the family fleet sideloads
 that. Superseded same-ref runs auto-cancel. Bump `package.json` version to match
 the tag (artifact names use it) — **and the iOS project with it**:
-`MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in
+`MARKETING_VERSION` (= the release semver — package.json's version, or its
+`major.minor.patch` prefix when package.json carries a prerelease string) and
+`CURRENT_PROJECT_VERSION` (a per-build counter, 27 at v0.19.0 and 28-32 across
+the five mic testers — never the semver) in
 `mobile/ios/SingZPlayer.xcodeproj/project.pbxproj` are the one place a version
 is written down by hand (android/app/build.gradle reads package.json, the
 desktop reads it too), and iOS treats an install of an unchanged version as
