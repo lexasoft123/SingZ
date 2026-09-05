@@ -2039,6 +2039,11 @@ export class IosNativePlaybackCoordinator {
   private async rememberPositionForRestart(
     handle: IosNativePlaybackHandle,
   ): Promise<void> {
+    // A song that never started keeps its own memory — the seek and the loop
+    // chosen before Play, which its restart prepare carries. A snapshot
+    // taken here would name the frame a cue rebuild happened to prepare at
+    // and no loop, and shadow both: the bar at one place, Play at another.
+    if (!handle.startWasIssued(handle.generation)) return;
     try {
       const session = await this.deps.native?.session();
       // Only a playhead that has actually moved is worth keeping. Recording
@@ -2453,7 +2458,7 @@ export class IosNativePlaybackCoordinator {
         renderedPositionSec: 0,
         audibleFrames: 0,
         countInStatus: null,
-        regionState: null,
+        regionState: handle.pendingRegionState(),
         error: null,
       });
     return 'leased-stopped';
@@ -3204,7 +3209,6 @@ export class IosNativePlaybackCoordinator {
           wasStarted,
           restoreTransport,
           preparedStartProjectFrame,
-          rememberedStartFrame,
           restoreLoop,
           statusSampleRate,
         } as const;
@@ -3250,7 +3254,6 @@ export class IosNativePlaybackCoordinator {
         wasStarted,
         restoreTransport,
         preparedStartProjectFrame,
-        rememberedStartFrame,
         restoreLoop,
         statusSampleRate,
       } = derived;
@@ -3334,10 +3337,12 @@ export class IosNativePlaybackCoordinator {
               : undefined,
           ),
         );
-        // The rebuilt graph IS at the position chosen before Play now; Play
-        // starts it as it is rather than parking it for another prepare.
-        if (prepared.ok && rememberedStartFrame !== undefined)
-          handle.clearRetryPosition();
+        // What was remembered before Play (a seek, a loop) stays remembered:
+        // the rebuilt graph sits at the remembered frame so the bar and the
+        // graph agree, and Play carries seek and loop in its own prepare —
+        // one more ~30 ms prepare on parked lanes, and one place that owns
+        // them. A loop baked into a rebuilt graph here was a loop the screen
+        // no longer showed and the singer could not un-arm.
         if (!prepared.ok) {
           const generation = handle.generation;
           handle.update({ phase: 'stopped', error: prepared.error });
@@ -3865,7 +3870,7 @@ export class IosNativePlaybackCoordinator {
         renderedPositionSec: 0,
         audibleFrames: 0,
         countInStatus: null,
-        regionState: null,
+        regionState: handle.pendingRegionState(),
       });
       log(
         'dsp',
@@ -3938,7 +3943,7 @@ export class IosNativePlaybackCoordinator {
       renderedPositionSec: 0,
       audibleFrames: 0,
       countInStatus: null,
-      regionState: null,
+      regionState: handle.pendingRegionState(),
     });
     log(
       'native-playback',
@@ -4319,6 +4324,13 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private lanePeaksGeneration = 0;
   private lanePeaksCache: NativePlaybackLanePeaksResult | null = null;
   private retryProjectSeconds: number | null = null;
+  /** An A-B loop set before Play on a song that never started: the core
+   *  takes a loop only on a running transport or as a prepare parameter, so
+   *  it is remembered here and travels with the prepare Play makes. */
+  private pendingPreparedLoop: {
+    startProjectFrame: number;
+    endProjectFrame: number;
+  } | null = null;
   private recoverySnapshot: NativePlaybackRecoverySnapshot | null = null;
   private lastTelemetry: NativePlaybackSessionStatus | null = null;
   /** When the poll last replaced `lastTelemetry` — its own stamp, not the
@@ -4432,6 +4444,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       // has ACCEPTED, or the new generation comes up at the defaults — a
       // master gain zeroed before Play came back at full volume at Play.
       const frame = this.retryPreparedStartFrame(outputSampleRate);
+      const loop = this.pendingPreparedLoop;
       return this.prepareOverrides(
         frame,
         this.materialized.lanes.map(lane => ({
@@ -4443,6 +4456,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
           solo: this.acceptedLaneControls.get(lane.id)?.solo ?? lane.solo,
         })),
         this.acceptedMasterGain,
+        // A loop set before Play: 'playing' is the ordinary start — the
+        // transport is not started by the prepare — with the loop declared.
+        loop === null ? undefined : { state: 'playing', loop },
       );
     }
     const frame = Math.round(recovery.positionSeconds * outputSampleRate);
@@ -4570,7 +4586,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     // remembered position (see seek): the prepared graph starts at its own
     // frame and the core moves no transport that is not running.
     const seekBeforePlay =
-      phase === 'prepared' && this.retryProjectSeconds !== null;
+      phase === 'prepared' &&
+      (this.retryProjectSeconds !== null || this.pendingPreparedLoop !== null);
     return {
       token,
       restart: phase === 'stopped' || seekBeforePlay,
@@ -4942,7 +4959,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       displayLatencySec: 0,
       audibleFrames: 0,
       countInStatus: null,
-      regionState: null,
+      // A loop remembered before Play stays on the screen through every
+      // prepare on its way to the graph Play makes.
+      regionState: this.pendingRegionState(),
       terminalReason: 'none',
       error: null,
     });
@@ -5323,6 +5342,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   clearRecoverySnapshot(): void {
     this.recoverySnapshot = null;
     this.retryProjectSeconds = null;
+    this.pendingPreparedLoop = null;
   }
 
   private projectFrame(
@@ -5487,10 +5507,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     // simply plays from the scrubbed spot, and so does this: the target is
     // remembered, the bar and the snapshot show it, and Play re-prepares
     // the parked lanes at that frame (tryBeginStart / startHandleLocked).
-    if (
-      this.snapshot().phase === 'prepared' &&
-      !this.startWasIssued(this.generation)
-    ) {
+    if (this.awaitingFirstPlay()) {
       const sampleRate = this.sampleRate();
       this.rememberRetryProjectFrame(projectFrame, sampleRate);
       const positionSec = projectFrame / sampleRate;
@@ -5564,6 +5581,28 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         this.generation,
         'The native playback loop region is invalid.',
       );
+    if (this.awaitingFirstPlay()) {
+      // The same refusal a seek meets before Play (see seek): the core sets a
+      // loop only on a running transport. Remembered, shown, and prepared
+      // into the graph Play makes (initialTransport.loop).
+      this.pendingPreparedLoop = { startProjectFrame, endProjectFrame };
+      const sampleRate = this.sampleRate();
+      this.update(
+        {
+          regionState: {
+            start: startProjectFrame / sampleRate,
+            end: endProjectFrame / sampleRate,
+            loop: true,
+          },
+        },
+        { force: true },
+      );
+      log(
+        'dsp',
+        `loop before Play remembered · generation ${this.generation} · frames ${startProjectFrame}–${endProjectFrame} · Play prepares with it`,
+      );
+      return;
+    }
     await this.dispatchTransport({
       kind: 'set-loop',
       startProjectFrame,
@@ -5572,7 +5611,39 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   }
 
   clearLoop(): Promise<void> {
+    if (this.awaitingFirstPlay()) {
+      this.pendingPreparedLoop = null;
+      this.update({ regionState: null }, { force: true });
+      return Promise.resolve();
+    }
     return this.dispatchTransport({ kind: 'clear-loop' });
+  }
+
+  /** Prepared, and Play has never been pressed: nothing runs in the core
+   *  for a transport command to move, so a seek or a loop is remembered
+   *  and Play prepares with it. */
+  awaitingFirstPlay(): boolean {
+    const phase = this.snapshot().phase;
+    // 'stopped' without a start ever issued is a prepare that failed or a
+    // rebuild that did; Play is a restart prepare either way, and it carries
+    // what is remembered here exactly as the prepared case does.
+    return (
+      (phase === 'prepared' || phase === 'stopped') &&
+      !this.startWasIssued(this.generation)
+    );
+  }
+
+  /** The region the screen shows for a loop remembered before Play — null
+   *  once it is cleared or the song plays, so started songs see no change. */
+  pendingRegionState(): NativePlaybackViewState['regionState'] {
+    const loop = this.pendingPreparedLoop;
+    if (loop === null) return null;
+    const sampleRate = this.sampleRate();
+    return {
+      start: loop.startProjectFrame / sampleRate,
+      end: loop.endProjectFrame / sampleRate,
+      loop: true,
+    };
   }
 
   reanchorTransport(): Promise<void> {

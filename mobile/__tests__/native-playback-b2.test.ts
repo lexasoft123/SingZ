@@ -2694,9 +2694,10 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('seek before play test complete');
   });
 
-  it('a cue change between a pre-Play seek and Play rebuilds at the remembered spot, and Play starts it as it is', async () => {
-    // Otherwise the rebuild prepared at the entry, the bar read the top, and
-    // Play parked and re-prepared at the remembered spot anyway: two answers.
+  it('a cue change between a pre-Play seek and Play rebuilds at the remembered spot; Play prepares there again', async () => {
+    // The rebuild prepares where the bar says, so the two agree; what was
+    // remembered before Play stays remembered and Play carries it in its
+    // own prepare — one owner, one more ~30 ms prepare on parked lanes.
     const h = harness({ swapCapable: true, syncClock: true });
     const project = await h.load(entry({ beat, metronome: initialMetronome }));
     const handle = project.nativePlayback!;
@@ -2714,19 +2715,166 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     // The listener-facing position is the rendered one less the display
     // latency: near 1.5, nowhere near the entry.
     expect(handle.snapshot().positionSec).toBeCloseTo(1.5, 1);
-    // Play: no park, no third prepare — the rebuilt graph is already there.
-    h.native.status.mockResolvedValueOnce(capability(2, 'running', 72_000));
+    h.native.status
+      .mockResolvedValueOnce(capability(2, 'unloaded'))
+      .mockResolvedValueOnce(capability(3, 'prepared', 72_000))
+      .mockResolvedValueOnce(capability(3, 'running', 72_000));
     const mark = h.calls.length;
     await expect(handle.start()).resolves.toEqual({ kind: 'started' });
     expect(h.calls.slice(mark)).toEqual([
+      'native.unloadRetainingLanes:2',
+      'native.prepare:3',
+      'legacy.unload',
+      'legacy.suspend',
+      'native.configure:3',
+      'native.open:3',
+      'native.start:3',
+    ]);
+    expect(h.prepareRequests[2]).toMatchObject({ preparedStartProjectFrame: 72_000 });
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 3 });
+    await handle.stop('rebuild between seek and play test complete');
+  });
+
+  it('an A-B loop set before Play is remembered, shown, and prepared into the graph Play makes', async () => {
+    // setLoop meets the same refusal a seek does before Play (the core sets
+    // a loop only on a running transport), and errored the handle the same
+    // way. The loop is a prepare parameter, so Play carries it.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    const before = h.calls.length;
+    await handle.setLoop(0.5, 1.5);
+    expect(h.calls.slice(before)).toEqual([]);
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'prepared',
+      error: null,
+      regionState: { start: 0.5, end: 1.5, loop: true },
+    });
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 24_000));
+    const mark = h.calls.length;
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    expect(h.calls.slice(mark)).toEqual([
+      'native.unloadRetainingLanes:1',
+      'native.prepare:2',
       'legacy.unload',
       'legacy.suspend',
       'native.configure:2',
       'native.open:2',
       'native.start:2',
     ]);
+    expect(h.prepareRequests[1]).toMatchObject({
+      initialTransport: { state: 'playing', loop: { startProjectFrame: 24_000, endProjectFrame: 72_000 } },
+    });
+    expect(h.prepareRequests[1]).not.toHaveProperty('preparedStartProjectFrame');
     expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
-    await handle.stop('rebuild between seek and play test complete');
+    await handle.stop('loop before play test complete');
+  });
+
+  it('a loop cleared again before Play leaves Play a plain start', async () => {
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.setLoop(0.5, 1.5);
+    await handle.clearLoop();
+    expect(handle.snapshot()).toMatchObject({ phase: 'prepared', regionState: null });
+    h.native.status.mockResolvedValueOnce(capability(1, 'running', 0));
+    const mark = h.calls.length;
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    expect(h.calls.slice(mark)).toEqual([
+      'legacy.unload',
+      'legacy.suspend',
+      'native.configure:1',
+      'native.open:1',
+      'native.start:1',
+    ]);
+    await handle.stop('loop cleared before play test complete');
+  });
+
+  it('a cue change after a pre-Play seek and loop keeps the loop remembered and shown; Play prepares with both', async () => {
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.seek(1.5);
+    await handle.setLoop(1, 2);
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'prepared', 0, 'ios'))
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared', 72_000));
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    // The rebuilt graph sits at the remembered frame and carries NO loop: a
+    // loop baked in here was one the screen no longer showed.
+    expect(h.prepareRequests[1]).toMatchObject({ preparedStartProjectFrame: 72_000 });
+    expect(h.prepareRequests[1]).not.toHaveProperty('initialTransport');
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'prepared',
+      generation: 2,
+      regionState: { start: 1, end: 2, loop: true },
+    });
+    // Un-armed before Play: Play is a plain start of the rebuilt graph.
+    await handle.clearLoop();
+    expect(handle.snapshot().regionState).toBeNull();
+    // Armed again: Play carries frame and loop in its own prepare.
+    await handle.setLoop(1, 2);
+    h.native.status
+      .mockResolvedValueOnce(capability(2, 'unloaded'))
+      .mockResolvedValueOnce(capability(3, 'prepared', 72_000))
+      .mockResolvedValueOnce(capability(3, 'running', 72_000));
+    const mark = h.calls.length;
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    expect(h.calls.slice(mark)).toEqual([
+      'native.unloadRetainingLanes:2',
+      'native.prepare:3',
+      'legacy.unload',
+      'legacy.suspend',
+      'native.configure:3',
+      'native.open:3',
+      'native.start:3',
+    ]);
+    expect(h.prepareRequests[2]).toMatchObject({
+      preparedStartProjectFrame: 72_000,
+      initialTransport: { state: 'playing', loop: { startProjectFrame: 48_000, endProjectFrame: 96_000 } },
+    });
+    await handle.stop('rebuild after seek and loop test complete');
+  });
+
+  it('training taking the output from a never-started song keeps its pre-Play seek and loop', async () => {
+    // The ownership stop remembers a started song's playhead in a recovery
+    // snapshot; on a never-started song that snapshot named the frame a cue
+    // rebuild had prepared at and no loop, and shadowed what the singer set.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.seek(1.5);
+    await handle.setLoop(1, 2);
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'prepared', 0, 'ios'))
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared', 72_000));
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    // The core now reports the rebuilt graph at 72 000 — what the snapshot
+    // would have captured.
+    h.native.status.mockResolvedValueOnce(capability(2, 'prepared', 72_000));
+    await expect(h.coordinator.stopForOwnership('training')).resolves.toBe(true);
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'stopped',
+      regionState: { start: 1, end: 2, loop: true },
+    });
+    // Still before Play: a new scrub is remembered and shown.
+    await handle.seek(3);
+    expect(handle.snapshot().positionSec).toBeCloseTo(3, 3);
+    h.native.status
+      .mockResolvedValueOnce(capability(3, 'prepared', 144_000))
+      .mockResolvedValueOnce(capability(3, 'running', 144_000));
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    // Play prepared where the bar said, with the loop — not the snapshot's frame.
+    expect(h.prepareRequests[2]).toMatchObject({
+      preparedStartProjectFrame: 144_000,
+      initialTransport: { state: 'playing', loop: { startProjectFrame: 48_000, endProjectFrame: 96_000 } },
+    });
+    await handle.stop('training handoff before play test complete');
   });
 
   it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {
