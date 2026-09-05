@@ -531,12 +531,12 @@ export class MultitrackEngine {
   }
 
   get position(): number {
-    const native = this.nativePlayback?.status
-    if (this.nativePlayback?.active && native?.format.sampleRate) {
-      const frame = Number(native.audibleProjectFrame)
-      return Number.isSafeInteger(frame)
-        ? Math.max(0, Math.min(this.duration, frame / native.format.sampleRate))
-        : this.startOffset
+    if (this.nativePlayback?.active) {
+      // Projected between status polls and pre-empted by an accepted seek,
+      // as the phones' clock is — the poll is 50 ms over IPC, and reading
+      // the raw last status put that under every seek read-back.
+      const seconds = this.nativePlayback.audibleSeconds()
+      return seconds === null ? this.startOffset : Math.max(0, Math.min(this.duration, seconds))
     }
     if (!this._playing) return this.startOffset
     // Track what the listener hears: stretch-node latency plus device output

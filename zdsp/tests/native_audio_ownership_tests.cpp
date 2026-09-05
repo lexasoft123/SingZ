@@ -29,6 +29,22 @@ int main() {
   CHECK(ownership.snapshot().kind == Kind::Monitor);
   CHECK(ownership.release(Kind::Monitor, 2));
 
+  // A seam re-keys the playback lease from the replaced generation to its
+  // candidate in one step: the kind never changes hands, another kind can
+  // never slip in between, and the old generation can no longer release it.
+  CHECK(ownership.acquire(Kind::Playback, 5) == Result::Acquired);
+  CHECK(!ownership.rekey(Kind::Playback, 6, 7));   // 6 does not hold it
+  CHECK(!ownership.rekey(Kind::Monitor, 5, 7));    // wrong kind
+  CHECK(!ownership.rekey(Kind::Playback, 5, 5));   // not a move
+  CHECK(!ownership.rekey(Kind::Playback, 5, 0));   // no generation
+  CHECK(ownership.rekey(Kind::Playback, 5, 7));
+  CHECK(ownership.snapshot().kind == Kind::Playback);
+  CHECK(ownership.snapshot().generation == 7);
+  CHECK(ownership.acquire(Kind::Monitor, 8) == Result::Busy);
+  CHECK(!ownership.release(Kind::Playback, 5));
+  CHECK(ownership.release(Kind::Playback, 7));
+  CHECK(ownership.snapshot().kind == Kind::None);
+
   std::atomic<bool> go{false};
   std::atomic<uint32_t> acquired{0};
   auto race = [&](Kind kind, uint64_t generation) {

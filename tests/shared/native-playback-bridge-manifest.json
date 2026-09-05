@@ -445,6 +445,12 @@
         "timePitchReplacementReady",
         "timePitchLoopPriming",
         "preparedStartProjectFrame",
+        "swapPendingGeneration",
+        "retiringSwapGeneration",
+        "swapLandings",
+        "swapLateLandings",
+        "swapPrimeNs",
+        "swapLandingFrames",
         "retainedBytes",
         "graphArenaBytes",
         "parkedLaneBytes",
@@ -516,14 +522,7 @@
         "graphSnapshot",
         "capability"
       ],
-      "absent": [
-        "swapPendingGeneration",
-        "retiringSwapGeneration",
-        "swapLandings",
-        "swapLateLandings",
-        "swapPrimeNs",
-        "swapLandingFrames"
-      ]
+      "absent": []
     }
   },
   "positionNow": {

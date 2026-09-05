@@ -239,6 +239,12 @@ const status = (generation: string, frame = '-960'): DesktopPlaybackStatus => ({
   timePitchReplacementReady: true,
   timePitchLoopPriming: true,
   preparedStartProjectFrame: '-960',
+  swapPendingGeneration: '0',
+  retiringSwapGeneration: '0',
+  swapLandings: 0,
+  swapLateLandings: 0,
+  swapPrimeNs: '0',
+  swapLandingFrames: '0',
   retainedBytes: '1024',
   graphArenaBytes: '512',
   parkedLaneBytes: '0',
@@ -487,10 +493,16 @@ describe('desktop native playback facade', () => {
       metronome: { click: false, countInBars: 0, volume: 0.4, accent: false, grid: false },
       training: { mode: 'period', periodSec: 3, stems: ['vocals'] }
     })
-    expect(api.stopDesktopPlayback).toHaveBeenCalledWith('1')
-    expect(api.unloadDesktopPlayback).toHaveBeenCalledWith('1')
+    // A structural change while the song renders is a SEAM now: the candidate
+    // is prepared naming the running generation, the core hands the clock
+    // across at a block boundary and retires the old graph itself — no stop,
+    // no unload. The frame primes the replacement's Stretch anchor and a
+    // pre-roll frame has no place in it (−960 → 0).
+    expect(api.stopDesktopPlayback).not.toHaveBeenCalled()
+    expect(api.unloadDesktopPlayback).not.toHaveBeenCalled()
     expect(prepared[1].config).toMatchObject({
-      preparedStartProjectFrame: -960,
+      swapFromGeneration: '1',
+      preparedStartProjectFrame: 0,
       masterGain: 0.5,
       playback: {
         transport: { playbackRate: 1.1, transposeSemitones: -2 },
@@ -594,6 +606,205 @@ describe('desktop native playback facade', () => {
     await client.reconfigure({ metronome: { ...metronome, click: true, countInBars: 2 } })
     expect(prepared[3].initialTransport).toMatchObject({ state: 'paused' })
     await client.unload()
+  })
+
+  /** A CoreAudio harness for the seam tests: prepare mints generations, the
+   *  status mock is whatever `nextStatus` returns, every call is recorded. */
+  const seamHarness = (nextStatus: (generation: string, reads: number) => DesktopPlaybackStatus) => {
+    let generation = '1'
+    let nextGeneration = 0
+    let reads = 0
+    const prepared: DesktopPlaybackPrepareConfig[] = []
+    const calls: string[] = []
+    const api = {
+      desktopPlaybackProviders: vi.fn(async () => [{
+        id: 'coreaudio', label: 'CoreAudio', available: true, errorCode: 'none', detail: ''
+      }]),
+      audioHostDevices: vi.fn(async () => ({
+        ok: true, platform: 'darwin', provider: 'coreaudio', defaultInputUid: '',
+        defaultOutputUid: 'speaker', error: '',
+        devices: [{
+          uid: 'speaker', label: 'Speaker', defaultInput: false, defaultOutput: true,
+          inputChannels: 0, outputChannels: 2, inputChannelLabels: [],
+          outputChannelLabels: ['L', 'R'], nominalSampleRate: 48_000,
+          direction: 'output', accessMode: 'shared', transport: 'built-in',
+          monitoringSuitability: 'low-latency',
+          sampleRateRanges: [{ minimumHz: 48_000, maximumHz: 48_000 }],
+          bufferFrames: { minimumFrames: 32, maximumFrames: 512, preferredFrames: 128, fundamentalFrames: 1 }
+        }]
+      })),
+      prepareDesktopPlayback: vi.fn(async (config: DesktopPlaybackPrepareConfig) => {
+        generation = String(++nextGeneration)
+        prepared.push(config)
+        calls.push(`prepare:${generation}${config.swapFromGeneration ? `:swap-from-${config.swapFromGeneration}` : ''}`)
+        return result(generation)
+      }),
+      openDesktopPlayback: vi.fn(async (value: string) => { calls.push(`open:${value}`); return result(value, 'output-open') }),
+      startDesktopPlayback: vi.fn(async (value: string) => { calls.push(`start:${value}`); return result(value, 'running') }),
+      stopDesktopPlayback: vi.fn(async (value: string) => { calls.push(`stop:${value}`); return result(value, 'stopped') }),
+      pauseDesktopPlayback: vi.fn(async (value: string) => { calls.push(`pause:${value}`); return result(value, 'running') }),
+      resumeDesktopPlayback: vi.fn(async (value: string) => { calls.push(`resume:${value}`); return result(value, 'running') }),
+      seekDesktopPlayback: vi.fn(async (value: string) => { calls.push(`seek:${value}`); return result(value, 'running') }),
+      desktopPlaybackStatus: vi.fn(async () => nextStatus(generation, ++reads)),
+      unloadDesktopPlayback: vi.fn(async (value: string) => { calls.push(`unload:${value}`); return result(value, 'unloaded', true) }),
+      setDesktopPlaybackLane: vi.fn(async (value: string) => result(value, 'running')),
+      setDesktopPlaybackMasterGain: vi.fn(async (value: string) => result(value, 'running'))
+    } as unknown as SingzApi
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient(
+      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
+      () => undefined
+    )
+    const metronome = { click: false, countInBars: 0, volume: 0, accent: true, grid: false }
+    const start = () => client.prepareAndStart({
+      provider: 'coreaudio',
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: { beats: [0, 0.5, 1, 1.5], bpm: 120, beatsPerBar: 4, downbeat: 0, downbeats: [0], source: 'auto' },
+      metronome,
+      countIn: true,
+      positionSeconds: 0,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    })
+    return { api, client, prepared, calls, metronome, start, generationNow: () => generation }
+  }
+  const playing = (generation: string, patch: Partial<DesktopPlaybackStatus> = {}): DesktopPlaybackStatus => ({
+    ...status(generation, '48000'),
+    transportState: 'playing',
+    loopEnabled: false,
+    // The fixture's default rate is 0.8; the clock tests read in real seconds.
+    playbackRate: 1,
+    ...patch
+  })
+
+  it('a cue change while playing is a SEAM: one prepare naming the old generation, no stop, no unload, and the transport lands on the new one', async () => {
+    // Measured on the desktop player-session harness: training on was an
+    // 840-900 ms rebuild, and every metronome touch one too; the phones seam
+    // these, and the core does the whole hand-over once a prepare names the
+    // generation it replaces. The transport telemetry names the OLD
+    // generation until the render thread lands the seam.
+    let landAfterRead = Infinity
+    const h = seamHarness((generation, reads) =>
+      playing(generation, {
+        transportGeneration: generation === '2' && reads < landAfterRead ? '1' : generation,
+        swapPendingGeneration: generation === '2' && reads < landAfterRead ? '1' : '0'
+      })
+    )
+    expect(await h.start()).toBe(true)
+    const reads = (h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    landAfterRead = reads + 3
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...h.metronome, click: true } })
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    expect(h.prepared[1]).toMatchObject({ swapFromGeneration: '1', initialTransport: { state: 'playing' } })
+    expect(h.prepared[1].preparedStartProjectFrame).toBe(48_000)
+    expect(h.client.status).toMatchObject({ generation: '2', transportGeneration: '2' })
+    expect(h.client.transportActive).toBe(true)
+    await h.client.unload()
+  })
+
+  it('a seam the core refuses falls back to the rebuild, asking for the refused candidate\'s receipt on the way', async () => {
+    const h = seamHarness((generation) => playing(generation))
+    expect(await h.start()).toBe(true)
+    const prepare = h.api.prepareDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    prepare.mockImplementationOnce(async (config: DesktopPlaybackPrepareConfig) => {
+      h.prepared.push(config)
+      h.calls.push('prepare:2:swap-from-1:refused')
+      return { ...result('2'), ok: false, errorCode: 'invalid-state', error: 'cannot replace that generation on its stream' }
+    })
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...h.metronome, click: true } })
+    expect(h.calls).toEqual(['prepare:2:swap-from-1:refused', 'unload:2', 'stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[2]).not.toHaveProperty('swapFromGeneration')
+    expect(h.prepared[2].initialTransport).toMatchObject({ state: 'playing' })
+    await h.client.unload()
+  })
+
+  it('a refusal that echoes the RUNNING generation unloads nothing: the rebuild takes it from there', async () => {
+    // Main's own busy guard answers a prepare with the live generation's
+    // number, not a candidate's. Treating that as a refused candidate
+    // unloaded the playing graph on the first real seam attempt.
+    const h = seamHarness((generation) => playing(generation))
+    expect(await h.start()).toBe(true)
+    const prepare = h.api.prepareDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    prepare.mockImplementationOnce(async (config: DesktopPlaybackPrepareConfig) => {
+      h.prepared.push(config)
+      h.calls.push('prepare:swap:busy')
+      return { ...result('1'), ok: false, errorCode: 'native-audio-busy', error: 'Unload the active native player before preparing another.' }
+    })
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...h.metronome, click: true } })
+    expect(h.calls).toEqual(['prepare:swap:busy', 'stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    await h.client.unload()
+  })
+
+  it('a paused song is rebuilt, not seamed: the core only seams a running generation', async () => {
+    const h = seamHarness((generation) => playing(generation))
+    expect(await h.start()).toBe(true)
+    await h.client.pause()
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...h.metronome, click: true } })
+    expect(h.calls[0]).toBe('stop:1')
+    expect(h.prepared[1]).not.toHaveProperty('swapFromGeneration')
+    expect(h.prepared[1].initialTransport).toMatchObject({ state: 'paused' })
+    await h.client.unload()
+  })
+
+  it('transportParked follows the intent, not a snapshot that still says stopped', async () => {
+    // Every status reads 'stopped' — what a generation reports for ~80 ms
+    // after its start is acknowledged. A pause issued then used to be
+    // skipped as "already parked" while the core played on.
+    const h = seamHarness((generation) => playing(generation, { transportState: 'stopped' }))
+    expect(await h.start()).toBe(true)
+    expect(h.client.transportParked).toBe(false)
+    await h.client.pause()
+    expect(h.client.transportParked).toBe(true)
+    await h.client.resume()
+    expect(h.client.transportParked).toBe(false)
+    await h.client.unload()
+  })
+
+  it('the audible position is projected between polls, bounded, folded at the loop, and pre-empted by an accepted seek', async () => {
+    vi.setSystemTime(new Date('2026-09-06T00:00:00Z'))
+    const h = seamHarness((generation) =>
+      playing(generation, { audibleProjectFrame: '48000', loopEnabled: true, loopStartFrame: '0', loopEndFrame: '192000', seekCount: '0' })
+    )
+    expect(await h.start()).toBe(true)
+    // The poller would re-read under the fake clock and move the read time;
+    // this test is about what happens BETWEEN reads.
+    ;(h.client as unknown as { stopPolling: () => void }).stopPolling()
+    // The last read is 1.0 s in; 100 ms later the bar shows 1.1 s.
+    expect(h.client.audibleSeconds()).toBeCloseTo(1.0, 3)
+    vi.advanceTimersByTime(100)
+    expect(h.client.audibleSeconds()).toBeCloseTo(1.1, 3)
+    // A stalled poll cannot run it away: one second is the most.
+    vi.advanceTimersByTime(3000)
+    expect(h.client.audibleSeconds()).toBeCloseTo(2.0, 3)
+    // Folded at B: a read at 3.95 s projected 100 ms lands at 0.05, not 4.05.
+    const statusMock = h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>
+    statusMock.mockImplementationOnce(async () => playing(h.generationNow(), { audibleProjectFrame: '189600', loopEnabled: true, loopStartFrame: '0', loopEndFrame: '192000' }))
+    await (h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh('1')
+    vi.advanceTimersByTime(100)
+    expect(h.client.audibleSeconds()).toBeCloseTo(0.05, 3)
+    // A seek shows its target the moment the core accepts it, before any
+    // status reflects it; the status never increments seekCount here, so the
+    // wait gives up after its bounded reads and the projection resumes.
+    const during: number[] = []
+    statusMock.mockImplementation(async () => {
+      during.push(h.client.audibleSeconds() ?? -1)
+      return playing(h.generationNow(), { audibleProjectFrame: '48000', seekCount: '0' })
+    })
+    await h.client.seek(7)
+    expect(during.length).toBeGreaterThan(1)
+    expect(during.every((value) => Math.abs(value - 7) < 1e-6)).toBe(true)
+    expect(h.client.audibleSeconds()).toBeCloseTo(1.0, 3)
+    await h.client.unload()
   })
 
   it.each(['prepare', 'open'] as const)(
@@ -929,6 +1140,10 @@ describe('desktop native playback facade', () => {
       } else {
         await client.prepareAndStart(asioRequest())
         if (stage === 'rebuild') {
+          // A paused song takes the rebuild path (a rendering one would be
+          // seamed, and a seam never unloads); the rebuild's unload is what
+          // this stage is about.
+          await client.pause()
           await expect(client.reconfigure({ playbackRate: 1.1 })).rejects.toMatchObject({
             name: 'DesktopNativeRecoveryError', code: 'provider-cleanup-incomplete', provider: 'asio'
           })

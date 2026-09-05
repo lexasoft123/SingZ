@@ -32,6 +32,10 @@ class NativeAudioOwnership final {
   NativeAudioAcquireResult acquire(NativeAudioOwnerKind kind,
                                    uint64_t generation);
   bool release(NativeAudioOwnerKind kind, uint64_t generation);
+  // A seam hands the lease from the generation it replaces to the one that
+  // replaced it, in one step: the same owner kind, no moment in which the
+  // device is unowned for another kind to take. False unless `from` holds it.
+  bool rekey(NativeAudioOwnerKind kind, uint64_t from, uint64_t to);
   NativeAudioOwnershipSnapshot snapshot() const;
 
  private:

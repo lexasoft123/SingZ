@@ -1073,7 +1073,7 @@ bool parseConfig(napi_env env, napi_value value,
            "bufferFrames", "maximumFrames", "masterGain",
            "maximumRetainedBytes", "playback", "training",
            "preparedStartProjectFrame", "initialTransport",
-           "graphDocument"}))
+           "graphDocument", "swapFromGeneration"}))
     return false;
   NativePlaybackPrepareConfig config;
   uint32_t sampleRate = 0;
@@ -1145,6 +1145,16 @@ bool parseConfig(napi_env env, napi_value value,
     config.preparedStartProjectFrame = frame;
   }
   napi_value initialTransport{};
+  // Replace a running generation on its stream (the phones' seam): the
+  // core hands the clock across at a block boundary and retires the old
+  // graph itself. Absent or zero is an ordinary prepare.
+  napi_value swapFrom{};
+  if (named(env, value, "swapFromGeneration", &swapFrom)) {
+    uint64_t swapGeneration = 0;
+    if (!exactU64(env, swapFrom, &swapGeneration))
+      return false;
+    config.swapFromGeneration = swapGeneration;
+  }
   if (named(env, value, "initialTransport", &initialTransport) &&
       !parseInitialTransport(env, initialTransport, &config.initialTransport)) {
     return false;
@@ -1195,6 +1205,46 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
                            "Playback configuration or lane paths are invalid"));
 
   std::lock_guard<std::mutex> lock(playback.mutex);
+  if (config.swapFromGeneration != 0) {
+    // A SEAM: the candidate replaces the running generation on its stream.
+    // No new backend, no new device lease — the stream, its format and its
+    // route are the ones the song is on, and the core does the hand-over at
+    // a block boundary and retires the old graph itself. Only the active
+    // generation may be named, and only on the provider it runs on.
+    if (playback.generation == 0 ||
+        config.swapFromGeneration != playback.generation)
+      return resultValue(env,
+                         simpleFailure(NativePlaybackError::InvalidGeneration,
+                                       generation,
+                                       "A native playback seam must name the "
+                                       "active generation"),
+                         "invalid-generation");
+    if (provider != playback.provider ||
+        !consumeProviderDeviceUid(provider, &config.outputDeviceUid))
+      return resultValue(
+          env, simpleFailure(NativePlaybackError::InvalidConfiguration,
+                             generation,
+                             "A native playback seam keeps the running "
+                             "provider and device"));
+    const uint64_t replaced = playback.generation;
+    const NativePlaybackResult claimed =
+        playback.session.claimGeneration(generation, 0);
+    if (!claimed.ok) return resultValue(env, claimed);
+    config.handoffLease = 0;
+    const NativePlaybackResult prepared = playback.session.prepare(
+        std::move(config), std::move(lanes), generation);
+    // Took: the lease and the addon's notion of "the active generation" move
+    // forward with it; the old one is the core's to retire. Refused: the
+    // candidate's claim is spent and nothing of it exists — the running
+    // generation is exactly as it was, and main must not move either.
+    const bool took = prepared.ok &&
+                      playback.ownership->rekey(NativeAudioOwnerKind::Playback,
+                                                replaced, generation);
+    if (took) playback.generation = generation;
+    napi_value result = resultValue(env, prepared);
+    setValue(env, result, "ownershipRetained", makeBool(env, took));
+    return result;
+  }
   if (playback.generation != 0)
     return resultValue(env,
                        simpleFailure(NativePlaybackError::InvalidState,
@@ -1797,6 +1847,15 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
            makeBool(env, source.timePitchLoopPriming));
   setSignedCounter(env, result, "preparedStartProjectFrame",
                    source.preparedStartProjectFrame);
+  // The seam's own telemetry, spelled exactly as the phone bridges spell it.
+  setCounter(env, result, "swapPendingGeneration", source.swapPendingGeneration);
+  setCounter(env, result, "retiringSwapGeneration",
+             source.retiringSwapGeneration);
+  setValue(env, result, "swapLandings", makeNumber(env, source.swapLandings));
+  setValue(env, result, "swapLateLandings",
+           makeNumber(env, source.swapLateLandings));
+  setCounter(env, result, "swapPrimeNs", source.swapPrimeNs);
+  setCounter(env, result, "swapLandingFrames", source.swapLandingFrames);
   setCounter(env, result, "retainedBytes",
              static_cast<uint64_t>(source.retainedBytes));
   setCounter(env, result, "graphArenaBytes",

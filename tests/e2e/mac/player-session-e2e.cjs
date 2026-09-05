@@ -228,6 +228,10 @@ async function runPass(kind, songs) {
     const hits = lines.filter((x) => FATAL_LOG.some((p) => p.test(x.line))).map((x) => `${x.source}: ${x.line.slice(0, 200)}`)
     if (hits.length) { pass.fatal.push({ what, hits }); throw new Error(`fatal log during "${what}": ${hits[0]}`) }
   }
+  // The native facade's last status, read through the engine (a JS runtime
+  // sees the private field): which generation renders, and the seam counters.
+  const seamFacts = (win) => val(win, `(function(){ const c = __test.engine.nativePlayback; const s = c && c.status; return s ? 'gen ' + s.generation + ' transport ' + s.transportGeneration + ' seams ' + s.swapLandings + ' late ' + s.swapLateLandings + ' pending ' + s.swapPendingGeneration : 'no native status' })()`)
+  const dspLines = async (win, fromMs) => (await logSince(win, fromMs)).filter((x) => x.source === 'dsp').map((x) => `${new Date(x.t).toISOString().slice(11, 23)} ${x.line.slice(0, 150)}`)
   const mute = async (win) => {
     await val(win, '__test.engine.setMasterVolume(0)')
   }
@@ -339,23 +343,27 @@ async function runPass(kind, songs) {
   log(`  [${kind}] lane ramps → applied: ${ramps.join(' / ')} ms`)
 
   // ---- pitch +2: the longest stall, absolute ceiling only --------------------
-  r = await watch(win, { ms: PITCH_LIMIT_MS + 3000, every: 20, action: '__test.setTranspose(2)', cond: 'false', stopOnHit: false, holdAfterHitMs: null })
+  const lastPollExpr = '(function(){ const c = e.nativePlayback; return c ? c.lastAtMs : null })()'
+  r = await watch(win, { ms: PITCH_LIMIT_MS + 3000, every: 20, action: '__test.setTranspose(2)', cond: 'false', stopOnHit: false, holdAfterHitMs: null, extra: lastPollExpr })
   const stall = longestStall(r.out)
   pass.ms.pitchStall = stall.ms
   await backendCheck(win, 'pitch change')
   await mute(win)
   await checkFatal(win, passStart, 'pitch change')
   pass.cpu['pitch-change'] = sampleCpu(pid)
-  log(`  [${kind}] pitch +2 → longest stall ${stall.ms} ms · transpose now ${await val(win, '__test.engine.transpose')} · cpu ${pass.cpu['pitch-change'].cpuPct}%`)
+  const pollGap = (out) => { let worst = 0; for (let i = 1; i < out.length; i++) { const d = out[i].x - out[i - 1].x; if (out[i].x !== null && out[i - 1].x !== null && d > worst) worst = d } return worst }
+  log(`  [${kind}] pitch +2 → longest stall ${stall.ms} ms · transpose now ${await val(win, '__test.engine.transpose')} · cpu ${pass.cpu['pitch-change'].cpuPct}%${kind === 'native' ? ` · ${await seamFacts(win)} · longest gap between status polls ${pollGap(r.out)} ms` : ''}`)
 
   // ---- training on ----------------------------------------------------------
   await val(win, `__test.setTrainCfg(Object.assign({}, __test.trainCfg, { mode: 'period', periodSec: 8, stems: ['vocals'] }))`)
   await sleep(300)
-  r = await watch(win, { ms: 10000, every: 20, action: '__test.setTraining(true)', cond: 'false', stopOnHit: false })
+  const tTrain = Date.now()
+  r = await watch(win, { ms: 10000, every: 20, action: '__test.setTraining(true)', cond: 'false', stopOnHit: false, extra: lastPollExpr })
   pass.ms.trainGap = longestStall(r.out).ms
   const trainingOn = await val(win, '__test.training')
   await checkFatal(win, passStart, 'training on')
-  log(`  [${kind}] training on → longest stall ${pass.ms.trainGap} ms · training=${trainingOn}`)
+  log(`  [${kind}] training on → longest stall ${pass.ms.trainGap} ms · training=${trainingOn}${kind === 'native' ? ` · ${await seamFacts(win)} · longest gap between status polls ${pollGap(r.out)} ms` : ''}`)
+  if (kind === 'native') for (const line of await dspLines(win, tTrain)) log(`      ${line}`)
 
   // ---- pause / resume -------------------------------------------------------
   r = await watch(win, { ms: 5000, every: 10, action: 'e.pause()', cond: '!s.playing && out.length > 2 && Math.abs(s.pos - out[out.length - 2].pos) < 1e-4', holdAfterHitMs: 300 })
@@ -405,6 +413,8 @@ async function runPass(kind, songs) {
   await val(win, '__test.engine.pause()')
   const finalLog = await logSince(win, 0)
   pass.notes.push(`log lines this launch: ${finalLog.length}`)
+  const events = finalLog.filter((x) => x.source === 'dsp')
+  log(`  [${kind}] graph events this launch: ${events.length}${events.length ? ' — ' + events.map((x) => x.line.split(' · ')[0]).join('; ').slice(0, 300) : ''}`)
   log(`  [${kind}] app restart ${relaunched.ms} ms · reopen A ready ${o3.ready} ms`)
   await app.close()
   return pass

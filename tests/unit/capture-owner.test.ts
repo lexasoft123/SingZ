@@ -860,6 +860,47 @@ describe('CaptureOwner', () => {
     expect(owner.beginMonitor(32, config)).toMatchObject({ ok: true, ownershipGeneration: '2' })
   })
 
+  it('admits a SEAM — a prepare naming the active generation from its owner — and moves the active generation with it', () => {
+    // The one prepare allowed while a player is active. The core prepares the
+    // candidate on the running generation's stream and retires the old graph
+    // itself, so no unload for the old generation ever arrives from the
+    // renderer; main's bookkeeping follows the seam forward. Anything else
+    // stays busy — and a seam naming a generation that is not the active one
+    // is refused before it reaches the addon.
+    const binding = fakeBinding()
+    // The real addon retains ownership of every generation it claims, and
+    // takes generations as BigInt — the seam's field included.
+    const swapFieldsSeen: unknown[] = []
+    binding.preparePlayback = (config, _lanes, generation) => {
+      if ('swapFromGeneration' in config) swapFieldsSeen.push(config.swapFromGeneration)
+      return { ...playbackResult(generation.toString()), ownershipRetained: true }
+    }
+    const owner = new CaptureOwner(binding)
+    expect(owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({ ok: true, generation: '1' })
+    expect(owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
+      ok: false, errorCode: 'native-audio-busy', generation: '1'
+    })
+    expect(owner.preparePlayback(8, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
+      ok: false, errorCode: 'native-audio-busy'
+    })
+    expect(owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
+      ok: true, generation: '2'
+    })
+    expect(swapFieldsSeen).toEqual([1n])
+    // Commands follow: the new generation answers to its owner, the old one
+    // is no longer main's to command.
+    expect(owner.startPlayback(7, '2')).toMatchObject({ ok: true })
+    expect(owner.startPlayback(7, '1')).toMatchObject({ ok: false, errorCode: 'invalid-generation' })
+    // A seam naming a generation that is not the active one never reaches the addon.
+    expect(owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
+      ok: false, errorCode: 'native-audio-busy'
+    })
+    expect(owner.unloadPlayback(7, '2')).toMatchObject({ ok: true })
+    expect(owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '2' }, playbackLanes(), 'darwin')).toMatchObject({
+      ok: false, errorCode: 'invalid-generation'
+    })
+  })
+
   it('stops an owned native monitor when its renderer disappears', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)

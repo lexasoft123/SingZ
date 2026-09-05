@@ -366,6 +366,13 @@ export class DesktopNativePlaybackClient {
    * within one popover visit stopped the music. */
   private transportIntent: 'playing' | 'paused' = 'paused'
   private last: DesktopPlaybackStatus | null = null
+  /** When `last` was read, so the position can be projected between polls
+   * the way the phones project theirs: a 50 ms poll over IPC is otherwise
+   * the floor under every seek read-back and every bar step. */
+  private lastAtMs = 0
+  /** A seek the core has accepted but the status has not yet reflected: the
+   * bar shows the target at once instead of one IPC round trip later. */
+  private pendingSeekFrame: number | null = null
   private poller: ReturnType<typeof setTimeout> | null = null
   private pollingEpoch = 0
   /** Every status read, including command refreshes, runs in this one lane.
@@ -406,8 +413,40 @@ export class DesktopNativePlaybackClient {
    * queue behind the rebuild, which restarts playback otherwise. */
   get transportParked(): boolean {
     const state = this.last?.transportState
+    // The INTENT, plus the one park the core decides alone (the song ran
+    // out). A snapshot's 'stopped' is what a generation reads for ~80 ms
+    // after its start is acknowledged, and trusting it skipped a pause
+    // issued in that window as "already parked" while the core played on.
     return this.ownsOutput && this.started && this.last !== null &&
-      (state === 'paused' || state === 'completed' || state === 'stopped')
+      (this.transportIntent === 'paused' || state === 'completed')
+  }
+
+  /** The audible position in seconds as the bar should show it: the last
+   * status's audible frame, projected forward by the time since that read
+   * while playing (bounded to one second, as the phones bound theirs — a
+   * seam's prepare holds main, and with it the poll, for over half a second
+   * while the old graph plays on), folded at the loop end, and pre-empted by
+   * a seek target the core has accepted but not yet reported. Null while no
+   * status describes a transport. */
+  audibleSeconds(): number | null {
+    const status = this.last
+    const sampleRate = status?.format.sampleRate
+    if (!status || !sampleRate || !this.ownsOutput) return null
+    if (this.pendingSeekFrame !== null) return Math.max(0, this.pendingSeekFrame / sampleRate)
+    const frame = Number(status.audibleProjectFrame)
+    if (!Number.isSafeInteger(frame)) return null
+    let seconds = frame / sampleRate
+    if (this.started && this.transportIntent === 'playing' &&
+        (status.transportState === 'playing' || status.transportState === 'pre-roll')) {
+      const elapsed = Math.max(0, Math.min(1, (Date.now() - this.lastAtMs) / 1000))
+      seconds += elapsed * (Number.isFinite(status.playbackRate) && status.playbackRate > 0 ? status.playbackRate : 1)
+      if (status.loopEnabled) {
+        const start = Number(status.loopStartFrame) / sampleRate
+        const end = Number(status.loopEndFrame) / sampleRate
+        if (end > start && seconds >= end) seconds = start + ((seconds - end) % (end - start))
+      }
+    }
+    return Math.max(0, seconds)
   }
 
   /** Whether the retained status still describes a live transport. Output
@@ -757,6 +796,21 @@ export class DesktopNativePlaybackClient {
       // generation is retired, failure is fail-closed and never wakes WebAudio.
       this.configFor(request, this.route, preparedStartProjectFrame, initialTransport)
       this.assertCommandableGeneration()
+      // A SEAM first, as the phones do: while the song is rendering, the
+      // candidate is prepared on the running stream (`swapFromGeneration`),
+      // the core adopts the old graph's decoded lanes, hands the clock across
+      // at a block boundary and retires the old graph itself — no stop, no
+      // unload, no gap. A cue, training or pitch change was a full rebuild
+      // here (measured 840-900 ms of silence for training on, a rebuild per
+      // metronome touch); the core refuses the seam with InvalidState when
+      // the old generation is not simply running, and the rebuild below is
+      // the fallback then, exactly as before.
+      // Never for a forced rebuild: that is the route-change path, where the
+      // stream the seam would keep is the one that just went away.
+      const seamable = !options.force && this.started && state === 'playing' &&
+        (status.transportState === 'playing' || status.transportState === 'pre-roll') &&
+        status.swapPendingGeneration === '0' && status.retiringSwapGeneration === '0'
+      if (seamable && await this.seam(request, oldGeneration, preparedStartProjectFrame, initialTransport)) return
       this.stopPolling()
       if (this.started) {
         try { await window.singz.stopDesktopPlayback(oldGeneration) } catch { /* unload is authoritative */ }
@@ -773,6 +827,59 @@ export class DesktopNativePlaybackClient {
       await this.activate(request, this.route, false, preparedStartProjectFrame, initialTransport)
       this.request = request
     })
+  }
+
+  /** Prepare `request` as a replacement for `oldGeneration` on its running
+   * stream and wait for the landing. True when the seam took; false when the
+   * core refused it (the caller rebuilds). Runs inside reconfigure's
+   * serialized section. */
+  private async seam(
+    request: DesktopNativePlaybackPrepare,
+    oldGeneration: string,
+    preparedStartProjectFrame: number,
+    initialTransport: DesktopPlaybackInitialTransportConfig
+  ): Promise<boolean> {
+    const config: DesktopPlaybackPrepareConfig = {
+      // The clock is carried across by the core; the frame only primes the
+      // replacement's Stretch anchor, and a pre-roll frame has no place in a
+      // plan that may have no count-in.
+      ...this.configFor(request, this.route!, Math.max(0, preparedStartProjectFrame), initialTransport),
+      swapFromGeneration: oldGeneration
+    }
+    const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+    if (!prepared.ok || prepared.generation === '0' || prepared.generation === oldGeneration) {
+      // Refused. When the CORE refused (InvalidState: not simply running, or
+      // another swap in flight) the answer names the candidate, whose claim
+      // is spent and of which nothing exists; the unload asked for here is
+      // the receipt the phones send too — main declines it today, since it
+      // never moved to the candidate, and the core's refusal paths reset the
+      // candidate's claim themselves, so nothing is owed. A refusal that
+      // names the running generation is main's own busy guard echoing the
+      // live player — unloading THAT would stop the song, and did, once.
+      if (prepared.generation !== '0' && prepared.generation !== oldGeneration) {
+        try { await window.singz.unloadDesktopPlayback(prepared.generation) } catch { /* nothing exists */ }
+      }
+      return false
+    }
+    const generation = prepared.generation
+    this.generation = generation
+    this.request = request
+    // The landing: the transport telemetry names the old generation until
+    // the render thread hands the clock across at a block boundary, then the
+    // new one. Bounded by reads, not by a timer; a seam that has not landed
+    // after these is still armed and lands on its own — the status polls
+    // keep following it.
+    // Through the same recovery conversion as every other post-command read:
+    // an IPC failure here is a cleanup-required state, not a bare rejection.
+    for (let attempt = 0; attempt < 40 && this.generation === generation; attempt++) {
+      const status = await this.requireCommandStatus(
+        generation,
+        request.provider,
+        'Native playback seam armed but its landing could not be confirmed.'
+      )
+      if (status.transportGeneration === generation) break
+    }
+    return true
   }
 
   async pause(): Promise<void> {
@@ -811,23 +918,32 @@ export class DesktopNativePlaybackClient {
       const generation = this.generation
       const provider = this.request?.provider ?? 'coreaudio'
       const before = this.last.seekCount
-      ensure(
-        await window.singz.seekDesktopPlayback(
-          generation,
-          Math.round(seconds * this.last.format.sampleRate)
-        ),
-        'Native seek failed'
-      )
-      await this.refreshCommandStatus(generation, provider)
+      const targetFrame = Math.round(seconds * this.last.format.sampleRate)
+      // Shown the moment it is issued — the IPC round trip alone is 20-60 ms
+      // on a busy main — and withdrawn only if the core refuses it.
+      this.pendingSeekFrame = targetFrame
+      this.onStateChange(this.last)
+      try {
+        try {
+          ensure(await window.singz.seekDesktopPlayback(generation, targetFrame), 'Native seek failed')
+        } catch (error) {
+          this.pendingSeekFrame = null
+          this.onStateChange(this.last)
+          throw error
+        }
+        await this.refreshCommandStatus(generation, provider)
       // The callback applies the queued seek at its next period. The core's
       // resume() resolves Playing either way now and lets the callback end the
       // song from its own frame, so this wait no longer decides whether the
       // restart sounds; it keeps the status base fresh before the resume and
       // gives up quietly. Bounded — status reads, not timers, so the wait is
       // a few IPC round trips at most.
-      for (let attempt = 0; attempt < 24 && this.generation === generation &&
-           this.last?.seekCount === before; attempt++) {
-        await this.refreshCommandStatus(generation, provider)
+        for (let attempt = 0; attempt < 24 && this.generation === generation &&
+             this.last?.seekCount === before; attempt++) {
+          await this.refreshCommandStatus(generation, provider)
+        }
+      } finally {
+        if (this.pendingSeekFrame === targetFrame) this.pendingSeekFrame = null
       }
     })
   }
@@ -1073,6 +1189,7 @@ export class DesktopNativePlaybackClient {
           return null
         }
         this.last = status
+        this.lastAtMs = Date.now()
         this.observeTransportBoundary(expectedGeneration, status)
         this.onStateChange(status)
         if (status.state === 'terminal' || status.state === 'quarantined') this.stopPolling()

@@ -1269,11 +1269,24 @@ export class CaptureOwner {
     lanes: DesktopPlaybackLaneConfig[],
     platform: NodeJS.Platform = process.platform
   ): DesktopPlaybackResult {
-    if (this.playbackGeneration) {
+    // A SEAM names the running generation it replaces (the core prepares the
+    // candidate on that generation's stream and retires the old graph
+    // itself): the one prepare that is allowed while a player is active, and
+    // only from the renderer that owns it. Anything else is still busy.
+    const seam = config.swapFromGeneration !== undefined && config.swapFromGeneration !== '0'
+    const seamOfOwn = seam && this.playbackGeneration !== '' &&
+      config.swapFromGeneration === this.playbackGeneration && this.playbackRendererId === rendererId
+    if (this.playbackGeneration && !seamOfOwn) {
       return failedPlayback(
         'Unload the active native player before preparing another.',
         'native-audio-busy',
         this.playbackGeneration
+      )
+    }
+    if (seam && !seamOfOwn) {
+      return failedPlayback(
+        'A native playback seam must name the active generation.',
+        'invalid-generation'
       )
     }
     if (
@@ -1323,10 +1336,20 @@ export class CaptureOwner {
     const generation = ++this.playbackHighWater
     const rawGeneration = generation.toString()
     try {
-      const result = binding.preparePlayback(config, lanes, generation)
+      // Generations cross into the addon as BigInt, never as the strings the
+      // renderer carries (its `exactU64` takes a bigint or a number); the
+      // seam's field is a generation like any other.
+      const nativeConfig = seamOfOwn
+        ? { ...config, swapFromGeneration: BigInt(config.swapFromGeneration!) as unknown as string }
+        : config
+      const result = binding.preparePlayback(nativeConfig, lanes, generation)
       // Once the native session claims a generation, even a decode/graph
       // failure owns a cleanup receipt. Retain it until exact unload proves
-      // every graph/host/quarantine domain empty.
+      // every graph/host/quarantine domain empty. A seam that took moves the
+      // active generation forward the same way: the old one is the core's to
+      // retire, and no unload for it will ever arrive from the renderer. A
+      // seam the core refused leaves the running generation exactly as it
+      // was (the candidate's claim is spent, nothing of it exists).
       if (result.generation === rawGeneration && result.ownershipRetained === true) {
         this.playbackGeneration = rawGeneration
         this.playbackRendererId = rendererId

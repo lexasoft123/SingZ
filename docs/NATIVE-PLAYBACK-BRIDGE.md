@@ -276,7 +276,7 @@ once a sample rate is fixed.
 | `training` | — | see below | no |
 | `preparedStartProjectFrame` | project frames, signed | JS-safe | no |
 | `initialTransport` | — | `{state: playing\|paused, loop?}` | no |
-| `swapFromGeneration` | generation | the generation this prepare replaces as a seam on its running stream; `0`/absent = a fresh start. One more positional JNI argument on Android | no |
+| `swapFromGeneration` | generation | the generation this prepare replaces as a seam on its running stream; `0`/absent = a fresh start. One more positional JNI argument on Android; a config key on the desktop | no |
 | `graphDocument` | — | `{format: 1, engine: "singz-dsp", nodes, connections}` | no |
 
 `playback.transport` is `{entrySeconds, durationSeconds, playbackRate,
@@ -453,7 +453,13 @@ has landed and those that missed their budget; `swapPrimeNs` the last
 candidate's prime time and `swapLandingFrames` the landing budget. All six are
 read leniently (`?? 0`): a binary without them still plays, it just never
 seams. Poll for the first two (the facade's armed/landed decision); log for
-the rest.
+the rest. The desktop addon emits the same six (2026-09-06) and its prepare
+takes `swapFromGeneration` like the phones': the desktop facade seams a cue,
+training or pitch change while the song renders (one prepare naming the
+running generation, no stop, no unload, the landing awaited on
+`transportGeneration`) and rebuilds when the core refuses the seam, when the
+song is paused, or on the forced route-change rebuild, where the stream a seam
+would keep is the one that went away.
 
 ### Memory and retention
 

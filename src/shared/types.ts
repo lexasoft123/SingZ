@@ -809,6 +809,14 @@ export interface DesktopPlaybackPrepareConfig {
   preparedStartProjectFrame?: number
   initialTransport?: DesktopPlaybackInitialTransportConfig
   graphDocument?: NativeGraphDocumentProjection
+  /** Replace this generation ON ITS RUNNING STREAM (the phones' seam): the
+   * core prepares the candidate while the named one keeps rendering, adopts
+   * its decoded lanes, hands the clock across at a block boundary and
+   * retires the old graph itself — no open, no start, no gap. Refused as
+   * InvalidState unless that generation is running with nothing else in
+   * flight; the caller then falls back to unload-and-prepare. Absent = an
+   * ordinary prepare. */
+  swapFromGeneration?: string
 }
 
 export interface DesktopPlaybackLaneConfig {
@@ -998,6 +1006,16 @@ export interface DesktopPlaybackStatus {
    */
   parkedLaneBytes: string
   parkedLaneCount: number
+  /** A swap in flight: `swapPendingGeneration` names the generation still
+   * rendering while `generation` already names its replacement (armed, not
+   * landed); `retiringSwapGeneration` one that landed and is not yet freed.
+   * Both '0' between swaps. Counters as the phones read them. */
+  swapPendingGeneration: string
+  retiringSwapGeneration: string
+  swapLandings: number
+  swapLateLandings: number
+  swapPrimeNs: string
+  swapLandingFrames: string
   masterGain: number
   referenceGain: number
   trainingEnabled: boolean

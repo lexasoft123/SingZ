@@ -645,9 +645,30 @@ on open → ready, faders, metronome save, pause, resume, back, second song, res
 reopen; the reds are the desktop native path's own shape and are the desktop's Step 4 —
 the graph is prepared lazily at Play (+690 ms over legacy), a seek is an IPC round trip
 plus a status refresh (72 vs 11 ms), training on is an 840 ms rebuild where the phones
-seam, the metronome VOLUME is structural (a rebuild per touch, where the phones treat it
-as a scalar), and playing costs +130 MB because the renderer keeps its Web Audio buffers
+seam, every metronome touch is a rebuild (the phones seam those too — the volume is a cue
+field on both), and playing costs +130 MB because the renderer keeps its Web Audio buffers
 beside the core's lanes. Backgrounding is n/a on the desktop.
+
+**The desktop's Step 4, first cut (2026-09-06):** the seam. The core has swapped a
+generation on its running stream since the phones' Step 3; the desktop never asked,
+because three layers stood in the way and the harness found each one refusing in turn
+— main's busy guard (a seam naming the active generation from its owner is now the one
+prepare allowed while a player is active, and main's bookkeeping moves forward with
+it), main's crossing (generations reach the addon as BigInt; a string was an "invalid
+configuration"), and the addon's own busy guard (a seam branch that creates no backend
+and takes no new device lease, re-keying the ownership ledger from the replaced
+generation to the candidate in one step). With it, the desktop facade's reconfigure
+seams a cue, training or pitch change while the song renders and rebuilds when the core
+refuses, when paused, or on the forced route-change rebuild. Measured (a busy Mac, load
+6-7): training on 41 ms against legacy's 0 and inside the +50 ms budget, where it was
+720-900 ms; pitch +2 40 ms where it was 700-900; four seams per pass, none late; the
+status poll never starved (60 ms worst gap, where the rebuild held main for 650 ms).
+Two smaller pieces rode along: the position is projected between status polls and
+pre-empted by an accepted seek the moment it is issued (seek read-back 52 ms worst,
+inside budget, where it was 72), and transportParked follows the intent rather than a
+snapshot that still says 'stopped' 80 ms after a start. 19-20/28 now; what is left on
+the desktop is the graph prepared lazily at Play (+0.7-2.8 s), the footprint, and the
+CPU rows nobody can read on this Mac until it is quiet.
 
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the

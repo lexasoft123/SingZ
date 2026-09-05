@@ -25,6 +25,16 @@ bool NativeAudioOwnership::release(NativeAudioOwnerKind kind,
   return true;
 }
 
+bool NativeAudioOwnership::rekey(NativeAudioOwnerKind kind, uint64_t from,
+                                 uint64_t to) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (kind == NativeAudioOwnerKind::None || kind_ != kind || from == 0 ||
+      to == 0 || from == to || generation_ != from)
+    return false;
+  generation_ = to;
+  return true;
+}
+
 NativeAudioOwnershipSnapshot NativeAudioOwnership::snapshot() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return {kind_, generation_};
