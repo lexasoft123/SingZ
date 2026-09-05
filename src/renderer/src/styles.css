@@ -1341,12 +1341,25 @@ button.chip-status:hover {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* The editor's buttons joined this row in 0.20; at the panel's width the
+     three of them plus the badge took every pixel and the credit — the one
+     flex item allowed to shrink — collapsed to nothing, which is the LRCLIB
+     attribution gone. The row wraps instead: the credit keeps its words and
+     the buttons drop to a second line when they must. */
+  flex-wrap: wrap;
+  gap: 4px 8px;
   padding: 9px 18px;
   border-bottom: 1px solid var(--line);
   font-size: 11.5px;
   color: var(--dim);
   min-width: 0;
+}
+
+.lp-source .src-credit {
+  /* Never shrunk below a readable width: with the row wrapping, the buttons
+     move rather than the credit vanishing. */
+  flex: 1 1 140px;
+  min-width: 140px;
 }
 
 /* verdict of the words-vs-recording check */
