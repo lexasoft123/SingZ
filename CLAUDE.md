@@ -162,7 +162,7 @@ Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
 `beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
-`focus-loss-android.cjs`): CDP over
+`focus-loss-android.cjs`, `play-from-anywhere.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
 after engine or loading changes. `loop-region` and `ab-repeat` are a PAIR
@@ -174,7 +174,7 @@ a SCREEN rather than the engine: it seeds two phone-library projects (a
 hand-made grid, and a song with nothing detected), opens the Song sheet and
 reads the Beat row through somebody else's analysis — the rule in
 `song-sheet-copy.ts`, which no headless suite can see applied to a real row.
-`player-session.cjs` is the only one that runs the SAME session TWICE, once
+`play-from-anywhere.cjs` drives the native Plays that are NOT a fresh song's first Play — a scrub or an A-B before Play, the count-in from a scrubbed spot, Play after a pause with and without the count-in — and compares the seek bar's level envelope across both backends; those paths reached a phone in build 49 with only jest and hand probes behind them, because the session harness below seeks, loops and pauses only after Play. `player-session.cjs` is the only one that runs the SAME session TWICE, once
 on each playback backend, and compares the two — and the only one that can
 drive a REAL iPhone (`--platform ios-device`, opt-in, named by `IOS_DEVICE`,
 never part of a bare run because it writes into somebody's own library; its

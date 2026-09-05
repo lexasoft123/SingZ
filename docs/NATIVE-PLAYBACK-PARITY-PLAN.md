@@ -603,6 +603,35 @@ the tip passed both rules (resume → advancing native 118 vs legacy 228) at 54/
 at load 4.3–5 — the four misses the two host-quiet rows and the two load-sensitive
 metronome rows, as on every busy run.
 
+**The Plays that are not a fresh song's first Play have a permanent driver
+(`mobile/tests/play-from-anywhere.cjs --platform ios|android`, 2026-09-05):** the
+session harness seeks, loops and pauses only after Play, which is how build 49 reached
+a phone with a pre-Play scrub and a pre-Play A-B both refused by the core; the fixes
+were covered by jest and by hand-run probes. The driver runs, silent, on the native
+backend: a scrub before Play with the count-in off (flat start on the target) and on (a
+pre-roll of negative frames, the bar sweeping the beats before the target, the dots lit
+on the clock, the landing on the target), an A-B armed before Play (loops inside
+[A,B)), Play after a pause with the count-in on (park, anchored prepare, landing on the
+paused spot) and off (a plain resume, no prepare), then the seek bar's level envelope on
+both backends (colour 96/96, worst level 7.3% on a quiet drum sliver). Writing it found
+two defects the probes had not: **the bar fell to 0 for one sample at the end of every
+count-in** — the clock projects the core's last report forward by its age, and in the
+last milliseconds of a pre-roll a report of −248 read 20 ms later is +712, which the
+sign test took for project frame 712 (the pre-roll test now keys on the REPORTED frame,
+so a projection past zero is the landing plus the overshoot); and **the counted-in
+resume landed on the render head, not the spot the singer heard** — 160–240 ms past the
+bar on the emulator's route, the same on any Bluetooth route, invisible on the
+simulator's 304-frame latency (the recovery snapshot now carries `heardSeconds`, the
+render head less presentation latency and the display trim floored at −latency exactly
+as the bar and the dots floor it, and the anchor is that). Pinned in `native-playback-b2`
+(a −248/20 ms clock read; a 7 680-frame route; a −0.3 s trim), each mutation-checked, and
+the driver fails on a bar that falls back during the sweep. Its A-B and plain-resume
+checks bound the RENDER frame, which is what the core loops and resumes; the count-in
+checks bound the bar, which is what the anchor lands on. Runs: simulator PASS ×4,
+emulator PASS ×3 after the fixes (emulator landing 45.56 against a 45.55 bar, was 45.74
+against 45.59; the last emulator run's final pre-roll sample was raw frame −248, the
+crossing case, showing 39.84 where it showed 0). The driver is in the e2e-verifier roster.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so

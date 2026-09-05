@@ -885,9 +885,11 @@ describe.each(['ios', 'android'] as const)(
         // Play after the interruption counts in again from where the song
         // stopped, as legacy does on every Play: the ordinary start with the
         // paused spot as the count-in's anchor, not a flat structural start
-        // (decided 2026-09-05, with Play after a pause).
+        // (decided 2026-09-05, with Play after a pause). The anchor is the
+        // spot the singer HEARD — the render head less the route's
+        // presentation latency (304 frames in this fixture).
         playback: {
-          transport: { playbackRate: 0.9, transposeSemitones: 2, countInAnchorSeconds: 0.5 },
+          transport: { playbackRate: 0.9, transposeSemitones: 2, countInAnchorSeconds: 0.5 - 304 / 48_000 },
           cues: { countInBars: 1 },
         },
         masterGain: 0.55,
@@ -2942,6 +2944,20 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       ageMs: 0,
     });
     expect(handle.clock().renderedSec).toBeCloseTo(1.0, 3);
+    // The last milliseconds of the pre-roll, read 20 ms after the report:
+    // the projection crosses zero (−248 + 960 = +712). That is the landing
+    // plus the overshoot, not project frame 712 — the bar was measured
+    // falling to 0 for one sample here on the emulator.
+    h.setPositionNow({
+      generation: 2,
+      transportState: 'pre-roll',
+      renderedProjectFrame: -248,
+      continuousFrame: 47_752,
+      remainingPreRollFrames: 248,
+      seekCount: 0,
+      ageMs: 20,
+    });
+    expect(handle.clock().renderedSec).toBeCloseTo((72_000 + 712) / 48_000, 4);
     // Landed: the frame itself.
     h.setPositionNow({
       generation: 2,
@@ -2987,7 +3003,9 @@ describe('iOS Phase 4B structural cue rebuild', () => {
           'native.start:2',
         ]);
         expect(h.prepareRequests[1]).toMatchObject({
-          playback: { transport: { countInAnchorSeconds: 1.5 } },
+          // The heard spot: the render head less the fixture's 304-frame
+          // presentation latency — what the bar showed at the pause.
+          playback: { transport: { countInAnchorSeconds: 1.5 - 304 / 48_000 } },
           initialTransport: { state: 'playing' },
         });
         expect(h.prepareRequests[1]).not.toHaveProperty('preparedStartProjectFrame');
@@ -2999,6 +3017,54 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       }
       await handle.stop('play after pause test complete');
     }
+  });
+
+  it('Play after a pause on a long-latency route counts in to the spot the singer heard, not the render head', async () => {
+    // On a Bluetooth route (or the emulator, measured 160-240 ms) the render
+    // head at the pause is a fifth of a second past the bar; landing the
+    // count-in on it had the band come in early.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    await handle.pause();
+    h.native.status
+      .mockResolvedValueOnce(
+        swapCapability(1, 'running', 72_000, {
+          transportState: 'paused',
+          renderedProjectFrame: 72_000,
+          audibleProjectFrame: 72_000 - 7_680,
+          presentationLatencyFrames: 7_680,
+        }),
+      )
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 64_320));
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    const request = h.prepareRequests[1] as { playback: { transport: { countInAnchorSeconds?: number } } };
+    expect(request.playback.transport.countInAnchorSeconds).toBeCloseTo(1.5 - 0.16, 6);
+    await handle.stop('heard-spot anchor test complete');
+  });
+
+  it('the heard-spot anchor floors the display trim at −latency, as the bar does', async () => {
+    // A trim dialled to −0.3 s on a route with 304 frames of latency shows
+    // the bar AT the render head (the bar floors the trim at −latency); the
+    // anchor must not land 280 ms past it.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
+    const handle = project.nativePlayback!;
+    handle.setDisplayTrim(-0.3);
+    await handle.start();
+    await handle.pause();
+    h.native.status
+      .mockResolvedValueOnce(swapCapability(1, 'running', 72_000, { transportState: 'paused', renderedProjectFrame: 72_000 }))
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 72_000));
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    const request = h.prepareRequests[1] as { playback: { transport: { countInAnchorSeconds?: number } } };
+    expect(request.playback.transport.countInAnchorSeconds).toBeCloseTo(1.5, 6);
+    await handle.stop('trim floor anchor test complete');
   });
 
   it('paused inside its own mid-song count-in, Play counts in again to the same landing', async () => {

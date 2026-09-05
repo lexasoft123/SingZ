@@ -679,7 +679,14 @@ interface NativePlaybackPrepareOverrides {
  * targets and are re-applied atomically by the next prepare request. */
 interface NativePlaybackRecoverySnapshot {
   readonly sourceGeneration: number;
+  /** The render head. */
   readonly positionSeconds: number;
+  /** The spot the singer HEARD — the render head less the route's
+   * presentation latency and the display trim, which is what the bar showed
+   * at the pause. A count-in lands here: on a Bluetooth route (or the
+   * emulator, measured 160-240 ms) the render head is a fifth of a second
+   * past the bar, and landing on it had the band come in early. */
+  readonly heardSeconds: number;
   readonly lanes: readonly NativePlaybackLaneStatus[];
   readonly masterGain: number;
   readonly loop: {
@@ -4579,7 +4586,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       recovery.lanes,
       recovery.masterGain,
       initialTransport,
-      countsIn ? recovery.positionSeconds : undefined,
+      countsIn ? recovery.heardSeconds : undefined,
     );
   }
 
@@ -4884,7 +4891,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       moving && !queued ? ageSec * this.playbackRate * sampleRate : 0;
     const renderedFrame = this.foldFrame(frame + advanced, sampleRate);
     return {
-      renderedSec: this.shownFrame(renderedFrame) / sampleRate,
+      renderedSec: this.shownFrame(renderedFrame, frame) / sampleRate,
       playing: moving,
       live: true,
       countIn: this.countInAt(transportState, renderedFrame, this.lastTelemetry),
@@ -4894,10 +4901,20 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   /** The frame the bar shows for a rendered frame: during a count-in that
    *  lands mid-song the negative pre-roll frames read as the beats before the
    *  landing, as the legacy bar sweeps them; everywhere else the frame
-   *  itself. The dots and the receipt logic keep the raw frame. */
-  private shownFrame(renderedFrame: number): number {
+   *  itself. The dots and the receipt logic keep the raw frame.
+   *
+   *  Whether a frame is a pre-roll frame is decided by the frame the CORE
+   *  reported (`reportedFrame`), never by the projected one: the clock
+   *  projects the last report forward by its age, and in the last few
+   *  milliseconds of a count-in that projection crosses zero — a report of
+   *  −248 read 20 ms later is +712, which as a project frame is the top of
+   *  the song, and the bar was measured falling to 0 for one sample before
+   *  the landing on the emulator. A projection past zero from a pre-roll
+   *  report is the landing plus the overshoot, which is where the transport
+   *  is by then. */
+  private shownFrame(renderedFrame: number, reportedFrame = renderedFrame): number {
     this.rawRenderedFrame = renderedFrame;
-    return renderedFrame < 0 && this.countInLandingFrame > 0
+    return reportedFrame < 0 && this.countInLandingFrame > 0
       ? this.countInLandingFrame + renderedFrame
       : renderedFrame;
   }
@@ -5391,6 +5408,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     const positionSeconds = session
       ? session.renderedProjectFrame / sampleRate
       : view.renderedPositionSec;
+    // Floored exactly as the bar and the dots floor it: a trim dialled below
+    // −latency reads as −latency there, so the anchor must read it the same
+    // way or a −0.3 s trim on a wired route lands 280 ms past the bar.
+    const latencySec = session
+      ? session.presentationLatencyFrames / sampleRate
+      : view.displayLatencySec;
+    const heardSeconds = Math.max(
+      0,
+      positionSeconds - latencySec - Math.max(this.displayTrimSec, -latencySec),
+    );
     const lanes =
       session && session.lanes.length > 0
         ? session.lanes.map(lane => ({ ...lane }))
@@ -5424,6 +5451,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.recoverySnapshot = {
       sourceGeneration: this.generation,
       positionSeconds,
+      heardSeconds,
       lanes,
       masterGain:
         session && Number.isFinite(session.masterGain)

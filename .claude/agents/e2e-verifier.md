@@ -91,6 +91,17 @@ Android:
    It drives `__test.audioInput` directly, never the training screen, because tapping fixed
    coordinates tests a layout and every fault this covers was in the transport.
    Then, on the same build and package, `ANDROID_PKG=com.lexasoft.singz.debug node
+- `node mobile/tests/play-from-anywhere.cjs --platform ios` (and `--platform android` on an
+   emulator) — the native backend's Plays that are not "Play from the top of a fresh song",
+   which the player-session harness never drives because it seeks, loops and pauses only
+   AFTER Play, and which reached a phone in build 49 with nothing covering them: a scrub
+   before Play (count-in off → flat start at the target; on → a pre-roll of negative frames
+   with the bar sweeping the beats before the target, the dots lit on the clock, a landing on
+   the target), an A-B armed before Play (loops inside [A,B)), Play after a pause with the
+   count-in on (the graph parks, an anchored prepare counts in again, the landing is the
+   paused spot) and off (a plain resume, no prepare), and the seek bar's level envelope
+   compared across BOTH backends on one song (the colour agrees per sliver, the levels agree
+   where there is signal). Silent throughout; ~2 min; prints PASS.
    mobile/tests/focus-loss-android.cjs` — audio focus loss under NATIVE playback, the one
    thing the player-session comparison cannot take away from the app: a plain playing
    song, an ARMED SWAP (a metronome change has claimed a candidate generation and the seam
