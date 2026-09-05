@@ -1914,6 +1914,16 @@ Where that list stands on 2026-09-05 (the record of record is
   suite), the shared
   `tests/shared/playback-cue-cases.json` fixture read by vitest and CTest, and
   the iOS/Android bridge schema runners.
+- The desktop's own Step 4 (2026-09-06): the facade seams a cue, training or
+  pitch change on the running stream (the addon and main learned
+  `swapFromGeneration`), projects its clock between status polls, follows its
+  own transport intent instead of an early snapshot, and prepares the graph
+  ahead of Play as the phones prepare at open. `tests/e2e/mac/player-session-
+  e2e.cjs` measures every one of its sixteen timing rules at parity or better
+  (Play → advancing 180 ms against Web Audio's 1300); the footprint rows stay
+  red by decision (the renderer keeps its Web Audio buffers for the fallback
+  and the editor, beside the core's lanes). The POCO ran the phone harness
+  at 55/58 with native opening a song in 4.6 s where Web Audio takes 19.3.
 - Still open from the list above: the Windows providers on the Dell, the
   target-executed codec proofs, one shared engine-contract suite across both
   legacy engines and the facade, hardware route/latency and memory envelopes,

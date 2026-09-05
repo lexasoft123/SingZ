@@ -158,8 +158,16 @@ async function main() {
     // ---- 3. a held stream --------------------------------------------------
     since = await now(dev)
     const bg = await dev.background()
-    await sleep(2500)
-    const heldBefore = await logLines(dev, since, '/parked for background|stream held/i')
+    // The park is logged when the hold lands, which under a busy host came
+    // after a fixed 2.5 s once and read as "no park line" on a run whose stop
+    // path was identical to a passing one (e2e-verifier, 2026-09-05). Poll for
+    // it up to a deadline instead of reading the log once.
+    let heldBefore = []
+    for (const deadline = Date.now() + 8000; Date.now() < deadline; ) {
+      heldBefore = await logLines(dev, since, '/parked for background|stream held/i')
+      if (heldBefore.length > 0) break
+      await sleep(250)
+    }
     await dev.ev(`void ${FOCUS_LOSS}`)
     await sleep(1500)
     const fg = await dev.foreground()

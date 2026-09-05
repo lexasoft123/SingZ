@@ -685,6 +685,39 @@ timing rules pass. The cost is the footprint, now in every phase (+100-150 MB): 
 decoded lanes live from open, as on the phones, beside the renderer's Web Audio buffers —
 the next desktop item, and a memory one.
 
+**The POCO leg, at last (2026-09-06, tip 4e41cf2, the side-by-side `.debug` build,
+`ANDROID_PKG=com.lexasoft.singz.debug`):** 55/58. On the phone the native backend opens
+the song in 4.6 s where legacy takes 19.3 s (decode on the JS thread against the core's
+pool), Play → advancing 190 vs 303 ms, seeks 38 vs 138 ms, resume 168 vs 302, foreground
+Play 136 vs 435, the second song 3.7 vs 14.2 s. The three reds: metronome save 303 vs
+181 ms (the UI's acceptance waits for the seam's arm, which on this phone is ~300 ms —
+over the +50 ms budget by 72), CPU idle-in-player 30.1 vs 27%, and CPU backgrounded 17
+vs 11.2% (native pauses in place with its stream held; legacy's process is idle). These
+are the phone's own numbers, not the Mac's. play-from-anywhere passed 6/6 on the same
+build. The iPhone 13 Pro Max leg is built (a Debug build signed manually with the match
+ad-hoc profile and the Distribution identity — the Mac has no Xcode account for automatic
+development signing — installed with devicectl) and is waiting on the phone being
+unlocked for the run: devicectl reports "The application failed to launch" against a
+passcode-locked phone, with no crash log, which is the lock and not the app. The two
+harness defects the verifier pass surfaced are fixed: open-close-memory resolves the
+simulator's name from SIM_UDID (PASS without the override), and focus-loss-android
+polls for the park line (10/10 on the emulator, on this tree's plain debug build —
+the POCO's suffixed build had replaced the local artifact and the driver rightly
+refused the mismatch until a plain build was reinstalled).
+
+**The desktop footprint, decided rather than fixed (2026-09-06):** with the graph prepared
+at open the native pass reads +100-150 MB against Web Audio in every phase. The extra is
+the decoded lanes the core holds from open — the phones pay the same — beside the
+renderer's own Web Audio buffers, which the desktop cannot let go: they are what the
+legacy fallback restarts on when a native start fails mid-request (`allowLegacyFallback`),
+what the peaks and the lyrics editor's envelope read (`getTrackBuffer`), and what the
+song plays on the moment the toggle is off. Releasing them under native would mean a
+re-decode on every fallback and a different editor; that is a project of its own, not a
+row to squeeze. The footprint rows therefore stay red on the desktop by decision, the
+way backgrounding stays uncompared, and the harness prints them so the number is never
+forgotten. The desktop's Step 4 closes here: every timing rule at parity or better, the
+seam, the projected clock, the intent-based park and the prepare ahead.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so
