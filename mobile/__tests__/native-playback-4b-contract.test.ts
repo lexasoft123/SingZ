@@ -211,6 +211,35 @@ describe('iOS Phase 4B bridge contract', () => {
     });
   });
 
+  it('carries a count-in anchor only when one is set, and refuses one before the entry', () => {
+    const plain = buildNativePlaybackPreparePlayback(null, { click: false, countInBars: 0, volume: 0.7, accent: true }, {
+      entrySeconds: 0,
+      playbackRate: 1,
+      transposeSemitones: 0,
+    });
+    expect(plain.transport).not.toHaveProperty('countInAnchorSeconds');
+    const anchored = buildNativePlaybackPreparePlayback(null, { click: false, countInBars: 0, volume: 0.7, accent: true }, {
+      entrySeconds: 0,
+      countInAnchorSeconds: 12.5,
+      playbackRate: 1,
+      transposeSemitones: 0,
+    });
+    expect(anchored.transport).toEqual({
+      entrySeconds: 0,
+      countInAnchorSeconds: 12.5,
+      playbackRate: 1,
+      transposeSemitones: 0,
+    });
+    expect(() =>
+      buildNativePlaybackPreparePlayback(null, { click: false, countInBars: 0, volume: 0.7, accent: true }, {
+        entrySeconds: 2,
+        countInAnchorSeconds: 1,
+        playbackRate: 1,
+        transposeSemitones: 0,
+      }),
+    ).toThrow();
+  });
+
   it('submits one immutable transport/cue plan rather than individual clicks', () => {
     const request = buildNativePlaybackPreparePlayback(beat, metronome, {
       entrySeconds: 1,

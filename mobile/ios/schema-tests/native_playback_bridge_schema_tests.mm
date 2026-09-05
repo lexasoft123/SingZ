@@ -1055,6 +1055,21 @@ void testPlaybackTransportCueSchema() {
       rejects(replacingPlaybackTransport(key, invalid));
   }
   rejects(replacingPlaybackTransport(@"entrySeconds", @(-1)));
+  // The count-in anchor is optional; set, it must be a finite non-negative
+  // second count and reaches the plan request as given.
+  for (id invalid in @[
+         @YES, @"1", NSNull.null, @(-0.5), [NSNumber numberWithDouble:NAN],
+         [NSNumber numberWithDouble:INFINITY]
+       ])
+    rejects(replacingPlaybackTransport(@"countInAnchorSeconds", invalid));
+  CHECK(SingzParsePlaybackPrepare(
+      replacingPlaybackTransport(@"countInAnchorSeconds", @2.5), &parsed,
+      &error));
+  CHECK(parsed.config.cuePlan->countInAnchorSeconds == 2.5);
+  CHECK(SingzParsePlaybackPrepare(withPlayback(validPlayback()), &parsed,
+                                  &error) &&
+        parsed.config.cuePlan.has_value() &&
+        parsed.config.cuePlan->countInAnchorSeconds < 0.0);
   rejects(replacingPlaybackTransport(@"durationSeconds", @0));
   rejects(replacingPlaybackTransport(@"durationSeconds", @43200.1));
   CHECK(SingzParsePlaybackPrepare(

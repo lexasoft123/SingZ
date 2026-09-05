@@ -30,6 +30,15 @@ struct PlaybackCuePlanRequest {
   double volume{0.7};
   bool accent{true};
   double entrySeconds{0.0};
+  // Where the song audibly BEGINS for this start, in original-song seconds,
+  // when that is not the entry: the count-in is planned before this position
+  // (entry beat, bar length, pre-roll and count-in events relative to it)
+  // while every other frame stays relative to the entry, and the plan carries
+  // the landing the transport jumps to when its pre-roll ends. Negative, or
+  // equal to the entry: no landing, the count-in precedes the entry itself.
+  // Legacy counts in on every Play from wherever the singer is; this is how
+  // the native transport does the same without moving the frame origin.
+  double countInAnchorSeconds{-1.0};
   double durationSeconds{0.0};
   double sampleRate{0.0};
   double playbackRate{1.0};
@@ -64,6 +73,9 @@ struct PlaybackCuePlan {
   int64_t sourceStartFrame{0};
   int64_t songDurationFrames{0};
   int64_t preRollFrames{0};
+  // Project frame (relative to the entry) the transport lands on the moment
+  // its pre-roll ends; 0 when the count-in precedes the entry itself.
+  int64_t landingProjectFrame{0};
   uint32_t countInEventCount{0};
   uint32_t countInBeatsPerBar{0};
   std::vector<PlaybackCueEvent> events;

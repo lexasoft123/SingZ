@@ -15,6 +15,7 @@ type FixtureCase = {
   name: string
   sampleRate: number
   entrySeconds: number
+  countInAnchorSeconds?: number
   durationSeconds: number
   playbackRate: number
   click: boolean
@@ -31,6 +32,7 @@ type FixtureCase = {
     sourceStartFrame: number
     songDurationFrames: number
     preRollFrames: number
+    landingProjectFrame: number
     countInEventCount: number
     countInBeatsPerBar: number
     clickFrames: number
@@ -69,6 +71,13 @@ function asBeatInfo(row: PlanInput): BeatInfo | null {
 
 function legacyPlan(row: PlanInput): FixtureCase['expected'] {
   const grid = asBeatInfo(row)
+  // The count-in is planned before the anchor when one is given (a Play from
+  // mid-song), and before the entry otherwise — the legacy engine's rule.
+  const hasAnchor =
+    row.countInAnchorSeconds !== undefined &&
+    row.countInAnchorSeconds >= 0 &&
+    row.countInAnchorSeconds !== row.entrySeconds
+  const anchorSeconds = hasAnchor ? row.countInAnchorSeconds! : row.entrySeconds
   const events: FixtureEvent[] = []
   let preRollFrames = 0
   let countInEventCount = 0
@@ -86,7 +95,7 @@ function legacyPlan(row: PlanInput): FixtureCase['expected'] {
       ])
     }
   } else if (row.click || row.countInBars > 0) {
-    const entryBeat = beatIndexAtOrAfter(grid, row.entrySeconds)
+    const entryBeat = beatIndexAtOrAfter(grid, anchorSeconds)
     let firstBeat = entryBeat
     if (row.countInBars > 0) {
       countInBeatsPerBar = barLengthAt(grid, entryBeat)
@@ -95,7 +104,7 @@ function legacyPlan(row: PlanInput): FixtureCase['expected'] {
       preRollFrames = Math.max(
         0,
         -llround(
-          (beatTime(grid, firstBeat) - row.entrySeconds) * row.sampleRate
+          (beatTime(grid, firstBeat) - anchorSeconds) * row.sampleRate
         )
       )
     }
@@ -105,7 +114,10 @@ function legacyPlan(row: PlanInput): FixtureCase['expected'] {
       if (beat >= entryBeat && seconds > row.durationSeconds) break
       if (events.length >= 40000) throw new Error('cue event limit exceeded')
       events.push([
-        llround((seconds - row.entrySeconds) * row.sampleRate),
+        llround(
+          (seconds - (beat < entryBeat ? anchorSeconds : row.entrySeconds)) *
+            row.sampleRate
+        ),
         row.accent && accentIndex(grid, beat) === 0 ? 'accent' : 'ordinary'
       ])
     }
@@ -117,6 +129,7 @@ function legacyPlan(row: PlanInput): FixtureCase['expected'] {
       (row.durationSeconds - row.entrySeconds) * row.sampleRate
     ),
     preRollFrames,
+    landingProjectFrame: llround((anchorSeconds - row.entrySeconds) * row.sampleRate),
     countInEventCount,
     countInBeatsPerBar,
     clickFrames: llround(row.sampleRate * 0.055),

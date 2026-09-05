@@ -269,6 +269,8 @@ singz::PlaybackCuePlanRequest requestFrom(const Json &row) {
   singz::PlaybackCuePlanRequest request;
   request.sampleRate = number(row.at("sampleRate"));
   request.entrySeconds = number(row.at("entrySeconds"));
+  if (row.object.count("countInAnchorSeconds") != 0)
+    request.countInAnchorSeconds = number(row.at("countInAnchorSeconds"));
   request.durationSeconds = number(row.at("durationSeconds"));
   request.playbackRate = number(row.at("playbackRate"));
   request.click = boolean(row.at("click"));
@@ -323,6 +325,8 @@ void runValidCase(const Json &row) {
          name + ": source start frame");
   expect(plan.songDurationFrames == i64(expected.at("songDurationFrames")),
          name + ": song duration frames");
+  expect(plan.landingProjectFrame == i64(expected.at("landingProjectFrame")),
+         name + ": landingProjectFrame");
   expect(plan.preRollFrames == i64(expected.at("preRollFrames")),
          name + ": pre-roll frames");
   expect(plan.countInEventCount == u32(expected.at("countInEventCount")),

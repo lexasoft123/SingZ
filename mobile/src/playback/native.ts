@@ -585,6 +585,13 @@ export interface NativePlaybackPreparePlayback {
   readonly version: 2;
   readonly transport: {
     readonly entrySeconds: number;
+    /** Where the song audibly begins when that is not the entry — a Play
+     *  from mid-song with the count-in on. The core plans the count-in
+     *  before it (entry beat, bar length, pre-roll, the clicks on the real
+     *  preceding beats) and lands the transport on it the frame the
+     *  pre-roll ends, exactly what the legacy engine does on every Play.
+     *  Absent when the count-in precedes the entry itself. */
+    readonly countInAnchorSeconds?: number;
     readonly playbackRate: number;
     readonly transposeSemitones: number;
   };
@@ -736,6 +743,8 @@ export type NativePlaybackPlatform = 'ios' | 'android';
 
 export interface NativePlaybackTransportIntent {
   readonly entrySeconds: number;
+  /** See NativePlaybackPreparePlayback.transport.countInAnchorSeconds. */
+  readonly countInAnchorSeconds?: number;
   readonly playbackRate: number;
   readonly transposeSemitones: number;
 }
@@ -1636,6 +1645,9 @@ export function buildNativePlaybackPreparePlayback(
   if (
     !Number.isFinite(transport.entrySeconds) ||
     transport.entrySeconds < 0 ||
+    (transport.countInAnchorSeconds !== undefined &&
+      (!Number.isFinite(transport.countInAnchorSeconds) ||
+        transport.countInAnchorSeconds < transport.entrySeconds)) ||
     !Number.isFinite(transport.playbackRate) ||
     transport.playbackRate < 0.25 ||
     transport.playbackRate > 4 ||
@@ -1666,7 +1678,16 @@ export function buildNativePlaybackPreparePlayback(
         };
   return {
     version: 2,
-    transport: { ...transport },
+    transport: {
+      entrySeconds: transport.entrySeconds,
+      // Emitted only when set: both bridge schemas take the key as optional
+      // and a JS `undefined` must not cross as a value.
+      ...(transport.countInAnchorSeconds === undefined
+        ? {}
+        : { countInAnchorSeconds: transport.countInAnchorSeconds }),
+      playbackRate: transport.playbackRate,
+      transposeSemitones: transport.transposeSemitones,
+    },
     cues: {
       click: metronome.click,
       countInBars: metronome.countInBars,
@@ -4402,6 +4423,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     lanes?: readonly NativePlaybackLaneStatus[],
     masterGain?: number,
     initialTransport?: NativePlaybackInitialTransport,
+    countInAnchorSeconds?: number,
   ): NativePlaybackPrepareOverrides {
     return {
       playback: buildNativePlaybackPreparePlayback(
@@ -4410,8 +4432,12 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         // The source/cue plan stays anchored to the song's original entry.
         // A rebuild moves only the generation's signed transport start below;
         // changing both would double-offset the positioned decoded source.
+        // A Play from mid-song with the count-in on moves neither: it names
+        // the count-in ANCHOR, and the core lands the transport there when
+        // the pre-roll ends.
         {
           entrySeconds: 0,
+          ...(countInAnchorSeconds === undefined ? {} : { countInAnchorSeconds }),
           playbackRate: this.playbackRate,
           transposeSemitones: this.transposeSemitones,
         },
@@ -4445,8 +4471,17 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       // master gain zeroed before Play came back at full volume at Play.
       const frame = this.retryPreparedStartFrame(outputSampleRate);
       const loop = this.pendingPreparedLoop;
+      // Legacy counts in on every Play from wherever the singer is. With the
+      // count-in on, the remembered position is the count-in's anchor and the
+      // start is the ordinary one (pre-roll, clicks on the real preceding
+      // beats, then the landing); with it off, the song starts there flat.
+      const countsIn =
+        frame !== undefined &&
+        frame > 0 &&
+        this.metronomeConfig.countInBars > 0 &&
+        this.beatInfo !== null;
       return this.prepareOverrides(
-        frame,
+        countsIn ? undefined : frame,
         this.materialized.lanes.map(lane => ({
           id: lane.id,
           cursorFrames: Math.max(0, frame ?? 0),
@@ -4459,6 +4494,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         // A loop set before Play: 'playing' is the ordinary start — the
         // transport is not started by the prepare — with the loop declared.
         loop === null ? undefined : { state: 'playing', loop },
+        countsIn && frame !== undefined ? frame / outputSampleRate : undefined,
       );
     }
     const frame = Math.round(recovery.positionSeconds * outputSampleRate);

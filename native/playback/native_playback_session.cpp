@@ -495,6 +495,15 @@ struct PreparedPlaybackTransport {
    * openOutput primes and beginBlock arms. advancePosition is ordinary
    * per-block advance, not a move. */
   bool pendingSourcePositionMoved{false};
+  /* A count-in before a position that is not the entry (Play from mid-song
+     with the metronome's count-in on): the pre-roll runs as it always has,
+     negative frames with the sources silent, and the moment it ends the
+     transport LANDS on this frame the way a seek would — source moved,
+     boundary queued, the Stretch replacement primed at prepare armed. Zero
+     when the count-in precedes the entry itself. A seek during the count-in
+     is the singer moving, and cancels the landing. */
+  int64_t landingProjectFrame{0};
+  bool landingPending{false};
   /* A swap asked this transport how much of the current block is still its
      own, which begins the block (commands drained, host flags coalesced) a
      little early. The first slice then must not begin it again. */
@@ -719,6 +728,7 @@ struct PreparedPlaybackTransport {
   }
 
   void initialize(uint64_t transportGeneration, int64_t initialFrame,
+                  int64_t countInLandingFrame,
                   const NativePlaybackInitialTransportConfig &initialTransport,
                   int64_t authoritativeDuration,
                   const zdsp::ScheduledCueEvent *events, uint32_t eventCount,
@@ -729,6 +739,10 @@ struct PreparedPlaybackTransport {
                       preparedInitialReanchorPlan) noexcept {
     generation = transportGeneration;
     initialProjectFrame = initialFrame;
+    // Only an ordinary start has a pre-roll to land from; a structural start
+    // (a rebuild, a swap candidate) begins inside the song.
+    landingProjectFrame =
+        initialFrame < 0 && countInLandingFrame > 0 ? countInLandingFrame : 0;
     initialPaused = initialTransport.startPaused;
     initialLoopEnabled = initialTransport.loop.has_value();
     initialLoopStart = initialTransport.loop.has_value()
@@ -764,6 +778,7 @@ struct PreparedPlaybackTransport {
     callbackProjectFrame = initialProjectFrame;
     callbackProjectFractionQ32 = 0;
     callbackContinuousFrame = 0;
+    landingPending = landingProjectFrame > 0;
     callbackLoopEnabled = false;
     callbackLoopStart = 0;
     callbackLoopEnd = 0;
@@ -1000,6 +1015,7 @@ struct PreparedPlaybackTransport {
         callbackProjectFrame = command.projectFrame;
         callbackProjectFractionQ32 = 0;
         pendingSourcePositionMoved = true;
+        landingPending = false;
         callbackState = command.state;
         callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
         if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand &&
@@ -1228,9 +1244,17 @@ struct PreparedPlaybackTransport {
         advancing = false;
         break;
       }
+      // A landing still ahead (the count-in before a mid-song start): the
+      // advance stops at 0 and continues from the landing, as the callback's
+      // does.
+      const bool landingAhead = landingProjectFrame > 0 && out.frame < 0 &&
+                                from.state ==
+                                    NativePlaybackTransportState::PreRoll;
       int64_t boundary = durationFrames;
       if (from.loopEnabled && out.frame < from.loopEnd)
         boundary = std::min(boundary, from.loopEnd);
+      if (landingAhead)
+        boundary = std::min<int64_t>(boundary, 0);
       const uint32_t chunk = static_cast<uint32_t>(
           std::min<uint64_t>(remaining, kAudioHostMaxFrames));
       const uint32_t frames =
@@ -1246,6 +1270,10 @@ struct PreparedPlaybackTransport {
       out.frame = position.samples;
       out.fractionQ32 = position.fraction;
       remaining -= frames;
+      if (landingAhead && out.frame >= 0) {
+        out.frame = landingProjectFrame;
+        out.fractionQ32 = 0;
+      }
     }
     out.valid = out.valid && (!advancing || remaining == 0);
     if (out.valid && landLoopEnabled && landLoopEnd > landLoopStart &&
@@ -1478,6 +1506,23 @@ struct PreparedPlaybackTransport {
     const bool running =
         callbackState == NativePlaybackTransportState::Playing ||
         callbackState == NativePlaybackTransportState::PreRoll;
+    if (running && landingPending && callbackProjectFrame >= 0) {
+      // The count-in has run out: the song begins at the landing, not at
+      // the entry. Exactly a seek's steps, on the frame the pre-roll ended
+      // at (the slice below is cut at 0 while a landing is pending).
+      landingPending = false;
+      callbackProjectFrame = landingProjectFrame;
+      callbackProjectFractionQ32 = 0;
+      pendingSourcePositionMoved = true;
+      callbackState = NativePlaybackTransportState::Playing;
+      callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+      if (timePitchProcessor.state != nullptr &&
+          armSignalsmithTimePitchSeek(timePitchProcessor))
+        callbackTimePitchBoundaryPrepared = true;
+      queueDiscontinuity({zdsp::DiscontinuityReason::SourceSeek,
+                          zdsp::DiscontinuityFlagResetState |
+                              zdsp::DiscontinuityFlagTimeValid});
+    }
     if (running && callbackLoopEnabled &&
         callbackProjectFrame >= callbackLoopEnd) {
       if (timePitchProcessor.state != nullptr &&
@@ -1513,6 +1558,8 @@ struct PreparedPlaybackTransport {
       int64_t boundary = durationFrames;
       if (callbackLoopEnabled && callbackProjectFrame < callbackLoopEnd)
         boundary = std::min(boundary, callbackLoopEnd);
+      if (landingPending && callbackProjectFrame < 0)
+        boundary = std::min<int64_t>(boundary, 0);
       if (callbackProjectFrame < boundary) {
         frames = framesToBoundary(boundary, frames);
       }
@@ -1926,6 +1973,10 @@ laneDecodeIdentity(const NativePlaybackLaneSource &source,
   if (frames == 0 || channels == 0)
     return false;
   constexpr uint64_t buckets = kNativePlaybackLaneSummaryBuckets;
+  // RMS per bucket over every channel: the sum of squares accumulates in
+  // double across channels, then one square root per bucket.
+  std::array<double, kNativePlaybackLaneSummaryBuckets> energy{};
+  std::array<uint64_t, kNativePlaybackLaneSummaryBuckets> counted{};
   for (uint32_t channel = 0; channel < channels; ++channel) {
     const float *samples = audio.channelData(channel);
     if (samples == nullptr)
@@ -1937,19 +1988,28 @@ laneDecodeIdentity(const NativePlaybackLaneSource &source,
         end = begin + 1;
       if (end > frames)
         end = frames;
-      float peak = (*peaks)[static_cast<size_t>(bucket)];
+      double sum = 0.0;
+      uint64_t count = 0;
       for (uint64_t frame = begin; frame < end; ++frame) {
         const float sample = samples[static_cast<size_t>(frame)];
         // Non-finite PCM cannot reach a drawing surface as a height. The
         // decoded lane is trusted, so this only pins the contract.
         if (!std::isfinite(sample))
           continue;
-        const float magnitude = sample < 0.0F ? -sample : sample;
-        if (magnitude > peak)
-          peak = magnitude;
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+        ++count;
       }
-      (*peaks)[static_cast<size_t>(bucket)] = peak > 1.0F ? 1.0F : peak;
+      energy[static_cast<size_t>(bucket)] += sum;
+      counted[static_cast<size_t>(bucket)] += count;
     }
+  }
+  for (uint64_t bucket = 0; bucket < buckets; ++bucket) {
+    const size_t index = static_cast<size_t>(bucket);
+    const double level =
+        counted[index] == 0
+            ? 0.0
+            : std::sqrt(energy[index] / static_cast<double>(counted[index]));
+    (*peaks)[index] = level > 1.0 ? 1.0F : static_cast<float>(level);
   }
   return true;
 }
@@ -3132,6 +3192,13 @@ struct PreparedPlaybackGraph {
           timePitchProcessor, timePitchAnchorInput());
       if (!initialTimePitchReanchorPlan.valid())
         return {zdsp::StatusCode::InvalidArgument, 37};
+      // A count-in that lands mid-song: the seek replacement for the landing
+      // is primed here, off the render thread, exactly as a seek's is, so
+      // the callback can arm it on the frame the pre-roll ends.
+      if (cuePlan != nullptr && cuePlan->landingProjectFrame > 0 &&
+          preparedStartProjectFrame < 0 &&
+          !primeTimePitchSeek(cuePlan->landingProjectFrame))
+        return {zdsp::StatusCode::InvalidArgument, 38};
       // Exactly the work a swap repeats at its predicted landing position:
       // the anchor fill, the initial prime, the reanchor plan. Not the loop
       // bank below, which a swap does not re-prime.
@@ -3166,6 +3233,7 @@ struct PreparedPlaybackGraph {
                                 &diagnostics);
     runnerInitialized = true;
     transport.initialize(transportGeneration, preparedStartProjectFrame,
+                         cuePlan == nullptr ? 0 : cuePlan->landingProjectFrame,
                          initialTransport,
                          static_cast<int64_t>(durationFrames),
                          cueEvents.empty() ? nullptr : cueEvents.data(),
@@ -3685,6 +3753,7 @@ struct PreparedPlaybackGraph {
                                 &diagnostics);
     runnerInitialized = true;
     transport.initialize(transportGeneration, preparedStartProjectFrame,
+                         cuePlan == nullptr ? 0 : cuePlan->landingProjectFrame,
                          initialTransport,
                          static_cast<int64_t>(durationFrames),
                          cueEvents.empty() ? nullptr : cueEvents.data(),

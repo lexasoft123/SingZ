@@ -1114,7 +1114,8 @@ static jstring nativePlaybackPrepare(
     jobjectArray lanePathsValue,
     jfloatArray laneGainsValue, jbooleanArray laneMutedValue,
     jbooleanArray laneSoloValue, jboolean playbackPresent, jdouble entrySeconds,
-    jdouble playbackRate, jdouble transposeSemitones, jboolean click,
+    jdouble countInAnchorSeconds, jdouble playbackRate,
+    jdouble transposeSemitones, jboolean click,
     jint countInBars, jdouble cueVolume,
     jboolean accent, jdoubleArray beatsValue, jint beatsPerBar, jint downbeat,
     jintArray downbeatsValue, jboolean trainingPresent, jint trainingMode,
@@ -1207,6 +1208,8 @@ static jstring nativePlaybackPrepare(
         !roots.empty() && validTraining && validGraph &&
         (!playbackPresent ||
          (std::isfinite(entrySeconds) && entrySeconds >= 0.0 &&
+          std::isfinite(countInAnchorSeconds) &&
+          (countInAnchorSeconds < 0.0 || countInAnchorSeconds >= entrySeconds) &&
           std::isfinite(playbackRate) && playbackRate >= 0.25 &&
           playbackRate <= 4.0 && std::isfinite(transposeSemitones) &&
           transposeSemitones >= -24.0 && transposeSemitones <= 24.0 &&
@@ -1265,6 +1268,7 @@ static jstring nativePlaybackPrepare(
       config.transposeSemitones = transposeSemitones;
       singz::PlaybackCuePlanRequest playback;
       playback.entrySeconds = entrySeconds;
+      playback.countInAnchorSeconds = countInAnchorSeconds;
       playback.playbackRate = playbackRate;
       playback.click = click == JNI_TRUE;
       playback.countInBars = static_cast<uint32_t>(countInBars);
@@ -1622,7 +1626,7 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
     {const_cast<char *>("nativePlaybackPrepare"),
      const_cast<char *>(
          "(JLjava/lang/String;[IIIIFJJJZJZZJJ[Ljava/lang/String;[Ljava/lang/String;"
-         "[F[Z[ZZDDDZIDZ[DII[IZIJ[J[J[Ljava/lang/String;Z"
+         "[F[Z[ZZDDDDZIDZ[DII[IZIJ[J[J[Ljava/lang/String;Z"
          "Z[Lcom/singzplayer/playback/NativePlaybackGraphNodeJni;"
          "[Lcom/singzplayer/playback/NativePlaybackGraphConnectionJni;"
          "[Ljava/lang/String;)Ljava/lang/String;"),

@@ -110,6 +110,10 @@ object NativePlaybackBridgeSchema {
 
   data class Playback(
     val entrySeconds: Double,
+    /** Where the song audibly begins when that is not the entry (a Play from
+     *  mid-song with the count-in on): the core plans the count-in before it
+     *  and lands the transport on it. Negative when absent. */
+    val countInAnchorSeconds: Double,
     val playbackRate: Double,
     val transposeSemitones: Double,
     val click: Boolean,
@@ -501,8 +505,12 @@ object NativePlaybackBridgeSchema {
     if (uint32(value["version"], false, "playback contract version") != PLAYBACK_CONTRACT_VERSION)
       invalid("The native playback contract version is unsupported")
     val transport = map(value["transport"], "transport")
-    exactKeys(transport, setOf("entrySeconds", "durationSeconds", "playbackRate", "transposeSemitones"))
+    exactKeys(transport, setOf("entrySeconds", "countInAnchorSeconds", "durationSeconds", "playbackRate", "transposeSemitones"))
     val entry = finite(transport["entrySeconds"], 0.0, MAXIMUM_DURATION_SECONDS, "entry")
+    val anchor = transport["countInAnchorSeconds"]?.let {
+      finite(it, 0.0, MAXIMUM_DURATION_SECONDS, "count-in anchor")
+    } ?: -1.0
+    if (anchor >= 0.0 && anchor < entry) invalid("The native playback count-in anchor precedes the entry")
     val rate = finite(transport["playbackRate"], 0.25, 4.0, "playback rate")
     val transpose = finite(transport["transposeSemitones"], -24.0, 24.0, "transpose")
     transport["durationSeconds"]?.let {
@@ -523,7 +531,7 @@ object NativePlaybackBridgeSchema {
       countInBars * (grid?.maximumBarLength() ?: 3)
     if (eventPotential > MAXIMUM_EVENTS)
       invalid("The native playback cue plan is too large")
-    return Playback(entry, rate, transpose, click, countInBars, volume, accent, grid)
+    return Playback(entry, anchor, rate, transpose, click, countInBars, volume, accent, grid)
   }
 
   private fun beatGrid(value: Map<String, Any?>, countInBars: Int): BeatGrid {

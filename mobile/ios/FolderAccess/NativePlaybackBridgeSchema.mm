@@ -285,7 +285,8 @@ bool parsePlayback(id value, double sampleRate,
   id cuesValue = playback[@"cues"];
   if (![transportValue isKindOfClass:NSDictionary.class] ||
       !hasOnlyKeys(transportValue,
-                   {@"entrySeconds", @"durationSeconds", @"playbackRate",
+                   {@"entrySeconds", @"countInAnchorSeconds",
+                    @"durationSeconds", @"playbackRate",
                     @"transposeSemitones"}) ||
       ![cuesValue isKindOfClass:NSDictionary.class] ||
       !hasOnlyKeys(cuesValue, {@"click", @"countInBars", @"volume", @"accent",
@@ -295,6 +296,14 @@ bool parsePlayback(id value, double sampleRate,
   NSDictionary *transport = transportValue;
   NSDictionary *cues = cuesValue;
   singz::PlaybackCuePlanRequest candidate;
+  // Optional: where the song audibly begins when that is not the entry (a
+  // Play from mid-song with the count-in on). Absent, the request's default
+  // (negative) says the count-in precedes the entry itself.
+  if (transport[@"countInAnchorSeconds"] != nil &&
+      (!parseFiniteDouble(transport[@"countInAnchorSeconds"],
+                          &candidate.countInAnchorSeconds, 0.0,
+                          singz::kPlaybackCueMaximumDurationSeconds)))
+    return false;
   if (!parseFiniteDouble(transport[@"entrySeconds"], &candidate.entrySeconds,
                          0.0, singz::kPlaybackCueMaximumDurationSeconds) ||
       !parseFiniteDouble(transport[@"playbackRate"], &candidate.playbackRate,

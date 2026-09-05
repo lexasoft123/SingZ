@@ -2683,13 +2683,17 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       'native.open:2',
       'native.start:2',
     ]);
+    // The harness's metronome counts in, so Play takes the ordinary start
+    // with the remembered position as the count-in's anchor (the frame-flat
+    // start is the countInBars 0 case, tested below).
     expect(h.prepareRequests[1]).toMatchObject({
-      preparedStartProjectFrame: 72_000,
+      playback: { transport: { entrySeconds: 0, countInAnchorSeconds: 1.5 } },
       masterGain: 0.25,
       lanes: expect.arrayContaining([
         expect.objectContaining({ id: 'vocals', gain: 0.4, muted: true, solo: false }),
       ]),
     });
+    expect(h.prepareRequests[1]).not.toHaveProperty('preparedStartProjectFrame');
     expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
     await handle.stop('seek before play test complete');
   });
@@ -2730,7 +2734,10 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       'native.open:3',
       'native.start:3',
     ]);
-    expect(h.prepareRequests[2]).toMatchObject({ preparedStartProjectFrame: 72_000 });
+    expect(h.prepareRequests[2]).toMatchObject({
+      playback: { transport: { countInAnchorSeconds: 1.5 } },
+    });
+    expect(h.prepareRequests[2]).not.toHaveProperty('preparedStartProjectFrame');
     expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 3 });
     await handle.stop('rebuild between seek and play test complete');
   });
@@ -2834,9 +2841,10 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       'native.start:3',
     ]);
     expect(h.prepareRequests[2]).toMatchObject({
-      preparedStartProjectFrame: 72_000,
+      playback: { transport: { countInAnchorSeconds: 1.5 } },
       initialTransport: { state: 'playing', loop: { startProjectFrame: 48_000, endProjectFrame: 96_000 } },
     });
+    expect(h.prepareRequests[2]).not.toHaveProperty('preparedStartProjectFrame');
     await handle.stop('rebuild after seek and loop test complete');
   });
 
@@ -2871,10 +2879,42 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await expect(handle.start()).resolves.toEqual({ kind: 'started' });
     // Play prepared where the bar said, with the loop — not the snapshot's frame.
     expect(h.prepareRequests[2]).toMatchObject({
-      preparedStartProjectFrame: 144_000,
+      playback: { transport: { countInAnchorSeconds: 3 } },
       initialTransport: { state: 'playing', loop: { startProjectFrame: 48_000, endProjectFrame: 96_000 } },
     });
+    expect(h.prepareRequests[2]).not.toHaveProperty('preparedStartProjectFrame');
     await handle.stop('training handoff before play test complete');
+  });
+
+  it('Play after a pre-Play seek counts in from there when the count-in is on, and starts flat when it is off', async () => {
+    // Legacy counts in on every Play from wherever the singer is. Native
+    // names the remembered position as the count-in ANCHOR and takes the
+    // ordinary start (pre-roll, then the landing); with the count-in off it
+    // is a structural start at the frame, as before.
+    for (const countInBars of [1, 0]) {
+      const h = harness({ swapCapable: true, syncClock: true });
+      const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars } }));
+      const handle = project.nativePlayback!;
+      await handle.seek(1.5);
+      h.native.status
+        .mockResolvedValueOnce(capability(1, 'unloaded'))
+        .mockResolvedValueOnce(capability(2, 'prepared'))
+        .mockResolvedValueOnce(capability(2, 'running', 72_000));
+      await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+      const request = h.prepareRequests[1] as {
+        preparedStartProjectFrame?: number;
+        playback: { transport: { countInAnchorSeconds?: number; entrySeconds: number } };
+      };
+      if (countInBars > 0) {
+        expect(request.playback.transport.countInAnchorSeconds).toBeCloseTo(1.5, 6);
+        expect(request.playback.transport.entrySeconds).toBe(0);
+        expect(request).not.toHaveProperty('preparedStartProjectFrame');
+      } else {
+        expect(request.playback.transport).not.toHaveProperty('countInAnchorSeconds');
+        expect(request.preparedStartProjectFrame).toBe(72_000);
+      }
+      await handle.stop('count-in anchor test complete');
+    }
   });
 
   it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {

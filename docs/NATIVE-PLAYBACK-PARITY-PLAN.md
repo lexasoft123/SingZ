@@ -550,6 +550,31 @@ iOS leg stands (2026-09-05 18:00): the app's 56 compared rules are green in thre
 consecutive runs (4k-3, 4k-5, 4k-6), 4k-3 fully 58/58; the host-quiet rows are a statement
 about the Mac and need a quieter hour, not another change.**
 
+**Field report from build 49 (2026-09-05 evening) and what it took:** a scrub on a
+prepared, never-started native song was refused by the core (a seek needs a running
+transport; the code is non-retryable) and put the handle in 'error' silently; an A-B armed
+before Play hit the same refusal through `setLoop`. Fixed in the facade (0782fb7, 93efe9e):
+both are remembered, shown, and carried by the re-prepare Play makes on the parked lanes.
+Two parity gaps came out of the same report and are fixed in the round after: (1) **the
+count-in** — legacy counts in on every Play from wherever the singer is, native only on the
+ordinary start from the entry. The cue plan now takes a count-in ANCHOR separate from the
+entry (`countInAnchorSeconds`, optional on both bridge schemas): the pre-roll and the
+count-in clicks are planned before the anchor on the real preceding beats, every other
+frame stays in the project timeline, and the transport LANDS on the anchor the frame its
+pre-roll ends — the seek's own steps, with the Stretch replacement primed at prepare
+(`countInLandsOnAnchorMidSong` in the session tests: silence through the pre-roll, the
+sample at the anchor on the very next frame, the transport at anchor + rendered). Play after
+a pre-Play scrub with the count-in on takes that path; with it off, the flat structural
+start as before. Why not "get the transport ready at open": the core starts a prepared graph
+only from its prepared frame (cursors and Stretch anchors are filled at prepare), and a host
+running from open takes the audio session, and ducks the singer's other audio, at open.
+(2) **The seek-bar histogram** — native summarised each sliver as the peak sample over all
+channels, legacy as the RMS of one 2048-frame window at the sliver's start on channel 0;
+native's bars sat near the ceiling and leaned to the drums' hue. Both sides are the RMS over
+every sample of every channel in the sliver now (`summarizeLanePeaks` keeps its wire name so
+older JS and older natives keep reading each other; `mobile/src/playback/lane-levels.ts` is
+the legacy side, unit-tested against a sine).
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so

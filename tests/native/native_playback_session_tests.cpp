@@ -2118,18 +2118,26 @@ void laneWaveformSummaryAndCountInMeter() {
   CHECK(monoLane.peaks.size() == buckets && monoLane.valid &&
         stereoLane.valid && shortLane.valid && silentLane.valid);
 
+  // The envelope is the RMS over every sample of every channel in the
+  // bucket — the legacy seek bar's statistic — not the peak. One spike in a
+  // bucket of 400 silent frames is spike/20; the stereo lane's extra spike
+  // sits in one channel of the same bucket, so both channels' 800 samples
+  // carry both.
   for (size_t bucket = 0; bucket < buckets; ++bucket) {
-    const float expected =
+    const double spike =
         std::fabs(pcm16(0.01F * static_cast<float>(bucket + 1)));
-    CHECK(monoLane.peaks[bucket] == expected);
-    const float expectedStereo =
-        bucket == stereoBucket
-            ? std::max(expected, std::fabs(pcm16(stereoSpike)))
-            : expected;
-    CHECK(stereoLane.peaks[bucket] == expectedStereo);
+    const double expected = std::sqrt(spike * spike / framesPerBucket);
+    CHECK(near(monoLane.peaks[bucket], static_cast<float>(expected), 1e-7F));
+    const double stereoExtra =
+        bucket == stereoBucket ? std::fabs(pcm16(stereoSpike)) : 0.0;
+    const double expectedStereo = std::sqrt(
+        (spike * spike + stereoExtra * stereoExtra) / (2.0 * framesPerBucket));
+    CHECK(near(stereoLane.peaks[bucket], static_cast<float>(expectedStereo),
+               1e-7F));
     CHECK(silentLane.peaks[bucket] == 0.0F);
     // Fewer frames than buckets: each bucket reads the one frame it starts
-    // on rather than reporting silence the lane does not contain.
+    // on rather than reporting silence the lane does not contain — and the
+    // RMS of one sample is that sample's magnitude.
     const size_t frame = bucket * shortSamples.size() / buckets;
     CHECK(shortLane.peaks[bucket] == std::fabs(pcm16(shortSamples[frame])));
   }
@@ -2156,6 +2164,74 @@ void laneWaveformSummaryAndCountInMeter() {
   std::remove(stereoWav.c_str());
   std::remove(shortWav.c_str());
   std::remove(silentWav.c_str());
+}
+
+// Legacy counts in on every Play from wherever the singer is. The native
+// transport does the same through a count-in ANCHOR: the plan's pre-roll runs
+// before the anchor, the transport counts down through negative frames with
+// the sources silent, and on the frame the pre-roll ends it lands on the
+// anchor the way a seek would. The song here is 0.1 before the anchor and 0.3
+// from it on, so the first audible sample says where playback began.
+void countInLandsOnAnchorMidSong() {
+  constexpr uint32_t landing = 19200; // 0.4 s at 48 kHz: one two-beat bar
+  constexpr uint32_t after = 3000;
+  std::vector<float> song(40000, 0.1F);
+  std::fill(song.begin() + landing, song.end(), 0.3F);
+  const std::string wav = writeWav("count-in-anchor.wav", 1, song);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+
+  singz::NativePlaybackPrepareConfig request = config();
+  request.cuePlan = cueRequest(true, 1, 0.0);
+  request.cuePlan->entrySeconds = 0.0;
+  request.cuePlan->countInAnchorSeconds = 0.4;
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+  const singz::NativePlaybackStatus prepared = session.status();
+  // Sources sit at the entry; the transport at minus the pre-roll; the count
+  // of events is the two count-in beats plus the three from the anchor on.
+  CHECK(prepared.preRollFrames == landing && prepared.cueEventCount == 5 &&
+        prepared.renderedProjectFrame == -static_cast<int64_t>(landing) &&
+        prepared.remainingPreRollFrames == landing &&
+        prepared.durationFrames == 40000 && prepared.lanes.size() == 1 &&
+        prepared.lanes[0].cursorFrames == 0);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  fake->captureOutput = true;
+  fake->outputTrace.clear();
+  uint32_t rendered = 0;
+  bool first = true;
+  while (rendered < landing + after) {
+    const uint32_t block = std::min<uint32_t>(512, landing + after - rendered);
+    CHECK(fake->drive(block, first ? singz::AudioHostDiscontinuityStart : 0));
+    first = false;
+    rendered += block;
+  }
+  fake->captureOutput = false;
+  const std::vector<float> out = fake->outputTrace;
+  const singz::NativePlaybackStatus played = session.status();
+  // Silence through the count-in; the song's 0.3 — the sample AT the anchor,
+  // not the 0.1 before it — on the very frame the pre-roll ends; and the
+  // transport reads the anchor plus what it rendered since.
+  CHECK(near(out[landing - 1], 0.0F, 0.00001F));
+  CHECK(near(out[landing], pcm16(0.3F), 0.0001F));
+  CHECK(played.transportState == singz::NativePlaybackTransportState::Playing &&
+        played.renderedProjectFrame == static_cast<int64_t>(landing + after) &&
+        played.remainingPreRollFrames == 0 &&
+        played.lanes[0].cursorFrames == landing + after);
+  const auto unloaded = session.unloadWithCleanup(1);
+  CHECK(unloaded.playback.ok && unloaded.cleanup.globallyComplete());
+  // Consume the fallback lease with an ordinary unload, so the tests after
+  // this one start from the Available coordinator state (as the cue test
+  // above does).
+  singz::NativePlaybackPrepareConfig cleanupConfig = config();
+  cleanupConfig.handoffLease = unloaded.cleanup.handoffLease;
+  auto cleanupLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  cleanupLanes.push_back(lane("cleanup", wav));
+  CHECK(session.prepare(std::move(cleanupConfig), std::move(cleanupLanes), 2).ok);
+  CHECK(session.unload(2).ok);
+  std::remove(wav.c_str());
 }
 
 void cueGraphTransportCompositionAndLifetime() {
@@ -6364,6 +6440,7 @@ int main() {
   portableGraphDocumentMaterializesActualTopology();
   trainingDuckComposition();
   cueGraphTransportCompositionAndLifetime();
+  countInLandsOnAnchorMidSong();
   nativeReferencePreviewClickContract();
   transportControlKernelAndTelemetry();
   resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands();

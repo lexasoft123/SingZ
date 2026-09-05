@@ -270,6 +270,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
           authorized.map { it.solo }.toBooleanArray(),
           playback != null,
           playback?.entrySeconds ?: 0.0,
+          playback?.countInAnchorSeconds ?: -1.0,
           playback?.playbackRate ?: 1.0,
           playback?.transposeSemitones ?: 0.0,
           playback?.click ?: false,

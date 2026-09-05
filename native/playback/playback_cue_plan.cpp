@@ -279,6 +279,16 @@ preparePlaybackCuePlan(const PlaybackCuePlanRequest &request) noexcept {
       return failure(PlaybackCuePlanError::InvalidConfiguration,
                      "cue plan scalar configuration is invalid");
     }
+    const bool hasAnchor = std::isfinite(request.countInAnchorSeconds) &&
+                           request.countInAnchorSeconds >= 0.0 &&
+                           request.countInAnchorSeconds != request.entrySeconds;
+    if (hasAnchor && (request.countInAnchorSeconds < request.entrySeconds ||
+                      request.countInAnchorSeconds > request.durationSeconds)) {
+      return failure(PlaybackCuePlanError::InvalidConfiguration,
+                     "cue plan count-in anchor is outside the song");
+    }
+    const double anchorSeconds =
+        hasAnchor ? request.countInAnchorSeconds : request.entrySeconds;
 
     PlaybackCuePlanResult validation;
     if (!validateGrid(request.beatGrid, &validation)) {
@@ -295,6 +305,8 @@ preparePlaybackCuePlan(const PlaybackCuePlanRequest &request) noexcept {
     plan->playbackRate = request.playbackRate;
     if (!roundedFrames(request.entrySeconds, request.sampleRate,
                        &plan->sourceStartFrame) ||
+        !roundedFrames(anchorSeconds - request.entrySeconds,
+                       request.sampleRate, &plan->landingProjectFrame) ||
         !roundedFrames(request.durationSeconds - request.entrySeconds,
                        request.sampleRate, &plan->songDurationFrames)) {
       return failure(PlaybackCuePlanError::LimitExceeded,
@@ -347,7 +359,7 @@ preparePlaybackCuePlan(const PlaybackCuePlanRequest &request) noexcept {
       }
     } else if (request.click || request.countInBars > 0) {
       const auto &grid = request.beatGrid;
-      const int64_t entryBeat = beatIndexAtOrAfter(grid, request.entrySeconds);
+      const int64_t entryBeat = beatIndexAtOrAfter(grid, anchorSeconds);
       int64_t firstBeat = entryBeat;
       if (request.countInBars > 0) {
         plan->countInBeatsPerBar = barLengthAt(grid, entryBeat);
@@ -362,7 +374,7 @@ preparePlaybackCuePlan(const PlaybackCuePlanRequest &request) noexcept {
         plan->countInEventCount = static_cast<uint32_t>(count);
         firstBeat -= static_cast<int64_t>(count);
         int64_t firstFrame = 0;
-        if (!roundedFrames(beatTime(grid, firstBeat) - request.entrySeconds,
+        if (!roundedFrames(beatTime(grid, firstBeat) - anchorSeconds,
                            request.sampleRate, &firstFrame)) {
           return failure(PlaybackCuePlanError::LimitExceeded,
                          "grid pre-roll cannot be represented");
@@ -378,7 +390,11 @@ preparePlaybackCuePlan(const PlaybackCuePlanRequest &request) noexcept {
         if (beat >= entryBeat && seconds > request.durationSeconds) {
           break;
         }
-        const double relative = seconds - request.entrySeconds;
+        // Count-in beats live in the pre-roll, relative to where the song
+        // begins; the beats from there on live in the project timeline.
+        const double relative =
+            beat < entryBeat ? seconds - anchorSeconds
+                             : seconds - request.entrySeconds;
         if (!addEvent(relative,
                       request.accent && accentIndex(grid, beat) == 0)) {
           return failure(PlaybackCuePlanError::LimitExceeded,

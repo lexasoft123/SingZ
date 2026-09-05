@@ -130,6 +130,7 @@ object SingzCore {
     laneSolo: BooleanArray,
     playbackPresent: Boolean,
     entrySeconds: Double,
+    countInAnchorSeconds: Double,
     playbackRate: Double,
     transposeSemitones: Double,
     click: Boolean,

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { laneSliverLevels, LANE_LEVEL_SLIVERS } from '../playback/lane-levels'
 import { Alert, DeviceEventEmitter, Image, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import {
   createNativeStackNavigator,
@@ -718,35 +719,32 @@ export default function PlayerScreen({
         cancelled = true
       }
     }
-    const N = 96
-    const WIN = 2048
     const t = setTimeout(() => {
       try {
+        // The same statistic the native core publishes for its lanes — the
+        // RMS of every sample of every channel in each sliver — so the two
+        // backends draw one bar (lane-levels.ts says what it replaced).
         const frames = Math.max(...stems.map((st) => st.buffer.length))
-        const scratch = new Float32Array(WIN)
+        const scratch = new Float32Array(4096)
+        const perLane = stems.map((st) => ({
+          color: laneMeta[st.id]?.color ?? C.dim,
+          levels: laneSliverLevels(st.buffer, frames, LANE_LEVEL_SLIVERS, scratch),
+        }))
+        if (cancelled) return
         const raw: { level: number; color: string }[] = []
-        for (let i = 0; i < N; i++) {
-          if (cancelled) return
-          const start = Math.floor((i / N) * frames)
+        for (let i = 0; i < LANE_LEVEL_SLIVERS; i++) {
           let total = 0
-          let bestRms = 0
-          let bestColor: string = C.dim
-          for (const st of stems) {
-            const b0 = st.buffer
-            // A lane shorter than the song (a custom track) is silent past
-            // its own end, not a repeat of its tail.
-            if (start >= b0.length) continue
-            b0.copyFromChannel(scratch, 0, Math.min(start, Math.max(0, b0.length - WIN)))
-            let sum = 0
-            for (let k = 0; k < WIN; k += 4) sum += scratch[k] * scratch[k]
-            const rms = Math.sqrt(sum / (WIN / 4))
-            total += rms * rms
-            if (rms > bestRms) {
-              bestRms = rms
-              bestColor = laneMeta[st.id]?.color ?? C.dim
+          let loudest = 0
+          let color: string = C.dim
+          for (const lane of perLane) {
+            const level = lane.levels[i]
+            total += level * level
+            if (level > loudest) {
+              loudest = level
+              color = lane.color
             }
           }
-          raw.push({ level: Math.sqrt(total), color: bestColor })
+          raw.push({ level: Math.sqrt(total), color })
         }
         const peak = Math.max(0.0001, ...raw.map((r) => r.level))
         if (!cancelled)

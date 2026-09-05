@@ -360,12 +360,17 @@ struct NativePlaybackLaneStatus {
   bool solo{false};
 };
 
-// One lane's prepared amplitude envelope: the peak absolute sample of every
-// channel inside each of the fixed buckets, as a linear 0..1 float. Computed
-// from the same decode that feeds the graph and deliberately NOT normalized —
-// the drawing side owns presentation scaling. `valid` is false only when the
-// lane carried no addressable audio (no frames or no channels), and `peaks`
-// is then all zeros.
+// One lane's prepared level envelope: the RMS of every sample of every
+// channel inside each of the fixed buckets, as a linear 0..1 float — the
+// same statistic the legacy engine's seek bar draws, so the two backends
+// draw one picture (a per-bucket PEAK sat near the ceiling everywhere and
+// favoured the drums' transients over the voice, which is what the native
+// bar used to show). Computed from the same decode that feeds the graph and
+// deliberately NOT normalized — the drawing side owns presentation scaling.
+// `valid` is false only when the lane carried no addressable audio (no
+// frames or no channels), and `peaks` is then all zeros. The field keeps its
+// name across the bridges: an older JS or an older native build must go on
+// reading the other's array.
 struct NativePlaybackLanePeaksEntry {
   std::string id;
   bool valid{false};
