@@ -160,7 +160,7 @@ its own latency inside every number.
 | end of song → Play restart | at the end: `seek(0); play()` → moving again near the top |
 | back → catalog | `__test.back()` → the catalog is on screen |
 | second song → player screen | a different song's open |
-| app restart → app ready | host-side, from relaunch to `__test` answering. Coarse (the Metro target poll is on a 1 s cadence) — but equally coarse for both backends |
+| app restart → app ready | from relaunch to the app's own boot mark: `CatalogScreen` writes `singz.boot` on mount and the driver polls it at 100 ms — Android through `run-as` on the pref store, iOS off the app container's plist (`plutil`; the simulator's cfprefsd denies the key exists). Nothing is evaluated over the inspector while the app boots: a 100 ms `typeof __test` poll there preceded a Fabric first-commit crash on the POCO, once. The previous host-side timing (Metro's target poll, 1 s) flipped this rule by 1.3 s on both backends across runs and could not resolve its own tolerance; the iPhone driver still uses it |
 | reopen after restart | the first song again, on the restarted app |
 
 Alongside the timings, three boolean families:
@@ -221,7 +221,22 @@ change, backgrounded, and after leaving the song.
   simulators up returns two SingZPlayer processes and answers about the
   wrong one.
 - **Android**: `utime+stime` from `/proc/<pid>/stat` across a 2 s wall
-  window, and `TOTAL PSS` from `dumpsys meminfo`.
+  window (5 s for the backgrounded phase, from one second into the hold —
+  a 2 s window three seconds in compared two different seconds of a
+  seven-second hold and flipped the rule by a point or two run after run
+  while exact per-thread ticks showed both backends on the same threads at
+  the same cost), and `TOTAL PSS` from `dumpsys meminfo`.
+
+The CPU rule is `native ≤ legacy + 2 ticks`: two of the sampler's own
+quanta over its window (1.0 point at 2 s and 0.4 at 5 s on Android, where a
+tick is 10 ms; 0.2 on iOS, where `top` prints tenths). Two utime+stime
+windows taken at different moments cannot resolve less than that, and a
+rule that asks them to is decided by which second it lands on. It is
+deliberately NOT wider: a residual outside two ticks is reported, and a
+longer window makes it more visible, not less. A backgrounded row where the
+two backends were doing different things (one still rendering, one not) is
+printed "not compared" and counted as such in the summary — apart from
+"never reached", which means a pass stopped early.
 - **A physical iPhone**: nothing. The columns are **blank**, on purpose.
   There is no `top` and no `ps` for a process on the phone, and `devicectl
   device info processes` returns a pid and an executable path and nothing

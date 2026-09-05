@@ -90,6 +90,20 @@ Android:
    instead by the host suite's mutation-checked fixtures (tests/native/core_host_tests.cpp).
    It drives `__test.audioInput` directly, never the training screen, because tapping fixed
    coordinates tests a layout and every fault this covers was in the transport.
+   Then, on the same build and package, `ANDROID_PKG=com.lexasoft.singz.debug node
+   mobile/tests/focus-loss-android.cjs` — audio focus loss under NATIVE playback, the one
+   thing the player-session comparison cannot take away from the app: a plain playing
+   song, an ARMED SWAP (a metronome change has claimed a candidate generation and the seam
+   has not landed — the core keeps the song playing when only the candidate is cancelled,
+   so the bridge must retire both), and a HELD stream (backgrounded, the graph parked). It
+   asserts that the song stops and stays stopped, that the log says why, and that Play
+   afterwards starts fresh — window 3 is where the facade used to answer "Android audio
+   focus is not owned" until the held-rate poll read the core. The loss is delivered by
+   `NativeAudioRuntime.debugAudioFocusChange`, which exists only in DEBUG builds and hands
+   AUDIOFOCUS_LOSS to the same listener on the same handler AudioManager uses; Android
+   delivering the callback is Android's contract, everything from the listener down is
+   ours. A release build has no such method and the driver says so. Ten rules; a full pass
+   is 10/10.
    NEEDS REAL AUDIO INPUT: an emulator booted `-no-audio` has none and the driver will
    correctly, uselessly, report a capture that delivers nothing — prefer an attached phone, and
    note this is the one step here that cannot run on a silent AVD.

@@ -161,7 +161,8 @@ directions. Details + env hooks:
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
-`beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`): CDP over
+`beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
+`focus-loss-android.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
 after engine or loading changes. `loop-region` and `ab-repeat` are a PAIR
@@ -207,7 +208,15 @@ project whose stems ALL carry audio — a silent stem discriminates nothing, and
 a fallback mutated to drop one passed until the mutation was moved to a stem
 with music in it — and both report whether the LATTICE and the aligned WORDS
 actually crossed, because a bare comparison sends neither and those are the
-two arguments the real pipeline always fills. `mic-android.cjs` is the one
+two arguments the real pipeline always fills. `focus-loss-android.cjs` takes audio
+focus away from NATIVE playback in the three windows the bridge's generation
+ledger has to get right — a playing song, an ARMED SWAP (the core keeps the
+song playing when only the candidate is cancelled, so the bridge must retire
+both generations), a HELD stream in the background — and asserts the song
+stops, the log says why, and Play afterwards starts fresh; the loss is
+delivered by `NativeAudioRuntime.debugAudioFocusChange`, a DEBUG-build-only
+method onto the same listener AudioManager calls, because nothing an `adb
+shell` can do takes focus deterministically. `mic-android.cjs` is the one
 that cannot run on a simulator AT ALL: it drives vocal-training CAPTURE
 through the `__test.audioInput` seam, so it wants a real phone with a real
 microphone — an AVD booted `-no-audio` has no input, and the driver then

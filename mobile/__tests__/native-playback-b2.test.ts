@@ -3285,6 +3285,13 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     ]);
   });
 
+  /** A running session whose transport is paused: what a release's one read
+   *  sees after a hold that began paused. */
+  const pausedStatus = (generation: number): NativePlaybackCapability => {
+    const base = capability(generation, 'running');
+    return { ...base, session: { ...base.session, transportState: 'paused' } };
+  };
+
   it('a song paused before the background is held too, and coming back releases it', async () => {
     const h = harness({ platform: 'android' });
     const handle = await started(h);
@@ -3298,8 +3305,10 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
 
     // Back in the foreground: the hold goes at once, not at the next Play —
     // a preview click or a seek would otherwise queue into a stream that
-    // renders nothing until then.
+    // renders nothing until then. The release reads the core once as it
+    // re-arms the poll; what it reads is the paused transport it held.
     h.calls.length = 0;
+    h.native.status.mockResolvedValueOnce(pausedStatus(generation));
     await h.coordinator.releaseHeldStream('app foregrounded');
     expect(h.calls).toEqual([`native.resumeOutput:${generation}`]);
 
@@ -3311,6 +3320,65 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     h.calls.length = 0;
     await h.coordinator.releaseHeldStream('again');
     expect(h.calls).toEqual([]);
+  });
+
+  it('a focus loss during the hold: the refused release reads the core once, and Play starts fresh', async () => {
+    // Measured on the POCO (focus-loss-android.cjs, window 3): home, a focus
+    // loss while held, back — the bridge had retired the generation, the
+    // release was refused "Android audio focus is not owned", and Play was
+    // refused the same way until the held-rate poll, ten seconds apart, read
+    // the core. The refusal reads it at once now.
+    const h = harness({ platform: 'android', swapCapable: true });
+    const handle = await started(h);
+    const generation = handle.snapshot().generation;
+    await h.coordinator.parkForBackground('app backgrounded');
+    expect(h.calls).toContain(`native.suspendOutput:${generation}`);
+    // What the bridge answers once fail-closed has run: the release refused,
+    // the session unloaded.
+    h.native.resumeOutput!.mockResolvedValueOnce(result(generation, 'running', false));
+    h.native.status.mockResolvedValueOnce(capability(generation, 'unloaded'));
+    await h.coordinator.releaseHeldStream('app foregrounded');
+    expect(handle.snapshot()).toMatchObject({ phase: 'stopped' });
+    expect(handle.snapshot().error).toMatch(/audio focus/);
+    // A stopped generation holds nothing — the mark must not outlive it, or
+    // every later seam is refused.
+    expect((handle as unknown as { streamHeldGeneration: number }).streamHeldGeneration).toBe(0);
+    h.calls.length = 0;
+    await handle.start();
+    expect(h.calls).toContain(`native.prepare:${generation + 1}`);
+    expect(h.calls).not.toContain(`native.resumeOutput:${generation}`);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: generation + 1 });
+    await handle.stop('focus loss during hold test complete');
+  });
+
+  it('releasing a held stream puts the poll back at its rate at once', async () => {
+    const h = harness({ platform: 'android', syncClock: true });
+    const handle = (await started(h)) as unknown as {
+      startPolling: () => void;
+      stopPolling: () => void;
+      pause: () => Promise<unknown>;
+    };
+    await handle.pause();
+    await h.coordinator.parkForBackground('app backgrounded');
+    const poll = jest.spyOn(h.coordinator, 'pollHandle').mockResolvedValue(undefined);
+    jest.useFakeTimers();
+    try {
+      handle.startPolling();
+      expect(poll).toHaveBeenCalledTimes(1);
+      // Held: the first tick re-arms at the held rate without reading.
+      jest.advanceTimersByTime(NATIVE_TELEMETRY_IDLE_POLL_MS);
+      expect(poll).toHaveBeenCalledTimes(1);
+      // Foreground: the release reads once and re-arms at the idle rate —
+      // not at the next held tick, up to ten seconds away.
+      await h.coordinator.releaseHeldStream('app foregrounded');
+      expect(poll).toHaveBeenCalledTimes(2);
+      jest.advanceTimersByTime(NATIVE_TELEMETRY_IDLE_POLL_MS);
+      expect(poll).toHaveBeenCalledTimes(3);
+    } finally {
+      handle.stopPolling();
+      jest.useRealTimers();
+      poll.mockRestore();
+    }
   });
 
   it('a foreground flip during the park leaves nothing held in the foreground', async () => {
@@ -3345,6 +3413,8 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     });
     h.calls.length = 0;
 
+    // The release inside the flip reads the core once: the paused transport.
+    h.native.status.mockResolvedValueOnce(pausedStatus(generation));
     await h.coordinator.parkForBackground('app backgrounded');
     expect(h.calls).toEqual([
       `native.transport:${generation}:pause`,

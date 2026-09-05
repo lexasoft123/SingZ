@@ -77,6 +77,12 @@ describe('Android native DSP runtime packaging', () => {
       /OnAudioFocusChangeListener \{ change ->\s*if \(change == AudioManager\.AUDIOFOCUS_GAIN \|\| invalidated\.get\(\)\) return@OnAudioFocusChangeListener\s*(?:\/\/[^\n]*\n\s*)*failClosed\(\)\s*\}/,
     );
     expect(module).toMatch(/private fun routeChanged\(\) \{\s*(?:\/\/[^\n]*\n\s*)*failClosed \{/);
+    // The one door a driver has onto the focus listener, and only in debug
+    // builds: focus-loss-android.cjs delivers AUDIOFOCUS_LOSS through it on
+    // the listener's own handler. A release build must not carry it open.
+    expect(module).toMatch(
+      /fun debugAudioFocusChange\(changeValue: Double, promise: Promise\) \{\s*if \(!BuildConfig\.DEBUG\) \{[\s\S]*?handler\.post \{\s*focusListener\.onAudioFocusChange\(change\)/,
+    );
     expect(module).toMatch(
       /private fun failClosed\(andThen: \(\) -> Unit = \{\}\) \{\s*val verdict = ledger\.failClosed\(\)\s*for \(generation in verdict\.targets\) \{\s*runCatching \{ SingzCore\.nativePlaybackRequestCancellation\(generation\) \}\s*\}\s*post \{\s*for \(generation in verdict\.targets\) \{\s*runCatching \{ SingzCore\.nativePlaybackUnload\(generation\) \}\s*\}\s*if \(verdict\.releaseFocus\) audioManager\.abandonAudioFocusRequest\(focusRequest\)/,
     );

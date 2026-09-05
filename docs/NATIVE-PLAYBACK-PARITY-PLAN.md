@@ -380,9 +380,12 @@ Guard with an open-close-memory-shaped legacy-vs-native check on the simulator.
 **Measured (2026-09-05, `sim-run-4c-2.log`, iOS simulator on the tip after Step 4, host load
 11–13 so only the memory columns are trusted — RSS does not see the host):** native RSS is
 UNDER legacy in every phase — idle-in-player 734 vs 780 MB, playing 727 vs 770, pitch-change
-lower too, after-leaving 671 vs 710. The premise of this step does not hold on this tip; the
-player-session RSS rules already are the open-close-memory-shaped guard, and they pass. No
-`vmmap` theory was needed. The same functional run: 51/58 on iOS, every miss a CPU column
+lower too, after-leaving 671 vs 710 — and the NEXT functional run (`sim-run-4d-2.log`, same
+tip, same host) read the opposite: playing 833 vs 761, pitch-change 847 vs 775, after-leaving
+725 vs 627. Two runs a hundred megabytes apart in both directions is not a settled premise
+either way; the simulator's RSS moves with Hermes's heap timing. The player-session RSS rules
+are the open-close-memory-shaped guard; the `vmmap --summary` look this step asks for is still
+owed, on a quiet host, before anything is concluded. The same functional run: 51/58 on iOS, every miss a CPU column
 (1.0 vs 0.6%, 20.8 vs 20.7%) or a timing on a simulator that shares a host at load 11 (seek
 worst-of-4 463 vs 60 — the first of four, the other three 66–68 — metronome touches 244 vs
 123, metronome save 172 vs 104), plus the two "host was quiet" rules, which say exactly that.
@@ -409,8 +412,10 @@ Also owed, found on the way: a device driver that pulls audio focus during an ar
 or a held stream (nothing in `mobile/tests/` can), and the iOS drivers' restart timing
 and CPU tolerance brought to the Android ones' resolution.
 
-Three consecutive green runs per platform on a quiet host (58/58, 56/56 — the
-metronome-save rule flips on a heavy tail, so three greens, not one), the POCO run, an
+Three consecutive green runs per platform on a quiet host (every compared rule — the
+Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
+backends disagree about rendering; the metronome-save rule flips on a heavy tail, so
+three greens, not one), the POCO run, an
 iPhone `--platform ios-device` for timings, the e2e-verifier pass, project memory and
 `DSP-GRAPH-PLAN.md` updated with the live command surface, then build 48 via the
 ship-ios-ipa skill.

@@ -560,6 +560,26 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     }
   }
 
+  /** DEBUG builds only: hand a focus change to the listener AudioManager
+   *  calls, on the handler it calls it on. `mobile/tests/focus-loss-android.cjs`
+   *  drives the three windows the ledger has to get right (playing, an armed
+   *  swap, a held stream) with it — Android delivering the callback is
+   *  Android's contract; everything from the listener down is ours, and this
+   *  is the only way a driver can take it. A release build has no such door:
+   *  the method rejects, and the driver says why. */
+  @ReactMethod
+  fun debugAudioFocusChange(changeValue: Double, promise: Promise) {
+    if (!BuildConfig.DEBUG) {
+      promise.reject("E_NATIVE_PLAYBACK", "debugAudioFocusChange exists only in debug builds")
+      return
+    }
+    val change = changeValue.toInt()
+    handler.post {
+      focusListener.onAudioFocusChange(change)
+      promise.resolve(null)
+    }
+  }
+
   private fun routeChanged() {
     // AudioDeviceCallback does not identify whether Android rerouted an
     // already-open Oboe stream. Retire the owners conservatively: a fresh

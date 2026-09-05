@@ -126,6 +126,31 @@ function createDevice({ udid, port, log }) {
       return { pid, out, t0 }
     },
 
+    /** The app's own boot mark (CatalogScreen writes `singz.boot` on mount;
+     *  on iOS `setTextPref` stores it under that key in the app's standard
+     *  defaults and flushes synchronously), read off the container's plist
+     *  at 100 ms: the cold restart timed in-app, as the Android driver does,
+     *  instead of by the Metro target poll's one-second quantum. The FILE,
+     *  not `simctl spawn defaults read` — the simulator's cfprefsd answered
+     *  "does not exist" for a key the plist on disk plainly held. `plutil`
+     *  treats a dot as a key-path separator, hence the escape. */
+    async awaitBoot(t0, maxMs = 60000) {
+      const plist = path.join(container(), 'Library', 'Preferences', `${BUNDLE}.plist`)
+      const deadline = Date.now() + maxMs
+      while (Date.now() < deadline) {
+        let mark = ''
+        try {
+          mark = execFileSync('plutil', ['-extract', 'singz\\.boot', 'raw', '-o', '-', plist], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+          }).trim()
+        } catch {}
+        if (mark && !/Could not extract/.test(mark)) return Date.now() - t0
+        await sleep(100)
+      }
+      throw new Error('the app never wrote its boot mark (singz.boot)')
+    },
+
     async attach() {
       session = await connect({ port, label: `"${NAME}"`, match: (t) => t.deviceName === NAME })
       dev.ev = session.ev
@@ -199,7 +224,10 @@ function createDevice({ udid, port, log }) {
       try {
         rssMb = Math.round(Number(execSync(`ps -o rss= -p ${pid}`).toString().trim()) / 1024)
       } catch {}
-      return { cpuPct, rssMb, pssMb: null }
+      // The resolution of top's printed %CPU: one tenth of a point over its
+      // one-second interval. The CPU rule tolerates two of these, as it does
+      // two scheduler ticks on Android.
+      return { cpuPct, tickPct: 0.1, rssMb, pssMb: null }
     }
   }
 

@@ -2169,6 +2169,10 @@ export class IosNativePlaybackCoordinator {
           'The native output stream could not be released after the background park.',
       );
     handle.streamHeldGeneration = 0;
+    // The poll was at the held rate; an interval re-arms itself only on its
+    // next tick, up to ten seconds away. Back to the phase's rate now, with
+    // one read, so what happened during the hold is on screen at once.
+    handle.rearmPoll();
     log(
       'dsp',
       `native stream released · generation ${generation} · ${result === null ? 'nothing was held' : 'resumed in place'}`,
@@ -2197,6 +2201,15 @@ export class IosNativePlaybackCoordinator {
         `held stream could not be released on foreground · generation ${handle.generation} · ${message(error)}`,
         'warn',
       );
+      // The usual reason is that the generation is gone: a focus loss or a
+      // route change during the hold retired it on the bridge, and the held
+      // poll — ten seconds apart — has not read that yet. Read it now, so the
+      // handle reports the stop and the next Play starts fresh instead of
+      // asking a dead generation to release a stream it no longer holds.
+      // Measured on the POCO (focus-loss-android.cjs, window 3): without
+      // this, Play answered "Android audio focus is not owned" until the
+      // next held-rate tick.
+      await this.pollHandle(handle);
     }
   }
 
@@ -3661,6 +3674,10 @@ export class IosNativePlaybackCoordinator {
   ): Promise<boolean> {
     const stopStartedAt = Date.now();
     handle.stopPolling();
+    // A stopped generation holds no stream. Left set, the mark outlived the
+    // generation: Play from 'stopped' starts fresh and never releases it, and
+    // swapsInPlace() then refused every seam for the rest of the session.
+    handle.streamHeldGeneration = 0;
     const phase = handle.snapshot().phase;
     if (phase === 'stopped' && handle.hasCurrentCleanup(this.fallbackLease))
       return true;
@@ -4660,6 +4677,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.generation = generation;
     this.output = output;
     this.swappingFromGeneration = 0;
+    this.streamHeldGeneration = 0;
     this.firstAudibleLogged = false;
     this.steadyRenderLogged = false;
     this.cleanupGeneration = 0;
@@ -5410,6 +5428,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       }
       void this.coordinator.pollHandle(this);
     }, intervalMs);
+  }
+
+  /** Back to the rate the phase wants, now, with one read — for the moment a
+   *  hold ends, when the armed interval is the held one and its next tick is
+   *  up to ten seconds away. */
+  rearmPoll(): void {
+    if (this.timer === null) return;
+    clearInterval(this.timer);
+    this.armPoll(this.pollIntervalMs());
+    void this.coordinator.pollHandle(this);
   }
 
   stopPolling(): void {

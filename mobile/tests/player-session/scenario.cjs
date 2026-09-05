@@ -1123,6 +1123,7 @@ function evaluate(legacy, native) {
         rows.push({
           rule: `CPU (${phase}): NOT compared — the backends were not doing the same thing`,
           ok: null,
+          uncompared: true,
           detail:
             `native ${n.cpuPct}% (transport ${native.detail.backgroundPlaying ? 'still playing' : 'stopped'})` +
             ` vs legacy ${l.cpuPct}% (transport ${legacy.detail.backgroundPlaying ? 'still playing' : 'stopped'})`
@@ -1160,6 +1161,7 @@ function evaluate(legacy, native) {
           : {
               rule: `${label} (${phase}): NOT compared — the backends were not doing the same thing`,
               ok: null,
+              uncompared: true,
               detail: `native ${n[memKey]} MB vs legacy ${l[memKey]} MB`
             }
       )
@@ -1273,12 +1275,18 @@ function renderTables(platformLabel, legacy, native, rows) {
      visible. It is not counted as a pass either. */
   for (const r of rows)
     out.push(`${r.ok === null ? '  -- ' : r.ok ? 'PASS' : 'FAIL'}  ${r.rule}\n        ${r.detail}`)
+  /* A row the run DID reach but deliberately did not compare (`uncompared`:
+     a backgrounded phase where the two backends were doing different things)
+     is a third thing again, and used to be summarized as "the run stopped
+     early" when both passes had run to the end. */
   const judged = rows.filter((r) => r.ok !== null)
   const bad = judged.filter((r) => !r.ok)
-  const skipped = rows.length - judged.length
+  const uncompared = rows.filter((r) => r.ok === null && r.uncompared).length
+  const skipped = rows.length - judged.length - uncompared
   out.push('')
   out.push(
     `${platformLabel}: ${judged.length - bad.length}/${judged.length} rules pass` +
+      (uncompared ? ` · ${uncompared} not compared` : '') +
       (skipped ? ` · ${skipped} never reached (the run stopped early)` : '')
   )
   for (const pass of [legacy, native]) {
