@@ -444,7 +444,8 @@ What the two simulator legs' misses are, now measured rather than presumed:
   01:09, and this time NO inspector touched the booting app (the restart is timed by the
   pref-store boot mark; attach comes after). So the inspector-poll explanation is withdrawn.
   Twelve plain boots under the native preference right after: 0 died. Both instances are
-  relaunches straight after a long native session, on optimized-core builds (052407b on).
+  relaunches on optimized-core builds (052407b on), but they differ in what came before —
+  see the loop result below.
   The driver now says "the app died during boot" when the pid vanishes instead of "never
   wrote its boot mark". OPEN: reproduce it through the harness's own restart step, read the
   full tombstone (bugreport `poco-bugreport-4f.zip` in the session scratchpad), and if it is
@@ -461,7 +462,14 @@ What the two simulator legs' misses are, now measured rather than presumed:
   its layout-animations proxy), on RN 0.86.0. So the lead is an upstream lifecycle bug at
   first commit, not `-O2` in our core — our library is nowhere in the stack — and the
   reproduction loop (session → clear mark → force-stop → start, under each backend) is what
-  says whether native playback is even a condition.
+  says whether native playback is even a condition. **Run (`relaunch-loop.cjs`, 20 s
+  sessions with one metronome change): native 0 of 6 relaunches died, legacy 0 of 6.** So a
+  short session does not reproduce it, and the two real instances differ: 4f died at the
+  native pass's restart step after a full four-minute native pass; 4a-3 died at the native
+  pass's FIRST launch, force-stopping a process that had only reopened song A on legacy
+  after its own restart. The harness remains the only reproduction — 2 deaths in 9 runs
+  since the optimized core (1 of 8 native restart steps, 1 of 9 pass-start relaunches, 0 of
+  9 legacy restarts).
 
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
