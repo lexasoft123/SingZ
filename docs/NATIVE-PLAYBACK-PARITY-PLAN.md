@@ -587,6 +587,22 @@ the polled snapshot). The POCO leg is owed and blocked on the phone's keyguard; 
 `-PdebugAppIdSuffix=.debug` build, never the plain one. Build 50 (0.19.1) shipped from
 f42bc31 with the count-in and the histogram; 2c6e1cc is not in it.
 
+**Play after a pause counts in (decided with the singer 2026-09-05, 7e3df75):** legacy counts
+in on every Play — a resume, a Play at the end, a Play after an interruption — and native
+now does the same when the metronome's count-in is on: the paused song is stopped where it
+is with its lanes parked (position, faders, master gain and loop in the recovery snapshot,
+the shown loop kept before the stop blanks the region), and restarted through the anchored
+prepare a pre-Play scrub takes. Paused inside its own count-in it counts in again to the
+same landing; at the end of a looped region it counts in to A with the loop declared. The
+earlier "structural start, no count-in replay" decision for the interruption and training
+Plays is reversed. Cost with the count-in on: ~30 ms of prepare on parked lanes plus the
+bar; off, the instant resume it was. Simulator: paused at 2.94 s → park 11 ms → pre-roll
+from −93 568 with the bar sweeping 1.0 → 2.94 → landing one block past. The harness's own
+pause/resume step runs with the count-in off (it resets it before the seeks): run 4m-1 on
+the tip passed both rules (resume → advancing native 118 vs legacy 228) at 54/58 on a host
+at load 4.3–5 — the four misses the two host-quiet rows and the two load-sensitive
+metronome rows, as on every busy run.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so
