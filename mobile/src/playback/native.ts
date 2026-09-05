@@ -704,6 +704,10 @@ interface MaterializedProject {
 interface NativeStartOperation {
   readonly token: number;
   readonly restart: boolean;
+  /** The restart is of a PREPARED song that never started, re-prepared at a
+   *  position the singer chose before Play: its graph is still live and its
+   *  lanes are parked before the new prepare, or the song is held twice. */
+  readonly parkFirst: boolean;
 }
 
 export interface PlaybackLoadOptions {
@@ -3138,6 +3142,8 @@ export class IosNativePlaybackCoordinator {
         }
 
         const wasStarted = handle.startWasIssued(oldGeneration);
+        const statusSampleRate =
+          read.sampleRate || handle.output?.sampleRate || 48_000;
         // A song that has run out is PARKED, the same reading publishTelemetry
         // takes. Calling it 'prepared' left the rebuilt graph with no output
         // open at the last frame, and the next Play started it there: the core
@@ -3170,25 +3176,35 @@ export class IosNativePlaybackCoordinator {
         const untouchedSincePrepare =
           !wasStarted &&
           read.renderedProjectFrame === read.preparedStartProjectFrame;
-        const preparedStartProjectFrame = untouchedSincePrepare
+        // A position chosen before Play (seek on a prepared song) is where
+        // the rebuilt graph is prepared, so the bar and the graph agree and
+        // Play then starts it as it is — otherwise the rebuild prepared at
+        // the entry, the bar read the top, and Play still started at the
+        // remembered spot.
+        const rememberedStartFrame = wasStarted
           ? undefined
-          : read.renderedProjectFrame >= 0
-            ? read.renderedProjectFrame
-            : restoreTransport === 'prepared'
+          : handle.retryPreparedStartFrame(statusSampleRate);
+        const preparedStartProjectFrame =
+          rememberedStartFrame !== undefined
+            ? rememberedStartFrame
+            : untouchedSincePrepare
               ? undefined
-              : 0;
+              : read.renderedProjectFrame >= 0
+                ? read.renderedProjectFrame
+                : restoreTransport === 'prepared'
+                  ? undefined
+                  : 0;
         const restoreLoop = read.loopEnabled
           ? {
               startProjectFrame: read.loopStartFrame,
               endProjectFrame: read.loopEndFrame,
             }
           : null;
-        const statusSampleRate =
-          read.sampleRate || handle.output?.sampleRate || 48_000;
         return {
           wasStarted,
           restoreTransport,
           preparedStartProjectFrame,
+          rememberedStartFrame,
           restoreLoop,
           statusSampleRate,
         } as const;
@@ -3234,6 +3250,7 @@ export class IosNativePlaybackCoordinator {
         wasStarted,
         restoreTransport,
         preparedStartProjectFrame,
+        rememberedStartFrame,
         restoreLoop,
         statusSampleRate,
       } = derived;
@@ -3317,6 +3334,10 @@ export class IosNativePlaybackCoordinator {
               : undefined,
           ),
         );
+        // The rebuilt graph IS at the position chosen before Play now; Play
+        // starts it as it is rather than parking it for another prepare.
+        if (prepared.ok && rememberedStartFrame !== undefined)
+          handle.clearRetryPosition();
         if (!prepared.ok) {
           const generation = handle.generation;
           handle.update({ phase: 'stopped', error: prepared.error });
@@ -3536,6 +3557,28 @@ export class IosNativePlaybackCoordinator {
         error: 'This native song is no longer current.',
       };
     if (operation.restart) {
+      if (operation.parkFirst && handle.generation > 0) {
+        // The prepared graph is live: its lanes park (the decoded PCM stays
+        // with the core, no graph attached) so the prepare below adopts them
+        // — the same release the cue rebuild makes, for the same reason: a
+        // song is ~140 MB per two minutes and cannot be held twice.
+        const parked = await this.cleanupGeneration(
+          handle,
+          handle.generation,
+          'park',
+        );
+        if (!parked || !this.startIsCurrent(handle, operation.token)) {
+          const detail = parked
+            ? 'Native start was cancelled.'
+            : 'Native start could not prove that the prepared graph was released.';
+          if (this.startIsCurrent(handle, operation.token)) handle.fail(detail);
+          return { kind: 'failed', error: detail };
+        }
+        log(
+          'dsp',
+          `Play prepares at the position chosen before it · generation ${handle.generation} parked`,
+        );
+      }
       let prepared: { ok: true } | { ok: false; error: string };
       try {
         prepared = await this.prepareHandle(handle, undefined, () =>
@@ -4382,10 +4425,26 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   prepareRestartOverrides(outputSampleRate: number): NativePlaybackPrepareOverrides {
     const recovery = this.recoverySnapshot;
-    if (recovery === null)
+    if (recovery === null) {
+      // No snapshot — a song that never started, re-prepared at the position
+      // chosen before Play. What the singer set before Play travels with it:
+      // faders, mutes, solos and the master gain, the controls this handle
+      // has ACCEPTED, or the new generation comes up at the defaults — a
+      // master gain zeroed before Play came back at full volume at Play.
+      const frame = this.retryPreparedStartFrame(outputSampleRate);
       return this.prepareOverrides(
-        this.retryPreparedStartFrame(outputSampleRate),
+        frame,
+        this.materialized.lanes.map(lane => ({
+          id: lane.id,
+          cursorFrames: Math.max(0, frame ?? 0),
+          totalFrames: 0,
+          gain: this.acceptedLaneControls.get(lane.id)?.gain ?? lane.gain,
+          muted: this.acceptedLaneControls.get(lane.id)?.muted ?? lane.muted,
+          solo: this.acceptedLaneControls.get(lane.id)?.solo ?? lane.solo,
+        })),
+        this.acceptedMasterGain,
       );
+    }
     const frame = Math.round(recovery.positionSeconds * outputSampleRate);
     const loop = recovery.loop;
     const initialTransport = this.startWasIssued(recovery.sourceGeneration)
@@ -4507,7 +4566,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     const token = ++this.operationEpoch;
     this.startOperation = token;
     this.update({ phase: 'starting', error: null });
-    return { token, restart: phase === 'stopped' };
+    // A prepared song the singer scrubbed before Play re-prepares at the
+    // remembered position (see seek): the prepared graph starts at its own
+    // frame and the core moves no transport that is not running.
+    const seekBeforePlay =
+      phase === 'prepared' && this.retryProjectSeconds !== null;
+    return {
+      token,
+      restart: phase === 'stopped' || seekBeforePlay,
+      parkFirst: seekBeforePlay,
+    };
   }
 
   finishStart(token: number): void {
@@ -4651,6 +4719,14 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    * last polled position, projected by wall time between polls.
    */
   clock(): NativePlaybackClock {
+    // A seek remembered before Play (see seek): the core still reports the
+    // prepared frame, the snapshot holds the singer's choice.
+    if (
+      this.retryProjectSeconds !== null &&
+      this.state.phase === 'prepared' &&
+      !this.startWasIssued(this.generation)
+    )
+      return this.polledClock();
     const now = this.coordinator.positionNow(this);
     if (now === null) return this.polledClock();
     const sampleRate = this.sampleRate();
@@ -5404,6 +5480,34 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   async seek(seconds: number): Promise<void> {
     const projectFrame = this.projectFrame(seconds, 'seek');
+    // A song that has never started has no running transport for the core
+    // to move: it refuses the seek (InvalidConfiguration, non-retryable), and
+    // the handle went to 'error' on it with nothing in the log — Smoke On
+    // The Water on build 49, scrubbed before Play, Play dead after. Legacy
+    // simply plays from the scrubbed spot, and so does this: the target is
+    // remembered, the bar and the snapshot show it, and Play re-prepares
+    // the parked lanes at that frame (tryBeginStart / startHandleLocked).
+    if (
+      this.snapshot().phase === 'prepared' &&
+      !this.startWasIssued(this.generation)
+    ) {
+      const sampleRate = this.sampleRate();
+      this.rememberRetryProjectFrame(projectFrame, sampleRate);
+      const positionSec = projectFrame / sampleRate;
+      this.update(
+        {
+          positionSec,
+          renderedPositionSec: positionSec,
+          telemetryAtMs: Date.now(),
+        },
+        { force: true },
+      );
+      log(
+        'dsp',
+        `seek before Play remembered · generation ${this.generation} · signed project frame ${projectFrame} · Play prepares there`,
+      );
+      return;
+    }
     // The clock reads the target from the moment the seek is issued until
     // the core's receipt counter moves — never the frame the seek is
     // leaving, which is the pull-back the singer saw as "the seek bar jumps

@@ -2629,6 +2629,106 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('intent across claim test complete');
   });
 
+  it('a seek before Play is remembered, shown, and Play prepares there on the parked lanes', async () => {
+    // The core refuses a seek on a transport that is not running, and the
+    // refusal is non-retryable: a scrub before Play put the handle in
+    // 'error' silently and Play was dead after it (Smoke On The Water,
+    // build 49). Legacy plays from the scrubbed spot; so does this.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    expect(handle.snapshot().phase).toBe('prepared');
+    let notifications = 0;
+    const unsubscribe = handle.subscribe(() => notifications++);
+    // What the singer set before Play must survive the re-prepare: the
+    // master gain zeroed before Play came back at full volume at Play once.
+    await handle.setMasterGain(0.25);
+    await handle.setLaneControl('vocals', 0.4, true, false);
+    const before = h.calls.length;
+    await handle.seek(1.5);
+    // Nothing went to the core; the song is still prepared, not errored.
+    expect(h.calls.slice(before)).toEqual([]);
+    expect(handle.snapshot()).toMatchObject({ phase: 'prepared', error: null });
+    expect(handle.snapshot().positionSec).toBeCloseTo(1.5, 3);
+    expect(notifications).toBe(1);
+    // The bar reads the remembered spot, whatever the prepared frame says.
+    h.setPositionNow({
+      generation: 1,
+      transportState: 'stopped',
+      renderedProjectFrame: 0,
+      continuousFrame: 0,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
+    unsubscribe();
+    h.setPositionNow(null);
+    // The park proves its release by reading the core; then the new
+    // generation's prepare and start.
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 72_000));
+    const mark = h.calls.length;
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    // The live prepared graph parked its lanes, the new prepare names the
+    // remembered frame, and the song starts there.
+    expect(h.calls.slice(mark)).toEqual([
+      'native.unloadRetainingLanes:1',
+      'native.prepare:2',
+      'legacy.unload',
+      'legacy.suspend',
+      'native.configure:2',
+      'native.open:2',
+      'native.start:2',
+    ]);
+    expect(h.prepareRequests[1]).toMatchObject({
+      preparedStartProjectFrame: 72_000,
+      masterGain: 0.25,
+      lanes: expect.arrayContaining([
+        expect.objectContaining({ id: 'vocals', gain: 0.4, muted: true, solo: false }),
+      ]),
+    });
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    await handle.stop('seek before play test complete');
+  });
+
+  it('a cue change between a pre-Play seek and Play rebuilds at the remembered spot, and Play starts it as it is', async () => {
+    // Otherwise the rebuild prepared at the entry, the bar read the top, and
+    // Play parked and re-prepared at the remembered spot anyway: two answers.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.seek(1.5);
+    // The pre-read of the prepared song, then the new generation prepared
+    // at the remembered frame (the core reports the frame it prepared at).
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'prepared', 0, 'ios'))
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared', 72_000));
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    expect(h.prepareRequests).toHaveLength(2);
+    expect(h.prepareRequests[1]).toMatchObject({ preparedStartProjectFrame: 72_000 });
+    expect(handle.snapshot()).toMatchObject({ phase: 'prepared', generation: 2 });
+    // The listener-facing position is the rendered one less the display
+    // latency: near 1.5, nowhere near the entry.
+    expect(handle.snapshot().positionSec).toBeCloseTo(1.5, 1);
+    // Play: no park, no third prepare — the rebuilt graph is already there.
+    h.native.status.mockResolvedValueOnce(capability(2, 'running', 72_000));
+    const mark = h.calls.length;
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    expect(h.calls.slice(mark)).toEqual([
+      'legacy.unload',
+      'legacy.suspend',
+      'native.configure:2',
+      'native.open:2',
+      'native.start:2',
+    ]);
+    expect(handle.snapshot()).toMatchObject({ phase: 'playing', generation: 2 });
+    await handle.stop('rebuild between seek and play test complete');
+  });
+
   it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {
     // The generation moved; nothing the singer sees did.
     const h = harness({ swapCapable: true, syncClock: true });
