@@ -505,6 +505,51 @@ What the two simulator legs' misses are, now measured rather than presumed:
   idle* 1.4 vs 0.9% — `top -l 2` samples one second by default, which catches native's
   two-second idle poll on every other sample; the sample spans the phase's window now.
 
+**Runs 4k-1…4k-3 on a680464/46f71eb (2026-09-05 14:20–15:20): 56 → 56 → 58 of 58 — the
+first full green on the iOS leg.** The restart and idle-CPU rules held from 4k-1 on. What
+the last two flips were, measured with in-app 5 ms samplers, the app's own log and a
+native stack sample of the JS thread rather than presumed: the seams arm in 3–10 ms on
+every metronome touch (the "armed in" line), so the save rule was timing the screen's
+save → render, a 90–140 ms block on a DEV build under the attached inspector on BOTH
+backends, and native added one full re-render per seam on top — the arm read's publish
+changed `generation` and nothing else the screen shows (quiet now, like the telemetry
+stamp). The first seek after the touches read back at 391 ms because the seek's forced
+notification re-rendered the player at the new position — 330 ms of React work under the
+inspector's per-component task wrapper (`consoleTaskRun` → interpreter in the sample),
+the same lyric re-layout block legacy pays AFTER its readback because its seek notifies
+nothing; the force is now for a paused/prepared screen or a build without the clock. The
+save rule's in-app sampler also moved from 30 to 10 ms (1.7 ticks of headroom on a 50 ms
+budget was the rule flipping on which tick the save landed in). 4k-3: native seeks
+34/32/26/25 ms against legacy's 55/61/70/59, touches 129/113/104 against 94/99/81.
+Standing caveat for every iOS timing row: it is measured on a DEV bundle with the
+inspector attached — React's owner-stack `console.createTask` per component render is
+what makes a settings toggle cost 100 ms here, and a release build has neither.
+
+**Runs 4k-4 and 4k-5 (46f71eb → e6964d2):** 4k-4 read the first seek after the touches at
+568 ms (the next three 27/23/88) — the seek had been issued 0–20 ms after the count-in
+reset's seam began, and the wrapper serializes every transport command, cue rebuilds
+included, so the scrub sat behind the rebuild's wait for the previous seam to land (15 ms
+session polls on a JS thread the DEV renders were blocking, ~300 ms), the prepare and the
+arm read before the handle so much as recorded the target. e6964d2: an absolute seek goes
+straight to the handle while it swaps in place (a seam refuses no seek; the core carries
+one across the landing — measured, the 4→5 seam landed at the seek's frame), so the clock
+reads the target at once, while the command itself still takes its turn behind the
+coordinator's ownership lock; refused, it re-queues where it always was; relative seeks
+stay queued (they read the render head, which a build without `positionNow` cannot overlay).
+The reviewer's catch on the first cut: the seek intent named the outgoing generation and
+the rebuild's claim nulled it — target, pull-back, jump — so the intent now crosses
+`beginSwapPrepare`/`abandonSwapPrepare` (the core copies the seek count across the seam).
+4k-5 on that tree: every app rule green, native seeks 28/20/38/32 against legacy's
+58/55/64/57; the two host-quiet rows missed because the full jest suite ran beside it —
+a lesson about the runner, not the app: `--wait-quiet` gates the start, not the phases.
+4k-6 on e6964d2, alone on the host: again every app rule green (native seeks 33/31/77/37
+against 57/60/65/53, touches 148/112/126 against 93/93/103), and again only the two
+host-quiet rows red, at 4.1–4.3 during backgrounded/after-leaving on a Mac whose baseline
+that hour was 3.2–4.9 (WindowServer and the desktop apps, not this harness). **Where the
+iOS leg stands (2026-09-05 18:00): the app's 56 compared rules are green in three
+consecutive runs (4k-3, 4k-5, 4k-6), 4k-3 fully 58/58; the host-quiet rows are a statement
+about the Mac and need a quieter hour, not another change.**
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so
