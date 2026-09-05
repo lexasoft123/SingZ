@@ -218,6 +218,10 @@ function createDevice({ serial, port, log, mobileRoot }) {
      *  its one-second target poll flipped the rule by a whole poll. */
     async awaitBoot(t0, maxMs = 60000) {
       const deadline = Date.now() + maxMs
+      // Seeded from the pid launch() saw, so a death before the first poll
+      // below still reads as one.
+      let seenPid = pid
+      let polls = 0
       while (Date.now() < deadline) {
         let xml = ''
         try {
@@ -225,6 +229,22 @@ function createDevice({ serial, port, log, mobileRoot }) {
         } catch {}
         const hit = /<string name="(?:txt:)?singz\.boot">([\s\S]*?)<\/string>/.exec(xml)
         if (hit && hit[1].trim()) return Date.now() - t0
+        /* A process that was there and is gone did not boot slowly — it died.
+           Say so, with where to look: twice a relaunch straight after a long
+           native session segfaulted in Fabric's first commit on the POCO,
+           and the first time it read as "never wrote its boot mark". Every
+           fifth poll, so the restart timing keeps its 100 ms quantum. (A
+           low-memory kill leaves no tombstone; the verdict is still right.) */
+        if (++polls % 5 === 0) {
+          const now = appPid()
+          if (now) seenPid = now
+          else if (seenPid) {
+            throw new Error(
+              `the app died during boot (pid ${seenPid} is gone before writing singz.boot) — ` +
+                'see `adb logcat -b crash` for the tombstone'
+            )
+          }
+        }
         await sleep(100)
       }
       throw new Error('the app never wrote its boot mark (singz.boot)')

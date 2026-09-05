@@ -412,6 +412,57 @@ Also owed, found on the way: a device driver that pulls audio focus during an ar
 or a held stream (nothing in `mobile/tests/` can), and the iOS drivers' restart timing
 and CPU tolerance brought to the Android ones' resolution.
 
+**First acceptance chain (2026-09-05 11:25–11:39, tip 1b09d46, `busy-runs-4f.*`, run at the
+singer's request with the host at load 4–7 after Lens was quit):** iOS 50/58 (`sim-run-4f-q1.log`),
+emulator 54/60 (`emu-run-4f-q1.log`), POCO VOID at its restart step (`poco-run-4f-q1.log`).
+What the two simulator legs' misses are, now measured rather than presumed:
+- **iOS: seek worst-of-4 (445 vs 59 ms) and metronome save (+60–70 ms); the run's other misses
+  were CPU playing 26.8 vs 24.4 and the three RSS rows already open above.** The
+  first seek after the third metronome touch is the only slow one in every run (445/463/414
+  vs 66–75 for the other three). Probes on the simulator (`first-seek-probe.cjs`, 20 ms
+  samples with the raw clock timed beside them, then a native `sample` of the process) put
+  it beyond doubt: the JS thread's interval callbacks stop for ~380–500 ms right after the
+  seek while both the position read and the synchronous clock call cost 0 ms, the Hermes
+  profiler sees no JavaScript running, and the native stack sample shows the thread inside
+  React Native's modern inspector — `consoleCreateTask` and `installConsoleHandler`. That is
+  React 19's development-build `console.createTask` per component render for owner stacks,
+  which captures a stack on every call while a debugger is attached; a swap notifies the
+  player screen three or four times across its awaits (claim, adopt, phase, telemetry),
+  each a full re-render, where legacy's metronome change notifies once. The harness IS an
+  attached debugger, so it pays this on every native change; a release build has neither
+  the DEV owner stacks nor an inspector. Two honest follow-ups, not taken here: coalesce the
+  handle's notifications across a swap (one re-render instead of four — cheaper in release
+  too), and say in the README that the iOS timing rules carry this DEV+inspector tax.
+- **Emulator: CPU playing 35.5 vs 27.6, pitch-change 76.6 vs 51.9, backgrounded 2.6 vs 2.0 at
+  host load 5, and pause → stopped 105 vs 39 ms (+66 over an 89 ms budget).** The CPU
+  columns are the Mac's; the same tip on the POCO reads 96 vs 123 and 182 vs 214. The pause
+  row is a timing under no host caveat and is not chased here.
+- **POCO: the native pass's relaunch died.** `am force-stop` of a process that had spent the
+  whole pass on native playback, `am start` 1.6 s later, SIGSEGV (SEGV_ACCERR, program
+  counter in the scudo heap) on `mqt_v_js` 3.5 s after start, in
+  `MountingCoordinator::pullTransaction` — frame for frame the run-3 crash of 2026-09-05
+  01:09, and this time NO inspector touched the booting app (the restart is timed by the
+  pref-store boot mark; attach comes after). So the inspector-poll explanation is withdrawn.
+  Twelve plain boots under the native preference right after: 0 died. Both instances are
+  relaunches straight after a long native session, on optimized-core builds (052407b on).
+  The driver now says "the app died during boot" when the pid vanishes instead of "never
+  wrote its boot mark". OPEN: reproduce it through the harness's own restart step, read the
+  full tombstone (bugreport `poco-bugreport-4f.zip` in the session scratchpad), and if it is
+  ours, HWASan the debug build. Until it is understood it is a release blocker on Android:
+  a release APK is optimized too. **Read since (tombstone_24, `libreactnative.so` from the
+  APK under NDK 27's llvm-objdump):** at `pullTransaction+524` the code has just locked the
+  coordinator's `mountingOverrideDelegate_` weak pointer and does `ldr x8,[x0]; ldr x8,[x8];
+  blr x8` — vtable slot 0 of the delegate, `shouldOverridePullTransaction` — and the word it
+  read as a vtable was a heap pointer: the object behind a still-live control block is no
+  longer a delegate. Both tombstones are identical through frame 8. No frame of our code in
+  any of the 62 threads; only the JS thread was running. The registrants of that delegate
+  list in this app are react-native-screens 4.27.0 (`NativeProxy.cpp:82`,
+  `screenRemovalListener_`) and react-native-reanimated 4.5.3 (`ReanimatedCommitHook.cpp:46`,
+  its layout-animations proxy), on RN 0.86.0. So the lead is an upstream lifecycle bug at
+  first commit, not `-O2` in our core — our library is nowhere in the stack — and the
+  reproduction loop (session → clear mark → force-stop → start, under each backend) is what
+  says whether native playback is even a condition.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so
