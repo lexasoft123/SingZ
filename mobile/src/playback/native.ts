@@ -5113,10 +5113,27 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  re-render the whole player screen for it every two seconds; in a
    *  development build under an attached inspector, where React captures an
    *  owner stack per component, that render is tens of milliseconds. */
-  update(patch: Partial<NativePlaybackViewState>): void {
-    let changed = false;
+  update(
+    patch: Partial<NativePlaybackViewState>,
+    options: { force?: boolean } = {},
+  ): void {
+    let changed = options.force === true;
+    // With the synchronous clock the screen reads the position from the
+    // clock every frame and never from these fields, so a poll whose only
+    // news is that the song moved on has nothing to tell it — and told it
+    // once a second anyway, a full render each time. Without the clock the
+    // polled position IS the position, and every move notifies.
+    const clockDriven = this.coordinator.syncClock;
     for (const key of Object.keys(patch) as (keyof NativePlaybackViewState)[]) {
       if (key === 'telemetryAtMs') continue;
+      if (
+        clockDriven &&
+        (key === 'positionSec' ||
+          key === 'renderedPositionSec' ||
+          key === 'audibleFrames' ||
+          key === 'displayLatencySec')
+      )
+        continue;
       if (!sameViewField(this.state[key], patch[key])) {
         changed = true;
         break;
@@ -5124,6 +5141,10 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     }
     this.state = { ...this.state, ...patch };
     if (!changed) return;
+    this.notify();
+  }
+
+  private notify(): void {
     if (this.notifyHold > 0) {
       this.notifyPending = true;
       return;
@@ -5235,11 +5256,18 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     // synchronous clock and for everything that reads the snapshot rather
     // than the clock; telemetry corrects it within one period.
     const positionSec = projectFrame / this.sampleRate();
-    this.update({
-      positionSec,
-      renderedPositionSec: positionSec,
-      telemetryAtMs: Date.now(),
-    });
+    // Forced: under the clock these keys are quiet in a poll, but a seek is
+    // the singer moving the song, and a PAUSED screen re-reads the position
+    // only when told — without this the bar snapped back after a scrub and
+    // the lyric highlight stayed put until the next Play.
+    this.update(
+      {
+        positionSec,
+        renderedPositionSec: positionSec,
+        telemetryAtMs: Date.now(),
+      },
+      { force: true },
+    );
   }
 
   async setLoop(startSeconds: number, endSeconds: number): Promise<void> {

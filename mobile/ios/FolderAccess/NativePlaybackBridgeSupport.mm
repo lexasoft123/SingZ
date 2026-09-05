@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <malloc/malloc.h>
 #include <memory>
 #include <string>
 #include <utility>
@@ -728,6 +729,15 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
                   bridge.preparedAudioSessionIntent =
                       std::move(audioSessionIntent);
                 }
+                // The lane decode's transient buffers are freed by now, but
+                // the small-allocation magazines they lived in stay resident
+                // until the zone is asked to let them go. Measured on the
+                // simulator idle in the player (vmmap --summary):
+                // MALLOC_SMALL (empty) 60 MB under native against 4 MB under
+                // legacy — the whole RSS gap the player-session rules read,
+                // and the same allocator on a phone. Here, on the bridge
+                // queue, never on the render thread.
+                if (result.ok) malloc_zone_pressure_relief(nullptr, 0);
                 SingzPlaybackInjectPrepareFault(
                     SingzPlaybackPrepareFaultPoint::PostPreparePreResult);
                 SingzPlaybackInjectPrepareFault(

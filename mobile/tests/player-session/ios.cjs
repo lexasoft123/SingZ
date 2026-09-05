@@ -64,6 +64,22 @@ function createDevice({ udid, port, log }) {
 
   let session = null
   let pid = null
+  let bootMarkBefore = ''
+
+  /** `singz.boot` off the app container's plist, '' when absent. plutil
+   *  treats a dot as a key-path separator, hence the escape. */
+  const readBootMark = () => {
+    try {
+      const mark = execFileSync(
+        'plutil',
+        ['-extract', 'singz\\.boot', 'raw', '-o', '-', path.join(container(), 'Library', 'Preferences', `${BUNDLE}.plist`)],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim()
+      return /Could not extract/.test(mark) ? '' : mark
+    } catch {
+      return ''
+    }
+  }
 
   /* Ask about THE pid simctl printed, never `pgrep` for the app: with two
    * simulators up there are two SingZPlayer processes and the wrong one
@@ -118,8 +134,25 @@ function createDevice({ udid, port, log }) {
     },
 
     async launch() {
+      // The mark the last boot wrote, so awaitBoot can wait for a DIFFERENT
+      // one: neither the in-app clear (cfprefsd may not have flushed it) nor
+      // the file edit below (cfprefsd may write its cache back) is proof
+      // against reading the previous boot's mark; a changed value is.
+      bootMarkBefore = readBootMark()
       execSync(`xcrun simctl terminate ${UDID} ${BUNDLE} 2>/dev/null || true`)
       await sleep(1200)
+      /* The boot mark is removed from the plist FILE here, with the app dead:
+         the scenario's in-app clear goes through cfprefsd, which had not
+         flushed it to disk by the time the process was terminated, so the
+         restart poll read the previous boot's mark and the rule measured
+         384 ms for a boot that takes seconds. */
+      try {
+        execFileSync(
+          'plutil',
+          ['-remove', 'singz\\.boot', path.join(container(), 'Library', 'Preferences', `${BUNDLE}.plist`)],
+          { stdio: 'ignore' }
+        )
+      } catch {}
       const t0 = Date.now()
       const out = execSync(`xcrun simctl launch ${UDID} ${BUNDLE}`).toString().trim()
       pid = /:\s*(\d+)/.exec(out)?.[1] ?? null
@@ -135,20 +168,13 @@ function createDevice({ udid, port, log }) {
      *  "does not exist" for a key the plist on disk plainly held. `plutil`
      *  treats a dot as a key-path separator, hence the escape. */
     async awaitBoot(t0, maxMs = 60000) {
-      const plist = path.join(container(), 'Library', 'Preferences', `${BUNDLE}.plist`)
       const deadline = Date.now() + maxMs
       while (Date.now() < deadline) {
-        let mark = ''
-        try {
-          mark = execFileSync('plutil', ['-extract', 'singz\\.boot', 'raw', '-o', '-', plist], {
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore']
-          }).trim()
-        } catch {}
-        if (mark && !/Could not extract/.test(mark)) return Date.now() - t0
+        const mark = readBootMark()
+        if (mark && mark !== bootMarkBefore) return Date.now() - t0
         await sleep(100)
       }
-      throw new Error('the app never wrote its boot mark (singz.boot)')
+      throw new Error('the app never wrote a new boot mark (singz.boot)')
     },
 
     async attach() {

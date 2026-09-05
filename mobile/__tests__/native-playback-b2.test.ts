@@ -2395,6 +2395,50 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('unchanged telemetry test complete');
   });
 
+  it('under the clock, a poll that only moved the position does not notify', async () => {
+    // The screen reads the position from the clock every frame; the poll's
+    // renderedPositionSec is nobody's display. Without the clock it is the
+    // display, and a move must notify.
+    for (const syncClock of [true, false]) {
+      const h = harness({ swapCapable: true, syncClock });
+      const project = await h.load(entry({ beat, metronome: initialMetronome }));
+      const handle = project.nativePlayback!;
+      await handle.start();
+      const telemetry = (session: unknown): void =>
+        (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(session);
+      telemetry(swapCapability(1, 'running', 48_000, { transportState: 'playing', renderedProjectFrame: 48_000 }).session);
+      let notifications = 0;
+      const unsubscribe = handle.subscribe(() => notifications++);
+      telemetry(swapCapability(1, 'running', 96_000, { transportState: 'playing', renderedProjectFrame: 96_000 }).session);
+      expect(notifications).toBe(syncClock ? 0 : 1);
+      // A change the screen shows notifies either way.
+      telemetry(swapCapability(1, 'running', 96_000, { transportState: 'paused', renderedProjectFrame: 96_000 }).session);
+      expect(notifications).toBe(syncClock ? 1 : 2);
+      unsubscribe();
+      await handle.stop('position-only publish test complete');
+    }
+  });
+
+  it('a seek while paused still tells the screen, clock or no clock', async () => {
+    // A paused player re-reads the position only when notified; the seek's
+    // own update is position-only, which the clock-driven dedupe would
+    // otherwise swallow — the bar snapped back after a scrub.
+    for (const syncClock of [true, false]) {
+      const h = harness({ swapCapable: true, syncClock });
+      const project = await h.load(entry({ beat, metronome: initialMetronome }));
+      const handle = project.nativePlayback!;
+      await handle.start();
+      await handle.pause();
+      let notifications = 0;
+      const unsubscribe = handle.subscribe(() => notifications++);
+      await handle.seek(30);
+      expect(notifications).toBeGreaterThanOrEqual(1);
+      expect(handle.snapshot().positionSec).toBeCloseTo(30, 3);
+      unsubscribe();
+      await handle.stop('paused seek notification test complete');
+    }
+  });
+
   it('carries a paused song across the seam paused, and its loop with it', async () => {
     const h = harness({ swapCapable: true });
     const project = await h.load(entry({ beat, metronome: initialMetronome }));
