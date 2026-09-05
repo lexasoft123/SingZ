@@ -4345,6 +4345,13 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private lanePeaksGeneration = 0;
   private lanePeaksCache: NativePlaybackLanePeaksResult | null = null;
   private retryProjectSeconds: number | null = null;
+  /** The frame the current generation's count-in lands on (a Play from
+   *  mid-song with the count-in on), 0 when its pre-roll precedes the entry:
+   *  during the pre-roll the core reports negative frames counting up to 0,
+   *  and the bar shows landing + frame — the real preceding beats the clicks
+   *  fall on, which is what the legacy bar sweeps through. Set when the
+   *  prepare request names the anchor, cleared by any prepare that does not. */
+  private countInLandingFrame = 0;
   /** An A-B loop set before Play on a song that never started: the core
    *  takes a loop only on a running transport or as a prepare parameter, so
    *  it is remembered here and travels with the prepare Play makes. */
@@ -4425,6 +4432,10 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     initialTransport?: NativePlaybackInitialTransport,
     countInAnchorSeconds?: number,
   ): NativePlaybackPrepareOverrides {
+    this.countInLandingFrame =
+      countInAnchorSeconds === undefined
+        ? 0
+        : Math.max(0, Math.round(countInAnchorSeconds * this.sampleRate()));
     return {
       playback: buildNativePlaybackPreparePlayback(
         this.beatInfo,
@@ -4826,11 +4837,21 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       moving && !queued ? ageSec * this.playbackRate * sampleRate : 0;
     const renderedFrame = this.foldFrame(frame + advanced, sampleRate);
     return {
-      renderedSec: renderedFrame / sampleRate,
+      renderedSec: this.shownFrame(renderedFrame) / sampleRate,
       playing: moving,
       live: true,
       countIn: this.countInAt(transportState, renderedFrame, this.lastTelemetry),
     };
+  }
+
+  /** The frame the bar shows for a rendered frame: during a count-in that
+   *  lands mid-song the negative pre-roll frames read as the beats before the
+   *  landing, as the legacy bar sweeps them; everywhere else the frame
+   *  itself. The dots and the receipt logic keep the raw frame. */
+  private shownFrame(renderedFrame: number): number {
+    return renderedFrame < 0 && this.countInLandingFrame > 0
+      ? this.countInLandingFrame + renderedFrame
+      : renderedFrame;
   }
 
   /** The clock on a native build without the synchronous read: the last
@@ -5013,7 +5034,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         (session.audibleProjectionQuality === 'current'
           ? session.audibleProjectFrame
           : session.renderedProjectFrame) / sampleRate,
-      renderedPositionSec: session.renderedProjectFrame / sampleRate,
+      renderedPositionSec:
+        this.shownFrame(session.renderedProjectFrame) / sampleRate,
       displayLatencySec: session.presentationLatencyFrames / sampleRate,
       countInStatus: this.countInAt(
         session.transportState,
@@ -5158,7 +5180,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       ...(session.audibleProjectionQuality === 'current'
         ? { positionSec: session.audibleProjectFrame / sampleRate }
         : {}),
-      renderedPositionSec: session.renderedProjectFrame / sampleRate,
+      renderedPositionSec:
+        this.shownFrame(session.renderedProjectFrame) / sampleRate,
       telemetryAtMs: Date.now(),
       advancing: session.transportState === 'playing',
       playbackRate: this.playbackRate,

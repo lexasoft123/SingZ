@@ -2917,6 +2917,43 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     }
   });
 
+  it('during a count-in that lands mid-song the bar reads the beats before the landing, not the top', async () => {
+    // The core counts the pre-roll down through negative frames; the legacy
+    // bar sweeps through the real preceding beats up to the scrubbed spot.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
+    const handle = project.nativePlayback!;
+    await handle.seek(1.5);
+    h.native.status
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 72_000));
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    // Half a second into a one-second pre-roll before the 1.5 s landing.
+    h.setPositionNow({
+      generation: 2,
+      transportState: 'pre-roll',
+      renderedProjectFrame: -24_000,
+      continuousFrame: 24_000,
+      remainingPreRollFrames: 24_000,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().renderedSec).toBeCloseTo(1.0, 3);
+    // Landed: the frame itself.
+    h.setPositionNow({
+      generation: 2,
+      transportState: 'playing',
+      renderedProjectFrame: 72_480,
+      continuousFrame: 48_480,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().renderedSec).toBeCloseTo(1.51, 3);
+    await handle.stop('count-in bar test complete');
+  });
+
   it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {
     // The generation moved; nothing the singer sees did.
     const h = harness({ swapCapable: true, syncClock: true });
