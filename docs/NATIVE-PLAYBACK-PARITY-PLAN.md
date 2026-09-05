@@ -670,6 +670,21 @@ snapshot that still says 'stopped' 80 ms after a start. 19-20/28 now; what is le
 the desktop is the graph prepared lazily at Play (+0.7-2.8 s), the footprint, and the
 CPU rows nobody can read on this Mac until it is quiet.
 
+**The desktop's Step 4, second cut (2026-09-06): the graph is prepared AHEAD of Play.**
+The phones prepare at open and start at Play; the desktop prepared at Play, which put the
+whole decode and graph build inside "Play → advancing". Now the engine schedules a
+prepare 400 ms after the last setting the loader applies (grid, metronome, transpose,
+tempo, training, region, faders each reschedule it), the facade prepares WITHOUT opening
+— Chromium keeps the output until Play, so the metronome preview still sounds and the two
+engines are never active at once — and Play opens and starts the prepared generation when
+its request still matches what was prepared (graph config and start position), or unloads
+it and prepares afresh, exactly as before. A song prepared ahead holds the playback lease
+without playing, so the monitor coordinator's begin and the section switch to training
+discard it first. Measured: Play → advancing 182 ms against legacy's 1322; all sixteen
+timing rules pass. The cost is the footprint, now in every phase (+100-150 MB): the
+decoded lanes live from open, as on the phones, beside the renderer's Web Audio buffers —
+the next desktop item, and a memory one.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so

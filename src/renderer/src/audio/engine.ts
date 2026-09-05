@@ -13,6 +13,7 @@ import type {
   DesktopNativePlaybackClient,
   DesktopNativeRecoveryErrorCode
 } from './desktop-native-playback'
+import type { DesktopNativePlaybackEngineRequest } from './desktop-native-playback'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 
@@ -98,6 +99,19 @@ export class MultitrackEngine {
   private outputRouteApplyPending: Promise<void> | null = null
   private nativeMonitorLease = false
   private nativePlayback: DesktopNativePlaybackClient | null = null
+  /** The prepare-ahead debounce: the loader and the settings that follow a
+   * load (grid, metronome, transpose, tempo, training, region, faders) each
+   * reschedule it, so the graph prepared ahead of Play is the settled one. */
+  private aheadTimer: ReturnType<typeof setTimeout> | null = null
+  /** Bumped by every discard, song switch and load: a prepare ahead that
+   * crosses one of those between its awaits finds the epoch moved and gives
+   * up, instead of arriving after the discard it was meant to obey. */
+  private aheadEpoch = 0
+  /** The app shell's word: only the songs section may prepare ahead. In
+   * training and monitoring the device belongs to capture, and an idle song
+   * holding the playback lease there is a "native audio busy" nobody asked
+   * for. */
+  private aheadAllowed = true
   private nativePlaybackUnload: Promise<void> | null = null
   private nativePlaybackUnloadError: unknown = null
   private pendingPlayRequests = new Set<Promise<void>>()
@@ -205,12 +219,96 @@ export class MultitrackEngine {
     if (this.teardownStarted) return
     this._songEpoch++
     this._playing = false
-    if (this.nativePlayback?.active) this.beginNativePlaybackUnload()
+    this.aheadEpoch++
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) this.beginNativePlaybackUnload()
+  }
+
+  /** The engine's request for the native graph, as Play builds it. */
+  private nativePlaybackRequest(countIn: boolean): DesktopNativePlaybackEngineRequest {
+    return {
+      lanes: this.tracks,
+      beat: this.beatsInfo,
+      metronome: this.met,
+      countIn,
+      positionSeconds: this.startOffset,
+      durationSeconds: this.duration,
+      sampleRate: this.ctx.sampleRate,
+      masterGain: this.masterVol,
+      playbackRate: this.rate,
+      transpose: this.semitones,
+      training: this.training,
+      loop: this.regionLoop ? this.region : null,
+      nativeAudioProvider: this.nativeAudioProvider,
+      graphDocument: this.graphDocument
+    }
+  }
+
+  /** Prepare the native graph ahead of Play (the phones prepare at open):
+   * debounced past the settings the loader applies after a load, skipped
+   * while playing or while native already owns a generation. Play adopts
+   * the prepared generation when its request still matches, and prepares
+   * afresh otherwise — never slower than before, ~1.5 s faster when the
+   * singer presses Play on the song as it opened. */
+  private scheduleNativePrepareAhead(): void {
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    if (this.teardownStarted || this._playing || this.tracks.length === 0 || !this.aheadAllowed) return
+    this.aheadTimer = setTimeout(() => {
+      this.aheadTimer = null
+      void this.prepareNativeAhead().catch((error) => {
+        console.error('Native prepare ahead of Play failed:', error)
+      })
+    }, 400)
+  }
+
+  private async prepareNativeAhead(): Promise<void> {
+    if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
+        this.pendingPlayRequests.size > 0 || !this.aheadAllowed) return
+    if (typeof localStorage === 'undefined' ||
+        localStorage.getItem('singz.desktop.native-playback') !== '1') return
+    const epoch = this._songEpoch
+    const ahead = this.aheadEpoch
+    const stale = (): boolean =>
+      epoch !== this._songEpoch || ahead !== this.aheadEpoch || this._playing ||
+      this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted
+    const module = await this.ensureNativePlayback()
+    if (stale() || module.client.active || module.client.recoveryPending) return
+    if (module.client.preparedAhead) await module.client.discardAhead()
+    if (stale()) return
+    await module.prepareAhead(module.client, this.nativePlaybackRequest(true))
+    // Discarded while the prepare ran: it is serialized behind, so this
+    // lands after the prepare and takes it with it.
+    if (stale()) await module.client.discardAhead()
+  }
+
+  /** Drop a graph prepared ahead of Play: the app is leaving the song for
+   * monitoring or training, where the device must be free. Not gated on
+   * `preparedAhead` — the facade serializes, so a prepare in flight is
+   * discarded the moment it lands. */
+  async discardNativeAhead(): Promise<void> {
+    this.aheadEpoch++
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    if (this.nativePlayback) await this.nativePlayback.discardAhead()
+  }
+
+  /** The app shell says which section is up: preparing ahead is a songs-
+   * section thing, and leaving it lets a prepared graph go. */
+  setNativeAheadAllowed(allowed: boolean): void {
+    if (this.aheadAllowed === allowed) return
+    this.aheadAllowed = allowed
+    if (allowed) this.scheduleNativePrepareAhead()
+    else void this.discardNativeAhead().catch((error) => {
+      console.error('Native prepare-ahead discard failed:', error)
+    })
   }
 
   private async ensureNativePlayback(): Promise<{
     client: DesktopNativePlaybackClient
     tryStart: typeof import('./desktop-native-playback').tryStartDesktopNativePlayback
+    prepareAhead: typeof import('./desktop-native-playback').prepareDesktopNativePlaybackAhead
     RecoveryError: typeof import('./desktop-native-playback').DesktopNativeRecoveryError
   }> {
     const module = await import('./desktop-native-playback')
@@ -224,6 +322,7 @@ export class MultitrackEngine {
     return {
       client: this.nativePlayback,
       tryStart: module.tryStartDesktopNativePlayback,
+      prepareAhead: module.prepareDesktopNativePlaybackAhead,
       RecoveryError: module.DesktopNativeRecoveryError
     }
   }
@@ -232,7 +331,11 @@ export class MultitrackEngine {
    * promise unobserved. A failed promise and its typed error remain available
    * for the next deliberate load/play/teardown boundary. */
   private beginNativePlaybackUnload(): Promise<void> | null {
-    if (!this.nativePlayback?.active) return null
+    // An ahead generation is not active — it never opened — but it holds
+    // decoded lanes and the addon's playback lease, and it goes with the
+    // song like an active one (the facade's unload handles the ahead-only
+    // case: no output to restore).
+    if (!this.nativePlayback?.active && !this.nativePlayback?.preparedAhead) return null
     if (this.nativePlaybackUnload && this.nativePlaybackUnloadError === null) {
       return this.nativePlaybackUnload
     }
@@ -583,6 +686,7 @@ export class MultitrackEngine {
   }
 
   async setBeats(info: BeatInfo | null): Promise<void> {
+    this.scheduleNativePrepareAhead()
     if (JSON.stringify(info) === JSON.stringify(this.beatsInfo)) return
     if (this.nativePlayback?.active) {
       await this.nativePlayback.reconfigure({ beat: info })
@@ -608,6 +712,7 @@ export class MultitrackEngine {
    * everything down has to take the metronome with it.
    */
   setMasterVolume(v: number): void {
+    this.scheduleNativePrepareAhead()
     const target = Math.max(0, Math.min(1, v))
     if (this.nativePlayback?.active) {
       void this.nativePlayback.setMasterGain(target).then(() => {
@@ -627,6 +732,7 @@ export class MultitrackEngine {
   }
 
   async setMetronome(m: MetronomeConfig): Promise<void> {
+    this.scheduleNativePrepareAhead()
     if (JSON.stringify(m) === JSON.stringify(this.met)) return
     if (this.nativePlayback?.active) {
       await this.nativePlayback.reconfigure({ metronome: m })
@@ -665,6 +771,7 @@ export class MultitrackEngine {
    * inside the region stops at its end. Live-updatable while playing.
    */
   async setRegion(region: { start: number; end: number } | null, loop: boolean): Promise<void> {
+    this.scheduleNativePrepareAhead()
     const targetRegion = region && region.end - region.start > 0.05 ? region : null
     const targetLoop = loop && targetRegion !== null
     if (targetLoop === this.regionLoop &&
@@ -726,6 +833,7 @@ export class MultitrackEngine {
    * exactly when training ends.
    */
   async setTraining(spec: TrainingSpec | null): Promise<void> {
+    this.scheduleNativePrepareAhead()
     if (JSON.stringify(spec) === JSON.stringify(this.training)) return
     if (this.nativePlayback?.active) {
       await this.nativePlayback.reconfigure({ training: spec })
@@ -1031,6 +1139,7 @@ export class MultitrackEngine {
   }
 
   async setTranspose(st: number): Promise<void> {
+    this.scheduleNativePrepareAhead()
     if (this.teardownStarted) return
     const target = Math.max(-12, Math.min(12, Math.round(st)))
     if (target === this.semitones) return
@@ -1052,6 +1161,7 @@ export class MultitrackEngine {
    * resulting pitch shift by -12*log2(rate) on top of the user's transpose.
    */
   async setTempo(rate: number): Promise<void> {
+    this.scheduleNativePrepareAhead()
     if (this.teardownStarted) return
     const target = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
     if (Math.abs(target - this.rate) < 0.0001) return
@@ -1182,7 +1292,10 @@ export class MultitrackEngine {
     if (this.teardownStarted) return
     this.clearRequestedPlaybackError()
     this._songEpoch++
-    if (this.nativePlayback?.active) this.beginNativePlaybackUnload()
+    this.aheadEpoch++
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) this.beginNativePlaybackUnload()
     this.stopSources()
     this.cancelPendingClicks()
     this.nextClickIdx = null
@@ -1205,6 +1318,7 @@ export class MultitrackEngine {
     this.emit()
     // Mid-session reloads (post-split hot-swap) resume without a count-in.
     if (opts.play) this.requestPlay('auto-resume', { countIn: false })
+    else this.scheduleNativePrepareAhead()
   }
 
   play(opts: { countIn?: boolean } = {}): Promise<void> {
@@ -1259,22 +1373,12 @@ export class MultitrackEngine {
       await nativeModule.client.cleanupForRetry()
       if (requestGeneration !== this.generation) return
     }
-    const nativeStarted = await nativeModule.tryStart(nativeModule.client, {
-      lanes: this.tracks,
-      beat: this.beatsInfo,
-      metronome: this.met,
-      countIn: opts.countIn !== false,
-      positionSeconds: this.startOffset,
-      durationSeconds: this.duration,
-      sampleRate: this.ctx.sampleRate,
-      masterGain: this.masterVol,
-      playbackRate: this.rate,
-      transpose: this.semitones,
-      training: this.training,
-      loop: this.regionLoop ? this.region : null,
-      nativeAudioProvider: this.nativeAudioProvider,
-      graphDocument: this.graphDocument
-    })
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    const nativeStarted = await nativeModule.tryStart(
+      nativeModule.client,
+      this.nativePlaybackRequest(opts.countIn !== false)
+    )
     if (requestGeneration !== this.generation) return
     if (nativeStarted) {
       this._playing = true
@@ -1450,6 +1554,9 @@ export class MultitrackEngine {
       this.startOffset = clamped
       this.trainTick() // keep the ducked-lane preview honest while paused
       this.emit()
+      // A scrub before Play changes the start the graph must be prepared
+      // for; the one prepared ahead would be unloaded at Play otherwise.
+      this.scheduleNativePrepareAhead()
     }
   }
 
@@ -1458,6 +1565,7 @@ export class MultitrackEngine {
   }
 
   setMuted(id: string, muted: boolean): void {
+    this.scheduleNativePrepareAhead()
     const t = this.tracks.find((t) => t.id === id)
     if (!t) return
     if (this.nativePlayback?.active) {
@@ -1476,6 +1584,7 @@ export class MultitrackEngine {
   }
 
   setSolo(id: string, solo: boolean): void {
+    this.scheduleNativePrepareAhead()
     const t = this.tracks.find((t) => t.id === id)
     if (!t) return
     if (this.nativePlayback?.active) {
@@ -1494,6 +1603,7 @@ export class MultitrackEngine {
   }
 
   setVolume(id: string, volume: number): void {
+    this.scheduleNativePrepareAhead()
     const t = this.tracks.find((t) => t.id === id)
     if (!t) return
     const target = Math.max(0, Math.min(1, volume))

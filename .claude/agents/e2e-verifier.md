@@ -45,12 +45,12 @@ Prereq state on this machine: models under "~/Library/Application Support/SingZ/
    native graph does not go through Chromium's mute, so every open zeroes the engine's
    master gain, which the native prepare carries. Refuses a busy host unless
    `ALLOW_BUSY_HOST=1`; `--pass legacy|native` measures one backend and compares nothing.
-   As of 2026-09-06 (after the desktop seam, the projected clock and the intent-based
-   park) it reports 19-20/28 on a busy Mac: seek, training on, pitch, metronome touches,
-   pause/resume and Play after the end are at parity or better; the reds left are the
-   graph being prepared lazily at Play (+0.7-2.8 s over legacy), the footprint (+130 MB
-   while playing, the renderer keeps its Web Audio buffers beside the core's lanes) and
-   whatever the host-quiet rows say about the Mac that day — measured, not flakes. Before
+   As of 2026-09-06 (after the desktop seam, the projected clock, the intent-based park
+   and the graph prepared AHEAD of Play) every one of its sixteen timing rules passes
+   (Play → advancing 182 ms against legacy's 1322); the reds left are the footprint
+   (+100-150 MB in every phase now — the prepared graph holds the decoded lanes from open,
+   as on the phones, while the renderer keeps its Web Audio buffers beside them) and
+   whatever the host-quiet and CPU rows say about the Mac that day — measured, not flakes. Before
    2026-09-06 it read 17-20/28 with training on as an 840 ms rebuild and every metronome
    touch a rebuild. A native pass that reports "playing on Web Audio" with an addon just
    built usually means the TREE moved after the build (the addon's source stamp covers

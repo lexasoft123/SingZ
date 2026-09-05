@@ -580,6 +580,12 @@ export default function App(): React.JSX.Element {
   const [trainingCues] = useState(() => engine.createTrainingCueController())
   const [trainingMic] = useState(() => new DesktopTrainingMicCapture())
   const [appSection, setAppSection] = useState<AppSection>('songs')
+  // Only the songs section prepares the native graph ahead of Play; in
+  // training and monitoring the device belongs to capture, and leaving the
+  // songs section lets a prepared graph go.
+  useEffect(() => {
+    engine.setNativeAheadAllowed(appSection === 'songs')
+  }, [appSection, engine])
   const appSectionRef = useRef<AppSection>('songs')
   appSectionRef.current = appSection
   const [desktopTraining, dispatchDesktopTraining] = useReducer(
@@ -1109,7 +1115,15 @@ export default function App(): React.JSX.Element {
   // route. Settings contributes its temporary preview stopper, then may close
   // while this exact coordinator generation remains audible and observable.
   const [monitorCoordinator] = useState(() => new DesktopMonitorCoordinator({
-    api: window.singz,
+    // A song prepared ahead of Play holds the playback lease without playing;
+    // monitoring needs the device, so the prepared graph goes first.
+    api: {
+      ...window.singz,
+      beginMonitor: async (config) => {
+        await engine.discardNativeAhead()
+        return window.singz.beginMonitor(config)
+      }
+    },
     stopPreview: async () => undefined,
     pauseSong: pauseForNativeMonitor,
     releaseLegacyOutput: releaseLegacyOutputForMonitor,

@@ -178,10 +178,12 @@ export interface DesktopNativePlaybackEngineRequest {
 
 /** Renderer-engine adapter kept in this lazy chunk so the ordinary Web Audio
  * entry does not pay for native provider selection or DTO composition. */
-export async function tryStartDesktopNativePlayback(
-  client: DesktopNativePlaybackClient,
+/** The decision and the prepare request for an engine request, or null when
+ * this song stays on Web Audio. Shared by the start at Play and the prepare
+ * ahead of it, so both answer the same question the same way. */
+export async function decideDesktopNativePlayback(
   request: DesktopNativePlaybackEngineRequest
-): Promise<boolean> {
+): Promise<DesktopNativePlaybackPrepare | null> {
   if (!request.graphDocument) {
     const correction = request.transpose - 12 * Math.log2(request.playbackRate)
     const nodes = synthesizedNativeGraphNodeCount({
@@ -192,7 +194,7 @@ export async function tryStartDesktopNativePlayback(
       hasReference: true,
       needsTimePitch: Number.isFinite(correction) && Math.abs(correction) > 1e-6
     })
-    if (nodes > MAX_NATIVE_GRAPH_NODES) return false
+    if (nodes > MAX_NATIVE_GRAPH_NODES) return null
   }
   const platform = /Mac/i.test(navigator.platform)
     ? 'darwin'
@@ -203,7 +205,7 @@ export async function tryStartDesktopNativePlayback(
   try {
     runtime = await window.singz.desktopPlaybackCapability()
   } catch {
-    return false
+    return null
   }
   const decision = selectDesktopPlaybackBackend(platform, {
     enabled: typeof localStorage !== 'undefined' &&
@@ -215,8 +217,8 @@ export async function tryStartDesktopNativePlayback(
     runtime,
     requestedProvider: platform === 'win32' ? request.nativeAudioProvider : 'coreaudio'
   })
-  if (decision.backend !== 'native') return false
-  return client.prepareAndStart({
+  if (decision.backend !== 'native') return null
+  return {
     provider: decision.provider,
     lanes: request.lanes.map((lane) => ({
       id: lane.id,
@@ -237,7 +239,28 @@ export async function tryStartDesktopNativePlayback(
     training: request.training,
     loop: request.loop,
     ...(request.graphDocument ? { graphDocument: request.graphDocument } : {})
-  })
+  }
+}
+
+export async function tryStartDesktopNativePlayback(
+  client: DesktopNativePlaybackClient,
+  request: DesktopNativePlaybackEngineRequest
+): Promise<boolean> {
+  const prepare = await decideDesktopNativePlayback(request)
+  return prepare ? client.prepareAndStart(prepare) : false
+}
+
+/** Prepare the song's native graph AHEAD of Play, as the phones do at open:
+ * the decode and the graph build happen while the singer is still looking
+ * at the song, and Play is an open and a start. Nothing is opened here and
+ * Chromium keeps the output until Play, so the metronome preview still
+ * sounds and the two engines are never active at once. */
+export async function prepareDesktopNativePlaybackAhead(
+  client: DesktopNativePlaybackClient,
+  request: DesktopNativePlaybackEngineRequest
+): Promise<boolean> {
+  const prepare = await decideDesktopNativePlayback(request)
+  return prepare ? client.prepareAhead(prepare) : false
 }
 
 function ensure(result: DesktopPlaybackResult, action: string): DesktopPlaybackResult {
@@ -373,6 +396,20 @@ export class DesktopNativePlaybackClient {
   /** A seek the core has accepted but the status has not yet reflected: the
    * bar shows the target at once instead of one IPC round trip later. */
   private pendingSeekFrame: number | null = null
+  /** A generation prepared ahead of Play (see prepareAhead): prepared, never
+   * opened, the output still Chromium's. Play opens and starts it when the
+   * request it was prepared for is still the request; anything else unloads
+   * it and prepares afresh. */
+  private ahead: {
+    generation: string
+    signature: string
+    positionSeconds: number
+    route: PreparedRoute
+  } | null = null
+
+  get preparedAhead(): boolean {
+    return this.ahead !== null
+  }
   private poller: ReturnType<typeof setTimeout> | null = null
   private pollingEpoch = 0
   /** Every status read, including command refreshes, runs in this one lane.
@@ -546,25 +583,44 @@ export class DesktopNativePlaybackClient {
             `Unload the failed ${this.recoveryProvider ?? 'native'} provider before selecting ${request.provider}.`
           )
         }
-        const providers = await window.singz.desktopPlaybackProviders()
-        const provider = providers.find((row) => row.id === request.provider)
-        if (!provider?.available) throw new Error(provider?.detail ?? 'Native provider is unavailable.')
-        const inventory = await window.singz.audioHostDevices(request.provider)
-        if (!inventory.ok) throw new Error(inventory.error)
-        if (inventory.provider !== request.provider) {
-          throw new Error('Native output inventory belongs to a different provider.')
+        // A generation prepared ahead of Play: if this request is the one it
+        // was prepared for (same graph, same start), open and start it — the
+        // decode and the build are already done. Otherwise it is unloaded
+        // and the ordinary path prepares afresh, exactly as if nothing had
+        // been prepared. A recovery retry never adopts one.
+        const ahead = this.ahead
+        if (ahead) {
+          this.ahead = null
+          // configFor can throw (a click with no grid, loop bounds, a graph
+          // document past this runtime): the prepared generation must not
+          // outlive that as nobody's — it would hold the device for the rest
+          // of the process. Unload first, then let the error be the error.
+          let same = false
+          try {
+            same = !recovering &&
+              JSON.stringify(this.configFor(request, ahead.route)) === ahead.signature &&
+              request.positionSeconds === ahead.positionSeconds
+          } catch (error) {
+            try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+            throw error
+          }
+          if (same) {
+            await this.lease.releaseLegacyOutput()
+            this.ownsOutput = true
+            const activated = await this.activate(
+              request, ahead.route, request.provider !== 'asio', undefined, undefined, ahead.generation
+            )
+            if (activated) {
+              this.recoveryProvider = null
+              this.recoveryKind = null
+              this.request = request
+              this.route = ahead.route
+            }
+            return activated
+          }
+          try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
         }
-        const output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
-        if (!output) throw new Error('No native output endpoint is available.')
-        const outputChannels = request.preferredOutputChannels?.length
-          ? [...request.preferredOutputChannels]
-          : Array.from({ length: Math.min(2, output.outputChannels) }, (_, index) => index)
-        const route: PreparedRoute = {
-          outputDeviceUid: output.uid,
-          outputChannels,
-          sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
-          bufferFrames: Math.max(1, output.bufferFrames.preferredFrames || 512)
-        }
+        const route = await this.resolveRoute(request)
         // Validate the immutable graph before releasing Chromium's output.
         this.configFor(request, route)
         if (!recovering) {
@@ -587,6 +643,70 @@ export class DesktopNativePlaybackClient {
         }
         throw error
       }
+    })
+  }
+
+  private async resolveRoute(request: DesktopNativePlaybackPrepare): Promise<PreparedRoute> {
+    const providers = await window.singz.desktopPlaybackProviders()
+    const provider = providers.find((row) => row.id === request.provider)
+    if (!provider?.available) throw new Error(provider?.detail ?? 'Native provider is unavailable.')
+    const inventory = await window.singz.audioHostDevices(request.provider)
+    if (!inventory.ok) throw new Error(inventory.error)
+    if (inventory.provider !== request.provider) {
+      throw new Error('Native output inventory belongs to a different provider.')
+    }
+    const output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
+    if (!output) throw new Error('No native output endpoint is available.')
+    const outputChannels = request.preferredOutputChannels?.length
+      ? [...request.preferredOutputChannels]
+      : Array.from({ length: Math.min(2, output.outputChannels) }, (_, index) => index)
+    return {
+      outputDeviceUid: output.uid,
+      outputChannels,
+      sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
+      bufferFrames: Math.max(1, output.bufferFrames.preferredFrames || 512)
+    }
+  }
+
+  /** Prepare `request` now, ahead of Play: decode, graph build, nothing
+   * opened, Chromium keeps the output. False when native is busy, recovering
+   * or the core declines; never throws into the caller — a failed prepare
+   * ahead costs nothing but the head start. */
+  async prepareAhead(request: DesktopNativePlaybackPrepare): Promise<boolean> {
+    return this.serialize(async () => {
+      if (this.ownsOutput || this.generation || this.ahead || this.recoveryPending) return false
+      try {
+        const route = await this.resolveRoute(request)
+        const config = this.configFor(request, route)
+        const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+        if (!prepared.ok || prepared.generation === '0') {
+          if (prepared.generation !== '0' && prepared.ownershipRetained === true) {
+            try { await window.singz.unloadDesktopPlayback(prepared.generation) } catch { /* nothing exists */ }
+          }
+          return false
+        }
+        this.ahead = {
+          generation: prepared.generation,
+          signature: JSON.stringify(config),
+          positionSeconds: request.positionSeconds,
+          route
+        }
+        return true
+      } catch {
+        return false
+      }
+    })
+  }
+
+  /** Let a generation prepared ahead go: the song changed, the singer left
+   * for monitoring or training, or the request it was prepared for is stale.
+   * Chromium never lost the output, so nothing is restored. */
+  async discardAhead(): Promise<void> {
+    return this.serialize(async () => {
+      const ahead = this.ahead
+      if (!ahead) return
+      this.ahead = null
+      try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
     })
   }
 
@@ -670,19 +790,26 @@ export class DesktopNativePlaybackClient {
     route: PreparedRoute,
     allowLegacyFallback: boolean,
     preparedStartProjectFrame?: number,
-    initialTransport?: DesktopPlaybackInitialTransportConfig
+    initialTransport?: DesktopPlaybackInitialTransportConfig,
+    /** A generation already prepared (ahead of Play): open and start it. */
+    preparedGeneration?: string
   ): Promise<boolean> {
     const config = this.configFor(request, route, preparedStartProjectFrame, initialTransport)
     let generation = ''
     let started = false
     try {
-      const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
-      generation = prepared.generation !== '0' &&
-        (prepared.ok || prepared.ownershipRetained === true)
-        ? prepared.generation
-        : ''
-      if (generation) this.generation = generation
-      ensure(prepared, 'Native graph prepare failed')
+      if (preparedGeneration) {
+        generation = preparedGeneration
+        this.generation = generation
+      } else {
+        const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+        generation = prepared.generation !== '0' &&
+          (prepared.ok || prepared.ownershipRetained === true)
+          ? prepared.generation
+          : ''
+        if (generation) this.generation = generation
+        ensure(prepared, 'Native graph prepare failed')
+      }
       ensure(await window.singz.openDesktopPlayback(generation), 'Native output open failed')
       ensure(await window.singz.startDesktopPlayback(generation), 'Native playback start failed')
       started = true
@@ -1029,6 +1156,11 @@ export class DesktopNativePlaybackClient {
   async unload(): Promise<void> {
     return this.serialize(async () => {
       this.stopPolling()
+      const ahead = this.ahead
+      if (ahead) {
+        this.ahead = null
+        try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+      }
       const generation = this.generation
       // Cleanup is now the only valid next command. Preserve `last` for
       // diagnostics if it fails, while ensuring Play/Pause UI cannot mistake

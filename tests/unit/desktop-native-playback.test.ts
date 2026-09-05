@@ -807,6 +807,149 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it('a graph prepared ahead of Play is opened and started by Play, with no second prepare and the output released only then', async () => {
+    // The phones prepare at open; the desktop prepared at Play, which put
+    // the whole decode and graph build inside "Play → advancing" (+0.7-2.8 s
+    // over Web Audio on the harness). Nothing is opened ahead of time, so
+    // Chromium keeps the output — and the metronome preview keeps sounding —
+    // until the singer presses Play.
+    const release = vi.fn(async () => undefined)
+    const h = seamHarness((generation) => playing(generation))
+    ;(h.client as unknown as { lease: { releaseLegacyOutput: () => Promise<void> } }).lease.releaseLegacyOutput = release
+    const request = {
+      provider: 'coreaudio' as const,
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: null,
+      metronome: h.metronome,
+      countIn: true,
+      positionSeconds: 0,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    }
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    expect(h.client.preparedAhead).toBe(true)
+    expect(h.client.active).toBe(false)
+    expect(release).not.toHaveBeenCalled()
+    expect(h.calls).toEqual(['prepare:1'])
+    // A second prepare ahead while one stands is declined, not stacked.
+    expect(await h.client.prepareAhead(request)).toBe(false)
+    h.calls.length = 0
+    // Play with the same request: open and start the prepared generation.
+    expect(await h.client.prepareAndStart(request)).toBe(true)
+    expect(h.calls).toEqual(['open:1', 'start:1'])
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(h.client.active).toBe(true)
+    expect(h.client.preparedAhead).toBe(false)
+    expect(h.client.transportActive).toBe(true)
+    await h.client.unload()
+  })
+
+  it('a graph prepared ahead for a different request is unloaded, and Play prepares afresh', async () => {
+    const h = seamHarness((generation) => playing(generation))
+    const request = {
+      provider: 'coreaudio' as const,
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: null,
+      metronome: h.metronome,
+      countIn: true,
+      positionSeconds: 0,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    }
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    h.calls.length = 0
+    // The singer scrubbed before Play: a different start.
+    expect(await h.client.prepareAndStart({ ...request, positionSeconds: 3 })).toBe(true)
+    expect(h.calls).toEqual(['unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).not.toHaveProperty('swapFromGeneration')
+    await h.client.unload()
+    // And a control change: a different graph.
+    const h2 = seamHarness((generation) => playing(generation))
+    expect(await h2.client.prepareAhead(request)).toBe(true)
+    h2.calls.length = 0
+    expect(await h2.client.prepareAndStart({ ...request, masterGain: 0.5 })).toBe(true)
+    expect(h2.calls).toEqual(['unload:1', 'prepare:2', 'open:2', 'start:2'])
+    await h2.client.unload()
+  })
+
+  it('an adoption whose request cannot be built unloads the prepared generation before the error', async () => {
+    // A click with no grid is refused by configFor. Without this the ahead
+    // generation would be nobody's — not the facade's, not main's to unload —
+    // and it would hold the device for the rest of the process.
+    const h = seamHarness((generation) => playing(generation))
+    const request = {
+      provider: 'coreaudio' as const,
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: null,
+      metronome: h.metronome,
+      countIn: true,
+      positionSeconds: 0,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    }
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    h.calls.length = 0
+    await expect(h.client.prepareAndStart({ ...request, metronome: { ...h.metronome, click: true } }))
+      .rejects.toThrow(/beat grid/)
+    expect(h.calls).toEqual(['unload:1'])
+    expect(h.client.preparedAhead).toBe(false)
+    expect(h.client.active).toBe(false)
+  })
+
+  it('a graph prepared ahead is let go by discardAhead and by unload, restoring nothing', async () => {
+    const restore = vi.fn(async () => undefined)
+    const h = seamHarness((generation) => playing(generation))
+    ;(h.client as unknown as { lease: { restoreLegacyOutput: () => Promise<void> } }).lease.restoreLegacyOutput = restore
+    const request = {
+      provider: 'coreaudio' as const,
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: null,
+      metronome: h.metronome,
+      countIn: true,
+      positionSeconds: 0,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    }
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    h.calls.length = 0
+    await h.client.discardAhead()
+    expect(h.calls).toEqual(['unload:1'])
+    expect(h.client.preparedAhead).toBe(false)
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    h.calls.length = 0
+    await h.client.unload()
+    expect(h.calls).toEqual(['unload:2'])
+    expect(h.client.preparedAhead).toBe(false)
+    expect(h.client.active).toBe(false)
+    // Chromium never lost the output: the lease's restore is a no-op here,
+    // and the facade did not call for one on the ahead generation's account.
+    expect(restore).not.toHaveBeenCalled()
+  })
+
   it.each(['prepare', 'open'] as const)(
     'binds explicit ASIO to exclusive output and never starts or restores legacy on %s failure',
     async (failureStage) => {
