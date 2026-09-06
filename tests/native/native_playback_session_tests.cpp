@@ -2214,7 +2214,8 @@ void countInLandsOnAnchorMidSong() {
   bool first = true;
   while (rendered < landing + after) {
     const uint32_t block = std::min<uint32_t>(512, landing + after - rendered);
-    CHECK(fake->drive(block, first ? singz::AudioHostDiscontinuityStart : 0));
+    CHECK(fake->drive(block, first ? singz::AudioHostDiscontinuityStart
+                                   : singz::AudioHostDiscontinuityNone));
     first = false;
     rendered += block;
   }
@@ -2280,7 +2281,8 @@ void cueGraphTransportCompositionAndLifetime() {
         zdsp::test::resetAllocationTrap();
         zdsp::test::setAllocationTrapEnabled(true);
       }
-      CHECK(fake->drive(block, first ? singz::AudioHostDiscontinuityStart : 0));
+      CHECK(fake->drive(block, first ? singz::AudioHostDiscontinuityStart
+                                     : singz::AudioHostDiscontinuityNone));
       if (first && trapFirstCallback) {
         zdsp::test::setAllocationTrapEnabled(false);
         CHECK(zdsp::test::trappedAllocationCount() == 0);
