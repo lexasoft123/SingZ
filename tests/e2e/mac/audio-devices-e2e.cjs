@@ -34,6 +34,10 @@
  * SINGZ_ANALYZE to a freshly built core binary to exercise native UID/channel
  * persistence; an older vendored binary deliberately exercises fallback.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../shared/watchdog.cjs').arm('audio-devices-e2e')
+
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { writeFileSync, mkdirSync, copyFileSync, createReadStream, rmSync } = require('node:fs')

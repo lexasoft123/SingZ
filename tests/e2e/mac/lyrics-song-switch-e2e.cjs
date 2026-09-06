@@ -38,6 +38,10 @@
  *      E2E_OUT (scratch dir for the copy, default os.tmpdir()),
  *      E2E_FETCH_DELAY_MS (per-request delay injected into main, default 4000).
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../shared/watchdog.cjs').arm('lyrics-song-switch-e2e')
+
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { readFileSync, writeFileSync, cpSync, rmSync, existsSync, readdirSync } = require('node:fs')

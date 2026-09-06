@@ -32,6 +32,10 @@
  *   ANDROID_SERIAL=672400b0 ANDROID_PKG=com.lexasoft.singz.debug \
  *     node mobile/tests/focus-loss-android.cjs
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('focus-loss-android')
+
 const path = require('path')
 const { stageSongs } = require('./player-session/seed.cjs')
 const { watchExpr, restoreVoice, restorePreference } = require('./player-session/scenario.cjs')

@@ -34,6 +34,10 @@
  *   ANDROID_SERIAL=emulator-5554 node mobile/tests/play-from-anywhere.cjs --platform android
  *   SIM_UDID=… METRO_PORT=8082 node mobile/tests/play-from-anywhere.cjs --platform ios
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('play-from-anywhere')
+
 const path = require('path')
 const { stageSongs } = require('./player-session/seed.cjs')
 const { sleep } = require('./player-session/cdp.cjs')

@@ -8,6 +8,10 @@
  * Session-scratch drivers stay out of the repo; this file is the permanent
  * CI harness (see CLAUDE.md).
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../shared/watchdog.cjs').arm('win-smoke')
+
 const path = require('node:path')
 const { _electron } = require('playwright-core')
 

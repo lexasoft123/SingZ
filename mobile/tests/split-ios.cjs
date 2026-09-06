@@ -51,6 +51,10 @@
  * NSUserDefaults from outside); global polls during the add's decode are
  * fine on the sim (the Hermes-inspector SIGSEGV was Android hardware).
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('split-ios', { totalMinutes: 120 })
+
 const { execFileSync } = require('node:child_process')
 const { readFileSync, copyFileSync, readdirSync, existsSync } = require('node:fs')
 const { join } = require('node:path')

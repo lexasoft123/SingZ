@@ -11,6 +11,10 @@
  * device-name filter is mandatory because Metro lists iOS and Android apps in
  * connection order and an unfiltered target makes target evidence vacuous.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('codec-target-ios')
+
 const { execFileSync } = require('node:child_process')
 const { mkdirSync, writeFileSync } = require('node:fs')
 const { dirname, resolve } = require('node:path')

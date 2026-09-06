@@ -19,6 +19,10 @@
  *   node mobile/tests/open-close-memory.cjs            # asserts
  *   STRICT=0 node mobile/tests/open-close-memory.cjs   # report only
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('open-close-memory')
+
 const http = require('http');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');

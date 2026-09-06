@@ -49,6 +49,10 @@
  * Preconditions: Debug app installed in a booted sim and running, served by
  * THIS Metro.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('beats-native-ios')
+
 const { execFileSync } = require('node:child_process')
 
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2'

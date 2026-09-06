@@ -26,6 +26,10 @@
  *      red. Read from the canvas pixels, because "it is in the state" is not
  *      the same claim as "the singer can see it"
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../shared/watchdog.cjs').arm('bar-edit-e2e')
+
 const { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
 const { homedir, tmpdir } = require('node:os')
 const { join } = require('node:path')

@@ -36,6 +36,10 @@
  *
  *   ANDROID_PKG=com.lexasoft.singz.debug node mobile/tests/mic-android.cjs
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('mic-android')
+
 const { execFileSync } = require('node:child_process')
 const { PKG, silenceDevice } = require('./android-lib.cjs')
 const { createPostConnectionBail } = require('./mic-android-lifecycle.cjs')

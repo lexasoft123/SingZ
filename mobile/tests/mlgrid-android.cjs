@@ -36,6 +36,10 @@
  *   ANDROID_SERIAL=<serial> ANDROID_PKG=com.lexasoft.singz.debug \
  *     DEVICE_NAME=<model> METRO_PORT=8082 node mobile/tests/mlgrid-android.cjs <rec>
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('mlgrid-android')
+
 const { execFileSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const fs = require('node:fs')

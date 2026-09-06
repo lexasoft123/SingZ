@@ -60,6 +60,21 @@ on a 40 s synthesized sample, not a quality corpus — real-song runs
 staged, and no parity gate can see the two implementations being fed DIFFERENT
 INPUTS, which is exactly how the melody framing bug survived a year of green.
 
+**Every E2E driver runs under a deadline** (`tests/shared/watchdog.cjs`, armed
+by a single `require(...).arm('<name>')` line at the top of each): a hang —
+a CDP evaluate against a suspended app, a Metro target that never appears,
+`devicectl` waiting on a locked phone — otherwise sits there for ever, because
+the open socket keeps node's loop alive, and the next run contends with it.
+Two deadlines: no output for ten minutes, or sixty minutes in total (the long
+drivers say so at their arming; `E2E_WATCHDOG_MINUTES` /
+`E2E_WATCHDOG_IDLE_MINUTES` override, `0` disarms). On expiry it names the
+deadline, how long the run had been going and the last line printed, kills its
+own DIRECT children — an Electron does not die with `process.exit`, and one
+was found hidden at 66 minutes — and exits 1; killing a run by hand prints the
+same diagnosis. Progress is taken from the driver's own output (the arming
+patches `console.log`), so a new driver needs no watchdog calls, only the
+arming line — and `tests/unit/e2e-watchdog.test.ts` refuses one that skips it.
+
 UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by

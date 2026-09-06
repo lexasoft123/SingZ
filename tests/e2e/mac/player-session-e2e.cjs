@@ -35,6 +35,10 @@
  *                       native provider is WASAPI and the CPU/footprint rows are
  *                       not sampled (no `top`; they print as n/a).
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../shared/watchdog.cjs').arm('player-session-e2e', { totalMinutes: 120 })
+
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { execFileSync } = require('node:child_process')

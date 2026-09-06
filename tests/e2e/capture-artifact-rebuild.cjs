@@ -1,3 +1,7 @@
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../shared/watchdog.cjs').arm('capture-artifact-rebuild')
+
 const assert = require('node:assert/strict')
 const { mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
 const { dirname, join, resolve } = require('node:path')
@@ -46,6 +50,10 @@ try {
   )
   selectManifest(`${JSON.stringify(corruptManifest, null, 2)}\n`)
   assert.equal(valid(corruptAddon, corruptManifest.sourceStamp), false, 'corruption detected')
+  // The build below blocks the loop with the child's output going straight
+  // to the terminal, so the watchdog sees no progress while it runs: say so
+  // first, and its idle deadline is measured from here.
+  console.log('building the capture addon (no output until it finishes)…')
   const result = spawnSync(
     process.execPath,
     [join(root, 'scripts/build-capture-addon.cjs'), target],

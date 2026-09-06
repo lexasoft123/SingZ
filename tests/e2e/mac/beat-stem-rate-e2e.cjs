@@ -35,6 +35,10 @@
  * must carry a bpmNear at all (Sixteen Tons does not — the driver refuses it
  * cleanly at startup). Known good: Wild World, Nothing Else Matters.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../shared/watchdog.cjs').arm('beat-stem-rate-e2e')
+
 const { _electron } = require('playwright-core')
 const { readFileSync, writeFileSync, cpSync, rmSync, existsSync } = require('node:fs')
 const { join } = require('node:path')

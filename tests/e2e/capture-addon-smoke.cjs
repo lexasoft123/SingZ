@@ -1,3 +1,7 @@
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../shared/watchdog.cjs').arm('capture-addon-smoke')
+
 const { app } = require('electron')
 const assert = require('node:assert/strict')
 const { unlinkSync, writeFileSync } = require('node:fs')

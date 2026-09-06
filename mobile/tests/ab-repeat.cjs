@@ -30,6 +30,10 @@
  *   node mobile/tests/ab-repeat.cjs
  *   SIM_UDID=… METRO_PORT=8082 node mobile/tests/ab-repeat.cjs
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('ab-repeat')
+
 const http = require('http');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');

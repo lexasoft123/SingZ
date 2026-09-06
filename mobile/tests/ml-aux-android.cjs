@@ -31,6 +31,10 @@
  * (add-song-android.cjs learned this first). run-as writes as the app, so
  * the files are the app's from the start on every device.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('ml-aux-android')
+
 const { execFileSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const fs = require('node:fs')
