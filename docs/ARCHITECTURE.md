@@ -7,6 +7,8 @@ Electron app in three layers, communicating over a small typed IPC bridge
 renderer (React)               preload            main (Node)
 ──────────────────             ────────           ─────────────────────────────
 MultitrackEngine (Web Audio)   window.singz  ──►  media.ts     allowlisted file access
+  — the fallback now; the
+  native DSP graph is default
 TrackStack/Waveform (canvas)                      separation.ts engine ladder + runs
 PitchStrip (piano roll + mic)                     lyrics.ts    LRCLIB→whisper ladder
 BeatGrid (beat lines over the lanes)
@@ -40,17 +42,28 @@ generation-bound WAV/FLAC frame-zero session: authorized descriptor decode and
 resample, sample-locked lane gain/mute/solo mixing, master limiting,
 output-host composition and deterministic ownership/telemetry.
 
-Phase iOS-B2 now exposes that session as an **opt-in Experimental iPhone
-backend**. `mobile/src/playback/native.ts` is the only product bridge consumer.
-It selects the backend before stem decode, materializes local WAV/FLAC paths,
-and creates no RNAudioAPI song `AudioBuffer`s on the native path. The limited
-native player supports start from frame zero and stop only; any project using
-seek/parity features, tempo, transpose, metronome, training mode, custom tracks
-or unsupported codecs stays wholly legacy. At start, the coordinator suspends
-and releases legacy output, configures and verifies the intended iOS playback
-session, then opens and starts RemoteIO. The Train tab is not activated until
-matching native stop/unload returns a process-global cleanup lease, so its mic
-session cannot race the native output owner.
+That session is now **the default playback backend on iOS, Android and macOS**
+(2026-09-06); Windows stays on Web Audio. It is a whole player, not the
+frame-zero preview it began as: transport, seek, loop, tempo and transpose,
+the metronome and its count-in, training ducking, custom lanes and the seek
+bar's own level envelope all run in the core, on one source tree for all three
+hosts. `mobile/src/playback/native.ts` is the phones' only bridge consumer: it selects
+the backend before project decode, materializes local WAV/FLAC paths, and
+creates no RNAudioAPI song `AudioBuffer`s on the native path.
+`src/renderer/src/audio/desktop-native-playback.ts` is the desktop's, and there
+the renderer KEEPS its decoded buffers — the fallback and the editor both need
+them — which is the desktop's decided footprint cost rather than an oversight.
+
+**Legacy is not going away.** It is the fallback when native refuses or is
+unavailable, it is the editor's engine, and it is the parity reference every
+rule in
+[NATIVE-PLAYBACK-PARITY-PLAN.md](NATIVE-PLAYBACK-PARITY-PLAN.md) is measured
+against — that document's first section is the live status of the cutover, and
+[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md) is the roadmap it belongs to. At start,
+the coordinator suspends and releases legacy output, configures and verifies
+the intended playback session, then opens and starts the host. The Train tab is
+not activated until matching native stop/unload returns a process-global
+cleanup lease, so its mic session cannot race the native output owner.
 
 The boundary itself — the thirteen phone methods and their arity rule, the
 request DTOs with units and bounds, the session block field by field, the
@@ -65,9 +78,9 @@ snapshot. Lazy legacy fallback is allowed only when exact unload returns
 lease in `prepare`. Uncertain cleanup blocks fallback. A prepare/open failure
 may fall back after this proof, while a start-command or later terminal failure
 never auto-falls back. Immediate claims and stop/unload cancellation supersede
-in-flight decode; callback failure is sticky and fail-silent. Desktop and
-Android product playback remain on their existing engines (see
-`docs/WINDOWS-AUDIO.md` and `docs/IOS-AUDIO.md`).
+in-flight decode; callback failure is sticky and fail-silent. The per-platform
+host details are in `docs/IOS-AUDIO.md`, `docs/ANDROID-AUDIO.md` and
+`docs/WINDOWS-AUDIO.md`.
 
 ## Audio playback (`renderer/src/audio/engine.ts`)
 

@@ -1,31 +1,83 @@
 # Native playback faster than legacy: every player-session rule green
 
-Branch `codex/dsp-graph-plan`, written 2026-09-04 at tip `7c10bbb`. Companion to
-[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md) (the architecture) and to the per-rule mechanism list
+Branch `codex/dsp-graph-plan`, opened 2026-09-04 at tip `7c10bbb`, current at `67e7133`.
+The execution record for **Phase 4** of [DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md), which is the
+architecture and the roadmap; the bridge's own contract is
+[NATIVE-PLAYBACK-BRIDGE.md](NATIVE-PLAYBACK-BRIDGE.md), and the per-rule mechanism list is
 kept at `~/.claude/plans/native-all-rules-pass.md` on the dev Mac.
 
-## Where it stands
+Which document answers what: **where are we** → this file's first section. **How is it
+built** → DSP-GRAPH-PLAN. **What may cross the bridge** → NATIVE-PLAYBACK-BRIDGE. **What
+happened, run by run** → the rest of this file.
 
-The native graph backend must be no worse than the legacy path on every rule of
-`mobile/tests/player-session.cjs` (58 rules on Android, 56 on iOS). Clean runs at `ff5be2e`
-(2026-09-04 morning): Android 50/58, iOS 44/56. Since then:
+## Where it stands (2026-09-06, tip `67e7133`)
 
-- `64a3293` — Play after the end of the song no longer resolves Completed off a stale
-  published frame (the core's `resume()` resolves PreRoll/Playing and leaves Completed to the
-  callback); the iOS `end → Play again: null` should now read a number.
-- `7c10bbb` — the telemetry poll reads a session-only bridge call (`session()`, same name and
-  arity on both phones) instead of re-enumerating every audio device and marshalling the
-  capability block every 400 ms.
+**This document is two things.** This section and the register below are the CURRENT
+status — read them and stop. Everything from "Why the legacy engine measures faster"
+onward is the chronological record of how it got here: the architecture comparison, the
+six steps, every run and every field report, kept because the numbers quoted elsewhere
+have to be traceable to the run that produced them.
 
-Their effect on the CPU rules is **unmeasured**: the one after-run was polluted by host load
-and a 45-minute load-gated retry per platform gave up (1-min load 7–10 from the user's own
-apps). On this Mac the CPU columns are only honest on a quiet host; the POCO phone is the
-instrument that sidesteps host load entirely.
+**What native is now.** The default playback backend on iOS, Android and macOS
+(`72ece1f`, the singer's decision); Windows stays on Web Audio. Legacy is not removed and
+is not going to be — it is the fallback, the editor's engine, and the parity reference
+every rule here is measured against.
 
-Failing rules at `ff5be2e`, both platforms: the worst-of-4 seek, metronome touches (iOS),
-training on, metronome save (iOS), pitch-change CPU, pause holds the position, seek
-pull-back (Android), Play → position advancing (iOS), CPU idle / playing / backgrounded,
-iOS RSS (+70..124 MB), end-of-song restart (iOS, fixed by `64a3293`).
+**Parity, per platform, at the last run of each:**
+
+| | harness | result | note |
+| --- | --- | --- | --- |
+| iOS simulator | `player-session --platform ios` | 58/58 | first full green at run 4k-3; the DEV+inspector tax is documented below |
+| iPhone 13 Pro Max | `player-session --platform ios-device` | 47/48 | after the seek fix; no void |
+| Android emulator | `player-session --platform android` | 55/60 (last run) | every miss host-bound (this Mac's load); 54/60 in the runs before it |
+| POCO (physical) | `player-session --platform android` | 55–58/58 | the reds are the phone's own |
+| macOS desktop | `tests/e2e/mac/player-session-e2e.cjs` | 16/16 timing rules | footprint rows red BY DECISION (the renderer keeps Web Audio for the fallback) |
+| Windows laptop | the same desktop harness on WASAPI | 15/18 | Play → advancing 152 ms against Web Audio's 1261 |
+| iOS simulator | `play-from-anywhere` | 8/8 | the Plays that are not a fresh song's first |
+| POCO (physical) | `play-from-anywhere` | 6/6 | the SIX-case driver it was then; the two cases added since (the transport button, the count-in under a lag) have never run on Android — see what is owed |
+
+**Headless, green at tip (all measured 2026-09-06):** repo typecheck; `npm test` 82 files /
+1189 tests; `npm run gates` 7/7; `cd mobile && npx jest` 57 suites / 686 tests; the E2E
+watchdog source gate 58. The native ctest gate (`zdsp/run-sanitizer-gates.sh`) was last run
+at its own step and has not been re-run at this tip.
+
+**The field-report register.** Every one of these came from the singer using a shipped
+build, and every one is fixed with unit tests and — where a screen is involved — a
+permanent driver case. They are the reason this branch is worth its length; each is
+written up in full below.
+
+| # | report | cause | landed |
+| --- | --- | --- | --- |
+| 1 | "no histogram, Play takes a long time" (build 51) | the legacy seek-bar scan read every sample on the JS thread | `677ad36` |
+| 2 | count-in: click and dot disagree, no dots on the first click, the previous line lights | even-division dots, a row that waited for the core, a swept bar | `ae0298e` |
+| 3 | "swipe back opens the player again and swipes back by itself" | the route prevented its own removal and raced the gesture | `807d785` |
+| 4 | "tapping a lyric line is broken when stopped mid line" | the shown position was latency-corrected while stopped | `0daed31` |
+| 5 | "the count-in highlights only the first and second dot and disappears" | the row died at the RENDER landing while the clicks were still sounding | `822671d` |
+| 6 | "1–1.5 s between pressing play and the pause button" | nothing notified the screen when the transport actually started | `67e7133` |
+
+**What is owed before a release** (nothing here blocks the merge to main; the first two
+block a `v*` tag):
+
+1. **Android at tip.** The last emulator/POCO runs were eight commits back, and three of
+   the commits since touch the poll cadence and the notification path — the machinery
+   Android's screen depends on.
+2. **The Android relaunch crash.** Two deaths in nine harness runs on optimized-core
+   builds; the tombstone lands in RN's own `pullTransaction` with react-native-screens and
+   reanimated as the delegate registrants and no frame of ours in any of 62 threads; a
+   plain relaunch loop was 0 of 12. Upstream-shaped, not upstream-proven. Written up in
+   Step 6.
+3. **The iPhone route matrix** — Speaker, wired, Bluetooth and CarPlay, with a route change
+   and a call interruption. DSP-GRAPH-PLAN's Phase 4 has asked for this since the start,
+   and report 5 above is exactly a laggy-route behaviour that could only be tested here
+   with a simulated trim.
+4. Release mechanics: the version bump, `docs/release-notes/v0.21.0.md` with its store
+   blocks, and the iOS `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` — note the sideload
+   builds have already reached 55, so CI's per-workflow `run_number` is far behind and
+   0.20.1 cannot be the version it uploads.
+
+**Parked by decision, each its own project:** the per-target codec proofs, one shared
+engine-contract suite across both legacy engines and the facade, and the desktop's
+playing-CPU residual (the graph's own render thread, ~1.4% of a core).
 
 ## Why the legacy engine measures faster: an architecture comparison
 

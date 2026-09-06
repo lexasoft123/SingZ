@@ -1,10 +1,30 @@
 # Future DSP graph architecture
 
-Status: roadmap; Phase 4A native monitoring and Phase 4A.1 app-shell
-persistence are product-wired and hardware-verified on macOS with the Zen
-Quadro SC
-Last reviewed: 2026-09-02
+Status: Phases 0-3 done; Phase 4 (the playback cutover) is shipping and native
+is the DEFAULT on iOS, Android and macOS; Phases 5-8 are roadmap.
+Last reviewed: 2026-09-06 (branch `codex/dsp-graph-plan`, tip `67e7133`)
 Foundation: PR #13, squash commit `a76a8d997143e12727bc37de0f19fda652d97f6b`
+
+Where each phase actually stands, and what remains before a release:
+[NATIVE-PLAYBACK-PARITY-PLAN.md](NATIVE-PLAYBACK-PARITY-PLAN.md) — its first
+section is the current status of Phase 4 and the one place kept up to date.
+
+## Phase status at a glance
+
+| Phase | State | Evidence |
+| --- | --- | --- |
+| 0A extract `zcore`/`zdsp` | done | root CMake owns the native build; `zcore`/`zdsp`/`third_party/native` split |
+| 0B freeze contracts | done | [ADRs](adr/); static C++20 interface, planar float32 buses |
+| 1 graph kernel + offline runner | done | `zdsp` kernel, the native ctest gate |
+| 2 capture source + analyzer migration | done | the `singz-capture` addon; native training capture on both phones |
+| 3 full-duplex host conformance | done | `zdsp/run-sanitizer-gates.sh`, three presets |
+| 4A/4A.1 desktop monitoring preview | done | product-wired, hardware-verified on macOS (Zen Quadro SC) |
+| 4B slices 1-4 transport/metronome/count-in | done 2026-09-02 | session literal `…anchored-preview.v4`, playback document v2 |
+| **4 slices 5-6 device cutover** | **shipping** | default on three platforms; parity per platform in the parity plan; three items still owed there |
+| 5 vocal-processing/recording blocks | not started | parked by design |
+| 6 VST3 desktop host | not started | parked by design |
+| 7 AUv3/CLAP adapters | not started | parked by design |
+| 8 release hardening + default cutover | **partly, out of order** | the default cutover happened first (the singer's call); its verification matrix — sanitizer suites, soak, suspend/resume, hot-plug, low-memory, the route matrix and a hardware latency/xrun report per release — has NOT been run, and the duplicate playback path is deliberately NOT removed |
 
 Implementation research: [DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md)
 
@@ -1359,8 +1379,15 @@ foundation; experimentally activated by B2):
   fallback. The playback RT manifest is derived from target `SOURCES`, with
   omitted-member and unbounded-loop negative fixtures.
 
-Phase iOS-B2 is implemented as a default-off Experimental iPhone product cut.
-Its feature gate selects native or legacy **before project decode**. A
+Phase iOS-B2 was implemented as a default-off Experimental iPhone product cut;
+what this paragraph describes is that cut, and 4B superseded its limits: the
+list below of what "stays wholly legacy" is no longer in force — transpose, tempo, the
+metronome and its count-in, training and custom tracks are all native now — and
+the flag defaults to native on iOS, Android and macOS since 2026-09-06. What
+`nativePlaybackEligibility` still refuses is narrower and real: an unsupported
+codec or extension, a lane count outside 1-16, a saved metronome document it
+cannot read, and no available output route. What survives unchanged is the SHAPE: the
+feature gate selects native or legacy **before project decode**. A
 native-selected load passes materialized authorized paths and never constructs
 RNAudioAPI `AudioBuffer`s for that song. Projects with active transpose,
 tempo, metronome/count-in, song-training, custom/original tracks, unsupported
@@ -1390,6 +1417,11 @@ The AUHAL slice deliberately rejects different input/output UIDs. A bounded
 cross-device FIFO, drift estimator/resampler and aggregate-device policy are
 deferred, as is the separately licensed ASIO provider. WASAPI, RemoteIO and
 Oboe are the implemented Phase 3B/3C/3D standalone providers described above.
+*(Phase 3/iOS-B2 as it stood in August 2026. Superseded by 4B and the 2026-09-06
+default flip: the native graph is the product output owner on iOS, Android and
+macOS now, and the desktop renderer and both phone UIs drive it. Kept for the
+ownership rules, which did not change.)*
+
 Desktop, Android and ineligible iPhone projects still use
 Web Audio/RNAudioAPI as their product output/session owner. The opt-in iOS-B2
 frame-zero player described above is the first product path that instead owns
@@ -1426,7 +1458,9 @@ remains the desktop owner, and RNAudioAPI remains the Android/default-iPhone
 owner. The opt-in iOS-B2 slice now exercises the first atomic product cutover
 for eligible frame-zero projects; other platforms remain pending. Its feature
 gate makes legacy and native output mutually exclusive, and enumeration alone
-never acquires a session.
+never acquires a session. *(Also August 2026: no platform is pending now — see
+the status table at the top. The mutual exclusion and the enumeration rule
+still hold.)*
 
 Platform details:
 
@@ -1630,9 +1664,14 @@ provides the decoded lifetime owner, generation-bound frame-zero transport and
 output-host composition. Its B2 product coordinator now supplies the Catalog
 load guard, exact cleanup lease and exclusive legacy-engine/session handoff
 for the Experimental audible iPhone path; other platforms require their
-corresponding session slice.
+corresponding session slice. *(August 2026 again: every platform has its slice
+now, and the path is no longer experimental — the status table at the top has
+the current picture.)*
 
 #### Phase 4B — transport, metronome and count-in
+
+*(Written before 4B was built; "the current frame-zero graph" is the August
+2026 one. What follows is the design that shipped.)*
 
 Metronome support is not a bridge flag on the current frame-zero graph.
 Count-in is transport: project time begins below zero while the output clock
@@ -1808,8 +1847,10 @@ exercise the new output host. It is the rollback boundary until slices 1-4 are
 complete and the new capability is present.
 
 Phase 4B slices 1-4 implemented 2026-09-02 (one source tree for all three
-hosts; native playback stays an explicit per-platform opt-in, never the
-default):
+hosts). Native playback was an explicit per-platform opt-in when this was
+written; it became the DEFAULT on iOS, Android and macOS on 2026-09-06
+(`72ece1f`), which is the decision the last bullet of the following list was
+waiting for. Windows stays on Web Audio:
 
 - Transport kernel and reference bus: `AudioHostGraphAdapter` carries a
   session-owned transport provider and advances signed project time through
@@ -1877,8 +1918,12 @@ physical-device gates):
 - Route/latency and memory-envelope measurements on hardware, and the
   feature-flag default decision, which stays "legacy" on every platform.
 
-Where that list stands on 2026-09-05 (the record of record is
-`docs/NATIVE-PLAYBACK-PARITY-PLAN.md`, Step 6; this is the summary):
+*(That list is the phase's original acceptance list, kept verbatim. Where each
+item stands follows; the default has since been taken the other way.)*
+
+Where that list stands on 2026-09-06 (the record of record is
+`docs/NATIVE-PLAYBACK-PARITY-PLAN.md`, whose first section is the live status;
+this is the summary):
 
 - The Android audible session has played: the emulator runs the native
   backend through the JNI bridge and Oboe host end to end (`player-session`
@@ -1929,11 +1974,21 @@ Where that list stands on 2026-09-05 (the record of record is
   152 ms against Web Audio's 1261; the two open rows carry the addon's first
   load in that pass and the seek is twenty milliseconds over budget on that
   machine's IPC. ASIO stays behind the unsigned SDK agreement.
-- Still open from the list above: the target-executed codec proofs, one shared engine-contract suite across both
-  legacy engines and the facade, hardware route/latency and memory envelopes,
-  and the default decision, which stays "legacy" on every platform. Two
-  harness rules are reported rather than compared: Play → first audible (the
-  two backends measure different events) and backgrounded CPU.
+- Still open from the list above: the target-executed codec proofs and one
+  shared engine-contract suite across both legacy engines and the facade (each
+  parked as its own project), and the hardware ROUTE matrix — Speaker, wired,
+  Bluetooth and CarPlay with a route change and a call interruption on a real
+  iPhone, which is the last device gate this phase actually owes. Memory
+  envelopes are measured (iOS footprint, Android PSS). The default decision was
+  taken on 2026-09-06: native everywhere but Windows. Two harness rules are
+  reported rather than compared: Play → first audible (the two backends measure
+  different events) and backgrounded CPU.
+- **The live status of this phase is not maintained here.** It moves too fast:
+  read the first section of
+  [NATIVE-PLAYBACK-PARITY-PLAN.md](NATIVE-PLAYBACK-PARITY-PLAN.md), which
+  carries the per-platform table, the field-report register and what is owed
+  before a release. What is kept here is the DESIGN and the phase's own
+  acceptance list, which do not move.
 
 Implement:
 
