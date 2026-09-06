@@ -329,8 +329,25 @@ void idleWorkerBarelyWakes() {
   // polls fast; give it that interval before counting.
   sleepMs(150);
   const uint64_t activeBefore = wakeups();
-  sleepMs(300);
-  const uint64_t active = wakeups() - activeBefore;
+  // A DEADLINE, not a fixed window. Counting wakeups in 300 ms and demanding
+  // thirty assumes the host can wake a thread every 10 ms, and Windows cannot:
+  // its default timer granularity is 15.6 ms, so the fast poll tops out near
+  // nineteen there and the bar was unreachable — this failed two of four
+  // Windows runs and passed the others only when something else on the box
+  // had raised the global timer resolution. The property under test is that
+  // an active loop polls FAST, so wait for the thirtieth wake instead: the
+  // fast rate gets there in under half a second even at 15.6 ms granularity,
+  // and three times slower still fits, while the idle rate (~100 ms) would
+  // need three seconds and cannot.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+  uint64_t active = 0;
+  while (std::chrono::steady_clock::now() < deadline) {
+    active = wakeups() - activeBefore;
+    if (active >= 30)
+      break;
+    sleepMs(10);
+  }
   expect(active >= 30, "an active recurring loop wakes the worker at the fast poll rate");
   singz::deactivateSignalsmithTimePitchLoop(stage.processor);
 }
