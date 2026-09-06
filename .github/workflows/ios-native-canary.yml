@@ -153,12 +153,26 @@ jobs:
       - name: Gate component architecture, symbols and dependencies
         working-directory: mobile/ios
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          # Every check below is a bare `test`/`grep -q`, so a failure is an
+          # exit code and nothing else — three runs of this job died here
+          # saying only "Process completed with exit code 1". The trap names
+          # the command instead, which is the whole difference between a gate
+          # and a mystery. `-E` is load-bearing: without it an ERR trap is NOT
+          # inherited by shell functions, and the opaquest checks in this
+          # workflow are inside one (`defined_symbols`, a four-stage pipeline
+          # under pipefail). The line number is an offset into THIS step's
+          # script, not into the workflow file.
+          trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
           device=$(find "$RUNNER_TEMP/singz-dsp-device-products" \
             -name libSingzDspRuntime.a -print -quit)
           simulator=$(find "$RUNNER_TEMP/singz-dsp-sim-products" \
             -name libSingzDspRuntime.a -print -quit)
-          test -n "$device" && test -n "$simulator"
+          # Separate statements, not an AND-chain: a failing first half of an
+          # `a && b` is exempt from errexit, so an empty $device used to sail
+          # through and surface later as `lipo -info ""`.
+          test -n "$device"
+          test -n "$simulator"
           xcrun lipo -info "$device" | grep -q 'arm64'
           sim_info=$(xcrun lipo -info "$simulator")
           case "$sim_info" in
@@ -183,7 +197,8 @@ jobs:
             createScheduledCueSource compileGraph renderGraphBlock \
             renderAudioHostGraph nativePlaybackRender \
             SingzDspRuntimeGetLinkStatus; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-dsp-symbols.txt"
+            grep -q "$symbol" "$RUNNER_TEMP/singz-dsp-symbols.txt" ||
+              { echo "missing symbol: $symbol" >&2; exit 1; }
           done
           if grep -E 'Java_|RCT|facebook|FLAC|Ort|VST|AudioUnit|AVAudio' \
             "$RUNNER_TEMP/singz-dsp-symbols.txt"; then
@@ -212,12 +227,26 @@ jobs:
       - name: Gate callback flags, architecture, symbols and dependencies
         working-directory: mobile/ios
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          # Every check below is a bare `test`/`grep -q`, so a failure is an
+          # exit code and nothing else — three runs of this job died here
+          # saying only "Process completed with exit code 1". The trap names
+          # the command instead, which is the whole difference between a gate
+          # and a mystery. `-E` is load-bearing: without it an ERR trap is NOT
+          # inherited by shell functions, and the opaquest checks in this
+          # workflow are inside one (`defined_symbols`, a four-stage pipeline
+          # under pipefail). The line number is an offset into THIS step's
+          # script, not into the workflow file.
+          trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
           device=$(find "$RUNNER_TEMP/singz-callback-device-products" \
             -name libSingzDeviceCallback.a -print -quit)
           simulator=$(find "$RUNNER_TEMP/singz-callback-sim-products" \
             -name libSingzDeviceCallback.a -print -quit)
-          test -n "$device" && test -n "$simulator"
+          # Separate statements, not an AND-chain: a failing first half of an
+          # `a && b` is exempt from errexit, so an empty $device used to sail
+          # through and surface later as `lipo -info ""`.
+          test -n "$device"
+          test -n "$simulator"
           xcrun lipo -info "$device" > "$RUNNER_TEMP/callback-device-lipo.txt"
           grep -q 'arm64' "$RUNNER_TEMP/callback-device-lipo.txt"
           sim_info=$(xcrun lipo -info "$simulator")
@@ -258,7 +287,8 @@ jobs:
             "$RUNNER_TEMP/singz-callback-objects.txt"
           for symbol in iosAudioHostRenderCallback invokeAudioHostCallback \
             AudioInputRingProducer resolveAudioInputTimestamp; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-callback-symbols.txt"
+            grep -q "$symbol" "$RUNNER_TEMP/singz-callback-symbols.txt" ||
+              { echo "missing symbol: $symbol" >&2; exit 1; }
           done
           if grep -E '__cxa|gxx_personality|clang_call_terminate|__ZTI|__ZTVN10__cxxabiv1' \
             "$RUNNER_TEMP/singz-callback-symbols.txt"; then
@@ -279,12 +309,26 @@ jobs:
       - name: Gate playback architecture, symbols and ownership
         working-directory: mobile/ios
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          # Every check below is a bare `test`/`grep -q`, so a failure is an
+          # exit code and nothing else — three runs of this job died here
+          # saying only "Process completed with exit code 1". The trap names
+          # the command instead, which is the whole difference between a gate
+          # and a mystery. `-E` is load-bearing: without it an ERR trap is NOT
+          # inherited by shell functions, and the opaquest checks in this
+          # workflow are inside one (`defined_symbols`, a four-stage pipeline
+          # under pipefail). The line number is an offset into THIS step's
+          # script, not into the workflow file.
+          trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
           device=$(find "$RUNNER_TEMP/singz-playback-device-products" \
             -name libSingzPlaybackSession.a -print -quit)
           simulator=$(find "$RUNNER_TEMP/singz-playback-sim-products" \
             -name libSingzPlaybackSession.a -print -quit)
-          test -n "$device" && test -n "$simulator"
+          # Separate statements, not an AND-chain: a failing first half of an
+          # `a && b` is exempt from errexit, so an empty $device used to sail
+          # through and surface later as `lipo -info ""`.
+          test -n "$device"
+          test -n "$simulator"
           xcrun lipo -info "$device" | grep -q 'arm64'
           sim_info=$(xcrun lipo -info "$simulator")
           case "$sim_info" in
@@ -312,7 +356,8 @@ jobs:
           xcrun nm -m "$device" > "$RUNNER_TEMP/singz-playback-symbols.txt"
           for symbol in NativePlaybackSession nativePlaybackSessionCapabilityTag \
             preparePlaybackCuePlan previewClick; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-playback-symbols.txt"
+            grep -q "$symbol" "$RUNNER_TEMP/singz-playback-symbols.txt" ||
+              { echo "missing symbol: $symbol" >&2; exit 1; }
           done
           if grep -E 'Java_|RCT|React|facebook|objc_msgSend|AVAudioSession' \
             "$RUNNER_TEMP/singz-playback-symbols.txt"; then
@@ -345,7 +390,17 @@ jobs:
 
       - name: Prove final link and single runtime owner
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          # Every check below is a bare `test`/`grep -q`, so a failure is an
+          # exit code and nothing else — three runs of this job died here
+          # saying only "Process completed with exit code 1". The trap names
+          # the command instead, which is the whole difference between a gate
+          # and a mystery. `-E` is load-bearing: without it an ERR trap is NOT
+          # inherited by shell functions, and the opaquest checks in this
+          # workflow are inside one (`defined_symbols`, a four-stage pipeline
+          # under pipefail). The line number is an offset into THIS step's
+          # script, not into the workflow file.
+          trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
           app=$(find "$RUNNER_TEMP/singz-app-derived" \
             -path '*Release-iphoneos/SingZPlayer.app' -print -quit)
           core=$(find "$RUNNER_TEMP/singz-app-derived" \
@@ -359,8 +414,13 @@ jobs:
           playback=$(find "$RUNNER_TEMP/singz-app-derived" \
             -path '*Release-iphoneos/SingzPlaybackSession/libSingzPlaybackSession.a' \
             -print -quit)
-          test -n "$app" && test -n "$core" && test -n "$runtime" \
-            && test -n "$callback" && test -n "$playback"
+          # One per line for the same reason: four of these five were exempt
+          # from errexit inside the chain, so only $playback was ever checked.
+          test -n "$app"
+          test -n "$core"
+          test -n "$runtime"
+          test -n "$callback"
+          test -n "$playback"
 
           binary="$app/SingZPlayer"
           bundle="$app/main.jsbundle"
@@ -389,7 +449,8 @@ jobs:
           for literal in IosNativePlaybackCoordinator NativeAudioRuntime \
             configureOutputSession previewClick \
             singz.playback.ios-native-experimental; do
-            grep -q "$literal" "$RUNNER_TEMP/singz-jsbundle-bytecode.txt"
+            grep -q "$literal" "$RUNNER_TEMP/singz-jsbundle-bytecode.txt" ||
+              { echo "missing literal: $literal" >&2; exit 1; }
           done
 
           # The bridge is intentionally reachable only through one typed
@@ -399,7 +460,8 @@ jobs:
             --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
             'NativeModules.NativeAudioRuntime' \
             mobile/src mobile/App.tsx mobile/index.js | LC_ALL=C sort)
-          test "$consumers" = 'mobile/src/playback/native.ts'
+          test "$consumers" = 'mobile/src/playback/native.ts' ||
+            { printf 'bridge consumers:\n%s\n' "$consumers" >&2; exit 1; }
           grep -q 'NativeModules.NativeAudioRuntime as' \
             mobile/src/playback/native.ts
           grep -q 'NativePlaybackBridgeApi' mobile/src/playback/native.ts
@@ -420,13 +482,15 @@ jobs:
             renderAudioHostGraph nativePlaybackRender \
             nativePlaybackSessionCapabilityTag preparePlaybackCuePlan \
             previewClick; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-app-symbols.txt"
+            grep -q "$symbol" "$RUNNER_TEMP/singz-app-symbols.txt" ||
+              { echo "missing symbol: $symbol" >&2; exit 1; }
           done
           # The input-capture callback closure must still come from the strict
           # component alongside the native playback/output symbols above.
           for symbol in AudioInputCallbackEndpoint AudioInputRingProducer \
             resolveAudioInputTimestamp; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-app-symbols.txt"
+            grep -q "$symbol" "$RUNNER_TEMP/singz-app-symbols.txt" ||
+              { echo "missing symbol: $symbol" >&2; exit 1; }
           done
 
           xcrun nm -m "$core" > "$RUNNER_TEMP/singz-core-symbols.txt"

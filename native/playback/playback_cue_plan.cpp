@@ -69,11 +69,17 @@ double localPeriod(const PlaybackCueBeatGrid &grid, int64_t index) {
       std::min<int64_t>(static_cast<int64_t>(beats.size()) - 1, start + 8);
   std::array<double, 8> intervals{};
   size_t count = 0;
-  for (int64_t i = start; i < end; ++i) {
+  // `end - start` is at most eight by construction above, so this loop cannot
+  // overrun — but only the reader knows that: gcc's -Warray-bounds sees a
+  // `count` it cannot bound and rejects the sort below at -Werror. The
+  // condition states the invariant instead of leaving it to be inferred, and
+  // costs one comparison per interval on a loop that runs at most eight times.
+  for (int64_t i = start; i < end && count < intervals.size(); ++i) {
     intervals[count++] =
         beats[static_cast<size_t>(i + 1)] - beats[static_cast<size_t>(i)];
   }
-  std::sort(intervals.begin(), intervals.begin() + count);
+  std::sort(intervals.begin(),
+            intervals.begin() + static_cast<std::ptrdiff_t>(count));
   return intervals[count / 2];
 }
 
