@@ -132,6 +132,7 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
     clock: () => ({
       renderedSec: state.renderedPositionSec,
       playing: state.phase === 'playing',
+      preRoll: state.countInStatus !== null,
       live: false,
       countIn: state.countInStatus
     }),
@@ -299,7 +300,8 @@ describe('the singer\'s latency trim', () => {
     // heard: the position is the head minus that latency, computed once in
     // the backend for both the live clock and the polled fallback.
     h.publish({
-      phase: 'paused',
+      phase: 'playing',
+      advancing: true,
       positionSec: 10,
       renderedPositionSec: 10.02,
       displayLatencySec: 0.02
@@ -346,7 +348,13 @@ describe('the singer\'s latency trim', () => {
   it('cannot let the highlight run ahead of the audio, however far it is dialled back', () => {
     const h = nativeHarness()
     h.backend.attach(h.project)
-    h.publish({ phase: 'paused', positionSec: 10, renderedPositionSec: 10.02, displayLatencySec: 0.02 })
+    h.publish({
+      phase: 'playing',
+      advancing: true,
+      positionSec: 10,
+      renderedPositionSec: 10.02,
+      displayLatencySec: 0.02
+    })
 
     // The singer can step the trim negative, and legacy floors the TOTAL
     // shift at zero, so its highlight can at most track the render clock.
@@ -358,10 +366,50 @@ describe('the singer\'s latency trim', () => {
     expect(h.backend.position).toBeCloseTo(h.backend.audioPosition, 5)
   })
 
+  it('shows a stopped or counting-in transport its own position, uncorrected', () => {
+    // Tapping a lyric line while the player is stopped seeks to that line;
+    // the highlight then has to BE on it. Subtracting the route latency put
+    // the shown position just before the line, so the line before it lit —
+    // reported from a phone, invisible on a simulator whose route is 10 ms.
+    // Legacy never corrects a stopped clock (`clockPosition` returns the
+    // start offset) and clamps to it through a count-in.
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    h.backend.setDisplayTrim(0.08)
+
+    h.publish({ phase: 'paused', positionSec: 30, renderedPositionSec: 30, displayLatencySec: 0.05 })
+    expect(h.backend.position).toBeCloseTo(30, 5)
+
+    h.publish({ phase: 'stopped', positionSec: 30, renderedPositionSec: 30, displayLatencySec: 0.05 })
+    expect(h.backend.position).toBeCloseTo(30, 5)
+
+    // Counting in: the clock holds the landing and the row is published.
+    h.publish({
+      phase: 'playing',
+      advancing: true,
+      positionSec: 30,
+      renderedPositionSec: 30,
+      displayLatencySec: 0.05,
+      countInStatus: { kind: 'beats', total: 4, done: 2, perBar: 4 }
+    })
+    expect(h.backend.position).toBeCloseTo(30, 5)
+
+    // And once the song is actually sounding, the correction is back.
+    h.publish({
+      phase: 'playing',
+      advancing: true,
+      positionSec: 30,
+      renderedPositionSec: 30,
+      displayLatencySec: 0.05,
+      countInStatus: null
+    })
+    expect(h.backend.position).toBeCloseTo(30 - 0.05 - 0.08, 5)
+  })
+
   it('never reports a negative position at the very start of a song', () => {
     const h = nativeHarness()
     h.backend.attach(h.project)
-    h.publish({ phase: 'paused', positionSec: 0.01, renderedPositionSec: 0.01 })
+    h.publish({ phase: 'playing', advancing: true, positionSec: 0.01, renderedPositionSec: 0.01 })
 
     h.backend.setDisplayTrim(0.5)
 

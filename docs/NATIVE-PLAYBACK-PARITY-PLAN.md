@@ -842,6 +842,36 @@ reconciles them into project.json. The route no longer prevents its removal; the
 runs from its cleanup with the same alert on failure, and a source test keeps the hook out
 of the navigator for good.
 
+**"Tapping on lyrics lines is broken when the player is stopped mid line", and
+"tapping the line should start from the tapped line start" (the phone, 2026-09-06
+afternoon).** One defect under both, and under the count-in complaint that came with
+them: the native backend subtracted the output latency from the SHOWN position in every
+state, where legacy subtracts it in none but playback. Legacy's `clockPosition` returns
+the start offset untouched while it is stopped and clamps to it through a count-in; the
+correction says where the ear is inside sound that is currently coming out, and a stopped
+transport is making none. So tapping a lyric line while stopped seeked to the line and
+then showed a position a route latency BEFORE it — inside the previous line, which is the
+one that lit — and Play from there began before the tapped line. The phone's route is
+34 ms and its lines are seconds apart, so it took a real song to see; the simulator's
+10 ms never crossed a boundary, which is why every driver passed. `position` now returns
+the rendered position itself while stopped or counting in (`NativePlaybackClock.preRoll`
+carries the second case), and the count-in's landing follows the same rule: the recovery
+snapshot's `heardSeconds` — head less latency and trim — becomes `shownSeconds`, which is
+where the bar is, so a tapped line's Play lands ON the line. That field was introduced the
+day before for the opposite reason, when the paused bar WAS latency-corrected and the
+landing was 160-240 ms past it; the bar's definition changing is what turns it round, and
+the intent ("land where the bar says") is the same both times. Measured on the phone
+before and after: the four taps land on the tapped line on both backends with identical
+positions, and the count-in from 60 s holds the bar at 60.000 rather than 59.966.
+Left standing, said out loud: legacy ALSO floors its playing clock at the start offset
+(`Math.max(startOffset, elapsed)`), which holds its highlight there for the first
+`latency + trim` of a run; native has no such floor, so for that long after a landing —
+34 ms on this phone with no trim, but a fifth of a second on Bluetooth or with a trim
+dialled in — the highlight can sit just below the line it landed on. Not the reported
+defect and not visible at 34 ms, but the same class; the fix is to floor the playing
+branch at the run's own start frame, and the loop fold has to be exempted from it the
+way legacy's fold returns before its clamp.
+
 **Profiled the same afternoon, host quiet, and half of it was ours to remove.** Per
 process while a song played (top, 3 s windows, `sample` for stacks): the GPU process
 identical on both backends (~9%); main +2.5 under native (the graph renders there); the

@@ -401,9 +401,21 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
    * live clock and the polled fallback.
    */
   get position(): number {
+    const clock = this.handle.clock()
+    // Only while the song is actually coming out of the speaker. The
+    // correction says where the EAR is inside sound already rendered; a
+    // stopped transport is making none, and a count-in holds its position at
+    // the landing. Legacy has always agreed by construction — `clockPosition`
+    // returns the start offset untouched when it is not playing, and clamps
+    // to it through a count-in — and subtracting anyway put a paused seek a
+    // latency BEFORE its target: tapping a lyric line while stopped
+    // highlighted the line before the one tapped (a phone, 2026-09-06; the
+    // simulator's 10 ms route never crossed a line boundary, which is why
+    // every driver passed).
+    if (!clock.playing || clock.preRoll) return Math.max(0, clock.renderedSec)
     return Math.max(
       0,
-      this.handle.clock().renderedSec - this.state().displayLatencySec - this.effectiveTrimSec
+      clock.renderedSec - this.state().displayLatencySec - this.effectiveTrimSec
     )
   }
   /**

@@ -885,11 +885,11 @@ describe.each(['ios', 'android'] as const)(
         // Play after the interruption counts in again from where the song
         // stopped, as legacy does on every Play: the ordinary start with the
         // paused spot as the count-in's anchor, not a flat structural start
-        // (decided 2026-09-05, with Play after a pause). The anchor is the
-        // spot the singer HEARD — the render head less the route's
-        // presentation latency (304 frames in this fixture).
+        // (decided 2026-09-05, with Play after a pause). The anchor is where
+        // the BAR is — a stopped transport shows the render head untouched,
+        // so the count-in lands exactly there.
         playback: {
-          transport: { playbackRate: 0.9, transposeSemitones: 2, countInAnchorSeconds: 0.5 - 304 / 48_000 },
+          transport: { playbackRate: 0.9, transposeSemitones: 2, countInAnchorSeconds: 0.5 },
           cues: { countInBars: 1 },
         },
         masterGain: 0.55,
@@ -3005,9 +3005,11 @@ describe('iOS Phase 4B structural cue rebuild', () => {
           'native.start:2',
         ]);
         expect(h.prepareRequests[1]).toMatchObject({
-          // The heard spot: the render head less the fixture's 304-frame
-          // presentation latency — what the bar showed at the pause.
-          playback: { transport: { countInAnchorSeconds: 1.5 - 304 / 48_000 } },
+          // The landing is the paused spot the BAR shows, and a stopped
+          // transport shows the render head untouched — no route latency
+          // taken off it (this once asserted head less the fixture's 304
+          // frames, which was right while the paused bar was corrected).
+          playback: { transport: { countInAnchorSeconds: 1.5 } },
           initialTransport: { state: 'playing' },
         });
         expect(h.prepareRequests[1]).not.toHaveProperty('preparedStartProjectFrame');
@@ -3021,10 +3023,13 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     }
   });
 
-  it('Play after a pause on a long-latency route counts in to the spot the singer heard, not the render head', async () => {
-    // On a Bluetooth route (or the emulator, measured 160-240 ms) the render
-    // head at the pause is a fifth of a second past the bar; landing the
-    // count-in on it had the band come in early.
+  it('Play after a pause on a long-latency route counts in to the bar, whatever the route latency is', async () => {
+    // The landing is wherever the BAR is, and a stopped transport shows the
+    // render head untouched — the same position legacy shows and the same one
+    // a tapped lyric line seeks to. This test once asserted the opposite
+    // (head less the latency), which was right while the paused bar was
+    // latency-corrected; that correction was itself the defect, because it
+    // put a tapped line's Play a route latency before the line.
     const h = harness({ swapCapable: true, syncClock: true });
     const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
     const handle = project.nativePlayback!;
@@ -3044,14 +3049,14 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       .mockResolvedValueOnce(capability(2, 'running', 64_320));
     await expect(handle.start()).resolves.toEqual({ kind: 'started' });
     const request = h.prepareRequests[1] as { playback: { transport: { countInAnchorSeconds?: number } } };
-    expect(request.playback.transport.countInAnchorSeconds).toBeCloseTo(1.5 - 0.16, 6);
-    await handle.stop('heard-spot anchor test complete');
+    expect(request.playback.transport.countInAnchorSeconds).toBeCloseTo(1.5, 6);
+    await handle.stop('bar anchor test complete');
   });
 
-  it('the heard-spot anchor floors the display trim at −latency, as the bar does', async () => {
-    // A trim dialled to −0.3 s on a route with 304 frames of latency shows
-    // the bar AT the render head (the bar floors the trim at −latency); the
-    // anchor must not land 280 ms past it.
+  it('the anchor ignores the display trim entirely, as the stopped bar does', async () => {
+    // The trim shifts the highlight while a song is SOUNDING; a stopped bar
+    // carries neither latency nor trim, so neither belongs in the landing —
+    // dialled to −0.3 s here, the anchor is still the paused spot.
     const h = harness({ swapCapable: true, syncClock: true });
     const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
     const handle = project.nativePlayback!;

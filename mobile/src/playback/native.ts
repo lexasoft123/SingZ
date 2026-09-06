@@ -682,12 +682,16 @@ interface NativePlaybackRecoverySnapshot {
   readonly sourceGeneration: number;
   /** The render head. */
   readonly positionSeconds: number;
-  /** The spot the singer HEARD — the render head less the route's
-   * presentation latency and the display trim, which is what the bar showed
-   * at the pause. A count-in lands here: on a Bluetooth route (or the
-   * emulator, measured 160-240 ms) the render head is a fifth of a second
-   * past the bar, and landing on it had the band come in early. */
-  readonly heardSeconds: number;
+  /** What the BAR shows where this snapshot was taken, which is where a
+   * count-in must land — a singer who taps a lyric line and presses Play
+   * starts on that line, not a route latency before it. While a transport is
+   * stopped that is the render head itself (the shown position carries no
+   * latency correction then, exactly as legacy's does not), so this is
+   * `positionSeconds`; it is kept as its own field because the two were
+   * briefly different, and the difference reached a phone twice — first as a
+   * band coming in late, then, after the bar stopped being corrected, as a
+   * Play that started a latency before the tapped line. */
+  readonly shownSeconds: number;
   readonly lanes: readonly NativePlaybackLaneStatus[];
   readonly masterGain: number;
   readonly loop: {
@@ -4597,7 +4601,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       recovery.lanes,
       recovery.masterGain,
       initialTransport,
-      countsIn ? recovery.heardSeconds : undefined,
+      countsIn ? recovery.shownSeconds : undefined,
     );
   }
 
@@ -4939,6 +4943,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     return {
       renderedSec: this.shownFrame(renderedFrame, frame) / sampleRate,
       playing: moving,
+      preRoll: transportState === 'pre-roll',
       live: true,
       countIn: this.countInAt(transportState, renderedFrame, this.lastTelemetry),
     };
@@ -4998,6 +5003,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     return {
       renderedSec,
       playing: state.phase === 'playing' && state.advancing === true,
+      // Without the synchronous clock the count-in status IS the pre-roll:
+      // it is published only while the transport reports one.
+      preRoll: state.countInStatus !== null,
       live: false,
       countIn: state.countInStatus,
     };
@@ -5497,16 +5505,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     const positionSeconds = session
       ? session.renderedProjectFrame / sampleRate
       : view.renderedPositionSec;
-    // Floored exactly as the bar and the dots floor it: a trim dialled below
-    // −latency reads as −latency there, so the anchor must read it the same
-    // way or a −0.3 s trim on a wired route lands 280 ms past the bar.
-    const latencySec = session
-      ? session.presentationLatencyFrames / sampleRate
-      : view.displayLatencySec;
-    const heardSeconds = Math.max(
-      0,
-      positionSeconds - latencySec - Math.max(this.displayTrimSec, -latencySec),
-    );
+    // Where the bar is, which is where a count-in lands. A stopped transport
+    // shows the render head untouched (backend `position`), so no latency or
+    // trim is taken off here either: taking it off landed Play a route
+    // latency before the line the singer had tapped.
+    const shownSeconds = Math.max(0, positionSeconds);
     const lanes =
       session && session.lanes.length > 0
         ? session.lanes.map(lane => ({ ...lane }))
@@ -5540,7 +5543,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.recoverySnapshot = {
       sourceGeneration: this.generation,
       positionSeconds,
-      heardSeconds,
+      shownSeconds,
       lanes,
       masterGain:
         session && Number.isFinite(session.masterGain)

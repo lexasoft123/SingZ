@@ -44,6 +44,7 @@ function nativeProject(): { project: LoadedProject; handle: NativePlaybackHandle
     clock: () => ({
       renderedSec: state.renderedPositionSec,
       playing: state.phase === 'playing',
+      preRoll: false,
       live: false,
       countIn: state.countInStatus
     }),

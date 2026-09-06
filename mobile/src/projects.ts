@@ -253,15 +253,21 @@ export interface NativePlaybackViewState {
  *
  * `renderedSec` is the render head — the signed project time the core had
  * rendered up to, advanced by how long ago it said so — untrimmed and before
- * presentation latency, exactly the legacy engine's `audioPosition`. What
- * the singer hears is that minus the latency and the trim, which the backend
- * subtracts once. `live` says whether this came from the synchronous native
- * read (`positionNow`) or, on an older native build, from the last polled
- * telemetry projected by wall time.
+ * presentation latency, exactly the legacy engine's `audioPosition`. While a
+ * song is SOUNDING, what the singer hears is that minus the latency and the
+ * trim, which the backend subtracts once; while the transport is stopped or
+ * counting in it is the shown position itself, which is what `preRoll` below
+ * and `playing` are for. `live` says whether this came from the synchronous
+ * native read (`positionNow`) or, on an older native build, from the last
+ * polled telemetry projected by wall time.
  */
 export interface NativePlaybackClock {
   readonly renderedSec: number
   readonly playing: boolean
+  /** The transport is counting the singer in: `renderedSec` is the landing,
+   *  held, and no output-latency correction belongs on it (see the backend's
+   *  `position`). */
+  readonly preRoll: boolean
   readonly live: boolean
   readonly countIn: PlaybackCountInStatus | null
 }
