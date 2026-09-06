@@ -49,8 +49,15 @@ add_library(singz_signalsmith_time_pitch STATIC
   "${SINGZ_REPO_ROOT}/native/playback/signalsmith_time_pitch.h")
 add_library(SingZ::signalsmith_time_pitch ALIAS singz_signalsmith_time_pitch)
 target_compile_features(singz_signalsmith_time_pitch PUBLIC cxx_std_20)
+# SYSTEM for the vendored tree: it is upstream's code, and the strict preset
+# compiles with -Wall -Wextra -Wpedantic -Werror. gcc then fails the build on
+# signalsmith's own style — stray semicolons in stft.h, a memcpy of
+# std::complex in fft.h — which is neither ours to fix nor ours to carry as a
+# patch. SYSTEM silences the vendored headers and NOT our wrapper, which keeps
+# every strict warning it had.
 target_include_directories(singz_signalsmith_time_pitch
-  PUBLIC "${SINGZ_REPO_ROOT}/native/playback"
+  PUBLIC "${SINGZ_REPO_ROOT}/native/playback")
+target_include_directories(singz_signalsmith_time_pitch SYSTEM
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/signalsmith")
 target_link_libraries(singz_signalsmith_time_pitch
   PUBLIC SingZ::zdsp_runtime
