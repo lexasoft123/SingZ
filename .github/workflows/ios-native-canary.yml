@@ -242,8 +242,12 @@ jobs:
             "$RUNNER_TEMP/singz-callback-build-settings.txt"
 
           xcrun nm -m "$device" > "$RUNNER_TEMP/singz-callback-symbols.txt"
+          # Same index-name tolerance as the playback archive below: `ar -t`
+          # prints `__.SYMDEF SORTED` or plain `__.SYMDEF` by toolchain, and
+          # this gate runs first — a narrow filter here would fail before the
+          # widened one there was ever reached.
           xcrun ar -t "$device" | \
-            grep -vE '^(__.SYMDEF SORTED|SingzDeviceCallback-dummy.o)$' | \
+            grep -vE '^(__\.SYMDEF( SORTED)?|SingzDeviceCallback-dummy.o)$' | \
             LC_ALL=C sort > "$RUNNER_TEMP/singz-callback-objects.txt"
           printf '%s\n' audio_host_callback.o audio_host_fifo_hot.o \
             audio_host_ios_callback.o audio_input_callback.o \
@@ -287,11 +291,21 @@ jobs:
             *arm64*x86_64*|*x86_64*arm64*) ;;
             *) echo "playback simulator archive is not universal: $sim_info" >&2; exit 1 ;;
           esac
+          # `ar -t` prints the symbol index as `__.SYMDEF SORTED` or plain
+          # `__.SYMDEF` depending on the toolchain; neither is an object.
           xcrun ar -t "$device" | \
-            grep -vE '^(__.SYMDEF SORTED|SingzPlaybackSession-dummy.o)$' \
+            grep -vE '^(__\.SYMDEF( SORTED)?|SingzPlaybackSession-dummy.o)$' \
             | LC_ALL=C sort > "$RUNNER_TEMP/singz-playback-objects.txt"
-          printf '%s\n' native_playback_session.o playback_cue_plan.o \
-            signalsmith_time_pitch.o | \
+          # The expected list is DERIVED from the pod's own source manifest
+          # rather than restated here. Restating it went stale the moment 4B
+          # added the graph-document materializer: the archive grew a fourth
+          # object, the hand-written three did not, and the gate failed for
+          # being out of date rather than for anything wrong with the build.
+          node -e "const m = require('./../scripts/native-component-sources.js');
+            const objects = [...m.nativePlaybackSessionFiles, ...m.signalsmithTimePitchFiles]
+              .filter((file) => file.endsWith('.cpp'))
+              .map((file) => file.split('/').pop().replace(/\.cpp$/, '.o'));
+            console.log(objects.join('\n'))" | \
             LC_ALL=C sort > "$RUNNER_TEMP/singz-playback-objects-expected.txt"
           diff -u "$RUNNER_TEMP/singz-playback-objects-expected.txt" \
             "$RUNNER_TEMP/singz-playback-objects.txt"

@@ -164,6 +164,17 @@ jobs:
       # here talks to Drive (mock-drive.ts stands in for it).
       - run: npm ci
 
+      # `mobile/src/gen/` is generated and gitignored, and the roundtrip suite
+      # imports mobile sources (writer.ts, projects.ts) — so a job that
+      # installs only the ROOT cannot resolve them, and the whole of `npm test`
+      # went red on `Cannot find module './gen/graph-document'` the first time
+      # this branch was pushed. It passes on a developer's Mac because a mobile
+      # install has been run there at some point, which is exactly the class of
+      # difference a clean runner exists to catch. The generator is a file copy
+      # with a banner: no node_modules, no mobile install, ~10 ms.
+      - name: Generate the mobile copy of the graph document
+        run: node mobile/scripts/sync-graph-document.js
+
       - name: Typecheck
         run: npm run typecheck
 

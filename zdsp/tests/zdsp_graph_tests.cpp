@@ -2,6 +2,7 @@
 #include "zdsp/scheduled_gain.h"
 #include "allocation_trap.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
