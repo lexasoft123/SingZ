@@ -718,6 +718,21 @@ way backgrounding stays uncompared, and the harness prints them so the number is
 forgotten. The desktop's Step 4 closes here: every timing rule at parity or better, the
 seam, the projected clock, the intent-based park and the prepare ahead.
 
+**Windows native playback has run, on the field laptop (2026-09-06, tip ab2e856):** the
+desktop harness, shipped as an exported tree with a prestaged library (`PS_LIB`; the
+laptop has no ffmpeg and no git — the native build lock learned to identify such a tree
+by its root, and the addon and the run both go through a scheduled task in the
+interactive session, since anything launched over SSH lands in session 0 and wedges),
+played the whole session on WASAPI: 15/18. Every seam landed (4 per pass, 0 late, status
+poll gap ≤ 68 ms); Play → advancing 152 ms against Web Audio's 1261; end of song → Play
+91 vs 210; training on 41 ms; pause, resume, faders, metronome, second song and restart at
+parity. The three reds: the native pass's FIRST open of a song is ~2 s slower (4.0 vs 2.0
+s to the player, 4.9 vs 3.4 to ready — the addon's first load and staging on that machine,
+once per process; the reopen after restart reads equal, 4.77 vs 4.74 s), and the seek
+read-back 81 ms worst against 11, twenty over budget on that laptop's IPC. CPU, footprint
+and host-quiet are not sampled on Windows and print n/a. This closes "no Dell run has
+exercised native playback"; ASIO stays behind the unsigned SDK agreement.
+
 Three consecutive green runs per platform on a quiet host (every compared rule — the
 Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
 backends disagree about rendering; the metronome-save rule flips on a heavy tail, so

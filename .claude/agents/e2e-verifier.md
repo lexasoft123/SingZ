@@ -45,6 +45,10 @@ Prereq state on this machine: models under "~/Library/Application Support/SingZ/
    native graph does not go through Chromium's mute, so every open zeroes the engine's
    master gain, which the native prepare carries. Refuses a busy host unless
    `ALLOW_BUSY_HOST=1`; `--pass legacy|native` measures one backend and compares nothing.
+   On the Windows field laptop it runs from an exported tree with `PS_LIB=<a library this
+   driver staged on the Mac>` (no ffmpeg there), through a scheduled task in the
+   interactive session (session 0 wedges Electron), and prints the CPU, footprint and
+   host-quiet rows as n/a; first run 2026-09-06: 15/18 on WASAPI, every seam landing.
    As of 2026-09-06 (after the desktop seam, the projected clock, the intent-based park
    and the graph prepared AHEAD of Play) every one of its sixteen timing rules passes
    (Play → advancing 182 ms against legacy's 1322); the reds left are the footprint

@@ -1924,8 +1924,12 @@ Where that list stands on 2026-09-05 (the record of record is
   red by decision (the renderer keeps its Web Audio buffers for the fallback
   and the editor, beside the core's lanes). The POCO ran the phone harness
   at 55/58 with native opening a song in 4.6 s where Web Audio takes 19.3.
-- Still open from the list above: the Windows providers on the Dell, the
-  target-executed codec proofs, one shared engine-contract suite across both
+- Windows native playback has run on the field laptop (2026-09-06): the
+  desktop harness on WASAPI, 15/18, every seam landing, Play → advancing
+  152 ms against Web Audio's 1261; the two open rows carry the addon's first
+  load in that pass and the seek is twenty milliseconds over budget on that
+  machine's IPC. ASIO stays behind the unsigned SDK agreement.
+- Still open from the list above: the target-executed codec proofs, one shared engine-contract suite across both
   legacy engines and the facade, hardware route/latency and memory envelopes,
   and the default decision, which stays "legacy" on every platform. Two
   harness rules are reported rather than compared: Play → first audible (the

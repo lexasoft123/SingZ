@@ -538,7 +538,7 @@ function judge(legacy, native) {
     if (!row.ok) fails++
     log(`${row.ok ? 'PASS' : 'FAIL'}  ${row.rule}${row.detail ? ` — ${row.detail}` : ''}`)
   }
-  log(`\nmac desktop: ${compared - fails}/${compared} rules pass`)
+  log(`\n${WIN ? 'windows' : 'mac'} desktop: ${compared - fails}/${compared} rules pass`)
   process.exit(fails ? 1 : 0)
 })().catch(async (e) => {
   console.error('HARNESS FAIL', e && (e.stack || e.message) || e)
