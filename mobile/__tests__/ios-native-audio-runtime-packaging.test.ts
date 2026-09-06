@@ -547,10 +547,16 @@ describe('iOS native DSP runtime packaging', () => {
     expect(canary).toContain('test "$consumers" = \'mobile/src/playback/native.ts\'')
     expect(canary).toContain('singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3')
     expect(canary).toContain('singz.native.playback-session.anchored-preview.v4')
-    expect(canary).toContain(
-      "printf '%s\\n' native_playback_session.o playback_cue_plan.o"
-    )
-    expect(canary).toContain('signalsmith_time_pitch.o')
+    // The canary's expected object list is DERIVED from the pod's source
+    // manifest, not restated in the workflow — a hand-written list went stale
+    // the moment 4B added the graph-document materializer, and the gate then
+    // failed for being out of date rather than for anything wrong with the
+    // build. What this pins is the derivation itself: both arrays, the .cpp
+    // filter that turns them into object names.
+    expect(canary).toContain("require('./../scripts/native-component-sources.js')")
+    expect(canary).toContain('m.nativePlaybackSessionFiles')
+    expect(canary).toContain('m.signalsmithTimePitchFiles')
+    expect(canary).toContain("file.endsWith('.cpp')")
     expect(canary).toContain('createPositionedDecodedBufferSource')
     expect(canary).toContain('createScheduledCueSource')
     expect(canary).toContain("grep -q 'NativePlaybackBridgeApi'")
