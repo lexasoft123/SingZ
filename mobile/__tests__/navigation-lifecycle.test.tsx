@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs'
 import React from 'react'
 import ReactTestRenderer from 'react-test-renderer'
 import type { MultitrackEngine } from '../src/engine'
@@ -156,10 +157,21 @@ test('a native project is rendered by the ordinary PlayerScreen route', async ()
 test('the back gesture works under native playback, exactly as it does under legacy', () => {
   // It was off for native only, so a singer's edge-swipe did nothing on the
   // same screen that accepted it a moment earlier under the other backend.
-  // Leaving is gated by PlayerRemovalFence and sequenced by
-  // closePlayerProject for both, so there is nothing for it to race.
+  // Leaving is sequenced by closePlayerProject for both, so there is nothing
+  // for it to race.
   expect(playerScreenOptions()).toEqual({
     gestureEnabled: true,
     fullScreenGestureEnabled: false
   })
+})
+
+test('the player route never holds its own removal', () => {
+  // A native-stack swipe has already left the screen when JS prevents the
+  // removal: the navigator pushes the player back and the fence's
+  // re-dispatched pop swipes it away again — the player "opens once more and
+  // swipes back by itself" on a phone. The metronome flush runs from the
+  // route's cleanup; the journal already holds every accepted edit.
+  const source = readFileSync(require.resolve('../src/ui/RootNavigator.tsx'), 'utf8')
+  expect(source).not.toMatch(/usePreventRemove/)
+  expect(source).toMatch(/flushMetronomeForLifecycle\('player back'/)
 })

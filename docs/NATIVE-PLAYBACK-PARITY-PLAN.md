@@ -827,6 +827,21 @@ exact parity of the statistic left with the bounded scan by design, and a sevent
 percussive sliver is invisible on the bar — and it sets a near-tie within 10% aside when
 judging the colour; a clear winner still has to agree.
 
+**"When I swipe the player back to the catalog, it opens once more and swipes back by
+itself" (the phone, 2026-09-06 afternoon).** The player route sat inside a removal fence
+that prevented EVERY pop, flushed the metronome journal, then re-dispatched the pop. On a
+native-stack swipe the prevention is a race with the gesture: answered while the gesture is
+still interactive it cancels it; answered after the native pop has completed it makes the
+navigator push the player back to honour the prevention, and the fence's own pop then
+swipes it away again — the phone, under a five-minute song, lands on the second side; the
+simulator (both backends, a synthetic full-speed swipe, the stack's route names recorded
+on every state change through a new dev hook) lands on the first and shows a single pop,
+which is why no driver had seen it. The hold was never load-bearing: accepted metronome
+edits are in the synchronously journaled phone entry before any flush, and the flush only
+reconciles them into project.json. The route no longer prevents its removal; the flush
+runs from its cleanup with the same alert on failure, and a source test keeps the hook out
+of the navigator for good.
+
 **Profiled the same afternoon, host quiet, and half of it was ours to remove.** Per
 process while a song played (top, 3 s windows, `sample` for stacks): the GPU process
 identical on both backends (~9%); main +2.5 under native (the graph renders there); the

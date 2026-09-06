@@ -1,8 +1,4 @@
-import { usePreventRemove } from '@react-navigation/native'
-import {
-  createNativeStackNavigator,
-  type NativeStackNavigationProp
-} from '@react-navigation/native-stack'
+import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, AppState, StyleSheet, View } from 'react-native'
 import type { MultitrackEngine } from '../engine'
@@ -20,6 +16,7 @@ import LogPanel from './LogPanel'
 import PlayerScreen from './PlayerScreen'
 import SettingsScreen from './SettingsScreen'
 import { C, NATIVE_SHEET_FIT_SUPPORTED } from './bits'
+import { TEST } from './testhooks'
 
 type RootStackParamList = {
   Catalog: undefined
@@ -92,8 +89,8 @@ export function PlayerRoute({
  * The swipe-back gesture used to be switched off whenever the project carried
  * a native handle, which made the two playback backends feel like different
  * apps: the same screen, and the singer's habitual edge-swipe silently did
- * nothing. Nothing about native playback needs it off — leaving the player is
- * gated by PlayerRemovalFence for both backends, and closePlayerProject
+ * nothing. Nothing about native playback needs it off — the metronome flush
+ * runs from the route's cleanup for both backends, and closePlayerProject
  * already sequences the native unload ahead of releasing legacy ownership,
  * whether the pop came from the button or from a gesture.
  */
@@ -158,28 +155,35 @@ function AddSongRoute({
   )
 }
 
+/**
+ * Flushes the metronome journal when the player route goes — WITHOUT holding
+ * the route. It used to prevent its own removal and re-dispatch the pop once
+ * the flush had landed, which on a native-stack swipe is a screen that has
+ * already left: the navigator pushes the player back to honour the
+ * prevention and the re-dispatched pop swipes it away again — "when I swipe
+ * back to the catalog, it opens once more and swipes back by itself" (a
+ * phone, 2026-09-06). Nothing needs the hold: accepted metronome edits live
+ * in the synchronously journaled phone entry before any flush, and the flush
+ * only reconciles them into project.json, so it runs from the route's
+ * cleanup instead, with the same alert on failure.
+ */
 function PlayerRemovalFence({
   children,
-  navigation,
   rootMounted
 }: {
   children: React.ReactNode
-  navigation: NativeStackNavigationProp<RootStackParamList, 'Player'>
   rootMounted: React.RefObject<boolean>
 }): React.JSX.Element {
-  const flushing = useRef(false)
-  usePreventRemove(true, ({ data }) => {
-    if (flushing.current) return
-    flushing.current = true
-    void flushMetronomeForLifecycle('player back', {
-      onFailure: failure => {
-        if (rootMounted.current) Alert.alert('Metronome setting was not saved', failure)
-      }
-    }).then(saved => {
-      flushing.current = false
-      if (saved && rootMounted.current) navigation.dispatch(data.action)
-    })
-  })
+  useEffect(
+    () => () => {
+      void flushMetronomeForLifecycle('player back', {
+        onFailure: failure => {
+          if (rootMounted.current) Alert.alert('Metronome setting was not saved', failure)
+        }
+      })
+    },
+    [rootMounted]
+  )
   return <>{children}</>
 }
 
@@ -259,6 +263,20 @@ export default function RootNavigator({
           headerShown: false,
           contentStyle: styles.root
         }}
+        screenListeners={{
+          // Dev-only: the stack's route names with a timestamp on every
+          // state change, so a driver can see a pop that came back (the
+          // double swipe-back of 2026-09-06 was invisible to `__test.screen`,
+          // which follows the loaded project, not the stack).
+          state: event => {
+            if (!TEST) return
+            const routes = (event.data as { state: { routes: { name: string }[] } }).state.routes.map(r => r.name)
+            const history = (TEST.stackHistory as { t: number; routes: string[] }[] | undefined) ?? []
+            const last = history[history.length - 1]
+            if (!last || last.routes.join('>') !== routes.join('>')) history.push({ t: Date.now(), routes })
+            TEST.stackHistory = history.slice(-40)
+          }
+        }}
       >
         <Stack.Screen name="Catalog">
           {({ navigation }) => (
@@ -289,7 +307,7 @@ export default function RootNavigator({
             project == null ? (
               <View style={styles.root} />
             ) : (
-              <PlayerRemovalFence navigation={navigation} rootMounted={mounted}>
+              <PlayerRemovalFence rootMounted={mounted}>
                 <PlayerRoute
                   active={active}
                   engine={engine}
