@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { laneSliverLevels, LANE_LEVEL_SLIVERS } from '../playback/lane-levels'
+import { laneSliverLevels, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
 import { Alert, DeviceEventEmitter, Image, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import {
   createNativeStackNavigator,
@@ -719,18 +719,35 @@ export default function PlayerScreen({
         cancelled = true
       }
     }
-    const t = setTimeout(() => {
+    // One lane per macrotask, never the whole song in one tick: this is the
+    // JS thread, and a tap on Play queues behind whatever it is doing. The
+    // scan is bounded per sliver (lane-levels.ts) AND yields between lanes,
+    // so a long song costs a few short ticks rather than one long one. Each
+    // tick re-checks `cancelled` — the song can close between them.
+    let t: ReturnType<typeof setTimeout> | null = null
+    const tick = (): Promise<void> =>
+      new Promise((resolve) => {
+        t = setTimeout(resolve, 0)
+      })
+    void (async () => {
       try {
-        // The same statistic the native core publishes for its lanes — the
-        // RMS of every sample of every channel in each sliver — so the two
-        // backends draw one bar (lane-levels.ts says what it replaced).
-        const frames = Math.max(...stems.map((st) => st.buffer.length))
-        const scratch = new Float32Array(4096)
-        const perLane = stems.map((st) => ({
-          color: laneMeta[st.id]?.color ?? C.dim,
-          levels: laneSliverLevels(st.buffer, frames, LANE_LEVEL_SLIVERS, scratch),
-        }))
+        await tick()
         if (cancelled) return
+        // The same statistic the native core publishes for its lanes — the
+        // RMS over every channel in each sliver — so the two backends draw
+        // one bar (lane-levels.ts says what it replaced, and why the read
+        // is bounded).
+        const frames = Math.max(...stems.map((st) => st.buffer.length))
+        const scratch = new Float32Array(LANE_LEVEL_WINDOW)
+        const perLane: { color: string; levels: Float32Array }[] = []
+        for (const st of stems) {
+          perLane.push({
+            color: laneMeta[st.id]?.color ?? C.dim,
+            levels: laneSliverLevels(st.buffer, frames, LANE_LEVEL_SLIVERS, scratch),
+          })
+          await tick()
+          if (cancelled) return
+        }
         const raw: { level: number; color: string }[] = []
         for (let i = 0; i < LANE_LEVEL_SLIVERS; i++) {
           let total = 0
@@ -752,10 +769,10 @@ export default function PlayerScreen({
       } catch {
         // A released buffer mid-read: the song is gone; nothing to draw.
       }
-    }, 0)
+    })()
     return () => {
       cancelled = true
-      clearTimeout(t)
+      if (t !== null) clearTimeout(t)
     }
   }, [project, laneMeta])
   /** Measured band width, for the played-clip's inner copy. */

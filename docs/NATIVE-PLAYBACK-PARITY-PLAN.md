@@ -575,6 +575,25 @@ every sample of every channel in the sliver now (`summarizeLanePeaks` keeps its 
 older JS and older natives keep reading each other; `mobile/src/playback/lane-levels.ts` is
 the legacy side, unit-tested against a sine).
 
+**Field report from build 51 (2026-09-06 morning): "you've broken the legacy player — no
+histogram appears, pressing Play takes a long time."** Build 50 already carried it; the
+histogram fix above is the cause. The new legacy statistic visited EVERY sample of every
+channel of every lane in a JS loop on the JS thread — under Hermes, which has no JIT — and
+the cost scales with the song: a four-minute six-stem song is ~140 M iterations, 5.3 s under
+node's interpreter-only mode on this Mac and longer on an iPhone 13, during which the bar is
+blank and a tap on Play sits in the queue behind the scan. The 2-minute synthesized song on
+the simulator's Release build showed nothing of it (the bar drawn, Play answering within a
+second), which is how it passed: the cost is a real song's length. `laneSliverLevels` is
+bounded per sliver now (`LANE_LEVEL_SLIVER_BUDGET`, eight 1024-frame windows spread evenly
+across a sliver longer than the budget — a stratified sample of every channel; a sliver
+within the budget is read whole, so a short song stays exact) and the screen scans one lane
+per macrotask, re-checking the cancel between ticks: 0.36 s for the same song under the
+same interpreter, in six ticks. The unit test counts the frames the fake hands out and pins
+the bound, alongside the sine, the late burst and the exact tail read. A lesson for the
+statistic-parity rule: the two backends compute the same number, but the native core runs it
+in C++ on its own thread at decode; the legacy side runs it in interpreted JS on the thread
+that answers taps, so parity of the STATISTIC must not become parity of the WORK.
+
 **Android on the new bridge (2026-09-05 night, emulator `emu-run-4l-1.log`, plain debug
 APK built 19:03 from f42bc31):** 55/60 — every functional rule green; the five misses are
 the host-bound rows (both host-quiet, the two CPU rows the emulator borrows from the Mac,
