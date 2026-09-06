@@ -766,6 +766,15 @@ own sentence: the iOS pod compiles the playback core from a GITIGNORED MIRROR
 after this change shipped the OLD core with a clean exit — caught only by grepping the
 `.debug.dylib` for a literal the change added (a Debug device build keeps its code there,
 not in the 92 KB stub). Sync the mirror before any device build; check the literal after.
+The POCO ran the same core the same morning (the `.debug` side-by-side build, the
+literal confirmed in `libsingzcore.so`): **58/58**, end of song → Play restart 371 vs 338 ms.
+The mac desktop on the rebuilt addon, host quiet (load 4.5–5.5, the quiet rows green):
+20/28, and every red is the row it was before this change at the value it had — the four
+footprint rows by decision, CPU playing/pitch-change +1.4–2.6 points, seek → position 72
+vs 12 ms against the 62 ms budget (71 in the quiet run before it), second song 318 vs 258
+(+60 against a 308 budget, 291 the run before). The seek change moved nothing on the
+desktop; the mac's seek row sits at its budget's edge run to run and is a separate
+question from this one.
 
 **The desktop footprint, decided rather than fixed (2026-09-06):** with the graph prepared
 at open the native pass reads +100-150 MB against Web Audio in every phase. The extra is
@@ -795,16 +804,19 @@ read-back 81 ms worst against 11, twenty over budget on that laptop's IPC. CPU, 
 and host-quiet are not sampled on Windows and print n/a. This closes "no Dell run has
 exercised native playback"; ASIO stays behind the unsigned SDK agreement.
 
-**Where the acceptance list stands, 2026-09-06 (tip cb20795):**
+**Where the acceptance list stands, 2026-09-06 (tip cb20795, phone rows updated after a96e09d):**
 
 - Three consecutive green runs per platform on a quiet host — every functional rule
   has been green on the simulator, the emulator, the POCO and the desktop across every
-  run of the last two days; the host-quiet rows have not passed once, because this Mac
+  run of the last two days; the host-quiet rows had not passed once before this morning, because this Mac
   has run at load 6-12 all day from its owner's own apps, and the CPU rows it colours
-  are therefore unread. Owed: three runs on a quiet Mac, nothing to change.
-- The POCO run — done (55/58; the reds are the phone's own).
-- An iPhone `--platform ios-device` run — built, installed, waiting on the phone being
-  unlocked (it re-locks; devicectl cannot launch on a passcode-locked phone).
+  are therefore unread. The first quiet mac run landed after the seek fix (load 4.5–5.5,
+  the host-quiet rows green, 20/28 with the reds the decided and known ones). Owed: two
+  more, nothing to change.
+- The POCO run — done: 55/58 on the earlier core, **58/58** on the fixed one (a96e09d).
+- An iPhone `--platform ios-device` run — done: 35/37 with the native pass voided by the
+  end-of-song double seek, then **47/48 and no void** on the fixed core (a96e09d; the red
+  is the seam's arm in the metronome save row, the POCO's class).
 - The e2e-verifier pass — done on both phones and the mac, plus the Windows laptop's
   smoke and its native session.
 - Project memory and `DSP-GRAPH-PLAN.md` — updated with the live command surface.
