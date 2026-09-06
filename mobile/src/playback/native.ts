@@ -779,6 +779,28 @@ const nativeModule = (): NativePlaybackApi | undefined =>
       | undefined,
   );
 
+/**
+ * The opt-in iOS codec target proof, for the driver that measures it. The
+ * method and its fixture bundle exist only in a proof build, so this answers
+ * null on every ordinary one.
+ *
+ * It lives here rather than at the call site because this module is the ONE
+ * consumer of `NativeModules.NativeAudioRuntime` — a rule the iOS canary
+ * enforces by grep, and one worth keeping even for a test hook: a second
+ * reference is a second place that can be wrong about the bridge's shape,
+ * which is precisely how `mlGrid` shipped with mismatched arity and no error.
+ */
+export function nativeCodecTargetProof():
+  | (() => Promise<string>)
+  | null {
+  const method = (
+    NativeModules.NativeAudioRuntime as
+      | { codecTargetProof?: () => Promise<string> }
+      | undefined
+  )?.codecTargetProof;
+  return typeof method === 'function' ? method.bind(NativeModules.NativeAudioRuntime) : null;
+}
+
 /** Field equality for the view state: the two object-valued fields
  *  (region, count-in) are rebuilt on every publish, so they compare by
  *  value; everything else by identity. */

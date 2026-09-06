@@ -17,7 +17,7 @@ import { KEY_DETECT_VERSION } from './src/gen/analysis-lib'
 import { LoadedSongSequence } from './src/training/runtime'
 import { TEST } from './src/ui/testhooks'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from './src/latency'
-import { iosNativePlayback } from './src/playback/native'
+import { iosNativePlayback, nativeCodecTargetProof } from './src/playback/native'
 
 const engine = new MultitrackEngine()
 const Tabs = createBottomTabNavigator<RootTabParamList>()
@@ -54,10 +54,12 @@ if (TEST) {
   hooks.codecTargetProof = (): boolean => {
     hooks.codecTargetProofDone = false
     hooks.codecTargetProofResult = null
-    const method = (NativeModules.NativeAudioRuntime as {
-      codecTargetProof?: () => Promise<string>
-    } | undefined)?.codecTargetProof
-    if (typeof method !== 'function') {
+    // Through the facade, not around it: `mobile/src/playback/native.ts` is
+    // the one module allowed to touch the bridge, and the iOS canary checks
+    // that by grep. A hook is not an exception — a second reader of the
+    // bridge's shape is a second place that can be wrong about it.
+    const method = nativeCodecTargetProof()
+    if (method === null) {
       hooks.codecTargetProofResult = JSON.stringify({
         error: 'codecTargetProof is not in this installed binary'
       })

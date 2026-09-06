@@ -269,11 +269,20 @@ describe('iOS native DSP runtime packaging', () => {
     const nativeRuntimeConsumers = productFiles.filter(file =>
       read(file).includes('NativeAudioRuntime')
     )
-    expect(nativeRuntimeConsumers.sort()).toEqual(['App.tsx', 'src/playback/native.ts'])
+    // ONE consumer, which is the rule the iOS canary enforces by grep. This
+    // assertion used to list App.tsx beside the facade — the test had been
+    // taught to accept a second reader of the bridge rather than the second
+    // reader being removed, so the suite was green while the canary was red.
+    // App.tsx reaches the opt-in codec proof through `nativeCodecTargetProof`
+    // now; a hook is not an exception to the rule, because a second place
+    // that describes the bridge's shape is a second place that can be wrong
+    // about it.
+    expect(nativeRuntimeConsumers.sort()).toEqual(['src/playback/native.ts'])
     const app = read('App.tsx')
-    expect(app.match(/NativeModules\.NativeAudioRuntime/g)).toHaveLength(1)
-    expect(app).toContain('codecTargetProof?: () => Promise<string>')
+    expect(app).not.toContain('NativeModules.NativeAudioRuntime')
+    expect(app).toContain('nativeCodecTargetProof()')
     expect(app).not.toContain('Partial<NativePlaybackBridgeApi>')
+    expect(read('src/playback/native.ts')).toContain('codecTargetProof?: () => Promise<string>')
     const facade = read('src/playback/native.ts')
     expect(facade).toContain('NativeModules.NativeAudioRuntime as')
     expect(facade).toContain('parseNativePlaybackCapability(await bridge.status(), Platform.OS)')
