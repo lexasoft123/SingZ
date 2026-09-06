@@ -1386,7 +1386,7 @@ export default function SettingsModal({
               }}
               disabled={nativePlaybackLeaseBlocked}
             />
-            Use experimental native DSP playback
+            Use native DSP playback
           </label>
           <p className="settings-hint">
             Uses the selected native provider when the song's features exactly match the native graph.

@@ -737,7 +737,7 @@ describe('engine-owned training audio', () => {
       vi.stubGlobal('AudioContext', FakeAudioContext)
       vi.stubGlobal('navigator', { platform: 'Win32' })
       vi.stubGlobal('localStorage', {
-        getItem: (key: string) => key === 'singz.desktop.native-playback' && toggleEnabled ? '1' : null
+        getItem: (key: string) => (key === 'singz.desktop.native-playback' ? (toggleEnabled ? '1' : '0') : null)
       })
       const api = {
         desktopPlaybackCapability: vi.fn(async () => capabilityAvailable ? ({

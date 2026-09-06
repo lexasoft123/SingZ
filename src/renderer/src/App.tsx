@@ -36,6 +36,7 @@ import {
   type DetectedBeats,
   type KeyGuess
 } from './audio/analysis-contract'
+import { desktopNativePlaybackPreferred } from './audio/native-playback-preference'
 import type { MlGrid } from './audio/analysis'
 import {
   clearUserBar,
@@ -628,16 +629,32 @@ export default function App(): React.JSX.Element {
   const [showCatalog, setShowCatalog] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
+    // The native toggle is stored explicitly from here on: the effect below
+    // writes it back as '1'/'0', so a first run with no stored choice must
+    // resolve the platform default NOW (native on macOS) rather than let an
+    // undefined field write '0' and quietly choose Web Audio.
+    // Resolved once, outside the try: a storage that throws must still reach
+    // the catch's fallback rather than rethrow from inside it.
+    let preferred = false
+    try {
+      preferred = desktopNativePlaybackPreferred()
+    } catch {
+      preferred = false
+    }
+    const withNative = (prefs: AudioPrefs): AudioPrefs => ({
+      ...prefs,
+      nativePlayback: prefs.nativePlayback ?? preferred
+    })
     try {
       const raw = localStorage.getItem('singz.audio')
       const stored = raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
-      if (stored.referenceVolume !== undefined) return stored
+      if (stored.referenceVolume !== undefined) return withNative(stored)
       const legacy = restoreDesktopTrainingPracticeSettings(
         localStorage.getItem('singz.training.practice')
       )
-      return { ...stored, referenceVolume: legacy.referenceVolume }
+      return withNative({ ...stored, referenceVolume: legacy.referenceVolume })
     } catch {
-      return { referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME }
+      return withNative({ referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME })
     }
   })
   const changeTrainingReferenceVolume = useCallback((referenceVolume: number) => {

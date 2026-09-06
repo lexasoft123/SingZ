@@ -21,6 +21,7 @@ import {
   DESKTOP_PLAYBACK_CONTRACT_VERSION
 } from '../../../shared/types'
 import type { BeatInfo, MetronomeConfig } from './beat'
+import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './native-playback-preference'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 import {
   MAX_NATIVE_GRAPH_NODES,
@@ -88,7 +89,7 @@ export function selectDesktopPlaybackBackend(
   platform: string,
   features: DesktopNativePlaybackFeatures
 ): DesktopPlaybackBackendDecision {
-  if (!features.enabled) return { backend: 'legacy', reason: 'experimental toggle is off' }
+  if (!features.enabled) return { backend: 'legacy', reason: 'native playback is off in Settings' }
   const provider = platform === 'darwin'
     ? (features.requestedProvider && features.requestedProvider !== 'coreaudio' ? null : 'coreaudio')
     : platform === 'win32'
@@ -202,11 +203,7 @@ export async function decideDesktopNativePlayback(
     })
     if (nodes > MAX_NATIVE_GRAPH_NODES) return null
   }
-  const platform = /Mac/i.test(navigator.platform)
-    ? 'darwin'
-    : /Win/i.test(navigator.platform)
-      ? 'win32'
-      : 'other'
+  const platform = detectedDesktopPlatform()
   let runtime: DesktopPlaybackRuntimeCapability
   try {
     runtime = await window.singz.desktopPlaybackCapability()
@@ -214,8 +211,7 @@ export async function decideDesktopNativePlayback(
     return null
   }
   const decision = selectDesktopPlaybackBackend(platform, {
-    enabled: typeof localStorage !== 'undefined' &&
-      localStorage.getItem('singz.desktop.native-playback') === '1',
+    enabled: desktopNativePlaybackPreferred(platform),
     playbackRate: request.playbackRate,
     transpose: request.transpose,
     training: request.training,

@@ -105,7 +105,7 @@ describe('desktop native playback selection', () => {
   })
 
   it.each([
-    [{ ...eligible, enabled: false }, 'experimental toggle is off'],
+    [{ ...eligible, enabled: false }, 'native playback is off in Settings'],
     [{ ...eligible, runtime: null }, 'native playback runtime capability is unavailable'],
     [{ ...eligible, playbackRate: 0.49 }, 'tempo is outside the desktop control range'],
     [{ ...eligible, transpose: 13 }, 'transpose is outside the desktop control range'],

@@ -14,6 +14,7 @@ import type {
   DesktopNativeRecoveryErrorCode
 } from './desktop-native-playback'
 import type { DesktopNativePlaybackEngineRequest } from './desktop-native-playback'
+import { desktopNativePlaybackPreferred } from './native-playback-preference'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 
@@ -266,8 +267,7 @@ export class MultitrackEngine {
   private async prepareNativeAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
         this.pendingPlayRequests.size > 0 || !this.aheadAllowed) return
-    if (typeof localStorage === 'undefined' ||
-        localStorage.getItem('singz.desktop.native-playback') !== '1') return
+    if (!desktopNativePlaybackPreferred()) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
     const stale = (): boolean =>

@@ -860,10 +860,23 @@ exercised native playback"; ASIO stays behind the unsigned SDK agreement.
 - Build 48 — superseded: builds 49, 50 and 51 shipped via the ship-ios-ipa skill.
 - Windows native playback — run on the field laptop (15/18 on WASAPI).
 - Left to their own projects, said out loud: the per-target codec proofs (per-target
-  FFmpeg pack builds), one shared engine-contract suite across both legacy engines and
-  the facade (it needs real audio contexts on both platforms, not stubs — a harness of
-  its own), and the feature-flag default, which is the singer's decision and stays
-  "legacy" on every platform until it is taken.
+  FFmpeg pack builds) and one shared engine-contract suite across both legacy engines
+  and the facade (it needs real audio contexts on both platforms, not stubs — a harness
+  of its own).
+- **The feature-flag default — taken (2026-09-06 afternoon): native is the default on
+  iOS, Android and macOS; Windows stays on Web Audio.** The singer took it after the
+  phones' reruns (47/48, 58/58) and three quiet mac runs. The phone store's `defaults()`
+  is `enabled: true` (a stored explicit choice either way is kept; malformed or future
+  documents fall back to the default, not to off); the desktop reads one helper
+  (`audio/native-playback-preference.ts`) from the engine's prepare-ahead, the facade's
+  backend choice and the settings state at first run — '1'/'0' when the singer chose,
+  else the platform default — and the settings initializer resolves it at once, because
+  the write-back effect would otherwise store '0' for an unset field and choose Web Audio
+  quietly. The Settings copy drops "experimental" on both platforms. Windows is left
+  where its field laptop's session put it (15/18 on WASAPI, the first-open addon load
+  and the seek row red) until that machine reads the same as the Mac. The desktop
+  playing-CPU residual (~1 point, the render thread) is accepted with this: it is the
+  price of the default, measured, beside the footprint rows.
 
 ## Verification, and what is out of scope
 - After every step: `cd mobile && npx tsc --noEmit -p tsconfig.json`, `cd mobile && npx

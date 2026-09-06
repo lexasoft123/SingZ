@@ -1713,7 +1713,7 @@ export function nativePlaybackEligibility(
   capability: NativePlaybackCapability | null,
 ): NativePlaybackEligibility {
   if (!enabled)
-    return { eligible: false, reason: 'experimental toggle is off' };
+    return { eligible: false, reason: 'native playback is off in Settings' };
   const supportedPlatform = nativePlaybackPlatform(platform);
   if (supportedPlatform === null)
     return { eligible: false, reason: 'mobile native playback is unavailable' };
@@ -1833,7 +1833,7 @@ export class IosNativePlaybackCoordinator {
       return {
         enabled: preference.enabled,
         supported: false,
-        detail: 'Experimental native playback is unavailable on this platform.',
+        detail: 'Native playback is unavailable on this platform.',
         capability: null,
       };
     if (!this.deps.native)
@@ -1870,7 +1870,7 @@ export class IosNativePlaybackCoordinator {
   saveEnabled(enabled: boolean): Promise<unknown> {
     log(
       'native-playback',
-      `experimental preference ${enabled ? 'enabled' : 'disabled'}`,
+      `native playback preference ${enabled ? 'enabled' : 'disabled'}`,
     );
     return this.deps.preferences.save(enabled);
   }

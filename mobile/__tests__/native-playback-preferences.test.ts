@@ -17,14 +17,14 @@ function memoryPreference(initial: string | null = null): {
   return { api: { get, set }, get, set };
 }
 
-describe('experimental iOS native playback preference', () => {
-  it('is conservative and disabled until explicitly enabled', async () => {
+describe('native playback preference', () => {
+  it('is native by default until explicitly disabled', async () => {
     const memory = memoryPreference();
     const store = new IosNativePlaybackPreferenceStore(memory.api);
 
     await expect(store.load()).resolves.toEqual({
       formatVersion: 1,
-      enabled: false,
+      enabled: true,
     });
     expect(memory.get).toHaveBeenCalledWith(
       IOS_NATIVE_PLAYBACK_PREFERENCE_KEY,
@@ -54,9 +54,19 @@ describe('experimental iOS native playback preference', () => {
     '{"formatVersion":2,"enabled":true}',
     '{"formatVersion":1,"enabled":"yes"}',
     'not-json',
-  ])('fails closed for malformed or future documents: %s', async raw => {
+  ])('falls back to the default for malformed or future documents: %s', async raw => {
     const store = new IosNativePlaybackPreferenceStore(
       memoryPreference(raw).api,
+    );
+    await expect(store.load()).resolves.toEqual({
+      formatVersion: 1,
+      enabled: true,
+    });
+  });
+
+  it('keeps an explicit off', async () => {
+    const store = new IosNativePlaybackPreferenceStore(
+      memoryPreference('{"formatVersion":1,"enabled":false}').api,
     );
     await expect(store.load()).resolves.toEqual({
       formatVersion: 1,

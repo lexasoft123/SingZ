@@ -75,12 +75,12 @@ export default function SettingsScreen({
             <View style={s.copy}>
               <View style={s.experimentalRow}>
                 <Text style={s.name}>Native playback</Text>
-                <Text style={s.badge}>EXPERIMENTAL</Text>
+                <Text style={s.badge}>DEFAULT</Text>
               </View>
               <Text style={s.description}>
                 {Platform.OS === 'ios' || Platform.OS === 'android'
                   ? 'Play eligible stem and added-track projects through zcore + zdsp. Native playback includes transport, pitch, tempo, loop, metronome, count-in and training; unsupported file formats stay on the regular player.'
-                  : 'This experiment is unavailable on this platform.'}
+                  : 'Native playback is unavailable on this platform.'}
               </Text>
             </View>
             {loading ? (
@@ -92,7 +92,7 @@ export default function SettingsScreen({
                 onValueChange={next => void toggle(next)}
                 trackColor={{ false: '#4a4339', true: '#7c511d' }}
                 thumbColor={enabled ? C.amber : '#b5aa98'}
-                accessibilityLabel="Enable experimental native playback"
+                accessibilityLabel="Native playback"
               />
             )}
           </View>

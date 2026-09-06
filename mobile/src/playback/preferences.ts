@@ -47,8 +47,11 @@ export class IosNativePlaybackPreferenceStore {
   }
 }
 
+/** Native is the default (decided 2026-09-06, after the iPhone 13 at 47/48 and the
+ * POCO at 58/58 on the fixed core). A stored explicit choice, either way, is
+ * kept; only the singer who never touched the switch gets the new default. */
 function defaults(): IosNativePlaybackPreference {
-  return { formatVersion: 1, enabled: false };
+  return { formatVersion: 1, enabled: true };
 }
 
 function restore(text: string): IosNativePlaybackPreference {
