@@ -42,6 +42,12 @@ static_assert(kSignalsmithLoopWorkerIdlePollInterval.count() * 2 <
                   static_cast<long>(kSignalsmithLoopReplenishSeconds * 1000.0),
               "the idle poll must notice an activation well inside one "
               "replenishment period");
+// The slot budget, per engine: 1 active; up to 2 loop-bank slots (4 while a
+// region is being re-set, both banks Ready); 0-1 pending reanchor plan; and
+// one per SEEK IN FLIGHT (each Seek command owns its replacement until the
+// callback drains it — SignalsmithTimePitchSeekPlan). With a loop armed that
+// is one or two seeks between callbacks; a burst past that is refused as
+// QueueFull by the session, the retryable code, never as a graph failure.
 constexpr uint32_t kSignalsmithAnchorSlotCount = 6;
 constexpr uint32_t kNoSignalsmithAnchorSlot = UINT32_MAX;
 constexpr uint32_t kSignalsmithReanchorSlotBits = 3;
@@ -77,6 +83,9 @@ struct SignalsmithAnchorSlot {
   signalsmith::stretch::SignalsmithStretch<float> stretch;
   std::atomic<AnchorSlotState> lifecycle{AnchorSlotState::Retired};
   std::atomic<AnchorKind> kind{AnchorKind::None};
+  // The prime count when this slot was last primed for a per-command seek
+  // plan; what a plan checks before it arms or discards (see the header).
+  std::atomic<uint64_t> stamp{0};
 };
 
 struct SignalsmithLoopBank {
@@ -107,6 +116,8 @@ struct SignalsmithTimePitchState {
   uint32_t minimumLoopOutputFrames{0};
   uint32_t activeSlot{0};
   std::atomic<uint32_t> pendingSeekSlot{kNoSignalsmithAnchorSlot};
+  // Under workerMutex: the next SignalsmithTimePitchSeekPlan stamp.
+  uint64_t nextSeekStamp{1};
   // Generation and slot are one atomic publication unit. Publishing them in
   // separate atomics permits a supersede/reuse ABA race where an old command
   // can claim a newly prepared slot with the same index.
@@ -718,6 +729,61 @@ bool armSignalsmithTimePitchSeek(
   const uint32_t slot = state->pendingSeekSlot.exchange(
       kNoSignalsmithAnchorSlot, std::memory_order_acq_rel);
   return armBoundarySlot(state, slot, AnchorKind::Seek);
+}
+
+SignalsmithTimePitchSeekPlan primeSignalsmithTimePitchSeekPlan(
+    const zdsp::ProcessorHandle &processor,
+    const SignalsmithTimePitchAnchorInput &input) noexcept {
+  if (processor.state == nullptr || processor.functions != &kFunctions)
+    return {};
+  auto *state = static_cast<SignalsmithTimePitchState *>(processor.state);
+  try {
+    std::lock_guard<std::mutex> lock(state->workerMutex);
+    if (!state->active || !validAnchorInput(*state, input))
+      return {};
+    // Deliberately NOT retirePendingSeek: another command's replacement is
+    // that command's to arm or discard.
+    const uint32_t slot = claimRetiredSlot(state);
+    if (slot == kNoSignalsmithAnchorSlot)
+      return {};
+    uint64_t stamp = state->nextSeekStamp++;
+    if (stamp == 0)
+      stamp = state->nextSeekStamp++;
+    // Stamped before it is Ready, so a plan that reads Ready reads its stamp.
+    state->slots[slot].stamp.store(stamp, std::memory_order_release);
+    if (!primeSlot(state, slot, input, AnchorKind::Seek))
+      return {};
+    return {slot, stamp};
+  } catch (...) {
+    return {};
+  }
+}
+
+bool armSignalsmithTimePitchSeekPlan(
+    const zdsp::ProcessorHandle &processor,
+    SignalsmithTimePitchSeekPlan plan) noexcept {
+  if (processor.state == nullptr || processor.functions != &kFunctions ||
+      !plan.valid())
+    return false;
+  auto *state = static_cast<SignalsmithTimePitchState *>(processor.state);
+  if (plan.slot >= state->slots.size() ||
+      state->slots[plan.slot].stamp.load(std::memory_order_acquire) !=
+          plan.stamp)
+    return false;
+  return armBoundarySlot(state, plan.slot, AnchorKind::Seek);
+}
+
+void discardSignalsmithTimePitchSeekPlan(
+    const zdsp::ProcessorHandle &processor,
+    SignalsmithTimePitchSeekPlan plan) noexcept {
+  if (processor.state == nullptr || processor.functions != &kFunctions ||
+      !plan.valid())
+    return;
+  auto *state = static_cast<SignalsmithTimePitchState *>(processor.state);
+  if (plan.slot < state->slots.size() &&
+      state->slots[plan.slot].stamp.load(std::memory_order_acquire) ==
+          plan.stamp)
+    retireReadySlot(state, plan.slot);
 }
 
 void discardSignalsmithTimePitchSeek(

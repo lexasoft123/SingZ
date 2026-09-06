@@ -3155,6 +3155,131 @@ void resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands() {
   std::remove(wav.c_str());
 }
 
+/* Play on a song that ran out, on a graph WITH a time/pitch stage, and the
+   seek arrives twice: the screen's own seek(0) and then the facade's, which
+   restarts a parked song by seeking before it resumes (the two came 54 ms
+   apart on an iPhone 13, 2026-09-05, and the second's boundary never
+   rendered: 73 refused callbacks, graph status 202, anchor outcome 57, then
+   the terminal). Each seek() primes its own Stretch replacement and the
+   second prime RETIRES the first's pending slot; a callback that drains the
+   first command in that window arms nothing. The contract is that the
+   transport still renders once the second command arrives. */
+void twoSeeksInARowAfterTheSongRanOutStillRenderWithATimePitchStage() {
+  const std::string wav = writeWav("two-seeks-parked.wav", 1,
+                                   std::vector<float>(4096, 0.1F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  singz::NativePlaybackPrepareConfig request = config();
+  request.playbackRate = 0.75;
+  request.transposeSemitones = 2.0;
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 91).ok);
+  CHECK(session.openOutput(91).ok && session.start(91).ok);
+  CHECK(fake->drive(64, singz::AudioHostDiscontinuityStart));
+  // Run out.
+  for (uint32_t i = 0; i < 200; ++i)
+    CHECK(fake->drive(64));
+  auto status = session.status();
+  CHECK(status.transportState ==
+            singz::NativePlaybackTransportState::Completed &&
+        status.adapterRenderFailures == 0);
+  CHECK(session.pause(91).ok && fake->drive(64));
+  status = session.status();
+  CHECK(status.transportState == singz::NativePlaybackTransportState::Paused);
+
+  // Back to back, no callback between: the mailbox holds both.
+  const uint64_t seeksBefore = status.seekCount;
+  CHECK(session.seek(91, 0).ok);
+  CHECK(session.seek(91, 0).ok);
+  CHECK(session.resume(91).ok);
+  for (uint32_t i = 0; i < 4; ++i)
+    CHECK(fake->drive(64));
+  status = session.status();
+  CHECK(status.adapterRenderFailures == 0 && status.graphStatusDetail != 202 &&
+        status.transportState ==
+            singz::NativePlaybackTransportState::Playing &&
+        status.seekCount >= seeksBefore + 1 && status.renderedProjectFrame > 0 &&
+        status.renderedProjectFrame < 2000);
+
+  // One callback between the two seeks: the first is armed and consumed
+  // before the second primes.
+  CHECK(session.pause(91).ok && fake->drive(64));
+  CHECK(session.seek(91, 0).ok && fake->drive(64));
+  CHECK(session.seek(91, 0).ok && session.resume(91).ok);
+  for (uint32_t i = 0; i < 4; ++i)
+    CHECK(fake->drive(64));
+  status = session.status();
+  CHECK(status.adapterRenderFailures == 0 && status.graphStatusDetail != 202 &&
+        status.transportState ==
+            singz::NativePlaybackTransportState::Playing);
+  CHECK(session.unload(91).ok);
+  std::remove(wav.c_str());
+}
+
+/* The interleaving the session API cannot order by itself: a callback that
+   drains the first seek WHILE the second seek() is priming. On the phone the
+   callback comes every 21 ms and a six-lane prime took ~50 ms, so the drain
+   landed inside the prime; on this Mac the prime is microseconds, so the
+   callback thread here is paced and the pair is raced 600 times. Before
+   per-command seek plans this wedged within the first 20 rounds (detail 202,
+   anchor 57, the session Terminal after ONE refused callback — mutation-
+   checked: arm from the shared mailbox again and it fails the same way).
+   Nondeterministic by nature, which is why the deterministic pair test
+   above sits beside it and the processor-level plan test pins the contract. */
+void twoSeeksRacedAgainstTheCallbackNeverWedge() {
+  const std::string wav = writeWav("two-seeks-race.wav", 2,
+                                   std::vector<float>(480000, 0.1F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  singz::NativePlaybackPrepareConfig request = config();
+  request.playbackRate = 0.75;
+  request.transposeSemitones = 2.0;
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  for (int i = 0; i < 6; ++i)
+    lanes.push_back(lane(("lane" + std::to_string(i)).c_str(), wav));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 92).ok);
+  CHECK(session.openOutput(92).ok && session.start(92).ok);
+  CHECK(fake->drive(64, singz::AudioHostDiscontinuityStart));
+  CHECK(session.pause(92).ok && fake->drive(64));
+  std::atomic<bool> stop{false};
+  std::atomic<uint32_t> callbacks{0};
+  std::thread rt([&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      (void)fake->drive(64);
+      callbacks.fetch_add(1, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+  });
+  bool healthy = true;
+  for (uint32_t round = 0; round < 600 && healthy; ++round) {
+    const auto first = session.seek(92, 1000 + round * 7);
+    const auto second = session.seek(92, 200000 + round * 7);
+    const uint32_t settle = callbacks.load() + 12;
+    while (callbacks.load() < settle) {
+    }
+    const auto status = session.status();
+    healthy = first.ok && second.ok && status.adapterRenderFailures == 0 &&
+              status.graphStatusDetail != 202 &&
+              status.state == singz::NativePlaybackState::Running;
+    if (!healthy)
+      std::fprintf(stderr,
+                   "round %u: first ok=%d second ok=%d ('%s') · failures %u · "
+                   "detail %u · anchor %u · state %u\n",
+                   round, first.ok ? 1 : 0, second.ok ? 1 : 0,
+                   second.message.c_str(), status.adapterRenderFailures,
+                   status.graphStatusDetail, status.timePitchAnchorOutcome,
+                   static_cast<unsigned>(status.state));
+  }
+  stop.store(true);
+  rt.join();
+  CHECK(healthy);
+  CHECK(session.unload(92).ok);
+  std::remove(wav.c_str());
+}
+
 // The synchronous read the phones' UI clock is built on. Its whole point is
 // what it does NOT do — take the control mutex, look inside the mailbox,
 // assemble a status — so the test pins what it reads (the callback's last
@@ -4476,13 +4601,14 @@ void audibleProjectionWaitsForLatencyHistory() {
    test dies on the FIRST host boundary, with drive() returning false.
 
    The other half of the guard — a source move arriving with no anchor
-   prepared must still refuse — is not covered here and cannot be, from the
-   session API. Both paths that move the source prime off-RT and REFUSE THE
-   COMMAND when priming fails (seek, reanchorTransport), and the arm can only
-   fail when nothing was primed; a batch of one-shots still arms its final
-   member. So that branch is defence-in-depth on the raw
-   PreparedPlaybackTransport contract, and only a transport-level harness
-   could reach it. It rests on the guard reading as written. */
+   prepared must still refuse — is reached from the session API after all,
+   and it is terminal: one refused callback ends the session. It was reached
+   on an iPhone 13 (2026-09-05) by two seeks 54 ms apart, when the second
+   seek's prime retired the first's replacement out of the shared mailbox
+   before the first command drained. Each Seek command carries its own plan
+   now (twoSeeksRacedAgainstTheCallbackNeverWedge, and the processor-level
+   perCommandSeekPlans), so priming failure — refused at the command — is
+   again the only way the arm can fail. */
 void hostBoundariesWithoutSourceMovementKeepRendering() {
   const std::string wav = writeWav("host-boundary-no-source-move.wav", 1,
                                    std::vector<float>(50000, 0.1F));
@@ -6444,6 +6570,8 @@ int main() {
   nativeReferencePreviewClickContract();
   transportControlKernelAndTelemetry();
   resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands();
+  twoSeeksInARowAfterTheSongRanOutStillRenderWithATimePitchStage();
+  twoSeeksRacedAgainstTheCallbackNeverWedge();
   positionNowReadsTheCallbackWithoutTheControlLock();
   aHeldStreamKeepsTheGraphAndResumesInPlace();
   aSwapLandsOnTheRunningStreamWithoutAGap();

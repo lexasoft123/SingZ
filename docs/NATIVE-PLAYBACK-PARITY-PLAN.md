@@ -730,6 +730,34 @@ polls for the park line (10/10 on the emulator, on this tree's plain debug build
 the POCO's suffixed build had replaced the local artifact and the driver rightly
 refused the mismatch until a plain build was reinstalled).
 
+**The iPhone 13 ran (2026-09-05 night), 35/37 with the native pass VOIDED at the end-of-song
+Play, and the void was a core defect the simulators cannot reach.** The harness's
+`b.seek(0); b.play()` on a song parked at its end is two seeks 54 ms apart — the screen's
+and then the facade's own, which restarts a parked song by seeking before it resumes —
+and the phone's log read: seek accepted in 35 ms, seek accepted in 87 ms, "seek receipt
+did not arrive", then `render terminal · graph status 1/202 · anchor 57`. 57 is 50 +
+SourceSeek: a boundary this code queued itself, with no anchor armed. Each `seek()`
+primed its Stretch replacement into ONE shared mailbox and the prime began by retiring
+whatever was there — so the second seek's prime retired the first seek's replacement
+before the first command had drained (a prime is ~50 ms on the phone against a 21 ms
+callback; on the Mac it is microseconds, which is why no simulator run ever saw it). The
+callback then drained a seek and armed nothing, refused the callback — and one refused
+callback is TERMINAL for the session (`refreshTerminalState` reads the callback's first
+terminal cause), so the 73 failures were the aftermath, not the cause, and the suite's own
+comment that "the arm can only fail when nothing was primed" was wrong. Reproduced on
+this Mac by racing a paced callback thread against seek pairs (round 3–19 of 1500, same
+202/57/Terminal), then fixed at the design: each Seek command now CARRIES its own primed
+replacement (`SignalsmithTimePitchSeekPlan`, slot + prime stamp, the way Reanchor carries
+its plan); the final one-shot of a drain arms its own, every other seek in the drain
+returns its slot, a seek that cancels a count-in landing returns the landing's mailbox
+slot, and a plan whose slot was since re-primed for another seek arms nothing. The mailbox
+stays for the landing and the standalone prime-then-reset API. Tests: the processor-level
+`perCommandSeekPlans` (two plans, distinct slots, discard/arm/stale-stamp, slots
+reusable), the deterministic back-to-back pair on a parked song, and the raced pair 600
+times (nondeterministic by nature, ~3 s, wedged within 20 rounds before the fix); all 48
+native suites green, the desktop addon rebuilt. The phone rerun is owed on a rebuilt
+binary — a native change on a stale one reads green vacuously.
+
 **The desktop footprint, decided rather than fixed (2026-09-06):** with the graph prepared
 at open the native pass reads +100-150 MB against Web Audio in every phase. The extra is
 the decoded lanes the core holds from open — the phones pay the same — beside the

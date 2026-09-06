@@ -58,6 +58,26 @@ struct SignalsmithTimePitchReanchorPlan {
   }
 };
 
+// A seek replacement prepared for ONE transport command, which owns it until
+// the callback arms it (final one-shot in its drain) or discards it (not the
+// final one). Each command carries its own slot, so two seeks in flight can
+// never retire each other's replacement. They could through the shared
+// `pendingSeekSlot` mailbox: the second seek's prime retired the first's slot
+// before the first command had drained, the callback then armed nothing for a
+// boundary that had moved the source and refused it — and one refusal is
+// terminal for the session (an iPhone 13, 2026-09-05: two seeks 54 ms apart
+// at the end of a song, anchor outcome 57, render terminal). `stamp` is the
+// slot's prime count: a command whose slot was since retired and re-primed
+// for another arms nothing rather than another seek's anchor.
+struct SignalsmithTimePitchSeekPlan {
+  uint32_t slot{UINT32_MAX};
+  uint64_t stamp{0};
+
+  [[nodiscard]] bool valid() const noexcept {
+    return slot != UINT32_MAX && stamp != 0;
+  }
+};
+
 enum class SignalsmithTimePitchLoopPrepareCode : uint32_t {
   Ready = 0,
   Disabled,
@@ -116,6 +136,19 @@ primeSignalsmithTimePitchReanchor(
     const SignalsmithTimePitchAnchorInput &input) noexcept;
 // Callback-domain operations. They perform bounded lock-free validation and
 // publication only; all Signalsmith work has already happened off RT.
+// Per-command seek anchors (see SignalsmithTimePitchSeekPlan). Priming runs on
+// the control thread and may block; arming and discarding are bounded,
+// lock-free and callback-safe. Nothing here touches the mailbox the
+// count-in landing and the standalone prime-then-reset API still use.
+[[nodiscard]] SignalsmithTimePitchSeekPlan primeSignalsmithTimePitchSeekPlan(
+    const zdsp::ProcessorHandle &processor,
+    const SignalsmithTimePitchAnchorInput &input) noexcept;
+[[nodiscard]] bool armSignalsmithTimePitchSeekPlan(
+    const zdsp::ProcessorHandle &processor,
+    SignalsmithTimePitchSeekPlan plan) noexcept;
+void discardSignalsmithTimePitchSeekPlan(
+    const zdsp::ProcessorHandle &processor,
+    SignalsmithTimePitchSeekPlan plan) noexcept;
 [[nodiscard]] bool armSignalsmithTimePitchSeek(
     const zdsp::ProcessorHandle &processor) noexcept;
 void discardSignalsmithTimePitchSeek(

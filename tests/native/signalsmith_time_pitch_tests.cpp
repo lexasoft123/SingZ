@@ -489,6 +489,75 @@ void preparedGenericReanchorBoundaries() {
          "discarding a non-final seek is bounded and returns its slot");
 }
 
+/* Two seek commands in flight own two replacements. The shared mailbox let
+   the second prime retire the first's slot before the first command drained
+   (the iPhone 13 pair, see the header): with plans, both stay Ready, the
+   final command arms its own, the other gives its slot back, and a plan whose
+   slot was since re-primed for another seek arms nothing. */
+void perCommandSeekPlans() {
+  Harness harness(5.0F);
+  std::vector<float> left(harness.anchorFrames());
+  std::vector<float> right(harness.anchorFrames());
+  for (uint32_t frame = 0; frame < left.size(); ++frame) {
+    left[frame] = std::sin(static_cast<float>(frame) * 0.011F);
+    right[frame] = std::cos(static_cast<float>(frame) * 0.013F);
+  }
+  const auto input = harness.anchorInput(left, right);
+  const auto first = singz::primeSignalsmithTimePitchSeekPlan(harness.processor, input);
+  const auto second = singz::primeSignalsmithTimePitchSeekPlan(harness.processor, input);
+  expect(first.valid() && second.valid() && first.slot != second.slot &&
+             first.stamp != second.stamp,
+         "two seek plans prime into two slots with distinct stamps");
+  auto status = singz::signalsmithTimePitchAnchorStatus(harness.processor);
+  expect(status.prepared == 2 && status.published == 0,
+         "priming a second plan does not retire the first");
+
+  zdsp::test::resetAllocationTrap();
+  zdsp::test::setAllocationTrapEnabled(true);
+  // The drain: the first command is not the final one-shot and discards; the
+  // second is and arms. Neither allocates.
+  singz::discardSignalsmithTimePitchSeekPlan(harness.processor, first);
+  expect(singz::armSignalsmithTimePitchSeekPlan(harness.processor, second),
+         "the final command arms its own replacement");
+  expect(!singz::armSignalsmithTimePitchSeekPlan(harness.processor, first),
+         "a discarded plan arms nothing");
+  zdsp::test::setAllocationTrapEnabled(false);
+  expect(zdsp::test::trappedAllocationCount() == 0,
+         "arming and discarding plans allocate nothing");
+  std::array<float, 128> in{};
+  std::array<float, 128> outL{};
+  std::array<float, 128> outR{};
+  in.fill(0.2F);
+  harness.reset(zdsp::DiscontinuityReason::SourceSeek);
+  harness.render(in.data(), in.data(), outL.data(), outR.data(), in.size());
+  status = singz::signalsmithTimePitchAnchorStatus(harness.processor);
+  expect(status.published == 1 && status.misses == 0,
+         "the armed plan publishes at the seek boundary");
+
+  // Reuse: a slot given back and re-primed for a later seek carries a new
+  // stamp; the old plan is refused, the new one arms.
+  const auto third = singz::primeSignalsmithTimePitchSeekPlan(harness.processor, input);
+  expect(third.valid() && third.stamp > second.stamp,
+         "a later plan carries a later stamp");
+  expect(!singz::armSignalsmithTimePitchSeekPlan(harness.processor,
+                                                 {third.slot, first.stamp}),
+         "a stale stamp on a re-primed slot arms nothing");
+  expect(singz::armSignalsmithTimePitchSeekPlan(harness.processor, third),
+         "the re-primed slot arms for its own plan");
+  harness.reset(zdsp::DiscontinuityReason::SourceSeek);
+  harness.render(in.data(), in.data(), outL.data(), outR.data(), in.size());
+  status = singz::signalsmithTimePitchAnchorStatus(harness.processor);
+  expect(status.published == 2 && status.misses == 0,
+         "the re-primed plan publishes too");
+
+  // Every slot given back: six plans in a row prime after all of the above.
+  for (uint32_t round = 0; round < 12; ++round) {
+    const auto plan = singz::primeSignalsmithTimePitchSeekPlan(harness.processor, input);
+    expect(plan.valid(), "a discarded plan's slot is reusable");
+    singz::discardSignalsmithTimePitchSeekPlan(harness.processor, plan);
+  }
+}
+
 void invalidContracts() {
   alignas(64) std::array<uint8_t, 65536> state{};
   singz::SignalsmithTimePitchConfig config{{711}, {48000.0}, 2, 128, 0.0F};
@@ -635,6 +704,7 @@ int main() {
   retainedEstimateCoversPinnedAllocator();
   preparedDeterministicRealtimeContract();
   preparedSeekAndRecurringLoopAnchors();
+  perCommandSeekPlans();
   idleWorkerBarelyWakes();
   preparedGenericReanchorBoundaries();
   drainsPreparedTail();

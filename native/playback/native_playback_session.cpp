@@ -323,6 +323,10 @@ struct PlaybackTransportCommand {
   SignalsmithTimePitchLoopPlan loopPlan{};
   SignalsmithTimePitchReanchorPlan reanchorPlan{};
   uint32_t projectFractionQ32{0};
+  // Seek only: the replacement this command owns (primed by the seek() that
+  // queued it; armed if it is the final one-shot of its drain, else discarded
+  // there). See SignalsmithTimePitchSeekPlan for the race this closes.
+  SignalsmithTimePitchSeekPlan seekPlan{};
 };
 
 // Where the song is, for a reader that holds NO lock.
@@ -883,15 +887,19 @@ struct PreparedPlaybackTransport {
     return true;
   }
 
-  bool seek(int64_t projectFrame) noexcept {
+  bool seek(int64_t projectFrame,
+            SignalsmithTimePitchSeekPlan seekPlan = {}) noexcept {
     const NativePlaybackTransportState state =
         desiredState == NativePlaybackTransportState::Paused
             ? NativePlaybackTransportState::Paused
             : (projectFrame >= durationFrames
                    ? NativePlaybackTransportState::Completed
                    : NativePlaybackTransportState::Playing);
-    if (!enqueue({generation, PlaybackTransportCommandKind::Seek, state,
-                  projectFrame, 0, 0}))
+    PlaybackTransportCommand command{generation,
+                                     PlaybackTransportCommandKind::Seek,
+                                     state, projectFrame, 0, 0};
+    command.seekPlan = seekPlan;
+    if (!enqueue(command))
       return false;
     desiredState = state;
     return true;
@@ -1011,21 +1019,36 @@ struct PreparedPlaybackTransport {
         callbackState = command.state;
         callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
         break;
-      case PlaybackTransportCommandKind::Seek:
+      case PlaybackTransportCommandKind::Seek: {
+        const bool cancelsLanding = landingPending;
         callbackProjectFrame = command.projectFrame;
         callbackProjectFractionQ32 = 0;
         pendingSourcePositionMoved = true;
         landingPending = false;
         callbackState = command.state;
         callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
-        if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand &&
-            timePitchProcessor.state != nullptr &&
-            armSignalsmithTimePitchSeek(timePitchProcessor))
-          callbackTimePitchBoundaryPrepared = true;
+        if (timePitchProcessor.state != nullptr) {
+          // A seek during the count-in cancels the landing, whose replacement
+          // sits in the mailbox: give the slot back, it will never be armed.
+          if (cancelsLanding)
+            discardSignalsmithTimePitchSeek(timePitchProcessor);
+          // This command's own replacement: armed when it is the last one-shot
+          // of the drain, returned to the pool otherwise. Never the mailbox —
+          // see SignalsmithTimePitchSeekPlan for the seek pair that wedged.
+          if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand) {
+            if (armSignalsmithTimePitchSeekPlan(timePitchProcessor,
+                                                command.seekPlan))
+              callbackTimePitchBoundaryPrepared = true;
+          } else {
+            discardSignalsmithTimePitchSeekPlan(timePitchProcessor,
+                                                command.seekPlan);
+          }
+        }
         queueDiscontinuity({zdsp::DiscontinuityReason::SourceSeek,
                             zdsp::DiscontinuityFlagResetState |
                                 zdsp::DiscontinuityFlagTimeValid});
         break;
+      }
       case PlaybackTransportCommandKind::SetLoop:
         callbackLoopEnabled = true;
         callbackLoopStart = command.loopStartFrame;
@@ -1047,8 +1070,10 @@ struct PreparedPlaybackTransport {
           pendingSourcePositionMoved = true;
         }
         if (timePitchProcessor.state != nullptr) {
+          // No mailbox discard here any more: seeks carry their own plans and
+          // discard them in their own case above, and the mailbox holds only a
+          // count-in landing's replacement, which a reanchor does not cancel.
           if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand) {
-            discardSignalsmithTimePitchSeek(timePitchProcessor);
             callbackTimePitchBoundaryPrepared =
                 armSignalsmithTimePitchReanchor(timePitchProcessor,
                                                 command.reanchorPlan);
@@ -2624,6 +2649,24 @@ struct PreparedPlaybackGraph {
            (fillTimePitchAnchor(projectFrame) &&
             primeSignalsmithTimePitchSeek(timePitchProcessor,
                                           timePitchAnchorInput()));
+  }
+
+  /* The replacement a seek COMMAND carries (SignalsmithTimePitchSeekPlan).
+     Invalid when priming failed; on a graph with no time/pitch stage there
+     is nothing to prime, and `ok` says so. */
+  struct PrimedSeekPlan {
+    bool ok{false};
+    SignalsmithTimePitchSeekPlan plan{};
+  };
+  PrimedSeekPlan primeTimePitchSeekPlan(int64_t projectFrame) noexcept {
+    if (!hasTimePitch)
+      return {true, {}};
+    if (!fillTimePitchAnchor(projectFrame))
+      return {};
+    const SignalsmithTimePitchSeekPlan plan =
+        primeSignalsmithTimePitchSeekPlan(timePitchProcessor,
+                                          timePitchAnchorInput());
+    return {plan.valid(), plan};
   }
 
   SignalsmithTimePitchReanchorPlan primeTimePitchReanchor(
@@ -7149,12 +7192,23 @@ NativePlaybackResult NativePlaybackSession::seek(uint64_t generation,
                    "The bounded transport command mailbox is full");
   const int64_t resolvedProjectFrame =
       impl_->prepared->transport.resolvedSeekFrame(projectFrame);
-  if (!impl_->prepared->primeTimePitchSeek(resolvedProjectFrame))
-    return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
-                   "The playback seek anchor could not be prepared off RT");
-  if (!impl_->prepared->transport.seek(resolvedProjectFrame))
+  const auto primed = impl_->prepared->primeTimePitchSeekPlan(resolvedProjectFrame);
+  if (!primed.ok) {
+    // Seeks in flight now hold one anchor slot EACH until the callback drains
+    // them (kSignalsmithAnchorSlotCount says how many that leaves). A pool
+    // with nothing free is the same situation as a full mailbox — the
+    // callback has not caught up — and is reported the same way: QueueFull is
+    // the code the facade retries, where GraphFailure ends the native pass.
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The playback seek anchor pool is full; the callback has not "
+                   "drained the seeks ahead of this one");
+  }
+  if (!impl_->prepared->transport.seek(resolvedProjectFrame, primed.plan)) {
+    discardSignalsmithTimePitchSeekPlan(impl_->prepared->timePitchProcessor,
+                                        primed.plan);
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded transport command mailbox is full");
+  }
   return impl_->success(generation);
 }
 
