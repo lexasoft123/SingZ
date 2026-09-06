@@ -70,16 +70,28 @@ double localPeriod(const PlaybackCueBeatGrid &grid, int64_t index) {
   std::array<double, 8> intervals{};
   size_t count = 0;
   // `end - start` is at most eight by construction above, so this loop cannot
-  // overrun — but only the reader knows that: gcc's -Warray-bounds sees a
-  // `count` it cannot bound and rejects the sort below at -Werror. The
-  // condition states the invariant instead of leaving it to be inferred, and
-  // costs one comparison per interval on a loop that runs at most eight times.
+  // overrun; the condition says so rather than leaving it to be inferred.
   for (int64_t i = start; i < end && count < intervals.size(); ++i) {
     intervals[count++] =
         beats[static_cast<size_t>(i + 1)] - beats[static_cast<size_t>(i)];
   }
-  std::sort(intervals.begin(),
-            intervals.begin() + static_cast<std::ptrdiff_t>(count));
+  // An insertion sort over at most eight doubles, not std::sort. gcc 13's
+  // -Warray-bounds rejects `std::sort(begin, begin + count)` on a
+  // std::array<double, 8> at -Werror — the diagnostic lands inside introsort's
+  // own inlined internals, where the bound on `count` established above cannot
+  // reach it, and a pragma at this call site does not suppress a warning
+  // attributed to a header line. Eight elements do not need introsort anyway:
+  // this is the same ascending order, so the median below is the same value
+  // the TypeScript twin computes (src/renderer/src/audio/beat.ts).
+  for (size_t i = 1; i < count; ++i) {
+    const double value = intervals[i];
+    size_t j = i;
+    while (j > 0 && intervals[j - 1] > value) {
+      intervals[j] = intervals[j - 1];
+      --j;
+    }
+    intervals[j] = value;
+  }
   return intervals[count / 2];
 }
 
