@@ -45,6 +45,7 @@ const path = require('path')
 const http = require('http')
 const { connect, sleep } = require('./cdp.cjs')
 const { hooksExpr } = require('./scenario.cjs')
+const { current: watchdog } = require('../../../tests/shared/watchdog.cjs')
 
 const BUNDLE = 'io.s-dev.singz'
 
@@ -291,10 +292,12 @@ function createDevice({ port, log, device }) {
     },
 
     async launch() {
-      const t0 = Date.now()
-      launchApp(BUNDLE, true)
-      pid = pidOf()
-      return { pid, out: `pid ${pid}`, t0 }
+      return watchdog().run('launch the app', 180, async () => {
+        const t0 = Date.now()
+        launchApp(BUNDLE, true)
+        pid = pidOf()
+        return { pid, out: `pid ${pid}`, t0 }
+      })
     },
 
     /* Reconnect if iOS froze the app and dropped the inspector.
@@ -338,18 +341,22 @@ function createDevice({ port, log, device }) {
     },
 
     async attach() {
-      session = await connect({ port, label: `"${NAME}"`, match: (t) => t.deviceName === NAME })
-      bindSession()
-      for (let i = 0; i < 120; i++) {
-        if ((await session.val('typeof __test')) === 'object' && (await session.val('typeof __r')) === 'function') break
-        await sleep(500)
-      }
-      if ((await session.val('typeof __test')) !== 'object') throw new Error('__test never appeared')
+      return watchdog().run('attach the debugger', 240, async () => {
+        session = await connect({ port, label: `"${NAME}"`, match: (t) => t.deviceName === NAME })
+        bindSession()
+        for (let i = 0; i < 120; i++) {
+          if ((await session.val('typeof __test')) === 'object' && (await session.val('typeof __r')) === 'function') break
+          await sleep(500)
+        }
+        if ((await session.val('typeof __test')) !== 'object') throw new Error('__test never appeared')
+      })
     },
 
     async installHooks() {
-      dev.runId = `r${Date.now()}`
-      await session.val(hooksExpr(dev.runId))
+      return watchdog().run('install the test hooks', 60, async () => {
+        dev.runId = `r${Date.now()}`
+        await session.val(hooksExpr(dev.runId))
+      })
     },
 
     async detach() {
@@ -361,10 +368,16 @@ function createDevice({ port, log, device }) {
      *  Android's Hermes inspector, not this one. A device decodes slower than
      *  the sim, so the default deadline is longer here. */
     async openProject(name, maxMs = 360000) {
-      const raw = await session.val(`__ps.open(${JSON.stringify(name)}, ${maxMs})`, maxMs + 20000)
-      const r = JSON.parse(raw)
-      if (r.marks.ready === undefined) throw new Error(`"${name}" never became ready: ${raw}`)
-      return r
+      return watchdog().run(
+        'open the song',
+        // Never tighter than the deadline the call itself carries.
+        Math.max(420, maxMs / 1000 + 60),
+        async () => {
+        const raw = await session.val(`__ps.open(${JSON.stringify(name)}, ${maxMs})`, maxMs + 20000)
+        const r = JSON.parse(raw)
+        if (r.marks.ready === undefined) throw new Error(`"${name}" never became ready: ${raw}`)
+        return r
+      })
     },
 
     async background() {

@@ -65,9 +65,20 @@ by a single `require(...).arm('<name>')` line at the top of each): a hang —
 a CDP evaluate against a suspended app, a Metro target that never appears,
 `devicectl` waiting on a locked phone — otherwise sits there for ever, because
 the open socket keeps node's loop alive, and the next run contends with it.
-Two deadlines: no output for ten minutes, or sixty minutes in total (the long
-drivers say so at their arming; `E2E_WATCHDOG_MINUTES` /
-`E2E_WATCHDOG_IDLE_MINUTES` override, `0` disarms). On expiry it names the
+Three deadlines. The one that matters is the STEP: a named operation with a
+budget it must finish inside — `await watchdog().run('open the song', 300,
+() => …)`, from `current()` in the same module, a no-op before anything armed
+it. A blanket silence timer has to be generous enough for the slowest quiet
+stretch in the repo, so a wedged five-second call would burn ten minutes before
+saying anything; a step says what was being done, how long it was allowed and
+how long it had been, on the second it runs out. Steps nest (the innermost owns
+the deadline), `{ soft: true }` rejects with a StepTimeout instead of ending the
+run, and `E2E_STEP_SCALE` multiplies every budget for a slower machine. The
+device layers under `mobile/tests/player-session/` put launch, attach, hook
+install and song open under budgets there, so every mobile driver inherits
+them. Behind the step are the two blanket ones: no output for ten minutes, or
+sixty minutes in total (the long drivers say so at their arming;
+`E2E_WATCHDOG_MINUTES` / `E2E_WATCHDOG_IDLE_MINUTES` override, `0` disarms). On expiry it names the
 deadline, how long the run had been going and the last line printed, kills its
 own DIRECT children — an Electron does not die with `process.exit`, and one
 was found hidden at 66 minutes — and exits 1; killing a run by hand prints the

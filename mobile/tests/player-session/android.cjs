@@ -36,6 +36,7 @@ const { execFileSync, execSync } = require('child_process')
 const { connect, sleep } = require('./cdp.cjs')
 const { hooksExpr } = require('./scenario.cjs')
 const { PKG, dataDir, extFilesDir, isEmulator, silenceDevice, grantExternal } = require('../android-lib.cjs')
+const { current: watchdog } = require('../../../tests/shared/watchdog.cjs')
 
 const ADB = process.env.ADB || path.join(process.env.HOME || '', 'Library/Android/sdk/platform-tools/adb')
 
@@ -197,18 +198,20 @@ function createDevice({ serial, port, log, mobileRoot }) {
     },
 
     async launch() {
-      shell(`am force-stop ${PKG}`)
-      await sleep(1500)
-      const t0 = Date.now()
-      pid = null // a stale pid from the previous launch would skip the wait
-      shell(`am start -n ${launchIntent()}`)
-      // 100 ms, not 500: this wait is inside the cold-restart timing, whose
-      // tolerance is about half a second (see connect's pollMs).
-      for (let i = 0; i < 300 && !pid; i++) {
-        pid = appPid()
-        if (!pid) await sleep(100)
-      }
-      return { pid, out: `pid ${pid}`, t0 }
+      return watchdog().run('launch the app', 180, async () => {
+        shell(`am force-stop ${PKG}`)
+        await sleep(1500)
+        const t0 = Date.now()
+        pid = null // a stale pid from the previous launch would skip the wait
+        shell(`am start -n ${launchIntent()}`)
+        // 100 ms, not 500: this wait is inside the cold-restart timing, whose
+        // tolerance is about half a second (see connect's pollMs).
+        for (let i = 0; i < 300 && !pid; i++) {
+          pid = appPid()
+          if (!pid) await sleep(100)
+        }
+        return { pid, out: `pid ${pid}`, t0 }
+      })
     },
 
     /** The app's own boot mark (CatalogScreen writes `singz.boot` on mount),
@@ -251,34 +254,38 @@ function createDevice({ serial, port, log, mobileRoot }) {
     },
 
     async attach() {
-      /* Metro DECORATES an Android device name — "sdk_gphone64_arm64 - 16 -
-         API 36" for a device whose `ro.product.model` is
-         "sdk_gphone64_arm64" — so an exact match (which is right on iOS)
-         finds nothing here. Match the appId AND the model as a prefix: the
-         appId alone would take a second emulator running the same package. */
-      const model = deviceName
-      session = await connect({
-        port,
-        label: `${PKG} on "${model}"`,
-        match: (t) => t.appId === PKG && String(t.deviceName || '').startsWith(model)
+      return watchdog().run('attach the debugger', 240, async () => {
+        /* Metro DECORATES an Android device name — "sdk_gphone64_arm64 - 16 -
+           API 36" for a device whose `ro.product.model` is
+           "sdk_gphone64_arm64" — so an exact match (which is right on iOS)
+           finds nothing here. Match the appId AND the model as a prefix: the
+           appId alone would take a second emulator running the same package. */
+        const model = deviceName
+        session = await connect({
+          port,
+          label: `${PKG} on "${model}"`,
+          match: (t) => t.appId === PKG && String(t.deviceName || '').startsWith(model)
+        })
+        dev.ev = session.ev
+        dev.val = session.val
+        dev.begin = session.begin
+        dev.end = session.end
+        for (let i = 0; i < 120; i++) {
+          if ((await session.val('typeof __test')) === 'object' && (await session.val('typeof __r')) === 'function') break
+          await sleep(500)
+        }
+        if ((await session.val('typeof __test')) !== 'object') throw new Error('__test never appeared')
+        pid = appPid()
       })
-      dev.ev = session.ev
-      dev.val = session.val
-      dev.begin = session.begin
-      dev.end = session.end
-      for (let i = 0; i < 120; i++) {
-        if ((await session.val('typeof __test')) === 'object' && (await session.val('typeof __r')) === 'function') break
-        await sleep(500)
-      }
-      if ((await session.val('typeof __test')) !== 'object') throw new Error('__test never appeared')
-      pid = appPid()
     },
 
     async installHooks() {
-      /* A fresh id per attach: every measurement window carries it back, so a
-         Metro reload mid-pass is caught rather than silently measured. */
-      dev.runId = `r${Date.now()}`
-      await session.val(hooksExpr(dev.runId))
+      return watchdog().run('install the test hooks', 60, async () => {
+        /* A fresh id per attach: every measurement window carries it back, so a
+           Metro reload mid-pass is caught rather than silently measured. */
+        dev.runId = `r${Date.now()}`
+        await session.val(hooksExpr(dev.runId))
+      })
     },
 
     async detach() {
@@ -288,40 +295,46 @@ function createDevice({ serial, port, log, mobileRoot }) {
 
     /** Fire the opener, then SAY NOTHING until the pref says it is over. */
     async openProject(name, maxMs = 300000) {
-      // Clear last open's marks so a stale value cannot be mistaken for this
-      // one; an empty string reads as "not there yet" to the poller below.
-      await session.ev(`__r('src/latency.ts').setStoredText('singz.ps', '')`)
-      await sleep(400)
-      // Deliberately NOT awaited over CDP — see the header.
-      await session.ev(`void __ps.open(${JSON.stringify(name)}, ${maxMs})`)
-      const deadline = Date.now() + maxMs + 20000
-      let raw = ''
-      while (Date.now() < deadline) {
-        await sleep(750)
-        let xml = ''
-        try {
-          xml = shell(`run-as ${PKG} cat shared_prefs/singz.xml 2>/dev/null || true`)
-        } catch {
-          continue
+      return watchdog().run(
+        'open the song',
+        // Never tighter than the deadline the call itself carries.
+        Math.max(420, maxMs / 1000 + 60),
+        async () => {
+        // Clear last open's marks so a stale value cannot be mistaken for this
+        // one; an empty string reads as "not there yet" to the poller below.
+        await session.ev(`__r('src/latency.ts').setStoredText('singz.ps', '')`)
+        await sleep(400)
+        // Deliberately NOT awaited over CDP — see the header.
+        await session.ev(`void __ps.open(${JSON.stringify(name)}, ${maxMs})`)
+        const deadline = Date.now() + maxMs + 20000
+        let raw = ''
+        while (Date.now() < deadline) {
+          await sleep(750)
+          let xml = ''
+          try {
+            xml = shell(`run-as ${PKG} cat shared_prefs/singz.xml 2>/dev/null || true`)
+          } catch {
+            continue
+          }
+          /* `setTextPref` namespaces every key it writes — the entry is
+             `txt:singz.ps`, not `singz.ps`. Accept both: the prefix is the
+             native module's business, not this driver's. */
+          const hit = /<string name="(?:txt:)?singz\.ps">([\s\S]*?)<\/string>/.exec(xml)
+          if (hit && hit[1].trim()) {
+            raw = hit[1]
+              .replace(/&quot;/g, '"')
+              .replace(/&apos;/g, "'")
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&amp;/g, '&')
+            break
+          }
         }
-        /* `setTextPref` namespaces every key it writes — the entry is
-           `txt:singz.ps`, not `singz.ps`. Accept both: the prefix is the
-           native module's business, not this driver's. */
-        const hit = /<string name="(?:txt:)?singz\.ps">([\s\S]*?)<\/string>/.exec(xml)
-        if (hit && hit[1].trim()) {
-          raw = hit[1]
-            .replace(/&quot;/g, '"')
-            .replace(/&apos;/g, "'")
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&amp;/g, '&')
-          break
-        }
-      }
-      if (!raw) throw new Error(`"${name}" never reported an open through singz.ps`)
-      const r = JSON.parse(raw)
-      if (r.marks.ready === undefined) throw new Error(`"${name}" never became ready: ${raw}`)
-      return r
+        if (!raw) throw new Error(`"${name}" never reported an open through singz.ps`)
+        const r = JSON.parse(raw)
+        if (r.marks.ready === undefined) throw new Error(`"${name}" never became ready: ${raw}`)
+        return r
+      })
     },
 
     async background() {

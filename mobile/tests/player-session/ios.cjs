@@ -26,6 +26,7 @@ const path = require('path')
 const { execSync, execFileSync } = require('child_process')
 const { connect, sleep } = require('./cdp.cjs')
 const { hooksExpr } = require('./scenario.cjs')
+const { current: watchdog } = require('../../../tests/shared/watchdog.cjs')
 
 const BUNDLE = 'io.s-dev.singz'
 
@@ -134,61 +135,63 @@ function createDevice({ udid, port, log }) {
     },
 
     async launch() {
-      // The mark the last boot wrote, so awaitBoot can wait for a DIFFERENT
-      // one: neither the in-app clear (cfprefsd may not have flushed it) nor
-      // the file edit below (cfprefsd may write its cache back) is proof
-      // against reading the previous boot's mark; a changed value is.
-      bootMarkBefore = readBootMark()
-      const was = pid
-      execSync(`xcrun simctl terminate ${UDID} ${BUNDLE} 2>/dev/null || true`)
-      /* Wait for the process to be GONE, and make it so if it is not: with
-         native playback holding an active audio session, `simctl terminate`
-         returned while the process stayed up, `simctl launch` then merely
-         fronted it, and the "restart" the rule timed was the dev client
-         reloading its bundle inside the same pid — 7.7 s against legacy's
-         real 4.8 s relaunch, and never a cold start at all. */
-      const gone = () => !alive(was)
-      const tTerm = Date.now()
-      for (let i = 0; i < 30 && was && !gone(); i++) await sleep(100)
-      let forced = false
-      if (was && !gone()) {
-        /* Still there 3 s after terminate: say so, keep a native stack sample
-           of what it is doing (scratchpad-independent: beside the run's cwd),
-           and force it. A restart timed past this point measured the wait for
-           a process that would not die, not a boot. */
-        forced = true
+      return watchdog().run('launch the app', 120, async () => {
+        // The mark the last boot wrote, so awaitBoot can wait for a DIFFERENT
+        // one: neither the in-app clear (cfprefsd may not have flushed it) nor
+        // the file edit below (cfprefsd may write its cache back) is proof
+        // against reading the previous boot's mark; a changed value is.
+        bootMarkBefore = readBootMark()
+        const was = pid
+        execSync(`xcrun simctl terminate ${UDID} ${BUNDLE} 2>/dev/null || true`)
+        /* Wait for the process to be GONE, and make it so if it is not: with
+           native playback holding an active audio session, `simctl terminate`
+           returned while the process stayed up, `simctl launch` then merely
+           fronted it, and the "restart" the rule timed was the dev client
+           reloading its bundle inside the same pid — 7.7 s against legacy's
+           real 4.8 s relaunch, and never a cold start at all. */
+        const gone = () => !alive(was)
+        const tTerm = Date.now()
+        for (let i = 0; i < 30 && was && !gone(); i++) await sleep(100)
+        let forced = false
+        if (was && !gone()) {
+          /* Still there 3 s after terminate: say so, keep a native stack sample
+             of what it is doing (scratchpad-independent: beside the run's cwd),
+             and force it. A restart timed past this point measured the wait for
+             a process that would not die, not a boot. */
+          forced = true
+          try {
+            const lingerFile = path.join(require('os').tmpdir(), `singz-exit-linger-${was}.txt`)
+            execSync(`sample ${was} 1 1 -file ${lingerFile} 2>/dev/null`)
+            log(`  launch: previous pid ${was} still up 3 s after terminate · stack sample in ${lingerFile}`)
+          } catch {}
+          try {
+            execSync(`kill -9 ${was} 2>/dev/null || true`)
+          } catch {}
+          for (let i = 0; i < 30 && !gone(); i++) await sleep(100)
+        }
+        const exitMs = Date.now() - tTerm
+        await sleep(400)
+        /* The boot mark is removed from the plist FILE here, with the app dead:
+           the scenario's in-app clear goes through cfprefsd, which had not
+           flushed it to disk by the time the process was terminated, so the
+           restart poll read the previous boot's mark and the rule measured
+           384 ms for a boot that takes seconds. */
         try {
-          const lingerFile = path.join(require('os').tmpdir(), `singz-exit-linger-${was}.txt`)
-          execSync(`sample ${was} 1 1 -file ${lingerFile} 2>/dev/null`)
-          log(`  launch: previous pid ${was} still up 3 s after terminate · stack sample in ${lingerFile}`)
+          execFileSync(
+            'plutil',
+            ['-remove', 'singz\\.boot', path.join(container(), 'Library', 'Preferences', `${BUNDLE}.plist`)],
+            { stdio: 'ignore' }
+          )
         } catch {}
-        try {
-          execSync(`kill -9 ${was} 2>/dev/null || true`)
-        } catch {}
-        for (let i = 0; i < 30 && !gone(); i++) await sleep(100)
-      }
-      const exitMs = Date.now() - tTerm
-      await sleep(400)
-      /* The boot mark is removed from the plist FILE here, with the app dead:
-         the scenario's in-app clear goes through cfprefsd, which had not
-         flushed it to disk by the time the process was terminated, so the
-         restart poll read the previous boot's mark and the rule measured
-         384 ms for a boot that takes seconds. */
-      try {
-        execFileSync(
-          'plutil',
-          ['-remove', 'singz\\.boot', path.join(container(), 'Library', 'Preferences', `${BUNDLE}.plist`)],
-          { stdio: 'ignore' }
+        const t0 = Date.now()
+        const out = execSync(`xcrun simctl launch ${UDID} ${BUNDLE}`).toString().trim()
+        pid = /:\s*(\d+)/.exec(out)?.[1] ?? null
+        log(
+          `  launch: previous pid ${was ?? '—'} ${was ? (forced ? `did NOT exit on terminate (forced after ${exitMs} ms)` : `exited in ${exitMs} ms`) : ''}` +
+            ` · simctl launch ${Date.now() - t0} ms → pid ${pid}`
         )
-      } catch {}
-      const t0 = Date.now()
-      const out = execSync(`xcrun simctl launch ${UDID} ${BUNDLE}`).toString().trim()
-      pid = /:\s*(\d+)/.exec(out)?.[1] ?? null
-      log(
-        `  launch: previous pid ${was ?? '—'} ${was ? (forced ? `did NOT exit on terminate (forced after ${exitMs} ms)` : `exited in ${exitMs} ms`) : ''}` +
-          ` · simctl launch ${Date.now() - t0} ms → pid ${pid}`
-      )
-      return { pid, out, t0 }
+        return { pid, out, t0 }
+      })
     },
 
     /** The app's own boot mark (CatalogScreen writes `singz.boot` on mount;
@@ -223,23 +226,27 @@ function createDevice({ udid, port, log }) {
     },
 
     async attach() {
-      session = await connect({ port, label: `"${NAME}"`, match: (t) => t.deviceName === NAME })
-      dev.ev = session.ev
-      dev.val = session.val
-      dev.begin = session.begin
-      dev.end = session.end
-      for (let i = 0; i < 80; i++) {
-        if ((await session.val('typeof __test')) === 'object' && (await session.val('typeof __r')) === 'function') break
-        await sleep(500)
-      }
-      if ((await session.val('typeof __test')) !== 'object') throw new Error('__test never appeared')
+      return watchdog().run('attach the debugger', 180, async () => {
+        session = await connect({ port, label: `"${NAME}"`, match: (t) => t.deviceName === NAME })
+        dev.ev = session.ev
+        dev.val = session.val
+        dev.begin = session.begin
+        dev.end = session.end
+        for (let i = 0; i < 80; i++) {
+          if ((await session.val('typeof __test')) === 'object' && (await session.val('typeof __r')) === 'function') break
+          await sleep(500)
+        }
+        if ((await session.val('typeof __test')) !== 'object') throw new Error('__test never appeared')
+      })
     },
 
     async installHooks() {
-      /* A fresh id per attach: every measurement window carries it back, so a
-         Metro reload mid-pass is caught rather than silently measured. */
-      dev.runId = `r${Date.now()}`
-      await session.val(hooksExpr(dev.runId))
+      return watchdog().run('install the test hooks', 60, async () => {
+        /* A fresh id per attach: every measurement window carries it back, so a
+           Metro reload mid-pass is caught rather than silently measured. */
+        dev.runId = `r${Date.now()}`
+        await session.val(hooksExpr(dev.runId))
+      })
     },
 
     async detach() {
@@ -250,10 +257,16 @@ function createDevice({ udid, port, log }) {
     /** iOS may poll over CDP throughout a load — it is Android's Hermes
      *  inspector that cannot be spoken to mid-decode, not this one. */
     async openProject(name, maxMs = 240000) {
-      const raw = await session.val(`__ps.open(${JSON.stringify(name)}, ${maxMs})`, maxMs + 20000)
-      const r = JSON.parse(raw)
-      if (r.marks.ready === undefined) throw new Error(`"${name}" never became ready: ${raw}`)
-      return r
+      return watchdog().run(
+        'open the song',
+        // Never tighter than the deadline the call itself carries.
+        Math.max(300, maxMs / 1000 + 60),
+        async () => {
+        const raw = await session.val(`__ps.open(${JSON.stringify(name)}, ${maxMs})`, maxMs + 20000)
+        const r = JSON.parse(raw)
+        if (r.marks.ready === undefined) throw new Error(`"${name}" never became ready: ${raw}`)
+        return r
+      })
     },
 
     async background() {

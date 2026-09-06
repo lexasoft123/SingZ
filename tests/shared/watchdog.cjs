@@ -10,7 +10,18 @@
  * and a source test (tests/unit/e2e-watchdog.test.ts) refuses a new driver
  * that does not.
  *
- * Two deadlines, because they catch different failures:
+ * Three deadlines, because they catch different failures:
+ *
+ *  - STEP. The one that matters: a named operation with a budget it must
+ *    finish inside — `await watchdog.run('open song A', 240, () => …)`, or
+ *    `watchdog().run(…)` through `current()` from a shared layer. (`step()`
+ *    is the bare progress note: one argument, no deadline.) A
+ *    blanket silence timer has to be generous enough for the slowest quiet
+ *    stretch in the repo, so it lets a wedged 5-second call burn ten minutes
+ *    before anyone hears about it; a step says what was being done, how long
+ *    it was allowed, and aborts on the second it runs out. Steps nest, and
+ *    the innermost one owns the deadline.
+ *
  *
  *  - IDLE. The driver has printed nothing for `idleMinutes`. This is the one
  *    that catches a hang, and it is why the arming patches `console.log`:
@@ -56,6 +67,16 @@ function defaultKillChildren() {
   }
 }
 
+/** A positive multiplier from the environment, else 1. */
+function envScale(name) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return 1
+  const value = Number(raw)
+  if (Number.isFinite(value) && value > 0) return value
+  process.stderr.write(`=== E2E WATCHDOG · ignoring ${name}=${raw}: not a positive multiplier ===\n`)
+  return 1
+}
+
 /** Minutes from the environment: a number, `0`/`off` for none, else null.
  *  A value that is neither says so rather than silently taking the default —
  *  a budget nobody can see is how a deadline stops being one. */
@@ -78,6 +99,9 @@ function createWatchdog({
   totalMinutes = DEFAULT_TOTAL_MINUTES,
   idleMinutes = DEFAULT_IDLE_MINUTES,
   onTimeout = null,
+  /** Every step budget is multiplied by this: a slower machine raises it
+   *  rather than editing every call site (`E2E_STEP_SCALE`). */
+  stepScale = 1,
   now = () => Date.now(),
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = timer => clearTimeout(timer),
@@ -92,12 +116,16 @@ function createWatchdog({
   let totalTimer = null
   let fired = false
   let disarmed = false
+  /** The named steps in flight, outermost first. */
+  const open = []
 
   const minutesSince = at => ((now() - at) / 60000).toFixed(1)
   const report = why => {
     write(`=== E2E WATCHDOG · ${name} · ${why} ===`)
     write(`    running ${minutesSince(started)} min · last progress ${minutesSince(lastProgressAt)} min ago`)
     write(`    last step: ${lastStep}`)
+    for (const entry of open)
+      write(`    in step: ${entry.label} · ${((now() - entry.at) / 1000).toFixed(1)}s of ${entry.budget}s`)
   }
 
   const fire = why => {
@@ -159,9 +187,50 @@ function createWatchdog({
   }
   armIdle()
 
+  /**
+   * One named operation, under its own deadline. Returns whatever the work
+   * returns; aborts the run when the budget goes, naming the step. `soft`
+   * rejects with a StepTimeout instead, for a step whose caller has something
+   * better to do than die (a probe that may legitimately not answer) — the
+   * work itself is NOT cancelled, because a promise cannot be: it runs on,
+   * holding whatever socket it was holding, so a soft caller must be able to
+   * live with a late arrival.
+   */
+  const runStep = async (label, rawBudgetSeconds, work, options = {}) => {
+    const budgetSeconds = rawBudgetSeconds * stepScale
+    progress(label)
+    const entry = { label, budget: budgetSeconds, at: now() }
+    open.push(entry)
+    let timer = null
+    const overran = new Promise((_, reject) => {
+      if (!(budgetSeconds > 0)) return
+      timer = setTimer(() => {
+        const why = `step "${label}" did not finish in ${budgetSeconds}s`
+        if (options.soft) {
+          const error = new Error(why)
+          error.name = 'StepTimeout'
+          reject(error)
+          return
+        }
+        fire(why)
+      }, budgetSeconds * 1000)
+      if (timer && typeof timer.unref === 'function') timer.unref()
+    })
+    try {
+      return await Promise.race([Promise.resolve().then(work), overran])
+    } finally {
+      if (timer !== null) clearTimer(timer)
+      const at = open.indexOf(entry)
+      if (at >= 0) open.splice(at, 1)
+      progress(open.length > 0 ? open[open.length - 1].label : `after ${label}`)
+    }
+  }
+
   return {
     /** Record progress, optionally naming the step for the diagnosis. */
     step: progress,
+    /** Run one named operation under its own deadline (see runStep). */
+    run: runStep,
     /** Stop watching — a clean end, or a driver taking over the process. */
     disarm() {
       disarmed = true
@@ -187,6 +256,7 @@ function arm(name, options = {}) {
     totalMinutes: total === null ? (options.totalMinutes ?? DEFAULT_TOTAL_MINUTES) : total,
     idleMinutes: idle === null ? (options.idleMinutes ?? DEFAULT_IDLE_MINUTES) : idle,
     onTimeout: options.onTimeout ?? null,
+    stepScale: envScale('E2E_STEP_SCALE'),
     // Forwarded so a caller's cleanup is the same on both exits — the signal
     // handler below reads the very same option.
     killChildren: options.killChildren ?? defaultKillChildren
@@ -216,7 +286,27 @@ function arm(name, options = {}) {
     })
   }
 
+  armed = watchdog
   return watchdog
 }
 
-module.exports = { arm, createWatchdog, DEFAULT_TOTAL_MINUTES, DEFAULT_IDLE_MINUTES }
+/** The watchdog this process armed, for a shared layer that wants to put its
+ *  own operations under a deadline without being handed the handle. Before
+ *  arming (or in a unit test) `run` is a passthrough, so a layer can call it
+ *  unconditionally. */
+let armed = null
+const current = () => ({
+  run: (label, budgetSeconds, work, options) =>
+    armed === null ? Promise.resolve().then(work) : armed.run(label, budgetSeconds, work, options),
+  step: label => {
+    if (armed !== null) armed.step(label)
+  }
+})
+
+module.exports = {
+  arm,
+  createWatchdog,
+  current,
+  DEFAULT_TOTAL_MINUTES,
+  DEFAULT_IDLE_MINUTES
+}

@@ -105,6 +105,81 @@ describe('the E2E watchdog', () => {
     expect(runtime.exited).toBe(1)
   })
 
+  it('aborts a step that overruns its own budget, naming it', async () => {
+    // The point of a step: a wedged five-second call says so on the second it
+    // runs out, instead of burning the blanket silence budget first.
+    const runtime = fakeRuntime()
+    const watchdog = createWatchdog({ name: 'stepper', totalMinutes: 60, idleMinutes: 10, ...runtime.hooks })
+    const pending = watchdog.run('open song A', 30, () => new Promise(() => undefined))
+    runtime.advance(29_000)
+    expect(runtime.exited).toBeNull()
+    runtime.advance(2_000)
+    expect(runtime.exited).toBe(1)
+    const said = runtime.lines.join('\n')
+    expect(said).toContain('step "open song A" did not finish in 30s')
+    expect(said).toContain('in step: open song A')
+    void pending
+  })
+
+  it('lets a step finish inside its budget and forgets it', async () => {
+    const runtime = fakeRuntime()
+    const watchdog = createWatchdog({ name: 'stepper', totalMinutes: 60, idleMinutes: 10, ...runtime.hooks })
+    await expect(watchdog.run('seek', 30, async () => 'landed')).resolves.toBe('landed')
+    runtime.advance(120_000)
+    expect(runtime.exited).toBeNull()
+    expect(watchdog.lastStep).toBe('after seek')
+  })
+
+  it('reports the innermost step when steps nest', async () => {
+    const runtime = fakeRuntime()
+    const watchdog = createWatchdog({ name: 'nested', totalMinutes: 60, idleMinutes: 10, ...runtime.hooks })
+    const outer = watchdog.run('the whole session', 600, () =>
+      watchdog.run('waiting for the first callback', 20, () => new Promise(() => undefined))
+    )
+    // The inner step is entered on a microtask, so let the chain tick before
+    // the clock moves.
+    await Promise.resolve()
+    await Promise.resolve()
+    runtime.advance(21_000)
+    expect(runtime.exited).toBe(1)
+    const said = runtime.lines.join('\n')
+    expect(said).toContain('step "waiting for the first callback" did not finish in 20s')
+    // Both are named, so the diagnosis says where in the run it was.
+    expect(said).toContain('in step: the whole session')
+    void outer
+  })
+
+  it('a soft step rejects instead of ending the run', async () => {
+    const runtime = fakeRuntime()
+    const watchdog = createWatchdog({ name: 'soft', totalMinutes: 60, idleMinutes: 10, ...runtime.hooks })
+    const probe = watchdog.run('optional probe', 10, () => new Promise(() => undefined), { soft: true })
+    const settled = probe.then(
+      () => 'resolved',
+      (error: Error) => error.name
+    )
+    runtime.advance(11_000)
+    await expect(settled).resolves.toBe('StepTimeout')
+    expect(runtime.exited).toBeNull()
+  })
+
+  it('scales every step budget at once, for a slower machine', async () => {
+    const runtime = fakeRuntime()
+    const watchdog = createWatchdog({
+      name: 'slow-machine',
+      totalMinutes: 60,
+      idleMinutes: 10,
+      stepScale: 3,
+      ...runtime.hooks
+    })
+    const pending = watchdog.run('open song A', 10, () => new Promise(() => undefined))
+    runtime.advance(29_000)
+    expect(runtime.exited).toBeNull()
+    runtime.advance(2_000)
+    expect(runtime.exited).toBe(1)
+    expect(runtime.lines.join('\n')).toContain('did not finish in 30s')
+    void pending
+  })
+
   it('takes the apps it started with it', () => {
     // An Electron launched by a driver does not die with `process.exit`, and
     // a hidden one outlives the run: one was found sitting at 66 minutes.
