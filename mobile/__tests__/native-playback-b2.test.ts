@@ -4808,6 +4808,47 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     await handle.stop('dot beats test complete');
   });
 
+  it('tells the screen the song began, without waiting for the next poll', async () => {
+    // Nothing else can tell it. The phase reaches 'playing' when the core
+    // ACCEPTS the start — before its stream runs — and `playing` is read from
+    // the clock at notification time, so that notification says "not
+    // playing"; the next one is the telemetry poll a second later. The
+    // transport button therefore stayed on Play with the song already
+    // sounding: 1.26 s and 0.54 s, measured on the simulator.
+    const h = harness({ swapCapable: true, syncClock: true })
+    const project = await h.load(entry({ beat: countInFixtureGrid, metronome: countInFixtureMetronome }))
+    const handle = project.nativePlayback!
+    open.push(handle)
+    const generation = handle.snapshot().generation
+    // The poll keeps saying the transport is stopped — which is what a start
+    // that has been accepted but whose stream has not run yet looks like — so
+    // it can carry no news: only the synchronous clock knows it moved.
+    const stopped = capability(generation, 'running', 0, 'ios')
+    h.native.status.mockImplementation(async () => ({
+      ...stopped,
+      session: { ...stopped.session, transportState: 'stopped' }
+    }) as never)
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' })
+    let notifications = 0
+    const unsubscribe = handle.subscribe(() => {
+      notifications++
+    })
+    h.setPositionNow({
+      generation,
+      transportState: 'playing',
+      renderedProjectFrame: 4_096,
+      continuousFrame: 4_096,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0
+    })
+    await new Promise(resolve => setTimeout(resolve, 250))
+    expect(notifications).toBeGreaterThan(0)
+    expect(handle.clock().playing).toBe(true)
+    unsubscribe()
+    await handle.stop('start watch test complete')
+  })
+
   it('keeps counting after the landing, until the last click has been HEARD', async () => {
     // The clicks are still sounding when the transport lands: the ear is a
     // presentation latency and the singer's trim behind the render head.

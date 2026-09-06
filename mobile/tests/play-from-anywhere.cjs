@@ -24,8 +24,12 @@
  *   4. Play after a pause, count-in on  → the graph parks, an anchored prepare
  *      counts in again, the landing is the paused spot
  *   5. Play after a pause, count-in off → a plain resume, no prepare
+ *   6. the transport BUTTON               → it turns to Pause when the song
+ *      starts, not when the next telemetry poll happens to land
+ *   7. the count-in under a laggy route   → every dot lights before the row
+ *      goes, because the clicks sound on past the landing
  * and then, on BOTH backends with the same song:
- *   6. the seek bar's level envelope    → the loudest lane per sliver (the
+ *   8. the seek bar's level envelope    → the loudest lane per sliver (the
  *      colour) agrees, and the levels agree where there is signal
  *
  * Prereqs: app built+installed (Debug) on a booted simulator or emulator,
@@ -105,7 +109,7 @@ const SR = 48000
   const snap = async () =>
     JSON.parse(
       await dev.val(
-        "(function(){ const b = __test.backend; const h = b.handle; const s = h ? h.snapshot() : {}; const m = __r('node_modules/react-native/index.js').NativeModules.NativeAudioRuntime; const n = m && m.positionNow ? m.positionNow() : null; return JSON.stringify({ t: Date.now(), phase: s.phase, error: s.error, pos: +b.position.toFixed(3), playing: b.playing, region: s.regionState, st: n && n.transportState, f: n && n.renderedProjectFrame, af: n && n.audibleFrames, cp: n && n.positionSec, pre: n && n.remainingPreRollFrames, dots: b.countInStatus }) })()"
+        "(function(){ const b = __test.backend; const h = b.handle; const s = h ? h.snapshot() : {}; const m = __r('node_modules/react-native/index.js').NativeModules.NativeAudioRuntime; const n = m && m.positionNow ? m.positionNow() : null; return JSON.stringify({ t: Date.now(), phase: s.phase, error: s.error, pos: +b.position.toFixed(3), playing: b.playing, region: s.regionState, st: n && n.transportState, f: n && n.renderedProjectFrame, af: n && n.audibleFrames, cp: n && n.positionSec, pre: n && n.remainingPreRollFrames, dots: b.countInStatus, button: __test.playing === true }) })()"
       )
     )
   const play = async () => {
@@ -259,7 +263,78 @@ const SR = 48000
   if (lines.some((l) => l.startsWith('preparing graph'))) fail('a plain resume prepared a graph')
   log(`5. Play after pause (count-in off): resumed in place at ${(first.f / SR).toFixed(2)} s, no prepare — ok`)
 
-  // ---- 6. the seek bar's level envelope, both backends --------------------
+  // ---- 6. the transport button follows the transport ----------------------
+  // The button is React state, and the state is set when the backend
+  // notifies — which used to be the phase change (before the core's stream
+  // runs, so `playing` still read false) and then nothing until the poll a
+  // second later. The singer sees Play on a song that is already sounding:
+  // measured 1.26 s on the simulator, and reported from a phone as "1 to 1.5
+  // seconds, the count-in already started". The budget is generous on
+  // purpose — this is a guard against the poll-length regression, not a
+  // frame-timing assertion, and the CDP round trip is 30-300 ms of it.
+  await dev.ev('void __test.backend.pause()')
+  await sleep(600)
+  s = await snap()
+  // Vacuity guard: if the pause were refused, the song from case 5 would
+  // still be playing, the first sample would carry both a moving transport
+  // and a lit button, and this case would report "0 ms behind" having
+  // measured no start at all.
+  if (s.phase !== 'paused' || s.button) fail(`the button test began on a ${s.phase} transport with the button ${s.button ? 'on Pause' : 'on Play'}`)
+  await dev.ev('__test.backend.seek(20)')
+  await sleep(500)
+  t0 = Date.now()
+  await play()
+  rows = await trace(3000, 30)
+  const moving = rows.find((r) => r.st === 'playing' || r.st === 'pre-roll')
+  const flipped = rows.find((r) => r.button)
+  if (!moving) fail('the transport never started for the button test')
+  if (!flipped) fail('the transport button never turned to Pause while the song played')
+  const buttonLagMs = flipped.t - moving.t
+  if (buttonLagMs > 700)
+    fail(`the button turned to Pause ${buttonLagMs} ms after the song started (budget 700 ms) — the screen is waiting for a poll again`)
+  log(`6. the transport button: song at +${moving.t - t0} ms, button at +${flipped.t - t0} ms (${buttonLagMs} ms behind) — ok`)
+
+  // ---- 7. the count-in under a laggy route --------------------------------
+  // The ear is a presentation latency and the singer's trim behind the render
+  // head, so the last clicks sound AFTER the transport lands. Legacy keeps
+  // its row until the music is heard to start; native dropped it at the
+  // landing and lost every dot inside the lag — three of four at 600 ms of
+  // trim, two of four at 1200 ms, while legacy lit all four. The trim stands
+  // in for a Bluetooth/CarPlay route the simulator has not got, and is put
+  // back to zero straight after: it is the singer's own setting.
+  await dev.ev('void __test.backend.pause()')
+  await sleep(600)
+  // Both of these persist — the trim per output route, the count-in in the
+  // project — so both are read first and put back in the `finally`, whatever
+  // happens in between. Restoring a literal 0 would be this driver quietly
+  // clearing a trim somebody had dialled in; player-session is the precedent
+  // for one of these ending up pointed at a real phone.
+  const trimBefore = JSON.parse(await dev.val('JSON.stringify(__test.latency())')).trimMs
+  const countInBefore = JSON.parse(await dev.val('JSON.stringify(__test.met)')).countInBars
+  await dev.ev('__test.changeMet({ countInBars: 1 })')
+  await sleep(1200)
+  await dev.ev(`void __test.setTrim(1200)`)
+  try {
+    await sleep(400)
+    await dev.ev('__test.backend.seek(20)')
+    await sleep(500)
+    await play()
+    rows = await trace(9000, 60)
+  } finally {
+    await dev.ev(`void __test.setTrim(${trimBefore})`)
+    await dev.ev(`__test.changeMet({ countInBars: ${countInBefore} })`)
+    await sleep(600)
+  }
+  const lit = rows.filter((r) => r.dots && r.dots.kind === 'beats')
+  if (lit.length < 3) fail(`the count-in row never appeared under a 1.2 s lag (${lit.length} samples)`)
+  const lastLit = lit[lit.length - 1]
+  if (lastLit.dots.done !== lastLit.dots.total)
+    fail(`the count-in row vanished at ${lastLit.dots.done} of ${lastLit.dots.total} dots — the clicks inside the output lag were never shown`)
+  if (!lit.some((r) => r.st === 'playing'))
+    fail('the count-in row did not outlive the landing, so the last clicks had no dots to light')
+  log(`7. the count-in under a 1.2 s lag: ${lit.length} samples, last row ${lastLit.dots.done}/${lastLit.dots.total}, still up ${lit.filter((r) => r.st === 'playing').length} samples past the landing — ok`)
+
+  // ---- 8. the seek bar's level envelope, both backends --------------------
   const native = JSON.parse(
     await dev.val("__test.backend.handle.lanePeaks().then(e => JSON.stringify(e && e.lanes.map(l => ({ id: l.id, valid: l.peaksValid, levels: Array.from(l.peaks) }))))", 20000)
   )
@@ -315,7 +390,7 @@ const SR = 48000
   // on a percussive sliver the two read 0.060 against 0.071 with half the sliver
   // visited. Invisible on the bar, and not a disagreement about the song.
   if (worst > 0.25) fail(`the level envelopes differ by ${(worst * 100).toFixed(1)}% at ${worstAt}`)
-  log(`6. seek bar envelope: colour agrees on ${96 - colourMismatch - nearTies}/96 slivers (${nearTies} near-ties within 10%), worst level difference ${(worst * 100).toFixed(2)}% at ${worstAt || 'none'} — ok`)
+  log(`8. seek bar envelope: colour agrees on ${96 - colourMismatch - nearTies}/96 slivers (${nearTies} near-ties within 10%), worst level difference ${(worst * 100).toFixed(2)}% at ${worstAt || 'none'} — ok`)
 
   await leave()
   await dev.ev(`__ps.setNative(${before.enabled ? 'true' : 'false'}).then(() => 1, () => 1)`)

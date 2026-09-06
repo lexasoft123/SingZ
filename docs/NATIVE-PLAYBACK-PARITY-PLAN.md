@@ -868,6 +868,48 @@ poll and retire the row a beat early — the very face this fixes. It needs a pu
 inside the tail's own length; if it ever shows up, latch from the poll alone or widen the
 tolerance to the projection cap.
 
+**"Time between pressing play and it changing to the pause button — 1 to 1.5 seconds, the
+count-in already started" (the phone, build 55, 2026-09-06 evening).** Measured on the
+simulator before touching anything: the transport was moving at 218 ms and the button
+flipped at 1264 ms; on the Play after a pause, 53 ms and 541 ms. The notifications tell the
+story exactly — one at 7 ms (phase 'starting'), two at 110 and 116 ms (phase 'playing',
+`backend.playing` still FALSE), and then nothing until the telemetry poll at 1128 ms. The
+phase reaches 'playing' when the core ACCEPTS the start, which is before its stream runs,
+and `playing` is read from the CLOCK at notification time — so the notification that
+carries the news arrives a fifth of a second too early to contain it, and the next one is a
+poll away. The poll is at the playing rate (a second) from the moment the phase says
+playing, which is exactly the window that needs to be fast.
+The facade now watches for the transport actually starting and says so: a frame-paced
+(33 ms) read of the SYNCHRONOUS clock — no bridge call, the same JSI read the clock makes
+anyway — armed when a start is issued and when a pause is resumed, retired the moment the
+transport is seen moving, self-limiting at 3 s, and cleared by every teardown. A build
+without that clock (Android) gets the fast poll instead, since its read is the only signal
+there. One trap, and it cost a whole measurement cycle: `startPolling()` stops the timer
+before arming its own and the start path calls it one line after issuing the start, so
+clearing the watch from `stopPolling()` cancelled every watch a millisecond after it armed
+— the fix measured exactly as if it were not there. The teardown paths clear it by name
+instead. After: 288 ms for the fresh Play and 141 ms for the Play after a pause, against
+transports moving at 205 and 54 — the button now follows the transport by a frame or two
+rather than by a poll. The fast poll is scoped to the
+clockless builds and bounded by the same 3 s, because an in-place swap arms a watch on a
+PAUSED song and an output that never opens is a real Android failure — either would
+otherwise pin the poll at five reads a second for the rest of the song, outranking even the
+ten-second background-held rate. A unit test pins the notification with a poll that carries
+no news; it fails against the unarmed version. `TEST.playing` exposes the button's own
+state to a driver, beside `clockDiag()`'s copy, so the E2E assertion reads the thing the
+singer looks at.
+
+**Both of the evening's findings are now permanent driver cases**, because a unit test
+cannot see a screen: `mobile/tests/play-from-anywhere.cjs` grew case 6, the button turning
+to Pause within 700 ms of the transport moving (measured 0 ms behind after the fix, against
+the 1.26 s that started this), and case 7, the count-in under a 1.2 s display trim standing
+in for a Bluetooth/CarPlay route — every dot lit before the row goes, and the row still up
+past the landing (46 samples, last row 4/4, 18 of them past the landing). The trim is the
+singer's own persisted setting, so it is restored in a `finally`. Both would have failed
+before their fixes on the numbers already measured here: 1264 ms against a 700 ms budget,
+and ●●●○ / ●●○○ at 600 and 1200 ms of trim. Full run on the simulator after the change:
+8/8 PASS.
+
 **"When I swipe the player back to the catalog, it opens once more and swipes back by
 itself" (the phone, 2026-09-06 afternoon).** The player route sat inside a removal fence
 that prevented EVERY pop, flushed the metronome journal, then re-dispatched the pop. On a

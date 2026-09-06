@@ -1222,6 +1222,10 @@ export default function PlayerScreen({
       added: addedCount,
       originalOnly
     }
+    /** The transport button's own state — what the singer sees, which is the
+     *  React state and not `engine.playing`. A driver comparing the two is
+     *  the only way to measure how long the button lags the transport. */
+    TEST.playing = playing
     TEST.countIn = countInDisplay === null
       ? null
       : { ...countInDisplay, kind: countInSt?.kind ?? null }

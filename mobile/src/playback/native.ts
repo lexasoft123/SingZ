@@ -196,6 +196,12 @@ export const NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC =
  */
 export const NATIVE_CLOCK_PROJECTION_LIMIT_SEC = 1;
 
+/** How often the facade looks for the transport to actually start moving
+ *  after a Play, and how long it keeps looking (see `watchTransportStart`).
+ *  A frame's worth: the read is the synchronous clock, not a bridge call. */
+const START_WATCH_TICK_MS = 33;
+const START_WATCH_LIMIT_MS = 3000;
+
 /** How far under its floor the position may sit before the floor is taken to
  *  describe a run that is over (see `floorSec`). Wide enough for the clock's
  *  own jitter, far narrower than a loop lap or a seek. */
@@ -3338,6 +3344,7 @@ export class IosNativePlaybackCoordinator {
       } = derived;
 
       handle.stopPolling();
+      handle.clearStartWatch();
       if (wasStarted) {
         try {
           await native.stop(oldGeneration);
@@ -3912,6 +3919,7 @@ export class IosNativePlaybackCoordinator {
   ): Promise<boolean> {
     const stopStartedAt = Date.now();
     handle.stopPolling();
+    handle.clearStartWatch();
     // A stopped generation holds no stream. Left set, the mark outlived the
     // generation: Play from 'stopped' starts fresh and never releases it, and
     // swapsInPlace() then refused every seam for the rest of the session.
@@ -3988,6 +3996,7 @@ export class IosNativePlaybackCoordinator {
   ): Promise<boolean> {
     const unloadStartedAt = Date.now();
     handle.stopPolling();
+    handle.clearStartWatch();
     if (handle.generation === 0) return this.active !== handle;
     const generation = handle.generation;
     const phase = handle.snapshot().phase;
@@ -4430,6 +4439,18 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  lands, and the row has to stay up to light them. Reset with
    *  `countInSeen`, and retired the moment the ear reaches the landing. */
   private countInSounding = false;
+  /** A start has been issued and the transport has not been seen moving yet.
+   *  Nothing else tells the screen the song began: the phase reaches
+   *  'playing' when the core ACCEPTS the start, which is before its stream
+   *  runs, and `playing` is read from the clock at notification time — so
+   *  the button stayed on Play until the next telemetry poll a second
+   *  later, with the count-in already sounding (measured 1.03 s and 0.54 s
+   *  on the simulator). */
+  private awaitingTransportStart = false;
+  private startWatchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the current watch was armed — the deadline for the fast poll on a
+   *  build that has no synchronous clock to tick against. */
+  private startWatchArmedAt = 0;
   /** The furthest the transport has been past the landing during the tail,
    *  so a position that moves BACKWARDS retires it (see `countInAt`). */
   private countInTailFrame = 0;
@@ -4763,6 +4784,52 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.countInSeen = false;
     this.countInSounding = false;
     this.countInTailFrame = 0;
+    this.awaitingTransportStart = true;
+    this.watchTransportStart();
+  }
+
+  /** Watch the synchronous clock for the transport starting, and tell the
+   *  screen the moment it does. The poll cannot: it runs at the playing rate
+   *  (a second) from the instant the phase says playing, which is exactly the
+   *  window this covers, and each of its reads costs a bridge round trip
+   *  where this one is a JSI call the clock already makes every frame. A
+   *  build without that clock has the fast poll below instead. Self-limiting:
+   *  a start that never takes stops being watched after
+   *  START_WATCH_LIMIT_MS, and the timer is unref'd nowhere because RN has
+   *  no such thing — `clearStartWatch` is what ends it. */
+  private watchTransportStart(): void {
+    if (this.startWatchTimer !== null) clearTimeout(this.startWatchTimer);
+    this.startWatchTimer = null;
+    const began = Date.now();
+    this.startWatchArmedAt = began;
+    if (!this.coordinator.syncClock) return;
+    const tick = (): void => {
+      this.startWatchTimer = null;
+      if (!this.awaitingTransportStart) return;
+      const now = this.coordinator.positionNow(this);
+      if (
+        now !== null &&
+        (now.transportState === 'pre-roll' || now.transportState === 'playing')
+      ) {
+        this.awaitingTransportStart = false;
+        this.notify();
+        return;
+      }
+      if (Date.now() - began > START_WATCH_LIMIT_MS) {
+        this.awaitingTransportStart = false;
+        return;
+      }
+      this.startWatchTimer = setTimeout(tick, START_WATCH_TICK_MS);
+    };
+    this.startWatchTimer = setTimeout(tick, START_WATCH_TICK_MS);
+  }
+
+  /** Stop looking: the transport moved, or the run it belonged to is over.
+   *  Called by the coordinator's teardown paths as well as from here. */
+  clearStartWatch(): void {
+    if (this.startWatchTimer !== null) clearTimeout(this.startWatchTimer);
+    this.startWatchTimer = null;
+    this.awaitingTransportStart = false;
   }
 
   /** The count-in clicks' times relative to the landing (≤ 0, seconds), as
@@ -5328,6 +5395,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   }
 
   publishTelemetry(session: NativePlaybackSessionStatus): void {
+    // The start took: stop looking for it, and stop polling fast on its
+    // behalf. Before every early return below, because a transport that is
+    // sounding is a transport that started — including the outgoing
+    // generation's, mid-swap, which is the song the singer can hear.
+    if (
+      this.awaitingTransportStart &&
+      (session.transportState === 'playing' ||
+        session.transportState === 'pre-roll')
+    )
+      this.clearStartWatch();
     const sampleRate = session.sampleRate || this.output?.sampleRate || 48_000;
     if (session.transportGeneration !== this.generation) {
       // An armed swap: the outgoing generation renders, and its number is
@@ -5582,6 +5659,12 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       this.runStartFrame = null;
     if (command.kind === 'pause') this.update({ phase: 'paused' });
     else if (command.kind === 'resume') {
+      // Play after a pause is a start too, and the button owes the same
+      // answer: the resume does not go through markStartIssued, so it arms
+      // the watch itself or the flip waits for the next poll (measured 394
+      // ms on the simulator, where the transport was moving at 44).
+      this.awaitingTransportStart = true;
+      this.watchTransportStart();
       // The core resumes from ITS paused frame, at most one block past the
       // one the clock held; from here the clock reads the core again. That
       // frame is also where this run of playback begins, so it is the floor —
@@ -5845,6 +5928,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   }
 
   async pause(): Promise<void> {
+    // Whatever the start was going to do, the singer has changed their mind.
+    this.clearStartWatch();
     // Freeze the clock at the frame under the singer's finger BEFORE the
     // command crosses, the way legacy captures `startOffset = audioPosition`
     // on the same line it stops — so the position cannot drain forward by a
@@ -6300,6 +6385,20 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  A build without the synchronous clock keeps the fast pre-roll poll,
    *  because its dots sample this grid. */
   private pollIntervalMs(): number {
+    // A start that has been issued and not yet taken, on a build whose only
+    // signal this is: the screen is waiting to be told the song began, and
+    // without the synchronous clock nothing else can tell it. Bounded by the
+    // same limit the watch uses, and scoped to those builds — a start that
+    // is never going to move (an in-place swap arms one on a PAUSED song,
+    // and an output that never opens is a real Android failure) would
+    // otherwise pin the poll at five reads a second for the rest of the
+    // song, outranking even the 10 s background-held rate.
+    if (
+      !this.coordinator.syncClock &&
+      this.awaitingTransportStart &&
+      Date.now() - this.startWatchArmedAt < START_WATCH_LIMIT_MS
+    )
+      return NATIVE_PRE_ROLL_POLL_MS;
     if (!this.coordinator.syncClock && this.state.countInStatus !== null)
       return NATIVE_PRE_ROLL_POLL_MS;
     if (this.streamHeldGeneration !== 0) return NATIVE_TELEMETRY_HELD_POLL_MS;
@@ -6340,6 +6439,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   stopPolling(): void {
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+    // NOT the start watch: `startPolling` stops the timer before arming its
+    // own, and the ordinary start path calls it one line after issuing the
+    // start — so clearing here cancelled every watch a millisecond after it
+    // armed, and the button went on flipping a poll late. The teardown paths
+    // clear it by name.
   }
 }
 
