@@ -4808,6 +4808,202 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     await handle.stop('dot beats test complete');
   });
 
+  it('keeps counting after the landing, until the last click has been HEARD', async () => {
+    // The clicks are still sounding when the transport lands: the ear is a
+    // presentation latency and the singer's trim behind the render head.
+    // Legacy keeps its row until the MUSIC is heard to start; native dropped
+    // it the moment the core said 'playing', so every dot inside that lag
+    // was lost — on the simulator a 0.6 s lag ended the row at three of four
+    // and a 1.2 s lag at two, while legacy lit all four on the same song.
+    // The singer sees a count-in that stops counting and vanishes.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat: countInFixtureGrid, metronome: countInFixtureMetronome }));
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    // 120 bpm, one bar: clicks at −2, −1.5, −1 and −0.5 s before the landing.
+    const preRoll = 96_000;
+    const base = capability(generation, 'running', 0, 'ios');
+    const latency = base.session.presentationLatencyFrames;
+    const at = (state: 'pre-roll' | 'playing', renderedFrame: number) => {
+      h.setPositionNow({
+        generation,
+        transportState: state,
+        renderedProjectFrame: renderedFrame,
+        continuousFrame: preRoll + renderedFrame,
+        remainingPreRollFrames: Math.max(0, -renderedFrame),
+        seekCount: 0,
+        ageMs: 0,
+      });
+      return handle.clock().countIn;
+    };
+    h.native.status.mockImplementation(async () => ({
+      ...base,
+      session: {
+        ...base.session,
+        transportState: 'pre-roll',
+        preRollFrames: preRoll,
+        remainingPreRollFrames: preRoll,
+        audibleProjectFrame: -preRoll,
+        renderedProjectFrame: -preRoll + latency,
+        countInEventCount: 4,
+        countInBeatsPerBar: 4,
+      },
+    }) as never);
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    await h.coordinator.pollHandle(handle as never);
+    // A CarPlay-sized lag: 1.2 s of trim, more than twice the last click's
+    // 0.5 s, so two of the four clicks sound AFTER the transport lands.
+    handle.setDisplayTrim(1.2);
+    expect(at('pre-roll', -1)).toMatchObject({ done: 2 });
+    // The landing. Under the old rule the row ended here, at two of four.
+    expect(at('playing', 0)).toMatchObject({ kind: 'beats', total: 4, done: 2 });
+    expect(at('playing', Math.round(0.5 * 48_000))).toMatchObject({ done: 3 });
+    expect(at('playing', Math.round(1.1 * 48_000))).toMatchObject({ done: 4 });
+    // And it retires when the ear reaches the landing, not before: every dot
+    // lit, the way legacy's does.
+    expect(at('playing', Math.round(1.3 * 48_000))).toBeNull();
+    // Retired for good — a later moment in the song is not a count-in.
+    expect(at('playing', Math.round(30 * 48_000))).toBeNull();
+    await handle.stop('count-in tail test complete');
+  });
+
+  it('does not hang the count-in row on a scrub back inside the tail', async () => {
+    // The tail runs forward from the landing. A position BELOW it is a
+    // discontinuity — a scrub back inside the window, or a loop fold from a
+    // region that starts before it — and reads as a runway of tens of
+    // seconds: the row would sit there, hollow, until the song climbed back.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat: countInFixtureGrid, metronome: countInFixtureMetronome }));
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    const preRoll = 96_000;
+    const base = capability(generation, 'running', 0, 'ios');
+    const latency = base.session.presentationLatencyFrames;
+    h.native.status.mockImplementation(async () => ({
+      ...base,
+      session: {
+        ...base.session,
+        transportState: 'pre-roll',
+        preRollFrames: preRoll,
+        remainingPreRollFrames: preRoll,
+        audibleProjectFrame: -preRoll,
+        renderedProjectFrame: -preRoll + latency,
+        countInEventCount: 4,
+        countInBeatsPerBar: 4,
+      },
+    }) as never);
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    await h.coordinator.pollHandle(handle as never);
+    handle.setDisplayTrim(1.2);
+    const at = (state: 'pre-roll' | 'playing', renderedFrame: number) => {
+      h.setPositionNow({
+        generation,
+        transportState: state,
+        renderedProjectFrame: renderedFrame,
+        continuousFrame: preRoll + renderedFrame,
+        remainingPreRollFrames: Math.max(0, -renderedFrame),
+        seekCount: 0,
+        ageMs: 0,
+      });
+      return handle.clock().countIn;
+    };
+    // The count-in anchor of a Play from mid-song: the landing is a second
+    // in, so the tail's frames are project frames around it rather than
+    // around zero. (Set directly — a Play from a scrub reaches this through
+    // a re-prepare, which is a different test's subject. The fixture song is
+    // two seconds long and the clock clamps to it, so the landing has to sit
+    // inside that.)
+    const landing = 48_000;
+    (handle as unknown as { countInLandingFrame: number }).countInLandingFrame =
+      landing;
+    expect(at('playing', landing)).toMatchObject({ kind: 'beats' });
+    // A scrub back to the top, still inside the 1.2 s tail.
+    expect(at('playing', 2_400)).toBeNull();
+    // And it stays retired when the song climbs back past the landing.
+    expect(at('playing', landing)).toBeNull();
+    await handle.stop('count-in tail scrub test complete');
+  });
+
+  it('retires the tail on a scrub back even when the landing is the top of the song', async () => {
+    // The commonest count-in there is: Play from the start, landing 0. Every
+    // frame is then at or above the landing, so "below the landing" cannot
+    // see a scrub — the rule has to be that the position moved BACKWARDS,
+    // the same one the position floor uses. Without it a scrub to the top
+    // inside the tail starts the count-in over with its dots reset.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat: countInFixtureGrid, metronome: countInFixtureMetronome }));
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    const preRoll = 96_000;
+    const base = capability(generation, 'running', 0, 'ios');
+    const latency = base.session.presentationLatencyFrames;
+    h.native.status.mockImplementation(async () => ({
+      ...base,
+      session: {
+        ...base.session,
+        transportState: 'pre-roll',
+        preRollFrames: preRoll,
+        remainingPreRollFrames: preRoll,
+        audibleProjectFrame: -preRoll,
+        renderedProjectFrame: -preRoll + latency,
+        countInEventCount: 4,
+        countInBeatsPerBar: 4,
+      },
+    }) as never);
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    await h.coordinator.pollHandle(handle as never);
+    handle.setDisplayTrim(1.2);
+    const at = (state: 'pre-roll' | 'playing', renderedFrame: number) => {
+      h.setPositionNow({
+        generation,
+        transportState: state,
+        renderedProjectFrame: renderedFrame,
+        continuousFrame: preRoll + renderedFrame,
+        remainingPreRollFrames: Math.max(0, -renderedFrame),
+        seekCount: 0,
+        ageMs: 0,
+      });
+      return handle.clock().countIn;
+    };
+    expect(at('playing', Math.round(0.6 * 48_000))).toMatchObject({ done: 3 });
+    // A scrub back to the top, still inside the 1.2 s tail.
+    expect(at('playing', 0)).toBeNull();
+    expect(at('playing', Math.round(0.9 * 48_000))).toBeNull();
+  });
+
+  it('does not resurrect a count-in row for a song that never counted in', async () => {
+    // The tail is only for a run that had a pre-roll. A flat start (no
+    // count-in, or a mid-song cue rebuild) reports 'playing' at a small
+    // frame too, and must show nothing at all.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(
+      entry({ beat: countInFixtureGrid, metronome: { ...countInFixtureMetronome, countInBars: 0 } }),
+    );
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    h.native.status.mockImplementation(async () => ({
+      ...capability(generation, 'running', 0, 'ios'),
+    }) as never);
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    await h.coordinator.pollHandle(handle as never);
+    handle.setDisplayTrim(1.2);
+    h.setPositionNow({
+      generation,
+      transportState: 'playing',
+      renderedProjectFrame: 0,
+      continuousFrame: 0,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().countIn).toBeNull();
+    await handle.stop('no count-in tail test complete');
+  });
+
   it('shows the count-in row hollow from the tap until the core reports its pre-roll', async () => {
     // Legacy shows 0/N the moment Play is tapped and fills the first dot on
     // the first click. Native showed nothing until its first pre-roll report,

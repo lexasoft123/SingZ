@@ -4424,6 +4424,15 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  sounded. Reset by a new start and by a new prepare — whichever the
    *  path runs last. */
   private countInSeen = false;
+  /** Whether this run actually counted in — the core reported a pre-roll.
+   *  It outlives the pre-roll on purpose: the clicks are still SOUNDING for
+   *  a presentation latency (and the singer's trim) after the transport
+   *  lands, and the row has to stay up to light them. Reset with
+   *  `countInSeen`, and retired the moment the ear reaches the landing. */
+  private countInSounding = false;
+  /** The furthest the transport has been past the landing during the tail,
+   *  so a position that moves BACKWARDS retires it (see `countInAt`). */
+  private countInTailFrame = 0;
   /** The last rendered frame as the core reported it — the SIGNED frame a
    *  log about the transport wants, where the snapshot holds the shown one. */
   private rawRenderedFrame = 0;
@@ -4515,6 +4524,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         ? 0
         : Math.max(0, Math.round(countInAnchorSeconds * this.sampleRate()));
     this.countInSeen = false;
+    this.countInSounding = false;
+    this.countInTailFrame = 0;
     this.runStartFrame =
       countInAnchorSeconds === undefined
         ? Math.max(0, preparedStartProjectFrame ?? 0)
@@ -4750,6 +4761,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   markStartIssued(generation: number): void {
     this.startIssuedGeneration = generation;
     this.countInSeen = false;
+    this.countInSounding = false;
+    this.countInTailFrame = 0;
   }
 
   /** The count-in clicks' times relative to the landing (≤ 0, seconds), as
@@ -5060,12 +5073,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     return {
       renderedSec,
       playing: state.phase === 'playing' && state.advancing === true,
-      // Without the synchronous clock the count-in status IS the pre-roll:
-      // it is published only while the transport reports one.
-      preRoll: state.countInStatus !== null,
+      // Without the synchronous clock the count-in status stands in for the
+      // pre-roll — but the row now outlives the landing by the output lag,
+      // to light the clicks that are still sounding, and THAT stretch is
+      // ordinary playing: `advancing` is the transport's own answer, and
+      // taking the row alone would pin the position to the render head for
+      // as long as the tail lasts.
+      preRoll: state.countInStatus !== null && state.advancing !== true,
       floorSec: this.floorSec(
         state.phase === 'playing' && state.advancing === true,
-        state.countInStatus !== null,
+        state.countInStatus !== null && state.advancing !== true,
         renderedSec * sampleRate,
         sampleRate,
       ),
@@ -5431,9 +5448,44 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         transportState === 'playing' ||
         transportState === 'paused' ||
         transportState === 'completed'
-      )
+      ) {
         this.countInSeen = true;
-      else if (
+        // The count-in is not over when the transport lands: the ear is a
+        // presentation latency and a trim behind the render head, so the
+        // last clicks are still sounding. Legacy keeps its row until the
+        // MUSIC is heard to start (`now >= startedAt + stretchLatency`);
+        // native dropped it at the landing and lost every dot inside that
+        // lag — measured on the simulator, a 0.6 s lag ended the row at
+        // three dots of four and a 1.2 s lag at two, while legacy lit all
+        // four. A count-in that stops counting is what the singer sees.
+        if (transportState === 'playing' && this.countInSounding && base !== null) {
+          // Pre-roll frames are signed against the landing; once the
+          // transport has landed the core reports project frames, so the
+          // same runway is measured from the landing frame.
+          const sinceLanding = renderedFrame - this.countInLandingFrame;
+          // The tail runs FORWARD from the landing, and only forward. A
+          // scrub back inside the window, or a loop fold from a region that
+          // starts before the landing, is a discontinuity: it reads as a
+          // runway of tens of seconds and would hang a hollow row on the
+          // screen, or — where the landing is the top of the song, which is
+          // the commonest count-in of all — start the tail over with its
+          // dots reset. So the same rule the position floor uses a few
+          // hundred lines up: below where it has already been means the run
+          // this tail belongs to is over.
+          const rate = base.sampleRate || this.sampleRate();
+          const backwards =
+            sinceLanding < this.countInTailFrame - rate * FLOOR_RETIRE_SEC;
+          if (!backwards && sinceLanding >= 0) {
+            this.countInTailFrame = Math.max(
+              this.countInTailFrame,
+              sinceLanding,
+            );
+            const row = this.countInRow(base, sinceLanding);
+            if (row !== null) return row;
+          }
+        }
+        this.countInSounding = false;
+      } else if (
         !this.countInSeen &&
         this.startWasIssued(this.generation) &&
         // Only when a pre-roll is actually pending: the core parks one at
@@ -5452,7 +5504,21 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       return null;
     }
     this.countInSeen = true;
+    this.countInSounding = true;
     if (base === null) return null;
+    return this.countInRow(base, renderedFrame);
+  }
+
+  /**
+   * The count-in row for a position `sinceLandingFrames` from the landing
+   * (negative before it). Null once the ear has reached the landing — the
+   * count-in is over when it is HEARD to be over, not when the render head
+   * crosses.
+   */
+  private countInRow(
+    base: NativePlaybackSessionStatus,
+    sinceLandingFrames: number,
+  ): PlaybackCountInStatus | null {
     const sampleRate = base.sampleRate || this.sampleRate();
     // Output latency through the signed audible position, plus the singer's
     // own trim — the part the OS under-reports and therefore the part the
@@ -5473,7 +5539,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     // is that much longer. Exiting on the render-domain remaining took the
     // dots away a latency plus a trim before the singer heard the song begin.
     const remainingFrames =
-      base.presentationLatencyFrames - renderedFrame + trimFrames;
+      base.presentationLatencyFrames - sinceLandingFrames + trimFrames;
     if (remainingFrames <= 0) return null;
     const total = base.countInEventCount;
     const perBar = base.countInBeatsPerBar;

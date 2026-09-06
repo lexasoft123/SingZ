@@ -827,6 +827,47 @@ exact parity of the statistic left with the bounded scan by design, and a sevent
 percussive sliver is invisible on the bar — and it sets a near-tie within 10% aside when
 judging the colour; a clear winner still has to agree.
 
+**Count-in, a fourth: "the count-in highlights only the first and second dot and then
+disappears at all — other songs too" (the phone, 2026-09-06 evening).** The count-in is
+not over when the transport lands. The ear is a presentation latency and the singer's own
+trim behind the render head, so the last clicks are still SOUNDING after the core says
+'playing' — legacy has always known this and keeps its row until the music is HEARD to
+start (`now >= startedAt + stretchLatency` in `countInStatus`, where `now` is the heard
+clock). Native tore the row down the moment `transportState` left 'pre-roll', which is the
+RENDER landing, so every dot whose click falls inside the output lag was lost: the row
+stops counting and vanishes. It is invisible on a low-latency route — 10 ms on the
+simulator, 34 ms on the phone's speaker — and total on a laggy one, which is why no driver
+had seen it and why every song shows it once the route is slow enough. Measured on the
+simulator with the singer's trim standing in for the route (Father and Son, 68 bpm, four
+clicks 0.96 s apart): at 0 ms all four dots light; at 600 ms the row ends at ●●●○; at 1200
+ms at ●●○○ — while legacy, on the same song and the same trim, lights all four. The facade
+now keeps the row alive past the landing and retires it when the heard position reaches
+it: the pre-roll's signed frame becomes the frame since the landing (`renderedFrame −
+countInLandingFrame`) once the transport is playing, and the existing "remaining ≤ 0 →
+null" rule then ends the count-in on the ear rather than the render head. Because every
+click offset is ≤ 0, the row can no longer disappear with a dot unlit. The tail runs FORWARD from the landing
+only, and the rule is the position floor's: below where it has already been means the run
+this tail belongs to is over. A scrub back inside the window, or a loop fold from a region
+that starts before the landing, would otherwise read as a runway of tens of seconds and
+hang a hollow row on the screen until the song climbed back — and where the landing is the
+top of the song, which is the commonest count-in of all, "below the landing" cannot see a
+scrub at all and the tail would simply start over with its dots reset. Both were caught in
+review rather than in the field; the window is 34 ms with no trim, which is why nothing had
+hit them. Guarded four ways (each fails against the rule it replaced): a unit test that
+walks a 1.2 s lag through the landing to 4/4 and then to null, one that refuses to
+resurrect a row for a run that never counted in, and two scrubs back inside the tail — one
+against a mid-song landing, one against a landing of zero. Verified on the simulator and on the iPhone 13 Pro Max with this tree's own
+native: at a 1.2 s trim the fourth dot now lights 0.6 s AFTER the landing and the row
+retires at the audible start. The polled clock's `preRoll` flag (Android, and any build
+without `positionNow`) now takes the transport's own `advancing` as well as the row, or
+the tail would pin the position to the render head for the length of the lag. Known lever,
+left alone on the evidence there is: the latch is written from both the synchronous read
+(projected forward by its age, capped at a second) and the poll (the raw reported frame),
+so a render thread that stops publishing mid-tail could latch a second ahead of the next
+poll and retire the row a beat early — the very face this fixes. It needs a publish stall
+inside the tail's own length; if it ever shows up, latch from the poll alone or widen the
+tolerance to the projection cap.
+
 **"When I swipe the player back to the catalog, it opens once more and swipes back by
 itself" (the phone, 2026-09-06 afternoon).** The player route sat inside a removal fence
 that prevented EVERY pop, flushed the metronome journal, then re-dispatched the pop. On a
