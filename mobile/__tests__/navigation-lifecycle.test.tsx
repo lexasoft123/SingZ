@@ -45,6 +45,7 @@ function nativeProject(): { project: LoadedProject; handle: NativePlaybackHandle
       renderedSec: state.renderedPositionSec,
       playing: state.phase === 'playing',
       preRoll: false,
+      floorSec: null,
       live: false,
       countIn: state.countInStatus
     }),

@@ -196,6 +196,11 @@ export const NATIVE_TELEMETRY_PROJECTION_LIMIT_SEC =
  */
 export const NATIVE_CLOCK_PROJECTION_LIMIT_SEC = 1;
 
+/** How far under its floor the position may sit before the floor is taken to
+ *  describe a run that is over (see `floorSec`). Wide enough for the clock's
+ *  own jitter, far narrower than a loop lap or a seek. */
+const FLOOR_RETIRE_SEC = 0.05;
+
 export interface NativePlaybackCleanup {
   readonly safety: string;
   readonly error: string;
@@ -4405,6 +4410,13 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private countInLandingFrame = 0;
   /** The bar length the current count-in counts (set by countInBeatOffsets). */
   private countInPerBar = 0;
+  /** Where the current run of playback began, in project frames: the prepared
+   *  start, a count-in's landing, a seek's target or the spot a resume picked
+   *  up from — whichever happened last. It floors the corrected position (see
+   *  `NativePlaybackClock.floorSec`), exactly as legacy's `startOffset` floors
+   *  its own clock, so the highlight cannot dip below the line the singer
+   *  started on while the ear catches up. Null until a run has a start. */
+  private runStartFrame: number | null = null;
   /** Whether a pre-roll (or the playing that follows one) has been observed
    *  since the current start was issued. Until it has, a start with a
    *  count-in shows its row hollow, as legacy shows it from the tap; without
@@ -4503,6 +4515,10 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         ? 0
         : Math.max(0, Math.round(countInAnchorSeconds * this.sampleRate()));
     this.countInSeen = false;
+    this.runStartFrame =
+      countInAnchorSeconds === undefined
+        ? Math.max(0, preparedStartProjectFrame ?? 0)
+        : this.countInLandingFrame;
     return {
       playback: buildNativePlaybackPreparePlayback(
         this.beatInfo,
@@ -4944,9 +4960,50 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       renderedSec: this.shownFrame(renderedFrame, frame) / sampleRate,
       playing: moving,
       preRoll: transportState === 'pre-roll',
+      floorSec: this.floorSec(
+        moving,
+        transportState === 'pre-roll',
+        renderedFrame,
+        sampleRate,
+      ),
       live: true,
       countIn: this.countInAt(transportState, renderedFrame, this.lastTelemetry),
     };
+  }
+
+  /** The floor under the corrected position while a song is sounding, or
+   *  null where none applies.
+   *
+   *  A loop is the exception legacy makes too: its fold returns before its
+   *  clamp, because a wrap is meant to take the position back below where the
+   *  run began. The armed state is read from `regionState` — the same source
+   *  the fold reads (`foldFrame`), never the polled `loopEnabled`, or the two
+   *  disagree for a poll period and a folded position meets a live floor.
+   *
+   *  And the floor RETIRES itself the moment the position is below it. A
+   *  stale floor is the dangerous direction: it clamps the highlight ABOVE
+   *  the song and freezes it, where a missing one merely restores the dip
+   *  this exists to remove. A wrap followed by the singer disarming A-B was
+   *  the case that proved it — the loop exemption ends with the disarm, and
+   *  the floor would otherwise still be a lap ahead — but it is written as
+   *  "below the floor means the floor is wrong" so that any path which moves
+   *  the position back without passing one of the three start sites heals in
+   *  a frame, including ones nobody has thought of. */
+  private floorSec(
+    moving: boolean,
+    preRoll: boolean,
+    renderedFrame: number,
+    sampleRate: number,
+  ): number | null {
+    if (!moving || preRoll || this.runStartFrame === null) return null;
+    // A frame under the floor by more than jitter: the run this floor
+    // described is over.
+    if (renderedFrame < this.runStartFrame - sampleRate * FLOOR_RETIRE_SEC) {
+      this.runStartFrame = null;
+      return null;
+    }
+    if (this.state.regionState?.loop === true) return null;
+    return Math.max(0, this.runStartFrame) / sampleRate;
   }
 
   /** The frame the bar shows for a rendered frame: during a count-in the
@@ -5006,6 +5063,12 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       // Without the synchronous clock the count-in status IS the pre-roll:
       // it is published only while the transport reports one.
       preRoll: state.countInStatus !== null,
+      floorSec: this.floorSec(
+        state.phase === 'playing' && state.advancing === true,
+        state.countInStatus !== null,
+        renderedSec * sampleRate,
+        sampleRate,
+      ),
       live: false,
       countIn: state.countInStatus,
     };
@@ -5445,10 +5508,23 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   }
 
   noteTransportCommand(command: NativePlaybackTransportCommand): void {
+    // A loop coming or going changes what "where the run began" means: the
+    // fold is about to move the position under the floor, or has stopped
+    // being allowed to. Retired here as well as on observation, so the
+    // disarm does not spend a frame clamped.
+    if (command.kind === 'set-loop' || command.kind === 'clear-loop')
+      this.runStartFrame = null;
     if (command.kind === 'pause') this.update({ phase: 'paused' });
     else if (command.kind === 'resume') {
       // The core resumes from ITS paused frame, at most one block past the
-      // one the clock held; from here the clock reads the core again.
+      // one the clock held; from here the clock reads the core again. That
+      // frame is also where this run of playback begins, so it is the floor —
+      // legacy captures its start offset from the audio clock when it pauses
+      // and clamps there on the way back.
+      this.runStartFrame =
+        this.pauseHold !== null
+          ? this.pauseHold.projectFrame
+          : Math.round(this.state.renderedPositionSec * this.sampleRate());
       this.pauseHold = null;
       this.update({ phase: 'playing' });
     } else if (command.kind === 'clear-loop') this.update({ regionState: null });
@@ -5737,6 +5813,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     if (this.awaitingFirstPlay()) {
       const sampleRate = this.sampleRate();
       this.rememberRetryProjectFrame(projectFrame, sampleRate);
+      this.runStartFrame = projectFrame;
       const positionSec = projectFrame / sampleRate;
       this.update(
         {
@@ -5757,6 +5834,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     // leaving, which is the pull-back the singer saw as "the seek bar jumps
     // back". A pause hold is superseded: the core will sit at the target.
     const before = this.coordinator.positionNow(this);
+    // Legacy's seek sets its start offset to the target and replays from
+    // there, so its floor moves with the seek; this one moves with it too, or
+    // a seek backwards would clamp the highlight to where the run began. On a
+    // build with the synchronous clock the target is read back at once
+    // (`seekIntent`); on one without it, the polled position catches up only
+    // after the dispatch below, and a read inside that window retires this
+    // floor — fail-open, and the older behaviour is exactly what it falls
+    // back to.
+    const floorBeforeSeek = this.runStartFrame;
+    this.runStartFrame = projectFrame;
     this.pauseHold = null;
     if (before !== null)
       this.seekIntent = {
@@ -5768,6 +5855,9 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       await this.dispatchTransport({ kind: 'seek', projectFrame });
     } catch (error) {
       this.seekIntent = null;
+      // The transport never moved, so neither does the floor: rolled back
+      // with the intent it was issued beside.
+      this.runStartFrame = floorBeforeSeek;
       throw error;
     }
     // Wherever the singer moved to, the song is no longer sitting at its end.

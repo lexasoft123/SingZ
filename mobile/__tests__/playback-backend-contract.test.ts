@@ -92,6 +92,8 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
   handle: NativePlaybackHandle
   publish: (patch: Partial<NativePlaybackViewState>) => void
   setSwapsInPlace: (value: boolean) => void
+  /** Where the run began, as the real handle's clock reports it. */
+  setFloor: (seconds: number | null) => void
 } {
   const calls: string[] = []
   const listeners = new Set<() => void>()
@@ -99,6 +101,7 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
   // rebuild (the core refuses seeks throughout), true is a seam on the
   // running stream (nothing is refused).
   let swapsInPlace = false
+  let floorSec: number | null = null
   let state: NativePlaybackViewState = {
     phase: initialPhase,
     generation: 7,
@@ -133,6 +136,7 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
       renderedSec: state.renderedPositionSec,
       playing: state.phase === 'playing',
       preRoll: state.countInStatus !== null,
+      floorSec,
       live: false,
       countIn: state.countInStatus
     }),
@@ -217,7 +221,8 @@ function nativeHarness(initialPhase: NativePlaybackViewState['phase'] = 'prepare
     calls,
     handle,
     publish,
-    setSwapsInPlace: value => { swapsInPlace = value }
+    setSwapsInPlace: value => { swapsInPlace = value },
+    setFloor: seconds => { floorSec = seconds }
   }
 }
 
@@ -404,6 +409,37 @@ describe('the singer\'s latency trim', () => {
       countInStatus: null
     })
     expect(h.backend.position).toBeCloseTo(30 - 0.05 - 0.08, 5)
+  })
+
+  it('cannot show a position below the spot the run started from', () => {
+    // For the latency's worth of time it takes the ear to reach the first
+    // sample, the corrected position is BELOW where the singer started, and
+    // the highlight sits in the line before it — 34 ms on a wired route, a
+    // fifth of a second on Bluetooth. Legacy has always floored at its start
+    // offset (`Math.max(startOffset, elapsed)`); this is that floor.
+    const h = nativeHarness()
+    h.backend.attach(h.project)
+    h.backend.setDisplayTrim(0.1)
+    h.setFloor(30)
+    h.publish({
+      phase: 'playing',
+      advancing: true,
+      positionSec: 30,
+      renderedPositionSec: 30.01,
+      displayLatencySec: 0.034
+    })
+    // 30.01 − 0.034 − 0.1 = 29.876 without the floor.
+    expect(h.backend.position).toBeCloseTo(30, 5)
+
+    // Once the ear has caught up the correction is the whole answer again.
+    h.publish({ renderedPositionSec: 31 })
+    expect(h.backend.position).toBeCloseTo(31 - 0.034 - 0.1, 5)
+
+    // A loop takes the position back below the start on purpose: legacy's
+    // fold returns before its clamp, and no floor applies here either.
+    h.setFloor(null)
+    h.publish({ renderedPositionSec: 30.01 })
+    expect(h.backend.position).toBeCloseTo(30.01 - 0.034 - 0.1, 5)
   })
 
   it('never reports a negative position at the very start of a song', () => {

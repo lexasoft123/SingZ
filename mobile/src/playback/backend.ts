@@ -413,8 +413,14 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     // simulator's 10 ms route never crossed a line boundary, which is why
     // every driver passed).
     if (!clock.playing || clock.preRoll) return Math.max(0, clock.renderedSec)
+    // Floored where the run began, as legacy floors at its start offset: for
+    // the latency's worth of time it takes the ear to reach the first sample,
+    // the corrected position is BELOW the spot the singer started from, and
+    // the highlight would sit in the line before it — 34 ms on a wired route,
+    // a fifth of a second on Bluetooth or with a trim dialled in.
     return Math.max(
       0,
+      clock.floorSec ?? 0,
       clock.renderedSec - this.state().displayLatencySec - this.effectiveTrimSec
     )
   }

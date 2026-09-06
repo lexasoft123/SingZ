@@ -863,14 +863,26 @@ landing was 160-240 ms past it; the bar's definition changing is what turns it r
 the intent ("land where the bar says") is the same both times. Measured on the phone
 before and after: the four taps land on the tapped line on both backends with identical
 positions, and the count-in from 60 s holds the bar at 60.000 rather than 59.966.
-Left standing, said out loud: legacy ALSO floors its playing clock at the start offset
-(`Math.max(startOffset, elapsed)`), which holds its highlight there for the first
-`latency + trim` of a run; native has no such floor, so for that long after a landing —
-34 ms on this phone with no trim, but a fifth of a second on Bluetooth or with a trim
-dialled in — the highlight can sit just below the line it landed on. Not the reported
-defect and not visible at 34 ms, but the same class; the fix is to floor the playing
-branch at the run's own start frame, and the loop fold has to be exempted from it the
-way legacy's fold returns before its clamp.
+**And the floor legacy has and native did not (same day, on the singer's ask).** Legacy
+clamps its playing clock at the start offset (`Math.max(startOffset, elapsed)`), which
+holds its highlight there for the first `latency + trim` of a run; native had no such
+floor, so for that long after a landing — 34 ms on this phone, a fifth of a second on
+Bluetooth or with a trim dialled in — the highlight sat just below the line it had landed
+on, which is the reported symptom in miniature. The clock now carries `floorSec`: where
+this run of playback began, tracked at the three places a run starts (a prepare, where a
+counted-in start's floor is the landing; a seek's target, because legacy's seek moves its
+start offset too, and taking the maximum instead would clamp a backwards seek to the old
+start; and the spot a resume picks up from). A loop is the exception legacy also makes —
+its fold returns before its clamp, because a wrap is meant to take the position back
+below the start — so no floor applies while one is armed; legacy is stricter, since its
+fold only takes over once the position passes B, so it still floors on lap ONE where
+native floors on none, and the difference is that same dip on the first lap. The floor
+also RETIRES itself the moment the position is seen below it, which is what makes a wrap
+safe: a stale floor clamps the highlight ABOVE the song, and a wrap followed by the singer
+disarming A-B would otherwise pin it there for the rest of the region — found in review,
+not in the field. Unit-covered on both sides: the backend (floored, then not once the ear
+has caught up, then a loop with no floor) and the facade (a run floored at its seek,
+retired by one read below it).
 
 **Profiled the same afternoon, host quiet, and half of it was ours to remove.** Per
 process while a song played (top, 3 s windows, `sample` for stacks): the GPU process

@@ -268,6 +268,13 @@ export interface NativePlaybackClock {
    *  held, and no output-latency correction belongs on it (see the backend's
    *  `position`). */
   readonly preRoll: boolean
+  /** Where this run of playback began — the floor under the corrected
+   *  position, so the highlight cannot sit below the spot the singer started
+   *  from for the latency's worth of time it takes the ear to get there.
+   *  Legacy has always floored (`Math.max(startOffset, elapsed)`). Null when
+   *  no floor applies: not playing, or a loop is armed, where the fold takes
+   *  the position back below the start on purpose. */
+  readonly floorSec: number | null
   readonly live: boolean
   readonly countIn: PlaybackCountInStatus | null
 }

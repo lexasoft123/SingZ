@@ -2921,6 +2921,52 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     }
   });
 
+  it('retires the position floor the moment the song is playing below it', async () => {
+    // The floor says where this run began, so the highlight cannot dip into
+    // the previous line while the ear catches up. A loop lap takes the
+    // position back below it on purpose — and if the singer then turns A-B
+    // OFF, the exemption ends while the floor is still a lap ahead, which
+    // would clamp the highlight there for the rest of the region. So a frame
+    // under the floor retires it, whatever moved the position.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat }));
+    const handle = project.nativePlayback!;
+    const generation = handle.snapshot().generation;
+    h.native.status.mockImplementation(
+      async () => capability(generation, 'running', 0, 'ios') as never,
+    );
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    await handle.seek(1.5);
+    const at = (seconds: number) => {
+      h.setPositionNow({
+        generation,
+        transportState: 'playing',
+        renderedProjectFrame: Math.round(seconds * 48_000),
+        continuousFrame: 48_000,
+        remainingPreRollFrames: 0,
+        seekCount: 1,
+        ageMs: 0,
+      });
+      return handle.clock();
+    };
+    // The seek is where this run began, so it is the floor.
+    expect(at(1.51).floorSec).toBeCloseTo(1.5, 5);
+    // A lap wraps the position back to A. One read below the floor and the
+    // floor is gone — no clamping once the loop is disarmed.
+    expect(at(0.5).floorSec).toBeNull();
+    expect(at(0.6).floorSec).toBeNull();
+
+    // A resume begins a run too: legacy captures its start offset when it
+    // pauses and clamps there on the way back, so Play after a pause floors
+    // at the paused spot — the count-in flavour re-prepares and was already
+    // covered, the plain one passes through no prepare and no seek.
+    at(0.9);
+    await handle.pause();
+    ;(handle as unknown as { noteTransportCommand(c: { kind: 'resume' }): void }).noteTransportCommand({ kind: 'resume' });
+    expect(at(0.91).floorSec).toBeCloseTo(0.9, 3);
+    await handle.stop('floor retirement test complete');
+  });
+
   it('during a count-in that lands mid-song the bar holds at the landing, as legacy holds at its start offset', async () => {
     // The core counts the pre-roll down through negative frames; legacy's
     // clock clamps at the start offset until the music enters, so the bar and
