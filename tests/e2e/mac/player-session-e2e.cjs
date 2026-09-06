@@ -29,6 +29,11 @@
  *
  * Usage: node tests/e2e/mac/player-session-e2e.cjs [--pass legacy|native|both]
  *        E2E_OUT=<dir>  ALLOW_BUSY_HOST=1  QUIET_LOAD=4
+ *        PS_LIB=<dir>   a library already staged (the two seeded projects, each
+ *                       with its stems and song file) — for a machine without
+ *                       ffmpeg, such as the Windows field laptop, where the
+ *                       native provider is WASAPI and the CPU/footprint rows are
+ *                       not sampled (no `top`; they print as n/a).
  */
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
@@ -45,7 +50,8 @@ const OUT = process.env.E2E_OUT ?? tmpdir()
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 const MOBILE = join(__dirname, '..', '..', '..', 'mobile')
 const PROFILE = join(OUT, 'player-session-userdata')
-const LIB = join(OUT, 'player-session-lib')
+const LIB = process.env.PS_LIB ? require('node:path').resolve(process.env.PS_LIB) : join(OUT, 'player-session-lib')
+const WIN = process.platform === 'win32'
 const ADVANCE = 0.008
 const PITCH_LIMIT_MS = 12000
 /** Diagnostic only: space the three metronome touches out (ms) to tell a
@@ -128,6 +134,11 @@ function processTree(rootPid) {
   return out
 }
 function sampleCpu(rootPid, windowSec = 2) {
+  const { load1 } = hostLoad()
+  // Windows has no `top` and no load average (os.loadavg() is zeros there):
+  // the CPU, footprint and host-quiet rows are not measured rather than
+  // measured wrongly, and print as n/a.
+  if (WIN) return { cpuPct: null, footprintMb: null, load1: null, quiet: true }
   const pids = new Set(processTree(rootPid))
   const text = execFileSync('top', ['-l', '2', '-s', String(windowSec), '-stats', 'pid,cpu,mem'], { encoding: 'utf8' })
   const second = text.split(/\nProcesses:/).pop()
@@ -140,7 +151,6 @@ function sampleCpu(rootPid, windowSec = 2) {
     const v = Number(m[3])
     memMb += m[4] === 'G' ? v * 1024 : m[4] === 'M' ? v : v / 1024
   }
-  const { load1 } = hostLoad()
   return { cpuPct: Math.round(cpu * 10) / 10, footprintMb: Math.round(memMb), load1, quiet: isQuiet(load1) }
 }
 
@@ -169,6 +179,14 @@ async function warmUp(songs) {
     }
     if (!ready) throw new Error(`warm-up: "${song.name}" never became ready`)
     await win.evaluate('__test.engine.setMasterVolume(0)')
+    // A library that already carries its analysis (a PS_LIB staged and run
+    // before) usually saves nothing on open — but "carries" is presence, not
+    // currency: after a detector stamp bump the app re-derives and saves
+    // again. So the quiet wait stays on this path too; only the "never
+    // saved" verdict is waived. Six seconds a song, and a stale stamp shows
+    // up as saves instead of being skipped past.
+    const doc = JSON.parse(require('node:fs').readFileSync(join(song.dir, 'project.json'), 'utf8'))
+    const analysed = Boolean(doc.settings?.melody && doc.settings?.key)
     // Done = at least one save has landed for THIS song AND none for 6 s
     // after the last (max 90 s). The log is cumulative across the one warm-up
     // app, so the count is taken relative to a baseline read at this song's
@@ -179,7 +197,7 @@ async function warmUp(songs) {
     // exists to prevent. Zero saves is a failure, not a note.
     const countSaves = async () => (await win.evaluate('window.singz.getLog()')).filter((x) => /project saved/.test(x.line)).length
     const base = await countSaves()
-    let lastSave = null
+    let lastSave = analysed ? Date.now() : null
     let seen = 0
     const until = Date.now() + 90000
     while (Date.now() < until) {
@@ -188,8 +206,8 @@ async function warmUp(songs) {
       if (lastSave !== null && Date.now() - lastSave > 6000) break
       await sleep(500)
     }
-    if (seen === 0) throw new Error(`warm-up: "${song.name}" was never saved within 90 s of ready — its analysis did not land`)
-    log(`  warm-up: ${song.name} analysed and saved (${seen} saves of its own)`)
+    if (seen === 0 && !analysed) throw new Error(`warm-up: "${song.name}" was never saved within 90 s of ready — its analysis did not land`)
+    log(`  warm-up: ${song.name} ${analysed ? 'already analysed' : 'analysed and saved'} (${seen} saves of its own)`)
     await win.evaluate('__test.setShowCatalog(true)')
     await win.waitForSelector('.lib-card', { timeout: 30000 })
   }
@@ -439,6 +457,10 @@ function judge(legacy, native) {
     const l = legacy.cpu[phase]
     const n = native.cpu[phase]
     if (!l || !n) continue
+    if (l.cpuPct === null || n.cpuPct === null) {
+      rows.push({ rule: `CPU and footprint (${phase}): n/a — not sampled on this platform`, ok: null })
+      continue
+    }
     const tick = 0.5 // top's %CPU over a 2 s window resolves to about half a point per process
     const cpuBudget = Math.round((l.cpuPct + 2 * tick) * 10) / 10
     rows.push({ rule: `CPU (${phase}): native ≤ legacy + 2 ticks`, ok: n.cpuPct <= cpuBudget, detail: `native ${n.cpuPct}% vs legacy ${l.cpuPct}% (budget ${cpuBudget}%)${l.quiet && n.quiet ? '' : ' — host BUSY'}` })
@@ -446,7 +468,9 @@ function judge(legacy, native) {
   }
   for (const p of [legacy, native]) {
     const busy = CPU_PHASES.filter((ph) => p.cpu[ph] && !p.cpu[ph].quiet)
-    rows.push({ rule: `the host was quiet (1-min load ≤ ${QUIET_LOAD}) through every CPU phase — ${p.backend}`, ok: busy.length === 0, detail: CPU_PHASES.filter((ph) => p.cpu[ph]).map((ph) => `${ph}=${p.cpu[ph].load1}`).join(' ') + (busy.length ? ` — BUSY during ${busy.join(', ')}: those CPU rows describe the host, not the app` : '') })
+    if (CPU_PHASES.every((ph) => !p.cpu[ph] || p.cpu[ph].load1 === null)) {
+      rows.push({ rule: `the host was quiet through every CPU phase — ${p.backend}: n/a — no load average on this platform`, ok: null })
+    } else rows.push({ rule: `the host was quiet (1-min load ≤ ${QUIET_LOAD}) through every CPU phase — ${p.backend}`, ok: busy.length === 0, detail: CPU_PHASES.filter((ph) => p.cpu[ph]).map((ph) => `${ph}=${p.cpu[ph].load1}`).join(' ') + (busy.length ? ` — BUSY during ${busy.join(', ')}: those CPU rows describe the host, not the app` : '') })
     rows.push({ rule: `no fatal native line in the log — ${p.backend}`, ok: p.fatal.length === 0, detail: p.fatal.map((f) => f.hits[0]).join(' | ') })
   }
   return rows
@@ -460,12 +484,26 @@ function judge(legacy, native) {
     process.exit(1)
   }
   if (!existsSync(APP)) throw new Error(`build first: ${APP} is missing (npm run build)`)
-  const songs = stageSongs(MOBILE)
   rmSync(PROFILE, { recursive: true, force: true })
-  rmSync(LIB, { recursive: true, force: true })
   mkdirSync(PROFILE, { recursive: true })
-  mkdirSync(LIB, { recursive: true })
+  let songs
+  if (process.env.PS_LIB) {
+    // A library staged elsewhere (by this driver on a machine with ffmpeg):
+    // read the two projects' names and lengths off their docs.
+    const { readdirSync, readFileSync } = require('node:fs')
+    songs = readdirSync(LIB, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => {
+      const doc = JSON.parse(readFileSync(join(LIB, d.name, 'project.json'), 'utf8'))
+      const beats = doc.settings?.beat?.beats ?? []
+      return { name: doc.name ?? d.name, dir: join(LIB, d.name), seconds: beats.length ? beats[beats.length - 1] : 0 }
+    }).sort((a, b) => b.seconds - a.seconds)
+    if (songs.length < 2) throw new Error(`PS_LIB=${LIB} needs the two seeded projects`)
+  } else {
+    songs = stageSongs(MOBILE)
+    rmSync(LIB, { recursive: true, force: true })
+    mkdirSync(LIB, { recursive: true })
+  }
   for (const s of songs) {
+    if (process.env.PS_LIB) break
     cpSync(s.dir, join(LIB, s.name), { recursive: true })
     // The desktop lists a project only when the song file its doc names is
     // present; the phones never need it, so the seed stages none. The stems

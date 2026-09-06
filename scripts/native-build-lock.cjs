@@ -10,6 +10,11 @@ const { tmpdir } = require('node:os')
 const { isAbsolute, join, resolve } = require('node:path')
 const { execFileSync } = require('node:child_process')
 
+/** The identity every worktree of one repository shares: its common git
+ *  directory. An exported tree (a `git archive` unpacked on a field machine
+ *  with no git at all — the Windows laptop) has none; there the tree's own
+ *  root is the identity, which still serializes every build of THAT tree
+ *  and is exactly as unique as the checkout it stands for. */
 function gitCommonDirectory(repoRoot) {
   let value
   try {
@@ -18,10 +23,20 @@ function gitCommonDirectory(repoRoot) {
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
     ).trim()
   } catch {
-    value = execFileSync(
-      'git', ['-C', repoRoot, 'rev-parse', '--git-common-dir'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
-    ).trim()
+    try {
+      value = execFileSync(
+        'git', ['-C', repoRoot, 'rev-parse', '--git-common-dir'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+      ).trim()
+    } catch (error) {
+      // No git on the machine, or a tree git does not recognise as a
+      // repository (exit 128 — an exported tree, and also a checkout whose
+      // .git has gone bad, for which the tree's own root is still the only
+      // identity anyone can serialize on). Anything else is a real failure
+      // and stays one.
+      if (error?.code === 'ENOENT' || error?.status === 128) return realpathSync(repoRoot)
+      throw error
+    }
   }
   const absolute = isAbsolute(value) ? value : resolve(repoRoot, value)
   return realpathSync(absolute)

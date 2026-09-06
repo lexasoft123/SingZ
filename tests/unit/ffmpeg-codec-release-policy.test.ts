@@ -189,6 +189,27 @@ describe('FFmpeg release policy', () => {
     })).toThrow('forbidden or missing @rpath dependencies')
   })
 
+  it('identifies an exported tree with no git by its own root, so a field machine can build', () => {
+    // The Windows laptop builds the addon from an unpacked `git archive` and
+    // has no git at all; asking git for the common dir threw ENOENT there and
+    // the build never started. Such a tree is its own identity.
+    const root = mkdtempSync(join(tmpdir(), 'singz-no-git-'))
+    try {
+      const path = nativeBuildLockPath(root)
+      expect(path).toContain('singz-native-build-')
+      expect(path).not.toContain(root)
+      expect(nativeBuildLockPath(root)).toBe(path)
+      const other = mkdtempSync(join(tmpdir(), 'singz-no-git-'))
+      try {
+        expect(nativeBuildLockPath(other)).not.toBe(path)
+      } finally {
+        rmSync(other, { recursive: true, force: true })
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('serializes sibling checkouts on one repository identity and one compile edge', () => {
     expect(nativeBuildLockPath(root)).toBe(nativeBuildLockPath(join(root, 'zcore')))
     expect(nativeBuildLockPath(root)).not.toContain(root)
