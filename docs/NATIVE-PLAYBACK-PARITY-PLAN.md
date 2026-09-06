@@ -589,7 +589,13 @@ across a sliver longer than the budget — a stratified sample of every channel;
 within the budget is read whole, so a short song stays exact) and the screen scans one lane
 per macrotask, re-checking the cancel between ticks: 0.36 s for the same song under the
 same interpreter, in six ticks. The unit test counts the frames the fake hands out and pins
-the bound, alongside the sine, the late burst and the exact tail read. A lesson for the
+the bound, alongside the sine, the late burst and the exact tail read. Measured on the
+simulator afterwards, legacy backend, a real 6.5-minute six-stem song from the library
+(Nothing Else Matters), a 5 ms interval on the JS thread recording every late tick, the
+app silent: the unbounded scan took 12.0 s and held the thread for ~2.4 s per lane (build
+51 held it for all six in ONE tick); the bounded scan took 0.55 s in holds of 100–140 ms.
+The screen's own mount is a 535–650 ms hold on either build. An iPhone 13 is slower than
+the simulator on this Mac by some factor, which is what the field felt. A lesson for the
 statistic-parity rule: the two backends compute the same number, but the native core runs it
 in C++ on its own thread at decode; the legacy side runs it in interpreted JS on the thread
 that answers taps, so parity of the STATISTIC must not become parity of the WORK.
