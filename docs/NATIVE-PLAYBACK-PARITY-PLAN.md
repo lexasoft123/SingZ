@@ -755,8 +755,17 @@ stays for the landing and the standalone prime-then-reset API. Tests: the proces
 `perCommandSeekPlans` (two plans, distinct slots, discard/arm/stale-stamp, slots
 reusable), the deterministic back-to-back pair on a parked song, and the raced pair 600
 times (nondeterministic by nature, ~3 s, wedged within 20 rounds before the fix); all 48
-native suites green, the desktop addon rebuilt. The phone rerun is owed on a rebuilt
-binary — a native change on a stale one reads green vacuously.
+native suites green, the desktop addon rebuilt. **Rerun on the iPhone 13 with the fix
+compiled in (2026-09-06 morning, run 4): 47/48, no void.** End of song → Play restart 337 ms
+native against 304 legacy, the anchor armed and the seam quiet; the one red is the
+metronome save acceptance, 202 vs 140 ms against a 190 ms budget — the seam's arm on this
+phone, the same class the POCO shows, not this change. One trap on the way, worth its
+own sentence: the iOS pod compiles the playback core from a GITIGNORED MIRROR
+(`mobile/ios/SingzPlaybackSession/native/`, written by
+`mobile/scripts/sync-singz-dsp-runtime.js` at postinstall), so the first device build
+after this change shipped the OLD core with a clean exit — caught only by grepping the
+`.debug.dylib` for a literal the change added (a Debug device build keeps its code there,
+not in the 92 KB stub). Sync the mirror before any device build; check the literal after.
 
 **The desktop footprint, decided rather than fixed (2026-09-06):** with the graph prepared
 at open the native pass reads +100-150 MB against Web Audio in every phase. The extra is
