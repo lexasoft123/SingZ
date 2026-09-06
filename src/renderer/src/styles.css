@@ -2379,7 +2379,8 @@ button.chip-status:hover {
   color: var(--danger);
 }
 
-.monitor-headphones-check {
+.monitor-headphones-check,
+.native-playback-check {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2389,13 +2390,15 @@ button.chip-status:hover {
   cursor: pointer;
 }
 
-.monitor-headphones-check input {
+.monitor-headphones-check input,
+.native-playback-check input {
   width: 15px;
   height: 15px;
   accent-color: var(--accent);
 }
 
-.monitor-headphones-check:has(input:focus-visible) {
+.monitor-headphones-check:has(input:focus-visible),
+.native-playback-check:has(input:focus-visible) {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
   border-radius: 3px;

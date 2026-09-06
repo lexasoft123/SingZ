@@ -112,10 +112,56 @@ function stageProject({ sampleDir, stemsDir, seconds, name, dest, bpm = 120, bea
 }
 
 /**
+ * A REAL project folder, staged as it is: the doc, the lyrics and every stem
+ * file, with two exceptions the silence rule demands (click off, no count-in,
+ * at rest) and nothing else touched — the stored grid, key and melody stay,
+ * so no phone spends a minute re-deriving a five-minute song before the
+ * session starts, and the beat grid is the singer's own. `PS_REAL_SONGS`
+ * names two folders, colon-separated, in scenario order (A gets most of the
+ * steps). The synthesized pair is a 2-minute song with a hand-made grid: the
+ * sizes that matter — decode time, lane memory, the seek bar's scan, the
+ * native graph's materialization — only show at a real song's length (build
+ * 50/51's histogram regression passed every synthesized run).
+ */
+function stageRealProject(source, dest) {
+  const doc = JSON.parse(fs.readFileSync(path.join(source, 'project.json'), 'utf8'))
+  fs.rmSync(dest, { recursive: true, force: true })
+  fs.mkdirSync(path.join(dest, 'stems'), { recursive: true })
+  const stems = fs.readdirSync(path.join(source, 'stems')).filter((f) => /\.(flac|wav|mp3|m4a|ogg|aac|opus)$/i.test(f))
+  for (const f of stems) fs.copyFileSync(path.join(source, 'stems', f), path.join(dest, 'stems', f))
+  if (fs.existsSync(path.join(source, 'lyrics.json'))) fs.copyFileSync(path.join(source, 'lyrics.json'), path.join(dest, 'lyrics.json'))
+  // The desktop lists a project only while the doc's original song file is
+  // present beside the stems (listProjects checks `songFile`); the phones do
+  // not read it. Without it the mac and the Windows laptop show an empty
+  // library and the harness times out on the first card.
+  if (doc.songFile && fs.existsSync(path.join(source, doc.songFile)))
+    fs.copyFileSync(path.join(source, doc.songFile), path.join(dest, doc.songFile))
+  doc.settings = doc.settings || {}
+  doc.settings.metronome = { ...(doc.settings.metronome || {}), click: false, countInBars: 0, volume: 0.7, accent: true }
+  // The scenario opens songs BY NAME, and a phone's library may already list
+  // this very song from Drive: the staged copy carries its own name.
+  doc.name = `${doc.name || path.basename(source)} (session copy)`
+  fs.writeFileSync(path.join(dest, 'project.json'), JSON.stringify(doc))
+  const first = stems.find((f) => /^vocals\./.test(f)) || stems[0]
+  const seconds = ffprobeSeconds(path.join(dest, 'stems', first))
+  const beat = doc.settings.beat || {}
+  const bars = Array.isArray(beat.downbeats) ? beat.downbeats.length : 0
+  return { name: doc.name, dir: dest, seconds, bars, bpm: beat.bpm || 0, real: true }
+}
+
+/**
  * Build (or reuse) both songs under the staging root. Returns the two
  * descriptors in scenario order; the platform layer installs `dir`.
+ * With `PS_REAL_SONGS=<dirA>:<dirB>` the two are real project folders instead.
  */
 function stageSongs(mobileRoot) {
+  if (process.env.PS_REAL_SONGS) {
+    const sources = process.env.PS_REAL_SONGS.split(':').map((s) => path.resolve(s.trim())).filter(Boolean)
+    if (sources.length !== 2) throw new Error(`PS_REAL_SONGS names ${sources.length} folders; the scenario needs exactly two (A:B)`)
+    const root = path.join(stageRoot(), 'real')
+    fs.mkdirSync(root, { recursive: true })
+    return sources.map((source) => stageRealProject(source, path.join(root, path.basename(source))))
+  }
   const sampleDir = path.join(mobileRoot, 'assets', 'sample')
   const sampleStems = path.join(sampleDir, 'stems')
   const root = stageRoot()
@@ -136,4 +182,4 @@ function stageSongs(mobileRoot) {
   return out
 }
 
-module.exports = { STEM_IDS, SONGS, stageSongs, stageRoot }
+module.exports = { STEM_IDS, SONGS, stageSongs, stageRealProject, stageRoot }

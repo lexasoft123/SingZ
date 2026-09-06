@@ -275,6 +275,17 @@ function parseCaptureManifest(path: string): CaptureArtifactManifest {
   return value as CaptureArtifactManifest
 }
 
+/** Automated runs are silent, and SINGZ_MUTE used to mute only Chromium
+ * (`mute-audio` in index.ts): the native CoreAudio/WASAPI graph never went
+ * through that switch, so once native became the default a driver that
+ * pressed Play for a second came out of the speakers. The master gain the
+ * renderer asks for is clamped to 0 here, at prepare and on every later set,
+ * so no renderer call can raise it; analysers, sinkId and timing are exactly
+ * as audible. */
+export function mutedMasterGain(gain: number): number {
+  return process.env.SINGZ_MUTE ? 0 : gain
+}
+
 export interface CaptureBindingLoadRuntime {
   addonPath: string
   electronVersion: string
@@ -1339,9 +1350,12 @@ export class CaptureOwner {
       // Generations cross into the addon as BigInt, never as the strings the
       // renderer carries (its `exactU64` takes a bigint or a number); the
       // seam's field is a generation like any other.
-      const nativeConfig = seamOfOwn
-        ? { ...config, swapFromGeneration: BigInt(config.swapFromGeneration!) as unknown as string }
-        : config
+      const nativeConfig = {
+        ...(seamOfOwn
+          ? { ...config, swapFromGeneration: BigInt(config.swapFromGeneration!) as unknown as string }
+          : config),
+        masterGain: mutedMasterGain(config.masterGain)
+      }
       const result = binding.preparePlayback(nativeConfig, lanes, generation)
       // Once the native session claims a generation, even a decode/graph
       // failure owns a cleanup receipt. Retain it until exact unload proves
@@ -1438,7 +1452,7 @@ export class CaptureOwner {
 
   setPlaybackMasterGain(rendererId: number, generation: string, gain: number): DesktopPlaybackResult {
     return this.playbackCommand(rendererId, generation, (binding, value) =>
-      binding.setPlaybackMasterGain(value, gain))
+      binding.setPlaybackMasterGain(value, mutedMasterGain(gain)))
   }
 
   playbackStatus(): DesktopPlaybackStatus | null {

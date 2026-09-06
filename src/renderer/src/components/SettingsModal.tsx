@@ -1377,7 +1377,7 @@ export default function SettingsModal({
           {!outputRouteUnconfirmed && outputStatus && (
             <p className="settings-hint warn">{outputStatus}</p>
           )}
-          <label className="monitor-headphones-check">
+          <label className="native-playback-check">
             <input
               type="checkbox"
               checked={audio.nativePlayback === true}

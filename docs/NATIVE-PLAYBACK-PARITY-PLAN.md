@@ -878,6 +878,31 @@ exercised native playback"; ASIO stays behind the unsigned SDK agreement.
   playing-CPU residual (~1 point, the render thread) is accepted with this: it is the
   price of the default, measured, beside the footprint rows.
 
+**The same session on REAL songs (2026-09-06 afternoon, the singer's ask):** two
+five-minute six-stem FLAC projects from the library (Deutschland 323 s / 128 MB, Zeit
+322 s / 97 MB), staged as they are by `PS_REAL_SONGS=<dirA>:<dirB>` (seed.cjs: stems,
+lyrics, the doc with click off and a distinguishing name — the phone's library may list
+the same song from Drive — and the original song file, without which the DESKTOP lists
+nothing: `listProjects` requires `songFile` and the first Dell attempt timed out on an
+empty catalog for that reason). The synthesized pair never sees a real song's sizes.
+- **iPhone 13: 44/48, no void, no terminal.** Opens take ~28–33 s on this Debug build on
+  both backends (the dev bundle's number, not the product's — CLAUDE.md's rule) and native
+  trails legacy by 3–4 s on the two open rows (+11–14%); the two metronome rows are the
+  seam's arm on a heavier graph (245 vs 160 ms; touches → advancing 209 vs 106). Seeks
+  reach their target in 24–482 ms on both; Play → advancing 251 vs 226; end → Play 309
+  vs 280; the background/foreground and restart rows at parity.
+- **POCO: 54/58.** Legacy opens the song in **66 s**, native in **8.8 s** — the JS decode
+  of a five-minute song against the core's, and the row the harness prints as −55 687 ms.
+  Reds: the two metronome rows (372 vs 218; 156 vs 75), end → Play 402 vs 340 (+12 over
+  budget), CPU idle-in-player 21.4 vs 16.5% (the prepared graph held idle).
+- **Windows field laptop, WASAPI: 14/18.** Native's first open of a real song 3973 vs
+  2095 ms to the player and 7646 vs 5958 to ready (the addon's first load plus a
+  five-minute materialization), second song 7201 vs 4746, the seek row 81 vs 11 as on
+  the synthesized run; everything else at parity or better (Play → advancing 181 vs 841,
+  seams 3–4 per pass, none late, status-poll gaps 218–220 ms — the steady cadence).
+- The mac desktop's real-song session is recorded below once run.
+
+
 ## Verification, and what is out of scope
 - After every step: `cd mobile && npx tsc --noEmit -p tsconfig.json`, `cd mobile && npx
   jest`, the native ctest gate (`cmake --build build/phase4-tests …` then `ctest`) for core
