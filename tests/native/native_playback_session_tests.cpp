@@ -530,7 +530,17 @@ public:
   uint32_t actualMaximumFrames{0};
   uint32_t actualNominalBufferFrames{0};
   uint32_t stops{0};
-  mutable uint32_t statusCalls{0};
+  // Atomic because ONE test drives this fake from a second thread while the
+  // main thread seeks (twoSeeksRacedAgainstTheCallbackNeverWedge): these are
+  // the fields drive() writes and status() reads, and TSAN caught the race on
+  // `callbacks`. std::atomic's operators keep every use site reading as it
+  // did. What is NOT covered: `format`, `latency`, the buffers and the
+  // control-path counters stay plain, and they are safe only because that one
+  // test opens before it starts its thread and unloads after it joins, and
+  // reaches no host method in between. A second threaded-drive test of a
+  // different shape has to check that for itself rather than assume the class
+  // is thread-safe — it is not.
+  mutable std::atomic<uint32_t> statusCalls{0};
   mutable uint32_t enumerations{0};
   uint32_t opens{0};
   uint32_t starts{0};
@@ -546,18 +556,18 @@ public:
 private:
   singz::AudioHostRender callback{nullptr};
   void *context{nullptr};
-  singz::AudioHostState state{singz::AudioHostState::Closed};
+  std::atomic<singz::AudioHostState> state{singz::AudioHostState::Closed};
   singz::AudioHostTerminalCauseLatch terminalCause{};
   singz::AudioHostFormat format{};
   singz::AudioHostLatency latency{};
-  uint64_t routeGeneration{1};
-  uint64_t streamGeneration{0};
-  uint64_t callbacks{0};
-  uint64_t renderedFrames{0};
-  uint64_t xruns{0};
-  uint64_t deadlineMisses{0};
-  uint64_t discontinuities{0};
-  uint64_t renderFailures{0};
+  std::atomic<uint64_t> routeGeneration{1};
+  std::atomic<uint64_t> streamGeneration{0};
+  std::atomic<uint64_t> callbacks{0};
+  std::atomic<uint64_t> renderedFrames{0};
+  std::atomic<uint64_t> xruns{0};
+  std::atomic<uint64_t> deadlineMisses{0};
+  std::atomic<uint64_t> discontinuities{0};
+  std::atomic<uint64_t> renderFailures{0};
 };
 
 singz::NativePlaybackPrepareConfig config() {
@@ -572,7 +582,7 @@ singz::NativePlaybackPrepareConfig config() {
 singz::NativePlaybackLaneSource lane(const char *id, const std::string &path,
                                      float gain = 1.0F, bool muted = false,
                                      bool solo = false) {
-  return {id, singz::OwnedFileDescriptor(openRead(path)), gain, muted, solo};
+  return {id, singz::OwnedFileDescriptor(openRead(path)), gain, muted, solo, {}};
 }
 
 const singz::NativePlaybackGraphSnapshot &
@@ -4001,9 +4011,20 @@ void aSwapWaitsOnAnOutgoingGenerationThatLatchedTerminal() {
 void aRateChangeSwapLandsOnItsAnchorFrame() {
   const std::vector<float> ramp = swapRamp(4096);
   const std::string wav = writeWav("swap-rate.wav", 1, ramp);
+  // The prime cost is INJECTED below the floor, not measured. This test is
+  // about the anchor arithmetic — the exact frame a seam lands on — and the
+  // landing budget adds 1.5x the measured prime once it crosses
+  // kSwapPrimeCostFloorNs, which moves that frame. On an ordinary build the
+  // real prime is under the floor and the arithmetic held; under
+  // ASAN+UBSAN, where everything is several times slower, it crossed and
+  // this test failed on a machine's speed rather than on the code. The floor
+  // exists precisely so a host suite's frame arithmetic stays exact, and a
+  // suite that relies on being fast enough is not exact.
+  singz::NativePlaybackTestHooks hooks{};
+  hooks.timePitchPrimeNs = 1'000'000; // 1 ms, below kSwapPrimeCostFloorNs
   auto backend = std::make_unique<ManualOutputBackend>();
   ManualOutputBackend *fake = backend.get();
-  singz::NativePlaybackSession session(std::move(backend));
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
   auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
   lanes.push_back(keyedLane("song", wav));
   CHECK(session.prepare(config(), std::move(lanes), 100).ok);
@@ -4163,9 +4184,14 @@ void aLoopSurvivesARateSwapAcrossItsWrap() {
     const bool incomingLoops = shape != LoopSwapShape::IncomingDropsLoop;
     const bool seamOnTheWrap = shape == LoopSwapShape::SeamOnTheWrap;
     const int64_t loopEnd = shape == LoopSwapShape::LoopToSongEnd ? 60000 : 20000;
+    // Injected below the floor for the same reason as the anchor-frame test
+    // above: this asserts where a seam lands, and a measured prime that
+    // crosses kSwapPrimeCostFloorNs moves it.
+    singz::NativePlaybackTestHooks hooks{};
+    hooks.timePitchPrimeNs = 1'000'000;
     auto backend = std::make_unique<ManualOutputBackend>();
     ManualOutputBackend *fake = backend.get();
-    singz::NativePlaybackSession session(std::move(backend));
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
     singz::NativePlaybackPrepareConfig looping = config();
     looping.playbackRate = 0.75;
     // 8 frames at 0.75 land one frame short of the loop end, or four short
@@ -4391,6 +4417,10 @@ void aSwapArmedTooLateLandsUnanchoredAndSaysSo() {
   const std::string wav = writeWav("swap-late.wav", 1, ramp);
   SwapArmingLatch latch;
   singz::NativePlaybackTestHooks hooks{blockSwapArming, &latch};
+  // Below the floor, as in the two tests above: the LATE landing is what this
+  // asserts, and a measured prime crossing kSwapPrimeCostFloorNs widens the
+  // budget enough to change the frame it lands on.
+  hooks.timePitchPrimeNs = 1'000'000;
   auto backend = std::make_unique<ManualOutputBackend>();
   ManualOutputBackend *fake = backend.get();
   singz::NativePlaybackSession session(std::move(backend), &hooks);
@@ -5871,7 +5901,7 @@ void generationFailureAndTerminalMatrix() {
           singz::NativePlaybackError::InvalidGeneration);
     auto malformed = std::vector<singz::NativePlaybackLaneSource>{};
     malformed.push_back(
-        {"bad", singz::OwnedFileDescriptor(), 1.0F, false, false});
+        {"bad", singz::OwnedFileDescriptor(), 1.0F, false, false, {}});
     CHECK(session.prepare(config(), std::move(malformed), 1).error ==
           singz::NativePlaybackError::InvalidConfiguration);
     CHECK(session.status().generation == 0 &&

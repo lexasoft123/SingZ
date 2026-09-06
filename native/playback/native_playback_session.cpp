@@ -3556,8 +3556,8 @@ struct PreparedPlaybackGraph {
           {static_cast<uint8_t *>(state), static_cast<uint32_t>(stateBytes)});
       if (timePitchProcessor.state == nullptr)
         return {zdsp::StatusCode::InvalidArgument, 11};
-        const size_t timePitchRetained =
-            signalsmithExternalRetainedBytes(timePitchConfig);
+      const size_t timePitchRetained =
+          signalsmithExternalRetainedBytes(timePitchConfig);
       if (timePitchRetained == 0 ||
           retainedBytes > std::numeric_limits<size_t>::max() -
                               timePitchRetained)

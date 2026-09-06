@@ -269,6 +269,30 @@ app.whenReady().then(() => {
   // This guards the live prepared graph accounting that a default/unloaded
   // status probe cannot observe. Running/stopped retention is covered by the
   // native lifecycle suite using the deterministic manual host.
+  // …but only where the host HAS an output to prepare against. A headless
+  // Windows runner reports no default output, `strictPlaybackConfig` then
+  // carries the `smoke:never-opened` placeholder, and the addon rightly
+  // refuses it — "The requested native audio provider or device identity is
+  // unavailable", which is the addon working, not failing. Asserting a device
+  // into existence is what made this gate red on CI while passing on both
+  // macOS runners and every developer machine. Skipped out loud, so a silent
+  // green never hides a machine that could have run it.
+  // The predicate is "this host has NO output", not "this host named no
+  // default" — the second is also what a broken default-output identity looks
+  // like, and skipping on it would turn that regression green on the very
+  // machines that could catch it (line 93 only asserts the field is a string,
+  // and '' is one).
+  const outputs = hostDevices.devices.filter((device) => device.outputChannels > 0)
+  if (outputs.length === 0) {
+    console.log(
+      'prepared-graph accounting skipped: the host has no output device at all ' +
+      `(provider ${hostDevices.provider}, ${hostDevices.devices.length} devices)`
+    )
+    app.quit()
+    return
+  }
+  assert.ok(hostDevices.defaultOutputUid,
+    'a host with outputs must name a default output')
   const wav = join(tmpdir(), `singz-capture-smoke-${process.pid}.wav`)
   writeSilentPcm16Wav(wav)
   try {

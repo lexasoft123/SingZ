@@ -748,7 +748,7 @@ struct ScheduledGainHarness {
     TransportContext transport{};
     transport.validFields = TransportValidProjectSamples |
                             TransportValidProjectRateQ32;
-    transport.stateFlags = playing ? TransportStatePlaying : 0;
+    transport.stateFlags = playing ? TransportStatePlaying : TransportStateNone;
     transport.projectTimeSamples = projectStart;
     transport.projectTimeFractionQ32 = projectFractionQ32;
     transport.projectRateQ32 = projectRateQ32;

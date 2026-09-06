@@ -29,7 +29,9 @@ constexpr uint64_t kOutputNode = 1203;
 constexpr std::string_view kProjectLaneBinding = "project-lane";
 constexpr std::string_view kSongMasterBinding = "song-master";
 constexpr std::string_view kReferenceCueBinding = "reference-cues";
-constexpr std::string_view kReferenceGainBinding = "reference-gain";
+// No kReferenceGainBinding: `Gain` covers BOTH the song master and the
+// reference gain, so its shape check cannot pin one binding — song-master is
+// checked where only it can appear, and reference-gain in the session.
 constexpr std::string_view kProjectOutputBinding = "project-output";
 
 bool stableName(const std::string &value) noexcept {
