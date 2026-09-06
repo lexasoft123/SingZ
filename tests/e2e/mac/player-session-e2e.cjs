@@ -28,7 +28,7 @@
  * FAIL naming the log's reason, never a measured pass.
  *
  * Usage: node tests/e2e/mac/player-session-e2e.cjs [--pass legacy|native|both]
- *        E2E_OUT=<dir>  ALLOW_BUSY_HOST=1  QUIET_LOAD=4
+ *        E2E_OUT=<dir>  ALLOW_BUSY_HOST=1  QUIET_LOAD=8
  *        PS_LIB=<dir>   a library already staged (the two seeded projects, each
  *                       with its stems and song file) — for a machine without
  *                       ffmpeg, such as the Windows field laptop, where the
@@ -297,7 +297,19 @@ async function runPass(kind, songs) {
   const o1 = await open(win, A)
   pass.ms.openPlayer = o1.player
   pass.ms.openReady = o1.ready
+  // "Idle in the player" means idle: on native the graph is prepared ahead
+  // of Play 400 ms after the last setting lands, and a sample taken during
+  // that decode read 45% on an idle screen. Wait for it to settle (or for
+  // 8 s) before sampling; legacy has nothing to wait for and gets the 1.5 s.
   await sleep(1500)
+  if (kind === 'native') {
+    for (const deadline = Date.now() + 8000; Date.now() < deadline; ) {
+      const ahead = await val(win, '(function(){ const c = __test.engine.nativePlayback; return !!(c && c.preparedAhead) })()')
+      if (ahead) break
+      await sleep(250)
+    }
+    await sleep(1000)
+  }
   pass.cpu['idle-in-player'] = sampleCpu(pid)
   const duration = await val(win, '__test.engine.duration')
   log(`  [${kind}] open A: player ${o1.player} ms · ready ${o1.ready} ms · duration ${duration.toFixed(1)} s`)

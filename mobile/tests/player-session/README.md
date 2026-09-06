@@ -42,7 +42,7 @@ QUIET_LOAD=3 ALLOW_BUSY_HOST=1 node mobile/tests/player-session.cjs    # run any
   reading 40% where the morning had read 29%, both backends' pitch-change
   CPU at 126%, and the table judging them anyway. The suite samples the
   1-minute load at start and **beside every CPU phase**: it refuses to start
-  above `QUIET_LOAD` (default 4, a third of a twelve-core rig) when a
+  above `QUIET_LOAD` (default 8, two thirds of a twelve-core rig) when a
   simulator or emulator is in the run, `--wait-quiet` blocks until three
   consecutive 30 s samples are quiet (bounded by `QUIET_WAIT_MIN`, default
   45), and `ALLOW_BUSY_HOST=1` runs regardless — the load then prints in the

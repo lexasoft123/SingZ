@@ -13,14 +13,16 @@
  * refuses to start on a busy host unless told otherwise, and a phase that
  * was sampled busy fails its own rule instead of reading as a result.
  *
- * "Quiet" is the 1-minute load average at or under QUIET_LOAD (default 4 —
- * a third of this rig's twelve cores; the env var moves it). Nothing about
+ * "Quiet" is the 1-minute load average at or under QUIET_LOAD (default 8 —
+ * two thirds of this rig's twelve cores, raised from 4 on 2026-09-06 because
+ * the singer's own desktop sits at 5-7 all day and a rule no run could ever
+ * pass measures nothing; the env var moves it). Nothing about
  * a physical phone depends on this, which is why the device layers say
  * whether they are host-bound and the rule only applies when they are.
  */
 const os = require('os')
 
-const QUIET_LOAD = Number(process.env.QUIET_LOAD || 4)
+const QUIET_LOAD = Number(process.env.QUIET_LOAD || 8)
 
 /** The 1-minute load average, to one decimal, and the core count it is
  *  measured against. */
